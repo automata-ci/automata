@@ -2595,48 +2595,323 @@ fn exact_replay_quarantine<'row>(
     Ok(Some(quarantine))
 }
 
+trait EvidenceRow {
+    fn evidence<T>(&self, column: &'static str) -> Result<T, LogicalWorkSelectionStoreError>
+    where
+        T: for<'decode> sqlx::Decode<'decode, Postgres> + sqlx::Type<Postgres> + Clone + 'static;
+}
+
+impl EvidenceRow for PgRow {
+    fn evidence<T>(&self, column: &'static str) -> Result<T, LogicalWorkSelectionStoreError>
+    where
+        T: for<'decode> sqlx::Decode<'decode, Postgres> + sqlx::Type<Postgres> + Clone + 'static,
+    {
+        self.try_get(column).map_err(operation_error)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SelectedWorkPhase {
+    Preparing,
+    Activating,
+    Materializing { instance_id: Uuid },
+}
+
+impl SelectedWorkPhase {
+    const fn state(self) -> &'static str {
+        match self {
+            Self::Preparing => "preparing",
+            Self::Activating => "activating",
+            Self::Materializing { .. } => "materializing",
+        }
+    }
+
+    const fn authority_kind(self) -> Option<&'static str> {
+        match self {
+            Self::Preparing => Some("preparation"),
+            Self::Activating => Some("activation"),
+            Self::Materializing { .. } => None,
+        }
+    }
+}
+
+const fn orchestration_phase(kind: LogicalJobOrchestrationAuthorityKind) -> SelectedWorkPhase {
+    match kind {
+        LogicalJobOrchestrationAuthorityKind::Preparation => SelectedWorkPhase::Preparing,
+        LogicalJobOrchestrationAuthorityKind::Activation => SelectedWorkPhase::Activating,
+    }
+}
+
+const fn materialization_phase(instance_id: Uuid) -> SelectedWorkPhase {
+    SelectedWorkPhase::Materializing { instance_id }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SelectedWorkEvidence<'selected> {
+    selection_id: Uuid,
+    owner_id: Uuid,
+    tenant_id: &'selected str,
+    run_id: Uuid,
+    invocation_id: Uuid,
+    logical_job_id: Uuid,
+    phase: SelectedWorkPhase,
+    generation: i64,
+    authority_digest: Sha256Digest,
+    claimed_at_ms: i64,
+    expires_at_ms: i64,
+}
+
+impl<'selected> From<&'selected SelectedLogicalJobOrchestration>
+    for SelectedWorkEvidence<'selected>
+{
+    fn from(selected: &'selected SelectedLogicalJobOrchestration) -> Self {
+        Self {
+            selection_id: selected.selection_id().as_uuid(),
+            owner_id: selected.owner().as_uuid(),
+            tenant_id: selected.target().tenant().as_str(),
+            run_id: selected.target().run_id().as_uuid(),
+            invocation_id: selected.target().invocation_id().as_uuid(),
+            logical_job_id: selected.target().logical_job_id().as_uuid(),
+            phase: orchestration_phase(selected.authority_kind()),
+            generation: pg_bigint(selected.generation().get()),
+            authority_digest: selected.authority_digest(),
+            claimed_at_ms: selected.claimed_at().get(),
+            expires_at_ms: selected.expires_at().get(),
+        }
+    }
+}
+
+impl<'selected> From<&'selected SelectedLogicalInstanceMaterialization>
+    for SelectedWorkEvidence<'selected>
+{
+    fn from(selected: &'selected SelectedLogicalInstanceMaterialization) -> Self {
+        Self {
+            selection_id: selected.selection_id().as_uuid(),
+            owner_id: selected.owner().as_uuid(),
+            tenant_id: selected.target().tenant().as_str(),
+            run_id: selected.target().run_id().as_uuid(),
+            invocation_id: selected.target().invocation_id().as_uuid(),
+            logical_job_id: selected.target().logical_job_id().as_uuid(),
+            phase: materialization_phase(selected.target().instance_id().as_uuid()),
+            generation: pg_bigint(selected.generation().get()),
+            authority_digest: selected.authority_digest(),
+            claimed_at_ms: selected.claimed_at().get(),
+            expires_at_ms: selected.expires_at().get(),
+        }
+    }
+}
+
+fn request_evidence_matches<R: EvidenceRow>(
+    row: &R,
+    owner_id: Uuid,
+    requested_at_ms: i64,
+    duration_ms: i64,
+) -> Result<bool, LogicalWorkSelectionStoreError> {
+    Ok(row.evidence::<Uuid>("owner_id")? == owner_id
+        && row.evidence::<i64>("requested_at_ms")? == requested_at_ms
+        && row.evidence::<i64>("duration_ms")? == duration_ms)
+}
+
+fn common_target_matches<R: EvidenceRow>(
+    row: &R,
+    selected: &SelectedWorkEvidence<'_>,
+    include_logical_job: bool,
+) -> Result<bool, LogicalWorkSelectionStoreError> {
+    Ok(row.evidence::<String>("tenant_id")? == selected.tenant_id
+        && row.evidence::<Uuid>("run_id")? == selected.run_id
+        && row.evidence::<Uuid>("invocation_id")? == selected.invocation_id
+        && (!include_logical_job
+            || row.evidence::<Uuid>("logical_job_id")? == selected.logical_job_id))
+}
+
+fn selected_target_matches<R: EvidenceRow>(
+    row: &R,
+    selected: &SelectedWorkEvidence<'_>,
+) -> Result<bool, LogicalWorkSelectionStoreError> {
+    Ok(common_target_matches(row, selected, true)?
+        && match selected.phase {
+            SelectedWorkPhase::Materializing { instance_id } => {
+                row.evidence::<Uuid>("instance_id")? == instance_id
+            }
+            SelectedWorkPhase::Preparing | SelectedWorkPhase::Activating => true,
+        })
+}
+
+fn live_authority_evidence_matches<R: EvidenceRow>(
+    row: &R,
+    selected: &SelectedWorkEvidence<'_>,
+) -> Result<bool, LogicalWorkSelectionStoreError> {
+    let materializing = matches!(selected.phase, SelectedWorkPhase::Materializing { .. });
+    let target_exact = common_target_matches(row, selected, materializing)?;
+    Ok(target_exact
+        && row.evidence::<Option<Uuid>>("origin_selection_id")? == Some(selected.selection_id)
+        && row.evidence::<Option<Uuid>>("authority_owner_id")? == Some(selected.owner_id)
+        && match selected.phase {
+            SelectedWorkPhase::Preparing | SelectedWorkPhase::Activating => {
+                row.evidence::<Option<Vec<u8>>>("authority_digest")?
+                    .as_deref()
+                    == Some(selected.authority_digest.as_bytes().as_slice())
+                    && row.evidence::<String>("authority_state")? == selected.phase.state()
+                    && row
+                        .evidence::<Option<i64>>("authority_generation")?
+                        .is_some_and(|generation| generation >= selected.generation)
+            }
+            SelectedWorkPhase::Materializing { .. } => {
+                row.evidence::<Vec<u8>>("authority_digest")?.as_slice()
+                    == selected.authority_digest.as_bytes().as_slice()
+                    && row.evidence::<String>("authority_state")? == selected.phase.state()
+                    && row.evidence::<i64>("authority_generation")? >= selected.generation
+            }
+        })
+}
+
+fn captured_authority_evidence_matches<R: EvidenceRow>(
+    row: &R,
+    owner_id: Uuid,
+    generation: i64,
+    digest: Sha256Digest,
+    claimed_at_ms: i64,
+    expires_at_ms: i64,
+) -> Result<bool, LogicalWorkSelectionStoreError> {
+    Ok(row.evidence::<Uuid>("authority_owner_id")? == owner_id
+        && row.evidence::<i64>("authority_generation")? == generation
+        && row.evidence::<Vec<u8>>("authority_digest")?.as_slice() == digest.as_bytes().as_slice()
+        && row.evidence::<i64>("authority_claimed_at_ms")? == claimed_at_ms
+        && row.evidence::<i64>("authority_expires_at_ms")? == expires_at_ms)
+}
+
+fn claimed_receipt_evidence_matches<R: EvidenceRow>(
+    row: &R,
+    selected: &SelectedWorkEvidence<'_>,
+) -> Result<bool, LogicalWorkSelectionStoreError> {
+    Ok(row.evidence::<String>("outcome")? == "claimed"
+        && row.evidence::<Uuid>("owner_id")? == selected.owner_id
+        && selected_target_matches(row, selected)?
+        && row.evidence::<i64>("generation")? == selected.generation
+        && match selected.phase.authority_kind() {
+            Some(kind) => {
+                row.evidence::<String>("authority_kind")? == kind
+                    && row.evidence::<Vec<u8>>("authority_digest")?
+                        == selected.authority_digest.as_bytes().as_slice()
+            }
+            None => {
+                row.evidence::<Vec<u8>>("authority_digest")?
+                    == selected.authority_digest.as_bytes().as_slice()
+            }
+        }
+        && row.evidence::<i64>("claimed_at_ms")? == selected.claimed_at_ms
+        && row.evidence::<i64>("expires_at_ms")? == selected.expires_at_ms)
+}
+
+fn replay_quarantine_selection_matches<R: EvidenceRow>(
+    row: &R,
+    selected: &SelectedWorkEvidence<'_>,
+    requested_at_ms: i64,
+    duration_ms: i64,
+) -> Result<bool, LogicalWorkSelectionStoreError> {
+    Ok(
+        row.evidence::<Uuid>("selection_id")? == selected.selection_id
+            && row.evidence::<Uuid>("selection_owner_id")? == selected.owner_id
+            && row.evidence::<i64>("selection_requested_at_ms")? == requested_at_ms
+            && row.evidence::<i64>("selection_duration_ms")? == duration_ms
+            && row.evidence::<i64>("selection_generation")? == selected.generation
+            && row.evidence::<i64>("selection_claimed_at_ms")? == selected.claimed_at_ms
+            && row.evidence::<i64>("selection_expires_at_ms")? == selected.expires_at_ms
+            && selected_target_matches(row, selected)?
+            && match selected.phase.authority_kind() {
+                Some(kind) => row.evidence::<String>("authority_kind")? == kind,
+                None => true,
+            }
+            && row.evidence::<Vec<u8>>("authority_digest")?.as_slice()
+                == selected.authority_digest.as_bytes().as_slice(),
+    )
+}
+
+fn replay_authority_evidence_matches<A: EvidenceRow, Q: EvidenceRow>(
+    authority: &A,
+    quarantine: &Q,
+    selected: &SelectedWorkEvidence<'_>,
+    generation_poison: bool,
+) -> Result<bool, LogicalWorkSelectionStoreError> {
+    let authority_owner = quarantine.evidence::<Uuid>("authority_owner_id")?;
+    Ok(selected_target_matches(authority, selected)?
+        && authority.evidence::<String>("authority_state")? == selected.phase.state()
+        && authority.evidence::<Option<Uuid>>("authority_owner_id")? == Some(authority_owner)
+        && authority.evidence::<Option<i64>>("authority_generation")?
+            == Some(quarantine.evidence::<i64>("authority_generation")?)
+        && authority
+            .evidence::<Option<Vec<u8>>>("authority_digest")?
+            .as_deref()
+            == Some(
+                quarantine
+                    .evidence::<Vec<u8>>("authority_digest")?
+                    .as_slice(),
+            )
+        && authority.evidence::<Option<i64>>("authority_claimed_at_ms")?
+            == Some(quarantine.evidence::<i64>("authority_claimed_at_ms")?)
+        && authority.evidence::<Option<i64>>("authority_expires_at_ms")?
+            == Some(quarantine.evidence::<i64>("authority_expires_at_ms")?)
+        && (generation_poison
+            || (authority_owner == selected.owner_id
+                && authority.evidence::<Option<Uuid>>("origin_selection_id")?
+                    == Some(selected.selection_id))))
+}
+
+fn persisted_quarantine_selection_matches<R: EvidenceRow, P: EvidenceRow>(
+    row: &R,
+    receipt: &P,
+    selected: &SelectedWorkEvidence<'_>,
+) -> Result<bool, LogicalWorkSelectionStoreError> {
+    Ok(
+        row.evidence::<Uuid>("selection_id")? == selected.selection_id
+            && row.evidence::<Uuid>("selection_owner_id")? == selected.owner_id
+            && row.evidence::<i64>("selection_generation")? == selected.generation
+            && row.evidence::<i64>("selection_requested_at_ms")?
+                == receipt.evidence::<i64>("requested_at_ms")?
+            && row.evidence::<i64>("selection_duration_ms")?
+                == receipt.evidence::<i64>("duration_ms")?
+            && row.evidence::<i64>("selection_claimed_at_ms")? == selected.claimed_at_ms
+            && row.evidence::<i64>("selection_expires_at_ms")? == selected.expires_at_ms
+            && selected_target_matches(row, selected)?
+            && match selected.phase.authority_kind() {
+                Some(kind) => row.evidence::<String>("authority_kind")? == kind,
+                None => true,
+            }
+            && row.evidence::<Vec<u8>>("authority_digest")?.as_slice()
+                == selected.authority_digest.as_bytes().as_slice(),
+    )
+}
+
 fn verify_activation_request(
     row: &PgRow,
     request: &ClaimNextLogicalJobOrchestration,
 ) -> Result<(), LogicalWorkSelectionStoreError> {
-    if row
-        .try_get::<Uuid, _>("owner_id")
-        .map_err(operation_error)?
-        != request.owner().as_uuid()
-        || row
-            .try_get::<i64, _>("requested_at_ms")
-            .map_err(operation_error)?
-            != request.observed_at().get()
-        || row
-            .try_get::<i64, _>("duration_ms")
-            .map_err(operation_error)?
-            != request.duration_ms()
-    {
-        return Err(LogicalWorkSelectionStoreError::SelectionConflict);
+    if request_evidence_matches(
+        row,
+        request.owner().as_uuid(),
+        request.observed_at().get(),
+        request.duration_ms(),
+    )? {
+        Ok(())
+    } else {
+        Err(LogicalWorkSelectionStoreError::SelectionConflict)
     }
-    Ok(())
 }
 
 fn verify_materialization_request(
     row: &PgRow,
     request: &ClaimNextLogicalInstanceMaterialization,
 ) -> Result<(), LogicalWorkSelectionStoreError> {
-    if row
-        .try_get::<Uuid, _>("owner_id")
-        .map_err(operation_error)?
-        != request.owner().as_uuid()
-        || row
-            .try_get::<i64, _>("requested_at_ms")
-            .map_err(operation_error)?
-            != request.observed_at().get()
-        || row
-            .try_get::<i64, _>("duration_ms")
-            .map_err(operation_error)?
-            != request.duration_ms()
-    {
-        return Err(LogicalWorkSelectionStoreError::SelectionConflict);
+    if request_evidence_matches(
+        row,
+        request.owner().as_uuid(),
+        request.observed_at().get(),
+        request.duration_ms(),
+    )? {
+        Ok(())
+    } else {
+        Err(LogicalWorkSelectionStoreError::SelectionConflict)
     }
-    Ok(())
 }
 
 fn selected_activation_from_receipt(
@@ -2946,92 +3221,25 @@ fn activation_quarantine_authority_matches(
     row: &PgRow,
     selected: &SelectedLogicalJobOrchestration,
 ) -> Result<bool, LogicalWorkSelectionStoreError> {
-    let expected_state = match selected.authority_kind() {
-        LogicalJobOrchestrationAuthorityKind::Preparation => "preparing",
-        LogicalJobOrchestrationAuthorityKind::Activation => "activating",
-    };
-    Ok(row
-        .try_get::<String, _>("tenant_id")
-        .map_err(operation_error)?
-        == selected.target().tenant().as_str()
-        && row.try_get::<Uuid, _>("run_id").map_err(operation_error)?
-            == selected.target().run_id().as_uuid()
-        && row
-            .try_get::<Uuid, _>("invocation_id")
-            .map_err(operation_error)?
-            == selected.target().invocation_id().as_uuid()
-        && row
-            .try_get::<Option<Uuid>, _>("origin_selection_id")
-            .map_err(operation_error)?
-            == Some(selected.selection_id().as_uuid())
-        && row
-            .try_get::<Option<Uuid>, _>("authority_owner_id")
-            .map_err(operation_error)?
-            == Some(selected.owner().as_uuid())
-        && row
-            .try_get::<Option<Vec<u8>>, _>("authority_digest")
-            .map_err(operation_error)?
-            .as_deref()
-            == Some(selected.authority_digest().as_bytes().as_slice())
-        && row
-            .try_get::<String, _>("authority_state")
-            .map_err(operation_error)?
-            == expected_state
-        && row
-            .try_get::<Option<i64>, _>("authority_generation")
-            .map_err(operation_error)?
-            .is_some_and(|generation| generation >= pg_bigint(selected.generation().get())))
+    live_authority_evidence_matches(row, &SelectedWorkEvidence::from(selected))
 }
 
 fn materialization_quarantine_authority_matches(
     row: &PgRow,
     selected: &SelectedLogicalInstanceMaterialization,
 ) -> Result<bool, LogicalWorkSelectionStoreError> {
-    Ok(row
-        .try_get::<String, _>("tenant_id")
-        .map_err(operation_error)?
-        == selected.target().tenant().as_str()
-        && row.try_get::<Uuid, _>("run_id").map_err(operation_error)?
-            == selected.target().run_id().as_uuid()
-        && row
-            .try_get::<Uuid, _>("invocation_id")
-            .map_err(operation_error)?
-            == selected.target().invocation_id().as_uuid()
-        && row
-            .try_get::<Uuid, _>("logical_job_id")
-            .map_err(operation_error)?
-            == selected.target().logical_job_id().as_uuid()
-        && row
-            .try_get::<Option<Uuid>, _>("origin_selection_id")
-            .map_err(operation_error)?
-            == Some(selected.selection_id().as_uuid())
-        && row
-            .try_get::<Option<Uuid>, _>("authority_owner_id")
-            .map_err(operation_error)?
-            == Some(selected.owner().as_uuid())
-        && row
-            .try_get::<Vec<u8>, _>("authority_digest")
-            .map_err(operation_error)?
-            .as_slice()
-            == selected.authority_digest().as_bytes().as_slice()
-        && row
-            .try_get::<String, _>("authority_state")
-            .map_err(operation_error)?
-            == "materializing"
-        && row
-            .try_get::<i64, _>("authority_generation")
-            .map_err(operation_error)?
-            >= pg_bigint(selected.generation().get()))
+    live_authority_evidence_matches(row, &SelectedWorkEvidence::from(selected))
 }
 
 fn activation_captured_authority(
     request: &QuarantineLogicalJobOrchestration,
 ) -> Result<(Uuid, i64, Sha256Digest, i64, i64), LogicalWorkSelectionStoreError> {
     match request.consumed().authority() {
-        ConsumedLogicalJobOrchestrationAuthority::Preparation(claimed)
-            if request.selected().authority_kind()
-                == LogicalJobOrchestrationAuthorityKind::Preparation =>
-        {
+        ConsumedLogicalJobOrchestrationAuthority::Preparation(claimed) => {
+            require_orchestration_authority_kind(
+                request.selected().authority_kind(),
+                LogicalJobOrchestrationAuthorityKind::Preparation,
+            )?;
             let claim = claimed.claim();
             Ok((
                 claim.owner().as_uuid(),
@@ -3041,10 +3249,11 @@ fn activation_captured_authority(
                 claim.expires_at().get(),
             ))
         }
-        ConsumedLogicalJobOrchestrationAuthority::Activation(claimed)
-            if request.selected().authority_kind()
-                == LogicalJobOrchestrationAuthorityKind::Activation =>
-        {
+        ConsumedLogicalJobOrchestrationAuthority::Activation(claimed) => {
+            require_orchestration_authority_kind(
+                request.selected().authority_kind(),
+                LogicalJobOrchestrationAuthorityKind::Activation,
+            )?;
             let claim = claimed.claim();
             Ok((
                 claim.owner().as_uuid(),
@@ -3054,10 +3263,20 @@ fn activation_captured_authority(
                 claim.expires_at().get(),
             ))
         }
-        _ => Err(StoreError::corrupt_data(
+    }
+}
+
+fn require_orchestration_authority_kind(
+    selected: LogicalJobOrchestrationAuthorityKind,
+    captured: LogicalJobOrchestrationAuthorityKind,
+) -> Result<(), LogicalWorkSelectionStoreError> {
+    if selected == captured {
+        Ok(())
+    } else {
+        Err(StoreError::corrupt_data(
             "consumed orchestration authority disagrees with selection kind",
         )
-        .into()),
+        .into())
     }
 }
 
@@ -3067,27 +3286,7 @@ fn activation_captured_authority_matches(
 ) -> Result<bool, LogicalWorkSelectionStoreError> {
     let (owner, generation, digest, claimed_at, expires_at) =
         activation_captured_authority(request)?;
-    Ok(row
-        .try_get::<Uuid, _>("authority_owner_id")
-        .map_err(operation_error)?
-        == owner
-        && row
-            .try_get::<i64, _>("authority_generation")
-            .map_err(operation_error)?
-            == generation
-        && row
-            .try_get::<Vec<u8>, _>("authority_digest")
-            .map_err(operation_error)?
-            .as_slice()
-            == digest.as_bytes().as_slice()
-        && row
-            .try_get::<i64, _>("authority_claimed_at_ms")
-            .map_err(operation_error)?
-            == claimed_at
-        && row
-            .try_get::<i64, _>("authority_expires_at_ms")
-            .map_err(operation_error)?
-            == expires_at)
+    captured_authority_evidence_matches(row, owner, generation, digest, claimed_at, expires_at)
 }
 
 fn materialization_captured_authority_matches(
@@ -3095,27 +3294,14 @@ fn materialization_captured_authority_matches(
     request: &QuarantineLogicalInstanceMaterialization,
 ) -> Result<bool, LogicalWorkSelectionStoreError> {
     let claim = request.consumed().authority().claim();
-    Ok(row
-        .try_get::<Uuid, _>("authority_owner_id")
-        .map_err(operation_error)?
-        == claim.owner().as_uuid()
-        && row
-            .try_get::<i64, _>("authority_generation")
-            .map_err(operation_error)?
-            == pg_bigint(claim.generation().get())
-        && row
-            .try_get::<Vec<u8>, _>("authority_digest")
-            .map_err(operation_error)?
-            .as_slice()
-            == claim.descriptor_digest().as_bytes().as_slice()
-        && row
-            .try_get::<i64, _>("authority_claimed_at_ms")
-            .map_err(operation_error)?
-            == claim.claimed_at().get()
-        && row
-            .try_get::<i64, _>("authority_expires_at_ms")
-            .map_err(operation_error)?
-            == claim.expires_at().get())
+    captured_authority_evidence_matches(
+        row,
+        claim.owner().as_uuid(),
+        pg_bigint(claim.generation().get()),
+        claim.descriptor_digest(),
+        claim.claimed_at().get(),
+        claim.expires_at().get(),
+    )
 }
 
 async fn lock_quarantine_horizon(
@@ -3181,96 +3367,14 @@ fn activation_quarantine_receipt_matches(
     row: &PgRow,
     selected: &SelectedLogicalJobOrchestration,
 ) -> Result<bool, LogicalWorkSelectionStoreError> {
-    Ok(row
-        .try_get::<String, _>("outcome")
-        .map_err(operation_error)?
-        == "claimed"
-        && row
-            .try_get::<Uuid, _>("owner_id")
-            .map_err(operation_error)?
-            == selected.owner().as_uuid()
-        && row
-            .try_get::<String, _>("tenant_id")
-            .map_err(operation_error)?
-            == selected.target().tenant().as_str()
-        && row.try_get::<Uuid, _>("run_id").map_err(operation_error)?
-            == selected.target().run_id().as_uuid()
-        && row
-            .try_get::<Uuid, _>("invocation_id")
-            .map_err(operation_error)?
-            == selected.target().invocation_id().as_uuid()
-        && row
-            .try_get::<Uuid, _>("logical_job_id")
-            .map_err(operation_error)?
-            == selected.target().logical_job_id().as_uuid()
-        && row
-            .try_get::<i64, _>("generation")
-            .map_err(operation_error)?
-            == pg_bigint(selected.generation().get())
-        && row
-            .try_get::<String, _>("authority_kind")
-            .map_err(operation_error)?
-            == authority_kind_name(selected.authority_kind())
-        && row
-            .try_get::<Vec<u8>, _>("authority_digest")
-            .map_err(operation_error)?
-            == selected.authority_digest().as_bytes().as_slice()
-        && row
-            .try_get::<i64, _>("claimed_at_ms")
-            .map_err(operation_error)?
-            == selected.claimed_at().get()
-        && row
-            .try_get::<i64, _>("expires_at_ms")
-            .map_err(operation_error)?
-            == selected.expires_at().get())
+    claimed_receipt_evidence_matches(row, &SelectedWorkEvidence::from(selected))
 }
 
 fn materialization_quarantine_receipt_matches(
     row: &PgRow,
     selected: &SelectedLogicalInstanceMaterialization,
 ) -> Result<bool, LogicalWorkSelectionStoreError> {
-    Ok(row
-        .try_get::<String, _>("outcome")
-        .map_err(operation_error)?
-        == "claimed"
-        && row
-            .try_get::<Uuid, _>("owner_id")
-            .map_err(operation_error)?
-            == selected.owner().as_uuid()
-        && row
-            .try_get::<String, _>("tenant_id")
-            .map_err(operation_error)?
-            == selected.target().tenant().as_str()
-        && row.try_get::<Uuid, _>("run_id").map_err(operation_error)?
-            == selected.target().run_id().as_uuid()
-        && row
-            .try_get::<Uuid, _>("invocation_id")
-            .map_err(operation_error)?
-            == selected.target().invocation_id().as_uuid()
-        && row
-            .try_get::<Uuid, _>("logical_job_id")
-            .map_err(operation_error)?
-            == selected.target().logical_job_id().as_uuid()
-        && row
-            .try_get::<Uuid, _>("instance_id")
-            .map_err(operation_error)?
-            == selected.target().instance_id().as_uuid()
-        && row
-            .try_get::<i64, _>("generation")
-            .map_err(operation_error)?
-            == pg_bigint(selected.generation().get())
-        && row
-            .try_get::<Vec<u8>, _>("authority_digest")
-            .map_err(operation_error)?
-            == selected.authority_digest().as_bytes().as_slice()
-        && row
-            .try_get::<i64, _>("claimed_at_ms")
-            .map_err(operation_error)?
-            == selected.claimed_at().get()
-        && row
-            .try_get::<i64, _>("expires_at_ms")
-            .map_err(operation_error)?
-            == selected.expires_at().get())
+    claimed_receipt_evidence_matches(row, &SelectedWorkEvidence::from(selected))
 }
 
 async fn lock_activation_quarantine(
@@ -3503,66 +3607,20 @@ fn activation_replay_quarantine_matches(
     authority: &PgRow,
     generation_poison: bool,
 ) -> Result<bool, LogicalWorkSelectionStoreError> {
-    let selection_exact = quarantine
-        .try_get::<Uuid, _>("selection_id")
-        .map_err(operation_error)?
-        == selected.selection_id().as_uuid()
-        && quarantine
-            .try_get::<Uuid, _>("selection_owner_id")
-            .map_err(operation_error)?
-            == selected.owner().as_uuid()
-        && quarantine
-            .try_get::<i64, _>("selection_requested_at_ms")
-            .map_err(operation_error)?
-            == request.observed_at().get()
-        && quarantine
-            .try_get::<i64, _>("selection_duration_ms")
-            .map_err(operation_error)?
-            == request.duration_ms()
-        && quarantine
-            .try_get::<i64, _>("selection_generation")
-            .map_err(operation_error)?
-            == pg_bigint(selected.generation().get())
-        && quarantine
-            .try_get::<i64, _>("selection_claimed_at_ms")
-            .map_err(operation_error)?
-            == selected.claimed_at().get()
-        && quarantine
-            .try_get::<i64, _>("selection_expires_at_ms")
-            .map_err(operation_error)?
-            == selected.expires_at().get()
-        && quarantine
-            .try_get::<String, _>("tenant_id")
-            .map_err(operation_error)?
-            == selected.target().tenant().as_str()
-        && quarantine
-            .try_get::<Uuid, _>("run_id")
-            .map_err(operation_error)?
-            == selected.target().run_id().as_uuid()
-        && quarantine
-            .try_get::<Uuid, _>("invocation_id")
-            .map_err(operation_error)?
-            == selected.target().invocation_id().as_uuid()
-        && quarantine
-            .try_get::<Uuid, _>("logical_job_id")
-            .map_err(operation_error)?
-            == selected.target().logical_job_id().as_uuid()
-        && quarantine
-            .try_get::<String, _>("authority_kind")
-            .map_err(operation_error)?
-            == authority_kind_name(selected.authority_kind())
-        && quarantine
-            .try_get::<Vec<u8>, _>("authority_digest")
-            .map_err(operation_error)?
-            .as_slice()
-            == selected.authority_digest().as_bytes().as_slice();
+    let evidence = SelectedWorkEvidence::from(selected);
+    let selection_exact = replay_quarantine_selection_matches(
+        quarantine,
+        &evidence,
+        request.observed_at().get(),
+        request.duration_ms(),
+    )?;
     Ok(selection_exact
         && replay_quarantine_receipt_kind_matches(receipt, quarantine, generation_poison)?
         && replay_captured_authority_shape_matches(
             quarantine,
-            pg_bigint(selected.generation().get()),
-            selected.claimed_at().get(),
-            selected.expires_at().get(),
+            evidence.generation,
+            evidence.claimed_at_ms,
+            evidence.expires_at_ms,
             generation_poison,
         )?
         && activation_replay_authority_matches(authority, quarantine, selected, generation_poison)?)
@@ -3576,66 +3634,20 @@ fn materialization_replay_quarantine_matches(
     authority: &PgRow,
     generation_poison: bool,
 ) -> Result<bool, LogicalWorkSelectionStoreError> {
-    let selection_exact = quarantine
-        .try_get::<Uuid, _>("selection_id")
-        .map_err(operation_error)?
-        == selected.selection_id().as_uuid()
-        && quarantine
-            .try_get::<Uuid, _>("selection_owner_id")
-            .map_err(operation_error)?
-            == selected.owner().as_uuid()
-        && quarantine
-            .try_get::<i64, _>("selection_requested_at_ms")
-            .map_err(operation_error)?
-            == request.observed_at().get()
-        && quarantine
-            .try_get::<i64, _>("selection_duration_ms")
-            .map_err(operation_error)?
-            == request.duration_ms()
-        && quarantine
-            .try_get::<i64, _>("selection_generation")
-            .map_err(operation_error)?
-            == pg_bigint(selected.generation().get())
-        && quarantine
-            .try_get::<i64, _>("selection_claimed_at_ms")
-            .map_err(operation_error)?
-            == selected.claimed_at().get()
-        && quarantine
-            .try_get::<i64, _>("selection_expires_at_ms")
-            .map_err(operation_error)?
-            == selected.expires_at().get()
-        && quarantine
-            .try_get::<String, _>("tenant_id")
-            .map_err(operation_error)?
-            == selected.target().tenant().as_str()
-        && quarantine
-            .try_get::<Uuid, _>("run_id")
-            .map_err(operation_error)?
-            == selected.target().run_id().as_uuid()
-        && quarantine
-            .try_get::<Uuid, _>("invocation_id")
-            .map_err(operation_error)?
-            == selected.target().invocation_id().as_uuid()
-        && quarantine
-            .try_get::<Uuid, _>("logical_job_id")
-            .map_err(operation_error)?
-            == selected.target().logical_job_id().as_uuid()
-        && quarantine
-            .try_get::<Uuid, _>("instance_id")
-            .map_err(operation_error)?
-            == selected.target().instance_id().as_uuid()
-        && quarantine
-            .try_get::<Vec<u8>, _>("authority_digest")
-            .map_err(operation_error)?
-            .as_slice()
-            == selected.authority_digest().as_bytes().as_slice();
+    let evidence = SelectedWorkEvidence::from(selected);
+    let selection_exact = replay_quarantine_selection_matches(
+        quarantine,
+        &evidence,
+        request.observed_at().get(),
+        request.duration_ms(),
+    )?;
     Ok(selection_exact
         && replay_quarantine_receipt_kind_matches(receipt, quarantine, generation_poison)?
         && replay_captured_authority_shape_matches(
             quarantine,
-            pg_bigint(selected.generation().get()),
-            selected.claimed_at().get(),
-            selected.expires_at().get(),
+            evidence.generation,
+            evidence.claimed_at_ms,
+            evidence.expires_at_ms,
             generation_poison,
         )?
         && materialization_replay_authority_matches(
@@ -3646,17 +3658,13 @@ fn materialization_replay_quarantine_matches(
         )?)
 }
 
-fn replay_quarantine_receipt_kind_matches(
-    receipt: &PgRow,
-    quarantine: &PgRow,
+fn replay_quarantine_receipt_kind_matches<R: EvidenceRow, Q: EvidenceRow>(
+    receipt: &R,
+    quarantine: &Q,
     generation_poison: bool,
 ) -> Result<bool, LogicalWorkSelectionStoreError> {
-    let outcome = receipt
-        .try_get::<String, _>("outcome")
-        .map_err(operation_error)?;
-    let failure = quarantine
-        .try_get::<String, _>("failure_kind")
-        .map_err(operation_error)?;
+    let outcome = receipt.evidence::<String>("outcome")?;
+    let failure = quarantine.evidence::<String>("failure_kind")?;
     Ok(if generation_poison {
         outcome == "quarantined" && failure == "generation_exhausted"
     } else {
@@ -3668,28 +3676,18 @@ fn replay_quarantine_receipt_kind_matches(
     })
 }
 
-fn replay_captured_authority_shape_matches(
-    quarantine: &PgRow,
+fn replay_captured_authority_shape_matches<R: EvidenceRow>(
+    quarantine: &R,
     selection_generation: i64,
     selection_claimed_at: i64,
     selection_expires_at: i64,
     generation_poison: bool,
 ) -> Result<bool, LogicalWorkSelectionStoreError> {
-    let owner = quarantine
-        .try_get::<Uuid, _>("authority_owner_id")
-        .map_err(operation_error)?;
-    let generation = quarantine
-        .try_get::<i64, _>("authority_generation")
-        .map_err(operation_error)?;
-    let claimed_at = quarantine
-        .try_get::<i64, _>("authority_claimed_at_ms")
-        .map_err(operation_error)?;
-    let expires_at = quarantine
-        .try_get::<i64, _>("authority_expires_at_ms")
-        .map_err(operation_error)?;
-    let quarantined_at = quarantine
-        .try_get::<i64, _>("quarantined_at_ms")
-        .map_err(operation_error)?;
+    let owner = quarantine.evidence::<Uuid>("authority_owner_id")?;
+    let generation = quarantine.evidence::<i64>("authority_generation")?;
+    let claimed_at = quarantine.evidence::<i64>("authority_claimed_at_ms")?;
+    let expires_at = quarantine.evidence::<i64>("authority_expires_at_ms")?;
+    let quarantined_at = quarantine.evidence::<i64>("quarantined_at_ms")?;
     let ordinary_base_exact = generation != selection_generation
         || (claimed_at == selection_claimed_at && expires_at == selection_expires_at);
     Ok(owner != Uuid::nil()
@@ -3712,77 +3710,12 @@ fn activation_replay_authority_matches(
     selected: &SelectedLogicalJobOrchestration,
     generation_poison: bool,
 ) -> Result<bool, LogicalWorkSelectionStoreError> {
-    let expected_state = match selected.authority_kind() {
-        LogicalJobOrchestrationAuthorityKind::Preparation => "preparing",
-        LogicalJobOrchestrationAuthorityKind::Activation => "activating",
-    };
-    let authority_owner = quarantine
-        .try_get::<Uuid, _>("authority_owner_id")
-        .map_err(operation_error)?;
-    Ok(authority
-        .try_get::<String, _>("tenant_id")
-        .map_err(operation_error)?
-        == selected.target().tenant().as_str()
-        && authority
-            .try_get::<Uuid, _>("run_id")
-            .map_err(operation_error)?
-            == selected.target().run_id().as_uuid()
-        && authority
-            .try_get::<Uuid, _>("invocation_id")
-            .map_err(operation_error)?
-            == selected.target().invocation_id().as_uuid()
-        && authority
-            .try_get::<Uuid, _>("logical_job_id")
-            .map_err(operation_error)?
-            == selected.target().logical_job_id().as_uuid()
-        && authority
-            .try_get::<String, _>("authority_state")
-            .map_err(operation_error)?
-            == expected_state
-        && authority
-            .try_get::<Option<Uuid>, _>("authority_owner_id")
-            .map_err(operation_error)?
-            == Some(authority_owner)
-        && authority
-            .try_get::<Option<i64>, _>("authority_generation")
-            .map_err(operation_error)?
-            == Some(
-                quarantine
-                    .try_get::<i64, _>("authority_generation")
-                    .map_err(operation_error)?,
-            )
-        && authority
-            .try_get::<Option<Vec<u8>>, _>("authority_digest")
-            .map_err(operation_error)?
-            .as_deref()
-            == Some(
-                quarantine
-                    .try_get::<Vec<u8>, _>("authority_digest")
-                    .map_err(operation_error)?
-                    .as_slice(),
-            )
-        && authority
-            .try_get::<Option<i64>, _>("authority_claimed_at_ms")
-            .map_err(operation_error)?
-            == Some(
-                quarantine
-                    .try_get::<i64, _>("authority_claimed_at_ms")
-                    .map_err(operation_error)?,
-            )
-        && authority
-            .try_get::<Option<i64>, _>("authority_expires_at_ms")
-            .map_err(operation_error)?
-            == Some(
-                quarantine
-                    .try_get::<i64, _>("authority_expires_at_ms")
-                    .map_err(operation_error)?,
-            )
-        && (generation_poison
-            || (authority_owner == selected.owner().as_uuid()
-                && authority
-                    .try_get::<Option<Uuid>, _>("origin_selection_id")
-                    .map_err(operation_error)?
-                    == Some(selected.selection_id().as_uuid()))))
+    replay_authority_evidence_matches(
+        authority,
+        quarantine,
+        &SelectedWorkEvidence::from(selected),
+        generation_poison,
+    )
 }
 
 fn materialization_replay_authority_matches(
@@ -3791,77 +3724,12 @@ fn materialization_replay_authority_matches(
     selected: &SelectedLogicalInstanceMaterialization,
     generation_poison: bool,
 ) -> Result<bool, LogicalWorkSelectionStoreError> {
-    let authority_owner = quarantine
-        .try_get::<Uuid, _>("authority_owner_id")
-        .map_err(operation_error)?;
-    Ok(authority
-        .try_get::<String, _>("tenant_id")
-        .map_err(operation_error)?
-        == selected.target().tenant().as_str()
-        && authority
-            .try_get::<Uuid, _>("run_id")
-            .map_err(operation_error)?
-            == selected.target().run_id().as_uuid()
-        && authority
-            .try_get::<Uuid, _>("invocation_id")
-            .map_err(operation_error)?
-            == selected.target().invocation_id().as_uuid()
-        && authority
-            .try_get::<Uuid, _>("logical_job_id")
-            .map_err(operation_error)?
-            == selected.target().logical_job_id().as_uuid()
-        && authority
-            .try_get::<Uuid, _>("instance_id")
-            .map_err(operation_error)?
-            == selected.target().instance_id().as_uuid()
-        && authority
-            .try_get::<String, _>("authority_state")
-            .map_err(operation_error)?
-            == "materializing"
-        && authority
-            .try_get::<Option<Uuid>, _>("authority_owner_id")
-            .map_err(operation_error)?
-            == Some(authority_owner)
-        && authority
-            .try_get::<Option<i64>, _>("authority_generation")
-            .map_err(operation_error)?
-            == Some(
-                quarantine
-                    .try_get::<i64, _>("authority_generation")
-                    .map_err(operation_error)?,
-            )
-        && authority
-            .try_get::<Option<Vec<u8>>, _>("authority_digest")
-            .map_err(operation_error)?
-            .as_deref()
-            == Some(
-                quarantine
-                    .try_get::<Vec<u8>, _>("authority_digest")
-                    .map_err(operation_error)?
-                    .as_slice(),
-            )
-        && authority
-            .try_get::<Option<i64>, _>("authority_claimed_at_ms")
-            .map_err(operation_error)?
-            == Some(
-                quarantine
-                    .try_get::<i64, _>("authority_claimed_at_ms")
-                    .map_err(operation_error)?,
-            )
-        && authority
-            .try_get::<Option<i64>, _>("authority_expires_at_ms")
-            .map_err(operation_error)?
-            == Some(
-                quarantine
-                    .try_get::<i64, _>("authority_expires_at_ms")
-                    .map_err(operation_error)?,
-            )
-        && (generation_poison
-            || (authority_owner == selected.owner().as_uuid()
-                && authority
-                    .try_get::<Option<Uuid>, _>("origin_selection_id")
-                    .map_err(operation_error)?
-                    == Some(selected.selection_id().as_uuid()))))
+    replay_authority_evidence_matches(
+        authority,
+        quarantine,
+        &SelectedWorkEvidence::from(selected),
+        generation_poison,
+    )
 }
 
 fn quarantine_row_matches(
@@ -3870,66 +3738,14 @@ fn quarantine_row_matches(
     receipt: &PgRow,
 ) -> Result<bool, LogicalWorkSelectionStoreError> {
     let selected = request.selected();
-    Ok(row
-        .try_get::<Uuid, _>("selection_id")
-        .map_err(operation_error)?
-        == selected.selection_id().as_uuid()
-        && row
-            .try_get::<Uuid, _>("selection_owner_id")
-            .map_err(operation_error)?
-            == selected.owner().as_uuid()
-        && row
-            .try_get::<i64, _>("selection_generation")
-            .map_err(operation_error)?
-            == pg_bigint(selected.generation().get())
-        && row
-            .try_get::<i64, _>("selection_requested_at_ms")
-            .map_err(operation_error)?
-            == receipt
-                .try_get::<i64, _>("requested_at_ms")
-                .map_err(operation_error)?
-        && row
-            .try_get::<i64, _>("selection_duration_ms")
-            .map_err(operation_error)?
-            == receipt
-                .try_get::<i64, _>("duration_ms")
-                .map_err(operation_error)?
-        && row
-            .try_get::<i64, _>("selection_claimed_at_ms")
-            .map_err(operation_error)?
-            == selected.claimed_at().get()
-        && row
-            .try_get::<i64, _>("selection_expires_at_ms")
-            .map_err(operation_error)?
-            == selected.expires_at().get()
-        && row
-            .try_get::<String, _>("tenant_id")
-            .map_err(operation_error)?
-            == selected.target().tenant().as_str()
-        && row.try_get::<Uuid, _>("run_id").map_err(operation_error)?
-            == selected.target().run_id().as_uuid()
-        && row
-            .try_get::<Uuid, _>("invocation_id")
-            .map_err(operation_error)?
-            == selected.target().invocation_id().as_uuid()
-        && row
-            .try_get::<Uuid, _>("logical_job_id")
-            .map_err(operation_error)?
-            == selected.target().logical_job_id().as_uuid()
-        && row
-            .try_get::<String, _>("authority_kind")
-            .map_err(operation_error)?
-            == authority_kind_name(selected.authority_kind())
-        && row
-            .try_get::<Vec<u8>, _>("authority_digest")
-            .map_err(operation_error)?
-            .as_slice()
-            == selected.authority_digest().as_bytes().as_slice()
-        && activation_captured_authority_matches(row, request)?
-        && row
-            .try_get::<String, _>("failure_kind")
-            .map_err(operation_error)?
-            == quarantine_kind(request.kind()))
+    Ok(
+        persisted_quarantine_selection_matches(
+            row,
+            receipt,
+            &SelectedWorkEvidence::from(selected),
+        )? && activation_captured_authority_matches(row, request)?
+            && row.evidence::<String>("failure_kind")? == quarantine_kind(request.kind()),
+    )
 }
 
 fn materialization_quarantine_row_matches(
@@ -3938,66 +3754,14 @@ fn materialization_quarantine_row_matches(
     receipt: &PgRow,
 ) -> Result<bool, LogicalWorkSelectionStoreError> {
     let selected = request.selected();
-    Ok(row
-        .try_get::<Uuid, _>("selection_id")
-        .map_err(operation_error)?
-        == selected.selection_id().as_uuid()
-        && row
-            .try_get::<Uuid, _>("selection_owner_id")
-            .map_err(operation_error)?
-            == selected.owner().as_uuid()
-        && row
-            .try_get::<i64, _>("selection_generation")
-            .map_err(operation_error)?
-            == pg_bigint(selected.generation().get())
-        && row
-            .try_get::<i64, _>("selection_requested_at_ms")
-            .map_err(operation_error)?
-            == receipt
-                .try_get::<i64, _>("requested_at_ms")
-                .map_err(operation_error)?
-        && row
-            .try_get::<i64, _>("selection_duration_ms")
-            .map_err(operation_error)?
-            == receipt
-                .try_get::<i64, _>("duration_ms")
-                .map_err(operation_error)?
-        && row
-            .try_get::<i64, _>("selection_claimed_at_ms")
-            .map_err(operation_error)?
-            == selected.claimed_at().get()
-        && row
-            .try_get::<i64, _>("selection_expires_at_ms")
-            .map_err(operation_error)?
-            == selected.expires_at().get()
-        && row
-            .try_get::<String, _>("tenant_id")
-            .map_err(operation_error)?
-            == selected.target().tenant().as_str()
-        && row.try_get::<Uuid, _>("run_id").map_err(operation_error)?
-            == selected.target().run_id().as_uuid()
-        && row
-            .try_get::<Uuid, _>("invocation_id")
-            .map_err(operation_error)?
-            == selected.target().invocation_id().as_uuid()
-        && row
-            .try_get::<Uuid, _>("logical_job_id")
-            .map_err(operation_error)?
-            == selected.target().logical_job_id().as_uuid()
-        && row
-            .try_get::<Uuid, _>("instance_id")
-            .map_err(operation_error)?
-            == selected.target().instance_id().as_uuid()
-        && row
-            .try_get::<Vec<u8>, _>("authority_digest")
-            .map_err(operation_error)?
-            .as_slice()
-            == selected.authority_digest().as_bytes().as_slice()
-        && materialization_captured_authority_matches(row, request)?
-        && row
-            .try_get::<String, _>("failure_kind")
-            .map_err(operation_error)?
-            == quarantine_kind(request.kind()))
+    Ok(
+        persisted_quarantine_selection_matches(
+            row,
+            receipt,
+            &SelectedWorkEvidence::from(selected),
+        )? && materialization_captured_authority_matches(row, request)?
+            && row.evidence::<String>("failure_kind")? == quarantine_kind(request.kind()),
+    )
 }
 
 fn decode_tenant(row: &PgRow) -> Result<TenantScope, LogicalWorkSelectionStoreError> {
@@ -4279,4 +4043,162 @@ fn operation_error(error: sqlx::Error) -> LogicalWorkSelectionStoreError {
 fn corrupt_value(error: impl std::fmt::Display) -> LogicalWorkSelectionStoreError {
     let _ = error;
     StoreError::corrupt_data("logical work selection value is invalid").into()
+}
+
+#[cfg(test)]
+#[rustfmt::skip] // Keep the mutation table compact enough to expose all nine contracts at once.
+mod evidence_tests {
+    use std::{any::Any, collections::HashMap, sync::Arc}; use super::*;
+    #[derive(Clone, Default)] struct TestRow(HashMap<&'static str, Arc<dyn Any + Send + Sync>>); impl TestRow { fn set<T: Any + Send + Sync>(&mut self, key: &'static str, value: T) { self.0.insert(key, Arc::new(value)); } }
+    impl EvidenceRow for TestRow {
+        fn evidence<T>(&self, key: &'static str) -> Result<T, LogicalWorkSelectionStoreError> where T: for<'decode> sqlx::Decode<'decode, Postgres> + sqlx::Type<Postgres> + Clone + 'static {
+            self.0.get(key).and_then(|value| value.downcast_ref()).cloned().ok_or_else(|| StoreError::corrupt_data("invalid test evidence row").into()) } }
+    macro_rules! rejects {
+        ($row:expr, $check:expr; $($key:expr => $value:expr),+ $(,)?) => {{ let baseline = $row.clone(); let check = $check;
+            assert!(check(&baseline).unwrap()); $({ let mut changed = baseline.clone(); changed.set($key, $value); assert!(!check(&changed).unwrap(), "{}", $key); })+ }};
+    }
+    fn id(value: u128) -> Uuid { Uuid::from_u128(value) }
+    fn phase_shape(phase: SelectedWorkPhase) -> (&'static str, Option<&'static str>, Option<Uuid>) { (phase.state(), phase.authority_kind(), match phase { SelectedWorkPhase::Materializing { instance_id } => Some(instance_id), _ => None }) }
+    fn selected(phase: SelectedWorkPhase) -> SelectedWorkEvidence<'static> {
+        SelectedWorkEvidence {
+            selection_id: id(1), owner_id: id(2), tenant_id: "tenant", run_id: id(3), invocation_id: id(4),
+            logical_job_id: id(5), phase, generation: 7, authority_digest: Sha256Digest::from_bytes([8; 32]),
+            claimed_at_ms: 10, expires_at_ms: 20 } }
+    fn row(selected: &SelectedWorkEvidence<'_>) -> TestRow {
+        let mut row = TestRow::default(); macro_rules! put { ($($key:literal => $value:expr),+ $(,)?) => { $(row.set($key, $value);)+ }; }
+        put!(
+            "selection_id" => selected.selection_id, "selection_owner_id" => selected.owner_id,
+            "selection_requested_at_ms" => 11_i64, "selection_duration_ms" => 12_i64,
+            "selection_generation" => selected.generation, "selection_claimed_at_ms" => selected.claimed_at_ms,
+            "selection_expires_at_ms" => selected.expires_at_ms, "owner_id" => selected.owner_id,
+            "requested_at_ms" => 11_i64, "duration_ms" => 12_i64, "outcome" => "claimed".to_owned(),
+            "tenant_id" => selected.tenant_id.to_owned(), "run_id" => selected.run_id,
+            "invocation_id" => selected.invocation_id, "logical_job_id" => selected.logical_job_id,
+            "generation" => selected.generation, "authority_digest" => selected.authority_digest.as_bytes().to_vec(),
+            "claimed_at_ms" => selected.claimed_at_ms, "expires_at_ms" => selected.expires_at_ms,
+            "authority_owner_id" => selected.owner_id, "authority_generation" => selected.generation,
+            "authority_claimed_at_ms" => selected.claimed_at_ms, "authority_expires_at_ms" => selected.expires_at_ms,
+            "quarantined_at_ms" => 30_i64, "failure_kind" => "relational_evidence".to_owned(),
+            "origin_selection_id" => Some(selected.selection_id), "authority_state" => selected.phase.state().to_owned(),
+        );
+        if let Some(kind) = selected.phase.authority_kind() { row.set("authority_kind", kind.to_owned()); }
+        if let SelectedWorkPhase::Materializing { instance_id } = selected.phase { row.set("instance_id", instance_id); } row
+    }
+    fn live_row(selected: &SelectedWorkEvidence<'_>) -> TestRow {
+        let mut row = row(selected); row.set("authority_owner_id", Some(selected.owner_id));
+        if selected.phase.authority_kind().is_some() { row.set("authority_digest", Some(selected.authority_digest.as_bytes().to_vec())); row.set("authority_generation", Some(selected.generation)); } row
+    }
+    fn authority_row(selected: &SelectedWorkEvidence<'_>) -> TestRow {
+        let mut row = live_row(selected); row.set("authority_generation", Some(selected.generation)); row.set("authority_digest", Some(selected.authority_digest.as_bytes().to_vec())); row.set("authority_claimed_at_ms", Some(selected.claimed_at_ms)); row.set("authority_expires_at_ms", Some(selected.expires_at_ms)); row
+    }
+    #[test] #[allow(clippy::too_many_lines)] // One table keeps cross-contract mutations comparable.
+    fn evidence_mutation_matrix_covers_all_nine_contracts() {
+        /* 1. Exact request evidence. */ let preparing = selected(SelectedWorkPhase::Preparing); let base = row(&preparing);
+        let request = |row: &TestRow| request_evidence_matches(row, id(2), 11, 12);
+        assert!(request(&base).unwrap());
+        rejects!(base, request; "owner_id" => id(9), "requested_at_ms" => 13_i64, "duration_ms" => 13_i64);
+        /* 2. Closed preparation/activation/materialization phase matrix. */ assert_eq!(phase_shape(orchestration_phase(LogicalJobOrchestrationAuthorityKind::Preparation)), ("preparing", Some("preparation"), None)); assert_eq!(phase_shape(orchestration_phase(LogicalJobOrchestrationAuthorityKind::Activation)), ("activating", Some("activation"), None)); assert_eq!(phase_shape(materialization_phase(id(6))), ("materializing", None, Some(id(6))));
+        for phase in [SelectedWorkPhase::Preparing, SelectedWorkPhase::Activating, SelectedWorkPhase::Materializing { instance_id: id(6) }] {
+            let selected = selected(phase); assert!(claimed_receipt_evidence_matches(&row(&selected), &selected).unwrap());
+            rejects!(live_row(&selected), |row| live_authority_evidence_matches(row, &selected);
+                "authority_state" => "wrong".to_owned());
+        }
+        rejects!(base, |row| claimed_receipt_evidence_matches(row, &preparing);
+            "authority_kind" => "activation".to_owned());
+        let materializing = selected(SelectedWorkPhase::Materializing { instance_id: id(6) });
+        rejects!(row(&materializing), |row| claimed_receipt_evidence_matches(row, &materializing);
+            "instance_id" => id(9));
+        /* 3. Live authority: all fields, renewal, optional orchestration, required materialization. */ let activating = selected(SelectedWorkPhase::Activating); let live = live_row(&activating);
+        let live_exact = |row: &TestRow| live_authority_evidence_matches(row, &activating);
+        assert!(live_exact(&live).unwrap());
+        rejects!(live, live_exact; "tenant_id" => "wrong".to_owned(), "run_id" => id(9),
+            "invocation_id" => id(9), "origin_selection_id" => None::<Uuid>,
+            "authority_owner_id" => None::<Uuid>, "authority_digest" => None::<Vec<u8>>,
+            "authority_state" => "preparing".to_owned(), "authority_generation" => Some(6_i64));
+        let mut renewed = live.clone(); renewed.set("authority_generation", Some(8_i64)); assert!(live_exact(&renewed).unwrap());
+        let mut required = live_row(&materializing); required.0.remove("authority_digest"); assert!(live_authority_evidence_matches(&required, &materializing).is_err());
+        required = live_row(&materializing); required.0.remove("authority_generation"); assert!(live_authority_evidence_matches(&required, &materializing).is_err());
+        rejects!(live_row(&materializing), |row| live_authority_evidence_matches(row, &materializing);
+            "logical_job_id" => id(9));
+        let mut sparse = live.clone(); sparse.0.remove("logical_job_id"); assert!(live_exact(&sparse).unwrap());
+        sparse.set("tenant_id", "wrong".to_owned()); sparse.0.remove("authority_digest"); assert!(!live_exact(&sparse).unwrap());
+        /* 4. Captured authority: five exact fields and wrong consumed orchestration kind. */ let captured = |row: &TestRow| captured_authority_evidence_matches(
+            row, preparing.owner_id, 7, preparing.authority_digest, 10, 20);
+        rejects!(base, captured; "authority_owner_id" => id(9), "authority_generation" => 8_i64,
+            "authority_digest" => vec![9_u8; 32], "authority_claimed_at_ms" => 11_i64,
+            "authority_expires_at_ms" => 21_i64);
+        assert!(require_orchestration_authority_kind(LogicalJobOrchestrationAuthorityKind::Preparation, LogicalJobOrchestrationAuthorityKind::Preparation).is_ok()); let mismatch = require_orchestration_authority_kind(LogicalJobOrchestrationAuthorityKind::Preparation, LogicalJobOrchestrationAuthorityKind::Activation).unwrap_err();
+        assert!(matches!(&mismatch, LogicalWorkSelectionStoreError::Store(StoreError::CorruptData(message)) if message == "consumed orchestration authority disagrees with selection kind")); assert_eq!(mismatch.to_string(), "durable data violated an Automata invariant: consumed orchestration authority disagrees with selection kind");
+        /* 5. Claimed receipt: outcome, common target, and all three phase shapes. */ let materialized = row(&materializing);
+        let receipt = |row: &TestRow| claimed_receipt_evidence_matches(row, &materializing);
+        rejects!(materialized, receipt; "outcome" => "idle".to_owned(), "owner_id" => id(9),
+            "tenant_id" => "wrong".to_owned(), "run_id" => id(9), "invocation_id" => id(9),
+            "logical_job_id" => id(9), "instance_id" => id(9), "generation" => 8_i64,
+            "authority_digest" => vec![9_u8; 32], "claimed_at_ms" => 11_i64, "expires_at_ms" => 21_i64);
+        /* 6. Replay quarantine: request/selection/target/phase/digest and closed outcome/failure pairs. */ let replay = |row: &TestRow| replay_quarantine_selection_matches(row, &preparing, 11, 12);
+        rejects!(base, replay; "selection_id" => id(9), "selection_owner_id" => id(9),
+            "selection_requested_at_ms" => 13_i64, "selection_duration_ms" => 13_i64,
+            "selection_generation" => 8_i64, "selection_claimed_at_ms" => 11_i64,
+            "selection_expires_at_ms" => 21_i64, "tenant_id" => "wrong".to_owned(),
+            "run_id" => id(9), "invocation_id" => id(9), "logical_job_id" => id(9),
+            "authority_kind" => "activation".to_owned(), "authority_digest" => vec![9_u8; 32]);
+        rejects!(materialized, |row| replay_quarantine_selection_matches(row, &materializing, 11, 12);
+            "instance_id" => id(9));
+        for failure in ["relational_evidence", "object_evidence", "payload_evidence"] {
+            let mut quarantine = base.clone(); quarantine.set("failure_kind", failure.to_owned());
+            assert!(replay_quarantine_receipt_kind_matches(&base, &quarantine, false).unwrap());
+        }
+        let mut poison = base.clone(); poison.set("outcome", "quarantined".to_owned());
+        poison.set("failure_kind", "generation_exhausted".to_owned());
+        assert!(replay_quarantine_receipt_kind_matches(&poison, &poison, true).unwrap());
+        assert!(!replay_quarantine_receipt_kind_matches(&base, &poison, false).unwrap());
+        poison.set("failure_kind", "unknown".to_owned());
+        assert!(!replay_quarantine_receipt_kind_matches(&poison, &poison, true).unwrap());
+        /* 7. Captured shape: exact/renewed ordinary, invalid intervals, and max/equal/expired poison. */ assert!(replay_captured_authority_shape_matches(&base, 7, 10, 20, false).unwrap());
+        let mut newer = base.clone(); newer.set("authority_generation", 8_i64);
+        newer.set("authority_claimed_at_ms", 12_i64); newer.set("authority_expires_at_ms", 25_i64);
+        assert!(replay_captured_authority_shape_matches(&newer, 7, 10, 20, false).unwrap());
+        let ordinary = |row: &TestRow| replay_captured_authority_shape_matches(row, 7, 10, 20, false);
+        rejects!(base, ordinary; "authority_claimed_at_ms" => 11_i64, "authority_owner_id" => Uuid::nil(),
+            "authority_generation" => 6_i64, "authority_claimed_at_ms" => -1_i64, "authority_expires_at_ms" => 10_i64,
+            "quarantined_at_ms" => 9_i64);
+        poison = base.clone(); poison.set("authority_generation", i64::MAX);
+        assert!(replay_captured_authority_shape_matches(&poison, i64::MAX, 10, 20, true).unwrap());
+        assert!(!replay_captured_authority_shape_matches(&poison, 7, 10, 20, true).unwrap());
+        poison.set("quarantined_at_ms", 19_i64);
+        assert!(!replay_captured_authority_shape_matches(&poison, i64::MAX, 10, 20, true).unwrap());
+        /* 8. Replay authority: ordinary owner/origin, poison-only waiver, current target/state/capture. */ let authority = authority_row(&activating); let quarantine = row(&activating);
+        assert!(replay_authority_evidence_matches(&authority, &quarantine, &activating, false).unwrap());
+        let mut other_owner = quarantine.clone(); other_owner.set("authority_owner_id", id(9));
+        let mut matching = authority.clone(); matching.set("authority_owner_id", Some(id(9)));
+        assert!(!replay_authority_evidence_matches(&matching, &other_owner, &activating, false).unwrap());
+        assert!(replay_authority_evidence_matches(&matching, &other_owner, &activating, true).unwrap());
+        let poison_replay = |row: &TestRow| replay_authority_evidence_matches(row, &other_owner, &activating, true);
+        for origin in [None, Some(id(9))] { let mut waived = matching.clone(); waived.set("origin_selection_id", origin); assert!(poison_replay(&waived).unwrap()); }
+        rejects!(matching, poison_replay; "run_id" => id(9), "authority_state" => "preparing".to_owned(),
+            "authority_generation" => Some(8_i64), "authority_digest" => Some(vec![9_u8; 32]),
+            "authority_claimed_at_ms" => Some(11_i64), "authority_expires_at_ms" => Some(21_i64));
+        rejects!(authority, |row| replay_authority_evidence_matches(row, &quarantine, &activating, false);
+            "origin_selection_id" => Some(id(9)));
+        /* 9. Persisted quarantine: every selection/receipt/target/phase/digest/captured/failure field. */ let receipt_row = materialized.clone();
+        let persisted = |row: &TestRow| -> Result<bool, LogicalWorkSelectionStoreError> { Ok(persisted_quarantine_selection_matches(row, &receipt_row, &materializing)?
+            && captured_authority_evidence_matches(row, materializing.owner_id, 7,
+                materializing.authority_digest, 10, 20)?
+            && row.evidence::<String>("failure_kind")? == "relational_evidence") };
+        rejects!(materialized, persisted; "selection_id" => id(9), "selection_owner_id" => id(9),
+            "selection_generation" => 8_i64, "selection_requested_at_ms" => 13_i64,
+            "selection_duration_ms" => 13_i64, "selection_claimed_at_ms" => 11_i64,
+            "selection_expires_at_ms" => 21_i64, "tenant_id" => "wrong".to_owned(),
+            "run_id" => id(9), "invocation_id" => id(9), "logical_job_id" => id(9),
+            "instance_id" => id(9), "authority_digest" => vec![9_u8; 32],
+            "authority_owner_id" => id(9), "authority_generation" => 8_i64,
+            "authority_claimed_at_ms" => 11_i64, "authority_expires_at_ms" => 21_i64,
+            "failure_kind" => "object_evidence".to_owned());
+        let mut changed_receipt = receipt_row.clone(); changed_receipt.set("requested_at_ms", 99_i64);
+        assert!(!persisted_quarantine_selection_matches(&materialized, &changed_receipt, &materializing).unwrap());
+        changed_receipt = receipt_row.clone(); changed_receipt.set("duration_ms", 99_i64);
+        assert!(!persisted_quarantine_selection_matches(&materialized, &changed_receipt, &materializing).unwrap());
+        rejects!(row(&activating), |candidate| persisted_quarantine_selection_matches(candidate, &row(&activating), &activating);
+            "authority_kind" => "preparation".to_owned());
+    }
 }
