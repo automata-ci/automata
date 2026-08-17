@@ -37,6 +37,17 @@ structure of [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
   stable JSON schema 3 and human output report its bounded name. The internal
   adapter can strictly inspect or create-and-adopt a repository-agnostic
   installation identity anchor without exposing a product mutation command.
+- Evaluation-only fixed-relay Local Docker runner execution on Linux. Runner
+  schema 5 binds the private provider to an exact existing installation anchor
+  and already-present digest-pinned guest image. Jobs receive no host bind,
+  Engine socket, per-job volume, or network; a protected tmpfs client performs
+  each bounded guest operation once, while durable replay remains host-owned.
+  The rootful relay must attest daemon-default user-namespace remapping, and
+  its architecture must exactly match the runner inventory. Every sandbox
+  proves a single nonzero UID/GID host mapping. Its administrator is
+  intentionally UID 0 with all Linux capability sets empty, not a promise of
+  `chown`, identity switching, or other POSIX capabilities. This adds no
+  `automata local run` lifecycle command.
 - Read-only `automata local check [WORKFLOW]` over a private, bounded snapshot
   of tracked and non-ignored live-worktree source. It hashes the exact
   deterministic archive consumed by shared workflow discovery, pins filesystem
@@ -58,7 +69,7 @@ structure of [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
   current-only `automata internal object-store ensure-bucket` image command.
   Server, initializer, and runner use closed bounded credential/trust
   configuration and the production AWS SDK client path; runner product schema
-  4 requires the same explicit trust choice. Config and SDK clients are one
+  5 requires the same explicit trust choice. Config and SDK clients are one
   inseparable store, canonical private-CA bytes and signing usage fail closed,
   connected-store diagnostics expose no bound state, validated transport is
   one closed security mode, and bucket creation is region-correct, idempotent,

@@ -762,7 +762,7 @@ The renderer consumes the current hidden image boundary
 client, test helper, compatibility alias, or placeholder service-init command.
 The initializer and server share the production S3 connection parser and the
 sole validated-config-to-store AWS SDK construction boundary. Runner product
-schema 4 independently requires the same closed
+schema 5 independently requires the same closed
 trust choice for every runner-side S3 client. Local HTTPS rendering selects
 exact private-CA trust and mounted bounded `SecretSource` file references for
 the CA and credentials on all three surfaces; the private root is never merged

@@ -15,13 +15,21 @@ homepage.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+automata-ci-execution.workspace = true
+automata-ci-sandbox-guest.workspace = true
+base64.workspace = true
 automata-ci-core.workspace = true
 automata-ci-workflow-github.workspace = true
 automata-ci-workflow-service.workspace = true
 bollard.workspace = true
+bytes.workspace = true
 cap-fs-ext.workspace = true
 cap-std.workspace = true
 flate2.workspace = true
+http.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

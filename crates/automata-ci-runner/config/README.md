@@ -9,23 +9,22 @@ locked Ubuntu 24.04 profile while keeping every host-local identity, state
 path, credential path, runtime mount, and metrics port distinct.
 [`runner.macos.example.json`](runner.macos.example.json)
 selects the Virtualization.framework provider on Apple Silicon macOS 15+.
-Exactly one of the `podman`, `kubernetes`, `windows_hyperv`, and
-`macos_virtualization` provider
-objects may be configured.
+Exactly one of the `podman`, `local_docker`, `kubernetes`, `windows_hyperv`,
+and `macos_virtualization` provider objects may be configured.
 
 The Linux examples' local bootstrap digest is not an official promoted profile;
 follow the
 [profile publication guide](https://github.com/automata-ci/automata/blob/main/images/github-hosted-ubuntu-24.04-x64/README.md)
 before trusting a protected-main candidate.
 
-Product schema v4 accepts exactly one sandbox provider. Host runners use the
-top-level `podman` object and require `state.podman`. Kubernetes runners omit
-`state.podman`, `state.windows_hyperv`, and `state.macos_virtualization` and use
-a top-level `kubernetes` object. Windows and macOS runners use their matching
-provider name in both locations. All non-v4 schemas, `windows_native`, and the
-removed macOS native key are rejected, not migrated. The runner loads
-credentials through Kubernetes' standard in-cluster or ambient kubeconfig
-discovery; the JSON remains secret-free.
+Product schema v5 accepts exactly one sandbox provider. Host runners use the
+top-level `podman` object and require `state.podman`. Kubernetes and local
+Docker runners omit every provider-specific state root and use a top-level
+`kubernetes` or `local_docker` object. Windows and macOS runners use their
+matching provider name in both locations. All non-v5 schemas,
+`windows_native`, and the removed macOS native key are rejected, not migrated.
+The Kubernetes runner loads credentials through standard in-cluster or ambient
+kubeconfig discovery; the JSON remains secret-free.
 
 `object_store.tls_trust` is mandatory and has exactly one of two current
 shapes: `{ "mode": "web_pki" }`, or `{ "mode": "private_ca",
@@ -70,6 +69,50 @@ containers, custom BuildKit configuration, and cross-attempt objects are
 rejected. Because Buildx and Podman request shapes evolve, validate the exact
 deployed versions with the opt-in live rootless fixture before enabling this
 field; an unreviewed future Docker create field fails closed.
+
+The evaluation-only local Docker selection has this closed shape:
+
+```json
+{
+  "local_docker": {
+    "installation_name": "evaluation",
+    "installation_id": "6e561f8b-9098-418d-b573-d82f5c73006e",
+    "guest_image": "registry.example/automata/sandbox-guest@sha256:<64 hex digits>"
+  }
+}
+```
+
+It is available only on Linux and selects no configurable Docker endpoint. The
+runner connects through the fixed private relay, verifies the exact daemon and
+installation anchor, and requires the immutable guest image to be already
+present. The executor must use disabled networking, a writable container root,
+administrator identity, at least 256 MiB of memory, one whole CPU, and three
+processes. Every environment must launch a container and use POSIX runner and
+workspace paths outside `/automata` and `/automata-control`. Jobs receive no
+host bind, engine socket, per-job volume, or network. Exited containers are
+never restarted. Durable host state owns invocation replay; ambiguity after an
+invocation commit fails closed until the exact sandbox is destroyed and proven
+absent.
+
+The relay daemon must be rootful Docker configured with daemon-default
+user-namespace remapping. `/info.SecurityOptions` must contain exactly
+`name=userns`, `name=seccomp,profile=builtin`, and `name=cgroupns`, with
+`name=no-new-privileges` optionally present. Rootless, AppArmor, SELinux, and
+unknown security options are rejected. `/info` must report memory, swap, CPU
+CFS period/quota, and PID-limit enforcement. Every job also proves that PID 1 has one
+canonical UID range and one canonical GID range, each starting at container ID
+0, mapping to a nonzero host ID, and covering container IDs through 65533.
+The relay architecture must exactly equal the architecture in the already
+validated runner inventory. Rootless Docker's usual multi-range map is
+intentionally unsupported. The
+administrator identity is UID 0 only inside that boundary with every Linux
+capability set empty under `no_new_privileges` and built-in seccomp; it does not
+provide `chown`, identity switching, or other POSIX capabilities.
+The relay must have no daemon `default-ulimits`; Docker API v1.44 cannot attest
+that setting before create, so this is a trusted relay prerequisite. Any
+daemon-injected ulimit still fails exact post-create inspection and is removed
+through the separate custody-only cleanup path. Guest and job images must not
+declare volumes, exposed ports, or a healthcheck.
 
 A Kubernetes selection has this provider-specific shape:
 

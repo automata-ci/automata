@@ -57,20 +57,62 @@ deterministic volume name, exact Automata-managed labels, local driver/scope,
 empty driver options, and container attachments. It exposes no generic Docker
 mutation, delete, prune, image-pull, helper-container, or Compose API.
 
+On Linux, the runner also consumes one evaluation-only sandbox-provider
+factory. The concrete Docker provider and engine API stay private. They connect
+only through the fixed `/run/automata-engine/docker.sock` relay, bind every
+operation to the exact daemon and installation anchor, and accept only an
+already-present immutable guest image. The fixed relay daemon must be rootful
+and report daemon-default user-namespace remapping, the built-in seccomp
+profile, and private cgroup namespaces. Rootless mode and daemons with AppArmor
+or SELinux enabled are deliberately not qualified because this provider does
+not model those daemon-added labels. `/info` must also report memory, swap, CPU
+CFS period/quota, and PID-limit enforcement. PID 1 then
+requires each kernel `uid_map` and `gid_map` to contain one nonzero host range
+covering container identities 0 through 65533. Daemon security-option drift is
+part of the pinned identity and invalidates the provider. The relay architecture
+must exactly match the architecture already recorded in the runner inventory;
+the immutable guest and job images must match that same relay architecture and
+must not declare volumes, exposed ports, or a healthcheck.
+
+Docker API v1.44 does not expose the daemon's `default-ulimits` configuration.
+An empty `default-ulimits` daemon policy is therefore a trusted fixed-relay
+prerequisite, not a preflight attestation. The provider still requires the
+realized container ulimit list to be empty; a violation fails closed after
+create, and cleanup uses only revalidated immutable custody evidence so the
+rejected container cannot strand its deterministic name.
+
+A job receives no host bind, host engine socket, per-job volume, or network.
+Its workspace and protected control client live in container tmpfs mounts. The
+protected guest broker replaces the profile keepalive as PID 1; the keepalive
+is bound into the sandbox identity but is not run as initialization. Raw
+provider endpoints are attempt-once. The production runner places them behind
+its durable exact-request replay boundary, while profile admission calls each
+raw operation once and destroys the sandbox after ambiguous evidence. The
+advertised administrator is deliberately attenuated: workflow processes have
+UID 0 only inside the proven remapped namespace, while inheritable, permitted,
+effective, bounding, and ambient Linux capability sets are all empty under
+`no_new_privileges` and the built-in seccomp profile. It does not promise
+`chown`, identity switching, or any other POSIX capability. Existing running
+containers are adopted only after exact identity inspection; an exited
+container is never restarted.
+Durable execution replay remains host-owned, and an ambiguous committed
+invocation fails closed until the exact sandbox is destroyed and proven absent.
+
 An installation is one reusable control-plane and runner-capacity domain, not
 one repository. Repositories sharing an installation are one trusted set and
 retain their own admission, authorization, secret, cache, and history scope in
 the existing control plane. A separate `--installation` name is the explicit
 way to request another deployment/capacity domain.
 
-No product command creates, adopts, or deletes an engine resource yet. The
-snapshot boundary is consumed by `automata local check`, which compiles an
-explicit local manual-dispatch event and all reachable same-snapshot reusable
-workflows through the shared compiler and credential analysis. It does not
-admit or run work, mint GitHub evidence, request a token, or publish a Check
-Run. Desired specification persistence, product-owned Compose rendering,
-workers, workflow execution, and GitHub connection are added only with their
-own tested contracts. There is still no host installation manifest, mirrored
+No `automata local` product command creates, adopts, or deletes an engine
+resource yet. The runner-only provider boundary above does not add a local
+lifecycle command. The snapshot boundary is consumed by `automata local check`,
+which compiles an explicit local manual-dispatch event and all reachable
+same-snapshot reusable workflows through the shared compiler and credential
+analysis. It does not admit or run work, mint GitHub evidence, request a token,
+or publish a Check Run. Desired specification persistence, product-owned
+Compose rendering, workers, and GitHub connection are added only with their own
+tested contracts. There is still no host installation manifest, mirrored
 resource inventory, lifecycle state machine, or secret value in this crate.
 
 This crate has no command-line parser. The `automata` product maps its public

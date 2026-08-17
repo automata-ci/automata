@@ -1,5 +1,5 @@
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "runner_id": "2f269f2a-1d5d-4a48-9f9e-797ea2fc97e2",
   "control_endpoint": "https://127.0.0.1:9090/",
   "state": {
