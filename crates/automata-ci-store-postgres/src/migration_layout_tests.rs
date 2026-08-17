@@ -199,7 +199,7 @@ const FROZEN_MIGRATIONS: &[(&str, &str)] = &[
     ),
     (
         "0049_delegated_workflow_dispatch.sql",
-        "89a474f5fe3f355c0192b81697b07550ae85b816660e2a70e34614f5f94b9ccfc4098f65b43567e2cf742ad586ad769a",
+        "df17f7d6396ca08d57594ca0411301a9ed3ea4d8c8e8d3f9acae5aba2592bff5ba0a7c26a78766bc23106d9a9f3d6f0c",
     ),
 ];
 

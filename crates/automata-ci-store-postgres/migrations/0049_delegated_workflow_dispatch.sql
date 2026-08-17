@@ -85,7 +85,7 @@ CREATE TABLE workflow_dispatch_source_resolutions (
             AND private_source_authority_policy_revision > 0)
     ),
     CONSTRAINT workflow_dispatch_source_resolutions_state CHECK (
-        state = ANY (ARRAY['claimed'::text, 'resolved'::text])
+        state = ANY (ARRAY['claimed'::text, 'retryable'::text, 'resolved'::text])
     ),
     CONSTRAINT workflow_dispatch_source_resolutions_state_shape CHECK (
         (state = 'claimed'
@@ -95,6 +95,18 @@ CREATE TABLE workflow_dispatch_source_resolutions (
             AND claimed_at_ms >= created_at_ms
             AND claim_expires_at_ms > claimed_at_ms
             AND claim_expires_at_ms - claimed_at_ms <= 900000
+            AND commit_sha IS NULL
+            AND source_digest IS NULL
+            AND source_object_key IS NULL
+            AND source_size_bytes IS NULL
+            AND source_media_type IS NULL
+            AND resolved_at_ms IS NULL)
+        OR
+        (state = 'retryable'
+            AND claim_owner_id IS NULL
+            AND claim_fence > 0
+            AND claimed_at_ms IS NULL
+            AND claim_expires_at_ms IS NULL
             AND commit_sha IS NULL
             AND source_digest IS NULL
             AND source_object_key IS NULL

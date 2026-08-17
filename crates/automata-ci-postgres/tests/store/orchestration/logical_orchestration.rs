@@ -2152,7 +2152,7 @@ fn workflow_dispatch_fixture_for_revision(
 
 #[tokio::test]
 #[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
-#[allow(clippy::too_many_lines)] // One lifecycle test proves claim, pin, replay, and release fencing.
+#[allow(clippy::too_many_lines)] // One lifecycle test proves claim, pin, replay, and retry fencing.
 async fn workflow_dispatch_source_resolution_pins_replays_and_releases_claims() -> TestResult {
     run_with_database(|database| async move {
         const TENANT: &str = "logical-dispatch-source-resolution";
@@ -2341,17 +2341,55 @@ async fn workflow_dispatch_source_resolution_pins_replays_and_releases_claims() 
             WorkflowDispatchSourceResolutionOutcome::Claimed(claim) => claim,
             outcome => return Err(format!("expected releasable claim, got {outcome:?}").into()),
         };
+        let released_fence = released_claim.fence();
         database
             .store()
-            .abandon_workflow_dispatch_source_resolution(released_claim)
+            .release_workflow_dispatch_source_resolution(released_claim)
             .await?;
-        let remaining: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM workflow_dispatch_source_resolutions WHERE operation_id = $1",
+        let released_state: String = sqlx::query_scalar(
+            "SELECT state FROM workflow_dispatch_source_resolutions WHERE operation_id = $1",
         )
         .bind(released_operation.as_uuid())
         .fetch_one(database.pool())
         .await?;
-        assert_eq!(remaining, 0);
+        assert_eq!(released_state, "retryable");
+        assert!(matches!(
+            database
+                .store()
+                .begin_workflow_dispatch_source_resolution(
+                    BeginWorkflowDispatchSourceResolution::new(
+                        actor.clone(),
+                        signed.repository().id(),
+                        signed.workflow_id(),
+                        "refs/heads/different",
+                        released_operation,
+                        second_worker,
+                        UnixMillis::new(database_now_ms(&database).await?),
+                        60_000,
+                    )?,
+                )
+                .await,
+            Err(WorkflowDispatchSourceResolutionStoreError::Conflict)
+        ));
+        let retried_claim = match database
+            .store()
+            .begin_workflow_dispatch_source_resolution(BeginWorkflowDispatchSourceResolution::new(
+                actor,
+                signed.repository().id(),
+                signed.workflow_id(),
+                signed.git_ref(),
+                released_operation,
+                second_worker,
+                UnixMillis::new(database_now_ms(&database).await?),
+                60_000,
+            )?)
+            .await?
+        {
+            WorkflowDispatchSourceResolutionOutcome::Claimed(claim) => claim,
+            outcome => return Err(format!("expected retried claim, got {outcome:?}").into()),
+        };
+        assert_eq!(retried_claim.worker_id(), second_worker);
+        assert_eq!(retried_claim.fence().get(), released_fence.get() + 1);
         Ok(())
     })
     .await

@@ -111,7 +111,7 @@ impl OperationalWorkflowDispatchBackend {
                     Err(error) => {
                         if self
                             .source_resolutions
-                            .abandon_workflow_dispatch_source_resolution(claim)
+                            .release_workflow_dispatch_source_resolution(claim)
                             .await
                             .is_err()
                         {

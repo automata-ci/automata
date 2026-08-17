@@ -1522,13 +1522,15 @@ impl GithubProviderCredentialAdapters {
             release_invalid_handoff(handoff).await;
             return Err(GithubWorkflowDispatchSourceCredentialError::Inconsistent);
         }
-        let canonical_request = github_server_service_credential_request(&authority)
-            .map_err(|_| GithubWorkflowDispatchSourceCredentialError::Inconsistent)?;
-        let repository = canonical_request.repository().repository().clone();
-        if repository.as_str() != manifest.github_repository_name().as_str() {
-            release_invalid_handoff(handoff).await;
-            return Err(GithubWorkflowDispatchSourceCredentialError::Inconsistent);
-        }
+        let canonical_repository = github_server_service_credential_request(&authority)
+            .ok()
+            .map(|request| request.repository().repository().clone());
+        let (handoff, repository) = validate_workflow_dispatch_source_repository(
+            handoff,
+            canonical_repository,
+            manifest.github_repository_name().as_str(),
+        )
+        .await?;
         let drop_release_arm = handoff.drop_release_arm.clone();
         let credential = GithubWorkflowDispatchSourceCredential {
             selector: handoff.selector,
@@ -1712,6 +1714,28 @@ impl GithubProviderCredentialAdapters {
             required_through,
         ));
     }
+}
+
+async fn validate_workflow_dispatch_source_repository(
+    handoff: GithubProviderCredentialHandoff,
+    canonical_repository: Option<automata_ci_scm::RepositoryId>,
+    expected_repository: &str,
+) -> Result<
+    (
+        GithubProviderCredentialHandoff,
+        automata_ci_scm::RepositoryId,
+    ),
+    GithubWorkflowDispatchSourceCredentialError,
+> {
+    let Some(repository) = canonical_repository else {
+        release_invalid_handoff(handoff).await;
+        return Err(GithubWorkflowDispatchSourceCredentialError::Inconsistent);
+    };
+    if repository.as_str() != expected_repository {
+        release_invalid_handoff(handoff).await;
+        return Err(GithubWorkflowDispatchSourceCredentialError::Inconsistent);
+    }
+    Ok((handoff, repository))
 }
 
 fn workflow_permission_identity_matches(

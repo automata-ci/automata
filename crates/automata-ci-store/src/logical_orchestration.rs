@@ -861,8 +861,8 @@ pub trait WorkflowDispatchSourceResolutionRepository: fmt::Debug + Send + Sync {
         request: CompleteWorkflowDispatchSourceResolution,
     ) -> Result<AuthenticatedWorkflowDispatchSource, WorkflowDispatchSourceResolutionStoreError>;
 
-    /// Releases an unresolved exact claim after a definitive provider failure.
-    async fn abandon_workflow_dispatch_source_resolution(
+    /// Releases the live lease after a provider failure while preserving operation identity.
+    async fn release_workflow_dispatch_source_resolution(
         &self,
         claim: WorkflowDispatchSourceClaim,
     ) -> Result<(), WorkflowDispatchSourceResolutionStoreError>;

@@ -91,11 +91,11 @@ impl WorkflowDispatchSourceResolutionRepository for PostgresStore {
         complete_dispatch_source_resolution(self, request).await
     }
 
-    async fn abandon_workflow_dispatch_source_resolution(
+    async fn release_workflow_dispatch_source_resolution(
         &self,
         claim: WorkflowDispatchSourceClaim,
     ) -> Result<(), WorkflowDispatchSourceResolutionStoreError> {
-        abandon_dispatch_source_resolution(self, claim).await
+        release_dispatch_source_resolution(self, claim).await
     }
 }
 
@@ -202,25 +202,20 @@ async fn begin_dispatch_source_resolution(
         .map_err(source_operation_error)?
     {
         validate_dispatch_source_operation(&existing, &actor, &request)?;
-        if existing
+        let state = existing
             .try_get::<String, _>("state")
-            .map_err(source_operation_error)?
-            == "resolved"
-        {
+            .map_err(source_operation_error)?;
+        if state == "resolved" {
             let source = resolved_dispatch_source_from_row(&existing)?;
             transaction.commit().await.map_err(source_operation_error)?;
             return Ok(WorkflowDispatchSourceResolutionOutcome::Resolved(source));
         }
-        let expires_at = existing
-            .try_get::<i64, _>("claim_expires_at_ms")
-            .map_err(source_operation_error)?;
-        let current_owner = existing
-            .try_get::<Uuid, _>("claim_owner_id")
-            .map_err(source_operation_error)?;
-        if expires_at > now.get() && current_owner != request.worker_id().as_uuid() {
-            return Err(WorkflowDispatchSourceResolutionStoreError::ClaimRejected);
-        }
-        if expires_at <= now.get() {
+        if state == "retryable"
+            || existing
+                .try_get::<Option<i64>, _>("claim_expires_at_ms")
+                .map_err(source_operation_error)?
+                .is_some_and(|expires_at| expires_at <= now.get())
+        {
             ensure_dispatch_source_manifest_current(&mut transaction, &existing).await?;
             let expires_at = now
                 .get()
@@ -228,10 +223,11 @@ async fn begin_dispatch_source_resolution(
                 .ok_or(WorkflowDispatchSourceResolutionStoreError::ClaimRejected)?;
             let update_query = format!(
                 "UPDATE workflow_dispatch_source_resolutions \
-                 SET claim_owner_id = $3, claim_fence = claim_fence + 1, \
+                 SET state = 'claimed', claim_owner_id = $3, claim_fence = claim_fence + 1, \
                      claimed_at_ms = $4, claim_expires_at_ms = $5 \
                  WHERE tenant_id = $1 AND operation_id = $2 \
-                   AND state = 'claimed' AND claim_fence < 9223372036854775807 \
+                   AND state = ANY (ARRAY['claimed'::text, 'retryable'::text]) \
+                   AND claim_fence < 9223372036854775807 \
                  RETURNING {DISPATCH_SOURCE_RESOLUTION_COLUMNS}"
             );
             let updated = sqlx::query(AssertSqlSafe(update_query))
@@ -247,6 +243,17 @@ async fn begin_dispatch_source_resolution(
             let claim = dispatch_source_claim_from_row(&updated)?;
             transaction.commit().await.map_err(source_operation_error)?;
             return Ok(WorkflowDispatchSourceResolutionOutcome::Claimed(claim));
+        }
+        let expires_at = existing
+            .try_get::<Option<i64>, _>("claim_expires_at_ms")
+            .map_err(source_operation_error)?
+            .ok_or_else(|| StoreError::corrupt_data("live dispatch source claim has no expiry"))?;
+        let current_owner = existing
+            .try_get::<Option<Uuid>, _>("claim_owner_id")
+            .map_err(source_operation_error)?
+            .ok_or_else(|| StoreError::corrupt_data("live dispatch source claim has no owner"))?;
+        if expires_at > now.get() && current_owner != request.worker_id().as_uuid() {
+            return Err(WorkflowDispatchSourceResolutionStoreError::ClaimRejected);
         }
         let claim = dispatch_source_claim_from_row(&existing)?;
         transaction.commit().await.map_err(source_operation_error)?;
@@ -505,13 +512,15 @@ async fn complete_dispatch_source_resolution(
     Ok(source)
 }
 
-async fn abandon_dispatch_source_resolution(
+async fn release_dispatch_source_resolution(
     store: &PostgresStore,
     claim: WorkflowDispatchSourceClaim,
 ) -> Result<(), WorkflowDispatchSourceResolutionStoreError> {
-    let deleted = sqlx::query(
+    let released = sqlx::query(
         r"
-        DELETE FROM workflow_dispatch_source_resolutions
+        UPDATE workflow_dispatch_source_resolutions
+        SET state = 'retryable', claim_owner_id = NULL,
+            claimed_at_ms = NULL, claim_expires_at_ms = NULL
         WHERE tenant_id = $1 AND operation_id = $2 AND state = 'claimed'
           AND repository_id = $3 AND workflow_id = $4 AND workflow_path = $5
           AND git_ref = $6 AND provider_connection_id = $7
@@ -570,7 +579,7 @@ async fn abandon_dispatch_source_resolution(
     .execute(&store.pool)
     .await
     .map_err(source_operation_error)?;
-    if deleted.rows_affected() != 1 {
+    if released.rows_affected() != 1 {
         return Err(WorkflowDispatchSourceResolutionStoreError::ClaimRejected);
     }
     Ok(())

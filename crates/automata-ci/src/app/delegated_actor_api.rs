@@ -653,7 +653,15 @@ async fn workspace_workflow_dispatch(
     let Some(backend) = state.workflow_dispatch.as_ref() else {
         return status_response(StatusCode::SERVICE_UNAVAILABLE);
     };
-    dispatch_delegated_workflow(backend, actor, repository_id, workflow_id, request).await
+    dispatch_delegated_workflow(
+        backend,
+        actor,
+        workspace_uuid,
+        repository_id,
+        workflow_id,
+        request,
+    )
+    .await
 }
 
 async fn workspace_viewer(
