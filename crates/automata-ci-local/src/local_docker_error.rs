@@ -15,6 +15,8 @@ pub enum LocalDockerErrorCode {
     EngineArchitectureMismatch,
     /// Docker returned an incomplete or internally inconsistent response.
     InvalidEngineResponse,
+    /// A bounded Docker Engine response exceeded the adapter's hard limit.
+    EngineOutputLimitExceeded,
     /// A required digest-pinned local sandbox image is absent.
     ImageUnavailable,
     /// A local sandbox image does not match its pinned digest or engine platform.
@@ -25,6 +27,8 @@ pub enum LocalDockerErrorCode {
     InvalidIdentityAnchor,
     /// A container is attached to the identity anchor.
     IdentityAnchorAttached,
+    /// A required closed Results network or endpoint does not match its contract.
+    ResultsTransportMismatch,
 }
 
 impl LocalDockerErrorCode {
@@ -43,6 +47,9 @@ impl LocalDockerErrorCode {
             Self::InvalidEngineResponse => {
                 "the Docker Engine returned an incomplete or inconsistent response"
             }
+            Self::EngineOutputLimitExceeded => {
+                "the Docker Engine response exceeded its hard output limit"
+            }
             Self::ImageUnavailable => {
                 "a required digest-pinned local sandbox image is not present in Docker"
             }
@@ -57,6 +64,9 @@ impl LocalDockerErrorCode {
             }
             Self::IdentityAnchorAttached => {
                 "the installation identity anchor is unexpectedly attached to a container"
+            }
+            Self::ResultsTransportMismatch => {
+                "the local Results transport does not satisfy its closed network contract"
             }
         }
     }

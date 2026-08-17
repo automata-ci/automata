@@ -4,6 +4,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
+    net::Ipv4Addr,
     sync::Arc,
     time::Duration,
 };
@@ -150,7 +151,7 @@ fn classify_label_failure(managed: &BTreeMap<&str, &str>) -> LocalDockerError {
 }
 
 #[cfg(unix)]
-fn map_engine_call(error: EngineApiError) -> LocalDockerError {
+pub(crate) fn map_engine_call(error: EngineApiError) -> LocalDockerError {
     match error {
         EngineApiError::RequestFailed => {
             LocalDockerError::new(LocalDockerErrorCode::EngineRequestFailed)
@@ -160,7 +161,7 @@ fn map_engine_call(error: EngineApiError) -> LocalDockerError {
         }
         #[cfg(unix)]
         EngineApiError::OutputLimit => {
-            LocalDockerError::new(LocalDockerErrorCode::InvalidEngineResponse)
+            LocalDockerError::new(LocalDockerErrorCode::EngineOutputLimitExceeded)
         }
     }
 }
@@ -205,6 +206,11 @@ pub(crate) struct InspectedImage {
     pub(crate) has_healthcheck: bool,
     pub(crate) labels: BTreeMap<String, String>,
     pub(crate) environment_names: Vec<String>,
+    pub(crate) default_path_only: bool,
+    pub(crate) user: String,
+    pub(crate) entrypoint: Vec<String>,
+    pub(crate) command: Vec<String>,
+    pub(crate) working_directory: String,
 }
 
 #[cfg(unix)]
@@ -223,6 +229,88 @@ pub(crate) struct ContainerDefinition {
     pub(crate) memory_bytes: i64,
     pub(crate) nano_cpus: i64,
     pub(crate) pids_limit: i64,
+    pub(crate) primary_network: Option<String>,
+    pub(crate) networks: BTreeMap<String, ContainerNetworkAttachment>,
+    pub(crate) capture_logs: bool,
+}
+
+#[cfg(unix)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ContainerNetworkAttachment {
+    pub(crate) network_id: String,
+    pub(crate) ipv4_address: Ipv4Addr,
+    pub(crate) aliases: Vec<String>,
+}
+
+#[cfg(unix)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct Ipv4Network {
+    pub(crate) network: Ipv4Addr,
+    pub(crate) prefix: u8,
+}
+
+#[cfg(unix)]
+impl Ipv4Network {
+    pub(crate) fn contains(&self, address: Ipv4Addr) -> bool {
+        let mask = u32::MAX << (32 - self.prefix);
+        u32::from(address) & mask == u32::from(self.network)
+    }
+
+    pub(crate) fn broadcast(&self) -> Ipv4Addr {
+        let mask = u32::MAX << (32 - self.prefix);
+        Ipv4Addr::from(u32::from(self.network) | !mask)
+    }
+
+    pub(crate) fn usable(&self, address: Ipv4Addr) -> bool {
+        self.contains(address) && address != self.network && address != self.broadcast()
+    }
+
+    pub(crate) fn canonical(&self) -> String {
+        format!("{}/{}", self.network, self.prefix)
+    }
+}
+
+#[cfg(unix)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct NetworkEndpoint {
+    pub(crate) name: String,
+    pub(crate) endpoint_id: String,
+    pub(crate) mac_address: String,
+    pub(crate) ipv4_address: Ipv4Addr,
+    pub(crate) ipv4_prefix: u8,
+}
+
+#[cfg(unix)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[allow(clippy::struct_excessive_bools)]
+pub(crate) struct InspectedNetwork {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) driver: String,
+    pub(crate) scope: String,
+    pub(crate) enable_ipv4: bool,
+    pub(crate) enable_ipv6: bool,
+    pub(crate) internal: bool,
+    pub(crate) attachable: bool,
+    pub(crate) ingress: bool,
+    pub(crate) config_only: bool,
+    pub(crate) config_from: String,
+    pub(crate) ipam_driver: String,
+    pub(crate) ipam_options: BTreeMap<String, String>,
+    pub(crate) ipv4_network: Ipv4Network,
+    pub(crate) ipv4_gateway: Ipv4Addr,
+    pub(crate) options: BTreeMap<String, String>,
+    pub(crate) labels: BTreeMap<String, String>,
+    pub(crate) containers: BTreeMap<String, NetworkEndpoint>,
+}
+
+#[cfg(unix)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CreateNetwork {
+    pub(crate) name: String,
+    pub(crate) labels: BTreeMap<String, String>,
+    pub(crate) ipv4_network: Ipv4Network,
+    pub(crate) ipv4_gateway: Ipv4Addr,
 }
 
 #[cfg(unix)]
@@ -350,6 +438,8 @@ pub(crate) trait SandboxEngineApi: AnchorEngineApi {
         name: &str,
     ) -> Result<Option<InspectedContainer>, EngineApiError>;
 
+    async fn results_target_running(&self, id: &str) -> Result<bool, EngineApiError>;
+
     async fn inspect_container_custody(
         &self,
         name_or_id: &str,
@@ -369,6 +459,17 @@ pub(crate) trait SandboxEngineApi: AnchorEngineApi {
     async fn remove_container(&self, id: &str) -> Result<(), EngineApiError>;
 
     async fn kill_container(&self, id: &str) -> Result<(), EngineApiError>;
+
+    async fn inspect_network(
+        &self,
+        id_or_name: &str,
+    ) -> Result<Option<InspectedNetwork>, EngineApiError>;
+
+    async fn create_network(&self, request: CreateNetwork) -> Result<String, EngineApiError>;
+
+    async fn remove_network(&self, id: &str) -> Result<(), EngineApiError>;
+
+    async fn container_logs(&self, id: &str, byte_limit: usize) -> Result<Vec<u8>, EngineApiError>;
 
     async fn download_guest_image_binary(
         &self,
@@ -439,7 +540,7 @@ impl PinnedDockerEngine {
             },
             api: ApiVersion {
                 major: 1,
-                minor: 44,
+                minor: 48,
             },
             architecture,
         }
@@ -470,7 +571,7 @@ pub(crate) async fn connect_relay_sandbox_engine(
 ) -> Result<(PinnedDockerEngine, Arc<dyn SandboxEngineApi>), LocalDockerError> {
     let api = ApiVersion {
         major: 1,
-        minor: 44,
+        minor: 48,
     };
     let engine = Arc::new(
         HttpEngine::connect_unix_socket(std::path::Path::new(LOCAL_DOCKER_RELAY_SOCKET), api)
@@ -551,7 +652,7 @@ fn validate_relay_facts(
         ));
     }
     if facts.engine_id.is_empty()
-        || facts.server_version.is_empty()
+        || !docker_engine_28_or_newer(&facts.server_version)
         || facts.operating_system != "linux"
         || minimum > api
         || maximum < api
@@ -561,6 +662,27 @@ fn validate_relay_facts(
         ));
     }
     Ok(architecture)
+}
+
+#[cfg(unix)]
+fn docker_engine_28_or_newer(value: &str) -> bool {
+    let mut components = value.split('.');
+    let Some(major) = components.next() else {
+        return false;
+    };
+    let Some(minor) = components.next() else {
+        return false;
+    };
+    let Some(patch) = components.next() else {
+        return false;
+    };
+    components.next().is_none()
+        && [major, minor, patch].iter().all(|component| {
+            !component.is_empty()
+                && component.bytes().all(|byte| byte.is_ascii_digit())
+                && (component.len() == 1 || !component.starts_with('0'))
+        })
+        && major.parse::<u64>().is_ok_and(|major| major >= 28)
 }
 
 #[cfg(all(test, unix))]
@@ -600,7 +722,7 @@ mod relay_tests {
             &facts(security_options),
             ApiVersion {
                 major: 1,
-                minor: 44,
+                minor: 48,
             },
         )
         .expect_err("security options must be rejected")
@@ -610,7 +732,7 @@ mod relay_tests {
     const fn api() -> ApiVersion {
         ApiVersion {
             major: 1,
-            minor: 44,
+            minor: 48,
         }
     }
 

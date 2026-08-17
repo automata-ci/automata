@@ -3,8 +3,8 @@ use std::{collections::BTreeMap, fmt, future::Future, sync::Arc, time::Duration}
 use automata_ci_execution::{
     Cancellation, CopyFromRequest, CopyToRequest, ExecutionCommand, ExecutionEndpoint,
     ExecutionError, ExecutionErrorKind, ExecutionOutput, ExecutionOutputRecord,
-    ExecutionOutputStream, ExecutionStage, ExecutionTermination, ProviderStage, SandboxCapability,
-    SandboxHandle, SignalRequest, WaitRequest,
+    ExecutionOutputStream, ExecutionStage, ExecutionTermination, NeverCancelled, ProviderStage,
+    SandboxCapability, SandboxHandle, SignalRequest, WaitRequest,
 };
 use automata_ci_sandbox_guest::{
     GUEST_PROTOCOL_VERSION, GuestOutputStream, GuestRejection, GuestRequest, GuestResponse,
@@ -15,7 +15,8 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use super::engine::{EngineApiError, EngineExecRequest};
 use super::{
     AttachedIdentity, ENDPOINT_CAPABILITIES, ENGINE_TRANSPORT_OVERHEAD, HandleOperationLock,
-    LocalDockerInner, ResourceNames, cancellation_requested, guest_client_user, lock_handle,
+    LocalDockerInner, ResourceNames, ResultsTransportBudget, cancellation_requested,
+    guest_client_user, lock_handle,
 };
 use automata_ci_sandbox_guest::LOCAL_CONTROL_CLIENT;
 
@@ -58,9 +59,10 @@ impl LocalDockerEndpoint {
             let _operation = lock_handle(Arc::clone(&self.operation_lock), cancellation)
                 .await
                 .ok_or_else(|| execution_error(ExecutionErrorKind::Cancelled, stage))?;
+            let budget = ResultsTransportBudget::start();
             let container = self
                 .inner
-                .verify_attached(&self.names, &self.attached)
+                .verify_attached(&self.names, &self.attached, cancellation, budget)
                 .await
                 .map_err(|kind| execution_error(map_provider_kind(kind), stage))?;
             let engine_request = EngineExecRequest {
@@ -73,7 +75,7 @@ impl LocalDockerEndpoint {
                 timeout,
             };
             self.inner
-                .verify_boundary_kind()
+                .verify_boundary_kind(cancellation, budget)
                 .await
                 .map_err(|kind| execution_error(map_provider_kind(kind), stage))?;
             require_active(cancellation, stage)?;
@@ -88,7 +90,7 @@ impl LocalDockerEndpoint {
                 .await
                 .map_err(|error| execution_error(map_engine_error(error), stage))?;
             self.inner
-                .verify_boundary_kind()
+                .verify_boundary_kind(cancellation, budget)
                 .await
                 .map_err(|kind| execution_error(map_provider_kind(kind), stage))?;
             let output = tokio::select! {
@@ -116,10 +118,19 @@ impl LocalDockerEndpoint {
             {
                 return Err(execution_error(ExecutionErrorKind::BackendRejected, stage));
             }
-            self.inner
-                .verify_attached(&self.names, &self.attached)
-                .await
-                .map_err(|kind| execution_error(map_provider_kind(kind), stage))?;
+            // Workload execution may legitimately run for far longer than an
+            // attestation budget. Start a fresh bounded custody phase after
+            // the Engine operation completes.
+            let final_budget = ResultsTransportBudget::start();
+            let final_verification = self
+                .inner
+                .verify_attached(&self.names, &self.attached, cancellation, final_budget)
+                .await;
+            if final_verification == Err(automata_ci_execution::ProviderErrorKind::Cancelled) {
+                self.cancel_running(&container.id, stage).await?;
+                return Err(execution_error(ExecutionErrorKind::Cancelled, stage));
+            }
+            final_verification.map_err(|kind| execution_error(map_provider_kind(kind), stage))?;
             if cancellation.disposition().requires_termination() {
                 self.cancel_running(&container.id, stage).await?;
                 return Err(execution_error(ExecutionErrorKind::Cancelled, stage));
@@ -133,9 +144,10 @@ impl LocalDockerEndpoint {
         container_id: &str,
         stage: ExecutionStage,
     ) -> Result<(), ExecutionError> {
+        let budget = ResultsTransportBudget::start();
         let current = self
             .inner
-            .verify_attached(&self.names, &self.attached)
+            .verify_attached(&self.names, &self.attached, &NeverCancelled, budget)
             .await
             .map_err(|kind| execution_error(map_provider_kind(kind), stage))?;
         if current.id != container_id {
@@ -145,7 +157,13 @@ impl LocalDockerEndpoint {
             ));
         }
         self.inner
-            .stop_exact_running_job(&self.names, &current, &self.handle, ProviderStage::Start)
+            .stop_exact_running_job(
+                &self.names,
+                &current,
+                &self.handle,
+                ProviderStage::Start,
+                budget,
+            )
             .await
             .map_err(|error| execution_error(map_provider_kind(error.kind()), stage))
     }

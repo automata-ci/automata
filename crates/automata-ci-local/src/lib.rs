@@ -23,6 +23,7 @@ mod installation;
 #[cfg(target_os = "linux")]
 mod local_docker;
 mod local_docker_error;
+mod results_transport;
 #[cfg(unix)]
 mod snapshot;
 #[cfg(not(unix))]
@@ -40,6 +41,7 @@ pub use installation::{
     InstallationName, InstallationNameError, InstallationSelectorKey,
 };
 pub use local_docker_error::{LocalDockerError, LocalDockerErrorCode};
+pub use results_transport::LocalDockerResultsTransport;
 /// Reserved in-container directory used by the fixed-relay Docker provider's protected client.
 pub const LOCAL_DOCKER_CONTROL_DIRECTORY: &str = "/automata-control";
 
@@ -49,6 +51,8 @@ pub const MINIMUM_LOCAL_DOCKER_SANDBOX_MEMORY_BYTES: u64 = 256 * 1_024 * 1_024;
 pub const MINIMUM_LOCAL_DOCKER_SANDBOX_CPU_MILLIS: u32 = 1_000;
 /// Smallest process limit that can contain PID 1, the protected client, and one workload process.
 pub const MINIMUM_LOCAL_DOCKER_SANDBOX_PIDS: u32 = 3;
+/// Largest one-based durable job-slot ordinal admitted by the local Docker topology.
+pub const MAXIMUM_LOCAL_DOCKER_JOB_SLOTS: u16 = 256;
 
 /// Connects the exact production-consumed fixed-relay Docker provider.
 ///
@@ -71,11 +75,15 @@ pub const MINIMUM_LOCAL_DOCKER_SANDBOX_PIDS: u32 = 3;
 pub async fn connect_local_docker_provider(
     installation: InstallationBinding,
     guest_image: automata_ci_execution::ImmutableImage,
+    results_transport: LocalDockerResultsTransport,
+    runner_id: automata_ci_execution::RunnerId,
     expected_runner_architecture: &automata_ci_core::Architecture,
 ) -> Result<std::sync::Arc<dyn automata_ci_execution::SandboxProvider>, LocalDockerError> {
     let provider = local_docker::LocalDockerProvider::connect(
         installation,
         guest_image,
+        results_transport,
+        runner_id,
         expected_runner_architecture,
     )
     .await?;
@@ -89,8 +97,9 @@ const MAX_DOCKER_CONTEXT_NAME_BYTES: usize = 128;
 const MAX_DOCKER_ENDPOINT_BYTES: usize = 4096;
 const MIN_DOCKER_API: ApiVersion = ApiVersion {
     major: 1,
-    minor: 44,
+    minor: 48,
 };
+const MIN_DOCKER_ENGINE_MAJOR: u64 = 28;
 const MIN_COMPOSE_VERSION: (u64, u64, u64) = (2, 20, 0);
 
 /// Container engine requested by a local-installation operation.
@@ -293,7 +302,9 @@ impl DoctorIssueCode {
             Self::UnsupportedEngineArchitecture => {
                 "use a native amd64 or arm64 Linux Docker Engine"
             }
-            Self::UnsupportedDockerApi => "upgrade Docker Engine to a supported API version",
+            Self::UnsupportedDockerApi => {
+                "upgrade Docker Engine to version 28 with API 1.48 or newer"
+            }
             Self::MissingEngineIdentity => "the Docker Engine did not report a stable identity",
             Self::EngineIdentityMismatch => "Docker version and info responses disagree",
             Self::MissingEngineCapability => {
@@ -1081,6 +1092,8 @@ fn validate_version(
     if architecture != component_architecture || architecture != host_architecture {
         return Err(DoctorIssueCode::UnsupportedEngineArchitecture);
     }
+    let server_major =
+        canonical_engine_major(&server.version).ok_or(DoctorIssueCode::UnsupportedDockerApi)?;
     let client_api =
         ApiVersion::parse(&client.api_version).ok_or(DoctorIssueCode::UnsupportedDockerApi)?;
     let server_api =
@@ -1099,7 +1112,8 @@ fn validate_version(
         .ok_or(DoctorIssueCode::UnsupportedDockerApi)?;
     let adapter_api =
         capped_adapter_api(client_api).ok_or(DoctorIssueCode::UnsupportedDockerApi)?;
-    if client_api < MIN_DOCKER_API
+    if server_major < MIN_DOCKER_ENGINE_MAJOR
+        || client_api < MIN_DOCKER_API
         || adapter_api < MIN_DOCKER_API
         || server_api < client_api
         || minimum_api > adapter_api
@@ -1113,6 +1127,23 @@ fn validate_version(
         api_version: format!("{}.{}", adapter_api.major, adapter_api.minor),
         architecture,
     })
+}
+
+fn canonical_engine_major(value: &str) -> Option<u64> {
+    let mut components = value.split('.');
+    let major = components.next()?;
+    let minor = components.next()?;
+    let patch = components.next()?;
+    if components.next().is_some()
+        || [major, minor, patch].iter().any(|component| {
+            component.is_empty()
+                || !component.bytes().all(|byte| byte.is_ascii_digit())
+                || (component.len() > 1 && component.starts_with('0'))
+        })
+    {
+        return None;
+    }
+    major.parse().ok()
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -1492,20 +1523,16 @@ mod tests {
     }
 
     #[test]
-    fn retains_an_older_negotiated_api_below_the_adapter_ceiling() {
+    fn rejects_an_api_below_the_results_transport_minimum() {
         let mut probes = healthy_probes(CONTEXT_UNIX);
         probes.version = success(
             VERSION_AMD64
                 .replacen("\"ApiVersion\":\"1.55\"", "\"ApiVersion\":\"1.44\"", 1)
                 .into_bytes(),
         );
-        let report = report("linux", "x86_64", &probes);
-        assert!(report.ready());
         assert_eq!(
-            report
-                .selected_engine()
-                .map(super::EngineSelection::api_version),
-            Some("1.44")
+            issue_codes(&report("linux", "x86_64", &probes)),
+            vec![DoctorIssueCode::UnsupportedDockerApi]
         );
     }
 

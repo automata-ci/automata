@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    net::SocketAddr,
+    net::{Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
     str::FromStr as _,
     time::Duration,
@@ -34,7 +34,7 @@ use super::files::{
 use super::spool_crypto::MAX_DECRYPT_ONLY_CONTENT_KEYS;
 
 /// Current on-disk runner product configuration schema.
-pub const RUNNER_PRODUCT_CONFIG_SCHEMA_VERSION: u16 = 5;
+pub const RUNNER_PRODUCT_CONFIG_SCHEMA_VERSION: u16 = 6;
 /// Hard ceiling applied before parsing a runner configuration document.
 pub const MAX_RUNNER_CONFIG_BYTES: usize = 256 * 1024;
 const PODMAN_RUNTIME_ROOT_NAME: &str = "automata-ci-podman";
@@ -337,6 +337,7 @@ pub enum RunnerProviderConfig {
 pub struct LocalDockerProductConfig {
     installation_binding: automata_ci_local::InstallationBinding,
     guest_image: ImmutableImage,
+    results_transport: automata_ci_local::LocalDockerResultsTransport,
 }
 
 impl LocalDockerProductConfig {
@@ -350,6 +351,12 @@ impl LocalDockerProductConfig {
     #[must_use]
     pub const fn guest_image(&self) -> &ImmutableImage {
         &self.guest_image
+    }
+
+    /// Returns the exact externally provisioned Results transport identity.
+    #[must_use]
+    pub const fn results_transport(&self) -> &automata_ci_local::LocalDockerResultsTransport {
+        &self.results_transport
     }
 }
 
@@ -1580,6 +1587,8 @@ impl RawInventory {
             || (provider_kind == ProviderKind::MacosVirtualization
                 && self.environment_profiles.len() != 1)
             || (provider_kind == ProviderKind::MacosVirtualization && self.max_parallel_jobs != 1)
+            || (provider_kind == ProviderKind::LocalDocker
+                && self.max_parallel_jobs > automata_ci_local::MAXIMUM_LOCAL_DOCKER_JOB_SLOTS)
         {
             return Err(RunnerProductConfigError::InvalidInventory);
         }
@@ -1943,6 +1952,16 @@ struct RawLocalDockerProductConfig {
     installation_name: String,
     installation_id: String,
     guest_image: String,
+    results_transport: RawLocalDockerResultsTransport,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawLocalDockerResultsTransport {
+    proxy_image: String,
+    transit_network_id: String,
+    results_container_id: String,
+    results_address: String,
 }
 
 impl RawLocalDockerProductConfig {
@@ -1967,9 +1986,26 @@ impl RawLocalDockerProductConfig {
             .map_err(|_| RunnerProductConfigError::InvalidLocalDocker)?;
         let guest_image = ImmutableImage::new(self.guest_image)
             .map_err(|_| RunnerProductConfigError::InvalidLocalDocker)?;
+        let proxy_image = ImmutableImage::new(self.results_transport.proxy_image)
+            .map_err(|_| RunnerProductConfigError::InvalidLocalDocker)?;
+        let results_address = self
+            .results_transport
+            .results_address
+            .parse::<Ipv4Addr>()
+            .ok()
+            .filter(|address| address.to_string() == self.results_transport.results_address)
+            .ok_or(RunnerProductConfigError::InvalidLocalDocker)?;
+        let results_transport = automata_ci_local::LocalDockerResultsTransport::new(
+            proxy_image,
+            self.results_transport.transit_network_id,
+            self.results_transport.results_container_id,
+            results_address,
+        )
+        .map_err(|_| RunnerProductConfigError::InvalidLocalDocker)?;
         Ok(LocalDockerProductConfig {
             installation_binding: automata_ci_local::InstallationBinding::new(name, id),
             guest_image,
+            results_transport,
         })
     }
 }
@@ -2457,7 +2493,7 @@ impl RawExecutorProductConfig {
                     || root_filesystem != RootFilesystemPolicy::Writable
                     || privilege != SandboxPrivilegePolicy::Unprivileged))
             || (provider_kind == ProviderKind::LocalDocker
-                && (network != NetworkPolicy::Disabled
+                && (network != NetworkPolicy::PrivateEgress
                     || root_filesystem != RootFilesystemPolicy::Writable
                     || privilege != SandboxPrivilegePolicy::Administrator))
         {

@@ -1944,7 +1944,7 @@ mod tests {
             SandboxCapability::CopyTo,
             SandboxCapability::CopyFrom,
             SandboxCapability::EnvironmentInjection,
-            SandboxCapability::NetworkDisabled,
+            SandboxCapability::PrivateEgress,
             SandboxCapability::WritableRootFilesystem,
             SandboxCapability::Administrator,
             SandboxCapability::UserNamespace,
@@ -1954,8 +1954,7 @@ mod tests {
         .expect("exact LocalDocker provider capabilities");
         let (profile, sandbox) = environment("local-docker-tools", profile_digest(0x69), 0x7a);
         let profiles = BTreeMap::from([(profile, sandbox)]);
-        let mut policy = linux_tool_policy();
-        policy.network = NetworkPolicy::Disabled;
+        let policy = linux_tool_policy();
 
         assert_eq!(
             admit_environment_profiles(&provider, runner_id(), &profiles, policy, &signals,),
