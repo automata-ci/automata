@@ -203,6 +203,7 @@ impl OrphanRecoveryCoordinator {
             .cloned()
             .ok_or(RunnerRuntimeError::ExecutorContract)?;
         if let Some(sandbox) = refreshed.sandbox().cloned() {
+            let signal = ExecutionCancellation::new();
             let negotiated = NegotiatedSession::new(
                 session.selected_protocol(),
                 session.selected_job_ir(),
@@ -221,8 +222,8 @@ impl OrphanRecoveryCoordinator {
                 guard,
                 self.protocol_limits,
                 Arc::clone(&self.content_operations),
+                signal.clone(),
             ));
-            let signal = ExecutionCancellation::new();
             let request = CleanupRequest::new(
                 self.runner_id,
                 session_id,

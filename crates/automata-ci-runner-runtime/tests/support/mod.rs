@@ -4835,12 +4835,13 @@ impl ActiveBacklogClient {
         session_id: automata_ci_core::RunnerSessionId,
         lease: Lease,
         sleeper: Arc<ManualDeadlineSleeper>,
+        limits: automata_ci_protocol::ProtocolLimits,
     ) -> Self {
         Self {
             session_id,
             lease,
             sleeper,
-            limits: automata_ci_protocol::ProtocolLimits::default(),
+            limits,
             state: Mutex::new(ActiveBacklogState::default()),
             changed: tokio::sync::Notify::new(),
         }
@@ -5310,6 +5311,8 @@ pub struct SlowLogClient {
     stop_on_first_batch: bool,
     retry_first_batch: bool,
     log_delay: Duration,
+    log_clock_advance_millis: u64,
+    first_log_release: Option<CancellationToken>,
     limits: automata_ci_protocol::ProtocolLimits,
     state: Mutex<SlowLogState>,
 }
@@ -5322,6 +5325,7 @@ impl SlowLogClient {
         shutdown: CancellationToken,
         stop_on_first_batch: bool,
         retry_first_batch: bool,
+        limits: automata_ci_protocol::ProtocolLimits,
     ) -> Self {
         let lease_clock_anchor = clock.monotonic_now().get();
         Self {
@@ -5333,7 +5337,9 @@ impl SlowLogClient {
             stop_on_first_batch,
             retry_first_batch,
             log_delay: Duration::from_millis(3),
-            limits: automata_ci_protocol::ProtocolLimits::default(),
+            log_clock_advance_millis: 8_000,
+            first_log_release: None,
+            limits,
             state: Mutex::new(SlowLogState {
                 log_batches: Vec::new(),
                 heartbeats: Vec::new(),
@@ -5341,6 +5347,28 @@ impl SlowLogClient {
                 retried_first_batch: false,
                 starved: false,
             }),
+        }
+    }
+
+    pub fn with_log_clock_advance(mut self, millis: u64) -> Self {
+        self.log_clock_advance_millis = millis;
+        self
+    }
+
+    pub fn with_first_log_release(mut self, release: CancellationToken) -> Self {
+        self.first_log_release = Some(release);
+        self
+    }
+
+    async fn wait_for_first_log_release(&self) {
+        let is_first = self
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .log_batches
+            .is_empty();
+        if is_first && let Some(release) = self.first_log_release.as_ref() {
+            release.cancelled().await;
         }
     }
 
@@ -5421,8 +5449,9 @@ impl RunnerRuntimeControlClient for SlowLogClient {
                     ))
                 }
                 RunnerToServer::LogBatch(batch) => {
+                    self.wait_for_first_log_release().await;
                     tokio::time::sleep(self.log_delay).await;
-                    let now = self.clock.advance_monotonic(8_000);
+                    let now = self.clock.advance_monotonic(self.log_clock_advance_millis);
                     let first = batch.frames().first().expect("nonempty log batch");
                     let last = batch.frames().last().expect("nonempty log batch");
                     let retry = {
@@ -6237,6 +6266,44 @@ fn control_reply(
 
 pub fn config(runner_id: RunnerId) -> RunnerRuntimeConfig {
     config_with_retry(runner_id, RetryPolicy::default())
+}
+
+pub fn protocol_limits_with_log_batch_size(
+    max_log_frames_per_batch: usize,
+) -> automata_ci_protocol::ProtocolLimits {
+    let defaults = automata_ci_protocol::ProtocolLimits::default();
+    automata_ci_protocol::ProtocolLimits::new(
+        defaults.max_frame_bytes(),
+        defaults.max_collection_items(),
+        defaults.max_text_bytes(),
+        max_log_frames_per_batch,
+        defaults.max_log_payload_bytes_per_batch(),
+    )
+    .expect("test protocol limits")
+}
+
+pub fn config_with_protocol_limits(
+    runner_id: RunnerId,
+    protocol_limits: automata_ci_protocol::ProtocolLimits,
+) -> RunnerRuntimeConfig {
+    config_with_protocol_limits_and_retry(runner_id, protocol_limits, RetryPolicy::default())
+}
+
+pub fn config_with_protocol_limits_and_retry(
+    runner_id: RunnerId,
+    protocol_limits: automata_ci_protocol::ProtocolLimits,
+    retry: RetryPolicy,
+) -> RunnerRuntimeConfig {
+    let limits = RunnerRuntimeLimits::new(
+        retry,
+        Duration::from_millis(25),
+        Duration::from_mins(5),
+        Duration::from_millis(100),
+        Duration::from_secs(30),
+    )
+    .expect("runtime limits");
+    RunnerRuntimeConfig::new(capabilities(runner_id, 1), protocol_limits, limits)
+        .expect("runtime config")
 }
 
 pub fn config_with_retry(runner_id: RunnerId, retry: RetryPolicy) -> RunnerRuntimeConfig {

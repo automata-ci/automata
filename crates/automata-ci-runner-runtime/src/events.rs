@@ -18,7 +18,8 @@ use automata_ci_runner_transport::PreparedRequest;
 use crate::content::ContentOperationCoordinator;
 use crate::outbox::{append_record, validate_log_segment_records};
 use crate::{
-    ExecutionEventError, ExecutionEvents, LogEvent, RuntimeClock, RuntimeIdSource, StableIdDomain,
+    ExecutionCancellation, ExecutionEventError, ExecutionEvents, LogEvent, RuntimeClock,
+    RuntimeIdSource, StableIdDomain,
 };
 
 #[derive(Clone)]
@@ -33,6 +34,7 @@ pub(crate) struct DurableExecutionEvents {
     guard: LeaseGuard,
     limits: ProtocolLimits,
     content_operations: Arc<ContentOperationCoordinator>,
+    cancellation: ExecutionCancellation,
     serial: Arc<std::sync::Mutex<()>>,
 }
 
@@ -66,6 +68,7 @@ impl DurableExecutionEvents {
         guard: LeaseGuard,
         limits: ProtocolLimits,
         content_operations: Arc<ContentOperationCoordinator>,
+        cancellation: ExecutionCancellation,
     ) -> Self {
         Self {
             journal,
@@ -78,6 +81,7 @@ impl DurableExecutionEvents {
             guard,
             limits,
             content_operations,
+            cancellation,
             serial: Arc::new(std::sync::Mutex::new(())),
         }
     }
@@ -339,6 +343,7 @@ impl DurableExecutionEvents {
     ) -> Result<(), ExecutionEventError> {
         let stream_id = self.stream_id();
         loop {
+            let delivery_generation = self.content_operations.log_delivery_generation();
             let loaded = self.load_open_log_tail(stream_id)?;
             let sequence = loaded.produced_through.map_or_else(
                 || Ok(LogSequence::new(0)),
@@ -391,6 +396,19 @@ impl DurableExecutionEvents {
                         automata_ci_runner_journal::JournalInvariantError::LogSegmentMutationConflict,
                     ),
                 )) => {}
+                Err(ExecutionEventError::Journal(
+                    automata_ci_runner_journal::JournalError::Invariant(
+                        automata_ci_runner_journal::JournalInvariantError::LogSegmentLimit
+                        | automata_ci_runner_journal::JournalInvariantError::LogBacklogLimit,
+                    ),
+                )) => {
+                    if !self.content_operations.wait_for_log_delivery_progress(
+                        delivery_generation,
+                        &self.cancellation,
+                    ) {
+                        return Err(ExecutionEventError::InvalidEvent);
+                    }
+                }
                 Err(error) => return Err(error),
             }
         }

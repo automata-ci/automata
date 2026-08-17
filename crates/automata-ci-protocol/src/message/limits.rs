@@ -7,7 +7,11 @@ pub const MAX_CONFIGURABLE_FRAME_BYTES: usize = 64 * 1024 * 1024;
 const DEFAULT_FRAME_BYTES: usize = 16 * 1024 * 1024;
 const DEFAULT_COLLECTION_ITEMS: usize = 4_096;
 const DEFAULT_TEXT_BYTES: usize = 1024 * 1024;
-const DEFAULT_LOG_FRAMES: usize = 16;
+// One completed process can hand the executor up to 65,536 ordered output
+// records at once. Keep one delivery batch at the existing collection ceiling
+// so a bounded command-output burst cannot exhaust the durable segment queue
+// merely because network acknowledgement is slower than local publication.
+const DEFAULT_LOG_FRAMES: usize = DEFAULT_COLLECTION_ITEMS;
 const DEFAULT_LOG_PAYLOAD_BYTES: usize = 4 * 1024 * 1024;
 
 /// Bounded allocation policy selected by trusted transport configuration.

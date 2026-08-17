@@ -2951,14 +2951,16 @@ async fn active_log_backlog_uses_deadline_cadence_instead_of_heartbeat_per_batch
     let fixture = support::seed_accepted_offer(journal.as_ref(), spool.as_ref(), runner_id);
     let clock = Arc::new(support::ManualClock::new(10_000, 50));
     let sleeper = Arc::new(support::ManualDeadlineSleeper::new(Arc::clone(&clock)));
+    let protocol_limits = support::protocol_limits_with_log_batch_size(16);
     let client = Arc::new(support::ActiveBacklogClient::new(
         fixture.session_id,
         fixture.lease,
         Arc::clone(&sleeper),
+        protocol_limits,
     ));
     let executor = Arc::new(support::ActiveLogExecutor::new(160));
     let runtime = RunnerSessionSupervisor::new(
-        support::config(runner_id),
+        support::config_with_protocol_limits(runner_id, protocol_limits),
         RunnerRuntimePorts::new(
             client.clone(),
             journal.clone(),
@@ -3267,6 +3269,7 @@ async fn terminal_log_backlog_is_batched_and_heartbeats_continue_during_slow_del
     let fixture = support::seed_accepted_offer(journal.as_ref(), spool.as_ref(), runner_id);
     let shutdown = CancellationToken::new();
     let clock = Arc::new(support::ManualClock::new(10_000, 50));
+    let protocol_limits = support::protocol_limits_with_log_batch_size(16);
     let client = Arc::new(support::SlowLogClient::new(
         fixture.session_id,
         fixture.lease,
@@ -3274,11 +3277,12 @@ async fn terminal_log_backlog_is_batched_and_heartbeats_continue_during_slow_del
         shutdown.clone(),
         false,
         true,
+        protocol_limits,
     ));
     let retry = RetryPolicy::new(2, Duration::from_millis(1), Duration::from_millis(2))
         .expect("short exact-log retry");
     let runtime = RunnerSessionSupervisor::new(
-        support::config_with_retry(runner_id, retry),
+        support::config_with_protocol_limits_and_retry(runner_id, protocol_limits, retry),
         RunnerRuntimePorts::new(
             client.clone(),
             journal.clone(),
@@ -3351,6 +3355,98 @@ async fn terminal_log_backlog_is_batched_and_heartbeats_continue_during_slow_del
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn saturated_log_segments_wait_for_acknowledgements_instead_of_failing_the_job() {
+    let scratch = support::Scratch::new("saturated-log-backpressure");
+    let runner_id = RunnerId::new();
+    let (journal, spool) = support::durable_ports(&scratch, runner_id);
+    let fixture = support::seed_accepted_offer(journal.as_ref(), spool.as_ref(), runner_id);
+    let shutdown = CancellationToken::new();
+    let first_log_release = CancellationToken::new();
+    let clock = Arc::new(support::ManualClock::new(10_000, 50));
+    let protocol_limits = support::protocol_limits_with_log_batch_size(1);
+    let client = Arc::new(
+        support::SlowLogClient::new(
+            fixture.session_id,
+            fixture.lease,
+            Arc::clone(&clock),
+            shutdown.clone(),
+            false,
+            false,
+            protocol_limits,
+        )
+        .with_log_clock_advance(0)
+        .with_first_log_release(first_log_release.clone()),
+    );
+    let runtime = RunnerSessionSupervisor::new(
+        support::config_with_protocol_limits(runner_id, protocol_limits),
+        RunnerRuntimePorts::new(
+            client.clone(),
+            journal.clone(),
+            spool,
+            Arc::new(support::BurstLogExecutor::new(160)),
+            clock,
+            Arc::new(automata_ci_runner_runtime::TokioRuntimeSleeper),
+            Arc::new(SystemRuntimeIds),
+        ),
+    );
+
+    let task = tokio::spawn(async move { runtime.run(shutdown).await });
+    let saturation = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let segment_count = journal
+                .snapshot()
+                .expect("saturated log snapshot")
+                .slot(fixture.slot)
+                .and_then(|slot| slot.log_delivery())
+                .map_or(0, |delivery| delivery.segments().len());
+            if segment_count == automata_ci_runner_journal::MAX_LOG_SEGMENTS_PER_SLOT {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    if saturation.is_err() {
+        let snapshot = journal.snapshot().expect("timed-out saturation snapshot");
+        let delivery = snapshot
+            .slot(fixture.slot)
+            .and_then(|slot| slot.log_delivery());
+        panic!(
+            "journal did not saturate: segments={}, produced={:?}, delivered_batches={}, task_finished={}",
+            delivery.map_or(0, |delivery| delivery.segments().len()),
+            delivery.and_then(automata_ci_runner_journal::LogDeliveryCursor::produced_through),
+            client.log_batches().len(),
+            task.is_finished(),
+        );
+    }
+    assert!(
+        !task.is_finished(),
+        "the executor waits for delivery capacity"
+    );
+
+    first_log_release.cancel();
+    tokio::time::timeout(Duration::from_secs(15), task)
+        .await
+        .expect("backpressured log delivery completes")
+        .expect("runtime task")
+        .expect("log saturation does not fail the job");
+
+    let batches = client.log_batches();
+    assert_eq!(batches.len(), 161, "160 output frames plus terminal EOS");
+    assert_eq!(batches.first().expect("first batch").first_sequence, 0);
+    assert_eq!(batches.last().expect("EOS batch").last_sequence, 160);
+    assert!(batches.iter().all(|batch| batch.frame_count == 1));
+    assert!(!client.starved());
+    assert!(
+        journal
+            .snapshot()
+            .expect("released saturated log delivery")
+            .slot(fixture.slot)
+            .is_none()
+    );
+}
+
 #[tokio::test]
 async fn crash_during_batched_log_request_reconstructs_the_exact_same_batch() {
     let scratch = support::Scratch::new("batched-log-crash-replay");
@@ -3358,6 +3454,7 @@ async fn crash_during_batched_log_request_reconstructs_the_exact_same_batch() {
     let (journal, spool) = support::durable_ports(&scratch, runner_id);
     let fixture = support::seed_accepted_offer(journal.as_ref(), spool.as_ref(), runner_id);
     let clock = Arc::new(support::ManualClock::new(10_000, 50));
+    let protocol_limits = support::protocol_limits_with_log_batch_size(16);
     let first_shutdown = CancellationToken::new();
     let first_client = Arc::new(support::SlowLogClient::new(
         fixture.session_id,
@@ -3366,9 +3463,10 @@ async fn crash_during_batched_log_request_reconstructs_the_exact_same_batch() {
         first_shutdown.clone(),
         true,
         false,
+        protocol_limits,
     ));
     RunnerSessionSupervisor::new(
-        support::config(runner_id),
+        support::config_with_protocol_limits(runner_id, protocol_limits),
         RunnerRuntimePorts::new(
             first_client.clone(),
             journal.clone(),
@@ -3393,9 +3491,10 @@ async fn crash_during_batched_log_request_reconstructs_the_exact_same_batch() {
         second_shutdown.clone(),
         false,
         false,
+        protocol_limits,
     ));
     RunnerSessionSupervisor::new(
-        support::config(runner_id),
+        support::config_with_protocol_limits(runner_id, protocol_limits),
         RunnerRuntimePorts::new(
             second_client.clone(),
             journal.clone(),

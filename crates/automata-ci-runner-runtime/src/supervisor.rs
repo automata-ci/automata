@@ -1738,6 +1738,13 @@ impl RunnerSessionSupervisor {
                 .await;
         }
         let lease = durable.offer().lease().clone();
+        let signal = ExecutionCancellation::new();
+        if durable.cancellation().is_some() {
+            signal.signal(ExecutionCancellationReason::ServerRequest);
+            self.observe(RunnerRuntimeEvent::Cancellation {
+                reason: RuntimeCancellationReason::ServerRequest,
+            });
+        }
         let events: Arc<dyn ExecutionEvents> = Arc::new(DurableExecutionEvents::new(
             Arc::clone(&self.inner.ports.journal),
             Arc::clone(&self.inner.ports.spool),
@@ -1749,14 +1756,8 @@ impl RunnerSessionSupervisor {
             lease.guard(),
             *self.inner.config.protocol_limits(),
             Arc::clone(&self.inner.content_operations),
+            signal.clone(),
         ));
-        let signal = ExecutionCancellation::new();
-        if durable.cancellation().is_some() {
-            signal.signal(ExecutionCancellationReason::ServerRequest);
-            self.observe(RunnerRuntimeEvent::Cancellation {
-                reason: RuntimeCancellationReason::ServerRequest,
-            });
-        }
         {
             let mut executions = self
                 .inner
@@ -2590,6 +2591,7 @@ impl RunnerSessionSupervisor {
                 guard,
                 acknowledgement,
             )?;
+            self.inner.content_operations.notify_log_delivery_progress();
             if !snapshot
                 .content_references()
                 .any(|content| content == head_content)
@@ -3181,6 +3183,7 @@ impl RunnerSessionSupervisor {
             lease.guard(),
             *self.inner.config.protocol_limits(),
             Arc::clone(&self.inner.content_operations),
+            ExecutionCancellation::new(),
         );
         tokio::task::spawn_blocking(move || events.ensure_log_stream_closed())
             .await
@@ -3352,6 +3355,7 @@ impl RunnerSessionSupervisor {
         cancellation: CancellationToken,
     ) -> Result<(), RunnerRuntimeError> {
         let lease = durable.offer().lease();
+        let signal = ExecutionCancellation::new();
         let events: Arc<dyn ExecutionEvents> = Arc::new(DurableExecutionEvents::new(
             Arc::clone(&self.inner.ports.journal),
             Arc::clone(&self.inner.ports.spool),
@@ -3363,8 +3367,8 @@ impl RunnerSessionSupervisor {
             lease.guard(),
             *self.inner.config.protocol_limits(),
             Arc::clone(&self.inner.content_operations),
+            signal.clone(),
         ));
-        let signal = ExecutionCancellation::new();
         let request = CleanupRequest::new(
             self.inner.config.capabilities().runner_id(),
             session.negotiated.session_id(),
