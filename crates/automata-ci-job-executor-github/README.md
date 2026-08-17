@@ -112,11 +112,12 @@ The control-plane activation boundary anonymously resolves exact-commit public
 repository metadata before Job IR publication and carries the complete
 statically knowable runtime feature set in `RunnerRequirements`:
 JavaScript/composite execution, the exact Node generation, literal composite
-shells, repository action handling, command files, and summaries. A local
-child reference compiled from repository-action metadata is rebound to the
-same repository and exact revision, so its definition is prepared recursively
-from that immutable repository snapshot rather than from the workflow
-workspace.
+shells, repository action handling, command files, and summaries. A `$/...`
+self-repository child compiled from repository-action metadata is rebound to
+the same repository and exact revision, so its definition is prepared
+recursively from that immutable repository snapshot. A `./...` child remains
+rooted in the workflow workspace and currently fails closed before Job IR
+publication or runner lease.
 Top-level literal and activation-resolved run shells are concretized by logical
 projection. Mutable tag/branch references and repository composite shell
 expressions fail closed pending ACT-02 resolution and binding support. Runner

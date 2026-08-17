@@ -28,7 +28,7 @@ use tar::{Builder, EntryType, Header};
 const EXACT_REVISION: &str = "de0fac2e4500dabe0009e67214ff5f5447ce83dd";
 
 #[tokio::test]
-async fn resolved_bundle_preparation_binds_local_children_to_resolved_source_provenance() {
+async fn resolved_bundle_distinguishes_workspace_and_repository_root_children() {
     let snapshot = RepositorySnapshot::from_bytes(
         ScmProviderId::new("github").expect("provider"),
         RepositoryId::new("actions/example").expect("repository"),
@@ -37,8 +37,8 @@ async fn resolved_bundle_preparation_binds_local_children_to_resolved_source_pro
         ArchiveFormat::TarGzip,
         action_archive(&[
             (
-                "root/action.yml",
-                b"runs:\n  using: composite\n  steps:\n    - uses: ./nested/action\n",
+                "root/actions/parent/action.yml",
+                b"runs:\n  using: composite\n  steps:\n    - uses: ./workspace/action\n    - uses: $/nested/action\n",
             ),
             (
                 "root/nested/action/action.yml",
@@ -65,23 +65,32 @@ async fn resolved_bundle_preparation_binds_local_children_to_resolved_source_pro
     let reference = ActionReference::Repository {
         repository: "actions/example".to_owned(),
         revision: EXACT_REVISION.to_owned(),
-        subpath: None,
+        subpath: Some("actions/parent".to_owned()),
     };
 
     let prepared_action = preparer
         .prepare(ActionPreparationRequest::new(&reference))
         .await
         .expect("prepared root action");
-    let [PreparedCompositeStep::Uses(child)] = prepared_action
+    let [
+        PreparedCompositeStep::Uses(workspace),
+        PreparedCompositeStep::Uses(repository),
+    ] = prepared_action
         .definition()
         .composite()
         .expect("composite")
         .steps()
     else {
-        panic!("one nested action expected")
+        panic!("workspace and self-repository actions expected")
     };
     assert_eq!(
-        child.reference(),
+        workspace.reference(),
+        &ActionReference::Local {
+            path: "./workspace/action".to_owned(),
+        }
+    );
+    assert_eq!(
+        repository.reference(),
         &ActionReference::Repository {
             repository: "actions/example".to_owned(),
             revision: EXACT_REVISION.to_owned(),

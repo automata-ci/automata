@@ -58,9 +58,10 @@ Tasks:
     boundary for exact-commit public actions. Activation anonymously and
     recursively resolves their metadata and records JavaScript/composite, exact
     Node generation, literal composite shells, repository-action, command-file,
-    and summary capabilities in Job IR. Repository-composite `./...` children
+    and summary capabilities in Job IR. Repository-composite `$/...` children
     bind to the same exact repository revision and are prepared recursively
-    from that immutable archive. Activation-known top-level shells are
+    from that immutable archive. Their `./...` children remain workspace-local
+    and fail closed before scheduling. Activation-known top-level shells are
     concretized. Capability matching rejects runners missing any requirement
     before lease acquisition; the runner repeats repository preflight before
     custody or provider work as defense in depth.

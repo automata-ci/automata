@@ -3292,6 +3292,11 @@ struct NestedNode20ActionPreparer {
     calls: Mutex<Vec<ActionReference>>,
 }
 
+#[derive(Debug, Default)]
+struct WorkspaceChildActionPreparer {
+    calls: Mutex<Vec<ActionReference>>,
+}
+
 #[async_trait]
 impl ActionPreparationPort for NestedNode20ActionPreparer {
     async fn prepare(
@@ -3328,39 +3333,74 @@ impl ActionPreparationPort for NestedNode20ActionPreparer {
                 ActionPreparationErrorKind::Resolution,
             ));
         }
-        let condition = GithubConditionCompiler::default()
-            .compile_condition(Some("always()"), GithubConditionPhase::Step)
-            .expect("condition");
-        let child = PreparedCompositeUsesStep::new(
-            PreparedCompositeStepMetadata::new(
-                None,
-                None,
-                condition,
-                PreparedBoolean::Literal(false),
-            ),
+        Ok(prepared_composite_action(
             ActionReference::Repository {
                 repository: repository.clone(),
                 revision: revision.clone(),
                 subpath: Some("nested".to_owned()),
             },
-            Vec::new(),
-            Vec::new(),
-        )
-        .expect("nested action");
-        let definition = PreparedActionDefinition::new(
-            Vec::new(),
-            Vec::new(),
-            PreparedActionExecution::Composite(
-                PreparedCompositeAction::new(vec![PreparedCompositeStep::Uses(child)])
-                    .expect("composite"),
-            ),
-        )
-        .expect("action definition");
-        let archive = Bytes::from_static(b"root-composite-action-archive");
-        let digest = Sha256Digest::from_bytes(Sha256::digest(&archive).into());
-        PreparedAction::with_definition(digest, archive, "", definition)
-            .map_err(|_| ActionPreparationError::new(ActionPreparationErrorKind::Internal))
+            "root",
+        ))
     }
+}
+
+#[async_trait]
+impl ActionPreparationPort for WorkspaceChildActionPreparer {
+    async fn prepare(
+        &self,
+        request: ActionPreparationRequest<'_>,
+    ) -> Result<PreparedAction, ActionPreparationError> {
+        self.calls
+            .lock()
+            .expect("action calls")
+            .push(request.reference().clone());
+        let ActionReference::Repository {
+            repository,
+            revision,
+            subpath,
+        } = request.reference()
+        else {
+            return Err(ActionPreparationError::new(
+                ActionPreparationErrorKind::UnsupportedReference,
+            ));
+        };
+        if repository != "synthetic/missing-runtime" || revision != REVISION || subpath.is_some() {
+            return Err(ActionPreparationError::new(
+                ActionPreparationErrorKind::Resolution,
+            ));
+        }
+        Ok(prepared_composite_action(
+            ActionReference::Local {
+                path: "./nested/action".to_owned(),
+            },
+            "workspace-child",
+        ))
+    }
+}
+
+fn prepared_composite_action(reference: ActionReference, label: &str) -> PreparedAction {
+    let condition = GithubConditionCompiler::default()
+        .compile_condition(Some("always()"), GithubConditionPhase::Step)
+        .expect("condition");
+    let child = PreparedCompositeUsesStep::new(
+        PreparedCompositeStepMetadata::new(None, None, condition, PreparedBoolean::Literal(false)),
+        reference,
+        Vec::new(),
+        Vec::new(),
+    )
+    .expect("nested action");
+    let definition = PreparedActionDefinition::new(
+        Vec::new(),
+        Vec::new(),
+        PreparedActionExecution::Composite(
+            PreparedCompositeAction::new(vec![PreparedCompositeStep::Uses(child)])
+                .expect("composite"),
+        ),
+    )
+    .expect("action definition");
+    let archive = Bytes::from(format!("{label}-composite-action-archive"));
+    let digest = Sha256Digest::from_bytes(Sha256::digest(&archive).into());
+    PreparedAction::with_definition(digest, archive, "", definition).expect("prepared action")
 }
 
 fn prepared_javascript_action(runtime: JavascriptRuntime, label: &str) -> PreparedAction {
@@ -3517,6 +3557,47 @@ async fn unsupported_nested_repository_runtime_quarantines_before_publication_or
         AutonomousWorkflowOutcome::Quarantined(AutonomousWorkflowQueue::Orchestration)
     );
     assert_eq!(actions.calls.lock().expect("action calls").len(), 2);
+    assert_eq!(harness.blobs.put_outcomes(), (0, 0));
+    assert!(harness.repository.publication_attempts().is_empty());
+    assert_eq!(harness.repository.successful_publications(), 0);
+    assert_eq!(harness.repository.mutation_counts(), (1, 0, 0));
+    assert_eq!(
+        harness.repository.quarantine_kinds().0,
+        vec![LogicalWorkQuarantineKind::PayloadEvidence]
+    );
+}
+
+#[tokio::test]
+async fn nested_workspace_reference_quarantines_without_fetching_a_parent_repository_child() {
+    let actions = Arc::new(WorkspaceChildActionPreparer::default());
+    let action_port: Arc<dyn ActionPreparationPort> = actions.clone();
+    let harness = new_harness_with_action_preparer(
+        WORKFLOW_WITH_REPOSITORY_ACTION_SOURCE,
+        JobAuthorityProfile::Standard,
+        Vec::new(),
+        Some(action_port),
+    )
+    .await;
+    complete_preparation(&harness).await;
+    harness.blobs.reset_observation();
+
+    assert_eq!(
+        harness
+            .service
+            .run_once(CancellationToken::new())
+            .await
+            .expect("workspace child capability admission"),
+        AutonomousWorkflowOutcome::Quarantined(AutonomousWorkflowQueue::Orchestration)
+    );
+    assert_eq!(
+        actions.calls.lock().expect("action calls").as_slice(),
+        &[ActionReference::Repository {
+            repository: "synthetic/missing-runtime".to_owned(),
+            revision: REVISION.to_owned(),
+            subpath: None,
+        }],
+        "workspace syntax must not be rebound into a second repository fetch"
+    );
     assert_eq!(harness.blobs.put_outcomes(), (0, 0));
     assert!(harness.repository.publication_attempts().is_empty());
     assert_eq!(harness.repository.successful_publications(), 0);

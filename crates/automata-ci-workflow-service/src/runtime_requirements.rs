@@ -153,10 +153,10 @@ fn discover_repository_action<'a>(
                                 }
                                 ActionReference::Local { .. }
                                 | ActionReference::Container { .. } => {
-                                    // Repository preparation must bind local syntax to
-                                    // the same exact repository revision, while nested
-                                    // containers remain unsupported. Neither may cross
-                                    // scheduling as an unresolved prepared child.
+                                    // Repository preparation binds `$/...` syntax to
+                                    // the same exact repository revision. Workspace-local
+                                    // and container children remain unresolved and cannot
+                                    // cross scheduling.
                                     return Err(RuntimeRequirementDiscoveryError::Invalid);
                                 }
                             },

@@ -391,6 +391,11 @@ struct RepositoryActionSource<'a> {
     revision: &'a str,
 }
 
+enum NestedActionReference {
+    Action(ActionReference),
+    SelfRepository(ActionSubpath),
+}
+
 fn prepare_metadata(
     metadata: &GithubActionMetadata,
     archive_digest: automata_ci_core::Sha256Digest,
@@ -527,8 +532,7 @@ fn prepare_composite_uses(
     conditions: &GithubConditionCompiler,
     source: Option<RepositoryActionSource<'_>>,
 ) -> Result<PreparedCompositeUsesStep, ActionPreparationError> {
-    let reference =
-        bind_repository_local_reference(prepare_nested_reference(step.uses().text())?, source)?;
+    let reference = bind_nested_reference(prepare_nested_reference(step.uses().text())?, source)?;
     PreparedCompositeUsesStep::new(
         prepare_composite_step_metadata(
             step.name(),
@@ -544,20 +548,21 @@ fn prepare_composite_uses(
     .map_err(|_| metadata_error())
 }
 
-fn bind_repository_local_reference(
-    reference: ActionReference,
+fn bind_nested_reference(
+    reference: NestedActionReference,
     source: Option<RepositoryActionSource<'_>>,
 ) -> Result<ActionReference, ActionPreparationError> {
-    let (ActionReference::Local { path }, Some(source)) = (&reference, source) else {
-        return Ok(reference);
-    };
-    let relative = path.strip_prefix("./").ok_or_else(metadata_error)?;
-    ActionSubpath::new(relative.to_owned()).map_err(|_| metadata_error())?;
-    Ok(ActionReference::Repository {
-        repository: source.repository.to_owned(),
-        revision: source.revision.to_owned(),
-        subpath: Some(relative.to_owned()),
-    })
+    match reference {
+        NestedActionReference::Action(reference) => Ok(reference),
+        NestedActionReference::SelfRepository(subpath) => {
+            let source = source.ok_or_else(metadata_error)?;
+            Ok(ActionReference::Repository {
+                repository: source.repository.to_owned(),
+                revision: source.revision.to_owned(),
+                subpath: Some(subpath.as_str().to_owned()),
+            })
+        }
+    }
 }
 
 fn prepare_composite_step_metadata(
@@ -692,15 +697,20 @@ fn find_expression_end(source: &str, mut cursor: usize) -> Option<usize> {
     None
 }
 
-fn prepare_nested_reference(source: &str) -> Result<ActionReference, ActionPreparationError> {
+fn prepare_nested_reference(source: &str) -> Result<NestedActionReference, ActionPreparationError> {
     if source.contains("${{") {
         return Err(metadata_error());
     }
     if source.starts_with("./") {
         validate_local_reference(source).map_err(|()| metadata_error())?;
-        return Ok(ActionReference::Local {
+        return Ok(NestedActionReference::Action(ActionReference::Local {
             path: source.to_owned(),
-        });
+        }));
+    }
+    if let Some(relative) = source.strip_prefix("$/") {
+        let relative = relative.trim_start_matches('/');
+        let subpath = ActionSubpath::new(relative.to_owned()).map_err(|_| metadata_error())?;
+        return Ok(NestedActionReference::SelfRepository(subpath));
     }
     if source.starts_with("docker://") {
         if source.len() == "docker://".len()
@@ -709,9 +719,9 @@ fn prepare_nested_reference(source: &str) -> Result<ActionReference, ActionPrepa
         {
             return Err(metadata_error());
         }
-        return Ok(ActionReference::Container {
+        return Ok(NestedActionReference::Action(ActionReference::Container {
             image: source.to_owned(),
-        });
+        }));
     }
     let (path, revision) = source.split_once('@').ok_or_else(metadata_error)?;
     if source.matches('@').count() != 1 || !valid_action_revision(revision) {
@@ -727,11 +737,11 @@ fn prepare_nested_reference(source: &str) -> Result<ActionReference, ActionPrepa
     {
         return Err(metadata_error());
     }
-    Ok(ActionReference::Repository {
+    Ok(NestedActionReference::Action(ActionReference::Repository {
         repository: format!("{}/{}", components[0], components[1]),
         revision: revision.to_owned(),
         subpath: (components.len() > 2).then(|| components[2..].join("/")),
-    })
+    }))
 }
 
 fn validate_local_reference(source: &str) -> Result<(), ()> {
@@ -813,11 +823,44 @@ mod tests {
     use super::*;
 
     #[test]
-    fn repository_composite_local_children_bind_to_the_same_immutable_source() {
+    fn repository_composite_workspace_children_remain_workspace_references() {
         let document = ActionDefinitionDocument::metadata_yaml(
             "action.yml",
             Bytes::from_static(
                 b"runs:\n  using: composite\n  steps:\n    - uses: ./nested/action\n",
+            ),
+        );
+        let metadata = GithubActionMetadataDecoder::default()
+            .decode(&document)
+            .expect("metadata");
+        let definition = prepare_definition(
+            &metadata,
+            &GithubConditionCompiler::default(),
+            Some(RepositoryActionSource {
+                repository: "owner/action",
+                revision: "0123456789abcdef0123456789abcdef01234567",
+            }),
+        )
+        .expect("prepared definition");
+        let [PreparedCompositeStep::Uses(step)] =
+            definition.composite().expect("composite").steps()
+        else {
+            panic!("one nested action expected")
+        };
+        assert_eq!(
+            step.reference(),
+            &ActionReference::Local {
+                path: "./nested/action".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn repository_composite_self_repository_children_bind_to_the_immutable_source() {
+        let document = ActionDefinitionDocument::metadata_yaml(
+            "action.yml",
+            Bytes::from_static(
+                b"runs:\n  using: composite\n  steps:\n    - uses: $/nested/action\n",
             ),
         );
         let metadata = GithubActionMetadataDecoder::default()
@@ -871,5 +914,21 @@ mod tests {
                 path: "./nested/action".to_owned(),
             }
         );
+    }
+
+    #[test]
+    fn self_repository_children_without_repository_provenance_fail_closed() {
+        let document = ActionDefinitionDocument::metadata_yaml(
+            "action.yml",
+            Bytes::from_static(
+                b"runs:\n  using: composite\n  steps:\n    - uses: $/nested/action\n",
+            ),
+        );
+        let metadata = GithubActionMetadataDecoder::default()
+            .decode(&document)
+            .expect("metadata");
+        let error = prepare_definition(&metadata, &GithubConditionCompiler::default(), None)
+            .expect_err("self-repository reference needs immutable source provenance");
+        assert_eq!(error.kind(), ActionPreparationErrorKind::Metadata);
     }
 }
