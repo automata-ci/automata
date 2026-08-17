@@ -106,6 +106,49 @@ That provider-foundation pull request did **not** prove or complete:
 - [ ] hostile cross-job, daemon-compromise, crash-transition, or cleanup soak;
 - [ ] Windows Actions compatibility or a production capability claim.
 
+The source tree now also contains an image/action component increment behind
+those release gates:
+
+- a closed, digest-bound Windows Server 2025 Server Core, x86-64,
+  Hyper-V-container profile manifest and image lock;
+- bounded, typed reference interfaces that bind the native media type and
+  digest of provenance, SPDX SBOM, patch, and revocation metadata, plus an
+  optional externally signed Ed25519 promotion
+  envelope that binds every evidence digest and the revocation generation;
+- exact manifest-to-configuration bindings for the guest, workspace,
+  `pwsh.exe`, `powershell.exe`, `cmd.exe`, `tar.exe`, the Automata SHA-256
+  helper, and any configured Node 12/16/20/24 runtime;
+- fresh-sandbox startup probes for all configured Windows action tools; and
+- bounded Windows action-archive validation, in-container digest verification,
+  extraction, reparse-tree inspection, and exact-generation Node execution.
+
+Candidate evidence that is internally consistent but lacks the external
+promotion signature remains shell-only. JavaScript, composite, repository,
+local-action, and Node-generation capabilities are composed only after both
+promotion verification and fresh profile probes succeed. The source-level
+pre-enrollment admission contract binds the runner, broker/provider identity,
+exact enrollment transaction, exact environment and
+resource/tool probe policy, image manifest/lock and signed-promotion identity,
+the versioned digest of the shared lifecycle/tool probe semantics, and canonical
+registration inventory into a short-lived authenticated receipt. The broker
+caller must invoke that shared helper rather than reproduce private probe argv.
+It must also obtain fresh broker proof for the fixed ordered host-input set:
+exact configuration, backend executable, manifest, lock, evidence records, and
+promotion envelope, each bound to content digest, trusted owner, protected and
+non-inherited DACL, non-reparse stable file ID, and approved local volume.
+It requires that only an opaque broker-custody handle cross restart and that the
+runner write no Windows enrollment secret or receipt to local staging. The
+restricted-broker caller remains a separate integration gate. Once composed,
+missing, stale, expired, tampered, or mismatched custody fails closed, and
+runtime startup re-runs the full
+profile probes independently; the receipt never substitutes for live evidence,
+and control-plane registered/live intersection retains only capabilities proved
+twice. Missing,
+mismatched, revoked, or substituted evidence and tools stop startup. The
+checked-in candidate files are contract fixtures: they do not claim a built,
+signed, scanned, patched, or physical-host-tested image, and they do not close
+WIN-ISO-03, WIN-ISO-10, or any production gate.
+
 The current direct CLI boundary is suitable for component development and an
 offline laboratory. It is not the final hostile-workload management boundary.
 A runner identity that can independently access the container-engine named pipe
@@ -351,15 +394,26 @@ Current runner product schema v6 selects exactly one provider. The Windows
 provider requires one or more digest-attested environment profiles with:
 
 - an immutable digest-qualified Windows image reference;
+- a digest-pinned Server 2025 manifest and image lock plus bounded typed
+  reference records for provenance, SPDX SBOM, patch-report, and revocation
+  artifacts;
 - a Windows keepalive executable and literal argument vector;
 - an in-container Windows workspace root;
-- Windows shell paths located in the image; and
+- exact `pwsh.exe`, `powershell.exe`, `cmd.exe`, `tar.exe`, Automata SHA-256
+  helper, and configured Node-generation paths located in the image; and
 - network disabled, writable container root, unprivileged execution, zero GPU,
   and zero claimed ephemeral-disk allocation.
 
-Example values are placeholders, not deployable image or runtime attestations.
-Operators must replace every placeholder digest with evidence from their own
-build and host qualification.
+The optional promotion configuration names an envelope, pinned key identifier,
+and Ed25519 public key. A canonical signed payload must explicitly promote and
+accept provenance, SBOM, patch, and revocation subjects while binding the exact
+profile, manifest, lock, base/output images, all evidence digests, and
+revocation generation. Without it the image remains a candidate and action
+capabilities stay absent.
+
+Example values and the checked-in candidate files are contract fixtures, not
+deployable image or runtime attestations. Operators must replace every
+placeholder digest with evidence from their own build and host qualification.
 
 ### Runtime invocation
 
@@ -547,6 +601,16 @@ The image factory must:
 - publish immutable digests only after security review; and
 - rotate or revoke an image without permitting mutable-tag fallback.
 
+The repository implements the consumer side of that contract: secure bounded
+file loading, exact digest/schema/binding validation, revocation rejection, and
+external Ed25519 promotion verification. The typed records bind external
+artifact digests and native media types; they are not substitutes for parsing
+or producing the referenced in-toto, SPDX, patch, or revocation artifacts. The
+accompanying candidate manifest, lock, and reference records intentionally
+contain placeholder values and no promotion envelope. This is neither the
+image factory nor evidence that any listed tool or image exists; real pipeline
+outputs and dedicated-host qualification remain mandatory.
+
 No host directory or shared mutable tool cache is mounted into the container.
 Source, action content, and outputs cross only through bounded provider-neutral
 copy and result interfaces. Persistent caches and artifacts use their product
@@ -730,6 +794,12 @@ and the broker can mutate only exact generation-bound Automata resources.
 
 ### WIN-ISO-03 — Hermetic Windows image supply chain
 
+- [x] Define a closed candidate manifest/lock schema for one Windows Server
+      2025 Server Core, x86-64, Hyper-V-container profile and exact tools.
+- [x] Add bounded verifier interfaces for manifest, lock, provenance, SPDX
+      SBOM, patch, revocation, and external Ed25519 promotion metadata.
+- [x] Keep checked-in fixtures explicitly candidate-only and withhold action
+      capabilities without a valid external promotion envelope.
 - [ ] Define the exact Server Core host/image compatibility matrix.
 - [ ] Build a digest-pinned image containing guest executable and reviewed
       shells/tools without job-time mutable installation.
@@ -750,7 +820,7 @@ for each advertised profile.
 First-PR component scope:
 
 - [x] Add the explicit Windows Hyper-V container launch variant.
-- [x] Keep the current schema-v4 `windows_hyperv` configuration and remove
+- [x] Keep the current schema-v6 `windows_hyperv` configuration and remove
       `windows_native`.
 - [x] Require disabled network, unprivileged workload, writable container root,
       no services, zero GPU, and no ephemeral-disk claim.
@@ -866,12 +936,16 @@ return a Windows host without accepting unknown state.
 **Dependencies:** WIN-01, WIN-02, RUN-01 through RUN-03, ACT-01, and
 WIN-ISO-06 through WIN-ISO-09 as applicable.
 
-- [ ] Run PowerShell 7, Windows PowerShell, cmd, and optional Python with exact
-      Windows argv, encoding, CRLF, environment, working-directory, and exit
-      semantics.
-- [ ] Run Node action pre/main/post and nested composite phases inside the same
-      isolated container.
-- [ ] Materialize actions without host execution or host mounts.
+- [x] Implement exact PowerShell 7, Windows PowerShell, cmd, and optional
+      Python argv, encoding, CRLF, environment, working-directory, and exit
+      semantics at the component boundary.
+- [x] Implement exact-generation Node action pre/main/post and composite phase
+      execution inside the same sandbox at the component boundary.
+- [x] Implement action materialization without host extraction or host mounts,
+      including bounded Windows archive-name/link/collision checks, in-sandbox
+      digest verification, extraction, and reparse-tree validation.
+- [ ] Prove those runtime and materialization paths in the shipped product on a
+      promoted image and dedicated Windows Hyper-V host.
 - [ ] Support only product artifact/cache/source interfaces accepted by their
       packages.
 - [ ] Reject Docker actions, nested job/service containers, devices,

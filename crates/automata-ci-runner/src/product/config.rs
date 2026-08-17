@@ -25,6 +25,7 @@ use automata_ci_runner_journal::StateRoot;
 use automata_ci_runner_spool::{ProtectionId, SpoolRoot};
 use http::Uri;
 use serde::Deserialize;
+use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 use url::Url;
 
@@ -32,6 +33,11 @@ use super::files::{
     SecretSource, SecureInputError, read_configuration_file, validate_absolute_path,
 };
 use super::spool_crypto::MAX_DECRYPT_ONLY_CONTENT_KEYS;
+use super::windows_image::{
+    FilesystemWindowsImageEvidenceVerifier, RawWindowsImageContractConfig, WindowsImageAdmission,
+    WindowsImageContractConfig, WindowsImageEvidenceVerifier, WindowsImageVerification,
+    WindowsImageVerificationRequest,
+};
 
 /// Current on-disk runner product configuration schema.
 pub const RUNNER_PRODUCT_CONFIG_SCHEMA_VERSION: u16 = 6;
@@ -53,6 +59,8 @@ const MAX_USER_AGENT_BYTES: usize = 256;
 
 /// Fully validated product configuration for one runner process.
 pub struct RunnerProductConfig {
+    configuration_path: Option<PathBuf>,
+    configuration_sha256: Option<Sha256Digest>,
     runner_id: RunnerId,
     control_endpoint: Uri,
     state: StateRoots,
@@ -77,7 +85,10 @@ impl RunnerProductConfig {
     pub fn load(path: &Path) -> Result<Self, RunnerProductConfigError> {
         let bytes = read_configuration_file(path, MAX_RUNNER_CONFIG_BYTES)
             .map_err(RunnerProductConfigError::SecureInput)?;
-        Self::from_json(&bytes)
+        let mut config = Self::from_json(&bytes)?;
+        config.configuration_path = Some(path.to_owned());
+        config.configuration_sha256 = Some(Sha256Digest::from_bytes(Sha256::digest(&bytes).into()));
+        config.with_verified_windows_image(&FilesystemWindowsImageEvidenceVerifier)
     }
 
     /// Parses an already-bounded configuration document. This exists for
@@ -100,6 +111,14 @@ impl RunnerProductConfig {
     #[must_use]
     pub const fn runner_id(&self) -> RunnerId {
         self.runner_id
+    }
+
+    pub(super) fn configuration_path(&self) -> Option<&Path> {
+        self.configuration_path.as_deref()
+    }
+
+    pub(super) const fn configuration_sha256(&self) -> Option<Sha256Digest> {
+        self.configuration_sha256
     }
 
     /// Returns the validated credential-free HTTPS control-plane origin.
@@ -128,8 +147,9 @@ impl RunnerProductConfig {
 
     /// Returns the validated durable registration ceiling for this runner identity.
     ///
-    /// Runtime admission independently reduces configured abilities to the
-    /// capabilities proved by the live provider before opening a session.
+    /// Image promotion and live profile admission may add Windows action
+    /// capabilities only to the ephemeral runtime inventory. They are never
+    /// included in this pre-admission registration or diagnostic surface.
     #[must_use]
     pub const fn inventory(&self) -> &RunnerCapabilities {
         &self.inventory
@@ -230,12 +250,67 @@ impl RunnerProductConfig {
     pub const fn metrics(&self) -> Option<&MetricsProductConfig> {
         self.metrics.as_ref()
     }
+
+    /// Applies one Windows image-evidence verifier before this configuration
+    /// can compose Windows action runtimes after live profile admission.
+    ///
+    /// The configuration is consumed so a failed or weaker re-verification
+    /// cannot leave a previously promoted image admission available to a caller.
+    /// Non-Windows configurations pass through unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized image-evidence error when the verifier rejects the
+    /// exact configured profile, image, paths, tools, or promotion material.
+    pub fn with_verified_windows_image(
+        mut self,
+        verifier: &dyn WindowsImageEvidenceVerifier,
+    ) -> Result<Self, RunnerProductConfigError> {
+        self.apply_windows_image_verification(verifier)?;
+        Ok(self)
+    }
+
+    fn apply_windows_image_verification(
+        &mut self,
+        verifier: &dyn WindowsImageEvidenceVerifier,
+    ) -> Result<(), RunnerProductConfigError> {
+        let RunnerProviderConfig::WindowsHyperV(windows) = &self.provider else {
+            return Ok(());
+        };
+        let (profile, environment) = self
+            .environments
+            .first_key_value()
+            .filter(|_| self.environments.len() == 1)
+            .ok_or(RunnerProductConfigError::InvalidWindowsImage)?;
+        let image = environment
+            .image()
+            .ok_or(RunnerProductConfigError::InvalidWindowsImage)?;
+        let request = WindowsImageVerificationRequest {
+            contract: windows.image_contract(),
+            profile_id: profile.id(),
+            profile_manifest_sha256: profile.digest(),
+            image,
+            workspace: environment.workspace(),
+            guest_agent: windows.guest_agent_path(),
+            toolchain: self.executor.toolchain(),
+        };
+        let verification = verifier
+            .verify(&request)
+            .map_err(|_| RunnerProductConfigError::InvalidWindowsImage)?;
+        let RunnerProviderConfig::WindowsHyperV(windows) = &mut self.provider else {
+            unreachable!("provider was matched above")
+        };
+        windows.image_verification = verification;
+        Ok(())
+    }
 }
 
 impl std::fmt::Debug for RunnerProductConfig {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("RunnerProductConfig")
+            .field("configuration_path", &self.configuration_path)
+            .field("configuration_sha256", &self.configuration_sha256)
             .field("runner_id", &self.runner_id)
             .field("control_endpoint", &self.control_endpoint)
             .field("state", &self.state)
@@ -318,6 +393,7 @@ impl StateRoots {
 }
 
 /// Validated execution-provider selection for one runner process.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug)]
 pub enum RunnerProviderConfig {
     /// Rootless Podman on a dedicated Linux execution host.
@@ -381,6 +457,8 @@ pub struct WindowsHyperVProductConfig {
     runtime_sha256: Sha256Digest,
     guest_agent_path: TargetPath,
     operation_timeout: Duration,
+    image_contract: WindowsImageContractConfig,
+    image_verification: WindowsImageVerification,
 }
 
 impl WindowsHyperVProductConfig {
@@ -406,6 +484,40 @@ impl WindowsHyperVProductConfig {
     #[must_use]
     pub const fn operation_timeout(&self) -> Duration {
         self.operation_timeout
+    }
+
+    /// Returns the digest-bound Server 2025 image evidence contract.
+    #[must_use]
+    pub const fn image_contract(&self) -> &WindowsImageContractConfig {
+        &self.image_contract
+    }
+
+    /// Returns the current image evidence decision.
+    #[must_use]
+    pub const fn image_admission(&self) -> WindowsImageAdmission {
+        self.image_verification.admission()
+    }
+
+    /// Returns the canonical signed-promotion payload digest after verification.
+    #[must_use]
+    pub const fn promotion_payload_sha256(&self) -> Option<Sha256Digest> {
+        self.image_verification.promotion_payload_sha256()
+    }
+
+    /// Returns the digest of the exact verified promotion public key.
+    #[must_use]
+    pub const fn promotion_public_key_sha256(&self) -> Option<Sha256Digest> {
+        self.image_verification.promotion_public_key_sha256()
+    }
+
+    /// Returns the digest of the complete verified promotion envelope.
+    #[must_use]
+    pub const fn promotion_envelope_sha256(&self) -> Option<Sha256Digest> {
+        self.image_verification.promotion_envelope_sha256()
+    }
+
+    pub(super) const fn evidence_digests(&self) -> Option<[Sha256Digest; 4]> {
+        self.image_verification.evidence_digests()
     }
 }
 
@@ -986,6 +1098,9 @@ pub enum RunnerProductConfigError {
     /// Kubernetes adapter policy or operator attestations are invalid.
     #[error("runner Kubernetes configuration is invalid")]
     InvalidKubernetes,
+    /// Windows image evidence is absent, mismatched, revoked, or not trusted.
+    #[error("runner Windows image evidence is invalid")]
+    InvalidWindowsImage,
     /// GitHub executor policy or toolchain paths are invalid.
     #[error("runner executor configuration is invalid")]
     InvalidExecutor,
@@ -1208,6 +1323,8 @@ impl RawRunnerProductConfig {
         }
         let object_store = self.object_store.validate()?;
         Ok(RunnerProductConfig {
+            configuration_path: None,
+            configuration_sha256: None,
             runner_id: self.runner_id,
             control_endpoint,
             state,
@@ -1802,6 +1919,29 @@ fn executor_runtime_features(
     features
 }
 
+pub(super) fn promoted_windows_runtime_features(
+    toolchain: &ToolchainConfig,
+) -> BTreeSet<RunnerFeature> {
+    let mut features = executor_runtime_features(toolchain, ProviderKind::WindowsHyperV);
+    features.extend([
+        RunnerFeature::COMPOSITE_ACTIONS,
+        RunnerFeature::REPOSITORY_ACTIONS,
+        RunnerFeature::LOCAL_ACTIONS,
+    ]);
+    for (available, feature) in [
+        (toolchain.node12().is_some(), RunnerFeature::NODE12_ACTIONS),
+        (toolchain.node16().is_some(), RunnerFeature::NODE16_ACTIONS),
+        (toolchain.node20().is_some(), RunnerFeature::NODE20_ACTIONS),
+        (toolchain.node24().is_some(), RunnerFeature::NODE24_ACTIONS),
+    ] {
+        if available {
+            features.insert(feature);
+            features.insert(RunnerFeature::JAVASCRIPT_ACTIONS);
+        }
+    }
+    features
+}
+
 #[cfg(test)]
 mod runtime_feature_tests {
     use super::*;
@@ -2181,6 +2321,7 @@ struct RawWindowsHyperVProductConfig {
     runtime_sha256: String,
     guest_agent_path: String,
     operation_timeout_seconds: u64,
+    image_contract: RawWindowsImageContractConfig,
 }
 
 impl RawWindowsHyperVProductConfig {
@@ -2215,6 +2356,11 @@ impl RawWindowsHyperVProductConfig {
             runtime_sha256,
             guest_agent_path,
             operation_timeout,
+            image_contract: self
+                .image_contract
+                .validate()
+                .map_err(|_| RunnerProductConfigError::InvalidProvider)?,
+            image_verification: WindowsImageVerification::unverified(),
         })
     }
 }
@@ -2753,6 +2899,7 @@ struct RawToolchainConfig {
 }
 
 impl RawToolchainConfig {
+    #[allow(clippy::too_many_lines)]
     fn validate(
         self,
         provider_kind: ProviderKind,
@@ -2805,11 +2952,33 @@ impl RawToolchainConfig {
                         .python
                         .as_ref()
                         .is_none_or(|path| exact_windows_executable(path, "python.exe"))
+                    && config
+                        .tar
+                        .as_ref()
+                        .is_some_and(|path| exact_windows_executable(path, "tar.exe"))
+                    && config
+                        .sha256sum
+                        .as_ref()
+                        .is_some_and(|path| exact_windows_executable(path, "automata-sha256.exe"))
+                    && [
+                        config.node12.as_ref(),
+                        config.node16.as_ref(),
+                        config.node20.as_ref(),
+                        config.node24.as_ref(),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .all(|path| exact_windows_executable(path, "node.exe"))
                     && [
                         config.python.as_ref(),
                         config.pwsh.as_ref(),
                         config.powershell.as_ref(),
                         config.cmd.as_ref(),
+                        config.tar.as_ref(),
+                        config.sha256sum.as_ref(),
+                        config.node12.as_ref(),
+                        config.node16.as_ref(),
+                        config.node20.as_ref(),
                         config.node24.as_ref(),
                     ]
                     .into_iter()
@@ -2821,12 +2990,6 @@ impl RawToolchainConfig {
                             .any(|segment| segment.eq_ignore_ascii_case("WindowsApps"))
                     })
                     && config.install.is_none()
-                    && config.tar.is_none()
-                    && config.sha256sum.is_none()
-                    && config.node12.is_none()
-                    && config.node16.is_none()
-                    && config.node20.is_none()
-                    && config.node24.is_none()
             }
             ProviderKind::MacosVirtualization => {
                 config.bash.is_some()

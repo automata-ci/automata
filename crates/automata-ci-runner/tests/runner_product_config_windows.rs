@@ -1,6 +1,11 @@
 #![cfg(windows)]
 
-use std::collections::BTreeSet;
+use std::{
+    collections::BTreeSet,
+    fs,
+    path::{Path, PathBuf},
+    sync::atomic::{AtomicUsize, Ordering},
+};
 
 use automata_ci_core::{
     Architecture, IsolationLevel, OperatingSystem, RunnerFeature, SandboxFeature,
@@ -8,7 +13,231 @@ use automata_ci_core::{
 use automata_ci_execution::{
     NetworkPolicy, RootFilesystemPolicy, SandboxLaunch, SandboxPrivilegePolicy,
 };
-use automata_ci_runner::product::{RunnerProductConfig, RunnerProductConfigError};
+use automata_ci_runner::product::{
+    RunnerProductConfig, RunnerProductConfigError, WindowsEnrollmentAdmissionRequest,
+    WindowsEnrollmentIntent, WindowsHostInputKind, WindowsImageAdmission,
+    windows_enrollment_admission_request,
+};
+use base64::Engine as _;
+use ring::{
+    rand::SystemRandom,
+    signature::{Ed25519KeyPair, KeyPair as _},
+};
+use serde::Serialize;
+
+static NEXT_EVIDENCE_ROOT: AtomicUsize = AtomicUsize::new(0);
+const BROKER_HOST_ID: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+fn write_secure_fixture(path: &Path, bytes: &[u8]) {
+    fs::write(path, bytes).expect("write Windows evidence fixture");
+    automata_ci_windows_file_security::restrict_file_to_current_user_for_test(path)
+        .expect("restrict Windows evidence fixture DACL");
+}
+
+fn assert_admitted_action_features(request: &WindowsEnrollmentAdmissionRequest) {
+    for feature in [
+        RunnerFeature::JAVASCRIPT_ACTIONS,
+        RunnerFeature::COMPOSITE_ACTIONS,
+        RunnerFeature::REPOSITORY_ACTIONS,
+        RunnerFeature::LOCAL_ACTIONS,
+        RunnerFeature::NODE24_ACTIONS,
+    ] {
+        assert!(
+            request
+                .binding()
+                .capabilities()
+                .features()
+                .contains(&feature),
+            "active admission must prove exact registration feature {feature}"
+        );
+    }
+}
+
+fn assert_host_input_contract(request: &WindowsEnrollmentAdmissionRequest, config_path: &Path) {
+    let inputs = request.binding().host_inputs();
+    assert_eq!(
+        inputs
+            .iter()
+            .map(automata_ci_runner::product::WindowsHostInputDescriptor::kind)
+            .collect::<Vec<_>>(),
+        vec![
+            WindowsHostInputKind::Configuration,
+            WindowsHostInputKind::BackendExecutable,
+            WindowsHostInputKind::ImageManifest,
+            WindowsHostInputKind::ImageLock,
+            WindowsHostInputKind::Provenance,
+            WindowsHostInputKind::Sbom,
+            WindowsHostInputKind::PatchReport,
+            WindowsHostInputKind::Revocations,
+            WindowsHostInputKind::PromotionEnvelope,
+        ]
+    );
+    assert_eq!(inputs[0].absolute_path(), config_path);
+    assert!(inputs.iter().all(|input| {
+        input.absolute_path().is_absolute()
+            && input
+                .expected_sha256()
+                .as_bytes()
+                .iter()
+                .any(|byte| *byte != 0)
+    }));
+    assert_eq!(
+        inputs
+            .iter()
+            .map(automata_ci_runner::product::WindowsHostInputDescriptor::absolute_path)
+            .collect::<BTreeSet<_>>()
+            .len(),
+        inputs.len()
+    );
+}
+
+struct EvidenceFixture {
+    root: PathBuf,
+    config: serde_json::Value,
+}
+
+impl EvidenceFixture {
+    fn new() -> Self {
+        let root = std::env::temp_dir().join(format!(
+            "automata-windows-image-evidence-{}-{}",
+            std::process::id(),
+            NEXT_EVIDENCE_ROOT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&root).expect("create evidence root");
+        for (name, bytes) in [
+            (
+                "manifest.json",
+                &include_bytes!(
+                    "../../../images/windows-server-2025-hyperv-candidate/manifest.candidate.json"
+                )[..],
+            ),
+            (
+                "image.lock.json",
+                &include_bytes!(
+                    "../../../images/windows-server-2025-hyperv-candidate/image.lock.candidate.json"
+                )[..],
+            ),
+            (
+                "provenance.json",
+                &include_bytes!(
+                    "../../../images/windows-server-2025-hyperv-candidate/provenance.candidate.json"
+                )[..],
+            ),
+            (
+                "sbom.spdx.json",
+                &include_bytes!(
+                    "../../../images/windows-server-2025-hyperv-candidate/sbom.candidate.json"
+                )[..],
+            ),
+            (
+                "patch-report.json",
+                &include_bytes!(
+                    "../../../images/windows-server-2025-hyperv-candidate/patch-report.candidate.json"
+                )[..],
+            ),
+            (
+                "revocations.json",
+                &include_bytes!(
+                    "../../../images/windows-server-2025-hyperv-candidate/revocations.candidate.json"
+                )[..],
+            ),
+        ] {
+            write_secure_fixture(&root.join(name), bytes);
+        }
+        let mut config = baseline();
+        for (field, name) in [
+            ("manifest_path", "manifest.json"),
+            ("lock_path", "image.lock.json"),
+            ("provenance_path", "provenance.json"),
+            ("sbom_path", "sbom.spdx.json"),
+            ("patch_report_path", "patch-report.json"),
+            ("revocations_path", "revocations.json"),
+        ] {
+            config["windows_hyperv"]["image_contract"][field] =
+                serde_json::json!(root.join(name).to_string_lossy());
+        }
+        Self { root, config }
+    }
+
+    fn write_config(&self, name: &str) -> PathBuf {
+        let path = self.root.join(name);
+        let bytes = serde_json::to_vec(&self.config).expect("serialize evidence configuration");
+        write_secure_fixture(&path, &bytes);
+        path
+    }
+}
+
+impl Drop for EvidenceFixture {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
+#[derive(Serialize)]
+#[allow(clippy::struct_excessive_bools)]
+struct TestPromotionPayload {
+    schema_version: u16,
+    decision: &'static str,
+    profile_id: &'static str,
+    base_image: String,
+    image: String,
+    manifest_sha256: &'static str,
+    lock_sha256: &'static str,
+    provenance_sha256: &'static str,
+    sbom_sha256: &'static str,
+    patch_report_sha256: &'static str,
+    revocations_sha256: &'static str,
+    revocation_generation: u64,
+    provenance_accepted: bool,
+    sbom_accepted: bool,
+    patch_accepted: bool,
+    revocations_accepted: bool,
+}
+
+fn add_promotion(fixture: &mut EvidenceFixture) {
+    let payload = TestPromotionPayload {
+        schema_version: 1,
+        decision: "promote",
+        profile_id: "automata.dev/windows-2025-x64-hyperv-v1",
+        base_image: format!(
+            "mcr.microsoft.com/windows/servercore@sha256:{}",
+            "0".repeat(64)
+        ),
+        image: format!(
+            "registry.example/automata/windows-runner@sha256:{}",
+            "1".repeat(64)
+        ),
+        manifest_sha256: "8469373351b458633450cd4f28e24b18fa756832a7917c9d8ae2a82ad6241c23",
+        lock_sha256: "181bc78f2993a8221f0ab4aa6d01f53ef05b02ac1755ffd84c1c0abf0f3c6747",
+        provenance_sha256: "8450f524b6efd5cc9017b805dd8803a1079dbc222c23ad4e890994d662f8bb25",
+        sbom_sha256: "280ba2ce2e4ce8767a7392fbc8176e6d98aebaf6e6e4595e49d88eeab6fcb655",
+        patch_report_sha256: "fd34d37ea605013011baa61331834de11ffd476584a4ba9cc2bc09ed0356d9fb",
+        revocations_sha256: "f08001567b8098fe63060a8eeaf12fb2e9dcb4be383c2480f9d887728ed3c223",
+        revocation_generation: 1,
+        provenance_accepted: true,
+        sbom_accepted: true,
+        patch_accepted: true,
+        revocations_accepted: true,
+    };
+    let payload = serde_json::to_vec(&payload).expect("serialize canonical promotion payload");
+    let key = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()).expect("generate signing key");
+    let key = Ed25519KeyPair::from_pkcs8(key.as_ref()).expect("decode signing key");
+    let encoder = base64::engine::general_purpose::STANDARD;
+    let envelope = serde_json::json!({
+        "schema_version": 1,
+        "key_id": "test.windows-image-promotion.v1",
+        "payload_base64": encoder.encode(&payload),
+        "signature_base64": encoder.encode(key.sign(&payload).as_ref())
+    });
+    let envelope_path = fixture.root.join("promotion.json");
+    let envelope_bytes = serde_json::to_vec(&envelope).expect("serialize promotion envelope");
+    write_secure_fixture(&envelope_path, &envelope_bytes);
+    fixture.config["windows_hyperv"]["image_contract"]["promotion"] = serde_json::json!({
+        "envelope_path": envelope_path.to_string_lossy(),
+        "key_id": "test.windows-image-promotion.v1",
+        "public_key_base64": encoder.encode(key.public_key().as_ref())
+    });
+}
 
 fn baseline() -> serde_json::Value {
     serde_json::from_slice(include_bytes!("fixtures/runner.windows.product.json"))
@@ -21,7 +250,19 @@ fn parse(value: &serde_json::Value) -> Result<RunnerProductConfig, RunnerProduct
     )
 }
 
+fn enrollment_intent() -> WindowsEnrollmentIntent {
+    WindowsEnrollmentIntent::new(
+        uuid::Uuid::from_u128(1),
+        &reqwest::Url::parse("https://enroll.example.test/").expect("enrollment origin"),
+        "windows-runner",
+        automata_ci_core::Sha256Digest::from_bytes([41; 32]),
+        automata_ci_core::Sha256Digest::from_bytes([42; 32]),
+    )
+    .expect("enrollment intent")
+}
+
 #[test]
+#[allow(clippy::too_many_lines)]
 fn internal_windows_fixture_selects_only_hyperv_containers() {
     let config = parse(&baseline()).expect("internal Windows product fixture");
     let windows = config.windows_hyperv().expect("Windows Hyper-V provider");
@@ -73,6 +314,10 @@ fn internal_windows_fixture_selects_only_hyperv_containers() {
     assert!(config.executor().toolchain().pwsh().is_some());
     assert!(config.executor().toolchain().powershell().is_some());
     assert!(config.executor().toolchain().cmd().is_some());
+    assert!(config.executor().toolchain().tar().is_some());
+    assert!(config.executor().toolchain().sha256sum().is_some());
+    assert!(config.executor().toolchain().node24().is_some());
+    assert_eq!(windows.image_admission(), WindowsImageAdmission::Unverified);
     for feature in [
         RunnerFeature::SHELL_STEPS,
         RunnerFeature::DEFAULT_WINDOWS_SHELL,
@@ -120,7 +365,178 @@ fn internal_windows_fixture_selects_only_hyperv_containers() {
     );
     assert_eq!(keepalive.arguments(), &["keepalive".to_owned()]);
     assert_eq!(environment.workspace().as_str(), r"C:\__w");
-    assert!(config.executor().toolchain().node24().is_none());
+    assert_eq!(
+        config
+            .executor()
+            .toolchain()
+            .node24()
+            .map(automata_ci_execution::TargetPath::as_str),
+        Some(r"C:\automata\externals\node24\node.exe")
+    );
+}
+
+#[test]
+fn candidate_evidence_is_verified_but_does_not_publish_action_capabilities() {
+    let fixture = EvidenceFixture::new();
+    let config = RunnerProductConfig::load(&fixture.write_config("candidate-runner.json"))
+        .expect("candidate evidence is internally consistent");
+
+    assert_eq!(
+        config
+            .windows_hyperv()
+            .expect("Windows provider")
+            .image_admission(),
+        WindowsImageAdmission::Candidate
+    );
+    for feature in [
+        RunnerFeature::JAVASCRIPT_ACTIONS,
+        RunnerFeature::COMPOSITE_ACTIONS,
+        RunnerFeature::REPOSITORY_ACTIONS,
+        RunnerFeature::LOCAL_ACTIONS,
+        RunnerFeature::NODE24_ACTIONS,
+    ] {
+        assert!(!config.inventory().features().contains(&feature));
+    }
+    assert!(
+        windows_enrollment_admission_request(&config, BROKER_HOST_ID, enrollment_intent(),)
+            .expect("candidate admission request")
+            .is_none(),
+        "unsigned candidate evidence must not create active enrollment authority"
+    );
+}
+
+#[test]
+fn exact_external_promotion_keeps_actions_pending_for_active_enrollment_admission() {
+    let mut fixture = EvidenceFixture::new();
+    add_promotion(&mut fixture);
+    let config_path = fixture.write_config("promoted-runner.json");
+    let config =
+        RunnerProductConfig::load(&config_path).expect("signed external promotion verifies");
+
+    assert_eq!(
+        config
+            .windows_hyperv()
+            .expect("Windows provider")
+            .image_admission(),
+        WindowsImageAdmission::Promoted
+    );
+    for feature in [
+        RunnerFeature::JAVASCRIPT_ACTIONS,
+        RunnerFeature::COMPOSITE_ACTIONS,
+        RunnerFeature::REPOSITORY_ACTIONS,
+        RunnerFeature::LOCAL_ACTIONS,
+        RunnerFeature::NODE24_ACTIONS,
+    ] {
+        assert!(
+            !config.inventory().features().contains(&feature),
+            "pre-admission inventory unexpectedly advertised {feature}"
+        );
+    }
+    for feature in [
+        RunnerFeature::NODE12_ACTIONS,
+        RunnerFeature::NODE16_ACTIONS,
+        RunnerFeature::NODE20_ACTIONS,
+    ] {
+        assert!(!config.inventory().features().contains(&feature));
+    }
+
+    let request =
+        windows_enrollment_admission_request(&config, BROKER_HOST_ID, enrollment_intent())
+            .expect("build promoted active-admission request")
+            .expect("a promoted Windows image requires active admission");
+    assert_eq!(request.binding().runner_id(), config.runner_id());
+    assert_eq!(request.binding().backend_id(), BROKER_HOST_ID);
+    assert_eq!(request.binding().sandbox_provider_id(), "windows-hyperv");
+    let windows = config.windows_hyperv().expect("Windows provider");
+    assert_eq!(
+        request.binding().backend_executable(),
+        windows.runtime_executable()
+    );
+    assert_eq!(
+        request.binding().backend_executable_sha256(),
+        windows.runtime_sha256()
+    );
+    assert_eq!(
+        request.binding().promotion_public_key_sha256(),
+        windows
+            .promotion_public_key_sha256()
+            .expect("verified promotion public key")
+    );
+    assert_eq!(
+        request.binding().promotion_envelope_sha256(),
+        windows
+            .promotion_envelope_sha256()
+            .expect("verified promotion envelope")
+    );
+    assert_eq!(
+        request.binding().intent().operation_id(),
+        uuid::Uuid::from_u128(1)
+    );
+    assert_eq!(
+        request.binding().profile(),
+        request.environment().attestation()
+    );
+    assert_eq!(request.probe_policy().contract_schema_version(), 1);
+    assert!(
+        request
+            .probe_policy()
+            .contract_sha256()
+            .as_bytes()
+            .iter()
+            .any(|byte| *byte != 0),
+        "the shared exact probe contract must be digest-bound"
+    );
+    assert_eq!(
+        request.binding().image(),
+        request
+            .environment()
+            .image()
+            .expect("Hyper-V container image")
+            .reference()
+    );
+    assert_admitted_action_features(&request);
+    assert_host_input_contract(&request, &config_path);
+}
+
+#[test]
+fn evidence_verification_rejects_a_same_basename_tool_substitution() {
+    let mut fixture = EvidenceFixture::new();
+    fixture.config["executor"]["toolchain"]["node24"] =
+        serde_json::json!(r"C:\automata\externals\substituted\node.exe");
+
+    assert_eq!(
+        RunnerProductConfig::load(&fixture.write_config("substituted-tool-runner.json"))
+            .expect_err("manifest and configured Node path must agree"),
+        RunnerProductConfigError::InvalidWindowsImage
+    );
+}
+
+#[test]
+fn evidence_verification_fails_closed_on_missing_evidence_and_bad_signature() {
+    let fixture = EvidenceFixture::new();
+    fs::remove_file(fixture.root.join("sbom.spdx.json")).expect("remove SBOM fixture");
+    assert_eq!(
+        RunnerProductConfig::load(&fixture.write_config("missing-sbom-runner.json"))
+            .expect_err("a missing SBOM must fail closed"),
+        RunnerProductConfigError::InvalidWindowsImage
+    );
+
+    let mut fixture = EvidenceFixture::new();
+    add_promotion(&mut fixture);
+    let envelope_path = fixture.root.join("promotion.json");
+    let mut envelope: serde_json::Value =
+        serde_json::from_slice(&fs::read(&envelope_path).expect("read promotion envelope"))
+            .expect("parse promotion envelope");
+    envelope["signature_base64"] =
+        serde_json::json!(base64::engine::general_purpose::STANDARD.encode([0_u8; 64]));
+    let envelope_bytes =
+        serde_json::to_vec(&envelope).expect("serialize corrupt promotion envelope");
+    write_secure_fixture(&envelope_path, &envelope_bytes);
+    assert_eq!(
+        RunnerProductConfig::load(&fixture.write_config("bad-signature-runner.json"))
+            .expect_err("an invalid promotion signature must fail closed"),
+        RunnerProductConfigError::InvalidWindowsImage
+    );
 }
 
 #[test]
@@ -261,16 +677,20 @@ fn windows_container_toolchain_and_paths_are_in_image_and_literal() {
     let mut configured_node = baseline();
     configured_node["executor"]["toolchain"]["node24"] =
         serde_json::json!(r"C:\Program Files\nodejs\node.exe");
-    assert_eq!(
-        parse(&configured_node).expect_err("Windows action execution is not advertised"),
-        RunnerProductConfigError::InvalidExecutor
+    let configured_node = parse(&configured_node).expect("literal node.exe is syntactically valid");
+    assert!(
+        !configured_node
+            .inventory()
+            .features()
+            .contains(&RunnerFeature::NODE24_ACTIONS),
+        "configuration parsing alone must not advertise the runtime"
     );
 
-    let mut legacy_node = baseline();
-    legacy_node["executor"]["toolchain"]["node20"] =
-        serde_json::json!(r"C:\Program Files\nodejs\node.exe");
+    let mut invalid_node = baseline();
+    invalid_node["executor"]["toolchain"]["node20"] =
+        serde_json::json!(r"C:\automata\externals\node20\node.cmd");
     assert_eq!(
-        parse(&legacy_node).expect_err("only Node 24 is supported"),
+        parse(&invalid_node).expect_err("every Node generation requires node.exe"),
         RunnerProductConfigError::InvalidExecutor
     );
 

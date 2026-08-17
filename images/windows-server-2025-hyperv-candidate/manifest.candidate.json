@@ -1,0 +1,72 @@
+{
+  "schema_version": 1,
+  "status": "candidate",
+  "profile_id": "automata.dev/windows-2025-x64-hyperv-v1",
+  "operating_system": "windows-server-2025",
+  "variant": "server-core",
+  "architecture": "x86_64",
+  "isolation": "hyperv-container",
+  "base_image": "mcr.microsoft.com/windows/servercore@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "image": "registry.example/automata/windows-runner@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+  "workspace": "C:\\__w",
+  "guest_agent": "C:\\automata\\guest\\automata-ci-sandbox-guest.exe",
+  "network_disabled": true,
+  "unprivileged": true,
+  "clean_workspace": true,
+  "tools": [
+    {
+      "kind": "pwsh",
+      "path": "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
+      "version": "candidate-7.x",
+      "sha256": "3333333333333333333333333333333333333333333333333333333333333333"
+    },
+    {
+      "kind": "powershell",
+      "path": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+      "version": "candidate-windows-server-2025",
+      "sha256": "4444444444444444444444444444444444444444444444444444444444444444"
+    },
+    {
+      "kind": "cmd",
+      "path": "C:\\Windows\\System32\\cmd.exe",
+      "version": "candidate-windows-server-2025",
+      "sha256": "5555555555555555555555555555555555555555555555555555555555555555"
+    },
+    {
+      "kind": "tar",
+      "path": "C:\\automata\\tools\\tar\\tar.exe",
+      "version": "candidate-gnu-tar",
+      "sha256": "6666666666666666666666666666666666666666666666666666666666666666"
+    },
+    {
+      "kind": "sha256",
+      "path": "C:\\automata\\tools\\hash\\automata-sha256.exe",
+      "version": "candidate-automata-sha256-v1",
+      "sha256": "7777777777777777777777777777777777777777777777777777777777777777"
+    },
+    {
+      "kind": "node24",
+      "path": "C:\\automata\\externals\\node24\\node.exe",
+      "version": "candidate-node-24",
+      "sha256": "8888888888888888888888888888888888888888888888888888888888888888"
+    }
+  ],
+  "evidence": {
+    "provenance": {
+      "sha256": "8450f524b6efd5cc9017b805dd8803a1079dbc222c23ad4e890994d662f8bb25",
+      "media_type": "application/vnd.automata.windows-image-evidence-reference+json"
+    },
+    "sbom": {
+      "sha256": "280ba2ce2e4ce8767a7392fbc8176e6d98aebaf6e6e4595e49d88eeab6fcb655",
+      "media_type": "application/vnd.automata.windows-image-evidence-reference+json"
+    },
+    "patch_report": {
+      "sha256": "fd34d37ea605013011baa61331834de11ffd476584a4ba9cc2bc09ed0356d9fb",
+      "media_type": "application/vnd.automata.windows-image-evidence-reference+json"
+    },
+    "revocations": {
+      "sha256": "f08001567b8098fe63060a8eeaf12fb2e9dcb4be383c2480f9d887728ed3c223",
+      "media_type": "application/vnd.automata.windows-image-evidence-reference+json"
+    }
+  }
+}

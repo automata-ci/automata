@@ -11,6 +11,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use automata_ci_action::{ActionBundleLimits, validate_windows_materialization_archive};
 use automata_ci_action_github::{GithubActionMetadataDecoder, JavascriptRuntime};
 use automata_ci_core::{
     ActionReference, AttemptId, JOB_RUNTIME_CONTEXT_MEDIA_TYPE, JobAuthorityProfile, JobConclusion,
@@ -90,7 +91,16 @@ const MAX_EVENT_DEPTH: usize = 128;
 const COMPOSITE_ORDINAL_BASE: u32 = 1 << 24;
 const TRUNCATED_OUTPUT_DIAGNOSTIC: &str =
     "command output exceeded the configured capture limit; user output was suppressed";
+const MASKED_SUMMARY_LIMIT_DIAGNOSTIC: &str = "$GITHUB_STEP_SUMMARY content was omitted after secret masking exceeded the retained text limit";
+const STEP_SUMMARY_LIMIT_DIAGNOSTIC: &str =
+    "$GITHUB_STEP_SUMMARY content was omitted after the cumulative step summary limit was reached";
+const JOB_SUMMARY_LIMIT_DIAGNOSTIC: &str =
+    "$GITHUB_STEP_SUMMARY content was omitted after the job attachment limit was reached";
 const LOCAL_ACTION_PROBE_SCRIPT: &str = "# automata-local-action-metadata\nif [ -f \"$1\" ]; then printf yml; elif [ -f \"$2\" ]; then printf yaml; else exit 44; fi";
+const WINDOWS_LOCAL_ACTION_PROBE_SCRIPT: &str = "# automata-local-action-metadata\n$ErrorActionPreference = 'Stop'\n$root = [System.IO.Path]::GetFullPath($env:AUTOMATA_INTERNAL_LOCAL_ACTION_ROOT).TrimEnd('\\')\n$yml = [System.IO.Path]::GetFullPath($env:AUTOMATA_INTERNAL_LOCAL_ACTION_YML)\n$yaml = [System.IO.Path]::GetFullPath($env:AUTOMATA_INTERNAL_LOCAL_ACTION_YAML)\n$directory = [System.IO.Path]::GetDirectoryName($yml)\nif ($null -eq $directory -or [System.IO.Path]::GetDirectoryName($yaml) -ne $directory) { exit 44 }\n$prefix = $root + '\\'\nif (-not $directory.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) { exit 44 }\n$rootItem = Get-Item -LiteralPath $root -Force\nif (($rootItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { exit 44 }\n$current = $root\n$relative = $directory.Substring($prefix.Length)\nforeach ($segment in ($relative -split '\\\\')) {\n  if ([System.String]::IsNullOrEmpty($segment)) { continue }\n  $current = [System.IO.Path]::Combine($current, $segment)\n  $item = Get-Item -LiteralPath $current -Force\n  if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { exit 44 }\n}\n$treePrefix = $directory.TrimEnd('\\') + '\\'\nforeach ($entry in Get-ChildItem -LiteralPath $directory -Force -Recurse) {\n  $full = [System.IO.Path]::GetFullPath($entry.FullName)\n  if (-not $full.StartsWith($treePrefix, [System.StringComparison]::OrdinalIgnoreCase)) { exit 44 }\n  if (($entry.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { exit 44 }\n}\nif ([System.IO.File]::Exists($yml)) { [Console]::Out.Write('yml') } elseif ([System.IO.File]::Exists($yaml)) { [Console]::Out.Write('yaml') } else { exit 44 }";
+const WINDOWS_LOCAL_ACTION_ROOT_ENVIRONMENT: &str = "AUTOMATA_INTERNAL_LOCAL_ACTION_ROOT";
+const WINDOWS_LOCAL_ACTION_YML_ENVIRONMENT: &str = "AUTOMATA_INTERNAL_LOCAL_ACTION_YML";
+const WINDOWS_LOCAL_ACTION_YAML_ENVIRONMENT: &str = "AUTOMATA_INTERNAL_LOCAL_ACTION_YAML";
 const ARTIFACT_HASH_SCRIPT: &str = "# automata-artifact-sha256\npath=$1\nshift\nif [ ! -f \"$path\" ]; then exit 44; fi\nvalue=$(\"$0\" \"$@\" < \"$path\") || exit $?\ndigest=${value%% *}\nprintf '%s' \"$digest\"";
 const WINDOWS_ARTIFACT_HASH_SCRIPT: &str = "# automata-artifact-sha256\n$ErrorActionPreference = 'Stop'\n$path = $env:AUTOMATA_INTERNAL_ARTIFACT_PATH\nif (-not [System.IO.File]::Exists($path)) { exit 44 }\n$stream = $null\n$hasher = $null\ntry {\n  $stream = [System.IO.File]::OpenRead($path)\n  $hasher = [System.Security.Cryptography.SHA256]::Create()\n  $bytes = $hasher.ComputeHash($stream)\n  $digest = [System.BitConverter]::ToString($bytes).Replace('-', '').ToLowerInvariant()\n  [Console]::Out.Write($digest)\n} finally {\n  if ($null -ne $stream) { $stream.Dispose() }\n  if ($null -ne $hasher) { $hasher.Dispose() }\n}";
 const WINDOWS_ARTIFACT_PATH_ENVIRONMENT: &str = "AUTOMATA_INTERNAL_ARTIFACT_PATH";
@@ -608,7 +618,7 @@ impl GithubJobExecutor {
             return Err(AdmissionRejection::InvalidJob);
         }
         self.validate_provider_admission(job, &workspace)?;
-        validate_action_step_admission(job, &workspace)?;
+        validate_action_step_admission(job, &workspace, self.ports.toolchain.as_ref())?;
         Ok(environment)
     }
 
@@ -1559,6 +1569,7 @@ impl GithubJobExecutor {
             planner.materials.insert(key, action.clone());
             action
         };
+        self.validate_action_materialization(&action)?;
         self.require_action_runtimes(action.definition())?;
         let slot = preferred_action_slot
             .map_or_else(|| budget.action_slot(), Ok)
@@ -1644,6 +1655,7 @@ impl GithubJobExecutor {
                     planner.materials.insert(key, action.clone());
                     action
                 };
+                self.validate_action_materialization(&action)?;
                 self.require_action_runtimes(action.definition())?;
                 let children = match action.definition().execution() {
                     PreparedActionExecution::Javascript(_) => Vec::new(),
@@ -1685,6 +1697,20 @@ impl GithubJobExecutor {
             planner.leave();
             result
         })
+    }
+
+    fn validate_action_materialization(
+        &self,
+        action: &PreparedAction,
+    ) -> Result<(), ActionLoadError> {
+        if self.ports.toolchain.platform() == TargetPlatform::Windows {
+            validate_windows_materialization_archive(
+                action.archive(),
+                ActionBundleLimits::default(),
+            )
+            .map_err(|_| ActionLoadError::Preparation(ActionPreparationErrorKind::Content))?;
+        }
+        Ok(())
     }
 
     fn require_action_runtimes(
@@ -2978,6 +3004,7 @@ impl GithubJobExecutor {
                     .prepare(ActionPreparationRequest::new(reference))
                     .await
                     .map_err(|error| ActionLoadError::Preparation(error.kind()))?;
+                self.validate_action_materialization(&action)?;
                 self.require_action_runtimes(action.definition())?;
                 let slot = preferred_action_slot
                     .map_or_else(|| budget.action_slot(), Ok)
@@ -3034,17 +3061,13 @@ impl GithubJobExecutor {
             CheckedOutLocalActionPreparer::definition_paths(&paths.workspace, reference)
                 .map_err(|error| ActionLoadError::Preparation(error.kind()))?;
         let phase = budget.phase().map_err(ActionLoadError::Executor)?;
-        let argv = ExecutionArgv::new(
-            required_tool(self.ports.toolchain.sh()).map_err(ActionLoadError::Executor)?,
-            vec![
-                "-c".to_owned(),
-                LOCAL_ACTION_PROBE_SCRIPT.to_owned(),
-                "automata-local-action".to_owned(),
-                candidates.action_yml().as_str().to_owned(),
-                candidates.action_yaml().as_str().to_owned(),
-            ],
+        let (argv, environment) = local_action_probe_invocation(
+            self.ports.toolchain.as_ref(),
+            &paths.workspace,
+            candidates.action_yml(),
+            candidates.action_yaml(),
         )
-        .map_err(|_| ActionLoadError::Executor(invalid_job()))?;
+        .map_err(ActionLoadError::Executor)?;
         let command = ExecutionCommand::new(
             self.ports.operation_ids.operation_id(
                 request.lease().attempt_id(),
@@ -3053,7 +3076,7 @@ impl GithubJobExecutor {
             ),
             argv,
             paths.workspace.clone(),
-            automata_ci_execution::ExecutionEnvironment::empty(),
+            environment,
             self.config.default_step_timeout(),
             64,
         )
@@ -3881,6 +3904,7 @@ impl GithubJobExecutor {
         Ok(())
     }
 
+    #[allow(clippy::too_many_lines)]
     fn prepare_action_content(
         &self,
         endpoint: &dyn ExecutionEndpoint,
@@ -3892,19 +3916,31 @@ impl GithubJobExecutor {
     ) -> Result<ActionPaths, ExecutorAdapterError> {
         let action_paths = paths.action(index, action.subpath())?;
         let prepare_ordinal = index.checked_add(1).ok_or_else(invalid_job)?;
-        let command = action_content::prepare_directory_command(
-            self.ports.operation_ids.operation_id(
-                attempt_id,
-                OperationPurpose::PrepareDirectory,
-                prepare_ordinal,
-            ),
-            required_tool(self.ports.toolchain.install())?,
-            &paths.workspace,
-            &action_paths.base,
-            &action_paths.extracted,
-            self.config.default_step_timeout(),
-            self.config.maximum_output_bytes(),
-        )?;
+        let prepare_operation = self.ports.operation_ids.operation_id(
+            attempt_id,
+            OperationPurpose::PrepareDirectory,
+            prepare_ordinal,
+        );
+        let command = match paths.workspace.platform() {
+            TargetPlatform::Posix => action_content::prepare_directory_command(
+                prepare_operation,
+                required_tool(self.ports.toolchain.install())?,
+                &paths.workspace,
+                &action_paths.base,
+                &action_paths.extracted,
+                self.config.default_step_timeout(),
+                self.config.maximum_output_bytes(),
+            )?,
+            TargetPlatform::Windows => action_content::prepare_windows_directory_command(
+                prepare_operation,
+                required_tool(self.ports.toolchain.pwsh())?,
+                &paths.workspace,
+                &action_paths.base,
+                &action_paths.extracted,
+                self.config.default_step_timeout(),
+                self.config.maximum_output_bytes(),
+            )?,
+        };
         let output = endpoint
             .exec(&command, &ProviderCancellationBridge(cancellation))
             .map_err(map_execution_error)?;
@@ -3921,6 +3957,38 @@ impl GithubJobExecutor {
         endpoint
             .copy_to(&request, &ProviderCancellationBridge(cancellation))
             .map_err(map_execution_error)?;
+        if paths.workspace.platform() == TargetPlatform::Windows {
+            let sha256 =
+                self.ports.toolchain.sha256().ok_or_else(|| {
+                    ExecutorAdapterError::new(ExecutorAdapterErrorKind::Unsupported)
+                })?;
+            let command = action_content::verify_archive_command(
+                self.ports.operation_ids.operation_id(
+                    attempt_id,
+                    OperationPurpose::VerifyActionArchive,
+                    index,
+                ),
+                sha256,
+                &paths.workspace,
+                &action_paths.archive,
+                self.config.default_step_timeout(),
+                128,
+            )?;
+            let output = endpoint
+                .exec(&command, &ProviderCancellationBridge(cancellation))
+                .map_err(map_execution_error)?;
+            require_success(&output)?;
+            let stdout = output
+                .stdout()
+                .strip_suffix(b"\r\n")
+                .or_else(|| output.stdout().strip_suffix(b"\n"))
+                .unwrap_or(output.stdout());
+            if !output.stderr().is_empty()
+                || stdout != action.archive_digest().to_string().as_bytes()
+            {
+                return Err(invalid_job());
+            }
+        }
         let command = action_content::extract_archive_command(
             self.ports.operation_ids.operation_id(
                 attempt_id,
@@ -3938,6 +4006,27 @@ impl GithubJobExecutor {
             .exec(&command, &ProviderCancellationBridge(cancellation))
             .map_err(map_execution_error)?;
         require_success(&output)?;
+        if paths.workspace.platform() == TargetPlatform::Windows {
+            let command = action_content::verify_windows_tree_command(
+                self.ports.operation_ids.operation_id(
+                    attempt_id,
+                    OperationPurpose::VerifyActionTree,
+                    index,
+                ),
+                required_tool(self.ports.toolchain.pwsh())?,
+                &paths.workspace,
+                &action_paths.extracted,
+                self.config.default_step_timeout(),
+                self.config.maximum_output_bytes(),
+            )?;
+            let output = endpoint
+                .exec(&command, &ProviderCancellationBridge(cancellation))
+                .map_err(map_execution_error)?;
+            require_success(&output)?;
+            if !output.stdout().is_empty() || !output.stderr().is_empty() {
+                return Err(invalid_job());
+            }
+        }
         Ok(action_paths)
     }
 
@@ -5069,6 +5158,7 @@ impl GithubJobExecutor {
                 applied.summary().markdown(),
                 &completed.annotations,
                 applied.notices(),
+                completed.command_file_notice,
                 masker,
             )?;
             Ok((applied.into_next_state(), next_attachments))
@@ -5165,6 +5255,7 @@ impl GithubJobExecutor {
             commands: completed.commands,
             artifacts: completed.artifacts,
             annotations,
+            command_file_notice: completed.command_file_notice,
         })
     }
 
@@ -5232,6 +5323,7 @@ impl GithubJobExecutor {
         cancellation: &dyn ExecutorCancellation,
     ) -> Result<DecodedCommandFiles, ExecutorAdapterError> {
         let mut parsed = Vec::with_capacity(COMMAND_FILE_KINDS.len());
+        let mut command_file_notice = None;
         for (index, (kind, path)) in paths.values.iter().enumerate() {
             if cancellation.is_cancelled() {
                 return Err(ExecutorAdapterError::new(
@@ -5242,10 +5334,17 @@ impl GithubJobExecutor {
                 .checked_mul(5)
                 .and_then(|value| value.checked_add(u32::try_from(index).ok()?))
                 .ok_or_else(|| ExecutorAdapterError::new(ExecutorAdapterErrorKind::InvalidJob))?;
-            let limit = if *kind == CommandFileKind::StepSummary {
+            let configured_limit = if *kind == CommandFileKind::StepSummary {
                 self.command_files.limits().maximum_summary_bytes()
             } else {
                 self.command_files.limits().maximum_file_bytes()
+            };
+            let transfer_limit = if *kind == CommandFileKind::StepSummary {
+                configured_limit
+                    .checked_add(1)
+                    .ok_or_else(|| ExecutorAdapterError::new(ExecutorAdapterErrorKind::Internal))?
+            } else {
+                configured_limit
             };
             let request = CopyFromRequest::new(
                 self.ports.operation_ids.operation_id(
@@ -5254,25 +5353,42 @@ impl GithubJobExecutor {
                     ordinal,
                 ),
                 path.clone(),
-                limit,
+                transfer_limit,
             )
             .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::Internal))?;
-            let bytes =
-                match endpoint.copy_from(&request, &ProviderCancellationBridge(cancellation)) {
-                    Ok(bytes) => bytes,
-                    Err(error)
-                        if *kind == CommandFileKind::StepSummary
-                            && error.kind() == ExecutionErrorKind::NotFound =>
-                    {
-                        Vec::new()
-                    }
-                    Err(error) => return Err(map_execution_error(error)),
-                };
+            let copied = endpoint.copy_from(&request, &ProviderCancellationBridge(cancellation));
             if cancellation.is_cancelled() {
                 return Err(ExecutorAdapterError::new(
                     ExecutorAdapterErrorKind::Cancelled,
                 ));
             }
+            let bytes = match copied {
+                Ok(bytes)
+                    if *kind == CommandFileKind::StepSummary && bytes.len() > configured_limit =>
+                {
+                    command_file_notice = Some(CommandFileNotice::SummaryTooLarge {
+                        maximum_bytes: configured_limit,
+                    });
+                    Vec::new()
+                }
+                Ok(bytes) => bytes,
+                Err(error)
+                    if *kind == CommandFileKind::StepSummary
+                        && error.kind() == ExecutionErrorKind::NotFound =>
+                {
+                    Vec::new()
+                }
+                Err(error)
+                    if *kind == CommandFileKind::StepSummary
+                        && error.kind() == ExecutionErrorKind::OutputLimitExceeded =>
+                {
+                    command_file_notice = Some(CommandFileNotice::SummaryTooLarge {
+                        maximum_bytes: configured_limit,
+                    });
+                    Vec::new()
+                }
+                Err(error) => return Err(map_execution_error(error)),
+            };
             parsed.push(
                 self.command_files
                     .decode(*kind, &bytes, platform)
@@ -5327,6 +5443,7 @@ impl GithubJobExecutor {
         Ok(DecodedCommandFiles {
             commands,
             artifacts,
+            command_file_notice,
         })
     }
 
@@ -5843,11 +5960,18 @@ struct CollectedPhase {
     commands: CompletedStepCommands,
     artifacts: ArtifactDeclarationCommandFile,
     annotations: Vec<automata_ci_github_runtime::Annotation>,
+    command_file_notice: Option<CommandFileNotice>,
 }
 
 struct DecodedCommandFiles {
     commands: CompletedStepCommands,
     artifacts: ArtifactDeclarationCommandFile,
+    command_file_notice: Option<CommandFileNotice>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CommandFileNotice {
+    SummaryTooLarge { maximum_bytes: usize },
 }
 
 #[derive(Clone, Default)]
@@ -5855,6 +5979,7 @@ struct ExecutionAttachments {
     by_step: BTreeMap<String, RetainedStepAttachments>,
     annotation_count: usize,
     aggregate_bytes: usize,
+    summary_budget_exhausted: bool,
 }
 
 impl ExecutionAttachments {
@@ -5864,18 +5989,11 @@ impl ExecutionAttachments {
         summary: &str,
         annotations: &[automata_ci_github_runtime::Annotation],
         notices: &[PhaseApplicationNotice],
+        command_file_notice: Option<CommandFileNotice>,
         masker: &mut SecretMasker,
     ) -> Result<(), ExecutorAdapterError> {
-        let summary = masked_attachment_text(summary, masker)?;
+        self.record_summary(step_id, summary, command_file_notice, masker)?;
         let retained = self.by_step.entry(step_id.to_owned()).or_default();
-        if !summary.is_empty() {
-            if retained.summary.len().saturating_add(summary.len()) > MAX_STEP_ATTACHMENT_TEXT_BYTES
-            {
-                return Err(resource_exhausted());
-            }
-            charge_attachment_bytes(&mut self.aggregate_bytes, summary.len())?;
-            retained.summary.push_str(&summary);
-        }
 
         for annotation in annotations {
             let properties = annotation
@@ -5950,6 +6068,193 @@ impl ExecutionAttachments {
         Ok(())
     }
 
+    fn record_summary(
+        &mut self,
+        step_id: &str,
+        summary: &str,
+        command_file_notice: Option<CommandFileNotice>,
+        masker: &mut SecretMasker,
+    ) -> Result<(), ExecutorAdapterError> {
+        if self.summary_budget_exhausted
+            || self
+                .by_step
+                .get(step_id)
+                .is_some_and(|retained| retained.summary_closed)
+        {
+            return Ok(());
+        }
+
+        if let Some(CommandFileNotice::SummaryTooLarge { maximum_bytes }) = command_file_notice {
+            self.record_summary_notice(
+                step_id,
+                &format!(
+                    "$GITHUB_STEP_SUMMARY upload aborted: content exceeds the {maximum_bytes}-byte limit"
+                ),
+                StepAnnotationLevel::Error,
+                false,
+                masker,
+            )?;
+            return Ok(());
+        }
+        if summary.is_empty() {
+            return Ok(());
+        }
+
+        // Every source file is capped at one byte beyond the configured 1 MiB
+        // ceiling before it reaches this boundary. Mask replacement can expand
+        // that bounded input by at most three times, so the masking work and
+        // temporary allocation remain bounded even for a one-byte secret.
+        let redacted_bytes = masker.mask(summary.as_bytes())?;
+        if redacted_bytes.len() > MAX_STEP_ATTACHMENT_TEXT_BYTES {
+            self.record_summary_notice(
+                step_id,
+                MASKED_SUMMARY_LIMIT_DIAGNOSTIC,
+                StepAnnotationLevel::Warning,
+                true,
+                masker,
+            )?;
+            return Ok(());
+        }
+        let redacted = String::from_utf8(redacted_bytes)
+            .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::Internal))?;
+        if redacted.is_empty() {
+            return Ok(());
+        }
+
+        let retained_bytes = self
+            .by_step
+            .get(step_id)
+            .map_or(0, |retained| retained.summary.len());
+        let Some(projected_step_bytes) = retained_bytes.checked_add(redacted.len()) else {
+            self.record_summary_notice(
+                step_id,
+                STEP_SUMMARY_LIMIT_DIAGNOSTIC,
+                StepAnnotationLevel::Warning,
+                true,
+                masker,
+            )?;
+            return Ok(());
+        };
+        if projected_step_bytes > MAX_STEP_ATTACHMENT_TEXT_BYTES {
+            self.record_summary_notice(
+                step_id,
+                STEP_SUMMARY_LIMIT_DIAGNOSTIC,
+                StepAnnotationLevel::Warning,
+                true,
+                masker,
+            )?;
+            return Ok(());
+        }
+
+        if self
+            .aggregate_bytes
+            .checked_add(redacted.len())
+            .is_none_or(|projected| projected > MAX_JOB_RESULT_ATTACHMENT_BYTES)
+        {
+            self.summary_budget_exhausted = true;
+            self.record_summary_notice(
+                step_id,
+                JOB_SUMMARY_LIMIT_DIAGNOSTIC,
+                StepAnnotationLevel::Warning,
+                true,
+                masker,
+            )?;
+            return Ok(());
+        }
+
+        self.aggregate_bytes += redacted.len();
+        self.by_step
+            .entry(step_id.to_owned())
+            .or_default()
+            .summary
+            .push_str(&redacted);
+        Ok(())
+    }
+
+    fn record_summary_notice(
+        &mut self,
+        step_id: &str,
+        message: &str,
+        level: StepAnnotationLevel,
+        close_summary: bool,
+        masker: &mut SecretMasker,
+    ) -> Result<(), ExecutorAdapterError> {
+        let already_noted = {
+            let retained = self.by_step.entry(step_id.to_owned()).or_default();
+            retained.summary_closed |= close_summary;
+            retained.summary_notice_recorded
+        };
+        if already_noted {
+            return Ok(());
+        }
+
+        // Diagnostics are masked too: a dynamically registered short secret
+        // can otherwise coincide with text in this runner-owned message.
+        let message = String::from_utf8(masker.mask(message.as_bytes())?)
+            .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::Internal))?;
+        if message.len() > MAX_STEP_ATTACHMENT_TEXT_BYTES {
+            return Err(resource_exhausted());
+        }
+        self.make_summary_notice_room(step_id, message.len());
+        let message = if self.aggregate_bytes.saturating_add(message.len())
+            <= MAX_JOB_RESULT_ATTACHMENT_BYTES
+        {
+            message
+        } else {
+            // The structured annotation remains a deterministic indicator even
+            // if unrelated, non-summary attachments left no reclaimable bytes.
+            String::new()
+        };
+        if self.annotation_count >= MAX_JOB_RESULT_ANNOTATIONS {
+            // Summary retention is observational and must never replace the
+            // process result merely because the annotation collection is full.
+            return Ok(());
+        }
+        self.aggregate_bytes += message.len();
+        self.annotation_count += 1;
+        let retained = self.by_step.entry(step_id.to_owned()).or_default();
+        retained.summary_notice_recorded = true;
+        retained
+            .annotations
+            .push(StepAnnotation::new(level, message, Vec::new()));
+        Ok(())
+    }
+
+    fn make_summary_notice_room(&mut self, preferred_step: &str, bytes: usize) {
+        let required = self
+            .aggregate_bytes
+            .saturating_add(bytes)
+            .saturating_sub(MAX_JOB_RESULT_ATTACHMENT_BYTES);
+        if required == 0 {
+            return;
+        }
+
+        let mut remaining = required;
+        if let Some(retained) = self.by_step.get_mut(preferred_step) {
+            remaining = remaining.saturating_sub(truncate_summary_suffix(
+                &mut retained.summary,
+                remaining,
+                &mut self.aggregate_bytes,
+            ));
+        }
+        if remaining == 0 {
+            return;
+        }
+        for (candidate, retained) in self.by_step.iter_mut().rev() {
+            if candidate == preferred_step {
+                continue;
+            }
+            remaining = remaining.saturating_sub(truncate_summary_suffix(
+                &mut retained.summary,
+                remaining,
+                &mut self.aggregate_bytes,
+            ));
+            if remaining == 0 {
+                break;
+            }
+        }
+    }
+
     fn take(&mut self, step_id: &str) -> RetainedStepAttachments {
         self.by_step.remove(step_id).unwrap_or_default()
     }
@@ -5959,6 +6264,24 @@ impl ExecutionAttachments {
 struct RetainedStepAttachments {
     summary: String,
     annotations: Vec<StepAnnotation>,
+    summary_closed: bool,
+    summary_notice_recorded: bool,
+}
+
+fn truncate_summary_suffix(
+    summary: &mut String,
+    requested: usize,
+    aggregate_bytes: &mut usize,
+) -> usize {
+    let original = summary.len();
+    let mut retained = original.saturating_sub(requested);
+    while !summary.is_char_boundary(retained) {
+        retained = retained.saturating_sub(1);
+    }
+    summary.truncate(retained);
+    let removed = original - retained;
+    *aggregate_bytes = aggregate_bytes.saturating_sub(removed);
+    removed
 }
 
 fn masked_attachment_text(
@@ -7222,10 +7545,13 @@ const fn conclusion_text(conclusion: JobConclusion) -> &'static str {
 fn validate_action_step_admission(
     job: &JobIrEnvelope,
     workspace: &TargetPath,
+    toolchain: &dyn GithubToolchain,
 ) -> Result<(), AdmissionRejection> {
+    let windows_materializer = workspace.platform() != TargetPlatform::Windows
+        || toolchain.tar().is_some() && toolchain.sha256().is_some();
     for step in job.job().steps() {
         match step.kind() {
-            SemanticStep::Action { .. } if workspace.platform() == TargetPlatform::Windows => {
+            SemanticStep::Action { .. } if !windows_materializer => {
                 return Err(AdmissionRejection::InvalidJob);
             }
             SemanticStep::Action {
@@ -7271,6 +7597,71 @@ fn validate_resource_admission(
     Ok(())
 }
 
+fn local_action_probe_invocation(
+    toolchain: &dyn GithubToolchain,
+    workspace: &TargetPath,
+    primary_metadata: &TargetPath,
+    fallback_metadata: &TargetPath,
+) -> Result<(ExecutionArgv, automata_ci_execution::ExecutionEnvironment), ExecutorAdapterError> {
+    match workspace.platform() {
+        TargetPlatform::Posix => {
+            let argv = ExecutionArgv::new(
+                required_tool(toolchain.sh())?,
+                vec![
+                    "-c".to_owned(),
+                    LOCAL_ACTION_PROBE_SCRIPT.to_owned(),
+                    "automata-local-action".to_owned(),
+                    primary_metadata.as_str().to_owned(),
+                    fallback_metadata.as_str().to_owned(),
+                ],
+            )
+            .map_err(|_| invalid_job())?;
+            Ok((argv, automata_ci_execution::ExecutionEnvironment::empty()))
+        }
+        TargetPlatform::Windows => {
+            if primary_metadata.platform() != TargetPlatform::Windows
+                || fallback_metadata.platform() != TargetPlatform::Windows
+            {
+                return Err(invalid_job());
+            }
+            let argv = ExecutionArgv::new(
+                required_tool(toolchain.pwsh())?,
+                vec![
+                    "-NoLogo".to_owned(),
+                    "-NoProfile".to_owned(),
+                    "-NonInteractive".to_owned(),
+                    "-Command".to_owned(),
+                    WINDOWS_LOCAL_ACTION_PROBE_SCRIPT.to_owned(),
+                ],
+            )
+            .map_err(|_| invalid_job())?;
+            let values = [
+                (WINDOWS_LOCAL_ACTION_ROOT_ENVIRONMENT, workspace.as_str()),
+                (
+                    WINDOWS_LOCAL_ACTION_YML_ENVIRONMENT,
+                    primary_metadata.as_str(),
+                ),
+                (
+                    WINDOWS_LOCAL_ACTION_YAML_ENVIRONMENT,
+                    fallback_metadata.as_str(),
+                ),
+            ]
+            .into_iter()
+            .map(|(name, value)| {
+                Ok(automata_ci_execution::EnvironmentVariable::new(
+                    automata_ci_execution::EnvironmentName::new(name).map_err(|_| invalid_job())?,
+                    automata_ci_execution::EnvironmentValue::new(value)
+                        .map_err(|_| invalid_job())?,
+                ))
+            })
+            .collect::<Result<Vec<_>, ExecutorAdapterError>>()?;
+            let environment = automata_ci_execution::ExecutionEnvironment::new(values)
+                .map_err(|_| resource_exhausted())?;
+            Ok((argv, environment))
+        }
+    }
+}
+
 fn tool_path(path: &TargetPath, platform: TargetPlatform) -> bool {
     path.platform() == platform
         && match platform {
@@ -7313,8 +7704,7 @@ fn valid_toolchain(toolchain: &dyn GithubToolchain) -> bool {
                     && toolchain.powershell().is_some()
                     && toolchain.cmd().is_some()
                     && toolchain.install().is_none()
-                    && toolchain.tar().is_none()
-                    && toolchain.sha256().is_none()
+                    && (toolchain.tar().is_some() == toolchain.sha256().is_some())
             }
         }
 }

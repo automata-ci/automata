@@ -124,7 +124,9 @@ fn extracted_executor_seams_retain_operation_identity_coordinates() {
         "letprepare_ordinal=index.checked_add(1).ok_or_else(invalid_job)?;",
         "OperationPurpose::PrepareDirectory,prepare_ordinal",
         "OperationPurpose::CopyActionArchive,index",
+        "OperationPurpose::VerifyActionArchive,index",
         "OperationPurpose::ExtractActionArchive,index",
+        "OperationPurpose::VerifyActionTree,index",
         "container_runtime::sandbox_spec(&self.config,request,operation_id,generation",
     ] {
         assert!(
@@ -149,7 +151,7 @@ fn extracted_executor_seams_retain_operation_identity_coordinates() {
         action_content
             .matches("ExecutionCommand::new(operation_id,")
             .count(),
-        2
+        5
     );
 
     let container_runtime = include_str!("../src/container_runtime.rs")

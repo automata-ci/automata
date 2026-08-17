@@ -70,10 +70,21 @@ Tasks:
     rejects a source-required feature outside that exact set before runtime or
     Job IR blob publication. Unknown feature identifiers, duplicate or excessive
     sets, historical mappings without the feature-policy section, and Windows
-    profiles that claim action or Node execution fail closed. The current Linux
-    example claims only its configured Bash, `sh`, Python, Node 24, action, and
-    command-file/summary toolchain features; Windows claims no action or Node
-    runtime.
+    profiles that claim action or Node execution without the corresponding
+    accepted profile ceiling fail closed. The current Linux example claims only
+    its configured Bash, `sh`, Python, Node 24, action, and command-file/summary
+    toolchain features. The checked-in Windows candidate remains shell-only.
+  - [x] Windows runner product loading separately verifies a digest-bound
+    Server 2025 manifest/lock, typed digest/media references for provenance,
+    SPDX SBOM, patch and revocation artifacts, and an external Ed25519 promotion
+    envelope. Runner composition adds composite,
+    repository, local-action, JavaScript, and exact Node-generation features
+    only after promotion and successful fresh-sandbox tool probes. An
+    authenticated, short-lived broker-custody receipt contract can carry that
+    exact set into Windows enrollment; the restricted-broker caller remains an
+    integration gate. That caller must make startup independently re-probe
+    before live advertisement. Missing, stale, or mismatched
+    receipt/image/tool/runtime evidence fails closed.
   - [x] Keep temporary placement absence distinct from terminal semantic
     admission. A job that passed its immutable profile ceiling but has no
     currently eligible runner remains durable `NoWork`; admission never derives
@@ -150,13 +161,24 @@ Tasks:
   behavior.
 - [x] Test command-file collection after success, failure, timeout, and
   cancellation.
-- [ ] Aggregate step summaries in completed-step order, define deletion and
+- [x] Aggregate step summaries in completed-step order, define deletion and
   empty-file behavior, and preserve a deterministic truncation indicator.
   - [x] Completed-step ordering plus missing, deleted, and empty summaries are
     defined and covered.
-  - [ ] Match the pinned runner's diagnostic-and-skip behavior for a summary
+  - [x] Match the pinned runner's diagnostic-and-skip behavior for a summary
     larger than 1 MiB across the bounded copy interface. The pinned runner does
-    not truncate the file, so no truncation policy is inferred.
+    not truncate the file, so no truncation policy is inferred. The executor
+    probes at most one byte beyond the attachment ceiling; either the sentinel
+    byte or the endpoint's bounded-output rejection emits the same non-fatal
+    diagnostic and omits the complete summary.
+  - [x] Bound retained summaries after masking and across repeated action or
+    composite phases. A phase that would take one step beyond 1 MiB is omitted,
+    the already-retained prefix is preserved, and one masked warning is retained
+    without changing the process conclusion.
+  - [x] Bound the complete job-result attachment set at 8 MiB. The first summary
+    crossing that ceiling closes further summary retention and leaves one
+    deterministic warning; enough previously retained summary suffix is removed
+    to keep that warning inside the durable result budget.
 - [x] Verify summary isolation across pre, main, post, composite, and repeated
   action occurrences.
 
@@ -222,6 +244,10 @@ Remaining tasks:
 - [ ] Enforce repository and organization action allowlists and immutable-SHA
   policy.
 - [ ] Verify archive digests, paths, links, and subpath containment.
+  - [x] The Windows component gate rejects traversal, links, special entries,
+    reserved/illegal names, case-insensitive collisions, stale destinations,
+    digest mismatch, and post-extraction reparse escape before action metadata
+    or code, and performs extraction only inside the sandbox.
 - [ ] Cache only immutable action content.
 - [ ] Keep credentials out of logs and durable action metadata.
 

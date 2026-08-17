@@ -63,7 +63,7 @@ use super::state::RuntimeMountSnapshot;
 use super::{
     ClientTlsMaterialError, ProductStateRootError, RunnerProductConfig, RunnerProductConfigError,
     RunnerProviderConfig, SecretSource, StandardGithubContext,
-    config::{ObjectStoreTlsTrust, required_podman_state_root},
+    config::{ObjectStoreTlsTrust, promoted_windows_runtime_features, required_podman_state_root},
     metrics::RunnerMetrics,
     profile_admission::{
         ProfileAdmissionError, ProfileAdmissionOutcome, ProfileAdmissionPolicy,
@@ -809,13 +809,39 @@ fn build_admitted_runtime_inventory(
     let admission = admit_configured_environment_profiles(config, provider, cancellation);
     after_profile_admission(admission, || {
         revalidate_provider_trust()?;
-        Ok(inventory_for_verified_provider(
-            config.inventory(),
+        admitted_runtime_inventory(
+            config,
             service_proxy_configured,
             buildkit_configured,
             provider.capabilities(),
-        ))
+        )
     })
+}
+
+fn admitted_runtime_inventory(
+    config: &RunnerProductConfig,
+    service_proxy_configured: bool,
+    buildkit_configured: bool,
+    provider: &ProviderCapabilities,
+) -> Result<RunnerCapabilities, RunnerProductError> {
+    let mut inventory = inventory_for_verified_provider(
+        config.inventory(),
+        service_proxy_configured,
+        buildkit_configured,
+        provider,
+    );
+    if config
+        .windows_hyperv()
+        .is_some_and(|windows| windows.image_admission().permits_actions())
+    {
+        inventory = inventory.with_features(promoted_windows_runtime_features(
+            config.executor().toolchain(),
+        ));
+    }
+    inventory
+        .validate()
+        .map_err(|_| RunnerProductError::SandboxProviderInvariant)?;
+    Ok(inventory)
 }
 
 fn after_profile_admission<Inventory>(
@@ -828,6 +854,7 @@ fn after_profile_admission<Inventory>(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn admit_configured_environment_profiles(
     config: &RunnerProductConfig,
     provider: &dyn automata_ci_execution::SandboxProvider,
@@ -849,7 +876,7 @@ fn admit_configured_environment_profiles(
     let toolchain = config.executor().toolchain();
     let policy = match config.provider() {
         RunnerProviderConfig::WindowsHyperV(_) => policy
-            .with_windows_hyperv_shells(
+            .with_windows_hyperv_tools(
                 toolchain
                     .pwsh()
                     .ok_or(RunnerProductError::ProviderConfiguration)?
@@ -863,6 +890,18 @@ fn admit_configured_environment_profiles(
                     .ok_or(RunnerProductError::ProviderConfiguration)?
                     .clone(),
                 toolchain.python().cloned(),
+                toolchain
+                    .tar()
+                    .ok_or(RunnerProductError::ProviderConfiguration)?
+                    .clone(),
+                toolchain
+                    .sha256sum()
+                    .ok_or(RunnerProductError::ProviderConfiguration)?
+                    .clone(),
+                toolchain.node12().cloned(),
+                toolchain.node16().cloned(),
+                toolchain.node20().cloned(),
+                toolchain.node24().cloned(),
             )
             .map_err(|_| RunnerProductError::ProviderConfiguration)?,
         RunnerProviderConfig::MacosVirtualization(_) => policy
@@ -1316,6 +1355,7 @@ fn load_s3_private_ca(certificate_source: &SecretSource) -> Result<S3TlsTrust, R
         .map_err(RunnerProductError::ObjectStore)
 }
 
+#[allow(clippy::too_many_lines)]
 fn build_toolchain(
     config: &RunnerProductConfig,
 ) -> Result<StaticGithubToolchain, RunnerProductError> {
@@ -1385,6 +1425,21 @@ fn build_toolchain(
     if let Some(path) = configured.python() {
         toolchain = toolchain.with_python(path.clone())?;
     }
+    let windows_actions = config
+        .windows_hyperv()
+        .is_some_and(|windows| windows.image_admission().permits_actions());
+    if windows_actions {
+        toolchain = toolchain.with_windows_action_materializer(
+            configured
+                .tar()
+                .ok_or(RunnerProductError::ProviderConfiguration)?
+                .clone(),
+            configured
+                .sha256sum()
+                .ok_or(RunnerProductError::ProviderConfiguration)?
+                .clone(),
+        )?;
+    }
     if matches!(
         config.provider(),
         RunnerProviderConfig::Podman(_)
@@ -1401,7 +1456,10 @@ fn build_toolchain(
         (JavascriptRuntime::Node20, configured.node20()),
         (JavascriptRuntime::Node24, configured.node24()),
     ] {
-        if let Some(path) = path {
+        if let Some(path) = path
+            && (!matches!(config.provider(), RunnerProviderConfig::WindowsHyperV(_))
+                || windows_actions)
+        {
             toolchain = toolchain.with_node(runtime, path.clone())?;
         }
     }
@@ -1638,6 +1696,8 @@ mod tests {
     #[cfg(unix)]
     use std::{fs, os::unix::fs::PermissionsExt as _, path::PathBuf};
 
+    #[cfg(target_os = "windows")]
+    use automata_ci_job_executor_github::GithubToolchain as _;
     use automata_ci_metrics::OPENMETRICS_CONTENT_TYPE;
 
     #[cfg(unix)]
@@ -1721,6 +1781,72 @@ mod tests {
         ));
     }
 
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn unverified_windows_image_cannot_compose_action_tools() {
+        let config = RunnerProductConfig::from_json(include_bytes!(
+            "../../tests/fixtures/runner.windows.product.json"
+        ))
+        .expect("internal Windows product fixture");
+
+        let toolchain = build_toolchain(&config).expect("shell-only Windows toolchain");
+
+        assert!(toolchain.tar().is_none());
+        assert!(toolchain.sha256().is_none());
+        assert!(toolchain.node(JavascriptRuntime::Node24).is_none());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn promoted_windows_features_exist_only_in_post_admission_inventory() {
+        struct InjectedPromotedEvidence;
+
+        impl super::super::windows_image::WindowsImageEvidenceVerifier for InjectedPromotedEvidence {
+            fn verify(
+                &self,
+                _request: &super::super::windows_image::WindowsImageVerificationRequest<'_>,
+            ) -> Result<
+                super::super::windows_image::WindowsImageVerification,
+                super::super::windows_image::WindowsImageVerificationError,
+            > {
+                Ok(
+                    super::super::windows_image::WindowsImageVerification::promoted(
+                        automata_ci_core::Sha256Digest::from_bytes([9; 32]),
+                        automata_ci_core::Sha256Digest::from_bytes([10; 32]),
+                        automata_ci_core::Sha256Digest::from_bytes([11; 32]),
+                    ),
+                )
+            }
+        }
+
+        let config = RunnerProductConfig::from_json(include_bytes!(
+            "../../tests/fixtures/runner.windows.product.json"
+        ))
+        .expect("internal Windows product fixture")
+        .with_verified_windows_image(&InjectedPromotedEvidence)
+        .expect("injected promotion boundary");
+        let provider = ProviderCapabilities::new([SandboxCapability::WholeJob])
+            .expect("provider capabilities");
+
+        assert!(
+            !config
+                .inventory()
+                .features()
+                .contains(&automata_ci_core::RunnerFeature::JAVASCRIPT_ACTIONS),
+            "durable and diagnostic inventory remains pre-admission"
+        );
+        let admitted = admitted_runtime_inventory(&config, false, false, &provider)
+            .expect("post-admission runtime inventory");
+        for feature in [
+            automata_ci_core::RunnerFeature::JAVASCRIPT_ACTIONS,
+            automata_ci_core::RunnerFeature::COMPOSITE_ACTIONS,
+            automata_ci_core::RunnerFeature::REPOSITORY_ACTIONS,
+            automata_ci_core::RunnerFeature::LOCAL_ACTIONS,
+            automata_ci_core::RunnerFeature::NODE24_ACTIONS,
+        ] {
+            assert!(admitted.features().contains(&feature), "missing {feature}");
+        }
+    }
     #[derive(Debug, Default)]
     struct StartupEffects {
         inventories: Cell<u8>,

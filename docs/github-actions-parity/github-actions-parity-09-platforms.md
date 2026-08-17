@@ -38,8 +38,10 @@ startup orphan check are component recovery, but they do not replace a
 restricted management broker, independent watchdog, or real engine/host fault
 evidence. A broker-verifiable signed admission grant, managed egress,
 credential delivery, a signed image factory, and dedicated-host acceptance
-also remain open. Action
-steps, job and service containers, egress, devices, and parallel capacity
+also remain open. The source tree has component support for Windows action
+materialization and JavaScript/composite execution, but the checked-in image
+evidence is an unsigned candidate. It therefore advertises shell-only
+capacity. Job and service containers, egress, devices, and parallel capacity
 remain unsupported.
 
 The detailed
@@ -49,6 +51,29 @@ blocking trust order is `EVT-01` -> `AUTH-02` -> `WIN-ISO-01`. The local
 pre-lease portion of that route is now enforced, but the provider cannot
 advertise support before the signed broker, management/recovery, image, and
 real-host gates pass.
+
+Image admission now verifies a digest-bound Windows Server 2025 Server Core
+manifest and lock together with provenance, SPDX SBOM, patch, and revocation
+metadata. It binds the exact guest/workspace and configured PowerShell, cmd,
+tar, hash-helper, and Node-generation paths. A canonical external Ed25519
+promotion envelope plus successful fresh-container probes are both required
+before runner composition adds JavaScript, composite, repository, local-action,
+or Node-generation features. Candidate, missing, mismatched, revoked, or
+substituted material never gains those features. These are component gates,
+not a signed image factory or physical-host evidence.
+
+Windows enrollment now has a typed pre-enrollment admission contract. Its
+short-lived authenticated receipt binds the runner, broker/provider identity,
+exact enrollment operation, image/profile/promotion trust anchor and probe
+policy, and canonical capability set;
+only an opaque restricted-broker custody handle is durable across retries.
+The production broker caller is a separate integration gate. It must fail
+closed when custody is absent, stale, expired, or mismatched, and runtime startup
+must independently repeat profile/tool admission. Once composed,
+an admitted action/Node feature can exist in both durable registration and live
+observation instead of being removed by their least-authority intersection.
+This interface and its injected tests are not a promoted image or physical-host
+release claim.
 
 Current component placement foundation binds GitHub-projected Windows jobs to
 both VM-grade isolation and the exact
@@ -97,22 +122,33 @@ offline Hyper-V-container gate.
 
 Tasks:
 
-- [ ] Add and probe Node 24, Git, Git Bash, archive extraction, tar/zstd, and
-  optional supported Python.
-- [ ] Publish exact versions, architecture, and paths in a tool manifest.
-- [ ] Withhold individual capabilities when a probe fails.
-- [ ] Replace POSIX `install` and `tar` action extraction with a secure
-  platform-specific materialization port.
-- [ ] Preserve archive digest and subpath provenance.
-- [ ] Reject traversal, links, reparse escape, and overwrite attacks.
-- [ ] Support local metadata reads and idempotent cleanup.
+- [x] Define and probe exact configured `pwsh.exe`, `powershell.exe`,
+  `cmd.exe`, `tar.exe`, Automata SHA-256 helper, and Node 12/16/20/24 paths in
+  a fresh Windows sandbox.
+- [x] Bind exact tool versions, architecture, paths, and digests through the
+  candidate manifest and externally signed promotion interface.
+- [x] Withhold all Windows action and Node capabilities unless image
+  verification and every configured live tool probe succeed.
+- [x] Add a Windows-specific in-sandbox materialization path with exact archive
+  digest verification and subpath provenance.
+- [x] Reject traversal, links, special entries, reserved/illegal Windows names,
+  case-fold collisions, stale destinations, digest mismatch, and reparse-tree
+  escape before metadata or action execution.
+- [x] Support in-sandbox local metadata reads and exact action cleanup phases at
+  the executor component boundary.
+- [ ] Add and qualify Git, Git Bash, zstd, and any optional Python distribution
+  required by the released action profile.
+- [ ] Publish real image/tool versions and digests from the external image
+  factory and pass the physical Windows qualification gate.
 - [ ] Honor reviewed proxy and custom-CA configuration during Git/action source
   access, Results traffic, and startup admission.
 
 Acceptance:
 
-- [ ] Startup proves every advertised tool inside a fresh sandbox.
-- [ ] Missing Node removes action capability without removing plain run steps.
+- [x] Product startup probes every configured action tool inside a fresh
+  sandbox before registration; injected component tests exercise this gate.
+- [x] Candidate or missing Node-generation evidence removes JavaScript and
+  exact Node capabilities without removing plain run steps.
 - [ ] Linux and Windows produce equivalent immutable action trees.
 
 ### WIN-02 — JavaScript and composite actions on Windows
@@ -122,12 +158,16 @@ WIN-ISO-08 managed data/credential boundary, RUN-01, ACT-01.
 
 Tasks:
 
-- [ ] Replace blanket Windows action rejection with granular capabilities.
-- [ ] Execute Node 24 pre, main, and post.
-- [ ] Execute local, repository, composite, and nested-composite actions.
-- [ ] Preserve Windows phase files, environment casing, and CRLF behavior.
+- [x] Replace blanket runner-side Windows action rejection with promotion- and
+  live-admission-gated granular capabilities.
+- [x] Execute metadata-selected Node 12/16/20/24 pre, main, and post through
+  exact configured paths; no generation or `PATH` fallback is allowed.
+- [x] Enable local, repository, composite, and nested-composite executor paths
+  only when their exact runtime capabilities were admitted.
+- [x] Preserve the existing Windows phase-file, environment-casing, and CRLF
+  executor behavior for admitted actions.
 - [ ] Populate action contexts and run cleanup after failure/cancellation.
-- [ ] Keep Docker actions and containers rejected until separately available.
+- [x] Keep Docker actions and containers rejected until separately available.
 
 Acceptance:
 

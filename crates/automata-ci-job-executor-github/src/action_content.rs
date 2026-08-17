@@ -3,6 +3,7 @@ use std::time::Duration;
 use automata_ci_core::OperationId;
 use automata_ci_execution::{
     CopyToRequest, ExecutionArgv, ExecutionCommand, ExecutionEnvironment, TargetPath,
+    TargetPlatform,
 };
 
 use crate::error::{ExecutorAdapterError, ExecutorAdapterErrorKind};
@@ -28,6 +29,50 @@ pub(super) fn prepare_directory_command(
             "--".to_owned(),
             base.as_str().to_owned(),
             extracted.as_str().to_owned(),
+        ],
+    )
+    .map_err(|_| internal())?;
+    ExecutionCommand::new(
+        operation_id,
+        argv,
+        workspace.clone(),
+        ExecutionEnvironment::empty(),
+        timeout,
+        output_limit,
+    )
+    .map_err(|_| internal())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn prepare_windows_directory_command(
+    operation_id: OperationId,
+    pwsh: TargetPath,
+    workspace: &TargetPath,
+    base: &TargetPath,
+    extracted: &TargetPath,
+    timeout: Duration,
+    output_limit: usize,
+) -> Result<ExecutionCommand, ExecutorAdapterError> {
+    if [workspace, base, extracted]
+        .into_iter()
+        .any(|path| path.platform() != TargetPlatform::Windows)
+    {
+        return Err(internal());
+    }
+    let quote = |path: &TargetPath| path.as_str().replace('\'', "''");
+    let script = format!(
+        "$ErrorActionPreference='Stop';$base='{}';$tree='{}';if(Test-Path -LiteralPath $base){{throw 'action directory already exists'}};[System.IO.Directory]::CreateDirectory($tree)|Out-Null",
+        quote(base),
+        quote(extracted),
+    );
+    let argv = ExecutionArgv::new(
+        pwsh,
+        vec![
+            "-NoLogo".to_owned(),
+            "-NoProfile".to_owned(),
+            "-NonInteractive".to_owned(),
+            "-Command".to_owned(),
+            script,
         ],
     )
     .map_err(|_| internal())?;
@@ -71,6 +116,74 @@ pub(super) fn extract_archive_command(
             "--strip-components=1".to_owned(),
             "--no-same-owner".to_owned(),
             "--no-same-permissions".to_owned(),
+        ],
+    )
+    .map_err(|_| internal())?;
+    ExecutionCommand::new(
+        operation_id,
+        argv,
+        workspace.clone(),
+        ExecutionEnvironment::empty(),
+        timeout,
+        output_limit,
+    )
+    .map_err(|_| internal())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn verify_archive_command(
+    operation_id: OperationId,
+    sha256: &ExecutionArgv,
+    workspace: &TargetPath,
+    archive_path: &TargetPath,
+    timeout: Duration,
+    output_limit: usize,
+) -> Result<ExecutionCommand, ExecutorAdapterError> {
+    if sha256.program().platform() != workspace.platform()
+        || archive_path.platform() != workspace.platform()
+    {
+        return Err(internal());
+    }
+    let mut arguments = sha256.arguments().to_vec();
+    arguments.push(archive_path.as_str().to_owned());
+    let argv = ExecutionArgv::new(sha256.program().clone(), arguments).map_err(|_| internal())?;
+    ExecutionCommand::new(
+        operation_id,
+        argv,
+        workspace.clone(),
+        ExecutionEnvironment::empty(),
+        timeout,
+        output_limit,
+    )
+    .map_err(|_| internal())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn verify_windows_tree_command(
+    operation_id: OperationId,
+    pwsh: TargetPath,
+    workspace: &TargetPath,
+    extracted: &TargetPath,
+    timeout: Duration,
+    output_limit: usize,
+) -> Result<ExecutionCommand, ExecutorAdapterError> {
+    if workspace.platform() != TargetPlatform::Windows
+        || extracted.platform() != TargetPlatform::Windows
+    {
+        return Err(internal());
+    }
+    let tree = extracted.as_str().replace('\'', "''");
+    let script = format!(
+        "$ErrorActionPreference='Stop';$tree='{tree}';$root=[System.IO.Path]::GetFullPath($tree).TrimEnd('\\')+'\\';foreach($entry in Get-ChildItem -LiteralPath $tree -Force -Recurse){{$full=[System.IO.Path]::GetFullPath($entry.FullName);if(-not $full.StartsWith($root,[System.StringComparison]::OrdinalIgnoreCase)){{throw 'action path escaped'}};if(($entry.Attributes -band [System.IO.FileAttributes]::ReparsePoint)-ne 0){{throw 'action reparse point'}}}}",
+    );
+    let argv = ExecutionArgv::new(
+        pwsh,
+        vec![
+            "-NoLogo".to_owned(),
+            "-NoProfile".to_owned(),
+            "-NonInteractive".to_owned(),
+            "-Command".to_owned(),
+            script,
         ],
     )
     .map_err(|_| internal())?;
