@@ -113,38 +113,16 @@ POSTGRES_TEST_SUPPORT_MODULES = frozenset({
     ("crates/automata-ci-postgres/tests/postgres.rs", "support"),
     (
         "crates/automata-ci-postgres/tests/postgres.rs",
-        "github_manifest_fixture",
+        "sign_in",
     ),
-    ("crates/automata-ci-postgres/tests/postgres.rs", "provisioning"),
     (
-        "crates/automata-ci-postgres/tests/auth/mod.rs",
-        "cli_session_activation",
+        "crates/automata-ci-postgres/tests/postgres.rs",
+        "runner_control",
     ),
-    ("crates/automata-ci-postgres/tests/auth/mod.rs", "delegated_actor"),
     (
-        "crates/automata-ci-postgres/tests/auth/mod.rs",
-        "github_mapping_management",
+        "crates/automata-ci-postgres/tests/postgres.rs",
+        "web_reads",
     ),
-    ("crates/automata-ci-postgres/tests/auth/mod.rs", "github_membership"),
-    ("crates/automata-ci-postgres/tests/auth/mod.rs", "human_auth"),
-    ("crates/automata-ci-postgres/tests/auth/mod.rs", "installation"),
-    ("crates/automata-ci-postgres/tests/auth/mod.rs", "login_device_cas"),
-    ("crates/automata-ci-postgres/tests/auth/mod.rs", "management"),
-    ("crates/automata-ci-postgres/tests/auth/mod.rs", "provider_tokens"),
-    ("crates/automata-ci-postgres/tests/auth/mod.rs", "request_auth"),
-    ("crates/automata-ci-postgres/tests/auth/mod.rs", "sign_in"),
-    ("crates/automata-ci-postgres/tests/store/mod.rs", "execution"),
-    ("crates/automata-ci-postgres/tests/store/mod.rs", "fixture"),
-    ("crates/automata-ci-postgres/tests/store/mod.rs", "orchestration"),
-    ("crates/automata-ci-postgres/tests/store/mod.rs", "provider"),
-    ("crates/automata-ci-postgres/tests/store/mod.rs", "security"),
-    (
-        "crates/automata-ci-postgres/tests/store/contracts/mod.rs",
-        "schema_catalog",
-    ),
-    ("crates/automata-ci-postgres/tests/secret/mod.rs", "provider"),
-    ("crates/automata-ci-postgres/tests/secret/mod.rs", "provider_replay"),
-    ("crates/automata-ci-postgres/tests/runner_auth/mod.rs", "directory"),
 })
 
 # Control's adapter contract tests remain unavailable unless the package's

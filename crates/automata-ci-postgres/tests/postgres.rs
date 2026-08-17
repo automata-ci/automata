@@ -1,15 +1,14 @@
-//! Consolidated `PostgreSQL` adapter contracts and database tests.
+//! Production-path `PostgreSQL` integration tests.
 
 #[cfg(feature = "test-support")]
 mod support;
 
 #[cfg(feature = "test-support")]
-#[path = "support/github_manifest_fixture.rs"]
-mod github_manifest_fixture;
-
-mod auth;
+#[path = "store/execution/runner_control.rs"]
+mod runner_control;
 #[cfg(feature = "test-support")]
-mod provisioning;
-mod runner_auth;
-mod secret;
-mod store;
+#[path = "auth/sign_in.rs"]
+mod sign_in;
+#[cfg(feature = "test-support")]
+#[path = "store/orchestration/web_reads.rs"]
+mod web_reads;

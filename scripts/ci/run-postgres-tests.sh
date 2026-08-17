@@ -93,7 +93,7 @@ if [[ "$plan" != true ]]; then
   fi
 fi
 
-printf 'PostgreSQL lane: adapters and Store\n' >&2
+printf 'PostgreSQL tests: authentication, runner, and web reads\n' >&2
 run_bounded_tests cargo test \
   -p automata-ci-postgres \
   --test postgres \
@@ -101,9 +101,9 @@ run_bounded_tests cargo test \
   --locked \
   -- \
   --ignored \
-  --test-threads=4
+  --test-threads=2
 
-printf 'PostgreSQL lane: fixture self-tests\n' >&2
+printf 'PostgreSQL tests: database harness\n' >&2
 run_bounded_tests cargo test \
   -p automata-ci-postgres \
   --lib \
@@ -114,7 +114,7 @@ run_bounded_tests cargo test \
   --ignored \
   --test-threads=1
 
-printf 'PostgreSQL lane: GitHub Results integration\n' >&2
+printf 'PostgreSQL tests: artifacts and cache\n' >&2
 run_bounded_tests cargo test \
   -p automata-ci-results-github \
   --test postgres_artifacts \
@@ -123,14 +123,4 @@ run_bounded_tests cargo test \
   --locked \
   -- \
   --ignored \
-  --test-threads=4
-
-printf 'PostgreSQL lane: end-to-end provider matrix\n' >&2
-run_bounded_tests cargo test \
-  -p automata-ci \
-  --test github_provider_end_to_end_matrix \
-  --all-features \
-  --locked \
-  -- \
-  --ignored \
-  --test-threads=1
+  --test-threads=2

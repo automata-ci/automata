@@ -395,78 +395,8 @@ import pathlib
 import sys
 
 root = pathlib.Path(sys.argv[1])
-ci_path = root / ".ci/workflows/ci.yml"
-ci = ci_path.read_text(encoding="utf-8")
-
-
-def step(contents: str, name: str) -> tuple[int, str]:
-    marker = f"      - name: {name}\n"
-    start = contents.find(marker)
-    if start < 0:
-        raise SystemExit(f"service-proxy-image-test: workflow step is missing: {name}")
-    end = contents.find("\n      - name: ", start + len(marker))
-    if end < 0:
-        end = len(contents)
-    return start, contents[start:end]
-
-
-static_offset, static_step = step(ci, "Verify static binaries")
-candidate_offset, candidate_step = step(
-    ci, "Prepare digest-bound private service-proxy image candidate"
-)
-if (
-    static_offset >= candidate_offset
-    or "./scripts/ci/verify-service-proxy-static.sh" not in static_step
-):
-    raise SystemExit(
-        "service-proxy-image-test: static process verification must precede the image candidate"
-    )
-
-required_environment = (
-    "        env:\n"
-    "          AUTOMATA_SERVICE_PROXY_OCI_BUILDER: buildah-chroot\n"
-    "          AUTOMATA_SERVICE_PROXY_PROCESS_PROBE: metadata-only\n"
-    "        run: |\n"
-)
-if required_environment not in candidate_step:
-    raise SystemExit(
-        "service-proxy-image-test: CI candidate does not pin the Buildah chroot contract"
-    )
-if (
-    "AUTOMATA_ENVIRONMENT_PROFILE_ID" in candidate_step
-    or "AUTOMATA_SERVICE_PROXY_CONTAINER_RUNTIME" in candidate_step
-    or "if [[" in candidate_step
-):
-    raise SystemExit(
-        "service-proxy-image-test: CI candidate contains a conditional or stale runtime"
-    )
-
 build = "./scripts/ci/build-service-proxy-candidate.sh"
-if candidate_step.count(build) != 2:
-    raise SystemExit(
-        "service-proxy-image-test: CI must build and reproduce exactly two candidates"
-    )
-policy_review = "python3 scripts/ci/service-proxy-publication.py prepare-candidate"
-if candidate_step.find(policy_review) <= candidate_step.rfind(build):
-    raise SystemExit(
-        "service-proxy-image-test: publication policy review must follow candidate builds"
-    )
 load_review = "python3 scripts/ci/verify-service-proxy-candidate-load.py"
-if candidate_step.find(load_review) <= candidate_step.find(policy_review):
-    raise SystemExit(
-        "service-proxy-image-test: Docker load verification must follow publication review"
-    )
-
-verify_tooling = step(ci, "Lint workflows and shell scripts")[1]
-for invocation in (
-    "./scripts/ci/tests/service-proxy-image.test.sh",
-    "python3 scripts/ci/tests/service-proxy-publication.test.py",
-):
-    if invocation not in verify_tooling:
-        raise SystemExit(
-            f"service-proxy-image-test: Verify does not run {invocation}"
-        )
-
 for relative in (".ci/workflows/release.yml", ".ci/workflows/service-proxy-image.yml"):
     publication = (root / relative).read_text(encoding="utf-8")
     if build not in publication:

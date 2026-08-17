@@ -23,7 +23,10 @@ use super::{
 const DATABASE_PREFIX: &str = "at_";
 const TEMPLATE_SUFFIX: &str = "_template";
 const MAX_NAMESPACE_LENGTH: usize = 27;
-const DEFAULT_POOL_CONNECTIONS: u32 = 16;
+// Integration tests exercise transaction and lock concurrency explicitly.
+// Eight connections preserve those in-test races while the PostgreSQL lane's
+// two libtest workers bound aggregate demand to sixteen primary connections.
+const DEFAULT_POOL_CONNECTIONS: u32 = 8;
 const MINIMUM_POSTGRES_VERSION: i32 = 180_000;
 const TEMPLATE_MARKER_VERSION: &str = "automata-ci-postgres-test-support:v1";
 const TEMPLATE_LOCK_SALT: i64 = 6_482_851_405_936_141_723;
@@ -1195,9 +1198,14 @@ const fn cleanup_state_name(state: u8) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        DatabaseIdentifier, INITIALIZER_FINGERPRINT_LENGTH_LIMIT, InitializerFingerprint,
-        MAX_NAMESPACE_LENGTH, TEMPLATE_MARKER_VERSION, TestNamespace,
+        DEFAULT_POOL_CONNECTIONS, DatabaseIdentifier, INITIALIZER_FINGERPRINT_LENGTH_LIMIT,
+        InitializerFingerprint, MAX_NAMESPACE_LENGTH, TEMPLATE_MARKER_VERSION, TestNamespace,
     };
+
+    #[test]
+    fn default_pool_is_bounded_for_parallel_integration_tests() {
+        assert_eq!(DEFAULT_POOL_CONNECTIONS, 8);
+    }
 
     #[test]
     fn namespace_validation_accepts_canonical_job_scope() {

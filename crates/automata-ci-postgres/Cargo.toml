@@ -14,7 +14,11 @@ autotests = false
 
 [features]
 default = []
-test-support = []
+test-support = [
+    "dep:automata-ci-core",
+    "dep:automata-ci-key-management",
+    "dep:automata-ci-store",
+]
 
 [[test]]
 name = "postgres"
@@ -26,6 +30,9 @@ path = "examples/postgres-test-cleanup.rs"
 required-features = ["test-support"]
 
 [dependencies]
+automata-ci-core = { workspace = true, optional = true }
+automata-ci-key-management = { workspace = true, optional = true }
+automata-ci-store = { workspace = true, features = ["adapter-spi"], optional = true }
 automata-ci-store-postgres = { workspace = true, features = ["test-support"] }
 sqlx.workspace = true
 tokio.workspace = true
