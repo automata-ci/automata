@@ -105,24 +105,9 @@ plan_key!(/// Stable workflow or logical-job output identity.
     WorkflowOutputKey, "workflow output key");
 
 #[cfg(test)]
-mod limit_contract_tests {
-    use super::{
-        MAX_PLAN_KEY_LENGTH, WorkflowIdentifierLimitRejection, workflow_identifier_byte_rejection,
-    };
-
-    #[test]
-    fn workflow_identifier_byte_limit_has_exact_boundaries() {
-        assert_eq!(
-            workflow_identifier_byte_rejection(MAX_PLAN_KEY_LENGTH - 1),
-            None
-        );
-        assert_eq!(
-            workflow_identifier_byte_rejection(MAX_PLAN_KEY_LENGTH),
-            None
-        );
-        assert_eq!(
-            workflow_identifier_byte_rejection(MAX_PLAN_KEY_LENGTH + 1),
-            Some(WorkflowIdentifierLimitRejection::KeyBytes)
-        );
-    }
+crate::test_support::limit_contract_tests! {
+    workflow_identifier_byte_limit_has_exact_boundaries: (
+        super::workflow_identifier_byte_rejection,
+        super::MAX_PLAN_KEY_LENGTH,
+    ) => super::WorkflowIdentifierLimitRejection::KeyBytes;
 }

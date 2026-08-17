@@ -198,43 +198,15 @@ impl ValueTemplate {
 }
 
 #[cfg(test)]
-mod limit_contract_tests {
-    use super::{
-        MAX_VALUE_TEMPLATE_SEGMENTS, MAX_VALUE_TEMPLATE_TEXT_BYTES, ValueTemplateLimitRejection,
-        value_template_segment_rejection, value_template_text_byte_rejection,
-    };
-
-    #[test]
-    fn value_template_segment_limit_has_exact_boundaries() {
-        assert_eq!(
-            value_template_segment_rejection(MAX_VALUE_TEMPLATE_SEGMENTS - 1),
-            None
-        );
-        assert_eq!(
-            value_template_segment_rejection(MAX_VALUE_TEMPLATE_SEGMENTS),
-            None
-        );
-        assert_eq!(
-            value_template_segment_rejection(MAX_VALUE_TEMPLATE_SEGMENTS + 1),
-            Some(ValueTemplateLimitRejection::Segments)
-        );
-    }
-
-    #[test]
-    fn value_template_text_byte_limit_has_exact_boundaries() {
-        assert_eq!(
-            value_template_text_byte_rejection(MAX_VALUE_TEMPLATE_TEXT_BYTES - 1),
-            None
-        );
-        assert_eq!(
-            value_template_text_byte_rejection(MAX_VALUE_TEMPLATE_TEXT_BYTES),
-            None
-        );
-        assert_eq!(
-            value_template_text_byte_rejection(MAX_VALUE_TEMPLATE_TEXT_BYTES + 1),
-            Some(ValueTemplateLimitRejection::TextBytes)
-        );
-    }
+crate::test_support::limit_contract_tests! {
+    value_template_segment_limit_has_exact_boundaries: (
+        super::value_template_segment_rejection,
+        super::MAX_VALUE_TEMPLATE_SEGMENTS,
+    ) => super::ValueTemplateLimitRejection::Segments;
+    value_template_text_byte_limit_has_exact_boundaries: (
+        super::value_template_text_byte_rejection,
+        super::MAX_VALUE_TEMPLATE_TEXT_BYTES,
+    ) => super::ValueTemplateLimitRejection::TextBytes;
 }
 
 /// A boolean that may remain deferred until a step is about to execute.

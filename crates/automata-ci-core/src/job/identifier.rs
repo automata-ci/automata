@@ -97,16 +97,9 @@ impl<'de> Deserialize<'de> for StepId {
 }
 
 #[cfg(test)]
-mod limit_contract_tests {
-    use super::{JobIdentifierLimitRejection, MAX_SEMANTIC_ID_LENGTH, step_id_byte_rejection};
-
-    #[test]
-    fn step_id_byte_limit_has_exact_boundaries() {
-        assert_eq!(step_id_byte_rejection(MAX_SEMANTIC_ID_LENGTH - 1), None);
-        assert_eq!(step_id_byte_rejection(MAX_SEMANTIC_ID_LENGTH), None);
-        assert_eq!(
-            step_id_byte_rejection(MAX_SEMANTIC_ID_LENGTH + 1),
-            Some(JobIdentifierLimitRejection::StepIdBytes)
-        );
-    }
+crate::test_support::limit_contract_tests! {
+    step_id_byte_limit_has_exact_boundaries: (
+        super::step_id_byte_rejection,
+        super::MAX_SEMANTIC_ID_LENGTH,
+    ) => super::JobIdentifierLimitRejection::StepIdBytes;
 }

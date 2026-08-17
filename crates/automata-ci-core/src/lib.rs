@@ -16,6 +16,9 @@ pub mod time;
 pub mod trust;
 pub mod workflow;
 
+#[cfg(test)]
+mod test_support;
+
 pub use capability::*;
 pub use digest::*;
 pub use execution::*;
