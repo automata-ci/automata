@@ -52,10 +52,8 @@ jobs:
       - name: Prepare build directory
         run: install -d -m 0700 -- "$TMPDIR"
 
-      - name: Set up sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-        with:
-          version: v0.17.0
+      - name: Install sccache
+        run: ./scripts/ci/install-sccache.sh
 
       - name: Run Rust checks
         run: |
@@ -122,10 +120,8 @@ jobs:
       - name: Prepare build directory
         run: install -d -m 0700 -- "$TMPDIR"
 
-      - name: Set up sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-        with:
-          version: v0.17.0
+      - name: Install sccache
+        run: ./scripts/ci/install-sccache.sh
 
       - name: Run PostgreSQL tests
         run: ./scripts/ci/run-postgres-tests.sh
