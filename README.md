@@ -16,33 +16,52 @@ Automata runs this repository's own CI. The
 [public dashboard](https://ci.automata-ci.com/automata-ci/automata/actions)
 shows push and pull-request runs, jobs, runner-redacted logs, and artifacts.
 
-## Try the interface
+## Run workflows
 
 You need Git, [rustup](https://rustup.rs/), and a native C/C++ build toolchain.
-The repository pins its Rust toolchain in `rust-toolchain.toml`.
+The repository pins its Rust toolchain in `rust-toolchain.toml`. No public
+package or image has been published, so build both commands from a reviewed
+source checkout:
 
 ```console
 git clone https://github.com/automata-ci/automata.git
 cd automata
-cargo run --locked --bin automata -- preview
+cargo install --path crates/automata-ci --locked
+cargo install --path crates/automata-ci-runner --locked
+automata --version
+automata-runner --version
 ```
 
-Open <http://127.0.0.1:8080>. Verify the process from another terminal:
+Then bring up the complete path:
+
+1. Configure PostgreSQL, S3-compatible object storage, the Results service,
+   runner mutual TLS, and the GitHub App integration. The
+   [`automata` configuration reference](crates/automata-ci/README.md) owns the
+   required server options, secret references, listener boundaries, and
+   startup checks. Start `automata server` only after those inputs are in
+   place.
+2. Prepare a Linux execution host with rootless Podman, enroll its identity,
+   and start `automata-runner run --config /ABSOLUTE/PATH/runner.json` under
+   the same dedicated account that owns the configuration. Follow the
+   [runner bootstrap guide](crates/automata-ci-runner/config/README.md); the
+   runner performs mandatory host and sandbox admission before it accepts a
+   job.
+3. Put Automata workflows in `.ci/workflows`, register the repository through
+   the configured GitHub provider, and push or dispatch a supported event.
+   Automata admits the workflow, leases its jobs to eligible runners, and
+   publishes the results through its UI and GitHub Checks.
+
+After the server starts, verify process and dependency readiness on the human
+listener:
 
 ```console
 curl --fail http://127.0.0.1:8080/healthz
 curl --fail http://127.0.0.1:8080/readyz
 ```
 
-Preview mode serves the server-rendered interface and health endpoints without
-external services. It does not accept webhooks, schedule jobs, connect to
-runners, or expose the Results API. The
-[hosted demo](https://automata-ci.github.io/automata/) shows the same interface
-with sample data and cannot execute workflows.
-
-To run workflows, configure the complete server and at least one runner. Start
-with the [`automata` configuration reference](crates/automata-ci/README.md) and
-the [Linux runner bootstrap guide](crates/automata-ci-runner/config/README.md).
+`/readyz` reports database, object-store, and autonomous-worker readiness. The
+server fails closed when a required dependency or credential is missing; it
+does not fall back to a preview process.
 
 ## What works
 
@@ -85,7 +104,6 @@ These are not all at the same release stage. In particular:
 
 | Area | Status | Boundary |
 | --- | --- | --- |
-| Web preview | Available | Source-build UI and health endpoints only; no workflow execution |
 | Local host and workflow checks | Available | Read-only source-build inspection; no admission or execution |
 | GitHub-to-runner workflow execution | Experimental | Runs real workflows; operating requirements and supported syntax may change |
 | GitHub provider and Checks | Experimental | Authenticated ingress and result projection are composed; production acceptance remains open |
@@ -113,21 +131,8 @@ The workspace builds two product commands:
 
 | Command | Purpose |
 | --- | --- |
-| `automata` | Run the control plane and use its preview, local inspection, authentication, secret, environment-review, rerun, runner-management, and administration operations |
+| `automata` | Run the control plane and perform local inspection, authentication, secret, environment-review, rerun, runner-management, and administration operations |
 | `automata-runner` | Enroll an execution host, inspect its capabilities, and execute leased jobs through one configured sandbox provider |
-
-Build and install both commands from the same reviewed checkout:
-
-```console
-cargo install --path crates/automata-ci --locked
-cargo install --path crates/automata-ci-runner --locked
-automata --version
-automata-runner --version
-```
-
-No crates.io package, release archive, or GHCR product image is public until an
-exact version appears in that registry and in
-[GitHub Releases](https://github.com/automata-ci/automata/releases).
 
 ### Inspect a local repository
 
