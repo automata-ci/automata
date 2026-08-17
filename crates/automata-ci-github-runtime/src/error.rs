@@ -165,9 +165,6 @@ pub enum WorkflowCommandError {
     /// A recognized command omits a required non-empty property.
     #[error("workflow command is missing a required property")]
     MissingRequiredProperty,
-    /// An environment or PATH mutation used a disabled legacy command.
-    #[error("insecure legacy workflow command is disabled")]
-    LegacyCommandDisabled,
     /// A `stop-commands` token is unsafe or collides with a command name.
     #[error("stop-commands token is empty, reserved, malformed, or too long")]
     InvalidStopToken,

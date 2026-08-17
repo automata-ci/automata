@@ -1,4 +1,12 @@
 @media (prefers-reduced-motion: reduce) {
+  .log-group__chevron {
+    transition: none;
+  }
+
+  .log-group[data-state="running"] .log-group__status,
+  .log-stream-state > span {
+    animation: none;
+  }
   *,
   *::before,
   *::after {

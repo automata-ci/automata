@@ -814,7 +814,7 @@ GitHub documents annotations, groups, masks, command stopping, state, and the
 - [ ] Convert matched log lines into annotations.
 - [ ] Support matcher removal.
 - [ ] Implement structured nested log groups.
-- [ ] Preserve group start and end in Results and UI.
+- [x] Preserve group start and end in Results and UI.
 - [ ] Implement `::debug::`.
 - [ ] Implement `ACTIONS_STEP_DEBUG`.
 - [ ] Set `RUNNER_DEBUG=1` when debug logging is enabled.
@@ -825,7 +825,8 @@ GitHub documents annotations, groups, masks, command stopping, state, and the
 - [x] Enforce immutability for the documented default `GITHUB_*` and
   `RUNNER_*` variables.
 - [x] Keep `NODE_OPTIONS` blocked through `GITHUB_ENV`.
-- [ ] Decide whether to support `ACTIONS_ALLOW_UNSECURE_COMMANDS`.
+- [x] Reject `ACTIONS_ALLOW_UNSECURE_COMMANDS`; workflow mutations use command
+  files rather than insecure stdout commands.
 - [ ] Match multiline environment/output delimiter parsing.
 - [ ] Match UTF-8 BOM behavior.
 - [ ] Match CRLF behavior.
@@ -929,7 +930,7 @@ branch scoping, rate limits, quotas, and eviction. See
 - [ ] Run production object-store acceptance.
 - [ ] Run BuildKit `cache-to` and `cache-from` acceptance.
 - [ ] Enable cache actions on Windows.
-- [ ] Decide whether CacheService v1 compatibility is needed.
+- [x] Reject CacheService v1 compatibility; require pinned modern clients.
 - [ ] Keep native GitHub cache inventory explicitly out of scope.
 
 ## 17. Secrets and configuration variables

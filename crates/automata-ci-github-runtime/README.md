@@ -60,8 +60,7 @@ same byte ceiling as a fail-closed decoder limit. Preserving the runner's
 diagnostic-and-skip behavior across the bounded executor copy interface is a
 narrow compatibility follow-up; no truncation behavior is inferred here.
 
-The parser supports both current `::command::data` syntax and the runner's
-legacy `##[command]data` syntax. Deprecated `set-output` and `save-state` are
-represented as typed mutations. Insecure `set-env` and `add-path` stdout
-commands remain disabled unless explicitly enabled in `WorkflowCommandPolicy`,
-matching the upstream opt-in behavior.
+The parser supports only current `::command::data` syntax. The removed
+`##[command]data` syntax and `set-output`, `save-state`, `set-env`, and
+`add-path` stdout mutation commands are ordinary process output. Actions must
+use the bounded command files for outputs, state, environment, and path changes.

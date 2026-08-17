@@ -242,37 +242,8 @@ interface JobLogJobModel {
   readonly durationLabel: string | null;
 }
 
-type LogChannel = "stdout" | "stderr" | "system";
-
-export interface JobLogLineModel {
-  /** Stable identity used to derive a namespaced DOM anchor. */
-  readonly id: string;
-  /** Exact display sequence; represented as text so u64 values remain lossless. */
-  readonly number: string;
-  readonly timestamp: TimestampModel;
-  readonly channel: LogChannel;
-  readonly text: string;
-}
-
-interface JobLogSearchModel {
-  readonly action: string;
-  readonly query: string;
-  readonly clearHref: string;
-}
-
-interface JobLogPaginationModel {
-  readonly currentCursor: string | null;
-  readonly previousCursor: string | null;
-  readonly nextCursor: string | null;
-  readonly label: string;
-}
-
 export interface JobLogLiveModel {
-  /** Opaque forward checkpoint for the last fully applied durable record. */
-  readonly checkpoint: string | null;
-  /** Durable stream state; a closed stream can still have unread committed pages. */
-  readonly state: "open" | "closed";
-  readonly moreAvailable: boolean;
+  readonly ticketHref: string;
 }
 
 export interface JobLogPageModel {
@@ -284,12 +255,9 @@ export interface JobLogPageModel {
   readonly navigationPagination: PaginationModel;
   readonly job: JobLogJobModel;
   readonly logVisibility: ResultCollectionVisibility;
-  readonly search: JobLogSearchModel;
-  readonly lines: readonly JobLogLineModel[];
-  /** Resumable live-tail state, absent for restricted and historical pages. */
+  /** Replay and live-tail access, absent when logs are restricted or not created. */
   readonly live: JobLogLiveModel | null;
   readonly notice: string | null;
-  readonly pagination: JobLogPaginationModel;
 }
 
 export interface DeepLinkSignInPageModel {

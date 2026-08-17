@@ -1431,7 +1431,7 @@ async fn seed_public_completed_run(
             requested_visibility, effective_visibility,
             output_safety_reason, output_safety_schema
         ) VALUES (
-            $1, $2, $3, $4, $5, $6, $7, 1, $8, 1, 1, 15, 21,
+            $1, $2, $3, $4, $5, $6, $7, 1, $8, 1, 2, 15, 21,
             'secretless', 'persist', 'public', 'public', 'repository_policy', $9
         )
         ",
@@ -1656,7 +1656,7 @@ async fn insert_duplicate_stream(
             requested_visibility, effective_visibility,
             output_safety_reason, output_safety_schema
         ) VALUES (
-            $1, $2, $3, $4, $5, $6, $7, 1, $8, 1, 1, 22,
+            $1, $2, $3, $4, $5, $6, $7, 1, $8, 1, 2, 22,
             'secretless', 'persist', 'public', 'public', 'repository_policy', $9
         )
         ",
@@ -1698,7 +1698,7 @@ async fn insert_duplicate_authoritative_stream(
         SELECT $1, terminal.attempt_id, terminal.runner_session_id, $2,
                terminal.runner_id, terminal.runner_session_epoch,
                terminal.runner_generation, terminal.runner_slot,
-               terminal.lease_id, terminal.fencing_token, 1, 22,
+               terminal.lease_id, terminal.fencing_token, 2, 22,
                'secretless', 'persist', 'public', 'public',
                'repository_policy', $4
         FROM attempt_terminal_results AS terminal

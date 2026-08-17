@@ -250,15 +250,24 @@ fn log_frame(
     payload: &[u8],
     end_of_stream: bool,
 ) -> LogFrame {
-    LogFrame::new(
-        stream_id,
-        attempt_id,
-        LogSequence::new(sequence),
-        UnixMillis::new(10),
-        LogChannel::Stdout,
-        payload.to_vec(),
-        end_of_stream,
-    )
+    if end_of_stream {
+        LogFrame::stream_finished(
+            stream_id,
+            attempt_id,
+            LogSequence::new(sequence),
+            UnixMillis::new(10),
+        )
+    } else {
+        LogFrame::line(
+            stream_id,
+            attempt_id,
+            LogSequence::new(sequence),
+            UnixMillis::new(10),
+            automata_ci_core::LogGroupId::new("test").expect("group ID"),
+            LogChannel::Stdout,
+            payload.to_vec(),
+        )
+    }
     .expect("valid log frame")
 }
 

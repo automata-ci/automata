@@ -8,6 +8,7 @@ import type {
   RunListItemModel,
   RunListPageModel,
 } from "../models";
+import type { LiveLogRecord } from "../liveLogs/sse";
 import {
   previewRepository,
   previewRunSamples,
@@ -28,7 +29,7 @@ const TAG_REF_PREFIX = "refs/tags/";
 const REF_PREFIX = "refs/";
 const RUN_LIST_KEYS = new Set(["view", "workflow", "status", "branch"]);
 const RUN_DETAIL_KEYS = new Set(["view", "run"]);
-const JOB_LOG_KEYS = new Set(["view", "run", "job", "q"]);
+const JOB_LOG_KEYS = new Set(["view", "run", "job"]);
 const VIEW_ONLY_KEYS = new Set(["view"]);
 
 export function previewRepositoryDirectory(
@@ -155,10 +156,7 @@ export function isPreviewRunDetailStateSupported(
 export function isPreviewJobLogStateSupported(
   searchParameters: URLSearchParams,
 ): boolean {
-  return (
-    hasOnlyUniqueKeys(searchParameters, JOB_LOG_KEYS) &&
-    isBoundedQueryValue(searchParameters.get("q"))
-  );
+  return hasOnlyUniqueKeys(searchParameters, JOB_LOG_KEYS);
 }
 
 export function isPreviewRepositorySettingsStateSupported(
@@ -282,7 +280,6 @@ export function previewRunDetail(
 export function previewJobLog(
   requestedRunId: string | null = null,
   requestedJobId: string | null = null,
-  searchParameters = new URLSearchParams(),
 ): JobLogPageModel | null {
   const sample = selectRunSample(requestedRunId);
   if (sample === undefined) {
@@ -305,9 +302,7 @@ export function previewJobLog(
     return null;
   }
 
-  const query = (searchParameters.get("q") ?? "").trim();
   const jobHref = jobLink(routeRunId, selectedJob.id);
-  const lines = selectedJobSample.logLines;
 
   return {
     kind: "job-log",
@@ -346,29 +341,19 @@ export function previewJobLog(
       durationLabel: selectedJob.durationLabel,
     },
     logVisibility: "full",
-    search: {
-      action: jobHref,
-      query,
-      clearHref: jobHref,
-    },
-    lines,
-    live: {
-      checkpoint: null,
-      state:
-        selectedJob.status.tone === "queued" ||
-        selectedJob.status.tone === "running"
-          ? "open"
-          : "closed",
-      moreAvailable: false,
-    },
-    notice: logNotice(selectedJob, lines.length),
-    pagination: {
-      currentCursor: null,
-      previousCursor: null,
-      nextCursor: null,
-      label: `${lines.length} log ${lines.length === 1 ? "line" : "lines"}`,
-    },
+    live: null,
+    notice: selectedJob.startedAt === null ? logNotice(selectedJob) : null,
   };
+}
+
+export function previewJobLogRecords(
+  requestedRunId: string | null = null,
+  requestedJobId: string | null = null,
+): readonly LiveLogRecord[] {
+  const sample = selectRunSample(requestedRunId);
+  return sample === undefined
+    ? []
+    : (selectJobSample(sample, requestedJobId)?.logRecords ?? []);
 }
 
 function hasOnlyUniqueKeys(
@@ -516,19 +501,14 @@ function matchesStatus(
   return true;
 }
 
-function logNotice(job: JobModel, lineCount: number): string {
-  if (lineCount === 0) {
-    if (job.status.tone === "queued") {
-      return "This job has not started, so no log output is available yet.";
-    }
-    if (job.status.tone === "running") {
-      return "No log output has been recorded yet.";
-    }
-    return "No log output was recorded for this job.";
+function logNotice(job: JobModel): string {
+  if (job.status.tone === "queued") {
+    return "This job has not started, so no log output is available yet.";
   }
-  return job.status.tone === "running"
-    ? "This job is still running. This page updates automatically as logs are committed."
-    : "Log entries are shown as one ordered job-wide stream.";
+  if (job.status.tone === "running") {
+    return "No log output has been recorded yet.";
+  }
+  return "No log output was recorded for this job.";
 }
 
 function workflowListHref(workflowId: string | null): string {

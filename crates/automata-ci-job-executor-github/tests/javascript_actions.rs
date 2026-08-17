@@ -17,9 +17,9 @@ use bytes::Bytes;
 use sha2::{Digest as _, Sha256};
 
 use support::{
-    CONTEXT_SECRET, Fixture, PhaseResponse, PostContextCancellationPoint, action_step, envelope,
-    envelope_with_environment, environment_map, prepared_node24_action,
-    prepared_node24_action_with_post_condition, run_step,
+    CONTEXT_SECRET, Fixture, PhaseResponse, PostContextCancellationPoint, action_step,
+    action_step_named, envelope, envelope_with_environment, environment_map,
+    prepared_node24_action, prepared_node24_action_with_post_condition, run_step,
 };
 
 fn prepared_identity_input_action() -> PreparedAction {
@@ -106,7 +106,11 @@ async fn hash_files_inputs_are_evaluated_inside_the_fenced_sandbox() {
             PhaseResponse::success(),
         ],
     );
-    let job = envelope(vec![action_step("cache", "actions/cache")]);
+    let job = envelope(vec![action_step_named(
+        "cache",
+        "Restore dependency cache",
+        "actions/cache",
+    )]);
     let request = fixture.request(job);
     let events: Arc<dyn ExecutionEvents> = fixture.events.clone();
 
@@ -117,6 +121,14 @@ async fn hash_files_inputs_are_evaluated_inside_the_fenced_sandbox() {
         .expect("hashFiles action executes");
 
     assert_eq!(result.conclusion(), JobConclusion::Success);
+    assert!(
+        fixture
+            .events
+            .started_log_groups()
+            .iter()
+            .any(|group| group.name() == "Restore dependency cache"),
+        "action log groups use the resolved workflow display name"
+    );
     let state = fixture.endpoint_state.lock().expect("endpoint lock");
     let commands = state
         .commands

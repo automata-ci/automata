@@ -15,11 +15,12 @@ use automata_ci_action_github::{GithubActionMetadataDecoder, JavascriptRuntime};
 use automata_ci_core::{
     ActionReference, AttemptId, JOB_RUNTIME_CONTEXT_MEDIA_TYPE, JobAuthorityProfile, JobConclusion,
     JobIrEnvelope, JobLifecycle, JobResult, JobResultOutput, JobResultValidationError,
-    JobRuntimeContext, MAX_JOB_RESULT_ANNOTATIONS, MAX_JOB_RESULT_ATTACHMENT_BYTES,
-    MAX_STEP_ANNOTATION_PROPERTIES, MAX_STEP_ATTACHMENT_TEXT_BYTES, OperationId, OutputSensitivity,
-    RuntimeBoolean, RuntimePositiveInteger, RuntimeTimeoutTemplate, SecretBinding, SemanticStep,
-    StepAnnotation, StepAnnotationLevel, StepAnnotationProperty, StepResult, TrustOutputAuthority,
-    UnixMillis, ValueSource, ValueTemplate, WORKFLOW_EVENT_MEDIA_TYPE,
+    JobRuntimeContext, LogGroup, LogGroupId, LogGroupKind, MAX_JOB_RESULT_ANNOTATIONS,
+    MAX_JOB_RESULT_ATTACHMENT_BYTES, MAX_STEP_ANNOTATION_PROPERTIES,
+    MAX_STEP_ATTACHMENT_TEXT_BYTES, OperationId, OutputSensitivity, RuntimeBoolean,
+    RuntimePositiveInteger, RuntimeTimeoutTemplate, SecretBinding, SemanticStep, StepAnnotation,
+    StepAnnotationLevel, StepAnnotationProperty, StepResult, TrustOutputAuthority, UnixMillis,
+    ValueSource, ValueTemplate, WORKFLOW_EVENT_MEDIA_TYPE,
 };
 use automata_ci_execution::{
     Cancellation, CancellationDisposition, CopyFromRequest, CopyToRequest, DestroySandbox,
@@ -69,7 +70,10 @@ use crate::{
         validate_environment_overlay_names,
     },
     error::{ExecutorAdapterError, ExecutorAdapterErrorKind, PortErrorKind},
-    output::{SecretMasker, emit_system, parse_output_with_cancellation, process_output},
+    output::{
+        DIAGNOSTICS_LOG_GROUP_ID, SecretMasker, emit_system, emit_system_for_group,
+        parse_output_with_cancellation, process_output,
+    },
     shell::{
         ShellAdmissionRejection, admit_shell_template, composite_shell, resolve_shell_template,
         shell_argv,
@@ -985,7 +989,7 @@ impl GithubJobExecutor {
                     self.ports.secrets.as_ref(),
                     request.environment().default_environment(),
                 );
-                let _display_name = cancellation_dominant(
+                let display_name = cancellation_dominant(
                     Self::resolve_value_template(
                         &value_builder,
                         step.name_template(),
@@ -1117,6 +1121,7 @@ impl GithubJobExecutor {
                         let execution = PhaseExecution {
                             step_id: step.id().as_str(),
                             report_step_id: step.id().as_str(),
+                            log_name: display_name.expose().to_owned(),
                             phase,
                             scope: StepPhase::Run,
                             program,
@@ -1148,6 +1153,7 @@ impl GithubJobExecutor {
                                 endpoint.as_ref(),
                                 &paths,
                                 step,
+                                display_name.expose(),
                                 index,
                                 reference,
                                 inputs,
@@ -2054,6 +2060,7 @@ impl GithubJobExecutor {
                 RegisteredPost {
                     top_step_index: index,
                     top_step_id: step.id().as_str().to_owned(),
+                    log_name: step.id().as_str().to_owned(),
                     runtime_step_id: step.id().as_str().to_owned(),
                     invocation: invocation.clone(),
                     javascript: javascript.clone(),
@@ -2100,6 +2107,7 @@ impl GithubJobExecutor {
         let execution = PhaseExecution {
             step_id: step.id().as_str(),
             report_step_id: step.id().as_str(),
+            log_name: step.id().as_str().to_owned(),
             phase: cancellation_dominant(phase_ordinal(index, 1), cancellation)?,
             scope: StepPhase::ActionPre(invocation),
             program: node,
@@ -2260,6 +2268,7 @@ impl GithubJobExecutor {
                         RegisteredPost {
                             top_step_index: top_index,
                             top_step_id: top_step.id().as_str().to_owned(),
+                            log_name: top_step.id().as_str().to_owned(),
                             runtime_step_id: identity.runtime_step_id.clone(),
                             invocation: invocation.clone(),
                             javascript: javascript.as_ref().clone(),
@@ -2332,6 +2341,7 @@ impl GithubJobExecutor {
                 let execution = PhaseExecution {
                     step_id: &identity.runtime_step_id,
                     report_step_id: top_step.id().as_str(),
+                    log_name: top_step.id().as_str().to_owned(),
                     phase: cancellation_dominant(
                         action_phase(budget, call_path.is_top(), top_index, 1),
                         cancellation,
@@ -2602,6 +2612,7 @@ impl GithubJobExecutor {
         endpoint: &dyn ExecutionEndpoint,
         paths: &AttemptPaths,
         step: &automata_ci_core::StepIr,
+        log_name: &str,
         index: u32,
         reference: &ActionReference,
         supplied_inputs: &std::collections::BTreeMap<String, automata_ci_core::ValueSource>,
@@ -2651,6 +2662,7 @@ impl GithubJobExecutor {
                 paths,
                 step,
                 index,
+                log_name.to_owned(),
                 reference.clone(),
                 supplied,
                 Vec::new(),
@@ -2689,6 +2701,7 @@ impl GithubJobExecutor {
         paths: &'a AttemptPaths,
         top_step: &'a automata_ci_core::StepIr,
         top_index: u32,
+        top_log_name: String,
         reference: ActionReference,
         supplied_inputs: BTreeMap<String, ResolvedEnvironmentValue>,
         action_environment: Vec<(String, ResolvedEnvironmentValue)>,
@@ -2872,6 +2885,7 @@ impl GithubJobExecutor {
                             paths,
                             top_step,
                             top_index,
+                            &top_log_name,
                             javascript,
                             &loaded.paths,
                             &identity,
@@ -2906,6 +2920,7 @@ impl GithubJobExecutor {
                             paths,
                             top_step,
                             top_index,
+                            &top_log_name,
                             composite,
                             loaded.definition.outputs(),
                             &loaded.paths,
@@ -3110,6 +3125,7 @@ impl GithubJobExecutor {
         paths: &AttemptPaths,
         top_step: &automata_ci_core::StepIr,
         top_index: u32,
+        top_log_name: &str,
         javascript: &crate::PreparedJavascriptAction,
         action_paths: &ActionPaths,
         identity: &ActionIdentity,
@@ -3169,6 +3185,7 @@ impl GithubJobExecutor {
                 RegisteredPost {
                     top_step_index: top_index,
                     top_step_id: top_step.id().as_str().to_owned(),
+                    log_name: top_log_name.to_owned(),
                     runtime_step_id: identity.runtime_step_id.clone(),
                     invocation: invocation.clone(),
                     javascript: javascript.clone(),
@@ -3232,6 +3249,7 @@ impl GithubJobExecutor {
                 let execution = PhaseExecution {
                     step_id: &identity.runtime_step_id,
                     report_step_id: top_step.id().as_str(),
+                    log_name: top_log_name.to_owned(),
                     phase: cancellation_dominant(
                         action_phase(budget, top_level, top_index, 1),
                         cancellation,
@@ -3301,6 +3319,7 @@ impl GithubJobExecutor {
         let execution = PhaseExecution {
             step_id: &identity.runtime_step_id,
             report_step_id: top_step.id().as_str(),
+            log_name: top_log_name.to_owned(),
             phase: cancellation_dominant(
                 action_phase(budget, top_level, top_index, 2),
                 cancellation,
@@ -3378,6 +3397,7 @@ impl GithubJobExecutor {
         paths: &AttemptPaths,
         top_step: &automata_ci_core::StepIr,
         top_index: u32,
+        top_log_name: &str,
         composite: &PreparedCompositeAction,
         outputs: &[crate::PreparedOutput],
         action_paths: &ActionPaths,
@@ -3597,6 +3617,7 @@ impl GithubJobExecutor {
                     let execution = PhaseExecution {
                         step_id: &runtime_step_id,
                         report_step_id: top_step.id().as_str(),
+                        log_name: top_log_name.to_owned(),
                         phase: cancellation_dominant(budget.phase(), cancellation)?,
                         scope: StepPhase::Run,
                         program,
@@ -3634,6 +3655,7 @@ impl GithubJobExecutor {
                         paths,
                         top_step,
                         top_index,
+                        top_log_name.to_owned(),
                         step.reference().clone(),
                         supplied,
                         step_action_environment,
@@ -4358,6 +4380,7 @@ impl GithubJobExecutor {
             let execution = PhaseExecution {
                 step_id: &post.runtime_step_id,
                 report_step_id: &post.top_step_id,
+                log_name: post.log_name.clone(),
                 phase: post.phase,
                 scope: StepPhase::ActionPost(post.invocation),
                 program: node,
@@ -4896,6 +4919,46 @@ impl GithubJobExecutor {
         if cancellation.is_cancelled() {
             return Ok(CommandOutcome::Cancelled);
         }
+        let group = execution.log_group()?;
+        let group_id = group.id().clone();
+        events
+            .begin_log_group(group)
+            .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::Internal))?;
+        let result = self.run_phase_body(
+            endpoint,
+            paths,
+            attempt_id,
+            execution,
+            commands,
+            attachments,
+            masker,
+            events,
+            cancellation,
+            &group_id,
+        );
+        let conclusion = result
+            .as_ref()
+            .map_or(JobConclusion::Failure, |outcome| outcome.conclusion());
+        events
+            .finish_log_group(group_id, conclusion)
+            .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::Internal))?;
+        result
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn run_phase_body(
+        &self,
+        endpoint: &dyn ExecutionEndpoint,
+        paths: &AttemptPaths,
+        attempt_id: AttemptId,
+        execution: PhaseExecution,
+        commands: &mut JobCommandState,
+        attachments: &mut ExecutionAttachments,
+        masker: &mut SecretMasker,
+        events: &Arc<dyn ExecutionEvents>,
+        cancellation: &dyn ExecutorCancellation,
+        group_id: &LogGroupId,
+    ) -> Result<CommandOutcome, ExecutorAdapterError> {
         let artifact_hash_timeout = execution.timeout.min(ARTIFACT_HASH_TIMEOUT);
         let command_paths = paths.command_files(execution.phase)?;
         let initialized = self
@@ -4938,11 +5001,10 @@ impl GithubJobExecutor {
         }
         let outcome = CommandOutcome::from_termination(output.termination());
         if output.was_truncated() {
-            if emit_system_while_active(TRUNCATED_OUTPUT_DIAGNOSTIC, masker, events, cancellation)?
-                .is_none()
-            {
+            if cancellation.is_cancelled() {
                 return Ok(CommandOutcome::Cancelled);
             }
+            emit_system_for_group(TRUNCATED_OUTPUT_DIAGNOSTIC, group_id, masker, events)?;
             return Err(ExecutorAdapterError::new(
                 ExecutorAdapterErrorKind::ResourceExhausted,
             ));
@@ -4956,6 +5018,7 @@ impl GithubJobExecutor {
                     &command_paths,
                     commands.platform(),
                     &output,
+                    group_id,
                     masker,
                     events,
                     cancellation,
@@ -5059,6 +5122,7 @@ impl GithubJobExecutor {
         paths: &CommandFilePaths,
         platform: CommandFilePlatform,
         output: &ExecutionOutput,
+        group_id: &LogGroupId,
         masker: &mut SecretMasker,
         events: &Arc<dyn ExecutionEvents>,
         cancellation: &dyn ExecutorCancellation,
@@ -5086,16 +5150,10 @@ impl GithubJobExecutor {
                 ExecutorAdapterErrorKind::Cancelled,
             ));
         }
-        let mut legacy = Vec::new();
         let mut annotations = Vec::new();
-        let processed = process_output(
-            parsed,
-            masker,
-            events,
-            &mut legacy,
-            &mut annotations,
-            &|| cancellation.is_cancelled(),
-        );
+        let processed = process_output(parsed, group_id, masker, events, &mut annotations, &|| {
+            cancellation.is_cancelled()
+        });
         if cancellation.is_cancelled() {
             return Err(ExecutorAdapterError::new(
                 ExecutorAdapterErrorKind::Cancelled,
@@ -5104,7 +5162,7 @@ impl GithubJobExecutor {
         processed
             .map_err(|error| observe_phase_failure(error, attempt_id, phase, "process_output"))?;
         Ok(CollectedPhase {
-            commands: completed.commands.with_legacy_mutations(&legacy),
+            commands: completed.commands,
             artifacts: completed.artifacts,
             annotations,
         })
@@ -5535,9 +5593,42 @@ impl JobExecutor for GithubJobExecutor {
         cancellation: ExecutionCancellation,
     ) -> ExecutorFuture<'_> {
         Box::pin(async move {
-            self.execute_job(request, events, cancellation)
-                .await
-                .map_err(ExecutorError::from)
+            let system_group_id = LogGroupId::new(DIAGNOSTICS_LOG_GROUP_ID).map_err(|_| {
+                ExecutorError::from(ExecutorAdapterError::new(
+                    ExecutorAdapterErrorKind::Internal,
+                ))
+            })?;
+            let system_group = LogGroup::new(
+                system_group_id.clone(),
+                None,
+                "Runner diagnostics",
+                LogGroupKind::Setup,
+                0,
+            )
+            .map_err(|_| {
+                ExecutorError::from(ExecutorAdapterError::new(
+                    ExecutorAdapterErrorKind::Internal,
+                ))
+            })?;
+            events.begin_log_group(system_group).map_err(|_| {
+                ExecutorError::from(ExecutorAdapterError::new(
+                    ExecutorAdapterErrorKind::Internal,
+                ))
+            })?;
+            let result = self
+                .execute_job(request, Arc::clone(&events), cancellation)
+                .await;
+            let conclusion = result
+                .as_ref()
+                .map_or(JobConclusion::Failure, JobResult::conclusion);
+            events
+                .finish_log_group(system_group_id, conclusion)
+                .map_err(|_| {
+                    ExecutorError::from(ExecutorAdapterError::new(
+                        ExecutorAdapterErrorKind::Internal,
+                    ))
+                })?;
+            result.map_err(ExecutorError::from)
         })
     }
 
@@ -5722,6 +5813,7 @@ impl Cancellation for ProviderCancellationBridge<'_> {
 struct PhaseExecution<'a> {
     step_id: &'a str,
     report_step_id: &'a str,
+    log_name: String,
     phase: u32,
     scope: StepPhase,
     program: TargetPath,
@@ -5729,6 +5821,22 @@ struct PhaseExecution<'a> {
     working_directory: TargetPath,
     environment: automata_ci_execution::ExecutionEnvironment,
     timeout: Duration,
+}
+
+impl PhaseExecution<'_> {
+    fn log_group(&self) -> Result<LogGroup, ExecutorAdapterError> {
+        let id = LogGroupId::new(format!("phase/{}", self.phase)).map_err(|_| invalid_job())?;
+        let (name, kind) = match &self.scope {
+            StepPhase::Run | StepPhase::ActionMain(_) => {
+                (self.log_name.clone(), LogGroupKind::Step)
+            }
+            StepPhase::ActionPre(_) => (format!("Pre {}", self.log_name), LogGroupKind::ActionPre),
+            StepPhase::ActionPost(_) => {
+                (format!("Post {}", self.log_name), LogGroupKind::ActionPost)
+            }
+        };
+        LogGroup::new(id, None, name, kind, self.phase).map_err(|_| invalid_job())
+    }
 }
 
 struct CollectedPhase {
@@ -5910,6 +6018,7 @@ impl CommandOutcome {
 struct RegisteredPost {
     top_step_index: u32,
     top_step_id: String,
+    log_name: String,
     runtime_step_id: String,
     invocation: ActionInvocationId,
     javascript: crate::PreparedJavascriptAction,

@@ -15,15 +15,15 @@ use automata_ci_action_github::JavascriptRuntime;
 use automata_ci_auth::secret::{SecretString, SharedSensitiveString};
 use automata_ci_core::{
     ActionReference, AttemptId, ContainerSpec, ContextValue, EnvironmentProfile,
-    EnvironmentProfileId, FencingToken, JobAuthorityProfile, JobContentReference,
+    EnvironmentProfileId, FencingToken, JobAuthorityProfile, JobConclusion, JobContentReference,
     JobExecutionContext, JobId, JobInstanceIdentity, JobIr, JobIrEnvelope, JobLifecycle,
     JobOutputDefinition, JobPermissionRequest, JobResourceAllocation, JobRuntimeContext, JobSource,
-    Lease, LeaseId, OperationId, ResourceCapacity, RunId, RunValueTemplates, RunnerId,
-    RunnerRequirements, RunnerSessionId, RuntimeBoolean, SecretBinding, SemanticStep, Sha256Digest,
-    ShellTemplate, StepId, StepIr, StrategyContext, TrustActorEvidence, TrustActorKind,
-    TrustAutomationKind, TrustEventKind, TrustEvidence, TrustOriginKind, TrustPolicy,
-    TrustRepositoryEvidence, TrustSnapshot, TrustTokenRecursion, UnixMillis, ValueSource,
-    ValueTemplate, WorkflowId,
+    Lease, LeaseId, LogGroup, LogGroupId, OperationId, ResourceCapacity, RunId, RunValueTemplates,
+    RunnerId, RunnerRequirements, RunnerSessionId, RuntimeBoolean, SecretBinding, SemanticStep,
+    Sha256Digest, ShellTemplate, StepId, StepIr, StrategyContext, TrustActorEvidence,
+    TrustActorKind, TrustAutomationKind, TrustEventKind, TrustEvidence, TrustOriginKind,
+    TrustPolicy, TrustRepositoryEvidence, TrustSnapshot, TrustTokenRecursion, UnixMillis,
+    ValueSource, ValueTemplate, WorkflowId,
 };
 use automata_ci_execution::{
     Cancellation, CopyFromRequest, CopyToRequest, DestroyDisposition, DestroySandbox,
@@ -971,9 +971,13 @@ fn envelope_with_all_settings_and_environment_profile(
 }
 
 pub fn action_step(id: &str, repository: &str) -> StepIr {
+    action_step_named(id, id, repository)
+}
+
+pub fn action_step_named(id: &str, name: &str, repository: &str) -> StepIr {
     StepIr::new(
         StepId::new(id).expect("valid step"),
-        ValueTemplate::literal(id).expect("step name template"),
+        ValueTemplate::literal(name).expect("step name template"),
         RuntimeBoolean::literal(false),
         SemanticStep::action(
             ActionReference::Repository {
@@ -2371,6 +2375,8 @@ pub struct FakeEvents {
 struct EventState {
     transitions: Vec<JobLifecycle>,
     logs: Vec<LogEvent>,
+    started_log_groups: Vec<LogGroup>,
+    active_log_groups: BTreeSet<LogGroupId>,
     sandbox: Option<SandboxIdentity>,
     provider_operation_begins: Vec<(OperationId, ProviderOperationKind)>,
     provider_operation_failures: Vec<(OperationId, ProviderFailureOutcome)>,
@@ -2391,6 +2397,14 @@ enum ProviderEventFailurePoint {
 impl FakeEvents {
     pub fn logs(&self) -> Vec<LogEvent> {
         self.state.lock().expect("events lock").logs.clone()
+    }
+
+    pub fn started_log_groups(&self) -> Vec<LogGroup> {
+        self.state
+            .lock()
+            .expect("events lock")
+            .started_log_groups
+            .clone()
     }
 
     pub fn transitions(&self) -> Vec<JobLifecycle> {
@@ -2474,6 +2488,32 @@ impl fmt::Debug for FakeEvents {
 }
 
 impl ExecutionEvents for FakeEvents {
+    fn begin_log_group(&self, group: LogGroup) -> Result<(), ExecutionEventError> {
+        let mut state = self.state.lock().expect("events lock");
+        if !state.active_log_groups.insert(group.id().clone()) {
+            return Err(ExecutionEventError::InvalidEvent);
+        }
+        state.started_log_groups.push(group);
+        Ok(())
+    }
+
+    fn finish_log_group(
+        &self,
+        group_id: LogGroupId,
+        _conclusion: JobConclusion,
+    ) -> Result<(), ExecutionEventError> {
+        if !self
+            .state
+            .lock()
+            .expect("events lock")
+            .active_log_groups
+            .remove(&group_id)
+        {
+            return Err(ExecutionEventError::InvalidEvent);
+        }
+        Ok(())
+    }
+
     fn bind_endpoint(
         &self,
         _provider: Arc<dyn SandboxProvider>,
@@ -2501,6 +2541,9 @@ impl ExecutionEvents for FakeEvents {
     ) -> Result<(), automata_ci_runner_runtime::ExecutionEventError> {
         let (cancellation, fail_after_cancellation) = {
             let mut state = self.state.lock().expect("events lock");
+            if !state.active_log_groups.contains(event.group_id()) {
+                return Err(ExecutionEventError::InvalidEvent);
+            }
             state.logs.push(event);
             let cancellation = state.cancellation_on_log.take();
             let fail = state.fail_log_after_cancellation;

@@ -551,11 +551,11 @@ approved divergence must name its early rejection boundary and test.
   additional roots are exposed by the current provider contract (`RUN-02`).
 - [x] **Custom shell templates:** publish and enforce the strict one-`{0}`
   grammar recorded in the executor README (`RUN-02`).
-- [ ] **Insecure legacy workflow commands:** honor
-  `ACTIONS_ALLOW_UNSECURE_COMMANDS`, or retain a deliberate secure divergence
-  with an admission diagnostic (`LOG-01`).
-- [ ] **Legacy Results/cache protocols:** implement v1 compatibility and legacy
-  environment variables, or require pinned modern clients (`CACHE-02`).
+- [x] **Insecure legacy workflow commands:** retain the deliberate secure
+  divergence: `ACTIONS_ALLOW_UNSECURE_COMMANDS` is unsupported and workflow
+  mutations use command files (`LOG-01`).
+- [x] **Legacy Results/cache protocols:** require pinned modern clients; v1
+  compatibility and legacy environment variables are unsupported (`CACHE-02`).
 - [ ] **GitHub REST compatibility:** decide which action-required REST calls go
   directly to GitHub and which, if any, require an Automata proxy (`ACT-02`).
 - [ ] **Container CLI/daemon compatibility:** keep a narrow BuildKit proxy,

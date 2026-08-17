@@ -1,8 +1,8 @@
 use std::{fmt, sync::Arc};
 
 use automata_ci_core::{
-    AttemptId, JobLifecycle, LeaseGuard, LogChannel, LogFrame, LogSequence, LogStreamId,
-    OperationId,
+    AttemptId, JobConclusion, JobLifecycle, LeaseGuard, LogFrame, LogGroup, LogGroupId,
+    LogSequence, LogStreamId, OperationId,
 };
 use automata_ci_execution::{ExecutionEndpoint, SandboxInspection, SandboxProvider};
 use automata_ci_protocol::{
@@ -53,6 +53,45 @@ struct LogSegmentCandidate {
     payload_bytes: u64,
     end_of_stream: bool,
     encoded: Vec<u8>,
+}
+
+#[derive(Clone)]
+enum PendingLogRecord {
+    GroupStarted(LogGroup),
+    Line(LogEvent),
+    GroupFinished(LogGroupId, JobConclusion),
+    StreamFinished,
+}
+
+impl PendingLogRecord {
+    fn frame(
+        self,
+        stream_id: LogStreamId,
+        attempt_id: AttemptId,
+        sequence: LogSequence,
+        emitted_at: automata_ci_core::UnixMillis,
+    ) -> Result<LogFrame, automata_ci_core::LogValidationError> {
+        match self {
+            Self::GroupStarted(group) => {
+                LogFrame::group_started(stream_id, attempt_id, sequence, emitted_at, group)
+            }
+            Self::Line(event) => LogFrame::line(
+                stream_id,
+                attempt_id,
+                sequence,
+                emitted_at,
+                event.group_id().clone(),
+                event.channel(),
+                event.payload().to_vec(),
+            ),
+            Self::GroupFinished(group_id, conclusion) => LogFrame::group_finished(
+                stream_id, attempt_id, sequence, emitted_at, group_id, conclusion,
+            ),
+            Self::StreamFinished => {
+                LogFrame::stream_finished(stream_id, attempt_id, sequence, emitted_at)
+            }
+        }
+    }
 }
 
 impl DurableExecutionEvents {
@@ -335,12 +374,7 @@ impl DurableExecutionEvents {
         }))
     }
 
-    fn emit_log_serialized(
-        &self,
-        channel: LogChannel,
-        payload: &[u8],
-        end_of_stream: bool,
-    ) -> Result<(), ExecutionEventError> {
+    fn emit_log_serialized(&self, record: &PendingLogRecord) -> Result<(), ExecutionEventError> {
         let stream_id = self.stream_id();
         loop {
             let delivery_generation = self.content_operations.log_delivery_generation();
@@ -353,16 +387,10 @@ impl DurableExecutionEvents {
                         .map_err(|_| ExecutionEventError::InvalidEvent)
                 },
             )?;
-            let frame = LogFrame::new(
-                stream_id,
-                self.attempt_id,
-                sequence,
-                self.clock.wall_now(),
-                channel,
-                payload.to_vec(),
-                end_of_stream,
-            )
-            .map_err(|_| ExecutionEventError::InvalidEvent)?;
+            let frame = record
+                .clone()
+                .frame(stream_id, self.attempt_id, sequence, self.clock.wall_now())
+                .map_err(|_| ExecutionEventError::InvalidEvent)?;
             let mut suffix = b"frame".to_vec();
             suffix.extend_from_slice(&sequence.get().to_be_bytes());
             let operation_id = self
@@ -414,12 +442,29 @@ impl DurableExecutionEvents {
         }
     }
 
-    fn emit_log_blocking(&self, event: &LogEvent) -> Result<(), ExecutionEventError> {
+    fn emit_log_blocking(&self, event: &PendingLogRecord) -> Result<(), ExecutionEventError> {
         let _serial = self
             .serial
             .lock()
             .map_err(|_| ExecutionEventError::InvalidEvent)?;
-        self.emit_log_serialized(event.channel(), event.payload(), false)
+        self.emit_log_serialized(event)
+    }
+
+    fn emit_record(&self, record: PendingLogRecord) -> Result<(), ExecutionEventError> {
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return self.emit_log_blocking(&record);
+        };
+        // The callback is synchronous so executors know the record is durable
+        // before continuing, but protected file I/O and full-tail decoding do
+        // not belong on a Tokio worker.
+        let events = self.clone();
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        drop(runtime.spawn_blocking(move || {
+            drop(sender.send(events.emit_log_blocking(&record)));
+        }));
+        receiver
+            .recv()
+            .unwrap_or(Err(ExecutionEventError::InvalidEvent))
     }
 
     pub(crate) fn ensure_log_stream_closed(&self) -> Result<(), ExecutionEventError> {
@@ -444,7 +489,7 @@ impl DurableExecutionEvents {
                 return Ok(());
             }
         }
-        self.emit_log_serialized(LogChannel::System, &[], true)
+        self.emit_log_serialized(&PendingLogRecord::StreamFinished)
     }
 }
 
@@ -492,21 +537,20 @@ impl ExecutionEvents for DurableExecutionEvents {
             .map_err(ExecutionEventError::Journal)
     }
 
+    fn begin_log_group(&self, group: LogGroup) -> Result<(), ExecutionEventError> {
+        self.emit_record(PendingLogRecord::GroupStarted(group))
+    }
+
     fn emit_log(&self, event: LogEvent) -> Result<(), ExecutionEventError> {
-        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-            return self.emit_log_blocking(&event);
-        };
-        // The callback is synchronous so executors know the frame is durable
-        // before continuing, but protected file I/O and full-tail decoding do
-        // not belong on a Tokio worker.
-        let events = self.clone();
-        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-        drop(runtime.spawn_blocking(move || {
-            drop(sender.send(events.emit_log_blocking(&event)));
-        }));
-        receiver
-            .recv()
-            .unwrap_or(Err(ExecutionEventError::InvalidEvent))
+        self.emit_record(PendingLogRecord::Line(event))
+    }
+
+    fn finish_log_group(
+        &self,
+        group_id: LogGroupId,
+        conclusion: JobConclusion,
+    ) -> Result<(), ExecutionEventError> {
+        self.emit_record(PendingLogRecord::GroupFinished(group_id, conclusion))
     }
 
     fn begin_provider_operation(

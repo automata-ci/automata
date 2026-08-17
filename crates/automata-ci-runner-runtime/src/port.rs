@@ -7,8 +7,8 @@ use std::{
 };
 
 use automata_ci_core::{
-    AttemptId, JobIrEnvelope, JobLifecycle, JobResult, Lease, LeaseGuard, LogChannel, OperationId,
-    RunnerId, RunnerSessionId, UnixMillis,
+    AttemptId, JobConclusion, JobIrEnvelope, JobLifecycle, JobResult, Lease, LeaseGuard,
+    LogChannel, LogGroup, LogGroupId, OperationId, RunnerId, RunnerSessionId, UnixMillis,
 };
 use automata_ci_execution::{
     ExecutionEndpoint, SandboxCustody, SandboxEnvironment, SandboxInspection, SandboxProvider,
@@ -383,6 +383,7 @@ impl Default for ExecutionCancellation {
 /// to the runtime.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LogEvent {
+    group_id: LogGroupId,
     channel: LogChannel,
     payload: Vec<u8>,
 }
@@ -393,8 +394,18 @@ impl LogEvent {
     /// Protocol payload validation is applied before commit. The runtime emits
     /// the terminal end-of-stream frame after the executor finishes.
     #[must_use]
-    pub fn new(channel: LogChannel, payload: Vec<u8>) -> Self {
-        Self { channel, payload }
+    pub fn new(group_id: LogGroupId, channel: LogChannel, payload: Vec<u8>) -> Self {
+        Self {
+            group_id,
+            channel,
+            payload,
+        }
+    }
+
+    /// Returns the execution group that owns these bytes.
+    #[must_use]
+    pub const fn group_id(&self) -> &LogGroupId {
+        &self.group_id
     }
 
     /// Returns the logical output channel.
@@ -463,6 +474,14 @@ pub trait ExecutionEvents: fmt::Debug + Send + Sync {
     /// be committed durably.
     fn transition(&self, next: JobLifecycle) -> Result<(), ExecutionEventError>;
 
+    /// Announces immutable metadata for one execution-log group.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ExecutionEventError`] for invalid sequencing or a failed
+    /// protected-content/journal commit.
+    fn begin_log_group(&self, group: LogGroup) -> Result<(), ExecutionEventError>;
+
     /// Publishes one payload-first ordered non-terminal log event.
     ///
     /// Executors never publish end-of-stream markers. After execution returns,
@@ -474,6 +493,18 @@ pub trait ExecutionEvents: fmt::Debug + Send + Sync {
     /// Returns [`ExecutionEventError`] for invalid sequencing, payload limits,
     /// or a failed protected-content/journal commit.
     fn emit_log(&self, event: LogEvent) -> Result<(), ExecutionEventError>;
+
+    /// Marks one previously announced execution-log group terminal.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ExecutionEventError`] for invalid sequencing or a failed
+    /// protected-content/journal commit.
+    fn finish_log_group(
+        &self,
+        group_id: LogGroupId,
+        conclusion: JobConclusion,
+    ) -> Result<(), ExecutionEventError>;
 
     /// Records or exactly resumes one provider mutation intention.
     ///

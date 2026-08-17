@@ -1328,13 +1328,54 @@ fn log_frame(value: &core::LogFrame) -> wire::LogFrame {
         attempt_id: uuid_bytes(value.attempt_id().as_uuid()),
         sequence: value.sequence().get(),
         emitted_at_unix_millis: value.emitted_at().get(),
-        channel: match value.channel() {
-            core::LogChannel::Stdout => wire::LogChannel::Stdout as i32,
-            core::LogChannel::Stderr => wire::LogChannel::Stderr as i32,
-            core::LogChannel::System => wire::LogChannel::System as i32,
+        record: Some(match value.record() {
+            core::LogRecord::GroupStarted { group } => {
+                wire::log_frame::Record::GroupStarted(log_group(group))
+            }
+            core::LogRecord::Line {
+                group_id,
+                channel,
+                payload,
+            } => wire::log_frame::Record::Line(wire::LogLine {
+                group_id: group_id.as_str().to_owned(),
+                channel: log_channel(*channel),
+                payload: payload.clone(),
+            }),
+            core::LogRecord::GroupFinished {
+                group_id,
+                conclusion,
+            } => wire::log_frame::Record::GroupFinished(wire::LogGroupFinished {
+                group_id: group_id.as_str().to_owned(),
+                conclusion: job_conclusion(*conclusion),
+            }),
+            core::LogRecord::StreamFinished => {
+                wire::log_frame::Record::StreamFinished(wire::LogStreamFinished {})
+            }
+        }),
+    }
+}
+
+fn log_group(value: &core::LogGroup) -> wire::LogGroup {
+    wire::LogGroup {
+        id: value.id().as_str().to_owned(),
+        parent_id: value.parent_id().map(|id| id.as_str().to_owned()),
+        name: value.name().to_owned(),
+        kind: match value.kind() {
+            core::LogGroupKind::Setup => wire::LogGroupKind::Setup as i32,
+            core::LogGroupKind::Step => wire::LogGroupKind::Step as i32,
+            core::LogGroupKind::ActionPre => wire::LogGroupKind::ActionPre as i32,
+            core::LogGroupKind::ActionPost => wire::LogGroupKind::ActionPost as i32,
+            core::LogGroupKind::Cleanup => wire::LogGroupKind::Cleanup as i32,
         },
-        payload: value.payload().to_vec(),
-        end_of_stream: value.is_end_of_stream(),
+        ordinal: value.ordinal(),
+    }
+}
+
+const fn log_channel(value: core::LogChannel) -> i32 {
+    match value {
+        core::LogChannel::Stdout => wire::LogChannel::Stdout as i32,
+        core::LogChannel::Stderr => wire::LogChannel::Stderr as i32,
+        core::LogChannel::System => wire::LogChannel::System as i32,
     }
 }
 

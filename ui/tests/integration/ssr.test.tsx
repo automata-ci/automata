@@ -4,18 +4,17 @@ import { renderToString } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { HtmlDocument } from "../../src/Document";
 import { JobLogPage } from "../../src/pages/JobLogPage";
+import type { LiveLogRecord } from "../../src/liveLogs";
 import { render, renderPage } from "../../src/entry-server";
 import type { RenderRequest } from "../../src/models";
 import {
   PAGE_MODEL_ELEMENT_ID,
   readRenderRequest,
 } from "../../src/serialization";
-import { RENDER_REQUEST_LIMITS } from "../../src/validation";
 import {
   deepLinkSignInRequest,
   directBindingListRequest,
   jobLogRequest,
-  PRIMARY_JOB_ID,
   PRIMARY_RUN_ID,
   RBAC_BINDING_ID,
   RBAC_ROLE_ID,
@@ -31,8 +30,6 @@ import {
   userDetailRequest,
   userListRequest,
 } from "../fixtures/renderRequests";
-
-const LOG_RESULT_COUNT_TEST_ID = "job-log-result-count";
 
 describe("server rendering", () => {
   it("renders the generic deep-link handoff with an exact POST return path", () => {
@@ -490,7 +487,7 @@ describe("server rendering", () => {
     ).toContain("Jobs are unavailable with your current access.");
   });
 
-  it("renders a searchable, flat, lossless job log document", () => {
+  it("renders the structured live job log shell", () => {
     const html = renderPage(jobLogRequest);
     const rendered = new DOMParser().parseFromString(html, "text/html");
     const headingText =
@@ -499,108 +496,68 @@ describe("server rendering", () => {
     expect(html).toContain("Job logs");
     expect(headingText).toContain("Run attempt 1");
     expect(headingText).toContain("Job attempt 2");
-    expect(html).toContain('method="get"');
-    expect(html).toContain('name="q"');
-    expect(html).toContain(
-      'id="automata-log-line-log-job-1-18446744073709551615"',
-    );
-    expect(html).toContain("18446744073709551615");
-    expect(html).toContain('data-channel="stderr"');
-    expect(html).toContain(">Refresh</a>");
-    expect(html).not.toContain('class="log-step"');
+    expect(html).toContain('placeholder="Search logs"');
+    expect(html).toContain("Expand all");
+    expect(html).toContain("Following");
+    expect(html).not.toContain("Job log pages");
   });
 
-  it("composes job-log search and cursor parameters onto one clean base route", () => {
+  it("keeps log search local to the streamed document", () => {
     if (jobLogRequest.page.kind !== "job-log") {
       throw new Error("The job-log fixture is unavailable");
     }
-    const page = jobLogRequest.page;
-    const query = "build failed~+é";
-    const request: RenderRequest = {
-      ...jobLogRequest,
-      page: {
-        ...page,
-        search: { ...page.search, query },
-        pagination: {
-          ...page.pagination,
-          currentCursor: "current",
-          previousCursor: "previous",
-          nextCursor: "next",
-        },
-      },
-    };
-    const rendered = new DOMParser().parseFromString(
-      renderPage(request),
-      "text/html",
-    );
-    const base = page.job.href;
-    const encodedQuery = "build%20failed~%2B%C3%A9";
-
-    expect(
-      rendered
-        .querySelector<HTMLAnchorElement>(".log-page-heading > a.button")
-        ?.getAttribute("href"),
-    ).toBe(`${base}?q=${encodedQuery}&cursor=current`);
-    expect(
-      rendered
-        .querySelector<HTMLAnchorElement>('.log-pagination a[rel="prev"]')
-        ?.getAttribute("href"),
-    ).toBe(`${base}?q=${encodedQuery}&cursor=previous`);
-    expect(
-      rendered
-        .querySelector<HTMLAnchorElement>('.log-pagination a[rel="next"]')
-        ?.getAttribute("href"),
-    ).toBe(`${base}?q=${encodedQuery}&cursor=next`);
-    expect(
-      rendered
-        .querySelector<HTMLFormElement>("form.log-search-form")
-        ?.getAttribute("action"),
-    ).toBe(base);
-    expect(
-      rendered
-        .querySelector<HTMLInputElement>(
-          'form.log-search-form input[name="cursor"]',
-        )
-        ?.getAttribute("value"),
-    ).toBe("current");
-    expect(
-      rendered
-        .querySelector<HTMLAnchorElement>("form.log-search-form a.text-link")
-        ?.getAttribute("href"),
-    ).toBe(`${base}?cursor=current`);
-  });
-
-  it("preserves preview routing parameters when composing live log search", () => {
-    if (jobLogRequest.page.kind !== "job-log") {
-      throw new Error("The job-log fixture is unavailable");
-    }
-    const action = "?view=job&run=run-1&job=job-1";
-    const model = {
-      ...jobLogRequest.page,
-      search: {
-        ...jobLogRequest.page.search,
-        action,
-        query: "Operating System",
-      },
-    };
+    const model = { ...jobLogRequest.page, live: null };
     const rendered = new DOMParser().parseFromString(
       renderToString(<JobLogPage model={model} />),
       "text/html",
     );
 
-    expect(
-      rendered
-        .querySelector<HTMLAnchorElement>(".log-page-heading > a.button")
-        ?.getAttribute("href"),
-    ).toBe(`${action}&q=Operating%20System`);
+    expect(rendered.querySelector('input[type="search"]')).not.toBeNull();
+    expect(rendered.querySelector("form.log-search-form")).toBeNull();
+  });
+
+  it("gives distinct log panels injective accessible IDs", () => {
+    if (jobLogRequest.page.kind !== "job-log") {
+      throw new Error("The job-log fixture is unavailable");
+    }
+    const records: LiveLogRecord[] = ["step/a", "step-a"].map(
+      (id, index) => ({
+        streamId: "00000000-0000-4000-8000-000000000005",
+        sequence: String(index + 1),
+        fragment: null,
+        emittedAtMs: 1_777_890_010_000 + index,
+        type: "group_started",
+        group: {
+          id,
+          parentId: null,
+          name: id,
+          kind: "step",
+          ordinal: index,
+        },
+      }),
+    );
+    const model = { ...jobLogRequest.page, live: null };
+    const rendered = new DOMParser().parseFromString(
+      renderToString(<JobLogPage initialRecords={records} model={model} />),
+      "text/html",
+    );
+    const controls = [...rendered.querySelectorAll(".log-group__summary")].map(
+      (button) => button.getAttribute("aria-controls"),
+    );
+    const regions = [...rendered.querySelectorAll(".log-group__output")].map(
+      (region) => region.id,
+    );
+
+    expect(new Set(controls).size).toBe(2);
+    expect(regions).toEqual(controls);
   });
 
   it.each([
-    ["queued", { label: "Queued", tone: "queued" }, true],
-    ["terminal", { label: "Succeeded", tone: "success" }, false],
+    ["queued", { label: "Queued", tone: "queued" }],
+    ["terminal", { label: "Succeeded", tone: "success" }],
   ] as const)(
-    "renders Refresh for a %s job only while it can change",
-    (_name, status, expected) => {
+    "does not require snapshot refresh controls for a %s job",
+    (_name, status) => {
       if (jobLogRequest.page.kind !== "job-log") {
         throw new Error("The job-log fixture is unavailable");
       }
@@ -628,9 +585,7 @@ describe("server rendering", () => {
         "text/html",
       );
 
-      expect(
-        rendered.querySelector(".log-page-heading > a.button") !== null,
-      ).toBe(expected);
+      expect(rendered.querySelector(".log-page-heading > a.button")).toBeNull();
       if (status.tone === "queued") {
         const headingText =
           rendered.querySelector(".log-page-heading")?.textContent;
@@ -640,31 +595,16 @@ describe("server rendering", () => {
     },
   );
 
-  it("namespaces host log identities away from document-owned IDs", () => {
-    if (jobLogRequest.page.kind !== "job-log") {
-      throw new Error("The job-log fixture is unavailable");
-    }
-    const request = {
-      ...jobLogRequest,
-      page: {
-        ...jobLogRequest.page,
-        lines: jobLogRequest.page.lines.map((line, index) =>
-          index === 0 ? { ...line, id: PAGE_MODEL_ELEMENT_ID } : line,
-        ),
-      },
-    };
-    const html = renderPage(request);
+  it("keeps the page-model identity unique on the job log", () => {
+    const html = renderPage(jobLogRequest);
     document.open();
     document.write(html);
     document.close();
 
-    expect(
-      document.querySelector(`#automata-log-line-${PAGE_MODEL_ELEMENT_ID}`),
-    ).not.toBeNull();
     expect(document.querySelectorAll(`#${PAGE_MODEL_ELEMENT_ID}`)).toHaveLength(
       1,
     );
-    expect(readRenderRequest(document)).toEqual(request);
+    expect(readRenderRequest(document)).toEqual(jobLogRequest);
   });
 
   it.each([
@@ -1172,146 +1112,6 @@ describe("hydration", () => {
     await act(async () => root?.unmount());
   });
 
-  it("polls a running job in place and stops after its terminal snapshot", async () => {
-    if (jobLogRequest.page.kind !== "job-log") {
-      throw new Error("The job-log fixture is unavailable");
-    }
-    const page = jobLogRequest.page;
-    const terminalStatus = { label: "Succeeded", tone: "success" } as const;
-    const terminalRequest: RenderRequest = {
-      ...jobLogRequest,
-      page: {
-        ...page,
-        jobs: page.jobs.map((job) =>
-          job.id === page.job.id
-            ? { ...job, status: terminalStatus }
-            : job,
-        ),
-        job: {
-          ...page.job,
-          status: terminalStatus,
-          durationLabel: "3m 9s",
-        },
-        lines: page.lines.map((line, index) =>
-          index === 1 ? { ...line, text: "Operating System: updated live" } : line,
-        ),
-        notice: null,
-      },
-    };
-    const fetchMock = vi.fn(async (_input: RequestInfo | URL) =>
-      new Response(JSON.stringify(terminalRequest), {
-        headers: {
-          "Content-Type": "application/json; charset=utf-8",
-          ETag: '"sha256-terminal"',
-        },
-      }),
-    );
-    vi.useFakeTimers();
-    vi.stubGlobal("fetch", fetchMock);
-    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-    document.open();
-    document.write(renderPage(jobLogRequest));
-    document.close();
-    const parsedRequest = readRenderRequest(document);
-
-    let root: ReturnType<typeof hydrateRoot> | undefined;
-    await act(async () => {
-      root = hydrateRoot(document, <HtmlDocument request={parsedRequest} />);
-    });
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(2_000);
-    });
-
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(fetchMock.mock.calls[0]?.[0]).toBe(
-      `${page.job.href}/snapshot`,
-    );
-    expect(document.querySelector(".heading-status .status")?.textContent).toContain(
-      "Succeeded",
-    );
-    expect(document.querySelector(".log-output")?.textContent).toContain(
-      "Operating System: updated live",
-    );
-    expect(document.querySelector(".log-page-heading > a.button")).toBeNull();
-
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(30_000);
-    });
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    await act(async () => root?.unmount());
-  });
-
-  it("revalidates live logs and retries rejected snapshots with bounded backoff", async () => {
-    if (jobLogRequest.page.kind !== "job-log") {
-      throw new Error("The job-log fixture is unavailable");
-    }
-    const snapshotHref = `${jobLogRequest.page.job.href}/snapshot`;
-    const responses = [
-      () =>
-        new Response(JSON.stringify(jobLogRequest), {
-          headers: {
-            "Content-Type": "application/json; charset=utf-8",
-            ETag: '"sha256-running"',
-          },
-        }),
-      () => new Response(null, { status: 304 }),
-      () =>
-        new Response(JSON.stringify(runDetailRequest), {
-          headers: { "Content-Type": "application/json; charset=utf-8" },
-        }),
-      () => new Response(null, { status: 503 }),
-    ];
-    const fetchMock = vi.fn(
-      async (_input: RequestInfo | URL, _init?: RequestInit) => {
-        const response = responses.shift();
-        if (response === undefined) {
-          throw new Error("unexpected job-log snapshot request");
-        }
-        return response();
-      },
-    );
-    vi.useFakeTimers();
-    vi.stubGlobal("fetch", fetchMock);
-    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-    document.open();
-    document.write(renderPage(jobLogRequest));
-    document.close();
-    const parsedRequest = readRenderRequest(document);
-
-    let root: ReturnType<typeof hydrateRoot> | undefined;
-    await act(async () => {
-      root = hydrateRoot(document, <HtmlDocument request={parsedRequest} />);
-    });
-    await act(async () => vi.advanceTimersByTimeAsync(2_000));
-    await act(async () => vi.advanceTimersByTimeAsync(2_000));
-
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(fetchMock.mock.calls[0]?.[0]).toBe(snapshotHref);
-    const firstHeaders = fetchMock.mock.calls[0]?.[1]?.headers;
-    const revalidationHeaders = fetchMock.mock.calls[1]?.[1]?.headers;
-    expect(firstHeaders).toBeInstanceOf(Headers);
-    expect(revalidationHeaders).toBeInstanceOf(Headers);
-    expect((firstHeaders as Headers).get("If-None-Match")).toBeNull();
-    expect((revalidationHeaders as Headers).get("If-None-Match")).toBe(
-      '"sha256-running"',
-    );
-
-    await act(async () => vi.advanceTimersByTimeAsync(2_000));
-    expect(fetchMock).toHaveBeenCalledTimes(3);
-    await act(async () => vi.advanceTimersByTimeAsync(3_999));
-    expect(fetchMock).toHaveBeenCalledTimes(3);
-
-    await act(async () => {
-      document.dispatchEvent(new Event("visibilitychange"));
-      await vi.advanceTimersByTimeAsync(0);
-    });
-    expect(fetchMock).toHaveBeenCalledTimes(4);
-    await act(async () => vi.advanceTimersByTimeAsync(7_999));
-    expect(fetchMock).toHaveBeenCalledTimes(4);
-
-    await act(async () => root?.unmount());
-  });
-
   it.each([
     ["run list", runListRequest, "Workflow runs"],
     ["run detail", runDetailRequest, "Build and test release candidate"],
@@ -1587,107 +1387,6 @@ describe("hydration", () => {
       window.dispatchEvent(storageEvent(themeStorage, null, null));
     });
     expect(document.documentElement.dataset.theme).toBe("dark");
-
-    await act(async () => root?.unmount());
-  });
-
-  it("progressively filters the current log page while retaining ordinary GET search", async () => {
-    document.open();
-    document.write(renderPage(jobLogRequest));
-    document.close();
-    const parsedRequest = readRenderRequest(document);
-    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-
-    let root: ReturnType<typeof hydrateRoot> | undefined;
-    await act(async () => {
-      root = hydrateRoot(document, <HtmlDocument request={parsedRequest} />);
-    });
-
-    const search = document.querySelector<HTMLInputElement>(
-      '#log-search[name="q"]',
-    );
-    expect(search?.form?.method).toBe("get");
-    expect(search?.getAttribute("autocapitalize")).toBe("none");
-    expect(search?.getAttribute("autocomplete")).toBe("off");
-    expect(search?.getAttribute("autocorrect")).toBe("off");
-    await act(async () => {
-      if (search !== null) {
-        const setValue = Object.getOwnPropertyDescriptor(
-          HTMLInputElement.prototype,
-          "value",
-        )?.set;
-        setValue?.call(search, "Operating System");
-        search.dispatchEvent(new Event("input", { bubbles: true }));
-      }
-    });
-    expect(document.querySelectorAll(".log-line")).toHaveLength(1);
-    expect(document.querySelector(".log-line")?.textContent).toContain(
-      "Operating System",
-    );
-    expect(
-      document.querySelector(`#${LOG_RESULT_COUNT_TEST_ID}`)?.textContent,
-    ).toBe("1 matching line on this page");
-
-    await act(async () => {
-      if (search !== null) {
-        const setValue = Object.getOwnPropertyDescriptor(
-          HTMLInputElement.prototype,
-          "value",
-        )?.set;
-        setValue?.call(search, "2026");
-        search.dispatchEvent(new Event("input", { bubbles: true }));
-      }
-    });
-    expect(document.querySelectorAll(".log-line")).toHaveLength(3);
-    expect(
-      document.querySelector(`#${LOG_RESULT_COUNT_TEST_ID}`)?.textContent,
-    ).toBe("3 matching lines on this page");
-
-    await act(async () => {
-      if (search !== null) {
-        const setValue = Object.getOwnPropertyDescriptor(
-          HTMLInputElement.prototype,
-          "value",
-        )?.set;
-        setValue?.call(search, "missing-token");
-        search.dispatchEvent(new Event("input", { bubbles: true }));
-      }
-    });
-    expect(document.querySelector(".log-output__empty")?.textContent).toBe(
-      "No log lines on this page match your search.",
-    );
-    expect(
-      document.querySelector(".log-output__empty")?.textContent,
-    ).not.toContain("missing-token");
-
-    await act(async () => {
-      if (search !== null) {
-        const setValue = Object.getOwnPropertyDescriptor(
-          HTMLInputElement.prototype,
-          "value",
-        )?.set;
-        setValue?.call(
-          search,
-          "🚀".repeat(RENDER_REQUEST_LIMITS.shortTextLength / 4 + 1),
-        );
-        search.dispatchEvent(new Event("input", { bubbles: true }));
-      }
-    });
-    expect(search?.checkValidity()).toBe(false);
-    expect(search?.validationMessage).toContain("1,024 UTF-8 bytes");
-    const refresh = Array.from(
-      document.querySelectorAll<HTMLAnchorElement>("a"),
-    ).find((link) => link.textContent?.trim() === "Refresh");
-    expect(refresh?.getAttribute("href")).toBe(
-      `/automata-ci/automata/actions/runs/${PRIMARY_RUN_ID}/jobs/${PRIMARY_JOB_ID}`,
-    );
-    expect(
-      document
-        .querySelector<HTMLAnchorElement>('a[rel="next"]')
-        ?.getAttribute("href"),
-    ).toBe(
-      `/automata-ci/automata/actions/runs/${PRIMARY_RUN_ID}/jobs/${PRIMARY_JOB_ID}?cursor=next`,
-    );
 
     await act(async () => root?.unmount());
   });

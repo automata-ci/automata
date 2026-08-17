@@ -1,6 +1,5 @@
 import type {
   ArtifactModel,
-  JobLogLineModel,
   JobModel,
   RepositoryModel,
   ResultCollectionModel,
@@ -8,6 +7,7 @@ import type {
   ShellModel,
   WorkflowNavigationItemModel,
 } from "../models";
+import type { LiveLogRecord } from "../liveLogs/sse";
 
 export const PREVIEW_PRIMARY_RUN_ID = "run-a4f69c2e";
 export const PREVIEW_SECONDARY_RUN_ID = "run-b6d8120f";
@@ -26,7 +26,7 @@ const FOUNDATION_COMMIT = "1923ba3a2ab7c8596edad1ae1aa9641b9b4a15cd";
 
 export interface PreviewJobSample {
   readonly job: Omit<JobModel, "href">;
-  readonly logLines: readonly JobLogLineModel[];
+  readonly logRecords: readonly LiveLogRecord[];
 }
 
 export interface PreviewRunSample {
@@ -364,13 +364,112 @@ export const previewRunSamples: readonly PreviewRunSample[] = [
 ];
 
 function jobSample(job: Omit<JobModel, "href">): PreviewJobSample {
-  return {
-    job,
-    logLines:
-      job.startedAt === null
-        ? []
-        : createLogLines(job.id, job.name, job.startedAt.iso, job.status.tone),
-  };
+  return { job, logRecords: createLogRecords(job) };
+}
+
+function createLogRecords(job: Omit<JobModel, "href">): readonly LiveLogRecord[] {
+  if (job.startedAt === null) return [];
+
+  const streamId = "00000000-0000-4000-8000-000000000042";
+  const startedAtMs = Date.parse(job.startedAt.iso);
+  if (!Number.isSafeInteger(startedAtMs)) {
+    throw new Error("The preview job start timestamp is invalid");
+  }
+  const base = (sequence: number, offsetMs: number) => ({
+    streamId,
+    sequence: String(sequence),
+    fragment: null,
+    emittedAtMs: startedAtMs + offsetMs,
+  });
+  const records: LiveLogRecord[] = [
+    {
+      ...base(0, 0),
+      type: "group_started",
+      group: {
+        id: `${job.id}/diagnostics`,
+        parentId: null,
+        name: "Runner diagnostics",
+        kind: "setup",
+        ordinal: 0,
+      },
+    },
+    {
+      ...base(1, 150),
+      type: "line",
+      groupId: `${job.id}/diagnostics`,
+      channel: "system",
+      text: "Runner image: ubuntu-24.04",
+    },
+    {
+      ...base(2, 400),
+      type: "group_finished",
+      groupId: `${job.id}/diagnostics`,
+      conclusion: "success",
+    },
+    {
+      ...base(3, 500),
+      type: "group_started",
+      group: {
+        id: `${job.id}/checkout`,
+        parentId: null,
+        name: "Checkout repository",
+        kind: "step",
+        ordinal: 1,
+      },
+    },
+    {
+      ...base(4, 900),
+      type: "line",
+      groupId: `${job.id}/checkout`,
+      channel: "stdout",
+      text: "Checking out automata-ci/automata at main",
+    },
+    {
+      ...base(5, 1_400),
+      type: "group_finished",
+      groupId: `${job.id}/checkout`,
+      conclusion: "success",
+    },
+    {
+      ...base(6, 1_500),
+      type: "group_started",
+      group: {
+        id: `${job.id}/build`,
+        parentId: null,
+        name: job.name,
+        kind: "step",
+        ordinal: 2,
+      },
+    },
+    {
+      ...base(7, 1_800),
+      type: "line",
+      groupId: `${job.id}/build`,
+      channel: "stdout",
+      text: "Operating System: Ubuntu 24.04.3 LTS",
+    },
+    {
+      ...base(8, 2_100),
+      type: "line",
+      groupId: `${job.id}/build`,
+      channel: job.status.tone === "failure" ? "stderr" : "stdout",
+      text:
+        job.status.tone === "failure"
+          ? "error: workspace test failed"
+          : job.status.tone === "running"
+            ? "Compiling automata-ci-job-executor-github"
+            : "Finished release build and workspace tests",
+    },
+  ];
+  if (job.status.tone !== "running") {
+    records.push({
+      ...base(9, 2_500),
+      type: "group_finished",
+      groupId: `${job.id}/build`,
+      conclusion: job.status.tone === "failure" ? "failure" : "success",
+    });
+  }
+  return records;
 }
 
 function artifact(
@@ -387,60 +486,4 @@ function artifact(
     downloadHref: null,
     expiresAt: null,
   };
-}
-
-function createLogLines(
-  jobId: string,
-  jobName: string,
-  startedAtIso: string,
-  tone: JobModel["status"]["tone"],
-): readonly JobLogLineModel[] {
-  const finalChannel = tone === "failure" ? "stderr" : "stdout";
-  const outcome =
-    tone === "running"
-      ? `${jobName} is still running`
-      : tone === "failure"
-        ? `${jobName} failed`
-        : `${jobName} completed successfully`;
-  const startTimestamp = logTimestamp(startedAtIso, 0);
-  const environmentTimestamp = logTimestamp(startedAtIso, 2);
-  const outcomeTimestamp = logTimestamp(startedAtIso, 15);
-
-  return [
-    {
-      id: `${jobId}-log-0`,
-      number: "0",
-      timestamp: startTimestamp,
-      channel: "system",
-      text: `Starting ${jobName}`,
-    },
-    {
-      id: `${jobId}-log-1`,
-      number: "1",
-      timestamp: environmentTimestamp,
-      channel: "stdout",
-      text: "Operating System: Ubuntu 24.04.3 LTS",
-    },
-    {
-      id: `${jobId}-log-2-1`,
-      number: "2.1",
-      timestamp: outcomeTimestamp,
-      channel: finalChannel,
-      text: outcome,
-    },
-  ];
-}
-
-function logTimestamp(
-  startedAtIso: string,
-  offsetSeconds: number,
-): JobLogLineModel["timestamp"] {
-  const startedAtMilliseconds = Date.parse(startedAtIso);
-  if (!Number.isFinite(startedAtMilliseconds)) {
-    throw new Error("The preview job start timestamp is invalid");
-  }
-  const iso = new Date(startedAtMilliseconds + offsetSeconds * 1_000)
-    .toISOString()
-    .replace(/\.000Z$/u, "Z");
-  return { iso, label: iso.slice(11, 19) };
 }

@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import type { PageModel } from "./models";
+import type { LiveLogRecord } from "./liveLogs/sse";
 import { ThemeToggle } from "./components/ThemeToggle";
 import { JobLogPage } from "./pages/JobLogPage";
 import { DeepLinkSignInPage } from "./pages/DeepLinkSignInPage";
@@ -53,6 +54,28 @@ export function App({ page, shellUtility }: AppProps) {
     default:
       return assertNever(page);
   }
+}
+
+interface PreviewAppProps extends AppProps {
+  readonly initialJobLogRecords: readonly LiveLogRecord[];
+}
+
+/** Keeps standalone sample data outside the production App contract. */
+export function PreviewApp({
+  initialJobLogRecords,
+  page,
+  shellUtility,
+}: PreviewAppProps) {
+  if (page.kind === "job-log") {
+    return (
+      <JobLogPage
+        initialRecords={initialJobLogRecords}
+        model={page}
+        shellUtility={shellUtility}
+      />
+    );
+  }
+  return <App page={page} shellUtility={shellUtility} />;
 }
 
 function assertNever(value: never): never {

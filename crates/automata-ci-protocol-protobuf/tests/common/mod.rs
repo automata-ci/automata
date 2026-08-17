@@ -719,15 +719,28 @@ fn log_frames(attempt: AttemptId) -> Vec<LogFrame> {
     ]
     .into_iter()
     .map(|(sequence, channel, payload, end)| {
-        LogFrame::new(
-            stream,
-            attempt,
-            LogSequence::new(sequence),
-            UnixMillis::new(1_700_000_004_000 + i64::try_from(sequence).expect("small sequence")),
-            channel,
-            payload.to_vec(),
-            end,
-        )
+        if end {
+            LogFrame::stream_finished(
+                stream,
+                attempt,
+                LogSequence::new(sequence),
+                UnixMillis::new(
+                    1_700_000_004_000 + i64::try_from(sequence).expect("small sequence"),
+                ),
+            )
+        } else {
+            LogFrame::line(
+                stream,
+                attempt,
+                LogSequence::new(sequence),
+                UnixMillis::new(
+                    1_700_000_004_000 + i64::try_from(sequence).expect("small sequence"),
+                ),
+                automata_ci_core::LogGroupId::new("test").expect("group ID"),
+                channel,
+                payload.to_vec(),
+            )
+        }
         .expect("fixture log frame is valid")
     })
     .collect()

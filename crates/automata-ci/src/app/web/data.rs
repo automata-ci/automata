@@ -39,13 +39,13 @@ pub(crate) const RUN_PAGE_SIZE: usize = 25;
 pub(crate) const REPOSITORY_PAGE_SIZE: usize = 25;
 /// Maximum number of jobs rendered in one run-navigation page.
 pub(crate) const RUN_JOB_PAGE_SIZE: usize = 200;
-/// Maximum number of rendered log lines returned by one page.
-pub(crate) const LOG_PAGE_SIZE: usize = 200;
-/// Maximum decoded text admitted to one rendered log page.
+/// Maximum number of structured log records returned by one replay batch.
+pub(crate) const LIVE_LOG_BATCH_RECORD_LIMIT: usize = 200;
+/// Maximum decoded text admitted to one replay batch.
 ///
-/// The bound leaves room below the renderer request ceiling for worst-case
-/// JSON escaping, job navigation, timestamps, and the rest of the page model.
-pub(crate) const LOG_PAGE_DECODED_BYTES: usize = 128 * 1024;
+/// The bound limits one transport write and the browser work required to apply
+/// it while replay catches up to the live tail.
+pub(crate) const LIVE_LOG_BATCH_DECODED_BYTES: usize = 128 * 1024;
 /// Maximum text admitted to one rendered log line.
 pub(crate) const LOG_LINE_BYTES: usize = 64 * 1024;
 /// Fixed member page size for the authenticated RBAC user list.
@@ -1106,13 +1106,6 @@ pub(crate) struct ArtifactSummary {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct JobLogRequest {
-    pub(crate) cursor: Option<String>,
-    pub(crate) limit: usize,
-    pub(crate) maximum_decoded_bytes: usize,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct JobLogPage {
     pub(crate) repository: Repository,
     pub(crate) run: RunSummary,
@@ -1122,22 +1115,8 @@ pub(crate) struct JobLogPage {
     pub(crate) job: JobSummary,
     /// Authorization state for the independently protected log collection.
     pub(crate) log_visibility: CollectionVisibility,
-    pub(crate) lines: Vec<LogLine>,
-    pub(crate) previous_cursor: Option<String>,
-    pub(crate) next_cursor: Option<String>,
-    /// Forward-only replay state for live delivery, absent on restricted or
-    /// historical reverse pages.
-    pub(crate) live: Option<JobLogLive>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct JobLogLive {
-    /// Last fully decoded durable record represented by this response.
-    pub(crate) checkpoint: Option<String>,
-    /// Whether the durable log stream has received its terminal record.
-    pub(crate) stream_closed: bool,
-    /// Whether another committed page was already available at read time.
-    pub(crate) more_available: bool,
+    /// Whether the selected job has an authorized structured stream.
+    pub(crate) live_available: bool,
 }
 
 /// One exact authorized live-log resource returned without a bearer credential.
@@ -1150,7 +1129,7 @@ pub(crate) struct AuthorizedLiveLog {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct LiveLogRecord {
     pub(crate) checkpoint: String,
-    pub(crate) line: LogLine,
+    pub(crate) record: LogRecord,
 }
 
 /// One bounded forward read used by every live-log transport adapter.
@@ -1177,12 +1156,47 @@ pub(crate) enum LogChannel {
     System,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum LogGroupKind {
+    Setup,
+    Step,
+    ActionPre,
+    ActionPost,
+    Cleanup,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct LogGroup {
+    pub(crate) id: String,
+    pub(crate) parent_id: Option<String>,
+    pub(crate) name: String,
+    pub(crate) kind: LogGroupKind,
+    pub(crate) ordinal: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum LogRecord {
+    GroupStarted {
+        sequence: u64,
+        emitted_at: UnixMillis,
+        group: LogGroup,
+    },
+    Line(LogLine),
+    GroupFinished {
+        sequence: u64,
+        emitted_at: UnixMillis,
+        group_id: String,
+        conclusion: automata_ci_core::JobConclusion,
+    },
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct LogLine {
     pub(crate) sequence: u64,
     /// One-based fragment when a durable frame exceeds the UI line limit.
     pub(crate) fragment: Option<u32>,
     pub(crate) emitted_at: UnixMillis,
+    pub(crate) group_id: String,
     pub(crate) channel: LogChannel,
     pub(crate) text: String,
 }
@@ -1271,7 +1285,6 @@ pub(crate) trait WebData: fmt::Debug + Send + Sync {
         repository: &RepositoryPath,
         run_id: RunId,
         job_id: JobId,
-        request: &JobLogRequest,
     ) -> Result<Option<JobLogPage>, WebDataError>;
 
     /// Authorizes one exact current attempt stream without issuing credentials.
@@ -1353,7 +1366,6 @@ impl WebData for EmptyWebData {
         _repository: &RepositoryPath,
         _run_id: RunId,
         _job_id: JobId,
-        _request: &JobLogRequest,
     ) -> Result<Option<JobLogPage>, WebDataError> {
         Ok(None)
     }

@@ -13,22 +13,60 @@ const MAX_U32 = 4_294_967_295;
 const MIN_TIMESTAMP_MS = -62_167_219_200_000;
 const MAX_TIMESTAMP_MS = 253_402_300_799_999;
 const STREAM_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+const GROUP_ID = /^[A-Za-z0-9:._/-]{1,256}$/u;
 const DECIMAL = /^(0|[1-9][0-9]{0,19})$/u;
+const CONTROL_CHARACTER = /[\u0000-\u001f\u007f-\u009f]/u;
 const CONTROL_CHARACTER_EXCEPT_TAB = /[\u0000-\u0008\u000a-\u001f\u007f-\u009f]/u;
 const BIDI_FORMATTING_CHARACTER =
   /[\u061c\u200e-\u200f\u202a-\u202e\u2066-\u2069]/u;
 
 export type LiveLogChannel = "stdout" | "stderr" | "system";
 
-export interface LiveLogRecord {
+interface LiveLogRecordBase {
   readonly streamId: string;
   /** Canonical decimal text keeps the Core u64 sequence lossless in JS. */
   readonly sequence: string;
   readonly fragment: number | null;
   readonly emittedAtMs: number;
+}
+
+export type LiveLogGroupKind =
+  | "setup"
+  | "step"
+  | "action_pre"
+  | "action_post"
+  | "cleanup";
+
+export interface LiveLogGroup {
+  readonly id: string;
+  readonly parentId: string | null;
+  readonly name: string;
+  readonly kind: LiveLogGroupKind;
+  readonly ordinal: number;
+}
+
+export interface LiveLogGroupStartedRecord extends LiveLogRecordBase {
+  readonly type: "group_started";
+  readonly group: LiveLogGroup;
+}
+
+export interface LiveLogLineRecord extends LiveLogRecordBase {
+  readonly type: "line";
+  readonly groupId: string;
   readonly channel: LiveLogChannel;
   readonly text: string;
 }
+
+export interface LiveLogGroupFinishedRecord extends LiveLogRecordBase {
+  readonly type: "group_finished";
+  readonly groupId: string;
+  readonly conclusion: "success" | "failure" | "cancelled" | "timed_out" | "skipped";
+}
+
+export type LiveLogRecord =
+  | LiveLogGroupStartedRecord
+  | LiveLogLineRecord
+  | LiveLogGroupFinishedRecord;
 
 export interface SseConnectionOptions {
   readonly url: URL;
@@ -45,7 +83,7 @@ export interface SseConnectionOptions {
 }
 
 export type SseConnectionResult =
-  | { readonly kind: "complete" }
+  | { readonly kind: "complete"; readonly checkpoint: string }
   | { readonly kind: "reconnect" };
 
 interface DecodedSseEvent {
@@ -154,8 +192,14 @@ export async function connectLiveLogSse(
             break;
           }
           case "complete":
+            if (event.id === null) {
+              throw new LiveLogSseError(
+                "protocol",
+                "the live-log completion has no checkpoint",
+              );
+            }
             parseProtocolEnvelope(event.data, "completion");
-            return { kind: "complete" };
+            return { kind: "complete", checkpoint: event.id };
           case "reconnect":
             parseProtocolEnvelope(event.data, "reconnect");
             return { kind: "reconnect" };
@@ -302,15 +346,14 @@ class SseDecoder {
 
 function parseLogRecord(data: string): LiveLogRecord {
   const record = parseJsonRecord(data, "log record");
-  exactKeys(record, [
+  const commonKeys = [
     "protocolVersion",
     "streamId",
     "sequence",
     "fragment",
     "emittedAtMs",
-    "channel",
-    "text",
-  ], "log record");
+    "type",
+  ];
   if (record.protocolVersion !== LIVE_LOG_PROTOCOL_VERSION) {
     throw new LiveLogProtocolError("the log record protocol version is unsupported");
   }
@@ -339,29 +382,107 @@ function parseLogRecord(data: string): LiveLogRecord {
   ) {
     throw new LiveLogProtocolError("the log record timestamp is invalid");
   }
-  if (
-    record.channel !== "stdout" &&
-    record.channel !== "stderr" &&
-    record.channel !== "system"
-  ) {
-    throw new LiveLogProtocolError("the log record channel is invalid");
-  }
-  if (
-    typeof record.text !== "string" ||
-    new TextEncoder().encode(record.text).byteLength > MAX_LOG_TEXT_BYTES ||
-    CONTROL_CHARACTER_EXCEPT_TAB.test(record.text) ||
-    BIDI_FORMATTING_CHARACTER.test(record.text)
-  ) {
-    throw new LiveLogProtocolError("the log record text is invalid");
-  }
-  return {
+  const base = {
     streamId: record.streamId,
     sequence: record.sequence,
     fragment: record.fragment as number | null,
     emittedAtMs: record.emittedAtMs as number,
-    channel: record.channel,
-    text: record.text,
   };
+  switch (record.type) {
+    case "group_started":
+      exactKeys(record, [...commonKeys, "group"], "group-started log record");
+      if (record.fragment !== null) {
+        throw new LiveLogProtocolError("a group-started record cannot be fragmented");
+      }
+      return { ...base, type: "group_started", group: parseLogGroup(record.group) };
+    case "line": {
+      exactKeys(record, [...commonKeys, "groupId", "channel", "text"], "line log record");
+      const groupId = logGroupId(record.groupId, "line group ID");
+      if (
+        record.channel !== "stdout" &&
+        record.channel !== "stderr" &&
+        record.channel !== "system"
+      ) {
+        throw new LiveLogProtocolError("the log record channel is invalid");
+      }
+      if (
+        typeof record.text !== "string" ||
+        new TextEncoder().encode(record.text).byteLength > MAX_LOG_TEXT_BYTES ||
+        CONTROL_CHARACTER_EXCEPT_TAB.test(record.text) ||
+        BIDI_FORMATTING_CHARACTER.test(record.text)
+      ) {
+        throw new LiveLogProtocolError("the log record text is invalid");
+      }
+      return {
+        ...base,
+        type: "line",
+        groupId,
+        channel: record.channel,
+        text: record.text,
+      };
+    }
+    case "group_finished":
+      exactKeys(record, [...commonKeys, "groupId", "conclusion"], "group-finished log record");
+      if (record.fragment !== null) {
+        throw new LiveLogProtocolError("a group-finished record cannot be fragmented");
+      }
+      if (
+        record.conclusion !== "success" &&
+        record.conclusion !== "failure" &&
+        record.conclusion !== "cancelled" &&
+        record.conclusion !== "timed_out" &&
+        record.conclusion !== "skipped"
+      ) {
+        throw new LiveLogProtocolError("the group conclusion is invalid");
+      }
+      return {
+        ...base,
+        type: "group_finished",
+        groupId: logGroupId(record.groupId, "finished group ID"),
+        conclusion: record.conclusion,
+      };
+    default:
+      throw new LiveLogProtocolError("the log record type is unsupported");
+  }
+}
+
+function parseLogGroup(value: unknown): LiveLogGroup {
+  const group = parseJsonValueRecord(value, "log group");
+  exactKeys(group, ["id", "parentId", "name", "kind", "ordinal"], "log group");
+  const id = logGroupId(group.id, "group ID");
+  const parentId = group.parentId === null ? null : logGroupId(group.parentId, "parent group ID");
+  if (parentId === id) {
+    throw new LiveLogProtocolError("a log group cannot contain itself");
+  }
+  if (
+    typeof group.name !== "string" ||
+    group.name.trim().length === 0 ||
+    new TextEncoder().encode(group.name).byteLength > 512 ||
+    CONTROL_CHARACTER.test(group.name) ||
+    BIDI_FORMATTING_CHARACTER.test(group.name)
+  ) {
+    throw new LiveLogProtocolError("the log group name is invalid");
+  }
+  if (
+    group.kind !== "setup" &&
+    group.kind !== "step" &&
+    group.kind !== "action_pre" &&
+    group.kind !== "action_post" &&
+    group.kind !== "cleanup"
+  ) {
+    throw new LiveLogProtocolError("the log group kind is invalid");
+  }
+  if (!Number.isInteger(group.ordinal) || (group.ordinal as number) < 0 || (group.ordinal as number) > MAX_U32) {
+    throw new LiveLogProtocolError("the log group ordinal is invalid");
+  }
+  return { id, parentId, name: group.name, kind: group.kind, ordinal: group.ordinal as number };
+}
+
+function logGroupId(value: unknown, label: string): string {
+  if (typeof value !== "string" || !GROUP_ID.test(value)) {
+    throw new LiveLogProtocolError(`the ${label} is invalid`);
+  }
+  return value;
 }
 
 function parseProtocolEnvelope(data: string, label: string): ProtocolEnvelope {
@@ -398,6 +519,10 @@ function parseJsonRecord(data: string, label: string): Record<string, unknown> {
   } catch {
     throw new LiveLogProtocolError(`the ${label} is not valid JSON`);
   }
+  return parseJsonValueRecord(value, label);
+}
+
+function parseJsonValueRecord(value: unknown, label: string): Record<string, unknown> {
   if (
     typeof value !== "object" ||
     value === null ||

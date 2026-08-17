@@ -84,8 +84,7 @@ const routeFields: readonly UrlFieldCase[] = [
   routeCase(jobLogRequest, ["page", "jobs", 0, "href"]),
   routeCase(jobLogRequest, ["page", "navigationPagination", "nextHref"]),
   routeCase(jobLogRequest, ["page", "job", "href"]),
-  routeCase(jobLogRequest, ["page", "search", "action"]),
-  routeCase(jobLogRequest, ["page", "search", "clearHref"]),
+  routeCase(jobLogRequest, ["page", "live", "ticketHref"]),
   routeCase(repositorySettingsRequest, ["page", "repository", "settingsHref"]),
   routeCase(repositorySettingsRequest, ["page", "update", "action"]),
   routeCase(userListRequest, ["page", "managementNav", "usersHref"]),
@@ -530,21 +529,6 @@ describe("render request validation", () => {
     setPath(input, ["page", "shell", "navigation"], new Array(1));
     expect(() => validateRenderRequest(input)).toThrow(
       "at $.page.shell.navigation[0]",
-    );
-  });
-
-  it("applies the aggregate serialized-size bound to direct object validation", () => {
-    const input = cloneRequest(jobLogRequest);
-    const originalLine = getRecord(input, ["page", "lines", 0]);
-    const largeLines = Array.from({ length: 33 }, (_unused, index) => ({
-      ...structuredClone(originalLine),
-      id: `large-line-${index}`,
-      number: String(index),
-      text: "x".repeat(RENDER_REQUEST_LIMITS.logLineTextLength),
-    }));
-    setPath(input, ["page", "lines"], largeLines);
-    expect(() => validateRenderRequest(input)).toThrow(
-      `expected at most ${MAX_SERIALIZED_RENDER_REQUEST_BYTES} serialized UTF-8 bytes`,
     );
   });
 
@@ -1395,135 +1379,21 @@ describe("render request validation", () => {
     expect(() => validateRenderRequest(detail)).toThrow("at $.page.jobs.items");
   });
 
-  it.each([
-    [
-      "numeric sequence",
-      ["page", "lines", 0, "number"],
-      42,
-      "$.page.lines[0].number",
-    ],
-    [
-      "oversized sequence",
-      ["page", "lines", 0, "number"],
-      "123456789012345678901",
-      "$.page.lines[0].number",
-    ],
-    [
-      "out-of-range u64 sequence",
-      ["page", "lines", 0, "number"],
-      "18446744073709551616",
-      "$.page.lines[0].number",
-    ],
-    [
-      "zero fragment",
-      ["page", "lines", 0, "number"],
-      "0.0",
-      "$.page.lines[0].number",
-    ],
-    [
-      "non-canonical fragment",
-      ["page", "lines", 0, "number"],
-      "0.01",
-      "$.page.lines[0].number",
-    ],
-    [
-      "out-of-range u32 fragment",
-      ["page", "lines", 0, "number"],
-      "0.4294967296",
-      "$.page.lines[0].number",
-    ],
-    [
-      "unsafe line ID",
-      ["page", "lines", 0, "id"],
-      "line id",
-      "$.page.lines[0].id",
-    ],
-    [
-      "unknown channel",
-      ["page", "lines", 0, "channel"],
-      "debug",
-      "$.page.lines[0].channel",
-    ],
-  ] as const)(
-    "rejects a job log with %s",
-    (_name, path, replacement, errorPath) => {
-      const input = cloneRequest(jobLogRequest);
-      setPath(input, path, replacement);
-      expect(() => validateRenderRequest(input)).toThrow(`at ${errorPath}`);
-    },
-  );
-
-  it("accepts log tabs and rejects unsanitized control or bidi text", () => {
-    const tabbed = cloneRequest(jobLogRequest);
-    setPath(tabbed, ["page", "lines", 0, "text"], "checkout\tcomplete");
-    expect(() => validateRenderRequest(tabbed)).not.toThrow();
-
-    for (const text of [
-      "line one\nline two",
-      "next\u0085line",
-      "safe\u202Efdp.exe",
-    ]) {
-      const input = cloneRequest(jobLogRequest);
-      setPath(input, ["page", "lines", 0, "text"], text);
-      expect(() => validateRenderRequest(input)).toThrow(
-        "at $.page.lines[0].text",
-      );
-    }
-  });
-
-  it("requires canonical ascending log sequence order", () => {
-    const descending = cloneRequest(jobLogRequest);
-    setPath(descending, ["page", "lines", 0, "number"], "2");
-    setPath(descending, ["page", "lines", 1, "number"], "1");
-    expect(() => validateRenderRequest(descending)).toThrow(
-      "at $.page.lines[1].number",
-    );
-
-    const mixedWholeAndFragment = cloneRequest(jobLogRequest);
-    setPath(mixedWholeAndFragment, ["page", "lines", 1, "number"], "0.1");
-    expect(() => validateRenderRequest(mixedWholeAndFragment)).toThrow(
-      "at $.page.lines[1].number",
-    );
-
-    const fragments = cloneRequest(jobLogRequest);
-    setPath(fragments, ["page", "lines", 0, "number"], "0.1");
-    setPath(fragments, ["page", "lines", 1, "number"], "0.2");
-    expect(() => validateRenderRequest(fragments)).not.toThrow();
-  });
-
-  it("requires stable unique log identities and a selected navigation job", () => {
-    const duplicateId = cloneRequest(jobLogRequest);
-    const duplicateIdLines = getArray(duplicateId, ["page", "lines"]);
-    const secondLine = getRecord(duplicateIdLines, [1]);
-    secondLine.id = getRecord(duplicateIdLines, [0]).id;
-    expect(() => validateRenderRequest(duplicateId)).toThrow(
-      "at $.page.lines[1].id",
-    );
-
-    const duplicateNumber = cloneRequest(jobLogRequest);
-    const duplicateNumberLines = getArray(duplicateNumber, ["page", "lines"]);
-    getRecord(duplicateNumberLines, [1]).number = getRecord(
-      duplicateNumberLines,
-      [0],
-    ).number;
-    expect(() => validateRenderRequest(duplicateNumber)).toThrow(
-      "at $.page.lines[1].number",
-    );
-
+  it("requires a consistent selected navigation job", () => {
     const missingSelectedJob = cloneRequest(jobLogRequest);
     setPath(missingSelectedJob, ["page", "job", "id"], "unknown-job");
     expect(() => validateRenderRequest(missingSelectedJob)).toThrow(
       "at $.page.job.id",
     );
 
-    for (const [path, replacement, errorPath] of [
-      [["page", "job", "name"], "Different job", "$.page.job.name"],
-      [["page", "job", "href"], "/different-job", "$.page.job.href"],
+    for (const [path, replacement] of [
+      [["page", "job", "name"], "Different job"],
+      [["page", "job", "href"], "/different-job"],
     ] as const) {
       const mismatched = cloneRequest(jobLogRequest);
       setPath(mismatched, path, replacement);
       expect(() => validateRenderRequest(mismatched)).toThrow(
-        `at ${errorPath}`,
+        "at $.page.job",
       );
     }
 
@@ -1531,7 +1401,7 @@ describe("render request validation", () => {
     setPath(mismatchedStatus, ["page", "job", "status", "label"], "Queued");
     setPath(mismatchedStatus, ["page", "job", "status", "tone"], "queued");
     expect(() => validateRenderRequest(mismatchedStatus)).toThrow(
-      "at $.page.job.status.label",
+      "at $.page.job",
     );
 
     const duplicateJobHref = cloneRequest(jobLogRequest);
@@ -1540,20 +1410,6 @@ describe("render request validation", () => {
     expect(() => validateRenderRequest(duplicateJobHref)).toThrow(
       "at $.page.jobs[1].href",
     );
-  });
-
-  it("keeps job-log search actions bound to the selected job", () => {
-    for (const field of ["action", "clearHref"] as const) {
-      const input = cloneRequest(jobLogRequest);
-      setPath(input, ["page", "search", field], "/different-job");
-      expect(() => validateRenderRequest(input)).toThrow(
-        `at $.page.search.${field}`,
-      );
-    }
-
-    const query = cloneRequest(jobLogRequest);
-    setPath(query, ["page", "search", "query"], "build failed~+é");
-    expect(() => validateRenderRequest(query)).not.toThrow();
   });
 
   it.each([
@@ -1569,20 +1425,8 @@ describe("render request validation", () => {
       "/job#output",
       "$.page.job.href",
     ],
-    [
-      "search action query",
-      ["page", "search", "action"],
-      "/job?q=already-present",
-      "$.page.search.action",
-    ],
-    [
-      "clear destination fragment",
-      ["page", "search", "clearHref"],
-      "/job#output",
-      "$.page.search.clearHref",
-    ],
   ] as const)(
-    "rejects a job-log %s before composing query state",
+    "rejects a job-log %s",
     (_name, path, replacement, errorPath) => {
       const input = cloneRequest(jobLogRequest);
       setPath(input, path, replacement);
@@ -1597,57 +1441,26 @@ describe("render request validation", () => {
     const destination = "/job?existing=1#output";
     setPath(input, ["page", "jobs", 0, "href"], destination);
     setPath(input, ["page", "job", "href"], destination);
-    setPath(input, ["page", "search", "action"], destination);
-    setPath(input, ["page", "search", "clearHref"], destination);
-
     expect(() => validateRenderRequest(input)).toThrow(
       "Invalid Automata render request at $.page.jobs[0].href: expected a query- and fragment-free job-log destination",
     );
   });
 
-  it("requires distinct canonical job-log pagination cursors", () => {
-    const input = cloneRequest(jobLogRequest);
-    const nextCursor = getRecord(input, ["page", "pagination"]).nextCursor;
-    setPath(input, ["page", "pagination", "previousCursor"], nextCursor);
-    expect(() => validateRenderRequest(input)).toThrow(
-      "at $.page.pagination.nextCursor",
-    );
-
-    const repeatedCurrent = cloneRequest(jobLogRequest);
-    setPath(
-      repeatedCurrent,
-      ["page", "pagination", "currentCursor"],
-      nextCursor,
-    );
-    expect(() => validateRenderRequest(repeatedCurrent)).toThrow(
-      "at $.page.pagination.currentCursor",
-    );
-
-    for (const cursor of ["", "cursor=bad", "cursor bad", "x".repeat(513)]) {
-      const malformed = cloneRequest(jobLogRequest);
-      setPath(malformed, ["page", "pagination", "currentCursor"], cursor);
-      expect(() => validateRenderRequest(malformed)).toThrow(
-        "at $.page.pagination.currentCursor",
-      );
-    }
-  });
-
-  it("validates resumable job-log live state independently of pagination", () => {
+  it("validates the structured live-log ticket contract", () => {
     const malformed = cloneRequest(jobLogRequest);
-    setPath(malformed, ["page", "live", "checkpoint"], "cursor=bad");
+    setPath(malformed, ["page", "live", "ticketHref"], "/wrong/live-ticket");
     expect(() => validateRenderRequest(malformed)).toThrow(
-      "at $.page.live.checkpoint",
+      "at $.page.live.ticketHref",
     );
 
-    const missingCheckpoint = cloneRequest(jobLogRequest);
-    setPath(missingCheckpoint, ["page", "live", "checkpoint"], null);
-    expect(() => validateRenderRequest(missingCheckpoint)).toThrow(
-      "at $.page.live.checkpoint",
+    const legacyState = cloneRequest(jobLogRequest);
+    setPath(legacyState, ["page", "live", "state"], "open");
+    expect(() => validateRenderRequest(legacyState)).toThrow(
+      "at $.page.live.state: expected no unknown field",
     );
 
     const restricted = cloneRequest(jobLogRequest);
     setPath(restricted, ["page", "logVisibility"], "restricted");
-    setPath(restricted, ["page", "lines"], []);
     expect(() => validateRenderRequest(restricted)).toThrow("at $.page.live");
 
     setPath(restricted, ["page", "live"], null);

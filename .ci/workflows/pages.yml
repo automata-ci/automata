@@ -31,6 +31,9 @@ jobs:
     if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    env:
+      APT_CONFIG: ${{ github.workspace }}/target/task-tmp/pages/apt.conf
+      TMPDIR: ${{ github.workspace }}/target/task-tmp/pages
     permissions:
       contents: read
     steps:
@@ -41,9 +44,13 @@ jobs:
           persist-credentials: false
 
       - name: Prepare task scratch directory
-        env:
-          TMPDIR: ${{ github.workspace }}/target/task-tmp/pages
-        run: install -d -m 0700 -- "$TMPDIR"
+        run: |
+          install -d -m 0700 -- "$TMPDIR"
+          printf '%s\n' \
+            'Acquire::Retries "5";' \
+            'Acquire::http::Timeout "30";' \
+            'Acquire::https::Timeout "30";' \
+            > "$APT_CONFIG"
 
       - name: Install Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -53,20 +60,16 @@ jobs:
 
       - name: Install locked demo dependencies
         working-directory: ui
-        env:
-          TMPDIR: ${{ github.workspace }}/target/task-tmp/pages
         run: npm ci --no-audit
 
-      - name: Install Chromium
+      - name: Install Chromium headless shell
         working-directory: ui
-        env:
-          TMPDIR: ${{ github.workspace }}/target/task-tmp/pages
-        run: npx --no-install playwright install --with-deps chromium
+        run: >-
+          npx --no-install playwright install
+          --with-deps --only-shell chromium
 
       - name: Build demo and capture theme-aware screenshots
         working-directory: ui
-        env:
-          TMPDIR: ${{ github.workspace }}/target/task-tmp/pages
         run: npm run screenshots
 
       - name: Upload screenshot review artifact

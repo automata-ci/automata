@@ -201,6 +201,10 @@ const FROZEN_MIGRATIONS: &[(&str, &str)] = &[
         "0049_delegated_workflow_dispatch.sql",
         "df17f7d6396ca08d57594ca0411301a9ed3ea4d8c8e8d3f9acae5aba2592bff5ba0a7c26a78766bc23106d9a9f3d6f0c",
     ),
+    (
+        "0050_structured_live_logs.sql",
+        "43e00572f617031aff81bcfb6711c9712a6b755038bc6f662a6f801665eadbc4069178d57642cc14b8b25f1cf08939dd",
+    ),
 ];
 
 const BASELINE_MIGRATION_COUNT: u32 = 26;
@@ -554,6 +558,32 @@ fn workflow_runtime_runner_feature_policy_is_relationally_exact() {
         ),
         "runner features must not reuse the container-feature census trigger"
     );
+}
+
+#[test]
+fn structured_live_logs_are_a_current_only_destructive_cutover() {
+    let source = include_str!("../migrations/0050_structured_live_logs.sql");
+
+    for required in [
+        "DELETE FROM human_live_log_tickets",
+        "DELETE FROM attempt_log_streams",
+        "WHERE log_schema <> 2",
+        "DROP CONSTRAINT attempt_log_streams_schema_range",
+        "ADD CONSTRAINT attempt_log_streams_schema_current",
+        "CHECK (log_schema = 2)",
+        "CHECK (protocol_version = 2)",
+    ] {
+        assert!(
+            source.contains(required),
+            "structured-log migration lost hard-cutover contract: {required}"
+        );
+    }
+    for forbidden in ["IF NOT EXISTS", "IN (1, 2)"] {
+        assert!(
+            !source.contains(forbidden),
+            "structured-log migration retained compatibility surface: {forbidden}"
+        );
+    }
 }
 
 fn migration_paths() -> Vec<PathBuf> {

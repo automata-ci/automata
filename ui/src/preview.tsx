@@ -1,10 +1,11 @@
 import { createRoot } from "react-dom/client";
 import type { Root } from "react-dom/client";
-import { App } from "./App";
+import { App, PreviewApp } from "./App";
 import { EmptyState } from "./components/EmptyState";
 import { Shell } from "./components/Shell";
 import { ThemeToggle } from "./components/ThemeToggle";
 import type { PageModel } from "./models";
+import type { LiveLogRecord } from "./liveLogs/sse";
 import "./styles.css";
 import "./styles/pages/preview.css";
 import { installPreviewFormRouting } from "./preview/formRouting";
@@ -16,6 +17,7 @@ import {
   isPreviewRunDetailStateSupported,
   isPreviewRunListStateSupported,
   previewJobLog,
+  previewJobLogRecords,
   previewRepositoryDirectory,
   previewRepositorySettings,
   previewRepositorySecrets,
@@ -69,12 +71,15 @@ if (view === null || view === "repositories" || view === "repositories-empty") {
   }
 } else if (view === "job") {
   const jobLog = isPreviewJobLogStateSupported(searchParameters)
-    ? previewJobLog(requestedRunId, requestedJobId, searchParameters)
+    ? previewJobLog(requestedRunId, requestedJobId)
     : null;
   if (jobLog === null) {
     renderNotFound("Job not found", "That workflow job is not part of this demo.");
   } else {
-    renderPreviewPage(jobLog);
+    renderPreviewJobLog(
+      jobLog,
+      previewJobLogRecords(requestedRunId, requestedJobId),
+    );
   }
 } else if (view === "settings") {
   if (isPreviewRepositorySettingsStateSupported(searchParameters)) {
@@ -122,7 +127,24 @@ if (view === null || view === "repositories" || view === "repositories-empty") {
 
 function renderPreviewPage(page: PageModel): void {
   document.title = page.shell.documentTitle;
-  reactRoot.render(<App page={page} shellUtility={<PreviewTools />} />);
+  reactRoot.render(
+    <App page={page} shellUtility={<PreviewTools />} />,
+  );
+  reconcilePreviewHashTarget();
+}
+
+function renderPreviewJobLog(
+  page: PageModel,
+  records: readonly LiveLogRecord[],
+): void {
+  document.title = page.shell.documentTitle;
+  reactRoot.render(
+    <PreviewApp
+      initialJobLogRecords={records}
+      page={page}
+      shellUtility={<PreviewTools />}
+    />,
+  );
   reconcilePreviewHashTarget();
 }
 

@@ -330,8 +330,8 @@ Tasks:
   default-branch lookup behavior.
 - [ ] Test action-level version calculation, pull-request/fork scopes,
   lookup-only, fail-on-cache-miss, and save-always behavior.
-- [ ] Decide whether legacy v1 endpoints and environment variables are needed;
-  implement them or publish an explicit rejected boundary.
+- [x] Require pinned modern clients; legacy v1 endpoints and environment
+  variables are outside the supported contract.
 - [ ] Reject `enableCrossOsArchive` until `CACHE-03` proves its archive and
   metadata contract.
 - [ ] Test executable bits, symlinks, Unicode, long paths, and case-sensitive
@@ -352,13 +352,14 @@ Acceptance:
 **Owner:** X. **Size:** L. **Dependencies:** RES-02, CHECK-01, EVT-01,
 DEP-01, ART-02, CACHE-01.
 
-This extends the existing run lists, filters, detail pages, job pages, log
-search, and artifact surfaces; it is not a greenfield UI rewrite.
+This hard-cut evolution keeps the existing run and artifact surfaces while
+replacing the flat job-log contract and UI.
 
-The current authenticated UI has deterministic run/job/log pagination,
-server-side log search, and authorized read-only artifact presentation with
-name, size, SHA-256 digest, expiry, and an Automata download route. The backend
-and Unix CLI already expose durable rerun-all, rerun-failed, and
+The current authenticated UI has deterministic run/job pagination, one
+checkpointed structured replay-and-tail stream per job, in-memory log search,
+and authorized read-only artifact presentation with name, size, SHA-256
+digest, expiry, and an Automata download route. The backend and Unix CLI
+already expose durable rerun-all, rerun-failed, and
 rerun-specific-job operations for supported source graphs; browser controls do
 not exist yet.
 
@@ -368,8 +369,8 @@ Tasks:
   attempt identity.
 - [ ] Show live/terminal step state, pre/main/post phases, summaries,
   annotations, grouped logs, outputs, environments, artifacts, and cache use.
-- [x] Preserve deterministic run, job, and log pagination plus current
-  server-side log search.
+- [x] Replace flat log pagination and server-side search with grouped,
+  checkpointed replay/live tailing and search over the replayed document.
 - [ ] Add cancel and rerun controls with CSRF, authorization, audit, idempotency,
   and stale-attempt protection.
 - [ ] Expose separate rerun-all, rerun-failed, and rerun-specific-job controls

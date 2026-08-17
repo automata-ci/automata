@@ -336,47 +336,11 @@ export const jobLogRequest: RenderRequest = {
       durationLabel: null,
     },
     logVisibility: "full",
-    search: {
-      action: `/automata-ci/automata/actions/runs/${PRIMARY_RUN_ID}/jobs/${PRIMARY_JOB_ID}`,
-      query: "",
-      clearHref: `/automata-ci/automata/actions/runs/${PRIMARY_RUN_ID}/jobs/${PRIMARY_JOB_ID}`,
-    },
-    lines: [
-      {
-        id: "log-job-1-0",
-        number: "0",
-        timestamp: { iso: "2026-08-06T08:15:05Z", label: "08:15:05" },
-        channel: "system",
-        text: "Current runner version: '2.336.0'",
-      },
-      {
-        id: "log-job-1-1",
-        number: "1",
-        timestamp: { iso: "2026-08-06T08:15:06Z", label: "08:15:06" },
-        channel: "stdout",
-        text: "Operating System: Ubuntu 24.04.3 LTS",
-      },
-      {
-        id: "log-job-1-18446744073709551615",
-        number: "18446744073709551615",
-        timestamp: { iso: "2026-08-06T08:18:14Z", label: "08:18:14" },
-        channel: "stderr",
-        text: "warning: release fixture uses the maximum durable sequence",
-      },
-    ],
     live: {
-      checkpoint: "checkpoint",
-      state: "open",
-      moreAvailable: true,
+      ticketHref: `/automata-ci/automata/actions/runs/${PRIMARY_RUN_ID}/jobs/${PRIMARY_JOB_ID}/live-ticket`,
     },
     notice:
       "This job is still running. This page updates automatically as logs are committed.",
-    pagination: {
-      currentCursor: null,
-      previousCursor: null,
-      nextCursor: "next",
-      label: "3 log lines",
-    },
   },
 };
 

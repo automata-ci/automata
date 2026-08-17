@@ -26,11 +26,11 @@ export interface LiveLogControllerOptions {
     checkpoint: string,
   ) => void | Promise<void>;
   readonly onComplete?: (checkpoint: string | null) => void | Promise<void>;
-  readonly onFallback?: (failure: LiveLogFailure) => void | Promise<void>;
+  readonly onFailure?: (failure: LiveLogFailure) => void | Promise<void>;
   readonly onStateChange?: (state: LiveLogControllerState) => void;
   readonly initialCheckpoint?: string | null;
   readonly fetch?: LiveLogFetch;
-  /** Number of failed connection attempts before snapshot fallback. */
+  /** Number of failed connection attempts before delivery stops. */
   readonly maxConsecutiveFailures?: number;
 }
 
@@ -44,7 +44,7 @@ export type LiveLogControllerState =
     }
   | { readonly kind: "paused" }
   | { readonly kind: "complete" }
-  | { readonly kind: "fallback"; readonly failure: LiveLogFailure };
+  | { readonly kind: "failed"; readonly failure: LiveLogFailure };
 
 export interface LiveLogFailure {
   readonly code: "ticket" | "transport" | "protocol" | "network" | "client";
@@ -64,7 +64,7 @@ interface LiveLogTransportDriver {
 }
 
 type LiveLogTransportResult =
-  | { readonly kind: "complete" }
+  | { readonly kind: "complete"; readonly checkpoint: string }
   | { readonly kind: "reconnect" };
 
 interface LiveLogTransportConnection {
@@ -113,6 +113,7 @@ export class LiveLogController {
   #abort: AbortController | null = null;
   #running: Promise<void> | null = null;
   #disposed = false;
+  #terminal = false;
   #retryMs = DEFAULT_RETRY_MS;
 
   constructor(options: LiveLogControllerOptions) {
@@ -147,6 +148,9 @@ export class LiveLogController {
     if (this.#disposed) {
       return Promise.reject(new Error("the live-log controller is disposed"));
     }
+    if (this.#terminal) {
+      return Promise.resolve();
+    }
     if (this.#running !== null) {
       if (this.#abort?.signal.aborted === true) {
         return this.#running.then(() => this.start());
@@ -176,6 +180,9 @@ export class LiveLogController {
 
   /** Stops network work while preserving the checkpoint for a later start. */
   pause(): void {
+    if (this.#terminal) {
+      return;
+    }
     this.#abort?.abort();
     if (!this.#disposed) {
       this.#emit({ kind: "paused" });
@@ -216,6 +223,8 @@ export class LiveLogController {
           },
         });
         if (result.kind === "complete") {
+          this.#checkpoint = validateLiveLogCheckpoint(result.checkpoint);
+          this.#terminal = true;
           await this.#options.onComplete?.(this.#checkpoint);
           this.#emit({ kind: "complete" });
           return;
@@ -229,9 +238,14 @@ export class LiveLogController {
         }
         failures += 1;
         const failure = safeFailure(error);
-        if (failures > this.#maximumFailures) {
-          this.#emit({ kind: "fallback", failure });
-          await this.#options.onFallback?.(failure);
+        if (
+          failure.code === "protocol" ||
+          failure.code === "client" ||
+          failures > this.#maximumFailures
+        ) {
+          this.#terminal = true;
+          this.#emit({ kind: "failed", failure });
+          await this.#options.onFailure?.(failure);
           return;
         }
         const delayMs = Math.min(

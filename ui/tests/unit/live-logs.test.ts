@@ -11,8 +11,8 @@ import {
 } from "../../src/liveLogs";
 
 const STREAM_ID = "00000000-0000-4000-8000-000000000005";
-const TICKET_ONE = `allt_v1_${"A".repeat(43)}`;
-const TICKET_TWO = `allt_v1_${"B".repeat(43)}`;
+const TICKET_ONE = `allt_v2_${"A".repeat(43)}`;
+const TICKET_TWO = `allt_v2_${"B".repeat(43)}`;
 
 describe("same-origin live-log ticket acquisition", () => {
   it("keeps the credential in a validated response and derives Core's origin", async () => {
@@ -21,7 +21,7 @@ describe("same-origin live-log ticket acquisition", () => {
         protocolVersion: LIVE_LOG_PROTOCOL_VERSION,
         ticket: TICKET_ONE,
         expiresAtMs: Date.now() + 60_000,
-        transports: [{ kind: "sse", method: "POST", path: "/live/v1/logs" }],
+        transports: [{ kind: "sse", method: "POST", path: "/live/v2/logs" }],
       }),
     );
     const acquire = createSameOriginLiveLogAccessProvider({
@@ -37,7 +37,7 @@ describe("same-origin live-log ticket acquisition", () => {
       ticket: TICKET_ONE,
       expiresAtMs: expect.any(Number),
       logsOrigin: "https://ci.example",
-      transports: [{ kind: "sse", method: "POST", path: "/live/v1/logs" }],
+      transports: [{ kind: "sse", method: "POST", path: "/live/v2/logs" }],
     });
     const [input, init] = fetchMock.mock.calls[0] ?? [];
     expect((input as URL).href).toBe(
@@ -94,7 +94,7 @@ describe("live-log capability validation", () => {
   it.each([
     [null, "plain object"],
     [{ ...access(TICKET_ONE), extra: true }, "unexpected fields"],
-    [{ ...access(TICKET_ONE), protocolVersion: 2 }, "version"],
+    [{ ...access(TICKET_ONE), protocolVersion: 1 }, "version"],
     [{ ...access(TICKET_ONE), ticket: "not-a-ticket" }, "ticket"],
     [{ ...access(TICKET_ONE), expiresAtMs: 0 }, "safe integer"],
     [{ ...access(TICKET_ONE), logsOrigin: "not a URL" }, "invalid"],
@@ -107,7 +107,7 @@ describe("live-log capability validation", () => {
         transports: Array.from({ length: 9 }, () => ({
           kind: "sse",
           method: "POST",
-          path: "/live/v1/logs",
+          path: "/live/v2/logs",
         })),
       },
       "too many",
@@ -116,14 +116,14 @@ describe("live-log capability validation", () => {
     [
       {
         ...access(TICKET_ONE),
-        transports: [{ kind: "SSE", method: "POST", path: "/live/v1/logs" }],
+        transports: [{ kind: "SSE", method: "POST", path: "/live/v2/logs" }],
       },
       "kind",
     ],
     [
       {
         ...access(TICKET_ONE),
-        transports: [{ kind: "sse", method: "post", path: "/live/v1/logs" }],
+        transports: [{ kind: "sse", method: "post", path: "/live/v2/logs" }],
       },
       "method",
     ],
@@ -140,6 +140,62 @@ describe("live-log capability validation", () => {
 });
 
 describe("live-log transport controller", () => {
+  it("delivers group lifecycle records and scoped lines in order", async () => {
+    const records: LiveLogRecord[] = [];
+    const payload = [
+      recordEvent("checkpoint_1", {
+        protocolVersion: LIVE_LOG_PROTOCOL_VERSION,
+        streamId: STREAM_ID,
+        sequence: "1",
+        fragment: null,
+        emittedAtMs: 1_777_890_010_000,
+        type: "group_started",
+        group: {
+          id: "phase/1",
+          parentId: null,
+          name: "Build",
+          kind: "step",
+          ordinal: 1,
+        },
+      }),
+      logEvent("checkpoint_2", { sequence: "2", text: "building" }),
+      recordEvent("checkpoint_3", {
+        protocolVersion: LIVE_LOG_PROTOCOL_VERSION,
+        streamId: STREAM_ID,
+        sequence: "3",
+        fragment: null,
+        emittedAtMs: 1_777_890_012_000,
+        type: "group_finished",
+        groupId: "phase/1",
+        conclusion: "success",
+      }),
+      completeEvent("checkpoint_4"),
+    ].join("");
+    const controller = new LiveLogController({
+      access: async () => access(TICKET_ONE),
+      fetch: async () => eventStreamResponse(payload),
+      onRecord: (record) => {
+        records.push(record);
+      },
+    });
+
+    await controller.start();
+
+    expect(records.map((record) => record.type)).toEqual([
+      "group_started",
+      "line",
+      "group_finished",
+    ]);
+    expect(records[0]).toMatchObject({
+      group: { id: "phase/1", name: "Build", kind: "step", ordinal: 1 },
+    });
+    expect(records[1]).toMatchObject({ groupId: "phase/1", text: "building" });
+    expect(records[2]).toMatchObject({
+      groupId: "phase/1",
+      conclusion: "success",
+    });
+  });
+
   it("decodes arbitrarily chunked UTF-8 records and advances after application", async () => {
     const applied: Array<{ record: LiveLogRecord; checkpoint: string }> = [];
     const states: string[] = [];
@@ -149,7 +205,7 @@ describe("live-log transport controller", () => {
         sequence: "18446744073709551615",
         text: "compile café 🚀",
       }),
-      "event: complete\ndata: {\"protocolVersion\":1}\n\n",
+      completeEvent("checkpoint_2"),
     ].join("");
     const fetchMock = vi.fn<LiveLogFetch>(async () =>
       eventStreamResponse(payload, [1, 5, 37, 43]),
@@ -173,15 +229,17 @@ describe("live-log transport controller", () => {
           sequence: "18446744073709551615",
           fragment: null,
           emittedAtMs: 1_777_890_010_000,
+          type: "line",
+          groupId: "phase/1",
           channel: "stdout",
           text: "compile café 🚀",
         },
       },
     ]);
-    expect(controller.checkpoint).toBe("checkpoint_1");
+    expect(controller.checkpoint).toBe("checkpoint_2");
     expect(states).toEqual(["connecting", "open", "complete"]);
     const [url, init] = fetchMock.mock.calls[0] ?? [];
-    expect((url as URL).href).toBe("https://logs.example/live/v1/logs");
+    expect((url as URL).href).toBe("https://logs.example/live/v2/logs");
     expect((url as URL).href).not.toContain(TICKET_ONE);
     expect(init).toMatchObject({
       credentials: "omit",
@@ -204,12 +262,12 @@ describe("live-log transport controller", () => {
     const responses = [
       eventStreamResponse(
         `${logEvent("checkpoint_1", { sequence: "7", text: "first" })}` +
-          "event: reconnect\ndata: {\"protocolVersion\":1}\n\n",
+          "event: reconnect\ndata: {\"protocolVersion\":2}\n\n",
       ),
       eventStreamResponse(
         `${logEvent("checkpoint_1", { sequence: "7", text: "first" })}` +
           `${logEvent("checkpoint_2", { sequence: "8", text: "second" })}` +
-          "event: complete\ndata: {\"protocolVersion\":1}\n\n",
+          completeEvent("checkpoint_3"),
       ),
     ];
     const fetchMock = vi.fn<LiveLogFetch>(async () => {
@@ -231,8 +289,8 @@ describe("live-log transport controller", () => {
 
     expect(acquire).toHaveBeenCalledTimes(2);
     expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(records.map((record) => record.text)).toEqual(["first", "second"]);
-    expect(controller.checkpoint).toBe("checkpoint_2");
+    expect(records.filter((record) => record.type === "line").map((record) => record.text)).toEqual(["first", "second"]);
+    expect(controller.checkpoint).toBe("checkpoint_3");
     const firstHeaders = fetchMock.mock.calls[0]?.[1]?.headers as Headers;
     const secondHeaders = fetchMock.mock.calls[1]?.[1]?.headers as Headers;
     expect(firstHeaders.get("Authorization")).toContain(TICKET_ONE);
@@ -240,31 +298,59 @@ describe("live-log transport controller", () => {
     expect(secondHeaders.get("Last-Event-ID")).toBe("checkpoint_1");
   });
 
-  it("does not advance a checkpoint for malformed data and selects fallback", async () => {
-    const fallback = vi.fn();
+  it("does not advance a checkpoint when malformed data fails delivery", async () => {
+    const failure = vi.fn();
     const malformed = logEvent("checkpoint_bad", {
       sequence: 9,
       text: "sequence must be lossless decimal text",
     });
+    const acquire = vi.fn(async () => access(TICKET_ONE));
+    const fetchMock = vi.fn<LiveLogFetch>(async () =>
+      eventStreamResponse(malformed),
+    );
     const controller = new LiveLogController({
-      access: async () => access(TICKET_ONE),
-      fetch: async () => eventStreamResponse(malformed),
-      maxConsecutiveFailures: 0,
+      access: acquire,
+      fetch: fetchMock,
       onRecord: vi.fn(),
-      onFallback: fallback,
+      onFailure: failure,
     });
 
     await controller.start();
 
     expect(controller.checkpoint).toBeNull();
-    expect(fallback).toHaveBeenCalledWith({
+    expect(failure).toHaveBeenCalledWith({
       code: "protocol",
       message: "the log record sequence is invalid",
     });
+    expect(acquire).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not restart after the stream reaches its terminal checkpoint", async () => {
+    const acquire = vi.fn(async () => access(TICKET_ONE));
+    const fetchMock = vi.fn<LiveLogFetch>(async () =>
+      eventStreamResponse(completeEvent("checkpoint_terminal")),
+    );
+    const states: string[] = [];
+    const controller = new LiveLogController({
+      access: acquire,
+      fetch: fetchMock,
+      onRecord: vi.fn(),
+      onStateChange: (state) => states.push(state.kind),
+    });
+
+    await controller.start();
+    controller.pause();
+    await controller.start();
+
+    expect(controller.checkpoint).toBe("checkpoint_terminal");
+    expect(acquire).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(states).toEqual(["connecting", "open", "complete"]);
   });
 
   it("replays a record when the UI has not successfully applied it", async () => {
-    const fallback = vi.fn();
+    const failure = vi.fn();
     const controller = new LiveLogController({
       access: async () => access(TICKET_ONE),
       fetch: async () =>
@@ -275,20 +361,20 @@ describe("live-log transport controller", () => {
       onRecord: () => {
         throw new Error("render target unavailable");
       },
-      onFallback: fallback,
+      onFailure: failure,
     });
 
     await controller.start();
 
     expect(controller.checkpoint).toBeNull();
-    expect(fallback).toHaveBeenCalledWith({
+    expect(failure).toHaveBeenCalledWith({
       code: "client",
       message: "the live-log client failed",
     });
   });
 
   it("rejects advertised transport paths that escape the trusted logs origin", async () => {
-    const fallback = vi.fn();
+    const failure = vi.fn();
     const controller = new LiveLogController({
       access: async () => ({
         ...access(TICKET_ONE),
@@ -296,19 +382,19 @@ describe("live-log transport controller", () => {
           {
             kind: "sse",
             method: "POST",
-            path: "//evil.invalid/live/v1/logs",
+            path: "//evil.invalid/live/v2/logs",
           },
         ],
       }),
       fetch: vi.fn() as LiveLogFetch,
       maxConsecutiveFailures: 0,
       onRecord: vi.fn(),
-      onFallback: fallback,
+      onFailure: failure,
     });
 
     await controller.start();
 
-    expect(fallback).toHaveBeenCalledWith(
+    expect(failure).toHaveBeenCalledWith(
       expect.objectContaining({ code: "protocol" }),
     );
   });
@@ -333,7 +419,7 @@ describe("live-log transport controller", () => {
       access: acquire,
       fetch: async () =>
         eventStreamResponse(
-          "event: complete\ndata: {\"protocolVersion\":1}\n\n",
+          completeEvent("checkpoint_complete"),
         ),
       onRecord: vi.fn(),
       onStateChange: (state) => states.push(state.kind),
@@ -464,10 +550,19 @@ describe("live-log SSE rejection", () => {
       "no checkpoint",
     ],
     [
+      "completion without checkpoint",
+      () =>
+        eventStreamResponse(
+          "event: complete\ndata: {\"protocolVersion\":2}\n\n",
+        ),
+      "protocol",
+      "no checkpoint",
+    ],
+    [
       "server error event",
       () =>
         eventStreamResponse(
-          "event: error\ndata: {\"protocolVersion\":1,\"error\":\"internal_error\"}\n\n",
+          "event: error\ndata: {\"protocolVersion\":2,\"error\":\"internal_error\"}\n\n",
         ),
       "transport",
       "internal_error",
@@ -506,7 +601,7 @@ describe("live-log SSE rejection", () => {
   });
 
   it.each([
-    [{ protocolVersion: 2 }, "protocol version"],
+    [{ protocolVersion: 1 }, "protocol version"],
     [{ streamId: "not-a-uuid" }, "stream ID"],
     [{ sequence: "18446744073709551616" }, "sequence"],
     [{ fragment: 0 }, "fragment"],
@@ -522,6 +617,36 @@ describe("live-log SSE rejection", () => {
       message: expect.stringContaining(message),
     });
   });
+
+  it.each(["Build\tstep", "Build\u202estep"]) (
+    "rejects an unsafe log group name %#",
+    async (name) => {
+      const failure = await failureFor(
+        eventStreamResponse(
+          recordEvent("checkpoint", {
+            protocolVersion: LIVE_LOG_PROTOCOL_VERSION,
+            streamId: STREAM_ID,
+            sequence: "1",
+            fragment: null,
+            emittedAtMs: 1_777_890_010_000,
+            type: "group_started",
+            group: {
+              id: "phase/1",
+              parentId: null,
+              name,
+              kind: "step",
+              ordinal: 1,
+            },
+          }),
+        ),
+      );
+
+      expect(failure).toEqual({
+        code: "protocol",
+        message: expect.stringContaining("group name"),
+      });
+    },
+  );
 
   it.each([
     ["not JSON", "not valid JSON"],
@@ -539,7 +664,7 @@ describe("live-log SSE rejection", () => {
       access: async () => access(TICKET_ONE),
       fetch: async () =>
         eventStreamResponse(
-          "extension: ignored\nevent: complete\ndata: {\"protocolVersion\":1}\n\n",
+          `extension: ignored\n${completeEvent("checkpoint_complete")}`,
         ),
       onRecord: vi.fn(),
     });
@@ -554,7 +679,7 @@ function access(ticket: string): LiveLogAccess {
     ticket,
     expiresAtMs: Date.now() + 60_000,
     logsOrigin: "https://logs.example",
-    transports: [{ kind: "sse", method: "POST", path: "/live/v1/logs" }],
+    transports: [{ kind: "sse", method: "POST", path: "/live/v2/logs" }],
   };
 }
 
@@ -568,11 +693,21 @@ function logEvent(
     sequence: "1",
     fragment: null,
     emittedAtMs: 1_777_890_010_000,
+    type: "line",
+    groupId: "phase/1",
     channel: "stdout",
     text: "line",
     ...overrides,
   };
+  return recordEvent(checkpoint, record);
+}
+
+function recordEvent(checkpoint: string, record: unknown): string {
   return `id: ${checkpoint}\nevent: log\ndata: ${JSON.stringify(record)}\n\n`;
+}
+
+function completeEvent(checkpoint: string): string {
+  return `id: ${checkpoint}\nevent: complete\ndata: {"protocolVersion":2}\n\n`;
 }
 
 function eventStreamResponse(
@@ -619,14 +754,14 @@ async function failureFor(response: Response): Promise<LiveLogFailure> {
     fetch: async () => response,
     maxConsecutiveFailures: 0,
     onRecord: vi.fn(),
-    onFallback: (selected) => {
+    onFailure: (selected) => {
       failure = selected;
     },
   });
 
   await controller.start();
   if (failure === undefined) {
-    throw new Error("the live-log controller did not select fallback");
+    throw new Error("the live-log controller did not report failure");
   }
   return failure;
 }
