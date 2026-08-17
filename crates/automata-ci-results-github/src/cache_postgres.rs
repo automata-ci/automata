@@ -16,8 +16,7 @@ use crate::{
 
 const ACTIVE_CACHE_LIFECYCLES: &[&str] =
     &["leased", "preparing", "running", "cancelling", "finalizing"];
-const MAX_REPOSITORY_CACHE_ENTRIES: usize = 4_096;
-const CACHE_ENTRY_CENSUS_LIMIT: i64 = 4_097;
+const CACHE_ENTRY_CENSUS_LIMIT: i64 = 16_385;
 const MAXIMUM_CACHE_CALLER_CLOCK_SKEW_SECONDS: u64 = 60;
 const MAXIMUM_CACHE_GARBAGE_BATCH: usize = 1_024;
 
@@ -29,7 +28,7 @@ enum CacheRepositoryLimitRejection {
 const fn repository_cache_entries_rejection(
     observed: usize,
 ) -> Option<CacheRepositoryLimitRejection> {
-    if observed > MAX_REPOSITORY_CACHE_ENTRIES {
+    if observed > PostgresCacheRepository::MAXIMUM_REPOSITORY_CACHE_ENTRIES {
         return Some(CacheRepositoryLimitRejection::RepositoryEntries);
     }
     None
@@ -42,6 +41,12 @@ pub struct PostgresCacheRepository {
 }
 
 impl PostgresCacheRepository {
+    /// Maximum finalized and in-progress cache entries retained per repository.
+    ///
+    /// Compiler caches publish one entry per compiled object, so this guard is
+    /// deliberately above the practical population admitted by the byte quota.
+    pub const MAXIMUM_REPOSITORY_CACHE_ENTRIES: usize = 16_384;
+
     /// Binds cache coordination to an existing product pool.
     #[must_use]
     pub fn new(pool: PgPool) -> Self {
@@ -1180,7 +1185,7 @@ async fn find_match(
             return Ok(Some(entry));
         }
         expired_after_lock.push(entry.entry_id.as_uuid());
-        if expired_after_lock.len() >= MAX_REPOSITORY_CACHE_ENTRIES {
+        if expired_after_lock.len() >= PostgresCacheRepository::MAXIMUM_REPOSITORY_CACHE_ENTRIES {
             return Ok(None);
         }
     }
@@ -1284,10 +1289,10 @@ async fn reserve_repository_entry_slot(
     repository_id: Uuid,
 ) -> Result<(), CacheRepositoryError> {
     let count = repository_entry_count(transaction, repository_id).await?;
-    if count < MAX_REPOSITORY_CACHE_ENTRIES {
+    if count < PostgresCacheRepository::MAXIMUM_REPOSITORY_CACHE_ENTRIES {
         return Ok(());
     }
-    if count > MAX_REPOSITORY_CACHE_ENTRIES {
+    if count > PostgresCacheRepository::MAXIMUM_REPOSITORY_CACHE_ENTRIES {
         return Err(error(CacheRepositoryErrorKind::ResourceExhausted));
     }
     let candidate = sqlx::query_scalar::<_, Uuid>(
@@ -1335,7 +1340,7 @@ async fn evict_to_fit(
     .fetch_all(&mut **transaction)
     .await
     .map_err(database_error)?;
-    if rows.len() > MAX_REPOSITORY_CACHE_ENTRIES {
+    if rows.len() > PostgresCacheRepository::MAXIMUM_REPOSITORY_CACHE_ENTRIES {
         return Err(error(CacheRepositoryErrorKind::ResourceExhausted));
     }
     let mut total = 0_u64;
@@ -1513,22 +1518,28 @@ fn corrupt_error(_error: sqlx::Error) -> CacheRepositoryError {
 #[cfg(test)]
 mod tests {
     use super::{
-        CACHE_ENTRY_CENSUS_LIMIT, CacheRepositoryLimitRejection, MAX_REPOSITORY_CACHE_ENTRIES,
+        CACHE_ENTRY_CENSUS_LIMIT, CacheRepositoryLimitRejection, PostgresCacheRepository,
         repository_cache_entries_rejection,
     };
 
     #[test]
     fn repository_cache_entries_have_exact_boundaries() {
         assert_eq!(
-            repository_cache_entries_rejection(MAX_REPOSITORY_CACHE_ENTRIES - 1),
+            repository_cache_entries_rejection(
+                PostgresCacheRepository::MAXIMUM_REPOSITORY_CACHE_ENTRIES - 1,
+            ),
             None
         );
         assert_eq!(
-            repository_cache_entries_rejection(MAX_REPOSITORY_CACHE_ENTRIES),
+            repository_cache_entries_rejection(
+                PostgresCacheRepository::MAXIMUM_REPOSITORY_CACHE_ENTRIES,
+            ),
             None
         );
         assert_eq!(
-            repository_cache_entries_rejection(MAX_REPOSITORY_CACHE_ENTRIES + 1),
+            repository_cache_entries_rejection(
+                PostgresCacheRepository::MAXIMUM_REPOSITORY_CACHE_ENTRIES + 1,
+            ),
             Some(CacheRepositoryLimitRejection::RepositoryEntries)
         );
     }
@@ -1537,7 +1548,7 @@ mod tests {
     fn cache_entry_census_limit_is_one_over_the_repository_limit() {
         assert_eq!(
             usize::try_from(CACHE_ENTRY_CENSUS_LIMIT).expect("cache entry census limit fits usize"),
-            MAX_REPOSITORY_CACHE_ENTRIES + 1
+            PostgresCacheRepository::MAXIMUM_REPOSITORY_CACHE_ENTRIES + 1
         );
     }
 }

@@ -714,9 +714,9 @@ async fn cache_touch_rechecks_exact_expiry_after_the_entry_lock_wait() -> TestRe
 #[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
 #[allow(clippy::too_many_lines)] // One narrative proves the exact cap, one-over refusal, and bounded eviction.
 async fn cache_entry_cardinality_is_bounded_even_for_zero_byte_entries() -> TestResult {
-    const ENTRY_LIMIT: i64 = 4_096;
+    let entry_limit = i64::try_from(PostgresCacheRepository::MAXIMUM_REPOSITORY_CACHE_ENTRIES)?;
 
-    run_with_database(|database| async move {
+    run_with_database(move |database| async move {
         let (repository, execution, _session_fence, _lease_guard) =
             active_attempt(&database).await?;
         let cache = read_write_cache_authority("automata/results-test", "refs/heads/main");
@@ -787,7 +787,7 @@ async fn cache_entry_cardinality_is_bounded_even_for_zero_byte_entries() -> Test
             ",
         )
         .bind(target.as_uuid())
-        .bind(ENTRY_LIMIT)
+        .bind(entry_limit)
         .execute(database.pool())
         .await?;
 
@@ -850,7 +850,7 @@ async fn cache_entry_cardinality_is_bounded_even_for_zero_byte_entries() -> Test
             .bind(execution.run_id().as_uuid())
             .fetch_one(database.pool())
             .await?,
-            ENTRY_LIMIT,
+            entry_limit,
         );
         Ok(())
     })
@@ -860,9 +860,10 @@ async fn cache_entry_cardinality_is_bounded_even_for_zero_byte_entries() -> Test
 #[tokio::test]
 #[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
 async fn concurrent_creates_respect_the_exact_cap_with_repeatable_read_sessions() -> TestResult {
-    const EXISTING_ENTRIES: i64 = 4_095;
+    let existing_entries =
+        i64::try_from(PostgresCacheRepository::MAXIMUM_REPOSITORY_CACHE_ENTRIES - 1)?;
 
-    run_with_database(|database| async move {
+    run_with_database(move |database| async move {
         let (repository, execution, _session_fence, _lease_guard) =
             active_attempt(&database).await?;
         let cache = read_write_cache_authority("automata/results-test", "refs/heads/main");
@@ -870,7 +871,7 @@ async fn concurrent_creates_respect_the_exact_cap_with_repeatable_read_sessions(
         repository
             .create(create_request(execution, cache.clone(), seed, "cap-seed"))
             .await?;
-        insert_zero_byte_finalized_entries(database.pool(), seed, EXISTING_ENTRIES - 1).await?;
+        insert_zero_byte_finalized_entries(database.pool(), seed, existing_entries - 1).await?;
         set_repeatable_read_session_default(database.pool()).await?;
 
         let repository_id = execution_repository_id(database.pool(), execution).await?;
@@ -920,7 +921,7 @@ async fn concurrent_creates_respect_the_exact_cap_with_repeatable_read_sessions(
             .bind(repository_id)
             .fetch_one(database.pool())
             .await?,
-            EXISTING_ENTRIES + 1,
+            existing_entries + 1,
         );
         assert_eq!(
             sqlx::query_scalar::<_, i64>(

@@ -20,6 +20,8 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: "1"
   SCCACHE_BASEDIRS: ${{ github.workspace }}
+  SCCACHE_GHA_CACHE_FROM: automata-rust-v1
+  SCCACHE_GHA_CACHE_TO: automata-rust-v1
   SCCACHE_IDLE_TIMEOUT: "0"
   SCCACHE_SERVER_UDS: '\x00automata-sccache'
   TMPDIR: ${{ github.workspace }}/target/task-tmp/ci
@@ -65,39 +67,32 @@ jobs:
             /opt/cargo/registry/cache
             /opt/cargo/registry/index
             /opt/cargo/registry/src
-          key: cargo-ubuntu-24.04-rust-1.97.1-${{ hashFiles('Cargo.lock') }}
+          key: cargo-v1-ubuntu-24.04-rust-1.97.1-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            cargo-ubuntu-24.04-rust-1.97.1-
+            cargo-v1-ubuntu-24.04-rust-1.97.1-
 
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-
-      - name: Lint workflows
+      - name: Run Rust checks
         run: |
+          cargo fmt --all -- --check
           ./scripts/ci/install-actionlint.sh target/ci-tools
           ./scripts/ci/lint-workflows.sh
-
-      - name: Run Clippy
-        run: cargo clippy --workspace --lib --bins --all-features --locked -- -D warnings
-
-      - name: Run Rust tests
-        run: >-
-          cargo test
-          --locked
-          --all-features
-          --lib
-          --no-fail-fast
-          -p automata-ci-control
-          -p automata-ci-core
-          -p automata-ci-github-delivery
-          -p automata-ci-job-executor-github
-          -p automata-ci-results-github
-          -p automata-ci-runner-runtime
-          -p automata-ci-sandbox-podman
-          -p automata-ci-store-postgres
-          -p automata-ci-ui-renderer
-          -p automata-ci-workflow-github
-          -p automata-ci-workflow-service
+          cargo clippy --workspace --lib --bins --all-features --locked -- -D warnings
+          cargo test \
+            --locked \
+            --all-features \
+            --lib \
+            --no-fail-fast \
+            -p automata-ci-control \
+            -p automata-ci-core \
+            -p automata-ci-github-delivery \
+            -p automata-ci-job-executor-github \
+            -p automata-ci-results-github \
+            -p automata-ci-runner-runtime \
+            -p automata-ci-sandbox-podman \
+            -p automata-ci-store-postgres \
+            -p automata-ci-ui-renderer \
+            -p automata-ci-workflow-github \
+            -p automata-ci-workflow-service
 
   postgres:
     name: PostgreSQL
@@ -156,9 +151,9 @@ jobs:
             /opt/cargo/registry/cache
             /opt/cargo/registry/index
             /opt/cargo/registry/src
-          key: cargo-ubuntu-24.04-rust-1.97.1-${{ hashFiles('Cargo.lock') }}
+          key: cargo-v1-ubuntu-24.04-rust-1.97.1-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            cargo-ubuntu-24.04-rust-1.97.1-
+            cargo-v1-ubuntu-24.04-rust-1.97.1-
 
       - name: Run PostgreSQL tests
         run: ./scripts/ci/run-postgres-tests.sh

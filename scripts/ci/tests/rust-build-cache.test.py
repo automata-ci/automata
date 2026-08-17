@@ -46,6 +46,11 @@ def main() -> None:
     assert workflow.count("SCCACHE_BASEDIRS: ${{ github.workspace }}") == 1, (
         "sccache must normalize each ephemeral checkout to a stable source path"
     )
+    assert workflow.count("SCCACHE_GHA_CACHE_FROM: automata-rust-v1") == 1
+    assert workflow.count("SCCACHE_GHA_CACHE_TO: automata-rust-v1") == 1
+    assert workflow.count("TMPDIR: ${{ github.workspace }}/target/task-tmp/ci") == 1, (
+        "build scratch must remain inside the repository target directory"
+    )
     for job in RUST_JOBS:
         body = job_body(workflow, job)
         assert "RUSTC_WRAPPER: sccache" in body, f"{job} lost the rustc wrapper"
@@ -70,6 +75,7 @@ def main() -> None:
         assert body.index(SHORT_STARTUP) < body.index(CACHE_ACTION), (
             f"{job} must start sccache before restoring build inputs"
         )
+        assert "cargo-v1-ubuntu-24.04-rust-1.97.1-" in body
         assert "/opt/cargo/registry/cache" in body
         assert "/opt/cargo/registry/index" in body
         assert "/opt/cargo/registry/src" in body
