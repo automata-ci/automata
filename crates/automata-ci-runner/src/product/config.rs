@@ -1771,7 +1771,10 @@ fn executor_runtime_features(
         }
     }
     match provider_kind {
-        ProviderKind::Podman | ProviderKind::Kubernetes | ProviderKind::MacosVirtualization
+        ProviderKind::Podman
+        | ProviderKind::LocalDocker
+        | ProviderKind::Kubernetes
+        | ProviderKind::MacosVirtualization
             if toolchain.bash().is_some() || toolchain.sh().is_some() =>
         {
             features.insert(RunnerFeature::DEFAULT_POSIX_SHELL);
@@ -1828,24 +1831,24 @@ mod runtime_feature_tests {
             node20: None,
             node24: Some(posix("/__e/node24/bin/node")),
         };
-        assert_eq!(
-            executor_runtime_features(&toolchain, ProviderKind::Podman),
-            BTreeSet::from([
-                RunnerFeature::SHELL_STEPS,
-                RunnerFeature::DEFAULT_POSIX_SHELL,
-                RunnerFeature::BASH_SHELL,
-                RunnerFeature::SH_SHELL,
-                RunnerFeature::PYTHON_SHELL,
-                RunnerFeature::PWSH_SHELL,
-                RunnerFeature::JAVASCRIPT_ACTIONS,
-                RunnerFeature::NODE24_ACTIONS,
-                RunnerFeature::COMPOSITE_ACTIONS,
-                RunnerFeature::REPOSITORY_ACTIONS,
-                RunnerFeature::LOCAL_ACTIONS,
-                RunnerFeature::COMMAND_FILES,
-                RunnerFeature::JOB_SUMMARIES,
-            ])
-        );
+        let expected = BTreeSet::from([
+            RunnerFeature::SHELL_STEPS,
+            RunnerFeature::DEFAULT_POSIX_SHELL,
+            RunnerFeature::BASH_SHELL,
+            RunnerFeature::SH_SHELL,
+            RunnerFeature::PYTHON_SHELL,
+            RunnerFeature::PWSH_SHELL,
+            RunnerFeature::JAVASCRIPT_ACTIONS,
+            RunnerFeature::NODE24_ACTIONS,
+            RunnerFeature::COMPOSITE_ACTIONS,
+            RunnerFeature::REPOSITORY_ACTIONS,
+            RunnerFeature::LOCAL_ACTIONS,
+            RunnerFeature::COMMAND_FILES,
+            RunnerFeature::JOB_SUMMARIES,
+        ]);
+        for provider in [ProviderKind::Podman, ProviderKind::LocalDocker] {
+            assert_eq!(executor_runtime_features(&toolchain, provider), expected);
+        }
     }
 
     #[test]
