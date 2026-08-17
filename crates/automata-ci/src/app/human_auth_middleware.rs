@@ -41,6 +41,7 @@ use super::{
         clear_csrf_cookie, clear_login_cookie, clear_session_cookie, csrf_set_cookie,
         extract_human_credential, verify_browser_mutation,
     },
+    live_log::is_browser_live_log_ticket_request,
     publication_settings::{
         MAX_PUBLICATION_SETTINGS_FORM_BYTES, PublicationSettingsFormSubmission,
         is_publication_settings_form, parse_publication_settings_form,
@@ -263,6 +264,8 @@ pub(crate) async fn authenticate_human_request(
     let Ok(presented) = extract_human_credential(request.headers(), state.cookie_mode()) else {
         return rejected_credential(surface, state.cookie_mode());
     };
+    let live_log_ticket =
+        is_browser_live_log_ticket_request(request.method(), request.uri().path());
     let Some(presented) = presented else {
         if surface == HumanRequestSurface::Cli {
             return request_auth_error_response(
@@ -273,7 +276,7 @@ pub(crate) async fn authenticate_human_request(
                 true,
             );
         }
-        if !is_safe_method(request.method()) {
+        if !is_safe_method(request.method()) && !live_log_ticket {
             return request_auth_error_response(
                 surface,
                 StatusCode::UNAUTHORIZED,
@@ -313,7 +316,7 @@ pub(crate) async fn authenticate_human_request(
     let cli_logout = request.uri().query().is_none()
         && is_cli_session_logout(request.method(), request.uri().path());
     let raw = presented.expose_secret();
-    let safe_method = is_safe_method(request.method());
+    let safe_method = is_safe_method(request.method()) || live_log_ticket;
     let mut pending_rbac_form_body = None;
     let browser_csrf = if expected_kind == SessionKind::Browser {
         let csrf = match state.sessions.derive_csrf_raw(raw, expected_kind) {
@@ -757,6 +760,7 @@ mod tests {
     use crate::app::rbac_management::VerifiedRbacManagementForm;
 
     const SESSION: &str = "v1~test-key~AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    const LIVE_LOG_TICKET_PATH: &str = "/automata-ci/automata/actions/runs/550e8400-e29b-41d4-a716-446655440000/jobs/11111111-1111-4111-8111-111111111111/live-ticket";
 
     #[derive(Debug)]
     struct MutableClock(AtomicU64);
@@ -1057,6 +1061,112 @@ mod tests {
                 HumanRequestSurface::Browser
             );
         }
+    }
+
+    #[test]
+    fn only_the_canonical_live_log_ticket_post_is_a_read_capability_request() {
+        assert!(is_browser_live_log_ticket_request(
+            &Method::POST,
+            LIVE_LOG_TICKET_PATH
+        ));
+        assert!(!is_browser_live_log_ticket_request(
+            &Method::GET,
+            LIVE_LOG_TICKET_PATH
+        ));
+        assert!(!is_browser_live_log_ticket_request(
+            &Method::POST,
+            "/automata-ci/automata/actions/runs/not-a-run/jobs/11111111-1111-4111-8111-111111111111/live-ticket"
+        ));
+        assert!(!is_browser_live_log_ticket_request(
+            &Method::POST,
+            &format!("{LIVE_LOG_TICKET_PATH}/extra")
+        ));
+    }
+
+    #[tokio::test]
+    async fn live_log_ticket_post_admits_anonymous_and_authenticated_viewers_without_csrf() {
+        let clock = Arc::new(MutableClock::new(100));
+        let (state, repository, _csrf) = middleware_fixture(clock);
+        let app = Router::new()
+            .route(
+                LIVE_LOG_TICKET_PATH,
+                post(|Extension(context): Extension<RequestContext>| async move {
+                    if context.viewer().is_none() {
+                        StatusCode::NO_CONTENT
+                    } else {
+                        StatusCode::ACCEPTED
+                    }
+                }),
+            )
+            .layer(middleware::from_fn_with_state(
+                state,
+                authenticate_human_request,
+            ));
+
+        let anonymous = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(LIVE_LOG_TICKET_PATH)
+                    .header("origin", "http://127.0.0.1:8080")
+                    .body(Body::empty())
+                    .expect("anonymous ticket request"),
+            )
+            .await
+            .expect("anonymous ticket response");
+        assert_eq!(anonymous.status(), StatusCode::NO_CONTENT);
+
+        let authenticated = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(LIVE_LOG_TICKET_PATH)
+                    .header(
+                        axum::http::header::COOKIE,
+                        format!("automata-dev-session={SESSION}"),
+                    )
+                    .header("origin", "http://127.0.0.1:8080")
+                    .body(Body::empty())
+                    .expect("authenticated ticket request"),
+            )
+            .await
+            .expect("authenticated ticket response");
+        assert_eq!(authenticated.status(), StatusCode::ACCEPTED);
+        assert_eq!(
+            *repository.observations.lock().expect("touch observations"),
+            [100]
+        );
+    }
+
+    #[tokio::test]
+    async fn unrelated_anonymous_post_remains_unauthorized() {
+        let clock = Arc::new(MutableClock::new(100));
+        let (state, repository, _csrf) = middleware_fixture(clock);
+        let app = Router::new()
+            .route("/mutate", post(|| async { StatusCode::NO_CONTENT }))
+            .layer(middleware::from_fn_with_state(
+                state,
+                authenticate_human_request,
+            ));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/mutate")
+                    .body(Body::empty())
+                    .expect("anonymous mutation"),
+            )
+            .await
+            .expect("anonymous mutation response");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(
+            repository
+                .observations
+                .lock()
+                .expect("touch observations")
+                .is_empty()
+        );
     }
 
     #[test]
