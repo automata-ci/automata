@@ -6,6 +6,7 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -133,7 +134,8 @@ def synthetic_workspace_reports(
     ordinary_covered: int,
 ) -> None:
     configuration = json.loads(policy_path.read_text(encoding="utf-8"))
-    sources = [("crates/core/src/lib.rs", ordinary_covered, 172_000)]
+    minimum_measured_lines = configuration["ordinary_guard"]["minimum_measured_lines"]
+    sources = [("crates/core/src/lib.rs", ordinary_covered, minimum_measured_lines)]
     for lane, lane_policy in configuration["lanes"].items():
         if lane == "ordinary":
             continue
@@ -657,13 +659,22 @@ os.execv({real_mv!r}, [{real_mv!r}, *sys.argv[1:]])
             encoding="utf-8",
         )
         runner_fake_mv.chmod(0o755)
+        runner_policy = json.loads(
+            (runner_ci / "rust-coverage-policy.json").read_text(encoding="utf-8")
+        )
+        runner_minimum_measured = runner_policy["ordinary_guard"][
+            "minimum_measured_lines"
+        ]
+        runner_floor = runner_policy["ordinary_guard"]["line_percent_floor"]
+        passing_covered = math.ceil(runner_minimum_measured * runner_floor / 100)
+        failing_covered = passing_covered - 1
         synthetic_summary = scratch / "synthetic-summary.json"
         synthetic_lcov = scratch / "synthetic-coverage.lcov"
         synthetic_workspace_reports(
             runner_ci / "rust-coverage-policy.json",
             synthetic_summary,
             synthetic_lcov,
-            141_040,
+            passing_covered,
         )
         runner_environment = dict(os.environ)
         runner_environment["PATH"] = f"{runner_fake_bin}:{runner_environment['PATH']}"
@@ -708,7 +719,7 @@ os.execv({real_mv!r}, [{real_mv!r}, *sys.argv[1:]])
             runner_ci / "rust-coverage-policy.json",
             failed_summary,
             failed_lcov,
-            140_000,
+            failing_covered,
         )
         combined_environment = dict(runner_environment)
         combined_environment["AUTOMATA_TEST_DATABASE_URL"] = (
@@ -1006,7 +1017,9 @@ os.execv({real_mv!r}, [{real_mv!r}, *sys.argv[1:]])
 
         invalid_lcov = scratch / "synthetic-invalid.lcov"
         invalid_lcov.write_text(
-            synthetic_lcov.read_text(encoding="utf-8").replace("LH:141040", "LH:1", 1),
+            synthetic_lcov.read_text(encoding="utf-8").replace(
+                f"LH:{passing_covered}", "LH:1", 1
+            ),
             encoding="utf-8",
         )
         invalid_environment = dict(runner_environment)

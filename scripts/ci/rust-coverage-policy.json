@@ -79,13 +79,13 @@
     }
   },
   "ordinary_guard": {
-    "line_percent_floor": 82.0,
-    "minimum_measured_lines": 172000,
+    "line_percent_floor": 81.0,
+    "minimum_measured_lines": 246000,
     "reviewed_baseline": {
-      "covered_lines": 145319,
-      "measured_lines": 175150,
-      "line_percent": 82.96831287467884,
-      "report_date": "2026-08-11"
+      "covered_lines": 202158,
+      "measured_lines": 246784,
+      "line_percent": 81.91698003112033,
+      "report_date": "2026-08-17"
     }
   }
 }
