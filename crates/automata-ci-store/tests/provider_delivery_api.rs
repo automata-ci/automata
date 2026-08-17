@@ -1,10 +1,11 @@
 use automata_ci_core::{RunId, Sha256Digest, UnixMillis};
+use automata_ci_provider::{ProviderConnectionId, ProviderIdentityError};
 use automata_ci_store::{
     AcceptProviderDelivery, AdmissionObject, ClaimProviderDelivery, ClaimedProviderDelivery,
     MAX_ADMISSION_EVENT_BYTES, MAX_ADMISSION_OBJECT_BYTES, MAX_PROVIDER_DELIVERY_ATTEMPTS,
     MAX_PROVIDER_DELIVERY_CLAIM_MILLIS, MAX_PROVIDER_DELIVERY_EVENT_ENVELOPE_BYTES,
     MAX_PROVIDER_DELIVERY_RETRY_BACKOFF_MILLIS, MAX_PROVIDER_DELIVERY_TOTAL_CLAIM_MILLIS,
-    ObjectKey, ProviderConnectionId, ProviderDeliveryClaimFence, ProviderDeliveryClaimOwnerId,
+    ObjectKey, ProviderDeliveryClaimFence, ProviderDeliveryClaimOwnerId,
     ProviderDeliveryEventEnvelope, ProviderDeliveryFailureKind, ProviderDeliveryId,
     ProviderDeliveryIdentity, ProviderDeliveryReceipt, ProviderDeliveryRenewalTiming,
     ProviderDeliveryState, ProviderDeliveryValueError, ProviderDeliveryWorkflowConclusion,
@@ -146,9 +147,7 @@ fn provider_event_and_standard_object_ceilings_remain_distinct() {
 fn provider_authority_rejects_sentinels_and_unbounded_values() {
     assert!(matches!(
         ProviderConnectionId::from_uuid(Uuid::nil()),
-        Err(ProviderDeliveryValueError::NilUuid(
-            "provider connection ID"
-        ))
+        Err(ProviderIdentityError::NilUuid("provider connection ID"))
     ));
     assert!(matches!(
         ProviderDeliveryClaimOwnerId::from_uuid(Uuid::nil()),

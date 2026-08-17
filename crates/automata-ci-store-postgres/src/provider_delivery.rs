@@ -4,11 +4,12 @@ use sqlx::{PgPool, Postgres, Row as _, Transaction, postgres::PgRow};
 use tokio::time::{Instant, timeout_at};
 use uuid::Uuid;
 
+use automata_ci_provider::ProviderConnectionId;
 use automata_ci_store::{
     AcceptProviderDelivery, AdmissionObject, ClaimProviderDelivery, ClaimedProviderDelivery,
     CompleteProviderDelivery, GithubCheckTerminalCause, MAX_PROVIDER_DELIVERY_ATTEMPTS,
     MAX_PROVIDER_DELIVERY_CLAIM_MILLIS, MAX_PROVIDER_DELIVERY_TOTAL_CLAIM_MILLIS, ObjectKey,
-    ProviderConnectionId, ProviderDeliveryClaimFence, ProviderDeliveryClaimOwnerId,
+    ProviderDeliveryClaimFence, ProviderDeliveryClaimOwnerId,
     ProviderDeliveryClaimRenewalRepository, ProviderDeliveryEventEnvelope, ProviderDeliveryId,
     ProviderDeliveryIdentity, ProviderDeliveryReceipt, ProviderDeliveryRepository,
     ProviderDeliveryState, ProviderDeliveryStoreError, ProviderDeliveryWorkflowConclusion,

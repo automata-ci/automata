@@ -1,5 +1,6 @@
 use automata_ci_core::{Sha256Digest, UnixMillis};
 use automata_ci_key_management::{EncryptedEnvelope, KeyId, WrappedDataKey};
+use automata_ci_provider::ProviderConnectionId;
 use automata_ci_store::{
     AcquireGithubServerServiceHandoff, ClaimNextGithubServerServiceMaintenance,
     FinishGithubServerServiceMint, GithubRepositoryName, GithubServerServiceAction,
@@ -16,8 +17,8 @@ use automata_ci_store::{
     GithubServerServiceValueError, GithubServerServiceWorkerId,
     MAX_GITHUB_SERVICE_CONSUMER_REQUEST_MILLIS, MAX_GITHUB_SERVICE_HANDOFF_MILLIS,
     MAX_GITHUB_SERVICE_PLAINTEXT_BYTES, MIN_GITHUB_SERVICE_READY_USE_MILLIS,
-    ProtectedGithubServerServiceCredential, ProviderConnectionId, ProviderInstallationId,
-    ProviderRepositoryId, RepositoryId, TenantScope,
+    ProtectedGithubServerServiceCredential, ProviderInstallationId, ProviderRepositoryId,
+    RepositoryId, TenantScope,
 };
 use uuid::Uuid;
 

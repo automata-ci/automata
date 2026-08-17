@@ -13,10 +13,11 @@ use automata_ci_github::{
     GithubWebhookBodyDigest, StoredAuthenticatedGithubWebhook, VerifiedGithubPush,
     VerifiedGithubWebhook, rehydrate_stored_authenticated_github_webhook,
 };
+use automata_ci_provider::ProviderConnectionId;
 use automata_ci_store::{
-    AdmissionObject, ClaimedProviderDelivery, ObjectKey, ProviderConnectionId,
-    ProviderDeliveryClaimFence, ProviderDeliveryClaimOwnerId, ProviderDeliveryEventEnvelope,
-    ProviderDeliveryId, ProviderDeliveryIdentity, ProviderDeliveryReceipt, ProviderDeliveryState,
+    AdmissionObject, ClaimedProviderDelivery, ObjectKey, ProviderDeliveryClaimFence,
+    ProviderDeliveryClaimOwnerId, ProviderDeliveryEventEnvelope, ProviderDeliveryId,
+    ProviderDeliveryIdentity, ProviderDeliveryReceipt, ProviderDeliveryState,
     ProviderInstallationId, ProviderRepositoryCoordinates, ProviderRepositoryId,
     ProviderRepositoryVisibility, TenantScope,
 };

@@ -5,6 +5,7 @@ use sqlx::{AssertSqlSafe, PgPool, Postgres, Row as _, Transaction};
 use uuid::Uuid;
 
 use super::{PostgresStore, durable_schema::current_durable_schemas};
+use automata_ci_provider::ProviderConnectionId;
 use automata_ci_store::{
     AdmitLogicalWorkflowRun, ClaimDueGithubScheduleFire, ClaimGithubScheduleDiscovery,
     ClaimedGithubScheduleFire, CompleteGithubScheduleFire, GITHUB_SCHEDULE_ARCHIVE_MEDIA_TYPE,
@@ -16,8 +17,8 @@ use automata_ci_store::{
     GithubScheduleRegistryReceipt, GithubScheduleRepository, GithubScheduleSourceAuthority,
     GithubScheduleStoreError, GithubScheduleWorkerId, LogicalWorkflowAdmissionStoreError,
     MAX_GITHUB_SCHEDULE_CLAIM_MILLIS, MAX_GITHUB_SCHEDULE_FIRE_ATTEMPTS, ObjectKey,
-    ProviderConnectionId, RegisterGithubScheduleRegistry, RegisterGithubScheduledCheckSubject,
-    RepositoryId, RetryGithubScheduleFire, StoreError, TenantScope,
+    RegisterGithubScheduleRegistry, RegisterGithubScheduledCheckSubject, RepositoryId,
+    RetryGithubScheduleFire, StoreError, TenantScope,
 };
 
 #[async_trait]

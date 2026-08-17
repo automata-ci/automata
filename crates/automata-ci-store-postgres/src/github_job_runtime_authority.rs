@@ -10,6 +10,7 @@ use super::{
     PostgresStore, durable_schema::current_durable_schemas,
     runtime_authority::github_manifest_origin_is_closed,
 };
+use automata_ci_provider::ProviderConnectionId;
 use automata_ci_store::{
     GITHUB_PROVIDER_API_ORIGIN, GITHUB_PROVIDER_REST_API_VERSION,
     GITHUB_PROVIDER_RUNNER_POLICY_MEDIA_TYPE, GITHUB_PROVIDER_WEB_ORIGIN,
@@ -23,8 +24,8 @@ use automata_ci_store::{
     LOGICAL_ACTIVATION_JOB_IR_MEDIA_TYPE, LogicalActivationGeneration,
     LogicalActivationPreparationGeneration, LogicalActivationWorkerId,
     LogicalMaterializationGeneration, LogicalMaterializationWorkerId, LogicalWorkSelectionId,
-    MAX_GITHUB_AUTHORITY_REQUEST_MILLIS, ObjectKey, ProviderConnectionId, ProviderInstallationId,
-    RepositoryId, RunnerGeneration, SessionEpoch, StableRunnerSlot, TenantScope,
+    MAX_GITHUB_AUTHORITY_REQUEST_MILLIS, ObjectKey, ProviderInstallationId, RepositoryId,
+    RunnerGeneration, SessionEpoch, StableRunnerSlot, TenantScope,
 };
 
 const GITHUB_REPOSITORY_AUTHORITY_NAMESPACE: &str = "github.repository";

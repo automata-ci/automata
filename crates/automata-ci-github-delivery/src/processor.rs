@@ -1562,6 +1562,7 @@ mod renewal_tests {
         StoredAuthenticatedGithubWebhook, VerifiedGithubPush, VerifiedGithubWebhook,
         rehydrate_stored_authenticated_github_webhook,
     };
+    use automata_ci_provider::ProviderConnectionId;
     use automata_ci_scm::{
         ArchiveFormat, ExactRevision, RepositoryId as ScmRepositoryId, RepositorySource,
         RepositorySourcePort, RepositorySourceRequest, ScmError, ScmProviderId,
@@ -1579,13 +1580,13 @@ mod renewal_tests {
         GithubSubjectEvidenceStoreError, GithubWorkflowRunSubjectEvidence,
         LogicalWorkflowAdmissionReceipt, LogicalWorkflowAdmissionRepository,
         LogicalWorkflowAdmissionStoreError, ManifestPinnedGithubDeliveryEvidence,
-        ManifestPinnedGithubDeliveryReceipt, ObjectKey, ProviderConnectionId,
-        ProviderDeliveryClaimFence, ProviderDeliveryClaimOwnerId, ProviderDeliveryEventEnvelope,
-        ProviderDeliveryId, ProviderDeliveryIdentity, ProviderDeliveryReceipt,
-        ProviderDeliveryRepository, ProviderDeliveryState, ProviderDeliveryStoreError,
-        ProviderDeliveryWorkflowInventory, ProviderDeliveryWorkflowInventoryReceipt,
-        ProviderDeliveryWorkflowOutcome, ProviderInstallationId, ProviderRepositoryCoordinates,
-        ProviderRepositoryId, ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
+        ManifestPinnedGithubDeliveryReceipt, ObjectKey, ProviderDeliveryClaimFence,
+        ProviderDeliveryClaimOwnerId, ProviderDeliveryEventEnvelope, ProviderDeliveryId,
+        ProviderDeliveryIdentity, ProviderDeliveryReceipt, ProviderDeliveryRepository,
+        ProviderDeliveryState, ProviderDeliveryStoreError, ProviderDeliveryWorkflowInventory,
+        ProviderDeliveryWorkflowInventoryReceipt, ProviderDeliveryWorkflowOutcome,
+        ProviderInstallationId, ProviderRepositoryCoordinates, ProviderRepositoryId,
+        ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
         RecordProviderDeliveryWorkflowProgress, RegisterProviderDeliveryWorkflowInventory,
         RejectProviderDelivery, RenewedProviderDeliveryClaim, RepositoryId as StoreRepositoryId,
         RetryProviderDelivery, TenantScope,

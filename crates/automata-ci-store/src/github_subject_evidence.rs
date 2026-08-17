@@ -18,12 +18,13 @@ use crate::{
     GithubCheckSubjectKey, GithubProviderManifest, GithubProviderManifestRevision,
     GithubProviderWebhookVerifierFingerprint, GithubRepositoryName,
     GithubServerServiceAuthoritySelector, GithubServerServiceRevision, LogicalWorkflowInvocationId,
-    MAX_PROVIDER_DELIVERY_ATTEMPTS, MAX_PROVIDER_DELIVERY_TOTAL_CLAIM_MILLIS, ProviderConnectionId,
+    MAX_PROVIDER_DELIVERY_ATTEMPTS, MAX_PROVIDER_DELIVERY_TOTAL_CLAIM_MILLIS,
     ProviderDeliveryClaimFence, ProviderDeliveryId, ProviderInstallationId, ProviderRepositoryId,
     ProviderRepositoryOwnerId, ProviderRepositoryVisibility, RepositoryId,
     RepositoryOperationError, TenantScope, WORKFLOW_PLAN_SCHEMA, WorkflowAdmissionIdempotency,
     WorkflowSnapshotId,
 };
+use automata_ci_provider::ProviderConnectionId;
 
 const MAX_EVIDENCE_TEXT_BYTES: usize = 1_024;
 

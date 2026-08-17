@@ -37,6 +37,7 @@ automata-ci-key-management.workspace = true
 automata-ci-local.workspace = true
 automata-ci-metrics.workspace = true
 automata-ci-oidc-github.workspace = true
+automata-ci-provider.workspace = true
 automata-ci-protocol.workspace = true
 automata-ci-protocol-protobuf.workspace = true
 automata-ci-provisioning.workspace = true

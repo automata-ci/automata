@@ -24,6 +24,7 @@ use automata_ci_credential_github::{
 };
 use automata_ci_protocol::ProtocolLimits;
 use automata_ci_protocol_protobuf::encode_job_ir;
+use automata_ci_provider::ProviderConnectionId;
 use automata_ci_store::{
     GithubJobRuntimeAuthorityEvidence, GithubJobRuntimeAuthorityExecution,
     GithubJobRuntimeAuthorityRepository, GithubJobRuntimeAuthorityResolution,
@@ -34,8 +35,8 @@ use automata_ci_store::{
     GithubServerServiceAppId, GithubServerServiceJwtIssuer, JobIrMetadata,
     LogicalActivationGeneration, LogicalActivationPreparationGeneration, LogicalActivationWorkerId,
     LogicalMaterializationGeneration, LogicalMaterializationWorkerId, LogicalWorkSelectionId,
-    ObjectKey, ProviderConnectionId, ProviderInstallationId, RepositoryId, RunnerGeneration,
-    RunnerSessionFence, SessionEpoch, StableRunnerSlot, TenantScope,
+    ObjectKey, ProviderInstallationId, RepositoryId, RunnerGeneration, RunnerSessionFence,
+    SessionEpoch, StableRunnerSlot, TenantScope,
 };
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;

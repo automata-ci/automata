@@ -8,9 +8,10 @@ use uuid::Uuid;
 
 use crate::{
     GithubRepositoryName, GithubScheduleFireId, GithubServerServiceAuthoritySelector,
-    ProviderConnectionId, ProviderDeliveryId, ProviderInstallationId, ProviderRepositoryId,
-    RepositoryId, RepositoryOperationError, TenantScope,
+    ProviderDeliveryId, ProviderInstallationId, ProviderRepositoryId, RepositoryId,
+    RepositoryOperationError, TenantScope,
 };
+use automata_ci_provider::ProviderConnectionId;
 
 /// Maximum number of outbox claims for one desired projection revision.
 pub const MAX_GITHUB_CHECK_PROJECTION_ATTEMPTS: u16 = 64;

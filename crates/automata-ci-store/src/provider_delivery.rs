@@ -6,6 +6,7 @@ use std::{
 
 use async_trait::async_trait;
 use automata_ci_core::{RunId, UnixMillis};
+use automata_ci_provider::ProviderConnectionId;
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 use tokio::time::Instant;
@@ -65,8 +66,6 @@ macro_rules! uuid_identity {
 
 uuid_identity!(/// Durable identity of one accepted provider delivery.
     ProviderDeliveryId, "provider delivery ID");
-uuid_identity!(/// Server-owned identity of one configured provider connection.
-    ProviderConnectionId, "provider connection ID");
 uuid_identity!(/// Durable identity of a provider-delivery worker.
     ProviderDeliveryClaimOwnerId, "provider delivery claim owner ID");
 

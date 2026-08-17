@@ -1250,6 +1250,7 @@ mod tests {
         EncryptedEnvelope, KeyEncryptionContext, KeyEncryptionError, KeyEncryptionProvider, KeyId,
         KeyPurpose, WrappedDataKey,
     };
+    use automata_ci_provider::ProviderConnectionId;
     use automata_ci_scm::RepositoryId as ScmRepositoryId;
     use automata_ci_scm::credential::{
         CredentialProvenance, MinimumValidity, PermissionLevel, PermissionName, PermissionSet,
@@ -1267,10 +1268,9 @@ mod tests {
         LoadGithubRuntimeAuthority, LogicalActivationGeneration,
         LogicalActivationPreparationGeneration, LogicalActivationWorkerId,
         LogicalMaterializationGeneration, LogicalMaterializationWorkerId, LogicalWorkSelectionId,
-        ProviderConnectionId, ProviderInstallationId, QuarantineGithubRuntimeAuthority,
-        ReadyGithubRuntimeAuthority, ReconcileGithubRuntimeAuthorities, RepositoryId,
-        RetryGithubRuntimeAuthorityRevocation, RunnerGeneration, SessionEpoch, StableRunnerSlot,
-        TenantScope,
+        ProviderInstallationId, QuarantineGithubRuntimeAuthority, ReadyGithubRuntimeAuthority,
+        ReconcileGithubRuntimeAuthorities, RepositoryId, RetryGithubRuntimeAuthorityRevocation,
+        RunnerGeneration, SessionEpoch, StableRunnerSlot, TenantScope,
     };
     use uuid::Uuid;
 

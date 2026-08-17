@@ -237,6 +237,7 @@ dependencies = [
  "automata-ci-postgres",
  "automata-ci-protocol",
  "automata-ci-protocol-protobuf",
+ "automata-ci-provider",
  "automata-ci-provisioning",
  "automata-ci-provisioning-grpc",
  "automata-ci-provisioning-postgres",
@@ -449,6 +450,7 @@ dependencies = [
  "automata-ci-key-management",
  "automata-ci-protocol",
  "automata-ci-protocol-protobuf",
+ "automata-ci-provider",
  "automata-ci-scm",
  "automata-ci-store",
  "axum",
@@ -526,6 +528,7 @@ dependencies = [
  "automata-ci-blob",
  "automata-ci-core",
  "automata-ci-github",
+ "automata-ci-provider",
  "automata-ci-schedule",
  "automata-ci-scm",
  "automata-ci-store",
@@ -746,6 +749,16 @@ dependencies = [
  "thiserror",
  "uuid",
  "zeroize",
+]
+
+[[package]]
+name = "automata-ci-provider"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+ "uuid",
 ]
 
 [[package]]
@@ -1138,6 +1151,7 @@ dependencies = [
  "automata-ci-github-permissions",
  "automata-ci-key-management",
  "automata-ci-oidc-github",
+ "automata-ci-provider",
  "automata-ci-schedule",
  "serde",
  "serde_json",
@@ -1160,6 +1174,7 @@ dependencies = [
  "automata-ci-core",
  "automata-ci-key-management",
  "automata-ci-oidc-github",
+ "automata-ci-provider",
  "automata-ci-schedule",
  "automata-ci-store",
  "automata-ci-tls",

@@ -92,6 +92,7 @@ use automata_ci_github::{
     GithubWebhookVerifier, VerifiedGithubWebhook, X_GITHUB_DELIVERY, X_GITHUB_EVENT,
     X_HUB_SIGNATURE_256,
 };
+use automata_ci_provider::ProviderConnectionId;
 use automata_ci_store::{
     AcceptManifestPinnedGithubDelivery, AcceptManifestPinnedGithubRepositoryDispatch,
     AcceptProviderDelivery, AdmissionObject, GithubAuthenticatedEvent,
@@ -101,9 +102,9 @@ use automata_ci_store::{
     GithubProviderWebhookVerifierFingerprint, GithubRepositoryDispatchEvidenceRepository,
     GithubServerServiceRevision, GithubSubjectEvidenceRepository, GithubSubjectEvidenceStoreError,
     ManifestPinnedGithubDeliveryReceipt, ObjectKey, PendingGithubRepositoryDispatchReceipt,
-    ProviderConnectionId, ProviderDeliveryEventEnvelope, ProviderDeliveryIdentity,
-    ProviderInstallationId, ProviderRepositoryCoordinates, ProviderRepositoryId,
-    ProviderRepositoryOwnerId, ProviderRepositoryVisibility, StoreError, TenantScope,
+    ProviderDeliveryEventEnvelope, ProviderDeliveryIdentity, ProviderInstallationId,
+    ProviderRepositoryCoordinates, ProviderRepositoryId, ProviderRepositoryOwnerId,
+    ProviderRepositoryVisibility, StoreError, TenantScope,
 };
 use bytes::Bytes;
 use http::HeaderMap;

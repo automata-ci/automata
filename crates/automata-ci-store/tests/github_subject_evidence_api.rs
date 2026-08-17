@@ -1,6 +1,7 @@
 use crate::github_manifest_fixture;
 
 use automata_ci_core::{RunId, Sha256Digest, UnixMillis, WorkflowId};
+use automata_ci_provider::ProviderConnectionId;
 use automata_ci_store::{
     AcceptManifestPinnedGithubDelivery, AcceptProviderDelivery, AdmissionObject,
     AuthenticatedGithubDeliveryClaim, GithubAuthenticatedEvent, GithubAuthenticatedEventKind,
@@ -14,7 +15,7 @@ use automata_ci_store::{
     GithubServerServiceRevision, GithubSubjectEvidenceRepository, GithubSubjectEvidenceStoreError,
     GithubSubjectEvidenceValueError, GithubWorkflowRunSubjectEvidence, LogicalWorkflowInvocationId,
     ManifestPinnedGithubDeliveryEvidence, ManifestPinnedGithubDeliveryReceipt, ObjectKey,
-    PendingGithubRepositoryDispatchEvidence, ProviderConnectionId, ProviderDeliveryClaimFence,
+    PendingGithubRepositoryDispatchEvidence, ProviderDeliveryClaimFence,
     ProviderDeliveryClaimOwnerId, ProviderDeliveryEventEnvelope, ProviderDeliveryId,
     ProviderDeliveryIdentity, ProviderInstallationId, ProviderRepositoryCoordinates,
     ProviderRepositoryId, ProviderRepositoryOwnerId, ProviderRepositoryVisibility,

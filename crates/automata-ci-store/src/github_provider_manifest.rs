@@ -19,12 +19,13 @@ use automata_ci_core::JobAuthorityProfile;
 use crate::{
     AdmissionObject, GithubCheckAppId, GithubCheckName, GithubCheckSubjectKey,
     GithubRepositoryName, GithubServerServiceAppClientId, GithubServerServiceAppId,
-    GithubServerServiceJwtIssuer, GithubServerServiceRevision, ProviderConnectionId,
-    ProviderDeliveryIdentity, ProviderInstallationId, ProviderRepositoryId,
-    ProviderRepositoryOwnerId, ProviderRepositoryVisibility, RegisterWorkflowRuntimePolicy,
-    RepositoryId, RepositoryOperationError, Sha256Digest, TenantScope,
-    WorkflowRuntimePolicyReceipt, WorkflowRuntimePolicyRevision,
+    GithubServerServiceJwtIssuer, GithubServerServiceRevision, ProviderDeliveryIdentity,
+    ProviderInstallationId, ProviderRepositoryId, ProviderRepositoryOwnerId,
+    ProviderRepositoryVisibility, RegisterWorkflowRuntimePolicy, RepositoryId,
+    RepositoryOperationError, Sha256Digest, TenantScope, WorkflowRuntimePolicyReceipt,
+    WorkflowRuntimePolicyRevision,
 };
+use automata_ci_provider::ProviderConnectionId;
 
 /// Exact media type of one canonical historical runner policy.
 pub const GITHUB_PROVIDER_RUNNER_POLICY_MEDIA_TYPE: &str =

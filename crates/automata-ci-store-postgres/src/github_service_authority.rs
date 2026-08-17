@@ -4,6 +4,7 @@ use automata_ci_key_management::{EncryptedEnvelope, KeyId, WrappedDataKey};
 use sqlx::{AssertSqlSafe, PgConnection, Row as _, postgres::PgRow};
 use uuid::Uuid;
 
+use automata_ci_provider::ProviderConnectionId;
 use automata_ci_store::{
     AcquireGithubServerServiceHandoff, BeginGithubServerServiceMint,
     BeginGithubServerServiceMintOutcome, ClaimNextGithubServerServiceMaintenance,
@@ -24,9 +25,9 @@ use automata_ci_store::{
     GithubServerServiceWorkerId, MAX_GITHUB_SERVICE_CONSECUTIVE_GENERATION_FAILURES,
     MAX_GITHUB_SERVICE_MINT_ATTEMPTS, MAX_GITHUB_SERVICE_REVOKE_ATTEMPTS,
     MIN_GITHUB_SERVICE_READY_USE_MILLIS, ProtectedGithubServerServiceCredential,
-    ProviderConnectionId, ProviderInstallationId, ProviderRepositoryId,
-    QuarantineGithubServerServiceCredential, ReleaseGithubServerServiceHandoff, RepositoryId,
-    RetireGithubServerServiceAuthority, Sha256Digest, TenantScope,
+    ProviderInstallationId, ProviderRepositoryId, QuarantineGithubServerServiceCredential,
+    ReleaseGithubServerServiceHandoff, RepositoryId, RetireGithubServerServiceAuthority,
+    Sha256Digest, TenantScope,
 };
 
 use super::{PostgresStore, pg_bigint};

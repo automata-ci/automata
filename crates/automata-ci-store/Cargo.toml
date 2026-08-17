@@ -28,6 +28,7 @@ automata-ci-core.workspace = true
 automata-ci-github-permissions.workspace = true
 automata-ci-key-management.workspace = true
 automata-ci-oidc-github.workspace = true
+automata-ci-provider.workspace = true
 automata-ci-schedule.workspace = true
 serde.workspace = true
 serde_json.workspace = true

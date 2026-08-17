@@ -1,6 +1,7 @@
 use crate::github_manifest_fixture;
 
 use automata_ci_core::{Sha256Digest, UnixMillis};
+use automata_ci_provider::ProviderConnectionId;
 use automata_ci_store::{
     BootstrapGithubProviderManifest, GITHUB_PROVIDER_ALL_DIRECT_WORKFLOWS_KEY,
     GITHUB_PROVIDER_ARCHIVE_FORMAT, GITHUB_PROVIDER_ARCHIVE_MAX_COMPRESSED_BYTES,
@@ -17,9 +18,9 @@ use automata_ci_store::{
     GithubProviderManifestValueError, GithubProviderOrigins,
     GithubProviderWebhookVerifierFingerprint, GithubProviderWorkflowSelection,
     GithubRepositoryName, GithubServerServiceAppClientId, GithubServerServiceAppId,
-    GithubServerServiceJwtIssuer, GithubServerServiceRevision, ProviderConnectionId,
-    ProviderDeliveryIdentity, ProviderInstallationId, ProviderRepositoryCoordinates,
-    ProviderRepositoryId, ProviderRepositoryOwnerId, ProviderRepositoryVisibility, TenantScope,
+    GithubServerServiceJwtIssuer, GithubServerServiceRevision, ProviderDeliveryIdentity,
+    ProviderInstallationId, ProviderRepositoryCoordinates, ProviderRepositoryId,
+    ProviderRepositoryOwnerId, ProviderRepositoryVisibility, TenantScope,
     github_provider_repository_id,
 };
 use uuid::Uuid;

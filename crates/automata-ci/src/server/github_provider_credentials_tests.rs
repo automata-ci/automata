@@ -14,6 +14,7 @@ use automata_ci_credential_github::GithubServerServiceMintCutoffOutcome;
 use automata_ci_key_management::{
     EnvelopeCodec, KeyId, LocalAes256GcmKeyring, LocalKeyMaterial, SecretBytes,
 };
+use automata_ci_provider::ProviderConnectionId;
 use automata_ci_store::{
     AdmissionObject, BeginGithubServerServiceMint, BootstrapGithubProviderManifest,
     BootstrapGithubProviderRepository, ClaimNextGithubServerServiceMaintenance,
@@ -35,7 +36,7 @@ use automata_ci_store::{
     GithubServerServiceJwtIssuer, GithubServerServiceMaintenanceOutcome,
     GithubServerServiceRevision, GithubServerServiceScope, GithubServerServiceStoreError,
     GithubServerServiceWorkerId, ObjectKey, ProtectedGithubServerServiceCredential,
-    ProviderConnectionId, ProviderDeliveryId, ProviderDeliveryIdentity, ProviderInstallationId,
+    ProviderDeliveryId, ProviderDeliveryIdentity, ProviderInstallationId,
     ProviderRepositoryCoordinates, ProviderRepositoryId, ProviderRepositoryOwnerId,
     ProviderRepositoryVisibility, QuarantineGithubServerServiceCredential,
     RegisterWorkflowRuntimePolicy, ReleaseGithubServerServiceHandoff, RepositoryId, Sha256Digest,

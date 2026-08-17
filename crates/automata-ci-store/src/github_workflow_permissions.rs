@@ -14,10 +14,10 @@ use crate::{
     GithubServerServiceConsumerClaim, GithubServerServiceConsumerId, GithubServerServiceGeneration,
     GithubServerServiceHandoffId, GithubServerServiceJwtIssuer, GithubServerServiceRevision,
     GithubServerServiceScope, GithubServerServiceWorkerId,
-    MAX_GITHUB_SERVICE_CONSUMER_REQUEST_MILLIS, ProviderConnectionId, ProviderInstallationId,
-    ProviderRepositoryId, ReleaseGithubServerServiceHandoff, RepositoryId, TenantScope,
-    WorkflowRuntimePolicyRevision,
+    MAX_GITHUB_SERVICE_CONSUMER_REQUEST_MILLIS, ProviderInstallationId, ProviderRepositoryId,
+    ReleaseGithubServerServiceHandoff, RepositoryId, TenantScope, WorkflowRuntimePolicyRevision,
 };
+use automata_ci_provider::ProviderConnectionId;
 
 const CANDIDATE_SCHEMA: u16 = 2;
 const OBSERVATION_SCHEMA: u16 = 2;

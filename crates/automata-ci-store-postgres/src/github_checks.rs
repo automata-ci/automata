@@ -4,6 +4,7 @@ use automata_ci_core::{AttemptId, JobId, RunId, Sha256Digest, UnixMillis};
 use sqlx::{AssertSqlSafe, PgConnection, Postgres, Row as _, Transaction};
 use uuid::Uuid;
 
+use automata_ci_provider::ProviderConnectionId;
 use automata_ci_store::{
     AdvanceGithubCheckAnnotations, AttemptStoreError, BeginGithubCheckAnnotationBatch,
     BeginGithubCheckRunCreate, BindGithubCheckRun, BindGithubCheckSuite,
@@ -19,11 +20,10 @@ use automata_ci_store::{
     GithubCheckSubjectReceipt, GithubCheckSuiteId, GithubCheckTerminalCause, GithubRepositoryName,
     GithubScheduleFireId, GithubServerServiceAuthorityId, GithubServerServiceAuthoritySelector,
     GithubServerServiceRevision, HUMAN_JOB_RESULT_MEDIA_TYPE, InitializeGithubCheckPresentation,
-    MAX_GITHUB_CHECK_PROJECTION_ATTEMPTS, MAX_TERMINAL_RESULT_BYTES, ProviderConnectionId,
-    ProviderDeliveryId, ProviderInstallationId, ProviderRepositoryId,
-    ReleaseUnissuedGithubCheckAnnotationBatch, ReleaseUnissuedGithubCheckRunCreate, RepositoryId,
-    ResolveGithubCheckRunCreate, RetryGithubCheckProjection, RetryUncertainGithubCheckAnnotations,
-    StoreError, TenantScope,
+    MAX_GITHUB_CHECK_PROJECTION_ATTEMPTS, MAX_TERMINAL_RESULT_BYTES, ProviderDeliveryId,
+    ProviderInstallationId, ProviderRepositoryId, ReleaseUnissuedGithubCheckAnnotationBatch,
+    ReleaseUnissuedGithubCheckRunCreate, RepositoryId, ResolveGithubCheckRunCreate,
+    RetryGithubCheckProjection, RetryUncertainGithubCheckAnnotations, StoreError, TenantScope,
 };
 
 use super::{PostgresStore, pg_bigint};

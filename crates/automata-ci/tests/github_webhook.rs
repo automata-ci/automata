@@ -27,6 +27,7 @@ use automata_ci_github_delivery::{
     GithubDeliveryClock, GithubDeliveryConnection, GithubDeliveryIngress,
     GithubDeliveryRepositories,
 };
+use automata_ci_provider::ProviderConnectionId;
 use automata_ci_store::{
     AcceptManifestPinnedGithubDelivery, AdmissionObject, GITHUB_PROVIDER_RUNNER_POLICY_MEDIA_TYPE,
     GithubAuthenticatedEventKind, GithubCheckName, GithubCheckSubjectId, GithubProviderManifest,
@@ -36,9 +37,9 @@ use automata_ci_store::{
     GithubServerServiceJwtIssuer, GithubServerServiceRevision, GithubSubjectEvidenceRepository,
     GithubSubjectEvidenceStoreError, GithubWorkflowRunSubjectEvidence,
     ManifestPinnedGithubDeliveryEvidence, ManifestPinnedGithubDeliveryReceipt, ObjectKey,
-    ProviderConnectionId, ProviderDeliveryId, ProviderInstallationId, ProviderRepositoryId,
-    ProviderRepositoryOwnerId, ProviderRepositoryVisibility, RepositoryId, TenantScope,
-    WorkflowRuntimePolicy, WorkflowRuntimePolicyRevision,
+    ProviderDeliveryId, ProviderInstallationId, ProviderRepositoryId, ProviderRepositoryOwnerId,
+    ProviderRepositoryVisibility, RepositoryId, TenantScope, WorkflowRuntimePolicy,
+    WorkflowRuntimePolicyRevision,
 };
 use axum::{
     Router,

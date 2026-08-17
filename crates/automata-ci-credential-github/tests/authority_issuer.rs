@@ -36,6 +36,7 @@ use automata_ci_key_management::{
 };
 use automata_ci_protocol::{ProtocolLimits, RuntimeAuthorityEndpoint};
 use automata_ci_protocol_protobuf::encode_job_ir;
+use automata_ci_provider::ProviderConnectionId;
 use automata_ci_scm::credential::{
     CredentialError, CredentialErrorKind, MinimumValidity, PermissionLevel, PermissionName,
     PermissionSet, ProviderResourceId, RepositoryCredentialRequest, RepositoryScope,
@@ -61,11 +62,10 @@ use automata_ci_store::{
     LogicalActivationGeneration, LogicalActivationPreparationGeneration, LogicalActivationWorkerId,
     LogicalMaterializationGeneration, LogicalMaterializationWorkerId, LogicalWorkSelectionId,
     MarkGithubRuntimeAuthorityIndeterminate, ObjectKey, ProtectedGithubRuntimeAuthority,
-    ProviderConnectionId, ProviderInstallationId, QuarantineGithubRuntimeAuthority,
-    ReadyGithubRuntimeAuthority, ReconcileGithubRuntimeAuthorities,
-    RejectGithubRuntimeAuthorityMint, RepositoryId, RetryGithubRuntimeAuthorityMint,
-    RetryGithubRuntimeAuthorityRevocation, RunnerGeneration, RunnerSessionFence, SessionEpoch,
-    StableRunnerSlot, TenantScope,
+    ProviderInstallationId, QuarantineGithubRuntimeAuthority, ReadyGithubRuntimeAuthority,
+    ReconcileGithubRuntimeAuthorities, RejectGithubRuntimeAuthorityMint, RepositoryId,
+    RetryGithubRuntimeAuthorityMint, RetryGithubRuntimeAuthorityRevocation, RunnerGeneration,
+    RunnerSessionFence, SessionEpoch, StableRunnerSlot, TenantScope,
 };
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;

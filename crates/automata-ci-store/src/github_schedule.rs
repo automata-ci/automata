@@ -12,9 +12,9 @@ use uuid::Uuid;
 use crate::{
     GithubCheckSubjectKey, GithubCheckSubjectReceipt, GithubProviderManifest,
     GithubProviderManifestRevision, GithubServerServiceAuthoritySelector, ObjectKey,
-    ProviderConnectionId, ProviderRepositoryOwnerId, ProviderRepositoryVisibility, RepositoryId,
-    StoreError, TenantScope,
+    ProviderRepositoryOwnerId, ProviderRepositoryVisibility, RepositoryId, StoreError, TenantScope,
 };
+use automata_ci_provider::ProviderConnectionId;
 
 /// Exact media type retained for one immutable gzip repository archive.
 pub const GITHUB_SCHEDULE_ARCHIVE_MEDIA_TYPE: &str =

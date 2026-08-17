@@ -7,9 +7,10 @@ use automata_ci_core::Sha256Digest;
 use thiserror::Error;
 
 use crate::{
-    GithubCheckAppId, GithubCheckHeadSha, GithubCheckRunId, GithubCheckSuiteId,
-    ProviderConnectionId, StoreError, TenantScope, WorkflowRerunReceipt,
+    GithubCheckAppId, GithubCheckHeadSha, GithubCheckRunId, GithubCheckSuiteId, StoreError,
+    TenantScope, WorkflowRerunReceipt,
 };
+use automata_ci_provider::ProviderConnectionId;
 
 const MAX_DELIVERY_ID_BYTES: usize = 255;
 const MAX_EXTERNAL_ID_BYTES: usize = 255;

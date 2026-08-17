@@ -8,6 +8,7 @@ use sha2::{Digest as _, Sha256};
 use sqlx::{Postgres, Row as _, Transaction, postgres::PgRow};
 use uuid::Uuid;
 
+use automata_ci_provider::ProviderConnectionId;
 use automata_ci_store::{
     AuthenticateGithubRuntimeAuthorityUnprotectedErasure, BeginGithubRuntimeAuthorityMint,
     BeginGithubRuntimeAuthorityMintOutcome, ClaimGithubRuntimeAuthorityMint,
@@ -29,12 +30,12 @@ use automata_ci_store::{
     LogicalActivationPreparationGeneration, LogicalActivationWorkerId,
     LogicalMaterializationGeneration, LogicalMaterializationWorkerId, LogicalWorkSelectionId,
     MAX_GITHUB_AUTHORITY_MINT_ATTEMPTS, MarkGithubRuntimeAuthorityIndeterminate,
-    ProtectedGithubRuntimeAuthority, ProviderConnectionId, ProviderInstallationId,
-    QuarantineGithubRuntimeAuthority, ReadyGithubRuntimeAuthority,
-    ReconcileGithubRuntimeAuthorities, RejectGithubRuntimeAuthorityMint, RepositoryId,
-    RetryGithubRuntimeAuthorityMint, RetryGithubRuntimeAuthorityRevocation,
-    RevalidateGithubRuntimeAuthorityRevocation, RevalidatedGithubRuntimeAuthorityRevocation,
-    RunnerGeneration, SessionEpoch, Sha256Digest, StableRunnerSlot, TenantScope,
+    ProtectedGithubRuntimeAuthority, ProviderInstallationId, QuarantineGithubRuntimeAuthority,
+    ReadyGithubRuntimeAuthority, ReconcileGithubRuntimeAuthorities,
+    RejectGithubRuntimeAuthorityMint, RepositoryId, RetryGithubRuntimeAuthorityMint,
+    RetryGithubRuntimeAuthorityRevocation, RevalidateGithubRuntimeAuthorityRevocation,
+    RevalidatedGithubRuntimeAuthorityRevocation, RunnerGeneration, SessionEpoch, Sha256Digest,
+    StableRunnerSlot, TenantScope,
 };
 
 use super::{PostgresStore, pg_bigint};

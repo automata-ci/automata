@@ -3,6 +3,7 @@ use automata_ci_core::{JobAuthorityProfile, RunId, Sha256Digest, UnixMillis, Wor
 use sqlx::{AssertSqlSafe, Postgres, Row as _, Transaction, ValueRef as _, postgres::PgRow};
 use uuid::Uuid;
 
+use automata_ci_provider::ProviderConnectionId;
 use automata_ci_store::{
     AcceptManifestPinnedGithubDelivery, AcceptManifestPinnedGithubRepositoryDispatch,
     AdmissionObject, AuthenticatedGithubDeliveryClaim, EventControlSubjectId, EventSubjectId,
@@ -19,8 +20,8 @@ use automata_ci_store::{
     GithubWorkflowRunSubjectEvidence, LogicalWorkflowInvocationId,
     ManifestPinnedGithubDeliveryEvidence, ManifestPinnedGithubDeliveryReceipt, ObjectKey,
     PendingGithubRepositoryDispatchEvidence, PendingGithubRepositoryDispatchReceipt,
-    ProviderConnectionId, ProviderDeliveryClaimFence, ProviderDeliveryClaimOwnerId,
-    ProviderDeliveryId, ProviderInstallationId, ProviderRepositoryId, ProviderRepositoryOwnerId,
+    ProviderDeliveryClaimFence, ProviderDeliveryClaimOwnerId, ProviderDeliveryId,
+    ProviderInstallationId, ProviderRepositoryId, ProviderRepositoryOwnerId,
     ProviderRepositoryVisibility, RecordGithubWorkflowRunSubjectEvidence, RepositoryId,
     ResolveGithubRepositoryDispatch, TenantScope, ValidateGithubWorkflowRunSubjectEvidenceReplay,
     WorkflowAdmissionIdempotency, WorkflowRuntimePolicyRevision, WorkflowSnapshotId,

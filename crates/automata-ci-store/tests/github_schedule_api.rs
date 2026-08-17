@@ -1,6 +1,7 @@
 use crate::github_manifest_fixture;
 
 use automata_ci_core::{RunId, Sha256Digest, UnixMillis};
+use automata_ci_provider::ProviderConnectionId;
 use automata_ci_schedule::CronExpression;
 use automata_ci_store::{
     ClaimDueGithubScheduleFire, ClaimGithubScheduleDiscovery, ClaimedGithubScheduleFire,
@@ -18,10 +19,9 @@ use automata_ci_store::{
     GithubServerServiceAuthoritySelector, GithubServerServiceJwtIssuer,
     GithubServerServiceRevision, GithubServerServiceScope, MAX_GITHUB_REGISTERED_SCHEDULES,
     MAX_GITHUB_SCHEDULE_CLAIM_MILLIS, MAX_GITHUB_SCHEDULE_FIRE_ATTEMPTS,
-    MAX_GITHUB_SCHEDULE_RETRY_MILLIS, ObjectKey, ProviderConnectionId, ProviderInstallationId,
-    ProviderRepositoryId, ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
-    RegisterGithubScheduleRegistry, RegisterGithubScheduledCheckSubject, RetryGithubScheduleFire,
-    TenantScope,
+    MAX_GITHUB_SCHEDULE_RETRY_MILLIS, ObjectKey, ProviderInstallationId, ProviderRepositoryId,
+    ProviderRepositoryOwnerId, ProviderRepositoryVisibility, RegisterGithubScheduleRegistry,
+    RegisterGithubScheduledCheckSubject, RetryGithubScheduleFire, TenantScope,
 };
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;

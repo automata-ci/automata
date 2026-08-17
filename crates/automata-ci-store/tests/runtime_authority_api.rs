@@ -3,6 +3,7 @@ use automata_ci_core::{
     Sha256Digest, UnixMillis,
 };
 use automata_ci_key_management::{ENVELOPE_SCHEMA_V1, EncryptedEnvelope, KeyId, WrappedDataKey};
+use automata_ci_provider::ProviderConnectionId;
 use automata_ci_store::{
     AuthenticateGithubRuntimeAuthorityUnprotectedErasure, BeginGithubRuntimeAuthorityMint,
     ClaimGithubRuntimeAuthorityMint, ClaimGithubRuntimeAuthorityRevocation,
@@ -19,8 +20,8 @@ use automata_ci_store::{
     LogicalActivationPreparationGeneration, LogicalActivationWorkerId,
     LogicalMaterializationGeneration, LogicalMaterializationWorkerId, LogicalWorkSelectionId,
     MAX_GITHUB_AUTHORITY_MINT_CLAIM_MILLIS, MAX_GITHUB_AUTHORITY_REQUEST_MILLIS,
-    ProtectedGithubRuntimeAuthority, ProviderConnectionId, ProviderInstallationId,
-    ReadyGithubRuntimeAuthority, RepositoryId, RevalidateGithubRuntimeAuthorityRevocation,
+    ProtectedGithubRuntimeAuthority, ProviderInstallationId, ReadyGithubRuntimeAuthority,
+    RepositoryId, RevalidateGithubRuntimeAuthorityRevocation,
     RevalidatedGithubRuntimeAuthorityRevocation, RunnerGeneration, SessionEpoch, StableRunnerSlot,
     TenantScope,
 };
