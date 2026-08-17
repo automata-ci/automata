@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use thiserror::Error;
 
-use crate::{BlobDescriptor, BlobPayload, PutBlobOutcome, VerifiedBlob};
+use crate::{BlobDescriptor, BlobKey, BlobPayload, MediaType, PutBlobOutcome, VerifiedBlob};
 
 /// Provider-neutral class of a blob operation failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -58,6 +58,25 @@ pub trait ImmutableBlobStore: std::fmt::Debug + Send + Sync {
     async fn get_verified(
         &self,
         descriptor: &BlobDescriptor,
+        maximum_bytes: u64,
+    ) -> Result<VerifiedBlob, BlobStoreError>;
+}
+
+/// Immutable records discoverable by a deterministic key.
+///
+/// This is intentionally separate from [`ImmutableBlobStore`]. Content blobs
+/// are read only when the caller already owns their complete descriptor. Small
+/// manifests sometimes provide that descriptor and must first be discovered by
+/// a key derived from their immutable logical identity. Implementations must
+/// still verify the stored size and SHA-256 metadata against the returned bytes
+/// before exposing a record.
+#[async_trait]
+pub trait ImmutableRecordStore: ImmutableBlobStore {
+    /// Loads an immutable record by its deterministic key and expected media type.
+    async fn get_record(
+        &self,
+        key: &BlobKey,
+        media_type: &MediaType,
         maximum_bytes: u64,
     ) -> Result<VerifiedBlob, BlobStoreError>;
 }

@@ -16,6 +16,7 @@ mod archive;
 mod cache;
 mod model;
 mod resolver;
+mod shared_cache;
 
 pub use archive::{inspect_archive, validate_windows_materialization_archive};
 pub use cache::{
@@ -29,3 +30,4 @@ pub use model::{
     ActionSubpathError, RepositoryActionRequest, ResolvedActionBundle,
 };
 pub use resolver::{ActionResolver, ImmutableActionResolver};
+pub use shared_cache::{ObjectActionReferenceIndex, ReadThroughActionReferenceIndex};

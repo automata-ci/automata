@@ -1,11 +1,16 @@
 use std::{future::Future, path::Path, pin::Pin, sync::Arc};
 
-use automata_ci_action::{ActionBundleLimits, ActionResolver, ImmutableActionResolver};
+use automata_ci_action::{
+    ActionBundleLimits, ActionReferenceIndex, ActionResolver, ImmutableActionResolver,
+    ObjectActionReferenceIndex, ReadThroughActionReferenceIndex,
+};
 use automata_ci_action_github::{
     GithubActionMetadataDecoder, GithubActionMetadataLimits, JavascriptRuntime,
 };
-use automata_ci_blob::ImmutableBlobStore;
-use automata_ci_blob_s3::{MAX_S3_PRIVATE_CA_PEM_BYTES, S3TlsTrust, StaticS3Credentials};
+use automata_ci_blob::{ImmutableBlobStore, ImmutableRecordStore};
+use automata_ci_blob_s3::{
+    MAX_S3_PRIVATE_CA_PEM_BYTES, S3BlobStore, S3TlsTrust, StaticS3Credentials,
+};
 use automata_ci_core::{ContainerCapabilities, ContainerFeature, RunnerCapabilities};
 use automata_ci_execution::{ProviderCapabilities, SandboxCapability};
 use automata_ci_job_executor_github::{
@@ -1236,8 +1241,9 @@ fn build_executor(
     provider: Arc<dyn automata_ci_execution::SandboxProvider>,
     ephemeral: Arc<dyn RunnerEphemeralClient>,
 ) -> Result<Arc<dyn JobExecutor>, RunnerProductError> {
-    let blobs = build_object_store(config)?;
-    let action_preparer = build_action_preparer(config, &blobs)?;
+    let object_store = build_object_store(config)?;
+    let blobs: Arc<dyn ImmutableBlobStore> = object_store.clone();
+    let action_preparer = build_action_preparer(config, &object_store)?;
     let job_content = Arc::new(ImmutableJobContent::new(
         blobs,
         automata_ci_execution::MAX_COPY_BYTES as u64,
@@ -1288,29 +1294,37 @@ fn build_executor(
 
 fn build_action_preparer(
     config: &RunnerProductConfig,
-    blobs: &Arc<dyn ImmutableBlobStore>,
+    object_store: &Arc<S3BlobStore>,
 ) -> Result<Arc<dyn ActionPreparationPort>, RunnerProductError> {
     let github_endpoint = config.github().http_endpoint()?;
     let scm: Arc<dyn ScmProvider> = Arc::new(github_endpoint);
-    let resolver = ImmutableActionResolver::new(scm, Arc::clone(blobs));
+    let blobs: Arc<dyn ImmutableBlobStore> = object_store.clone();
+    let records: Arc<dyn ImmutableRecordStore> = object_store.clone();
+    let references: Arc<dyn ActionReferenceIndex> =
+        Arc::new(ObjectActionReferenceIndex::new(records));
     #[cfg(unix)]
-    let resolver = {
+    let (references, archives) = {
         let state_root = config.state().journal().as_path();
-        let references = Arc::new(FileActionReferenceIndex::open(
-            ActionReferenceIndexRoot::explicit(state_root.join("action-reference-cache"))?,
-            ActionReferenceIndexLimits::default(),
-        )?);
+        let local_references: Arc<dyn ActionReferenceIndex> =
+            Arc::new(FileActionReferenceIndex::open(
+                ActionReferenceIndexRoot::explicit(state_root.join("action-reference-cache"))?,
+                ActionReferenceIndexLimits::default(),
+            )?);
         let archives = Arc::new(FileActionArchiveCache::open(
             ActionArchiveCacheRoot::explicit(state_root.join("action-archive-cache"))?,
             ActionArchiveCacheLimits::default(),
         )?);
-        // The resolver itself enforces that only credential-free, canonical
-        // exact commits can consult or populate these caches. Private and
-        // mutable references always re-authorize through SCM.
-        resolver
-            .with_reference_index(references)
-            .with_local_blob_cache(archives)
+        let layered: Arc<dyn ActionReferenceIndex> = Arc::new(
+            ReadThroughActionReferenceIndex::new(local_references, references),
+        );
+        (layered, archives)
     };
+    // The resolver itself enforces that only credential-free, canonical exact
+    // commits can consult or populate these caches. The shared manifest makes
+    // a warm action discoverable across replicas and runners without GitHub.
+    let resolver = ImmutableActionResolver::new(scm, blobs).with_reference_index(references);
+    #[cfg(unix)]
+    let resolver = resolver.with_local_blob_cache(archives);
     let resolver: Arc<dyn ActionResolver> = Arc::new(resolver);
     Ok(Arc::new(ResolvedBundleActionPreparer::new(
         resolver,
@@ -1326,7 +1340,7 @@ fn build_action_preparer(
 
 fn build_object_store(
     config: &RunnerProductConfig,
-) -> Result<Arc<dyn ImmutableBlobStore>, RunnerProductError> {
+) -> Result<Arc<S3BlobStore>, RunnerProductError> {
     let object_store = config.object_store();
     let store_config = match object_store.tls_trust() {
         ObjectStoreTlsTrust::WebPki => object_store.store_config().clone(),

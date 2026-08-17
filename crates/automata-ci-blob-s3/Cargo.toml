@@ -22,6 +22,7 @@ workspace = true
 [dependencies]
 async-trait.workspace = true
 automata-ci-blob.workspace = true
+automata-ci-core.workspace = true
 automata-ci-tls.workspace = true
 aws-sdk-s3.workspace = true
 aws-smithy-http-client.workspace = true
