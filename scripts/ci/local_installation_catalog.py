@@ -635,6 +635,8 @@ def validate_service_proxy_candidate(
     source_image: dict,
 ) -> dict:
     publication, candidate_module = service_proxy_module()
+    if candidate_module.LOCAL_IMAGE_NAME != source_image["canonical_repository"]:
+        fail("service-proxy candidate local repository differs")
     members, source, identity, _, candidate_sha256 = (
         publication.load_candidate_archive(  # type: ignore[attr-defined]
             candidate_path,
@@ -655,6 +657,13 @@ def validate_service_proxy_candidate(
     )
     oci_bytes = members[candidate_module.IMAGE_ARCHIVE_NAME]
     config_digest, config = oci_config_binding(oci_bytes, manifest_digest)
+    _, load_config_digest = candidate_module.docker_load_archive(
+        oci_bytes,
+        manifest_digest,
+        source["release"]["source_date_epoch"],
+    )
+    if load_config_digest != config_digest:
+        fail("service-proxy Docker load config digest differs")
     if config.get("architecture") != "amd64" or config.get("os") != "linux":
         fail("service-proxy candidate platform differs")
     validate_process(

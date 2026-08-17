@@ -318,6 +318,10 @@ jobs:
           ./scripts/ci/build-service-proxy-candidate.sh \
             target/service-proxy-context \
             target/service-proxy-publication
+          python3 scripts/ci/verify-service-proxy-candidate-load.py \
+            --candidate target/service-proxy-publication/automata-service-proxy-candidate-x86_64-unknown-linux-musl.tar \
+            --source-directory "$GITHUB_WORKSPACE" \
+            --expected-commit "$RELEASE_COMMIT"
 
       - name: Require complete private service-proxy candidate evidence
         env:

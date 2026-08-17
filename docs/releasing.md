@@ -232,6 +232,20 @@ contract. Buildah still inspects the image metadata, and
 configuration, source bindings, and candidate provenance before the subsequent
 `prepare-candidate` policy gate accepts it.
 
+The canonical candidate retains one deterministic local reference on the sole
+OCI index descriptor:
+`automata.local/automata-ci-service-proxy:manifest-<manifest-sha256>`.
+Ordinary CI, release staging, and the dedicated promotion workflow load the
+completed candidate into Docker and prove that this tag creates the matching
+immutable image before removing it again. The loader derives a bounded Docker
+save transport from the validated OCI manifest, config, layers, and rootfs
+diff IDs so both classic and containerd-backed Engine stores are supported.
+The imported tag must resolve to exactly the OCI manifest ID or config ID;
+containerd-backed stores additionally expose the matching
+`automata.local/automata-ci-service-proxy@sha256:<manifest>` identity, while
+classic stores do not synthesize a repository digest. The manifest digest
+remains the source-image authority; the tag is the closed local import name.
+
 Every image and publication validator requires the sole current
 `io.automata.service-proxy.protocol-version=2` capability. Protocol 1 images
 predate the Results mode and cannot be admitted or promoted by this path.

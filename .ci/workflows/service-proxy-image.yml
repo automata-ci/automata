@@ -212,6 +212,10 @@ jobs:
           cmp -- \
             target/service-proxy-publication/automata-service-proxy-candidate-x86_64-unknown-linux-musl.tar \
             target/service-proxy-publication-reproduction/automata-service-proxy-candidate-x86_64-unknown-linux-musl.tar
+          python3 scripts/ci/verify-service-proxy-candidate-load.py \
+            --candidate target/service-proxy-publication/automata-service-proxy-candidate-x86_64-unknown-linux-musl.tar \
+            --source-directory "$CANDIDATE_SOURCE_DIRECTORY" \
+            --expected-commit "$CANDIDATE_COMMIT"
 
       - name: Record exact unpublished handoff bytes
         id: handoff
