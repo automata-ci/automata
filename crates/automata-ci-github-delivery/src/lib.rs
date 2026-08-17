@@ -110,8 +110,6 @@ use http::HeaderMap;
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
-/// Canonical media type retained for an authenticated raw GitHub push event.
-pub const GITHUB_PUSH_EVENT_MEDIA_TYPE: &str = "application/vnd.automata.github-push+json";
 /// Media type for a generic authenticated raw GitHub event.
 pub const GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE: &str =
     automata_ci_github::GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE;
