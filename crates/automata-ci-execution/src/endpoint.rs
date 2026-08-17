@@ -321,7 +321,7 @@ impl fmt::Debug for ExecutionEnvironment {
     }
 }
 
-/// One idempotently identified command execution.
+/// One command execution with a stable correlation identifier.
 #[derive(Clone, Eq, PartialEq)]
 pub struct ExecutionCommand {
     operation_id: OperationId,
@@ -362,7 +362,7 @@ impl ExecutionCommand {
         })
     }
 
-    /// Returns the stable identifier used to replay this exact execution.
+    /// Returns the stable correlation identifier for this exact execution.
     #[must_use]
     pub const fn operation_id(&self) -> OperationId {
         self.operation_id
@@ -662,7 +662,7 @@ pub enum ExecutionSignal {
     Kill,
 }
 
-/// Idempotently identified signal request.
+/// Signal request with a stable correlation identifier.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SignalRequest {
     operation_id: OperationId,
@@ -670,7 +670,7 @@ pub struct SignalRequest {
 }
 
 impl SignalRequest {
-    /// Creates an idempotently identified request for one portable signal.
+    /// Creates an operation-identified request for one portable signal.
     #[must_use]
     pub const fn new(operation_id: OperationId, signal: ExecutionSignal) -> Self {
         Self {
@@ -679,7 +679,7 @@ impl SignalRequest {
         }
     }
 
-    /// Returns the stable identifier used to replay this exact signal request.
+    /// Returns the stable correlation identifier for this exact signal request.
     #[must_use]
     pub const fn operation_id(self) -> OperationId {
         self.operation_id
@@ -715,7 +715,7 @@ impl WaitRequest {
         })
     }
 
-    /// Returns the stable identifier used to replay this exact wait request.
+    /// Returns the stable correlation identifier for this exact wait request.
     #[must_use]
     pub const fn operation_id(self) -> OperationId {
         self.operation_id
@@ -757,7 +757,7 @@ impl CopyToRequest {
         })
     }
 
-    /// Returns the stable identifier used to replay this exact copy request.
+    /// Returns the stable correlation identifier for this exact copy request.
     #[must_use]
     pub const fn operation_id(&self) -> OperationId {
         self.operation_id
@@ -819,7 +819,7 @@ impl CopyFromRequest {
         })
     }
 
-    /// Returns the stable identifier used to replay this exact copy request.
+    /// Returns the stable correlation identifier for this exact copy request.
     #[must_use]
     pub const fn operation_id(&self) -> OperationId {
         self.operation_id
@@ -843,6 +843,12 @@ impl CopyFromRequest {
 /// provider-specific authority observed at adapter cancellation checkpoints;
 /// the disposition or an endpoint return is not evidence that remotely
 /// initiated work has quiesced.
+///
+/// Operation identifiers are correlation inputs for an exact-request replay
+/// boundary. A raw provider endpoint may be attempt-once; callers that can
+/// retry must first install a durable decorator that binds each identifier to
+/// the complete request and its protected result. A direct caller must never
+/// retry a raw operation after an ambiguous return.
 pub trait ExecutionEndpoint: fmt::Debug + Send + Sync {
     /// Returns the exact opaque sandbox handle to which this endpoint is bound.
     fn handle(&self) -> &SandboxHandle;
@@ -852,9 +858,10 @@ pub trait ExecutionEndpoint: fmt::Debug + Send + Sync {
     /// Executes one literal argv request.
     ///
     /// Implementations must not insert a shell, must enforce the command's
-    /// timeout and aggregate output limit, and must bind the operation ID to
-    /// exact request material for idempotent replay. Environment values may
-    /// contain secrets and must not pass through durable host-side staging.
+    /// timeout and aggregate output limit. A replay-owning decorator binds the
+    /// operation ID to exact request material before invoking a raw endpoint.
+    /// Environment values may contain secrets and must not pass through
+    /// durable host-side staging.
     ///
     /// # Errors
     ///
@@ -867,8 +874,9 @@ pub trait ExecutionEndpoint: fmt::Debug + Send + Sync {
 
     /// Signals the sandbox's primary workload.
     ///
-    /// Implementations must map only the declared portable signal and bind the
-    /// operation ID to the exact request for idempotent replay.
+    /// Implementations must map only the declared portable signal. A
+    /// replay-owning decorator binds the operation ID to the exact request
+    /// before invoking a raw endpoint.
     ///
     /// # Errors
     ///
