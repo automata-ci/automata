@@ -14,6 +14,7 @@ mod cache_port;
 mod cache_postgres;
 mod cache_service;
 mod http;
+mod http_support;
 mod model;
 mod observer;
 mod port;

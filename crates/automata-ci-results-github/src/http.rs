@@ -1,13 +1,10 @@
-use std::{
-    str::FromStr as _,
-    sync::{Arc, OnceLock},
-};
+use std::{str::FromStr as _, sync::Arc};
 
 use automata_ci_core::{JobId, RunId, Sha256Digest};
 use axum::{
     Json, Router,
     body::{Body, Bytes},
-    extract::{DefaultBodyLimit, MatchedPath, Path, Query, State, rejection::JsonRejection},
+    extract::{DefaultBodyLimit, Path, Query, State, rejection::JsonRejection},
     http::{HeaderMap, Request, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -16,16 +13,23 @@ use axum::{
 use futures::{StreamExt as _, stream};
 use serde::{Deserialize, Serialize};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use uuid::Uuid;
 
 use crate::{
     ArtifactId, ArtifactService, PublishedArtifactMetadata, ResultsHttpRoute, ResultsObserver,
     ResultsServiceError, ResultsServiceErrorKind, ResultsTransferDirection, RuntimeTokenClaims,
-    RuntimeTokenVerifier, SignedDownloadCapability, SignedUploadCapability, TokenError, UploadId,
+    RuntimeTokenVerifier, SignedDownloadCapability, SignedUploadCapability, UploadId,
     azure::{AzureProtocolError, parse_block_list, validate_block_id},
-    observer::{NoopResultsObserver, ResultsHttpObservation},
+    http_support::{
+        AzureErrorClass, SignedUrlQuery, TwirpErrorBody, TwirpErrorClass, admit_results_upload,
+        authenticate_runtime_token, content_length_matches, no_store, observe_results_http,
+        parse_canonical_u64, results_upload_admission, signature_has_valid_shape,
+    },
+    observer::NoopResultsObserver,
 };
+
+#[cfg(test)]
+use crate::http_support::{MAXIMUM_CONCURRENT_RESULTS_UPLOADS, ResultsUploadAdmission};
 
 const CREATE_ARTIFACT_PATH: &str =
     "/twirp/github.actions.results.api.v1.ArtifactService/CreateArtifact";
@@ -38,75 +42,6 @@ const GET_SIGNED_ARTIFACT_URL_PATH: &str =
 const UPLOAD_PATH: &str = "/_apis/results/artifacts/{upload_id}/blob";
 const DOWNLOAD_PATH: &str = "/_apis/results/artifacts/{artifact_id}/{content_digest}/download.zip";
 const DEFAULT_MIME_TYPE: &str = "application/octet-stream";
-const MAXIMUM_SIGNATURE_BYTES: usize = 256;
-/// Four maximum-size cache blocks bound upload buffering to 512 MiB per process.
-const MAXIMUM_CONCURRENT_RESULTS_UPLOADS: usize = 4;
-const RESULTS_UPLOAD_OVERLOAD_BODY: &str = "<?xml version=\"1.0\" encoding=\"utf-8\"?><Error><Code>ServerBusy</Code><Message>The Results upload service is temporarily unavailable.</Message></Error>";
-const X_CONTENT_TYPE_OPTIONS: header::HeaderName =
-    header::HeaderName::from_static("x-content-type-options");
-
-#[derive(Debug)]
-pub(crate) struct ResultsUploadAdmission {
-    permits: Arc<Semaphore>,
-}
-
-impl ResultsUploadAdmission {
-    fn new() -> Self {
-        Self {
-            permits: Arc::new(Semaphore::new(MAXIMUM_CONCURRENT_RESULTS_UPLOADS)),
-        }
-    }
-
-    async fn acquire(&self) -> Result<OwnedSemaphorePermit, tokio::sync::AcquireError> {
-        Arc::clone(&self.permits).acquire_owned().await
-    }
-
-    #[cfg(test)]
-    fn in_flight(&self) -> usize {
-        MAXIMUM_CONCURRENT_RESULTS_UPLOADS - self.permits.available_permits()
-    }
-}
-
-pub(crate) fn results_upload_admission() -> Arc<ResultsUploadAdmission> {
-    static ADMISSION: OnceLock<Arc<ResultsUploadAdmission>> = OnceLock::new();
-    Arc::clone(ADMISSION.get_or_init(|| Arc::new(ResultsUploadAdmission::new())))
-}
-
-pub(crate) async fn admit_results_upload(
-    State(admission): State<Arc<ResultsUploadAdmission>>,
-    request: Request<Body>,
-    next: Next,
-) -> Response {
-    // Waiting here applies bounded, FIFO backpressure before Axum starts buffering
-    // another request body. Cache traffic therefore cannot turn a valid artifact
-    // upload into a transient protocol failure when the shared memory budget is full.
-    let Ok(_permit) = admission.acquire().await else {
-        return results_upload_overloaded();
-    };
-    next.run(request).await
-}
-
-fn results_upload_overloaded() -> Response {
-    let mut response = (
-        StatusCode::SERVICE_UNAVAILABLE,
-        [(header::CONTENT_TYPE, "application/xml; charset=utf-8")],
-        RESULTS_UPLOAD_OVERLOAD_BODY,
-    )
-        .into_response();
-    harden_results_response(&mut response);
-    response
-}
-
-pub(crate) fn harden_results_response(response: &mut Response) {
-    response.headers_mut().insert(
-        header::CACHE_CONTROL,
-        header::HeaderValue::from_static("no-store"),
-    );
-    response.headers_mut().insert(
-        X_CONTENT_TYPE_OPTIONS,
-        header::HeaderValue::from_static("nosniff"),
-    );
-}
 
 /// Independent HTTP-body ceilings for the Twirp and Azure compatibility surfaces.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -246,20 +181,7 @@ async fn observe_http(
     request: Request<Body>,
     next: Next,
 ) -> Response {
-    let observation = ResultsHttpObservation::new(
-        observer,
-        request.method(),
-        results_http_route(
-            request
-                .extensions()
-                .get::<MatchedPath>()
-                .map(MatchedPath::as_str),
-        ),
-    );
-    let mut response = next.run(request).await;
-    harden_results_response(&mut response);
-    observation.finish(response.status());
-    response
+    observe_results_http(observer, results_http_route, request, next).await
 }
 
 fn results_http_route(matched_path: Option<&str>) -> ResultsHttpRoute {
@@ -298,9 +220,8 @@ async fn create_artifact(
     headers: HeaderMap,
     request: Result<Json<CreateArtifactRequest>, JsonRejection>,
 ) -> Response {
-    let claims = match authenticate(&state, &headers) {
-        Ok(claims) => claims,
-        Err(error) => return twirp_token_error(error),
+    let Ok(claims) = authenticate_runtime_token(state.runtime_tokens.as_ref(), &headers) else {
+        return twirp_error(TwirpErrorClass::Unauthenticated);
     };
     let Ok(Json(request)) = request else {
         return twirp_error(TwirpErrorClass::InvalidArgument);
@@ -369,9 +290,8 @@ async fn finalize_artifact(
     headers: HeaderMap,
     request: Result<Json<FinalizeArtifactRequest>, JsonRejection>,
 ) -> Response {
-    let claims = match authenticate(&state, &headers) {
-        Ok(claims) => claims,
-        Err(error) => return twirp_token_error(error),
+    let Ok(claims) = authenticate_runtime_token(state.runtime_tokens.as_ref(), &headers) else {
+        return twirp_error(TwirpErrorClass::Unauthenticated);
     };
     let Ok(Json(request)) = request else {
         return twirp_error(TwirpErrorClass::InvalidArgument);
@@ -441,9 +361,8 @@ async fn list_artifacts(
     headers: HeaderMap,
     request: Result<Json<ListArtifactsRequest>, JsonRejection>,
 ) -> Response {
-    let claims = match authenticate(&state, &headers) {
-        Ok(claims) => claims,
-        Err(error) => return twirp_token_error(error),
+    let Ok(claims) = authenticate_runtime_token(state.runtime_tokens.as_ref(), &headers) else {
+        return twirp_error(TwirpErrorClass::Unauthenticated);
     };
     let Ok(Json(request)) = request else {
         return twirp_error(TwirpErrorClass::InvalidArgument);
@@ -517,9 +436,8 @@ async fn get_signed_artifact_url(
     headers: HeaderMap,
     request: Result<Json<GetSignedArtifactUrlRequest>, JsonRejection>,
 ) -> Response {
-    let claims = match authenticate(&state, &headers) {
-        Ok(claims) => claims,
-        Err(error) => return twirp_token_error(error),
+    let Ok(claims) = authenticate_runtime_token(state.runtime_tokens.as_ref(), &headers) else {
+        return twirp_error(TwirpErrorClass::Unauthenticated);
     };
     let Ok(Json(request)) = request else {
         return twirp_error(TwirpErrorClass::InvalidArgument);
@@ -565,33 +483,25 @@ async fn get_signed_artifact_url(
     }))
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct DownloadQuery {
-    se: u64,
-    sig: String,
-}
-
 async fn download_artifact(
     State(state): State<ApiState>,
     Path((artifact_id, content_digest)): Path<(String, String)>,
-    Query(query): Query<DownloadQuery>,
+    Query(query): Query<SignedUrlQuery>,
 ) -> Response {
     let Ok(artifact_id) = parse_artifact_id(&artifact_id) else {
-        return download_error(StatusCode::BAD_REQUEST);
+        return no_store(StatusCode::BAD_REQUEST);
     };
     let content_digest = match Sha256Digest::from_str(&content_digest) {
         Ok(value) if value.to_string() == content_digest => value,
-        _ => return download_error(StatusCode::BAD_REQUEST),
+        _ => return no_store(StatusCode::BAD_REQUEST),
     };
-    if query.sig.is_empty()
-        || query.sig.len() > MAXIMUM_SIGNATURE_BYTES
+    if !signature_has_valid_shape(&query.sig)
         || state
             .download_capabilities
             .verify_download(artifact_id, content_digest, query.se, &query.sig)
             .is_err()
     {
-        return download_error(StatusCode::FORBIDDEN);
+        return no_store(StatusCode::FORBIDDEN);
     }
     let prepared = match state
         .service
@@ -629,16 +539,12 @@ async fn download_artifact(
         .header(header::CONTENT_DISPOSITION, disposition)
         .header(header::ETAG, etag)
         .body(body)
-        .unwrap_or_else(|_| download_error(StatusCode::INTERNAL_SERVER_ERROR));
+        .unwrap_or_else(|_| no_store(StatusCode::INTERNAL_SERVER_ERROR));
     no_store(response)
 }
 
-fn download_error(status: StatusCode) -> Response {
-    no_store(status)
-}
-
 fn download_service_error(error: ResultsServiceError) -> Response {
-    download_error(match error.kind() {
+    no_store(match error.kind() {
         ResultsServiceErrorKind::InvalidArgument => StatusCode::BAD_REQUEST,
         ResultsServiceErrorKind::PermissionDenied => StatusCode::FORBIDDEN,
         ResultsServiceErrorKind::NotFound => StatusCode::NOT_FOUND,
@@ -671,7 +577,7 @@ async fn azure_blob(
         Ok(value) => UploadId::from_uuid(value),
         Err(_) => return azure_error(AzureErrorClass::InvalidRequest),
     };
-    if query.sig.is_empty() || query.sig.len() > MAXIMUM_SIGNATURE_BYTES {
+    if !signature_has_valid_shape(&query.sig) {
         return azure_error(AzureErrorClass::AuthenticationFailed);
     }
     if state
@@ -717,23 +623,6 @@ async fn azure_blob(
     }
 }
 
-fn authenticate(state: &ApiState, headers: &HeaderMap) -> Result<RuntimeTokenClaims, TokenError> {
-    let mut values = headers.get_all(header::AUTHORIZATION).iter();
-    let value = values.next().ok_or(TokenError::Malformed)?;
-    if values.next().is_some() {
-        return Err(TokenError::Malformed);
-    }
-    let value = value.to_str().map_err(|_| TokenError::Malformed)?;
-    let (scheme, credential) = value.split_once(' ').ok_or(TokenError::Malformed)?;
-    if !scheme.eq_ignore_ascii_case("Bearer")
-        || credential.is_empty()
-        || credential.bytes().any(|byte| byte.is_ascii_whitespace())
-    {
-        return Err(TokenError::Malformed);
-    }
-    state.runtime_tokens.verify(credential)
-}
-
 fn request_ids_match(claims: &RuntimeTokenClaims, run_id: &str, job_id: &str) -> bool {
     let Ok(run_id) = RunId::from_str(run_id) else {
         return false;
@@ -752,56 +641,10 @@ fn parse_timestamp(value: &str) -> Result<u64, ()> {
     u64::try_from(timestamp.unix_timestamp()).map_err(|_| ())
 }
 
-pub(crate) fn parse_canonical_u64(value: &str) -> Result<u64, ()> {
-    if value.is_empty()
-        || value.len() > 20
-        || !value.bytes().all(|byte| byte.is_ascii_digit())
-        || (value.len() > 1 && value.starts_with('0'))
-    {
-        return Err(());
-    }
-    value.parse().map_err(|_| ())
-}
-
 fn parse_artifact_id(value: &str) -> Result<ArtifactId, ()> {
     parse_canonical_u64(value)
         .and_then(|value| i64::try_from(value).map_err(|_| ()))
         .and_then(|value| ArtifactId::new(value).map_err(|_| ()))
-}
-
-pub(crate) fn content_length_matches(headers: &HeaderMap, actual: usize) -> bool {
-    let mut values = headers.get_all(header::CONTENT_LENGTH).iter();
-    let Some(value) = values.next() else {
-        return false;
-    };
-    if values.next().is_some() {
-        return false;
-    }
-    value
-        .to_str()
-        .ok()
-        .and_then(|value| parse_canonical_u64(value).ok())
-        .and_then(|value| usize::try_from(value).ok())
-        == Some(actual)
-}
-
-#[derive(Clone, Copy, Debug)]
-enum TwirpErrorClass {
-    InvalidArgument,
-    Unauthenticated,
-    PermissionDenied,
-    NotFound,
-    AlreadyExists,
-    FailedPrecondition,
-    ResourceExhausted,
-    Unavailable,
-    Internal,
-}
-
-#[derive(Debug, Serialize)]
-struct TwirpErrorBody {
-    code: &'static str,
-    msg: &'static str,
 }
 
 fn twirp_error(class: TwirpErrorClass) -> Response {
@@ -851,10 +694,6 @@ fn twirp_error(class: TwirpErrorClass) -> Response {
     no_store((status, Json(TwirpErrorBody { code, msg: message })))
 }
 
-fn twirp_token_error(_error: TokenError) -> Response {
-    twirp_error(TwirpErrorClass::Unauthenticated)
-}
-
 fn twirp_service_error(error: ResultsServiceError) -> Response {
     twirp_error(match error.kind() {
         ResultsServiceErrorKind::InvalidArgument => TwirpErrorClass::InvalidArgument,
@@ -866,18 +705,6 @@ fn twirp_service_error(error: ResultsServiceError) -> Response {
         ResultsServiceErrorKind::Unavailable => TwirpErrorClass::Unavailable,
         ResultsServiceErrorKind::Internal => TwirpErrorClass::Internal,
     })
-}
-
-#[derive(Clone, Copy, Debug)]
-enum AzureErrorClass {
-    InvalidRequest,
-    AuthenticationFailed,
-    NotFound,
-    Conflict,
-    InvalidState,
-    TooLarge,
-    Unavailable,
-    Internal,
 }
 
 fn azure_success() -> Response {
@@ -962,12 +789,6 @@ fn azure_service_error(error: ResultsServiceError) -> Response {
         ResultsServiceErrorKind::Unavailable => AzureErrorClass::Unavailable,
         ResultsServiceErrorKind::Internal => AzureErrorClass::Internal,
     })
-}
-
-fn no_store(response: impl IntoResponse) -> Response {
-    let mut response = response.into_response();
-    harden_results_response(&mut response);
-    response
 }
 
 #[cfg(test)]
