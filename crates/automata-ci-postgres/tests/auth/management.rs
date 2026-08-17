@@ -4440,6 +4440,12 @@ async fn windows_runner_enrollment_is_signed_one_use_monotonic_and_fresh_after_l
         .fetch_one(pool)
         .await?;
         assert_eq!(persisted, (1, 1, 1, true, "windows-hyperv".to_owned(), true));
+        let admission_before_renewal: serde_json::Value = sqlx::query_scalar(
+            "SELECT to_jsonb(admission) FROM windows_runner_admissions AS admission WHERE runner_id=$1",
+        )
+        .bind(runner_id.as_uuid())
+        .fetch_one(pool)
+        .await?;
 
         for statement in [
             "UPDATE windows_image_promotion_high_water SET promotion_serial=promotion_serial-1",
@@ -4586,6 +4592,72 @@ async fn windows_runner_enrollment_is_signed_one_use_monotonic_and_fresh_after_l
                 .await?,
             RunnerEnrollmentConsumeOutcome::Replayed(expected_response)
         );
+
+        let certificate_issued_at_seconds = now_ms.div_euclid(1_000);
+        let presented_expires_at_seconds = certificate_issued_at_seconds
+            .checked_add(MAX_RUNNER_CERTIFICATE_LIFETIME_SECONDS)
+            .ok_or("Windows certificate expiry overflow")?;
+        let renewal_now_seconds = presented_expires_at_seconds
+            .checked_sub(RUNNER_CERTIFICATE_RENEWAL_WINDOW_SECONDS)
+            .ok_or("Windows certificate renewal time underflow")?;
+        clock
+            .set(
+                renewal_now_seconds
+                    .checked_mul(1_000)
+                    .ok_or("Windows certificate renewal milliseconds overflow")?,
+            )
+            .await?;
+        let renewed_expires_at_seconds = renewal_now_seconds
+            .checked_add(MAX_RUNNER_CERTIFICATE_LIFETIME_SECONDS)
+            .ok_or("renewed Windows certificate expiry overflow")?;
+        let renewal_response = br#"{"runner":"windows-hyperv-runner","renewed":true}"#.to_vec();
+        let renewal = repository
+            .renew_runner_certificate(
+                RenewRunnerCertificate::new(
+                    authenticated_runner(
+                        runner_id,
+                        [0xa6; 32],
+                        renewal_now_seconds,
+                        presented_expires_at_seconds,
+                    )?,
+                    Uuid::new_v4(),
+                    [0xb1; 32],
+                )?,
+                |signed_runner_id, database_time_ms| {
+                    assert_eq!(signed_runner_id, runner_id.as_uuid());
+                    assert_eq!(database_time_ms.div_euclid(1_000), renewal_now_seconds);
+                    Ok(IssuedRunnerCertificateRenewal::new(
+                        [0xb2; 32],
+                        renewal_now_seconds,
+                        renewed_expires_at_seconds,
+                        renewal_response.clone(),
+                    ))
+                },
+            )
+            .await?;
+        assert_eq!(
+            renewal,
+            RunnerCertificateRenewalOutcome::Applied(renewal_response)
+        );
+        let (admission_after_renewal, certificate_count, renewal_receipt_count): (
+            serde_json::Value,
+            i64,
+            i64,
+        ) = sqlx::query_as(
+            r"
+            SELECT
+                to_jsonb(admission),
+                (SELECT count(*) FROM runner_machine_certificates WHERE runner_id=$1),
+                (SELECT count(*) FROM runner_certificate_renewal_receipts WHERE runner_id=$1)
+            FROM windows_runner_admissions AS admission
+            WHERE admission.runner_id=$1
+            ",
+        )
+        .bind(runner_id.as_uuid())
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(admission_after_renewal, admission_before_renewal);
+        assert_eq!((certificate_count, renewal_receipt_count), (2, 1));
         Ok(())
     })
     .await
