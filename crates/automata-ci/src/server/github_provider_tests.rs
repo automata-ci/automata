@@ -1,5 +1,6 @@
 use std::{collections::BTreeMap, fs, path::PathBuf, sync::Mutex};
 
+use automata_ci_provider::ProviderConnectionId;
 use serde_json::{Value, json};
 
 use super::*;

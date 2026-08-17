@@ -11,6 +11,7 @@ use async_trait::async_trait;
 use automata_ci_auth::secret::SecretString;
 use automata_ci_blob::ImmutableBlobStore;
 use automata_ci_core::UnixMillis;
+use automata_ci_provider::ProviderConnectionId;
 use automata_ci_scm::{
     RepositoryId as ScmRepositoryId, RepositorySource, RepositorySourcePort, ScmProvider,
 };
@@ -21,11 +22,11 @@ use automata_ci_store::{
     GithubServerServiceRevision, GithubServerServiceWorkerId, GithubSubjectEvidenceRepository,
     MAX_GITHUB_SERVICE_CONSUMER_REQUEST_MILLIS, MAX_PROVIDER_DELIVERY_ATTEMPTS,
     MAX_PROVIDER_DELIVERY_CLAIM_MILLIS, MAX_PROVIDER_DELIVERY_TOTAL_CLAIM_MILLIS,
-    ProviderConnectionId, ProviderDeliveryClaimOwnerId, ProviderDeliveryClaimRenewalRepository,
-    ProviderDeliveryIdentity, ProviderDeliveryRenewalTiming, ProviderDeliveryRepository,
-    ProviderDeliveryStoreError, ProviderInstallationId, ProviderRepositoryId,
-    ProviderRepositoryOwnerId, ProviderRepositoryVisibility, RenewProviderDeliveryClaim,
-    RenewedProviderDeliveryClaim, TenantScope,
+    ProviderDeliveryClaimOwnerId, ProviderDeliveryClaimRenewalRepository, ProviderDeliveryIdentity,
+    ProviderDeliveryRenewalTiming, ProviderDeliveryRepository, ProviderDeliveryStoreError,
+    ProviderInstallationId, ProviderRepositoryId, ProviderRepositoryOwnerId,
+    ProviderRepositoryVisibility, RenewProviderDeliveryClaim, RenewedProviderDeliveryClaim,
+    TenantScope,
 };
 use thiserror::Error;
 use tokio::{sync::OwnedMutexGuard, time::Instant};

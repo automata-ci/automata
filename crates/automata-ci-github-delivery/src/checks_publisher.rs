@@ -20,6 +20,7 @@ use automata_ci_github::{
     GithubCheckRunState, GithubCheckSuiteCreateOutcome, GithubCheckSuiteId as HttpSuiteId,
     GithubCheckTimestamp, GithubChecksError, GithubHttpEndpoint, GithubObservedCheckConclusion,
 };
+use automata_ci_provider::ProviderConnectionId;
 use automata_ci_scm::{ExactRevision, RepositoryId as ScmRepositoryId};
 use automata_ci_store::{
     AdvanceGithubCheckAnnotations, BeginGithubCheckAnnotationBatch, BeginGithubCheckRunCreate,
@@ -36,10 +37,10 @@ use automata_ci_store::{
     GithubServerServiceConsumerClaim, GithubServerServiceConsumerId, GithubServerServiceHandoffId,
     GithubServerServiceRevision, GithubServerServiceWorkerId, InitializeGithubCheckPresentation,
     MAX_GITHUB_CHECK_PROJECTION_ATTEMPTS, MAX_GITHUB_CHECK_PROJECTION_CLAIM_MILLIS,
-    MAX_GITHUB_CHECK_PROJECTION_RETRY_MILLIS, ProviderConnectionId, ProviderInstallationId,
-    ProviderRepositoryId, ReleaseUnissuedGithubCheckAnnotationBatch,
-    ReleaseUnissuedGithubCheckRunCreate, RepositoryId, ResolveGithubCheckRunCreate,
-    RetryGithubCheckProjection, RetryUncertainGithubCheckAnnotations, TenantScope,
+    MAX_GITHUB_CHECK_PROJECTION_RETRY_MILLIS, ProviderInstallationId, ProviderRepositoryId,
+    ReleaseUnissuedGithubCheckAnnotationBatch, ReleaseUnissuedGithubCheckRunCreate, RepositoryId,
+    ResolveGithubCheckRunCreate, RetryGithubCheckProjection, RetryUncertainGithubCheckAnnotations,
+    TenantScope,
 };
 use thiserror::Error;
 use tokio::time::{Instant, timeout_at};

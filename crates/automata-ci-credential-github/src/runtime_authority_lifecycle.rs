@@ -899,6 +899,7 @@ mod tests {
         KeyEncryptionContext, KeyEncryptionProvider, KeyId, LocalAes256GcmKeyring,
         LocalKeyMaterial, WrappedDataKey,
     };
+    use automata_ci_provider::ProviderConnectionId;
     use automata_ci_store::{
         AuthenticateGithubRuntimeAuthorityUnprotectedErasure, BeginGithubRuntimeAuthorityMint,
         BeginGithubRuntimeAuthorityMintOutcome, ClaimGithubRuntimeAuthorityMint,
@@ -916,11 +917,11 @@ mod tests {
         LogicalActivationPreparationGeneration, LogicalActivationWorkerId,
         LogicalMaterializationGeneration, LogicalMaterializationWorkerId, LogicalWorkSelectionId,
         MarkGithubRuntimeAuthorityIndeterminate, ProtectedGithubRuntimeAuthority,
-        ProviderConnectionId, ProviderInstallationId, QuarantineGithubRuntimeAuthority,
-        ReadyGithubRuntimeAuthority, ReconcileGithubRuntimeAuthorities,
-        RejectGithubRuntimeAuthorityMint, RepositoryId, RetryGithubRuntimeAuthorityMint,
-        RetryGithubRuntimeAuthorityRevocation, RevalidatedGithubRuntimeAuthorityRevocation,
-        RunnerGeneration, SessionEpoch, StableRunnerSlot, TenantScope,
+        ProviderInstallationId, QuarantineGithubRuntimeAuthority, ReadyGithubRuntimeAuthority,
+        ReconcileGithubRuntimeAuthorities, RejectGithubRuntimeAuthorityMint, RepositoryId,
+        RetryGithubRuntimeAuthorityMint, RetryGithubRuntimeAuthorityRevocation,
+        RevalidatedGithubRuntimeAuthorityRevocation, RunnerGeneration, SessionEpoch,
+        StableRunnerSlot, TenantScope,
     };
 
     use super::*;

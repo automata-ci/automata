@@ -345,7 +345,7 @@ pub use provider_delivery::{
     CompleteProviderDelivery, MAX_PROVIDER_DELIVERY_ATTEMPTS, MAX_PROVIDER_DELIVERY_CLAIM_MILLIS,
     MAX_PROVIDER_DELIVERY_EVENT_ENVELOPE_BYTES, MAX_PROVIDER_DELIVERY_RETRY_BACKOFF_MILLIS,
     MAX_PROVIDER_DELIVERY_TOTAL_CLAIM_MILLIS, MAX_PROVIDER_DELIVERY_WORKFLOW_OUTCOMES,
-    ProviderConnectionId, ProviderDeliveryClaimFence, ProviderDeliveryClaimOwnerId,
+    ProviderDeliveryClaimFence, ProviderDeliveryClaimOwnerId,
     ProviderDeliveryClaimRenewalRepository, ProviderDeliveryEventEnvelope,
     ProviderDeliveryFailureKind, ProviderDeliveryId, ProviderDeliveryIdentity,
     ProviderDeliveryReceipt, ProviderDeliveryRenewalTiming, ProviderDeliveryRepository,

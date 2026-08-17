@@ -19,6 +19,7 @@ use automata_ci_core::{
     TrustRepositoryEvidence, TrustTokenRecursion, UnixMillis, WorkflowEventProvenance,
     WorkflowPlan,
 };
+use automata_ci_provider::ProviderConnectionId;
 use automata_ci_scm::{
     ArchiveFormat, ArchiveLimits, RepositoryId as ScmRepositoryId, RevisionSpec, ScmError,
     ScmErrorKind, ScmProvider, SnapshotRequest,
@@ -34,9 +35,9 @@ use automata_ci_store::{
     GithubServerServiceAuthoritySelector, GithubServerServiceClaimFence,
     GithubServerServiceConsumerClaim, GithubServerServiceConsumerId, GithubServerServiceRevision,
     GithubServerServiceWorkerId, MAX_GITHUB_SCHEDULE_CLAIM_MILLIS,
-    MAX_GITHUB_SCHEDULE_RETRY_MILLIS, ObjectKey, ProviderConnectionId,
-    ProviderRepositoryVisibility, RegisterGithubScheduleRegistry,
-    RegisterGithubScheduledCheckSubject, RetryGithubScheduleFire, WorkflowAdmissionIdempotency,
+    MAX_GITHUB_SCHEDULE_RETRY_MILLIS, ObjectKey, ProviderRepositoryVisibility,
+    RegisterGithubScheduleRegistry, RegisterGithubScheduledCheckSubject, RetryGithubScheduleFire,
+    WorkflowAdmissionIdempotency,
 };
 use automata_ci_workflow_github::{
     CompilationDisposition, CompileWorkflowRequest, GithubEventMetadata, GithubWorkflowCompiler,

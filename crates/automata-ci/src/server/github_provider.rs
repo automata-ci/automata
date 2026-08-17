@@ -22,6 +22,7 @@ use automata_ci_credential_github::{
 };
 use automata_ci_github::GithubWebhookVerifier;
 use automata_ci_github_delivery::GithubDeliveryConnection;
+use automata_ci_provider::ProviderConnectionId;
 use automata_ci_store::{
     AdmissionObject, BootstrapGithubProviderManifest, BootstrapGithubProviderRepository,
     EnsureGithubServerServiceAuthority, GITHUB_PROVIDER_API_ORIGIN,
@@ -32,10 +33,9 @@ use automata_ci_store::{
     GithubServerServiceAuthorityRepository, GithubServerServiceAuthorityState,
     GithubServerServiceScope, GithubServerServiceStoreError,
     GithubWorkflowPermissionDefaultsObservationError,
-    GithubWorkflowPermissionDefaultsObservationRepository, ObjectKey, ProviderConnectionId,
-    ProviderRepositoryVisibility, RegisterWorkflowRuntimePolicy, RepositoryId,
-    Sha256Digest as StoreSha256Digest, TenantScope, WorkflowRuntimePolicy,
-    WorkflowRuntimePolicyRevision, github_provider_repository_id,
+    GithubWorkflowPermissionDefaultsObservationRepository, ObjectKey, ProviderRepositoryVisibility,
+    RegisterWorkflowRuntimePolicy, RepositoryId, Sha256Digest as StoreSha256Digest, TenantScope,
+    WorkflowRuntimePolicy, WorkflowRuntimePolicyRevision, github_provider_repository_id,
 };
 use automata_ci_workflow_service::GITHUB_RUNNER_POLICY_MEDIA_TYPE;
 use bytes::Bytes;

@@ -1,5 +1,6 @@
 use automata_ci_blob::{BlobDescriptor, BlobKey, MediaType};
 use automata_ci_core::{JobId, RunId, Sha256Digest, UnixMillis};
+use automata_ci_provider::ProviderConnectionId;
 use automata_ci_store::{
     BeginGithubCheckRunCreate, BlockGithubCheckProjectionForCredentialRejection,
     ClaimGithubCheckProjection, ClaimedGithubCheckProjection, GithubCheckAnnotationProgress,
@@ -10,9 +11,9 @@ use automata_ci_store::{
     GithubCheckSubjectReceipt, GithubCheckSuiteId, GithubCheckTerminalCause, GithubCheckValueError,
     GithubRepositoryName, GithubServerServiceAuthorityId, GithubServerServiceAuthoritySelector,
     GithubServerServiceRevision, MAX_GITHUB_CHECK_CREATE_RECONCILE_GRACE_MILLIS,
-    MAX_GITHUB_CHECK_PROJECTION_RETRY_MILLIS, ProviderConnectionId, ProviderDeliveryId,
-    ProviderInstallationId, ProviderRepositoryId, ReleaseUnissuedGithubCheckRunCreate,
-    RepositoryId, ResolveGithubCheckRunCreate, TenantScope,
+    MAX_GITHUB_CHECK_PROJECTION_RETRY_MILLIS, ProviderDeliveryId, ProviderInstallationId,
+    ProviderRepositoryId, ReleaseUnissuedGithubCheckRunCreate, RepositoryId,
+    ResolveGithubCheckRunCreate, TenantScope,
 };
 use uuid::Uuid;
 

@@ -15,6 +15,7 @@ use automata_ci_github_delivery::{
     GithubDeliveryWorkflowProcessor, GithubDeliveryWorkflowProcessorCompletion,
     GithubDeliveryWorkflowProcessorError, GithubDeliveryWorkflowRequest,
 };
+use automata_ci_provider::ProviderConnectionId;
 use automata_ci_scm::{
     ArchiveFormat, ExactRevision, RepositoryId as ScmRepositoryId, RepositorySnapshot,
     RepositorySource, RepositorySourcePort, RepositorySourceRequest, ResolvedRevision, ScmError,
@@ -34,10 +35,10 @@ use automata_ci_store::{
     GithubSubjectEvidenceStoreError, GithubWorkflowRunSubjectEvidence,
     ManifestPinnedGithubDeliveryEvidence, ManifestPinnedGithubDeliveryReceipt, ObjectKey,
     PendingGithubRepositoryDispatchEvidence, PendingGithubRepositoryDispatchReceipt,
-    ProviderConnectionId, ProviderDeliveryClaimFence, ProviderDeliveryClaimOwnerId,
-    ProviderDeliveryEventEnvelope, ProviderDeliveryFailureKind, ProviderDeliveryId,
-    ProviderDeliveryIdentity, ProviderDeliveryReceipt, ProviderDeliveryRepository,
-    ProviderDeliveryState, ProviderDeliveryStoreError, ProviderDeliveryWorkflowConclusion,
+    ProviderDeliveryClaimFence, ProviderDeliveryClaimOwnerId, ProviderDeliveryEventEnvelope,
+    ProviderDeliveryFailureKind, ProviderDeliveryId, ProviderDeliveryIdentity,
+    ProviderDeliveryReceipt, ProviderDeliveryRepository, ProviderDeliveryState,
+    ProviderDeliveryStoreError, ProviderDeliveryWorkflowConclusion,
     ProviderDeliveryWorkflowInventoryReceipt, ProviderDeliveryWorkflowOutcome,
     ProviderInstallationId, ProviderRepositoryCoordinates, ProviderRepositoryId,
     ProviderRepositoryOwnerId, ProviderRepositoryVisibility,

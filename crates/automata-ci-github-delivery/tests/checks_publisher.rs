@@ -24,6 +24,7 @@ use automata_ci_github_delivery::{
     GithubChecksPublisherConfig, GithubChecksPublisherError, GithubChecksPublisherOutcome,
     GithubChecksServerServiceCredential, GithubServerServiceCredentialRelease,
 };
+use automata_ci_provider::ProviderConnectionId;
 use automata_ci_scm::RepositoryId as ScmRepositoryId;
 use automata_ci_store::{
     AdvanceGithubCheckAnnotations, BeginGithubCheckAnnotationBatch, BeginGithubCheckRunCreate,
@@ -41,7 +42,7 @@ use automata_ci_store::{
     GithubServerServiceAuthoritySelector, GithubServerServiceClaimFence,
     GithubServerServiceConsumerClaim, GithubServerServiceConsumerId, GithubServerServiceHandoffId,
     GithubServerServiceRevision, GithubServerServiceWorkerId, InitializeGithubCheckPresentation,
-    ProviderConnectionId, ProviderDeliveryId, ProviderInstallationId, ProviderRepositoryId,
+    ProviderDeliveryId, ProviderInstallationId, ProviderRepositoryId,
     ReleaseUnissuedGithubCheckAnnotationBatch, ReleaseUnissuedGithubCheckRunCreate, RepositoryId,
     ResolveGithubCheckRunCreate, RetryGithubCheckProjection, RetryUncertainGithubCheckAnnotations,
     TenantScope,

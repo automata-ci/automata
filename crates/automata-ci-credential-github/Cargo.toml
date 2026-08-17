@@ -17,6 +17,7 @@ automata-ci-auth.workspace = true
 automata-ci-control.workspace = true
 automata-ci-core.workspace = true
 automata-ci-key-management.workspace = true
+automata-ci-provider.workspace = true
 automata-ci-protocol.workspace = true
 automata-ci-scm.workspace = true
 automata-ci-store.workspace = true

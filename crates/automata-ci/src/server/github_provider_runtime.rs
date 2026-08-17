@@ -56,6 +56,7 @@ use automata_ci_github_delivery::{
 };
 use automata_ci_key_management::{EnvelopeCodec, KeyEncryptionProvider};
 use automata_ci_protocol::RuntimeAuthorityEndpoint;
+use automata_ci_provider::ProviderConnectionId;
 use automata_ci_scm::ScmProvider;
 use automata_ci_store::{
     GITHUB_PROVIDER_WEB_ORIGIN, GithubCheckProjectionOutbox, GithubCheckProjectionWorkerId,
@@ -68,7 +69,7 @@ use automata_ci_store::{
     GithubServerServiceWorkerId, GithubSubjectEvidenceRepository,
     GithubWorkflowPermissionDefaultsObservation,
     GithubWorkflowPermissionDefaultsObservationRepository, LogicalWorkflowAdmissionRepository,
-    MAX_GITHUB_SERVICE_CONSUMER_REQUEST_MILLIS, ProviderConnectionId, ProviderDeliveryClaimOwnerId,
+    MAX_GITHUB_SERVICE_CONSUMER_REQUEST_MILLIS, ProviderDeliveryClaimOwnerId,
     ProviderRepositoryVisibility, RetireGithubServerServiceAuthority, TenantScope,
 };
 use automata_ci_store_postgres::PostgresStore;

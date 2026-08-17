@@ -18,9 +18,10 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
-    GithubRepositoryName, ProviderConnectionId, ProviderInstallationId, ProviderRepositoryId,
-    RepositoryId, RepositoryOperationError, Sha256Digest, TenantScope,
+    GithubRepositoryName, ProviderInstallationId, ProviderRepositoryId, RepositoryId,
+    RepositoryOperationError, Sha256Digest, TenantScope,
 };
+use automata_ci_provider::ProviderConnectionId;
 
 /// Maximum duration of one pre-mint repository claim.
 pub const MAX_GITHUB_SERVICE_MINT_CLAIM_MILLIS: i64 = 2 * 60 * 1_000;

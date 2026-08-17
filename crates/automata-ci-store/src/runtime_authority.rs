@@ -28,10 +28,11 @@ use crate::{
     LogicalActivationGeneration, LogicalActivationPreparationGeneration, LogicalActivationWorkerId,
     LogicalMaterializationGeneration, LogicalMaterializationWorkerId, LogicalWorkSelectionId,
     MAX_LOGICAL_ACTIVATION_CLAIM_MILLIS, MAX_LOGICAL_ACTIVATION_PREPARATION_CLAIM_MILLIS,
-    MAX_LOGICAL_MATERIALIZATION_CLAIM_MILLIS, ProviderConnectionId, ProviderInstallationId,
-    RepositoryId, RepositoryOperationError, RunnerGeneration, SessionEpoch, Sha256Digest,
-    StableRunnerSlot, TenantScope,
+    MAX_LOGICAL_MATERIALIZATION_CLAIM_MILLIS, ProviderInstallationId, RepositoryId,
+    RepositoryOperationError, RunnerGeneration, SessionEpoch, Sha256Digest, StableRunnerSlot,
+    TenantScope,
 };
+use automata_ci_provider::ProviderConnectionId;
 
 /// Maximum time held by a pre-mint repository claim.
 pub const MAX_GITHUB_AUTHORITY_MINT_CLAIM_MILLIS: i64 = 2 * 60 * 1_000;

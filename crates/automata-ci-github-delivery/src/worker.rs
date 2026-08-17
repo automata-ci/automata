@@ -2654,10 +2654,11 @@ fn processor_lease_error(error: GithubDeliveryWorkerError) -> GithubDeliveryWork
 
 #[cfg(test)]
 mod lease_tests {
+    use automata_ci_provider::ProviderConnectionId;
     use automata_ci_store::{
-        ObjectKey, ProviderConnectionId, ProviderDeliveryClaimOwnerId,
-        ProviderDeliveryEventEnvelope, ProviderDeliveryId, ProviderDeliveryReceipt,
-        ProviderInstallationId, ProviderRepositoryCoordinates, ProviderRepositoryId, TenantScope,
+        ObjectKey, ProviderDeliveryClaimOwnerId, ProviderDeliveryEventEnvelope, ProviderDeliveryId,
+        ProviderDeliveryReceipt, ProviderInstallationId, ProviderRepositoryCoordinates,
+        ProviderRepositoryId, TenantScope,
     };
     use uuid::Uuid;
 

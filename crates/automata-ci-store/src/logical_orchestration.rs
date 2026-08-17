@@ -18,9 +18,10 @@ use crate::{
     GithubServerServiceAuthoritySelector, GithubServerServiceClaimFence,
     GithubServerServiceConsumerClaim, GithubServerServiceConsumerId, GithubServerServiceRevision,
     GithubServerServiceWorkerId, JobCredentialRequirements,
-    LOGICAL_ACTIVATION_RUNTIME_CONTEXT_MEDIA_TYPE, ProviderConnectionId, RepositoryId,
-    Sha256Digest, StoreError, TenantScope, WorkflowAdmissionIdempotency, WorkflowSnapshotId,
+    LOGICAL_ACTIVATION_RUNTIME_CONTEXT_MEDIA_TYPE, RepositoryId, Sha256Digest, StoreError,
+    TenantScope, WorkflowAdmissionIdempotency, WorkflowSnapshotId,
 };
+use automata_ci_provider::ProviderConnectionId;
 
 /// Logical-orchestration schema for phase-one admission.
 pub const LOGICAL_ORCHESTRATION_SCHEMA: u16 = 1;

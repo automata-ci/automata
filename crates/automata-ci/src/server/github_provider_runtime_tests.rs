@@ -15,6 +15,7 @@ use automata_ci_credential_github::{
     GithubInstallationTokenRevocationCandidate, GithubInstallationTokenRevocationFailureKind,
     GithubInstallationTokenRevocationOutcome,
 };
+use automata_ci_provider::ProviderConnectionId;
 use automata_ci_store::{
     GithubRepositoryId, GithubRepositoryName, GithubRuntimeAuthorityActivationSelectionTail,
     GithubRuntimeAuthorityIdentity, GithubRuntimeAuthorityMaterializationSelectionTail,
@@ -24,8 +25,8 @@ use automata_ci_store::{
     GithubServerServiceJwtIssuer, GithubServerServiceRevision, GithubServerServiceScope,
     LogicalActivationGeneration, LogicalActivationPreparationGeneration, LogicalActivationWorkerId,
     LogicalMaterializationGeneration, LogicalMaterializationWorkerId, LogicalWorkSelectionId,
-    ProviderConnectionId, ProviderInstallationId, ProviderRepositoryId, RepositoryId,
-    RunnerGeneration, SessionEpoch, StableRunnerSlot, TenantScope,
+    ProviderInstallationId, ProviderRepositoryId, RepositoryId, RunnerGeneration, SessionEpoch,
+    StableRunnerSlot, TenantScope,
 };
 use serde_json::{Value, json};
 use url::Url;

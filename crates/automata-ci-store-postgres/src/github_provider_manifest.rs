@@ -10,6 +10,7 @@ use super::{
         register_locked_workflow_runtime_policy,
     },
 };
+use automata_ci_provider::ProviderConnectionId;
 use automata_ci_store::{
     AdmissionObject, BootstrapGithubProviderRepository, GithubCheckName,
     GithubInstallationBindingGeneration, GithubProviderManifest,
@@ -19,10 +20,9 @@ use automata_ci_store::{
     GithubProviderRepositoryBootstrapReceipt, GithubProviderRunnerPolicyObject,
     GithubProviderWebhookVerifierFingerprint, GithubProviderWorkflowSelection,
     GithubRepositoryName, GithubServerServiceAppClientId, GithubServerServiceAppId,
-    GithubServerServiceJwtIssuer, GithubServerServiceRevision, ObjectKey, ProviderConnectionId,
-    ProviderInstallationId, ProviderRepositoryId, ProviderRepositoryOwnerId,
-    ProviderRepositoryVisibility, RepositoryId, StoreError, TenantScope,
-    WorkflowRuntimePolicyRevision, WorkflowRuntimePolicyStoreError,
+    GithubServerServiceJwtIssuer, GithubServerServiceRevision, ObjectKey, ProviderInstallationId,
+    ProviderRepositoryId, ProviderRepositoryOwnerId, ProviderRepositoryVisibility, RepositoryId,
+    StoreError, TenantScope, WorkflowRuntimePolicyRevision, WorkflowRuntimePolicyStoreError,
 };
 
 const CURRENT_MANIFEST_QUERY: &str = r"
