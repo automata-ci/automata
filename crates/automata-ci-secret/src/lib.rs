@@ -25,13 +25,11 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-mod dispatch;
 mod model;
 mod provider;
 mod registry;
 mod value;
 
-pub use dispatch::SecretProviderDispatchError;
 pub use model::{
     EnvironmentScopeId, ModelError, ProviderRequestId, RepositoryScopeId, SecretDescriptor,
     SecretId, SecretName, SecretScope, TenantScopeId, WorkloadContext, WorkloadId,
