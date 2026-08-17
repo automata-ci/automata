@@ -192,12 +192,13 @@ jobs:
       handoff_sha256: ${{ steps.handoff.outputs.handoff_sha256 }}
       manifest_sha256: ${{ steps.handoff.outputs.manifest_sha256 }}
       runner_digest: ${{ steps.images.outputs.runner_digest }}
+      sandbox_guest_digest: ${{ steps.images.outputs.sandbox_guest_digest }}
       service_proxy_candidate_artifact_digest: ${{ steps.upload-service-proxy.outputs.artifact-digest }}
       service_proxy_candidate_artifact_id: ${{ steps.upload-service-proxy.outputs.artifact-id }}
-      service_proxy_candidate_filename: ${{ steps.service-proxy-candidate.outputs.candidate_filename }}
-      service_proxy_candidate_sha256: ${{ steps.service-proxy-candidate.outputs.candidate_sha256 }}
-      service_proxy_image_digest: ${{ steps.service-proxy-candidate.outputs.image_digest }}
-      service_proxy_provenance_sha256: ${{ steps.service-proxy-candidate.outputs.provenance_sha256 }}
+      service_proxy_candidate_filename: ${{ steps.selected-service-proxy-candidate.outputs.candidate_filename }}
+      service_proxy_candidate_sha256: ${{ steps.selected-service-proxy-candidate.outputs.candidate_sha256 }}
+      service_proxy_image_digest: ${{ steps.selected-service-proxy-candidate.outputs.image_digest }}
+      service_proxy_provenance_sha256: ${{ steps.selected-service-proxy-candidate.outputs.provenance_sha256 }}
     permissions:
       artifact-metadata: write
       attestations: write
@@ -289,6 +290,7 @@ jobs:
         run: |
           ./scripts/ci/build-static-musl.sh
           AUTOMATA_SCRATCH_RUNTIME=docker ./scripts/ci/verify-static-musl.sh
+          ./scripts/ci/verify-sandbox-guest-static.sh
           ./scripts/ci/verify-service-proxy-static.sh
 
       - name: Generate release metadata
@@ -396,9 +398,13 @@ jobs:
           archive="target/distribution/automata-x86_64-unknown-linux-musl.tar.gz"
           checksum="${archive}.sha256"
           manifest="target/distribution/automata-release-manifest.json"
+          catalog="target/distribution/automata-local-installation-catalog.json"
+          service_proxy_candidate="target/service-proxy-publication/automata-service-proxy-candidate-x86_64-unknown-linux-musl.tar"
           archive_name="${archive##*/}"
           checksum_name="${checksum##*/}"
           manifest_name="${manifest##*/}"
+          catalog_name="${catalog##*/}"
+          service_proxy_candidate_name="${service_proxy_candidate##*/}"
           prerelease_args=()
           case "$RELEASE_PRERELEASE" in
             true) prerelease_args=(--prerelease) ;;
@@ -433,7 +439,8 @@ jobs:
                   f"draft release contains unexpected assets: {unexpected!r}"
               )
           ' "$RELEASE_PRERELEASE" \
-            "$archive_name" "$checksum_name" "$manifest_name"
+            "$archive_name" "$checksum_name" "$manifest_name" \
+            "$catalog_name" "$service_proxy_candidate_name"
           }
 
           require_base_draft_assets() {
@@ -456,7 +463,8 @@ jobs:
                   f"draft release assets are not recoverable: {sorted(actual)!r}"
               )
           ' "$RELEASE_PRERELEASE" \
-            "$archive_name" "$checksum_name" "$manifest_name"
+            "$archive_name" "$checksum_name" "$manifest_name" \
+            "$catalog_name" "$service_proxy_candidate_name"
           }
 
           verify_remote_release_assets() (
@@ -501,6 +509,8 @@ jobs:
             gh release view "$RELEASE_TAG" --json assets \
               --jq '.assets[].name' > "$assets_file"
             mapfile -t existing_assets < "$assets_file"
+            candidate_present=false
+            catalog_present=false
             manifest_present=false
             missing_assets=()
             for expected_path in "$archive" "$checksum"; do
@@ -522,10 +532,21 @@ jobs:
               gh release upload "$RELEASE_TAG" "${missing_assets[@]}"
             fi
             for existing_asset in "${existing_assets[@]}"; do
-              if [[ "$existing_asset" == "$manifest_name" ]]; then
-                manifest_present=true
-              fi
+              case "$existing_asset" in
+                "$catalog_name") catalog_present=true ;;
+                "$service_proxy_candidate_name") candidate_present=true ;;
+                "$manifest_name") manifest_present=true ;;
+              esac
             done
+            if [[ "$catalog_present" == true && "$candidate_present" != true ]]; then
+              printf 'error: draft catalog has no preceding candidate binding\n' >&2
+              exit 1
+            fi
+            if [[ "$manifest_present" == true ]] && \
+              [[ "$catalog_present" != true || "$candidate_present" != true ]]; then
+              printf 'error: draft manifest has incomplete prerequisite bindings\n' >&2
+              exit 1
+            fi
           else
             gh release create "$RELEASE_TAG" \
               --draft \
@@ -534,11 +555,17 @@ jobs:
               --title "Automata ${RELEASE_VERSION}" \
               --verify-tag \
               "$archive" "$checksum"
+            candidate_present=false
+            catalog_present=false
             manifest_present=false
           fi
           require_base_draft_assets
           verify_remote_release_assets
-          printf 'manifest_present=%s\n' "$manifest_present" >> "$GITHUB_OUTPUT"
+          {
+            printf 'candidate_present=%s\n' "$candidate_present"
+            printf 'catalog_present=%s\n' "$catalog_present"
+            printf 'manifest_present=%s\n' "$manifest_present"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Attest accepted release archive bytes
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
@@ -547,14 +574,9 @@ jobs:
             target/distribution/automata-x86_64-unknown-linux-musl.tar.gz
             target/distribution/automata-x86_64-unknown-linux-musl.tar.gz.sha256
 
-      - name: Attest unpublished service-proxy candidate bytes
-        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
-        with:
-          subject-path: target/service-proxy-publication/${{ steps.service-proxy-candidate.outputs.candidate_filename }}
-
-      - name: Recover immutable image binding from the draft
+      - name: Recover immutable release binding from the draft
         id: recovered
-        if: ${{ steps.draft.outputs.manifest_present == 'true' }}
+        if: ${{ steps.draft.outputs.candidate_present == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_COMMIT: ${{ needs.gate.outputs.commit }}
@@ -565,21 +587,63 @@ jobs:
           RELEASE_TAG_OBJECT: ${{ needs.gate.outputs.tag_object }}
           RELEASE_VERSION: ${{ needs.gate.outputs.version }}
         run: |
+          recovery_directory="$(mktemp -d "${TMPDIR%/}/release-binding.XXXXXXXX")"
+          trap 'env -u GH_TOKEN -u GITHUB_TOKEN rm -rf -- "$recovery_directory"' EXIT
+          patterns=(
+            --pattern automata-service-proxy-candidate-x86_64-unknown-linux-musl.tar
+          )
+          if [[ "${{ steps.draft.outputs.catalog_present }}" == true ]]; then
+            patterns+=(--pattern automata-local-installation-catalog.json)
+          fi
+          if [[ "${{ steps.draft.outputs.manifest_present }}" == true ]]; then
+            patterns+=(--pattern automata-release-manifest.json)
+          fi
           gh release download "$RELEASE_TAG" \
-            --dir target/distribution \
-            --pattern automata-release-manifest.json
-          env -u GH_TOKEN -u GITHUB_TOKEN \
-            python3 scripts/ci/release-handoff.py verify-manifest \
-              --repository-root . \
-              --manifest target/distribution/automata-release-manifest.json \
-              --tag "$RELEASE_TAG" \
-              --tag-object "$RELEASE_TAG_OBJECT" \
-              --commit "$RELEASE_COMMIT" \
-              --version "$RELEASE_VERSION" \
-              --prerelease "$RELEASE_PRERELEASE" \
-              --source-date-epoch "$RELEASE_SOURCE_DATE_EPOCH" \
-              --created "$RELEASE_CREATED" \
-              --github-output "$GITHUB_OUTPUT"
+            --dir "$recovery_directory" \
+            "${patterns[@]}"
+          cmp -- \
+            target/service-proxy-publication/automata-service-proxy-candidate-x86_64-unknown-linux-musl.tar \
+            "$recovery_directory/automata-service-proxy-candidate-x86_64-unknown-linux-musl.tar"
+          if [[ "${{ steps.draft.outputs.catalog_present }}" == true ]]; then
+            gh attestation verify \
+              "$recovery_directory/automata-local-installation-catalog.json" \
+              --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.ci/workflows/release.yml" \
+              --source-digest "$RELEASE_COMMIT" \
+              --source-ref "refs/tags/$RELEASE_TAG" \
+              --deny-self-hosted-runners
+            install -m 0444 -- \
+              "$recovery_directory/automata-local-installation-catalog.json" \
+              target/distribution/automata-local-installation-catalog.json
+            env -u GH_TOKEN -u GITHUB_TOKEN \
+              python3 scripts/ci/local_installation_catalog.py verify \
+                --repository-root . \
+                --catalog target/distribution/automata-local-installation-catalog.json \
+                --tag "$RELEASE_TAG" \
+                --tag-object "$RELEASE_TAG_OBJECT" \
+                --commit "$RELEASE_COMMIT" \
+                --version "$RELEASE_VERSION" \
+                --prerelease "$RELEASE_PRERELEASE" \
+                --source-date-epoch "$RELEASE_SOURCE_DATE_EPOCH" \
+                --created "$RELEASE_CREATED" \
+                --github-output "$GITHUB_OUTPUT"
+          fi
+          if [[ "${{ steps.draft.outputs.manifest_present }}" == true ]]; then
+            install -m 0444 -- \
+              "$recovery_directory/automata-release-manifest.json" \
+              target/distribution/automata-release-manifest.json
+            env -u GH_TOKEN -u GITHUB_TOKEN \
+              python3 scripts/ci/release-handoff.py verify-manifest \
+                --repository-root . \
+                --manifest target/distribution/automata-release-manifest.json \
+                --tag "$RELEASE_TAG" \
+                --tag-object "$RELEASE_TAG_OBJECT" \
+                --commit "$RELEASE_COMMIT" \
+                --version "$RELEASE_VERSION" \
+                --prerelease "$RELEASE_PRERELEASE" \
+                --source-date-epoch "$RELEASE_SOURCE_DATE_EPOCH" \
+                --created "$RELEASE_CREATED"
+          fi
           printf 'present=true\n' >> "$GITHUB_OUTPUT"
 
       - name: Prepare and verify image build context
@@ -589,6 +653,14 @@ jobs:
           ./scripts/ci/prepare-container-context.sh \
             target/distribution/automata-x86_64-unknown-linux-musl.tar.gz \
             target/container-release \
+            "$RELEASE_VERSION"
+
+      - name: Prepare sandbox-guest image build context
+        env:
+          RELEASE_VERSION: ${{ needs.gate.outputs.version }}
+        run: |
+          ./scripts/ci/prepare-sandbox-guest-context.sh \
+            target/sandbox-guest-context \
             "$RELEASE_VERSION"
 
       - name: Sign in to GHCR
@@ -623,10 +695,11 @@ jobs:
           }
           require_absent_tag ghcr.io/automata-ci/automata
           require_absent_tag ghcr.io/automata-ci/automata-runner
+          require_absent_tag ghcr.io/automata-ci/automata-sandbox-guest
 
       - name: Build and publish Automata image
         id: automata-image
-        if: ${{ steps.draft.outputs.manifest_present != 'true' }}
+        if: ${{ steps.draft.outputs.catalog_present != 'true' }}
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: target/container-release
@@ -643,7 +716,7 @@ jobs:
 
       - name: Build and publish runner image
         id: runner-image
-        if: ${{ steps.draft.outputs.manifest_present != 'true' }}
+        if: ${{ steps.draft.outputs.catalog_present != 'true' }}
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: target/container-release
@@ -658,11 +731,29 @@ jobs:
           provenance: mode=max
           sbom: true
 
+      - name: Build and publish sandbox-guest image
+        id: sandbox-guest-image
+        if: ${{ steps.draft.outputs.catalog_present != 'true' }}
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: target/sandbox-guest-context
+          file: target/sandbox-guest-context/Containerfile
+          platforms: linux/amd64
+          outputs: type=image,name=ghcr.io/automata-ci/automata-sandbox-guest,push-by-digest=true,name-canonical=true,push=true
+          build-args: |
+            AUTOMATA_CREATED=${{ needs.gate.outputs.created }}
+            AUTOMATA_REVISION=${{ needs.gate.outputs.commit }}
+            AUTOMATA_VERSION=${{ needs.gate.outputs.version }}
+            SOURCE_DATE_EPOCH=${{ needs.gate.outputs.source_date_epoch }}
+          provenance: mode=max
+          sbom: true
+
       - name: Select immutable image digests
         id: images
         env:
           AUTOMATA_DIGEST: ${{ steps.recovered.outputs.automata_digest || steps.automata-image.outputs.digest }}
           RUNNER_DIGEST: ${{ steps.recovered.outputs.runner_digest || steps.runner-image.outputs.digest }}
+          SANDBOX_GUEST_DIGEST: ${{ steps.recovered.outputs.sandbox_guest_digest || steps.sandbox-guest-image.outputs.digest }}
         run: |
           [[ "$AUTOMATA_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || {
             printf 'error: invalid Automata image digest: %s\n' \
@@ -674,10 +765,98 @@ jobs:
               "$RUNNER_DIGEST" >&2
             exit 1
           }
+          [[ "$SANDBOX_GUEST_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+            printf 'error: invalid sandbox-guest image digest: %s\n' \
+              "$SANDBOX_GUEST_DIGEST" >&2
+            exit 1
+          }
           {
             printf 'automata_digest=%s\n' "$AUTOMATA_DIGEST"
             printf 'runner_digest=%s\n' "$RUNNER_DIGEST"
+            printf 'sandbox_guest_digest=%s\n' "$SANDBOX_GUEST_DIGEST"
           } >> "$GITHUB_OUTPUT"
+
+      - name: Create verified local-installation catalog
+        if: ${{ steps.draft.outputs.catalog_present != 'true' }}
+        env:
+          AUTOMATA_DIGEST: ${{ steps.images.outputs.automata_digest }}
+          RELEASE_COMMIT: ${{ needs.gate.outputs.commit }}
+          RELEASE_CREATED: ${{ needs.gate.outputs.created }}
+          RELEASE_PRERELEASE: ${{ needs.gate.outputs.prerelease }}
+          RELEASE_SOURCE_DATE_EPOCH: ${{ needs.gate.outputs.source_date_epoch }}
+          RELEASE_TAG: ${{ needs.gate.outputs.tag }}
+          RELEASE_TAG_OBJECT: ${{ needs.gate.outputs.tag_object }}
+          RELEASE_VERSION: ${{ needs.gate.outputs.version }}
+          RUNNER_DIGEST: ${{ steps.images.outputs.runner_digest }}
+          SANDBOX_GUEST_DIGEST: ${{ steps.images.outputs.sandbox_guest_digest }}
+        run: |
+          evidence_directory="target/local-installation-evidence"
+          install -d -m 0700 -- "$evidence_directory"
+          capture() {
+            local role="$1"
+            local source="$2"
+            python3 scripts/ci/local_installation_catalog.py capture-registry \
+              --source "$source" \
+              --output "${evidence_directory}/${role}.json"
+          }
+          capture automata \
+            "ghcr.io/automata-ci/automata@${AUTOMATA_DIGEST}"
+          capture runner \
+            "ghcr.io/automata-ci/automata-runner@${RUNNER_DIGEST}"
+          capture sandbox-guest \
+            "ghcr.io/automata-ci/automata-sandbox-guest@${SANDBOX_GUEST_DIGEST}"
+          capture postgres \
+            "docker.io/library/postgres:18.4-bookworm@sha256:7e6103cf85f88f7a0eddb3ec0b1ba8940eba098ed118ade25a729ca9daee5568"
+          capture rustfs \
+            "docker.io/rustfs/rustfs:1.0.0-beta.11@sha256:84ce557a0245a06a9aae5516f55ee0f007fca78d41df356f419306fdc0cb168c"
+          capture profile \
+            "ghcr.io/automata-ci/automata-ubuntu-24.04-x64@sha256:e2c20ad25ff71fb61d9609e84daf8384a122b8f26a047836ac50d832c632e194"
+          python3 scripts/ci/local_installation_catalog.py create \
+            --repository-root . \
+            --output target/distribution/automata-local-installation-catalog.json \
+            --service-proxy-candidate \
+              target/service-proxy-publication/automata-service-proxy-candidate-x86_64-unknown-linux-musl.tar \
+            --evidence "automata=${evidence_directory}/automata.json" \
+            --evidence "runner=${evidence_directory}/runner.json" \
+            --evidence "sandbox-guest=${evidence_directory}/sandbox-guest.json" \
+            --evidence "postgres=${evidence_directory}/postgres.json" \
+            --evidence "rustfs=${evidence_directory}/rustfs.json" \
+            --evidence "profile=${evidence_directory}/profile.json" \
+            --tag "$RELEASE_TAG" \
+            --tag-object "$RELEASE_TAG_OBJECT" \
+            --commit "$RELEASE_COMMIT" \
+            --version "$RELEASE_VERSION" \
+            --prerelease "$RELEASE_PRERELEASE" \
+            --source-date-epoch "$RELEASE_SOURCE_DATE_EPOCH" \
+            --created "$RELEASE_CREATED"
+
+      - name: Select the verified service-proxy candidate binding
+        id: selected-service-proxy-candidate
+        env:
+          RELEASE_COMMIT: ${{ needs.gate.outputs.commit }}
+          RELEASE_CREATED: ${{ needs.gate.outputs.created }}
+          RELEASE_PRERELEASE: ${{ needs.gate.outputs.prerelease }}
+          RELEASE_SOURCE_DATE_EPOCH: ${{ needs.gate.outputs.source_date_epoch }}
+          RELEASE_TAG: ${{ needs.gate.outputs.tag }}
+          RELEASE_TAG_OBJECT: ${{ needs.gate.outputs.tag_object }}
+          RELEASE_VERSION: ${{ needs.gate.outputs.version }}
+        run: |
+          python3 scripts/ci/local_installation_catalog.py verify \
+            --repository-root . \
+            --catalog target/distribution/automata-local-installation-catalog.json \
+            --tag "$RELEASE_TAG" \
+            --tag-object "$RELEASE_TAG_OBJECT" \
+            --commit "$RELEASE_COMMIT" \
+            --version "$RELEASE_VERSION" \
+            --prerelease "$RELEASE_PRERELEASE" \
+            --source-date-epoch "$RELEASE_SOURCE_DATE_EPOCH" \
+            --created "$RELEASE_CREATED" \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Attest release-scoped service-proxy candidate bytes
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: target/service-proxy-publication/${{ steps.selected-service-proxy-candidate.outputs.candidate_filename }}
 
       - name: Create immutable cross-job handoff
         id: handoff
@@ -692,6 +871,7 @@ jobs:
           RELEASE_TAG_OBJECT: ${{ needs.gate.outputs.tag_object }}
           RELEASE_VERSION: ${{ needs.gate.outputs.version }}
           RUNNER_DIGEST: ${{ steps.images.outputs.runner_digest }}
+          SANDBOX_GUEST_DIGEST: ${{ steps.images.outputs.sandbox_guest_digest }}
         run: |
           handoff="target/release-handoff/automata-release-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.tar"
           common=(
@@ -723,8 +903,14 @@ jobs:
             python3 scripts/ci/release-handoff.py create \
               "${common[@]}" \
               --automata-digest "$AUTOMATA_DIGEST" \
-              --runner-digest "$RUNNER_DIGEST"
+              --runner-digest "$RUNNER_DIGEST" \
+              --sandbox-guest-digest "$SANDBOX_GUEST_DIGEST"
           fi
+
+      - name: Attest local-installation catalog bytes
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: target/distribution/automata-local-installation-catalog.json
 
       - name: Revalidate identity before the immutable image binding
         env:
@@ -763,12 +949,33 @@ jobs:
               --version "$RELEASE_VERSION" \
               --prerelease "$RELEASE_PRERELEASE" < "$release_state"
 
-      - name: Bind new image digests in the draft manifest
+      - name: Bind new catalog artifacts and image digests in the draft
         if: ${{ steps.draft.outputs.manifest_present != 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.gate.outputs.tag }}
         run: |
+          assets_file="$RUNNER_TEMP/binding-assets.txt"
+          gh release view "$RELEASE_TAG" --json assets \
+            --jq '.assets[].name' > "$assets_file"
+          verification_directory="$(mktemp -d "${TMPDIR%/}/binding-assets.XXXXXXXX")"
+          trap 'env -u GH_TOKEN -u GITHUB_TOKEN rm -rf -- "$verification_directory"' EXIT
+          bind_payload() {
+            local path="$1"
+            local name="${path##*/}"
+            if grep -Fx "$name" "$assets_file" >/dev/null; then
+              gh release download "$RELEASE_TAG" \
+                --dir "$verification_directory" \
+                --pattern "$name"
+              cmp -- "$path" "$verification_directory/$name"
+            else
+              gh release upload "$RELEASE_TAG" "$path"
+            fi
+          }
+          bind_payload \
+            target/service-proxy-publication/automata-service-proxy-candidate-x86_64-unknown-linux-musl.tar
+          bind_payload \
+            target/distribution/automata-local-installation-catalog.json
           gh release upload "$RELEASE_TAG" \
             target/distribution/automata-release-manifest.json
 
@@ -781,6 +988,8 @@ jobs:
           archive="target/distribution/automata-x86_64-unknown-linux-musl.tar.gz"
           checksum="${archive}.sha256"
           manifest="target/distribution/automata-release-manifest.json"
+          catalog="target/distribution/automata-local-installation-catalog.json"
+          service_proxy_candidate="target/service-proxy-publication/automata-service-proxy-candidate-x86_64-unknown-linux-musl.tar"
           verification_directory="$(mktemp -d "${TMPDIR%/}/bound-assets.XXXXXXXX")"
           trap 'env -u GH_TOKEN -u GITHUB_TOKEN rm -rf -- "$verification_directory"' EXIT
           gh release view "$RELEASE_TAG" --json isDraft,isPrerelease,assets |
@@ -798,24 +1007,34 @@ jobs:
           if actual != expected:
               raise SystemExit(f"draft release assets differ: {actual!r}")
           ' "$RELEASE_PRERELEASE" \
-            "${archive##*/}" "${checksum##*/}" "${manifest##*/}"
+            "${archive##*/}" "${checksum##*/}" "${manifest##*/}" \
+            "${catalog##*/}" "${service_proxy_candidate##*/}"
           gh release download "$RELEASE_TAG" \
             --dir "$verification_directory" \
             --pattern "${archive##*/}" \
             --pattern "${checksum##*/}" \
-            --pattern "${manifest##*/}"
+            --pattern "${manifest##*/}" \
+            --pattern "${catalog##*/}" \
+            --pattern "${service_proxy_candidate##*/}"
           env -u GH_TOKEN -u GITHUB_TOKEN \
             cmp -- "$archive" "$verification_directory/${archive##*/}"
           env -u GH_TOKEN -u GITHUB_TOKEN \
             cmp -- "$checksum" "$verification_directory/${checksum##*/}"
           env -u GH_TOKEN -u GITHUB_TOKEN \
             cmp -- "$manifest" "$verification_directory/${manifest##*/}"
+          env -u GH_TOKEN -u GITHUB_TOKEN \
+            cmp -- "$catalog" "$verification_directory/${catalog##*/}"
+          env -u GH_TOKEN -u GITHUB_TOKEN \
+            cmp -- \
+              "$service_proxy_candidate" \
+              "$verification_directory/${service_proxy_candidate##*/}"
 
       - name: Create or verify immutable version image tags
         env:
           AUTOMATA_DIGEST: ${{ steps.images.outputs.automata_digest }}
           RELEASE_VERSION: ${{ needs.gate.outputs.version }}
           RUNNER_DIGEST: ${{ steps.images.outputs.runner_digest }}
+          SANDBOX_GUEST_DIGEST: ${{ steps.images.outputs.sandbox_guest_digest }}
         run: |
           bind_version_tag() {
             local image="$1"
@@ -849,6 +1068,9 @@ jobs:
           }
           bind_version_tag ghcr.io/automata-ci/automata "$AUTOMATA_DIGEST"
           bind_version_tag ghcr.io/automata-ci/automata-runner "$RUNNER_DIGEST"
+          bind_version_tag \
+            ghcr.io/automata-ci/automata-sandbox-guest \
+            "$SANDBOX_GUEST_DIGEST"
 
       - name: Attest Automata image provenance
         env:
@@ -892,11 +1114,33 @@ jobs:
           sbom-path: target/container-release/sbom/automata-runner.cdx.json
           push-to-registry: true
 
+      - name: Attest sandbox-guest image provenance
+        env:
+          HOME: ${{ env.ATTESTATION_HOME }}
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ghcr.io/automata-ci/automata-sandbox-guest
+          subject-digest: ${{ steps.images.outputs.sandbox_guest_digest }}
+          subject-version: ${{ needs.gate.outputs.version }}
+          push-to-registry: true
+
+      - name: Attest sandbox-guest image SBOM
+        env:
+          HOME: ${{ env.ATTESTATION_HOME }}
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ghcr.io/automata-ci/automata-sandbox-guest
+          subject-digest: ${{ steps.images.outputs.sandbox_guest_digest }}
+          subject-version: ${{ needs.gate.outputs.version }}
+          sbom-path: target/sandbox-guest-context/sbom/automata-ci-sandbox-guest.cdx.json
+          push-to-registry: true
+
       - name: Verify anonymous versioned GHCR images
         env:
           AUTOMATA_DIGEST: ${{ steps.images.outputs.automata_digest }}
           RELEASE_VERSION: ${{ needs.gate.outputs.version }}
           RUNNER_DIGEST: ${{ steps.images.outputs.runner_digest }}
+          SANDBOX_GUEST_DIGEST: ${{ steps.images.outputs.sandbox_guest_digest }}
         run: |
           docker logout ghcr.io
 
@@ -931,6 +1175,10 @@ jobs:
             ghcr.io/automata-ci/automata-runner \
             "$RUNNER_DIGEST" \
             "$RELEASE_VERSION"
+          verify_image \
+            ghcr.io/automata-ci/automata-sandbox-guest \
+            "$SANDBOX_GUEST_DIGEST" \
+            "$RELEASE_VERSION"
 
       - name: Upload raw immutable release handoff
         id: upload-handoff
@@ -941,21 +1189,21 @@ jobs:
           path: target/release-handoff/${{ steps.handoff.outputs.handoff_filename }}
           retention-days: 90
 
-      - name: Upload raw unpublished service-proxy candidate
+      - name: Upload raw release-scoped service-proxy candidate
         id: upload-service-proxy
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           archive: false
           if-no-files-found: error
           name: automata-service-proxy-candidate-x86_64-unknown-linux-musl
-          path: target/service-proxy-publication/${{ steps.service-proxy-candidate.outputs.candidate_filename }}
+          path: target/service-proxy-publication/${{ steps.selected-service-proxy-candidate.outputs.candidate_filename }}
           retention-days: 90
 
       - name: Verify uploaded service-proxy candidate identity
         env:
           ARTIFACT_DIGEST: ${{ steps.upload-service-proxy.outputs.artifact-digest }}
           ARTIFACT_ID: ${{ steps.upload-service-proxy.outputs.artifact-id }}
-          CANDIDATE_SHA256: ${{ steps.service-proxy-candidate.outputs.candidate_sha256 }}
+          CANDIDATE_SHA256: ${{ steps.selected-service-proxy-candidate.outputs.candidate_sha256 }}
         run: |
           artifact_digest="${ARTIFACT_DIGEST#sha256:}"
           [[ "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]] || {
@@ -1104,6 +1352,7 @@ jobs:
             --handoff-sha256 "$HANDOFF_SHA256" \
             --automata-digest "${{ needs.stage_release.outputs.automata_digest }}" \
             --runner-digest "${{ needs.stage_release.outputs.runner_digest }}" \
+            --sandbox-guest-digest "${{ needs.stage_release.outputs.sandbox_guest_digest }}" \
             --extract-root . \
             --tag "$RELEASE_TAG" \
             --tag-object "$RELEASE_TAG_OBJECT" \
@@ -1138,6 +1387,7 @@ jobs:
           RELEASE_TAG_OBJECT: ${{ needs.gate.outputs.tag_object }}
           RELEASE_VERSION: ${{ needs.gate.outputs.version }}
           RUNNER_DIGEST: ${{ needs.stage_release.outputs.runner_digest }}
+          SANDBOX_GUEST_DIGEST: ${{ needs.stage_release.outputs.sandbox_guest_digest }}
         run: |
           install -d -m 0700 -- "$TMPDIR"
           remote_refs="$(
@@ -1163,6 +1413,8 @@ jobs:
           archive="target/distribution/automata-x86_64-unknown-linux-musl.tar.gz"
           checksum="${archive}.sha256"
           manifest="target/distribution/automata-release-manifest.json"
+          catalog="target/distribution/automata-local-installation-catalog.json"
+          service_proxy_candidate="target/service-proxy-publication/automata-service-proxy-candidate-x86_64-unknown-linux-musl.tar"
           verification_directory="$(mktemp -d "${TMPDIR%/}/draft.XXXXXXXX")"
           trap 'env -u GH_TOKEN -u GITHUB_TOKEN rm -rf -- "$verification_directory"' EXIT
           gh release view "$RELEASE_TAG" --json isDraft,isPrerelease,assets |
@@ -1180,18 +1432,27 @@ jobs:
           if actual != expected:
               raise SystemExit(f"draft assets differ: {actual!r}")
           ' "$RELEASE_PRERELEASE" \
-            "${archive##*/}" "${checksum##*/}" "${manifest##*/}"
+            "${archive##*/}" "${checksum##*/}" "${manifest##*/}" \
+            "${catalog##*/}" "${service_proxy_candidate##*/}"
           gh release download "$RELEASE_TAG" \
             --dir "$verification_directory" \
             --pattern "${archive##*/}" \
             --pattern "${checksum##*/}" \
-            --pattern "${manifest##*/}"
+            --pattern "${manifest##*/}" \
+            --pattern "${catalog##*/}" \
+            --pattern "${service_proxy_candidate##*/}"
           env -u GH_TOKEN -u GITHUB_TOKEN \
             cmp -- "$archive" "$verification_directory/${archive##*/}"
           env -u GH_TOKEN -u GITHUB_TOKEN \
             cmp -- "$checksum" "$verification_directory/${checksum##*/}"
           env -u GH_TOKEN -u GITHUB_TOKEN \
             cmp -- "$manifest" "$verification_directory/${manifest##*/}"
+          env -u GH_TOKEN -u GITHUB_TOKEN \
+            cmp -- "$catalog" "$verification_directory/${catalog##*/}"
+          env -u GH_TOKEN -u GITHUB_TOKEN \
+            cmp -- \
+              "$service_proxy_candidate" \
+              "$verification_directory/${service_proxy_candidate##*/}"
 
           release_state="$RUNNER_TEMP/github-releases-before-crates.json"
           gh api --paginate --slurp \
@@ -1217,6 +1478,9 @@ jobs:
           }
           verify_image ghcr.io/automata-ci/automata "$AUTOMATA_DIGEST"
           verify_image ghcr.io/automata-ci/automata-runner "$RUNNER_DIGEST"
+          verify_image \
+            ghcr.io/automata-ci/automata-sandbox-guest \
+            "$SANDBOX_GUEST_DIGEST"
 
       - name: Verify packages and prepare the credential-free publication plan
         id: prepare
@@ -1252,9 +1516,18 @@ jobs:
           tools="target/release-publisher-tools/${TOOLS_FILENAME}"
           install -d -m 0700 -- "${tools%/*}"
           for source in \
+            Cargo.toml \
+            LICENSE \
+            images/github-hosted-ubuntu-24.04-x64/profile-lock.json \
+            images/github-hosted-ubuntu-24.04-x64/profile-manifest.json \
+            images/local-installation/catalog-v1.json \
+            images/service-proxy/Containerfile \
             scripts/ci/check-release-order.py \
+            scripts/ci/local_installation_catalog.py \
             scripts/ci/publish-crates.py \
-            scripts/ci/release-handoff.py; do
+            scripts/ci/release-handoff.py \
+            scripts/ci/service-proxy-candidate.py \
+            scripts/ci/service-proxy-publication.py; do
             [[ -f "$source" && ! -L "$source" ]] || {
               printf 'error: publisher tool is not a regular source file: %s\n' \
                 "$source" >&2
@@ -1272,9 +1545,18 @@ jobs:
             --owner=0 \
             --sort=name \
             -- \
+            Cargo.toml \
+            LICENSE \
+            images/github-hosted-ubuntu-24.04-x64/profile-lock.json \
+            images/github-hosted-ubuntu-24.04-x64/profile-manifest.json \
+            images/local-installation/catalog-v1.json \
+            images/service-proxy/Containerfile \
             scripts/ci/check-release-order.py \
+            scripts/ci/local_installation_catalog.py \
             scripts/ci/publish-crates.py \
-            scripts/ci/release-handoff.py
+            scripts/ci/release-handoff.py \
+            scripts/ci/service-proxy-candidate.py \
+            scripts/ci/service-proxy-publication.py
           tools_sha256="$(sha256sum "$tools" | awk '{print $1}')"
           {
             printf 'tools_filename=%s\n' "$TOOLS_FILENAME"
@@ -1383,6 +1665,7 @@ jobs:
           RELEASE_TAG_OBJECT: ${{ needs.gate.outputs.tag_object }}
           RELEASE_VERSION: ${{ needs.gate.outputs.version }}
           RUNNER_DIGEST: ${{ needs.stage_release.outputs.runner_digest }}
+          SANDBOX_GUEST_DIGEST: ${{ needs.stage_release.outputs.sandbox_guest_digest }}
           TOOLS_ARTIFACT_DIGEST: ${{ needs.prepare_crates.outputs.tools_artifact_digest }}
           TOOLS_FILENAME: ${{ needs.prepare_crates.outputs.tools_filename }}
           TOOLS_SHA256: ${{ needs.prepare_crates.outputs.tools_sha256 }}
@@ -1443,9 +1726,18 @@ jobs:
           destination = pathlib.Path(sys.argv[2])
           expected_digest = sys.argv[3]
           expected = {
+              "Cargo.toml",
+              "LICENSE",
+              "images/github-hosted-ubuntu-24.04-x64/profile-lock.json",
+              "images/github-hosted-ubuntu-24.04-x64/profile-manifest.json",
+              "images/local-installation/catalog-v1.json",
+              "images/service-proxy/Containerfile",
               "scripts/ci/check-release-order.py",
+              "scripts/ci/local_installation_catalog.py",
               "scripts/ci/publish-crates.py",
               "scripts/ci/release-handoff.py",
+              "scripts/ci/service-proxy-candidate.py",
+              "scripts/ci/service-proxy-publication.py",
           }
           flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
           flags |= getattr(os, "O_NOFOLLOW", 0)
@@ -1497,6 +1789,7 @@ jobs:
             --handoff-sha256 "$HANDOFF_SHA256" \
             --automata-digest "$AUTOMATA_DIGEST" \
             --runner-digest "$RUNNER_DIGEST" \
+            --sandbox-guest-digest "$SANDBOX_GUEST_DIGEST" \
             --extract-root "$publish_root" \
             --tag "$RELEASE_TAG" \
             --tag-object "$RELEASE_TAG_OBJECT" \
@@ -1524,6 +1817,7 @@ jobs:
           RELEASE_TAG_OBJECT: ${{ needs.gate.outputs.tag_object }}
           RELEASE_VERSION: ${{ needs.gate.outputs.version }}
           RUNNER_DIGEST: ${{ needs.stage_release.outputs.runner_digest }}
+          SANDBOX_GUEST_DIGEST: ${{ needs.stage_release.outputs.sandbox_guest_digest }}
         run: |
           cd -- "$PUBLISH_ROOT"
           remote_refs="$(
@@ -1550,6 +1844,8 @@ jobs:
           archive="target/distribution/automata-x86_64-unknown-linux-musl.tar.gz"
           checksum="${archive}.sha256"
           manifest="target/distribution/automata-release-manifest.json"
+          catalog="target/distribution/automata-local-installation-catalog.json"
+          service_proxy_candidate="target/service-proxy-publication/automata-service-proxy-candidate-x86_64-unknown-linux-musl.tar"
           verification_directory="$(
             mktemp -d "$RUNNER_TEMP/crates-approved.XXXXXXXX"
           )"
@@ -1569,18 +1865,27 @@ jobs:
           if actual != expected:
               raise SystemExit(f"draft assets differ: {actual!r}")
           ' "$RELEASE_PRERELEASE" \
-            "${archive##*/}" "${checksum##*/}" "${manifest##*/}"
+            "${archive##*/}" "${checksum##*/}" "${manifest##*/}" \
+            "${catalog##*/}" "${service_proxy_candidate##*/}"
           gh release download "$RELEASE_TAG" \
             --dir "$verification_directory" \
             --pattern "${archive##*/}" \
             --pattern "${checksum##*/}" \
-            --pattern "${manifest##*/}"
+            --pattern "${manifest##*/}" \
+            --pattern "${catalog##*/}" \
+            --pattern "${service_proxy_candidate##*/}"
           env -u GH_TOKEN -u GITHUB_TOKEN \
             cmp -- "$archive" "$verification_directory/${archive##*/}"
           env -u GH_TOKEN -u GITHUB_TOKEN \
             cmp -- "$checksum" "$verification_directory/${checksum##*/}"
           env -u GH_TOKEN -u GITHUB_TOKEN \
             cmp -- "$manifest" "$verification_directory/${manifest##*/}"
+          env -u GH_TOKEN -u GITHUB_TOKEN \
+            cmp -- "$catalog" "$verification_directory/${catalog##*/}"
+          env -u GH_TOKEN -u GITHUB_TOKEN \
+            cmp -- \
+              "$service_proxy_candidate" \
+              "$verification_directory/${service_proxy_candidate##*/}"
 
           release_state="$RUNNER_TEMP/github-releases-after-approval.json"
           gh api --paginate --slurp \
@@ -1606,10 +1911,13 @@ jobs:
           }
           verify_image ghcr.io/automata-ci/automata "$AUTOMATA_DIGEST"
           verify_image ghcr.io/automata-ci/automata-runner "$RUNNER_DIGEST"
+          verify_image \
+            ghcr.io/automata-ci/automata-sandbox-guest \
+            "$SANDBOX_GUEST_DIGEST"
 
       # id-token permission is job-wide. Before this explicit crates.io exchange,
       # this job runs only pinned artifact downloads, bounded materialization,
-      # fixed runner clients, and the three digest-bound audited release helpers.
+      # fixed runner clients, and the digest-bound audited release helpers.
       # It checks out no repository and runs no build or dependency code.
       - name: Request short-lived crates.io credentials
         id: crates-auth
@@ -1719,6 +2027,7 @@ jobs:
             --handoff-sha256 "$HANDOFF_SHA256" \
             --automata-digest "${{ needs.stage_release.outputs.automata_digest }}" \
             --runner-digest "${{ needs.stage_release.outputs.runner_digest }}" \
+            --sandbox-guest-digest "${{ needs.stage_release.outputs.sandbox_guest_digest }}" \
             --extract-root . \
             --tag "$RELEASE_TAG" \
             --tag-object "$RELEASE_TAG_OBJECT" \
@@ -1741,6 +2050,7 @@ jobs:
           RELEASE_TAG_OBJECT: ${{ needs.gate.outputs.tag_object }}
           RELEASE_VERSION: ${{ needs.gate.outputs.version }}
           RUNNER_DIGEST: ${{ needs.stage_release.outputs.runner_digest }}
+          SANDBOX_GUEST_DIGEST: ${{ needs.stage_release.outputs.sandbox_guest_digest }}
         run: |
           local_object="$(git rev-parse --verify "refs/tags/${RELEASE_TAG}")"
           local_commit="$(git rev-parse --verify 'HEAD^{commit}')"
@@ -1772,6 +2082,8 @@ jobs:
           archive="target/distribution/automata-x86_64-unknown-linux-musl.tar.gz"
           checksum="${archive}.sha256"
           manifest="target/distribution/automata-release-manifest.json"
+          catalog="target/distribution/automata-local-installation-catalog.json"
+          service_proxy_candidate="target/service-proxy-publication/automata-service-proxy-candidate-x86_64-unknown-linux-musl.tar"
           verification_directory="$(mktemp -d "${TMPDIR%/}/finalize.XXXXXXXX")"
           trap 'env -u GH_TOKEN -u GITHUB_TOKEN rm -rf -- "$verification_directory"' EXIT
           gh release view "$RELEASE_TAG" --json isDraft,isPrerelease,assets |
@@ -1789,18 +2101,27 @@ jobs:
           if actual != expected:
               raise SystemExit(f"draft assets differ: {actual!r}")
           ' "$RELEASE_PRERELEASE" \
-            "${archive##*/}" "${checksum##*/}" "${manifest##*/}"
+            "${archive##*/}" "${checksum##*/}" "${manifest##*/}" \
+            "${catalog##*/}" "${service_proxy_candidate##*/}"
           gh release download "$RELEASE_TAG" \
             --dir "$verification_directory" \
             --pattern "${archive##*/}" \
             --pattern "${checksum##*/}" \
-            --pattern "${manifest##*/}"
+            --pattern "${manifest##*/}" \
+            --pattern "${catalog##*/}" \
+            --pattern "${service_proxy_candidate##*/}"
           env -u GH_TOKEN -u GITHUB_TOKEN \
             cmp -- "$archive" "$verification_directory/${archive##*/}"
           env -u GH_TOKEN -u GITHUB_TOKEN \
             cmp -- "$checksum" "$verification_directory/${checksum##*/}"
           env -u GH_TOKEN -u GITHUB_TOKEN \
             cmp -- "$manifest" "$verification_directory/${manifest##*/}"
+          env -u GH_TOKEN -u GITHUB_TOKEN \
+            cmp -- "$catalog" "$verification_directory/${catalog##*/}"
+          env -u GH_TOKEN -u GITHUB_TOKEN \
+            cmp -- \
+              "$service_proxy_candidate" \
+              "$verification_directory/${service_proxy_candidate##*/}"
 
           verify_image() {
             local image="$1"
@@ -1817,6 +2138,9 @@ jobs:
           }
           verify_image ghcr.io/automata-ci/automata "$AUTOMATA_DIGEST"
           verify_image ghcr.io/automata-ci/automata-runner "$RUNNER_DIGEST"
+          verify_image \
+            ghcr.io/automata-ci/automata-sandbox-guest \
+            "$SANDBOX_GUEST_DIGEST"
 
       - name: Revalidate release order before finalization
         env:
@@ -1855,6 +2179,7 @@ jobs:
         env:
           AUTOMATA_DIGEST: ${{ needs.stage_release.outputs.automata_digest }}
           RUNNER_DIGEST: ${{ needs.stage_release.outputs.runner_digest }}
+          SANDBOX_GUEST_DIGEST: ${{ needs.stage_release.outputs.sandbox_guest_digest }}
         run: |
           promote_image() {
             local image="$1"
@@ -1870,12 +2195,16 @@ jobs:
           promote_image \
             ghcr.io/automata-ci/automata-runner \
             "$RUNNER_DIGEST"
+          promote_image \
+            ghcr.io/automata-ci/automata-sandbox-guest \
+            "$SANDBOX_GUEST_DIGEST"
 
       - name: Verify anonymous stable aliases
         if: ${{ needs.gate.outputs.prerelease == 'false' }}
         env:
           AUTOMATA_DIGEST: ${{ needs.stage_release.outputs.automata_digest }}
           RUNNER_DIGEST: ${{ needs.stage_release.outputs.runner_digest }}
+          SANDBOX_GUEST_DIGEST: ${{ needs.stage_release.outputs.sandbox_guest_digest }}
         run: |
           docker logout ghcr.io
 
@@ -1905,6 +2234,9 @@ jobs:
           verify_alias \
             ghcr.io/automata-ci/automata-runner \
             "$RUNNER_DIGEST"
+          verify_alias \
+            ghcr.io/automata-ci/automata-sandbox-guest \
+            "$SANDBOX_GUEST_DIGEST"
 
       - name: Sign out of GHCR
         if: ${{ always() }}
@@ -1920,13 +2252,18 @@ jobs:
           RELEASE_TAG_OBJECT: ${{ needs.gate.outputs.tag_object }}
           RELEASE_VERSION: ${{ needs.gate.outputs.version }}
           RUNNER_DIGEST: ${{ needs.stage_release.outputs.runner_digest }}
+          SANDBOX_GUEST_DIGEST: ${{ needs.stage_release.outputs.sandbox_guest_digest }}
         run: |
           archive="target/distribution/automata-x86_64-unknown-linux-musl.tar.gz"
           checksum="${archive}.sha256"
           manifest="target/distribution/automata-release-manifest.json"
+          catalog="target/distribution/automata-local-installation-catalog.json"
+          service_proxy_candidate="target/service-proxy-publication/automata-service-proxy-candidate-x86_64-unknown-linux-musl.tar"
           archive_name="${archive##*/}"
           checksum_name="${checksum##*/}"
           manifest_name="${manifest##*/}"
+          catalog_name="${catalog##*/}"
+          service_proxy_candidate_name="${service_proxy_candidate##*/}"
 
           require_remote_release_commit() {
             local direct_object=''
@@ -1977,7 +2314,9 @@ jobs:
               raise SystemExit(
                   f"draft release assets differ from the exact expected set: {actual!r}"
               )
-          ' "$IS_PRERELEASE" "$archive_name" "$checksum_name" "$manifest_name"
+          ' "$IS_PRERELEASE" \
+            "$archive_name" "$checksum_name" "$manifest_name" \
+            "$catalog_name" "$service_proxy_candidate_name"
           }
 
           require_exact_published_release() {
@@ -2002,7 +2341,8 @@ jobs:
                   f"published release assets differ from the exact set: {actual!r}"
               )
           ' "$IS_PRERELEASE" "$RELEASE_TAG" \
-            "$archive_name" "$checksum_name" "$manifest_name"
+            "$archive_name" "$checksum_name" "$manifest_name" \
+            "$catalog_name" "$service_proxy_candidate_name"
             if [[ "$IS_PRERELEASE" == false ]]; then
               latest_tag="$(
                 gh api "repos/${GITHUB_REPOSITORY}/releases/latest" \
@@ -2053,13 +2393,21 @@ jobs:
               --dir "$verification_directory" \
               --pattern "$archive_name" \
               --pattern "$checksum_name" \
-              --pattern "$manifest_name"
+              --pattern "$manifest_name" \
+              --pattern "$catalog_name" \
+              --pattern "$service_proxy_candidate_name"
             env -u GH_TOKEN -u GITHUB_TOKEN \
               cmp -- "$archive" "$verification_directory/$archive_name"
             env -u GH_TOKEN -u GITHUB_TOKEN \
               cmp -- "$checksum" "$verification_directory/$checksum_name"
             env -u GH_TOKEN -u GITHUB_TOKEN \
               cmp -- "$manifest" "$verification_directory/$manifest_name"
+            env -u GH_TOKEN -u GITHUB_TOKEN \
+              cmp -- "$catalog" "$verification_directory/$catalog_name"
+            env -u GH_TOKEN -u GITHUB_TOKEN \
+              cmp -- \
+                "$service_proxy_candidate" \
+                "$verification_directory/$service_proxy_candidate_name"
             (
               cd -- "$verification_directory"
               env -u GH_TOKEN -u GITHUB_TOKEN \
@@ -2074,6 +2422,9 @@ jobs:
             ghcr.io/automata-ci/automata "$AUTOMATA_DIGEST"
           require_exact_version_image \
             ghcr.io/automata-ci/automata-runner "$RUNNER_DIGEST"
+          require_exact_version_image \
+            ghcr.io/automata-ci/automata-sandbox-guest \
+            "$SANDBOX_GUEST_DIGEST"
           require_exact_draft_assets
           require_remote_release_commit
           edit_status=0

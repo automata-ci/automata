@@ -42,6 +42,10 @@ class ReleaseHandoffContract(unittest.TestCase):
         )
         (packages / "automata-ci-1.2.3.crate").write_bytes(b"crate one\n")
         (packages / "automata-ci-runner-1.2.3.crate").write_bytes(b"crate two\n")
+        (self.root / release_handoff.CATALOG_PATH).write_bytes(b"{}\n")
+        candidate = self.root / release_handoff.SERVICE_PROXY_CANDIDATE_PATH
+        candidate.parent.mkdir(parents=True)
+        candidate.write_bytes(b"service proxy candidate\n")
         self.identity = release_handoff.ReleaseIdentity(
             tag="v1.2.3",
             tag_object="a" * 40,
@@ -53,9 +57,24 @@ class ReleaseHandoffContract(unittest.TestCase):
         )
         self.automata_digest = f"sha256:{'c' * 64}"
         self.runner_digest = f"sha256:{'d' * 64}"
+        self.sandbox_guest_digest = f"sha256:{'e' * 64}"
         self.expected_crates = ["automata-ci", "automata-ci-runner"]
+        self.catalog_validation = mock.patch.object(
+            release_handoff.local_catalog,
+            "validate_catalog",
+            return_value=(
+                {
+                    "automata": self.automata_digest,
+                    "runner": self.runner_digest,
+                    "sandbox-guest": self.sandbox_guest_digest,
+                },
+                [release_handoff.SERVICE_PROXY_CANDIDATE_PATH],
+            ),
+        )
+        self.catalog_validation.start()
 
     def tearDown(self) -> None:
+        self.catalog_validation.stop()
         self.temporary.cleanup()
 
     def create(self, name: str = "handoff.tar") -> tuple[pathlib.Path, pathlib.Path, str]:
@@ -66,6 +85,7 @@ class ReleaseHandoffContract(unittest.TestCase):
             self.identity,
             self.automata_digest,
             self.runner_digest,
+            self.sandbox_guest_digest,
             self.expected_crates,
         )
         _, digest = release_handoff.create_handoff(
@@ -119,6 +139,7 @@ class ReleaseHandoffContract(unittest.TestCase):
             self.identity,
             self.automata_digest,
             self.runner_digest,
+            self.sandbox_guest_digest,
         )
         extraction_root = self.root / "consumer"
         extraction_root.mkdir()
@@ -129,16 +150,19 @@ class ReleaseHandoffContract(unittest.TestCase):
     def test_manifest_binds_identity_images_assets_and_every_crate(self) -> None:
         manifest_path, _, _ = self.create()
         manifest, _ = release_handoff.load_manifest(manifest_path)
-        automata, runner, paths = release_handoff.validate_manifest(
+        automata, runner, sandbox_guest, paths = release_handoff.validate_manifest(
             manifest, self.identity, self.root
         )
         self.assertEqual(automata, self.automata_digest)
         self.assertEqual(runner, self.runner_digest)
+        self.assertEqual(sandbox_guest, self.sandbox_guest_digest)
         self.assertEqual(
             paths,
             [
                 release_handoff.ARCHIVE_PATH,
                 release_handoff.CHECKSUM_PATH,
+                release_handoff.CATALOG_PATH,
+                release_handoff.SERVICE_PROXY_CANDIDATE_PATH,
                 "target/package/automata-ci-1.2.3.crate",
                 "target/package/automata-ci-runner-1.2.3.crate",
             ],
@@ -159,6 +183,7 @@ class ReleaseHandoffContract(unittest.TestCase):
                 self.identity,
                 self.automata_digest,
                 self.runner_digest,
+                self.sandbox_guest_digest,
                 self.expected_crates,
             )
 
@@ -172,7 +197,29 @@ class ReleaseHandoffContract(unittest.TestCase):
                 self.identity,
                 self.automata_digest,
                 self.runner_digest,
+                self.sandbox_guest_digest,
                 self.expected_crates,
+            )
+
+    def test_crate_limit_accounts_for_every_fixed_handoff_member(self) -> None:
+        package_directory = self.root / "target" / "package"
+        for archive in package_directory.glob("*.crate"):
+            archive.unlink()
+        expected = []
+        for index in range(release_handoff.MAX_CRATE_ENTRIES):
+            name = f"crate-{index:03d}"
+            expected.append(name)
+            (package_directory / f"{name}-1.2.3.crate").write_bytes(b"x")
+        entries = release_handoff.package_entries(
+            self.root, self.identity.version, expected
+        )
+        self.assertEqual(len(entries), release_handoff.MAX_CRATE_ENTRIES)
+
+        overflow = "crate-overflow"
+        (package_directory / f"{overflow}-1.2.3.crate").write_bytes(b"x")
+        with self.assertRaisesRegex(SystemExit, "too many crate archives"):
+            release_handoff.package_entries(
+                self.root, self.identity.version, [*expected, overflow]
             )
 
     def test_manifest_rejects_json_type_confusion(self) -> None:
@@ -182,7 +229,7 @@ class ReleaseHandoffContract(unittest.TestCase):
         with self.assertRaisesRegex(SystemExit, "schema version"):
             release_handoff.validate_manifest(manifest, self.identity, self.root)
 
-        manifest["schema_version"] = 1
+        manifest["schema_version"] = release_handoff.SCHEMA_VERSION
         manifest["release"]["prerelease"] = 0
         with self.assertRaisesRegex(SystemExit, "must be a boolean"):
             release_handoff.validate_manifest(manifest, self.identity, self.root)
@@ -206,7 +253,11 @@ class ReleaseHandoffContract(unittest.TestCase):
         )
         with self.assertRaisesRegex(SystemExit, "handoff digest mismatch"):
             release_handoff.verify_handoff(
-                changed, self.identity, self.automata_digest, self.runner_digest
+                changed,
+                self.identity,
+                self.automata_digest,
+                self.runner_digest,
+                self.sandbox_guest_digest,
             )
 
         extra = handoff_path.with_name("extra.tar")
@@ -227,7 +278,11 @@ class ReleaseHandoffContract(unittest.TestCase):
             archive.addfile(unexpected, io.BytesIO(b"x"))
         with self.assertRaisesRegex(SystemExit, "canonical order|exact manifest set"):
             release_handoff.verify_handoff(
-                extra, self.identity, self.automata_digest, self.runner_digest
+                extra,
+                self.identity,
+                self.automata_digest,
+                self.runner_digest,
+                self.sandbox_guest_digest,
             )
 
     def test_non_regular_or_noncanonical_tar_metadata_fails_closed(self) -> None:
@@ -246,7 +301,11 @@ class ReleaseHandoffContract(unittest.TestCase):
                 archive.addfile(member, io.BytesIO(payload[member.name]))
         with self.assertRaisesRegex(SystemExit, "metadata is not canonical"):
             release_handoff.verify_handoff(
-                unsafe, self.identity, self.automata_digest, self.runner_digest
+                unsafe,
+                self.identity,
+                self.automata_digest,
+                self.runner_digest,
+                self.sandbox_guest_digest,
             )
 
         trailing = handoff_path.with_name("trailing.tar")
@@ -296,6 +355,8 @@ class ReleaseHandoffContract(unittest.TestCase):
             self.automata_digest,
             "--runner-digest",
             self.runner_digest,
+            "--sandbox-guest-digest",
+            self.sandbox_guest_digest,
         ]
         result = subprocess.run(command, check=False, capture_output=True, text=True)
         self.assertNotEqual(result.returncode, 0)
@@ -327,6 +388,7 @@ class ReleaseHandoffContract(unittest.TestCase):
                     self.identity,
                     self.automata_digest,
                     self.runner_digest,
+                    self.sandbox_guest_digest,
                     expected_handoff_digest=digest,
                 )
         self.assertEqual(opened.call_count, 1)
@@ -335,7 +397,11 @@ class ReleaseHandoffContract(unittest.TestCase):
     def test_extraction_refuses_to_overwrite_or_follow_parent_symlink(self) -> None:
         _, handoff_path, _ = self.create()
         _, contents = release_handoff.verify_handoff(
-            handoff_path, self.identity, self.automata_digest, self.runner_digest
+            handoff_path,
+            self.identity,
+            self.automata_digest,
+            self.runner_digest,
+            self.sandbox_guest_digest,
         )
         extraction_root = self.root / "consumer"
         extraction_root.mkdir()

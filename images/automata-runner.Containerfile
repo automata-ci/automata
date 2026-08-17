@@ -23,6 +23,7 @@ COPY --chmod=0444 THIRD_PARTY_NOTICES.txt /usr/share/licenses/automata-runner/TH
 COPY --chmod=0444 VERSION /usr/share/doc/automata-runner/VERSION
 COPY --chmod=0444 sbom/automata-runner.cdx.json /usr/share/sbom/automata-runner.cdx.json
 
+WORKDIR /
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/automata-runner"]
 CMD ["doctor", "--json"]
