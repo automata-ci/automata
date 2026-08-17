@@ -1,6 +1,6 @@
 [package]
-name = "automata-ci-windows-broker"
-description = "Privileged Windows Hyper-V broker lifecycle core for Automata"
+name = "automata-ci-windows-broker-core"
+description = "Provider-independent Windows broker admission policy core for Automata"
 publish.workspace = true
 version.workspace = true
 edition.workspace = true
@@ -18,12 +18,8 @@ workspace = true
 automata-ci-core.workspace = true
 automata-ci-execution.workspace = true
 automata-ci-protocol.workspace = true
-automata-ci-runner-spool.workspace = true
-automata-ci-sandbox-guest.workspace = true
 automata-ci-windows-broker-protocol.workspace = true
-automata-ci-windows-broker-core.workspace = true
 base64.workspace = true
-getrandom.workspace = true
 ring.workspace = true
 serde.workspace = true
 serde_json.workspace = true

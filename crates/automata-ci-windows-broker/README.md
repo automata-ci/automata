@@ -1,9 +1,18 @@
 # automata-ci-windows-broker
 
-Privileged Windows Hyper-V lifecycle core. It owns grant verification,
-closed lifecycle policy, durable reconciliation, and watchdog supervision.
-The file ledger is isolated behind `BrokerLedger`; HCS is isolated behind
-`WindowsHostComputeAdapter` and implemented by a separate adapter crate.
+Privileged Windows Hyper-V broker application service. Pure admission request,
+host-input, promotion, trust, and synthetic-probe policy lives in
+`automata-ci-windows-broker-core`, which has no filesystem or service adapters.
+This crate owns admission and lifecycle state machines and composes them only
+through explicit repository, custody, result-store, lifecycle-ledger, and
+host-compute ports.
+
+Concrete admission persistence is namespaced under `admission::repository`;
+concrete custody persistence is namespaced under `custody::file`. Alternative
+service deployments can supply either port without importing a file-backed
+implementation. The lifecycle file ledger is isolated behind `BrokerLedger`;
+HCS is isolated behind `WindowsHostComputeAdapter` and implemented by the
+separate `automata-ci-windows-broker-hcs` adapter crate.
 
 Successful exec and copy payloads are authenticated, encrypted, and
 synchronized through `BrokerResultStore` before the lifecycle ledger adopts an
