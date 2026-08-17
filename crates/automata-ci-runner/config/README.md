@@ -17,11 +17,11 @@ follow the
 [profile publication guide](https://github.com/automata-ci/automata/blob/main/images/github-hosted-ubuntu-24.04-x64/README.md)
 before trusting a protected-main candidate.
 
-Product schema v5 accepts exactly one sandbox provider. Host runners use the
+Product schema v6 accepts exactly one sandbox provider. Host runners use the
 top-level `podman` object and require `state.podman`. Kubernetes and local
 Docker runners omit every provider-specific state root and use a top-level
 `kubernetes` or `local_docker` object. Windows and macOS runners use their
-matching provider name in both locations. All non-v5 schemas,
+matching provider name in both locations. All non-v6 schemas,
 `windows_native`, and the removed macOS native key are rejected, not migrated.
 The Kubernetes runner loads credentials through standard in-cluster or ambient
 kubeconfig discovery; the JSON remains secret-free.
@@ -77,22 +77,32 @@ The evaluation-only local Docker selection has this closed shape:
   "local_docker": {
     "installation_name": "evaluation",
     "installation_id": "6e561f8b-9098-418d-b573-d82f5c73006e",
-    "guest_image": "registry.example/automata/sandbox-guest@sha256:<64 hex digits>"
+    "guest_image": "registry.example/automata/sandbox-guest@sha256:<64 hex digits>",
+    "results_transport": {
+      "proxy_image": "registry.example/automata/service-proxy@sha256:<64 hex digits>",
+      "transit_network_id": "<64 lowercase hex digits>",
+      "results_container_id": "<64 lowercase hex digits>",
+      "results_address": "10.91.0.2"
+    }
   }
 }
 ```
 
 It is available only on Linux and selects no configurable Docker endpoint. The
 runner connects through the fixed private relay, verifies the exact daemon and
-installation anchor, and requires the immutable guest image to be already
-present. The executor must use disabled networking, a writable container root,
+installation anchor, and requires the immutable guest and Results-proxy images
+to be already present. The Results object contains only exact Engine IDs, one
+canonical private numeric address, and a digest pin; ports and topology are not
+configurable. The executor must use `private_egress`, a writable container root,
 administrator identity, at least 256 MiB of memory, one whole CPU, and three
-processes. Every environment must launch a container and use POSIX runner and
-workspace paths outside `/automata` and `/automata-control`. Jobs receive no
-host bind, engine socket, per-job volume, or network. Exited containers are
-never restarted. Durable host state owns invocation replay; ambiguity after an
-invocation commit fails closed until the exact sandbox is destroyed and proven
-absent.
+processes. `max_parallel_jobs` is bounded to 256 and maps directly to durable
+one-based slot custody. Every environment must launch a container and use POSIX
+runner and workspace paths outside `/automata` and `/automata-control`. Jobs
+receive no host bind, engine socket, or per-job volume. Their only network path
+is the fixed Results proxy, with no external DNS or public egress. Exited
+containers are never restarted. Durable host state owns invocation replay;
+ambiguity after an invocation commit fails closed until the exact sandbox is
+destroyed and proven absent.
 
 The relay daemon must be rootful Docker configured with daemon-default
 user-namespace remapping. `/info.SecurityOptions` must contain exactly
@@ -108,11 +118,17 @@ intentionally unsupported. The
 administrator identity is UID 0 only inside that boundary with every Linux
 capability set empty under `no_new_privileges` and built-in seccomp; it does not
 provide `chown`, identity switching, or other POSIX capabilities.
-The relay must have no daemon `default-ulimits`; Docker API v1.44 cannot attest
-that setting before create, so this is a trusted relay prerequisite. Any
-daemon-injected ulimit still fails exact post-create inspection and is removed
-through the separate custody-only cleanup path. Guest and job images must not
-declare volumes, exposed ports, or a healthcheck.
+The relay must run Docker Engine 28 or newer with API 1.48 and have no daemon
+`default-ulimits`; that setting is a trusted relay prerequisite. Any
+daemon-injected ulimit still fails exact post-create inspection and can be
+removed through the separate custody-only cleanup path when the front-network
+custody remains exact. Container-runtime/image or shared-transit damage does not
+by itself block that container cleanup; exact front-network drift blocks destroy,
+and a foreign endpoint can leave the emptied front network for operator recovery.
+Guest, job, and Results-proxy images must not declare volumes, exposed ports, or
+a healthcheck. The
+renderer-owned transit must be an internal isolated private IPv4 bridge with a
+first-host gateway and a `/23`-or-wider prefix.
 
 A Kubernetes selection has this provider-specific shape:
 

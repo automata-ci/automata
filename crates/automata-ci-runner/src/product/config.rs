@@ -976,7 +976,8 @@ pub enum RunnerProductConfigError {
     /// Rootless Podman process configuration is invalid.
     #[error("runner Podman configuration is invalid")]
     InvalidPodman,
-    /// Fixed-relay local Docker binding or guest image is invalid.
+    /// Fixed-relay local Docker binding, guest/Results-proxy image, or Results
+    /// transit/target is invalid.
     #[error("runner local Docker configuration is invalid")]
     InvalidLocalDocker,
     /// Exactly one host-compatible execution provider must be selected.

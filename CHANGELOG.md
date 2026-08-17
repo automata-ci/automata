@@ -38,9 +38,12 @@ structure of [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
   adapter can strictly inspect or create-and-adopt a repository-agnostic
   installation identity anchor without exposing a product mutation command.
 - Evaluation-only fixed-relay Local Docker runner execution on Linux. Runner
-  schema 5 binds the private provider to an exact existing installation anchor
-  and already-present digest-pinned guest image. Jobs receive no host bind,
-  Engine socket, per-job volume, or network; a protected tmpfs client performs
+  schema 6 binds the private provider to an exact existing installation anchor,
+  already-present digest-pinned guest and Results-proxy images, and an exact
+  pre-provisioned Results transit/target. Each job receives only a deterministic
+  internal network and fixed-port credential-free proxy, with no public egress
+  or external DNS. Jobs receive no host bind, Engine socket, or per-job volume;
+  a protected tmpfs client performs
   each bounded guest operation once, while durable replay remains host-owned.
   The rootful relay must attest daemon-default user-namespace remapping, and
   its architecture must exactly match the runner inventory. Every sandbox
@@ -69,7 +72,7 @@ structure of [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
   current-only `automata internal object-store ensure-bucket` image command.
   Server, initializer, and runner use closed bounded credential/trust
   configuration and the production AWS SDK client path; runner product schema
-  5 requires the same explicit trust choice. Config and SDK clients are one
+  6 requires the same explicit trust choice. Config and SDK clients are one
   inseparable store, canonical private-CA bytes and signing usage fail closed,
   connected-store diagnostics expose no bound state, validated transport is
   one closed security mode, and bucket creation is region-correct, idempotent,

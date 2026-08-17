@@ -70,7 +70,9 @@ pub const MAXIMUM_LOCAL_DOCKER_JOB_SLOTS: u16 = 256;
 /// # Errors
 ///
 /// Returns a redacted failure when the relay, daemon identity, installation
-/// binding, anchor, or already-present immutable guest image fails verification.
+/// binding, anchor, already-present immutable guest or Results-proxy image,
+/// pre-provisioned transit network, or running numeric Results target fails
+/// verification.
 #[cfg(target_os = "linux")]
 pub async fn connect_local_docker_provider(
     installation: InstallationBinding,

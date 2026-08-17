@@ -2,7 +2,7 @@
 
 Automata supports macOS jobs only through a disposable macOS 15-or-newer ARM64
 virtual machine on an Apple Silicon macOS 15+ host. The former native provider
-has been deleted. Current runner product schema v5 has no `macos_native` key,
+has been deleted. Current runner product schema v6 has no `macos_native` key,
 no migration from a noncurrent schema, and no host-shared resource mode.
 
 ## Why Virtualization.framework
@@ -228,7 +228,7 @@ the custody boundary for stable spool and object-store secrets. A
 Keychain-backed TLS identity is not a current alternate mode.
 
 The linked checked-in example is the sole complete current boundary: runner
-product schema 5. It selects the `macos_virtualization` provider, a writable
+product schema 6. It selects the `macos_virtualization` provider, a writable
 unprivileged executor with networking disabled, and the mandatory closed
 `object_store.tls_trust` policy. Do not reconstruct a product document from a
 partial provider-only excerpt; noncurrent schemas are rejected rather than

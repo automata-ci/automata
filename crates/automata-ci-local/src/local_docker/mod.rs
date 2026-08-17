@@ -224,12 +224,15 @@ impl ResultsTransportBudget {
 
 impl LocalDockerProvider {
     /// Connects through the fixed private relay and verifies the exact
-    /// installation anchor and already-present digest-pinned guest image.
+    /// installation anchor, already-present digest-pinned guest and
+    /// Results-proxy images, pre-provisioned transit network, and running
+    /// numeric Results target.
     ///
     /// # Errors
     ///
     /// Returns a redacted failure when daemon identity, installation binding,
-    /// image digest, platform, labels, or inherited image defaults are invalid.
+    /// anchor, guest or Results-proxy image identity, shared transit, running
+    /// Results target, or attached peer-proxy identity is invalid.
     pub(super) async fn connect(
         installation: InstallationBinding,
         guest_image: ImmutableImage,
