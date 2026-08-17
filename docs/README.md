@@ -39,6 +39,8 @@ It does not connect to repositories or execute workflows.
 
 - [Architecture](architecture.md) explains the components, data flow, storage,
   and trust boundaries.
+- [GitHub Checks](github-checks.md) records the experimental result projection,
+  Details, recovery, annotation, and rerun contracts.
 - [Compatibility](compatibility.md) lists the supported GitHub Actions subsets
   and the evidence required for broader claims.
 - [GitHub Actions parity backlog](github-actions-parity-backlog.md) records the
