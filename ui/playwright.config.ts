@@ -8,9 +8,9 @@ export default defineConfig({
   testDir: "tests/visual",
   outputDir: "dist/playwright",
   forbidOnly: process.env.CI !== undefined,
-  fullyParallel: false,
+  fullyParallel: process.env.CI !== undefined,
   retries: 0,
-  workers: 1,
+  workers: process.env.CI === undefined ? 1 : 4,
   reporter: "line",
   use: {
     baseURL: previewBaseUrl,
