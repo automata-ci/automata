@@ -1,0 +1,304 @@
+{
+  "images": {
+    "automata": {
+      "canonical_repository": "automata.local/automata",
+      "config": {
+        "command": [
+          "preview",
+          "--listen",
+          "0.0.0.0:8080"
+        ],
+        "entrypoint": [
+          "/usr/local/bin/automata"
+        ],
+        "required_environment": {},
+        "required_labels": {
+          "org.opencontainers.image.licenses": "MIT",
+          "org.opencontainers.image.source": "https://github.com/automata-ci/automata",
+          "org.opencontainers.image.title": "Automata"
+        },
+        "user": "65532:65532",
+        "working_directory": "/"
+      },
+      "runtime": {
+        "binary": "/usr/local/bin/automata",
+        "gid": 65532,
+        "uid": 65532
+      },
+      "source": {
+        "kind": "release-registry",
+        "repository": "ghcr.io/automata-ci/automata"
+      }
+    },
+    "postgres": {
+      "canonical_repository": "automata.local/postgres",
+      "config": {
+        "command": [
+          "postgres"
+        ],
+        "entrypoint": [
+          "docker-entrypoint.sh"
+        ],
+        "required_environment": {
+          "PGDATA": "/var/lib/postgresql/18/docker",
+          "PG_MAJOR": "18",
+          "PG_VERSION": "18.4-1.pgdg12+1"
+        },
+        "required_labels": {},
+        "user": "",
+        "working_directory": ""
+      },
+      "runtime": {
+        "bootstrap_gid": 0,
+        "bootstrap_uid": 0,
+        "data_gid": 999,
+        "data_mount": "/var/lib/postgresql",
+        "data_uid": 999,
+        "entrypoint": "/usr/local/bin/docker-entrypoint.sh",
+        "password_file_environment": "POSTGRES_PASSWORD_FILE",
+        "pg_isready": "/usr/bin/pg_isready",
+        "pgdata": "/var/lib/postgresql/18/docker",
+        "postgres": "/usr/lib/postgresql/18/bin/postgres",
+        "server_certificate": "/run/automata-local/postgres/tls/server.pem",
+        "server_private_key": "/run/automata-local/postgres/tls/server-key.pem",
+        "server_private_key_modes": [
+          "0600-owner",
+          "0640-root-server-group"
+        ]
+      },
+      "source": {
+        "config_digest": "sha256:526573c93ea530a230b553cc513075ab9d70b63bfd2300ef5eb5ad1cafbbc595",
+        "kind": "registry",
+        "platform_manifest_digest": "sha256:7e6103cf85f88f7a0eddb3ec0b1ba8940eba098ed118ade25a729ca9daee5568",
+        "reference": "docker.io/library/postgres:18.4-bookworm@sha256:7e6103cf85f88f7a0eddb3ec0b1ba8940eba098ed118ade25a729ca9daee5568"
+      }
+    },
+    "profile": {
+      "canonical_repository": "automata.local/github-hosted-ubuntu-24.04-x64",
+      "config": {
+        "command": [
+          "/bin/sleep",
+          "infinity"
+        ],
+        "entrypoint": [],
+        "required_environment": {
+          "AUTOMATA_ENVIRONMENT_PROFILE_ID": "automata.dev/github-hosted-ubuntu-24-04-x64-v1",
+          "CARGO_HOME": "/opt/cargo",
+          "RUNNER_TOOL_CACHE": "/opt/hostedtoolcache",
+          "RUSTUP_HOME": "/opt/rustup"
+        },
+        "required_labels": {
+          "io.automata.environment-profile": "automata.dev/github-hosted-ubuntu-24-04-x64-v1",
+          "org.opencontainers.image.licenses": "MIT",
+          "org.opencontainers.image.source": "https://github.com/automata-ci/automata",
+          "org.opencontainers.image.title": "Automata GitHub-hosted Ubuntu 24.04 x64 compatibility profile"
+        },
+        "user": "0:0",
+        "working_directory": "/__w"
+      },
+      "runtime": {
+        "gid": 0,
+        "uid": 0,
+        "workspace": "/__w"
+      },
+      "source": {
+        "config_digest": "sha256:95b914337d8f4c55ae2c8d9d065e94b79007a2627927b4552c1643189d6e0813",
+        "kind": "registry",
+        "platform_manifest_digest": "sha256:e2c20ad25ff71fb61d9609e84daf8384a122b8f26a047836ac50d832c632e194",
+        "reference": "ghcr.io/automata-ci/automata-ubuntu-24.04-x64@sha256:e2c20ad25ff71fb61d9609e84daf8384a122b8f26a047836ac50d832c632e194"
+      }
+    },
+    "runner": {
+      "canonical_repository": "automata.local/automata-runner",
+      "config": {
+        "command": [
+          "doctor",
+          "--json"
+        ],
+        "entrypoint": [
+          "/usr/local/bin/automata-runner"
+        ],
+        "required_environment": {},
+        "required_labels": {
+          "org.opencontainers.image.licenses": "MIT",
+          "org.opencontainers.image.source": "https://github.com/automata-ci/automata",
+          "org.opencontainers.image.title": "Automata Runner"
+        },
+        "user": "65532:65532",
+        "working_directory": "/"
+      },
+      "runtime": {
+        "binary": "/usr/local/bin/automata-runner",
+        "commands": [
+          "enroll",
+          "run"
+        ],
+        "gid": 65532,
+        "product_config_schema": 6,
+        "uid": 65532
+      },
+      "source": {
+        "kind": "release-registry",
+        "repository": "ghcr.io/automata-ci/automata-runner"
+      }
+    },
+    "rustfs": {
+      "canonical_repository": "automata.local/rustfs",
+      "config": {
+        "command": [
+          "rustfs"
+        ],
+        "entrypoint": [
+          "/entrypoint.sh"
+        ],
+        "required_environment": {
+          "RUSTFS_VOLUMES": "/data"
+        },
+        "required_labels": {},
+        "user": "rustfs",
+        "working_directory": "/"
+      },
+      "runtime": {
+        "access_key_file_environment": "RUSTFS_ACCESS_KEY_FILE",
+        "ca_certificate_name": "ca.crt",
+        "data_gid": 10001,
+        "data_mode": "0750",
+        "data_mount": "/data",
+        "data_uid": 10001,
+        "entrypoint": "/entrypoint.sh",
+        "gid": 10001,
+        "health_client": "/usr/bin/curl",
+        "health_path": "/health",
+        "secret_key_file_environment": "RUSTFS_SECRET_KEY_FILE",
+        "server": "/usr/bin/rustfs",
+        "server_certificate_name": "rustfs_cert.pem",
+        "server_private_key_name": "rustfs_key.pem",
+        "sse_master_key_environment": "RUSTFS_SSE_S3_MASTER_KEY",
+        "tls_path_environment": "RUSTFS_TLS_PATH",
+        "uid": 10001
+      },
+      "source": {
+        "config_digest": "sha256:93dda33a086d9d7a8dd16ac7d398c937fd9a1f0ccd539d22e95c7bea4ae9213f",
+        "kind": "registry",
+        "platform_manifest_digest": "sha256:e4151ec4728f4d39a714a2c5f6e1f4bc8e0789fe5af4874b95121bae39c6cd12",
+        "reference": "docker.io/rustfs/rustfs:1.0.0-beta.11@sha256:84ce557a0245a06a9aae5516f55ee0f007fca78d41df356f419306fdc0cb168c"
+      }
+    },
+    "sandbox-guest": {
+      "canonical_repository": "automata.local/automata-ci-sandbox-guest",
+      "config": {
+        "command": [],
+        "entrypoint": [
+          "/usr/local/bin/automata-ci-sandbox-guest"
+        ],
+        "required_environment": {},
+        "required_labels": {
+          "io.automata.sandbox-guest.protocol-version": "3",
+          "org.opencontainers.image.licenses": "MIT",
+          "org.opencontainers.image.source": "https://github.com/automata-ci/automata",
+          "org.opencontainers.image.title": "Automata Sandbox Guest"
+        },
+        "user": "65532:65532",
+        "working_directory": "/"
+      },
+      "runtime": {
+        "binary": "/usr/local/bin/automata-ci-sandbox-guest",
+        "gid": 65532,
+        "guest_protocol": 3,
+        "uid": 65532
+      },
+      "source": {
+        "kind": "release-registry",
+        "repository": "ghcr.io/automata-ci/automata-sandbox-guest"
+      }
+    },
+    "service-proxy": {
+      "canonical_repository": "automata.local/automata-ci-service-proxy",
+      "config": {
+        "command": [],
+        "entrypoint": [
+          "/usr/libexec/automata-ci-service-proxy"
+        ],
+        "required_environment": {},
+        "required_labels": {
+          "io.automata.service-proxy.protocol-version": "2",
+          "org.opencontainers.image.licenses": "MIT",
+          "org.opencontainers.image.source": "https://github.com/automata-ci/automata",
+          "org.opencontainers.image.title": "Automata CI service proxy"
+        },
+        "user": "65532:65532",
+        "working_directory": "/"
+      },
+      "runtime": {
+        "binary": "/usr/libexec/automata-ci-service-proxy",
+        "gid": 65532,
+        "protocol": 2,
+        "uid": 65532
+      },
+      "source": {
+        "kind": "release-candidate",
+        "path": "target/service-proxy-publication/automata-service-proxy-candidate-x86_64-unknown-linux-musl.tar"
+      }
+    }
+  },
+  "platform": {
+    "architecture": "amd64",
+    "os": "linux"
+  },
+  "profile": {
+    "compatibility_label": "ubuntu-24.04",
+    "id": "automata.dev/github-hosted-ubuntu-24-04-x64-v1",
+    "image_role": "profile",
+    "lock_path": "images/github-hosted-ubuntu-24.04-x64/profile-lock.json",
+    "lock_sha256": "05fb47e52d497bb1cb887c19e4b865cfe49da73d462df57451d1b6efaa669238",
+    "manifest_path": "images/github-hosted-ubuntu-24.04-x64/profile-manifest.json",
+    "manifest_sha256": "f7a6f8e592a484f59330bf2cedd839adc75488618ee58efcc3c3d4957d186e21"
+  },
+  "schema": "automata.local/release-catalog-source/v1",
+  "scope": {
+    "engine": "linux/amd64",
+    "host": "unix"
+  },
+  "services": {
+    "dns": {
+      "objects": "objects.automata.invalid",
+      "postgres": "postgres.automata.invalid",
+      "results": "results.automata.invalid",
+      "runner": "runner.automata.invalid"
+    },
+    "object_store": {
+      "bucket": "automata",
+      "force_path_style": true,
+      "operation_timeout_seconds": 30,
+      "port": 9000,
+      "prefix": "objects/v1",
+      "region": "us-east-1",
+      "transport": "https-private-ca"
+    },
+    "ports": {
+      "human": 8080,
+      "results": 8081,
+      "runner_control": 9090
+    },
+    "runner": {
+      "executor": "github",
+      "executor_contract": {
+        "ephemeral_disk_bytes": 0,
+        "minimum_cpu_millis": 1000,
+        "minimum_memory_bytes": 268435456,
+        "minimum_pids": 3,
+        "network": "private_egress",
+        "privilege": "administrator",
+        "root_filesystem": "writable",
+        "runner_root": "/__automata",
+        "workspace": "/__w"
+      },
+      "maximum_parallel_jobs": 256,
+      "profile_role": "profile",
+      "provider": "local-docker",
+      "provider_control_directory": "/automata-control",
+      "sandbox_guest_role": "sandbox-guest",
+      "service_proxy_role": "service-proxy"
+    }
+  }
+}

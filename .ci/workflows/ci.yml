@@ -108,9 +108,11 @@ jobs:
           ./scripts/ci/tests/container-context.test.sh
           ./scripts/ci/tests/install.test.sh
           python3 scripts/ci/tests/integration-test-targets.test.py
+          python3 scripts/ci/tests/local-installation-catalog.test.py
           python3 scripts/ci/tests/release-handoff.test.py
           python3 scripts/ci/tests/rust-build-cache.test.py
           python3 scripts/ci/tests/rust-coverage.test.py
+          ./scripts/ci/tests/sandbox-guest-image.test.sh
           python3 scripts/ci/tests/service-proxy-buildah-containerfile.test.py
           python3 scripts/ci/tests/service-proxy-candidate.test.py
           ./scripts/ci/tests/service-proxy-image.test.sh
@@ -722,6 +724,7 @@ jobs:
           AUTOMATA_SCRATCH_RUNTIME: docker
         run: |
           ./scripts/ci/verify-static-musl.sh
+          ./scripts/ci/verify-sandbox-guest-static.sh
           ./scripts/ci/verify-service-proxy-static.sh
 
       - name: Generate binary and embedded-runtime SBOMs
@@ -738,6 +741,18 @@ jobs:
           diff --recursive --brief \
             target/distribution-input/licenses \
             target/third-party-license-reproduction
+
+      - name: Prepare and verify sandbox-guest image
+        run: |
+          ./scripts/ci/prepare-sandbox-guest-context.sh \
+            target/sandbox-guest-context \
+            "$AUTOMATA_EXPECTED_VERSION"
+          ./scripts/ci/verify-sandbox-guest-image.sh \
+            target/sandbox-guest-context \
+            "$AUTOMATA_EXPECTED_VERSION" \
+            "$AUTOMATA_EXPECTED_GIT_SHA" \
+            "$AUTOMATA_RELEASE_CREATED" \
+            "$SOURCE_DATE_EPOCH"
 
       - name: Package and reproduce deterministic distribution
         run: |

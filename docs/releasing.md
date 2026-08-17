@@ -25,10 +25,10 @@ workspace version `X.Y.Z` is intended to publish:
 | Destination | Published names |
 | --- | --- |
 | crates.io | Every publishable workspace package in dependency order, including `automata-ci` and `automata-ci-runner` |
-| GitHub Release | `automata-x86_64-unknown-linux-musl.tar.gz`, its `.sha256` file, and `automata-release-manifest.json` |
-| GHCR | `ghcr.io/automata-ci/automata:X.Y.Z` and `ghcr.io/automata-ci/automata-runner:X.Y.Z` |
-| Stable aliases | Both GHCR images also receive `latest` for a non-prerelease version |
-| Attestations | The release archive, checksum, and both image digests |
+| GitHub Release | `automata-x86_64-unknown-linux-musl.tar.gz`, its `.sha256` file, `automata-release-manifest.json`, `automata-local-installation-catalog.json`, and `automata-service-proxy-candidate-x86_64-unknown-linux-musl.tar` |
+| GHCR | `ghcr.io/automata-ci/automata:X.Y.Z`, `ghcr.io/automata-ci/automata-runner:X.Y.Z`, and `ghcr.io/automata-ci/automata-sandbox-guest:X.Y.Z` |
+| Stable aliases | All three GHCR images also receive `latest` for a non-prerelease version |
+| Attestations | The release archive and checksum, local-installation catalog, service-proxy candidate, and provenance and SBOM statements for all three images |
 
 The archive contains `automata`, `automata-runner`, the license, third-party
 notices, SBOMs, a version file, and internal checksums. The filename stays
@@ -134,11 +134,12 @@ GitHub's `id-token` permission is job-wide rather than step-scoped. The
 `crates-io` job therefore checks out no repository and runs no build or
 dependency command. Before the explicit crates.io authentication action, it
 runs only pinned artifact-download code, fixed runner clients, bounded
-materialization, and the three small release helpers from a same-run raw tool
-bundle selected by artifact ID and verified against both the artifact-service
-digest and the preparation-job SHA-256. Those helpers are part of the audited
-credential-bound trusted code; changes to them require the same review as the
-workflow itself.
+materialization, and the closed release-helper module set from a same-run raw
+tool bundle selected by artifact ID and verified against both the
+artifact-service digest and the preparation-job SHA-256. Those helpers and
+their exact catalog, profile, Containerfile, license, and workspace-version
+inputs are part of the audited credential-bound trusted code; changes to them
+require the same review as the workflow itself.
 
 ### 4. Enable private security reporting and dependency alerts
 
@@ -164,11 +165,11 @@ publishing crates whose homepage metadata points there.
 ### 6. Plan the first GHCR visibility change
 
 New organization container packages are private by default. After a future
-authorized workflow first pushes `automata` and `automata-runner`, an
-organization owner or package administrator must change both packages to
-**Public** under their package settings. Public Container Registry packages can
-then be pulled anonymously; GitHub documents the irreversible visibility
-change in
+authorized workflow first pushes `automata`, `automata-runner`, and
+`automata-sandbox-guest`, an organization owner or package administrator must
+change all three packages to **Public** under their package settings. Public
+Container Registry packages can then be pulled anonymously; GitHub documents
+the irreversible visibility change in
 [Configuring package access and visibility](https://docs.github.com/en/packages/learn-github-packages/configuring-a-packages-access-control-and-visibility).
 
 The future sequence must test anonymous manifest access before publishing any
@@ -300,11 +301,12 @@ used only to make the review metadata well formed; they do not claim a hosted
 workflow identity. `prepare-candidate` applies the same trusted publisher policy
 as ordinary CI and extracts the reviewed OCI bytes. The operator handoff is
 `target/service-proxy-policy-review/automata-service-proxy.oci.tar`; the outer
-`automata-service-proxy-candidate-*.tar` is only the reproducible policy input,
-not the upload artifact. Review the adjacent proposed lock, source identity,
-source provenance, and SBOM together with that OCI archive. These steps write
-only below `target/`; they do not push an image, bind a tag, or create an
-attestation.
+`automata-service-proxy-candidate-*.tar` is the reproducible policy input, not
+the image-registry upload artifact. A release also retains that outer candidate
+as the byte-exact local-installation payload named by its catalog. Review the
+adjacent proposed lock, source identity, source provenance, and SBOM together
+with the OCI archive. These steps write only below `target/`; they do not push
+an image, bind a tag, or create an attestation.
 
 A separately authorized operator may upload only the reviewed OCI archive and
 must capture and anonymously re-read the registry digest before proposing a
@@ -313,6 +315,23 @@ authenticate an Automata-issued statement binding the publisher commit,
 `.ci/workflows/service-proxy-image.yml`, an authenticated Automata dispatch,
 the main ref, the candidate source commit, source-provenance digest, and exact
 image digest.
+
+## Local-installation release catalog
+
+`images/local-installation/catalog-v1.json` is the reviewed source contract for
+one Unix-hosted, `linux/amd64` installation. Its role set is closed to exactly
+Automata, runner, sandbox guest, service proxy, PostgreSQL, RustFS, and the
+GitHub-hosted Ubuntu 24.04 x64 compatibility profile. The release workflow
+resolves the three first-party images produced by that release, retains the
+protocol 2 service-proxy OCI candidate, and qualifies each fixed third-party or
+profile image with its top-level, platform-manifest, and configuration digests.
+The emitted catalog also binds the exact profile manifest and lock bytes.
+
+The catalog is declarative release evidence. It does not materialize engine
+objects, install or bootstrap a runner, mint credentials, select secrets, or
+add a relay or generic image-fetch API. A later installation implementation
+must consume this closed schema in its own reviewed slice and still prove the
+downloaded assets and registry content against these bindings.
 
 ## Prepare a release
 
@@ -398,20 +417,22 @@ mismatched checkout, or a dirty release build.
 
 When enabled, the tag push starts `.ci/workflows/release.yml`. Every version
 shares one repository-wide publication lock, so crates.io publication and the
-two global `latest` aliases cannot race another release. A different unfinished
-draft blocks the next tag, and a stable version must be newer than every stable
-GitHub Release already published. The future pipeline must perform these gates
-in order:
+three global `latest` aliases cannot race another release. A different
+unfinished draft blocks the next tag, and a stable version must be newer than
+every stable GitHub Release already published. The future pipeline must perform
+these gates in order:
 
 1. prove, before mutation, that the tag commit is an ancestor of current `main`
    and that exact provider-authenticated Automata CI authority passed for that
    SHA;
-2. stage every crate and exercise both static musl executables inside the
-   protected `release` environment;
-3. generate SBOMs, license material, the deterministic archive, checksums, and
-   the canonical release manifest;
-4. create or recover the exact draft, verify its accepted bytes, attest the
-   archive, and bind the two image digests before creating version tags;
+2. stage every crate and exercise the two distribution executables and both
+   fixed helper executables as static musl binaries inside the protected
+   `release` environment;
+3. generate SBOMs, license material, the deterministic archive and checksum,
+   the release-scoped service-proxy candidate, the closed local-installation
+   catalog, and the canonical release manifest;
+4. create or recover the exact draft, verify and attest its accepted bytes, and
+   bind the three release-image digests before creating version tags;
 5. transfer the bounded payload, publication plan, and minimal release-helper
    bundle through same-run raw artifacts selected by numeric ID and checked
    against both service and producer digests;
@@ -423,13 +444,14 @@ in order:
    the official length-prefixed crates.io API in dependency order;
 8. verify every exact non-yanked crates.io version and its owner set before any
    mutable alias changes;
-9. move both GHCR `latest` aliases only for a stable release and verify them; and
+9. move all three GHCR `latest` aliases only for a stable release and verify
+   them; and
 10. revalidate the remote tag, release order, version images, and draft bytes in
     the last pre-publication window, then make the GitHub Release public without
     OIDC credentials.
 
 Versions containing a prerelease suffix publish as GitHub prereleases and do
-not move either GHCR `latest` tag.
+not move any GHCR `latest` tag.
 
 ## Verify the published release
 
@@ -438,12 +460,33 @@ credentials:
 
 ```console
 version="$(./scripts/ci/workspace-version.sh)"
+release_commit="$(git rev-parse "v${version}^{commit}")"
 
 curl --fail --location \
   "https://github.com/automata-ci/automata/releases/download/v${version}/automata-x86_64-unknown-linux-musl.tar.gz.sha256"
+curl --fail --location --output automata-local-installation-catalog.json \
+  "https://github.com/automata-ci/automata/releases/download/v${version}/automata-local-installation-catalog.json"
+curl --fail --location \
+  --output automata-service-proxy-candidate-x86_64-unknown-linux-musl.tar \
+  "https://github.com/automata-ci/automata/releases/download/v${version}/automata-service-proxy-candidate-x86_64-unknown-linux-musl.tar"
+gh attestation verify automata-local-installation-catalog.json \
+  --repo automata-ci/automata \
+  --signer-workflow automata-ci/automata/.ci/workflows/release.yml \
+  --source-ref "refs/tags/v${version}" \
+  --source-digest "$release_commit" \
+  --deny-self-hosted-runners
+gh attestation verify \
+  automata-service-proxy-candidate-x86_64-unknown-linux-musl.tar \
+  --repo automata-ci/automata \
+  --signer-workflow automata-ci/automata/.ci/workflows/release.yml \
+  --source-ref "refs/tags/v${version}" \
+  --source-digest "$release_commit" \
+  --deny-self-hosted-runners
 cargo search automata-ci --limit 1
 podman manifest inspect "ghcr.io/automata-ci/automata:${version}" >/dev/null
 podman manifest inspect "ghcr.io/automata-ci/automata-runner:${version}" >/dev/null
+podman manifest inspect \
+  "ghcr.io/automata-ci/automata-sandbox-guest:${version}" >/dev/null
 ```
 
 Test the installer on a disposable x86-64 Linux account or container, confirm
@@ -460,18 +503,20 @@ immutable tag only through an authenticated Automata dispatch that rebinds the
 trusted provider origin, repository, tag and commit, workflow/event/ref,
 logical job, and exact run/job authority. The intended recovery contract is:
 
-- an interrupted draft may contain the archive/checksum pair, the canonical
-  manifest, all three, or none, but no unexpected asset; the workflow
-  byte-verifies every existing asset, uploads only an absent expected member,
-  and requires the exact three downloaded bytes plus a valid checksum before
-  publication;
+- a draft always starts with the archive/checksum pair and may then contain the
+  service-proxy candidate, the candidate plus catalog, or the candidate plus
+  catalog and manifest, but no other partial order or unexpected asset; recovery
+  byte-verifies the deterministic candidate, authenticates an existing catalog
+  attestation before accepting its image digests, validates the manifest against
+  those exact payloads, and requires all five downloaded assets plus a valid
+  checksum before publication;
 - an already published crate is skipped only when its crates.io checksum
   exactly matches the local package archive;
 - a checksum mismatch fails rather than assuming the version is equivalent;
   and
-- once the draft manifest binds image digests, recovery does not rebuild them;
-  missing version tags are created from those exact digests and any different or
-  unbound version tag fails closed.
+- once the attested draft catalog binds image digests, recovery does not rebuild
+  them; missing version tags are created from those exact digests and any
+  different or unbound version tag fails closed.
 
 The handoff and the second credential-free `cargo package` output must match
 byte for byte before publication is authorized. The credentialed executor does
@@ -492,10 +537,10 @@ tag to repair a failed release. If the tagged source is wrong, publish a new
 patch version. A crates.io version cannot be overwritten, and the future
 workflow must treat a public GitHub Release as immutable.
 
-The two GHCR `latest` updates are sequential and cannot be transactional. A
-failure between them can temporarily leave one alias ahead; authenticated
-recovery must reapply and verify both exact digests. Use immutable version tags,
-not `latest`, as the release-completeness signal.
+The three GHCR `latest` updates are sequential and cannot be transactional. A
+failure between them can temporarily leave one or two aliases ahead;
+authenticated recovery must reapply and verify all three exact digests. Use
+immutable version tags, not `latest`, as the release-completeness signal.
 
 Finalization reconciles an error from `gh release edit` by re-reading the exact
 public tag, prerelease/latest state, asset set and bytes, and annotated tag
@@ -513,13 +558,25 @@ The development scripts can exercise the archive path without publishing:
 export AUTOMATA_EXPECTED_VERSION="$(./scripts/ci/workspace-version.sh)"
 export AUTOMATA_EXPECTED_GIT_SHA="$(git rev-parse --verify 'HEAD^{commit}')"
 export AUTOMATA_BUILD_GIT_SHA="$AUTOMATA_EXPECTED_GIT_SHA"
+export AUTOMATA_RELEASE_CREATED="$(git show -s --format=%cI HEAD)"
 export SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
 
 ./scripts/ci/build-static-musl.sh
 ./scripts/ci/verify-static-musl.sh
+./scripts/ci/verify-sandbox-guest-static.sh
+./scripts/ci/verify-service-proxy-static.sh
 ./scripts/ci/generate-sboms.sh
 ./scripts/ci/prepare-third-party-license-sources.sh
 ./scripts/ci/generate-third-party-licenses.sh
+./scripts/ci/prepare-sandbox-guest-context.sh \
+  target/sandbox-guest-context \
+  "$AUTOMATA_EXPECTED_VERSION"
+./scripts/ci/verify-sandbox-guest-image.sh \
+  target/sandbox-guest-context \
+  "$AUTOMATA_EXPECTED_VERSION" \
+  "$AUTOMATA_EXPECTED_GIT_SHA" \
+  "$AUTOMATA_RELEASE_CREATED" \
+  "$SOURCE_DATE_EPOCH"
 ./scripts/ci/package-static-musl.sh
 bash scripts/ci/tests/install.test.sh
 bash scripts/ci/tests/container-context.test.sh

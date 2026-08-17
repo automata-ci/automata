@@ -5,25 +5,42 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import io
 import json
 import os
 import pathlib
 import re
 import stat
+import sys
 import tarfile
 from collections.abc import Collection
 from dataclasses import dataclass
 from typing import BinaryIO, NoReturn
 
 
-SCHEMA_VERSION = 1
+SCRIPT_DIRECTORY = pathlib.Path(__file__).resolve().parent
+CATALOG_SCRIPT = SCRIPT_DIRECTORY / "local_installation_catalog.py"
+CATALOG_SPEC = importlib.util.spec_from_file_location(
+    "release_local_installation_catalog", CATALOG_SCRIPT
+)
+if CATALOG_SPEC is None or CATALOG_SPEC.loader is None:
+    raise RuntimeError(f"could not load {CATALOG_SCRIPT}")
+local_catalog = importlib.util.module_from_spec(CATALOG_SPEC)
+sys.modules[CATALOG_SPEC.name] = local_catalog
+CATALOG_SPEC.loader.exec_module(local_catalog)
+
+
+SCHEMA_VERSION = 2
 ARCHIVE_PATH = "target/distribution/automata-x86_64-unknown-linux-musl.tar.gz"
 CHECKSUM_PATH = f"{ARCHIVE_PATH}.sha256"
 MANIFEST_PATH = "target/distribution/automata-release-manifest.json"
+CATALOG_PATH = local_catalog.CATALOG_PATH
+SERVICE_PROXY_CANDIDATE_PATH = local_catalog.SERVICE_PROXY_CANDIDATE_PATH
 IMAGE_NAMES = {
     "automata": "ghcr.io/automata-ci/automata",
     "automata-runner": "ghcr.io/automata-ci/automata-runner",
+    "automata-sandbox-guest": "ghcr.io/automata-ci/automata-sandbox-guest",
 }
 SHA256 = re.compile(r"[0-9a-f]{64}")
 OCI_DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
@@ -33,9 +50,13 @@ MAX_HANDOFF_SIZE = 768 * 1024 * 1024
 MAX_HANDOFF_CONTENT_SIZE = 700 * 1024 * 1024
 MAX_HANDOFF_MEMBER_SIZE = 256 * 1024 * 1024
 MAX_HANDOFF_MEMBERS = 128
+FIXED_HANDOFF_MEMBERS = 5
+MAX_CRATE_ENTRIES = MAX_HANDOFF_MEMBERS - FIXED_HANDOFF_MEMBERS
 MAX_MANIFEST_SIZE = 1024 * 1024
 MAX_CRATE_SIZE = 10 * 1024 * 1024
 MAX_RELEASE_ARCHIVE_SIZE = 256 * 1024 * 1024
+MAX_CATALOG_SIZE = local_catalog.MAX_JSON_SIZE
+MAX_SERVICE_PROXY_CANDIDATE_SIZE = local_catalog.MAX_CANDIDATE_SIZE
 MAX_TEXT_SIZE = 512
 
 
@@ -241,7 +262,7 @@ def package_entries(
                 "version": version,
             }
         )
-        if len(entries) > MAX_HANDOFF_MEMBERS - 3:
+        if len(entries) > MAX_CRATE_ENTRIES:
             fail("too many crate archives for one release handoff")
     if not entries:
         fail("no crate archives were found")
@@ -256,10 +277,14 @@ def build_manifest(
     identity: ReleaseIdentity,
     automata_digest: str,
     runner_digest: str,
+    sandbox_guest_digest: str,
     expected_crates: Collection[str],
 ) -> dict:
     automata_digest = require_match(automata_digest, OCI_DIGEST, "Automata image digest")
     runner_digest = require_match(runner_digest, OCI_DIGEST, "runner image digest")
+    sandbox_guest_digest = require_match(
+        sandbox_guest_digest, OCI_DIGEST, "sandbox-guest image digest"
+    )
     archive = file_entry(
         ARCHIVE_PATH,
         repository_root,
@@ -273,6 +298,33 @@ def build_manifest(
         MAX_TEXT_SIZE,
     )
     validate_checksum(repository_root / CHECKSUM_PATH, archive["sha256"])
+    catalog_entry = file_entry(
+        CATALOG_PATH,
+        repository_root,
+        "local-installation catalog",
+        MAX_CATALOG_SIZE,
+    )
+    candidate_entry = file_entry(
+        SERVICE_PROXY_CANDIDATE_PATH,
+        repository_root,
+        "service-proxy candidate",
+        MAX_SERVICE_PROXY_CANDIDATE_SIZE,
+    )
+    catalog_document = local_catalog.load_canonical(
+        repository_root / CATALOG_PATH,
+        "local-installation catalog",
+        MAX_CATALOG_SIZE,
+    )
+    local_catalog.validate_catalog(
+        catalog_document,
+        identity.document(),
+        repository_root=repository_root,
+        expected_registry_digests={
+            "automata": automata_digest,
+            "runner": runner_digest,
+            "sandbox-guest": sandbox_guest_digest,
+        },
+    )
     return {
         "crates": package_entries(
             repository_root, identity.version, expected_crates
@@ -286,9 +338,13 @@ def build_manifest(
                 "digest": runner_digest,
                 "name": IMAGE_NAMES["automata-runner"],
             },
+            "automata-sandbox-guest": {
+                "digest": sandbox_guest_digest,
+                "name": IMAGE_NAMES["automata-sandbox-guest"],
+            },
         },
         "release": identity.document(),
-        "release_assets": [archive, checksum],
+        "release_assets": [archive, checksum, catalog_entry, candidate_entry],
         "schema_version": SCHEMA_VERSION,
     }
 
@@ -325,8 +381,9 @@ def validate_manifest(
     repository_root: pathlib.Path | None = None,
     expected_automata_digest: str | None = None,
     expected_runner_digest: str | None = None,
+    expected_sandbox_guest_digest: str | None = None,
     expected_crates: Collection[str] | None = None,
-) -> tuple[str, str, list[str]]:
+) -> tuple[str, str, str, list[str]]:
     require_exact_keys(
         document,
         {"crates", "images", "release", "release_assets", "schema_version"},
@@ -366,9 +423,14 @@ def validate_manifest(
         fail("manifest release identity differs from the gated release")
 
     assets = document["release_assets"]
-    if not isinstance(assets, list) or len(assets) != 2:
-        fail("manifest must contain exactly two release asset records")
-    expected_asset_paths = [ARCHIVE_PATH, CHECKSUM_PATH]
+    if not isinstance(assets, list) or len(assets) != 4:
+        fail("manifest must contain exactly four release asset records")
+    expected_asset_paths = [
+        ARCHIVE_PATH,
+        CHECKSUM_PATH,
+        CATALOG_PATH,
+        SERVICE_PROXY_CANDIDATE_PATH,
+    ]
     asset_paths: list[str] = []
     asset_digests: dict[str, str] = {}
     for index, value in enumerate(assets):
@@ -384,7 +446,7 @@ def validate_manifest(
     if (
         not isinstance(crates, list)
         or not crates
-        or len(crates) > MAX_HANDOFF_MEMBERS - 3
+        or len(crates) > MAX_CRATE_ENTRIES
     ):
         fail("manifest must contain a bounded, non-empty crate archive list")
     crate_paths: list[str] = []
@@ -430,6 +492,11 @@ def validate_manifest(
         image_digests["automata-runner"] != expected_runner_digest
     ):
         fail("manifest runner image digest differs from the staged digest")
+    if expected_sandbox_guest_digest is not None and (
+        image_digests["automata-sandbox-guest"]
+        != expected_sandbox_guest_digest
+    ):
+        fail("manifest sandbox-guest image digest differs from the staged digest")
 
     file_paths = asset_paths + crate_paths
     if len(file_paths) != len(set(file_paths)):
@@ -441,6 +508,10 @@ def validate_manifest(
                 if entry["path"] == ARCHIVE_PATH
                 else MAX_TEXT_SIZE
                 if entry["path"] == CHECKSUM_PATH
+                else MAX_CATALOG_SIZE
+                if entry["path"] == CATALOG_PATH
+                else MAX_SERVICE_PROXY_CANDIDATE_SIZE
+                if entry["path"] == SERVICE_PROXY_CANDIDATE_PATH
                 else MAX_CRATE_SIZE
             )
             actual = file_digest(
@@ -453,7 +524,27 @@ def validate_manifest(
         validate_checksum(
             repository_root / CHECKSUM_PATH, asset_digests[ARCHIVE_PATH]
         )
-    return image_digests["automata"], image_digests["automata-runner"], file_paths
+        catalog_document = local_catalog.load_canonical(
+            repository_root / CATALOG_PATH,
+            "local-installation catalog",
+            MAX_CATALOG_SIZE,
+        )
+        local_catalog.validate_catalog(
+            catalog_document,
+            identity.document(),
+            repository_root=repository_root,
+            expected_registry_digests={
+                "automata": image_digests["automata"],
+                "runner": image_digests["automata-runner"],
+                "sandbox-guest": image_digests["automata-sandbox-guest"],
+            },
+        )
+    return (
+        image_digests["automata"],
+        image_digests["automata-runner"],
+        image_digests["automata-sandbox-guest"],
+        file_paths,
+    )
 
 
 def write_file_exclusive(path: pathlib.Path, contents: bytes, mode: int = 0o644) -> None:
@@ -489,6 +580,10 @@ def add_tar_file(
         if relative_path == ARCHIVE_PATH
         else MAX_TEXT_SIZE
         if relative_path == CHECKSUM_PATH
+        else MAX_CATALOG_SIZE
+        if relative_path == CATALOG_PATH
+        else MAX_SERVICE_PROXY_CANDIDATE_SIZE
+        if relative_path == SERVICE_PROXY_CANDIDATE_PATH
         else MAX_CRATE_SIZE
     )
     regular_file(path, f"handoff member {relative_path}", maximum_size)
@@ -541,7 +636,7 @@ def pack_handoff(
     if manifest_path.resolve(strict=False) != expected_manifest_path.resolve(strict=False):
         fail(f"manifest input must be {expected_manifest_path}")
     manifest, manifest_bytes = load_manifest(manifest_path)
-    _, _, payload_paths = validate_manifest(
+    _, _, _, payload_paths = validate_manifest(
         manifest,
         identity,
         repository_root,
@@ -669,6 +764,7 @@ def verify_handoff(
     identity: ReleaseIdentity,
     expected_automata_digest: str,
     expected_runner_digest: str,
+    expected_sandbox_guest_digest: str,
     *,
     expected_handoff_digest: str | None = None,
 ) -> tuple[dict, dict[str, bytes]]:
@@ -685,11 +781,12 @@ def verify_handoff(
         manifest, _, contents = load_handoff_stream(stream, before.st_size, identity)
         if file_identity(os.fstat(stream.fileno())) != file_identity(before):
             fail("handoff archive changed while it was verified")
-    _, _, payload_paths = validate_manifest(
+    _, _, _, payload_paths = validate_manifest(
         manifest,
         identity,
         expected_automata_digest=expected_automata_digest,
         expected_runner_digest=expected_runner_digest,
+        expected_sandbox_guest_digest=expected_sandbox_guest_digest,
     )
     expected_members = sorted([MANIFEST_PATH, *payload_paths])
     if sorted(contents) != expected_members:
@@ -713,6 +810,21 @@ def verify_handoff(
     )
     if checksum != expected_checksum:
         fail("handoff checksum does not exactly describe the release archive")
+    catalog_document = local_catalog.parse_json(
+        contents[CATALOG_PATH],
+        "local-installation catalog",
+        canonical=True,
+    )
+    local_catalog.validate_catalog(
+        catalog_document,
+        identity.document(),
+        expected_registry_digests={
+            "automata": expected_automata_digest,
+            "runner": expected_runner_digest,
+            "sandbox-guest": expected_sandbox_guest_digest,
+        },
+        payloads=contents,
+    )
     return manifest, contents
 
 
@@ -807,6 +919,7 @@ def main() -> None:
     create.add_argument("--handoff", required=True, type=pathlib.Path)
     create.add_argument("--automata-digest", required=True)
     create.add_argument("--runner-digest", required=True)
+    create.add_argument("--sandbox-guest-digest", required=True)
     create.add_argument("--expected-crate", action="append", required=True)
     create.add_argument("--github-output", type=pathlib.Path)
 
@@ -830,6 +943,7 @@ def main() -> None:
     verify.add_argument("--handoff-sha256", required=True)
     verify.add_argument("--automata-digest", required=True)
     verify.add_argument("--runner-digest", required=True)
+    verify.add_argument("--sandbox-guest-digest", required=True)
     verify.add_argument("--extract-root", type=pathlib.Path)
     verify.add_argument("--github-output", type=pathlib.Path)
 
@@ -843,6 +957,7 @@ def main() -> None:
             identity,
             arguments.automata_digest,
             arguments.runner_digest,
+            arguments.sandbox_guest_digest,
             arguments.expected_crate,
         )
         manifest_digest, handoff_digest = create_handoff(
@@ -885,7 +1000,7 @@ def main() -> None:
     if arguments.operation == "verify-manifest":
         repository_root = arguments.repository_root.resolve(strict=True)
         manifest, contents = load_manifest(arguments.manifest)
-        automata_digest, runner_digest, _ = validate_manifest(
+        automata_digest, runner_digest, sandbox_guest_digest, _ = validate_manifest(
             manifest, identity, repository_root
         )
         write_outputs(
@@ -893,6 +1008,7 @@ def main() -> None:
             {
                 "automata_digest": automata_digest,
                 "runner_digest": runner_digest,
+                "sandbox_guest_digest": sandbox_guest_digest,
                 "manifest_sha256": sha256_bytes(contents),
             },
         )
@@ -903,6 +1019,7 @@ def main() -> None:
         identity,
         arguments.automata_digest,
         arguments.runner_digest,
+        arguments.sandbox_guest_digest,
         expected_handoff_digest=arguments.handoff_sha256,
     )
     if arguments.extract_root is not None:
@@ -912,6 +1029,9 @@ def main() -> None:
         {
             "automata_digest": manifest["images"]["automata"]["digest"],
             "runner_digest": manifest["images"]["automata-runner"]["digest"],
+            "sandbox_guest_digest": manifest["images"]["automata-sandbox-guest"][
+                "digest"
+            ],
             "manifest_sha256": sha256_bytes(contents[MANIFEST_PATH]),
         },
     )

@@ -25,6 +25,7 @@ COPY --chmod=0444 sbom/automata.cdx.json /usr/share/sbom/automata.cdx.json
 COPY --chmod=0444 sbom/renderer.cdx.json /usr/share/sbom/renderer.cdx.json
 COPY --chmod=0444 sbom/ui-runtime.cdx.json /usr/share/sbom/ui-runtime.cdx.json
 
+WORKDIR /
 USER 65532:65532
 EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/automata"]

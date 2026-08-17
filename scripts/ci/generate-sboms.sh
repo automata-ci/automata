@@ -62,19 +62,29 @@ target_directory="$(
 automata_binary="${target_directory}/${target}/release/automata"
 runner_binary="${target_directory}/${target}/release/automata-runner"
 service_proxy_binary="${target_directory}/${target}/release/automata-ci-service-proxy"
-readonly target_directory automata_binary runner_binary service_proxy_binary
+sandbox_guest_binary="${target_directory}/${target}/release/automata-ci-sandbox-guest"
+readonly \
+    target_directory \
+    automata_binary \
+    runner_binary \
+    service_proxy_binary \
+    sandbox_guest_binary
 [[ -x "${automata_binary}" ]] || die "missing executable ${automata_binary}"
 [[ -x "${runner_binary}" ]] || die "missing executable ${runner_binary}"
 [[ -x "${service_proxy_binary}" ]] || \
     die "missing executable ${service_proxy_binary}"
+[[ -x "${sandbox_guest_binary}" ]] || \
+    die "missing executable ${sandbox_guest_binary}"
 
 automata_raw="${repository_root}/crates/automata-ci/automata_bin.cdx.json"
 runner_raw="${repository_root}/crates/automata-ci-runner/automata-runner_bin.cdx.json"
 service_proxy_raw="${repository_root}/crates/automata-ci-service-proxy/automata-ci-service-proxy_bin.cdx.json"
-readonly automata_raw runner_raw service_proxy_raw
+sandbox_guest_raw="${repository_root}/crates/automata-ci-sandbox-guest/automata-ci-sandbox-guest_bin.cdx.json"
+readonly automata_raw runner_raw service_proxy_raw sandbox_guest_raw
 [[ ! -e "${automata_raw}" ]] || die "refusing to overwrite ${automata_raw}"
 [[ ! -e "${runner_raw}" ]] || die "refusing to overwrite ${runner_raw}"
 [[ ! -e "${service_proxy_raw}" ]] || die "refusing to overwrite ${service_proxy_raw}"
+[[ ! -e "${sandbox_guest_raw}" ]] || die "refusing to overwrite ${sandbox_guest_raw}"
 
 scratch_root="$(
     automata_canonical_target_child \
@@ -85,7 +95,11 @@ mkdir -p -- "${scratch_root}"
 scratch_directory="$(mktemp -d "${scratch_root}/release.XXXXXXXX")"
 readonly scratch_directory
 cleanup() {
-    rm -f -- "${automata_raw}" "${runner_raw}" "${service_proxy_raw}"
+    rm -f -- \
+        "${automata_raw}" \
+        "${runner_raw}" \
+        "${service_proxy_raw}" \
+        "${sandbox_guest_raw}"
     rm -rf -- "${scratch_directory}"
 }
 trap cleanup EXIT
@@ -136,6 +150,12 @@ generate_rust_sbom \
     "${service_proxy_raw}" \
     "${service_proxy_binary}" \
     automata-ci-service-proxy.cdx.json
+generate_rust_sbom \
+    automata-ci-sandbox-guest \
+    "${repository_root}/crates/automata-ci-sandbox-guest/Cargo.toml" \
+    "${sandbox_guest_raw}" \
+    "${sandbox_guest_binary}" \
+    automata-ci-sandbox-guest.cdx.json
 
 npm --prefix "${embedded_runtime_input}" sbom \
     --omit=dev \
@@ -172,10 +192,11 @@ mkdir -p -- "${output_directory}"
 for name in \
     automata.cdx.json \
     automata-runner.cdx.json \
+    automata-ci-sandbox-guest.cdx.json \
     automata-ci-service-proxy.cdx.json \
     renderer.cdx.json \
     ui-runtime.cdx.json
 do
     install -m 0444 -- "${scratch_directory}/${name}" "${output_directory}/${name}"
 done
-printf 'Created five CycloneDX SBOMs in %s\n' "${output_directory}"
+printf 'Created six CycloneDX SBOMs in %s\n' "${output_directory}"

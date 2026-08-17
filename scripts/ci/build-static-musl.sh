@@ -54,11 +54,13 @@ cargo build \
   --bin automata \
   --bin automata-runner
 
-# This non-publishable binary exists only as input to its scratch helper image.
-# It is deliberately outside the public distribution archive above.
+# These non-publishable binaries exist only as inputs to their scratch helper
+# images. They are deliberately outside the public distribution archive above.
 cargo build \
   --locked \
   --release \
   --target "$target" \
   --package automata-ci-service-proxy \
-  --bin automata-ci-service-proxy
+  --bin automata-ci-service-proxy \
+  --package automata-ci-sandbox-guest \
+  --bin automata-ci-sandbox-guest
