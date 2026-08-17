@@ -825,8 +825,8 @@ pub(super) fn rbac_user_list(
                 "Users · Access management · Automata".to_owned(),
             )?,
             management_nav: rbac_management_navigation("users"),
-            heading: "Users",
-            summary: "Review authenticated tenant members and their current status.",
+            heading: "Members",
+            summary: "Review human and delegated tenant identities and their current status.",
             notice,
             pagination: Pagination {
                 previous_href: None,
@@ -834,7 +834,7 @@ pub(super) fn rbac_user_list(
                     .next_cursor
                     .as_deref()
                     .map(|cursor| rbac_list_href(RBAC_USERS_PATH, Some(cursor))),
-                label: pluralized(users.len(), "user", "users"),
+                label: pluralized(users.len(), "member", "members"),
             },
             users,
         },
@@ -1034,7 +1034,7 @@ pub(super) fn rbac_user_detail(
             )?,
             management_nav: rbac_management_navigation("users"),
             heading: heading.to_owned(),
-            summary: "Stable provider identity, current status, and visible role assignments.",
+            summary: "Stable identity, current status, and visible role assignments.",
             user,
             role_assignments,
             notice,
@@ -3614,7 +3614,7 @@ mod tests {
         assert!(page["users"][1]["displayName"].is_null());
         assert_eq!(page["users"][1]["status"], "disabled");
         assert!(page["pagination"]["previousHref"].is_null());
-        assert_eq!(page["pagination"]["label"], "2 users");
+        assert_eq!(page["pagination"]["label"], "2 members");
         assert_eq!(
             page["pagination"]["nextHref"],
             "/settings/access/users?cursor=cccccccc-cccc-4ccc-8ccc-cccccccccccc"
@@ -3723,7 +3723,7 @@ mod tests {
                 .expect("management shell"),
                 management_nav: rbac_management_navigation("users"),
                 heading: "Ada Lovelace".to_owned(),
-                summary: "Stable provider identity, current status, and visible role assignments.",
+                summary: "Stable identity, current status, and visible role assignments.",
                 user: rbac_managed_user(&user_record).expect("managed user"),
                 notice: None,
                 status_update: None,

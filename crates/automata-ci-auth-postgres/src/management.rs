@@ -380,10 +380,21 @@ async fn load_member(
         FROM tenant_human_memberships AS membership
         JOIN human_principals AS principal ON principal.id = membership.principal_id
         LEFT JOIN LATERAL (
-            SELECT provider_id, provider_subject, provider_login, display_name
-            FROM human_provider_identities
-            WHERE principal_id = membership.principal_id
-            ORDER BY provider_id, provider_subject
+            SELECT candidate.provider_id, candidate.provider_login, candidate.display_name
+            FROM (
+                SELECT provider_id, provider_subject AS identity_subject,
+                       provider_login, display_name, 0 AS identity_priority
+                FROM human_provider_identities
+                WHERE principal_id = membership.principal_id
+                UNION ALL
+                SELECT issuer AS provider_id, subject::text AS identity_subject,
+                       subject::text AS provider_login, display_name,
+                       1 AS identity_priority
+                FROM delegated_actor_identities
+                WHERE principal_id = membership.principal_id
+            ) AS candidate
+            ORDER BY candidate.identity_priority, candidate.provider_id,
+                     candidate.identity_subject
             LIMIT 1
         ) AS identity ON TRUE
         WHERE membership.tenant_id = $1 AND membership.principal_id = $2
@@ -1600,10 +1611,22 @@ impl HumanRbacManagementRepository for PostgresHumanRbacManagementRepository {
                 FROM tenant_human_memberships AS membership
                 JOIN human_principals AS principal ON principal.id = membership.principal_id
                 LEFT JOIN LATERAL (
-                    SELECT provider_id, provider_subject, provider_login, display_name
-                    FROM human_provider_identities
-                    WHERE principal_id = membership.principal_id
-                    ORDER BY provider_id, provider_subject
+                    SELECT candidate.provider_id, candidate.provider_login,
+                           candidate.display_name
+                    FROM (
+                        SELECT provider_id, provider_subject AS identity_subject,
+                               provider_login, display_name, 0 AS identity_priority
+                        FROM human_provider_identities
+                        WHERE principal_id = membership.principal_id
+                        UNION ALL
+                        SELECT issuer AS provider_id, subject::text AS identity_subject,
+                               subject::text AS provider_login, display_name,
+                               1 AS identity_priority
+                        FROM delegated_actor_identities
+                        WHERE principal_id = membership.principal_id
+                    ) AS candidate
+                    ORDER BY candidate.identity_priority, candidate.provider_id,
+                             candidate.identity_subject
                     LIMIT 1
                 ) AS identity ON TRUE
                 WHERE membership.tenant_id = $1
@@ -2920,5 +2943,30 @@ mod tests {
             Err(ManagementRepositoryError::CorruptData)
         );
         assert_eq!(ensure_revision_can_advance(advanceable), Ok(()));
+    }
+
+    #[test]
+    fn delegated_identity_projection_is_a_valid_member() {
+        let principal_id = Uuid::parse_str("39d3a601-9130-405b-8e1c-fa7de8ad9d8a")
+            .expect("principal ID");
+        let record = MemberRow {
+            principal_id,
+            provider_id: Some("https://ci.example.test".to_owned()),
+            provider_login: Some("ea2556ba-c0e0-42b8-b0ca-bde08a3ba5c4".to_owned()),
+            display_name: Some("CI operator".to_owned()),
+            membership_status: "active".to_owned(),
+            authorization_revision: 2,
+            membership_revision: 1,
+        }
+        .into_record()
+        .expect("delegated identity projection");
+
+        assert_eq!(record.principal_id().as_uuid(), principal_id);
+        assert_eq!(record.provider_id().as_str(), "https://ci.example.test");
+        assert_eq!(
+            record.provider_login(),
+            "ea2556ba-c0e0-42b8-b0ca-bde08a3ba5c4"
+        );
+        assert_eq!(record.display_name(), Some("CI operator"));
     }
 }

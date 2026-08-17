@@ -112,7 +112,7 @@ export const authorizedManagementFixtures: readonly AuthorizedManagementFixture[
           Reason for disabling
           <input maxlength="1024" name="reason" required>
         </label>
-        <button class="button button--danger" type="submit">Disable user</button>
+        <button class="button button--danger" type="submit">Disable member</button>
       </form>
     `,
   },

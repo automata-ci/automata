@@ -27,7 +27,7 @@ export function UserDetailPage({ model, shellUtility }: UserDetailPageProps) {
     >
       <section className="panel rbac-panel" aria-labelledby="user-identity-heading">
         <div className="panel__heading">
-          <h2 id="user-identity-heading">User identity</h2>
+          <h2 id="user-identity-heading">Member identity</h2>
           <RbacStatus status={model.user.status} />
         </div>
         <dl className="rbac-definition-list">
@@ -36,11 +36,11 @@ export function UserDetailPage({ model, shellUtility }: UserDetailPageProps) {
             <dd>{model.user.displayName ?? "Not provided"}</dd>
           </div>
           <div>
-            <dt>Provider login</dt>
+            <dt>Identity reference</dt>
             <dd>{model.user.providerLogin}</dd>
           </div>
           <div>
-            <dt>Provider</dt>
+            <dt>Identity provider</dt>
             <dd>{rbacProviderLabel(model.user.providerId)}</dd>
           </div>
         </dl>
@@ -86,7 +86,7 @@ export function UserDetailPage({ model, shellUtility }: UserDetailPageProps) {
               }
               type="submit"
             >
-              {model.statusUpdate.operation === "disable" ? "Disable user" : "Enable user"}
+              {model.statusUpdate.operation === "disable" ? "Disable member" : "Enable member"}
             </button>
           </form>
         )}

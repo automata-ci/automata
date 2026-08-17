@@ -1473,7 +1473,7 @@ describe("hydration", () => {
       rendered.querySelector(
         'section[aria-labelledby="users-heading"] .rbac-empty',
       )?.textContent,
-    ).toContain("No users");
+    ).toContain("No members");
   });
 
   it("renders a concise user identity and read-only role assignments", () => {
