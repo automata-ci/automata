@@ -1,4 +1,4 @@
--- Wave 1 capability-policy append-only migration 0046. Earlier applied versions remain frozen.
+-- Wave 1 capability-policy append-only migration 0047. Earlier applied versions remain frozen.
 
 ALTER TABLE workflow_runtime_policy_mappings
     ADD COLUMN runner_feature_schema smallint,
