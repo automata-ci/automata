@@ -801,6 +801,9 @@ impl ServerConfig {
         let conformance_export_token = conformance_export_configuration(args, human_auth.as_ref())?;
         let secret_encryption = secret_encryption_configuration(args)?;
         let runner_public_authority = runner_public_authority_configuration(args)?;
+        if windows_runner_admission.is_some() && human_auth.is_none() {
+            return Err(ServerConfigError::MissingWindowsRunnerAdmissionOrigin);
+        }
         if (secret_encryption.is_some() || human_auth.is_some())
             && runner_public_authority.is_none()
         {
@@ -1604,6 +1607,9 @@ pub enum ServerConfigError {
     /// The optional Windows runner admission trust registry is malformed or incoherent.
     #[error("Windows runner admission trust configuration is invalid")]
     InvalidWindowsRunnerAdmissionConfiguration,
+    /// Windows admission is enabled without one canonical public enrollment origin.
+    #[error("Windows runner admission requires a public enrollment origin")]
+    MissingWindowsRunnerAdmissionOrigin,
     /// The opt-in mTLS management listener is partial, malformed, or unbounded.
     #[error("management listener configuration is invalid")]
     InvalidManagementConfiguration,

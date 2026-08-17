@@ -45,8 +45,14 @@ CREATE TABLE windows_image_promotion_high_water (
     promotion_key_id text NOT NULL,
     promotion_trust_bundle_sha256 bytea NOT NULL,
     promotion_public_key_sha256 bytea NOT NULL,
+    promotion_payload_sha256 bytea NOT NULL,
+    promotion_envelope_sha256 bytea NOT NULL,
+    image_reference text NOT NULL,
+    image_sha256 bytea NOT NULL,
     promotion_serial bigint NOT NULL,
     revocation_generation bigint NOT NULL,
+    promotion_issued_at_ms bigint NOT NULL,
+    promotion_expires_at_ms bigint NOT NULL,
     updated_at_ms bigint NOT NULL,
     CONSTRAINT windows_image_promotion_high_water_pkey PRIMARY KEY (
         trust_bundle_id,promotion_key_id
@@ -64,9 +70,25 @@ CREATE TABLE windows_image_promotion_high_water (
         AND promotion_trust_bundle_sha256 <> decode(repeat('00', 32), 'hex')
         AND octet_length(promotion_public_key_sha256) = 32
         AND promotion_public_key_sha256 <> decode(repeat('00', 32), 'hex')
+        AND octet_length(promotion_payload_sha256) = 32
+        AND promotion_payload_sha256 <> decode(repeat('00', 32), 'hex')
+        AND octet_length(promotion_envelope_sha256) = 32
+        AND promotion_envelope_sha256 <> decode(repeat('00', 32), 'hex')
+        AND octet_length(image_sha256) = 32
+        AND image_sha256 <> decode(repeat('00', 32), 'hex')
+    ),
+    CONSTRAINT windows_image_promotion_high_water_image CHECK (
+        octet_length(image_reference) BETWEEN 1 AND 2048
+        AND image_reference !~ '[[:cntrl:]]'
+        AND image_reference LIKE '%@sha256:' || encode(image_sha256, 'hex')
     ),
     CONSTRAINT windows_image_promotion_high_water_values CHECK (
-        promotion_serial > 0 AND revocation_generation > 0 AND updated_at_ms >= 0
+        promotion_serial > 0
+        AND revocation_generation > 0
+        AND promotion_issued_at_ms > 0
+        AND promotion_expires_at_ms > promotion_issued_at_ms
+        AND promotion_expires_at_ms - promotion_issued_at_ms <= 604800000
+        AND updated_at_ms >= 0
     )
 );
 
@@ -82,6 +104,18 @@ BEGIN
        OR NEW.promotion_public_key_sha256 <> OLD.promotion_public_key_sha256
        OR NEW.promotion_serial < OLD.promotion_serial
        OR NEW.revocation_generation < OLD.revocation_generation
+       OR (
+           NEW.promotion_serial = OLD.promotion_serial
+           AND NEW.revocation_generation = OLD.revocation_generation
+           AND (
+               NEW.promotion_payload_sha256 <> OLD.promotion_payload_sha256
+               OR NEW.promotion_envelope_sha256 <> OLD.promotion_envelope_sha256
+               OR NEW.image_reference <> OLD.image_reference
+               OR NEW.image_sha256 <> OLD.image_sha256
+               OR NEW.promotion_issued_at_ms <> OLD.promotion_issued_at_ms
+               OR NEW.promotion_expires_at_ms <> OLD.promotion_expires_at_ms
+           )
+       )
        OR NEW.updated_at_ms < OLD.updated_at_ms THEN
         RAISE EXCEPTION 'Windows image promotion high-water state is immutable or monotonic'
             USING ERRCODE = '23514',
@@ -320,14 +354,34 @@ AS $$
 DECLARE
     current_promotion_serial bigint;
     current_revocation_generation bigint;
+    current_promotion_payload_sha256 bytea;
+    current_promotion_envelope_sha256 bytea;
+    current_image_reference text;
+    current_image_sha256 bytea;
+    current_promotion_issued_at_ms bigint;
+    current_promotion_expires_at_ms bigint;
     registered_capabilities jsonb;
     database_now_ms bigint;
 BEGIN
     -- Lock the rollback floor before the runner so every admission path uses
     -- the same order as enrollment. Sample the database clock only after both
     -- potentially blocking reads have returned.
-    SELECT high_water.promotion_serial, high_water.revocation_generation
-    INTO current_promotion_serial, current_revocation_generation
+    SELECT high_water.promotion_serial,
+           high_water.revocation_generation,
+           high_water.promotion_payload_sha256,
+           high_water.promotion_envelope_sha256,
+           high_water.image_reference,
+           high_water.image_sha256,
+           high_water.promotion_issued_at_ms,
+           high_water.promotion_expires_at_ms
+    INTO current_promotion_serial,
+         current_revocation_generation,
+         current_promotion_payload_sha256,
+         current_promotion_envelope_sha256,
+         current_image_reference,
+         current_image_sha256,
+         current_promotion_issued_at_ms,
+         current_promotion_expires_at_ms
     FROM windows_image_promotion_high_water AS high_water
     WHERE high_water.trust_bundle_id = NEW.promotion_trust_bundle_id
       AND high_water.promotion_key_id = NEW.promotion_key_id
@@ -337,7 +391,13 @@ BEGIN
 
     IF NOT FOUND
        OR current_promotion_serial <> NEW.promotion_serial
-       OR current_revocation_generation <> NEW.revocation_generation THEN
+       OR current_revocation_generation <> NEW.revocation_generation
+       OR current_promotion_payload_sha256 <> NEW.promotion_payload_sha256
+       OR current_promotion_envelope_sha256 <> NEW.promotion_envelope_sha256
+       OR current_image_reference <> NEW.image_reference
+       OR current_image_sha256 <> NEW.image_sha256
+       OR current_promotion_issued_at_ms <> NEW.promotion_issued_at_ms
+       OR current_promotion_expires_at_ms <> NEW.promotion_expires_at_ms THEN
         RAISE EXCEPTION 'Windows runner admission does not use the current image promotion floor'
             USING ERRCODE = '23514',
                   CONSTRAINT = 'windows_runner_admission_current_promotion';

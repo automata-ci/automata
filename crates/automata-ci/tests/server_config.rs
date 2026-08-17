@@ -119,6 +119,24 @@ fn oidc_manifest(mode: &str) -> Vec<u8> {
     .expect("OIDC manifest fixture")
 }
 
+fn windows_admission_manifest() -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "schema": 1,
+        "issuers": [{
+            "issuer_key_id": "broker-primary",
+            "ed25519_public_key_base64":
+                "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+            "broker_host_id": "11".repeat(32),
+            "environment_profile": {
+                "id": "automata/windows-server-2025",
+                "digest": "22".repeat(32),
+            },
+            "promotion_trust_bundle_id": "windows-images-production",
+        }],
+    }))
+    .expect("Windows admission manifest fixture")
+}
+
 #[test]
 fn source_debug_output_redacts_environment_names_and_paths() {
     let marker = "AUTOMATA_SENSITIVE_REFERENCE_MARKER";
@@ -481,6 +499,36 @@ fn human_auth_configuration_is_atomic_and_derives_a_fixed_callback() {
         ServerConfig::from_args(&partial),
         Err(ServerConfigError::IncompleteHumanAuth)
     ));
+}
+
+#[test]
+fn windows_admission_requires_one_canonical_public_enrollment_origin() {
+    let manifest_path = test_file("windows-admission-origin.json");
+    write_secret_file(&manifest_path, windows_admission_manifest());
+    let manifest_source = format!("file:{}", manifest_path.display());
+    let cli = Cli::try_parse_from([
+        "automata",
+        "server",
+        "--results-public-url",
+        "https://results.example.test/",
+        "--runner-public-url",
+        "https://runner.example.test/",
+        "--windows-runner-admission-config-source",
+        manifest_source.as_str(),
+    ])
+    .expect("independent Windows admission syntax must parse");
+    let Command::Server(args) = cli.command else {
+        panic!("server command expected");
+    };
+    assert!(matches!(
+        ServerConfig::from_args(&args),
+        Err(ServerConfigError::MissingWindowsRunnerAdmissionOrigin)
+    ));
+
+    let mut args = configured_human_auth_args();
+    args.windows_runner_admission_config_source = Some(SecretSource::File(manifest_path));
+    ServerConfig::from_args(&args)
+        .expect("admission trust and the human origin form one coherent configuration");
 }
 
 #[test]

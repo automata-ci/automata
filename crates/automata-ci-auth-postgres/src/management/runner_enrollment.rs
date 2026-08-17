@@ -8,6 +8,7 @@ use automata_ci_core::{
     IsolationLevel, MAX_REGISTERED_RUNNERS, OperatingSystem, RunnerCapabilities, RunnerFeature,
     RunnerGroup, SandboxFeature, Sha256Digest,
 };
+use automata_ci_protocol::VerifiedWindowsRunnerAdmission;
 use sha2::{Digest as _, Sha256};
 use sqlx::{FromRow, PgPool, Postgres, Transaction};
 use uuid::Uuid;
@@ -332,83 +333,156 @@ impl std::fmt::Debug for ConsumeRunnerEnrollment {
 /// rollback floors in the same transaction that registers the runner.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WindowsRunnerAdmissionRecord {
+    /// Opaque proof that the protocol verifier authenticated every flattened
+    /// field below. Keeping the witness owned prevents callers from minting a
+    /// persistence record from structurally plausible bytes.
+    verified: VerifiedWindowsRunnerAdmission,
     /// Exact canonical schema authenticated by the broker.
-    pub schema_version: u16,
+    schema_version: u16,
     /// Runner identity authenticated by the admission receipt.
-    pub runner_id: Uuid,
+    runner_id: Uuid,
     /// Enrollment operation authenticated by the admission receipt.
-    pub operation_id: Uuid,
+    operation_id: Uuid,
     /// Server-configured broker admission signing-key identity.
-    pub issuer_key_id: String,
+    issuer_key_id: String,
     /// Globally one-use broker receipt nonce.
-    pub nonce: Sha256Digest,
+    nonce: Sha256Digest,
     /// Domain-separated digest of the complete signed envelope.
-    pub envelope_sha256: Sha256Digest,
+    envelope_sha256: Sha256Digest,
     /// Exact canonical claims bytes covered by the signature.
-    pub signed_payload: Vec<u8>,
+    signed_payload: Vec<u8>,
     /// Exact Ed25519 signature bytes.
-    pub authenticator: Vec<u8>,
+    authenticator: Vec<u8>,
     /// Broker-owned host identity scoped by server trust.
-    pub broker_host_id: String,
+    broker_host_id: String,
     /// Fixed sandbox provider identity authenticated by the broker.
-    pub sandbox_provider_id: String,
+    sandbox_provider_id: String,
     /// Exact control origin bound by the receipt.
-    pub control_origin: String,
+    control_origin: String,
     /// Exact public enrollment origin bound by the receipt.
-    pub enrollment_origin: String,
+    enrollment_origin: String,
     /// Digest of the human-readable runner name.
-    pub runner_name_sha256: Sha256Digest,
+    runner_name_sha256: Sha256Digest,
     /// Digest of the broker-custodied one-time enrollment token.
-    pub enrollment_token_sha256: Sha256Digest,
+    enrollment_token_sha256: Sha256Digest,
     /// Digest of the broker-custodied key's certificate request.
-    pub csr_sha256: Sha256Digest,
+    csr_sha256: Sha256Digest,
     /// Digest of the complete broker admission request.
-    pub request_binding_sha256: Sha256Digest,
+    request_binding_sha256: Sha256Digest,
     /// Stable environment profile identity.
-    pub environment_profile_id: String,
+    environment_profile_id: String,
     /// Exact environment profile digest.
-    pub environment_profile_sha256: Sha256Digest,
+    environment_profile_sha256: Sha256Digest,
     /// Immutable digest-qualified Windows image reference.
-    pub image_reference: String,
+    image_reference: String,
     /// Exact Windows image digest.
-    pub image_sha256: Sha256Digest,
+    image_sha256: Sha256Digest,
     /// Shared live-probe contract digest.
-    pub probe_contract_sha256: Sha256Digest,
+    probe_contract_sha256: Sha256Digest,
     /// Whether the broker attested sealed immutable action trees.
-    pub sealed_action_trees: bool,
+    sealed_action_trees: bool,
     /// Whether the admitted profile is strictly network-disabled.
-    pub network_disabled: bool,
+    network_disabled: bool,
     /// Broker/control-owned promotion trust-bundle identity.
-    pub promotion_trust_bundle_id: String,
+    promotion_trust_bundle_id: String,
     /// Exact promotion signing-key identity.
-    pub promotion_key_id: String,
+    promotion_key_id: String,
     /// Canonical promotion payload digest.
-    pub promotion_payload_sha256: Sha256Digest,
+    promotion_payload_sha256: Sha256Digest,
     /// Complete promotion envelope digest.
-    pub promotion_envelope_sha256: Sha256Digest,
+    promotion_envelope_sha256: Sha256Digest,
     /// Monotonic promotion serial.
-    pub promotion_serial: u64,
+    promotion_serial: u64,
     /// Monotonic revocation generation.
-    pub revocation_generation: u64,
+    revocation_generation: u64,
     /// Signed promotion issue time.
-    pub promotion_issued_at_ms: u64,
+    promotion_issued_at_ms: u64,
     /// Signed promotion expiry time.
-    pub promotion_expires_at_ms: u64,
+    promotion_expires_at_ms: u64,
     /// Short-lived admission receipt issue time.
-    pub receipt_issued_at_ms: u64,
+    receipt_issued_at_ms: u64,
     /// Short-lived admission receipt expiry time.
-    pub receipt_expires_at_ms: u64,
+    receipt_expires_at_ms: u64,
     /// Digest of the exact capabilities serialized in the receipt.
-    pub capabilities_sha256: Sha256Digest,
+    capabilities_sha256: Sha256Digest,
     /// Commitment to the opaque broker custody handle.
-    pub custody_handle_sha256: Sha256Digest,
+    custody_handle_sha256: Sha256Digest,
     /// Commitment to the idempotent broker completion nonce.
-    pub completion_nonce_sha256: Sha256Digest,
+    completion_nonce_sha256: Sha256Digest,
     /// Ordered authenticated broker/authority evidence digests.
-    pub evidence_sha256: [Sha256Digest; 9],
+    evidence_sha256: [Sha256Digest; 9],
 }
 
 impl WindowsRunnerAdmissionRecord {
+    /// Flattens one protocol-verified authority for transactional persistence.
+    ///
+    /// This is the only constructor. Every stored field is derived from the
+    /// opaque verifier result, never from a caller-supplied persistence DTO.
+    #[must_use]
+    pub fn from_verified(verified: VerifiedWindowsRunnerAdmission) -> Self {
+        let envelope = verified.envelope();
+        let claims = verified.claims();
+        let binding = claims.binding();
+        let transaction = binding.transaction();
+        let broker = binding.broker_profile();
+        let promotion = binding.promotion();
+        let promotion_validity = promotion.validity();
+        let validity = claims.validity();
+        let evidence = claims.evidence();
+        let broker_evidence = evidence.broker();
+        let authority_evidence = evidence.authority();
+        Self {
+            schema_version: claims.schema_version(),
+            runner_id: transaction.runner_id().as_uuid(),
+            operation_id: transaction.operation_id().as_uuid(),
+            issuer_key_id: claims.issuer_key_id().to_owned(),
+            nonce: claims.nonce(),
+            envelope_sha256: verified.envelope_sha256(),
+            signed_payload: envelope.signed_payload().to_vec(),
+            authenticator: envelope.authenticator().to_vec(),
+            broker_host_id: broker.broker_host_id().to_owned(),
+            sandbox_provider_id: broker.sandbox_provider_id().to_owned(),
+            control_origin: transaction.control_origin().to_owned(),
+            enrollment_origin: transaction.enrollment_origin().to_owned(),
+            runner_name_sha256: transaction.runner_name_sha256(),
+            enrollment_token_sha256: transaction.enrollment_token_sha256(),
+            csr_sha256: transaction.csr_sha256(),
+            request_binding_sha256: broker.request_binding_sha256(),
+            environment_profile_id: broker.profile().id().as_str().to_owned(),
+            environment_profile_sha256: broker.profile().digest(),
+            image_reference: broker.image().reference().to_owned(),
+            image_sha256: broker.image().digest(),
+            probe_contract_sha256: broker.probe_contract_sha256(),
+            sealed_action_trees: broker.sealed_action_trees(),
+            network_disabled: broker.network_disabled(),
+            promotion_trust_bundle_id: promotion.trust_bundle_id().to_owned(),
+            promotion_key_id: promotion.key_id().to_owned(),
+            promotion_payload_sha256: promotion.payload_sha256(),
+            promotion_envelope_sha256: promotion.envelope_sha256(),
+            promotion_serial: promotion.promotion_serial(),
+            revocation_generation: promotion.revocation_generation(),
+            promotion_issued_at_ms: promotion_validity.issued_at_unix_millis(),
+            promotion_expires_at_ms: promotion_validity.expires_at_unix_millis(),
+            receipt_issued_at_ms: validity.issued_at_unix_millis(),
+            receipt_expires_at_ms: validity.expires_at_unix_millis(),
+            capabilities_sha256: binding.capabilities_sha256(),
+            custody_handle_sha256: claims.custody_handle_sha256(),
+            completion_nonce_sha256: claims.completion_nonce_sha256(),
+            evidence_sha256: [
+                broker_evidence.broker_attestation_sha256(),
+                broker_evidence.host_input_attestation_sha256(),
+                broker_evidence.image_attestation_sha256(),
+                broker_evidence.network_attestation_sha256(),
+                broker_evidence.profile_contract_sha256(),
+                authority_evidence.authority_attestation_sha256(),
+                authority_evidence.promotion_trust_bundle_sha256(),
+                authority_evidence.promotion_public_key_sha256(),
+                authority_evidence.cleanup_receipt_sha256(),
+            ],
+            verified,
+        }
+    }
+
     fn valid_for(&self, request: &ConsumeRunnerEnrollment) -> bool {
         let Some(profile) = request.capabilities.environment_profiles().iter().next() else {
             return false;
@@ -433,7 +507,10 @@ impl WindowsRunnerAdmissionRecord {
             Sha256Digest::from_bytes(Sha256::digest(request.runner_name.as_bytes()).into());
         let capabilities_sha256 = Sha256Digest::from_bytes(Sha256::digest(capabilities).into());
         let image_suffix = format!("@sha256:{}", self.image_sha256);
-        self.schema_version == WINDOWS_ADMISSION_SCHEMA_VERSION
+        self.envelope_sha256 == self.verified.envelope_sha256()
+            && self.signed_payload.as_slice() == self.verified.envelope().signed_payload()
+            && self.authenticator.as_slice() == self.verified.envelope().authenticator()
+            && self.schema_version == WINDOWS_ADMISSION_SCHEMA_VERSION
             && self.runner_id == request.runner_id
             && self.operation_id == request.operation_id
             && request.capabilities.environment_profiles().len() == 1
@@ -1332,13 +1409,24 @@ async fn advance_windows_promotion_high_water(
         r"
         INSERT INTO windows_image_promotion_high_water (
             trust_bundle_id,promotion_key_id,promotion_trust_bundle_sha256,
-            promotion_public_key_sha256,promotion_serial,
-            revocation_generation,updated_at_ms
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7)
+            promotion_public_key_sha256,promotion_payload_sha256,
+            promotion_envelope_sha256,image_reference,image_sha256,
+            promotion_serial,revocation_generation,promotion_issued_at_ms,
+            promotion_expires_at_ms,updated_at_ms
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
         ON CONFLICT (trust_bundle_id,promotion_key_id) DO UPDATE
-        SET promotion_serial=EXCLUDED.promotion_serial,
+        SET promotion_payload_sha256=EXCLUDED.promotion_payload_sha256,
+            promotion_envelope_sha256=EXCLUDED.promotion_envelope_sha256,
+            image_reference=EXCLUDED.image_reference,
+            image_sha256=EXCLUDED.image_sha256,
+            promotion_serial=EXCLUDED.promotion_serial,
             revocation_generation=EXCLUDED.revocation_generation,
-            updated_at_ms=EXCLUDED.updated_at_ms
+            promotion_issued_at_ms=EXCLUDED.promotion_issued_at_ms,
+            promotion_expires_at_ms=EXCLUDED.promotion_expires_at_ms,
+            updated_at_ms=GREATEST(
+                windows_image_promotion_high_water.updated_at_ms,
+                EXCLUDED.updated_at_ms
+            )
         WHERE windows_image_promotion_high_water.promotion_trust_bundle_sha256
                   = EXCLUDED.promotion_trust_bundle_sha256
           AND windows_image_promotion_high_water.promotion_public_key_sha256
@@ -1347,14 +1435,50 @@ async fn advance_windows_promotion_high_water(
                   <= EXCLUDED.promotion_serial
           AND windows_image_promotion_high_water.revocation_generation
                   <= EXCLUDED.revocation_generation
+          AND (
+              windows_image_promotion_high_water.promotion_serial
+                  < EXCLUDED.promotion_serial
+              OR windows_image_promotion_high_water.revocation_generation
+                  < EXCLUDED.revocation_generation
+              OR (
+                  windows_image_promotion_high_water.promotion_serial
+                      = EXCLUDED.promotion_serial
+                  AND windows_image_promotion_high_water.revocation_generation
+                      = EXCLUDED.revocation_generation
+                  AND windows_image_promotion_high_water.promotion_payload_sha256
+                      = EXCLUDED.promotion_payload_sha256
+                  AND windows_image_promotion_high_water.promotion_envelope_sha256
+                      = EXCLUDED.promotion_envelope_sha256
+                  AND windows_image_promotion_high_water.image_reference
+                      = EXCLUDED.image_reference
+                  AND windows_image_promotion_high_water.image_sha256
+                      = EXCLUDED.image_sha256
+                  AND windows_image_promotion_high_water.promotion_issued_at_ms
+                      = EXCLUDED.promotion_issued_at_ms
+                  AND windows_image_promotion_high_water.promotion_expires_at_ms
+                      = EXCLUDED.promotion_expires_at_ms
+              )
+          )
         ",
     )
     .bind(&admission.promotion_trust_bundle_id)
     .bind(&admission.promotion_key_id)
     .bind(admission.evidence_sha256[6].as_bytes().as_slice())
     .bind(admission.evidence_sha256[7].as_bytes().as_slice())
+    .bind(admission.promotion_payload_sha256.as_bytes().as_slice())
+    .bind(admission.promotion_envelope_sha256.as_bytes().as_slice())
+    .bind(&admission.image_reference)
+    .bind(admission.image_sha256.as_bytes().as_slice())
     .bind(promotion_serial)
     .bind(revocation_generation)
+    .bind(
+        i64::try_from(admission.promotion_issued_at_ms)
+            .map_err(|_| ManagementRepositoryError::InvalidRequest)?,
+    )
+    .bind(
+        i64::try_from(admission.promotion_expires_at_ms)
+            .map_err(|_| ManagementRepositoryError::InvalidRequest)?,
+    )
     .bind(now_ms)
     .execute(&mut **transaction)
     .await

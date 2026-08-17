@@ -195,7 +195,7 @@ const FROZEN_MIGRATIONS: &[(&str, &str)] = &[
     ),
     (
         "0048_windows_runner_admission.sql",
-        "0177d7c7bdf42ff547403583b2c1d1e8cb2aafe0ba28cd71d83706e5664bcdae49bfeac18ba9bb58799a0e69c75a7d5d",
+        "a80284bf98fcbbdd2516fdddbfd17ecd0981f8dc41fc874f670718e740ff702239a73695ad0a942af2275893b23994ca",
     ),
 ];
 

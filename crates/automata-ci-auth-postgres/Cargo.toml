@@ -15,6 +15,7 @@ readme = "README.md"
 automata-ci-auth.workspace = true
 automata-ci-core.workspace = true
 automata-ci-key-management.workspace = true
+automata-ci-protocol.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

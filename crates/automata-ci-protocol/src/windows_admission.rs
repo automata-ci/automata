@@ -1298,6 +1298,7 @@ pub trait WindowsRunnerAdmissionTrustStore: Send + Sync {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VerifiedWindowsRunnerAdmission {
     claims: WindowsRunnerAdmissionClaims,
+    envelope: WindowsRunnerAdmissionEnvelope,
     envelope_sha256: Sha256Digest,
 }
 
@@ -1306,6 +1307,13 @@ impl VerifiedWindowsRunnerAdmission {
     #[must_use]
     pub const fn claims(&self) -> &WindowsRunnerAdmissionClaims {
         &self.claims
+    }
+
+    /// Returns the exact envelope whose signature and canonical payload were
+    /// verified to create this authority.
+    #[must_use]
+    pub const fn envelope(&self) -> &WindowsRunnerAdmissionEnvelope {
+        &self.envelope
     }
 
     /// Returns the only capability set eligible for Windows registration.
@@ -1354,6 +1362,7 @@ pub fn verify_windows_runner_admission(
     Ok(VerifiedWindowsRunnerAdmission {
         envelope_sha256: envelope_digest(envelope),
         claims,
+        envelope: envelope.clone(),
     })
 }
 
@@ -1742,6 +1751,15 @@ mod tests {
         assert_eq!(
             verified.capabilities(),
             envelope.claims().expect("claims").binding().capabilities()
+        );
+        assert_eq!(verified.envelope(), &envelope);
+        assert_eq!(
+            verified.envelope().signed_payload(),
+            envelope.signed_payload()
+        );
+        assert_eq!(
+            verified.envelope().authenticator(),
+            envelope.authenticator()
         );
         assert!(!zero_digest(verified.envelope_sha256()));
 

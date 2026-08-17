@@ -762,62 +762,7 @@ fn windows_runner_admission(
     {
         return Err(ApiError::EnrollmentRejected);
     }
-    let broker = binding.broker_profile();
-    let promotion = binding.promotion();
-    let promotion_validity = promotion.validity();
-    let validity = claims.validity();
-    let evidence = claims.evidence();
-    let broker_evidence = evidence.broker();
-    let authority_evidence = evidence.authority();
-    Ok(Some(WindowsRunnerAdmissionRecord {
-        schema_version: claims.schema_version(),
-        runner_id: runner_id.as_uuid(),
-        operation_id: request.operation_id,
-        issuer_key_id: claims.issuer_key_id().to_owned(),
-        nonce: claims.nonce(),
-        envelope_sha256: verified.envelope_sha256(),
-        signed_payload: envelope.signed_payload().to_vec(),
-        authenticator: envelope.authenticator().to_vec(),
-        broker_host_id: broker.broker_host_id().to_owned(),
-        sandbox_provider_id: broker.sandbox_provider_id().to_owned(),
-        control_origin: transaction.control_origin().to_owned(),
-        enrollment_origin: transaction.enrollment_origin().to_owned(),
-        runner_name_sha256,
-        enrollment_token_sha256: transaction.enrollment_token_sha256(),
-        csr_sha256,
-        request_binding_sha256: broker.request_binding_sha256(),
-        environment_profile_id: broker.profile().id().as_str().to_owned(),
-        environment_profile_sha256: broker.profile().digest(),
-        image_reference: broker.image().reference().to_owned(),
-        image_sha256: broker.image().digest(),
-        probe_contract_sha256: broker.probe_contract_sha256(),
-        sealed_action_trees: broker.sealed_action_trees(),
-        network_disabled: broker.network_disabled(),
-        promotion_trust_bundle_id: promotion.trust_bundle_id().to_owned(),
-        promotion_key_id: promotion.key_id().to_owned(),
-        promotion_payload_sha256: promotion.payload_sha256(),
-        promotion_envelope_sha256: promotion.envelope_sha256(),
-        promotion_serial: promotion.promotion_serial(),
-        revocation_generation: promotion.revocation_generation(),
-        promotion_issued_at_ms: promotion_validity.issued_at_unix_millis(),
-        promotion_expires_at_ms: promotion_validity.expires_at_unix_millis(),
-        receipt_issued_at_ms: validity.issued_at_unix_millis(),
-        receipt_expires_at_ms: validity.expires_at_unix_millis(),
-        capabilities_sha256: binding.capabilities_sha256(),
-        custody_handle_sha256: claims.custody_handle_sha256(),
-        completion_nonce_sha256: claims.completion_nonce_sha256(),
-        evidence_sha256: [
-            broker_evidence.broker_attestation_sha256(),
-            broker_evidence.host_input_attestation_sha256(),
-            broker_evidence.image_attestation_sha256(),
-            broker_evidence.network_attestation_sha256(),
-            broker_evidence.profile_contract_sha256(),
-            authority_evidence.authority_attestation_sha256(),
-            authority_evidence.promotion_trust_bundle_sha256(),
-            authority_evidence.promotion_public_key_sha256(),
-            authority_evidence.cleanup_receipt_sha256(),
-        ],
-    }))
+    Ok(Some(WindowsRunnerAdmissionRecord::from_verified(verified)))
 }
 
 fn sha256(value: &[u8]) -> Sha256Digest {

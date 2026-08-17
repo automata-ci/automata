@@ -49,6 +49,7 @@ automata-ci-secret.workspace = true
 automata-ci-secret-postgres.workspace = true
 automata-ci-store = { workspace = true, features = ["adapter-spi"] }
 automata-ci-workflow-service.workspace = true
+ring.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
