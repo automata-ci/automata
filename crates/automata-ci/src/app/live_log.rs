@@ -70,6 +70,48 @@ const ACCESS_CONTROL_REQUEST_HEADERS: HeaderName =
     HeaderName::from_static("access-control-request-headers");
 const X_ACCEL_BUFFERING: HeaderName = HeaderName::from_static("x-accel-buffering");
 
+/// Identifies the exact browser endpoint whose POST is a read capability
+/// acquisition rather than an account or repository mutation.
+///
+/// The human-auth middleware uses this classifier to admit anonymous viewers
+/// of public logs and to avoid requiring a CSRF token for authenticated
+/// viewers. The endpoint itself still requires the configured exact Origin,
+/// an empty body, durable log authorization, and a one-time ticket.
+pub(crate) fn is_browser_live_log_ticket_request(method: &Method, path: &str) -> bool {
+    if method != Method::POST {
+        return false;
+    }
+    let mut segments = path.strip_prefix('/').unwrap_or_default().split('/');
+    let (
+        Some(owner),
+        Some(repository),
+        Some("actions"),
+        Some("runs"),
+        Some(run_id),
+        Some("jobs"),
+        Some(job_id),
+        Some("live-ticket"),
+        None,
+    ) = (
+        segments.next(),
+        segments.next(),
+        segments.next(),
+        segments.next(),
+        segments.next(),
+        segments.next(),
+        segments.next(),
+        segments.next(),
+        segments.next(),
+    )
+    else {
+        return false;
+    };
+    valid_route_segment(owner)
+        && valid_route_segment(repository)
+        && parse_run_id(run_id).is_some()
+        && parse_job_id(job_id).is_some()
+}
+
 /// Shared ticket, authorization, replay, and notification dependencies.
 #[derive(Clone)]
 pub(crate) struct LiveLogService {

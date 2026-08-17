@@ -151,18 +151,7 @@ updates in the same settings area. The checked-in `.github/dependabot.yml`
 enables scheduled version-update pull requests; repository settings still
 control alerts and security updates.
 
-### 5. Enable GitHub Pages from Actions
-
-Under **Settings → Pages → Build and deployment**, select **GitHub Actions**
-as the source. The least-privilege `pages.yml` workflow builds the static UI demo
-and screenshots from `main`; its deploy job alone receives `pages: write` and
-`id-token: write`. Restrict the `github-pages` environment to the default branch
-as defense in depth. Pull request review runs use per-PR concurrency groups,
-separate from the serialized main deployment group. Merge a reviewed `ui/`
-change, then confirm <https://automata-ci.github.io/automata/> is public before
-publishing crates whose homepage metadata points there.
-
-### 6. Plan the first GHCR visibility change
+### 5. Plan the first GHCR visibility change
 
 New organization container packages are private by default. After a future
 authorized workflow first pushes `automata`, `automata-runner`, and
@@ -179,7 +168,7 @@ immutable tag only after rebinding the original authority evidence; GitHub
 Actions manual dispatch is not an alternative. Do not create a new version
 merely to complete this one-time visibility step.
 
-### 7. Protect the release identity
+### 6. Protect the release identity
 
 Use a repository ruleset to restrict creation, update, and deletion of `v*` tags
 to release maintainers. Enable GitHub's
