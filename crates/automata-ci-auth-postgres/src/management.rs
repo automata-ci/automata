@@ -2947,8 +2947,8 @@ mod tests {
 
     #[test]
     fn delegated_identity_projection_is_a_valid_member() {
-        let principal_id = Uuid::parse_str("39d3a601-9130-405b-8e1c-fa7de8ad9d8a")
-            .expect("principal ID");
+        let principal_id =
+            Uuid::parse_str("39d3a601-9130-405b-8e1c-fa7de8ad9d8a").expect("principal ID");
         let record = MemberRow {
             principal_id,
             provider_id: Some("https://ci.example.test".to_owned()),
