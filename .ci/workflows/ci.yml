@@ -23,7 +23,7 @@ env:
   SCCACHE_GHA_CACHE_FROM: automata-rust-v1
   SCCACHE_GHA_CACHE_TO: automata-rust-v1
   SCCACHE_IDLE_TIMEOUT: "0"
-  SCCACHE_SERVER_UDS: /tmp/automata-sccache.sock
+  SCCACHE_SERVER_PORT: "4226"
   TMPDIR: ${{ github.workspace }}/target/task-tmp/ci
 
 jobs:
