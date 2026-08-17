@@ -241,6 +241,7 @@ export class LiveLogController {
         if (
           failure.code === "protocol" ||
           failure.code === "client" ||
+          (error instanceof LiveLogRequestError && !error.retryable) ||
           failures > this.#maximumFailures
         ) {
           this.#terminal = true;

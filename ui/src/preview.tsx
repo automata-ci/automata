@@ -5,7 +5,7 @@ import { EmptyState } from "./components/EmptyState";
 import { Shell } from "./components/Shell";
 import { ThemeToggle } from "./components/ThemeToggle";
 import type { PageModel } from "./models";
-import type { LiveLogRecord } from "./liveLogs/sse";
+import type { LiveLogRecord } from "./logs/sse";
 import "./styles.css";
 import "./styles/pages/preview.css";
 import { installPreviewFormRouting } from "./preview/formRouting";

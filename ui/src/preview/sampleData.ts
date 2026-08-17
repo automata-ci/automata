@@ -7,7 +7,7 @@ import type {
   ShellModel,
   WorkflowNavigationItemModel,
 } from "../models";
-import type { LiveLogRecord } from "../liveLogs/sse";
+import type { LiveLogRecord } from "../logs/sse";
 
 export const PREVIEW_PRIMARY_RUN_ID = "run-a4f69c2e";
 export const PREVIEW_SECONDARY_RUN_ID = "run-b6d8120f";

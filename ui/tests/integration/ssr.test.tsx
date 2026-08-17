@@ -4,7 +4,7 @@ import { renderToString } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { HtmlDocument } from "../../src/Document";
 import { JobLogPage } from "../../src/pages/JobLogPage";
-import type { LiveLogRecord } from "../../src/liveLogs";
+import type { LiveLogRecord } from "../../src/logs";
 import { render, renderPage } from "../../src/entry-server";
 import type { RenderRequest } from "../../src/models";
 import {

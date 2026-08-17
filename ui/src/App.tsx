@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import type { PageModel } from "./models";
-import type { LiveLogRecord } from "./liveLogs/sse";
+import type { LiveLogRecord } from "./logs/sse";
 import { ThemeToggle } from "./components/ThemeToggle";
 import { JobLogPage } from "./pages/JobLogPage";
 import { DeepLinkSignInPage } from "./pages/DeepLinkSignInPage";

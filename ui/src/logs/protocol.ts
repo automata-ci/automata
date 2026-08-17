@@ -84,6 +84,9 @@ export function createSameOriginLiveLogAccessProvider(
       throw new LiveLogRequestError(
         "ticket",
         `the live-log ticket endpoint returned ${response.status}`,
+        response.status >= 500 ||
+          response.status === 408 ||
+          response.status === 429,
       );
     }
     const length = response.headers.get("Content-Length");
@@ -182,11 +185,17 @@ export class LiveLogProtocolError extends Error {
 
 export class LiveLogRequestError extends Error {
   readonly code: "ticket" | "transport";
+  readonly retryable: boolean;
 
-  constructor(code: "ticket" | "transport", message: string) {
+  constructor(
+    code: "ticket" | "transport",
+    message: string,
+    retryable = true,
+  ) {
     super(message);
     this.name = "LiveLogRequestError";
     this.code = code;
+    this.retryable = retryable;
   }
 }
 

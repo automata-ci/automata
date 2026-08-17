@@ -6,9 +6,9 @@ import type {
   LiveLogGroupFinishedRecord,
   LiveLogLineRecord,
   LiveLogRecord,
-} from "../liveLogs/sse";
-import { LiveLogController, type LiveLogControllerState } from "../liveLogs/controller";
-import { createSameOriginLiveLogAccessProvider } from "../liveLogs/protocol";
+} from "../logs/sse";
+import { LiveLogController, type LiveLogControllerState } from "../logs/controller";
+import { createSameOriginLiveLogAccessProvider } from "../logs/protocol";
 import { ActionsLayout } from "../components/ActionsLayout";
 import { Breadcrumbs } from "../components/Breadcrumbs";
 import { RunNavigation } from "../components/RunNavigation";
@@ -66,7 +66,9 @@ export function JobLogPage({ model, shellUtility, initialRecords = [] }: JobLogP
         }
       },
       onStateChange: (state) => setConnection(state.kind),
-      onFailure: (failure) => setStreamError(failure.message),
+      onFailure: () => setStreamError(
+        "The log stream could not be opened. Refresh the page to try again.",
+      ),
     });
     const start = () => {
       void controller.start().catch(() =>
@@ -199,6 +201,8 @@ export function JobLogPage({ model, shellUtility, initialRecords = [] }: JobLogP
                   <div className="log-empty">
                     {normalizedQuery !== ""
                       ? "No steps match your search."
+                      : streamError !== null
+                        ? "Log output could not be loaded."
                       : running
                         ? "Waiting for log output…"
                         : "Logs are unavailable for this job."}

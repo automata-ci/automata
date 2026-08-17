@@ -9,7 +9,7 @@ import type {
   RunListItemModel,
   RunListPageModel,
 } from "../models";
-import type { LiveLogRecord } from "../liveLogs/sse";
+import type { LiveLogRecord } from "../logs/sse";
 import {
   previewRepository,
   previewRunSamples,
