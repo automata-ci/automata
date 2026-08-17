@@ -31,9 +31,10 @@ jobs:
     timeout-minutes: 10
     resources:
       limits:
+        cpu: "4"
         memory: 5Gi
     env:
-      CARGO_BUILD_JOBS: "2"
+      CARGO_BUILD_JOBS: "4"
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
       CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: -C link-arg=-fuse-ld=lld
@@ -104,6 +105,7 @@ jobs:
     timeout-minutes: 10
     resources:
       limits:
+        cpu: "4"
         memory: 4Gi
     services:
       postgres:
@@ -122,7 +124,7 @@ jobs:
     env:
       AUTOMATA_TEST_DATABASE_URL: postgresql://automata_ci:automata-ci-local-only@127.0.0.1:5432/automata_ci
       AUTOMATA_TEST_DATABASE_NAMESPACE: ci_${{ github.run_id }}_${{ github.run_attempt }}
-      CARGO_BUILD_JOBS: "2"
+      CARGO_BUILD_JOBS: "4"
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
       CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: -C link-arg=-fuse-ld=lld
@@ -167,6 +169,7 @@ jobs:
     timeout-minutes: 5
     resources:
       limits:
+        cpu: "2"
         memory: 2Gi
     defaults:
       run:
