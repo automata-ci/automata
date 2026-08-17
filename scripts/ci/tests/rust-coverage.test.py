@@ -568,6 +568,7 @@ def main() -> None:
             """#!/usr/bin/env python3
 import os
 import json
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -611,7 +612,15 @@ elif arguments[:2] == ["llvm-cov", "report"]:
         ),
         None,
     )
-    if ignore_argument is None or "/target/" not in ignore_argument:
+    # cargo-llvm-cov evaluates exclusions against this workspace-relative path
+    # after applying --remap-path-prefix.
+    generated_source = (
+        "target/llvm-cov-target/debug/build/automata-ci-provisioning-grpc-"
+        "303a492b5e06c8cb/out/automata.management.v1.rs"
+    )
+    if ignore_argument is None or re.search(
+        ignore_argument.removeprefix("--ignore-filename-regex="), generated_source
+    ) is None:
         raise SystemExit(98)
     output = Path(arguments[arguments.index("--output-path") + 1])
     fixture = (
