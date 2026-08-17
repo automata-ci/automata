@@ -10,7 +10,7 @@ use url::{Host, Url};
 use crate::{RepositoryId, StoreError, TenantScope};
 
 /// Wire version shared by ticket issuance and live-log transports.
-pub const HUMAN_LIVE_LOG_PROTOCOL_VERSION: u16 = 1;
+pub const HUMAN_LIVE_LOG_PROTOCOL_VERSION: u16 = 2;
 /// Maximum time in which an issued live-log ticket may be redeemed.
 pub const MAX_HUMAN_LIVE_LOG_TICKET_LIFETIME: Duration = Duration::from_mins(1);
 

@@ -2,11 +2,11 @@ use std::{collections::BTreeSet, fmt, sync::Arc};
 
 use aho_corasick::{AhoCorasick, AhoCorasickKind, MatchKind};
 use automata_ci_auth::output_policy::SecretExposureClass;
-use automata_ci_core::{JobSecretExposure, LogChannel, MAX_LOG_FRAME_BYTES};
+use automata_ci_core::{JobSecretExposure, LogChannel, LogGroupId, MAX_LOG_FRAME_BYTES};
 use automata_ci_execution::{ExecutionOutputRecord, ExecutionOutputStream};
 use automata_ci_github_runtime::{
-    Annotation, GithubWorkflowCommandSession, LegacyStepMutation, WorkflowCommandEvent,
-    WorkflowCommandLimits, WorkflowCommandPolicy, WorkflowCommandProcessor, WorkflowLine,
+    Annotation, GithubWorkflowCommandSession, WorkflowCommandEvent, WorkflowCommandLimits,
+    WorkflowCommandPolicy, WorkflowCommandProcessor, WorkflowLine,
 };
 use automata_ci_runner_runtime::{ExecutionEvents, LogEvent};
 use zeroize::Zeroize as _;
@@ -16,6 +16,7 @@ use crate::{ExecutorAdapterError, error::ExecutorAdapterErrorKind};
 const MAX_MASKS: usize = 4_096;
 const MAX_MASK_BYTES: usize = 1_048_576;
 const MASK_REPLACEMENT: &[u8] = b"***";
+pub(crate) const DIAGNOSTICS_LOG_GROUP_ID: &str = "job/diagnostics";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum MaskLimitRejection {
@@ -230,18 +231,6 @@ impl ParsedOutput {
             })
             .collect()
     }
-
-    pub(crate) fn legacy_mutation_count(&self) -> usize {
-        self.lines
-            .iter()
-            .filter(|line| {
-                matches!(
-                    line.parsed,
-                    WorkflowLine::Command(WorkflowCommandEvent::LegacyMutation(_))
-                )
-            })
-            .count()
-    }
 }
 
 struct ParsedOutputLine {
@@ -308,9 +297,9 @@ pub(crate) fn parse_output_with_cancellation(
 
 pub(crate) fn process_output(
     parsed: ParsedOutput,
+    group_id: &LogGroupId,
     masker: &mut SecretMasker,
     events: &Arc<dyn ExecutionEvents>,
-    legacy: &mut Vec<LegacyStepMutation>,
     annotations: &mut Vec<Annotation>,
     cancellation: &dyn Fn() -> bool,
 ) -> Result<(), ExecutorAdapterError> {
@@ -321,6 +310,7 @@ pub(crate) fn process_output(
                 emit_line_with_cancellation(
                     output.as_str().as_bytes(),
                     line.newline,
+                    group_id,
                     line.channel,
                     masker,
                     events,
@@ -328,11 +318,11 @@ pub(crate) fn process_output(
                 )?;
             }
             WorkflowLine::Command(command) => match command {
-                WorkflowCommandEvent::LegacyMutation(mutation) => legacy.push(mutation),
                 WorkflowCommandEvent::Annotation(annotation) => {
                     emit_line_with_cancellation(
                         annotation.message().as_bytes(),
                         true,
+                        group_id,
                         line.channel,
                         masker,
                         events,
@@ -344,6 +334,7 @@ pub(crate) fn process_output(
                     emit_line_with_cancellation(
                         group.title().as_bytes(),
                         true,
+                        group_id,
                         line.channel,
                         masker,
                         events,
@@ -450,7 +441,6 @@ fn register_dynamic_masks(
         | WorkflowCommandEvent::Debug(_)
         | WorkflowCommandEvent::EchoChanged(_)
         | WorkflowCommandEvent::EndGroup
-        | WorkflowCommandEvent::LegacyMutation(_)
         | WorkflowCommandEvent::Matcher(_)
         | WorkflowCommandEvent::Notice(_)
         | WorkflowCommandEvent::ResumeCommands => {}
@@ -460,11 +450,12 @@ fn register_dynamic_masks(
 
 fn emit_synthetic(
     value: &str,
+    group_id: &LogGroupId,
     channel: LogChannel,
     masker: &mut SecretMasker,
     events: &Arc<dyn ExecutionEvents>,
 ) -> Result<(), ExecutorAdapterError> {
-    emit_line(value.as_bytes(), true, channel, masker, events)
+    emit_line(value.as_bytes(), true, group_id, channel, masker, events)
 }
 
 pub(crate) fn emit_system(
@@ -472,22 +463,35 @@ pub(crate) fn emit_system(
     masker: &mut SecretMasker,
     events: &Arc<dyn ExecutionEvents>,
 ) -> Result<(), ExecutorAdapterError> {
-    emit_synthetic(value, LogChannel::System, masker, events)
+    let group_id = LogGroupId::new(DIAGNOSTICS_LOG_GROUP_ID)
+        .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::Internal))?;
+    emit_synthetic(value, &group_id, LogChannel::System, masker, events)
+}
+
+pub(crate) fn emit_system_for_group(
+    value: &str,
+    group_id: &LogGroupId,
+    masker: &mut SecretMasker,
+    events: &Arc<dyn ExecutionEvents>,
+) -> Result<(), ExecutorAdapterError> {
+    emit_synthetic(value, group_id, LogChannel::System, masker, events)
 }
 
 fn emit_line(
     content: &[u8],
     newline: bool,
+    group_id: &LogGroupId,
     channel: LogChannel,
     masker: &mut SecretMasker,
     events: &Arc<dyn ExecutionEvents>,
 ) -> Result<(), ExecutorAdapterError> {
-    emit_line_with_cancellation(content, newline, channel, masker, events, None)
+    emit_line_with_cancellation(content, newline, group_id, channel, masker, events, None)
 }
 
 fn emit_line_with_cancellation(
     content: &[u8],
     newline: bool,
+    group_id: &LogGroupId,
     channel: LogChannel,
     masker: &mut SecretMasker,
     events: &Arc<dyn ExecutionEvents>,
@@ -512,7 +516,7 @@ fn emit_line_with_cancellation(
             ));
         }
         let emitted = events
-            .emit_log(LogEvent::new(channel, chunk.to_vec()))
+            .emit_log(LogEvent::new(group_id.clone(), channel, chunk.to_vec()))
             .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::Internal));
         if cancellation.is_some_and(|check| check()) {
             return Err(ExecutorAdapterError::new(
@@ -572,7 +576,7 @@ mod cancellation_tests {
         let error = parse_output_with_cancellation(
             &records,
             WorkflowCommandLimits::default(),
-            WorkflowCommandPolicy::new(true, false),
+            WorkflowCommandPolicy::new(false),
             &mut masker,
             &cancellation,
         )

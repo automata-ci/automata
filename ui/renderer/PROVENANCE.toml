@@ -32,14 +32,14 @@ lock_sha256 = "2708e0efcb929afc9e89c86419b24efdeee4737830febd8dc43d880d05bc7305"
 manifest_sha256 = "d9de6b1701e8643aeccc3fa026ca69fcb55df199d926ba257b61753c9ec9907f"
 macro_patch_sha256 = "f4018e023c45cb6208b33fa3998605e6034d6d84be466d6b66a8379a7bf43a1f"
 wit_sha256 = "d59593c5b09a51c61b687508750b00c1cd723071d98844e82578cbbdc08eb3b8"
-ssr_bundle_sha256 = "9b043974b85a059288cefb3b2fe9fcc9d931c24afc0343c17922c9a081c5252f"
+ssr_bundle_sha256 = "54e92c66e01ff05cc547942d0f2c70980d650e8fe0353debfdd7c9ffeff83497"
 
 [ui]
 package_lock_sha256 = "819549a6cebc05e55f696fe3d4157453d9bec508c5f931859077a5ef15ccd3f2"
-script_public_path = "/assets/entry-client-BtS0iu6T.js"
-stylesheet_public_path = "/assets/entry-client-CZQroQzR.css"
+script_public_path = "/assets/entry-client-BA2uQ19J.js"
+stylesheet_public_path = "/assets/entry-client-DVFlvuI2.css"
 
 [artifacts]
-component_sha256 = "5b19ac6fe7c9d7fcc50ac84606ab97209c38a394fc17aa8692274d628eabb890"
-script_sha256 = "191e2c5ea2a7c03fe9a67e2eab4e138a12a9c527d107afd588a562d59df055b5"
-stylesheet_sha256 = "f023a41fc0df18f83bc3fcbc17a8e2bb4c1e461225c439e403d9e96e97a15fd2"
+component_sha256 = "9a385679fb4f0f6f4bbb9413cfaa6ee9f3c44bc26c93bd1fb3e6c237434e077e"
+script_sha256 = "71432f12430698c4de361defaf9dbe88f8f57794dddf7db24854e62f3ca640ee"
+stylesheet_sha256 = "fb78513d776e708684504dedff65dc2047fbf159be8407d07a93c205d3837272"

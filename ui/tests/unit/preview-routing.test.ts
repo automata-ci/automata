@@ -19,17 +19,6 @@ describe("preview GET routing", () => {
     );
   });
 
-  it("preserves run and job identity for log searches", () => {
-    const form = createForm(
-      "http://automata.test/demo/?view=job&run=run-a4f69c2e&job=job-1&q=old",
-      [["q", "Operating System"]],
-    );
-
-    expect(previewGetDestination(form, "http://automata.test/demo/?view=job")).toBe(
-      "/demo/?view=job&run=run-a4f69c2e&job=job-1&q=Operating+System",
-    );
-  });
-
   it("does not enhance mutations or navigation away from the current preview path", () => {
     const mutation = createForm("http://automata.test/demo/?view=runs", []);
     mutation.method = "post";
@@ -53,7 +42,7 @@ describe("preview GET routing", () => {
     submitter.value = "search";
     submitter.setAttribute(
       "formaction",
-      "http://automata.test/demo/?view=job&run=run-a4f69c2e&job=job-1&q=old&intent=old",
+      "http://automata.test/demo/?view=runs&workflow=ci&q=old&intent=old",
     );
     form.append(submitter);
 
@@ -64,7 +53,7 @@ describe("preview GET routing", () => {
         submitter,
       ),
     ).toBe(
-      "/demo/?view=job&run=run-a4f69c2e&job=job-1&q=runner&intent=search",
+      "/demo/?view=runs&workflow=ci&q=runner&intent=search",
     );
 
     submitter.setAttribute("formmethod", "post");

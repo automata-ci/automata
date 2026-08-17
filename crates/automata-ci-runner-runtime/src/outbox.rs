@@ -206,15 +206,24 @@ mod tests {
         }
 
         fn record(&self, sequence: u64, end_of_stream: bool) -> Vec<u8> {
-            let frame = LogFrame::new(
-                self.stream_id,
-                self.attempt_id,
-                LogSequence::new(sequence),
-                UnixMillis::new(10_000),
-                LogChannel::Stdout,
-                b"x".to_vec(),
-                end_of_stream,
-            )
+            let frame = if end_of_stream {
+                LogFrame::stream_finished(
+                    self.stream_id,
+                    self.attempt_id,
+                    LogSequence::new(sequence),
+                    UnixMillis::new(10_000),
+                )
+            } else {
+                LogFrame::line(
+                    self.stream_id,
+                    self.attempt_id,
+                    LogSequence::new(sequence),
+                    UnixMillis::new(10_000),
+                    automata_ci_core::LogGroupId::new("test").expect("group ID"),
+                    LogChannel::Stdout,
+                    b"x".to_vec(),
+                )
+            }
             .expect("log frame");
             let message = RunnerToServer::LogBatch(LogBatch::new(
                 MessageHeader::request(

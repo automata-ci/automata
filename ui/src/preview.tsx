@@ -5,6 +5,7 @@ import { EmptyState } from "./components/EmptyState";
 import { Shell } from "./components/Shell";
 import { ThemeToggle } from "./components/ThemeToggle";
 import type { PageModel } from "./models";
+import type { LiveLogRecord } from "./liveLogs/sse";
 import "./styles.css";
 import "./styles/pages/preview.css";
 import { installPreviewFormRouting } from "./preview/formRouting";
@@ -16,6 +17,7 @@ import {
   isPreviewRunDetailStateSupported,
   isPreviewRunListStateSupported,
   previewJobLog,
+  previewJobLogRecords,
   previewRepositoryDirectory,
   previewRepositorySettings,
   previewRepositorySecrets,
@@ -69,12 +71,15 @@ if (view === null || view === "repositories" || view === "repositories-empty") {
   }
 } else if (view === "job") {
   const jobLog = isPreviewJobLogStateSupported(searchParameters)
-    ? previewJobLog(requestedRunId, requestedJobId, searchParameters)
+    ? previewJobLog(requestedRunId, requestedJobId)
     : null;
   if (jobLog === null) {
     renderNotFound("Job not found", "That workflow job is not part of this demo.");
   } else {
-    renderPreviewPage(jobLog);
+    renderPreviewPage(
+      jobLog,
+      previewJobLogRecords(requestedRunId, requestedJobId),
+    );
   }
 } else if (view === "settings") {
   if (isPreviewRepositorySettingsStateSupported(searchParameters)) {
@@ -120,9 +125,18 @@ if (view === null || view === "repositories" || view === "repositories-empty") {
   renderNotFound("Page not found", "That page is not part of this demo.");
 }
 
-function renderPreviewPage(page: PageModel): void {
+function renderPreviewPage(
+  page: PageModel,
+  initialJobLogRecords: readonly LiveLogRecord[] = [],
+): void {
   document.title = page.shell.documentTitle;
-  reactRoot.render(<App page={page} shellUtility={<PreviewTools />} />);
+  reactRoot.render(
+    <App
+      initialJobLogRecords={initialJobLogRecords}
+      page={page}
+      shellUtility={<PreviewTools />}
+    />,
+  );
   reconcilePreviewHashTarget();
 }
 

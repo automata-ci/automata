@@ -1,9 +1,4 @@
-use std::{
-    collections::{HashSet, VecDeque},
-    fmt::Write as _,
-    str::FromStr as _,
-    sync::Arc,
-};
+use std::{collections::HashSet, fmt::Write as _, str::FromStr as _, sync::Arc};
 
 use async_trait::async_trait;
 use automata_ci_auth::authorization::{
@@ -12,7 +7,8 @@ use automata_ci_auth::authorization::{
 };
 use automata_ci_blob::{BlobStoreError, BlobStoreErrorKind, ImmutableBlobStore};
 use automata_ci_core::{
-    AttemptId, JobConclusion, JobId, JobLifecycle, LogFrame, LogSequence, LogStreamId, RunId,
+    AttemptId, JobConclusion, JobId, JobLifecycle, LOG_SCHEMA_VERSION, LogFrame,
+    LogGroupKind as CoreLogGroupKind, LogRecord as CoreLogRecord, LogSequence, LogStreamId, RunId,
     Sha256Digest, UnixMillis, WorkflowId,
 };
 use automata_ci_results_github::{
@@ -38,12 +34,12 @@ use super::{
     codec::{LogSegmentExpectation, decode_log_segment},
     data::{
         ArtifactDownload, ArtifactSummary, AuthorizedLiveLog, CollectionVisibility, JobLogLive,
-        JobLogPage, JobLogRequest, JobNavigationItem, JobSummary, LiveLogBatch, LiveLogRecord,
-        LogChannel, LogLine, Repository, RepositoryDirectoryItem, RepositoryDirectoryPage,
-        RepositoryDirectoryRequest, RepositoryPath, RepositorySettingsDestination,
-        RepositorySettingsPage, RequestContext, RunDetailPage, RunDetailRequest, RunListPage,
-        RunListRequest, RunSummary, Status, StatusFilter, VisibleCollection, WebData, WebDataError,
-        Workflow, WorkflowDefinition,
+        JobLogPage, JobNavigationItem, JobSummary, LiveLogBatch, LiveLogRecord, LogChannel,
+        LogGroup, LogGroupKind, LogLine, LogRecord, Repository, RepositoryDirectoryItem,
+        RepositoryDirectoryPage, RepositoryDirectoryRequest, RepositoryPath,
+        RepositorySettingsDestination, RepositorySettingsPage, RequestContext, RunDetailPage,
+        RunDetailRequest, RunListPage, RunListRequest, RunSummary, Status, StatusFilter,
+        VisibleCollection, WebData, WebDataError, Workflow, WorkflowDefinition,
     },
     text::is_safe_display_text,
 };
@@ -1320,9 +1316,11 @@ fn durable_job_log_visibility(
 }
 
 fn log_stream_safety_is_valid(stream: &automata_ci_store::HumanLogStream) -> bool {
-    automata_ci_store::human_output_publication_safety_schema_is_current(i32::from(
-        stream.publication.safety_schema,
-    )) && stream.raw_log_disposition == HumanRawLogDisposition::Persist
+    stream.schema.get() == LOG_SCHEMA_VERSION
+        && automata_ci_store::human_output_publication_safety_schema_is_current(i32::from(
+            stream.publication.safety_schema,
+        ))
+        && stream.raw_log_disposition == HumanRawLogDisposition::Persist
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1330,16 +1328,22 @@ struct RenderedFrameLine {
     sequence: LogSequence,
     ordinal: u32,
     emitted_at: UnixMillis,
+    group_id: String,
     channel: LogChannel,
     text: String,
     fragmented: bool,
 }
 
 fn render_frame_lines(frame: &LogFrame) -> Result<Vec<RenderedFrameLine>, WebDataError> {
-    if frame.payload().is_empty() && frame.is_end_of_stream() {
+    let CoreLogRecord::Line {
+        group_id,
+        channel,
+        payload,
+    } = frame.record()
+    else {
         return Ok(Vec::new());
-    }
-    let decoded = String::from_utf8_lossy(frame.payload());
+    };
+    let decoded = String::from_utf8_lossy(payload);
     let mut chunks = Vec::new();
     let mut remaining = decoded.as_ref();
     while !remaining.is_empty() {
@@ -1363,7 +1367,8 @@ fn render_frame_lines(frame: &LogFrame) -> Result<Vec<RenderedFrameLine>, WebDat
                 sequence: frame.sequence(),
                 ordinal: u32::try_from(index).map_err(|_| WebDataError::Corrupt)?,
                 emitted_at: frame.emitted_at(),
-                channel: match frame.channel() {
+                group_id: group_id.as_str().to_owned(),
+                channel: match channel {
                     automata_ci_core::LogChannel::Stdout => LogChannel::Stdout,
                     automata_ci_core::LogChannel::Stderr => LogChannel::Stderr,
                     automata_ci_core::LogChannel::System => LogChannel::System,
@@ -1421,45 +1426,87 @@ fn visible_log_line(line: RenderedFrameLine) -> LogLine {
         sequence: line.sequence.get(),
         fragment: line.fragmented.then_some(line.ordinal + 1),
         emitted_at: line.emitted_at,
+        group_id: line.group_id,
         channel: line.channel,
         text: line.text,
     }
 }
 
-fn rendered_line_cursor(
-    line: &RenderedFrameLine,
-    direction: HumanLogSegmentPageDirection,
-) -> DecodedLogCursor {
-    DecodedLogCursor {
-        sequence: line.sequence,
-        line_ordinal: line.ordinal,
-        direction,
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RenderedFrameRecord {
+    sequence: LogSequence,
+    ordinal: u32,
+    record: LogRecord,
+}
+
+impl RenderedFrameRecord {
+    fn decoded_bytes(&self) -> usize {
+        match &self.record {
+            LogRecord::Line(line) => line.text.len(),
+            LogRecord::GroupStarted { group, .. } => group.name.len(),
+            LogRecord::GroupFinished { group_id, .. } => group_id.len(),
+        }
     }
 }
 
-fn segment_cursor(
-    cursor: HumanLogSegmentCursor,
-    direction: HumanLogSegmentPageDirection,
-) -> DecodedLogCursor {
-    DecodedLogCursor {
-        sequence: cursor.sequence,
-        line_ordinal: 0,
-        direction,
+fn render_frame_records(frame: &LogFrame) -> Result<Vec<RenderedFrameRecord>, WebDataError> {
+    match frame.record() {
+        CoreLogRecord::GroupStarted { group } => Ok(vec![RenderedFrameRecord {
+            sequence: frame.sequence(),
+            ordinal: 0,
+            record: LogRecord::GroupStarted {
+                sequence: frame.sequence().get(),
+                emitted_at: frame.emitted_at(),
+                group: LogGroup {
+                    id: group.id().as_str().to_owned(),
+                    parent_id: group.parent_id().map(|id| id.as_str().to_owned()),
+                    name: group.name().to_owned(),
+                    kind: match group.kind() {
+                        CoreLogGroupKind::Setup => LogGroupKind::Setup,
+                        CoreLogGroupKind::Step => LogGroupKind::Step,
+                        CoreLogGroupKind::ActionPre => LogGroupKind::ActionPre,
+                        CoreLogGroupKind::ActionPost => LogGroupKind::ActionPost,
+                        CoreLogGroupKind::Cleanup => LogGroupKind::Cleanup,
+                    },
+                    ordinal: group.ordinal(),
+                },
+            },
+        }]),
+        CoreLogRecord::Line { .. } => render_frame_lines(frame).map(|lines| {
+            lines
+                .into_iter()
+                .map(|line| RenderedFrameRecord {
+                    sequence: line.sequence,
+                    ordinal: line.ordinal,
+                    record: LogRecord::Line(visible_log_line(line)),
+                })
+                .collect()
+        }),
+        CoreLogRecord::GroupFinished {
+            group_id,
+            conclusion,
+        } => Ok(vec![RenderedFrameRecord {
+            sequence: frame.sequence(),
+            ordinal: 0,
+            record: LogRecord::GroupFinished {
+                sequence: frame.sequence().get(),
+                emitted_at: frame.emitted_at(),
+                group_id: group_id.as_str().to_owned(),
+                conclusion: *conclusion,
+            },
+        }]),
+        CoreLogRecord::StreamFinished => Ok(Vec::new()),
     }
 }
 
-fn candidate_is_on_requested_side(
-    candidate: &RenderedFrameLine,
-    cursor: Option<DecodedLogCursor>,
-) -> bool {
-    let Some(cursor) = cursor else {
-        return true;
-    };
-    let candidate_position = (candidate.sequence.get(), candidate.ordinal);
-    let boundary = (cursor.sequence.get(), cursor.line_ordinal);
-    match cursor.direction {
-        HumanLogSegmentPageDirection::Newer => candidate_position >= boundary,
-        HumanLogSegmentPageDirection::Older => candidate_position < boundary,
+fn rendered_record_cursor(
+    record: &RenderedFrameRecord,
+    direction: HumanLogSegmentPageDirection,
+) -> DecodedLogCursor {
+    DecodedLogCursor {
+        sequence: record.sequence,
+        line_ordinal: record.ordinal,
+        direction,
     }
 }
 
@@ -1480,67 +1527,6 @@ fn cursor_boundary_is_valid(
             next.direction == HumanLogSegmentPageDirection::Newer
                 && next.sequence == cursor.sequence
         })
-}
-
-fn log_page_cursors(
-    requested: Option<DecodedLogCursor>,
-    lines: &[RenderedFrameLine],
-    discarded_reverse_line: bool,
-    forward_next: Option<DecodedLogCursor>,
-    page: &automata_ci_store::HumanLogSegmentPage,
-) -> (Option<DecodedLogCursor>, Option<DecodedLogCursor>) {
-    let direction = requested.map_or(HumanLogSegmentPageDirection::Newer, |cursor| {
-        cursor.direction
-    });
-    match direction {
-        HumanLogSegmentPageDirection::Newer => {
-            let previous = lines
-                .first()
-                .map(|line| rendered_line_cursor(line, HumanLogSegmentPageDirection::Older))
-                .filter(cursor_has_preceding_position)
-                .or_else(|| {
-                    requested
-                        .filter(cursor_has_preceding_position)
-                        .map(|cursor| DecodedLogCursor {
-                            direction: HumanLogSegmentPageDirection::Older,
-                            ..cursor
-                        })
-                })
-                .or_else(|| {
-                    page.older_cursor
-                        .map(|cursor| segment_cursor(cursor, HumanLogSegmentPageDirection::Older))
-                });
-            let next = forward_next.or_else(|| {
-                page.newer_cursor
-                    .map(|cursor| segment_cursor(cursor, HumanLogSegmentPageDirection::Newer))
-            });
-            (previous, next)
-        }
-        HumanLogSegmentPageDirection::Older => {
-            let previous = if discarded_reverse_line || page.older_cursor.is_some() {
-                lines
-                    .first()
-                    .map(|line| rendered_line_cursor(line, HumanLogSegmentPageDirection::Older))
-                    .filter(cursor_has_preceding_position)
-                    .or_else(|| {
-                        page.older_cursor.map(|cursor| {
-                            segment_cursor(cursor, HumanLogSegmentPageDirection::Older)
-                        })
-                    })
-            } else {
-                None
-            };
-            let next = requested.map(|cursor| DecodedLogCursor {
-                direction: HumanLogSegmentPageDirection::Newer,
-                ..cursor
-            });
-            (previous, next)
-        }
-    }
-}
-
-const fn cursor_has_preceding_position(cursor: &DecodedLogCursor) -> bool {
-    cursor.sequence.get() > 0 || cursor.line_ordinal > 0
 }
 
 fn block_list_digest(blocks: &[HumanArtifactBlock]) -> Sha256Digest {
@@ -1854,7 +1840,6 @@ impl LiveWebData {
         detail: HumanJobDetail,
         dashboard_metadata_allowed: bool,
         selected_log_access_allowed: bool,
-        request: &JobLogRequest,
     ) -> Result<Option<JobLogPage>, WebDataError> {
         if detail.run.id != scope.run_id
             || detail.job.id != scope.job_id
@@ -1919,248 +1904,27 @@ impl LiveWebData {
             } else {
                 (vec![selected_navigation], None, None)
             };
-        if !selected_log_access_allowed || detail.log_stream.is_none() {
-            if request.cursor.is_some() {
-                return Ok(None);
-            }
-            let settings_visible = dashboard_metadata_allowed
-                && self.settings_visible(context, tenant, repository).await?;
-            return Ok(Some(JobLogPage {
-                repository: map_repository(repository, settings_visible),
-                run: map_run(&detail.run)?,
-                jobs,
-                previous_navigation_job_id,
-                next_navigation_job_id,
-                job: selected_job,
-                log_visibility: if selected_log_access_allowed {
-                    CollectionVisibility::Full
-                } else {
-                    CollectionVisibility::Restricted
-                },
-                lines: Vec::new(),
-                previous_cursor: None,
-                next_cursor: None,
-                live: None,
-            }));
-        }
-        let Some(log_stream) = detail.log_stream else {
-            return Err(WebDataError::Corrupt);
-        };
-        let decoded_cursor = match request.cursor.as_deref() {
-            None => None,
-            Some(cursor) => match decode_log_cursor(
-                cursor,
-                tenant,
-                repository.id,
-                scope.run_id,
-                scope.job_id,
-                log_stream.id,
-            ) {
-                Some(cursor) => Some(cursor),
-                None => return Ok(None),
-            },
-        };
         let run = map_run(&detail.run)?;
-        let Some(attempt) = detail.job.latest_attempt.as_ref() else {
-            return Err(WebDataError::Corrupt);
-        };
-        if log_stream.attempt_id != attempt.id {
-            return Err(WebDataError::Corrupt);
-        }
-        let store_cursor = decoded_cursor.map(|cursor| HumanLogSegmentCursor {
-            sequence: if cursor.direction == HumanLogSegmentPageDirection::Older
-                && cursor.line_ordinal > 0
-            {
-                LogSequence::new(cursor.sequence.get() + 1)
-            } else {
-                cursor.sequence
-            },
-            direction: cursor.direction,
-        });
-        let page_size = HumanLogSegmentPageSize::new(LOG_SEGMENT_PAGE_SIZE)
-            .map_err(|_| WebDataError::Corrupt)?;
-        let query = HumanLogSegmentQuery {
-            scope: scope.clone(),
-            stream_id: log_stream.id,
-            cursor: store_cursor,
-            limit: page_size,
-        };
-        let Some(page) = self
-            .reads
-            .list_log_segments(&query)
-            .await
-            .map_err(map_store_error)?
-        else {
-            return Err(WebDataError::Corrupt);
-        };
-        if page.stream != log_stream {
-            return Err(WebDataError::Corrupt);
-        }
-
-        let direction = decoded_cursor.map_or(HumanLogSegmentPageDirection::Newer, |cursor| {
-            cursor.direction
-        });
-        let mut forward_lines = Vec::new();
-        let mut reverse_lines = VecDeque::new();
-        let mut decoded_bytes = 0_usize;
-        let mut discarded_reverse_line = false;
-        let mut next_exact = None;
-        let mut saw_boundary = decoded_cursor.is_none();
-        let mut forward_checkpoint =
-            decoded_cursor.filter(|cursor| cursor.direction == HumanLogSegmentPageDirection::Newer);
-        'segments: for segment in &page.segments {
-            let blob = self
-                .objects
-                .get_verified(&segment.descriptor, segment.descriptor.size())
-                .await
-                .map_err(map_blob_error)?;
-            let expectation = LogSegmentExpectation::new(
-                log_stream.attempt_id,
-                log_stream.id,
-                segment.first_sequence,
-                segment.last_sequence,
-                segment.uncompressed_size,
-                segment.end_of_stream,
-            );
-            let frames =
-                tokio::task::spawn_blocking(move || decode_log_segment(&blob, expectation))
-                    .await
-                    .map_err(|_| WebDataError::Unavailable)?
-                    .map_err(|_| WebDataError::Corrupt)?;
-            for frame in frames {
-                let candidates = render_frame_lines(&frame)?;
-                if direction == HumanLogSegmentPageDirection::Newer && candidates.is_empty() {
-                    forward_checkpoint = Some(DecodedLogCursor {
-                        sequence: frame.sequence(),
-                        line_ordinal: 0,
-                        direction: HumanLogSegmentPageDirection::Newer,
-                    });
+        let live = if selected_log_access_allowed {
+            match detail.log_stream {
+                Some(log_stream) => {
+                    let Some(attempt) = detail.job.latest_attempt.as_ref() else {
+                        return Err(WebDataError::Corrupt);
+                    };
+                    if log_stream.attempt_id != attempt.id {
+                        return Err(WebDataError::Corrupt);
+                    }
+                    Some(JobLogLive {
+                        stream_closed: log_stream.closed_at.is_some(),
+                    })
                 }
-                if let Some(cursor) = decoded_cursor {
-                    if direction == HumanLogSegmentPageDirection::Newer {
-                        if frame.sequence() < cursor.sequence {
-                            continue;
-                        }
-                        if frame.sequence() > cursor.sequence && !saw_boundary {
-                            return Ok(None);
-                        }
-                    }
-                    if frame.sequence() == cursor.sequence {
-                        saw_boundary = true;
-                        if usize::try_from(cursor.line_ordinal)
-                            .ok()
-                            .is_none_or(|ordinal| ordinal >= candidates.len())
-                            && !(cursor.line_ordinal == 0 && frame.payload().is_empty())
-                        {
-                            return Ok(None);
-                        }
-                    }
-                }
-                for candidate in candidates {
-                    if !candidate_is_on_requested_side(&candidate, decoded_cursor) {
-                        continue;
-                    }
-                    if direction == HumanLogSegmentPageDirection::Older {
-                        decoded_bytes = decoded_bytes
-                            .checked_add(candidate.text.len())
-                            .ok_or(WebDataError::Corrupt)?;
-                        reverse_lines.push_back(candidate);
-                        while reverse_lines.len() > request.limit
-                            || decoded_bytes > request.maximum_decoded_bytes
-                        {
-                            let discarded = reverse_lines
-                                .pop_front()
-                                .expect("an over-limit reverse log page is non-empty");
-                            decoded_bytes = decoded_bytes
-                                .checked_sub(discarded.text.len())
-                                .ok_or(WebDataError::Corrupt)?;
-                            discarded_reverse_line = true;
-                        }
-                    } else {
-                        let next_bytes = decoded_bytes
-                            .checked_add(candidate.text.len())
-                            .ok_or(WebDataError::Corrupt)?;
-                        if forward_lines.len() == request.limit
-                            || next_bytes > request.maximum_decoded_bytes
-                        {
-                            next_exact = Some(rendered_line_cursor(
-                                &candidate,
-                                HumanLogSegmentPageDirection::Newer,
-                            ));
-                            break 'segments;
-                        }
-                        decoded_bytes = next_bytes;
-                        forward_checkpoint = Some(rendered_line_cursor(
-                            &candidate,
-                            HumanLogSegmentPageDirection::Newer,
-                        ));
-                        forward_lines.push(candidate);
-                    }
-                }
+                None => None,
             }
-        }
-        if !cursor_boundary_is_valid(decoded_cursor, saw_boundary, &page) {
-            return Ok(None);
-        }
-
-        let selected_lines = if direction == HumanLogSegmentPageDirection::Older {
-            reverse_lines.into_iter().collect::<Vec<_>>()
         } else {
-            forward_lines
+            None
         };
-        let (previous_exact, next_exact) = log_page_cursors(
-            decoded_cursor,
-            &selected_lines,
-            discarded_reverse_line,
-            next_exact,
-            &page,
-        );
-        let previous_cursor = previous_exact.map(|cursor| {
-            encode_log_cursor(
-                tenant,
-                repository.id,
-                scope.run_id,
-                scope.job_id,
-                log_stream.id,
-                cursor,
-            )
-        });
-        let next_cursor = next_exact.map(|cursor| {
-            encode_log_cursor(
-                tenant,
-                repository.id,
-                scope.run_id,
-                scope.job_id,
-                log_stream.id,
-                cursor,
-            )
-        });
-        let live = (direction == HumanLogSegmentPageDirection::Newer).then(|| JobLogLive {
-            checkpoint: forward_checkpoint.map(|cursor| {
-                encode_log_cursor(
-                    tenant,
-                    repository.id,
-                    scope.run_id,
-                    scope.job_id,
-                    log_stream.id,
-                    cursor,
-                )
-            }),
-            stream_closed: log_stream.closed_at.is_some(),
-            more_available: next_cursor.is_some(),
-        });
-        if log_stream.closed_at.is_some()
-            && next_cursor.is_none()
-            && page
-                .segments
-                .last()
-                .is_some_and(|segment| !segment.end_of_stream)
-        {
-            return Err(WebDataError::Corrupt);
-        }
         let settings_visible = dashboard_metadata_allowed
             && self.settings_visible(context, tenant, repository).await?;
-        let lines = selected_lines.into_iter().map(visible_log_line).collect();
         Ok(Some(JobLogPage {
             repository: map_repository(repository, settings_visible),
             run,
@@ -2168,10 +1932,11 @@ impl LiveWebData {
             previous_navigation_job_id,
             next_navigation_job_id,
             job: selected_job,
-            log_visibility: CollectionVisibility::Full,
-            lines,
-            previous_cursor,
-            next_cursor,
+            log_visibility: if selected_log_access_allowed {
+                CollectionVisibility::Full
+            } else {
+                CollectionVisibility::Restricted
+            },
             live,
         }))
     }
@@ -2620,15 +2385,7 @@ impl WebData for LiveWebData {
         repository_path: &RepositoryPath,
         run_id: RunId,
         job_id: JobId,
-        request: &JobLogRequest,
     ) -> Result<Option<JobLogPage>, WebDataError> {
-        if request.limit == 0
-            || request.limit > super::data::LOG_PAGE_SIZE
-            || request.maximum_decoded_bytes == 0
-            || request.maximum_decoded_bytes > super::data::LOG_PAGE_DECODED_BYTES
-        {
-            return Ok(None);
-        }
         let tenant = Self::tenant(context)?;
         let Some(repository) = self
             .resolve_repository_exact(&tenant, repository_path)
@@ -2680,7 +2437,6 @@ impl WebData for LiveWebData {
             detail,
             dashboard_metadata_allowed,
             selected_log_access_allowed,
-            request,
         )
         .await
     }
@@ -2824,7 +2580,7 @@ impl WebData for LiveWebData {
                     .map_err(|_| WebDataError::Unavailable)?
                     .map_err(|_| WebDataError::Corrupt)?;
             for frame in frames {
-                let candidates = render_frame_lines(&frame)?;
+                let candidates = render_frame_records(&frame)?;
                 if candidates.is_empty() {
                     checkpoint_cursor = Some(DecodedLogCursor {
                         sequence: frame.sequence(),
@@ -2861,17 +2617,17 @@ impl WebData for LiveWebData {
                         }
                     }
                     let next_bytes = decoded_bytes
-                        .checked_add(candidate.text.len())
+                        .checked_add(candidate.decoded_bytes())
                         .ok_or(WebDataError::Corrupt)?;
-                    if records.len() == super::data::LOG_PAGE_SIZE
-                        || next_bytes > super::data::LOG_PAGE_DECODED_BYTES
+                    if records.len() == super::data::LIVE_LOG_BATCH_RECORD_LIMIT
+                        || next_bytes > super::data::LIVE_LOG_BATCH_DECODED_BYTES
                     {
                         hit_limit = true;
                         break 'segments;
                     }
                     decoded_bytes = next_bytes;
                     let cursor =
-                        rendered_line_cursor(&candidate, HumanLogSegmentPageDirection::Newer);
+                        rendered_record_cursor(&candidate, HumanLogSegmentPageDirection::Newer);
                     let checkpoint = encode_log_cursor(
                         scope.tenant(),
                         scope.repository_id(),
@@ -2883,7 +2639,7 @@ impl WebData for LiveWebData {
                     checkpoint_cursor = Some(cursor);
                     records.push(LiveLogRecord {
                         checkpoint,
-                        line: visible_log_line(candidate),
+                        record: candidate.record,
                     });
                 }
             }
@@ -3014,7 +2770,6 @@ impl WebData for LiveWebData {
 #[cfg(test)]
 mod tests {
     use std::{
-        fmt::Write as _,
         io::Write as _,
         sync::{Arc, Mutex},
     };
@@ -3030,8 +2785,9 @@ mod tests {
     };
     use automata_ci_blob::{BlobKey, BlobPayload, ImmutableBlobStore, MediaType, MemoryBlobStore};
     use automata_ci_core::{
-        AttemptId, AttemptNumber, JobId, JobIrVersion, JobLifecycle, LogChannel as CoreLogChannel,
-        LogFrame, LogSequence, LogStreamId, RunId, Sha256Digest, UnixMillis, WorkflowId,
+        AttemptId, AttemptNumber, JobId, JobIrVersion, JobLifecycle, LOG_SCHEMA_VERSION,
+        LogChannel as CoreLogChannel, LogFrame, LogGroupKind as CoreLogGroupKind, LogSequence,
+        LogStreamId, RunId, Sha256Digest, UnixMillis, WorkflowId,
     };
     use automata_ci_store::{
         DocumentSchema, HumanAuthorizationTarget, HumanGitCommitId, HumanJob, HumanJobAttempt,
@@ -3059,9 +2815,9 @@ mod tests {
         RepositorySecretsPageRequest, RepositorySecretsReadOutcome, VerifiedRepositorySecretForm,
     };
     use crate::app::web::data::{
-        CollectionVisibility, JobLogPage, JobLogRequest, REPOSITORY_PAGE_SIZE,
-        RepositoryDirectoryRequest, RepositoryPath, RepositorySettingsDestination, RequestContext,
-        RunListRequest, Status, StatusFilter, Viewer, WebData, WebDataError,
+        CollectionVisibility, REPOSITORY_PAGE_SIZE, RepositoryDirectoryRequest, RepositoryPath,
+        RepositorySettingsDestination, RequestContext, RunListRequest, Status, StatusFilter,
+        Viewer, WebData, WebDataError,
     };
 
     #[test]
@@ -3656,7 +3412,7 @@ mod tests {
         let log_stream = HumanLogStream {
             id: LogStreamId::new(),
             attempt_id,
-            schema: DocumentSchema::new(1).expect("log schema"),
+            schema: DocumentSchema::new(LOG_SCHEMA_VERSION).expect("log schema"),
             opened_at: UnixMillis::new(1_200),
             closed_at: Some(UnixMillis::new(1_900)),
             raw_log_disposition,
@@ -3719,25 +3475,38 @@ mod tests {
         log_stream: &HumanLogStream,
         payload: Vec<u8>,
     ) -> (Arc<MemoryBlobStore>, HumanLogSegment) {
+        let group_id = automata_ci_core::LogGroupId::new("test").expect("group ID");
         let frames = vec![
-            LogFrame::new(
+            LogFrame::group_started(
                 log_stream.id,
                 log_stream.attempt_id,
                 LogSequence::new(0),
-                UnixMillis::new(1_300),
-                CoreLogChannel::Stdout,
-                payload,
-                false,
+                UnixMillis::new(1_250),
+                automata_ci_core::LogGroup::new(
+                    group_id.clone(),
+                    None,
+                    "Checkout",
+                    CoreLogGroupKind::Step,
+                    0,
+                )
+                .expect("log group"),
             )
-            .expect("log frame"),
-            LogFrame::new(
+            .expect("group start frame"),
+            LogFrame::line(
                 log_stream.id,
                 log_stream.attempt_id,
                 LogSequence::new(1),
+                UnixMillis::new(1_300),
+                group_id,
+                CoreLogChannel::Stdout,
+                payload,
+            )
+            .expect("log frame"),
+            LogFrame::stream_finished(
+                log_stream.id,
+                log_stream.attempt_id,
+                LogSequence::new(2),
                 UnixMillis::new(1_900),
-                CoreLogChannel::System,
-                Vec::new(),
-                true,
             )
             .expect("end frame"),
         ];
@@ -3755,7 +3524,7 @@ mod tests {
         );
         let segment = HumanLogSegment {
             first_sequence: LogSequence::new(0),
-            last_sequence: LogSequence::new(1),
+            last_sequence: LogSequence::new(2),
             descriptor: payload.descriptor().clone(),
             uncompressed_size: u64::try_from(uncompressed.len()).expect("log size"),
             stored_at: UnixMillis::new(1_900),
@@ -3904,50 +3673,6 @@ mod tests {
         )
     }
 
-    fn first_log_page_request() -> JobLogRequest {
-        JobLogRequest {
-            cursor: None,
-            limit: 200,
-            maximum_decoded_bytes: super::super::data::LOG_PAGE_DECODED_BYTES,
-        }
-    }
-
-    async fn read_log_page(
-        data: &LiveWebData,
-        context: &RequestContext,
-        repository: &RepositoryPath,
-        run_id: RunId,
-        job_id: JobId,
-        cursor: Option<String>,
-        limit: usize,
-    ) -> JobLogPage {
-        WebData::job_log(
-            data,
-            context,
-            repository,
-            run_id,
-            job_id,
-            &JobLogRequest {
-                cursor,
-                limit,
-                maximum_decoded_bytes: super::super::data::LOG_PAGE_DECODED_BYTES,
-            },
-        )
-        .await
-        .expect("log page read")
-        .expect("authorized log page")
-    }
-
-    fn assert_log_texts(page: &JobLogPage, expected: &[&str]) {
-        assert_eq!(
-            page.lines
-                .iter()
-                .map(|line| line.text.as_str())
-                .collect::<Vec<_>>(),
-            expected
-        );
-    }
-
     fn authenticated_request_context() -> RequestContext {
         let tenant_id = TenantId::new("tenant-1").expect("tenant ID");
         let authorization = AuthorizationContext::authenticated(
@@ -3968,53 +3693,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn invalid_cursors_are_hidden_and_log_denial_restricts_only_the_collection() {
-        let (data, context, repository, run_id, job_id) = fake_live_data(true).await;
-        let invalid_cursor = JobLogRequest {
-            cursor: Some("not-a-canonical-cursor".to_owned()),
-            limit: 200,
-            maximum_decoded_bytes: super::super::data::LOG_PAGE_DECODED_BYTES,
-        };
-        assert!(
-            WebData::job_log(
-                &data,
-                &context,
-                &repository,
-                run_id,
-                job_id,
-                &invalid_cursor,
-            )
-            .await
-            .expect("invalid cursors are hidden")
-            .is_none()
-        );
-
+    async fn log_denial_restricts_only_the_collection() {
         let (data, context, repository, run_id, job_id) = fake_live_data(false).await;
-        let first_page = JobLogRequest {
-            cursor: None,
-            limit: 200,
-            maximum_decoded_bytes: super::super::data::LOG_PAGE_DECODED_BYTES,
-        };
-        let page = WebData::job_log(&data, &context, &repository, run_id, job_id, &first_page)
+        let page = WebData::job_log(&data, &context, &repository, run_id, job_id)
             .await
             .expect("job detail lookup")
             .expect("dashboard-readable metadata remains visible");
         assert_eq!(page.log_visibility, CollectionVisibility::Restricted);
-        assert!(page.lines.is_empty());
-        assert!(page.previous_cursor.is_none());
-        assert!(page.next_cursor.is_none());
         assert!(page.live.is_none());
-
-        let denied_cursor = JobLogRequest {
-            cursor: Some("not-a-canonical-cursor".to_owned()),
-            ..first_page
-        };
-        assert!(
-            WebData::job_log(&data, &context, &repository, run_id, job_id, &denied_cursor,)
-                .await
-                .expect("restricted log cursors are hidden")
-                .is_none()
-        );
     }
 
     #[tokio::test]
@@ -4032,17 +3718,10 @@ mod tests {
             })
             .await;
 
-        let page = WebData::job_log(
-            &data,
-            &context,
-            &repository,
-            run_id,
-            job_id,
-            &first_log_page_request(),
-        )
-        .await
-        .expect("public log lookup")
-        .expect("public log must not depend on dashboard publication");
+        let page = WebData::job_log(&data, &context, &repository, run_id, job_id)
+            .await
+            .expect("public log lookup")
+            .expect("public log must not depend on dashboard publication");
 
         assert_eq!(page.jobs.len(), 1);
         assert_eq!(page.jobs[0].id, job_id);
@@ -4101,7 +3780,6 @@ mod tests {
             &repository,
             run_id,
             job_id,
-            &first_log_page_request(),
         )
         .await
         .expect("job navigation read")
@@ -4141,23 +3819,13 @@ mod tests {
             })
             .await;
 
-        let page = WebData::job_log(
-            &data,
-            &context,
-            &repository,
-            run_id,
-            job_id,
-            &first_log_page_request(),
-        )
-        .await
-        .expect("job detail read")
-        .expect("dashboard-readable job detail");
+        let page = WebData::job_log(&data, &context, &repository, run_id, job_id)
+            .await
+            .expect("job detail read")
+            .expect("dashboard-readable job detail");
 
         assert_eq!(page.job.id, job_id);
         assert_eq!(page.log_visibility, CollectionVisibility::Restricted);
-        assert!(page.lines.is_empty());
-        assert!(page.previous_cursor.is_none());
-        assert!(page.next_cursor.is_none());
         assert!(page.live.is_none());
     }
 
@@ -4175,9 +3843,8 @@ mod tests {
         };
         let (data, anonymous, repository, run_id, job_id, calls) =
             fake_live_data_with_policy(policy).await;
-        let request = first_log_page_request();
         assert!(
-            WebData::job_log(&data, &anonymous, &repository, run_id, job_id, &request,)
+            WebData::job_log(&data, &anonymous, &repository, run_id, job_id)
                 .await
                 .expect("anonymous private-log denial")
                 .is_none()
@@ -4204,12 +3871,12 @@ mod tests {
         }
 
         let authenticated = authenticated_request_context();
-        let page = WebData::job_log(&data, &authenticated, &repository, run_id, job_id, &request)
+        let page = WebData::job_log(&data, &authenticated, &repository, run_id, job_id)
             .await
             .expect("authenticated private-log lookup")
             .expect("log-authorized viewer");
         assert_eq!(page.jobs.len(), 1);
-        assert_eq!(page.lines.len(), 1);
+        assert!(page.live.is_some());
 
         let (denied, _, repository, run_id, job_id, _) =
             fake_live_data_with_policy(FakeLivePolicy {
@@ -4218,22 +3885,15 @@ mod tests {
             })
             .await;
         assert!(
-            WebData::job_log(
-                &denied,
-                &authenticated,
-                &repository,
-                run_id,
-                job_id,
-                &request,
-            )
-            .await
-            .expect("authenticated log-permission denial")
-            .is_none()
+            WebData::job_log(&denied, &authenticated, &repository, run_id, job_id,)
+                .await
+                .expect("authenticated log-permission denial")
+                .is_none()
         );
     }
 
     #[tokio::test]
-    async fn masked_readable_secret_logs_are_private_and_preserve_user_output() {
+    async fn masked_readable_secret_logs_are_private() {
         let policy = FakeLivePolicy {
             dashboard_visibility: OutputVisibility::Private,
             log_visibility: OutputVisibility::Private,
@@ -4246,10 +3906,8 @@ mod tests {
         };
         let (data, anonymous, repository, run_id, job_id, _) =
             fake_live_data_with_policy(policy).await;
-        let request = first_log_page_request();
-
         assert!(
-            WebData::job_log(&data, &anonymous, &repository, run_id, job_id, &request,)
+            WebData::job_log(&data, &anonymous, &repository, run_id, job_id)
                 .await
                 .expect("anonymous readable-secret denial")
                 .is_none()
@@ -4260,14 +3918,12 @@ mod tests {
             &repository,
             run_id,
             job_id,
-            &request,
         )
         .await
         .expect("authenticated masked-log lookup")
         .expect("log-authorized viewer");
 
-        assert_eq!(page.lines.len(), 1);
-        assert_eq!(page.lines[0].text, "checkout ok");
+        assert!(page.live.is_some());
     }
 
     #[tokio::test]
@@ -4284,21 +3940,13 @@ mod tests {
         };
         let (data, anonymous, repository, run_id, job_id, calls) =
             fake_live_data_with_policy(policy).await;
-        let page = WebData::job_log(
-            &data,
-            &anonymous,
-            &repository,
-            run_id,
-            job_id,
-            &first_log_page_request(),
-        )
-        .await
-        .expect("anonymous public runner-redacted log lookup")
-        .expect("public runner-redacted log page");
+        let page = WebData::job_log(&data, &anonymous, &repository, run_id, job_id)
+            .await
+            .expect("anonymous public runner-redacted log lookup")
+            .expect("public runner-redacted log page");
 
         assert_eq!(page.log_visibility, CollectionVisibility::Full);
-        assert_eq!(page.lines.len(), 1);
-        assert_eq!(page.lines[0].text, "checkout ok");
+        assert!(page.live.is_some());
         assert!(
             calls
                 .lock()
@@ -4326,23 +3974,13 @@ mod tests {
         };
         let (data, anonymous, repository, run_id, job_id, calls) =
             fake_live_data_with_policy_and_stream(policy, None, false).await;
-        let page = WebData::job_log(
-            &data,
-            &anonymous,
-            &repository,
-            run_id,
-            job_id,
-            &first_log_page_request(),
-        )
-        .await
-        .expect("anonymous public empty-log lookup")
-        .expect("public empty-log page");
+        let page = WebData::job_log(&data, &anonymous, &repository, run_id, job_id)
+            .await
+            .expect("anonymous public empty-log lookup")
+            .expect("public empty-log page");
 
         assert_eq!(page.log_visibility, CollectionVisibility::Full);
         assert!(page.job.logs_available);
-        assert!(page.lines.is_empty());
-        assert!(page.previous_cursor.is_none());
-        assert!(page.next_cursor.is_none());
         assert!(page.live.is_none());
         assert!(
             calls
@@ -4360,13 +3998,12 @@ mod tests {
     #[tokio::test]
     async fn job_log_parent_scope_mismatches_remain_closed() {
         let (data, context, repository, run_id, job_id) = fake_live_data(true).await;
-        let request = first_log_page_request();
         assert_eq!(
-            WebData::job_log(&data, &context, &repository, RunId::new(), job_id, &request,).await,
+            WebData::job_log(&data, &context, &repository, RunId::new(), job_id).await,
             Err(WebDataError::Corrupt)
         );
         assert_eq!(
-            WebData::job_log(&data, &context, &repository, run_id, JobId::new(), &request,).await,
+            WebData::job_log(&data, &context, &repository, run_id, JobId::new()).await,
             Err(WebDataError::Corrupt)
         );
         let mismatched_repository = RepositoryPath {
@@ -4374,29 +4011,13 @@ mod tests {
             name: repository.name.clone(),
         };
         assert_eq!(
-            WebData::job_log(
-                &data,
-                &context,
-                &mismatched_repository,
-                run_id,
-                job_id,
-                &request,
-            )
-            .await,
+            WebData::job_log(&data, &context, &mismatched_repository, run_id, job_id,).await,
             Err(WebDataError::Corrupt)
         );
         let foreign_tenant =
             RequestContext::anonymous(TenantId::new("tenant-2").expect("foreign tenant"));
         assert_eq!(
-            WebData::job_log(
-                &data,
-                &foreign_tenant,
-                &repository,
-                run_id,
-                job_id,
-                &request,
-            )
-            .await,
+            WebData::job_log(&data, &foreign_tenant, &repository, run_id, job_id,).await,
             Err(WebDataError::Corrupt)
         );
     }
@@ -4560,6 +4181,28 @@ mod tests {
     }
 
     #[test]
+    fn log_stream_reader_rejects_noncurrent_log_schemas() {
+        let run_id = RunId::new();
+        let run = fixture_run(run_id, OutputVisibility::Private);
+        let (_, mut stream) = fixture_job_detail(
+            run,
+            JobId::new(),
+            AttemptId::new(),
+            HumanRawLogDisposition::Persist,
+            fixture_output_publication(
+                OutputVisibility::Private,
+                SecretExposureClass::Secretless,
+                "fixture",
+            ),
+        );
+        assert!(log_stream_safety_is_valid(&stream));
+        for schema in [1, 3] {
+            stream.schema = DocumentSchema::new(schema).expect("noncurrent log schema");
+            assert!(!log_stream_safety_is_valid(&stream));
+        }
+    }
+
+    #[test]
     fn log_stream_reader_accepts_public_runner_redacted_logs() {
         let run_id = RunId::new();
         let run = fixture_run(run_id, OutputVisibility::Public);
@@ -4579,48 +4222,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn live_job_log_decodes_verified_segments_and_omits_the_end_marker() {
-        let (data, context, repository, run_id, job_id) = fake_live_data(true).await;
-        let request = JobLogRequest {
-            cursor: None,
-            limit: 200,
-            maximum_decoded_bytes: super::super::data::LOG_PAGE_DECODED_BYTES,
-        };
-        let page = WebData::job_log(&data, &context, &repository, run_id, job_id, &request)
-            .await
-            .expect("read live log")
-            .expect("authorized log page");
-        assert_eq!(page.repository.scm_provider, "github");
-        assert_eq!(page.job.attempt, Some(1));
-        assert_eq!(page.lines.len(), 1);
-        assert_eq!(page.lines[0].sequence, 0);
-        assert_eq!(page.lines[0].text, "checkout ok");
-        assert_eq!(page.job.status, Status::Lost);
-        assert!(page.jobs[0].logs_available);
-        assert!(page.jobs[1].logs_available);
-        assert!(page.next_cursor.is_none());
-        let live = page.live.expect("forward page live checkpoint");
-        assert!(live.stream_closed);
-        assert!(!live.more_available);
-        let checkpoint = live.checkpoint.expect("terminal checkpoint");
-        let replay = read_log_page(
-            &data,
-            &context,
-            &repository,
-            run_id,
-            job_id,
-            Some(checkpoint.clone()),
-            200,
-        )
-        .await;
-        assert!(replay.lines.is_empty());
-        assert_eq!(
-            replay.live.and_then(|live| live.checkpoint).as_deref(),
-            Some(checkpoint.as_str())
-        );
-    }
-
-    #[tokio::test]
     async fn transport_neutral_tail_authorizes_exact_scope_and_controls_replay() {
         let (data, context, repository, run_id, job_id) = fake_live_data(true).await;
         let authorized = WebData::authorize_live_log(&data, &context, &repository, run_id, job_id)
@@ -4632,11 +4233,19 @@ mod tests {
             .await
             .expect("initial durable tail")
             .expect("current stream");
-        assert_eq!(first.records.len(), 1);
-        assert_eq!(first.records[0].line.text, "checkout ok");
+        assert_eq!(first.records.len(), 2);
+        assert!(matches!(
+            &first.records[0].record,
+            super::super::data::LogRecord::GroupStarted { group, .. }
+                if group.id == "test" && group.name == "Checkout"
+        ));
+        assert!(matches!(
+            &first.records[1].record,
+            super::super::data::LogRecord::Line(line) if line.text == "checkout ok"
+        ));
         assert!(first.stream_closed);
         assert!(!first.more_available);
-        let checkpoint = first.records[0].checkpoint.clone();
+        let checkpoint = first.records[1].checkpoint.clone();
 
         let replay = WebData::read_live_log(&data, &authorized.scope, Some(&checkpoint), true)
             .await
@@ -4669,209 +4278,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn split_log_segment_pages_round_trip_at_exact_line_boundaries() {
-        let policy = FakeLivePolicy {
-            dashboard_visibility: OutputVisibility::Public,
-            log_visibility: OutputVisibility::Public,
-            log_exposure: SecretExposureClass::Secretless,
-            raw_log_disposition: HumanRawLogDisposition::Persist,
-            allow_dashboard: true,
-            allow_logs: true,
-            allow_settings_read: false,
-            allow_settings_update: false,
-        };
-        let mut payload = String::new();
-        for index in 0..5 {
-            writeln!(payload, "line {index}").expect("writing to a String cannot fail");
-        }
-        let payload = payload.into_bytes();
-        let (data, context, repository, run_id, job_id, _) =
-            fake_live_data_with_policy_and_payload(policy, Some(payload)).await;
-        let first = read_log_page(&data, &context, &repository, run_id, job_id, None, 2).await;
-        assert_log_texts(&first, &["line 0", "line 1"]);
-        assert!(first.previous_cursor.is_none());
-        let first_live = first.live.as_ref().expect("first forward checkpoint");
-        assert!(first_live.stream_closed);
-        assert!(first_live.more_available);
-        let first_next = first.next_cursor.expect("second-page cursor");
-
-        let second = read_log_page(
-            &data,
-            &context,
-            &repository,
-            run_id,
-            job_id,
-            Some(first_next.clone()),
-            2,
-        )
-        .await;
-        assert_log_texts(&second, &["line 2", "line 3"]);
-        let second_previous = second.previous_cursor.expect("first-page cursor");
-        let second_next = second.next_cursor.expect("third-page cursor");
-
-        let third = read_log_page(
-            &data,
-            &context,
-            &repository,
-            run_id,
-            job_id,
-            Some(second_next.clone()),
-            2,
-        )
-        .await;
-        assert_log_texts(&third, &["line 4"]);
-        assert!(third.next_cursor.is_none());
-        let third_live = third.live.as_ref().expect("terminal forward checkpoint");
-        assert!(third_live.stream_closed);
-        assert!(!third_live.more_available);
-
-        let back_to_second = read_log_page(
-            &data,
-            &context,
-            &repository,
-            run_id,
-            job_id,
-            third.previous_cursor,
-            2,
-        )
-        .await;
-        assert_log_texts(&back_to_second, &["line 2", "line 3"]);
-        assert!(back_to_second.live.is_none());
-        assert_eq!(
-            back_to_second.next_cursor.as_deref(),
-            Some(second_next.as_str())
-        );
-        let back_to_first = read_log_page(
-            &data,
-            &context,
-            &repository,
-            run_id,
-            job_id,
-            back_to_second.previous_cursor,
-            2,
-        )
-        .await;
-        assert_log_texts(&back_to_first, &["line 0", "line 1"]);
-        assert!(back_to_first.live.is_none());
-        assert!(back_to_first.previous_cursor.is_none());
-        assert_eq!(
-            back_to_first.next_cursor.as_deref(),
-            Some(first_next.as_str())
-        );
-
-        let direct_back_to_first = read_log_page(
-            &data,
-            &context,
-            &repository,
-            run_id,
-            job_id,
-            Some(second_previous),
-            2,
-        )
-        .await;
-        assert_eq!(direct_back_to_first.lines, back_to_first.lines);
-    }
-
-    #[tokio::test]
-    async fn forward_log_checkpoint_replays_its_record_and_then_advances() {
-        let policy = FakeLivePolicy {
-            dashboard_visibility: OutputVisibility::Public,
-            log_visibility: OutputVisibility::Public,
-            log_exposure: SecretExposureClass::Secretless,
-            raw_log_disposition: HumanRawLogDisposition::Persist,
-            allow_dashboard: true,
-            allow_logs: true,
-            allow_settings_read: false,
-            allow_settings_update: false,
-        };
-        let (data, context, repository, run_id, job_id, _) =
-            fake_live_data_with_policy_and_payload(policy, Some(b"zero\none\ntwo\n".to_vec()))
-                .await;
-        let first = read_log_page(&data, &context, &repository, run_id, job_id, None, 2).await;
-        let checkpoint = first
-            .live
-            .and_then(|live| live.checkpoint)
-            .expect("first forward checkpoint");
-
-        let replay = read_log_page(
-            &data,
-            &context,
-            &repository,
-            run_id,
-            job_id,
-            Some(checkpoint.clone()),
-            2,
-        )
-        .await;
-
-        assert_log_texts(&replay, &["one", "two"]);
-        assert_ne!(
-            replay.live.and_then(|live| live.checkpoint).as_deref(),
-            Some(checkpoint.as_str())
-        );
-    }
-
-    #[tokio::test]
-    async fn forged_canonical_log_positions_are_non_enumerating() {
-        let policy = FakeLivePolicy {
-            dashboard_visibility: OutputVisibility::Public,
-            log_visibility: OutputVisibility::Public,
-            log_exposure: SecretExposureClass::Secretless,
-            raw_log_disposition: HumanRawLogDisposition::Persist,
-            allow_dashboard: true,
-            allow_logs: true,
-            allow_settings_read: false,
-            allow_settings_update: false,
-        };
-        let (data, context, repository, run_id, job_id, _) =
-            fake_live_data_with_policy_and_payload(policy, Some(b"one\ntwo\n".to_vec())).await;
-        let first = WebData::job_log(
-            &data,
-            &context,
-            &repository,
-            run_id,
-            job_id,
-            &JobLogRequest {
-                cursor: None,
-                limit: 1,
-                maximum_decoded_bytes: super::super::data::LOG_PAGE_DECODED_BYTES,
-            },
-        )
-        .await
-        .expect("first log page")
-        .expect("authorized first page");
-        let cursor = first.next_cursor.expect("end-marker cursor");
-        let cursor_bytes =
-            base64::Engine::decode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, &cursor)
-                .expect("decode cursor");
-
-        for (range, replacement) in [
-            (83..91, 99_u64.to_be_bytes().to_vec()),
-            (91..95, u32::MAX.to_be_bytes().to_vec()),
-        ] {
-            let mut forged = cursor_bytes.clone();
-            forged[range].copy_from_slice(&replacement);
-            let forged =
-                base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, forged);
-            let result = WebData::job_log(
-                &data,
-                &context,
-                &repository,
-                run_id,
-                job_id,
-                &JobLogRequest {
-                    cursor: Some(forged),
-                    limit: 1,
-                    maximum_decoded_bytes: super::super::data::LOG_PAGE_DECODED_BYTES,
-                },
-            )
-            .await
-            .expect("forged positions are hidden");
-            assert!(result.is_none());
-        }
-    }
-
     #[test]
     fn branch_filters_are_normalized_without_rewriting_canonical_refs() {
         assert_eq!(
@@ -4887,14 +4293,14 @@ mod tests {
 
     #[test]
     fn log_frames_split_on_lines_and_utf8_boundaries_with_stable_ordinals() {
-        let frame = LogFrame::new(
+        let frame = LogFrame::line(
             LogStreamId::new(),
             AttemptId::new(),
             LogSequence::new(7),
             UnixMillis::new(10),
+            automata_ci_core::LogGroupId::new("test").expect("group ID"),
             CoreLogChannel::Stdout,
             b"first\n\nlast\n".to_vec(),
-            false,
         )
         .expect("frame");
         let lines = render_frame_lines(&frame).expect("lines");
@@ -4911,14 +4317,14 @@ mod tests {
         );
 
         let oversized = "é".repeat(super::super::data::LOG_LINE_BYTES / 2 + 1);
-        let frame = LogFrame::new(
+        let frame = LogFrame::line(
             LogStreamId::new(),
             AttemptId::new(),
             LogSequence::new(8),
             UnixMillis::new(11),
+            automata_ci_core::LogGroupId::new("test").expect("group ID"),
             CoreLogChannel::Stderr,
             oversized.into_bytes(),
-            false,
         )
         .expect("frame");
         let lines = render_frame_lines(&frame).expect("split lines");
@@ -4929,14 +4335,14 @@ mod tests {
 
     #[test]
     fn log_rendering_exposes_controls_and_bidi_formatting_as_plain_text() {
-        let frame = LogFrame::new(
+        let frame = LogFrame::line(
             LogStreamId::new(),
             AttemptId::new(),
             LogSequence::new(9),
             UnixMillis::new(12),
+            automata_ci_core::LogGroupId::new("test").expect("group ID"),
             CoreLogChannel::Stdout,
             "safe\t\u{001b}[31m\u{202e}copy\r\n".as_bytes().to_vec(),
-            false,
         )
         .expect("frame");
         let lines = render_frame_lines(&frame).expect("sanitized lines");
@@ -4952,14 +4358,11 @@ mod tests {
 
     #[test]
     fn pure_end_marker_is_not_rendered() {
-        let frame = LogFrame::new(
+        let frame = LogFrame::stream_finished(
             LogStreamId::new(),
             AttemptId::new(),
             LogSequence::new(9),
             UnixMillis::new(12),
-            CoreLogChannel::System,
-            Vec::new(),
-            true,
         )
         .expect("end frame");
         assert!(render_frame_lines(&frame).expect("lines").is_empty());

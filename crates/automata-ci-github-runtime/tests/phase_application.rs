@@ -1,10 +1,8 @@
 use automata_ci_github_runtime::{
     ActionInvocationId, CommandFileDecoder, CommandFileKind, CommandFilePlatform,
     CompletedStepApplicator, CompletedStepCommands, EnvironmentMutationBlockReason,
-    GithubCommandFileDecoder, GithubCompletedStepApplicator, GithubWorkflowCommandSession,
-    JobCommandState, LegacyStepMutation, ParsedCommandFile, PhaseApplicationNotice,
-    ReservedEnvironmentNamespace, StepId, StepPhase, StepScope, WorkflowCommandEvent,
-    WorkflowCommandLimits, WorkflowCommandPolicy, WorkflowCommandProcessor, WorkflowLine,
+    GithubCommandFileDecoder, GithubCompletedStepApplicator, JobCommandState, ParsedCommandFile,
+    PhaseApplicationNotice, ReservedEnvironmentNamespace, StepId, StepPhase, StepScope,
     classify_environment_mutation,
 };
 
@@ -566,96 +564,6 @@ fn github_env_default_name_case_follows_the_target_platform() {
             PhaseApplicationNotice::BlockedNodeOptions,
         ]
     );
-}
-
-#[test]
-fn legacy_set_env_default_names_are_applied_with_target_platform_semantics() {
-    let mutations = [
-        legacy_environment_mutation("GITHUB_ENV", "attacker"),
-        legacy_environment_mutation("RUNNER_TEMP", "attacker"),
-        legacy_environment_mutation("github_path", "unix-value"),
-        legacy_environment_mutation("runner_arch", "unix-value"),
-        legacy_environment_mutation("CI", "custom"),
-    ];
-    let files = commands(b"", b"", b"", b"", b"").with_legacy_mutations(&mutations);
-    let scope = StepScope::new(
-        StepId::new("legacy-environment").expect("valid step ID"),
-        StepPhase::Run,
-    );
-    let applicator = GithubCompletedStepApplicator::default();
-
-    let unix = applicator
-        .apply_completed_step(
-            &JobCommandState::new(CommandFilePlatform::Unix),
-            &scope,
-            &files,
-        )
-        .expect("bounded Unix state");
-    assert_eq!(
-        value(unix.next_state().environment(), "github_path"),
-        Some("unix-value")
-    );
-    assert_eq!(
-        value(unix.next_state().environment(), "runner_arch"),
-        Some("unix-value")
-    );
-    assert_eq!(value(unix.next_state().environment(), "CI"), Some("custom"));
-    assert_eq!(
-        unix.notices(),
-        [
-            PhaseApplicationNotice::BlockedReservedEnvironment(
-                ReservedEnvironmentNamespace::Github,
-            ),
-            PhaseApplicationNotice::BlockedReservedEnvironment(
-                ReservedEnvironmentNamespace::Runner,
-            ),
-        ]
-    );
-
-    let windows = applicator
-        .apply_completed_step(
-            &JobCommandState::new(CommandFilePlatform::Windows),
-            &scope,
-            &files,
-        )
-        .expect("bounded Windows state");
-    assert_eq!(windows.next_state().environment().len(), 1);
-    assert_eq!(
-        value(windows.next_state().environment(), "CI"),
-        Some("custom")
-    );
-    assert_eq!(
-        windows.notices(),
-        [
-            PhaseApplicationNotice::BlockedReservedEnvironment(
-                ReservedEnvironmentNamespace::Github,
-            ),
-            PhaseApplicationNotice::BlockedReservedEnvironment(
-                ReservedEnvironmentNamespace::Runner,
-            ),
-            PhaseApplicationNotice::BlockedReservedEnvironment(
-                ReservedEnvironmentNamespace::Github,
-            ),
-            PhaseApplicationNotice::BlockedReservedEnvironment(
-                ReservedEnvironmentNamespace::Runner,
-            ),
-        ]
-    );
-}
-
-fn legacy_environment_mutation(name: &str, value: &str) -> LegacyStepMutation {
-    let mut session = GithubWorkflowCommandSession::new(
-        WorkflowCommandLimits::default(),
-        WorkflowCommandPolicy::new(true, true),
-    );
-    let line = format!("::set-env name={name}::{value}");
-    let event = session
-        .process_line(line.as_bytes())
-        .expect("valid legacy environment command");
-    let WorkflowLine::Command(WorkflowCommandEvent::LegacyMutation(mutation)) = event else {
-        panic!("expected a deferred legacy mutation for {name}");
-    };
-    mutation
 }
 
 fn ascii_case_variants(value: &str) -> Vec<String> {

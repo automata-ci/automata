@@ -1262,6 +1262,37 @@ pub struct JobResultMessage {
     pub result: ::core::option::Option<JobResult>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct LogGroup {
+    #[prost(string, tag = "1")]
+    pub id: ::prost::alloc::string::String,
+    #[prost(string, optional, tag = "2")]
+    pub parent_id: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, tag = "3")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(enumeration = "LogGroupKind", tag = "4")]
+    pub kind: i32,
+    #[prost(uint32, tag = "5")]
+    pub ordinal: u32,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct LogLine {
+    #[prost(string, tag = "1")]
+    pub group_id: ::prost::alloc::string::String,
+    #[prost(enumeration = "LogChannel", tag = "2")]
+    pub channel: i32,
+    #[prost(bytes = "vec", tag = "3")]
+    pub payload: ::prost::alloc::vec::Vec<u8>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct LogGroupFinished {
+    #[prost(string, tag = "1")]
+    pub group_id: ::prost::alloc::string::String,
+    #[prost(enumeration = "JobConclusion", tag = "2")]
+    pub conclusion: i32,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct LogStreamFinished {}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct LogFrame {
     #[prost(uint32, tag = "1")]
     pub schema_version: u32,
@@ -1273,12 +1304,22 @@ pub struct LogFrame {
     pub sequence: u64,
     #[prost(sint64, tag = "5")]
     pub emitted_at_unix_millis: i64,
-    #[prost(enumeration = "LogChannel", tag = "6")]
-    pub channel: i32,
-    #[prost(bytes = "vec", tag = "7")]
-    pub payload: ::prost::alloc::vec::Vec<u8>,
-    #[prost(bool, tag = "8")]
-    pub end_of_stream: bool,
+    #[prost(oneof = "log_frame::Record", tags = "9, 10, 11, 12")]
+    pub record: ::core::option::Option<log_frame::Record>,
+}
+/// Nested message and enum types in `LogFrame`.
+pub mod log_frame {
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum Record {
+        #[prost(message, tag = "9")]
+        GroupStarted(super::LogGroup),
+        #[prost(message, tag = "10")]
+        Line(super::LogLine),
+        #[prost(message, tag = "11")]
+        GroupFinished(super::LogGroupFinished),
+        #[prost(message, tag = "12")]
+        StreamFinished(super::LogStreamFinished),
+    }
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct LogBatch {
@@ -1932,6 +1973,44 @@ impl LogChannel {
             "LOG_CHANNEL_STDOUT" => Some(Self::Stdout),
             "LOG_CHANNEL_STDERR" => Some(Self::Stderr),
             "LOG_CHANNEL_SYSTEM" => Some(Self::System),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum LogGroupKind {
+    Unspecified = 0,
+    Setup = 1,
+    Step = 2,
+    ActionPre = 3,
+    ActionPost = 4,
+    Cleanup = 5,
+}
+impl LogGroupKind {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "LOG_GROUP_KIND_UNSPECIFIED",
+            Self::Setup => "LOG_GROUP_KIND_SETUP",
+            Self::Step => "LOG_GROUP_KIND_STEP",
+            Self::ActionPre => "LOG_GROUP_KIND_ACTION_PRE",
+            Self::ActionPost => "LOG_GROUP_KIND_ACTION_POST",
+            Self::Cleanup => "LOG_GROUP_KIND_CLEANUP",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "LOG_GROUP_KIND_UNSPECIFIED" => Some(Self::Unspecified),
+            "LOG_GROUP_KIND_SETUP" => Some(Self::Setup),
+            "LOG_GROUP_KIND_STEP" => Some(Self::Step),
+            "LOG_GROUP_KIND_ACTION_PRE" => Some(Self::ActionPre),
+            "LOG_GROUP_KIND_ACTION_POST" => Some(Self::ActionPost),
+            "LOG_GROUP_KIND_CLEANUP" => Some(Self::Cleanup),
             _ => None,
         }
     }

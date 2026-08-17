@@ -26,11 +26,11 @@ export interface LiveLogControllerOptions {
     checkpoint: string,
   ) => void | Promise<void>;
   readonly onComplete?: (checkpoint: string | null) => void | Promise<void>;
-  readonly onFallback?: (failure: LiveLogFailure) => void | Promise<void>;
+  readonly onFailure?: (failure: LiveLogFailure) => void | Promise<void>;
   readonly onStateChange?: (state: LiveLogControllerState) => void;
   readonly initialCheckpoint?: string | null;
   readonly fetch?: LiveLogFetch;
-  /** Number of failed connection attempts before snapshot fallback. */
+  /** Number of failed connection attempts before delivery stops. */
   readonly maxConsecutiveFailures?: number;
 }
 
@@ -44,7 +44,7 @@ export type LiveLogControllerState =
     }
   | { readonly kind: "paused" }
   | { readonly kind: "complete" }
-  | { readonly kind: "fallback"; readonly failure: LiveLogFailure };
+  | { readonly kind: "failed"; readonly failure: LiveLogFailure };
 
 export interface LiveLogFailure {
   readonly code: "ticket" | "transport" | "protocol" | "network" | "client";
@@ -230,8 +230,8 @@ export class LiveLogController {
         failures += 1;
         const failure = safeFailure(error);
         if (failures > this.#maximumFailures) {
-          this.#emit({ kind: "fallback", failure });
-          await this.#options.onFallback?.(failure);
+          this.#emit({ kind: "failed", failure });
+          await this.#options.onFailure?.(failure);
           return;
         }
         const delayMs = Math.min(

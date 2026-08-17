@@ -33,10 +33,10 @@ use automata_ci_core::{
     Architecture, AttemptId, FencingToken, JobAuthorityProfile, JobConclusion, JobId,
     JobInstanceIdentity, JobIr, JobIrEnvelope, JobIrVersion, JobIrVersionRange, JobLifecycle,
     JobPermissionRequest, JobResult, JobSecretExposure, JobSource, Lease, LeaseGuard, LeaseId,
-    LogChannel, LogFrame, LogSequence, LogStreamId, OperatingSystem, OperationId, RunId,
-    RunValueTemplates, RunnerCapabilities, RunnerGroup, RunnerId, RunnerLabel, RunnerPlatform,
-    RunnerRequirements, RunnerSessionId, RuntimeBoolean, SecretBinding, SemanticStep, Sha256Digest,
-    ShellTemplate, StepId, StepIr, UnixMillis, ValueTemplate, WorkflowId,
+    LogFrame, LogSequence, LogStreamId, OperatingSystem, OperationId, RunId, RunValueTemplates,
+    RunnerCapabilities, RunnerGroup, RunnerId, RunnerLabel, RunnerPlatform, RunnerRequirements,
+    RunnerSessionId, RuntimeBoolean, SecretBinding, SemanticStep, Sha256Digest, ShellTemplate,
+    StepId, StepIr, UnixMillis, ValueTemplate, WorkflowId,
 };
 use automata_ci_protocol::{
     CommandAck, CommandCursor, CommandSequence, HandshakeErrorCode,
@@ -2923,14 +2923,11 @@ async fn rejected_durable_log_authority_fails_before_blob_or_sql_commit() {
         ),
         LeaseGuard::new(LeaseId::new(), FencingToken::new(1).expect("fencing token")),
         vec![
-            LogFrame::new(
+            LogFrame::stream_finished(
                 LogStreamId::new(),
                 AttemptId::new(),
                 LogSequence::new(0),
                 UnixMillis::new(2_000),
-                LogChannel::Stdout,
-                b"untrusted output".to_vec(),
-                true,
             )
             .expect("log frame"),
         ],
@@ -3009,14 +3006,11 @@ async fn lease_log_and_terminal_ingress_replay_exact_acknowledgements_once() {
         ),
         guard,
         vec![
-            LogFrame::new(
+            LogFrame::stream_finished(
                 stream_id,
                 attempt_id,
                 LogSequence::new(0),
                 UnixMillis::new(2_000),
-                LogChannel::Stdout,
-                b"hello".to_vec(),
-                true,
             )
             .expect("log frame"),
         ],

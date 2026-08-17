@@ -9,6 +9,9 @@
 
 .log-viewer {
   overflow: hidden;
+  border: 1px solid var(--border-default);
+  border-radius: 6px;
+  background: var(--canvas-default);
 }
 
 .log-toolbar {
@@ -16,16 +19,17 @@
   min-height: 56px;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
-  padding: 10px 16px;
+  gap: 12px;
+  padding: 10px 12px 10px 16px;
   background: var(--canvas-subtle);
   border-bottom: 1px solid var(--border-default);
 }
 
-.log-toolbar > div:first-child {
+.log-toolbar__title,
+.log-toolbar__actions {
   display: flex;
   min-width: 0;
-  align-items: baseline;
+  align-items: center;
   gap: 8px;
 }
 
@@ -35,55 +39,171 @@
   font-weight: 600;
 }
 
-.log-toolbar > div:first-child > span {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--fg-muted);
-  font-size: 12px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .log-search {
-  flex: 0 1 280px;
+  width: min(28vw, 280px);
   min-width: 180px;
 }
 
-.log-search-form {
-  display: flex;
-  flex: 0 1 480px;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 8px;
+.log-search input {
+  width: 100%;
 }
 
-.log-notice {
+.button--compact {
+  min-height: 32px;
+  padding: 4px 10px;
+  white-space: nowrap;
+}
+
+.log-stream-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+
+.log-stream-state > span {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.log-stream-state[data-state="open"] {
+  color: var(--success-fg);
+}
+
+.log-stream-state[data-state="failed"] {
+  color: var(--danger-fg);
+}
+
+.log-stream-state[data-state="connecting"] > span,
+.log-stream-state[data-state="reconnecting"] > span {
+  animation: log-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes log-pulse {
+  50% { opacity: 0.35; }
+}
+
+.log-notice,
+.log-stream-error {
   margin: 0;
-  padding: 10px 16px;
+  padding: 9px 16px;
   color: var(--fg-muted);
   background: var(--canvas-subtle);
   border-bottom: 1px solid var(--border-default);
   font-size: 12px;
-  overflow-wrap: anywhere;
 }
 
-.log-output {
+.log-stream-error {
+  color: var(--danger-fg);
+}
+
+.log-groups {
+  max-height: min(72vh, 920px);
+  min-height: 220px;
+  overflow: auto;
+  background: var(--log-canvas);
+  color: var(--log-fg);
+  scrollbar-gutter: stable;
+}
+
+.log-groups:focus-visible {
+  outline-offset: -2px;
+}
+
+.log-group + .log-group {
+  border-top: 1px solid var(--log-border);
+}
+
+.log-group__summary {
   display: grid;
-  grid-template-columns:
-    minmax(48px, max-content) 84px 68px
-    minmax(var(--log-message-min-width), 1fr);
-  max-width: 100%;
-  overflow-x: auto;
+  width: 100%;
+  grid-template-columns: 18px 16px minmax(0, 1fr) max-content;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
   color: var(--log-fg);
   background: var(--log-canvas);
-  border-top: 1px solid var(--log-border);
+  border: 0;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.log-group__summary:hover {
+  background: var(--log-highlight);
+}
+
+.log-group__summary:focus-visible {
+  position: relative;
+  z-index: 1;
+  outline-offset: -2px;
+}
+
+.log-group__chevron {
+  color: var(--log-muted);
+  font-size: 20px;
+  line-height: 1;
+  transform: rotate(0deg);
+  transition: transform 120ms ease;
+}
+
+.log-group__summary[aria-expanded="true"] .log-group__chevron {
+  transform: rotate(90deg);
+}
+
+.log-group__status {
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--log-muted);
+  border-radius: 50%;
+}
+
+.log-group[data-state="running"] .log-group__status {
+  border-color: var(--log-accent);
+  border-right-color: transparent;
+  animation: log-spin 900ms linear infinite;
+}
+
+.log-group[data-state="success"] .log-group__status {
+  border-color: var(--success-fg);
+  background: var(--success-fg);
+}
+
+.log-group[data-state="failure"] .log-group__status,
+.log-group[data-state="timed_out"] .log-group__status,
+.log-group[data-state="cancelled"] .log-group__status {
+  border-color: var(--danger-fg);
+  background: var(--danger-fg);
+}
+
+@keyframes log-spin { to { transform: rotate(360deg); } }
+
+.log-group__name {
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.log-group__duration {
+  color: var(--log-muted);
+  font-size: 12px;
+}
+
+.log-group__output {
+  display: grid;
+  grid-template-columns: minmax(54px, max-content) 88px minmax(var(--log-message-min-width), 1fr);
+  overflow-x: auto;
+  border-top: 1px solid var(--log-border-muted);
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: 12px;
   line-height: 1.55;
 }
 
-.log-output:focus-visible,
-.log-line > a:focus-visible {
+.log-group__output:focus-visible {
   outline-offset: -2px;
 }
 
@@ -91,7 +211,7 @@
   display: grid;
   grid-column: 1 / -1;
   grid-template-columns: subgrid;
-  min-height: 28px;
+  min-height: 26px;
   align-items: start;
 }
 
@@ -112,30 +232,13 @@
   white-space: nowrap;
 }
 
-.log-line > a:hover {
-  color: var(--log-accent);
-  text-decoration: none;
+.log-line > a:focus-visible {
+  outline-offset: -2px;
 }
 
 .log-line > time {
   padding: 4px 10px 3px;
   color: var(--log-muted);
-}
-
-.log-line__channel {
-  padding: 4px 8px 3px;
-  color: var(--log-muted);
-  font-size: 11px;
-  text-transform: uppercase;
-}
-
-.log-line[data-channel="stderr"] .log-line__channel,
-.log-line[data-channel="stderr"] > code {
-  color: var(--log-danger);
-}
-
-.log-line[data-channel="system"] .log-line__channel {
-  color: var(--log-system);
 }
 
 .log-line > code {
@@ -148,15 +251,18 @@
   white-space: pre-wrap;
 }
 
-.log-output__empty {
-  grid-column: 1 / -1;
-  min-width: var(--log-output-min-width);
-  margin: 0;
-  padding: 18px 16px;
-  color: var(--log-muted);
+.log-line[data-channel="stderr"] > code {
+  color: var(--log-danger);
 }
 
-.log-pagination {
-  background: var(--canvas-default);
-  border-color: var(--log-border);
+.log-group__empty,
+.log-empty {
+  padding: 18px 16px;
+  color: var(--log-muted);
+  font-family: var(--font-sans);
+  font-size: 13px;
+}
+
+.log-group__empty {
+  grid-column: 1 / -1;
 }

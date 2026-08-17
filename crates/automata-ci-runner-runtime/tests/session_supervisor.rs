@@ -1649,12 +1649,12 @@ async fn executor_failure_is_terminalized_per_slot_while_sibling_and_supervisor_
     assert!(
         frames[..support::FAILURE_ISOLATION_LOG_COUNT]
             .iter()
-            .all(|frame| frame.channel() == LogChannel::Stdout
+            .all(|frame| frame.channel() == Some(LogChannel::Stdout)
                 && !frame.payload().is_empty()
                 && !frame.is_end_of_stream())
     );
     let eos = frames.last().expect("runtime EOS");
-    assert_eq!(eos.channel(), LogChannel::System);
+    assert_eq!(eos.channel(), None);
     assert!(eos.payload().is_empty());
     assert!(eos.is_end_of_stream());
     assert_eq!(
@@ -1845,7 +1845,7 @@ async fn credential_free_executor_failure_remains_secretless_without_an_authorit
         "zero-credential infrastructure failures remain eligible for public persistence"
     );
     assert!(client.log_frames().iter().any(|frame| {
-        frame.channel() == LogChannel::Stdout
+        frame.channel() == Some(LogChannel::Stdout)
             && !frame.payload().is_empty()
             && !frame.is_end_of_stream()
     }));

@@ -1,7 +1,6 @@
 use automata_ci_github_runtime::{
-    AnnotationLevel, CommandNotice, GithubWorkflowCommandSession, LegacyStepMutation,
-    MatcherCommand, SecretMask, WorkflowCommandError, WorkflowCommandEvent, WorkflowCommandLimits,
-    WorkflowCommandPolicy, WorkflowCommandProcessor, WorkflowLine,
+    AnnotationLevel, GithubWorkflowCommandSession, MatcherCommand, SecretMask,
+    WorkflowCommandEvent, WorkflowCommandProcessor, WorkflowLine,
 };
 
 fn render(line: WorkflowLine) -> String {
@@ -71,7 +70,7 @@ fn reviewed_command_fixture_matches_golden() {
 }
 
 #[test]
-fn current_and_legacy_grammars_use_their_exact_escape_maps() {
+fn current_grammar_uses_its_exact_escape_map_and_old_syntax_is_output() {
     let mut session = GithubWorkflowCommandSession::default();
     let current = session
         .process_line(b"::warning title=a%2Cb%3Ac::x%0Ay%252C")
@@ -82,14 +81,16 @@ fn current_and_legacy_grammars_use_their_exact_escape_maps() {
     assert_eq!(current.property("title"), Some("a,b:c"));
     assert_eq!(current.message(), "x\ny%2C");
 
-    let legacy = session
+    let removed = session
         .process_line(b"prefix ##[warning title=a%3B%5D;]x%0Ay%253B")
-        .expect("valid legacy command");
-    let WorkflowLine::Command(WorkflowCommandEvent::Annotation(legacy)) = legacy else {
-        panic!("expected annotation");
+        .expect("removed syntax is ordinary output");
+    let WorkflowLine::Output(removed) = removed else {
+        panic!("removed syntax was still recognized");
     };
-    assert_eq!(legacy.property("title"), Some("a;]"));
-    assert_eq!(legacy.message(), "x\ny%3B");
+    assert_eq!(
+        removed.as_str(),
+        "prefix ##[warning title=a%3B%5D;]x%0Ay%253B"
+    );
 }
 
 #[test]
@@ -183,7 +184,7 @@ fn annotation_locations_follow_upstream_normalization_rules() {
 }
 
 #[test]
-fn matcher_echo_and_deprecated_mutations_are_typed() {
+fn matcher_and_echo_commands_are_typed() {
     let mut session = GithubWorkflowCommandSession::default();
     assert!(matches!(
         session
@@ -200,84 +201,29 @@ fn matcher_echo_and_deprecated_mutations_are_typed() {
         WorkflowLine::Command(WorkflowCommandEvent::EchoChanged(true))
     ));
     assert!(session.echo_enabled());
-    let output = session
-        .process_line(b"::set-output name=result::yes")
-        .expect("legacy output remains supported");
-    let WorkflowLine::Command(WorkflowCommandEvent::LegacyMutation(LegacyStepMutation::Output(
-        output,
-    ))) = output
-    else {
-        panic!("expected legacy output");
-    };
-    assert_eq!(output.name(), "result");
-    assert_eq!(output.value(), "yes");
 }
 
 #[test]
-fn insecure_legacy_env_and_path_commands_require_explicit_policy() {
-    let mut default_session = GithubWorkflowCommandSession::default();
-    assert_eq!(
-        default_session.process_line(b"::set-env name=KEY::value"),
-        Err(WorkflowCommandError::LegacyCommandDisabled)
-    );
-
-    let mut enabled = GithubWorkflowCommandSession::new(
-        WorkflowCommandLimits::default(),
-        WorkflowCommandPolicy::new(true, true),
-    );
-    assert!(matches!(
-        enabled
-            .process_line(b"::set-env name=NODE_OPTIONS::unsafe")
-            .expect("blocked value is a notice"),
-        WorkflowLine::Command(WorkflowCommandEvent::Notice(
-            CommandNotice::BlockedNodeOptions
-        ))
-    ));
-    let path = enabled
-        .process_line(b"::add-path::/tool/bin")
-        .expect("opted-in add-path");
-    let WorkflowLine::Command(WorkflowCommandEvent::LegacyMutation(LegacyStepMutation::Path(path))) =
-        path
-    else {
-        panic!("expected PATH mutation");
-    };
-    assert_eq!(path.as_str(), "/tool/bin");
-}
-
-#[test]
-fn legacy_set_env_defers_reserved_names_to_target_aware_application() {
-    let mut enabled = GithubWorkflowCommandSession::new(
-        WorkflowCommandLimits::default(),
-        WorkflowCommandPolicy::new(true, true),
-    );
-
-    for name in [
-        "GITHUB_ENV",
-        "github_path",
-        "gItHuB_workspace",
-        "RUNNER_OS",
-        "runner_temp",
-        "rUnNeR_arch",
-        "CI",
-        "ci",
+fn removed_stdout_mutations_are_plain_output() {
+    let mut session = GithubWorkflowCommandSession::default();
+    for line in [
+        "::set-output name=result::yes",
+        "::save-state name=token::value",
+        "::set-env name=KEY::value",
+        "::add-path::/tool/bin",
     ] {
-        let line = format!("::set-env name={name}::attacker");
-        let event = enabled
+        let parsed = session
             .process_line(line.as_bytes())
-            .expect("target-dependent name is preserved");
-        let WorkflowLine::Command(WorkflowCommandEvent::LegacyMutation(
-            LegacyStepMutation::Environment(command),
-        )) = event
-        else {
-            panic!("expected deferred environment mutation for {name}");
+            .expect("removed commands are ordinary output");
+        let WorkflowLine::Output(output) = parsed else {
+            panic!("removed stdout mutation was still recognized");
         };
-        assert_eq!(command.name(), name);
-        assert_eq!(command.value(), "attacker");
+        assert_eq!(output.as_str(), line);
     }
 }
 
 #[test]
-fn v2_only_trims_leading_space_while_legacy_can_have_a_prefix() {
+fn current_syntax_trims_leading_space_but_rejects_prefixes() {
     let mut session = GithubWorkflowCommandSession::default();
     assert!(matches!(
         session
@@ -294,7 +240,7 @@ fn v2_only_trims_leading_space_while_legacy_can_have_a_prefix() {
     assert!(matches!(
         session
             .process_line(b"prefix ##[debug]yes")
-            .expect("legacy prefix is valid"),
-        WorkflowLine::Command(WorkflowCommandEvent::Debug(_))
+            .expect("removed syntax is output"),
+        WorkflowLine::Output(_)
     ));
 }

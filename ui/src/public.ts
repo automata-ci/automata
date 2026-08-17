@@ -30,12 +30,19 @@ export {
   type LiveLogTransportCapability,
   type SameOriginLiveLogAccessProviderOptions,
 } from "./liveLogs/protocol";
-export type { LiveLogChannel, LiveLogRecord } from "./liveLogs/sse";
+export type {
+  LiveLogChannel,
+  LiveLogGroup,
+  LiveLogGroupFinishedRecord,
+  LiveLogGroupKind,
+  LiveLogGroupStartedRecord,
+  LiveLogLineRecord,
+  LiveLogRecord,
+} from "./liveLogs/sse";
 export * from "./liveLogs";
 export type {
   ArtifactModel,
   CommitModel,
-  JobLogLineModel,
   JobLogLiveModel,
   JobLogPageModel,
   JobModel,

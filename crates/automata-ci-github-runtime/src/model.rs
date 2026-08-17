@@ -501,28 +501,6 @@ impl CompletedStepCommands {
         self
     }
 
-    /// Merges deprecated stdout mutations into the corresponding command-file
-    /// channels. This is pure and preserves observation order within each
-    /// channel.
-    #[must_use]
-    pub fn with_legacy_mutations(mut self, mutations: &[LegacyStepMutation]) -> Self {
-        for mutation in mutations {
-            match mutation {
-                LegacyStepMutation::Environment(command) => {
-                    self.environment.commands.push(command.clone());
-                }
-                LegacyStepMutation::Output(command) => {
-                    self.output.commands.push(command.clone());
-                }
-                LegacyStepMutation::State(command) => {
-                    self.state.commands.push(command.clone());
-                }
-                LegacyStepMutation::Path(path) => self.path.paths.push(path.0.clone()),
-            }
-        }
-        self
-    }
-
     /// Returns decoded job-environment mutations.
     #[must_use]
     pub const fn environment(&self) -> &EnvironmentCommandFile {
@@ -798,7 +776,7 @@ impl fmt::Debug for JobCommandState {
     }
 }
 
-/// Non-fatal compatibility decision made while applying a completed step.
+/// Non-fatal policy decision made while applying a completed step.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PhaseApplicationNotice {
     /// A `NODE_OPTIONS` environment mutation was intentionally ignored.
@@ -1151,28 +1129,6 @@ impl fmt::Debug for MatcherOwner {
     }
 }
 
-/// One legacy PATH update, wrapped so its contents remain Debug-redacted.
-#[derive(Clone, Eq, PartialEq)]
-pub struct PathEntry(SensitiveText);
-
-impl PathEntry {
-    pub(crate) fn new(value: String) -> Self {
-        Self(SensitiveText::new(value))
-    }
-
-    /// Returns the potentially sensitive path for a job-environment adapter.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        self.0.as_str()
-    }
-}
-
-impl fmt::Debug for PathEntry {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.debug_tuple("PathEntry").field(&self.0).finish()
-    }
-}
-
 /// Pure problem-matcher declaration. Loading and validating JSON belongs to a
 /// workspace-confined matcher adapter.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1205,19 +1161,6 @@ impl MatcherCommand {
     }
 }
 
-/// Deprecated stdout mutation retained for compatibility with older actions.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum LegacyStepMutation {
-    /// Set or replace one job environment entry.
-    Environment(NameValueCommand),
-    /// Publish or replace one output for the current step.
-    Output(NameValueCommand),
-    /// Save or replace one value for the paired action post phase.
-    State(NameValueCommand),
-    /// Prepend one entry to the job PATH.
-    Path(PathEntry),
-}
-
 /// Non-fatal command behavior that a runner adapter should surface as a
 /// warning or compatibility diagnostic.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1228,7 +1171,7 @@ pub enum CommandNotice {
     MissingMatcherPath,
     /// A `remove-matcher` command supplied both or neither removal selector.
     InvalidMatcherRemoval,
-    /// A legacy attempt to set `NODE_OPTIONS` was intentionally ignored.
+    /// An attempt to set `NODE_OPTIONS` was intentionally ignored.
     BlockedNodeOptions,
 }
 
@@ -1251,8 +1194,6 @@ pub enum WorkflowCommandEvent {
     ResumeCommands,
     /// Add or remove one or more problem matchers.
     Matcher(MatcherCommand),
-    /// Apply a recognized legacy environment, output, state, or PATH mutation.
-    LegacyMutation(LegacyStepMutation),
     /// Change whether recognized command lines are echoed to the job log.
     EchoChanged(bool),
     /// Surface a non-fatal compatibility decision.
@@ -1268,31 +1209,19 @@ pub enum WorkflowLine {
     Command(WorkflowCommandEvent),
 }
 
-/// Opt-in compatibility switches matching upstream feature gates.
+/// Feature switches for stdout workflow-command parsing.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WorkflowCommandPolicy {
-    allow_insecure_legacy_commands: bool,
     enhanced_annotations: bool,
 }
 
 impl WorkflowCommandPolicy {
-    /// Creates a compatibility policy for one command session.
-    ///
-    /// `allow_insecure_legacy_commands` controls only legacy environment and
-    /// PATH mutation commands. `enhanced_annotations` controls recognition of
-    /// the newer `notice` command.
+    /// Creates a command policy for one session.
     #[must_use]
-    pub const fn new(allow_insecure_legacy_commands: bool, enhanced_annotations: bool) -> Self {
+    pub const fn new(enhanced_annotations: bool) -> Self {
         Self {
-            allow_insecure_legacy_commands,
             enhanced_annotations,
         }
-    }
-
-    /// Reports whether legacy `set-env` and `add-path` commands are accepted.
-    #[must_use]
-    pub const fn allow_insecure_legacy_commands(self) -> bool {
-        self.allow_insecure_legacy_commands
     }
 
     /// Reports whether `notice` is recognized as an annotation command.
@@ -1305,7 +1234,6 @@ impl WorkflowCommandPolicy {
 impl Default for WorkflowCommandPolicy {
     fn default() -> Self {
         Self {
-            allow_insecure_legacy_commands: false,
             enhanced_annotations: true,
         }
     }

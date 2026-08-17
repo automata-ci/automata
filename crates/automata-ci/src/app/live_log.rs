@@ -36,16 +36,17 @@ use tracing::error;
 use zeroize::{Zeroize as _, Zeroizing};
 
 use super::web::{
-    LiveLogBatch, LiveLogRecord, LogChannel, RepositoryPath, RequestContext, WebData, WebDataError,
+    LiveLogBatch, LiveLogRecord, LogChannel, LogGroup, LogGroupKind, LogRecord, RepositoryPath,
+    RequestContext, WebData, WebDataError,
 };
 
 /// Authenticated browser endpoint that issues a capability for one exact log.
 pub(crate) const BROWSER_LIVE_LOG_TICKET_PATH: &str =
     "/{owner}/{repository}/actions/runs/{run_id}/jobs/{job_id}/live-ticket";
 /// Credential-only public endpoint used by the reference streaming transport.
-pub(crate) const LIVE_LOG_SSE_PATH: &str = "/live/v1/logs";
+pub(crate) const LIVE_LOG_SSE_PATH: &str = "/live/v2/logs";
 
-const TICKET_PREFIX: &str = "allt_v1_";
+const TICKET_PREFIX: &str = "allt_v2_";
 const TICKET_RANDOM_BYTES: usize = 32;
 const TICKET_ENCODED_BYTES: usize = 43;
 const TICKET_LENGTH: usize = TICKET_PREFIX.len() + TICKET_ENCODED_BYTES;
@@ -524,30 +525,115 @@ struct SseLogDocument<'a> {
     sequence: String,
     fragment: Option<u32>,
     emitted_at_ms: i64,
-    channel: &'static str,
-    text: &'a str,
+    #[serde(flatten)]
+    record: SseLogRecord<'a>,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum SseLogRecord<'a> {
+    GroupStarted {
+        group: SseLogGroup<'a>,
+    },
+    Line {
+        group_id: &'a str,
+        channel: &'static str,
+        text: &'a str,
+    },
+    GroupFinished {
+        group_id: &'a str,
+        conclusion: &'static str,
+    },
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SseLogGroup<'a> {
+    id: &'a str,
+    parent_id: Option<&'a str>,
+    name: &'a str,
+    kind: &'static str,
+    ordinal: u32,
 }
 
 fn sse_log_event(scope: &HumanLiveLogScope, record: &LiveLogRecord) -> Result<Bytes, ()> {
-    let channel = match record.line.channel {
-        LogChannel::Stdout => "stdout",
-        LogChannel::Stderr => "stderr",
-        LogChannel::System => "system",
+    let (sequence, fragment, emitted_at_ms, payload) = match &record.record {
+        LogRecord::GroupStarted {
+            sequence,
+            emitted_at,
+            group,
+        } => (
+            *sequence,
+            None,
+            emitted_at.get(),
+            SseLogRecord::GroupStarted {
+                group: sse_log_group(group),
+            },
+        ),
+        LogRecord::Line(line) => (
+            line.sequence,
+            line.fragment,
+            line.emitted_at.get(),
+            SseLogRecord::Line {
+                group_id: &line.group_id,
+                channel: match line.channel {
+                    LogChannel::Stdout => "stdout",
+                    LogChannel::Stderr => "stderr",
+                    LogChannel::System => "system",
+                },
+                text: &line.text,
+            },
+        ),
+        LogRecord::GroupFinished {
+            sequence,
+            emitted_at,
+            group_id,
+            conclusion,
+        } => (
+            *sequence,
+            None,
+            emitted_at.get(),
+            SseLogRecord::GroupFinished {
+                group_id,
+                conclusion: match conclusion {
+                    automata_ci_core::JobConclusion::Success => "success",
+                    automata_ci_core::JobConclusion::Failure => "failure",
+                    automata_ci_core::JobConclusion::Cancelled => "cancelled",
+                    automata_ci_core::JobConclusion::TimedOut => "timed_out",
+                    automata_ci_core::JobConclusion::Skipped => "skipped",
+                },
+            },
+        ),
     };
     let document = SseLogDocument {
         protocol_version: HUMAN_LIVE_LOG_PROTOCOL_VERSION,
         stream_id: scope.stream_id().to_string(),
-        sequence: record.line.sequence.to_string(),
-        fragment: record.line.fragment,
-        emitted_at_ms: record.line.emitted_at.get(),
-        channel,
-        text: &record.line.text,
+        sequence: sequence.to_string(),
+        fragment,
+        emitted_at_ms,
+        record: payload,
     };
     let json = serde_json::to_string(&document).map_err(|_| ())?;
     Ok(Bytes::from(format!(
         "id: {}\nevent: log\ndata: {json}\n\n",
         record.checkpoint
     )))
+}
+
+fn sse_log_group(group: &LogGroup) -> SseLogGroup<'_> {
+    SseLogGroup {
+        id: &group.id,
+        parent_id: group.parent_id.as_deref(),
+        name: &group.name,
+        kind: match group.kind {
+            LogGroupKind::Setup => "setup",
+            LogGroupKind::Step => "step",
+            LogGroupKind::ActionPre => "action_pre",
+            LogGroupKind::ActionPost => "action_post",
+            LogGroupKind::Cleanup => "cleanup",
+        },
+        ordinal: group.ordinal,
+    }
 }
 
 fn sse_complete_event(checkpoint: Option<&str>) -> Bytes {
@@ -828,7 +914,7 @@ mod tests {
         assert!(ticket.expose_secret().starts_with(TICKET_PREFIX));
         assert_eq!(ticket.expose_secret().len(), TICKET_LENGTH);
         assert!(ticket_digest(ticket.expose_secret()).is_ok());
-        assert!(ticket_digest("allt_v1_not-canonical").is_err());
+        assert!(ticket_digest("allt_v2_not-canonical").is_err());
         assert!(!format!("{ticket:?}").contains(ticket.expose_secret()));
     }
 
@@ -840,8 +926,11 @@ mod tests {
             sequence: u64::MAX.to_string(),
             fragment: None,
             emitted_at_ms: 1_777_890_010_000,
-            channel: "stdout",
-            text: "complete",
+            record: SseLogRecord::Line {
+                group_id: "phase/1",
+                channel: "stdout",
+                text: "complete",
+            },
         };
 
         let json = serde_json::to_string(&document).expect("SSE JSON");

@@ -24,17 +24,16 @@ use axum::routing::{get, post};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::Deserialize;
-use sha2::{Digest as _, Sha256};
 use tokio::sync::Semaphore;
 use tracing::error;
 
 use super::data::{
-    EmptyWebData, JobLogRequest, LOG_PAGE_DECODED_BYTES, LOG_PAGE_SIZE, REPOSITORY_PAGE_SIZE,
-    RUN_JOB_PAGE_SIZE, RUN_PAGE_SIZE, RbacDirectBindingListRequest, RbacRoleDetailRequest,
-    RbacRoleListRequest, RbacUserDetailRequest, RbacUserListRequest, RbacWebData, RbacWebDataError,
-    RbacWebReadOutcome, RepositoryDirectoryRequest, RepositoryPath, RequestContext,
-    RunDetailRequest, RunListRequest, SetupPageAvailability, SetupPageAvailabilityError,
-    SetupPageAvailabilityState, StatusFilter, WebData, WebDataError,
+    EmptyWebData, REPOSITORY_PAGE_SIZE, RUN_JOB_PAGE_SIZE, RUN_PAGE_SIZE,
+    RbacDirectBindingListRequest, RbacRoleDetailRequest, RbacRoleListRequest,
+    RbacUserDetailRequest, RbacUserListRequest, RbacWebData, RbacWebDataError, RbacWebReadOutcome,
+    RepositoryDirectoryRequest, RepositoryPath, RequestContext, RunDetailRequest, RunListRequest,
+    SetupPageAvailability, SetupPageAvailabilityError, SetupPageAvailabilityState, StatusFilter,
+    WebData, WebDataError,
 };
 use super::encoding::percent_encode;
 use super::model;
@@ -97,13 +96,6 @@ struct ValidatedRunListQuery {
 #[serde(deny_unknown_fields)]
 struct RunDetailQuery {
     job_cursor: Option<String>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct JobLogQuery {
-    q: Option<String>,
-    cursor: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -268,10 +260,6 @@ fn router_with_optional_rbac_data(
         .route(
             "/{owner}/{repository}/actions/runs/{run_id}/jobs/{job_id}",
             get(job_log),
-        )
-        .route(
-            "/{owner}/{repository}/actions/runs/{run_id}/jobs/{job_id}/snapshot",
-            get(job_log_snapshot),
         )
         .route(
             "/{owner}/{repository}/actions/runs/{run_id}/artifacts/{artifact_id}",
@@ -1336,12 +1324,11 @@ async fn job_log(
     csrf: Option<Extension<Arc<CsrfToken>>>,
     path: Result<Path<(String, String, String, String)>, PathRejection>,
     RawQuery(raw_query): RawQuery,
-    query: Result<Query<JobLogQuery>, QueryRejection>,
 ) -> Response<Body> {
-    let (Ok(Path((owner, repository, run_id, job_id))), Ok(Query(query))) = (path, query) else {
+    let Ok(Path((owner, repository, run_id, job_id))) = path else {
         return bad_request();
     };
-    if !valid_raw_query_encoding(raw_query.as_deref()) {
+    if raw_query.as_deref().is_some_and(|query| !query.is_empty()) {
         return bad_request();
     }
     let Some(repository_path) = repository_path(owner, repository) else {
@@ -1353,34 +1340,22 @@ async fn job_log(
     let Some(job_id) = parse_job_id(&job_id) else {
         return bad_request();
     };
-    let Some((search, cursor)) = validate_log_query(query) else {
-        return bad_request();
-    };
     let context = request_context(&state, context);
     let csrf = csrf.map(|Extension(csrf)| csrf);
     let ShellMutationResolution::Valid(mutation) = shell_mutation(&context, csrf.as_deref()) else {
         return internal_server_error();
     };
-    let request = JobLogRequest {
-        cursor,
-        limit: LOG_PAGE_SIZE,
-        maximum_decoded_bytes: LOG_PAGE_DECODED_BYTES,
-    };
     let data = match state
         .data
-        .job_log(&context, &repository_path, run_id, job_id, &request)
+        .job_log(&context, &repository_path, run_id, job_id)
         .await
     {
         Ok(Some(data)) => data,
         Ok(None) if context.viewer().is_none() && context.sign_in_action().is_some() => {
-            let mut return_path = format!(
+            let return_path = format!(
                 "/{}/{}/actions/runs/{run_id}/jobs/{job_id}",
                 repository_path.owner, repository_path.name
             );
-            if let Some(query) = raw_query.as_deref().filter(|query| !query.is_empty()) {
-                return_path.push('?');
-                return_path.push_str(query);
-            }
             return deep_link_sign_in(state, &context, return_path).await;
         }
         Ok(None) => return not_found(),
@@ -1400,21 +1375,14 @@ async fn job_log(
             return internal_server_error();
         }
     };
-    let request_json = match model::job_log(
-        client_assets(),
-        csp_nonce.clone(),
-        &context,
-        mutation,
-        &search,
-        request.cursor.as_deref(),
-        data,
-    ) {
-        Ok(request) => request,
-        Err(error) => {
-            error!(%error, "failed to assemble job log page");
-            return internal_server_error();
-        }
-    };
+    let request_json =
+        match model::job_log(client_assets(), csp_nonce.clone(), &context, mutation, data) {
+            Ok(request) => request,
+            Err(error) => {
+                error!(%error, "failed to assemble job log page");
+                return internal_server_error();
+            }
+        };
     render(state, request_json, csp_nonce).await
 }
 
@@ -1439,82 +1407,6 @@ async fn deep_link_sign_in(
             }
         };
     render(state, request_json, csp_nonce).await
-}
-
-async fn job_log_snapshot(
-    State(state): State<WebState>,
-    context: Option<Extension<RequestContext>>,
-    csrf: Option<Extension<Arc<CsrfToken>>>,
-    path: Result<Path<(String, String, String, String)>, PathRejection>,
-    request_headers: HeaderMap,
-    RawQuery(raw_query): RawQuery,
-    query: Result<Query<JobLogQuery>, QueryRejection>,
-) -> Response<Body> {
-    let (Ok(Path((owner, repository, run_id, job_id))), Ok(Query(query))) = (path, query) else {
-        return bad_request();
-    };
-    if !valid_raw_query_encoding(raw_query.as_deref()) {
-        return bad_request();
-    }
-    let Some(repository_path) = repository_path(owner, repository) else {
-        return bad_request();
-    };
-    let Some(run_id) = parse_run_id(&run_id) else {
-        return bad_request();
-    };
-    let Some(job_id) = parse_job_id(&job_id) else {
-        return bad_request();
-    };
-    let Some((search, cursor)) = validate_log_query(query) else {
-        return bad_request();
-    };
-    let context = request_context(&state, context);
-    let csrf = csrf.map(|Extension(csrf)| csrf);
-    let ShellMutationResolution::Valid(mutation) = shell_mutation(&context, csrf.as_deref()) else {
-        return internal_server_error();
-    };
-    let request = JobLogRequest {
-        cursor,
-        limit: LOG_PAGE_SIZE,
-        maximum_decoded_bytes: LOG_PAGE_DECODED_BYTES,
-    };
-    let data = match state
-        .data
-        .job_log(&context, &repository_path, run_id, job_id, &request)
-        .await
-    {
-        Ok(Some(data)) => data,
-        // This endpoint is consumed only after the viewer has loaded the HTML
-        // page. A generic 404 on expired/changed authority preserves the same
-        // non-enumerating boundary without returning login HTML to `fetch`.
-        Ok(None) => return not_found(),
-        Err(error) => return data_error_response(error),
-    };
-    if !repository_matches(&data.repository, &repository_path)
-        || data.run.id != run_id
-        || data.job.id != job_id
-    {
-        error!("job snapshot data did not preserve its requested scope");
-        return internal_server_error();
-    }
-    let request_json = match model::job_log(
-        client_assets(),
-        // The snapshot is JSON rather than executable HTML, but using the same
-        // validated model builder keeps its shape and limits identical.
-        "snapshot".to_owned(),
-        &context,
-        mutation,
-        &search,
-        request.cursor.as_deref(),
-        data,
-    ) {
-        Ok(request) => request,
-        Err(error) => {
-            error!(%error, "failed to assemble job snapshot");
-            return internal_server_error();
-        }
-    };
-    json_snapshot_response(request_json, &request_headers)
 }
 
 async fn artifact(
@@ -1887,21 +1779,6 @@ fn validate_run_query(query: RunListQuery) -> Option<ValidatedRunListQuery> {
     })
 }
 
-fn validate_log_query(query: JobLogQuery) -> Option<(String, Option<String>)> {
-    let search = query.q.unwrap_or_default();
-    let trimmed = search.trim();
-    if search.len() > MAX_FILTER_BYTES
-        || search.chars().any(forbidden_display_character)
-        || (!trimmed.is_empty() && !is_safe_display_text(trimmed, MAX_FILTER_BYTES))
-    {
-        return None;
-    }
-    if !valid_cursor(query.cursor.as_deref()) {
-        return None;
-    }
-    Some((trimmed.to_owned(), query.cursor))
-}
-
 fn canonical_git_ref_length(value: &str) -> usize {
     if value.starts_with("refs/") {
         value.len()
@@ -1959,43 +1836,6 @@ fn if_none_match_matches(value: &HeaderValue, etag: &str) -> bool {
                     .is_some_and(|candidate| candidate == etag)
         })
     })
-}
-
-fn json_snapshot_response(body: String, request_headers: &HeaderMap) -> Response<Body> {
-    let digest = Sha256::digest(body.as_bytes());
-    let mut etag = String::with_capacity(2 + "sha256-".len() + digest.len() * 2);
-    etag.push('"');
-    etag.push_str("sha256-");
-    for byte in digest {
-        write!(&mut etag, "{byte:02x}").expect("writing to a String cannot fail");
-    }
-    etag.push('"');
-
-    let not_modified = request_headers
-        .get(IF_NONE_MATCH)
-        .is_some_and(|value| if_none_match_matches(value, &etag));
-    let mut response = if not_modified {
-        let mut response = Response::new(Body::empty());
-        *response.status_mut() = StatusCode::NOT_MODIFIED;
-        response
-    } else {
-        Response::new(Body::from(body))
-    };
-    let headers = response.headers_mut();
-    headers.insert(
-        CONTENT_TYPE,
-        HeaderValue::from_static("application/json; charset=utf-8"),
-    );
-    headers.insert(CACHE_CONTROL, HeaderValue::from_static(PAGE_CACHE_CONTROL));
-    headers.insert(
-        HeaderName::from_static("x-content-type-options"),
-        HeaderValue::from_static("nosniff"),
-    );
-    let Ok(etag) = HeaderValue::from_str(&etag) else {
-        return internal_server_error();
-    };
-    headers.insert(ETAG, etag);
-    response
 }
 
 fn artifact_response(download: super::data::ArtifactDownload) -> Response<Body> {
@@ -2399,12 +2239,12 @@ mod tests {
     use super::*;
     use crate::app::web::data::{
         ArtifactDownload, ArtifactSummary, CollectionVisibility, JobLogLive, JobLogPage,
-        JobNavigationItem, JobSummary, LogChannel, LogLine, RBAC_BINDING_PAGE_SIZE,
-        RBAC_ROLE_PAGE_SIZE, RBAC_USER_DETAIL_BINDING_LIMIT, RBAC_USER_PAGE_SIZE,
-        RbacDirectBindingListPage, RbacRoleListPage, RbacUserDetailPage, RbacUserListPage,
-        Repository as DataRepository, RepositoryDirectoryItem, RepositoryDirectoryPage,
-        RepositorySettingsDestination, RepositorySettingsPage, RunDetailPage, RunListPage,
-        RunSummary, Status, Viewer, VisibleCollection, Workflow, WorkflowDefinition,
+        JobNavigationItem, JobSummary, RBAC_BINDING_PAGE_SIZE, RBAC_ROLE_PAGE_SIZE,
+        RBAC_USER_DETAIL_BINDING_LIMIT, RBAC_USER_PAGE_SIZE, RbacDirectBindingListPage,
+        RbacRoleListPage, RbacUserDetailPage, RbacUserListPage, Repository as DataRepository,
+        RepositoryDirectoryItem, RepositoryDirectoryPage, RepositorySettingsDestination,
+        RepositorySettingsPage, RunDetailPage, RunListPage, RunSummary, Status, Viewer,
+        VisibleCollection, Workflow, WorkflowDefinition,
     };
 
     const WORKFLOW_ID: &str = "11111111-1111-4111-8111-11111111111a";
@@ -2489,9 +2329,6 @@ mod tests {
             repository: RepositoryPath,
             run_id: RunId,
             job_id: JobId,
-            cursor: Option<String>,
-            limit: usize,
-            maximum_decoded_bytes: usize,
         },
         Artifact {
             repository: RepositoryPath,
@@ -2661,15 +2498,11 @@ mod tests {
             repository: &RepositoryPath,
             run_id: RunId,
             job_id: JobId,
-            request: &JobLogRequest,
         ) -> Result<Option<JobLogPage>, WebDataError> {
             self.record(RecordedCall::JobLog {
                 repository: repository.clone(),
                 run_id,
                 job_id,
-                cursor: request.cursor.clone(),
-                limit: request.limit,
-                maximum_decoded_bytes: request.maximum_decoded_bytes,
             });
             let mut page = job_log_page();
             if self.outcome == FakeOutcome::ScopeMismatch {
@@ -3123,28 +2956,8 @@ mod tests {
             next_navigation_job_id: None,
             job,
             log_visibility: CollectionVisibility::Full,
-            lines: vec![
-                LogLine {
-                    sequence: 38,
-                    fragment: None,
-                    emitted_at: UnixMillis::new(1_777_890_010_000),
-                    channel: LogChannel::System,
-                    text: "Runner image is ready.".to_owned(),
-                },
-                LogLine {
-                    sequence: 39,
-                    fragment: Some(1),
-                    emitted_at: UnixMillis::new(1_777_890_115_000),
-                    channel: LogChannel::Stdout,
-                    text: "All 128 tests passed.".to_owned(),
-                },
-            ],
-            previous_cursor: None,
-            next_cursor: Some("log_40".to_owned()),
             live: Some(JobLogLive {
-                checkpoint: Some("log_39".to_owned()),
                 stream_closed: false,
-                more_available: true,
             }),
         }
     }
@@ -4538,9 +4351,7 @@ mod tests {
             run_list_path
         );
 
-        let job_path = format!(
-            "/acme-labs/payments-api/actions/runs/{RUN_ID}/jobs/{JOB_ID}?q=retry%20warning&cursor=log_20"
-        );
+        let job_path = format!("/acme-labs/payments-api/actions/runs/{RUN_ID}/jobs/{JOB_ID}");
         let response = get(&app, &job_path).await;
         assert_eq!(response.status(), StatusCode::OK);
         let requests = renderer.requests();
@@ -4551,7 +4362,7 @@ mod tests {
         )
         .expect("job-log render request JSON");
         assert_eq!(page["page"]["shell"]["signIn"]["returnPath"], job_path);
-        assert_eq!(page["page"]["pagination"]["currentCursor"], "log_20");
+        assert!(page["page"].get("pagination").is_none());
     }
 
     #[tokio::test]
@@ -4841,10 +4652,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn job_log_preserves_search_pagination_and_job_navigation() {
+    async fn job_log_renders_structured_stream_metadata_and_job_navigation() {
         let (app, renderer, data) = test_router(FakeOutcome::Found);
         let path = format!("/acme-labs/payments-api/actions/runs/{RUN_ID}/jobs/{JOB_ID}");
-        let response = get(&app, &format!("{path}?q=retry%20warning&cursor=log_20")).await;
+        let response = get(&app, &path).await;
         let page = renderer.page();
 
         assert_page_headers(&response, &page);
@@ -4870,14 +4681,14 @@ mod tests {
             page["page"]["jobs"][1]["href"],
             format!("/acme-labs/payments-api/actions/runs/{RUN_ID}/jobs/{OTHER_JOB_ID}")
         );
-        assert_eq!(page["page"]["search"]["query"], "retry warning");
-        assert_eq!(page["page"]["search"]["action"], path);
-        assert!(page["page"]["search"].get("refreshHref").is_none());
-        assert_eq!(page["page"]["lines"][1]["id"], format!("log-{JOB_ID}-39.1"));
-        assert_eq!(page["page"]["lines"][1]["channel"], "stdout");
-        assert_eq!(page["page"]["pagination"]["nextCursor"], "log_40");
-        assert_eq!(page["page"]["pagination"]["currentCursor"], "log_20");
-        assert!(page["page"]["pagination"].get("nextHref").is_none());
+        assert!(page["page"].get("search").is_none());
+        assert!(page["page"].get("lines").is_none());
+        assert!(page["page"].get("pagination").is_none());
+        assert_eq!(
+            page["page"]["live"]["ticketHref"],
+            format!("{path}/live-ticket")
+        );
+        assert_eq!(page["page"]["live"]["state"], "open");
         assert!(
             page["page"]["notice"]
                 .as_str()
@@ -4890,65 +4701,8 @@ mod tests {
                 repository: repository_path(),
                 run_id: run_id(),
                 job_id: job_id(),
-                cursor: Some("log_20".to_owned()),
-                limit: LOG_PAGE_SIZE,
-                maximum_decoded_bytes: LOG_PAGE_DECODED_BYTES,
             }]
         );
-    }
-
-    #[tokio::test]
-    async fn job_snapshot_is_bounded_no_store_json_with_conditional_revalidation() {
-        let (app, renderer, data) = test_router(FakeOutcome::Found);
-        let uri = format!(
-            "/acme-labs/payments-api/actions/runs/{RUN_ID}/jobs/{JOB_ID}/snapshot?q=retry%20warning&cursor=log_20"
-        );
-        let response = get(&app, &uri).await;
-
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            response.headers()[CONTENT_TYPE],
-            "application/json; charset=utf-8"
-        );
-        assert_eq!(response.headers()[CACHE_CONTROL], PAGE_CACHE_CONTROL);
-        assert_eq!(response.headers()["x-content-type-options"], "nosniff");
-        let etag = response.headers()[ETAG]
-            .to_str()
-            .expect("snapshot ETag")
-            .to_owned();
-        assert!(etag.starts_with("\"sha256-"));
-        let body = to_bytes(response.into_body(), 8 * 1_024 * 1_024)
-            .await
-            .expect("snapshot body");
-        let snapshot: serde_json::Value =
-            serde_json::from_slice(&body).expect("snapshot render request");
-        assert_eq!(snapshot["page"]["kind"], "job-log");
-        assert_eq!(snapshot["page"]["job"]["id"], JOB_ID);
-        assert_eq!(snapshot["page"]["search"]["query"], "retry warning");
-        assert_eq!(snapshot["page"]["pagination"]["currentCursor"], "log_20");
-        assert!(renderer.requests().is_empty());
-
-        let not_modified = app
-            .clone()
-            .oneshot(
-                HttpRequest::builder()
-                    .uri(&uri)
-                    .header(IF_NONE_MATCH, &etag)
-                    .body(Body::empty())
-                    .expect("conditional snapshot request"),
-            )
-            .await
-            .expect("snapshot route");
-        assert_eq!(not_modified.status(), StatusCode::NOT_MODIFIED);
-        assert_eq!(not_modified.headers()[ETAG], etag);
-        assert_eq!(not_modified.headers()[CACHE_CONTROL], PAGE_CACHE_CONTROL);
-        assert!(
-            to_bytes(not_modified.into_body(), 1)
-                .await
-                .expect("empty 304 body")
-                .is_empty()
-        );
-        assert_eq!(data.calls().len(), 2);
     }
 
     #[tokio::test]
@@ -5000,9 +4754,7 @@ mod tests {
             )
             .expect("anonymous sign-in context");
             let app = app.layer(Extension(context));
-            let uri = format!(
-                "/acme-labs/payments-api/actions/runs/{RUN_ID}/jobs/{JOB_ID}?q=retry%20warning"
-            );
+            let uri = format!("/acme-labs/payments-api/actions/runs/{RUN_ID}/jobs/{JOB_ID}");
 
             let response = get(&app, &uri).await;
             let page = renderer.page();
@@ -5020,9 +4772,6 @@ mod tests {
                     repository: repository_path(),
                     run_id: run_id(),
                     job_id: job_id(),
-                    cursor: None,
-                    limit: LOG_PAGE_SIZE,
-                    maximum_decoded_bytes: LOG_PAGE_DECODED_BYTES,
                 }]
             );
         }

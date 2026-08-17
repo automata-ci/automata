@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import type { PageModel } from "./models";
+import type { LiveLogRecord } from "./liveLogs/sse";
 import { ThemeToggle } from "./components/ThemeToggle";
 import { JobLogPage } from "./pages/JobLogPage";
 import { DeepLinkSignInPage } from "./pages/DeepLinkSignInPage";
@@ -18,9 +19,11 @@ import { SetupPage } from "./pages/SetupPage";
 export interface AppProps {
   readonly page: PageModel;
   readonly shellUtility?: ReactNode;
+  /** Structured sample records used only by the standalone UI preview. */
+  readonly initialJobLogRecords?: readonly LiveLogRecord[];
 }
 
-export function App({ page, shellUtility }: AppProps) {
+export function App({ page, shellUtility, initialJobLogRecords = [] }: AppProps) {
   const utility = shellUtility === undefined ? <ThemeToggle /> : shellUtility;
 
   switch (page.kind) {
@@ -33,7 +36,7 @@ export function App({ page, shellUtility }: AppProps) {
     case "run-detail":
       return <RunDetailPage model={page} shellUtility={utility} />;
     case "job-log":
-      return <JobLogPage model={page} shellUtility={utility} />;
+      return <JobLogPage initialRecords={initialJobLogRecords} model={page} shellUtility={utility} />;
     case "deep-link-sign-in":
       return <DeepLinkSignInPage model={page} shellUtility={utility} />;
     case "repository-settings":

@@ -1,341 +1,207 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import type { JobLogLineModel, JobLogPageModel } from "../models";
+import type { JobLogPageModel } from "../models";
+import type {
+  LiveLogGroup,
+  LiveLogGroupFinishedRecord,
+  LiveLogLineRecord,
+  LiveLogRecord,
+} from "../liveLogs/sse";
+import { LiveLogController, type LiveLogControllerState } from "../liveLogs/controller";
+import { createSameOriginLiveLogAccessProvider } from "../liveLogs/protocol";
 import { ActionsLayout } from "../components/ActionsLayout";
 import { Breadcrumbs } from "../components/Breadcrumbs";
-import { Icon } from "../components/Icon";
-import { MetadataSeparator } from "../components/MetadataSeparator";
-import { Pagination } from "../components/Pagination";
 import { RunNavigation } from "../components/RunNavigation";
 import { Shell } from "../components/Shell";
 import { StatusBadge } from "../components/StatusBadge";
-import {
-  enforceLogQueryValidity,
-  isValidLogQuery,
-} from "../components/textInputConstraints";
 import { durationCopy, startTimeCopy } from "../presentation/runPresentation";
-import { encodeQueryComponent } from "../queryEncoding";
-import { parseRenderRequest } from "../serialization";
-import { RENDER_REQUEST_LIMITS } from "../validation/limits";
 
 export interface JobLogPageProps {
   readonly model: JobLogPageModel;
   readonly shellUtility?: ReactNode;
+  /** Structured sample records used only by the standalone UI preview. */
+  readonly initialRecords?: readonly LiveLogRecord[];
 }
 
-const LOG_OUTPUT_ID = "job-log-output";
-const LOG_RESULT_COUNT_ID = "job-log-result-count";
+interface LogGroupView extends LiveLogGroup {
+  readonly startedAtMs: number;
+  readonly finishedAtMs: number | null;
+  readonly conclusion: LiveLogGroupFinishedRecord["conclusion"] | null;
+  readonly lines: LiveLogLineRecord[];
+}
 
-export function JobLogPage({ model, shellUtility }: JobLogPageProps) {
-  const [liveModel, setLiveModel] = useState(model);
-  const [query, setQuery] = useState(model.search.query);
-  const normalizedQuery = normalizeQuery(query);
-  const visibleLines = useMemo(
-    () => filterLogLines(liveModel.lines, normalizedQuery),
-    [liveModel.lines, normalizedQuery],
-  );
-  const resultLabel =
-    normalizedQuery.length === 0
-      ? liveModel.pagination.label
-      : matchingLineCount(visibleLines.length);
-  const canRefresh =
-    liveModel.job.status.tone === "queued" ||
-    liveModel.job.status.tone === "running";
-  const navigationQuery = isValidLogQuery(query)
-    ? query.trim()
-    : liveModel.search.query;
-  const refreshHref = logQueryHref(
-    liveModel.search.action,
-    navigationQuery,
-    liveModel.pagination.currentCursor,
-  );
+type ConnectionState = LiveLogControllerState["kind"] | "idle";
+
+export function JobLogPage({ model, shellUtility, initialRecords = [] }: JobLogPageProps) {
+  const initialStateRef = useRef<InitialLogViewState | null>(null);
+  initialStateRef.current ??= replayRecords(initialRecords);
+  const groupsRef = useRef(initialStateRef.current.groups);
+  const [groups, setGroups] = useState<readonly LogGroupView[]>(initialStateRef.current.ordered);
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(initialStateRef.current.expanded);
+  const [query, setQuery] = useState("");
+  const [connection, setConnection] = useState<ConnectionState>("idle");
+  const [following, setFollowing] = useState(true);
+  const followingRef = useRef(true);
+  const [streamError, setStreamError] = useState<string | null>(null);
+  const viewerRef = useRef<HTMLDivElement>(null);
+  const shouldScrollRef = useRef(false);
+
   useEffect(() => {
-    if (!canRefresh) {
-      return undefined;
-    }
-    const controller = new AbortController();
-    let timeout: number | undefined;
-    let etag: string | null = null;
-    let delay = 2_000;
-    const snapshotHref = logQueryHref(
-      `${model.job.href}/snapshot`,
-      model.search.query,
-      model.pagination.currentCursor,
-    );
-    const schedule = (nextDelay = delay) => {
-      window.clearTimeout(timeout);
-      if (document.visibilityState === "visible") {
-        timeout = window.setTimeout(async () => {
-          try {
-            const headers = new Headers();
-            headers.set("Accept", "application/json");
-            if (etag !== null) {
-              headers.set("If-None-Match", etag);
-            }
-            const response = await fetch(snapshotHref, {
-              credentials: "same-origin",
-              headers,
-              signal: controller.signal,
-            });
-            if (response.status === 304) {
-              delay = 2_000;
-              schedule();
-              return;
-            }
-            if (!response.ok) {
-              throw new Error(`job snapshot returned ${response.status}`);
-            }
-            const next = parseRenderRequest(await response.text());
-            if (
-              next.page.kind !== "job-log" ||
-              next.page.job.id !== model.job.id ||
-              next.page.job.href !== model.job.href ||
-              next.page.run.href !== model.run.href
-            ) {
-              throw new Error("job snapshot changed request scope");
-            }
-            etag = response.headers.get("ETag");
-            delay = 2_000;
-            setLiveModel(next.page);
-            if (
-              next.page.job.status.tone === "queued" ||
-              next.page.job.status.tone === "running"
-            ) {
-              schedule();
-            }
-          } catch (error) {
-            if (controller.signal.aborted) {
-              return;
-            }
-            delay = Math.min(delay * 2, 30_000);
-            schedule(delay);
-          }
-        }, nextDelay);
-      }
-    };
+    if (model.live === null || model.logVisibility !== "full") return undefined;
+    const controller = new LiveLogController({
+      access: createSameOriginLiveLogAccessProvider({ endpoint: model.live.ticketHref }),
+      onRecord: (record) => {
+        shouldScrollRef.current = followingRef.current && isNearBottom(viewerRef.current);
+        applyRecord(groupsRef.current, record);
+        setGroups(orderedGroups(groupsRef.current));
+        if (record.type === "group_started") {
+          setExpanded((current) => new Set(current).add(record.group.id));
+        } else if (record.type === "group_finished") {
+          setExpanded((current) => {
+            const next = new Set(current);
+            if (record.conclusion === "success") next.delete(record.groupId);
+            else next.add(record.groupId);
+            return next;
+          });
+        }
+      },
+      onStateChange: (state) => setConnection(state.kind),
+      onFailure: (failure) => setStreamError(failure.message),
+    });
     const visibilityChanged = () => {
-      window.clearTimeout(timeout);
-      if (document.visibilityState === "visible") {
-        schedule(0);
-      }
+      if (document.visibilityState === "visible") void controller.start();
+      else controller.pause();
     };
     document.addEventListener("visibilitychange", visibilityChanged);
-    schedule();
+    void controller.start().catch(() => setStreamError("The log stream could not be opened."));
     return () => {
       document.removeEventListener("visibilitychange", visibilityChanged);
-      controller.abort();
-      window.clearTimeout(timeout);
+      controller.dispose();
     };
-  }, [
-    canRefresh,
-    model.job.href,
-    model.job.id,
-    model.pagination.currentCursor,
-    model.run.href,
-    model.search.query,
-  ]);
-  const clearHref = logQueryHref(
-    liveModel.search.clearHref,
-    "",
-    liveModel.pagination.currentCursor,
+  }, [model.live, model.logVisibility]);
+
+  useLayoutEffect(() => {
+    if (shouldScrollRef.current) {
+      viewerRef.current?.scrollTo({ top: viewerRef.current.scrollHeight });
+      shouldScrollRef.current = false;
+    }
+  }, [groups]);
+
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+  const visibleGroups = useMemo(
+    () => filterGroups(groups, normalizedQuery),
+    [groups, normalizedQuery],
   );
-  const pagination = useMemo(
-    () => ({
-      label: liveModel.pagination.label,
-      previousHref: cursorHref(
-        liveModel.search.action,
-        navigationQuery,
-        liveModel.pagination.previousCursor,
-      ),
-      nextHref: cursorHref(
-        liveModel.search.action,
-        navigationQuery,
-        liveModel.pagination.nextCursor,
-      ),
-    }),
-    [liveModel.pagination, liveModel.search.action, navigationQuery],
-  );
+  const canExpand = visibleGroups.length === 0 || visibleGroups.some((group) => !expanded.has(group.id));
+  const running = model.job.status.tone === "queued" || model.job.status.tone === "running";
 
   return (
-    <Shell
-      shell={liveModel.shell}
-      repository={liveModel.repository}
-      utility={shellUtility}
-    >
+    <Shell shell={model.shell} repository={model.repository} utility={shellUtility}>
       <main className="layout-wide page">
-        <ActionsLayout
-          navigation={
-            <RunNavigation
-              jobs={liveModel.jobs}
-              jobsVisibility="full"
-              pagination={liveModel.navigationPagination}
-              selectedJobId={liveModel.job.id}
-              summaryHref={liveModel.run.href}
-            />
-          }
-        >
-          <Breadcrumbs
-            items={[
-              { href: liveModel.repository.runsHref, label: "Actions" },
-              {
-                href: liveModel.run.workflowHref,
-                label: liveModel.run.workflowName,
-              },
-              {
-                href: liveModel.run.href,
-                label: `Run #${liveModel.run.number}`,
-              },
-              { href: null, label: liveModel.job.name },
-            ]}
+        <ActionsLayout navigation={
+          <RunNavigation
+            jobs={model.jobs}
+            jobsVisibility="full"
+            pagination={model.navigationPagination}
+            selectedJobId={model.job.id}
+            summaryHref={model.run.href}
           />
+        }>
+          <Breadcrumbs items={[
+            { href: model.repository.runsHref, label: "Actions" },
+            { href: model.run.workflowHref, label: model.run.workflowName },
+            { href: model.run.href, label: `Run #${model.run.number}` },
+            { href: null, label: model.job.name },
+          ]} />
 
           <header className="page-heading page-heading--run log-page-heading">
             <div>
               <div className="heading-status">
-                <StatusBadge status={liveModel.job.status} />
-                <span>Run attempt {liveModel.run.attempt}</span>
-                <span>Job attempt {liveModel.job.attempt}</span>
-                {liveModel.job.startedAt === null ? (
-                  <span>{startTimeCopy(liveModel.job.status)}</span>
-                ) : (
-                  <span>
-                    Started{" "}
-                    <time dateTime={liveModel.job.startedAt.iso}>
-                      {liveModel.job.startedAt.label}
-                    </time>
-                  </span>
-                )}
-                {liveModel.job.status.tone === "queued" &&
-                liveModel.job.durationLabel === null ? null : (
-                  <span>
-                    {durationCopy(
-                      liveModel.job.status,
-                      liveModel.job.durationLabel,
-                    )}
-                  </span>
-                )}
+                <StatusBadge status={model.job.status} />
+                <span>Run attempt {model.run.attempt}</span>
+                <span>Job attempt {model.job.attempt}</span>
+                <span>{model.job.startedAt === null ? startTimeCopy(model.job.status) : `Started ${model.job.startedAt.label}`}</span>
+                {model.job.durationLabel === null ? null : <span>{durationCopy(model.job.status, model.job.durationLabel)}</span>}
               </div>
-              <h1>{liveModel.job.name}</h1>
-              <p>
-                <a href={liveModel.run.href}>
-                  Run #{liveModel.run.number}: {liveModel.run.name}
-                </a>
-                {liveModel.job.runnerLabel === null ? null : (
-                  <>
-                    <MetadataSeparator />
-                    {liveModel.job.runnerLabel}
-                  </>
-                )}
-              </p>
+              <h1>{model.job.name}</h1>
+              <p><a href={model.run.href}>Run #{model.run.number}: {model.run.name}</a></p>
             </div>
-            {canRefresh ? (
-              <a className="button" href={refreshHref}>
-                Refresh
-              </a>
-            ) : null}
           </header>
 
-          <section
-            className="panel log-viewer"
-            aria-labelledby="job-logs-heading"
-          >
+          <section className="log-viewer" aria-labelledby="job-logs-heading">
             <div className="log-toolbar">
-              <div>
+              <div className="log-toolbar__title">
                 <h2 id="job-logs-heading">Job logs</h2>
-                <span aria-live="polite" id={LOG_RESULT_COUNT_ID}>
-                  {resultLabel}
-                </span>
+                <StreamState state={connection} running={running} />
               </div>
-              {liveModel.logVisibility === "full" ? (
-                <form
-                  action={liveModel.search.action}
-                  aria-label="Search job logs"
-                  className="log-search-form"
-                  method="get"
-                  role="search"
-                >
-                  {liveModel.pagination.currentCursor === null ? null : (
-                    <input
-                      name="cursor"
-                      type="hidden"
-                      value={liveModel.pagination.currentCursor}
-                    />
-                  )}
-                  <div className="filter-search log-search">
-                    <Icon name="search" />
-                    <label className="sr-only" htmlFor="log-search">
-                      Search job logs
-                    </label>
+              {model.logVisibility === "full" ? (
+                <div className="log-toolbar__actions">
+                  <label className="log-search">
+                    <span className="sr-only">Search job logs</span>
                     <input
                       autoCapitalize="none"
                       autoComplete="off"
-                      autoCorrect="off"
-                      aria-controls={LOG_OUTPUT_ID}
-                      aria-describedby={LOG_RESULT_COUNT_ID}
-                      id="log-search"
-                      maxLength={RENDER_REQUEST_LIMITS.shortTextLength}
-                      name="q"
                       onChange={(event) => setQuery(event.currentTarget.value)}
-                      onInput={(event) =>
-                        enforceLogQueryValidity(event.currentTarget)
-                      }
                       placeholder="Search logs"
                       spellCheck={false}
                       type="search"
                       value={query}
                     />
-                  </div>
-                  <button className="button" type="submit">
-                    Search
+                  </label>
+                  <button className="button button--compact" onClick={() => setExpanded(canExpand ? new Set(visibleGroups.map((group) => group.id)) : new Set())} type="button">
+                    {canExpand ? "Expand all" : "Collapse all"}
                   </button>
-                  {query.trim().length === 0 ? null : (
-                    <a className="text-link" href={clearHref}>
-                      Clear search
-                    </a>
-                  )}
-                </form>
+                  <button
+                    aria-pressed={following}
+                    className="button button--compact"
+                    onClick={() => {
+                      followingRef.current = !followingRef.current;
+                      setFollowing(followingRef.current);
+                      if (followingRef.current) {
+                        viewerRef.current?.scrollTo({
+                          top: viewerRef.current.scrollHeight,
+                        });
+                      }
+                    }}
+                    type="button"
+                  >
+                    {following ? "Following" : "Follow logs"}
+                  </button>
+                </div>
               ) : null}
             </div>
 
-            {liveModel.notice === null ? null : (
-              <p className="log-notice" role="status">
-                {liveModel.notice}
-              </p>
-            )}
-
-            {liveModel.logVisibility === "restricted" ? (
-              <p className="log-output__empty" role="status">
-                Logs are unavailable or you do not have permission to view them.
-              </p>
+            {model.notice === null ? null : <p className="log-notice" role="status">{model.notice}</p>}
+            {streamError === null ? null : <p className="log-stream-error" role="alert">{streamError}</p>}
+            {model.logVisibility === "restricted" ? (
+              <div className="log-empty">Logs are unavailable or you do not have permission to view them.</div>
             ) : (
               <div
-                aria-label={`${liveModel.job.name} output`}
-                className="log-output"
-                id={LOG_OUTPUT_ID}
+                aria-label={`${model.job.name} output`}
+                className="log-groups"
+                onScroll={() => {
+                  if (!isNearBottom(viewerRef.current)) {
+                    followingRef.current = false;
+                    setFollowing(false);
+                  }
+                }}
+                ref={viewerRef}
                 role="region"
                 tabIndex={0}
               >
-                {visibleLines.length === 0 ? (
-                  <p className="log-output__empty">
-                    {normalizedQuery.length === 0
-                      ? "No log lines are available on this page."
-                      : "No log lines on this page match your search."}
-                  </p>
-                ) : (
-                  visibleLines.map((line) => (
-                    <LogLine key={line.id} line={line} />
-                  ))
-                )}
+                {visibleGroups.length === 0 ? (
+                  <div className="log-empty">{normalizedQuery === "" ? "Waiting for log output…" : "No steps match your search."}</div>
+                ) : visibleGroups.map((group) => (
+                  <LogGroupPanel
+                    expanded={expanded.has(group.id) || normalizedQuery !== ""}
+                    group={group}
+                    key={group.id}
+                    onToggle={() => setExpanded((current) => toggled(current, group.id))}
+                    query={normalizedQuery}
+                  />
+                ))}
               </div>
             )}
-
-            {liveModel.logVisibility === "full" ? (
-              <Pagination
-                label="Job log pages"
-                pagination={pagination}
-                variant="log"
-              />
-            ) : null}
           </section>
         </ActionsLayout>
       </main>
@@ -343,81 +209,139 @@ export function JobLogPage({ model, shellUtility }: JobLogPageProps) {
   );
 }
 
-function LogLine({ line }: { readonly line: JobLogLineModel }) {
-  const domId = logLineDomId(line.id);
-
+function LogGroupPanel({ expanded, group, onToggle, query }: {
+  readonly expanded: boolean;
+  readonly group: LogGroupView;
+  readonly onToggle: () => void;
+  readonly query: string;
+}) {
+  const lines = query === "" ? group.lines : group.lines.filter((line) => lineMatches(line, query));
+  const panelId = `log-group-${domSafe(group.id)}`;
   return (
-    <div className="log-line" data-channel={line.channel} id={domId}>
-      <a aria-label={`Link to log line ${line.number}`} href={`#${domId}`}>
-        {line.number}
-      </a>
-      <time dateTime={line.timestamp.iso}>{line.timestamp.label}</time>
-      <span className="log-line__channel">{line.channel}</span>
+    <article className="log-group" data-state={group.conclusion ?? "running"}>
+      <button aria-controls={panelId} aria-expanded={expanded} className="log-group__summary" onClick={onToggle} type="button">
+        <span aria-hidden="true" className="log-group__chevron">›</span>
+        <span aria-hidden="true" className="log-group__status" />
+        <span className="sr-only">{groupStatus(group)}</span>
+        <span className="log-group__name">{group.name}</span>
+        <span className="log-group__duration">{groupDuration(group)}</span>
+      </button>
+      {expanded ? (
+        <div
+          aria-label={`${group.name} log output`}
+          className="log-group__output"
+          id={panelId}
+          role="region"
+          tabIndex={0}
+        >
+          {lines.length === 0 ? <div className="log-group__empty">No output</div> : lines.map((line) => <LogLine key={`${line.sequence}.${line.fragment ?? 0}`} line={line} />)}
+        </div>
+      ) : null}
+    </article>
+  );
+}
+
+function LogLine({ line }: { readonly line: LiveLogLineRecord }) {
+  const number = line.fragment === null ? line.sequence : `${line.sequence}.${line.fragment}`;
+  const id = `log-line-${number.replace(".", "-")}`;
+  return (
+    <div className="log-line" data-channel={line.channel} id={id}>
+      <a aria-label={`Link to log line ${number}`} href={`#${id}`}>{number}</a>
+      <time dateTime={new Date(line.emittedAtMs).toISOString()}>{formatLogTime(line.emittedAtMs)}</time>
       <code>{line.text}</code>
     </div>
   );
 }
 
-function normalizeQuery(query: string): string {
-  return query.trim().toLowerCase();
+function StreamState({ state, running }: { readonly state: ConnectionState; readonly running: boolean }) {
+  const label = state === "open" ? "Live" : state === "reconnecting" || state === "connecting" ? "Connecting" : state === "complete" ? "Complete" : state === "failed" ? "Failed" : running ? "Waiting" : "Loaded";
+  return <span className="log-stream-state" data-state={state}><span aria-hidden="true" />{label}</span>;
 }
 
-function filterLogLines(
-  lines: readonly JobLogLineModel[],
-  normalizedQuery: string,
-): readonly JobLogLineModel[] {
-  return normalizedQuery.length === 0
-    ? lines
-    : lines.filter((line) => matchesQuery(line, normalizedQuery));
-}
-
-function matchesQuery(line: JobLogLineModel, normalizedQuery: string): boolean {
-  return [
-    line.number,
-    line.timestamp.iso,
-    line.timestamp.label,
-    line.channel,
-    line.text,
-  ].some((value) =>
-    value.toLowerCase().includes(normalizedQuery),
-  );
-}
-
-function matchingLineCount(count: number): string {
-  return `${count} matching ${count === 1 ? "line" : "lines"} on this page`;
-}
-
-function cursorHref(
-  action: string,
-  query: string,
-  cursor: string | null,
-): string | null {
-  if (cursor === null) {
-    return null;
+function applyRecord(groups: Map<string, LogGroupView>, record: LiveLogRecord): void {
+  if (record.type === "group_started") {
+    if (groups.has(record.group.id)) throw new Error("the log stream repeated a group");
+    if (
+      record.group.parentId !== null &&
+      !groups.has(record.group.parentId)
+    ) {
+      throw new Error("the log stream referenced an unknown parent group");
+    }
+    groups.set(record.group.id, { ...record.group, startedAtMs: record.emittedAtMs, finishedAtMs: null, conclusion: null, lines: [] });
+    return;
   }
-  return logQueryHref(action, query, cursor);
+  const groupId = record.groupId;
+  const group = groups.get(groupId);
+  if (group === undefined) throw new Error("the log stream referenced an unknown group");
+  if (group.conclusion !== null) {
+    throw new Error("the log stream referenced a finished group");
+  }
+  if (record.type === "line") {
+    group.lines.push(record);
+  } else {
+    groups.set(groupId, { ...group, finishedAtMs: record.emittedAtMs, conclusion: record.conclusion });
+  }
 }
 
-function logQueryHref(
-  action: string,
-  query: string,
-  cursor: string | null,
-): string {
-  const parameters: string[] = [];
-  if (query.length > 0) {
-    parameters.push(`q=${encodeQueryComponent(query)}`);
-  }
-  if (cursor !== null) {
-    parameters.push(`cursor=${encodeQueryComponent(cursor)}`);
-  }
-  if (parameters.length === 0) {
-    return action;
-  }
-  const separator = action.includes("?") ? "&" : "?";
-  return `${action}${separator}${parameters.join("&")}`;
+interface InitialLogViewState {
+  readonly groups: Map<string, LogGroupView>;
+  readonly ordered: readonly LogGroupView[];
+  readonly expanded: ReadonlySet<string>;
 }
 
-/** Keep host identities out of the document-wide ID namespace. */
-function logLineDomId(id: string): string {
-  return `automata-log-line-${id}`;
+function replayRecords(records: readonly LiveLogRecord[]): InitialLogViewState {
+  const groups = new Map<string, LogGroupView>();
+  for (const record of records) applyRecord(groups, record);
+  return {
+    groups,
+    ordered: orderedGroups(groups),
+    expanded: new Set(
+      [...groups.values()]
+        .filter((group) => group.conclusion !== "success")
+        .map((group) => group.id),
+    ),
+  };
+}
+
+function orderedGroups(groups: ReadonlyMap<string, LogGroupView>): readonly LogGroupView[] {
+  return [...groups.values()].sort((left, right) => left.ordinal - right.ordinal || left.id.localeCompare(right.id));
+}
+
+function filterGroups(groups: readonly LogGroupView[], query: string): readonly LogGroupView[] {
+  if (query === "") return groups;
+  return groups.filter((group) => group.name.toLocaleLowerCase().includes(query) || group.lines.some((line) => lineMatches(line, query)));
+}
+
+function lineMatches(line: LiveLogLineRecord, query: string): boolean {
+  return line.text.toLocaleLowerCase().includes(query) || line.channel.includes(query) || line.sequence.includes(query);
+}
+
+function toggled(values: ReadonlySet<string>, id: string): ReadonlySet<string> {
+  const next = new Set(values);
+  if (next.has(id)) next.delete(id); else next.add(id);
+  return next;
+}
+
+function isNearBottom(element: HTMLElement | null): boolean {
+  return element === null || element.scrollHeight - element.scrollTop - element.clientHeight < 80;
+}
+
+function groupDuration(group: LogGroupView): string {
+  if (group.finishedAtMs === null) return "Running";
+  const milliseconds = Math.max(0, group.finishedAtMs - group.startedAtMs);
+  return milliseconds < 1_000 ? `${milliseconds}ms` : `${(milliseconds / 1_000).toFixed(milliseconds < 10_000 ? 1 : 0)}s`;
+}
+
+function groupStatus(group: LogGroupView): string {
+  if (group.conclusion === null) return "Running";
+  if (group.conclusion === "timed_out") return "Timed out";
+  return `${group.conclusion[0]?.toLocaleUpperCase() ?? ""}${group.conclusion.slice(1)}`;
+}
+
+function formatLogTime(milliseconds: number): string {
+  return new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }).format(milliseconds);
+}
+
+function domSafe(value: string): string {
+  return value.replace(/[^A-Za-z0-9_-]/gu, "-");
 }

@@ -474,8 +474,8 @@ impl<'a> EnvironmentBuilder<'a> {
 /// Rejects workflow-controlled names in the runner-owned default catalog.
 ///
 /// `NODE_OPTIONS` remains valid in declarative environment maps. GitHub only
-/// blocks that name when it is written through `GITHUB_ENV` or legacy
-/// `set-env`, which is enforced by the runtime command applicator.
+/// blocks that name when it is written through `GITHUB_ENV`, which is enforced
+/// by the runtime command applicator.
 pub(crate) fn validate_environment_overlay_names<'name>(
     platform: CommandFilePlatform,
     names: impl IntoIterator<Item = &'name str>,

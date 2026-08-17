@@ -3,19 +3,41 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{AttemptId, CORE_SCHEMA_VERSION, LogStreamId, UnixMillis};
+use crate::{AttemptId, JobConclusion, LogStreamId, UnixMillis};
+
+/// Current durable execution-log document schema.
+pub const LOG_SCHEMA_VERSION: u16 = 2;
 
 /// Defensive maximum for one wire frame; larger writes must be chunked.
 pub const MAX_LOG_FRAME_BYTES: usize = 1_048_576;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum LogLimitRejection {
-    FrameBytes,
+    Frame,
+    GroupId,
+    GroupName,
 }
+
+const MAX_LOG_GROUP_ID_BYTES: usize = 256;
+const MAX_LOG_GROUP_NAME_BYTES: usize = 512;
 
 const fn log_frame_byte_rejection(observed: usize) -> Option<LogLimitRejection> {
     if observed > MAX_LOG_FRAME_BYTES {
-        return Some(LogLimitRejection::FrameBytes);
+        return Some(LogLimitRejection::Frame);
+    }
+    None
+}
+
+const fn log_group_id_byte_rejection(observed: usize) -> Option<LogLimitRejection> {
+    if observed > MAX_LOG_GROUP_ID_BYTES {
+        return Some(LogLimitRejection::GroupId);
+    }
+    None
+}
+
+const fn log_group_name_byte_rejection(observed: usize) -> Option<LogLimitRejection> {
+    if observed > MAX_LOG_GROUP_NAME_BYTES {
+        return Some(LogLimitRejection::GroupName);
     }
     None
 }
@@ -63,6 +85,186 @@ pub enum LogChannel {
     System,
 }
 
+/// Stable identity of one execution-log disclosure group.
+#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct LogGroupId(String);
+
+impl LogGroupId {
+    /// Creates a bounded portable group identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LogValidationError`] when the identity is empty, too large, or
+    /// contains characters outside the portable group-identity alphabet.
+    pub fn new(value: impl Into<String>) -> Result<Self, LogValidationError> {
+        let value = value.into();
+        if value.is_empty() {
+            return Err(LogValidationError::EmptyGroupId);
+        }
+        if log_group_id_byte_rejection(value.len()).is_some() {
+            return Err(LogValidationError::GroupIdTooLarge {
+                maximum: MAX_LOG_GROUP_ID_BYTES,
+            });
+        }
+        if !value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b':' | b'.' | b'_' | b'-' | b'/')
+        }) {
+            return Err(LogValidationError::InvalidGroupId);
+        }
+        Ok(Self(value))
+    }
+
+    /// Returns the exact case-sensitive group identity.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for LogGroupId {
+    type Error = LogValidationError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl From<LogGroupId> for String {
+    fn from(value: LogGroupId) -> Self {
+        value.0
+    }
+}
+
+/// Presentation kind for one execution-log group.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LogGroupKind {
+    /// Runner and sandbox preparation before workflow steps execute.
+    Setup,
+    /// A workflow-authored run or action step.
+    Step,
+    /// An action's pre-entrypoint.
+    ActionPre,
+    /// An action's registered post-entrypoint.
+    ActionPost,
+    /// Job-level service and sandbox cleanup.
+    Cleanup,
+}
+
+/// Immutable metadata announced before a group can own log lines.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LogGroup {
+    id: LogGroupId,
+    parent_id: Option<LogGroupId>,
+    name: String,
+    kind: LogGroupKind,
+    ordinal: u32,
+}
+
+impl LogGroup {
+    /// Creates a bounded execution-log group descriptor.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LogValidationError`] for an empty or unsafe name, or when a
+    /// group names itself as its parent.
+    pub fn new(
+        id: LogGroupId,
+        parent_id: Option<LogGroupId>,
+        name: impl Into<String>,
+        kind: LogGroupKind,
+        ordinal: u32,
+    ) -> Result<Self, LogValidationError> {
+        let group = Self {
+            id,
+            parent_id,
+            name: name.into(),
+            kind,
+            ordinal,
+        };
+        group.validate()?;
+        Ok(group)
+    }
+
+    fn validate(&self) -> Result<(), LogValidationError> {
+        if self.name.trim().is_empty() {
+            return Err(LogValidationError::EmptyGroupName);
+        }
+        if log_group_name_byte_rejection(self.name.len()).is_some() {
+            return Err(LogValidationError::GroupNameTooLarge {
+                maximum: MAX_LOG_GROUP_NAME_BYTES,
+            });
+        }
+        if self.name.chars().any(char::is_control) {
+            return Err(LogValidationError::InvalidGroupName);
+        }
+        if self.parent_id.as_ref() == Some(&self.id) {
+            return Err(LogValidationError::SelfParentGroup);
+        }
+        Ok(())
+    }
+
+    /// Returns the stable group identity.
+    #[must_use]
+    pub const fn id(&self) -> &LogGroupId {
+        &self.id
+    }
+
+    /// Returns the optional containing group.
+    #[must_use]
+    pub const fn parent_id(&self) -> Option<&LogGroupId> {
+        self.parent_id.as_ref()
+    }
+
+    /// Returns the redaction-safe display name.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Returns the presentation kind.
+    #[must_use]
+    pub const fn kind(&self) -> LogGroupKind {
+        self.kind
+    }
+
+    /// Returns the stable display ordinal within the attempt.
+    #[must_use]
+    pub const fn ordinal(&self) -> u32 {
+        self.ordinal
+    }
+}
+
+/// Typed payload of one ordered execution-log record.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LogRecord {
+    /// Announces immutable metadata before the group owns any lines.
+    GroupStarted {
+        /// Immutable metadata for the newly active group.
+        group: LogGroup,
+    },
+    /// One output payload explicitly owned by a previously announced group.
+    Line {
+        /// Group that owns the output bytes.
+        group_id: LogGroupId,
+        /// Logical source of the output bytes.
+        channel: LogChannel,
+        /// Raw bytes; canonical JSON uses an integer array.
+        payload: Vec<u8>,
+    },
+    /// Marks one announced group terminal.
+    GroupFinished {
+        /// Group reaching its terminal state.
+        group_id: LogGroupId,
+        /// Effective terminal conclusion.
+        conclusion: JobConclusion,
+    },
+    /// Closes the complete attempt log stream.
+    StreamFinished,
+}
+
 /// Independently retryable frame of log bytes.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct LogFrame {
@@ -71,38 +273,118 @@ pub struct LogFrame {
     attempt_id: AttemptId,
     sequence: LogSequence,
     emitted_at: UnixMillis,
-    channel: LogChannel,
-    /// Raw bytes. In canonical JSON this is an integer array, avoiding an
-    /// implicit or implementation-specific binary codec.
-    payload: Vec<u8>,
-    end_of_stream: bool,
+    record: LogRecord,
 }
 
 impl LogFrame {
-    /// Creates and validates a current-schema frame.
+    /// Announces one execution-log group.
     ///
     /// # Errors
     ///
-    /// Returns [`LogValidationError`] when the payload is empty without an
-    /// end marker or exceeds [`MAX_LOG_FRAME_BYTES`].
-    pub fn new(
+    /// Returns [`LogValidationError`] when the group metadata is invalid.
+    pub fn group_started(
         stream_id: LogStreamId,
         attempt_id: AttemptId,
         sequence: LogSequence,
         emitted_at: UnixMillis,
-        channel: LogChannel,
-        payload: Vec<u8>,
-        end_of_stream: bool,
+        group: LogGroup,
     ) -> Result<Self, LogValidationError> {
-        let frame = Self {
-            schema_version: CORE_SCHEMA_VERSION,
+        Self::new(
             stream_id,
             attempt_id,
             sequence,
             emitted_at,
-            channel,
-            payload,
-            end_of_stream,
+            LogRecord::GroupStarted { group },
+        )
+    }
+
+    /// Creates one group-owned output line record.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LogValidationError`] when the payload is empty or exceeds
+    /// [`MAX_LOG_FRAME_BYTES`].
+    pub fn line(
+        stream_id: LogStreamId,
+        attempt_id: AttemptId,
+        sequence: LogSequence,
+        emitted_at: UnixMillis,
+        group_id: LogGroupId,
+        channel: LogChannel,
+        payload: Vec<u8>,
+    ) -> Result<Self, LogValidationError> {
+        Self::new(
+            stream_id,
+            attempt_id,
+            sequence,
+            emitted_at,
+            LogRecord::Line {
+                group_id,
+                channel,
+                payload,
+            },
+        )
+    }
+
+    /// Marks one execution-log group terminal.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LogValidationError`] if the assembled record is invalid.
+    pub fn group_finished(
+        stream_id: LogStreamId,
+        attempt_id: AttemptId,
+        sequence: LogSequence,
+        emitted_at: UnixMillis,
+        group_id: LogGroupId,
+        conclusion: JobConclusion,
+    ) -> Result<Self, LogValidationError> {
+        Self::new(
+            stream_id,
+            attempt_id,
+            sequence,
+            emitted_at,
+            LogRecord::GroupFinished {
+                group_id,
+                conclusion,
+            },
+        )
+    }
+
+    /// Creates the unique terminal stream record.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LogValidationError`] if the assembled record is invalid.
+    pub fn stream_finished(
+        stream_id: LogStreamId,
+        attempt_id: AttemptId,
+        sequence: LogSequence,
+        emitted_at: UnixMillis,
+    ) -> Result<Self, LogValidationError> {
+        Self::new(
+            stream_id,
+            attempt_id,
+            sequence,
+            emitted_at,
+            LogRecord::StreamFinished,
+        )
+    }
+
+    fn new(
+        stream_id: LogStreamId,
+        attempt_id: AttemptId,
+        sequence: LogSequence,
+        emitted_at: UnixMillis,
+        record: LogRecord,
+    ) -> Result<Self, LogValidationError> {
+        let frame = Self {
+            schema_version: LOG_SCHEMA_VERSION,
+            stream_id,
+            attempt_id,
+            sequence,
+            emitted_at,
+            record,
         };
         frame.validate()?;
         Ok(frame)
@@ -115,20 +397,26 @@ impl LogFrame {
     /// Returns [`LogValidationError`] for an unsupported schema or invalid
     /// payload size.
     pub fn validate(&self) -> Result<(), LogValidationError> {
-        if self.schema_version != CORE_SCHEMA_VERSION {
+        if self.schema_version != LOG_SCHEMA_VERSION {
             return Err(LogValidationError::UnsupportedSchema {
-                supported: CORE_SCHEMA_VERSION,
+                supported: LOG_SCHEMA_VERSION,
                 received: self.schema_version,
             });
         }
-        if self.payload.is_empty() && !self.end_of_stream {
-            return Err(LogValidationError::EmptyNonTerminalFrame);
-        }
-        if log_frame_byte_rejection(self.payload.len()).is_some() {
-            return Err(LogValidationError::FrameTooLarge {
-                size: self.payload.len(),
-                maximum: MAX_LOG_FRAME_BYTES,
-            });
+        match &self.record {
+            LogRecord::GroupStarted { group } => group.validate()?,
+            LogRecord::Line { payload, .. } => {
+                if payload.is_empty() {
+                    return Err(LogValidationError::EmptyLine);
+                }
+                if log_frame_byte_rejection(payload.len()).is_some() {
+                    return Err(LogValidationError::FrameTooLarge {
+                        size: payload.len(),
+                        maximum: MAX_LOG_FRAME_BYTES,
+                    });
+                }
+            }
+            LogRecord::GroupFinished { .. } | LogRecord::StreamFinished => {}
         }
         Ok(())
     }
@@ -163,28 +451,47 @@ impl LogFrame {
         self.emitted_at
     }
 
-    /// Returns the logical source of the captured bytes.
+    /// Returns the typed record payload.
     #[must_use]
-    pub const fn channel(&self) -> LogChannel {
-        self.channel
+    pub const fn record(&self) -> &LogRecord {
+        &self.record
+    }
+
+    /// Returns the logical source when this record contains output bytes.
+    #[must_use]
+    pub const fn channel(&self) -> Option<LogChannel> {
+        match self.record {
+            LogRecord::Line { channel, .. } => Some(channel),
+            LogRecord::GroupStarted { .. }
+            | LogRecord::GroupFinished { .. }
+            | LogRecord::StreamFinished => None,
+        }
     }
 
     /// Borrows the raw, codec-independent frame payload.
     #[must_use]
     pub fn payload(&self) -> &[u8] {
-        &self.payload
+        match &self.record {
+            LogRecord::Line { payload, .. } => payload,
+            LogRecord::GroupStarted { .. }
+            | LogRecord::GroupFinished { .. }
+            | LogRecord::StreamFinished => &[],
+        }
     }
 
     /// Reports whether this frame closes its stream.
     #[must_use]
     pub const fn is_end_of_stream(&self) -> bool {
-        self.end_of_stream
+        matches!(self.record, LogRecord::StreamFinished)
     }
 }
 
 #[cfg(test)]
 mod limit_contract_tests {
-    use super::{LogLimitRejection, MAX_LOG_FRAME_BYTES, log_frame_byte_rejection};
+    use super::{
+        LogLimitRejection, MAX_LOG_FRAME_BYTES, MAX_LOG_GROUP_ID_BYTES, MAX_LOG_GROUP_NAME_BYTES,
+        log_frame_byte_rejection, log_group_id_byte_rejection, log_group_name_byte_rejection,
+    };
 
     #[test]
     fn log_frame_byte_limit_has_exact_boundaries() {
@@ -192,7 +499,24 @@ mod limit_contract_tests {
         assert_eq!(log_frame_byte_rejection(MAX_LOG_FRAME_BYTES), None);
         assert_eq!(
             log_frame_byte_rejection(MAX_LOG_FRAME_BYTES + 1),
-            Some(LogLimitRejection::FrameBytes)
+            Some(LogLimitRejection::Frame)
+        );
+    }
+
+    #[test]
+    fn log_group_limits_have_exact_boundaries() {
+        assert_eq!(log_group_id_byte_rejection(MAX_LOG_GROUP_ID_BYTES), None);
+        assert_eq!(
+            log_group_id_byte_rejection(MAX_LOG_GROUP_ID_BYTES + 1),
+            Some(LogLimitRejection::GroupId)
+        );
+        assert_eq!(
+            log_group_name_byte_rejection(MAX_LOG_GROUP_NAME_BYTES),
+            None
+        );
+        assert_eq!(
+            log_group_name_byte_rejection(MAX_LOG_GROUP_NAME_BYTES + 1),
+            Some(LogLimitRejection::GroupName)
         );
     }
 }
@@ -211,7 +535,7 @@ impl LogAck {
     #[must_use]
     pub const fn new(stream_id: LogStreamId, contiguous_through: Option<LogSequence>) -> Self {
         Self {
-            schema_version: CORE_SCHEMA_VERSION,
+            schema_version: LOG_SCHEMA_VERSION,
             stream_id,
             contiguous_through,
         }
@@ -236,11 +560,11 @@ impl LogAck {
     ///
     /// Returns [`LogValidationError::UnsupportedSchema`] for another schema.
     pub fn validate(&self) -> Result<(), LogValidationError> {
-        if self.schema_version == CORE_SCHEMA_VERSION {
+        if self.schema_version == LOG_SCHEMA_VERSION {
             Ok(())
         } else {
             Err(LogValidationError::UnsupportedSchema {
-                supported: CORE_SCHEMA_VERSION,
+                supported: LOG_SCHEMA_VERSION,
                 received: self.schema_version,
             })
         }
@@ -276,9 +600,36 @@ pub enum LogValidationError {
         /// Schema version found at the interchange boundary.
         received: u16,
     },
-    /// A frame carried neither bytes nor the terminal marker.
-    #[error("a non-terminal log frame cannot have an empty payload")]
-    EmptyNonTerminalFrame,
+    /// A line record carried no bytes.
+    #[error("a log line cannot have an empty payload")]
+    EmptyLine,
+    /// A group identity was empty.
+    #[error("a log group identity cannot be empty")]
+    EmptyGroupId,
+    /// A group identity exceeded the bounded wire limit.
+    #[error("log group identity exceeds {maximum} bytes")]
+    GroupIdTooLarge {
+        /// Maximum accepted group identity size.
+        maximum: usize,
+    },
+    /// A group identity used an unsafe or non-portable character.
+    #[error("log group identity is not portable")]
+    InvalidGroupId,
+    /// A group display name was empty.
+    #[error("a log group display name cannot be empty")]
+    EmptyGroupName,
+    /// A group display name exceeded the bounded wire limit.
+    #[error("log group display name exceeds {maximum} bytes")]
+    GroupNameTooLarge {
+        /// Maximum accepted display-name size.
+        maximum: usize,
+    },
+    /// A group display name contained a control character.
+    #[error("log group display name contains a control character")]
+    InvalidGroupName,
+    /// A group named itself as its parent.
+    #[error("a log group cannot contain itself")]
+    SelfParentGroup,
     /// A single frame exceeded the defensive wire limit and must be chunked.
     #[error("log frame has {size} bytes; maximum is {maximum}")]
     FrameTooLarge {

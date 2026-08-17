@@ -3,19 +3,15 @@ import type { PaginationModel } from "../models";
 export interface PaginationProps {
   readonly label: string;
   readonly pagination: PaginationModel;
-  readonly variant?: "default" | "log";
 }
 
-export function Pagination({ label, pagination, variant = "default" }: PaginationProps) {
+export function Pagination({ label, pagination }: PaginationProps) {
   if (pagination.previousHref === null && pagination.nextHref === null) {
     return null;
   }
 
   return (
-    <nav
-      className={`pagination${variant === "log" ? " log-pagination" : ""}`}
-      aria-label={label}
-    >
+    <nav className="pagination" aria-label={label}>
       {pagination.previousHref === null ? (
         <span className="button button--quiet" aria-disabled="true">
           Previous

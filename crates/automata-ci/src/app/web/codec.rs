@@ -216,7 +216,7 @@ mod tests {
     };
 
     #[test]
-    fn decodes_frames_without_stringifying_or_omitting_terminal_payload() {
+    fn decodes_binary_lines_and_the_typed_stream_terminator() {
         let attempt = AttemptId::new();
         let stream = LogStreamId::new();
         let frames = vec![
@@ -229,7 +229,7 @@ mod tests {
         assert_eq!(decoded, frames);
         assert_eq!(decoded[0].payload(), &[0xff, 0xfe]);
         assert!(decoded[1].is_end_of_stream());
-        assert_eq!(decoded[1].payload(), b"done");
+        assert!(decoded[1].payload().is_empty());
     }
 
     #[test]
@@ -363,15 +363,24 @@ mod tests {
         payload: Vec<u8>,
         end_of_stream: bool,
     ) -> LogFrame {
-        LogFrame::new(
-            stream,
-            attempt,
-            LogSequence::new(sequence),
-            UnixMillis::new(10),
-            LogChannel::Stdout,
-            payload,
-            end_of_stream,
-        )
+        if end_of_stream {
+            LogFrame::stream_finished(
+                stream,
+                attempt,
+                LogSequence::new(sequence),
+                UnixMillis::new(10),
+            )
+        } else {
+            LogFrame::line(
+                stream,
+                attempt,
+                LogSequence::new(sequence),
+                UnixMillis::new(10),
+                automata_ci_core::LogGroupId::new("test").expect("group ID"),
+                LogChannel::Stdout,
+                payload,
+            )
+        }
         .expect("valid log frame")
     }
 

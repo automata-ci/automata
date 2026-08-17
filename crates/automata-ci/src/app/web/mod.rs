@@ -7,12 +7,12 @@ mod routes;
 mod text;
 
 pub(crate) use data::{
-    ArtifactSummary, CollectionVisibility, JobLogPage, JobLogRequest, JobSummary,
-    LOG_PAGE_DECODED_BYTES, LOG_PAGE_SIZE, LiveLogBatch, LiveLogRecord, LogChannel, LogLine,
-    REPOSITORY_PAGE_SIZE, RUN_JOB_PAGE_SIZE, RUN_PAGE_SIZE, Repository, RepositoryDirectoryItem,
-    RepositoryDirectoryPage, RepositoryDirectoryRequest, RepositoryPath,
-    RepositorySettingsDestination, RunDetailPage, RunDetailRequest, RunListPage, RunListRequest,
-    RunSummary, Status, StatusFilter, WebDataError, Workflow, WorkflowDefinition,
+    ArtifactSummary, CollectionVisibility, JobLogPage, JobSummary, LiveLogBatch, LiveLogRecord,
+    LogChannel, LogGroup, LogGroupKind, LogRecord, REPOSITORY_PAGE_SIZE, RUN_JOB_PAGE_SIZE,
+    RUN_PAGE_SIZE, Repository, RepositoryDirectoryItem, RepositoryDirectoryPage,
+    RepositoryDirectoryRequest, RepositoryPath, RepositorySettingsDestination, RunDetailPage,
+    RunDetailRequest, RunListPage, RunListRequest, RunSummary, Status, StatusFilter, WebDataError,
+    Workflow, WorkflowDefinition,
 };
 #[cfg(test)]
 pub(crate) use data::{

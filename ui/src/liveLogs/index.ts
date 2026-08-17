@@ -16,4 +16,12 @@ export {
   type LiveLogTransportCapability,
   type SameOriginLiveLogAccessProviderOptions,
 } from "./protocol";
-export type { LiveLogChannel, LiveLogRecord } from "./sse";
+export type {
+  LiveLogChannel,
+  LiveLogGroup,
+  LiveLogGroupFinishedRecord,
+  LiveLogGroupKind,
+  LiveLogGroupStartedRecord,
+  LiveLogLineRecord,
+  LiveLogRecord,
+} from "./sse";

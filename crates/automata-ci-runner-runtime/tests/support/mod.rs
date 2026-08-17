@@ -15,9 +15,9 @@ use automata_ci_core::{
     Architecture, AttemptId, EnvironmentProfile, EnvironmentProfileId, FencingToken,
     IsolationLevel, JobAuthorityProfile, JobConclusion, JobId, JobInstanceIdentity, JobIr,
     JobIrEnvelope, JobLifecycle, JobPermissionRequest, JobResult, JobSecretExposure, JobSource,
-    Lease, LeaseId, LogAck, LogChannel, LogFrame, OperationId, RunId, RunValueTemplates,
-    RunnerCapabilities, RunnerId, RunnerPlatform, RunnerRequirements, RuntimeBoolean,
-    SandboxCapabilities, SemanticStep, Sha256Digest, ShellTemplate, StepId, StepIr,
+    Lease, LeaseId, LogAck, LogChannel, LogFrame, LogGroupId, OperationId, RunId,
+    RunValueTemplates, RunnerCapabilities, RunnerId, RunnerPlatform, RunnerRequirements,
+    RuntimeBoolean, SandboxCapabilities, SemanticStep, Sha256Digest, ShellTemplate, StepId, StepIr,
     TrustActorEvidence, TrustActorKind, TrustAutomationKind, TrustEventKind, TrustEvidence,
     TrustOriginKind, TrustPolicy, TrustRepositoryEvidence, TrustTokenRecursion, UnixMillis,
     ValueTemplate, WorkflowId,
@@ -50,6 +50,14 @@ use automata_ci_runner_runtime::{
     RuntimeControlError, RuntimeControlErrorKind, RuntimeControlFuture, RuntimeControlReply,
     RuntimeControlRetry, RuntimeSleeper, SleepFuture,
 };
+
+fn test_log_event(channel: LogChannel, payload: Vec<u8>) -> LogEvent {
+    LogEvent::new(
+        LogGroupId::new("test").expect("test log group ID"),
+        channel,
+        payload,
+    )
+}
 use automata_ci_runner_spool::{
     ContentCommitmentDomain, ContentKind, ContentProtectionError, ContentProtector,
     DurableContentPublication, DurableContentRef, DurableContentStore,
@@ -1686,7 +1694,7 @@ impl JobExecutor for CancellationContentRaceExecutor {
             }
             self.probe.mark_log_attempt_started();
             events
-                .emit_log(LogEvent::new(
+                .emit_log(test_log_event(
                     LogChannel::Stdout,
                     b"sibling publication".to_vec(),
                 ))
@@ -1797,7 +1805,7 @@ impl JobExecutor for FailureIsolationExecutor {
                     .map_err(|_| ExecutorError::new(ExecutorErrorKind::Internal))?;
                 for sequence in 0..FAILURE_ISOLATION_LOG_COUNT {
                     events
-                        .emit_log(LogEvent::new(
+                        .emit_log(test_log_event(
                             LogChannel::Stdout,
                             format!("failed executor log {sequence}").into_bytes(),
                         ))
@@ -1974,7 +1982,7 @@ impl JobExecutor for CleanupIsolationExecutor {
                     .map_err(|_| ExecutorError::new(ExecutorErrorKind::Internal))?;
                 if self.order_probe.is_some() {
                     events
-                        .emit_log(LogEvent::new(
+                        .emit_log(test_log_event(
                             LogChannel::Stdout,
                             b"terminal cleanup ordering".to_vec(),
                         ))
@@ -1992,7 +2000,7 @@ impl JobExecutor for CleanupIsolationExecutor {
                 .map_err(|_| ExecutorError::new(ExecutorErrorKind::Internal))?;
             self.survivor_started.store(true, Ordering::SeqCst);
             events
-                .emit_log(LogEvent::new(
+                .emit_log(test_log_event(
                     LogChannel::Stdout,
                     b"surviving execution".to_vec(),
                 ))
@@ -2094,7 +2102,7 @@ impl JobExecutor for CapacityFailureIsolationExecutor {
             if request.slot().get() == 1 {
                 for _ in 0..self.data_frames {
                     events
-                        .emit_log(LogEvent::new(
+                        .emit_log(test_log_event(
                             LogChannel::Stdout,
                             vec![b'x'; self.payload_bytes],
                         ))
@@ -2179,7 +2187,7 @@ impl JobExecutor for ActiveLogExecutor {
                 .map_err(|_| ExecutorError::new(ExecutorErrorKind::Internal))?;
             for index in 0..self.data_frames {
                 events
-                    .emit_log(LogEvent::new(
+                    .emit_log(test_log_event(
                         LogChannel::Stdout,
                         format!("active-frame-{index:04}").into_bytes(),
                     ))
@@ -2263,14 +2271,14 @@ impl JobExecutor for LogSegmentRaceExecutor {
                 .transition(JobLifecycle::Running)
                 .map_err(|_| ExecutorError::new(ExecutorErrorKind::Internal))?;
             events
-                .emit_log(LogEvent::new(LogChannel::Stdout, b"race-frame-0".to_vec()))
+                .emit_log(test_log_event(LogChannel::Stdout, b"race-frame-0".to_vec()))
                 .map_err(|_| ExecutorError::new(ExecutorErrorKind::Internal))?;
             self.first_emitted.store(true, Ordering::SeqCst);
             self.changed.notify_waiters();
 
             self.emit_second.cancelled().await;
             events
-                .emit_log(LogEvent::new(LogChannel::Stdout, b"race-frame-1".to_vec()))
+                .emit_log(test_log_event(LogChannel::Stdout, b"race-frame-1".to_vec()))
                 .map_err(|_| ExecutorError::new(ExecutorErrorKind::Internal))?;
             self.second_emitted.store(true, Ordering::SeqCst);
             self.changed.notify_waiters();
@@ -2309,7 +2317,7 @@ impl JobExecutor for BurstLogExecutor {
                 for index in 0..self.data_frames {
                     let payload = format!("frame-{index:04}").into_bytes();
                     events
-                        .emit_log(LogEvent::new(LogChannel::Stdout, payload))
+                        .emit_log(test_log_event(LogChannel::Stdout, payload))
                         .map_err(|_| ExecutorError::new(ExecutorErrorKind::Internal))?;
                 }
             }

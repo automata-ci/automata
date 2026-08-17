@@ -2506,11 +2506,18 @@ fn log_batch(
         "log_batch.frames",
     )?;
     let payload_bytes = value.frames.iter().try_fold(0_usize, |total, frame| {
-        total
-            .checked_add(frame.payload.len())
-            .ok_or(DecodeError::InvalidValue {
-                field: "log_batch.payload_bytes",
-            })
+        let payload = match frame.record.as_ref() {
+            Some(wire::log_frame::Record::Line(line)) => line.payload.len(),
+            Some(
+                wire::log_frame::Record::GroupStarted(_)
+                | wire::log_frame::Record::GroupFinished(_)
+                | wire::log_frame::Record::StreamFinished(_),
+            )
+            | None => 0,
+        };
+        total.checked_add(payload).ok_or(DecodeError::InvalidValue {
+            field: "log_batch.payload_bytes",
+        })
     })?;
     if payload_bytes > limits.max_log_payload_bytes_per_batch() {
         return Err(DecodeError::LogPayloadTooLarge {
@@ -2533,19 +2540,76 @@ fn log_batch(
 fn log_frame(value: wire::LogFrame) -> Result<core::LogFrame, DecodeError> {
     check_schema(
         value.schema_version,
-        core::CORE_SCHEMA_VERSION,
+        core::LOG_SCHEMA_VERSION,
         "log_frame.schema_version",
     )?;
-    core::LogFrame::new(
-        core::LogStreamId::from_uuid(uuid(value.stream_id, "log_frame.stream_id")?),
-        core::AttemptId::from_uuid(uuid(value.attempt_id, "log_frame.attempt_id")?),
-        core::LogSequence::new(value.sequence),
-        core::UnixMillis::new(value.emitted_at_unix_millis),
-        log_channel(value.channel)?,
-        value.payload,
-        value.end_of_stream,
-    )
+    let stream_id = core::LogStreamId::from_uuid(uuid(value.stream_id, "log_frame.stream_id")?);
+    let attempt_id = core::AttemptId::from_uuid(uuid(value.attempt_id, "log_frame.attempt_id")?);
+    let sequence = core::LogSequence::new(value.sequence);
+    let emitted_at = core::UnixMillis::new(value.emitted_at_unix_millis);
+    match required(value.record, "log_frame.record")? {
+        wire::log_frame::Record::GroupStarted(group) => core::LogFrame::group_started(
+            stream_id,
+            attempt_id,
+            sequence,
+            emitted_at,
+            log_group(group)?,
+        ),
+        wire::log_frame::Record::Line(line) => core::LogFrame::line(
+            stream_id,
+            attempt_id,
+            sequence,
+            emitted_at,
+            log_group_id(line.group_id)?,
+            log_channel(line.channel)?,
+            line.payload,
+        ),
+        wire::log_frame::Record::GroupFinished(group) => core::LogFrame::group_finished(
+            stream_id,
+            attempt_id,
+            sequence,
+            emitted_at,
+            log_group_id(group.group_id)?,
+            job_conclusion(group.conclusion, "log_frame.group_finished.conclusion")?,
+        ),
+        wire::log_frame::Record::StreamFinished(_) => {
+            core::LogFrame::stream_finished(stream_id, attempt_id, sequence, emitted_at)
+        }
+    }
     .map_err(|_| DecodeError::InvalidValue { field: "log_frame" })
+}
+
+fn log_group(value: wire::LogGroup) -> Result<core::LogGroup, DecodeError> {
+    core::LogGroup::new(
+        log_group_id(value.id)?,
+        value.parent_id.map(log_group_id).transpose()?,
+        value.name,
+        log_group_kind(value.kind)?,
+        value.ordinal,
+    )
+    .map_err(|_| DecodeError::InvalidValue {
+        field: "log_frame.group_started",
+    })
+}
+
+fn log_group_id(value: String) -> Result<core::LogGroupId, DecodeError> {
+    core::LogGroupId::new(value).map_err(|_| DecodeError::InvalidValue {
+        field: "log_frame.group_id",
+    })
+}
+
+fn log_group_kind(value: i32) -> Result<core::LogGroupKind, DecodeError> {
+    match wire::LogGroupKind::try_from(value) {
+        Ok(wire::LogGroupKind::Setup) => Ok(core::LogGroupKind::Setup),
+        Ok(wire::LogGroupKind::Step) => Ok(core::LogGroupKind::Step),
+        Ok(wire::LogGroupKind::ActionPre) => Ok(core::LogGroupKind::ActionPre),
+        Ok(wire::LogGroupKind::ActionPost) => Ok(core::LogGroupKind::ActionPost),
+        Ok(wire::LogGroupKind::Cleanup) => Ok(core::LogGroupKind::Cleanup),
+        Ok(wire::LogGroupKind::Unspecified) | Err(_) => Err(DecodeError::UnknownEnum {
+            field: "log_frame.group_kind",
+            value,
+        }),
+    }
 }
 
 fn log_channel(value: i32) -> Result<core::LogChannel, DecodeError> {
@@ -2570,7 +2634,7 @@ fn log_ack_message(value: wire::LogAckMessage) -> Result<protocol::LogAckMessage
 fn log_ack(value: wire::LogAck) -> Result<core::LogAck, DecodeError> {
     check_schema(
         value.schema_version,
-        core::CORE_SCHEMA_VERSION,
+        core::LOG_SCHEMA_VERSION,
         "log_ack.schema_version",
     )?;
     Ok(core::LogAck::new(

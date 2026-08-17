@@ -163,7 +163,7 @@ fn ordered_parse_finds_a_later_cross_stream_mask_before_emission() {
             ),
         ]),
         WorkflowCommandLimits::default(),
-        WorkflowCommandPolicy::new(true, false),
+        WorkflowCommandPolicy::new(false),
         &mut masker,
     )
     .expect("ordered discovery");
@@ -211,7 +211,7 @@ fn ordered_line_assembly_uses_line_completion_and_stream_end_order() {
             ExecutionOutputRecord::end_of_stream(ExecutionOutputStream::Stderr),
         ],
         WorkflowCommandLimits::default(),
-        WorkflowCommandPolicy::new(true, false),
+        WorkflowCommandPolicy::new(false),
         &mut masker,
     )
     .expect("ordered line assembly");
@@ -237,16 +237,16 @@ fn stop_and_resume_state_crosses_streams_in_record_order() {
             ),
             (
                 ExecutionOutputStream::Stderr,
-                "::set-env name=BLOCKED::yes\n".to_owned(),
+                "::debug::visible while commands are stopped\n".to_owned(),
             ),
             (ExecutionOutputStream::Stdout, format!("::{token}::\n")),
         ]),
         WorkflowCommandLimits::default(),
-        WorkflowCommandPolicy::new(true, false),
+        WorkflowCommandPolicy::new(false),
         &mut masker,
     )
     .expect("stopped sequence");
-    assert_eq!(stopped.legacy_mutation_count(), 0);
+    assert_eq!(stopped.output_lines().len(), 1);
 
     let mut masker = SecretMasker::new();
     let resumed = parse_output(
@@ -258,15 +258,15 @@ fn stop_and_resume_state_crosses_streams_in_record_order() {
             (ExecutionOutputStream::Stderr, format!("::{token}::\n")),
             (
                 ExecutionOutputStream::Stdout,
-                "::set-env name=ALLOWED::yes\n".to_owned(),
+                "::debug::recognized after resume\n".to_owned(),
             ),
         ]),
         WorkflowCommandLimits::default(),
-        WorkflowCommandPolicy::new(true, false),
+        WorkflowCommandPolicy::new(false),
         &mut masker,
     )
     .expect("resumed sequence");
-    assert_eq!(resumed.legacy_mutation_count(), 1);
+    assert!(resumed.output_lines().is_empty());
 }
 
 fn records<const N: usize>(

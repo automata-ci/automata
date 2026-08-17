@@ -596,3 +596,18 @@
     align-items: center;
   }
 }
+@media (max-width: 760px) {
+  .log-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .log-toolbar__actions {
+    flex-wrap: wrap;
+  }
+
+  .log-search {
+    width: 100%;
+    flex: 1 1 100%;
+  }
+}

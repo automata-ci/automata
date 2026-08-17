@@ -68,7 +68,7 @@ pub enum EnvironmentMutationBlockReason {
     /// The name is a runner-owned default in the identified namespace.
     Reserved(ReservedEnvironmentNamespace),
     /// The name is `NODE_OPTIONS`, which GitHub blocks specifically for
-    /// `GITHUB_ENV` and legacy `set-env` mutations.
+    /// `GITHUB_ENV` mutations.
     NodeOptions,
 }
 

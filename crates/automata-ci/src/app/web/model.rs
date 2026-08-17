@@ -33,10 +33,10 @@ use crate::app::repository_secrets::{
 
 use super::data::{
     ArtifactSummary, CollectionVisibility, JobLogLive as JobLogLiveData, JobLogPage as JobLogData,
-    JobSummary, LOG_LINE_BYTES, LOG_PAGE_DECODED_BYTES, LogChannel, REPOSITORY_PAGE_SIZE,
-    RbacDirectBindingListPage as RbacDirectBindingListData, RbacRoleListPage as RbacRoleListData,
-    RbacUserDetailPage as RbacUserDetailData, RbacUserListPage as RbacUserListData,
-    Repository as RepositoryData, RepositoryDirectoryItem as RepositoryDirectoryItemData,
+    JobSummary, REPOSITORY_PAGE_SIZE, RbacDirectBindingListPage as RbacDirectBindingListData,
+    RbacRoleListPage as RbacRoleListData, RbacUserDetailPage as RbacUserDetailData,
+    RbacUserListPage as RbacUserListData, Repository as RepositoryData,
+    RepositoryDirectoryItem as RepositoryDirectoryItemData,
     RepositoryDirectoryPage as RepositoryDirectoryData,
     RepositoryDirectoryRequest as RepositoryDirectoryRequestData, RepositorySettingsDestination,
     RepositorySettingsPage as RepositorySettingsData, RequestContext,
@@ -465,26 +465,21 @@ struct JobLogPage {
     navigation_pagination: Pagination,
     job: JobLogJob,
     log_visibility: &'static str,
-    search: JobLogSearch,
-    lines: Vec<JobLogLine>,
     live: Option<JobLogLive>,
     notice: Option<&'static str>,
-    pagination: JobLogPagination,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct JobLogLive {
-    checkpoint: Option<String>,
+    ticket_href: String,
     state: &'static str,
-    more_available: bool,
 }
 
-fn job_log_live(live: JobLogLiveData) -> JobLogLive {
+fn job_log_live(live: &JobLogLiveData, ticket_href: String) -> JobLogLive {
     JobLogLive {
-        checkpoint: live.checkpoint,
+        ticket_href,
         state: if live.stream_closed { "closed" } else { "open" },
-        more_available: live.more_available,
     }
 }
 
@@ -524,32 +519,6 @@ struct JobLogJob {
     status: Status,
     started_at: Option<Timestamp>,
     duration_label: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct JobLogSearch {
-    action: String,
-    query: String,
-    clear_href: String,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct JobLogPagination {
-    current_cursor: Option<String>,
-    previous_cursor: Option<String>,
-    next_cursor: Option<String>,
-    label: String,
-}
-
-#[derive(Debug, Serialize)]
-struct JobLogLine {
-    id: String,
-    number: String,
-    timestamp: Timestamp,
-    channel: &'static str,
-    text: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -2011,8 +1980,6 @@ pub(super) fn job_log(
     csp_nonce: String,
     context: &RequestContext,
     mutation: Option<ShellMutation<'_>>,
-    query: &str,
-    request_cursor: Option<&str>,
     data: JobLogData,
 ) -> Result<String, ModelError> {
     if !valid_job_log_data(&data)
@@ -2053,38 +2020,13 @@ pub(super) fn job_log(
             .map(|job_id| paths.job(data.run.id, job_id)),
         label: pluralized(navigation.len(), "job", "jobs"),
     };
-    let lines = data
-        .lines
-        .into_iter()
-        .map(|line| {
-            let suffix = line.fragment.map_or_else(
-                || line.sequence.to_string(),
-                |part| format!("{}.{}", line.sequence, part),
-            );
-            Ok(JobLogLine {
-                id: format!("log-{}-{suffix}", data.job.id),
-                number: suffix,
-                timestamp: log_timestamp(line.emitted_at)?,
-                channel: match line.channel {
-                    LogChannel::Stdout => "stdout",
-                    LogChannel::Stderr => "stderr",
-                    LogChannel::System => "system",
-                },
-                text: line.text,
-            })
-        })
-        .collect::<Result<Vec<_>, ModelError>>()?;
-    let pagination = JobLogPagination {
-        current_cursor: request_cursor.map(str::to_owned),
-        previous_cursor: data.previous_cursor,
-        next_cursor: data.next_cursor,
-        label: pluralized(lines.len(), "log line", "log lines"),
-    };
-    let live = data.live.map(job_log_live);
+    let live = data
+        .live
+        .as_ref()
+        .map(|live| job_log_live(live, format!("{job_href}/live-ticket")));
     let title = format!("{} logs · Automata", data.job.name);
     let notice = job_log_notice(data.job.status);
-    let return_path_candidate = job_log_href(&job_href, query, request_cursor);
-    let return_path = login_return_path(return_path_candidate, job_href.clone())?;
+    let return_path = login_return_path(job_href.clone(), job_href.clone())?;
 
     serialize_request(
         assets,
@@ -2105,15 +2047,8 @@ pub(super) fn job_log(
             navigation_pagination,
             job: selected_job,
             log_visibility: collection_visibility(data.log_visibility),
-            search: JobLogSearch {
-                action: job_href.clone(),
-                query: query.to_owned(),
-                clear_href: job_href.clone(),
-            },
-            lines,
             live,
             notice,
-            pagination,
         },
     )
 }
@@ -2145,10 +2080,6 @@ pub(super) fn deep_link_sign_in(
 }
 
 fn valid_job_log_data(data: &JobLogData) -> bool {
-    let decoded_bytes = data
-        .lines
-        .iter()
-        .try_fold(0_usize, |total, line| total.checked_add(line.text.len()));
     valid_repository(&data.repository)
         && valid_run(&data.run)
         && valid_job(&data.job)
@@ -2171,25 +2102,7 @@ fn valid_job_log_data(data: &JobLogData) -> bool {
                 job.name == data.job.name && job.status == data.job.status && job.logs_available
             })
         && (data.log_visibility == CollectionVisibility::Full) == data.job.logs_available
-        && (data.log_visibility == CollectionVisibility::Full
-            || (data.lines.is_empty()
-                && data.previous_cursor.is_none()
-                && data.next_cursor.is_none()
-                && data.live.is_none()))
-        && data.live.as_ref().is_none_or(|live| {
-            data.log_visibility == CollectionVisibility::Full
-                && live.more_available == data.next_cursor.is_some()
-                && (!live.more_available || live.checkpoint.is_some())
-        })
-        && data.lines.len() <= super::data::LOG_PAGE_SIZE
-        && decoded_bytes.is_some_and(|bytes| bytes <= LOG_PAGE_DECODED_BYTES)
-        && data.lines.iter().all(|line| {
-            line.text.len() <= LOG_LINE_BYTES
-                && valid_log_text(&line.text)
-                && line.fragment.is_none_or(|fragment| fragment != 0)
-        })
-        && all_unique(data.lines.iter().map(|line| (line.sequence, line.fragment)))
-        && log_lines_are_strictly_ordered(&data.lines)
+        && (data.log_visibility == CollectionVisibility::Full || data.live.is_none())
 }
 
 pub(super) fn repository_settings(
@@ -2765,10 +2678,6 @@ fn timestamp(value: UnixMillis) -> Result<Timestamp, ModelError> {
     timestamp_from_millis(value.get(), false)
 }
 
-fn log_timestamp(value: UnixMillis) -> Result<Timestamp, ModelError> {
-    timestamp_from_millis(value.get(), true)
-}
-
 fn timestamp_seconds(value: i64) -> Result<Timestamp, ModelError> {
     value
         .checked_mul(1_000)
@@ -3098,17 +3007,6 @@ fn run_detail_href(action: &str, job_cursor: Option<&str>) -> String {
     query_href(action, &pairs)
 }
 
-fn job_log_href(action: &str, query: &str, cursor: Option<&str>) -> String {
-    let mut pairs = Vec::new();
-    if !query.is_empty() {
-        pairs.push(("q", query));
-    }
-    if let Some(cursor) = cursor {
-        pairs.push(("cursor", cursor));
-    }
-    query_href(action, &pairs)
-}
-
 fn query_href(action: &str, pairs: &[(&str, &str)]) -> String {
     if pairs.is_empty() {
         return action.to_owned();
@@ -3187,21 +3085,6 @@ fn valid_artifact(artifact: &ArtifactSummary) -> bool {
 
 fn valid_text(value: &str) -> bool {
     is_safe_display_text(value, 1_024)
-}
-
-fn valid_log_text(value: &str) -> bool {
-    !value
-        .chars()
-        .any(|character| character != '\t' && forbidden_display_character(character))
-}
-
-fn log_lines_are_strictly_ordered(lines: &[super::data::LogLine]) -> bool {
-    lines.windows(2).all(|pair| {
-        let previous = &pair[0];
-        let next = &pair[1];
-        (previous.sequence, previous.fragment.unwrap_or(0))
-            < (next.sequence, next.fragment.unwrap_or(0))
-    })
 }
 
 fn all_unique<T>(values: impl IntoIterator<Item = T>) -> bool
@@ -3340,16 +3223,12 @@ mod tests {
         assert!(!valid_text("\u{3164}"));
         assert!(!valid_source_segment("\u{200b}\u{fe0f}"));
         assert!(!valid_text("Build\u{0000}test"));
-        assert!(valid_log_text("column one\tcolumn two"));
-        assert!(!valid_log_text("line one\nline two"));
-        assert!(!valid_log_text("color\u{001b}[31m"));
         for formatting in [
             '\u{061c}', '\u{200e}', '\u{200f}', '\u{202a}', '\u{202e}', '\u{2066}', '\u{2069}',
         ] {
             let spoofed = format!("safe{formatting}copy");
             assert!(!valid_text(&spoofed));
             assert!(!valid_source_segment(&spoofed));
-            assert!(!valid_log_text(&spoofed));
         }
     }
 

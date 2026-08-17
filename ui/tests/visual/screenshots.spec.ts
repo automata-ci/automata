@@ -252,9 +252,9 @@ test("preview navigation opens a run and its job logs", async ({ page }) => {
   );
   await expect(main.getByRole("heading", { name: "Job logs" })).toBeVisible();
   await expect(page).toHaveTitle("Linux release build logs · Automata");
-  await expect(main.getByRole("link", { name: "Refresh" })).toHaveAttribute(
-    "href",
-    `?view=job&run=${PRIMARY_RUN_ID}&job=job-1`,
+  await expect(main.getByRole("button", { name: "Following" })).toHaveAttribute(
+    "aria-pressed",
+    "true",
   );
 });
 
@@ -583,6 +583,7 @@ test("access management skip navigation bypasses management tabs", async ({
 }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("./?view=users");
+  await waitForStableRender(page, "Users");
   const skipLink = page.getByRole("link", { name: "Skip to content" });
   await page.keyboard.press("Tab");
   await expect(skipLink).toBeFocused();
@@ -601,6 +602,7 @@ test("access management skip navigation bypasses management tabs", async ({
 
   await page.setViewportSize({ width: 768, height: 1_024 });
   await page.goto("./?view=users");
+  await waitForStableRender(page, "Users");
   const overflowingRegion = page.getByRole("region", { name: "Users" });
   await overflowingRegion.locator("table").evaluate((table) => {
     table.style.minWidth = "1200px";
@@ -615,7 +617,7 @@ test("access management skip navigation bypasses management tabs", async ({
   await expect(overflowingRegion).toBeFocused();
 });
 
-test("compact job links open the flat stream with stable lossless line numbers", async ({
+test("compact job links open structured panels with in-memory search", async ({
   page,
 }) => {
   await page.goto(`./?view=run&run=${PRIMARY_RUN_ID}`);
@@ -633,47 +635,34 @@ test("compact job links open the flat stream with stable lossless line numbers",
     name: "Linux release build output",
   });
   await expect(
-    output.getByRole("link", { name: "Link to log line 2.1" }),
-  ).toHaveText("2.1");
+    output.getByRole("button", { name: /Runner diagnostics/u }),
+  ).toHaveAttribute("aria-expanded", "false");
+  await expect(
+    output.getByRole("button", { name: /Checkout repository/u }),
+  ).toHaveAttribute("aria-expanded", "false");
+  await expect(
+    output.getByRole("button", { name: /Linux release build/u }),
+  ).toHaveAttribute("aria-expanded", "true");
+  await expect(
+    output.getByRole("link", { name: "Link to log line 8" }),
+  ).toHaveText("8");
 
   await main
     .getByRole("searchbox", { name: "Search job logs" })
     .fill("Operating System");
-  const refresh = main.getByRole("link", { name: "Refresh" });
-  await expect(refresh).toHaveAttribute(
-    "href",
-    new RegExp(`job=job-1&q=Operating%20System$`, "u"),
-  );
   await expect(
     output.getByRole("link", { name: /^Link to log line/u }),
   ).toHaveCount(1);
   await expect(
-    output.getByRole("link", { name: "Link to log line 1" }),
-  ).toHaveText("1");
-
-  await main.getByRole("button", { name: "Search", exact: true }).click();
-  await expect(page).toHaveURL(
-    new RegExp(
-      `view=job.*run=${PRIMARY_RUN_ID}.*job=job-1.*q=Operating\\+System`,
-      "u",
-    ),
-  );
-  await expect(
-    output.getByRole("link", { name: /^Link to log line/u }),
-  ).toHaveCount(1);
-
-  await expect(refresh).toHaveAttribute(
-    "href",
-    new RegExp(`job=job-1&q=Operating%20System$`, "u"),
-  );
-  await refresh.click();
-  await expect(page).toHaveURL(/q=Operating%20System$/u);
-
-  await main.getByRole("link", { name: "Clear search", exact: true }).click();
+    output.getByRole("link", { name: "Link to log line 7" }),
+  ).toHaveText("7");
   await expect(page).not.toHaveURL(/[?&]q=/u);
+
+  await main.getByRole("searchbox", { name: "Search job logs" }).fill("");
+  await main.getByRole("button", { name: "Expand all" }).click();
   await expect(
-    output.getByRole("link", { name: /^Link to log line/u }),
-  ).toHaveCount(3);
+    output.getByRole("link", { name: "Link to log line 4" }),
+  ).toHaveText("4");
 });
 
 test("preview filters are functional and source navigation is allowlisted", async ({
@@ -1421,14 +1410,11 @@ test("job log controls respond to available content width", async ({ page }) => 
       const searchBox = await page
         .getByRole("searchbox", { name: "Search job logs" })
         .boundingBox();
-      const searchButton = await page
-        .getByRole("button", { name: "Search", exact: true })
+      const expandButton = await page
+        .getByRole("button", { name: "Expand all", exact: true })
         .boundingBox();
       expect(searchBox).not.toBeNull();
-      expect(searchButton).not.toBeNull();
-      expect(
-        Math.abs((searchBox?.y ?? 0) - (searchButton?.y ?? 0)),
-      ).toBeLessThanOrEqual(1);
+      expect(expandButton).not.toBeNull();
     }
     await expectNoDocumentOverflow(page);
   }
@@ -1539,7 +1525,7 @@ for (const width of [1440, 390, 320]) {
       label,
     );
     await replaceText(jobMain.locator(".log-toolbar > div:first-child > span"), label);
-    await replaceText(jobMain.locator(".log-notice"), longCopy);
+    await replaceText(jobMain.locator(".log-group__output code").first(), longCopy);
     await expectNoDocumentOverflow(page);
   });
 }
@@ -1661,7 +1647,7 @@ test("clipped log regions keep focus rings visible and keyboard scrolling local"
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("./?view=job&job=job-1", { waitUntil: "networkidle" });
   const output = page.getByRole("region", {
-    name: "Linux release build output",
+    name: "Linux release build log output",
   });
   await output.focus();
   await expect(output).toBeFocused();
@@ -1676,7 +1662,7 @@ test("clipped log regions keep focus rings visible and keyboard scrolling local"
     .toBeGreaterThan(0);
   await expectNoDocumentOverflow(page);
 
-  const lineLink = output.getByRole("link", { name: "Link to log line 0" });
+  const lineLink = output.getByRole("link", { name: "Link to log line 7" });
   await lineLink.focus();
   await expect(lineLink).toBeFocused();
   await expect(lineLink).toHaveCSS("outline-offset", "-2px");
@@ -1688,18 +1674,18 @@ test("bidirectional log text stays isolated in its message cell", async ({
 }) => {
   await page.goto("./?view=job&job=job-1", { waitUntil: "networkidle" });
   const firstLine = page.locator(".log-line").first();
-  const channel = firstLine.locator(".log-line__channel");
+  const timestamp = firstLine.locator("time");
   const message = firstLine.locator("code");
   await replaceText(message, "بدء مهمة إصدار لينكس");
 
   await expect(message).toHaveCSS("direction", "ltr");
   await expect(message).toHaveCSS("unicode-bidi", "plaintext");
-  const channelBox = await channel.boundingBox();
+  const timestampBox = await timestamp.boundingBox();
   const messageBox = await message.boundingBox();
-  expect(channelBox).not.toBeNull();
+  expect(timestampBox).not.toBeNull();
   expect(messageBox).not.toBeNull();
   expect(messageBox?.x ?? 0).toBeGreaterThanOrEqual(
-    (channelBox?.x ?? 0) + (channelBox?.width ?? 0) - 1,
+    (timestampBox?.x ?? 0) + (timestampBox?.width ?? 0) - 1,
   );
   await expectNoDocumentOverflow(page);
 });

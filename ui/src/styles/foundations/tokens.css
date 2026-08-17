@@ -55,10 +55,8 @@
   --log-muted: #8b949e;
   --log-accent: #58a6ff;
   --log-danger: #ff7b72;
-  --log-system: #d2a8ff;
   --log-highlight: rgb(56 139 253 / 12%);
   --log-message-min-width: 520px;
-  --log-output-min-width: 760px;
 
   background: var(--canvas-default);
   color: var(--fg-default);

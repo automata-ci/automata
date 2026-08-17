@@ -34,8 +34,7 @@ use axum::{
 };
 
 use super::web::{
-    ArtifactSummary, CollectionVisibility, JobLogPage, JobLogRequest, JobSummary,
-    LOG_PAGE_DECODED_BYTES, LOG_PAGE_SIZE, LogChannel, LogLine, REPOSITORY_PAGE_SIZE,
+    ArtifactSummary, CollectionVisibility, JobLogPage, JobSummary, REPOSITORY_PAGE_SIZE,
     RUN_JOB_PAGE_SIZE, RUN_PAGE_SIZE, Repository, RepositoryDirectoryItem, RepositoryDirectoryPage,
     RepositoryDirectoryRequest, RepositorySettingsDestination, RunDetailPage, RunDetailRequest,
     RunListPage, RunListRequest, RunSummary, Status, StatusFilter, WebData, WebDataError, Workflow,
@@ -53,22 +52,22 @@ use automata_ci_core::WorkflowId;
 use automata_ci_store::HumanLiveLogBrowserOrigin;
 
 /// Protected Core endpoint used by Cloud to resolve the current viewer.
-pub const DELEGATED_ACTOR_VIEWER_PATH: &str = "/internal/v1/workspaces/{workspace_id}/viewer";
+pub const DELEGATED_ACTOR_VIEWER_PATH: &str = "/internal/v2/workspaces/{workspace_id}/viewer";
 /// Protected Core endpoint used by Cloud to list repositories visible to one actor.
 pub const DELEGATED_ACTOR_REPOSITORIES_PATH: &str =
-    "/internal/v1/workspaces/{workspace_id}/repositories";
+    "/internal/v2/workspaces/{workspace_id}/repositories";
 /// Protected Core endpoint used by Cloud to list repository workflow runs.
 pub const DELEGATED_ACTOR_RUNS_PATH: &str =
-    "/internal/v1/workspaces/{workspace_id}/repositories/{owner}/{repository}/runs";
+    "/internal/v2/workspaces/{workspace_id}/repositories/{owner}/{repository}/runs";
 /// Protected Core endpoint used by Cloud to read one run and its current jobs.
 pub const DELEGATED_ACTOR_RUN_PATH: &str =
-    "/internal/v1/workspaces/{workspace_id}/repositories/{owner}/{repository}/runs/{run_id}";
-/// Protected Core endpoint used by Cloud to read one durable job-log snapshot.
-pub const DELEGATED_ACTOR_JOB_LOG_PATH: &str = "/internal/v1/workspaces/{workspace_id}/repositories/{owner}/{repository}/runs/{run_id}/jobs/{job_id}";
+    "/internal/v2/workspaces/{workspace_id}/repositories/{owner}/{repository}/runs/{run_id}";
+/// Protected Core endpoint used by Cloud to read job and structured-stream metadata.
+pub const DELEGATED_ACTOR_JOB_LOG_PATH: &str = "/internal/v2/workspaces/{workspace_id}/repositories/{owner}/{repository}/runs/{run_id}/jobs/{job_id}";
 /// Protected Core endpoint used by Cloud to authorize one browser log tail.
-pub const DELEGATED_ACTOR_LIVE_LOG_TICKET_PATH: &str = "/internal/v1/workspaces/{workspace_id}/repositories/{owner}/{repository}/runs/{run_id}/jobs/{job_id}/live-ticket";
+pub const DELEGATED_ACTOR_LIVE_LOG_TICKET_PATH: &str = "/internal/v2/workspaces/{workspace_id}/repositories/{owner}/{repository}/runs/{run_id}/jobs/{job_id}/live-ticket";
 /// Protected Core endpoint used by Cloud to dispatch one exact durable workflow source.
-pub const DELEGATED_ACTOR_WORKFLOW_DISPATCH_PATH: &str = "/internal/v1/workspaces/{workspace_id}/repositories/{repository_id}/workflows/{workflow_id}/dispatches";
+pub const DELEGATED_ACTOR_WORKFLOW_DISPATCH_PATH: &str = "/internal/v2/workspaces/{workspace_id}/repositories/{repository_id}/workflows/{workflow_id}/dispatches";
 
 const MAX_ASSERTION_BYTES: usize = 8 * 1024;
 const MAX_JWT_SEGMENT_BYTES: usize = 6 * 1024;
@@ -440,12 +439,6 @@ struct RunDetailQuery {
     job_cursor: Option<String>,
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct JobLogQuery {
-    cursor: Option<String>,
-}
-
 #[derive(Serialize)]
 struct RepositoryDirectoryResponse {
     protocol_version: u8,
@@ -566,9 +559,6 @@ struct JobLogResponse {
     next_navigation_job_id: Option<String>,
     job: JobSummaryResponse,
     log_visibility: &'static str,
-    lines: Vec<LogLineResponse>,
-    previous_cursor: Option<String>,
-    next_cursor: Option<String>,
     live: Option<JobLogLiveResponse>,
 }
 
@@ -581,19 +571,8 @@ struct JobNavigationItemResponse {
 }
 
 #[derive(Serialize)]
-struct LogLineResponse {
-    sequence: String,
-    fragment: Option<u32>,
-    emitted_at_ms: i64,
-    channel: &'static str,
-    text: String,
-}
-
-#[derive(Serialize)]
 struct JobLogLiveResponse {
-    checkpoint: Option<String>,
     stream_closed: bool,
-    more_available: bool,
 }
 
 /// Builds the Cloud-authenticated hosted Core API surface.
@@ -689,7 +668,7 @@ async fn workspace_viewer(
             (header::CONTENT_TYPE, "application/json"),
         ],
         Json(WorkspaceViewerResponse {
-            protocol_version: 1,
+            protocol_version: 2,
             workspace_id,
             principal_id: principal_id.as_str().to_owned(),
             display_name: snapshot.viewer().display_name().to_owned(),
@@ -817,7 +796,6 @@ async fn workspace_job_log(
         String,
         String,
     )>,
-    Query(query): Query<JobLogQuery>,
     headers: HeaderMap,
 ) -> Response {
     let Some(repository) = repository_path(owner, repository) else {
@@ -826,21 +804,13 @@ async fn workspace_job_log(
     let (Some(run_id), Some(job_id)) = (parse_run_id(&run_id), parse_job_id(&job_id)) else {
         return status_response(StatusCode::NOT_FOUND);
     };
-    if !valid_cursor(query.cursor.as_deref()) {
-        return status_response(StatusCode::BAD_REQUEST);
-    }
     let context = match resolve_context(&state, &workspace_id, &headers).await {
         Ok(context) => context,
         Err(response) => return response,
     };
-    let request = JobLogRequest {
-        cursor: query.cursor,
-        limit: LOG_PAGE_SIZE,
-        maximum_decoded_bytes: LOG_PAGE_DECODED_BYTES,
-    };
     match state
         .web_data
-        .job_log(&context, &repository, run_id, job_id, &request)
+        .job_log(&context, &repository, run_id, job_id)
         .await
     {
         Ok(Some(page)) => json_response(job_log_response(workspace_id, page)),
@@ -929,7 +899,7 @@ fn repository_directory_response(
     page: RepositoryDirectoryPage,
 ) -> RepositoryDirectoryResponse {
     RepositoryDirectoryResponse {
-        protocol_version: 1,
+        protocol_version: 2,
         workspace_id,
         repositories: page
             .repositories
@@ -967,7 +937,7 @@ fn repository_response(repository: Repository) -> RepositoryResponse {
 
 fn run_list_response(workspace_id: String, page: RunListPage) -> RunListResponse {
     RunListResponse {
-        protocol_version: 1,
+        protocol_version: 2,
         workspace_id,
         repository: repository_response(page.repository),
         workflows: page
@@ -1020,7 +990,7 @@ fn run_summary_response(run: RunSummary) -> RunSummaryResponse {
 
 fn run_detail_response(workspace_id: String, page: RunDetailPage) -> RunDetailResponse {
     RunDetailResponse {
-        protocol_version: 1,
+        protocol_version: 2,
         workspace_id,
         repository: repository_response(page.repository),
         run: run_summary_response(page.run),
@@ -1073,7 +1043,7 @@ fn artifact_summary_response(artifact: ArtifactSummary) -> ArtifactSummaryRespon
 
 fn job_log_response(workspace_id: String, page: JobLogPage) -> JobLogResponse {
     JobLogResponse {
-        protocol_version: 1,
+        protocol_version: 2,
         workspace_id,
         repository: repository_response(page.repository),
         run: run_summary_response(page.run),
@@ -1091,28 +1061,9 @@ fn job_log_response(workspace_id: String, page: JobLogPage) -> JobLogResponse {
         next_navigation_job_id: page.next_navigation_job_id.map(|id| id.to_string()),
         job: job_summary_response(page.job),
         log_visibility: collection_visibility(page.log_visibility),
-        lines: page.lines.into_iter().map(log_line_response).collect(),
-        previous_cursor: page.previous_cursor,
-        next_cursor: page.next_cursor,
         live: page.live.map(|live| JobLogLiveResponse {
-            checkpoint: live.checkpoint,
             stream_closed: live.stream_closed,
-            more_available: live.more_available,
         }),
-    }
-}
-
-fn log_line_response(line: LogLine) -> LogLineResponse {
-    LogLineResponse {
-        sequence: line.sequence.to_string(),
-        fragment: line.fragment,
-        emitted_at_ms: line.emitted_at.get(),
-        channel: match line.channel {
-            LogChannel::Stdout => "stdout",
-            LogChannel::Stderr => "stderr",
-            LogChannel::System => "system",
-        },
-        text: line.text,
     }
 }
 
@@ -1335,17 +1286,6 @@ mod tests {
             serde_json::to_value(artifact_summary_response(artifact)).expect("artifact JSON");
         assert_eq!(response["id"], i64::MAX.to_string());
         assert_eq!(response["size_bytes"], u64::MAX.to_string());
-
-        let line = LogLine {
-            sequence: u64::MAX,
-            fragment: Some(3),
-            emitted_at: UnixMillis::new(1_765_000_000_001),
-            channel: LogChannel::Stderr,
-            text: "failure".to_owned(),
-        };
-        let response = serde_json::to_value(log_line_response(line)).expect("line JSON");
-        assert_eq!(response["sequence"], u64::MAX.to_string());
-        assert_eq!(response["channel"], "stderr");
     }
 
     #[test]

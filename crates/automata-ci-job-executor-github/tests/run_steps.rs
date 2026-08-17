@@ -3,10 +3,11 @@ mod support;
 use std::{collections::BTreeMap, sync::Arc};
 
 use automata_ci_core::{
-    JobConclusion, JobSecretExposure, RunnerId, StepAnnotationLevel, StepIr, ValueSource,
+    JobConclusion, JobSecretExposure, LogGroupKind, RunnerId, StepAnnotationLevel, StepIr,
+    ValueSource,
 };
 use automata_ci_execution::{RootFilesystemPolicy, SandboxCustody, SandboxPrivilegePolicy};
-use automata_ci_github_runtime::{CommandFileKind, WorkflowCommandPolicy};
+use automata_ci_github_runtime::CommandFileKind;
 use automata_ci_runner_runtime::{
     ExecutionCancellation, ExecutionEvents, ExecutorErrorKind, JobExecutor,
 };
@@ -38,6 +39,12 @@ async fn credential_free_execution_has_no_authority_or_secret_and_emits_public_o
 
     assert_eq!(result.conclusion(), JobConclusion::Success);
     assert_eq!(result.secret_exposure(), JobSecretExposure::Secretless);
+    let groups = fixture.events.started_log_groups();
+    assert_eq!(groups.len(), 2);
+    assert_eq!(groups[0].name(), "Runner diagnostics");
+    assert_eq!(groups[0].kind(), LogGroupKind::Setup);
+    assert_eq!(groups[1].name(), "Public");
+    assert_eq!(groups[1].kind(), LogGroupKind::Step);
     assert!(
         fixture
             .events
@@ -560,75 +567,6 @@ async fn stderr_mask_registration_redacts_a_secret_captured_on_stdout() {
     assert_eq!(logs.len(), 1);
     assert_eq!(logs[0].channel(), automata_ci_core::LogChannel::Stdout);
     assert_eq!(logs[0].payload(), b"***\n");
-}
-
-#[tokio::test]
-async fn ordered_cross_stream_stop_resume_does_not_apply_a_suppressed_mutation() {
-    let token = "resume-token-123";
-    let response = PhaseResponse::success()
-        .with_stdout(format!("::stop-commands::{token}\n"))
-        .with_stderr("::set-env name=BLOCKED::yes\n")
-        .with_stdout(format!("::{token}::\n"));
-    let fixture = Fixture::secretless(Vec::new(), vec![response, PhaseResponse::success()])
-        .with_workflow_command_policy(WorkflowCommandPolicy::new(true, false));
-    let request = fixture.request(support::envelope(vec![
-        run_step("ordered-first", "Ordered first", "true"),
-        run_step("ordered-second", "Ordered second", "true"),
-    ]));
-    let events: Arc<dyn ExecutionEvents> = fixture.events.clone();
-
-    let result = fixture
-        .executor
-        .execute(request, events, ExecutionCancellation::new())
-        .await
-        .expect("job executes");
-
-    assert_eq!(result.conclusion(), JobConclusion::Success);
-    let state = fixture.endpoint_state.lock().expect("endpoint lock");
-    let commands = state
-        .commands
-        .iter()
-        .filter(|command| command.argv().program().as_str() == "/usr/bin/bash")
-        .collect::<Vec<_>>();
-    assert_eq!(commands.len(), 2);
-    assert!(!environment_map(commands[1]).contains_key("BLOCKED"));
-}
-
-#[tokio::test]
-async fn ordered_cross_stream_resume_activates_a_later_stdout_mutation() {
-    let token = "resume-token-123";
-    let response = PhaseResponse::success()
-        .with_stdout(format!("::stop-commands::{token}\n"))
-        .with_stderr(format!("::{token}::\n"))
-        .with_stdout("::set-env name=ALLOWED::yes\n");
-    let fixture = Fixture::secretless(Vec::new(), vec![response, PhaseResponse::success()])
-        .with_workflow_command_policy(WorkflowCommandPolicy::new(true, false));
-    let request = fixture.request(support::envelope(vec![
-        run_step("ordered-first", "Ordered first", "true"),
-        run_step("ordered-second", "Ordered second", "true"),
-    ]));
-    let events: Arc<dyn ExecutionEvents> = fixture.events.clone();
-
-    let result = fixture
-        .executor
-        .execute(request, events, ExecutionCancellation::new())
-        .await
-        .expect("job executes");
-
-    assert_eq!(result.conclusion(), JobConclusion::Success);
-    let state = fixture.endpoint_state.lock().expect("endpoint lock");
-    let commands = state
-        .commands
-        .iter()
-        .filter(|command| command.argv().program().as_str() == "/usr/bin/bash")
-        .collect::<Vec<_>>();
-    assert_eq!(commands.len(), 2);
-    assert_eq!(
-        environment_map(commands[1])
-            .get("ALLOWED")
-            .map(String::as_str),
-        Some("yes")
-    );
 }
 
 #[tokio::test]

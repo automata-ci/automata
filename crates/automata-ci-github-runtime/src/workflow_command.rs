@@ -3,15 +3,14 @@ use std::fmt::{self, Debug};
 use crate::model::SensitiveText;
 use crate::{
     Annotation, AnnotationLevel, AnnotationProperty, CommandNotice, DebugMessage, GroupTitle,
-    LegacyStepMutation, MaskRegistration, MatcherCommand, MatcherFile, MatcherOwner,
-    NameValueCommand, OutputLine, PathEntry, SecretMask, StopCommands, WorkflowCommandError,
-    WorkflowCommandEvent, WorkflowCommandLimits, WorkflowCommandPolicy, WorkflowLine,
+    MaskRegistration, MatcherCommand, MatcherFile, MatcherOwner, OutputLine, SecretMask,
+    StopCommands, WorkflowCommandError, WorkflowCommandEvent, WorkflowCommandLimits,
+    WorkflowCommandPolicy, WorkflowLine,
 };
 
 const REGISTERED_COMMANDS: &[&str] = &[
     "add-mask",
     "add-matcher",
-    "add-path",
     "debug",
     "echo",
     "endgroup",
@@ -19,9 +18,6 @@ const REGISTERED_COMMANDS: &[&str] = &[
     "group",
     "notice",
     "remove-matcher",
-    "save-state",
-    "set-env",
-    "set-output",
     "stop-commands",
     "warning",
 ];
@@ -32,9 +28,9 @@ pub trait WorkflowCommandProcessor: Debug + Send {
     ///
     /// # Errors
     ///
-    /// Rejects non-UTF-8 input, malformed recognized commands, unsafe legacy
-    /// mutations, invalid stop tokens, and aggregate or per-line limit
-    /// violations. Error values never contain line data or secret values.
+    /// Rejects non-UTF-8 input, malformed recognized commands, invalid stop
+    /// tokens, and aggregate or per-line limit violations. Error values never
+    /// contain line data or secret values.
     fn process_line(&mut self, source: &[u8]) -> Result<WorkflowLine, WorkflowCommandError>;
 
     /// Reports whether command echoing is enabled after the latest line.
@@ -80,7 +76,7 @@ impl GithubWorkflowCommandSession {
         self.limits
     }
 
-    /// Returns the compatibility policy selected for this session.
+    /// Returns the command feature policy selected for this session.
     #[must_use]
     pub const fn policy(&self) -> WorkflowCommandPolicy {
         self.policy
@@ -252,31 +248,6 @@ impl GithubWorkflowCommandSession {
             };
             self.echo_enabled = enabled;
             WorkflowCommandEvent::EchoChanged(enabled)
-        } else if raw.name.eq_ignore_ascii_case("set-output") {
-            WorkflowCommandEvent::LegacyMutation(LegacyStepMutation::Output(named_mutation(raw)?))
-        } else if raw.name.eq_ignore_ascii_case("save-state") {
-            WorkflowCommandEvent::LegacyMutation(LegacyStepMutation::State(named_mutation(raw)?))
-        } else if raw.name.eq_ignore_ascii_case("set-env") {
-            if !self.policy.allow_insecure_legacy_commands() {
-                return Err(WorkflowCommandError::LegacyCommandDisabled);
-            }
-            let command = named_mutation(raw)?;
-            if command.name().eq_ignore_ascii_case("NODE_OPTIONS") {
-                WorkflowCommandEvent::Notice(CommandNotice::BlockedNodeOptions)
-            } else {
-                // Runner-owned default matching depends on the target
-                // platform. Preserve the mutation until the completed-step
-                // applicator can enforce Unix or Windows name semantics.
-                WorkflowCommandEvent::LegacyMutation(LegacyStepMutation::Environment(command))
-            }
-        } else if raw.name.eq_ignore_ascii_case("add-path") {
-            if !self.policy.allow_insecure_legacy_commands() {
-                return Err(WorkflowCommandError::LegacyCommandDisabled);
-            }
-            if raw.data.is_empty() {
-                return Err(WorkflowCommandError::MissingRequiredProperty);
-            }
-            WorkflowCommandEvent::LegacyMutation(LegacyStepMutation::Path(PathEntry::new(raw.data)))
         } else {
             return Ok(WorkflowLine::Output(OutputLine::new(
                 original_line.to_owned(),
@@ -341,17 +312,6 @@ fn parse_command(
     limits: WorkflowCommandLimits,
     dynamic_command: Option<&str>,
 ) -> Result<Option<RawCommand>, WorkflowCommandError> {
-    if let Some(command) = parse_v2(line, limits, dynamic_command)? {
-        return Ok(Some(command));
-    }
-    parse_legacy(line, limits, dynamic_command)
-}
-
-fn parse_v2(
-    line: &str,
-    limits: WorkflowCommandLimits,
-    dynamic_command: Option<&str>,
-) -> Result<Option<RawCommand>, WorkflowCommandError> {
     let message = line.trim_start();
     let Some(rest) = message.strip_prefix("::") else {
         return Ok(None);
@@ -369,7 +329,7 @@ fn parse_v2(
 
     let properties = if let Some(space) = space.filter(|space| *space > 0) {
         let raw_properties = command_info[space + 1..].trim();
-        parse_properties(raw_properties, ',', PropertyEscaping::V2, limits)?
+        parse_properties(raw_properties, limits)?
     } else {
         Vec::new()
     };
@@ -382,64 +342,13 @@ fn parse_v2(
     }))
 }
 
-fn parse_legacy(
-    line: &str,
-    limits: WorkflowCommandLimits,
-    dynamic_command: Option<&str>,
-) -> Result<Option<RawCommand>, WorkflowCommandError> {
-    let Some(prefix) = line.find("##[") else {
-        return Ok(None);
-    };
-    let info_start = prefix + 3;
-    let Some(relative_end) = line[info_start..].find(']') else {
-        return Ok(None);
-    };
-    let end = info_start + relative_end;
-    let command_info = &line[info_start..end];
-    let space = command_info.find(' ');
-    let command_name = space.map_or(command_info, |index| &command_info[..index]);
-    if !registered(command_name, dynamic_command) {
-        return Ok(None);
-    }
-    validate_command_name(command_name, limits)?;
-
-    let properties = if let Some(space) = space.filter(|space| *space > 0) {
-        parse_properties(
-            &command_info[space + 1..],
-            ';',
-            PropertyEscaping::Legacy,
-            limits,
-        )?
-    } else {
-        Vec::new()
-    };
-    let data = unescape_legacy(&line[end + 1..]);
-    validate_data(&data, limits)?;
-    Ok(Some(RawCommand {
-        name: command_name.to_owned(),
-        properties,
-        data,
-    }))
-}
-
-#[derive(Clone, Copy)]
-enum PropertyEscaping {
-    V2,
-    Legacy,
-}
-
 fn parse_properties(
     source: &str,
-    separator: char,
-    escaping: PropertyEscaping,
     limits: WorkflowCommandLimits,
 ) -> Result<Vec<RawProperty>, WorkflowCommandError> {
     let mut properties: Vec<RawProperty> = Vec::new();
     let mut property_count = 0_usize;
-    for property in source
-        .split(separator)
-        .filter(|property| !property.is_empty())
-    {
+    for property in source.split(',').filter(|property| !property.is_empty()) {
         property_count = property_count.saturating_add(1);
         if property_count > limits.maximum_properties() {
             return Err(WorkflowCommandError::TooManyProperties {
@@ -459,10 +368,7 @@ fn parse_properties(
                 maximum: limits.maximum_name_bytes(),
             });
         }
-        let value = match escaping {
-            PropertyEscaping::V2 => unescape_v2_property(raw_value),
-            PropertyEscaping::Legacy => unescape_legacy(raw_value),
-        };
+        let value = unescape_v2_property(raw_value);
         validate_data(&value, limits)?;
         if let Some(existing) = properties
             .iter_mut()
@@ -523,28 +429,12 @@ fn unescape_v2_property(value: &str) -> String {
         .replace("%25", "%")
 }
 
-fn unescape_legacy(value: &str) -> String {
-    value
-        .replace("%3B", ";")
-        .replace("%0D", "\r")
-        .replace("%0A", "\n")
-        .replace("%5D", "]")
-        .replace("%25", "%")
-}
-
 fn raw_property<'a>(command: &'a RawCommand, name: &str) -> Option<&'a str> {
     command
         .properties
         .iter()
         .find(|property| property.name.eq_ignore_ascii_case(name))
         .map(|property| property.value.as_str())
-}
-
-fn named_mutation(command: RawCommand) -> Result<NameValueCommand, WorkflowCommandError> {
-    let name = raw_property(&command, "name")
-        .filter(|name| !name.is_empty())
-        .ok_or(WorkflowCommandError::MissingRequiredProperty)?;
-    Ok(NameValueCommand::from_parts(name.to_owned(), command.data))
 }
 
 fn remove_matcher(command: RawCommand) -> WorkflowCommandEvent {

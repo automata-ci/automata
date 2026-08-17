@@ -78,7 +78,7 @@ describe("preview model projections", () => {
       expect(detail.jobs.visibility).toBe(sample.jobs.visibility);
       expect(detail.artifacts.visibility).toBe(sample.artifacts.visibility);
 
-      for (const { job, logLines } of sample.jobs.items) {
+      for (const { job } of sample.jobs.items) {
         expect("href" in job).toBe(false);
         const expectedJobHref = `?view=job&run=${sample.run.id}&job=${job.id}`;
         expect(detail.jobs.items.find(({ id }) => id === job.id)?.href).toBe(
@@ -92,20 +92,7 @@ describe("preview model projections", () => {
         }
         expect(log.run.href).toBe(`?view=run&run=${sample.run.id}`);
         expect(log.job.href).toBe(expectedJobHref);
-        expect(log.lines).toEqual(logLines);
-        expect(new Set(log.lines.map(({ id }) => id)).size).toBe(
-          log.lines.length,
-        );
-        expect(
-          log.lines.every(({ timestamp }) =>
-            /^\d{2}:\d{2}:\d{2}$/u.test(timestamp.label),
-          ),
-        ).toBe(true);
-        for (let index = 1; index < log.lines.length; index += 1) {
-          expect(Date.parse(log.lines[index]?.timestamp.iso ?? "")).toBeGreaterThan(
-            Date.parse(log.lines[index - 1]?.timestamp.iso ?? ""),
-          );
-        }
+        expect(log.live).toBeNull();
       }
     }
 
@@ -178,22 +165,12 @@ describe("preview model projections", () => {
     ).toBe(false);
     expect(
       isPreviewJobLogStateSupported(
-        new URLSearchParams("view=job&run=known&job=job-1&q=build"),
+        new URLSearchParams("view=job&run=known&job=job-1"),
       ),
     ).toBe(true);
     expect(
       isPreviewJobLogStateSupported(
-        new URLSearchParams("view=job&run=known&job=job-1&q=line%0Abreak"),
-      ),
-    ).toBe(false);
-    expect(
-      isPreviewJobLogStateSupported(
-        new URLSearchParams("view=job&run=known&job=job-1&q=%E2%80%8B"),
-      ),
-    ).toBe(false);
-    expect(
-      isPreviewJobLogStateSupported(
-        new URLSearchParams("view=job&run=known&job=job-1&q=build%E2%80%AE"),
+        new URLSearchParams("view=job&run=known&job=job-1&q=build"),
       ),
     ).toBe(false);
     expect(
@@ -257,18 +234,8 @@ describe("preview model projections", () => {
     if (firstSample === undefined || firstJob === undefined) {
       return;
     }
-    const searched = previewJobLog(
-      firstSample.run.id,
-      firstJob.job.id,
-      new URLSearchParams("q=Operating%20System"),
-    );
-    expect(searched?.search.query).toBe("Operating System");
-    expect(searched?.lines).toHaveLength(firstJob.logLines.length);
-    expect(searched?.pagination.label).toBe(
-      `${firstJob.logLines.length} log ${
-        firstJob.logLines.length === 1 ? "line" : "lines"
-      }`,
-    );
+    const logPage = previewJobLog(firstSample.run.id, firstJob.job.id);
+    expect(logPage?.job.id).toBe(firstJob.job.id);
   });
 
   it("keeps the repository settings preview read-only and token-free", () => {

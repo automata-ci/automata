@@ -84,9 +84,9 @@ describe("stylesheet entrypoint boundaries", () => {
     const previewEntry = source("preview.tsx");
 
     expect(previewEntry).not.toMatch(/from "\.\/pages\//u);
-    expect(previewEntry.match(/<App page=/gu)).toHaveLength(1);
+    expect(previewEntry.match(/<App\b/gu)).toHaveLength(1);
     expect(previewEntry).toContain("renderPreviewPage(runDetail)");
-    expect(previewEntry).toContain("renderPreviewPage(jobLog)");
+    expect(previewEntry).toContain("previewJobLogRecords(requestedRunId, requestedJobId)");
     expect(previewEntry).toContain("renderPreviewPage(previewRepositorySettings())");
     expect(previewEntry).toContain("renderPreviewPage(previewRepositoryDirectory(");
     expect(previewEntry).toContain("renderPreviewPage(previewRunList(searchParameters))");

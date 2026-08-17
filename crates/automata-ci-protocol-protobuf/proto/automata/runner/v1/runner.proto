@@ -910,15 +910,49 @@ enum LogChannel {
   LOG_CHANNEL_SYSTEM = 3;
 }
 
+enum LogGroupKind {
+  LOG_GROUP_KIND_UNSPECIFIED = 0;
+  LOG_GROUP_KIND_SETUP = 1;
+  LOG_GROUP_KIND_STEP = 2;
+  LOG_GROUP_KIND_ACTION_PRE = 3;
+  LOG_GROUP_KIND_ACTION_POST = 4;
+  LOG_GROUP_KIND_CLEANUP = 5;
+}
+
+message LogGroup {
+  string id = 1;
+  optional string parent_id = 2;
+  string name = 3;
+  LogGroupKind kind = 4;
+  uint32 ordinal = 5;
+}
+
+message LogLine {
+  string group_id = 1;
+  LogChannel channel = 2;
+  bytes payload = 3;
+}
+
+message LogGroupFinished {
+  string group_id = 1;
+  JobConclusion conclusion = 2;
+}
+
+message LogStreamFinished {}
+
 message LogFrame {
   uint32 schema_version = 1;
   bytes stream_id = 2;
   bytes attempt_id = 3;
   uint64 sequence = 4;
   sint64 emitted_at_unix_millis = 5;
-  LogChannel channel = 6;
-  bytes payload = 7;
-  bool end_of_stream = 8;
+  reserved 6 to 8;
+  oneof record {
+    LogGroup group_started = 9;
+    LogLine line = 10;
+    LogGroupFinished group_finished = 11;
+    LogStreamFinished stream_finished = 12;
+  }
 }
 
 message LogBatch {
