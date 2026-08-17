@@ -264,11 +264,11 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     permissions:
-      artifact-metadata: write
-      attestations: write
+      artifact-metadata: write # Bind uploaded review artifacts to service digests.
+      attestations: write # Publish provenance for the candidate image.
       contents: read
-      id-token: write
-      packages: write
+      id-token: write # Mint the OIDC identity used to sign attestations.
+      packages: write # Push the immutable review image to GHCR.
     env:
       ANONYMOUS_AUTH_FILE: ${{ github.workspace }}/target/task-tmp/service-proxy-anonymous-auth.json
       ATTESTATION_HOME: ${{ github.workspace }}/target/task-tmp/service-proxy-attestation-home
@@ -551,7 +551,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     permissions:
-      attestations: read
+      attestations: read # Verify the reviewed image's provenance before promotion.
       contents: read
     env:
       ANONYMOUS_AUTH_FILE: ${{ github.workspace }}/target/task-tmp/service-proxy-anonymous-auth.json
@@ -687,9 +687,13 @@ jobs:
           AUTOMATA_SERVICE_PROXY_CONTAINER_RUNTIME=podman \
             ./scripts/ci/verify-service-proxy-image.sh \
               "$LOCKED_IMAGE" \
-              "${{ steps.evidence.outputs.version }}" \
-              "${{ steps.evidence.outputs.candidate_commit }}" \
-              "${{ steps.evidence.outputs.created }}"
+              "${EVIDENCE_VERSION}" \
+              "${EVIDENCE_CANDIDATE_COMMIT}" \
+              "${EVIDENCE_CREATED}"
+        env:
+          EVIDENCE_VERSION: ${{ steps.evidence.outputs.version }}
+          EVIDENCE_CANDIDATE_COMMIT: ${{ steps.evidence.outputs.candidate_commit }}
+          EVIDENCE_CREATED: ${{ steps.evidence.outputs.created }}
 
   promote:
     name: Bind protected stable service-proxy tags
@@ -700,7 +704,7 @@ jobs:
     environment: service-proxy-promotion
     permissions:
       contents: read
-      packages: write
+      packages: write # Bind stable GHCR tags to the reviewed image digest.
     env:
       ANONYMOUS_AUTH_FILE: ${{ github.workspace }}/target/task-tmp/service-proxy-anonymous-auth.json
       CANDIDATE_COMMIT: ${{ needs.validate.outputs.candidate_commit }}
