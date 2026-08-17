@@ -1,11 +1,13 @@
 # Local installation and deployment roadmap
 
 - Roadmap status: Active
-- Available slice: read-only `automata local doctor` and source-only
-  `automata local check` from a reviewed source checkout
+- Available slice: read-only `automata local doctor`, source-only
+  `automata local check`, and explicit runner-schema-6 evaluation through the
+  fixed-relay `LocalDocker` provider; there is no `automata local run` yet
 - Current implementation checkpoints: 2B.1 pinned Docker context and immutable
-  identity anchor, plus the read-only source-validation portion of 3B
-- Date: 2026-08-16
+  identity anchor, the evaluation-only 3A provider and closed Results gateway
+  foundation, plus the read-only source-validation portion of 3B
+- Date: 2026-08-17
 
 This roadmap owns the work required to make Automata easy to evaluate on one
 machine, run repository-scoped work through a repository-agnostic local
@@ -189,11 +191,11 @@ onboarding path:
 | --- | --- | --- |
 | `automata local doctor` | Cross-platform host, Docker, Compose, and architecture preflight | It is deliberately read-only; checkpoint 2A retired checkpoint 1's proposed native state-root input, and checkpoint 2B.1 makes installation identity engine-owned |
 | `automata local check` | Deterministic bounded live-worktree archive, exact `.github/workflows` selection, local-only manual event compilation, reachable same-snapshot reusable workflows with typed call-graph and root-secret propagation, and value-free external/built-in credential discovery | It is deliberately read-only and fails closed on Windows; repository identity, local admission, scheduling, execution, and GitHub Checks remain absent |
-| `automata-ci-local` Engine adapter | Exact-endpoint Docker connection plus strict identity-anchor inspect/create/adopt with fake and opt-in live tests | No product command calls the mutation API until desired intent and convergent lifecycle contracts land |
+| `automata-ci-local` Docker boundary | Exact-endpoint anchor management plus a private fixed-relay provider with deterministic closed Results topology | Convergent lifecycle must provision the renderer-owned shared transit/listener; no local product command calls the mutation API yet |
 | Control-plane configuration and container build | Complete server configuration and product images | Configuration and bootstrap are manual and Unix-oriented |
 | GitHub workflow crates | Frontend, compiler, typed workflow contracts, reusable-workflow handling | They need a separately authorized local snapshot source |
 | Workflow service | Credential requirement discovery, admission, and orchestration boundaries | It needs local provenance as an additional source authority |
-| Runner and runner journal | Enrollment/redeem, mTLS protocol, durable slots, result delivery, `max_parallel_jobs` | There is no evaluation-only Docker Engine job provider |
+| Runner and runner journal | Enrollment/redeem, mTLS protocol, durable slots, result delivery, bounded `max_parallel_jobs`, and explicit evaluation-only `local_docker` composition | Local snapshot admission and repository-scoped Results/cache authority remain absent |
 | Secret and key-management crates | Secret domain, versioned providers, envelope encryption, delivery, and masking | CLI credential custody is Linux-only and local prompting is absent |
 | Rootless Podman, macOS VM, and native Windows providers | Hardened production or advanced execution profiles | None is the portable Linux-container evaluation provider |
 | Release automation | Guarded Linux x86-64 release flow | Native CLI artifacts and multi-architecture images are not public |
@@ -762,7 +764,7 @@ The renderer consumes the current hidden image boundary
 client, test helper, compatibility alias, or placeholder service-init command.
 The initializer and server share the production S3 connection parser and the
 sole validated-config-to-store AWS SDK construction boundary. Runner product
-schema 5 independently requires the same closed
+schema 6 independently requires the same closed
 trust choice for every runner-side S3 client. Local HTTPS rendering selects
 exact private-CA trust and mounted bounded `SecretSource` file references for
 the CA and credentials on all three surfaces; the private root is never merged
@@ -785,16 +787,30 @@ the desired `N`, profile, render inputs, data, and run history.
 
 ### 3A. `LocalDocker` provider
 
-Implement the evaluation-only Docker Engine provider behind the existing
-sandbox/provider interfaces. Reuse executor requests, operation identity,
-runner custody, copy/exec/attach/output bounds, cancellation, and result
-delivery. Add fake-daemon conformance and an ignored live Docker suite.
+Status: evaluation provider and its closed Results gateway foundation are
+implemented behind the existing sandbox/provider interfaces. The provider
+requires Docker Engine 28/API 1.48 and consumes one externally provisioned
+transit network, running numeric Results target, and protocol-2 proxy image. It
+deterministically maps profile admission plus job slots 1 through 256 to
+disjoint `/29` front networks and transit addresses. Jobs join only their front
+network; the proxy alone bridges that front to the internal transit at fixed
+port 8081, with no public egress or external DNS.
+
+Create, attach, inspect, and endpoint operations re-attest the shared transport
+and every attached peer under one bounded cancellation-aware budget. Destroy
+skips shared-transit and container-runtime/image re-attestation, so damage there
+does not by itself block removal of containers with exact immutable custody.
+Exact front-network drift blocks destroy before mutation; a foreign endpoint
+prevents deletion of the front network after owned containers are removed. The
+provider does not own or delete the shared transit or Results listener.
 
 Gate: shell and JavaScript-action sandboxes execute; restart attach and exact
 cancellation work; realized configuration is inspected; foreign collisions
 fail without mutation; prohibited privilege, namespace, bind, device, socket,
 and network requests fail closed; output/copy bounds hold; and destroy leaves no
-owned job resources.
+owned job resources. The renderer-owned transit/listener, local repository
+authority, Results/cache URL and token injection, and `automata local run`
+composition remain separate gates.
 
 ### 3B. `LocalSnapshot` source adapter
 

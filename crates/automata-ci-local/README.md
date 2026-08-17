@@ -2,10 +2,10 @@
 
 `automata-ci-local` owns the cross-platform, disposable local-installation
 boundary used by `automata local`. It validates the initial x86-64 Linux, Apple
-Silicon macOS, or x86-64 Windows host tuple; a local Linux Docker Engine; Docker
-API compatibility; and Compose plugin version 2.20.0 or newer. It will supervise
-the local Compose project without adding container-engine behavior to the
-control-plane crate.
+Silicon macOS, or x86-64 Windows host tuple; a local Linux Docker Engine 28.0.0
+or newer with API 1.48 or newer; and Compose plugin version 2.20.0 or newer. It
+will supervise the local Compose project without adding container-engine
+behavior to the control-plane crate.
 
 The user-visible slice remains read-only: it provides both host preflight and
 snapshot-backed workflow checking. During `local doctor`, context discovery is
@@ -60,8 +60,12 @@ mutation, delete, prune, image-pull, helper-container, or Compose API.
 On Linux, the runner also consumes one evaluation-only sandbox-provider
 factory. The concrete Docker provider and engine API stay private. They connect
 only through the fixed `/run/automata-engine/docker.sock` relay, bind every
-operation to the exact daemon and installation anchor, and accept only an
-already-present immutable guest image. The fixed relay daemon must be rootful
+operation to the exact daemon and installation anchor, and accept only
+already-present immutable guest, job, and Results-proxy images. The mandatory
+`LocalDockerResultsTransport` pins one renderer-owned transit-network ID, one
+running Results-container ID and private IPv4 address, and the proxy image; the
+per-sandbox provider never creates, replaces, or deletes the shared transport.
+The fixed relay daemon must be rootful
 and report daemon-default user-namespace remapping, the built-in seccomp
 profile, and private cgroup namespaces. Rootless mode and daemons with AppArmor
 or SELinux enabled are deliberately not qualified because this provider does
@@ -71,18 +75,36 @@ requires each kernel `uid_map` and `gid_map` to contain one nonzero host range
 covering container identities 0 through 65533. Daemon security-option drift is
 part of the pinned identity and invalidates the provider. The relay architecture
 must exactly match the architecture already recorded in the runner inventory;
-the immutable guest and job images must match that same relay architecture and
-must not declare volumes, exposed ports, or a healthcheck.
+the immutable guest, job, and proxy images must match that same relay
+architecture and must not declare volumes, exposed ports, or a healthcheck. The
+proxy additionally has an exact credential-free runtime shape and must carry
+`io.automata.service-proxy.protocol-version=2`.
 
-Docker API v1.44 does not expose the daemon's `default-ulimits` configuration.
-An empty `default-ulimits` daemon policy is therefore a trusted fixed-relay
-prerequisite, not a preflight attestation. The provider still requires the
-realized container ulimit list to be empty; a violation fails closed after
-create, and cleanup uses only revalidated immutable custody evidence so the
-rejected container cannot strand its deterministic name.
+The bounded Engine facts do not expose the daemon's `default-ulimits`
+configuration. An empty `default-ulimits` policy is therefore a trusted
+fixed-relay prerequisite, not a preflight attestation. The provider still
+requires the realized container ulimit list to be empty; a violation fails
+closed after create, and custody-only destroy can still remove the container
+when its immutable custody and exact front network remain valid.
 
-A job receives no host bind, host engine socket, per-job volume, or network.
-Its workspace and protected control client live in container tmpfs mounts. The
+A job receives no host bind, host engine socket, or per-job volume. It joins one
+deterministic internal `/29` front network shared only with a credential-free
+proxy. That proxy joins the front network and the separate internal transit;
+the job never joins transit, control, or dependency networks. Its only route is
+`results.automata.invalid:8081` through the exact proxy to the configured
+numeric Results address, with no external DNS or public egress. Installation
+custody deterministically maps profile admission plus job slots 1 through 256
+to disjoint front networks and transit addresses; collisions, overlap, or
+insufficient transit capacity fail without an alternate allocation scan.
+
+Create, attach, inspect, and endpoint operations re-attest the complete shared
+transit and all attached peer proxies under one cancellation-aware 30-second
+budget. Destroy skips shared-transit and container-runtime/image re-attestation,
+so damage there does not by itself block removal of containers whose immutable
+custody remains exact. Exact front-network drift blocks destroy before mutation;
+a foreign endpoint prevents deletion of the front network after owned containers
+are removed. Its workspace and protected control client live in container tmpfs
+mounts. The
 protected guest broker replaces the profile keepalive as PID 1; the keepalive
 is bound into the sandbox identity but is not run as initialization. Raw
 provider endpoints are attempt-once. The production runner places them behind
@@ -97,6 +119,11 @@ containers are adopted only after exact identity inspection; an exited
 container is never restarted.
 Durable execution replay remains host-owned, and an ambiguous committed
 invocation fails closed until the exact sandbox is destroyed and proven absent.
+
+This transport foundation does not itself provision the shared transit or
+listener, inject Results/cache URLs, or issue a token. Local snapshot admission
+and repository-scoped Results/cache authority remain separate reviewed work;
+there is no ambient installation credential or GitHub-authority fallback.
 
 An installation is one reusable control-plane and runner-capacity domain, not
 one repository. Repositories sharing an installation are one trusted set and

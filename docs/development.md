@@ -280,8 +280,8 @@ adding a page kind.
 
 The first cross-platform local-installation slice is a read-only host check for
 x86-64 Linux, Apple Silicon macOS, and x86-64 Windows. It requires a local Linux
-Docker Engine with the supported API and matching architecture, Docker Compose
-plugin version 2.20.0 or newer, and rejects a Unix root process:
+Docker Engine 28.0.0 or newer with API 1.48 or newer and matching architecture,
+Docker Compose plugin version 2.20.0 or newer, and rejects a Unix root process:
 
 ```console
 cargo run --locked -p automata-ci -- local doctor
@@ -337,15 +337,17 @@ creates a Check Run; local admission and execution remain later roadmap
 checkpoints.
 
 The ignored fixed-relay Local Docker conformance fixture requires an existing
-installation anchor, the explicit `/run/automata-engine/docker.sock` relay, and
-already-present digest-pinned Linux job and sandbox-guest images. The relay must
+installation anchor, the explicit `/run/automata-engine/docker.sock` relay,
+already-present digest-pinned Linux job, sandbox-guest, and service-proxy
+images, and the exact renderer-owned Results transit and target. The relay must
 front rootful Docker with daemon-default user-namespace remapping enabled; the
 built-in seccomp and private-cgroup-namespace security options must be reported,
 AppArmor and SELinux must be disabled, every required resource controller must
-be available, and daemon `default-ulimits` must be empty. Docker v1.44 cannot
-preflight the last setting; the fixture therefore verifies the realized empty
-ulimit contract and custody-only rollback. Rootless Docker and multi-range
-UID/GID maps are intentionally rejected. The
+be available, and daemon `default-ulimits` must be empty. The fixture verifies
+the realized empty-ulimit contract and custody-only rollback. Its network gate
+also requires `results.automata.invalid:8081` to reach only the configured
+numeric Results target while external DNS and public-IP egress fail. Rootless
+Docker and multi-range UID/GID maps are intentionally rejected. The
 fixture verifies the job's nonzero host mappings, attenuated UID-0 identity and
 empty Linux capability sets, shell and JavaScript execution, and the protected
 tmpfs client. It then removes only the revalidated sibling containers it
@@ -356,6 +358,10 @@ AUTOMATA_LOCAL_DOCKER_INSTALLATION='evaluation' \
 AUTOMATA_LOCAL_DOCKER_INSTALLATION_ID='6e561f8b-9098-418d-b573-d82f5c73006e' \
 AUTOMATA_LOCAL_DOCKER_JOB_IMAGE='registry.example/automata/job@sha256:<64-lowercase-hex>' \
 AUTOMATA_LOCAL_DOCKER_GUEST_IMAGE='registry.example/automata/sandbox-guest@sha256:<64-lowercase-hex>' \
+AUTOMATA_LOCAL_DOCKER_RESULTS_PROXY_IMAGE='registry.example/automata/service-proxy@sha256:<64-lowercase-hex>' \
+AUTOMATA_LOCAL_DOCKER_RESULTS_TRANSIT_NETWORK_ID='<64-lowercase-hex>' \
+AUTOMATA_LOCAL_DOCKER_RESULTS_CONTAINER_ID='<64-lowercase-hex>' \
+AUTOMATA_LOCAL_DOCKER_RESULTS_ADDRESS='10.91.0.2' \
 cargo test --locked -p automata-ci-local \
   'local_docker::tests::fixed_relay_live_shell_and_javascript_conformance' \
   -- --ignored --exact --nocapture

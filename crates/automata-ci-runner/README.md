@@ -130,15 +130,20 @@ environment. Jobs do not receive runner state paths, the host Podman socket,
 control-plane credentials, or provider-control credentials.
 
 The evaluation-only local Docker provider similarly exposes no host socket,
-bind, per-job volume, or network. It uses one fixed private relay and an
-already-present immutable guest image, then verifies the exact daemon,
-installation anchor, image, and container identity around lifecycle operations.
+bind, or per-job volume. Each job joins one deterministic internal front
+network with a credential-free fixed-port proxy; only the proxy joins the exact
+pre-provisioned Results transit, so jobs have no external DNS or public egress.
+The provider uses one fixed private relay and already-present immutable guest
+and Results-proxy images, then verifies the exact daemon, installation anchor,
+images, transit, running numeric Results target, and peer proxies.
 The rootful relay daemon must attest daemon-default user-namespace remapping
 plus built-in seccomp and private cgroup namespaces, expose every required
 memory/CPU/PID controller, have AppArmor and SELinux disabled, and exactly match
 the architecture already advertised by the runner inventory. Its trusted
-configuration must leave `default-ulimits` empty because Docker API v1.44 does
-not expose that daemon setting. Rootless Docker is not qualified, and each sandbox separately proves one
+relay must run Docker Engine 28 or newer with API 1.48 or newer. Its trusted
+configuration must leave `default-ulimits` empty because the bounded Engine
+facts do not expose that daemon setting. Rootless Docker is not qualified, and
+each sandbox separately proves one
 nonzero host UID/GID mapping that covers its fixed identities. The guest's
 protected client lives in tmpfs. Its administrator contract is an attenuated
 UID 0 inside that remapped namespace with every Linux capability set empty; it
@@ -183,7 +188,7 @@ the private journal state root. A warm job
 therefore reads local disk first and falls back to the shared object store; it
 does not contact GitHub again.
 
-Runner product schema 5 requires an explicit object-store trust policy.
+Runner product schema 6 requires an explicit object-store trust policy.
 `web_pki` uses platform roots; `private_ca` loads exactly one bounded CA through
 an existing secure-input descriptor and installs it into an otherwise empty
 root store. The PEM bytes must use canonical RFC 7468 64-column/LF encoding
