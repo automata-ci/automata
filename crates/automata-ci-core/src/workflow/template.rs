@@ -22,48 +22,19 @@ pub(super) enum WorkflowTemplateLimitRejection {
 }
 
 #[cfg(test)]
-mod limit_contract_tests {
-    use super::*;
-
-    #[test]
-    fn workflow_template_byte_limit_has_exact_boundaries() {
-        assert_eq!(
-            workflow_template_byte_rejection(MAX_TEMPLATE_BYTES - 1),
-            None
-        );
-        assert_eq!(workflow_template_byte_rejection(MAX_TEMPLATE_BYTES), None);
-        assert_eq!(
-            workflow_template_byte_rejection(MAX_TEMPLATE_BYTES + 1),
-            Some(WorkflowTemplateLimitRejection::Bytes)
-        );
-    }
-    #[test]
-    fn workflow_template_segment_limit_has_exact_boundaries() {
-        assert_eq!(
-            workflow_template_segment_rejection(MAX_TEMPLATE_SEGMENTS - 1),
-            None
-        );
-        assert_eq!(
-            workflow_template_segment_rejection(MAX_TEMPLATE_SEGMENTS),
-            None
-        );
-        assert_eq!(
-            workflow_template_segment_rejection(MAX_TEMPLATE_SEGMENTS + 1),
-            Some(WorkflowTemplateLimitRejection::Segments)
-        );
-    }
-    #[test]
-    fn expression_context_limit_has_exact_boundaries() {
-        assert_eq!(
-            expression_context_rejection(MAX_EXPRESSION_CONTEXTS - 1),
-            None
-        );
-        assert_eq!(expression_context_rejection(MAX_EXPRESSION_CONTEXTS), None);
-        assert_eq!(
-            expression_context_rejection(MAX_EXPRESSION_CONTEXTS + 1),
-            Some(WorkflowTemplateLimitRejection::Contexts)
-        );
-    }
+crate::test_support::limit_contract_tests! {
+    workflow_template_byte_limit_has_exact_boundaries: (
+        super::workflow_template_byte_rejection,
+        super::MAX_TEMPLATE_BYTES,
+    ) => super::WorkflowTemplateLimitRejection::Bytes;
+    workflow_template_segment_limit_has_exact_boundaries: (
+        super::workflow_template_segment_rejection,
+        super::MAX_TEMPLATE_SEGMENTS,
+    ) => super::WorkflowTemplateLimitRejection::Segments;
+    expression_context_limit_has_exact_boundaries: (
+        super::expression_context_rejection,
+        super::MAX_EXPRESSION_CONTEXTS,
+    ) => super::WorkflowTemplateLimitRejection::Contexts;
 }
 
 pub(super) const fn workflow_template_byte_rejection(

@@ -754,101 +754,29 @@ pub enum JobResultValidationError {
 }
 
 #[cfg(test)]
-mod limit_contract_tests {
-    use super::*;
-
-    #[test]
-    fn job_result_output_byte_limit_has_exact_boundaries() {
-        assert_eq!(
-            job_result_output_byte_rejection(MAX_JOB_RESULT_OUTPUT_UTF16_BYTES - 1),
-            None
-        );
-        assert_eq!(
-            job_result_output_byte_rejection(MAX_JOB_RESULT_OUTPUT_UTF16_BYTES),
-            None
-        );
-        assert_eq!(
-            job_result_output_byte_rejection(MAX_JOB_RESULT_OUTPUT_UTF16_BYTES + 1),
-            Some(JobResultLimitRejection::OutputUtf16Bytes)
-        );
-    }
-    #[test]
-    fn job_result_attachment_byte_limit_has_exact_boundaries() {
-        assert_eq!(
-            job_result_attachment_byte_rejection(MAX_JOB_RESULT_ATTACHMENT_BYTES - 1),
-            None
-        );
-        assert_eq!(
-            job_result_attachment_byte_rejection(MAX_JOB_RESULT_ATTACHMENT_BYTES),
-            None
-        );
-        assert_eq!(
-            job_result_attachment_byte_rejection(MAX_JOB_RESULT_ATTACHMENT_BYTES + 1),
-            Some(JobResultLimitRejection::AttachmentBytes)
-        );
-    }
-    #[test]
-    fn job_result_annotation_count_limit_has_exact_boundaries() {
-        assert_eq!(
-            job_result_annotation_count_rejection(MAX_JOB_RESULT_ANNOTATIONS - 1),
-            None
-        );
-        assert_eq!(
-            job_result_annotation_count_rejection(MAX_JOB_RESULT_ANNOTATIONS),
-            None
-        );
-        assert_eq!(
-            job_result_annotation_count_rejection(MAX_JOB_RESULT_ANNOTATIONS + 1),
-            Some(JobResultLimitRejection::Annotations)
-        );
-    }
-    #[test]
-    fn step_annotation_property_count_limit_has_exact_boundaries() {
-        assert_eq!(
-            step_annotation_property_count_rejection(MAX_STEP_ANNOTATION_PROPERTIES - 1),
-            None
-        );
-        assert_eq!(
-            step_annotation_property_count_rejection(MAX_STEP_ANNOTATION_PROPERTIES),
-            None
-        );
-        assert_eq!(
-            step_annotation_property_count_rejection(MAX_STEP_ANNOTATION_PROPERTIES + 1),
-            Some(JobResultLimitRejection::AnnotationProperties)
-        );
-    }
-    #[test]
-    fn step_attachment_text_byte_limit_has_exact_boundaries() {
-        assert_eq!(
-            step_attachment_text_byte_rejection(MAX_STEP_ATTACHMENT_TEXT_BYTES - 1),
-            None
-        );
-        assert_eq!(
-            step_attachment_text_byte_rejection(MAX_STEP_ATTACHMENT_TEXT_BYTES),
-            None
-        );
-        assert_eq!(
-            step_attachment_text_byte_rejection(MAX_STEP_ATTACHMENT_TEXT_BYTES + 1),
-            Some(JobResultLimitRejection::StepAttachmentTextBytes)
-        );
-    }
-    #[test]
-    fn step_annotation_property_name_byte_limit_has_exact_boundaries() {
-        assert_eq!(
-            step_annotation_property_name_byte_rejection(
-                MAX_STEP_ANNOTATION_PROPERTY_NAME_BYTES - 1
-            ),
-            None
-        );
-        assert_eq!(
-            step_annotation_property_name_byte_rejection(MAX_STEP_ANNOTATION_PROPERTY_NAME_BYTES),
-            None
-        );
-        assert_eq!(
-            step_annotation_property_name_byte_rejection(
-                MAX_STEP_ANNOTATION_PROPERTY_NAME_BYTES + 1
-            ),
-            Some(JobResultLimitRejection::AnnotationPropertyNameBytes)
-        );
-    }
+crate::test_support::limit_contract_tests! {
+    job_result_output_byte_limit_has_exact_boundaries: (
+        super::job_result_output_byte_rejection,
+        super::MAX_JOB_RESULT_OUTPUT_UTF16_BYTES,
+    ) => super::JobResultLimitRejection::OutputUtf16Bytes;
+    job_result_attachment_byte_limit_has_exact_boundaries: (
+        super::job_result_attachment_byte_rejection,
+        super::MAX_JOB_RESULT_ATTACHMENT_BYTES,
+    ) => super::JobResultLimitRejection::AttachmentBytes;
+    job_result_annotation_count_limit_has_exact_boundaries: (
+        super::job_result_annotation_count_rejection,
+        super::MAX_JOB_RESULT_ANNOTATIONS,
+    ) => super::JobResultLimitRejection::Annotations;
+    step_annotation_property_count_limit_has_exact_boundaries: (
+        super::step_annotation_property_count_rejection,
+        super::MAX_STEP_ANNOTATION_PROPERTIES,
+    ) => super::JobResultLimitRejection::AnnotationProperties;
+    step_attachment_text_byte_limit_has_exact_boundaries: (
+        super::step_attachment_text_byte_rejection,
+        super::MAX_STEP_ATTACHMENT_TEXT_BYTES,
+    ) => super::JobResultLimitRejection::StepAttachmentTextBytes;
+    step_annotation_property_name_byte_limit_has_exact_boundaries: (
+        super::step_annotation_property_name_byte_rejection,
+        super::MAX_STEP_ANNOTATION_PROPERTY_NAME_BYTES,
+    ) => super::JobResultLimitRejection::AnnotationPropertyNameBytes;
 }

@@ -557,88 +557,27 @@ fn push_value(
 }
 
 #[cfg(test)]
-mod limit_contract_tests {
-    use super::{
-        ExpressionProgramLimitRejection, MAX_EXPRESSION_DEPTH, MAX_EXPRESSION_DIALECT_LENGTH,
-        MAX_EXPRESSION_INSTRUCTIONS, MAX_EXPRESSION_SOURCE_BYTES, MAX_EXPRESSION_TEXT_BYTES,
-        expression_depth_rejection, expression_dialect_byte_rejection,
-        expression_instruction_rejection, expression_source_byte_rejection,
-        expression_text_byte_rejection,
-    };
-
-    #[test]
-    fn expression_source_byte_limit_has_exact_boundaries() {
-        assert_eq!(
-            expression_source_byte_rejection(MAX_EXPRESSION_SOURCE_BYTES - 1),
-            None
-        );
-        assert_eq!(
-            expression_source_byte_rejection(MAX_EXPRESSION_SOURCE_BYTES),
-            None
-        );
-        assert_eq!(
-            expression_source_byte_rejection(MAX_EXPRESSION_SOURCE_BYTES + 1),
-            Some(ExpressionProgramLimitRejection::SourceBytes)
-        );
-    }
-
-    #[test]
-    fn expression_instruction_limit_has_exact_boundaries() {
-        assert_eq!(
-            expression_instruction_rejection(MAX_EXPRESSION_INSTRUCTIONS - 1),
-            None
-        );
-        assert_eq!(
-            expression_instruction_rejection(MAX_EXPRESSION_INSTRUCTIONS),
-            None
-        );
-        assert_eq!(
-            expression_instruction_rejection(MAX_EXPRESSION_INSTRUCTIONS + 1),
-            Some(ExpressionProgramLimitRejection::Instructions)
-        );
-    }
-
-    #[test]
-    fn expression_depth_limit_has_exact_boundaries() {
-        assert_eq!(expression_depth_rejection(MAX_EXPRESSION_DEPTH - 1), None);
-        assert_eq!(expression_depth_rejection(MAX_EXPRESSION_DEPTH), None);
-        assert_eq!(
-            expression_depth_rejection(MAX_EXPRESSION_DEPTH + 1),
-            Some(ExpressionProgramLimitRejection::Depth)
-        );
-    }
-
-    #[test]
-    fn expression_text_byte_limit_has_exact_boundaries() {
-        assert_eq!(
-            expression_text_byte_rejection(MAX_EXPRESSION_TEXT_BYTES - 1),
-            None
-        );
-        assert_eq!(
-            expression_text_byte_rejection(MAX_EXPRESSION_TEXT_BYTES),
-            None
-        );
-        assert_eq!(
-            expression_text_byte_rejection(MAX_EXPRESSION_TEXT_BYTES + 1),
-            Some(ExpressionProgramLimitRejection::TextBytes)
-        );
-    }
-
-    #[test]
-    fn expression_dialect_byte_limit_has_exact_boundaries() {
-        assert_eq!(
-            expression_dialect_byte_rejection(MAX_EXPRESSION_DIALECT_LENGTH - 1),
-            None
-        );
-        assert_eq!(
-            expression_dialect_byte_rejection(MAX_EXPRESSION_DIALECT_LENGTH),
-            None
-        );
-        assert_eq!(
-            expression_dialect_byte_rejection(MAX_EXPRESSION_DIALECT_LENGTH + 1),
-            Some(ExpressionProgramLimitRejection::DialectBytes)
-        );
-    }
+crate::test_support::limit_contract_tests! {
+    expression_source_byte_limit_has_exact_boundaries: (
+        super::expression_source_byte_rejection,
+        super::MAX_EXPRESSION_SOURCE_BYTES,
+    ) => super::ExpressionProgramLimitRejection::SourceBytes;
+    expression_instruction_limit_has_exact_boundaries: (
+        super::expression_instruction_rejection,
+        super::MAX_EXPRESSION_INSTRUCTIONS,
+    ) => super::ExpressionProgramLimitRejection::Instructions;
+    expression_depth_limit_has_exact_boundaries: (
+        super::expression_depth_rejection,
+        super::MAX_EXPRESSION_DEPTH,
+    ) => super::ExpressionProgramLimitRejection::Depth;
+    expression_text_byte_limit_has_exact_boundaries: (
+        super::expression_text_byte_rejection,
+        super::MAX_EXPRESSION_TEXT_BYTES,
+    ) => super::ExpressionProgramLimitRejection::TextBytes;
+    expression_dialect_byte_limit_has_exact_boundaries: (
+        super::expression_dialect_byte_rejection,
+        super::MAX_EXPRESSION_DIALECT_LENGTH,
+    ) => super::ExpressionProgramLimitRejection::DialectBytes;
 }
 
 /// Invalid durable expression dialect, source, or canonical program.

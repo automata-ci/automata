@@ -233,41 +233,13 @@ pub(super) fn validate_logical_name(
 }
 
 #[cfg(test)]
-mod limit_contract_tests {
-    use super::{
-        JobInstanceLimitRejection, MAX_JOB_LOGICAL_NAME_BYTES, MAX_JOB_OUTPUT_DEFINITIONS,
-        job_logical_name_byte_rejection, job_output_definition_rejection,
-    };
-
-    #[test]
-    fn job_logical_name_byte_limit_has_exact_boundaries() {
-        assert_eq!(
-            job_logical_name_byte_rejection(MAX_JOB_LOGICAL_NAME_BYTES - 1),
-            None
-        );
-        assert_eq!(
-            job_logical_name_byte_rejection(MAX_JOB_LOGICAL_NAME_BYTES),
-            None
-        );
-        assert_eq!(
-            job_logical_name_byte_rejection(MAX_JOB_LOGICAL_NAME_BYTES + 1),
-            Some(JobInstanceLimitRejection::LogicalNameBytes)
-        );
-    }
-
-    #[test]
-    fn job_output_definition_limit_has_exact_boundaries() {
-        assert_eq!(
-            job_output_definition_rejection(MAX_JOB_OUTPUT_DEFINITIONS - 1),
-            None
-        );
-        assert_eq!(
-            job_output_definition_rejection(MAX_JOB_OUTPUT_DEFINITIONS),
-            None
-        );
-        assert_eq!(
-            job_output_definition_rejection(MAX_JOB_OUTPUT_DEFINITIONS + 1),
-            Some(JobInstanceLimitRejection::OutputDefinitions)
-        );
-    }
+crate::test_support::limit_contract_tests! {
+    job_logical_name_byte_limit_has_exact_boundaries: (
+        super::job_logical_name_byte_rejection,
+        super::MAX_JOB_LOGICAL_NAME_BYTES,
+    ) => super::JobInstanceLimitRejection::LogicalNameBytes;
+    job_output_definition_limit_has_exact_boundaries: (
+        super::job_output_definition_rejection,
+        super::MAX_JOB_OUTPUT_DEFINITIONS,
+    ) => super::JobInstanceLimitRejection::OutputDefinitions;
 }

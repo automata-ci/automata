@@ -197,41 +197,13 @@ fn canonical_permission_name(value: &str) -> bool {
 }
 
 #[cfg(test)]
-mod limit_contract_tests {
-    use super::{
-        JobPermissionLimitRejection, MAX_JOB_PERMISSION_GRANTS, MAX_JOB_PERMISSION_NAME_BYTES,
-        job_permission_grant_rejection, job_permission_name_byte_rejection,
-    };
-
-    #[test]
-    fn job_permission_grant_limit_has_exact_boundaries() {
-        assert_eq!(
-            job_permission_grant_rejection(MAX_JOB_PERMISSION_GRANTS - 1),
-            None
-        );
-        assert_eq!(
-            job_permission_grant_rejection(MAX_JOB_PERMISSION_GRANTS),
-            None
-        );
-        assert_eq!(
-            job_permission_grant_rejection(MAX_JOB_PERMISSION_GRANTS + 1),
-            Some(JobPermissionLimitRejection::Grants)
-        );
-    }
-
-    #[test]
-    fn job_permission_name_byte_limit_has_exact_boundaries() {
-        assert_eq!(
-            job_permission_name_byte_rejection(MAX_JOB_PERMISSION_NAME_BYTES - 1),
-            None
-        );
-        assert_eq!(
-            job_permission_name_byte_rejection(MAX_JOB_PERMISSION_NAME_BYTES),
-            None
-        );
-        assert_eq!(
-            job_permission_name_byte_rejection(MAX_JOB_PERMISSION_NAME_BYTES + 1),
-            Some(JobPermissionLimitRejection::NameBytes)
-        );
-    }
+crate::test_support::limit_contract_tests! {
+    job_permission_grant_limit_has_exact_boundaries: (
+        super::job_permission_grant_rejection,
+        super::MAX_JOB_PERMISSION_GRANTS,
+    ) => super::JobPermissionLimitRejection::Grants;
+    job_permission_name_byte_limit_has_exact_boundaries: (
+        super::job_permission_name_byte_rejection,
+        super::MAX_JOB_PERMISSION_NAME_BYTES,
+    ) => super::JobPermissionLimitRejection::NameBytes;
 }

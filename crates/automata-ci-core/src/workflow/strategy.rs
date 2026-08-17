@@ -836,100 +836,37 @@ fn is_json_number(value: &str) -> bool {
 }
 
 #[cfg(test)]
-mod limit_contract_tests {
-    use super::*;
-
-    #[test]
-    fn matrix_expansion_limit_has_exact_boundaries() {
-        assert_eq!(matrix_expansion_rejection(MAX_MATRIX_EXPANSION - 1), None);
-        assert_eq!(matrix_expansion_rejection(MAX_MATRIX_EXPANSION), None);
-        assert_eq!(
-            matrix_expansion_rejection(MAX_MATRIX_EXPANSION + 1),
-            Some(MatrixLimitRejection::Expansion)
-        );
-    }
-    #[test]
-    fn matrix_axis_count_limit_has_exact_boundaries() {
-        assert_eq!(matrix_axis_count_rejection(MAX_MATRIX_AXES - 1), None);
-        assert_eq!(matrix_axis_count_rejection(MAX_MATRIX_AXES), None);
-        assert_eq!(
-            matrix_axis_count_rejection(MAX_MATRIX_AXES + 1),
-            Some(MatrixLimitRejection::Axes)
-        );
-    }
-    #[test]
-    fn matrix_axis_value_count_limit_has_exact_boundaries() {
-        assert_eq!(
-            matrix_axis_value_count_rejection(MAX_MATRIX_AXIS_VALUES - 1),
-            None
-        );
-        assert_eq!(
-            matrix_axis_value_count_rejection(MAX_MATRIX_AXIS_VALUES),
-            None
-        );
-        assert_eq!(
-            matrix_axis_value_count_rejection(MAX_MATRIX_AXIS_VALUES + 1),
-            Some(MatrixLimitRejection::AxisValues)
-        );
-    }
-    #[test]
-    fn matrix_patch_count_limit_has_exact_boundaries() {
-        assert_eq!(matrix_patch_count_rejection(MAX_MATRIX_PATCHES - 1), None);
-        assert_eq!(matrix_patch_count_rejection(MAX_MATRIX_PATCHES), None);
-        assert_eq!(
-            matrix_patch_count_rejection(MAX_MATRIX_PATCHES + 1),
-            Some(MatrixLimitRejection::Patches)
-        );
-    }
-    #[test]
-    fn matrix_object_entry_count_limit_has_exact_boundaries() {
-        assert_eq!(
-            matrix_object_entry_count_rejection(MAX_MATRIX_OBJECT_ENTRIES - 1),
-            None
-        );
-        assert_eq!(
-            matrix_object_entry_count_rejection(MAX_MATRIX_OBJECT_ENTRIES),
-            None
-        );
-        assert_eq!(
-            matrix_object_entry_count_rejection(MAX_MATRIX_OBJECT_ENTRIES + 1),
-            Some(MatrixLimitRejection::ObjectEntries)
-        );
-    }
-    #[test]
-    fn matrix_value_depth_limit_has_exact_boundaries() {
-        assert_eq!(
-            matrix_value_depth_rejection(MAX_MATRIX_VALUE_DEPTH - 1),
-            None
-        );
-        assert_eq!(matrix_value_depth_rejection(MAX_MATRIX_VALUE_DEPTH), None);
-        assert_eq!(
-            matrix_value_depth_rejection(MAX_MATRIX_VALUE_DEPTH + 1),
-            Some(MatrixLimitRejection::ValueDepth)
-        );
-    }
-    #[test]
-    fn matrix_text_byte_limit_has_exact_boundaries() {
-        assert_eq!(matrix_text_byte_rejection(MAX_MATRIX_TEXT_BYTES - 1), None);
-        assert_eq!(matrix_text_byte_rejection(MAX_MATRIX_TEXT_BYTES), None);
-        assert_eq!(
-            matrix_text_byte_rejection(MAX_MATRIX_TEXT_BYTES + 1),
-            Some(MatrixLimitRejection::TextBytes)
-        );
-    }
-    #[test]
-    fn matrix_static_candidate_count_limit_has_exact_boundaries() {
-        assert_eq!(
-            matrix_static_candidate_count_rejection(MAX_STATIC_MATRIX_CANDIDATE_COMBINATIONS - 1),
-            None
-        );
-        assert_eq!(
-            matrix_static_candidate_count_rejection(MAX_STATIC_MATRIX_CANDIDATE_COMBINATIONS),
-            None
-        );
-        assert_eq!(
-            matrix_static_candidate_count_rejection(MAX_STATIC_MATRIX_CANDIDATE_COMBINATIONS + 1),
-            Some(MatrixLimitRejection::StaticCandidates)
-        );
-    }
+crate::test_support::limit_contract_tests! {
+    matrix_expansion_limit_has_exact_boundaries: (
+        super::matrix_expansion_rejection,
+        super::MAX_MATRIX_EXPANSION,
+    ) => super::MatrixLimitRejection::Expansion;
+    matrix_axis_count_limit_has_exact_boundaries: (
+        super::matrix_axis_count_rejection,
+        super::MAX_MATRIX_AXES,
+    ) => super::MatrixLimitRejection::Axes;
+    matrix_axis_value_count_limit_has_exact_boundaries: (
+        super::matrix_axis_value_count_rejection,
+        super::MAX_MATRIX_AXIS_VALUES,
+    ) => super::MatrixLimitRejection::AxisValues;
+    matrix_patch_count_limit_has_exact_boundaries: (
+        super::matrix_patch_count_rejection,
+        super::MAX_MATRIX_PATCHES,
+    ) => super::MatrixLimitRejection::Patches;
+    matrix_object_entry_count_limit_has_exact_boundaries: (
+        super::matrix_object_entry_count_rejection,
+        super::MAX_MATRIX_OBJECT_ENTRIES,
+    ) => super::MatrixLimitRejection::ObjectEntries;
+    matrix_value_depth_limit_has_exact_boundaries: (
+        super::matrix_value_depth_rejection,
+        super::MAX_MATRIX_VALUE_DEPTH,
+    ) => super::MatrixLimitRejection::ValueDepth;
+    matrix_text_byte_limit_has_exact_boundaries: (
+        super::matrix_text_byte_rejection,
+        super::MAX_MATRIX_TEXT_BYTES,
+    ) => super::MatrixLimitRejection::TextBytes;
+    matrix_static_candidate_count_limit_has_exact_boundaries: (
+        super::matrix_static_candidate_count_rejection,
+        super::MAX_STATIC_MATRIX_CANDIDATE_COMBINATIONS,
+    ) => super::MatrixLimitRejection::StaticCandidates;
 }

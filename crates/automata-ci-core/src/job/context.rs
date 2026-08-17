@@ -1011,71 +1011,23 @@ fn validate_opaque_identifier(value: &str, field: &'static str) -> Result<(), Ru
 }
 
 #[cfg(test)]
-mod limit_contract_tests {
-    use super::{
-        MAX_CONTEXT_VALUE_DEPTH, MAX_CONTEXT_VALUE_NODES, MAX_CONTEXT_VALUE_TEXT_BYTES,
-        MAX_RUNTIME_CONTEXT_IDENTIFIER_BYTES, RuntimeContextLimitRejection,
-        context_value_depth_rejection, context_value_node_rejection,
-        context_value_text_byte_rejection, runtime_context_identifier_byte_rejection,
-    };
-
-    #[test]
-    fn context_value_depth_limit_has_exact_boundaries() {
-        assert_eq!(
-            context_value_depth_rejection(MAX_CONTEXT_VALUE_DEPTH - 1),
-            None
-        );
-        assert_eq!(context_value_depth_rejection(MAX_CONTEXT_VALUE_DEPTH), None);
-        assert_eq!(
-            context_value_depth_rejection(MAX_CONTEXT_VALUE_DEPTH + 1),
-            Some(RuntimeContextLimitRejection::ValueDepth)
-        );
-    }
-
-    #[test]
-    fn context_value_node_limit_has_exact_boundaries() {
-        assert_eq!(
-            context_value_node_rejection(MAX_CONTEXT_VALUE_NODES - 1),
-            None
-        );
-        assert_eq!(context_value_node_rejection(MAX_CONTEXT_VALUE_NODES), None);
-        assert_eq!(
-            context_value_node_rejection(MAX_CONTEXT_VALUE_NODES + 1),
-            Some(RuntimeContextLimitRejection::ValueNodes)
-        );
-    }
-
-    #[test]
-    fn context_value_text_byte_limit_has_exact_boundaries() {
-        assert_eq!(
-            context_value_text_byte_rejection(MAX_CONTEXT_VALUE_TEXT_BYTES - 1),
-            None
-        );
-        assert_eq!(
-            context_value_text_byte_rejection(MAX_CONTEXT_VALUE_TEXT_BYTES),
-            None
-        );
-        assert_eq!(
-            context_value_text_byte_rejection(MAX_CONTEXT_VALUE_TEXT_BYTES + 1),
-            Some(RuntimeContextLimitRejection::ValueTextBytes)
-        );
-    }
-
-    #[test]
-    fn runtime_context_identifier_byte_limit_has_exact_boundaries() {
-        assert_eq!(
-            runtime_context_identifier_byte_rejection(MAX_RUNTIME_CONTEXT_IDENTIFIER_BYTES - 1),
-            None
-        );
-        assert_eq!(
-            runtime_context_identifier_byte_rejection(MAX_RUNTIME_CONTEXT_IDENTIFIER_BYTES),
-            None
-        );
-        assert_eq!(
-            runtime_context_identifier_byte_rejection(MAX_RUNTIME_CONTEXT_IDENTIFIER_BYTES + 1),
-            Some(RuntimeContextLimitRejection::IdentifierBytes)
-        );
-    }
+crate::test_support::limit_contract_tests! {
+    context_value_depth_limit_has_exact_boundaries: (
+        super::context_value_depth_rejection,
+        super::MAX_CONTEXT_VALUE_DEPTH,
+    ) => super::RuntimeContextLimitRejection::ValueDepth;
+    context_value_node_limit_has_exact_boundaries: (
+        super::context_value_node_rejection,
+        super::MAX_CONTEXT_VALUE_NODES,
+    ) => super::RuntimeContextLimitRejection::ValueNodes;
+    context_value_text_byte_limit_has_exact_boundaries: (
+        super::context_value_text_byte_rejection,
+        super::MAX_CONTEXT_VALUE_TEXT_BYTES,
+    ) => super::RuntimeContextLimitRejection::ValueTextBytes;
+    runtime_context_identifier_byte_limit_has_exact_boundaries: (
+        super::runtime_context_identifier_byte_rejection,
+        super::MAX_RUNTIME_CONTEXT_IDENTIFIER_BYTES,
+    ) => super::RuntimeContextLimitRejection::IdentifierBytes;
 }
 
 /// Invalid canonical value or runtime-context blob.

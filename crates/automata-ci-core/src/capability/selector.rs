@@ -137,25 +137,13 @@ const fn selector_length_rejection(characters: usize, kind: &'static str) -> Opt
 }
 
 #[cfg(test)]
-mod limit_contract_tests {
-    use super::{MAX_SELECTOR_LENGTH, SelectorError, selector_length_rejection};
-
-    #[test]
-    fn selector_character_limit_has_exact_boundaries() {
-        assert_eq!(
-            selector_length_rejection(MAX_SELECTOR_LENGTH - 1, "runner label"),
-            None
-        );
-        assert_eq!(
-            selector_length_rejection(MAX_SELECTOR_LENGTH, "runner label"),
-            None
-        );
-        assert_eq!(
-            selector_length_rejection(MAX_SELECTOR_LENGTH + 1, "runner label"),
-            Some(SelectorError::TooLong {
-                kind: "runner label",
-                max: MAX_SELECTOR_LENGTH,
-            })
-        );
-    }
+crate::test_support::limit_contract_tests! {
+    selector_character_limit_has_exact_boundaries: (
+        super::selector_length_rejection,
+        super::MAX_SELECTOR_LENGTH,
+        "runner label",
+    ) => super::SelectorError::TooLong {
+        kind: "runner label",
+        max: super::MAX_SELECTOR_LENGTH,
+    };
 }
