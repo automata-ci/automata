@@ -7,15 +7,18 @@
 //! and the provider verifies the effective runtime state before returning a
 //! handle. Process-isolated and native-host Windows execution are not present.
 
+mod admission;
 mod broker;
 #[cfg(windows)]
 mod command;
+mod custody;
 #[cfg(windows)]
 mod endpoint;
 #[cfg(windows)]
 mod error;
 #[cfg(windows)]
 mod hcs_engine;
+mod host_input;
 #[cfg(windows)]
 mod naming;
 #[cfg(windows)]
@@ -25,6 +28,18 @@ mod provider;
 #[cfg(not(windows))]
 mod unsupported;
 
+pub use admission::{
+    FileWindowsBrokerAdmissionAuthority, UnavailableWindowsBrokerAdmissionAuthority,
+    UnavailableWindowsBrokerSyntheticProbe, VerifiedWindowsBrokerAdmissionEvaluator,
+    WindowsBrokerAdmissionAuthority, WindowsBrokerAdmissionCompletion, WindowsBrokerAdmissionError,
+    WindowsBrokerAdmissionEvaluation, WindowsBrokerAdmissionEvaluator,
+    WindowsBrokerAdmissionInputSet, WindowsBrokerAdmissionInputSource,
+    WindowsBrokerAdmissionReceipt, WindowsBrokerAdmissionSigningKey,
+    WindowsBrokerPlacementRenewalReceipt, WindowsBrokerPromotionTrustBundle,
+    WindowsBrokerPromotionTrustKey, WindowsBrokerPromotionTrustRegistry,
+    WindowsBrokerSyntheticProbe, WindowsBrokerSyntheticProbeEvidence,
+    floor_windows_admission_issued_at,
+};
 pub use broker::{
     BrokerAdapterEffect, BrokerCopyFromRequest, BrokerCopyToRequest, BrokerError,
     BrokerExecRequest, BrokerGrantKeyring, BrokerLedger, BrokerLedgerError, BrokerLifecyclePhase,
@@ -41,8 +56,17 @@ pub use command::{
     RuntimeCommandExecutor, RuntimeCommandOutput, RuntimeCommandRequest,
     RuntimeCommandRequestError, RuntimeCommandTermination, SystemRuntimeCommandExecutor,
 };
+pub use custody::{
+    FileWindowsBrokerCustody, WindowsBrokerCustodyError, WindowsBrokerCustodyHandle,
+    WindowsBrokerCustodyKind, WindowsBrokerCustodyMetadata, WindowsBrokerCustodyProtector,
+};
 #[cfg(windows)]
 pub use hcs_engine::WindowsEngineHostComputeAdapter;
+pub use host_input::{
+    WindowsBrokerHostInputAttestation, WindowsBrokerHostInputAttestor,
+    WindowsBrokerHostInputDescriptor, WindowsBrokerHostInputError, WindowsBrokerHostInputKind,
+    WindowsBrokerHostInputObservation, WindowsBrokerHostInputRequest,
+};
 #[cfg(windows)]
 pub use provider::{WindowsHyperVContainerProvider, WindowsHyperVContainerProviderOptions};
 #[cfg(not(windows))]

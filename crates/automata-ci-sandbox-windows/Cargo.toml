@@ -20,11 +20,13 @@ automata-ci-execution.workspace = true
 automata-ci-protocol.workspace = true
 automata-ci-sandbox-guest.workspace = true
 base64.workspace = true
+getrandom.workspace = true
 ring.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
+zeroize.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 bollard.workspace = true
