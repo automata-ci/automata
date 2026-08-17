@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use super::{
     AuditDescriptor, AuthorizedActor, MutationAuthorization, authorize_mutation,
-    closed_authorization, commit, finish_applied, map_database_error,
+    closed_authorization, commit, database_time_milliseconds, finish_applied, map_database_error,
 };
 
 const ACTION_TOKEN_CREATE: &str = "runner.enrollment_token.create";
