@@ -252,9 +252,10 @@ pub enum ExecutionErrorKind {
 
 /// Secret-free execution failure.
 ///
-/// Endpoint requests carry operation identifiers so callers can retry the
-/// exact request. Adapters must not embed raw backend diagnostics, command
-/// output, paths, environment values, or copied payloads in this error.
+/// Endpoint requests carry operation identifiers as correlation keys for a
+/// caller-owned exact-request replay boundary; they do not make a raw endpoint
+/// retryable. Adapters must not embed raw backend diagnostics, command output,
+/// paths, environment values, or copied payloads in this error.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 #[error("execution endpoint failed during {stage:?}: {kind:?}")]
 pub struct ExecutionError {

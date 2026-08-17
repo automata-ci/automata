@@ -530,14 +530,22 @@ impl ResourceLimits {
     }
 }
 
-/// Exact provider launch mechanism selected by an environment profile.
+/// Exact provider launch material selected by an environment profile.
+///
+/// A direct-launch provider realizes this material as the sandbox's initial
+/// process. A broker-based container provider may substitute its own guest as
+/// PID 1 under the [`SandboxLaunch::Container`] keepalive contract.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SandboxLaunch {
     /// Launch inside a digest-pinned container kept alive for the whole job.
     Container {
         /// Exact immutable image selected by the admitted profile.
         image: ImmutableImage,
-        /// Literal command keeping the whole-job container alive.
+        /// Literal liveness command for a direct-launch provider.
+        ///
+        /// A broker-based provider may substitute its own guest process as
+        /// PID 1, but must bind this value as part of the complete profile and
+        /// sandbox identity. This command is not an initialization contract.
         keepalive: ExecutionArgv,
     },
     /// Launch inside a Windows container whose runtime is required to enforce
@@ -659,7 +667,7 @@ impl SandboxEnvironment {
         self.attestation.digest()
     }
 
-    /// Returns the exact launch mechanism selected by the profile.
+    /// Returns the exact profile-bound launch material.
     #[must_use]
     pub const fn launch(&self) -> &SandboxLaunch {
         &self.launch
@@ -675,9 +683,11 @@ impl SandboxEnvironment {
         }
     }
 
-    /// Returns the literal keepalive command for a container launch.
+    /// Returns the profile-bound liveness command for a container launch.
     ///
-    /// Arguments are potentially sensitive and redacted by `Debug`.
+    /// A direct-launch provider executes this command. A broker-based provider
+    /// may bind it without executing it, and it is never an initialization
+    /// contract. Arguments are potentially sensitive and redacted by `Debug`.
     #[must_use]
     pub const fn keepalive(&self) -> Option<&ExecutionArgv> {
         match &self.launch {

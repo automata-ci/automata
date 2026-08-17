@@ -16,11 +16,17 @@
 //! never host paths. Provider and container handles are opaque ownership
 //! tokens; callers must not parse them or substitute backend identifiers.
 //!
-//! Mutating requests carry an [`OperationId`] so an adapter can replay an exact
-//! request idempotently. When a backend might have changed external state, a
-//! [`ProviderError`] reports [`OperationOutcome::Uncertain`] and may carry a
-//! recovery handle. Callers must inspect or retry that exact operation rather
-//! than assuming it had no effect.
+//! Sandbox-provider mutations carry an [`OperationId`] for exact, idempotent
+//! lifecycle replay. When a lifecycle backend might have changed external
+//! state, a [`ProviderError`] reports [`OperationOutcome::Uncertain`] and may
+//! carry a recovery handle. Callers must reconcile or retry that exact
+//! lifecycle request rather than assuming it had no effect.
+//!
+//! Execution-endpoint requests also carry an [`OperationId`], but a raw
+//! endpoint adapter may be attempt-once. Callers that can retry must install a
+//! durable decorator that binds the identifier to the complete request and its
+//! protected result. Direct callers must not retry a raw endpoint operation
+//! after an ambiguous return.
 //!
 //! Environment values, argv entries, copied bytes, output, health commands,
 //! and opaque handles are redacted from selected `Debug` implementations.
