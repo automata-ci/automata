@@ -1,14 +1,6 @@
 //! Bounded reconciliation and revocation for protected GitHub job authority.
 
-use std::{
-    collections::BTreeMap,
-    fmt,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
-    },
-    time::Duration,
-};
+use std::{collections::BTreeMap, fmt, sync::Arc, time::Duration};
 
 use automata_ci_auth::secret::SecretString;
 use automata_ci_core::UnixMillis;
@@ -30,16 +22,15 @@ use automata_ci_store::{
 };
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
-use tokio::{
-    runtime::Handle,
-    sync::{OwnedSemaphorePermit, oneshot},
-};
+use tokio::{runtime::Handle, sync::oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
     GithubAppCredentialBroker, GithubInstallationTokenRevocationCandidate,
     GithubInstallationTokenRevocationFailureKind, GithubInstallationTokenRevocationOutcome,
-    GithubRuntimeAuthorityCoordinatorClock, config::whole_milliseconds,
+    GithubRuntimeAuthorityCoordinatorClock,
+    config::whole_milliseconds,
+    supervised_custody::{Entry, Reservation, SupervisedCustody},
 };
 
 const INSTALLATION_TOKEN_FRAME_DOMAIN: &[u8] = b"automata-ci/github-installation-token/v1\0";
@@ -326,13 +317,8 @@ pub enum GithubRuntimeAuthorityLifecycleSupervisorError {
 /// Bounded independent custody for exact post-provider lifecycle mutations.
 pub struct GithubRuntimeAuthorityLifecycleSupervisor {
     repository: Arc<dyn GithubRuntimeAuthorityRepository>,
-    runtime: Handle,
     retry_interval: Duration,
-    permits: Arc<tokio::sync::Semaphore>,
-    outstanding: Arc<AtomicUsize>,
-    pending: Arc<AtomicUsize>,
-    drained: Arc<tokio::sync::Notify>,
-    custody: Arc<Mutex<Vec<Arc<SupervisedLifecycleCommit>>>>,
+    custody: SupervisedCustody<PendingGithubRuntimeAuthorityLifecycleCommit>,
 }
 
 impl GithubRuntimeAuthorityLifecycleSupervisor {
@@ -356,29 +342,14 @@ impl GithubRuntimeAuthorityLifecycleSupervisor {
         }
         Ok(Self {
             repository,
-            runtime,
             retry_interval,
-            permits: Arc::new(tokio::sync::Semaphore::new(capacity)),
-            outstanding: Arc::new(AtomicUsize::new(0)),
-            pending: Arc::new(AtomicUsize::new(0)),
-            drained: Arc::new(tokio::sync::Notify::new()),
-            custody: Arc::new(Mutex::new(Vec::with_capacity(capacity))),
+            custody: SupervisedCustody::new(runtime, capacity),
         })
     }
 
     fn try_reserve(&self) -> Option<LifecycleCommitReservation> {
         self.redrive_retained();
-        self.outstanding.fetch_add(1, Ordering::AcqRel);
-        let Ok(permit) = Arc::clone(&self.permits).try_acquire_owned() else {
-            self.outstanding.fetch_sub(1, Ordering::AcqRel);
-            self.drained.notify_waiters();
-            return None;
-        };
-        Some(LifecycleCommitReservation {
-            _permit: permit,
-            outstanding: Arc::clone(&self.outstanding),
-            drained: Arc::clone(&self.drained),
-        })
+        self.custody.try_reserve()
     }
 
     fn supervise(
@@ -386,21 +357,7 @@ impl GithubRuntimeAuthorityLifecycleSupervisor {
         reservation: LifecycleCommitReservation,
         pending_commit: PendingGithubRuntimeAuthorityLifecycleCommit,
     ) -> oneshot::Receiver<GithubRuntimeAuthorityReceipt> {
-        let custody = Arc::new(SupervisedLifecycleCommit {
-            _reservation: reservation,
-            _pending_observation: LifecyclePendingObservation::new(
-                Arc::clone(&self.pending),
-                Arc::clone(&self.drained),
-            ),
-            pending: pending_commit,
-            task_abort: Mutex::new(None),
-            driver_active: Arc::new(AtomicBool::new(false)),
-            removed: AtomicBool::new(false),
-        });
-        self.custody
-            .lock()
-            .expect("runtime-authority lifecycle custody lock")
-            .push(Arc::clone(&custody));
+        let custody = self.custody.retain(reservation, pending_commit);
 
         let (result_sender, result_receiver) = oneshot::channel();
         let started = self.start_driver(&custody, Some(result_sender));
@@ -410,112 +367,59 @@ impl GithubRuntimeAuthorityLifecycleSupervisor {
 
     fn start_driver(
         &self,
-        custody: &Arc<SupervisedLifecycleCommit>,
+        custody: &Arc<Entry<PendingGithubRuntimeAuthorityLifecycleCommit>>,
         result_sender: Option<oneshot::Sender<GithubRuntimeAuthorityReceipt>>,
     ) -> bool {
-        if custody.removed.load(Ordering::Acquire) {
-            return false;
-        }
-        if custody
-            .driver_active
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return false;
-        }
-        if custody.removed.load(Ordering::Acquire) {
-            custody.driver_active.store(false, Ordering::Release);
-            self.drained.notify_waiters();
-            return false;
-        }
         let repository = Arc::clone(&self.repository);
-        let retained = Arc::clone(&self.custody);
-        let task_custody = Arc::clone(custody);
         let retry_interval = self.retry_interval;
-        let driver_active = LifecycleDriverObservation {
-            active: Arc::clone(&custody.driver_active),
-            drained: Arc::clone(&self.drained),
-        };
-        let task = self.runtime.spawn(async move {
-            let _driver_active = driver_active;
-            let receipt = loop {
-                match task_custody.pending.replay(repository.as_ref()).await {
-                    Ok(receipt) => break receipt,
-                    Err(_) => tokio::time::sleep(retry_interval).await,
+        self.custody.start_driver(
+            custody,
+            move |custody| async move {
+                loop {
+                    match custody.value().replay(repository.as_ref()).await {
+                        Ok(receipt) => break receipt,
+                        Err(_) => tokio::time::sleep(retry_interval).await,
+                    }
                 }
-            };
-            task_custody.removed.store(true, Ordering::Release);
-            drop(take_lifecycle_custody(&retained, &task_custody));
-            drop(task_custody);
-            if let Some(result_sender) = result_sender {
-                let _ = result_sender.send(receipt);
-            }
-        });
-        *custody
-            .task_abort
-            .lock()
-            .expect("runtime-authority lifecycle task lock") = Some(task.abort_handle());
-        true
+            },
+            move |receipt| {
+                if let Some(result_sender) = result_sender {
+                    let _ = result_sender.send(receipt);
+                }
+            },
+        )
     }
 
     fn redrive_retained(&self) {
-        let custody = self
-            .custody
-            .lock()
-            .expect("runtime-authority lifecycle custody lock")
-            .clone();
-        for custody in custody {
+        for custody in self.custody.retained() {
             let _ = self.start_driver(&custody, None);
         }
     }
 
     #[cfg(test)]
     fn abort_pending_task(&self) -> bool {
-        let custody = self
-            .custody
-            .lock()
-            .expect("runtime-authority lifecycle custody lock")
+        self.custody
+            .retained()
             .first()
-            .cloned();
-        let Some(custody) = custody else {
-            return false;
-        };
-        let task = custody
-            .task_abort
-            .lock()
-            .expect("runtime-authority lifecycle task lock")
-            .clone();
-        task.is_some_and(|task| {
-            task.abort();
-            true
-        })
+            .is_some_and(|custody| custody.abort_driver())
     }
 
     /// Returns the number of exact lifecycle mutations under independent custody.
     #[must_use]
     pub fn pending_count(&self) -> usize {
-        self.pending.load(Ordering::Acquire)
+        self.custody.pending()
     }
 
     /// Closes admission for new provider-side lifecycle work during shutdown.
     /// Already-supervised mutations retain their permits and custody.
     pub fn close(&self) {
-        self.permits.close();
+        self.custody.close();
     }
 
     /// Waits until every supervised lifecycle mutation commits. Process wall
     /// time can never authorize loss of pending custody.
     pub async fn wait_for_idle(&self) {
-        loop {
-            let notified = self.drained.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
-            self.redrive_retained();
-            if self.outstanding.load(Ordering::Acquire) == 0 {
-                return;
-            }
-            notified.await;
-        }
+        self.custody.wait_for_idle(|| self.redrive_retained()).await;
     }
 
     /// Waits up to `timeout` for all currently supervised mutations to commit.
@@ -534,86 +438,15 @@ impl fmt::Debug for GithubRuntimeAuthorityLifecycleSupervisor {
             .debug_struct("GithubRuntimeAuthorityLifecycleSupervisor")
             .field("repository", &"[AUTHORITY REPOSITORY]")
             .field("retry_interval", &self.retry_interval)
-            .field("outstanding", &self.outstanding.load(Ordering::Acquire))
+            .field("outstanding", &self.custody.outstanding())
             .field("pending", &self.pending_count())
-            .field("available_capacity", &self.permits.available_permits())
-            .field(
-                "retained_custody",
-                &self
-                    .custody
-                    .lock()
-                    .expect("runtime-authority lifecycle custody lock")
-                    .len(),
-            )
+            .field("available_capacity", &self.custody.available())
+            .field("retained_custody", &self.custody.retained_count())
             .finish_non_exhaustive()
     }
 }
 
-struct SupervisedLifecycleCommit {
-    _reservation: LifecycleCommitReservation,
-    _pending_observation: LifecyclePendingObservation,
-    pending: PendingGithubRuntimeAuthorityLifecycleCommit,
-    task_abort: Mutex<Option<tokio::task::AbortHandle>>,
-    driver_active: Arc<AtomicBool>,
-    removed: AtomicBool,
-}
-
-struct LifecycleDriverObservation {
-    active: Arc<AtomicBool>,
-    drained: Arc<tokio::sync::Notify>,
-}
-
-impl Drop for LifecycleDriverObservation {
-    fn drop(&mut self) {
-        self.active.store(false, Ordering::Release);
-        self.drained.notify_waiters();
-    }
-}
-
-fn take_lifecycle_custody(
-    retained: &Mutex<Vec<Arc<SupervisedLifecycleCommit>>>,
-    target: &Arc<SupervisedLifecycleCommit>,
-) -> Option<Arc<SupervisedLifecycleCommit>> {
-    let mut retained = retained
-        .lock()
-        .expect("runtime-authority lifecycle custody lock");
-    let position = retained
-        .iter()
-        .position(|entry| Arc::ptr_eq(entry, target))?;
-    Some(retained.swap_remove(position))
-}
-
-struct LifecycleCommitReservation {
-    _permit: OwnedSemaphorePermit,
-    outstanding: Arc<AtomicUsize>,
-    drained: Arc<tokio::sync::Notify>,
-}
-
-impl Drop for LifecycleCommitReservation {
-    fn drop(&mut self) {
-        self.outstanding.fetch_sub(1, Ordering::AcqRel);
-        self.drained.notify_waiters();
-    }
-}
-
-struct LifecyclePendingObservation {
-    count: Arc<AtomicUsize>,
-    drained: Arc<tokio::sync::Notify>,
-}
-
-impl LifecyclePendingObservation {
-    fn new(count: Arc<AtomicUsize>, drained: Arc<tokio::sync::Notify>) -> Self {
-        count.fetch_add(1, Ordering::AcqRel);
-        Self { count, drained }
-    }
-}
-
-impl Drop for LifecyclePendingObservation {
-    fn drop(&mut self) {
-        self.count.fetch_sub(1, Ordering::AcqRel);
-        self.drained.notify_waiters();
-    }
-}
+type LifecycleCommitReservation = Reservation;
 
 /// Result of one bounded reconcile-and-revoke maintenance step.
 #[derive(Debug)]
@@ -1343,17 +1176,14 @@ mod tests {
         repository.assert_exact_mutation_attempts(&expected, 1);
         let stale_custody = supervisor
             .custody
-            .lock()
-            .expect("runtime-authority lifecycle custody lock")
+            .retained()
             .first()
             .cloned()
             .expect("lifecycle custody retained before confirmation");
         gate.release();
         result.await.expect("confirmed lifecycle mutation");
         tokio::time::timeout(Duration::from_secs(1), async {
-            while !stale_custody.removed.load(Ordering::Acquire)
-                || stale_custody.driver_active.load(Ordering::Acquire)
-            {
+            while !stale_custody.is_removed() || stale_custody.is_driver_active() {
                 tokio::task::yield_now().await;
             }
         })
