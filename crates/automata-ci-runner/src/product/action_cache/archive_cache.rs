@@ -147,7 +147,10 @@ impl FileActionArchiveCache {
     ) -> Result<Self, BlobStoreError> {
         fs::create_dir_all(root.as_path()).map_err(|_| unavailable())?;
         let metadata = fs::symlink_metadata(root.as_path()).map_err(|_| unavailable())?;
-        if !metadata.file_type().is_dir() || metadata.nlink() != 2 {
+        // Directory link counts are filesystem-specific and can change when
+        // cache files are added. `symlink_metadata` still keeps symlink and
+        // non-directory roots fail-closed without interpreting that count.
+        if !metadata.file_type().is_dir() {
             return Err(integrity());
         }
         fs::set_permissions(root.as_path(), fs::Permissions::from_mode(0o700))
