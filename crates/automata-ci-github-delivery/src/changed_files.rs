@@ -310,9 +310,9 @@ fn changed_file_selection(
 mod tests {
     use automata_ci_auth::secret::SecretString;
     use automata_ci_github::{
-        GITHUB_PUSH_EVENT_MEDIA_TYPE, GithubPushDiffIncompleteReason, GithubRepositoryVisibility,
-        GithubWebhookBodyDigest, StoredAuthenticatedGithubPush,
-        rehydrate_stored_authenticated_github_push,
+        GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE, GithubPushDiffIncompleteReason,
+        GithubRepositoryVisibility, GithubWebhookBodyDigest, StoredAuthenticatedGithubWebhook,
+        VerifiedGithubWebhook, rehydrate_stored_authenticated_github_webhook,
     };
     use bytes::Bytes;
     use sha2::{Digest as _, Sha256};
@@ -416,12 +416,13 @@ mod tests {
         let mut digest_bytes = [0_u8; 32];
         digest_bytes.copy_from_slice(&digest);
         let encoded_size = u64::try_from(body.len()).unwrap();
-        rehydrate_stored_authenticated_github_push(
-            StoredAuthenticatedGithubPush::from_durable_coordinates(
+        let event = rehydrate_stored_authenticated_github_webhook(
+            StoredAuthenticatedGithubWebhook::from_durable_coordinates(
                 body,
                 GithubWebhookBodyDigest::from_bytes(digest_bytes),
                 encoded_size,
-                GITHUB_PUSH_EVENT_MEDIA_TYPE,
+                GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE,
+                "push",
                 "delivery-test",
                 9,
                 42,
@@ -431,6 +432,10 @@ mod tests {
                 "repo",
             ),
         )
-        .unwrap()
+        .unwrap();
+        let VerifiedGithubWebhook::Push(push) = event else {
+            panic!("expected push fixture");
+        };
+        push
     }
 }

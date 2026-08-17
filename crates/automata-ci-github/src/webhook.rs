@@ -18,8 +18,6 @@ pub const MAX_GITHUB_WEBHOOK_BODY_BYTES: usize = 26_214_400;
 pub const MAX_GITHUB_WEBHOOK_SECRET_BYTES: usize = 16_384;
 /// Maximum commit summaries GitHub documents in one push webhook.
 pub const MAX_GITHUB_PUSH_COMMITS: usize = 2_048;
-/// Exact durable media type required for a stored authenticated GitHub push.
-pub const GITHUB_PUSH_EVENT_MEDIA_TYPE: &str = "application/vnd.automata.github-push+json";
 /// Exact durable media type for a authenticated GitHub event.
 pub const GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE: &str =
     "application/vnd.automata.github-authenticated-event+json";
@@ -109,31 +107,10 @@ impl fmt::Debug for GithubWebhookVerifierFingerprint {
     }
 }
 
-/// Exact stored object and durable identity evidence for one authenticated push.
-///
-/// Construction does not authenticate or decode the body. The value exists so
-/// the only stored-body rehydration entry point must receive the complete
-/// immutable coordinates recorded after webhook authentication. Call
-/// [`rehydrate_stored_authenticated_github_push`] to validate and consume it.
-pub struct StoredAuthenticatedGithubPush {
-    raw_body: Bytes,
-    body_sha256: GithubWebhookBodyDigest,
-    encoded_size: u64,
-    media_type: Box<str>,
-    delivery_id: Box<str>,
-    installation_id: u64,
-    repository_id: u64,
-    repository_owner_id: u64,
-    repository_visibility: GithubRepositoryVisibility,
-    repository_owner: Box<str>,
-    repository_name: Box<str>,
-}
-
 /// Durable coordinates for any supported authenticated GitHub event.
 ///
-/// This evidence is distinct from [`StoredAuthenticatedGithubPush`]. The media
-/// type and explicit event name prevent rows from being silently reinterpreted
-/// as another event kind. Construction is inert; only
+/// The media type and explicit event name prevent rows from being silently
+/// reinterpreted as another event kind. Construction is inert; only
 /// [`rehydrate_stored_authenticated_github_webhook`] validates and consumes
 /// the coordinates.
 pub struct StoredAuthenticatedGithubWebhook {
@@ -206,118 +183,6 @@ impl fmt::Debug for StoredAuthenticatedGithubWebhook {
             .field("repository_name", &"[redacted]")
             .finish()
     }
-}
-
-impl StoredAuthenticatedGithubPush {
-    /// Binds exact stored bytes to all durable object and routing coordinates.
-    ///
-    /// This constructor deliberately performs no partial validation. The
-    /// consuming rehydration call checks every coordinate before decoding JSON,
-    /// which prevents callers from accidentally treating construction as an
-    /// authentication or integrity decision.
-    #[allow(clippy::too_many_arguments)]
-    #[must_use]
-    pub fn from_durable_coordinates(
-        raw_body: Bytes,
-        body_sha256: GithubWebhookBodyDigest,
-        encoded_size: u64,
-        media_type: impl Into<Box<str>>,
-        delivery_id: impl Into<Box<str>>,
-        installation_id: u64,
-        repository_id: u64,
-        repository_owner_id: u64,
-        repository_visibility: GithubRepositoryVisibility,
-        repository_owner: impl Into<Box<str>>,
-        repository_name: impl Into<Box<str>>,
-    ) -> Self {
-        Self {
-            raw_body,
-            body_sha256,
-            encoded_size,
-            media_type: media_type.into(),
-            delivery_id: delivery_id.into(),
-            installation_id,
-            repository_id,
-            repository_owner_id,
-            repository_visibility,
-            repository_owner: repository_owner.into(),
-            repository_name: repository_name.into(),
-        }
-    }
-}
-
-impl fmt::Debug for StoredAuthenticatedGithubPush {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("StoredAuthenticatedGithubPush")
-            .field("raw_body", &"[redacted]")
-            .field("body_sha256", &"[redacted]")
-            .field("encoded_size", &self.encoded_size)
-            .field("media_type", &"[redacted]")
-            .field("delivery_id", &"[redacted]")
-            .field("installation_id", &self.installation_id)
-            .field("repository_id", &self.repository_id)
-            .field("repository_owner_id", &self.repository_owner_id)
-            .field("repository_visibility", &self.repository_visibility)
-            .field("repository_owner", &"[redacted]")
-            .field("repository_name", &"[redacted]")
-            .finish()
-    }
-}
-
-/// Rehydrates one previously authenticated exact push object.
-///
-/// Media type, encoded size, SHA-256, and every durable routing identity are
-/// checked before the result is returned. Media, size, and digest validation
-/// precede JSON decoding. The body is not authenticated again: callers must
-/// supply coordinates committed only after the original HMAC boundary accepted
-/// these exact bytes.
-///
-/// # Errors
-///
-/// Rejects noncanonical object coordinates, digest or identity mismatches,
-/// malformed JSON, and any payload that violates the same strict normalization
-/// rules as [`GithubWebhookVerifier`].
-pub fn rehydrate_stored_authenticated_github_push(
-    evidence: StoredAuthenticatedGithubPush,
-) -> Result<VerifiedGithubPush, GithubStoredPushError> {
-    if evidence.media_type.as_ref() != GITHUB_PUSH_EVENT_MEDIA_TYPE {
-        return Err(GithubStoredPushError::UnexpectedMediaType);
-    }
-    let actual_size = u64::try_from(evidence.raw_body.len()).unwrap_or(u64::MAX);
-    if evidence.encoded_size == 0
-        || evidence.raw_body.len() > MAX_GITHUB_WEBHOOK_BODY_BYTES
-        || actual_size != evidence.encoded_size
-    {
-        return Err(GithubStoredPushError::SizeMismatch);
-    }
-    let actual_digest = webhook_body_digest(&evidence.raw_body);
-    if actual_digest != evidence.body_sha256 {
-        return Err(GithubStoredPushError::DigestMismatch);
-    }
-    validate_stored_identity(&evidence)?;
-
-    let payload: PushPayload = serde_json::from_slice(&evidence.raw_body)
-        .map_err(|_| GithubStoredPushError::MalformedPayload)?;
-    validate_stored_payload_identity(&payload, &evidence)?;
-    normalize_push(
-        PushRequestHeaders {
-            event_name: "push".into(),
-            delivery_id: evidence.delivery_id,
-        },
-        evidence.raw_body,
-        payload,
-    )
-    .map_err(|error| match error {
-        GithubWebhookError::MalformedPayload => GithubStoredPushError::MalformedPayload,
-        GithubWebhookError::InvalidPayload
-        | GithubWebhookError::InvalidSecret
-        | GithubWebhookError::InvalidHeaders
-        | GithubWebhookError::InvalidSignature
-        | GithubWebhookError::BodyTooLarge
-        | GithubWebhookError::AuthenticationFailed
-        | GithubWebhookError::UnsupportedEvent => GithubStoredPushError::InvalidPayload,
-    })
 }
 
 /// Rehydrates one authenticated GitHub event envelope.
@@ -1021,32 +886,6 @@ pub enum GithubWebhookError {
     InvalidPayload,
 }
 
-/// Sanitized stored authenticated-push rehydration failures.
-#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
-pub enum GithubStoredPushError {
-    /// The durable object is not the canonical authenticated-push media type.
-    #[error("the stored GitHub push media type is invalid")]
-    UnexpectedMediaType,
-    /// The durable encoded size is zero, excessive, or differs from the bytes.
-    #[error("the stored GitHub push size is invalid")]
-    SizeMismatch,
-    /// The exact stored bytes do not match the durable SHA-256 coordinate.
-    #[error("the stored GitHub push digest does not match")]
-    DigestMismatch,
-    /// Durable routing coordinates violate the authenticated ingress shape.
-    #[error("the stored GitHub push identity is invalid")]
-    InvalidDurableIdentity,
-    /// The exact stored bytes are not an unambiguous push JSON document.
-    #[error("the stored GitHub push payload is malformed")]
-    MalformedPayload,
-    /// The stored body identity differs from its durable routing coordinates.
-    #[error("the stored GitHub push identity does not match its payload")]
-    IdentityMismatch,
-    /// Stored provider fields violate strict push invariants.
-    #[error("the stored GitHub push payload is inconsistent")]
-    InvalidPayload,
-}
-
 /// Sanitized authenticated-event rehydration failures.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum GithubStoredWebhookError {
@@ -1368,22 +1207,6 @@ fn webhook_body_digest(raw_body: &[u8]) -> GithubWebhookBodyDigest {
     GithubWebhookBodyDigest::from_bytes(bytes)
 }
 
-fn validate_stored_identity(
-    evidence: &StoredAuthenticatedGithubPush,
-) -> Result<(), GithubStoredPushError> {
-    if !valid_stored_identity(
-        evidence.installation_id,
-        evidence.repository_id,
-        evidence.repository_owner_id,
-        evidence.delivery_id.as_bytes(),
-        &evidence.repository_owner,
-        &evidence.repository_name,
-    ) {
-        return Err(GithubStoredPushError::InvalidDurableIdentity);
-    }
-    Ok(())
-}
-
 fn valid_stored_identity(
     installation_id: u64,
     repository_id: u64,
@@ -1402,27 +1225,6 @@ fn valid_stored_identity(
         && validate_repository_component(repository_owner).is_ok()
         && validate_repository_component(repository_name).is_ok()
         && !has_ascii_case_insensitive_suffix(repository_name, ".git")
-}
-
-fn validate_stored_payload_identity(
-    payload: &PushPayload,
-    evidence: &StoredAuthenticatedGithubPush,
-) -> Result<(), GithubStoredPushError> {
-    if payload.installation.id != evidence.installation_id
-        || payload.repository.id != evidence.repository_id
-        || payload.repository.owner.id != evidence.repository_owner_id
-        || normalized_repository_visibility(
-            payload.repository.private,
-            &payload.repository.visibility,
-        )
-        .map_err(|_| GithubStoredPushError::InvalidPayload)?
-            != evidence.repository_visibility
-        || payload.repository.owner.login != evidence.repository_owner.as_ref()
-        || payload.repository.name != evidence.repository_name.as_ref()
-    {
-        return Err(GithubStoredPushError::IdentityMismatch);
-    }
-    Ok(())
 }
 
 fn validate_repository_component(value: &str) -> Result<(), GithubWebhookError> {

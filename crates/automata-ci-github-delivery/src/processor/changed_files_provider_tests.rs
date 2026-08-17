@@ -10,8 +10,8 @@ use automata_ci_core::{Sha256Digest, UnixMillis};
 use automata_ci_github::{
     GITHUB_API_VERSION, GITHUB_EVENT_ENVELOPE_V1_MEDIA_TYPE, GITHUB_RAW_EVENT_OBJECT_KEY_PREFIX,
     GithubHttpEndpoint, GithubHttpLimits, GithubRepositoryVisibility, GithubSealedEventEnvelopeV1,
-    GithubWebhookBodyDigest, StoredAuthenticatedGithubPush, VerifiedGithubPush,
-    VerifiedGithubWebhook, rehydrate_stored_authenticated_github_push,
+    GithubWebhookBodyDigest, StoredAuthenticatedGithubWebhook, VerifiedGithubPush,
+    VerifiedGithubWebhook, rehydrate_stored_authenticated_github_webhook,
 };
 use automata_ci_store::{
     AdmissionObject, ClaimedProviderDelivery, ObjectKey, ProviderConnectionId,
@@ -35,8 +35,7 @@ use super::{
     GithubPushChangedFilesRequest,
 };
 use crate::{
-    GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE, GITHUB_PUSH_EVENT_MEDIA_TYPE,
-    GithubRestPushChangedFilesProvider,
+    GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE, GithubRestPushChangedFilesProvider,
     service::provider_required_through,
     worker::{GithubDeliveryClaimLease, GithubDeliveryClaimSnapshot},
 };
@@ -166,12 +165,13 @@ fn delivery_fixture(visibility: ProviderRepositoryVisibility) -> DeliveryFixture
         GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE,
     )
     .expect("raw event");
-    let push = rehydrate_stored_authenticated_github_push(
-        StoredAuthenticatedGithubPush::from_durable_coordinates(
+    let event = rehydrate_stored_authenticated_github_webhook(
+        StoredAuthenticatedGithubWebhook::from_durable_coordinates(
             body,
             GithubWebhookBodyDigest::from_bytes(digest_bytes),
             encoded_size,
-            GITHUB_PUSH_EVENT_MEDIA_TYPE,
+            GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE,
+            "push",
             DELIVERY,
             INSTALLATION_ID,
             REPOSITORY_ID,
@@ -181,7 +181,10 @@ fn delivery_fixture(visibility: ProviderRepositoryVisibility) -> DeliveryFixture
             REPOSITORY,
         ),
     )
-    .expect("verified push");
+    .expect("verified webhook");
+    let VerifiedGithubWebhook::Push(push) = event else {
+        panic!("expected push fixture");
+    };
     let sealed_event =
         GithubSealedEventEnvelopeV1::seal(&VerifiedGithubWebhook::Push(push.clone()), descriptor)
             .expect("sealed event envelope");
