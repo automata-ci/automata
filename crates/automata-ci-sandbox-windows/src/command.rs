@@ -181,6 +181,7 @@ pub struct RuntimeCommandOutput {
 
 impl RuntimeCommandOutput {
     /// Creates a successful synthetic output for an injected executor.
+    #[cfg(test)]
     #[must_use]
     pub fn success(stdout: impl Into<Vec<u8>>) -> Self {
         Self {
@@ -193,6 +194,7 @@ impl RuntimeCommandOutput {
     }
 
     /// Creates a failed synthetic output for an injected executor.
+    #[cfg(test)]
     #[must_use]
     pub fn failure(code: i32, stderr: impl Into<Vec<u8>>) -> Self {
         Self {

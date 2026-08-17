@@ -1064,12 +1064,20 @@ dependencies = [
 name = "automata-ci-sandbox-windows"
 version = "0.1.0"
 dependencies = [
+ "automata-ci-core",
  "automata-ci-execution",
+ "automata-ci-protocol",
  "automata-ci-sandbox-guest",
  "base64 0.23.1",
+ "bollard",
+ "futures",
+ "ring",
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "tar",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]

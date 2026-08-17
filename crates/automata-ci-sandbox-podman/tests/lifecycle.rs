@@ -901,8 +901,21 @@ fn same_profile_id_with_a_different_attestation_digest_cannot_replay() {
     assert_eq!(error.kind(), ProviderErrorKind::Conflict);
 }
 
+fn assert_environment_transfer_capabilities(
+    fixture: &Fixture,
+    endpoint_capabilities: &[SandboxCapability],
+) {
+    for capability in [
+        SandboxCapability::EnvironmentInjection,
+        SandboxCapability::CopyTo,
+        SandboxCapability::CopyFrom,
+    ] {
+        assert!(endpoint_capabilities.contains(&capability));
+        assert!(fixture.provider.capabilities().supports(capability));
+    }
+}
+
 #[test]
-#[allow(clippy::too_many_lines)] // One adversarial transcript proves environment isolation end to end.
 fn environment_values_are_exact_redacted_and_do_not_control_the_podman_client() {
     let fixture = Fixture::new("environment");
     let created = fixture
@@ -913,14 +926,7 @@ fn environment_values_are_exact_redacted_and_do_not_control_the_podman_client() 
         .provider
         .attach(created.handle(), &NeverCancelled)
         .expect("attach");
-    for capability in [
-        SandboxCapability::EnvironmentInjection,
-        SandboxCapability::CopyTo,
-        SandboxCapability::CopyFrom,
-    ] {
-        assert!(endpoint.capabilities().contains(&capability));
-        assert!(fixture.provider.capabilities().supports(capability));
-    }
+    assert_environment_transfer_capabilities(&fixture, endpoint.capabilities());
     let secret = "single-line-secret";
     let home = "/__w/_home";
     let path = "/opt/tool/bin:/usr/bin";
