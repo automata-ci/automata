@@ -23,7 +23,7 @@ pub enum Command {
     /// This explicit mode is intended for release-image smoke tests and local
     /// UI previews. It never starts durable stores, Results, or runner control.
     Preview(PreviewArgs),
-    /// Inspect prerequisites for a disposable local Automata installation.
+    /// Inspect or manage a disposable local Automata installation.
     Local(LocalArgs),
     /// Authenticate the operator CLI and manage its server-scoped session.
     Auth(AuthArgs),
@@ -134,6 +134,12 @@ pub enum LocalCommand {
     /// Seal or replay one x86-64 Linux epoch without starting services.
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     Init(LocalInitArgs),
+    /// Inspect recorded custody or reset progress without changing host or Engine state.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    Status(LocalStatusArgs),
+    /// Remove exact sealed Engine custody while retaining images and the state root.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    Reset(LocalResetArgs),
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -152,6 +158,30 @@ pub struct LocalInitArgs {
     /// Operator-selected canonical release evidence; init verifies structure and digests, not OIDC authenticity.
     #[arg(long, value_name = "file:ABS", value_parser = parse_catalog_source)]
     pub catalog_source: String,
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[derive(Debug, Args)]
+/// Read-only sealed-installation status inputs.
+pub struct LocalStatusArgs {
+    /// Explicit absolute host directory containing installation custody.
+    #[arg(long, value_name = "ABS", value_parser = parse_absolute_state_directory)]
+    pub state_directory: PathBuf,
+    /// Render one stable redacted JSON document instead of human text.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[derive(Debug, Args)]
+/// Exact destructive local-installation reset inputs.
+pub struct LocalResetArgs {
+    /// Explicit absolute host directory containing installation custody.
+    #[arg(long, value_name = "ABS", value_parser = parse_absolute_state_directory)]
+    pub state_directory: PathBuf,
+    /// Confirm deletion without an interactive prompt.
+    #[arg(long, required = true)]
+    pub yes: bool,
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]

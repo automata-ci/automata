@@ -44,7 +44,9 @@ pub use commands::{
     SecretDeleteArgs, SecretListArgs, SecretProviderArgs, SecretProviderCommand, ServerArgs,
 };
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-pub use commands::{InternalLocalArgs, InternalLocalCommand, LocalInitArgs};
+pub use commands::{
+    InternalLocalArgs, InternalLocalCommand, LocalInitArgs, LocalResetArgs, LocalStatusArgs,
+};
 pub use output::OutputFormat;
 pub use values::{RepositoryRef, SecretScope};
 

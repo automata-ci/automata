@@ -9,8 +9,8 @@ behavior to the control-plane crate.
 
 The user-visible slice provides read-only host preflight and snapshot-backed
 workflow checking on the qualified platforms. On x86-64 Linux it also provides
-`automata local init`, a mutating init-only operation for a Docker Engine at
-exactly `unix:///var/run/docker.sock`. During `local doctor`, context
+sealed `init`, read-only metadata `status`, and exact confirmed `reset` for a
+Docker Engine at exactly `unix:///var/run/docker.sock`. During `local doctor`, context
 discovery is completed first, subsequent daemon probes are pinned to that exact
 local Unix-socket or Windows-named-pipe endpoint, and JSON schema 3 reports the
 bounded context name. Init accepts only the fixed Unix socket so the verified
@@ -93,10 +93,28 @@ epoch and material. The desired record includes the local service-proxy tag and
 both acceptable OCI IDs so later convergence can reattest the same daemon
 representation. This slice has no renderer and generates no Compose document.
 Init invokes no Compose operation and starts no service, relay, bootstrap,
-database, object store, or runner. No public `up`, `down`, `status`, `reset`,
-relay, or bootstrap lifecycle command exists; `ResetRequired` is detectable,
-but there is no reset command. The adapter exposes no generic delete, prune, or
-arbitrary helper API.
+database, object store, or runner. Public `local status --state-directory ABS`
+opens only existing custody with a shared, nonrepairing lock. It validates the
+canonical host records and exact Engine identity, images, volume metadata,
+attachments, and related-resource union, but deliberately does not inspect
+volume contents or manifests; `recorded_sealed` is that narrower claim. Public
+`local reset --state-directory ABS --yes` never prompts. It authorizes deletion
+from an authority-bound canonical epoch plus complete exact post-Desired Engine
+custody, rejecting copied/pre-guard, mismatched, unexpectedly managed, or
+foreign-attached state before mutation. Missing or safe malformed material,
+certificate, selector, and commit records are not deletion authority and do not
+strand cleanup; a canonically valid conflicting selector or commit blocks.
+Both commands use Bollard directly at the fixed Docker socket with pinned API
+1.48; Docker CLI availability, current context, `DOCKER_API_VERSION`, and
+Compose readiness affect neither status nor reset. Init and doctor retain the
+full CLI/context/Compose preflight.
+The self-contained topology-bound intent durably reconciles helper, eleven
+roles, Desired, anchor, and whatever safe fixed host records remain. It retains
+images, the state directory, and the verified held operation lock. Missing or
+retagged images do not block deletion because reset derives any stale-helper
+contract from the sealed epoch and never owns image removal. No public `up`,
+`down`, relay, or bootstrap lifecycle command exists.
+The adapter exposes no generic delete, prune, or arbitrary helper API.
 
 On Linux, the runner also consumes one evaluation-only sandbox-provider
 factory. The concrete Docker provider and engine API stay private. They connect
@@ -170,21 +188,24 @@ there is no ambient installation credential or GitHub-authority fallback.
 An installation is one reusable control-plane and runner-capacity domain, not
 one repository. Repositories sharing an installation are one trusted set and
 retain their own admission, authorization, secret, cache, and history scope in
-the existing control plane. A separate `--installation` name is the explicit
-way to request another deployment/capacity domain.
+the existing control plane. At creation time, init's separate `--installation`
+name requests another deployment/capacity domain; status and reset recover that
+identity only from the explicit state-directory custody.
 
-`automata local init` is the sole product mutation command: it imports or pulls
-the verified image set, creates/adopts exact installation volumes, and seals
-host material plus desired topology without converging it. The runner-only
-provider boundary above still does not add a local lifecycle command. The
+`automata local init` imports or pulls the verified image set, creates/adopts
+exact installation volumes, and seals host material plus desired topology
+without converging it. `automata local reset` is the only other product mutation
+in this slice and removes one exact established installation while retaining
+images and the custody root/lock. The runner-only provider boundary above still
+does not add a local execution command. The
 snapshot boundary is consumed separately by `automata local check`, which
 compiles an explicit local manual-dispatch event and all reachable same-snapshot
 reusable workflows through the shared compiler and credential analysis. It
 does not admit or run work, mint GitHub evidence, request a token, or publish a
-Check Run. There is no mirrored live-resource inventory or public lifecycle
-state machine, and secret values never enter the desired document. This slice
-does not generate a Compose document.
+Check Run. Status derives a bounded live Engine inventory on demand rather than
+persisting a mirrored one, and secret values never enter the desired document
+or status output. This slice does not generate a Compose document.
 
 This crate has no command-line parser. The `automata` product maps its public
-CLI into the high-level local-check and x86-64 Linux init requests; filesystem,
-catalog, materializer, snapshot, and archive authority stay private.
+CLI into the high-level local-check and x86-64 Linux init/status/reset requests;
+filesystem, catalog, materializer, snapshot, and archive authority stay private.

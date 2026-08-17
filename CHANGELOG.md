@@ -50,8 +50,22 @@ structure of [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
   materializer with a bounded canonical stdin request. Init seals the immutable
   epoch plus credential-free canonical desired intent and supports exact
   replay; it does not independently authenticate catalog OIDC provenance,
-  generate or invoke Compose, or start services. `ResetRequired` is detectable,
-  while `local up`, `down`, `status`, and `reset` remain absent.
+  generate or invoke Compose, or start services. `ResetRequired` is detectable.
+- x86-64 Linux-only `automata local status --state-directory ABS [--json]`
+  and `automata local reset --state-directory ABS --yes`. Status is an
+  existing-only, shared-lock, nonrepairing inspection of canonical host custody
+  and exact Engine metadata; it reports volume contents as not inspected.
+  Both commands connect directly to the fixed Docker socket with pinned API
+  1.48, independent of Docker CLI/context/environment and Compose readiness.
+  Reset requires an authority-bound canonical epoch plus complete exact
+  post-Desired Engine custody, rejects copied/pre-guard custody, unexpected
+  managed resources, and foreign attachments before mutation, then durably
+  reconciles exact helper, volume, anchor, and safe fixed-record deletion.
+  Missing or malformed non-authority material/certificate records do not strand
+  exact cleanup; canonically valid conflicting selector/commit records do.
+  Imported images, the state directory, and its original operation lock are
+  retained; missing retained images do not block custody deletion. `local up`
+  and `down` remain absent.
 - Evaluation-only fixed-relay Local Docker runner execution on Linux. Runner
   schema 6 binds the private provider to an exact existing installation anchor,
   already-present digest-pinned guest and Results-proxy images, and an exact

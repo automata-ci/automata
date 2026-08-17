@@ -1,9 +1,10 @@
 //! Cross-platform boundary for disposable local Automata installations.
 //!
 //! The crate owns Docker Engine discovery and exact local workflow inspection
-//! without depending on the product CLI. Lifecycle mutation is added in
-//! separately reviewed slices; [`inspect`] and [`check_workflow`] are read-only
-//! and create no engine resources, admission records, or host state.
+//! without depending on the product CLI. On x86-64 Linux it also owns sealed
+//! initialization, recorded-custody status, and exact confirmed reset;
+//! [`inspect`] and [`check_workflow`] remain read-only and create no engine
+//! resources, admission records, or host state.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -47,7 +48,9 @@ pub(crate) use desired_spec::{
 pub use engine::{DockerInstallationAdapter, LocalEngineError, LocalEngineErrorCode};
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub use init::{
-    LocalInitError, LocalInitErrorCode, LocalInitOutcome, LocalInitRequest, initialize_local,
+    LocalInitError, LocalInitErrorCode, LocalInitOutcome, LocalInitRequest,
+    LocalInstallationStatus, LocalResetOutcome, LocalResetRequest, LocalStatusReport,
+    LocalStatusRequest, initialize_local, inspect_local_status, reset_local,
 };
 pub use installation::{
     ComposeProjectName, Installation, InstallationBinding, InstallationId, InstallationIdError,
@@ -463,6 +466,18 @@ pub struct EngineSelection {
     connection: DockerConnection,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ValidatedEngineSelection {
+    engine: Engine,
+    context_name: String,
+    endpoint: EngineEndpoint,
+    engine_id: String,
+    server_version: String,
+    api_version: String,
+    architecture: EngineArchitecture,
+    connection: DockerConnection,
+}
+
 impl EngineSelection {
     /// Returns the selected container engine.
     pub const fn engine(&self) -> Engine {
@@ -512,6 +527,42 @@ impl EngineSelection {
     /// Returns the exact Docker Compose plugin version.
     pub fn compose_version(&self) -> &str {
         &self.compose_version
+    }
+
+    pub(crate) fn validated_engine(&self) -> ValidatedEngineSelection {
+        ValidatedEngineSelection {
+            engine: self.engine,
+            context_name: self.context_name.clone(),
+            endpoint: self.endpoint,
+            engine_id: self.engine_id.clone(),
+            server_version: self.server_version.clone(),
+            api_version: self.api_version.clone(),
+            architecture: self.architecture,
+            connection: self.connection.clone(),
+        }
+    }
+}
+
+impl ValidatedEngineSelection {
+    #[cfg(test)]
+    pub(crate) fn connection_host(&self) -> &str {
+        self.connection.host()
+    }
+
+    pub(crate) fn engine_id(&self) -> &str {
+        &self.engine_id
+    }
+
+    pub(crate) fn server_version(&self) -> &str {
+        &self.server_version
+    }
+
+    pub(crate) fn api_version(&self) -> &str {
+        &self.api_version
+    }
+
+    pub(crate) const fn architecture(&self) -> EngineArchitecture {
+        self.architecture
     }
 
     pub(crate) const fn connection(&self) -> &DockerConnection {
@@ -818,15 +869,44 @@ fn evaluate_engine(
         ));
         return None;
     }
+    let validated_engine =
+        evaluate_engine_only(operating_system, host_architecture, probes, issues);
+    let compose: Option<DockerComposeDocument> =
+        parse_probe(DoctorProbe::DockerCompose, &probes.compose, issues);
+    let compose_version = compose.as_ref().and_then(|compose| {
+        record_validation(
+            DoctorProbe::DockerCompose,
+            validate_compose(compose),
+            issues,
+        )
+    });
+    let validated_engine = validated_engine?;
+    Some(EngineSelection {
+        engine: validated_engine.engine,
+        compose: ComposeFrontend::DockerPlugin,
+        context_name: validated_engine.context_name,
+        endpoint: validated_engine.endpoint,
+        engine_id: validated_engine.engine_id,
+        server_version: validated_engine.server_version,
+        api_version: validated_engine.api_version,
+        architecture: validated_engine.architecture,
+        compose_version: compose_version?,
+        connection: validated_engine.connection,
+    })
+}
 
+fn evaluate_engine_only(
+    operating_system: &str,
+    host_architecture: &str,
+    probes: &ProbeSet,
+    issues: &mut Vec<DoctorIssue>,
+) -> Option<ValidatedEngineSelection> {
     let context: Option<DockerContextDocument> =
         parse_probe(DoctorProbe::DockerContext, &probes.context, issues);
     let version: Option<DockerVersionDocument> =
         parse_probe(DoctorProbe::DockerVersion, &probes.version, issues);
     let info: Option<DockerInfoDocument> =
         parse_probe(DoctorProbe::DockerInfo, &probes.info, issues);
-    let compose: Option<DockerComposeDocument> =
-        parse_probe(DoctorProbe::DockerCompose, &probes.compose, issues);
 
     let connection = context.as_ref().and_then(|context| {
         record_validation(
@@ -842,13 +922,6 @@ fn evaluate_engine(
             issues,
         )
     });
-    let compose_version = compose.as_ref().and_then(|compose| {
-        record_validation(
-            DoctorProbe::DockerCompose,
-            validate_compose(compose),
-            issues,
-        )
-    });
     let engine_id = info.as_ref().and_then(|info| {
         version.as_ref().and_then(|version| {
             record_validation(
@@ -858,16 +931,14 @@ fn evaluate_engine(
             )
         })
     });
-    Some(EngineSelection {
+    Some(ValidatedEngineSelection {
         engine: Engine::Docker,
-        compose: ComposeFrontend::DockerPlugin,
         context_name: connection.as_ref()?.context_name.clone(),
         endpoint: connection.as_ref()?.endpoint,
         engine_id: engine_id?,
         server_version: version.as_ref()?.server_version.clone(),
         api_version: version.as_ref()?.api_version.clone(),
         architecture: version.as_ref()?.architecture,
-        compose_version: compose_version?,
         connection: connection?,
     })
 }

@@ -30,6 +30,7 @@ const INIT_RECORDS: [&str; 5] = [
     CERTIFICATE_RECORD,
     MATERIALIZATION_RECORD,
 ];
+const RESET_INTENT_RECORD: &str = "reset-intent.json";
 const MAX_EPOCH_BYTES: usize = 64 * 1024;
 const MAX_CERTIFICATE_RECORD_BYTES: usize = 128 * 1024;
 const MAX_CATALOG_BYTES: usize = 1024 * 1024;
@@ -42,6 +43,111 @@ pub(super) struct StateRoot {
     authority_sha256: Sha256Digest,
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(super) struct StateSnapshot {
+    pub(super) material_root: Option<Vec<u8>>,
+    pub(super) epoch: Option<Vec<u8>>,
+    pub(super) certificates: Option<Vec<u8>>,
+    pub(super) installation_selection: Option<Vec<u8>>,
+    pub(super) materialization: Option<Vec<u8>>,
+    pub(super) reset_intent: Option<Vec<u8>>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(super) struct ResetRecordObservation {
+    present: bool,
+    completed_present: bool,
+    staged_present: bool,
+    completed: Option<Vec<u8>>,
+    staged: Option<Vec<u8>>,
+}
+
+impl ResetRecordObservation {
+    pub(super) const fn present(&self) -> bool {
+        self.present
+    }
+
+    pub(super) const fn completed_present(&self) -> bool {
+        self.completed_present
+    }
+
+    pub(super) const fn staged_present(&self) -> bool {
+        self.staged_present
+    }
+
+    pub(super) fn completed(&self) -> Option<&[u8]> {
+        self.completed.as_deref()
+    }
+
+    pub(super) fn staged(&self) -> Option<&[u8]> {
+        self.staged.as_deref()
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(super) struct ResetStateSnapshot {
+    pub(super) material_root: ResetRecordObservation,
+    pub(super) epoch: ResetRecordObservation,
+    pub(super) certificates: ResetRecordObservation,
+    pub(super) installation_selection: ResetRecordObservation,
+    pub(super) materialization: ResetRecordObservation,
+    pub(super) reset_intent: ResetRecordObservation,
+}
+
+impl ResetStateSnapshot {
+    pub(super) fn is_empty(&self) -> bool {
+        !self.material_root.present()
+            && !self.epoch.present()
+            && !self.certificates.present()
+            && !self.installation_selection.present()
+            && !self.materialization.present()
+            && !self.reset_intent.present()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum StateRecord {
+    Materialization,
+    Certificates,
+    MaterialRoot,
+    InstallationSelection,
+    Epoch,
+    ResetIntent,
+}
+
+impl StateRecord {
+    const ALL: [Self; 6] = [
+        Self::Materialization,
+        Self::Certificates,
+        Self::MaterialRoot,
+        Self::InstallationSelection,
+        Self::Epoch,
+        Self::ResetIntent,
+    ];
+
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Materialization => MATERIALIZATION_RECORD,
+            Self::Certificates => CERTIFICATE_RECORD,
+            Self::MaterialRoot => MATERIAL_ROOT,
+            Self::InstallationSelection => INSTALLATION_SELECTION,
+            Self::Epoch => EPOCH_RECORD,
+            Self::ResetIntent => RESET_INTENT_RECORD,
+        }
+    }
+
+    const fn maximum(self) -> usize {
+        match self {
+            Self::Certificates => MAX_CERTIFICATE_RECORD_BYTES,
+            Self::MaterialRoot => 32,
+            Self::Materialization
+            | Self::InstallationSelection
+            | Self::Epoch
+            | Self::ResetIntent => MAX_EPOCH_BYTES,
+        }
+    }
+}
+
 impl StateRoot {
     pub(super) fn acquire(path: &Path) -> Result<Self, LocalInitError> {
         let (parent, name) = open_parent(path, true)?;
@@ -51,19 +157,13 @@ impl StateRoot {
         }
         let directory =
             openat(&parent, &name, directory_flags(), Mode::empty()).map_err(|_| state_path())?;
-        verify_private_directory(&directory)?;
+        let initial_root = private_directory_metadata(&directory)?;
         fs::fsync(&parent).map_err(|_| state_path())?;
 
         let operation_lock = open_operation_lock(&directory)?;
-        fs::flock(&operation_lock, FlockOperation::NonBlockingLockExclusive).map_err(|error| {
-            if error == rustix::io::Errno::AGAIN {
-                LocalInitError::new(LocalInitErrorCode::OperationInProgress)
-            } else {
-                state_path()
-            }
-        })?;
-        let root_metadata = private_directory_metadata(&directory)?;
-        let lock_metadata = verify_private_regular(&operation_lock, Some(0))?;
+        lock(&operation_lock, FlockOperation::NonBlockingLockExclusive)?;
+        let (root_metadata, lock_metadata) =
+            revalidate_root_and_lock(&parent, &name, &directory, &operation_lock, &initial_root)?;
         let authority_sha256 = state_authority_digest(&root_metadata, &lock_metadata);
         let state = Self {
             directory,
@@ -72,6 +172,36 @@ impl StateRoot {
         };
         state.validate_replay_layout()?;
         Ok(state)
+    }
+
+    pub(super) fn observe_existing(path: &Path) -> Result<Self, LocalInitError> {
+        Self::open_existing(path, FlockOperation::NonBlockingLockShared)
+    }
+
+    pub(super) fn acquire_existing(path: &Path) -> Result<Self, LocalInitError> {
+        Self::open_existing(path, FlockOperation::NonBlockingLockExclusive)
+    }
+
+    fn open_existing(path: &Path, operation: FlockOperation) -> Result<Self, LocalInitError> {
+        let (parent, name) = open_parent(path, true)?;
+        let directory =
+            openat(&parent, &name, directory_flags(), Mode::empty()).map_err(|error| {
+                if error == rustix::io::Errno::NOENT {
+                    reset_required()
+                } else {
+                    state_path()
+                }
+            })?;
+        let initial_root = private_directory_metadata(&directory)?;
+        let operation_lock = open_operation_lock_existing(&directory)?;
+        lock(&operation_lock, operation)?;
+        let (root_metadata, lock_metadata) =
+            revalidate_root_and_lock(&parent, &name, &directory, &operation_lock, &initial_root)?;
+        Ok(Self {
+            directory,
+            _operation_lock: operation_lock,
+            authority_sha256: state_authority_digest(&root_metadata, &lock_metadata),
+        })
     }
 
     pub(super) const fn authority_sha256(&self) -> Sha256Digest {
@@ -100,6 +230,166 @@ impl StateRoot {
         Ok(())
     }
 
+    pub(super) fn reset_intent_present(&self) -> Result<bool, LocalInitError> {
+        let temporary = temporary_name(RESET_INTENT_RECORD);
+        Ok(self
+            .read_private(RESET_INTENT_RECORD, MAX_EPOCH_BYTES)?
+            .is_some()
+            || self.read_private(&temporary, MAX_EPOCH_BYTES)?.is_some())
+    }
+
+    pub(super) fn snapshot_read_only(&self) -> Result<StateSnapshot, LocalInitError> {
+        let names = self.exact_entry_names(false)?;
+        let snapshot = StateSnapshot {
+            material_root: self.read_private(MATERIAL_ROOT, 32)?,
+            epoch: self.read_private(EPOCH_RECORD, MAX_EPOCH_BYTES)?,
+            certificates: self.read_private(CERTIFICATE_RECORD, MAX_CERTIFICATE_RECORD_BYTES)?,
+            installation_selection: self.read_private(INSTALLATION_SELECTION, MAX_EPOCH_BYTES)?,
+            materialization: self.read_private(MATERIALIZATION_RECORD, MAX_EPOCH_BYTES)?,
+            reset_intent: self.read_private(RESET_INTENT_RECORD, MAX_EPOCH_BYTES)?,
+        };
+        let repeated = self.exact_entry_names(false)?;
+        if repeated != names {
+            return Err(reset_required());
+        }
+        if snapshot.reset_intent.is_none() {
+            validate_init_record_layout(&repeated, None)?;
+        }
+        Ok(snapshot)
+    }
+
+    pub(super) fn snapshot_for_reset(&self) -> Result<ResetStateSnapshot, LocalInitError> {
+        let names = self.exact_entry_names(true)?;
+        let snapshot = ResetStateSnapshot {
+            material_root: self.observe_record_for_reset(StateRecord::MaterialRoot)?,
+            epoch: self.observe_record_for_reset(StateRecord::Epoch)?,
+            certificates: self.observe_record_for_reset(StateRecord::Certificates)?,
+            installation_selection: self
+                .observe_record_for_reset(StateRecord::InstallationSelection)?,
+            materialization: self.observe_record_for_reset(StateRecord::Materialization)?,
+            reset_intent: self.observe_record_for_reset(StateRecord::ResetIntent)?,
+        };
+        if self.exact_entry_names(true)? != names {
+            return Err(reset_required());
+        }
+        Ok(snapshot)
+    }
+
+    pub(super) fn observe_reset_intent_for_reset(
+        &self,
+    ) -> Result<ResetRecordObservation, LocalInitError> {
+        self.observe_record_for_reset(StateRecord::ResetIntent)
+    }
+
+    pub(super) fn reconcile_validated_reset_intent(
+        &self,
+        expected: &[u8],
+    ) -> Result<Vec<u8>, LocalInitError> {
+        let temporary = temporary_name(RESET_INTENT_RECORD);
+        let completed = self.observe_private_for_reset(RESET_INTENT_RECORD, MAX_EPOCH_BYTES)?;
+        let staged = self.observe_private_for_reset(&temporary, MAX_EPOCH_BYTES)?;
+        let completed_bytes = readable_reset_authority(&completed)?;
+        let staged_bytes = readable_reset_authority(&staged)?;
+        let Some(staged_bytes) = staged_bytes else {
+            return match completed_bytes {
+                Some(completed_bytes) if completed_bytes == expected => {
+                    Ok(completed_bytes.to_vec())
+                }
+                _ => Err(reset_required()),
+            };
+        };
+        if let Some(completed_bytes) = completed_bytes {
+            if completed_bytes != expected || staged_bytes != expected {
+                return Err(reset_required());
+            }
+            self.remove_private_for_reset(&temporary, MAX_EPOCH_BYTES)?;
+            let published = self.observe_private_for_reset(RESET_INTENT_RECORD, MAX_EPOCH_BYTES)?;
+            let residual = self.observe_private_for_reset(&temporary, MAX_EPOCH_BYTES)?;
+            if readable_reset_authority(&published)? != Some(expected) || residual.present {
+                return Err(reset_required());
+            }
+            return Ok(expected.to_vec());
+        }
+        if staged_bytes != expected {
+            return Err(reset_required());
+        }
+        renameat_with(
+            &self.directory,
+            &temporary,
+            &self.directory,
+            RESET_INTENT_RECORD,
+            rustix::fs::RenameFlags::NOREPLACE,
+        )
+        .map_err(|_| reset_required())?;
+        fs::fsync(&self.directory).map_err(|_| reset_required())?;
+        let published = self.observe_private_for_reset(RESET_INTENT_RECORD, MAX_EPOCH_BYTES)?;
+        let residual = self.observe_private_for_reset(&temporary, MAX_EPOCH_BYTES)?;
+        if readable_reset_authority(&published)? != Some(staged_bytes) || residual.present {
+            return Err(reset_required());
+        }
+        Ok(staged_bytes.to_vec())
+    }
+
+    pub(super) fn store_reset_intent(&self, bytes: &[u8]) -> Result<(), LocalInitError> {
+        if bytes.is_empty() || bytes.len() > MAX_EPOCH_BYTES {
+            return Err(state_path());
+        }
+        self.exact_entry_names(true)?;
+        let completed = self.read_private(RESET_INTENT_RECORD, MAX_EPOCH_BYTES)?;
+        let recovered = self.recover_temporary(
+            RESET_INTENT_RECORD,
+            MAX_EPOCH_BYTES,
+            completed.as_deref().or(Some(bytes)),
+        )?;
+        if let Some(existing) = completed.or(recovered) {
+            if existing != bytes {
+                return Err(reset_required());
+            }
+        } else {
+            let result = match self.create_private(RESET_INTENT_RECORD, bytes) {
+                Ok(()) => Ok(()),
+                Err(error) if error.code() == LocalInitErrorCode::StateCollision => {
+                    if self
+                        .read_private(RESET_INTENT_RECORD, MAX_EPOCH_BYTES)?
+                        .as_deref()
+                        == Some(bytes)
+                    {
+                        Ok(())
+                    } else {
+                        Err(reset_required())
+                    }
+                }
+                Err(error) => Err(error),
+            };
+            result?;
+        }
+        let snapshot = self.snapshot_for_reset()?;
+        if snapshot.reset_intent.completed() != Some(bytes)
+            || snapshot.reset_intent.staged_present()
+        {
+            return Err(reset_required());
+        }
+        Ok(())
+    }
+
+    pub(super) fn remove_record(&self, record: StateRecord) -> Result<(), LocalInitError> {
+        let name = record.name();
+        let temporary = temporary_name(name);
+        for candidate in [&temporary, name] {
+            self.remove_private_for_reset(candidate, record.maximum())?;
+        }
+        if self
+            .observe_private_for_reset(name, record.maximum())?
+            .present
+            || self
+                .observe_private_for_reset(&temporary, record.maximum())?
+                .present
+        {
+            return Err(reset_required());
+        }
+        Ok(())
+    }
+
     /// Requires the four authority/material records and no temporary before
     /// the first durable materialization-complete publication.
     pub(super) fn validate_before_materialization(&self) -> Result<(), LocalInitError> {
@@ -112,6 +402,52 @@ impl StateRoot {
     pub(super) fn validate_complete(&self) -> Result<(), LocalInitError> {
         let names = self.entry_names()?;
         validate_init_record_layout(&names, Some(INIT_RECORDS.len()))
+    }
+
+    fn remove_private_for_reset(&self, name: &str, maximum: usize) -> Result<(), LocalInitError> {
+        if self.observe_private_for_reset(name, maximum)?.present {
+            let _attempt = fs::unlinkat(&self.directory, name, fs::AtFlags::empty());
+            if self.observe_private_for_reset(name, maximum)?.present
+                || fs::fsync(&self.directory).is_err()
+            {
+                return Err(reset_required());
+            }
+        }
+        Ok(())
+    }
+
+    fn exact_entry_names(
+        &self,
+        allow_temporaries: bool,
+    ) -> Result<BTreeSet<String>, LocalInitError> {
+        let mut allowed = BTreeSet::from([OPERATION_LOCK.to_owned()]);
+        for record in StateRecord::ALL {
+            allowed.insert(record.name().to_owned());
+            if allow_temporaries {
+                allowed.insert(temporary_name(record.name()));
+            }
+        }
+        let names = self.entry_names()?;
+        if !names.contains(OPERATION_LOCK) || names.iter().any(|name| !allowed.contains(name)) {
+            return Err(reset_required());
+        }
+        Ok(names)
+    }
+
+    fn observe_record_for_reset(
+        &self,
+        record: StateRecord,
+    ) -> Result<ResetRecordObservation, LocalInitError> {
+        let completed = self.observe_private_for_reset(record.name(), record.maximum())?;
+        let temporary =
+            self.observe_private_for_reset(&temporary_name(record.name()), record.maximum())?;
+        Ok(ResetRecordObservation {
+            present: completed.present || temporary.present,
+            completed_present: completed.present,
+            staged_present: temporary.present,
+            completed: completed.completed,
+            staged: temporary.completed,
+        })
     }
 
     pub(super) fn load_material_root(&self) -> Result<Option<[u8; 32]>, LocalInitError> {
@@ -285,6 +621,66 @@ impl StateRoot {
             return Err(reset_required());
         }
         Ok(Some(bytes))
+    }
+
+    fn observe_private_for_reset(
+        &self,
+        name: &str,
+        maximum: usize,
+    ) -> Result<ResetRecordObservation, LocalInitError> {
+        let descriptor = match openat(
+            &self.directory,
+            name,
+            OFlags::PATH | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::empty(),
+        ) {
+            Ok(descriptor) => descriptor,
+            Err(rustix::io::Errno::NOENT) => return Ok(ResetRecordObservation::default()),
+            Err(_) => return Err(reset_required()),
+        };
+        let before = verify_safe_reset_regular(&descriptor)?;
+        let size = usize::try_from(before.st_size).map_err(|_| reset_required())?;
+        if size == 0 || size > maximum || before.st_mode & 0o400 == 0 {
+            let after = fstat(&descriptor).map_err(|_| reset_required())?;
+            if !same_file(&before, &after) {
+                return Err(reset_required());
+            }
+            return Ok(ResetRecordObservation {
+                present: true,
+                completed_present: true,
+                staged_present: false,
+                completed: None,
+                staged: None,
+            });
+        }
+        let readable = openat(
+            &self.directory,
+            name,
+            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+            Mode::empty(),
+        )
+        .map_err(|_| reset_required())?;
+        let readable_before = verify_safe_reset_regular(&readable)?;
+        if !same_file(&before, &readable_before) {
+            return Err(reset_required());
+        }
+        let mut file = File::from(readable);
+        let mut bytes = Vec::with_capacity(size);
+        std::io::Read::by_ref(&mut file)
+            .take(u64::try_from(maximum + 1).expect("bounded state file size fits u64"))
+            .read_to_end(&mut bytes)
+            .map_err(|_| reset_required())?;
+        let after = fstat(&file).map_err(|_| reset_required())?;
+        if bytes.len() != size || !same_file(&readable_before, &after) {
+            return Err(reset_required());
+        }
+        Ok(ResetRecordObservation {
+            present: true,
+            completed_present: true,
+            staged_present: false,
+            completed: Some(bytes),
+            staged: None,
+        })
     }
 
     fn create_private(&self, name: &str, bytes: &[u8]) -> Result<(), LocalInitError> {
@@ -461,6 +857,63 @@ fn open_operation_lock(directory: &OwnedFd) -> Result<OwnedFd, LocalInitError> {
     Ok(descriptor)
 }
 
+fn open_operation_lock_existing(directory: &OwnedFd) -> Result<OwnedFd, LocalInitError> {
+    let descriptor = openat(
+        directory,
+        OPERATION_LOCK,
+        OFlags::RDWR | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+        Mode::empty(),
+    )
+    .map_err(|_| reset_required())?;
+    verify_private_regular(&descriptor, Some(0))?;
+    Ok(descriptor)
+}
+
+fn lock(descriptor: &OwnedFd, operation: FlockOperation) -> Result<(), LocalInitError> {
+    fs::flock(descriptor, operation).map_err(|error| {
+        if error == rustix::io::Errno::AGAIN {
+            LocalInitError::new(LocalInitErrorCode::OperationInProgress)
+        } else {
+            state_path()
+        }
+    })
+}
+
+fn revalidate_root_and_lock(
+    parent: &OwnedFd,
+    name: &OsStr,
+    directory: &OwnedFd,
+    operation_lock: &OwnedFd,
+    initial_root: &rustix::fs::Stat,
+) -> Result<(rustix::fs::Stat, rustix::fs::Stat), LocalInitError> {
+    let root_metadata = private_directory_metadata(directory)?;
+    let rebound_root =
+        openat(parent, name, directory_flags(), Mode::empty()).map_err(|_| reset_required())?;
+    let rebound_root_metadata = private_directory_metadata(&rebound_root)?;
+    let lock_metadata = verify_private_regular(operation_lock, Some(0))?;
+    let rebound_lock = open_operation_lock_existing(directory)?;
+    let rebound_lock_metadata = verify_private_regular(&rebound_lock, Some(0))?;
+    if !same_inode(initial_root, &root_metadata)
+        || !same_inode(&root_metadata, &rebound_root_metadata)
+        || !same_inode(&lock_metadata, &rebound_lock_metadata)
+        || lock_metadata.st_ctime != rebound_lock_metadata.st_ctime
+        || lock_metadata.st_ctime_nsec != rebound_lock_metadata.st_ctime_nsec
+    {
+        return Err(reset_required());
+    }
+    Ok((root_metadata, lock_metadata))
+}
+
+fn readable_reset_authority(
+    observation: &ResetRecordObservation,
+) -> Result<Option<&[u8]>, LocalInitError> {
+    match (observation.present, observation.completed.as_deref()) {
+        (false, None) => Ok(None),
+        (true, Some(bytes)) => Ok(Some(bytes)),
+        _ => Err(reset_required()),
+    }
+}
+
 pub(super) struct EvidenceDirectory {
     directory: OwnedFd,
     catalog: Vec<u8>,
@@ -597,10 +1050,6 @@ fn verify_trusted_ancestor(directory: &OwnedFd, state: bool) -> Result<(), Local
     Ok(())
 }
 
-fn verify_private_directory(directory: &OwnedFd) -> Result<(), LocalInitError> {
-    private_directory_metadata(directory).map(|_| ())
-}
-
 fn private_directory_metadata(directory: &OwnedFd) -> Result<rustix::fs::Stat, LocalInitError> {
     let metadata = fstat(directory).map_err(|_| state_path())?;
     if FileType::from_raw_mode(metadata.st_mode) != FileType::Directory
@@ -647,6 +1096,18 @@ fn verify_private_regular(
     Ok(metadata)
 }
 
+fn verify_safe_reset_regular(file: &OwnedFd) -> Result<rustix::fs::Stat, LocalInitError> {
+    let metadata = fstat(file).map_err(|_| reset_required())?;
+    if FileType::from_raw_mode(metadata.st_mode) != FileType::RegularFile
+        || metadata.st_uid != rustix::process::geteuid().as_raw()
+        || metadata.st_nlink != 1
+        || metadata.st_mode & 0o7077 != 0
+    {
+        return Err(reset_required());
+    }
+    Ok(metadata)
+}
+
 fn same_file(left: &rustix::fs::Stat, right: &rustix::fs::Stat) -> bool {
     left.st_dev == right.st_dev
         && left.st_ino == right.st_ino
@@ -659,6 +1120,10 @@ fn same_file(left: &rustix::fs::Stat, right: &rustix::fs::Stat) -> bool {
         && left.st_mtime_nsec == right.st_mtime_nsec
         && left.st_ctime == right.st_ctime
         && left.st_ctime_nsec == right.st_ctime_nsec
+}
+
+fn same_inode(left: &rustix::fs::Stat, right: &rustix::fs::Stat) -> bool {
+    left.st_dev == right.st_dev && left.st_ino == right.st_ino
 }
 
 fn path_error(state: bool) -> LocalInitError {

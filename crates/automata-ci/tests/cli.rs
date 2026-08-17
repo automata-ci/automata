@@ -188,23 +188,91 @@ fn local_init_requires_explicit_canonical_host_custody_and_catalog_evidence() {
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
-fn local_init_stops_at_sealed_desired_state_without_hidden_lifecycle_commands() {
+fn local_init_status_and_reset_stop_before_service_lifecycle_commands() {
     let mut command = Cli::command();
     let local = command.find_subcommand_mut("local").expect("local command");
     let names = local
         .get_subcommands()
         .map(clap::Command::get_name)
         .collect::<Vec<_>>();
-    assert_eq!(names, ["doctor", "check", "init"]);
+    assert_eq!(names, ["doctor", "check", "init", "status", "reset"]);
 
     let init = local.find_subcommand_mut("init").expect("init command");
     let help = init.render_long_help().to_string();
     assert!(help.contains("without starting services"));
-    for hidden_lifecycle in ["up", "down", "status", "reset", "bootstrap", "relay"] {
+    let status = local.find_subcommand_mut("status").expect("status command");
+    let help = status.render_long_help().to_string();
+    assert!(help.contains("recorded custody or reset progress"));
+    let reset = local.find_subcommand_mut("reset").expect("reset command");
+    let help = reset.render_long_help().to_string();
+    assert!(help.contains("retaining images and the state root"));
+    for hidden_lifecycle in ["up", "down", "bootstrap", "relay"] {
         assert!(
             Cli::try_parse_from(["automata", "local", hidden_lifecycle]).is_err(),
-            "{hidden_lifecycle} must not leak into the v1 init-only boundary"
+            "{hidden_lifecycle} must not leak into the current sealed-custody boundary"
         );
+    }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn local_status_and_reset_require_explicit_state_and_reset_confirmation() {
+    let cli = Cli::try_parse_from([
+        "automata",
+        "local",
+        "status",
+        "--state-directory",
+        "/var/lib/automata-local/team",
+        "--json",
+    ])
+    .unwrap();
+    let Command::Local(local) = cli.command else {
+        panic!("local command expected");
+    };
+    let LocalCommand::Status(args) = local.command else {
+        panic!("local status expected");
+    };
+    assert_eq!(
+        args.state_directory,
+        std::path::Path::new("/var/lib/automata-local/team")
+    );
+    assert!(args.json);
+
+    let cli = Cli::try_parse_from([
+        "automata",
+        "local",
+        "reset",
+        "--state-directory",
+        "/var/lib/automata-local/team",
+        "--yes",
+    ])
+    .unwrap();
+    let Command::Local(local) = cli.command else {
+        panic!("local command expected");
+    };
+    let LocalCommand::Reset(args) = local.command else {
+        panic!("local reset expected");
+    };
+    assert!(args.yes);
+
+    for invalid in [
+        vec!["automata", "local", "status"],
+        vec![
+            "automata",
+            "local",
+            "status",
+            "--state-directory",
+            "relative",
+        ],
+        vec![
+            "automata",
+            "local",
+            "reset",
+            "--state-directory",
+            "/var/lib/automata-local/team",
+        ],
+    ] {
+        assert!(Cli::try_parse_from(invalid).is_err());
     }
 }
 
@@ -235,7 +303,7 @@ fn internal_local_materializer_is_one_fixed_argument_free_operation() {
 
 #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
 #[test]
-fn local_init_and_its_internal_materializer_are_not_advertised() {
+fn linux_x86_64_local_mutations_and_internal_materializer_are_not_advertised() {
     let mut command = Cli::command();
     let local = command.find_subcommand_mut("local").expect("local command");
     let names = local
@@ -243,7 +311,9 @@ fn local_init_and_its_internal_materializer_are_not_advertised() {
         .map(clap::Command::get_name)
         .collect::<Vec<_>>();
     assert_eq!(names, ["doctor", "check"]);
-    assert!(Cli::try_parse_from(["automata", "local", "init"]).is_err());
+    for command in ["init", "status", "reset"] {
+        assert!(Cli::try_parse_from(["automata", "local", command]).is_err());
+    }
     assert!(Cli::try_parse_from(["automata", "internal", "local", "materialize"]).is_err());
 }
 

@@ -7,9 +7,9 @@ use automata_ci_workflow_github::GithubWorkflowDispatchInputs;
 use automata_ci_workflow_service::BuiltInCredentialRequirement;
 use tokio_util::sync::CancellationToken;
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-use crate::cli::LocalInitArgs;
 use crate::cli::{LocalArgs, LocalCheckArgs, LocalCommand, LocalContainerEngine, LocalDoctorArgs};
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+use crate::cli::{LocalInitArgs, LocalResetArgs, LocalStatusArgs};
 
 pub(crate) async fn execute(args: &LocalArgs) -> Result<()> {
     match &args.command {
@@ -17,7 +17,145 @@ pub(crate) async fn execute(args: &LocalArgs) -> Result<()> {
         LocalCommand::Check(args) => Box::pin(check(args)).await,
         #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
         LocalCommand::Init(args) => Box::pin(init(args)).await,
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        LocalCommand::Status(args) => Box::pin(status(args)).await,
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        LocalCommand::Reset(args) => Box::pin(reset(args)).await,
     }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+async fn status(args: &LocalStatusArgs) -> Result<()> {
+    use automata_ci_local::{LocalStatusRequest, inspect_local_status};
+
+    let cancellation = CancellationToken::new();
+    let request = LocalStatusRequest::new(args.state_directory.clone(), cancellation.clone());
+    let mut inspection = Box::pin(inspect_local_status(request));
+    let report = tokio::select! {
+        biased;
+        () = crate::shutdown::wait_without_logging() => {
+            cancellation.cancel();
+            inspection.await.map_err(anyhow::Error::from)?
+        }
+        result = &mut inspection => result.map_err(anyhow::Error::from)?,
+    };
+    if args.json {
+        serde_json::to_writer_pretty(std::io::stdout().lock(), &report)?;
+        println!();
+    } else {
+        print_local_status(&report)?;
+    }
+    Ok(())
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn print_local_status(report: &automata_ci_local::LocalStatusReport) -> std::io::Result<()> {
+    write_local_status(report, &mut std::io::stdout().lock())
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+struct LocalStatusPresentation {
+    status: automata_ci_local::LocalInstallationStatus,
+    installation: Option<String>,
+    installation_id: Option<String>,
+    workers: Option<u16>,
+    epoch_fingerprint: Option<String>,
+    image_count: usize,
+    volume_count: usize,
+    reset_progress: Option<(usize, usize)>,
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+impl From<&automata_ci_local::LocalStatusReport> for LocalStatusPresentation {
+    fn from(report: &automata_ci_local::LocalStatusReport) -> Self {
+        Self {
+            status: report.status(),
+            installation: report.installation().map(str::to_owned),
+            installation_id: report.installation_id().map(str::to_owned),
+            workers: report.workers(),
+            epoch_fingerprint: report.epoch_fingerprint().map(|value| value.to_string()),
+            image_count: report.image_count(),
+            volume_count: report.volume_count(),
+            reset_progress: report.reset_progress(),
+        }
+    }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn write_local_status(
+    report: &automata_ci_local::LocalStatusReport,
+    writer: &mut impl std::io::Write,
+) -> std::io::Result<()> {
+    write_local_status_presentation(&LocalStatusPresentation::from(report), writer)
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn write_local_status_presentation(
+    report: &LocalStatusPresentation,
+    writer: &mut impl std::io::Write,
+) -> std::io::Result<()> {
+    let status = match report.status {
+        automata_ci_local::LocalInstallationStatus::Incomplete => "incomplete",
+        automata_ci_local::LocalInstallationStatus::RecordedSealed => "recorded sealed",
+        automata_ci_local::LocalInstallationStatus::ResetInProgress => "reset in progress",
+    };
+    writeln!(writer, "Automata local installation: {status}")?;
+    if let Some(installation) = report.installation.as_deref() {
+        writeln!(writer, "Installation: {installation}")?;
+    }
+    if let Some(id) = report.installation_id.as_deref() {
+        writeln!(writer, "Installation identity: {id}")?;
+    }
+    if let Some(workers) = report.workers {
+        writeln!(writer, "Worker slots: {workers}")?;
+    }
+    if let Some(fingerprint) = report.epoch_fingerprint.as_deref() {
+        writeln!(writer, "Epoch fingerprint: {fingerprint}")?;
+    }
+    if report.status == automata_ci_local::LocalInstallationStatus::RecordedSealed {
+        writeln!(
+            writer,
+            "Engine metadata: {} image representations, {} owned volumes; no attachments or unknown managed resources",
+            report.image_count, report.volume_count
+        )?;
+        writeln!(writer, "Volume contents: not inspected")?;
+    }
+    if let Some((removed, total)) = report.reset_progress {
+        writeln!(
+            writer,
+            "Reset progress: {removed}/{total} Engine resources removed"
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+async fn reset(args: &LocalResetArgs) -> Result<()> {
+    use automata_ci_local::{LocalResetRequest, reset_local};
+
+    let cancellation = CancellationToken::new();
+    let request =
+        LocalResetRequest::new(args.state_directory.clone(), args.yes, cancellation.clone());
+    let mut reset = Box::pin(reset_local(request));
+    let outcome = tokio::select! {
+        biased;
+        () = crate::shutdown::wait_without_logging() => {
+            cancellation.cancel();
+            reset.await.map_err(anyhow::Error::from)?
+        }
+        result = &mut reset => result.map_err(anyhow::Error::from)?,
+    };
+    println!(
+        "Automata local installation '{}' reset: {} persistent role volumes and the identity anchor removed; images were not removed{}",
+        outcome.installation(),
+        outcome.removed_volumes(),
+        if outcome.completed_after_cancellation() {
+            "; completed after shutdown cancellation"
+        } else {
+            ""
+        }
+    );
+    Ok(())
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -265,5 +403,75 @@ const fn architecture_name(architecture: EngineArchitecture) -> &'static str {
     match architecture {
         EngineArchitecture::Amd64 => "amd64",
         EngineArchitecture::Arm64 => "arm64",
+    }
+}
+
+#[cfg(all(test, target_os = "linux", target_arch = "x86_64"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_status_human_presentation_is_exact_for_every_public_state() {
+        let cases = [
+            (
+                LocalStatusPresentation {
+                    status: automata_ci_local::LocalInstallationStatus::Incomplete,
+                    installation: Some("default".to_owned()),
+                    installation_id: None,
+                    workers: None,
+                    epoch_fingerprint: None,
+                    image_count: 0,
+                    volume_count: 0,
+                    reset_progress: None,
+                },
+                "Automata local installation: incomplete\nInstallation: default\n",
+            ),
+            (
+                LocalStatusPresentation {
+                    status: automata_ci_local::LocalInstallationStatus::RecordedSealed,
+                    installation: Some("default".to_owned()),
+                    installation_id: Some("11111111-1111-4111-8111-111111111111".to_owned()),
+                    workers: Some(2),
+                    epoch_fingerprint: Some("sha256:fixture".to_owned()),
+                    image_count: 4,
+                    volume_count: 12,
+                    reset_progress: None,
+                },
+                concat!(
+                    "Automata local installation: recorded sealed\n",
+                    "Installation: default\n",
+                    "Installation identity: 11111111-1111-4111-8111-111111111111\n",
+                    "Worker slots: 2\n",
+                    "Epoch fingerprint: sha256:fixture\n",
+                    "Engine metadata: 4 image representations, 12 owned volumes; no attachments or unknown managed resources\n",
+                    "Volume contents: not inspected\n",
+                ),
+            ),
+            (
+                LocalStatusPresentation {
+                    status: automata_ci_local::LocalInstallationStatus::ResetInProgress,
+                    installation: Some("default".to_owned()),
+                    installation_id: Some("11111111-1111-4111-8111-111111111111".to_owned()),
+                    workers: None,
+                    epoch_fingerprint: Some("sha256:fixture".to_owned()),
+                    image_count: 0,
+                    volume_count: 0,
+                    reset_progress: Some((7, 13)),
+                },
+                concat!(
+                    "Automata local installation: reset in progress\n",
+                    "Installation: default\n",
+                    "Installation identity: 11111111-1111-4111-8111-111111111111\n",
+                    "Epoch fingerprint: sha256:fixture\n",
+                    "Reset progress: 7/13 Engine resources removed\n",
+                ),
+            ),
+        ];
+
+        for (report, expected) in cases {
+            let mut rendered = Vec::new();
+            write_local_status_presentation(&report, &mut rendered).unwrap();
+            assert_eq!(String::from_utf8(rendered).unwrap(), expected);
+        }
     }
 }

@@ -65,6 +65,15 @@ pub(super) fn load_or_issue(
     validate_record(&stored, &keys, epoch)
 }
 
+pub(super) fn validate_existing(
+    bytes: &[u8],
+    deriver: &MaterialDeriver,
+    epoch: &ImmutableEpoch,
+) -> Result<CertificateMaterial, LocalInitError> {
+    let keys = DerivedKeys::new(deriver)?;
+    validate_record(bytes, &keys, epoch)
+}
+
 struct DerivedKeys {
     ca: KeyPair,
     ca_pem: Zeroizing<String>,

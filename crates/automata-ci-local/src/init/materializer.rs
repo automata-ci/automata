@@ -108,7 +108,7 @@ impl VolumeRole {
         }
     }
 
-    const fn is_static(self) -> bool {
+    pub(super) const fn is_static(self) -> bool {
         matches!(
             self,
             Self::ControlMaterial | Self::Desired | Self::PostgresConfig | Self::RustfsConfig
