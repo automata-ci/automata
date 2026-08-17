@@ -205,97 +205,80 @@ pub(super) const SUBJECT_COLUMNS: &str = r"
     subject.desired_revision, subject.created_at_ms, subject.desired_updated_at_ms
 ";
 
-const LOCK_PROJECTION_CANDIDATE_SQL: &str = r"
-    SELECT outbox.subject_id, subject.origin_kind
-    FROM github_check_projection_outbox AS outbox
-    JOIN github_check_subjects AS subject
-      ON subject.id = outbox.subject_id
-    WHERE subject.provider_connection_id = $1
-      AND CASE subject.origin_kind
-        WHEN 'provider_delivery' THEN EXISTS (
-            SELECT 1
-            FROM github_provider_delivery_evidence AS delivery_evidence
-            WHERE delivery_evidence.provider_delivery_id = subject.provider_delivery_id
-              AND delivery_evidence.tenant_id = subject.tenant_id
-              AND delivery_evidence.repository_id = subject.repository_id
-              AND (
-                delivery_evidence.github_check_subject_id =
-                    COALESCE(subject.parent_subject_id, subject.id)
-                OR EXISTS (
-                    SELECT 1
-                    FROM github_workflow_run_subject_evidence AS run_evidence
-                    WHERE run_evidence.github_check_subject_id =
-                              COALESCE(subject.parent_subject_id, subject.id)
-                      AND run_evidence.provider_delivery_id =
-                          subject.provider_delivery_id
-                      AND run_evidence.tenant_id = subject.tenant_id
-                      AND run_evidence.repository_id = subject.repository_id
-                      AND (
-                          subject.parent_subject_id IS NOT NULL
-                          OR run_evidence.workflow_path = subject.subject_key
-                      )
-                      AND run_evidence.run_id = subject.workflow_run_id
-                )
-                OR EXISTS (
-                    SELECT 1
-                    FROM provider_delivery_workflow_progress AS progress
-                    WHERE progress.inbox_id = subject.provider_delivery_id
-                      AND progress.tenant_id = subject.tenant_id
-                      AND progress.workflow_path = subject.subject_key
-                      AND progress.outcome_kind = 'failed'
-                      AND subject.workflow_run_id IS NULL
-                )
-              )
+#[rustfmt::skip]
+macro_rules! projection_origin_authority_sql {
+    ($prefix:literal, $indent:literal, $schedule_connection_indent:literal, $suffix:literal $(,)?) => {
+        concat!(
+            $prefix,
+            $indent, "AND CASE subject.origin_kind\n",
+            $indent, "  WHEN 'provider_delivery' THEN EXISTS (\n",
+            $indent, "      SELECT 1\n",
+            $indent, "      FROM github_provider_delivery_evidence AS delivery_evidence\n",
+            $indent, "      WHERE delivery_evidence.provider_delivery_id = subject.provider_delivery_id\n",
+            $indent, "        AND delivery_evidence.tenant_id = subject.tenant_id\n",
+            $indent, "        AND delivery_evidence.repository_id = subject.repository_id\n",
+            $indent, "        AND (\n",
+            $indent, "          delivery_evidence.github_check_subject_id =\n",
+            $indent, "              COALESCE(subject.parent_subject_id, subject.id)\n",
+            $indent, "          OR EXISTS (\n",
+            $indent, "              SELECT 1\n",
+            $indent, "              FROM github_workflow_run_subject_evidence AS run_evidence\n",
+            $indent, "              WHERE run_evidence.github_check_subject_id =\n",
+            $indent, "                        COALESCE(subject.parent_subject_id, subject.id)\n",
+            $indent, "                AND run_evidence.provider_delivery_id =\n",
+            $indent, "                    subject.provider_delivery_id\n",
+            $indent, "                AND run_evidence.tenant_id = subject.tenant_id\n",
+            $indent, "                AND run_evidence.repository_id = subject.repository_id\n",
+            $indent, "                AND (\n",
+            $indent, "                    subject.parent_subject_id IS NOT NULL\n",
+            $indent, "                    OR run_evidence.workflow_path = subject.subject_key\n",
+            $indent, "                )\n",
+            $indent, "                AND run_evidence.run_id = subject.workflow_run_id\n",
+            $indent, "          )\n",
+            $indent, "          OR EXISTS (\n",
+            $indent, "              SELECT 1\n",
+            $indent, "              FROM provider_delivery_workflow_progress AS progress\n",
+            $indent, "              WHERE progress.inbox_id = subject.provider_delivery_id\n",
+            $indent, "                AND progress.tenant_id = subject.tenant_id\n",
+            $indent, "                AND progress.workflow_path = subject.subject_key\n",
+            $indent, "                AND progress.outcome_kind = 'failed'\n",
+            $indent, "                AND subject.workflow_run_id IS NULL\n",
+            $indent, "          )\n",
+            $indent, "        )\n",
+            $indent, "  )\n",
+            $indent, "  WHEN 'scheduled_fire' THEN EXISTS (\n",
+            $indent, "      SELECT 1\n",
+            $indent, "      FROM github_schedule_check_evidence AS schedule_evidence\n",
+            $indent, "      WHERE schedule_evidence.github_check_subject_id =\n",
+            $indent, "                COALESCE(subject.parent_subject_id, subject.id)\n",
+            $indent, "        AND schedule_evidence.schedule_fire_id = subject.schedule_fire_id\n",
+            $indent, "        AND schedule_evidence.tenant_id = subject.tenant_id\n",
+            $indent, "        AND schedule_evidence.repository_id = subject.repository_id\n",
+            $indent, "        AND schedule_evidence.provider_connection_id =\n",
+            $indent, $schedule_connection_indent, "subject.provider_connection_id\n",
+            $indent, "  )\n",
+            $indent, "  WHEN 'workflow_rerun' THEN EXISTS (\n",
+            $indent, "      SELECT 1\n",
+            $indent, "      FROM workflow_rerun_check_evidence AS rerun_evidence\n",
+            $indent, "      WHERE rerun_evidence.github_check_subject_id =\n",
+            $indent, "                COALESCE(subject.parent_subject_id, subject.id)\n",
+            $indent, "        AND rerun_evidence.run_id = subject.workflow_rerun_run_id\n",
+            $indent, "        AND rerun_evidence.tenant_id = subject.tenant_id\n",
+            $indent, "        AND rerun_evidence.repository_id = subject.repository_id\n",
+            $indent, "        AND rerun_evidence.provider_connection_id =\n",
+            $indent, "            subject.provider_connection_id\n",
+            $indent, "  )\n",
+            $indent, "  ELSE FALSE\n",
+            $indent, "END\n",
+            $suffix,
         )
-        WHEN 'scheduled_fire' THEN EXISTS (
-            SELECT 1
-            FROM github_schedule_check_evidence AS schedule_evidence
-            WHERE schedule_evidence.github_check_subject_id =
-                      COALESCE(subject.parent_subject_id, subject.id)
-              AND schedule_evidence.schedule_fire_id = subject.schedule_fire_id
-              AND schedule_evidence.tenant_id = subject.tenant_id
-              AND schedule_evidence.repository_id = subject.repository_id
-              AND schedule_evidence.provider_connection_id =
-                subject.provider_connection_id
-        )
-        WHEN 'workflow_rerun' THEN EXISTS (
-            SELECT 1
-            FROM workflow_rerun_check_evidence AS rerun_evidence
-            WHERE rerun_evidence.github_check_subject_id =
-                      COALESCE(subject.parent_subject_id, subject.id)
-              AND rerun_evidence.run_id = subject.workflow_rerun_run_id
-              AND rerun_evidence.tenant_id = subject.tenant_id
-              AND rerun_evidence.repository_id = subject.repository_id
-              AND rerun_evidence.provider_connection_id =
-                  subject.provider_connection_id
-        )
-        ELSE FALSE
-      END
-      AND outbox.claim_fence < 9223372036854775807
-      AND (
-        outbox.attempted_revision IS DISTINCT FROM subject.desired_revision
-        OR outbox.attempt_count < 64
-      )
-      AND (
-        outbox.state = 'pending'
-        OR outbox.state = 'retry' AND outbox.next_attempt_at_ms <= $2
-        OR outbox.state = 'create_indeterminate'
-           AND outbox.next_reconcile_at_ms <= $2
-        OR outbox.state = 'claimed' AND outbox.claim_expires_at_ms <= $2
-      )
-    ORDER BY
-        CASE outbox.state
-            WHEN 'pending' THEN outbox.state_updated_at_ms
-            WHEN 'retry' THEN outbox.next_attempt_at_ms
-            WHEN 'create_indeterminate' THEN outbox.next_reconcile_at_ms
-            ELSE outbox.claim_expires_at_ms
-        END,
-        outbox.subject_id
-    FOR UPDATE OF outbox SKIP LOCKED
-    LIMIT 1
-";
+    };
+}
 
-const CLAIM_LOCKED_DELIVERY_PROJECTION_SQL: &str = r"
+macro_rules! claim_locked_projection_sql {
+    ($origin_authority:literal) => {
+        concat!(
+            r"
     UPDATE github_check_projection_outbox AS outbox
     SET state = 'claimed',
         attempted_revision = subject.desired_revision,
@@ -322,7 +305,113 @@ const CLAIM_LOCKED_DELIVERY_PROJECTION_SQL: &str = r"
         last_failure_kind = NULL,
         blocked_reason = NULL,
         state_updated_at_ms = $4
-    FROM github_check_subjects AS subject,
+",
+            $origin_authority,
+            r"      AND outbox.claim_fence < 9223372036854775807
+      AND (
+        outbox.attempted_revision IS DISTINCT FROM subject.desired_revision
+        OR outbox.attempt_count < 64
+      )
+      AND (
+        outbox.state = 'pending'
+        OR outbox.state = 'retry' AND outbox.next_attempt_at_ms <= $4
+        OR outbox.state = 'create_indeterminate'
+           AND outbox.next_reconcile_at_ms <= $4
+        OR outbox.state = 'claimed' AND outbox.claim_expires_at_ms <= $4
+      )
+    RETURNING
+        outbox.subject_id, outbox.attempt_count, outbox.claim_fence,
+        outbox.claim_action, outbox.external_suite_id, outbox.external_run_id,
+        outbox.claimed_at_ms, outbox.claim_expires_at_ms,
+        subject.id, subject.tenant_id, subject.repository_id,
+        subject.origin_kind, subject.provider_delivery_id,
+        subject.schedule_fire_id, subject.workflow_rerun_run_id,
+        subject.subject_key, subject.subject_kind, subject.parent_subject_id,
+        subject.job_id, subject.job_attempt_id,
+        subject.provider_connection_id, subject.provider_installation_id,
+        subject.github_repository_id, subject.github_repository_name,
+        subject.github_app_id, subject.head_sha,
+        subject.check_name, subject.external_id, subject.workflow_run_id,
+        subject.linked_at_ms,
+        subject.desired_state, subject.desired_conclusion, subject.terminal_cause,
+        subject.desired_revision, subject.created_at_ms,
+        subject.desired_updated_at_ms,
+        (SELECT attempt.started_at_ms
+           FROM job_attempts AS attempt
+          WHERE attempt.id = subject.job_attempt_id) AS job_started_at_ms,
+        (SELECT terminal.completed_at_ms
+           FROM attempt_terminal_results AS terminal
+          WHERE terminal.attempt_id = subject.job_attempt_id) AS job_completed_at_ms,
+        (SELECT terminal.result_schema
+           FROM attempt_terminal_results AS terminal
+          WHERE terminal.attempt_id = subject.job_attempt_id) AS job_result_schema,
+        (SELECT terminal.result_size_bytes
+           FROM attempt_terminal_results AS terminal
+          WHERE terminal.attempt_id = subject.job_attempt_id) AS job_result_size_bytes,
+        (SELECT terminal.result_digest
+           FROM attempt_terminal_results AS terminal
+          WHERE terminal.attempt_id = subject.job_attempt_id) AS job_result_digest,
+        (SELECT terminal.result_object_key
+           FROM attempt_terminal_results AS terminal
+          WHERE terminal.attempt_id = subject.job_attempt_id) AS job_result_object_key,
+        (SELECT progress.presentation_digest
+           FROM github_check_annotation_progress AS progress
+          WHERE progress.subject_id = subject.id) AS annotation_presentation_digest,
+        (SELECT progress.annotation_total
+           FROM github_check_annotation_progress AS progress
+          WHERE progress.subject_id = subject.id) AS annotation_total,
+        (SELECT progress.annotation_next
+           FROM github_check_annotation_progress AS progress
+          WHERE progress.subject_id = subject.id) AS annotation_next,
+        (SELECT progress.uncertain_batch_size
+           FROM github_check_annotation_progress AS progress
+          WHERE progress.subject_id = subject.id) AS annotation_uncertain_batch_size,
+        evidence.checks_authority_id,
+        evidence.checks_authority_identity_digest,
+        evidence.checks_authority_app_configuration_revision,
+        evidence.checks_authority_policy_revision
+",
+        )
+    };
+}
+
+const LOCK_PROJECTION_CANDIDATE_SQL: &str = projection_origin_authority_sql!(
+    r"
+    SELECT outbox.subject_id, subject.origin_kind
+    FROM github_check_projection_outbox AS outbox
+    JOIN github_check_subjects AS subject
+      ON subject.id = outbox.subject_id
+    WHERE subject.provider_connection_id = $1
+",
+    "      ",
+    "          ",
+    r"      AND outbox.claim_fence < 9223372036854775807
+      AND (
+        outbox.attempted_revision IS DISTINCT FROM subject.desired_revision
+        OR outbox.attempt_count < 64
+      )
+      AND (
+        outbox.state = 'pending'
+        OR outbox.state = 'retry' AND outbox.next_attempt_at_ms <= $2
+        OR outbox.state = 'create_indeterminate'
+           AND outbox.next_reconcile_at_ms <= $2
+        OR outbox.state = 'claimed' AND outbox.claim_expires_at_ms <= $2
+      )
+    ORDER BY
+        CASE outbox.state
+            WHEN 'pending' THEN outbox.state_updated_at_ms
+            WHEN 'retry' THEN outbox.next_attempt_at_ms
+            WHEN 'create_indeterminate' THEN outbox.next_reconcile_at_ms
+            ELSE outbox.claim_expires_at_ms
+        END,
+        outbox.subject_id
+    FOR UPDATE OF outbox SKIP LOCKED
+    LIMIT 1
+",
+);
+
+const CLAIM_LOCKED_DELIVERY_PROJECTION_SQL: &str = claim_locked_projection_sql!(
+    r"    FROM github_check_subjects AS subject,
          github_provider_delivery_evidence AS evidence
     WHERE outbox.subject_id = $1
       AND subject.id = outbox.subject_id
@@ -358,99 +447,11 @@ const CLAIM_LOCKED_DELIVERY_PROJECTION_SQL: &str = r"
               AND subject.workflow_run_id IS NULL
         )
       )
-      AND outbox.claim_fence < 9223372036854775807
-      AND (
-        outbox.attempted_revision IS DISTINCT FROM subject.desired_revision
-        OR outbox.attempt_count < 64
-      )
-      AND (
-        outbox.state = 'pending'
-        OR outbox.state = 'retry' AND outbox.next_attempt_at_ms <= $4
-        OR outbox.state = 'create_indeterminate'
-           AND outbox.next_reconcile_at_ms <= $4
-        OR outbox.state = 'claimed' AND outbox.claim_expires_at_ms <= $4
-      )
-    RETURNING
-        outbox.subject_id, outbox.attempt_count, outbox.claim_fence,
-        outbox.claim_action, outbox.external_suite_id, outbox.external_run_id,
-        outbox.claimed_at_ms, outbox.claim_expires_at_ms,
-        subject.id, subject.tenant_id, subject.repository_id,
-        subject.origin_kind, subject.provider_delivery_id,
-        subject.schedule_fire_id, subject.workflow_rerun_run_id,
-        subject.subject_key, subject.subject_kind, subject.parent_subject_id,
-        subject.job_id, subject.job_attempt_id,
-        subject.provider_connection_id, subject.provider_installation_id,
-        subject.github_repository_id, subject.github_repository_name,
-        subject.github_app_id, subject.head_sha,
-        subject.check_name, subject.external_id, subject.workflow_run_id,
-        subject.linked_at_ms,
-        subject.desired_state, subject.desired_conclusion, subject.terminal_cause,
-        subject.desired_revision, subject.created_at_ms,
-        subject.desired_updated_at_ms,
-        (SELECT attempt.started_at_ms
-           FROM job_attempts AS attempt
-          WHERE attempt.id = subject.job_attempt_id) AS job_started_at_ms,
-        (SELECT terminal.completed_at_ms
-           FROM attempt_terminal_results AS terminal
-          WHERE terminal.attempt_id = subject.job_attempt_id) AS job_completed_at_ms,
-        (SELECT terminal.result_schema
-           FROM attempt_terminal_results AS terminal
-          WHERE terminal.attempt_id = subject.job_attempt_id) AS job_result_schema,
-        (SELECT terminal.result_size_bytes
-           FROM attempt_terminal_results AS terminal
-          WHERE terminal.attempt_id = subject.job_attempt_id) AS job_result_size_bytes,
-        (SELECT terminal.result_digest
-           FROM attempt_terminal_results AS terminal
-          WHERE terminal.attempt_id = subject.job_attempt_id) AS job_result_digest,
-        (SELECT terminal.result_object_key
-           FROM attempt_terminal_results AS terminal
-          WHERE terminal.attempt_id = subject.job_attempt_id) AS job_result_object_key,
-        (SELECT progress.presentation_digest
-           FROM github_check_annotation_progress AS progress
-          WHERE progress.subject_id = subject.id) AS annotation_presentation_digest,
-        (SELECT progress.annotation_total
-           FROM github_check_annotation_progress AS progress
-          WHERE progress.subject_id = subject.id) AS annotation_total,
-        (SELECT progress.annotation_next
-           FROM github_check_annotation_progress AS progress
-          WHERE progress.subject_id = subject.id) AS annotation_next,
-        (SELECT progress.uncertain_batch_size
-           FROM github_check_annotation_progress AS progress
-          WHERE progress.subject_id = subject.id) AS annotation_uncertain_batch_size,
-        evidence.checks_authority_id,
-        evidence.checks_authority_identity_digest,
-        evidence.checks_authority_app_configuration_revision,
-        evidence.checks_authority_policy_revision
-";
+"
+);
 
-const CLAIM_LOCKED_SCHEDULE_PROJECTION_SQL: &str = r"
-    UPDATE github_check_projection_outbox AS outbox
-    SET state = 'claimed',
-        attempted_revision = subject.desired_revision,
-        attempt_count = CASE
-            WHEN outbox.attempted_revision IS DISTINCT FROM subject.desired_revision
-                THEN 1
-            ELSE outbox.attempt_count + 1
-        END,
-        claim_fence = outbox.claim_fence + 1,
-        claim_owner_id = $3,
-        claim_action = CASE
-            WHEN outbox.external_suite_id IS NULL THEN 'ensure_suite'
-            WHEN outbox.external_run_id IS NULL
-                 AND outbox.create_started_at_ms IS NULL THEN 'prepare_run_create'
-            WHEN outbox.external_run_id IS NULL THEN 'reconcile_run_create'
-            ELSE 'publish'
-        END,
-        claimed_desired_revision = subject.desired_revision,
-        claimed_desired_state = subject.desired_state,
-        claimed_desired_conclusion = subject.desired_conclusion,
-        claimed_at_ms = $4,
-        claim_expires_at_ms = $5,
-        next_attempt_at_ms = NULL,
-        last_failure_kind = NULL,
-        blocked_reason = NULL,
-        state_updated_at_ms = $4
-    FROM github_check_subjects AS subject,
+const CLAIM_LOCKED_SCHEDULE_PROJECTION_SQL: &str = claim_locked_projection_sql!(
+    r"    FROM github_check_subjects AS subject,
          github_schedule_check_evidence AS evidence
     WHERE outbox.subject_id = $1
       AND subject.id = outbox.subject_id
@@ -462,99 +463,11 @@ const CLAIM_LOCKED_SCHEDULE_PROJECTION_SQL: &str = r"
       AND evidence.tenant_id = subject.tenant_id
       AND evidence.repository_id = subject.repository_id
       AND evidence.provider_connection_id = subject.provider_connection_id
-      AND outbox.claim_fence < 9223372036854775807
-      AND (
-        outbox.attempted_revision IS DISTINCT FROM subject.desired_revision
-        OR outbox.attempt_count < 64
-      )
-      AND (
-        outbox.state = 'pending'
-        OR outbox.state = 'retry' AND outbox.next_attempt_at_ms <= $4
-        OR outbox.state = 'create_indeterminate'
-           AND outbox.next_reconcile_at_ms <= $4
-        OR outbox.state = 'claimed' AND outbox.claim_expires_at_ms <= $4
-      )
-    RETURNING
-        outbox.subject_id, outbox.attempt_count, outbox.claim_fence,
-        outbox.claim_action, outbox.external_suite_id, outbox.external_run_id,
-        outbox.claimed_at_ms, outbox.claim_expires_at_ms,
-        subject.id, subject.tenant_id, subject.repository_id,
-        subject.origin_kind, subject.provider_delivery_id,
-        subject.schedule_fire_id, subject.workflow_rerun_run_id,
-        subject.subject_key, subject.subject_kind, subject.parent_subject_id,
-        subject.job_id, subject.job_attempt_id,
-        subject.provider_connection_id, subject.provider_installation_id,
-        subject.github_repository_id, subject.github_repository_name,
-        subject.github_app_id, subject.head_sha,
-        subject.check_name, subject.external_id, subject.workflow_run_id,
-        subject.linked_at_ms,
-        subject.desired_state, subject.desired_conclusion, subject.terminal_cause,
-        subject.desired_revision, subject.created_at_ms,
-        subject.desired_updated_at_ms,
-        (SELECT attempt.started_at_ms
-           FROM job_attempts AS attempt
-          WHERE attempt.id = subject.job_attempt_id) AS job_started_at_ms,
-        (SELECT terminal.completed_at_ms
-           FROM attempt_terminal_results AS terminal
-          WHERE terminal.attempt_id = subject.job_attempt_id) AS job_completed_at_ms,
-        (SELECT terminal.result_schema
-           FROM attempt_terminal_results AS terminal
-          WHERE terminal.attempt_id = subject.job_attempt_id) AS job_result_schema,
-        (SELECT terminal.result_size_bytes
-           FROM attempt_terminal_results AS terminal
-          WHERE terminal.attempt_id = subject.job_attempt_id) AS job_result_size_bytes,
-        (SELECT terminal.result_digest
-           FROM attempt_terminal_results AS terminal
-          WHERE terminal.attempt_id = subject.job_attempt_id) AS job_result_digest,
-        (SELECT terminal.result_object_key
-           FROM attempt_terminal_results AS terminal
-          WHERE terminal.attempt_id = subject.job_attempt_id) AS job_result_object_key,
-        (SELECT progress.presentation_digest
-           FROM github_check_annotation_progress AS progress
-          WHERE progress.subject_id = subject.id) AS annotation_presentation_digest,
-        (SELECT progress.annotation_total
-           FROM github_check_annotation_progress AS progress
-          WHERE progress.subject_id = subject.id) AS annotation_total,
-        (SELECT progress.annotation_next
-           FROM github_check_annotation_progress AS progress
-          WHERE progress.subject_id = subject.id) AS annotation_next,
-        (SELECT progress.uncertain_batch_size
-           FROM github_check_annotation_progress AS progress
-          WHERE progress.subject_id = subject.id) AS annotation_uncertain_batch_size,
-        evidence.checks_authority_id,
-        evidence.checks_authority_identity_digest,
-        evidence.checks_authority_app_configuration_revision,
-        evidence.checks_authority_policy_revision
-";
+"
+);
 
-const CLAIM_LOCKED_RERUN_PROJECTION_SQL: &str = r"
-    UPDATE github_check_projection_outbox AS outbox
-    SET state = 'claimed',
-        attempted_revision = subject.desired_revision,
-        attempt_count = CASE
-            WHEN outbox.attempted_revision IS DISTINCT FROM subject.desired_revision
-                THEN 1
-            ELSE outbox.attempt_count + 1
-        END,
-        claim_fence = outbox.claim_fence + 1,
-        claim_owner_id = $3,
-        claim_action = CASE
-            WHEN outbox.external_suite_id IS NULL THEN 'ensure_suite'
-            WHEN outbox.external_run_id IS NULL
-                 AND outbox.create_started_at_ms IS NULL THEN 'prepare_run_create'
-            WHEN outbox.external_run_id IS NULL THEN 'reconcile_run_create'
-            ELSE 'publish'
-        END,
-        claimed_desired_revision = subject.desired_revision,
-        claimed_desired_state = subject.desired_state,
-        claimed_desired_conclusion = subject.desired_conclusion,
-        claimed_at_ms = $4,
-        claim_expires_at_ms = $5,
-        next_attempt_at_ms = NULL,
-        last_failure_kind = NULL,
-        blocked_reason = NULL,
-        state_updated_at_ms = $4
-    FROM github_check_subjects AS subject,
+const CLAIM_LOCKED_RERUN_PROJECTION_SQL: &str = claim_locked_projection_sql!(
+    r"    FROM github_check_subjects AS subject,
          workflow_rerun_check_evidence AS evidence
     WHERE outbox.subject_id = $1
       AND subject.id = outbox.subject_id
@@ -567,70 +480,60 @@ const CLAIM_LOCKED_RERUN_PROJECTION_SQL: &str = r"
       AND evidence.tenant_id = subject.tenant_id
       AND evidence.repository_id = subject.repository_id
       AND evidence.provider_connection_id = subject.provider_connection_id
-      AND outbox.claim_fence < 9223372036854775807
-      AND (
-        outbox.attempted_revision IS DISTINCT FROM subject.desired_revision
-        OR outbox.attempt_count < 64
-      )
-      AND (
-        outbox.state = 'pending'
-        OR outbox.state = 'retry' AND outbox.next_attempt_at_ms <= $4
-        OR outbox.state = 'create_indeterminate'
-           AND outbox.next_reconcile_at_ms <= $4
-        OR outbox.state = 'claimed' AND outbox.claim_expires_at_ms <= $4
-      )
-    RETURNING
-        outbox.subject_id, outbox.attempt_count, outbox.claim_fence,
-        outbox.claim_action, outbox.external_suite_id, outbox.external_run_id,
-        outbox.claimed_at_ms, outbox.claim_expires_at_ms,
-        subject.id, subject.tenant_id, subject.repository_id,
-        subject.origin_kind, subject.provider_delivery_id,
-        subject.schedule_fire_id, subject.workflow_rerun_run_id,
-        subject.subject_key, subject.subject_kind, subject.parent_subject_id,
-        subject.job_id, subject.job_attempt_id,
-        subject.provider_connection_id, subject.provider_installation_id,
-        subject.github_repository_id, subject.github_repository_name,
-        subject.github_app_id, subject.head_sha,
-        subject.check_name, subject.external_id, subject.workflow_run_id,
-        subject.linked_at_ms,
-        subject.desired_state, subject.desired_conclusion, subject.terminal_cause,
-        subject.desired_revision, subject.created_at_ms,
-        subject.desired_updated_at_ms,
-        (SELECT attempt.started_at_ms
-           FROM job_attempts AS attempt
-          WHERE attempt.id = subject.job_attempt_id) AS job_started_at_ms,
-        (SELECT terminal.completed_at_ms
-           FROM attempt_terminal_results AS terminal
-          WHERE terminal.attempt_id = subject.job_attempt_id) AS job_completed_at_ms,
-        (SELECT terminal.result_schema
-           FROM attempt_terminal_results AS terminal
-          WHERE terminal.attempt_id = subject.job_attempt_id) AS job_result_schema,
-        (SELECT terminal.result_size_bytes
-           FROM attempt_terminal_results AS terminal
-          WHERE terminal.attempt_id = subject.job_attempt_id) AS job_result_size_bytes,
-        (SELECT terminal.result_digest
-           FROM attempt_terminal_results AS terminal
-          WHERE terminal.attempt_id = subject.job_attempt_id) AS job_result_digest,
-        (SELECT terminal.result_object_key
-           FROM attempt_terminal_results AS terminal
-          WHERE terminal.attempt_id = subject.job_attempt_id) AS job_result_object_key,
-        (SELECT progress.presentation_digest
-           FROM github_check_annotation_progress AS progress
-          WHERE progress.subject_id = subject.id) AS annotation_presentation_digest,
-        (SELECT progress.annotation_total
-           FROM github_check_annotation_progress AS progress
-          WHERE progress.subject_id = subject.id) AS annotation_total,
-        (SELECT progress.annotation_next
-           FROM github_check_annotation_progress AS progress
-          WHERE progress.subject_id = subject.id) AS annotation_next,
-        (SELECT progress.uncertain_batch_size
-           FROM github_check_annotation_progress AS progress
-          WHERE progress.subject_id = subject.id) AS annotation_uncertain_batch_size,
-        evidence.checks_authority_id,
-        evidence.checks_authority_identity_digest,
-        evidence.checks_authority_app_configuration_revision,
-        evidence.checks_authority_policy_revision
-";
+"
+);
+
+const PROJECTION_FENCE_EXHAUSTED_SQL: &str = projection_origin_authority_sql!(
+    r"
+        SELECT EXISTS (
+            SELECT 1
+            FROM github_check_projection_outbox AS outbox
+            JOIN github_check_subjects AS subject ON subject.id = outbox.subject_id
+            WHERE subject.provider_connection_id = $1
+",
+    "              ",
+    "            ",
+    r"              AND outbox.claim_fence = 9223372036854775807
+              AND (
+                outbox.state = 'pending'
+                OR outbox.state = 'retry' AND outbox.next_attempt_at_ms <= $2
+                OR outbox.state = 'create_indeterminate'
+                   AND outbox.next_reconcile_at_ms <= $2
+                OR outbox.state = 'claimed' AND outbox.claim_expires_at_ms <= $2
+              )
+        )
+        ",
+);
+
+const BLOCK_EXHAUSTED_CANDIDATES_SQL: &str = projection_origin_authority_sql!(
+    r"
+        UPDATE github_check_projection_outbox AS outbox
+        SET state = 'blocked',
+            next_attempt_at_ms = NULL,
+            last_failure_kind = NULL,
+            blocked_reason = 'attempt_limit',
+            claim_owner_id = NULL, claim_action = NULL,
+            claimed_desired_revision = NULL, claimed_desired_state = NULL,
+            claimed_desired_conclusion = NULL,
+            claimed_at_ms = NULL, claim_expires_at_ms = NULL,
+            state_updated_at_ms = $2
+        FROM github_check_subjects AS subject
+        WHERE subject.id = outbox.subject_id
+          AND subject.provider_connection_id = $1
+",
+    "          ",
+    "            ",
+    r"          AND outbox.attempted_revision = subject.desired_revision
+          AND outbox.attempt_count >= 64
+          AND (
+            outbox.state = 'pending'
+            OR outbox.state = 'retry' AND outbox.next_attempt_at_ms <= $2
+            OR outbox.state = 'create_indeterminate'
+               AND outbox.next_reconcile_at_ms <= $2
+            OR outbox.state = 'claimed' AND outbox.claim_expires_at_ms <= $2
+          )
+        ",
+);
 
 #[async_trait]
 impl GithubCheckProjectionOutbox for PostgresStore {
@@ -2076,89 +1979,12 @@ async fn projection_fence_exhausted(
     connection_id: ProviderConnectionId,
     database_now: i64,
 ) -> Result<bool, GithubCheckStoreError> {
-    sqlx::query_scalar(
-        r"
-        SELECT EXISTS (
-            SELECT 1
-            FROM github_check_projection_outbox AS outbox
-            JOIN github_check_subjects AS subject ON subject.id = outbox.subject_id
-            WHERE subject.provider_connection_id = $1
-              AND CASE subject.origin_kind
-                WHEN 'provider_delivery' THEN EXISTS (
-                    SELECT 1
-                    FROM github_provider_delivery_evidence AS delivery_evidence
-                    WHERE delivery_evidence.provider_delivery_id = subject.provider_delivery_id
-                      AND delivery_evidence.tenant_id = subject.tenant_id
-                      AND delivery_evidence.repository_id = subject.repository_id
-                      AND (
-                        delivery_evidence.github_check_subject_id =
-                            COALESCE(subject.parent_subject_id, subject.id)
-                        OR EXISTS (
-                            SELECT 1
-                            FROM github_workflow_run_subject_evidence AS run_evidence
-                            WHERE run_evidence.github_check_subject_id =
-                                      COALESCE(subject.parent_subject_id, subject.id)
-                              AND run_evidence.provider_delivery_id =
-                                  subject.provider_delivery_id
-                              AND run_evidence.tenant_id = subject.tenant_id
-                              AND run_evidence.repository_id = subject.repository_id
-                              AND (
-                                  subject.parent_subject_id IS NOT NULL
-                                  OR run_evidence.workflow_path = subject.subject_key
-                              )
-                              AND run_evidence.run_id = subject.workflow_run_id
-                        )
-                        OR EXISTS (
-                            SELECT 1
-                            FROM provider_delivery_workflow_progress AS progress
-                            WHERE progress.inbox_id = subject.provider_delivery_id
-                              AND progress.tenant_id = subject.tenant_id
-                              AND progress.workflow_path = subject.subject_key
-                              AND progress.outcome_kind = 'failed'
-                              AND subject.workflow_run_id IS NULL
-                        )
-                      )
-                )
-                WHEN 'scheduled_fire' THEN EXISTS (
-                    SELECT 1
-                    FROM github_schedule_check_evidence AS schedule_evidence
-                    WHERE schedule_evidence.github_check_subject_id =
-                              COALESCE(subject.parent_subject_id, subject.id)
-                      AND schedule_evidence.schedule_fire_id = subject.schedule_fire_id
-                      AND schedule_evidence.tenant_id = subject.tenant_id
-                      AND schedule_evidence.repository_id = subject.repository_id
-                      AND schedule_evidence.provider_connection_id =
-                          subject.provider_connection_id
-                )
-                WHEN 'workflow_rerun' THEN EXISTS (
-                    SELECT 1
-                    FROM workflow_rerun_check_evidence AS rerun_evidence
-                    WHERE rerun_evidence.github_check_subject_id =
-                              COALESCE(subject.parent_subject_id, subject.id)
-                      AND rerun_evidence.run_id = subject.workflow_rerun_run_id
-                      AND rerun_evidence.tenant_id = subject.tenant_id
-                      AND rerun_evidence.repository_id = subject.repository_id
-                      AND rerun_evidence.provider_connection_id =
-                          subject.provider_connection_id
-                )
-                ELSE FALSE
-              END
-              AND outbox.claim_fence = 9223372036854775807
-              AND (
-                outbox.state = 'pending'
-                OR outbox.state = 'retry' AND outbox.next_attempt_at_ms <= $2
-                OR outbox.state = 'create_indeterminate'
-                   AND outbox.next_reconcile_at_ms <= $2
-                OR outbox.state = 'claimed' AND outbox.claim_expires_at_ms <= $2
-              )
-        )
-        ",
-    )
-    .bind(connection_id.as_uuid())
-    .bind(database_now)
-    .fetch_one(&mut **transaction)
-    .await
-    .map_err(operation_error)
+    sqlx::query_scalar(PROJECTION_FENCE_EXHAUSTED_SQL)
+        .bind(connection_id.as_uuid())
+        .bind(database_now)
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(operation_error)
 }
 
 async fn block_exhausted_candidates(
@@ -2166,97 +1992,12 @@ async fn block_exhausted_candidates(
     connection_id: ProviderConnectionId,
     database_now: i64,
 ) -> Result<(), GithubCheckStoreError> {
-    sqlx::query(
-        r"
-        UPDATE github_check_projection_outbox AS outbox
-        SET state = 'blocked',
-            next_attempt_at_ms = NULL,
-            last_failure_kind = NULL,
-            blocked_reason = 'attempt_limit',
-            claim_owner_id = NULL, claim_action = NULL,
-            claimed_desired_revision = NULL, claimed_desired_state = NULL,
-            claimed_desired_conclusion = NULL,
-            claimed_at_ms = NULL, claim_expires_at_ms = NULL,
-            state_updated_at_ms = $2
-        FROM github_check_subjects AS subject
-        WHERE subject.id = outbox.subject_id
-          AND subject.provider_connection_id = $1
-          AND CASE subject.origin_kind
-            WHEN 'provider_delivery' THEN EXISTS (
-                SELECT 1
-                FROM github_provider_delivery_evidence AS delivery_evidence
-                WHERE delivery_evidence.provider_delivery_id = subject.provider_delivery_id
-                  AND delivery_evidence.tenant_id = subject.tenant_id
-                  AND delivery_evidence.repository_id = subject.repository_id
-                  AND (
-                    delivery_evidence.github_check_subject_id =
-                        COALESCE(subject.parent_subject_id, subject.id)
-                    OR EXISTS (
-                        SELECT 1
-                        FROM github_workflow_run_subject_evidence AS run_evidence
-                        WHERE run_evidence.github_check_subject_id =
-                                  COALESCE(subject.parent_subject_id, subject.id)
-                          AND run_evidence.provider_delivery_id =
-                              subject.provider_delivery_id
-                          AND run_evidence.tenant_id = subject.tenant_id
-                          AND run_evidence.repository_id = subject.repository_id
-                          AND (
-                              subject.parent_subject_id IS NOT NULL
-                              OR run_evidence.workflow_path = subject.subject_key
-                          )
-                          AND run_evidence.run_id = subject.workflow_run_id
-                    )
-                    OR EXISTS (
-                        SELECT 1
-                        FROM provider_delivery_workflow_progress AS progress
-                        WHERE progress.inbox_id = subject.provider_delivery_id
-                          AND progress.tenant_id = subject.tenant_id
-                          AND progress.workflow_path = subject.subject_key
-                          AND progress.outcome_kind = 'failed'
-                          AND subject.workflow_run_id IS NULL
-                    )
-                  )
-            )
-            WHEN 'scheduled_fire' THEN EXISTS (
-                SELECT 1
-                FROM github_schedule_check_evidence AS schedule_evidence
-                WHERE schedule_evidence.github_check_subject_id =
-                          COALESCE(subject.parent_subject_id, subject.id)
-                  AND schedule_evidence.schedule_fire_id = subject.schedule_fire_id
-                  AND schedule_evidence.tenant_id = subject.tenant_id
-                  AND schedule_evidence.repository_id = subject.repository_id
-                  AND schedule_evidence.provider_connection_id =
-                      subject.provider_connection_id
-            )
-            WHEN 'workflow_rerun' THEN EXISTS (
-                SELECT 1
-                FROM workflow_rerun_check_evidence AS rerun_evidence
-                WHERE rerun_evidence.github_check_subject_id =
-                          COALESCE(subject.parent_subject_id, subject.id)
-                  AND rerun_evidence.run_id = subject.workflow_rerun_run_id
-                  AND rerun_evidence.tenant_id = subject.tenant_id
-                  AND rerun_evidence.repository_id = subject.repository_id
-                  AND rerun_evidence.provider_connection_id =
-                      subject.provider_connection_id
-            )
-            ELSE FALSE
-          END
-          AND outbox.attempted_revision = subject.desired_revision
-          AND outbox.attempt_count >= 64
-          AND (
-            outbox.state = 'pending'
-            OR outbox.state = 'retry' AND outbox.next_attempt_at_ms <= $2
-            OR outbox.state = 'create_indeterminate'
-               AND outbox.next_reconcile_at_ms <= $2
-            OR outbox.state = 'claimed' AND outbox.claim_expires_at_ms <= $2
-          )
-        ",
-    )
-    .bind(connection_id.as_uuid())
-    .bind(database_now)
-    .execute(&mut **transaction)
-    .await
-    .map_err(operation_error)?;
+    sqlx::query(BLOCK_EXHAUSTED_CANDIDATES_SQL)
+        .bind(connection_id.as_uuid())
+        .bind(database_now)
+        .execute(&mut **transaction)
+        .await
+        .map_err(operation_error)?;
     Ok(())
 }
 
@@ -2587,4 +2328,114 @@ fn operation_error(error: sqlx::Error) -> GithubCheckStoreError {
         return GithubCheckStoreError::ExternalIdentityConflict;
     }
     GithubCheckStoreError::operation(error)
+}
+
+#[cfg(test)]
+mod tests {
+    use sha2::{Digest as _, Sha256};
+
+    use super::*;
+
+    #[rustfmt::skip]
+    const PROJECTION_SQL: [&str; 6] = [LOCK_PROJECTION_CANDIDATE_SQL, CLAIM_LOCKED_DELIVERY_PROJECTION_SQL, CLAIM_LOCKED_SCHEDULE_PROJECTION_SQL, CLAIM_LOCKED_RERUN_PROJECTION_SQL, PROJECTION_FENCE_EXHAUSTED_SQL, BLOCK_EXHAUSTED_CANDIDATES_SQL];
+    #[rustfmt::skip]
+    const FINGERPRINTS: [(usize, &str, usize, &str); 6] = [
+        (4159, "691859128cd03244c477255920adc51ea2c649cf06f9040d1fa0f14f1d5e7e5c", 2992, "3210a2469eb3f703ab710fea0013c58bb79ec9ae9f536f3c74a561803ca77bcb"),
+        (6285, "bace26ab71eddd1fd8a26bfae37e7254e5fd20d468abf4d4f8930d0eb2596a38", 5118, "6b2fecb3ad8d196f5539467fc0fdda38e2265568351272fe1099729ec8dde866"),
+        (5241, "b8fdd9e95c5856d800e80eb88f154ba13c2ccef7d2ee307049d648f4e709917d", 4384, "73737d04020eec9ac84c84d57f5ef7e40f6a393810451720e3405fbe31beefa5"),
+        (5278, "c3d9e042cca7c7183d7398087cd873aa7a353e1d1deff98f9b529cb3337d62c3", 4415, "743b5543234e7e8c898976c9a7ad8dc1a359afe3041b8deb67495f8811040fad"),
+        (4244, "40d9d6a2235070d9ee8d005649f82be97a89cfd8a6694cd7ae918b34c65b8602", 2593, "e9f89a3d82dbe3739d4562daad4bb3d736fc47fa8df77a2fe961ea8f0ed0a251"),
+        (4402, "fa051bb08fde7acb32390dc421db6d14ca07b651b9df8ef5e02ac11bd9512bc8", 2939, "e926232caf0c5ca982cd0281d572418864d3c4a61cb70cb427808f4c225122a6"),
+    ];
+
+    #[test]
+    fn projection_sql_fingerprints_are_stable() {
+        for (index, sql) in PROJECTION_SQL.into_iter().enumerate() {
+            let (raw_len, raw_sha, canonical_len, canonical_sha) = FINGERPRINTS[index];
+            assert_eq!((sql.len(), sha256(sql)), (raw_len, raw_sha.to_owned()));
+            let canonical = canonical_sql(sql);
+            assert_eq!(
+                (canonical.len(), sha256(&canonical)),
+                (canonical_len, canonical_sha.to_owned())
+            );
+        }
+    }
+
+    #[rustfmt::skip]
+    #[test]
+    fn projection_origin_authority_is_shared() {
+        let canonical = [LOCK_PROJECTION_CANDIDATE_SQL, PROJECTION_FENCE_EXHAUSTED_SQL, BLOCK_EXHAUSTED_CANDIDATES_SQL]
+            .map(|sql| canonical_sql(origin_authority(sql)));
+        assert!(canonical.windows(2).all(|pair| pair[0] == pair[1]));
+        assert_eq!((canonical[0].len(), sha256(&canonical[0])),
+            (2118, "793e9a4664128465995c1c1957f4f2e73dce82a8bda586468474caf2800330c2".to_owned()));
+    }
+
+    #[test]
+    fn placeholders_and_returning_projection_are_preserved() {
+        #[rustfmt::skip]
+        let expected: [&[u8]; 6] = [
+            &[1, 2, 2, 2][..], &[3, 4, 5, 4, 1, 2, 4, 4, 4], &[3, 4, 5, 4, 1, 2, 4, 4, 4],
+            &[3, 4, 5, 4, 1, 2, 4, 4, 4], &[1, 2, 2, 2], &[2, 1, 2, 2, 2],
+        ];
+        for (sql, expected) in PROJECTION_SQL.into_iter().zip(expected) {
+            assert_eq!(placeholder_sequence(sql), expected);
+        }
+        let returning = [
+            CLAIM_LOCKED_DELIVERY_PROJECTION_SQL,
+            CLAIM_LOCKED_SCHEDULE_PROJECTION_SQL,
+            CLAIM_LOCKED_RERUN_PROJECTION_SQL,
+        ]
+        .map(|sql| {
+            sql.split_once("    RETURNING\n")
+                .expect("claim RETURNING")
+                .1
+        });
+        assert!(returning.windows(2).all(|pair| pair[0] == pair[1]));
+        assert_eq!(returning[0].split(',').count(), 50);
+    }
+
+    #[test]
+    fn claims_keep_closed_origin_evidence_and_null_guards() {
+        #[rustfmt::skip]
+        let cases = [
+            (CLAIM_LOCKED_DELIVERY_PROJECTION_SQL, "provider_delivery", "github_provider_delivery_evidence", &["schedule_fire_id"][..], &["provider_delivery_id", "workflow_rerun_run_id"][..]),
+            (CLAIM_LOCKED_SCHEDULE_PROJECTION_SQL, "scheduled_fire", "github_schedule_check_evidence", &["provider_delivery_id"][..], &["schedule_fire_id", "workflow_rerun_run_id"][..]),
+            (CLAIM_LOCKED_RERUN_PROJECTION_SQL, "workflow_rerun", "workflow_rerun_check_evidence", &["provider_delivery_id", "schedule_fire_id"][..], &["workflow_rerun_run_id"][..]),
+        ];
+        for (sql, origin, evidence, required_nulls, forbidden_nulls) in cases {
+            assert!(sql.contains(&format!("subject.origin_kind = '{origin}'")));
+            assert!(sql.contains(&format!("{evidence} AS evidence")));
+            assert!(
+                required_nulls
+                    .iter()
+                    .all(|field| sql.contains(&format!("subject.{field} IS NULL")))
+            );
+            assert!(
+                forbidden_nulls
+                    .iter()
+                    .all(|field| !sql.contains(&format!("subject.{field} IS NULL")))
+            );
+        }
+    }
+
+    fn sha256(value: &str) -> String {
+        Sha256Digest::from_bytes(Sha256::digest(value.as_bytes()).into()).to_string()
+    }
+
+    fn canonical_sql(sql: &str) -> String {
+        sql.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    fn origin_authority(sql: &str) -> &str {
+        let start = sql.find("CASE subject.origin_kind").expect("origin CASE");
+        let end = sql[start..].find("ELSE FALSE").expect("closed origin CASE") + start;
+        let end = sql[end..].find("END").expect("origin CASE end") + end + "END".len();
+        &sql[start..end]
+    }
+
+    #[rustfmt::skip]
+    fn placeholder_sequence(sql: &str) -> Vec<u8> {
+        sql.as_bytes().windows(2).filter(|pair| pair[0] == b'$' && pair[1].is_ascii_digit()).map(|pair| pair[1] - b'0').collect()
+    }
 }
