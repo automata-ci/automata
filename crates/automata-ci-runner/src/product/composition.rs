@@ -236,15 +236,11 @@ async fn run_local_docker(
 }
 
 #[cfg(not(target_os = "linux"))]
-#[allow(
-    clippy::unused_async,
-    reason = "the platform stub preserves the shared async provider dispatch contract"
-)]
-async fn run_local_docker(
+fn run_local_docker(
     _config: &RunnerProductConfig,
     _shutdown: RunnerShutdown,
-) -> Result<SupervisionDisposition, RunnerProductError> {
-    Err(RunnerProductError::UnsupportedPlatform)
+) -> std::future::Ready<Result<SupervisionDisposition, RunnerProductError>> {
+    std::future::ready(Err(RunnerProductError::UnsupportedPlatform))
 }
 
 async fn run_podman(

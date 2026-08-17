@@ -1444,33 +1444,6 @@ norlX3KEHNe7cTke5cP4OA==";
         }
     }
 
-    fn trusted_push_snapshot() -> TrustSnapshot {
-        let repository =
-            TrustRepositoryEvidence::new("90210", "731").expect("stable repository trust evidence");
-        TrustPolicy::current()
-            .evaluate(
-                TrustEvidence::new(TrustOriginKind::ProviderWebhook, TrustEventKind::Push)
-                    .with_original_actor(
-                        TrustActorEvidence::new(
-                            "4242",
-                            TrustActorKind::User,
-                            TrustAutomationKind::None,
-                        )
-                        .expect("stable actor trust evidence"),
-                    )
-                    .with_repositories(repository.clone(), repository)
-                    .with_refs("refs/heads/main", "refs/heads/main", "refs/heads/main")
-                    .with_revisions(
-                        "0123456789abcdef0123456789abcdef01234567",
-                        "0123456789abcdef0123456789abcdef01234567",
-                        "0123456789abcdef0123456789abcdef01234567",
-                    )
-                    .with_fork(false)
-                    .with_token_recursion(TrustTokenRecursion::Suppressed),
-            )
-            .expect("complete same-repository trust snapshot")
-    }
-
     fn current_policy() -> GithubOidcCurrentPolicy {
         GithubOidcCurrentPolicy::new(
             GithubOidcSubjectPolicyMode::StableOwnerEvidence,
