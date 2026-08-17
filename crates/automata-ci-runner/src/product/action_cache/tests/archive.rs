@@ -1,5 +1,6 @@
 use std::{
     fs,
+    os::unix::fs::symlink,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -15,7 +16,7 @@ use bytes::Bytes;
 static NEXT_SCRATCH: AtomicU64 = AtomicU64::new(1);
 
 #[tokio::test]
-async fn archive_bytes_survive_reopen_and_are_verified() {
+async fn archive_cache_reopens_with_lock_and_archive_content() {
     let scratch = Scratch::new("reopen");
     let payload = payload(b"immutable action archive");
     let descriptor = payload.descriptor().clone();
@@ -27,9 +28,36 @@ async fn archive_bytes_survive_reopen_and_are_verified() {
             PutBlobOutcome::Created
         );
     }
+    assert!(scratch.path().join(".action-archive-cache.lock").is_file());
+    assert!(
+        scratch
+            .path()
+            .join(format!("action-archive-v1-{}.tar.gz", descriptor.digest()))
+            .is_file()
+    );
     let reopened = FileActionArchiveCache::open(scratch.root(), limits).unwrap();
     let loaded = reopened.get_verified(&descriptor, 1024).await.unwrap();
     assert_eq!(loaded.bytes().as_ref(), b"immutable action archive");
+}
+
+#[test]
+fn archive_cache_rejects_non_directory_and_symlink_roots() {
+    let scratch = Scratch::new("unsafe-roots");
+    fs::create_dir_all(scratch.path()).unwrap();
+
+    let file_root = scratch.path().join("file-root");
+    fs::write(&file_root, b"not a directory").unwrap();
+    let file_root = ActionArchiveCacheRoot::explicit(file_root).unwrap();
+    assert!(FileActionArchiveCache::open(file_root, ActionArchiveCacheLimits::default()).is_err());
+
+    let target = scratch.path().join("target");
+    fs::create_dir(&target).unwrap();
+    let symlink_root = scratch.path().join("symlink-root");
+    symlink(&target, &symlink_root).unwrap();
+    let symlink_root = ActionArchiveCacheRoot::explicit(symlink_root).unwrap();
+    let error = FileActionArchiveCache::open(symlink_root, ActionArchiveCacheLimits::default())
+        .unwrap_err();
+    assert_eq!(error.kind(), BlobStoreErrorKind::Integrity);
 }
 
 #[tokio::test]
@@ -114,6 +142,10 @@ impl Scratch {
 
     fn root(&self) -> ActionArchiveCacheRoot {
         ActionArchiveCacheRoot::explicit(self.0.clone()).unwrap()
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
     }
 }
 

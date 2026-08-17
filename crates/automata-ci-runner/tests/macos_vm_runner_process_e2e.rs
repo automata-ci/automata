@@ -34,10 +34,11 @@ use automata_ci_protocol::{
     CommandAck, CommandCursor, CommandSequence, JobResultMessage, JobRuntimeAuthorities,
     LeaseDisposition, LeaseOffer, LeaseRenewal, LeaseRequest, LogAckMessage, LogBatch,
     MessageHeader, NegotiatedSession, NoWork, OperationAck, ProtocolLimits, RunnerSlotOrdinal,
-    RunnerToServer, SUPPORTED_PROTOCOL_RANGE, ServerCommandHeader, ServerHello, ServerTiming,
-    ServerToRunner, SessionDisposition,
+    RunnerToServer, RuntimeAuthorityAck, RuntimeAuthorityGrant, RuntimeAuthorityRequest,
+    SUPPORTED_PROTOCOL_RANGE, ServerCommandHeader, ServerHello, ServerTiming, ServerToRunner,
+    SessionDisposition,
 };
-use automata_ci_protocol_protobuf::encode_job_runtime_context;
+use automata_ci_protocol_protobuf::{encode_job_runtime_context, encode_runtime_authorities};
 use automata_ci_runner::product::RUNNER_PRODUCT_CONFIG_SCHEMA_VERSION;
 use automata_ci_runner_transport::{
     ApplicationError, ApplicationErrorKind, AuthenticatedRunnerRequest, HandlerFuture,
@@ -199,6 +200,15 @@ async fn shipped_runner_process_executes_a_claimed_isolated_shell_job() {
         observation.command_cursor,
         Some(handler.offer_cursor()),
         "runner did not durably acknowledge the offered command cursor"
+    );
+    assert!(
+        observation.runtime_authority_progress != RuntimeAuthorityProgress::NotRequested,
+        "runner did not request the post-accept runtime-authority bundle"
+    );
+    assert_eq!(
+        observation.runtime_authority_progress,
+        RuntimeAuthorityProgress::Acknowledged,
+        "runner did not acknowledge durable adoption of the runtime-authority bundle"
     );
     assert_eq!(observation.conclusion, Some(JobConclusion::Success));
     let logs = String::from_utf8_lossy(&observation.logs);
@@ -617,9 +627,18 @@ struct ProcessObservation {
     hello_operating_system: Option<OperatingSystem>,
     accepted: bool,
     command_cursor: Option<CommandCursor>,
+    runtime_authority_progress: RuntimeAuthorityProgress,
     logs: Vec<u8>,
     conclusion: Option<JobConclusion>,
     completed_poll: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum RuntimeAuthorityProgress {
+    #[default]
+    NotRequested,
+    Requested,
+    Acknowledged,
 }
 
 #[derive(Debug)]
@@ -628,6 +647,7 @@ struct ProcessFlowHandler {
     session_id: RunnerSessionId,
     lease: Lease,
     offer: LeaseOffer,
+    authorities: JobRuntimeAuthorities,
     state: Mutex<ProcessFlowState>,
     result_ready: tokio::sync::Notify,
     completed_poll: tokio::sync::Notify,
@@ -658,13 +678,13 @@ impl ProcessFlowHandler {
             RunnerSlotOrdinal::new(1).expect("slot"),
             lease.clone(),
             job,
-            authorities,
         );
         Self {
             runner_id,
             session_id,
             lease,
             offer,
+            authorities,
             state: Mutex::new(ProcessFlowState::default()),
             result_ready: tokio::sync::Notify::new(),
             completed_poll: tokio::sync::Notify::new(),
@@ -747,6 +767,10 @@ impl ProcessFlowHandler {
                     reply_header(response.header()),
                 )))
             }
+            RunnerToServer::RuntimeAuthorityRequest(request) => {
+                self.handle_runtime_authority_request(request)
+            }
+            RunnerToServer::RuntimeAuthorityAck(ack) => self.handle_runtime_authority_ack(*ack),
             RunnerToServer::Heartbeat(heartbeat) => {
                 if heartbeat.attempt_id() != self.lease.attempt_id()
                     || heartbeat.guard() != self.lease.guard()
@@ -774,6 +798,64 @@ impl ProcessFlowHandler {
             RunnerToServer::JobResult(result) => self.handle_job_result(result),
             RunnerToServer::CommandAck(ack) => self.handle_command_ack(*ack),
         }
+    }
+
+    fn runtime_authority_bundle_digest(&self) -> Result<Sha256Digest, ApplicationError> {
+        let encoded = encode_runtime_authorities(
+            &self.authorities,
+            self.offer.job(),
+            self.offer.lease(),
+            &ProtocolLimits::default(),
+        )
+        .map_err(|_| internal_application_error())?;
+        Ok(Sha256Digest::from_bytes(Sha256::digest(&encoded).into()))
+    }
+
+    fn handle_runtime_authority_request(
+        &self,
+        request: &RuntimeAuthorityRequest,
+    ) -> Result<ServerToRunner, ApplicationError> {
+        request
+            .binding()
+            .validate_for_offer(&self.offer)
+            .map_err(|_| internal_application_error())?;
+        let bundle_digest = self.runtime_authority_bundle_digest()?;
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if !state.observation.accepted {
+            return Err(internal_application_error());
+        }
+        if state.observation.runtime_authority_progress == RuntimeAuthorityProgress::NotRequested {
+            state.observation.runtime_authority_progress = RuntimeAuthorityProgress::Requested;
+        }
+        Ok(ServerToRunner::RuntimeAuthorityGrant(Box::new(
+            RuntimeAuthorityGrant::new(
+                reply_header(request.header()),
+                request.binding(),
+                bundle_digest,
+                self.authorities.clone(),
+            ),
+        )))
+    }
+
+    fn handle_runtime_authority_ack(
+        &self,
+        acknowledgement: RuntimeAuthorityAck,
+    ) -> Result<ServerToRunner, ApplicationError> {
+        acknowledgement
+            .binding()
+            .validate_for_offer(&self.offer)
+            .map_err(|_| internal_application_error())?;
+        if acknowledgement.bundle_digest() != self.runtime_authority_bundle_digest()? {
+            return Err(internal_application_error());
+        }
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.observation.runtime_authority_progress == RuntimeAuthorityProgress::NotRequested {
+            return Err(internal_application_error());
+        }
+        state.observation.runtime_authority_progress = RuntimeAuthorityProgress::Acknowledged;
+        Ok(ServerToRunner::OperationAck(OperationAck::new(
+            reply_header(acknowledgement.header()),
+        )))
     }
 
     fn handle_lease_request(
