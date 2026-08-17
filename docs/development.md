@@ -276,9 +276,9 @@ the locked, reproducible profile environment:
 Read [the UI guide](../ui/README.md) before changing the render contract or
 adding a page kind.
 
-## Local installation preflight
+## Local installation preflight and sealed init
 
-The first cross-platform local-installation slice is a read-only host check for
+The cross-platform local-installation preflight is a read-only host check for
 x86-64 Linux, Apple Silicon macOS, and x86-64 Windows. It requires a local Linux
 Docker Engine 28.0.0 or newer with API 1.48 or newer and matching architecture,
 Docker Compose plugin version 2.20.0 or newer, and rejects a Unix root process:
@@ -288,11 +288,36 @@ cargo run --locked -p automata-ci -- local doctor
 cargo run --locked -p automata-ci -- local doctor --json
 ```
 
-The command does not create host state or any container resources. It reports
+Doctor does not create host state or container resources. It reports
 the selected Docker context and pins all daemon probes to that context's exact
-validated local endpoint. The library's anchor adapter is exercised by fake
-Engine tests, but no product command invokes its mutation API yet. `local up`
-and the worker composition remain planned; follow the
+validated local endpoint.
+
+On x86-64 Linux, the production `local init` consumer is a separate mutating
+boundary:
+
+```console
+cargo run --locked -p automata-ci -- local init \
+  --state-directory /var/lib/automata-local/default \
+  --catalog-source file:/srv/automata-release/local-installation-catalog.json
+```
+
+It accepts only an x86-64 Linux Engine at
+`unix:///var/run/docker.sock`, an explicit canonical absolute state directory,
+and an explicit local release-catalog file. The catalog-selected candidate must
+be its exact no-follow regular sibling. Init verifies the canonical catalog and
+candidate structure/digests, but the operator remains responsible for selecting
+authenticated release evidence. It pulls or imports the exact image set,
+creates/adopts the immutable identity and twelve owner-specific persistent
+volumes, retains one-time certificate custody, runs one fixed networkless
+materializer, and seals the immutable epoch plus canonical desired intent.
+Replay reattests the same custody and fails closed on missing or conflicting
+records/resources.
+
+Init stops after sealing material and desired intent. It has no renderer,
+generates no Compose document, invokes no Compose operation, and starts no
+control plane, relay, bootstrap, database, object store, or runner.
+`ResetRequired` is detectable, but no reset command exists yet; `local up`,
+`down`, `status`, and `reset` remain planned. Follow the
 [local installation and deployment roadmap](maintainers/roadmaps/local-installation.md) for
 their merge and host-qualification gates.
 
@@ -339,8 +364,9 @@ checkpoints.
 The ignored fixed-relay Local Docker conformance fixture requires an existing
 installation anchor, the explicit `/run/automata-engine/docker.sock` relay,
 already-present digest-pinned Linux job, sandbox-guest, and service-proxy
-images, and the exact renderer-owned Results transit and target. The relay must
-front rootful Docker with daemon-default user-namespace remapping enabled; the
+images, and the exact externally provisioned Results transit and target. The
+relay must front rootful Docker with daemon-default user-namespace remapping
+enabled; the
 built-in seccomp and private-cgroup-namespace security options must be reported,
 AppArmor and SELinux must be disabled, every required resource controller must
 be available, and daemon `default-ulimits` must be empty. The fixture verifies

@@ -1,6 +1,10 @@
 use std::{fmt, net::SocketAddr, path::PathBuf, str::FromStr};
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+use automata_ci_local::InstallationName;
 use clap::{Args, Subcommand, ValueEnum};
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+use std::num::NonZeroU16;
 use uuid::Uuid;
 
 use super::{OutputFormat, RepositoryRef, SecretScope};
@@ -66,7 +70,27 @@ pub struct InternalArgs {
 /// Closed image-internal service initialization boundaries.
 pub enum InternalCommand {
     /// Initialize the configured object-store boundary.
-    ObjectStore(InternalObjectStoreArgs),
+    ObjectStore(Box<InternalObjectStoreArgs>),
+    /// Materialize one fixed local-installation epoch inside its helper.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    Local(InternalLocalArgs),
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[derive(Debug, Args)]
+/// Fixed image-internal local-installation operations.
+pub struct InternalLocalArgs {
+    /// Exact fixed local-installation helper operation.
+    #[command(subcommand)]
+    pub command: InternalLocalCommand,
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[derive(Debug, Subcommand)]
+/// Closed one-shot local-installation helper boundary.
+pub enum InternalLocalCommand {
+    /// Materialize and seal the fixed mounted epoch volumes.
+    Materialize,
 }
 
 #[derive(Debug, Args)]
@@ -107,6 +131,58 @@ pub enum LocalCommand {
     Doctor(LocalDoctorArgs),
     /// Validate one exact local workflow without admission or execution.
     Check(LocalCheckArgs),
+    /// Seal or replay one x86-64 Linux epoch without starting services.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    Init(LocalInitArgs),
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[derive(Debug, Args)]
+/// Immutable local-installation initialization inputs.
+pub struct LocalInitArgs {
+    /// Explicit absolute host directory for private installation custody.
+    #[arg(long, value_name = "ABS", value_parser = parse_absolute_state_directory)]
+    pub state_directory: PathBuf,
+    /// Canonical local installation selector.
+    #[arg(long, default_value = "default")]
+    pub installation: InstallationName,
+    /// Immutable ordinary-runner capacity for this epoch.
+    #[arg(long, default_value = "1")]
+    pub workers: NonZeroU16,
+    /// Operator-selected canonical release evidence; init verifies structure and digests, not OIDC authenticity.
+    #[arg(long, value_name = "file:ABS", value_parser = parse_catalog_source)]
+    pub catalog_source: String,
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn parse_absolute_state_directory(value: &str) -> Result<PathBuf, &'static str> {
+    if !valid_absolute_unix_path(value) {
+        return Err("state directory must be one canonical absolute Unix path");
+    }
+    Ok(PathBuf::from(value))
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn parse_catalog_source(value: &str) -> Result<String, &'static str> {
+    let Some(path) = value.strip_prefix("file:") else {
+        return Err("catalog source must use file:/absolute/path");
+    };
+    if !valid_absolute_unix_path(path) {
+        return Err("catalog source must use one canonical absolute Unix path");
+    }
+    Ok(value.to_owned())
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn valid_absolute_unix_path(value: &str) -> bool {
+    value.starts_with('/')
+        && value != "/"
+        && !value.ends_with('/')
+        && !value.contains("//")
+        && value
+            .split('/')
+            .skip(1)
+            .all(|part| !part.is_empty() && !matches!(part, "." | ".."))
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum, serde::Serialize)]

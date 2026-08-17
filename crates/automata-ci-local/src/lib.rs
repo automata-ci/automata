@@ -18,7 +18,11 @@ use tokio::{
 };
 
 mod check;
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+mod desired_spec;
 mod engine;
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+mod init;
 mod installation;
 #[cfg(target_os = "linux")]
 mod local_docker;
@@ -35,11 +39,25 @@ pub use check::{
     LocalCheckDiagnostic, LocalCheckIssue, LocalCheckIssueCode, LocalCheckReport,
     LocalCheckRequest, LocalCheckSource, LocalCheckedJob, LocalCheckedWorkflow, check_workflow,
 };
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub(crate) use desired_spec::{
+    DesiredSpec, DesiredSpecImages, DesiredSpecInput, LocalImportedImage, LocalProfile,
+    ResultsTransit,
+};
 pub use engine::{DockerInstallationAdapter, LocalEngineError, LocalEngineErrorCode};
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub use init::{
+    LocalInitError, LocalInitErrorCode, LocalInitOutcome, LocalInitRequest, initialize_local,
+};
 pub use installation::{
     ComposeProjectName, Installation, InstallationBinding, InstallationId, InstallationIdError,
     InstallationName, InstallationNameError, InstallationSelectorKey,
 };
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[doc(hidden)]
+pub fn run_local_init_materializer() -> Result<(), LocalInitError> {
+    init::run_fixed_materializer()
+}
 pub use local_docker_error::{LocalDockerError, LocalDockerErrorCode};
 pub use results_transport::LocalDockerResultsTransport;
 /// Reserved in-container directory used by the fixed-relay Docker provider's protected client.
@@ -464,6 +482,11 @@ impl EngineSelection {
     /// Returns the validated local endpoint class.
     pub const fn endpoint(&self) -> EngineEndpoint {
         self.endpoint
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    pub(crate) fn connection_host(&self) -> &str {
+        self.connection.host()
     }
 
     /// Returns the exact non-secret engine identity.

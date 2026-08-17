@@ -7,12 +7,15 @@ or newer with API 1.48 or newer; and Compose plugin version 2.20.0 or newer. It
 will supervise the local Compose project without adding container-engine
 behavior to the control-plane crate.
 
-The user-visible slice remains read-only: it provides both host preflight and
-snapshot-backed workflow checking. During `local doctor`, context discovery is
-completed first, subsequent daemon probes are pinned to that exact local
-Unix-socket or Windows-named-pipe endpoint, and JSON schema 3 reports the
-bounded context name. The private endpoint URI is retained only so the library
-adapter can connect to the same daemon and reverify its identity.
+The user-visible slice provides read-only host preflight and snapshot-backed
+workflow checking on the qualified platforms. On x86-64 Linux it also provides
+`automata local init`, a mutating init-only operation for a Docker Engine at
+exactly `unix:///var/run/docker.sock`. During `local doctor`, context
+discovery is completed first, subsequent daemon probes are pinned to that exact
+local Unix-socket or Windows-named-pipe endpoint, and JSON schema 3 reports the
+bounded context name. Init accepts only the fixed Unix socket so the verified
+daemon, imported images, sealed topology, and future relay all name the same
+authority.
 
 The private local-snapshot foundation uses live bytes for staged additions
 and tracked modifications, omits tracked deletions and ignored files, and seals
@@ -51,20 +54,59 @@ from GitHub delivery evidence. The command is independent of `local doctor`,
 Docker, network access, and GitHub tokens, and performs no admission, scheduling,
 execution, or Check publication.
 
-The first engine adapter can inspect or create-and-adopt one immutable external
-identity volume for a named installation. It always post-inspects Docker's
-deterministic volume name, exact Automata-managed labels, local driver/scope,
-empty driver options, and container attachments. It exposes no generic Docker
-mutation, delete, prune, image-pull, helper-container, or Compose API.
+`local init` requires an explicit absolute `--state-directory` and an explicit
+`--catalog-source file:ABS`; neither has an environment fallback. The state
+directory, its trusted ancestry, operation lock, and fixed records are opened
+without following links and with exact invoking-user ownership and modes. The
+immutable epoch binds a domain-separated digest of the stable state-root
+identity and the identity of the held operation-lock file. This custody assumes
+a trusted stable local filesystem: copying, restoring, remounting, or replacing
+the lock changes authority and requires a future reset or migration. The
+operator-selected catalog is canonical, bounded, and digest verified, but init
+does not claim that the file was independently OIDC-authenticated. The sole OCI
+candidate must be the catalog-declared regular no-follow sibling of that exact
+catalog file. Registry roles are pulled only by their catalog-bound digests;
+the candidate is structurally verified, converted to the bounded portable
+Docker-load form, and qualified under its exact daemon-local tag and mutually
+exclusive classic/config-ID or containerd/manifest-ID representation.
+
+The init adapter creates or exactly adopts the immutable external identity
+volume, elects the immutable Desired volume as a guard before image
+qualification or any other role mutation, and then creates or adopts the other
+eleven owner-specific persistent volumes. Persistent labels bind
+installation identity, material schema/generation, and immutable epoch
+fingerprint, never a mutable plan digest. A fixed one-shot materializer runs
+with no network, a read-only root, UID 0, all capabilities dropped except
+`CHOWN` and `DAC_OVERRIDE`, and only the exact image, command, and twelve
+mounts. It receives one bounded canonical request over attached stdin and
+publishes static role manifests last after validating content,
+metadata, links, and cross-file certificate/key equality. Host custody retains
+the exact one-time certificate bytes. Partial fresh volume creation and matching
+fixed write temporaries resume exactly, and an uncommitted malformed temporary
+is discarded and rebuilt. Loss or conflicting final/static custody after
+established materialization requires reset rather than silent repair. The
+material root is KDF root derivation input only and is never copied verbatim
+into a credential.
+
+Init seals only the canonical desired specification together with the immutable
+epoch and material. The desired record includes the local service-proxy tag and
+both acceptable OCI IDs so later convergence can reattest the same daemon
+representation. This slice has no renderer and generates no Compose document.
+Init invokes no Compose operation and starts no service, relay, bootstrap,
+database, object store, or runner. No public `up`, `down`, `status`, `reset`,
+relay, or bootstrap lifecycle command exists; `ResetRequired` is detectable,
+but there is no reset command. The adapter exposes no generic delete, prune, or
+arbitrary helper API.
 
 On Linux, the runner also consumes one evaluation-only sandbox-provider
 factory. The concrete Docker provider and engine API stay private. They connect
 only through the fixed `/run/automata-engine/docker.sock` relay, bind every
 operation to the exact daemon and installation anchor, and accept only
 already-present immutable guest, job, and Results-proxy images. The mandatory
-`LocalDockerResultsTransport` pins one renderer-owned transit-network ID, one
-running Results-container ID and private IPv4 address, and the proxy image; the
-per-sandbox provider never creates, replaces, or deletes the shared transport.
+`LocalDockerResultsTransport` pins one externally provisioned transit-network
+ID, one running Results-container ID and private IPv4 address, and the proxy
+image; the per-sandbox provider never creates, replaces, or deletes the shared
+transport.
 The fixed relay daemon must be rootful
 and report daemon-default user-namespace remapping, the built-in seccomp
 profile, and private cgroup namespaces. Rootless mode and daemons with AppArmor
@@ -131,17 +173,18 @@ retain their own admission, authorization, secret, cache, and history scope in
 the existing control plane. A separate `--installation` name is the explicit
 way to request another deployment/capacity domain.
 
-No `automata local` product command creates, adopts, or deletes an engine
-resource yet. The runner-only provider boundary above does not add a local
-lifecycle command. The snapshot boundary is consumed by `automata local check`,
-which compiles an explicit local manual-dispatch event and all reachable
-same-snapshot reusable workflows through the shared compiler and credential
-analysis. It does not admit or run work, mint GitHub evidence, request a token,
-or publish a Check Run. Desired specification persistence, product-owned
-Compose rendering, workers, and GitHub connection are added only with their own
-tested contracts. There is still no host installation manifest, mirrored
-resource inventory, lifecycle state machine, or secret value in this crate.
+`automata local init` is the sole product mutation command: it imports or pulls
+the verified image set, creates/adopts exact installation volumes, and seals
+host material plus desired topology without converging it. The runner-only
+provider boundary above still does not add a local lifecycle command. The
+snapshot boundary is consumed separately by `automata local check`, which
+compiles an explicit local manual-dispatch event and all reachable same-snapshot
+reusable workflows through the shared compiler and credential analysis. It
+does not admit or run work, mint GitHub evidence, request a token, or publish a
+Check Run. There is no mirrored live-resource inventory or public lifecycle
+state machine, and secret values never enter the desired document. This slice
+does not generate a Compose document.
 
 This crate has no command-line parser. The `automata` product maps its public
-CLI into the high-level local-check request; snapshot and archive authority stay
-private.
+CLI into the high-level local-check and x86-64 Linux init requests; filesystem,
+catalog, materializer, snapshot, and archive authority stay private.

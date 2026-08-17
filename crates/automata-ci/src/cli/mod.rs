@@ -43,6 +43,8 @@ pub use commands::{
     RunnerTokenArgs, S3ConnectionArgs, S3TlsTrustMode, SecretArgs, SecretCommand, SecretCreateArgs,
     SecretDeleteArgs, SecretListArgs, SecretProviderArgs, SecretProviderCommand, ServerArgs,
 };
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub use commands::{InternalLocalArgs, InternalLocalCommand, LocalInitArgs};
 pub use output::OutputFormat;
 pub use values::{RepositoryRef, SecretScope};
 

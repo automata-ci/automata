@@ -2,11 +2,14 @@
 
 - Roadmap status: Active
 - Available slice: read-only `automata local doctor`, source-only
-  `automata local check`, and explicit runner-schema-6 evaluation through the
-  fixed-relay `LocalDocker` provider; there is no `automata local run` yet
+  `automata local check`, x86-64 Linux-only sealed `automata local init`, and
+  explicit runner-schema-6 evaluation through the fixed-relay `LocalDocker`
+  provider; init starts no services and there is no `automata local run` or
+  `up` yet
 - Current implementation checkpoints: 2B.1 pinned Docker context and immutable
-  identity anchor, the evaluation-only 3A provider and closed Results gateway
-  foundation, plus the read-only source-validation portion of 3B
+  identity anchor; 2B.2 verified catalog/image/material/epoch/desired sealing;
+  the evaluation-only 3A provider and closed Results gateway foundation; plus
+  the read-only source-validation portion of 3B
 - Date: 2026-08-17
 
 This roadmap owns the work required to make Automata easy to evaluate on one
@@ -114,18 +117,25 @@ host-native profile.
 
 ## Command structure
 
-The target command surface keeps local lifecycle, runs, secrets, and optional
-integrations in distinct namespaces:
+The currently available command surface is deliberately small:
 
 ```console
 automata local doctor [--json]
-automata local check [WORKFLOW] [--event EVENT]
-  [--input NAME=VALUE]... [--json]
+automata local check [WORKFLOW] [--input NAME=VALUE]... [--json]
+automata local init --state-directory ABS --catalog-source file:ABS
+  [--installation NAME] [--workers N]
+```
+
+Init is x86-64 Linux-only and stops after sealed material and canonical desired
+intent. It generates no Compose document. The target surface below remains
+planned and is not accepted by the current CLI; it keeps lifecycle, runs,
+secrets, and optional integrations in distinct namespaces:
+
+```console
 automata local run [WORKFLOW] [--workers N] [--event EVENT]
   [--input NAME=VALUE]... [--allow-architecture-substitution]
   [--non-interactive] [--allow-missing-secrets] [--json]
 
-automata local init [--workers N]
 automata local up
 automata local status [--json]
 automata local down
@@ -191,7 +201,8 @@ onboarding path:
 | --- | --- | --- |
 | `automata local doctor` | Cross-platform host, Docker, Compose, and architecture preflight | It is deliberately read-only; checkpoint 2A retired checkpoint 1's proposed native state-root input, and checkpoint 2B.1 makes installation identity engine-owned |
 | `automata local check` | Deterministic bounded live-worktree archive, exact `.github/workflows` selection, local-only manual event compilation, reachable same-snapshot reusable workflows with typed call-graph and root-secret propagation, and value-free external/built-in credential discovery | It is deliberately read-only and fails closed on Windows; repository identity, local admission, scheduling, execution, and GitHub Checks remain absent |
-| `automata-ci-local` Docker boundary | Exact-endpoint anchor management plus a private fixed-relay provider with deterministic closed Results topology | Convergent lifecycle must provision the renderer-owned shared transit/listener; no local product command calls the mutation API yet |
+| `automata local init` | x86-64 Linux-only exact-socket identity/image/volume adoption, host material and one-time certificate custody, fixed materialization, and sealed canonical desired intent | It has no renderer or Compose document and starts no services; convergence, bootstrap, `up`, `down`, `status`, and reset remain absent |
+| `automata-ci-local` Docker boundary | Exact-endpoint anchor and sealed-init management plus a private fixed-relay provider with deterministic closed Results topology | Convergent lifecycle must provision and reattest the renderer-owned shared transit/listener |
 | Control-plane configuration and container build | Complete server configuration and product images | Configuration and bootstrap are manual and Unix-oriented |
 | GitHub workflow crates | Frontend, compiler, typed workflow contracts, reusable-workflow handling | They need a separately authorized local snapshot source |
 | Workflow service | Credential requirement discovery, admission, and orchestration boundaries | It needs local provenance as an additional source authority |
@@ -214,7 +225,7 @@ improve the shared abstraction instead of creating a local duplicate.
 | Operation identity | `automata_ci_core::OperationId` | Local provenance fields around the shared ID |
 | Service lifecycle | Docker Compose convergence, health, project labels, and engine inspection | A deterministic project specification and CLI supervisor |
 | Installation identity | A deterministic external Docker volume with immutable identity labels | Exact create/adopt inspection and engine-scoped serialization |
-| Desired specification | Canonical product configuration and Compose rendering contracts | One minimal value-free document in an engine-managed config volume |
+| Desired specification | Canonical credential-free product intent | One minimal immutable v1 document in an engine-managed config volume; future rendering remains a convergence concern |
 | Workflow syntax | `GithubWorkflowFrontend`, the existing compiler, typed input and reusable-workflow contracts | A source-policy adapter that admits local workflow locations |
 | Admission and orchestration | Existing workflow service, transaction boundary, scheduler, cancellation, and run history | An explicit `LocalSnapshot` authority and provenance |
 | Runner | Existing runner process, mTLS protocol, journal/spool, and `max_parallel_jobs` | Local runner configuration and a Docker sandbox provider |
@@ -319,21 +330,21 @@ Compose labels used for independent project discovery are validated separately.
 #### Persistent desired specification
 
 A separate engine-managed config volume persists one schema-versioned,
-credential-value-free desired-spec document. It contains only the installation
-binding, requested `max_parallel_jobs`, exact local profile and architecture
-decision, image/render inputs, renderer version, and canonical plan digest
-needed to reconstruct the same stack after `down`. It contains no credential
-value, container or network ID, live phase, daemon version, or resource
+credential-value-free desired-spec document. Current immutable v1 contains the
+installation binding, requested `max_parallel_jobs`, human port, exact local
+profile and architecture decision, exact image inputs, stable Results transit
+addressing, and its canonical plan digest. The imported service proxy retains
+its deterministic daemon-local tag plus both acceptable OCI IDs for later
+reattestation. It contains no renderer field, rendered Compose bytes,
+credential value, live resource ID, live phase, daemon version, or resource
 inventory.
 
 The digest is computed from the canonical document with its digest field
-excluded, then read back and recomputed before rendering. A digest-pinned helper
-container with only the config volume mounted performs bounded decode, temporary
-write, file and directory synchronization, and atomic rename. The supervisor
-checks the helper by container ID, reads the committed document back through a
-fresh helper, and accepts the update only when its recomputed digest and
-installation binding agree. An interruption therefore leaves either the prior
-complete document or the next complete document, never a partial desired spec.
+excluded and is read back and recomputed after the fixed materializer commits
+it. Current desired v1 is deliberately immutable within an epoch; a future
+mutable desired contract requires an explicit schema migration rather than an
+in-place reinterpretation. An interruption leaves either no established final
+record or the complete canonical document, never an accepted partial spec.
 
 Every persistent service volume carries only immutable Automata
 contract/identity/role labels: managed marker, contract and resource kind,
@@ -344,7 +355,8 @@ PostgreSQL, object, runner, or desired-spec data look foreign.
 
 #### Replaceable topology and `down`
 
-The canonical desired spec renders a product-owned Compose configuration. Its
+Future convergence renders the canonical desired spec into a product-owned
+Compose configuration. Its
 containers, networks, initialization helpers, and generated-config volumes are
 replaceable and carry the exact plan digest plus their role in the managed
 namespace. Reconciliation refuses a mixed-digest or unknown-role topology,
@@ -720,48 +732,72 @@ Doctor JSON schema 3 reports the bounded selected context name without exposing
 the retained endpoint URI, and CLI process tests prove daemon probes receive the
 exact validated `--host` value.
 
-#### 2B.2. Desired-spec config volume and atomic helper
+#### 2B.2. Verified sealed init and fixed materializer
 
-Extend the adapter with the separate persistent desired-spec config volume and
-the exact `desired-spec` persistent-volume role. Its immutable labels bind only
-the installation UUID, full selector key, Compose project, persistent-volume
-contract/resource kind, and exact role; they contain neither repository
-identity nor a mutable plan digest. Create and adoption use the same fresh
-post-inspection, local driver/scope, empty-option, no-bind, exact-label, and
-attachment checks as the anchor before any helper is started.
+The x86-64 Linux-only `automata local init` consumer requires an explicit
+absolute private state directory and an explicit `file:ABS` release catalog. It
+accepts only the exact Docker authority at
+`unix:///var/run/docker.sock`. The catalog is operator-selected release
+evidence: init verifies its canonical structure, source-contract digest, closed
+profile/image set, and exact no-follow sibling candidate, but does not invent an
+OIDC-authentication claim for the selected file. Registry roles retain the
+catalog's top-level provenance while Docker qualification uses the exact
+linux/amd64 platform reference. The service-proxy candidate retains its fixed
+GHCR provenance name, is deeply verified before mutation, and is converted to a
+bounded hybrid Docker-load archive. Its daemon-local tag is accepted only with
+the mutually exclusive classic config-ID/no-RepoDigest or containerd
+manifest-ID/exact-RepoDigest representation.
 
-Define the bounded, canonical, credential-value-free desired-spec document. It
-contains only the installation binding, requested `max_parallel_jobs`, exact
-local profile and architecture decision, closed image/render inputs, renderer
-version, and canonical plan digest needed to reconstruct the same stack after
-`down`. Reuse the existing digest-pinned sandbox guest as the one-shot helper;
-strengthen its bounded file write to use a same-directory exclusive temporary
-file, file synchronization, atomic rename, and directory synchronization. The
-adapter post-inspects each exact helper container ID before start, performs a
-fresh helper readback after commit, and accepts the document only when canonical
-decode, installation binding, and recomputed digest agree. It never pulls the
-helper implicitly.
+State custody uses trusted-ancestry, no-follow opens, exact invoking-user
+ownership/modes, one held process lock, one 32-byte material root, canonical
+epoch and selection records, and exact one-time certificate bytes. A
+domain-separated state-authority digest binds the stable state-root identity
+and the verified held lock-file identity into the epoch. This assumes trusted
+stable local-filesystem custody: copying, restoring, remounting, or replacing
+the lock changes authority and requires a future reset or migration. The
+material root is KDF root derivation input and is never copied verbatim into a
+credential.
 
-Gate: foreign config-volume name, key, project, role, label, driver, option, or
-attachment evidence fails before helper mutation; interruption leaves either
-the prior complete desired document or the next complete document; and `N`,
-profile, architecture decision, and closed render inputs reconstruct the same
-digest after an adapter restart with no realized topology. Stateful fake-daemon
-and ignored live-Docker tests cover the public read/commit adapter, exact helper
-post-inspection, bounded protocol, fresh readback, and zero topology. This slice
-completes checkpoint 2B but still exposes no user lifecycle command.
+After epoch validation and before image qualification, helper recovery, or any
+other role mutation, init creates or exactly adopts Desired as the atomic guard
+among the twelve owner-specific persistent volumes. Labels bind installation
+identity, material schema/generation, role, and immutable epoch fingerprint,
+never the desired plan digest. A fixed-purpose materializer uses the exact
+qualified Automata image, no network, a read-only root, UID 0,
+`CapDrop=ALL`, only `CHOWN` and `DAC_OVERRIDE`, and exactly the twelve volume
+mounts. It receives one bounded canonical request over attached stdin; no
+secret request is stored in a writable image layer or temporary request mount.
+Static role manifests publish last after content, metadata, link, certificate,
+and key validation; dynamic owner roots remain empty until future convergence.
+Missing or conflicting established custody is reset required, while
+uncommitted fixed crash temporaries are safely rebuilt.
+
+The slice persists canonical credential-free desired intent, including the
+imported service-proxy tag plus both acceptable OCI IDs for later reattestation.
+It has no renderer, produces no Compose document, and then stops. Init invokes
+no Compose operation and starts no control plane, relay, bootstrap, database,
+object store, or runner; `up`, `down`, `status`, and `reset` remain absent.
+`ResetRequired` is detectable, but no reset command exists yet. Stateful
+recovery, adversarial parser and filesystem tests, strict helper-inspection
+tests, and live Docker portable-load qualification cover the sealed boundary.
+This completes checkpoint 2B's material/desired-intent handoff without claiming
+convergence.
 
 ### 2C. Convergent Compose lifecycle and exact reset
 
-Build on the completed 2B.2 adapter. Add checked-in value-free rendering,
-persistent identity-only volume labels, digest-labeled replaceable topology,
-the inert ID-held engine lock, union discovery, `up`, `status`, `down`, and exact
-reset. The command layer remains private until these operations are convergent
-and their destructive boundary is proven.
+Build on the completed 2B.2 sealed desired-intent/material handoff. Introduce
+the renderer and its complete executable command surface together, then add
+convergence, digest-labeled replaceable topology, the inert ID-held engine lock,
+union discovery, `up`, `status`, `down`, and exact reset. The command layer
+remains private until these operations are convergent and their destructive
+boundary is proven.
 
-The renderer consumes the current hidden image boundary
-`automata internal object-store ensure-bucket`; it does not invent a shell
-client, test helper, compatibility alias, or placeholder service-init command.
+The renderer may reuse the current hidden image boundary
+`automata internal object-store ensure-bucket`, but it must not emit references
+to absent readiness, bootstrap, or relay commands. Those fixed hidden
+operations and the renderer that invokes them land and qualify together; the
+renderer does not invent a shell client, test helper, compatibility alias, or
+placeholder service-init command.
 The initializer and server share the production S3 connection parser and the
 sole validated-config-to-store AWS SDK construction boundary. Runner product
 schema 6 independently requires the same closed

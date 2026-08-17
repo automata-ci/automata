@@ -7,13 +7,48 @@ use automata_ci_workflow_github::GithubWorkflowDispatchInputs;
 use automata_ci_workflow_service::BuiltInCredentialRequirement;
 use tokio_util::sync::CancellationToken;
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+use crate::cli::LocalInitArgs;
 use crate::cli::{LocalArgs, LocalCheckArgs, LocalCommand, LocalContainerEngine, LocalDoctorArgs};
 
 pub(crate) async fn execute(args: &LocalArgs) -> Result<()> {
     match &args.command {
         LocalCommand::Doctor(args) => Box::pin(doctor(args)).await,
         LocalCommand::Check(args) => Box::pin(check(args)).await,
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        LocalCommand::Init(args) => Box::pin(init(args)).await,
     }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+async fn init(args: &LocalInitArgs) -> Result<()> {
+    use automata_ci_local::{LocalInitRequest, initialize_local};
+
+    let cancellation = CancellationToken::new();
+    let request = LocalInitRequest::new(
+        args.state_directory.clone(),
+        args.catalog_source.clone(),
+        args.installation.clone(),
+        args.workers,
+        cancellation.clone(),
+    );
+    let mut initialization = Box::pin(initialize_local(request));
+    let outcome = tokio::select! {
+        biased;
+        () = crate::shutdown::wait_without_logging() => {
+            cancellation.cancel();
+            let result = initialization.await;
+            result.map_err(anyhow::Error::from)?;
+            bail!("local initialization completed recovery after a process shutdown signal")
+        }
+        result = &mut initialization => result.map_err(anyhow::Error::from)?,
+    };
+    println!(
+        "Automata local installation '{}' sealed with {} worker slot(s); no services were started",
+        outcome.installation(),
+        outcome.workers()
+    );
+    Ok(())
 }
 
 async fn check(args: &LocalCheckArgs) -> Result<()> {

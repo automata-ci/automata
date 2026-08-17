@@ -115,6 +115,8 @@ impl LocalEngineError {
 pub struct DockerInstallationAdapter {
     engine: Arc<dyn EngineApi>,
     selection: EngineSelection,
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    docker: Option<Docker>,
 }
 
 impl fmt::Debug for DockerInstallationAdapter {
@@ -144,10 +146,14 @@ impl DockerInstallationAdapter {
         let selection = report
             .selected_engine()
             .ok_or_else(|| LocalEngineError::new(LocalEngineErrorCode::PreflightRequired))?;
-        let engine = Arc::new(BollardEngine::connect(selection)?);
+        let engine = BollardEngine::connect(selection)?;
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        let docker = Some(engine.docker.clone());
         let adapter = Self {
-            engine,
+            engine: Arc::new(engine),
             selection: selection.clone(),
+            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+            docker,
         };
         adapter.verify_engine().await?;
         Ok(adapter)
@@ -238,6 +244,18 @@ impl DockerInstallationAdapter {
         Ok(())
     }
 
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    pub(crate) async fn verify_for_init(&self) -> Result<(), LocalEngineError> {
+        self.verify_engine().await
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    pub(crate) fn exact_docker(&self) -> Result<Docker, LocalEngineError> {
+        self.docker
+            .clone()
+            .ok_or_else(|| LocalEngineError::new(LocalEngineErrorCode::ConnectionUnavailable))
+    }
+
     async fn inspect_verified_identity(
         &self,
         name: &InstallationName,
@@ -279,7 +297,12 @@ impl DockerInstallationAdapter {
 
     #[cfg(test)]
     fn with_test_engine(selection: EngineSelection, engine: Arc<dyn EngineApi>) -> Self {
-        Self { engine, selection }
+        Self {
+            engine,
+            selection,
+            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+            docker: None,
+        }
     }
 }
 
