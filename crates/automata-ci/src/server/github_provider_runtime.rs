@@ -1086,7 +1086,7 @@ fn provider_credential_config(
     .map_err(|_| GithubProviderRuntimeBuildError::InvalidProviderClient)
 }
 
-fn provider_http_endpoint(
+pub(crate) fn provider_http_endpoint(
     transport: &GithubProviderTransport,
 ) -> Result<GithubHttpEndpoint, GithubProviderRuntimeBuildError> {
     match transport {

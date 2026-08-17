@@ -36,24 +36,32 @@ That code is not yet production acceptance. It currently reaches the local
 container engine through a pinned CLI. Its synchronized provider journal and
 startup orphan check are component recovery, but they do not replace a
 restricted management broker, independent watchdog, or real engine/host fault
-evidence. Authenticated trust routing, managed egress, credential delivery, a
-signed image factory, and dedicated-host acceptance also remain open. Action
+evidence. A broker-verifiable signed admission grant, managed egress,
+credential delivery, a signed image factory, and dedicated-host acceptance
+also remain open. Action
 steps, job and service containers, egress, devices, and parallel capacity
 remain unsupported.
 
 The detailed
 [Windows runner isolation plan](../platforms/windows.md) makes one fresh
 Hyper-V-isolated Windows container per job the only Windows direction. The
-blocking trust order is `EVT-01` -> `AUTH-02` -> `WIN-ISO-01`; component
-provider work may proceed offline but cannot advertise support before that
-route and the management/recovery gates pass.
+blocking trust order is `EVT-01` -> `AUTH-02` -> `WIN-ISO-01`. The local
+pre-lease portion of that route is now enforced, but the provider cannot
+advertise support before the signed broker, management/recovery, image, and
+real-host gates pass.
 
 Current component placement foundation binds GitHub-projected Windows jobs to
 both VM-grade isolation and the exact
 `automata.core/windows-hyperv-container@v1` launch capability. Only the
 `windows_hyperv` runner composition advertises it; Linux and macOS do not.
 Capability intersection and scheduler matching reject a generic VM before a
-placement becomes a lease. This is not the AUTH-02 trust grant and does not
+placement becomes a lease. Scheduling now also derives a server-only one-use
+grant from the canonical AUTH-02 snapshot and immutable materialization
+authority. PostgreSQL re-derives the grant against locked current JobIR,
+requirements, trust, profile, operation, runner generation/session/slot, lease,
+and expiry state before leasing. Missing, incomplete, stale, or grant-free
+Windows claims fail closed. The value is neither serialized nor signed and is
+not the independently verified WIN-ISO-02 broker credential, so it does not
 make Windows schedulable in production.
 
 ## Work packages
@@ -69,8 +77,8 @@ The implementation is split into WIN-ISO-00 through WIN-ISO-12 in the
 trust-to-isolation placement, a least-privilege container-management broker, a
 signed immutable Windows image, engine/HCS/HCN lifecycle, a bounded guest
 executable, default-deny networking, credential and data boundaries, crash
-recovery, and adversarial Windows CI. The first Wave 1 pull request implements
-only the explicitly checked component-foundation portions of those packages.
+recovery, and adversarial Windows CI. The checked items record only repository
+component and local admission behavior; they are not physical-host acceptance.
 
 Acceptance:
 

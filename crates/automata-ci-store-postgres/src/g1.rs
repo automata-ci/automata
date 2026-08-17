@@ -13,10 +13,11 @@ use automata_ci_control::{
         DEFAULT_CANCELLATION_REASON, RequestCancellation,
     },
     lease::{
-        BeginLeaseRequest, BegunLeaseRequest, ClaimRejection, ClaimedAttempt, CompleteLeaseRequest,
-        LeaseRequestCompletion, LeaseRequestKey, NoWorkLeaseRequest, RevokedLeaseOfferFallback,
-        RunnableAttempt, RunnableQueueKey, RunnableScanLimit, RunnableScanPage,
-        RunnableScanRequest, TryClaimAttempt, TryClaimOutcome, TryClaimReceipt,
+        AuthenticatedPlacementTrust, BeginLeaseRequest, BegunLeaseRequest, ClaimRejection,
+        ClaimedAttempt, CompleteLeaseRequest, LeaseRequestCompletion, LeaseRequestKey,
+        NoWorkLeaseRequest, RevokedLeaseOfferFallback, RunnableAttempt, RunnableQueueKey,
+        RunnableScanLimit, RunnableScanPage, RunnableScanRequest, TryClaimAttempt, TryClaimOutcome,
+        TryClaimReceipt,
         repository::{
             RunnableAttemptRepository, RunnerClaimRepository, RunnerLeaseRequestRepository,
         },
@@ -44,10 +45,10 @@ use automata_ci_control::{
     },
 };
 use automata_ci_core::{
-    AttemptId, FencingToken, JobConclusion, JobId, JobIrVersion, JobLifecycle, Lease, LeaseGuard,
-    LeaseId, LogSequence, OperationId, RUNNER_REQUIREMENTS_SCHEMA_VERSION, RunId,
-    RunnerCapabilities, RunnerGroup, RunnerId, RunnerRequirements, RunnerSessionId, Sha256Digest,
-    UnixMillis,
+    AttemptId, FencingToken, JobAuthorityProfile, JobConclusion, JobId, JobIrVersion, JobLifecycle,
+    Lease, LeaseGuard, LeaseId, LogSequence, OperationId, RUNNER_REQUIREMENTS_SCHEMA_VERSION,
+    RunId, RunnerCapabilities, RunnerGroup, RunnerId, RunnerRequirements, RunnerSessionId,
+    Sha256Digest, TrustSnapshot, UnixMillis,
 };
 use automata_ci_key_management::{
     ENVELOPE_NONCE_BYTES, EncryptedEnvelope, EnvelopeError, KeyEncryptionContext,
@@ -7526,11 +7527,21 @@ async fn scan_page_rows(
         r"
         SELECT attempt.id AS attempt_id, attempt.job_id, attempt.queued_at_ms,
                job.run_id, job.requirements, job.job_ir_schema,
-               job.job_ir_size_bytes, job.job_ir_digest, job.job_ir_object_key
+               job.job_ir_size_bytes, job.job_ir_digest, job.job_ir_object_key,
+               trust.snapshot_schema AS placement_trust_snapshot_schema,
+               trust.policy_revision AS placement_trust_policy_revision,
+               trust.policy_digest AS placement_trust_policy_digest,
+               trust.snapshot_digest AS placement_trust_snapshot_digest,
+               trust.snapshot_bytes AS placement_trust_snapshot_bytes,
+               concrete.authority_profile AS placement_authority_profile,
+               concrete.requirements_digest AS placement_requirements_digest
         FROM job_attempts AS attempt
         JOIN jobs AS job ON job.id = attempt.job_id
         JOIN workflow_runs AS run ON run.id = job.run_id
         JOIN repositories AS repository ON repository.id = run.repository_id
+        LEFT JOIN workflow_run_trust_snapshots AS trust ON trust.run_id = run.id
+        LEFT JOIN logical_workflow_concrete_jobs AS concrete
+          ON concrete.job_id = job.id AND concrete.run_id = run.id
         WHERE repository.tenant_id = $1
           AND job.admission_epoch = $9
           AND job.job_ir_schema = $2
@@ -8343,12 +8354,20 @@ async fn evaluate_claim(
 
     let row = sqlx::query(
         r"
-        SELECT attempt.lifecycle, attempt.fencing_token, attempt.changed_at_ms,
+        SELECT attempt.id AS attempt_id, attempt.lifecycle, attempt.fencing_token,
+               attempt.queued_at_ms, attempt.changed_at_ms,
                job.id AS job_id, job.admission_epoch, job.job_ir_schema,
                job.job_ir_size_bytes, job.job_ir_digest, job.job_ir_object_key,
                job.requirements,
                repository.tenant_id, run.id AS run_id, run.repository_id,
                run.status AS run_status, run.concurrency_group_key,
+               trust.snapshot_schema AS placement_trust_snapshot_schema,
+               trust.policy_revision AS placement_trust_policy_revision,
+               trust.policy_digest AS placement_trust_policy_digest,
+               trust.snapshot_digest AS placement_trust_snapshot_digest,
+               trust.snapshot_bytes AS placement_trust_snapshot_bytes,
+               concrete.authority_profile AS placement_authority_profile,
+               concrete.requirements_digest AS placement_requirements_digest,
                EXISTS (
                    SELECT 1 FROM attempt_cancellation_intents AS cancellation
                    WHERE cancellation.attempt_id = attempt.id
@@ -8370,6 +8389,9 @@ async fn evaluate_claim(
         JOIN jobs AS job ON job.id = attempt.job_id
         JOIN workflow_runs AS run ON run.id = job.run_id
         JOIN repositories AS repository ON repository.id = run.repository_id
+        LEFT JOIN workflow_run_trust_snapshots AS trust ON trust.run_id = run.id
+        LEFT JOIN logical_workflow_concrete_jobs AS concrete
+          ON concrete.job_id = job.id AND concrete.run_id = run.id
         WHERE attempt.id = $1
         FOR UPDATE OF attempt, run
         ",
@@ -8438,11 +8460,14 @@ async fn evaluate_claim(
     let admission_epoch: i32 = row.try_get("admission_epoch").map_err(operation_error)?;
     let job_version =
         decode_job_ir_version(row.try_get("job_ir_schema").map_err(operation_error)?)?;
-    let requirements: RunnerRequirements = serde_json::from_value(
-        row.try_get::<serde_json::Value, _>("requirements")
-            .map_err(operation_error)?,
-    )
-    .map_err(|_| StoreError::corrupt_data("invalid durable runner requirements"))?;
+    let durable_candidate = decode_runnable_attempt(&row)?;
+    if !automata_ci_control::adapter_spi::try_claim_attempt_matches_runnable(
+        request,
+        &durable_candidate,
+    ) {
+        return Ok(TryClaimOutcome::Rejected(ClaimRejection::NotRoutable));
+    }
+    let requirements = durable_candidate.requirements().clone();
     let machine_requirements = requirements
         .clone()
         .with_labels(std::iter::empty::<automata_ci_core::RunnerLabel>())
@@ -8531,22 +8556,7 @@ async fn evaluate_claim(
     )
     .map_err(|error| StoreError::corrupt_data(error.to_string()))?;
     let assignment = AttemptAssignment::new(request.session(), request.slot());
-    let job_id = JobId::from_uuid(row.try_get("job_id").map_err(operation_error)?);
-    let run_id = RunId::from_uuid(row.try_get("run_id").map_err(operation_error)?);
-    let size = u64::try_from(
-        row.try_get::<i64, _>("job_ir_size_bytes")
-            .map_err(operation_error)?,
-    )
-    .map_err(|_| StoreError::corrupt_data("negative JobIR size"))?;
-    let digest = decode_sha256_digest(row.try_get("job_ir_digest").map_err(operation_error)?)
-        .map_err(|error| StoreError::corrupt_data(error.clone()))?;
-    let object_key = ObjectKey::new(
-        row.try_get::<String, _>("job_ir_object_key")
-            .map_err(operation_error)?,
-    )
-    .map_err(|error| StoreError::corrupt_data(error.to_string()))?;
-    let metadata = JobIrMetadata::new(job_id, run_id, job_version, size, digest, object_key)
-        .map_err(|error| StoreError::corrupt_data(error.to_string()))?;
+    let metadata = durable_candidate.job_ir().clone();
     let claimed = ClaimedAttempt::try_new(lease, assignment, metadata)
         .map_err(|error| StoreError::corrupt_data(error.to_string()))?;
     Ok(TryClaimOutcome::Claimed(Box::new(claimed)))
@@ -9310,6 +9320,7 @@ fn decode_runnable_attempt(row: &sqlx::postgres::PgRow) -> Result<RunnableAttemp
     .map_err(|error| StoreError::corrupt_data(error.to_string()))?;
     let ir_metadata = JobIrMetadata::new(job_id, run_id, version, size, digest, key)
         .map_err(|error| StoreError::corrupt_data(error.to_string()))?;
+    let placement_trust = decode_placement_trust(row, &requirements)?;
     RunnableAttempt::try_new(
         attempt_id,
         job_id,
@@ -9317,8 +9328,115 @@ fn decode_runnable_attempt(row: &sqlx::postgres::PgRow) -> Result<RunnableAttemp
         queued_at,
         requirements,
         ir_metadata,
+        placement_trust,
     )
     .map_err(|error| StoreError::corrupt_data(error.to_string()))
+}
+
+fn decode_placement_trust(
+    row: &sqlx::postgres::PgRow,
+    requirements: &RunnerRequirements,
+) -> Result<Option<AuthenticatedPlacementTrust>, StoreError> {
+    let snapshot_schema = row
+        .try_get::<Option<i16>, _>("placement_trust_snapshot_schema")
+        .map_err(operation_error)?;
+    let policy_revision = row
+        .try_get::<Option<i64>, _>("placement_trust_policy_revision")
+        .map_err(operation_error)?;
+    let policy_digest = row
+        .try_get::<Option<Vec<u8>>, _>("placement_trust_policy_digest")
+        .map_err(operation_error)?;
+    let snapshot_digest = row
+        .try_get::<Option<Vec<u8>>, _>("placement_trust_snapshot_digest")
+        .map_err(operation_error)?;
+    let snapshot_bytes = row
+        .try_get::<Option<Vec<u8>>, _>("placement_trust_snapshot_bytes")
+        .map_err(operation_error)?;
+    let authority_profile = row
+        .try_get::<Option<String>, _>("placement_authority_profile")
+        .map_err(operation_error)?;
+    let requirements_digest = row
+        .try_get::<Option<Vec<u8>>, _>("placement_requirements_digest")
+        .map_err(operation_error)?;
+
+    let trust_absent = snapshot_schema.is_none()
+        && policy_revision.is_none()
+        && policy_digest.is_none()
+        && snapshot_digest.is_none()
+        && snapshot_bytes.is_none();
+    let trust_complete = snapshot_schema.is_some()
+        && policy_revision.is_some()
+        && policy_digest.is_some()
+        && snapshot_digest.is_some()
+        && snapshot_bytes.is_some();
+    if !trust_absent && !trust_complete {
+        return Err(StoreError::corrupt_data(
+            "partial authenticated placement trust snapshot",
+        ));
+    }
+    let materialization_absent = authority_profile.is_none() && requirements_digest.is_none();
+    let materialization_complete = authority_profile.is_some() && requirements_digest.is_some();
+    if !materialization_absent && !materialization_complete {
+        return Err(StoreError::corrupt_data(
+            "partial authenticated placement materialization evidence",
+        ));
+    }
+    if trust_absent || materialization_absent {
+        return Ok(None);
+    }
+
+    let schema = u16::try_from(snapshot_schema.expect("complete placement trust shape"))
+        .map_err(|_| StoreError::corrupt_data("invalid placement trust snapshot schema"))?;
+    let revision = u64::try_from(policy_revision.expect("complete placement trust shape"))
+        .ok()
+        .and_then(std::num::NonZeroU64::new)
+        .ok_or_else(|| StoreError::corrupt_data("invalid placement trust policy revision"))?;
+    let policy_digest =
+        decode_sha256_digest(policy_digest.expect("complete placement trust shape"))
+            .map_err(StoreError::corrupt_data)?;
+    let snapshot_digest =
+        decode_sha256_digest(snapshot_digest.expect("complete placement trust shape"))
+            .map_err(StoreError::corrupt_data)?;
+    let snapshot = TrustSnapshot::from_canonical_bytes(
+        &snapshot_bytes.expect("complete placement trust shape"),
+        snapshot_digest,
+    )
+    .map_err(|_| StoreError::corrupt_data("invalid authenticated placement trust snapshot"))?;
+    if snapshot.schema() != schema
+        || snapshot.policy_revision() != revision
+        || snapshot.policy_digest() != policy_digest
+        || snapshot.digest() != snapshot_digest
+    {
+        return Err(StoreError::corrupt_data(
+            "authenticated placement trust metadata mismatch",
+        ));
+    }
+    let authority_profile = match authority_profile
+        .expect("complete placement materialization shape")
+        .as_str()
+    {
+        "standard" => JobAuthorityProfile::Standard,
+        "credential_free" => JobAuthorityProfile::CredentialFree,
+        _ => {
+            return Err(StoreError::corrupt_data(
+                "invalid placement authority profile",
+            ));
+        }
+    };
+    let requirements_digest = decode_sha256_digest(
+        requirements_digest.expect("complete placement materialization shape"),
+    )
+    .map_err(StoreError::corrupt_data)?;
+    let placement_trust =
+        AuthenticatedPlacementTrust::try_new(&snapshot, authority_profile, requirements).map_err(
+            |_| StoreError::corrupt_data("invalid authenticated placement trust evidence"),
+        )?;
+    if placement_trust.requirements_digest() != requirements_digest {
+        return Err(StoreError::corrupt_data(
+            "authenticated placement requirements digest mismatch",
+        ));
+    }
+    Ok(Some(placement_trust))
 }
 
 fn operation_error(error: sqlx::Error) -> StoreError {

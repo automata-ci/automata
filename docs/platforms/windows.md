@@ -16,7 +16,7 @@ evidence from real Windows hosts.
 | Initial network profile | Disabled |
 | Security priority | Isolation integrity, trust routing, management-plane least privilege, destructive cleanup, then action parity |
 | Work packages | WIN-ISO-00 through WIN-ISO-12; WIN-01 through WIN-03 remain capability work behind the isolation gate |
-| Last reviewed | 2026-08-14 |
+| Last reviewed | 2026-08-16 |
 
 The words **must**, **must not**, **should**, and **may** express required,
 recommended, and optional constraints. An unchecked task is planned work. It
@@ -91,7 +91,7 @@ implemented scope is intentionally smaller than production acceptance:
       egress, GPUs, ephemeral-disk claims, and parallel capacity unavailable
       unless their later packages pass.
 
-This pull request does **not** prove or complete:
+That provider-foundation pull request did **not** prove or complete:
 
 - [ ] authenticated workload trust classification;
 - [ ] the AUTH-02 one-use trust decision and trust-to-provider admission grant;
@@ -113,6 +113,23 @@ could bypass fixed argument construction after runner compromise. WIN-ISO-02
 must place that authority behind a narrow broker, or prove an equivalently
 restricted engine service identity and API surface, before hostile jobs are
 admitted.
+
+The current source tree now also has a local pre-lease admission increment. It
+rehydrates the canonical AUTH-02 trust snapshot and immutable materialization
+authority, filters Windows candidates without complete authenticated evidence,
+and derives a server-only one-use `WindowsHyperVPlacementGrant`. The value binds
+the attempt, poll operation, runner generation/session/slot, lease, JobIR,
+trust-policy and snapshot digests, authority profile, exact current
+requirements, environment profile, and expiry. PostgreSQL re-derives that value
+from locked current state immediately before changing `queued` to `leased`, so
+a missing grant, a legacy direct-claim bypass, or stale trust/requirements state
+cannot fall through to another Windows boundary.
+
+That value is intentionally not a broker credential: it is not serialized,
+signed, or accepted from a runner. WIN-ISO-02 must define and independently
+verify the broker-consumable signed form. This increment therefore closes the
+local pre-placement seam without live-provider credentials, not the hostile-host
+acceptance gate.
 
 ## Non-negotiable invariants
 
@@ -663,20 +680,28 @@ implicit default.
 
 **Dependencies:** EVT-01, then AUTH-02.
 
-- [ ] Carry authenticated event identity, repository/ref provenance, actor,
+- [x] Carry authenticated event identity, repository/ref provenance, actor,
       fork/Dependabot status, policy version, requested secrets, and trust
-      classification into scheduling.
+      classification into scheduling through the canonical AUTH-02 snapshot,
+      JobIR digest, and immutable materialization authority.
 - [x] Define the exact `WindowsHyperVContainer` requirement, pair it with
       `IsolationLevel::VirtualMachine`, carry it through JobIR/protobuf replay,
       and reject generic VM or alternate-provider capabilities before lease.
-- [ ] Reject unknown, missing, stale, or unsigned authenticated placement
-      evidence through the AUTH-02 one-use grant.
-- [ ] Ensure no scheduler, rerun, recovery, administrative API, or capacity
+- [x] Reject unknown, missing, incomplete, or stale local placement evidence by
+      re-deriving the server-only grant from locked durable state before lease.
+- [ ] Sign a broker-consumable one-use grant and verify it independently at the
+      restricted management boundary.
+- [x] Ensure no scheduler, rerun, recovery, administrative API, or capacity
       fallback can select an alternate Windows boundary.
-- [ ] Bind a one-use admission grant to attempt, operation, generation,
-      profile, image, resources, network policy, authority, and expiry.
+- [x] Bind the server-only one-use admission value to attempt, operation,
+      generation/session/slot, lease, JobIR, profile/image manifest, exact
+      requirements (including resources and network policy), authority, and
+      expiry.
 - [ ] Retain reason codes and the trust-decision digest without raw secrets or
       provider payloads.
+- [x] Test missing grants, operation/trust rebinding, generation/profile
+      binding, stale requirements re-derivation, and a legacy direct-claim
+      bypass.
 - [ ] Test public fork, private fork, Dependabot, deleted actor, changed ref,
       replay, stale policy, missing fields, and capacity outage.
 

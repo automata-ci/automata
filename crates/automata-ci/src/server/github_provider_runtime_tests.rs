@@ -82,6 +82,7 @@ fn repository(
         "runner_policy": {
             "workspace": {"derivation": 1, "root": "/__w", "schema": 1},
             "mappings": [{
+                "runner_features": {"schema": 1, "supported": ["automata.core/bash-shell@v1", "automata.core/command-files@v1", "automata.core/default-posix-shell@v1", "automata.core/job-summaries@v1", "automata.core/sh-shell@v1", "automata.core/shell-steps@v1"]},
                 "container_features": ["automata.core/job-containers@v1"],
                 "architecture": "x86_64",
                 "operating_system": "linux",
@@ -104,7 +105,7 @@ fn repository(
                 "minimum_requests": {"cpu_millis": 100, "memory_bytes": 268_435_456, "ephemeral_disk_bytes": 0, "gpu_count": 0},
                 "maximum_limits": {"cpu_millis": 4000, "memory_bytes": 8_589_934_592_u64, "ephemeral_disk_bytes": 0, "gpu_count": 0}
             },
-            "schema": 1
+            "schema": 2
         },
         "check_name": "Automata CI",
         "authorities": {

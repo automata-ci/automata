@@ -1,25 +1,29 @@
 //! Current-contract projection from activated logical jobs into executable `JobIR`.
 
-use std::{collections::BTreeMap, fmt};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+};
 
 use automata_ci_core::{
     ActionReference, Architecture, CompiledBooleanTemplate, CompiledExpressionTemplate,
-    CompiledPositiveIntegerTemplate, CompiledValueTemplate, ContainerSpec, ExpressionProgram,
-    ExpressionSegment, JobAuthorityProfile, JobContentReference, JobExecutionContext, JobId, JobIr,
-    JobIrEnvelope, JobOutputDefinition, JobPermissionGrant, JobPermissionRequest,
-    JobResourceAllocation, JobResourcePolicy, JobSource, JobValidationError, LogicalJobKind,
-    LogicalJobOutputSource, LogicalOutputMergePolicy, LogicalServiceContainerTemplate,
-    LogicalStepKind, LogicalStepTemplate, LogicalTimeoutTemplate, LogicalTimeoutUnit,
-    MAX_CONTEXT_VALUE_NODES, MAX_CONTEXT_VALUE_TEXT_BYTES, OperatingSystem, PermissionLevel,
-    PermissionSnapshotRequest, PlanSourceOrigin, ResourceAllocationError, ResourceCapacity,
-    ResourcePolicyError, RunId, RunValueTemplates, RunnerFeature, RunnerRequirements,
-    RuntimeBoolean, RuntimePositiveInteger, RuntimeTimeoutTemplate, RuntimeTimeoutUnit,
-    SemanticStep, Sha256Digest, ShellTemplate, StepId, StepIr, TemplateValueMap,
-    TrustEnvironmentAuthority, TrustPermissionAuthority, TrustSecretAuthority, TrustSnapshot,
-    ValueSource, ValueTemplate, ValueTemplateError, ValueTemplateSegment, WorkflowId,
-    WorkflowPermissions,
+    CompiledPositiveIntegerTemplate, CompiledValueTemplate, ContainerFeature, ContainerSpec,
+    ExpressionProgram, ExpressionSegment, JobAuthorityProfile, JobContentReference,
+    JobExecutionContext, JobId, JobIr, JobIrEnvelope, JobOutputDefinition, JobPermissionGrant,
+    JobPermissionRequest, JobResourceAllocation, JobResourcePolicy, JobSource, JobValidationError,
+    LogicalJobKind, LogicalJobOutputSource, LogicalOutputMergePolicy,
+    LogicalServiceContainerTemplate, LogicalStepKind, LogicalStepTemplate, LogicalTimeoutTemplate,
+    LogicalTimeoutUnit, MAX_CONTEXT_VALUE_NODES, MAX_CONTEXT_VALUE_TEXT_BYTES, OperatingSystem,
+    PermissionLevel, PermissionSnapshotRequest, PlanSourceOrigin, ResourceAllocationError,
+    ResourceCapacity, ResourcePolicyError, RunId, RunValueTemplates, RunnerFeature,
+    RunnerRequirements, RuntimeBoolean, RuntimePositiveInteger, RuntimeTimeoutTemplate,
+    RuntimeTimeoutUnit, SemanticStep, Sha256Digest, ShellTemplate, StepId, StepIr,
+    TemplateValueMap, TrustEnvironmentAuthority, TrustPermissionAuthority, TrustSecretAuthority,
+    TrustSnapshot, ValueSource, ValueTemplate, ValueTemplateError, ValueTemplateSegment,
+    WorkflowId, WorkflowJobKey, WorkflowPermissions,
 };
 use automata_ci_github_permissions::github_workflow_permission;
+use automata_ci_job_executor_github::static_shell_requirement;
 use automata_ci_protocol::ProtocolLimits;
 use automata_ci_store::{ReusableWorkflowPermissionSnapshot, WorkflowPermissionPolicy};
 use automata_ci_workflow_github::{
@@ -30,8 +34,11 @@ use bytes::Bytes;
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
+use crate::activation::evaluate_activated_string;
 use crate::{
-    ActivatedJobInstance, ActivatedJobResources, ActivatedRunnerSelection, ValidatedLogicalJob,
+    ActivatedJobInstance, ActivatedJobResources, ActivatedRunnerSelection,
+    ActivationEvaluationSite, ActivationStatus, GithubLogicalActivationEvaluator,
+    ValidatedLogicalJob,
 };
 
 /// Canonical content type for a protobuf-encoded current job runtime context.
@@ -66,6 +73,8 @@ pub struct ProjectGithubLogicalJobRequest<'a> {
     resource_policy: JobResourcePolicy,
     permission_ceiling: Option<&'a ReusableWorkflowPermissionSnapshot>,
     trust_snapshot: Option<&'a TrustSnapshot>,
+    runtime_features: BTreeSet<RunnerFeature>,
+    activation_evaluation: Option<(&'a GithubLogicalActivationEvaluator, ActivationStatus)>,
 }
 
 impl fmt::Debug for ProjectGithubLogicalJobRequest<'_> {
@@ -110,6 +119,8 @@ impl<'a> ProjectGithubLogicalJobRequest<'a> {
             resource_policy,
             permission_ceiling: None,
             trust_snapshot: None,
+            runtime_features: BTreeSet::new(),
+            activation_evaluation: None,
         }
     }
 
@@ -127,6 +138,27 @@ impl<'a> ProjectGithubLogicalJobRequest<'a> {
     #[must_use]
     pub const fn with_trust_snapshot(mut self, snapshot: &'a TrustSnapshot) -> Self {
         self.trust_snapshot = Some(snapshot);
+        self
+    }
+
+    /// Adds runtime requirements prepared from immutable repository-action metadata.
+    #[must_use]
+    pub fn with_runtime_features(
+        mut self,
+        features: impl IntoIterator<Item = RunnerFeature>,
+    ) -> Self {
+        self.runtime_features.extend(features);
+        self
+    }
+
+    /// Binds the evaluator and aggregate status used to resolve instance-known shells.
+    #[must_use]
+    pub const fn with_activation_evaluation(
+        mut self,
+        evaluator: &'a GithubLogicalActivationEvaluator,
+        status: ActivationStatus,
+    ) -> Self {
+        self.activation_evaluation = Some((evaluator, status));
         self
     }
 }
@@ -219,13 +251,7 @@ fn project_github_logical_job(
     let LogicalJobKind::Steps(step_job) = request.job.execution() else {
         unreachable!("unsupported reusable jobs were rejected above");
     };
-    let trust_snapshot = request
-        .trust_snapshot
-        .ok_or(LogicalJobProjectionError::MissingTrustSnapshot)?;
-    if trust_snapshot.is_construction_placeholder() {
-        return Err(LogicalJobProjectionError::MissingTrustSnapshot);
-    }
-    validate_trust_runtime_authority(trust_snapshot, request.instance)?;
+    let trust_snapshot = required_trust_snapshot(request.trust_snapshot, request.instance)?;
     let runner = request
         .instance
         .runner()
@@ -239,13 +265,11 @@ fn project_github_logical_job(
         request.permission_ceiling,
         trust_snapshot.authority().permissions(),
     )?;
-    let requirements = runner_requirements(runner, request.profiles)?.with_resource_allocation(
-        resource_allocation(
-            request.instance.resources().copied(),
-            request.resource_policy,
-        )?,
-    );
-    let requirements = permission_requirements(requirements, &permission_request);
+    let (requirements, selected_profile) = runner_requirements(runner, request.profiles)?;
+    let requirements = requirements.with_resource_allocation(resource_allocation(
+        request.instance.resources().copied(),
+        request.resource_policy,
+    )?);
     validate_workspace_platform(&requirements, request.execution.workspace())?;
 
     let runtime_context = request.instance.runtime_context().clone();
@@ -272,9 +296,19 @@ fn project_github_logical_job(
         .run_defaults()
         .working_directory()
         .or_else(|| plan.logical().run_defaults().working_directory());
-    let steps = project_steps(step_job.steps(), default_shell)?;
+    let steps = project_steps(
+        step_job.steps(),
+        default_shell,
+        request.job.key().value(),
+        request.instance.runtime_context(),
+        request.activation_evaluation,
+    )?;
+    let requirements = runtime_requirements(requirements, &steps, &request.runtime_features)?;
+    let requirements = permission_requirements(requirements, &permission_request);
     let outputs = project_outputs(request.job.outputs())?;
     let services = project_services(step_job.services())?;
+    let requirements = service_requirements(requirements, &services);
+    validate_profile_runtime_features(selected_profile, requirements.features())?;
     let mut job = JobIr::new(
         request.job_id,
         request.run_id,
@@ -310,6 +344,18 @@ fn project_github_logical_job(
         runtime_context,
         runtime_context_bytes: Bytes::from(runtime_context_bytes),
     })
+}
+
+fn required_trust_snapshot<'a>(
+    snapshot: Option<&'a TrustSnapshot>,
+    instance: &ActivatedJobInstance,
+) -> Result<&'a TrustSnapshot, LogicalJobProjectionError> {
+    let snapshot = snapshot.ok_or(LogicalJobProjectionError::MissingTrustSnapshot)?;
+    if snapshot.is_construction_placeholder() {
+        return Err(LogicalJobProjectionError::MissingTrustSnapshot);
+    }
+    validate_trust_runtime_authority(snapshot, instance)?;
+    Ok(snapshot)
 }
 
 fn validate_trust_runtime_authority(
@@ -479,6 +525,77 @@ fn permission_requirements(
     requirements.with_features(features)
 }
 
+fn runtime_requirements(
+    requirements: RunnerRequirements,
+    steps: &[StepIr],
+    prepared: &BTreeSet<RunnerFeature>,
+) -> Result<RunnerRequirements, LogicalJobProjectionError> {
+    let mut features = requirements.features().clone();
+    features.extend(prepared.iter().cloned());
+    for step in steps {
+        features.insert(RunnerFeature::COMMAND_FILES);
+        features.insert(RunnerFeature::JOB_SUMMARIES);
+        match step.kind() {
+            SemanticStep::Run { values } => {
+                features.insert(RunnerFeature::SHELL_STEPS);
+                match values.shell() {
+                    ShellTemplate::Default => match requirements.operating_system() {
+                        Some(OperatingSystem::Windows) => {
+                            features.insert(RunnerFeature::DEFAULT_WINDOWS_SHELL);
+                        }
+                        Some(OperatingSystem::Linux | OperatingSystem::Macos) => {
+                            features.insert(RunnerFeature::DEFAULT_POSIX_SHELL);
+                        }
+                        Some(OperatingSystem::Other(_)) | None => {}
+                    },
+                    ShellTemplate::Named { value } | ShellTemplate::CommandTemplate { value } => {
+                        let literal = literal_value_template(value)
+                            .ok_or(LogicalJobProjectionError::InvalidShell)?;
+                        features.insert(
+                            static_shell_requirement(literal)
+                                .map_err(|_| LogicalJobProjectionError::InvalidShell)?,
+                        );
+                    }
+                    ShellTemplate::Dynamic { .. } => {}
+                }
+            }
+            SemanticStep::Action { reference, .. } => match reference {
+                ActionReference::Repository { .. } => {
+                    features.insert(RunnerFeature::REPOSITORY_ACTIONS);
+                }
+                ActionReference::Local { .. } => {
+                    features.insert(RunnerFeature::LOCAL_ACTIONS);
+                }
+                ActionReference::Container { .. } => {
+                    return Err(LogicalJobProjectionError::Unsupported(
+                        UnsupportedLogicalJobSemantics::ContainerAction,
+                    ));
+                }
+            },
+        }
+    }
+    Ok(requirements.with_features(features))
+}
+
+fn service_requirements(
+    requirements: RunnerRequirements,
+    services: &BTreeMap<String, ContainerSpec>,
+) -> RunnerRequirements {
+    if services.is_empty() {
+        return requirements;
+    }
+    let mut features = requirements.container_features().clone();
+    features.insert(ContainerFeature::SERVICE_CONTAINERS);
+    requirements.with_container_features(features)
+}
+
+fn literal_value_template(value: &ValueTemplate) -> Option<&str> {
+    let [segment] = value.segments() else {
+        return None;
+    };
+    segment.literal_value()
+}
+
 fn validate_plan_execution(
     plan: &automata_ci_core::WorkflowPlan,
     execution: &JobExecutionContext,
@@ -527,10 +644,10 @@ fn github_job_source(
     ))
 }
 
-fn runner_requirements(
+fn runner_requirements<'a>(
     runner: &ActivatedRunnerSelection,
-    profiles: &GithubRunnerProfileCatalog,
-) -> Result<RunnerRequirements, LogicalJobProjectionError> {
+    profiles: &'a GithubRunnerProfileCatalog,
+) -> Result<(RunnerRequirements, &'a GithubRunnerProfileMapping), LogicalJobProjectionError> {
     let mut mapped: Option<&GithubRunnerProfileMapping> = None;
     for label in runner.labels() {
         let Some(candidate) = profiles.get(label) else {
@@ -541,31 +658,28 @@ fn runner_requirements(
         }
         mapped = Some(candidate);
     }
+    let mapped = mapped.ok_or(LogicalJobProjectionError::MissingRunnerProfilePolicy)?;
 
     let mut requirements = RunnerRequirements::default().with_labels(
         runner
             .labels()
             .iter()
-            .filter(|label| mapped.is_none_or(|mapping| mapping.selector() != *label))
+            .filter(|label| mapped.selector() != *label)
             .cloned(),
     );
     if let Some(group) = runner.group() {
         requirements = requirements.with_eligible_groups([group.clone()]);
     }
 
-    let mut operating_system = mapped.map_or(MergedSelector::Unset, |mapping| {
-        MergedSelector::Value(mapping.operating_system().clone())
-    });
-    let mut architecture = mapped.map_or(MergedSelector::Unset, |mapping| {
-        MergedSelector::Value(mapping.architecture().clone())
-    });
+    let mut operating_system = MergedSelector::Value(mapped.operating_system().clone());
+    let mut architecture = MergedSelector::Value(mapped.architecture().clone());
     for label in runner.labels() {
         match label.as_str() {
-            "linux" => merge_selector(&mut operating_system, OperatingSystem::Linux),
-            "windows" => merge_selector(&mut operating_system, OperatingSystem::Windows),
-            "macos" => merge_selector(&mut operating_system, OperatingSystem::Macos),
-            "x64" | "x86_64" => merge_selector(&mut architecture, Architecture::X86_64),
-            "arm64" | "aarch64" => merge_selector(&mut architecture, Architecture::Aarch64),
+            "linux" => merge_selector(&mut operating_system, &OperatingSystem::Linux),
+            "windows" => merge_selector(&mut operating_system, &OperatingSystem::Windows),
+            "macos" => merge_selector(&mut operating_system, &OperatingSystem::Macos),
+            "x64" | "x86_64" => merge_selector(&mut architecture, &Architecture::X86_64),
+            "arm64" | "aarch64" => merge_selector(&mut architecture, &Architecture::Aarch64),
             _ => {}
         }
     }
@@ -574,11 +688,9 @@ fn runner_requirements(
     {
         return Err(LogicalJobProjectionError::ConflictingRunnerSelectors);
     }
-    if let Some(mapping) = mapped {
-        requirements = requirements
-            .with_environment_profile(mapping.environment_profile().clone())
-            .with_container_features(mapping.container_features().iter().cloned());
-    }
+    requirements = requirements
+        .with_environment_profile(mapped.environment_profile().clone())
+        .with_container_features(mapped.container_features().iter().cloned());
     if let MergedSelector::Value(value) = operating_system {
         requirements = match value {
             OperatingSystem::Windows => requirements.with_windows_hyperv_container(),
@@ -588,7 +700,22 @@ fn runner_requirements(
     if let MergedSelector::Value(value) = architecture {
         requirements = requirements.with_architecture(value);
     }
-    Ok(requirements)
+    Ok((requirements, mapped))
+}
+
+fn validate_profile_runtime_features(
+    selected: &GithubRunnerProfileMapping,
+    required: &BTreeSet<RunnerFeature>,
+) -> Result<(), LogicalJobProjectionError> {
+    let supported = selected
+        .supported_runner_features()
+        .ok_or(LogicalJobProjectionError::MissingRunnerFeaturePolicy)?;
+    if let Some(feature) = required.difference(supported).next() {
+        return Err(LogicalJobProjectionError::UnsupportedRunnerFeature {
+            feature: feature.clone(),
+        });
+    }
+    Ok(())
 }
 
 fn resource_allocation(
@@ -631,15 +758,13 @@ fn resource_allocation(
 }
 
 enum MergedSelector<T> {
-    Unset,
     Value(T),
     Conflict,
 }
 
-fn merge_selector<T: Eq>(slot: &mut MergedSelector<T>, value: T) {
+fn merge_selector<T: Eq>(slot: &mut MergedSelector<T>, value: &T) {
     match slot {
-        MergedSelector::Unset => *slot = MergedSelector::Value(value),
-        MergedSelector::Value(current) if current == &value => {}
+        MergedSelector::Value(current) if current == value => {}
         MergedSelector::Value(_) | MergedSelector::Conflict => {
             *slot = MergedSelector::Conflict;
         }
@@ -673,12 +798,24 @@ fn validate_workspace_platform(
 fn project_steps(
     steps: &[LogicalStepTemplate],
     default_shell: Option<&automata_ci_core::Located<CompiledValueTemplate>>,
+    job_key: &WorkflowJobKey,
+    runtime: &automata_ci_core::JobRuntimeContext,
+    activation_evaluation: Option<(&GithubLogicalActivationEvaluator, ActivationStatus)>,
 ) -> Result<Vec<StepIr>, LogicalJobProjectionError> {
     let ids = step_ids(steps)?;
     steps
         .iter()
         .zip(ids)
-        .map(|(step, id)| project_step(step, id, default_shell))
+        .map(|(step, id)| {
+            project_step(
+                step,
+                id,
+                default_shell,
+                job_key,
+                runtime,
+                activation_evaluation,
+            )
+        })
         .collect()
 }
 
@@ -686,6 +823,9 @@ fn project_step(
     step: &LogicalStepTemplate,
     id: StepId,
     default_shell: Option<&automata_ci_core::Located<CompiledValueTemplate>>,
+    job_key: &WorkflowJobKey,
+    runtime: &automata_ci_core::JobRuntimeContext,
+    activation_evaluation: Option<(&GithubLogicalActivationEvaluator, ActivationStatus)>,
 ) -> Result<StepIr, LogicalJobProjectionError> {
     let name = match step.name() {
         Some(name) => value_template(name.value())?,
@@ -699,7 +839,12 @@ fn project_step(
     let kind = match step.execution() {
         LogicalStepKind::Run(run) => {
             let command = value_template(run.script().value())?;
-            let shell = shell_template(run.shell().or(default_shell))?;
+            let shell = shell_template(
+                run.shell().or(default_shell),
+                job_key,
+                runtime,
+                activation_evaluation,
+            )?;
             let mut values = RunValueTemplates::new(command, shell);
             if let Some(directory) = run.working_directory() {
                 values = values.with_working_directory(value_template(directory.value())?);
@@ -855,26 +1000,42 @@ fn runtime_timeout(
 
 fn shell_template(
     shell: Option<&automata_ci_core::Located<CompiledValueTemplate>>,
+    job_key: &WorkflowJobKey,
+    runtime: &automata_ci_core::JobRuntimeContext,
+    activation_evaluation: Option<(&GithubLogicalActivationEvaluator, ActivationStatus)>,
 ) -> Result<ShellTemplate, LogicalJobProjectionError> {
     let Some(shell) = shell else {
         return Ok(ShellTemplate::default_shell());
     };
-    match shell.value() {
-        CompiledValueTemplate::Literal(value) => {
-            if value.trim().is_empty() || value.chars().any(char::is_control) {
-                return Err(LogicalJobProjectionError::InvalidShell);
-            }
-            let template = ValueTemplate::literal(value)
-                .map_err(LogicalJobProjectionError::InvalidValueTemplate)?;
-            if value.contains("{0}") {
-                Ok(ShellTemplate::command_template(template))
-            } else {
-                Ok(ShellTemplate::named(template))
-            }
+    let value = match shell.value() {
+        CompiledValueTemplate::Literal(value) => value.clone(),
+        CompiledValueTemplate::Expression(expression) => {
+            let (evaluator, status) =
+                activation_evaluation.ok_or(LogicalJobProjectionError::InvalidShell)?;
+            evaluate_activated_string(
+                evaluator,
+                expression,
+                job_key,
+                runtime,
+                status,
+                ActivationEvaluationSite::StepShell,
+            )
+            .map_err(|_| LogicalJobProjectionError::InvalidShell)?
         }
-        CompiledValueTemplate::Expression(_) => {
-            Ok(ShellTemplate::dynamic(value_template(shell.value())?))
-        }
+    };
+    literal_shell_template(&value)
+}
+
+fn literal_shell_template(value: &str) -> Result<ShellTemplate, LogicalJobProjectionError> {
+    if value.trim().is_empty() || value.chars().any(char::is_control) {
+        return Err(LogicalJobProjectionError::InvalidShell);
+    }
+    let template =
+        ValueTemplate::literal(value).map_err(LogicalJobProjectionError::InvalidValueTemplate)?;
+    if value.contains("{0}") {
+        Ok(ShellTemplate::command_template(template))
+    } else {
+        Ok(ShellTemplate::named(template))
     }
 }
 
@@ -959,6 +1120,24 @@ fn single_program<'a>(
     Ok(program)
 }
 
+pub(crate) fn logical_action_references(
+    job: ValidatedLogicalJob<'_>,
+) -> Result<Vec<ActionReference>, LogicalJobProjectionError> {
+    let LogicalJobKind::Steps(step_job) = job.execution() else {
+        return Err(LogicalJobProjectionError::Unsupported(
+            UnsupportedLogicalJobSemantics::ReusableWorkflowJob,
+        ));
+    };
+    step_job
+        .steps()
+        .iter()
+        .filter_map(|step| match step.execution() {
+            LogicalStepKind::Run(_) => None,
+            LogicalStepKind::Uses(uses) => Some(action_reference(uses.reference().value())),
+        })
+        .collect()
+}
+
 fn action_reference(source: &str) -> Result<ActionReference, LogicalJobProjectionError> {
     if source.contains("${{") {
         return Err(LogicalJobProjectionError::InvalidActionReference);
@@ -1040,23 +1219,10 @@ fn valid_action_component(value: &str) -> bool {
 }
 
 fn valid_action_revision(value: &str) -> bool {
-    !value.is_empty()
-        && value != "@"
-        && value.trim() == value
-        && !value.starts_with(['/', '.', '-'])
-        && !value.ends_with(['/', '.'])
-        && !value.contains("//")
-        && !value.contains("..")
-        && !value.contains("@{")
-        && value.split('/').all(|component| {
-            !component.is_empty()
-                && !component.starts_with('.')
-                && !component.ends_with('.')
-                && !component.as_bytes().ends_with(b".lock")
-        })
-        && !value.chars().any(|character| {
-            character.is_control() || character.is_whitespace() || "\\~^:?*[]".contains(character)
-        })
+    value.len() == 40
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
 fn encode_runtime_context(
@@ -1155,6 +1321,18 @@ pub enum LogicalJobProjectionError {
     /// More than one activated selector maps to an exact environment profile.
     #[error("runner profile selector is ambiguous")]
     AmbiguousRunnerProfile,
+    /// No activated selector named an immutable repository-pinned profile.
+    #[error("runner selection has no immutable runtime profile policy")]
+    MissingRunnerProfilePolicy,
+    /// A historical selected profile predates the current feature-policy contract.
+    #[error("selected runner profile has no current runner-feature policy")]
+    MissingRunnerFeaturePolicy,
+    /// Immutable source requirements exceed the selected profile's declared support.
+    #[error("selected runner profile does not support source-required feature {feature}")]
+    UnsupportedRunnerFeature {
+        /// Canonical, non-secret feature identity derived from immutable source semantics.
+        feature: RunnerFeature,
+    },
     /// Generic labels select mutually incompatible platforms.
     #[error("runner selectors require conflicting platforms")]
     ConflictingRunnerSelectors,

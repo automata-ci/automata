@@ -28,6 +28,7 @@ mod reusable_runtime;
 mod reusable_workflow;
 mod run_finalization;
 mod runner_policy;
+mod runtime_requirements;
 mod service;
 mod workflow_rerun;
 
@@ -110,7 +111,7 @@ pub use run_finalization::{
 pub use runner_policy::{
     GITHUB_RUNNER_POLICY_MEDIA_TYPE, GithubRunnerPolicy, GithubRunnerPolicyError,
     MAX_GITHUB_RUNNER_POLICY_BYTES, MAX_GITHUB_RUNNER_POLICY_CONTAINER_FEATURES,
-    MAX_GITHUB_RUNNER_POLICY_MAPPINGS,
+    MAX_GITHUB_RUNNER_POLICY_MAPPINGS, MAX_GITHUB_RUNNER_POLICY_RUNNER_FEATURES,
 };
 pub use service::{WorkflowAdmissionError, WorkflowAdmissionService};
 pub use workflow_rerun::WorkflowRerunService;

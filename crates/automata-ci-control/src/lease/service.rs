@@ -313,18 +313,7 @@ impl<'a> LeasePollService<'a> {
             .map(candidate_from_durable)
             .collect::<Result<Vec<_>, _>>()?;
         self.observer.observe_candidates(candidates.len());
-        let mut scheduler_candidates = Vec::with_capacity(candidates.len());
-        for candidate in &candidates {
-            let disposition = if let Some(gate) = self.attempt_gate {
-                gate.evaluate(candidate.candidate.attempt_id(), observed_at)
-                    .await?
-            } else {
-                RunnableAttemptGateDisposition::Ready
-            };
-            if disposition == RunnableAttemptGateDisposition::Ready {
-                scheduler_candidates.push(candidate.candidate.clone());
-            }
-        }
+        let scheduler_candidates = self.eligible_candidates(&candidates, observed_at).await?;
         let runners = [effective];
         let input = SchedulingInput::new(&scheduler_candidates, &runners)
             .map_err(LeasePollError::InvalidSchedulingInput)?;
@@ -357,6 +346,29 @@ impl<'a> LeasePollService<'a> {
                 Self::receipt_outcome(poll, &receipt, None, false)
             }
         }
+    }
+
+    async fn eligible_candidates(
+        &self,
+        candidates: &[ApplicationCandidate],
+        observed_at: UnixMillis,
+    ) -> Result<Vec<RunnableCandidate>, LeasePollError> {
+        let mut eligible = Vec::with_capacity(candidates.len());
+        for candidate in candidates {
+            if !candidate.windows_placement_authorized {
+                continue;
+            }
+            let disposition = if let Some(gate) = self.attempt_gate {
+                gate.evaluate(candidate.candidate.attempt_id(), observed_at)
+                    .await?
+            } else {
+                RunnableAttemptGateDisposition::Ready
+            };
+            if disposition == RunnableAttemptGateDisposition::Ready {
+                eligible.push(candidate.candidate.clone());
+            }
+        }
+        Ok(eligible)
     }
 
     async fn claim(
@@ -396,9 +408,14 @@ impl<'a> LeasePollService<'a> {
             .checked_add(self.config.lease_time_to_live().as_millis())
             .map(UnixMillis::new)
             .ok_or(LeasePollError::LeaseExpiryOverflow)?;
-        let claim = TryClaimAttempt::new(
+        let durable = page
+            .candidates()
+            .iter()
+            .find(|candidate| candidate.attempt_id() == placement.attempt_id())
+            .ok_or(LeasePollInvariant::UnknownPlacementAttempt)?;
+        let claim = TryClaimAttempt::for_candidate(
             poll.request_key,
-            placement.attempt_id(),
+            durable,
             self.lease_ids.next_lease_id(),
             observed_at,
             expires_at,
@@ -579,6 +596,7 @@ impl ValidatedLeasePoll {
 
 struct ApplicationCandidate {
     candidate: RunnableCandidate,
+    windows_placement_authorized: bool,
 }
 
 fn ensure_routing_context(
@@ -688,5 +706,6 @@ fn candidate_from_durable(
             durable.queued_at(),
             routing,
         ),
+        windows_placement_authorized: durable.windows_placement_is_authorizable(),
     })
 }

@@ -26,9 +26,10 @@ use automata_ci_control::{
     },
 };
 use automata_ci_core::{
-    Architecture, AttemptId, AttemptNumber, JobId, JobIrVersion, JobLifecycle, LeaseId,
-    OperatingSystem, OperationId, RunnerCapabilities, RunnerFeature, RunnerGroup, RunnerLabel,
-    RunnerPlatform, RunnerRequirements, RunnerSessionId, Sha256Digest, UnixMillis,
+    Architecture, AttemptId, AttemptNumber, EnvironmentProfile, EnvironmentProfileId, JobId,
+    JobIrVersion, JobLifecycle, LeaseId, OperatingSystem, OperationId, RunnerCapabilities,
+    RunnerFeature, RunnerGroup, RunnerLabel, RunnerPlatform, RunnerRequirements, RunnerSessionId,
+    Sha256Digest, UnixMillis,
 };
 use automata_ci_store::{
     AcknowledgeRunnerCommands, CloseRunnerSession, CommandCursor, CommandReplayLimit,
@@ -561,6 +562,48 @@ async fn claim_receipts_bind_one_based_slots_and_cancellation_delivery() -> Test
             database.store().get_attempt(attempt_id).await?.lifecycle(),
             JobLifecycle::Lost,
             "cancelling work must never silently requeue"
+        );
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
+async fn windows_claim_without_authenticated_placement_grant_is_rejected_under_lock() -> TestResult
+{
+    run_with_database(|database| async move {
+        let seed = seed_control_plane(database.pool(), 1).await?;
+        let fence = seed.session_fences[0];
+        let profile = EnvironmentProfile::new(
+            EnvironmentProfileId::new("automata.test/windows-2025")?,
+            Sha256Digest::from_bytes([0x25; 32]),
+        );
+        let windows_job = insert_job_with_requirements(
+            &database,
+            seed.run_id,
+            "windows-without-trust",
+            RunnerRequirements::default()
+                .with_windows_hyperv_container()
+                .with_architecture(Architecture::X86_64)
+                .with_environment_profile(profile),
+        )
+        .await?;
+        let attempt_id = insert_attempt(database.store(), windows_job, 1, 10).await?;
+
+        // This deliberately bypasses LeasePollService and constructs the old,
+        // grant-free claim shape. The durable transaction must still fail closed.
+        let request = claim(&database, OperationId::new(), attempt_id, fence, 1).await?;
+        assert!(request.windows_placement_grant().is_none());
+        let receipt = database.store().try_claim(request).await?;
+
+        assert!(matches!(
+            receipt.outcome(),
+            TryClaimOutcome::Rejected(ClaimRejection::NotRoutable)
+        ));
+        assert_eq!(
+            database.store().get_attempt(attempt_id).await?.lifecycle(),
+            JobLifecycle::Queued
         );
         Ok(())
     })

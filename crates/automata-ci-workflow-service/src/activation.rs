@@ -205,6 +205,8 @@ pub enum ActivationEvaluationSite {
     JobResourceQuantity,
     /// One reusable-workflow input binding.
     ReusableWorkflowInput,
+    /// A run step shell selected for one concrete job instance.
+    StepShell,
 }
 
 impl fmt::Display for ActivationEvaluationSite {
@@ -225,6 +227,7 @@ impl fmt::Display for ActivationEvaluationSite {
             Self::JobContinueOnError => "job continue-on-error",
             Self::JobResourceQuantity => "job resource quantity",
             Self::ReusableWorkflowInput => "reusable workflow input",
+            Self::StepShell => "step shell",
         })
     }
 }
@@ -292,6 +295,31 @@ impl ActivationEvaluationContext<'_> {
             status,
             matrix: None,
             strategy: None,
+        }
+    }
+
+    const fn activated_instance<'a>(
+        job_key: &'a WorkflowJobKey,
+        runtime: &'a JobRuntimeContext,
+        status: ActivationStatus,
+        include_instance: bool,
+    ) -> ActivationEvaluationContext<'a> {
+        ActivationEvaluationContext {
+            job_key,
+            inputs: runtime.inputs(),
+            vars: runtime.vars(),
+            needs: runtime.needs(),
+            status,
+            matrix: if include_instance {
+                Some(runtime.matrix())
+            } else {
+                None
+            },
+            strategy: if include_instance {
+                Some(runtime.strategy())
+            } else {
+                None
+            },
         }
     }
 
@@ -1471,6 +1499,25 @@ where
         .map_err(|source| LogicalActivationError::Evaluation { site, source })
 }
 
+pub(crate) fn evaluate_activated_string<E>(
+    evaluator: &E,
+    expression: &CompiledExpressionTemplate,
+    job_key: &WorkflowJobKey,
+    runtime: &JobRuntimeContext,
+    status: ActivationStatus,
+    site: ActivationEvaluationSite,
+) -> Result<String, LogicalActivationError<E::Error>>
+where
+    E: LogicalActivationEvaluator,
+{
+    let base = ActivationEvaluationContext::activated_instance(job_key, runtime, status, false);
+    let session = evaluator
+        .prepare(&base)
+        .map_err(|source| LogicalActivationError::Preparation { source })?;
+    let instance = ActivationEvaluationContext::activated_instance(job_key, runtime, status, true);
+    evaluate_string(&session, expression, &instance, site)
+}
+
 fn evaluate_condition<E>(
     evaluator: &E,
     expression: &CompiledExpressionTemplate,
@@ -1580,7 +1627,8 @@ const fn evaluation_site_allows_context(
         | ActivationEvaluationSite::RunnerLabel
         | ActivationEvaluationSite::JobTimeout
         | ActivationEvaluationSite::JobContinueOnError
-        | ActivationEvaluationSite::JobResourceQuantity => matches!(
+        | ActivationEvaluationSite::JobResourceQuantity
+        | ActivationEvaluationSite::StepShell => matches!(
             context,
             ExpressionContext::Github
                 | ExpressionContext::Inputs

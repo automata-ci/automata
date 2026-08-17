@@ -108,14 +108,32 @@ generations and no `PATH` probe. The current Ubuntu profile advertises only its
 pinned Node 24 executable. Container-action execution and `runs.plugin` remain
 unsupported.
 
-`JobExecutor::admit` is synchronous and Job IR contains immutable action
-references rather than resolved `action.yml` bytes. Consequently repository
-runtime discovery cannot literally precede the lease in this component. A
-future cross-layer materialization/admission contract must carry the prepared
-action graph or its runtime requirements into Job IR to close that boundary.
-Checked-out local action metadata is created by preceding workflow code and is
-necessarily read from the isolated workspace after provider creation; it is
-still validated before any local action phase executes.
+The control-plane activation boundary anonymously resolves exact-commit public
+repository metadata before Job IR publication and carries the complete
+statically knowable runtime feature set in `RunnerRequirements`:
+JavaScript/composite execution, the exact Node generation, literal composite
+shells, repository action handling, command files, and summaries. A `$/...`
+self-repository child compiled from repository-action metadata is rebound to
+the same repository and exact revision, so its definition is prepared
+recursively from that immutable repository snapshot. A `./...` child remains
+rooted in the workflow workspace and currently fails closed before Job IR
+publication or runner lease.
+Top-level literal and activation-resolved run shells are concretized by logical
+projection. Mutable tag/branch references and repository composite shell
+expressions fail closed pending ACT-02 resolution and binding support. Runner
+capability matching therefore happens before lease acquisition. This executor
+deliberately repeats repository preparation and runtime validation before
+secret-custody acknowledgement or provider work as a defense against
+capability drift.
+
+Checked-out local action metadata is different: preceding workflow code may
+create or replace it, so its runtime requirements cannot be soundly known at
+control-plane activation time. Such source references currently fail
+activation before Job IR publication or runner lease. The executor retains its
+bounded in-sandbox metadata compiler and exact runtime/shell checks as defense
+in depth, but that JIT path is not advertised as runnable source support.
+Private repository action resolution is not yet composed; it remains ACT-02
+work rather than silently borrowing workflow credentials.
 
 Prepared inputs retain metadata declaration order and use case-insensitive
 caller lookup. Every declared input is present: an omitted input uses its

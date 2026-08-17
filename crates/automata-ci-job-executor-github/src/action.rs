@@ -221,7 +221,7 @@ impl CheckedOutLocalActionPreparer {
             .decoder
             .decode(&document)
             .map_err(|error| map_metadata_error(&error))?;
-        let definition = prepare_definition(&metadata, &self.conditions)?;
+        let definition = prepare_definition(&metadata, &self.conditions, None)?;
         PreparedLocalAction::new(path.clone(), definition).map_err(|_| metadata_error())
     }
 }
@@ -306,8 +306,8 @@ impl ActionPreparationPort for ResolvedBundleActionPreparer {
         request: ActionPreparationRequest<'_>,
     ) -> Result<PreparedAction, ActionPreparationError> {
         let ActionReference::Repository {
-            repository,
-            revision,
+            repository: repository_name,
+            revision: revision_name,
             subpath,
         } = request.reference()
         else {
@@ -315,8 +315,8 @@ impl ActionPreparationPort for ResolvedBundleActionPreparer {
                 ActionPreparationErrorKind::UnsupportedReference,
             ));
         };
-        let repository = RepositoryId::new(repository.clone()).map_err(|_| internal())?;
-        let revision = RevisionSpec::new(revision.clone()).map_err(|_| internal())?;
+        let repository = RepositoryId::new(repository_name.clone()).map_err(|_| internal())?;
+        let revision = RevisionSpec::new(revision_name.clone()).map_err(|_| internal())?;
         let subpath = match subpath {
             Some(value) => ActionSubpath::new(value.clone()).map_err(|_| internal())?,
             None => ActionSubpath::root(),
@@ -377,8 +377,23 @@ impl ActionPreparationPort for ResolvedBundleActionPreparer {
             bundle.archive_bytes().clone(),
             bundle.subpath().as_str(),
             &self.conditions,
+            Some(RepositoryActionSource {
+                repository: bundle.repository().as_str(),
+                revision: bundle.resolved_revision().as_str(),
+            }),
         )
     }
+}
+
+#[derive(Clone, Copy)]
+struct RepositoryActionSource<'a> {
+    repository: &'a str,
+    revision: &'a str,
+}
+
+enum NestedActionReference {
+    Action(ActionReference),
+    SelfRepository(ActionSubpath),
 }
 
 fn prepare_metadata(
@@ -387,8 +402,9 @@ fn prepare_metadata(
     archive: bytes::Bytes,
     subpath: &str,
     conditions: &GithubConditionCompiler,
+    source: Option<RepositoryActionSource<'_>>,
 ) -> Result<PreparedAction, ActionPreparationError> {
-    let definition = prepare_definition(metadata, conditions)?;
+    let definition = prepare_definition(metadata, conditions, source)?;
     PreparedAction::with_definition(archive_digest, archive, subpath, definition)
         .map_err(|_| internal())
 }
@@ -396,11 +412,16 @@ fn prepare_metadata(
 fn prepare_definition(
     metadata: &GithubActionMetadata,
     conditions: &GithubConditionCompiler,
+    source: Option<RepositoryActionSource<'_>>,
 ) -> Result<PreparedActionDefinition, ActionPreparationError> {
     let execution = if let Some(javascript) = metadata.javascript() {
         PreparedActionExecution::Javascript(Box::new(prepare_javascript(javascript, conditions)?))
     } else if let Some(composite) = metadata.composite() {
-        PreparedActionExecution::Composite(prepare_composite(composite.steps(), conditions)?)
+        PreparedActionExecution::Composite(prepare_composite(
+            composite.steps(),
+            conditions,
+            source,
+        )?)
     } else {
         return Err(ActionPreparationError::new(
             ActionPreparationErrorKind::UnsupportedExecution,
@@ -468,6 +489,7 @@ fn prepare_javascript(
 fn prepare_composite(
     steps: &[CompositeStep],
     conditions: &GithubConditionCompiler,
+    source: Option<RepositoryActionSource<'_>>,
 ) -> Result<PreparedCompositeAction, ActionPreparationError> {
     let steps = steps
         .iter()
@@ -476,7 +498,7 @@ fn prepare_composite(
                 prepare_composite_run(step, conditions).map(PreparedCompositeStep::Run)
             }
             CompositeStep::Uses(step) => {
-                prepare_composite_uses(step, conditions).map(PreparedCompositeStep::Uses)
+                prepare_composite_uses(step, conditions, source).map(PreparedCompositeStep::Uses)
             }
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -508,8 +530,9 @@ fn prepare_composite_run(
 fn prepare_composite_uses(
     step: &CompositeUsesStep,
     conditions: &GithubConditionCompiler,
+    source: Option<RepositoryActionSource<'_>>,
 ) -> Result<PreparedCompositeUsesStep, ActionPreparationError> {
-    let reference = prepare_nested_reference(step.uses().text())?;
+    let reference = bind_nested_reference(prepare_nested_reference(step.uses().text())?, source)?;
     PreparedCompositeUsesStep::new(
         prepare_composite_step_metadata(
             step.name(),
@@ -523,6 +546,23 @@ fn prepare_composite_uses(
         prepare_key_values(step.environment(), conditions)?,
     )
     .map_err(|_| metadata_error())
+}
+
+fn bind_nested_reference(
+    reference: NestedActionReference,
+    source: Option<RepositoryActionSource<'_>>,
+) -> Result<ActionReference, ActionPreparationError> {
+    match reference {
+        NestedActionReference::Action(reference) => Ok(reference),
+        NestedActionReference::SelfRepository(subpath) => {
+            let source = source.ok_or_else(metadata_error)?;
+            Ok(ActionReference::Repository {
+                repository: source.repository.to_owned(),
+                revision: source.revision.to_owned(),
+                subpath: Some(subpath.as_str().to_owned()),
+            })
+        }
+    }
 }
 
 fn prepare_composite_step_metadata(
@@ -657,15 +697,20 @@ fn find_expression_end(source: &str, mut cursor: usize) -> Option<usize> {
     None
 }
 
-fn prepare_nested_reference(source: &str) -> Result<ActionReference, ActionPreparationError> {
+fn prepare_nested_reference(source: &str) -> Result<NestedActionReference, ActionPreparationError> {
     if source.contains("${{") {
         return Err(metadata_error());
     }
     if source.starts_with("./") {
         validate_local_reference(source).map_err(|()| metadata_error())?;
-        return Ok(ActionReference::Local {
+        return Ok(NestedActionReference::Action(ActionReference::Local {
             path: source.to_owned(),
-        });
+        }));
+    }
+    if let Some(relative) = source.strip_prefix("$/") {
+        let relative = relative.trim_start_matches('/');
+        let subpath = ActionSubpath::new(relative.to_owned()).map_err(|_| metadata_error())?;
+        return Ok(NestedActionReference::SelfRepository(subpath));
     }
     if source.starts_with("docker://") {
         if source.len() == "docker://".len()
@@ -674,9 +719,9 @@ fn prepare_nested_reference(source: &str) -> Result<ActionReference, ActionPrepa
         {
             return Err(metadata_error());
         }
-        return Ok(ActionReference::Container {
+        return Ok(NestedActionReference::Action(ActionReference::Container {
             image: source.to_owned(),
-        });
+        }));
     }
     let (path, revision) = source.split_once('@').ok_or_else(metadata_error)?;
     if source.matches('@').count() != 1 || !valid_action_revision(revision) {
@@ -692,11 +737,11 @@ fn prepare_nested_reference(source: &str) -> Result<ActionReference, ActionPrepa
     {
         return Err(metadata_error());
     }
-    Ok(ActionReference::Repository {
+    Ok(NestedActionReference::Action(ActionReference::Repository {
         repository: format!("{}/{}", components[0], components[1]),
         revision: revision.to_owned(),
         subpath: (components.len() > 2).then(|| components[2..].join("/")),
-    })
+    }))
 }
 
 fn validate_local_reference(source: &str) -> Result<(), ()> {
@@ -769,4 +814,121 @@ const fn metadata_error() -> ActionPreparationError {
 
 const fn internal() -> ActionPreparationError {
     ActionPreparationError::new(ActionPreparationErrorKind::Internal)
+}
+
+#[cfg(test)]
+mod tests {
+    use automata_ci_action_github::GithubActionMetadataDecoder;
+
+    use super::*;
+
+    #[test]
+    fn repository_composite_workspace_children_remain_workspace_references() {
+        let document = ActionDefinitionDocument::metadata_yaml(
+            "action.yml",
+            Bytes::from_static(
+                b"runs:\n  using: composite\n  steps:\n    - uses: ./nested/action\n",
+            ),
+        );
+        let metadata = GithubActionMetadataDecoder::default()
+            .decode(&document)
+            .expect("metadata");
+        let definition = prepare_definition(
+            &metadata,
+            &GithubConditionCompiler::default(),
+            Some(RepositoryActionSource {
+                repository: "owner/action",
+                revision: "0123456789abcdef0123456789abcdef01234567",
+            }),
+        )
+        .expect("prepared definition");
+        let [PreparedCompositeStep::Uses(step)] =
+            definition.composite().expect("composite").steps()
+        else {
+            panic!("one nested action expected")
+        };
+        assert_eq!(
+            step.reference(),
+            &ActionReference::Local {
+                path: "./nested/action".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn repository_composite_self_repository_children_bind_to_the_immutable_source() {
+        let document = ActionDefinitionDocument::metadata_yaml(
+            "action.yml",
+            Bytes::from_static(
+                b"runs:\n  using: composite\n  steps:\n    - uses: $/nested/action\n",
+            ),
+        );
+        let metadata = GithubActionMetadataDecoder::default()
+            .decode(&document)
+            .expect("metadata");
+        let definition = prepare_definition(
+            &metadata,
+            &GithubConditionCompiler::default(),
+            Some(RepositoryActionSource {
+                repository: "owner/action",
+                revision: "0123456789abcdef0123456789abcdef01234567",
+            }),
+        )
+        .expect("prepared definition");
+        let [PreparedCompositeStep::Uses(step)] =
+            definition.composite().expect("composite").steps()
+        else {
+            panic!("one nested action expected")
+        };
+        assert_eq!(
+            step.reference(),
+            &ActionReference::Repository {
+                repository: "owner/action".to_owned(),
+                revision: "0123456789abcdef0123456789abcdef01234567".to_owned(),
+                subpath: Some("nested/action".to_owned()),
+            }
+        );
+    }
+
+    #[test]
+    fn checked_out_composite_local_children_remain_workspace_references() {
+        let document = ActionDefinitionDocument::metadata_yaml(
+            "action.yml",
+            Bytes::from_static(
+                b"runs:\n  using: composite\n  steps:\n    - uses: ./nested/action\n",
+            ),
+        );
+        let metadata = GithubActionMetadataDecoder::default()
+            .decode(&document)
+            .expect("metadata");
+        let definition = prepare_definition(&metadata, &GithubConditionCompiler::default(), None)
+            .expect("prepared definition");
+        let [PreparedCompositeStep::Uses(step)] =
+            definition.composite().expect("composite").steps()
+        else {
+            panic!("one nested action expected")
+        };
+        assert_eq!(
+            step.reference(),
+            &ActionReference::Local {
+                path: "./nested/action".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn self_repository_children_without_repository_provenance_fail_closed() {
+        let document = ActionDefinitionDocument::metadata_yaml(
+            "action.yml",
+            Bytes::from_static(
+                b"runs:\n  using: composite\n  steps:\n    - uses: $/nested/action\n",
+            ),
+        );
+        let metadata = GithubActionMetadataDecoder::default()
+            .decode(&document)
+            .expect("metadata");
+        let error = prepare_definition(&metadata, &GithubConditionCompiler::default(), None)
+            .expect_err("self-repository reference needs immutable source provenance");
+        assert_eq!(error.kind(), ActionPreparationErrorKind::Metadata);
+    }
 }

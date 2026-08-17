@@ -1,6 +1,8 @@
 use std::{collections::BTreeSet, fmt, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
+use automata_ci_action::{ActionBundleLimits, ActionResolver, ImmutableActionResolver};
+use automata_ci_action_github::{GithubActionMetadataDecoder, GithubActionMetadataLimits};
 use automata_ci_auth::{
     authorization::AuthorizationContext,
     github::GithubEndpoints,
@@ -43,6 +45,9 @@ use automata_ci_control::runner_control::{
 use automata_ci_control::scheduling::{DeterministicScheduler, SchedulerPolicy};
 use automata_ci_core::RunId;
 use automata_ci_github::MAX_GITHUB_WEBHOOK_SECRET_BYTES;
+use automata_ci_job_executor_github::{
+    ActionPreparationPort, NoRepositoryCredentials, ResolvedBundleActionPreparer,
+};
 use automata_ci_key_management::KeyEncryptionProvider;
 use automata_ci_protocol::ProtocolLimits;
 use automata_ci_provisioning::{
@@ -69,6 +74,7 @@ use automata_ci_runner_transport::{
     ConfigurationError as TransportConfigurationError, RunnerControlHandler, RunnerControlServer,
     ServerTlsConfig, TransportLimits,
 };
+use automata_ci_scm::ScmProvider;
 use automata_ci_secret::{SecretProvider, SecretProviderRegistry};
 use automata_ci_secret_postgres::PostgresSecretProvider;
 use automata_ci_store::{
@@ -111,6 +117,7 @@ use super::github_job_runtime_authority::unavailable_github_job_runtime_authorit
 use super::github_oidc::{
     GithubOidcProductError, build_github_oidc_product, compose_runtime_authority_issuer,
 };
+use super::github_provider_runtime::provider_http_endpoint;
 use super::state_metrics::ControlPlaneStateSampler;
 use super::{
     ControlPlaneMaintenanceLoop, ControlPlaneMetrics, DatabaseGithubProviderConfig,
@@ -152,6 +159,7 @@ use crate::app::{
     workflow_dispatch_api::{WorkflowDispatchApiBackend, workflow_dispatch_api_router},
     workflow_rerun_api::{WorkflowRerunApiBackend, workflow_rerun_api_router},
 };
+use automata_ci_workflow_github::GithubConditionCompiler;
 
 use super::human_auth::HumanAuthRuntime;
 use super::installation_setup::InstallationSetupService;
@@ -340,14 +348,45 @@ impl ProductionComponents {
         let workflow_activations: Arc<dyn LogicalActivationRepository> = store.clone();
         let workflow_materializations: Arc<dyn LogicalMaterializationRepository> = store.clone();
         let workflow_executor: Arc<dyn AutonomousWorkflowPhaseExecutor> =
-            Arc::new(GithubAutonomousWorkflowPhaseExecutor::with_limits(
-                Arc::clone(&blob_store),
-                Arc::clone(&workflow_preparations),
-                Arc::clone(&workflow_activations),
-                Arc::clone(&workflow_materializations),
-                Arc::clone(&workflow_clock),
-                ProtocolLimits::default(),
-            ));
+            if let Some(github) = github_provider_config.as_ref() {
+                let endpoint = provider_http_endpoint(github.config().transport())?;
+                let scm: Arc<dyn ScmProvider> = Arc::new(endpoint);
+                let resolver: Arc<dyn ActionResolver> =
+                    Arc::new(ImmutableActionResolver::new(scm, Arc::clone(&blob_store)));
+                let actions: Arc<dyn ActionPreparationPort> = Arc::new(
+                    ResolvedBundleActionPreparer::new(
+                        resolver,
+                        Arc::new(NoRepositoryCredentials),
+                        Arc::new(GithubActionMetadataDecoder::new(
+                            GithubActionMetadataLimits::default(),
+                        )),
+                        GithubConditionCompiler::default(),
+                        ActionBundleLimits::default(),
+                        automata_ci_execution::MAX_COPY_BYTES as u64,
+                    )
+                    .map_err(|_| ServerCompositionError::InvalidGithubProviderConfiguration)?,
+                );
+                Arc::new(
+                    GithubAutonomousWorkflowPhaseExecutor::with_limits_and_action_preparer(
+                        Arc::clone(&blob_store),
+                        Arc::clone(&workflow_preparations),
+                        Arc::clone(&workflow_activations),
+                        Arc::clone(&workflow_materializations),
+                        Arc::clone(&workflow_clock),
+                        ProtocolLimits::default(),
+                        actions,
+                    ),
+                )
+            } else {
+                Arc::new(GithubAutonomousWorkflowPhaseExecutor::with_limits(
+                    Arc::clone(&blob_store),
+                    Arc::clone(&workflow_preparations),
+                    Arc::clone(&workflow_activations),
+                    Arc::clone(&workflow_materializations),
+                    Arc::clone(&workflow_clock),
+                    ProtocolLimits::default(),
+                ))
+            };
         let logical_activation_worker =
             LogicalActivationWorkerId::from_uuid(RunId::new().as_uuid())
                 .map_err(|_| ServerCompositionError::InvalidAutonomousWorkflowWorker)?;

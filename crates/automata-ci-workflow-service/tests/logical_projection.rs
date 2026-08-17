@@ -1,4 +1,7 @@
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 use automata_ci_core::{
     Architecture, ContainerFeature, ContextValue, EnvironmentProfile, EnvironmentProfileId,
@@ -143,7 +146,7 @@ jobs:
           TOKEN_HINT: ${{ secrets.SYNTHETIC_TOKEN }}
         run: echo ${{ matrix.target }}
       - name: Consume ${{ matrix.target }}
-        uses: synthetic/example-action/subdir@0123456789abcdef
+        uses: synthetic/example-action/subdir@0123456789abcdef0123456789abcdef01234567
         with:
           label: artifact-${{ matrix.target }}
 ";
@@ -297,8 +300,43 @@ fn profiles() -> GithubRunnerProfileCatalog {
         OperatingSystem::Linux,
         Architecture::X86_64,
     )
-    .expect("mapping")])
+    .expect("mapping")
+    .with_supported_runner_features(linux_runner_features())])
     .expect("catalog")
+}
+
+fn linux_runner_features() -> Vec<RunnerFeature> {
+    vec![
+        RunnerFeature::SHELL_STEPS,
+        RunnerFeature::DEFAULT_POSIX_SHELL,
+        RunnerFeature::BASH_SHELL,
+        RunnerFeature::SH_SHELL,
+        RunnerFeature::PYTHON_SHELL,
+        RunnerFeature::PWSH_SHELL,
+        RunnerFeature::JAVASCRIPT_ACTIONS,
+        RunnerFeature::NODE12_ACTIONS,
+        RunnerFeature::NODE16_ACTIONS,
+        RunnerFeature::NODE20_ACTIONS,
+        RunnerFeature::NODE24_ACTIONS,
+        RunnerFeature::COMPOSITE_ACTIONS,
+        RunnerFeature::REPOSITORY_ACTIONS,
+        RunnerFeature::LOCAL_ACTIONS,
+        RunnerFeature::COMMAND_FILES,
+        RunnerFeature::JOB_SUMMARIES,
+        RunnerFeature::OIDC_TOKENS,
+    ]
+}
+
+fn windows_runner_features() -> Vec<RunnerFeature> {
+    vec![
+        RunnerFeature::SHELL_STEPS,
+        RunnerFeature::DEFAULT_WINDOWS_SHELL,
+        RunnerFeature::PWSH_SHELL,
+        RunnerFeature::WINDOWS_POWERSHELL_SHELL,
+        RunnerFeature::CMD_SHELL,
+        RunnerFeature::COMMAND_FILES,
+        RunnerFeature::JOB_SUMMARIES,
+    ]
 }
 
 fn fixed_id<T>(value: u128, constructor: impl FnOnce(Uuid) -> T) -> T {
@@ -321,6 +359,15 @@ fn project_envelope_with_profiles_and_workspace(
     profiles: &GithubRunnerProfileCatalog,
     workspace: &str,
 ) -> JobIrEnvelope {
+    try_project_envelope_with_profiles_and_workspace(source, profiles, workspace)
+        .expect("projection")
+}
+
+fn try_project_envelope_with_profiles_and_workspace(
+    source: &str,
+    profiles: &GithubRunnerProfileCatalog,
+    workspace: &str,
+) -> Result<JobIrEnvelope, LogicalJobProjectionError> {
     let plan = plan(source);
     let activation = activate(&plan);
     let instance = &activation.instances()[0];
@@ -344,9 +391,91 @@ fn project_envelope_with_profiles_and_workspace(
             )
             .with_trust_snapshot(&trusted_snapshot()),
         )
-        .expect("projection")
-        .into_parts()
-        .0
+        .map(|projected| projected.into_parts().0)
+}
+
+#[test]
+fn selected_profile_rejects_source_required_feature_with_stable_sanitized_diagnostic() {
+    let source = r"name: Synthetic CI
+on: workflow_dispatch
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - shell: bash
+        run: echo public
+";
+    let supported = linux_runner_features()
+        .into_iter()
+        .filter(|feature| feature != &RunnerFeature::BASH_SHELL)
+        .collect::<Vec<_>>();
+    let profiles = GithubRunnerProfileCatalog::new([GithubRunnerProfileMapping::new(
+        "ubuntu-latest",
+        EnvironmentProfile::new(
+            EnvironmentProfileId::new("github/ubuntu-24-04").expect("profile id"),
+            Sha256Digest::from_bytes([3; 32]),
+        ),
+        OperatingSystem::Linux,
+        Architecture::X86_64,
+    )
+    .expect("mapping")
+    .with_supported_runner_features(supported)])
+    .expect("catalog");
+
+    let error =
+        try_project_envelope_with_profiles_and_workspace(source, &profiles, "/workspace/synthetic")
+            .expect_err("unsupported profile feature must be terminal before publication");
+    assert!(matches!(
+        &error,
+        LogicalJobProjectionError::UnsupportedRunnerFeature { feature }
+            if feature == &RunnerFeature::BASH_SHELL
+    ));
+    assert_eq!(
+        error.to_string(),
+        "selected runner profile does not support source-required feature automata.core/bash-shell@v1"
+    );
+    assert!(!format!("{error:?}").contains("echo public"));
+}
+
+#[test]
+fn missing_or_historical_profile_feature_policy_fails_closed() {
+    let source = r"name: Synthetic CI
+on: workflow_dispatch
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps: [{run: echo public}]
+";
+    let empty = GithubRunnerProfileCatalog::default();
+    let missing =
+        try_project_envelope_with_profiles_and_workspace(source, &empty, "/workspace/synthetic")
+            .expect_err("an unmapped source selector has no global support policy");
+    assert!(matches!(
+        missing,
+        LogicalJobProjectionError::MissingRunnerProfilePolicy
+    ));
+
+    let historical = GithubRunnerProfileCatalog::new([GithubRunnerProfileMapping::new(
+        "ubuntu-latest",
+        EnvironmentProfile::new(
+            EnvironmentProfileId::new("github/ubuntu-24-04").expect("profile id"),
+            Sha256Digest::from_bytes([3; 32]),
+        ),
+        OperatingSystem::Linux,
+        Architecture::X86_64,
+    )
+    .expect("historical profile mapping")])
+    .expect("historical profile catalog");
+    let missing_feature_policy = try_project_envelope_with_profiles_and_workspace(
+        source,
+        &historical,
+        "/workspace/synthetic",
+    )
+    .expect_err("a historical profile cannot admit current source features");
+    assert!(matches!(
+        missing_feature_policy,
+        LogicalJobProjectionError::MissingRunnerFeaturePolicy
+    ));
 }
 
 #[test]
@@ -466,6 +595,259 @@ fn literal_template(template: &automata_ci_core::ValueTemplate) -> &str {
 }
 
 #[test]
+fn linux_projection_carries_every_static_runtime_requirement_through_protobuf() {
+    let source = r"on: workflow_dispatch
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo default
+      - shell: bash -e {0}
+        run: echo bash
+      - shell: python -u {0}
+        run: print('python')
+      - uses: ./actions/local
+      - uses: synthetic/node/action@0123456789abcdef0123456789abcdef01234567
+";
+    let plan = plan(source);
+    let activation = activate_without_secrets(&plan);
+    let instance = &activation.instances()[0];
+    let validated = ValidatedLogicalPlan::new(&plan).expect("validated plan");
+    let job = validated
+        .job(&WorkflowJobKey::new("build").expect("job key"))
+        .expect("validated job");
+    let projected = GithubLogicalJobProjector::new()
+        .project(
+            ProjectGithubLogicalJobRequest::new(
+                job,
+                instance,
+                fixed_id(81, WorkflowId::from_uuid),
+                fixed_id(82, automata_ci_core::RunId::from_uuid),
+                fixed_id(83, JobId::from_uuid),
+                execution(instance),
+                &profiles(),
+                JobAuthorityProfile::Standard,
+                &permission_policy(),
+                resource_policy(),
+            )
+            .with_trust_snapshot(&trusted_snapshot())
+            .with_runtime_features([
+                RunnerFeature::JAVASCRIPT_ACTIONS,
+                RunnerFeature::NODE24_ACTIONS,
+                RunnerFeature::COMPOSITE_ACTIONS,
+            ]),
+        )
+        .expect("projection");
+    let expected = BTreeSet::from([
+        RunnerFeature::SHELL_STEPS,
+        RunnerFeature::DEFAULT_POSIX_SHELL,
+        RunnerFeature::BASH_SHELL,
+        RunnerFeature::PYTHON_SHELL,
+        RunnerFeature::JAVASCRIPT_ACTIONS,
+        RunnerFeature::NODE24_ACTIONS,
+        RunnerFeature::COMPOSITE_ACTIONS,
+        RunnerFeature::REPOSITORY_ACTIONS,
+        RunnerFeature::LOCAL_ACTIONS,
+        RunnerFeature::COMMAND_FILES,
+        RunnerFeature::JOB_SUMMARIES,
+    ]);
+    assert_eq!(
+        projected.envelope().job().requirements().features(),
+        &expected
+    );
+
+    let encoded = automata_ci_protocol_protobuf::encode_job_ir(projected.envelope(), &limits())
+        .expect("encode JobIR");
+    let decoded =
+        automata_ci_protocol_protobuf::decode_job_ir(&encoded, &limits()).expect("decode JobIR");
+    assert_eq!(decoded.job().requirements().features(), &expected);
+}
+
+#[test]
+fn windows_projection_carries_exact_shell_requirements_without_inventing_node() {
+    let source = r"on: workflow_dispatch
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - run: Write-Output default
+      - shell: pwsh
+        run: Write-Output core
+      - shell: powershell -File {0}
+        run: Write-Output desktop
+      - shell: cmd
+        run: echo cmd
+";
+    let profiles = GithubRunnerProfileCatalog::new([GithubRunnerProfileMapping::new(
+        "windows-latest",
+        EnvironmentProfile::new(
+            EnvironmentProfileId::new("github/windows-2025").expect("profile id"),
+            Sha256Digest::from_bytes([8; 32]),
+        ),
+        OperatingSystem::Windows,
+        Architecture::X86_64,
+    )
+    .expect("mapping")
+    .with_supported_runner_features(windows_runner_features())])
+    .expect("profiles");
+    let plan = plan(source);
+    let activation = activate_without_secrets(&plan);
+    let instance = &activation.instances()[0];
+    let validated = ValidatedLogicalPlan::new(&plan).expect("validated plan");
+    let job = validated
+        .job(&WorkflowJobKey::new("build").expect("job key"))
+        .expect("validated job");
+    let execution = JobExecutionContext::new(
+        "Synthetic CI",
+        GIT_REF,
+        r"C:\__w\synthetic",
+        JobContentReference::new(
+            "runs/synthetic/event.json",
+            Sha256Digest::from_bytes([7; 32]),
+            2,
+            "application/json",
+        ),
+        runtime_reference(instance),
+    );
+    let projected = GithubLogicalJobProjector::new()
+        .project(
+            ProjectGithubLogicalJobRequest::new(
+                job,
+                instance,
+                fixed_id(84, WorkflowId::from_uuid),
+                fixed_id(85, automata_ci_core::RunId::from_uuid),
+                fixed_id(86, JobId::from_uuid),
+                execution,
+                &profiles,
+                JobAuthorityProfile::Standard,
+                &permission_policy(),
+                resource_policy(),
+            )
+            .with_trust_snapshot(&trusted_snapshot()),
+        )
+        .expect("Windows projection");
+    assert_eq!(
+        projected.envelope().job().requirements().features(),
+        &BTreeSet::from([
+            RunnerFeature::SHELL_STEPS,
+            RunnerFeature::DEFAULT_WINDOWS_SHELL,
+            RunnerFeature::PWSH_SHELL,
+            RunnerFeature::WINDOWS_POWERSHELL_SHELL,
+            RunnerFeature::CMD_SHELL,
+            RunnerFeature::COMMAND_FILES,
+            RunnerFeature::JOB_SUMMARIES,
+        ])
+    );
+}
+
+#[test]
+fn invalid_literal_shell_is_rejected_during_projection_before_scheduling() {
+    let source = r"on: workflow_dispatch
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - shell: fish
+        run: echo unsupported
+";
+    let plan = plan(source);
+    let activation = activate_without_secrets(&plan);
+    let instance = &activation.instances()[0];
+    let validated = ValidatedLogicalPlan::new(&plan).expect("validated plan");
+    let job = validated
+        .job(&WorkflowJobKey::new("build").expect("job key"))
+        .expect("validated job");
+    let error = GithubLogicalJobProjector::new()
+        .project(
+            ProjectGithubLogicalJobRequest::new(
+                job,
+                instance,
+                fixed_id(87, WorkflowId::from_uuid),
+                fixed_id(88, automata_ci_core::RunId::from_uuid),
+                fixed_id(89, JobId::from_uuid),
+                execution(instance),
+                &profiles(),
+                JobAuthorityProfile::Standard,
+                &permission_policy(),
+                resource_policy(),
+            )
+            .with_trust_snapshot(&trusted_snapshot()),
+        )
+        .expect_err("unknown literal shells fail before scheduling");
+    assert!(matches!(error, LogicalJobProjectionError::InvalidShell));
+}
+
+#[test]
+fn unsupported_matrix_resolved_shell_is_rejected_before_scheduling() {
+    let plan = plan(&SOURCE.replace("shell: [bash]", "shell: [fish]"));
+    let activation = activate(&plan);
+    let instance = &activation.instances()[0];
+    let validated = ValidatedLogicalPlan::new(&plan).expect("validated plan");
+    let job = validated
+        .job(&WorkflowJobKey::new("build").expect("job key"))
+        .expect("validated job");
+    let activation_evaluator = GithubLogicalActivationEvaluator::new(github_context());
+    let error = GithubLogicalJobProjector::new()
+        .project(
+            ProjectGithubLogicalJobRequest::new(
+                job,
+                instance,
+                fixed_id(90, WorkflowId::from_uuid),
+                fixed_id(91, automata_ci_core::RunId::from_uuid),
+                fixed_id(92, JobId::from_uuid),
+                execution(instance),
+                &profiles(),
+                JobAuthorityProfile::Standard,
+                &permission_policy(),
+                resource_policy(),
+            )
+            .with_trust_snapshot(&trusted_snapshot())
+            .with_activation_evaluation(&activation_evaluator, ActivationStatus::Success),
+        )
+        .expect_err("matrix-resolved unsupported shells fail before scheduling");
+    assert!(matches!(error, LogicalJobProjectionError::InvalidShell));
+}
+
+#[test]
+fn mutable_repository_action_revision_is_rejected_before_scheduling() {
+    let source = r"on: workflow_dispatch
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: synthetic/action@v1
+";
+    let plan = plan(source);
+    let activation = activate_without_secrets(&plan);
+    let instance = &activation.instances()[0];
+    let validated = ValidatedLogicalPlan::new(&plan).expect("validated plan");
+    let job = validated
+        .job(&WorkflowJobKey::new("build").expect("job key"))
+        .expect("validated job");
+    let error = GithubLogicalJobProjector::new()
+        .project(
+            ProjectGithubLogicalJobRequest::new(
+                job,
+                instance,
+                fixed_id(93, WorkflowId::from_uuid),
+                fixed_id(94, automata_ci_core::RunId::from_uuid),
+                fixed_id(95, JobId::from_uuid),
+                execution(instance),
+                &profiles(),
+                JobAuthorityProfile::Standard,
+                &permission_policy(),
+                resource_policy(),
+            )
+            .with_trust_snapshot(&trusted_snapshot()),
+        )
+        .expect_err("mutable action revisions fail before scheduling");
+    assert!(matches!(
+        error,
+        LogicalJobProjectionError::InvalidActionReference
+    ));
+}
+
+#[test]
 fn mapped_profile_preserves_multi_label_and_group_routing() {
     let source = r"name: Synthetic CI
 on: workflow_dispatch
@@ -487,6 +869,7 @@ jobs:
         Architecture::X86_64,
     )
     .expect("profile mapping")
+    .with_supported_runner_features(linux_runner_features())
     .with_container_features([ContainerFeature::DOCKER_COMPATIBLE_API])])
     .expect("profile catalog");
 
@@ -546,7 +929,8 @@ jobs:
         OperatingSystem::Windows,
         Architecture::X86_64,
     )
-    .expect("Windows profile mapping")])
+    .expect("Windows profile mapping")
+    .with_supported_runner_features(windows_runner_features())])
     .expect("profile catalog");
 
     let envelope =
@@ -593,6 +977,7 @@ jobs:
                 Architecture::X86_64,
             )
             .expect("profile mapping")
+            .with_supported_runner_features(linux_runner_features())
         }),
     )
     .expect("profile catalog");
@@ -643,6 +1028,7 @@ fn activated_logical_job_projects_exactly_into_current_job_ir_and_runtime_contex
     let job = validated
         .job(&WorkflowJobKey::new("build").expect("job key"))
         .expect("validated job");
+    let activation_evaluator = GithubLogicalActivationEvaluator::new(github_context());
     let projected = GithubLogicalJobProjector::new()
         .project(
             ProjectGithubLogicalJobRequest::new(
@@ -657,7 +1043,8 @@ fn activated_logical_job_projects_exactly_into_current_job_ir_and_runtime_contex
                 &permission_policy(),
                 resource_policy(),
             )
-            .with_trust_snapshot(&trusted_snapshot()),
+            .with_trust_snapshot(&trusted_snapshot())
+            .with_activation_evaluation(&activation_evaluator, ActivationStatus::Success),
         )
         .expect("projection");
 
@@ -709,6 +1096,13 @@ fn activated_logical_job_projects_exactly_into_current_job_ir_and_runtime_contex
         .services()
         .get("database")
         .expect("database service");
+    assert!(
+        envelope
+            .job()
+            .requirements()
+            .container_features()
+            .contains(&ContainerFeature::SERVICE_CONTAINERS)
+    );
     assert_eq!(database.ports().len(), 2);
     assert_eq!(database.ports()[0].container_port(), 5432);
     assert_eq!(database.ports()[0].requested_host_port(), Some(5432));
@@ -742,9 +1136,16 @@ fn activated_logical_job_projects_exactly_into_current_job_ir_and_runtime_contex
     assert!(matches!(
         steps[0].kind(),
         SemanticStep::Run { values }
-            if matches!(values.shell(), ShellTemplate::Dynamic { .. })
+            if matches!(values.shell(), ShellTemplate::Named { .. })
                 && values.working_directory().is_none()
     ));
+    assert!(
+        envelope
+            .job()
+            .requirements()
+            .features()
+            .contains(&RunnerFeature::BASH_SHELL)
+    );
     assert!(matches!(
         steps[1].kind(),
         SemanticStep::Action {
@@ -755,10 +1156,22 @@ fn activated_logical_job_projects_exactly_into_current_job_ir_and_runtime_contex
             },
             inputs,
         } if repository == "synthetic/example-action"
-            && revision == "0123456789abcdef"
+            && revision == "0123456789abcdef0123456789abcdef01234567"
             && subpath == "subdir"
             && matches!(inputs.get("label"), Some(ValueSource::Template(_)))
     ));
+
+    let encoded_job = automata_ci_protocol_protobuf::encode_job_ir(envelope, &limits())
+        .expect("encode service JobIR");
+    let decoded_job = automata_ci_protocol_protobuf::decode_job_ir(&encoded_job, &limits())
+        .expect("decode service JobIR");
+    assert!(
+        decoded_job
+            .job()
+            .requirements()
+            .container_features()
+            .contains(&ContainerFeature::SERVICE_CONTAINERS)
+    );
 
     let decoded = automata_ci_protocol_protobuf::decode_job_runtime_context(
         projected.runtime_context_bytes(),
@@ -1193,7 +1606,7 @@ jobs:
 jobs:
   build:
     permissions: {id-token: write}
-    runs-on: [self-hosted, linux, x64]
+    runs-on: [self-hosted, linux, x64, ubuntu-latest]
     steps: [{run: echo ok}]
 ",
             true,
@@ -1261,7 +1674,7 @@ fn reusable_callee_contract_does_not_block_step_job_projection() {
   workflow_dispatch:
 jobs:
   build:
-    runs-on: linux
+    runs-on: ubuntu-latest
     steps: [{run: echo ok}]
 ",
     );

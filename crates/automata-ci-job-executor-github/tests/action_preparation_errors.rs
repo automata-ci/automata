@@ -1,5 +1,6 @@
 use std::{
     fmt,
+    io::Cursor,
     sync::{Arc, Mutex},
 };
 
@@ -13,13 +14,90 @@ use automata_ci_blob::{ImmutableBlobStore, MemoryBlobStore};
 use automata_ci_core::ActionReference;
 use automata_ci_job_executor_github::{
     ActionPreparationErrorKind, ActionPreparationPort, ActionPreparationRequest,
-    NoRepositoryCredentials, ResolvedBundleActionPreparer,
+    NoRepositoryCredentials, PreparedCompositeStep, ResolvedBundleActionPreparer,
 };
 use automata_ci_scm::{
-    ArchiveLimits, RepositorySnapshot, ScmError, ScmErrorKind, ScmProvider, ScmProviderId,
-    SnapshotRequest,
+    ArchiveFormat, ArchiveLimits, RepositoryId, RepositorySnapshot, ResolvedRevision, RevisionSpec,
+    ScmError, ScmErrorKind, ScmProvider, ScmProviderId, SnapshotRequest,
 };
 use automata_ci_workflow_github::GithubConditionCompiler;
+use bytes::Bytes;
+use flate2::{Compression, write::GzEncoder};
+use tar::{Builder, EntryType, Header};
+
+const EXACT_REVISION: &str = "de0fac2e4500dabe0009e67214ff5f5447ce83dd";
+
+#[tokio::test]
+async fn resolved_bundle_distinguishes_workspace_and_repository_root_children() {
+    let snapshot = RepositorySnapshot::from_bytes(
+        ScmProviderId::new("github").expect("provider"),
+        RepositoryId::new("actions/example").expect("repository"),
+        RevisionSpec::new(EXACT_REVISION).expect("requested revision"),
+        ResolvedRevision::new(EXACT_REVISION).expect("resolved revision"),
+        ArchiveFormat::TarGzip,
+        action_archive(&[
+            (
+                "root/actions/parent/action.yml",
+                b"runs:\n  using: composite\n  steps:\n    - uses: ./workspace/action\n    - uses: $/nested/action\n",
+            ),
+            (
+                "root/nested/action/action.yml",
+                b"runs:\n  using: node20\n  main: dist/index.js\n",
+            ),
+        ]),
+    );
+    let scm = Arc::new(FixedSnapshotScm {
+        provider: ScmProviderId::new("github").expect("provider"),
+        snapshot,
+    });
+    let blobs: Arc<dyn ImmutableBlobStore> = Arc::new(MemoryBlobStore::default());
+    let resolver: Arc<dyn ActionResolver> =
+        Arc::new(ImmutableActionResolver::new(scm, Arc::clone(&blobs)));
+    let preparer = ResolvedBundleActionPreparer::new(
+        resolver,
+        Arc::new(NoRepositoryCredentials),
+        Arc::new(GithubActionMetadataDecoder::default()),
+        GithubConditionCompiler::default(),
+        ActionBundleLimits::default(),
+        automata_ci_execution::MAX_COPY_BYTES as u64,
+    )
+    .expect("action preparer");
+    let reference = ActionReference::Repository {
+        repository: "actions/example".to_owned(),
+        revision: EXACT_REVISION.to_owned(),
+        subpath: Some("actions/parent".to_owned()),
+    };
+
+    let prepared_action = preparer
+        .prepare(ActionPreparationRequest::new(&reference))
+        .await
+        .expect("prepared root action");
+    let [
+        PreparedCompositeStep::Uses(workspace),
+        PreparedCompositeStep::Uses(repository),
+    ] = prepared_action
+        .definition()
+        .composite()
+        .expect("composite")
+        .steps()
+    else {
+        panic!("workspace and self-repository actions expected")
+    };
+    assert_eq!(
+        workspace.reference(),
+        &ActionReference::Local {
+            path: "./workspace/action".to_owned(),
+        }
+    );
+    assert_eq!(
+        repository.reference(),
+        &ActionReference::Repository {
+            repository: "actions/example".to_owned(),
+            revision: EXACT_REVISION.to_owned(),
+            subpath: Some("nested/action".to_owned()),
+        }
+    );
+}
 
 #[tokio::test]
 async fn public_and_arbitrary_action_fetches_never_receive_an_ambient_credential() {
@@ -168,6 +246,45 @@ impl ActionResolver for FailingResolver {
     ) -> Result<ResolvedActionBundle, ActionResolveError> {
         Err(ActionResolveError::new(self.0))
     }
+}
+
+#[derive(Debug)]
+struct FixedSnapshotScm {
+    provider: ScmProviderId,
+    snapshot: RepositorySnapshot,
+}
+
+#[async_trait]
+impl ScmProvider for FixedSnapshotScm {
+    fn provider_id(&self) -> &ScmProviderId {
+        &self.provider
+    }
+
+    async fn fetch_snapshot(
+        &self,
+        _request: SnapshotRequest<'_>,
+    ) -> Result<RepositorySnapshot, ScmError> {
+        Ok(self.snapshot.clone())
+    }
+}
+
+fn action_archive(entries: &[(&str, &[u8])]) -> Bytes {
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    {
+        let mut archive = Builder::new(&mut encoder);
+        for (path, bytes) in entries {
+            let mut header = Header::new_gnu();
+            header.set_mode(0o644);
+            header.set_size(u64::try_from(bytes.len()).expect("entry length"));
+            header.set_entry_type(EntryType::Regular);
+            header.set_cksum();
+            archive
+                .append_data(&mut header, path, Cursor::new(bytes))
+                .expect("append action archive entry");
+        }
+        archive.finish().expect("finish action archive");
+    }
+    Bytes::from(encoder.finish().expect("compress action archive"))
 }
 
 struct CredentialObservingScm {

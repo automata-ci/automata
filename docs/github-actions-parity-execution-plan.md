@@ -229,6 +229,15 @@ complete. The resolved `max-parallel` policy now survives activation
 publication, restart-readable PostgreSQL storage, and exact replay; enforcing
 that capacity during selection remains in Wave 2.
 
+Provider status: the local `WIN-ISO-01` pre-lease seam now combines the exact
+Hyper-V-container requirement with canonical AUTH-02 trust and a one-use,
+generation-bound server grant that PostgreSQL re-derives under the claim lock.
+It rejects missing or stale evidence and grant-free direct claims without an
+alternate Windows fallback. This is not the signed broker credential or real
+Hyper-V/HCS acceptance evidence. The `PLAT-01` schema/probe foundation is also
+present, while signed image publication, compatibility workload evidence, and
+production-provider enforcement remain open.
+
 Exit criteria:
 
 - [x] fork and Dependabot authority is reduced correctly;
@@ -236,7 +245,10 @@ Exit criteria:
 - [x] reserved runner environment names cannot be overwritten;
 - [x] matrix and expression behavior has exact external candidate fixtures;
 - [x] official artifact/cache clients run against real product adapters;
-- [ ] unsupported jobs fail before a lease.
+- [x] unsupported jobs fail before a lease. Every runnable job must select an
+  immutable profile whose versioned feature ceiling covers all source-derived
+  requirements before Job IR publication; temporary runner absence remains
+  `NoWork` rather than a terminal failure.
 
 ### Wave 2: durable runtime interfaces
 

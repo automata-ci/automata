@@ -3,14 +3,15 @@ use std::collections::BTreeMap;
 use async_trait::async_trait;
 use automata_ci_core::{
     Architecture, ContainerFeature, EnvironmentProfile, EnvironmentProfileId, OperatingSystem,
-    RunId, RunnerLabel, Sha256Digest, UnixMillis,
+    RunId, RunnerFeature, RunnerLabel, Sha256Digest, UnixMillis,
 };
 use sqlx::{Postgres, Row as _, Transaction, postgres::PgRow};
 
 use super::{PostgresStore, durable_schema::current_durable_schemas, pg_bigint};
 use automata_ci_store::{
     PinnedWorkflowRuntimePolicy, RegisterWorkflowRuntimePolicy, RepositoryId, StoreError,
-    TenantScope, WorkflowRuntimePolicy, WorkflowRuntimePolicyMapping, WorkflowRuntimePolicyPin,
+    TenantScope, WORKFLOW_RUNTIME_POLICY_RUNNER_FEATURE_SCHEMA, WorkflowRunnerFeaturePolicy,
+    WorkflowRuntimePolicy, WorkflowRuntimePolicyMapping, WorkflowRuntimePolicyPin,
     WorkflowRuntimePolicyReceipt, WorkflowRuntimePolicyRepository, WorkflowRuntimePolicyRevision,
     WorkflowRuntimePolicyStoreError,
 };
@@ -103,6 +104,11 @@ pub(super) async fn register_locked_workflow_runtime_policy(
     current: Option<PgRow>,
     authoritative_at: UnixMillis,
 ) -> Result<WorkflowRuntimePolicyReceipt, WorkflowRuntimePolicyStoreError> {
+    if i16::try_from(request.policy().schema()).ok()
+        != Some(current_durable_schemas().workflow_runtime_policy_i16)
+    {
+        return Err(WorkflowRuntimePolicyStoreError::Conflict);
+    }
     if let Some(current) = current {
         let revision: i64 = current
             .try_get("policy_revision")
@@ -195,7 +201,7 @@ async fn insert_revision(
             .map_err(corrupt_value)?,
     )
     .bind(serde_json::to_vec(&request.policy().resource_policy()).map_err(corrupt_value)?)
-    .bind(i16::try_from(request.policy().schema()).map_err(corrupt_value)?)
+    .bind(schemas.workflow_runtime_policy_i16)
     .bind(request.policy().workspace_root())
     .bind(count_i32(request.policy().mappings().len())?)
     .bind(registered_at.get())
@@ -211,14 +217,16 @@ async fn insert_mappings(
     transaction: &mut Transaction<'_, Postgres>,
     request: &RegisterWorkflowRuntimePolicy,
 ) -> Result<(), WorkflowRuntimePolicyStoreError> {
+    let schemas = current_durable_schemas();
     for mapping in request.policy().mappings() {
         let rows = sqlx::query(
             r"
             INSERT INTO workflow_runtime_policy_mappings (
                 tenant_id, repository_id, policy_revision, selector,
                 environment_profile_id, environment_profile_digest,
-                operating_system, architecture, feature_count
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+                operating_system, architecture, feature_count,
+                runner_feature_schema, runner_feature_count
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
             ",
         )
         .bind(request.pin().tenant().as_str())
@@ -230,6 +238,16 @@ async fn insert_mappings(
         .bind(operating_system_name(mapping.operating_system()))
         .bind(architecture_name(mapping.architecture()))
         .bind(count_i32(mapping.container_features().len())?)
+        .bind(
+            mapping
+                .runner_feature_policy()
+                .map(|_| schemas.workflow_runtime_runner_feature_policy_i16),
+        )
+        .bind(count_i32(
+            mapping
+                .runner_feature_policy()
+                .map_or(0, |policy| policy.supported().len()),
+        )?)
         .execute(&mut **transaction)
         .await
         .map_err(operation_error)?
@@ -253,6 +271,27 @@ async fn insert_mappings(
             .map_err(operation_error)?
             .rows_affected();
             exact_one(rows, "workflow runtime policy feature insert")?;
+        }
+        if let Some(policy) = mapping.runner_feature_policy() {
+            for feature in policy.supported() {
+                let rows = sqlx::query(
+                    r"
+                    INSERT INTO workflow_runtime_policy_runner_features (
+                        tenant_id, repository_id, policy_revision, selector, feature
+                    ) VALUES ($1,$2,$3,$4,$5)
+                    ",
+                )
+                .bind(request.pin().tenant().as_str())
+                .bind(request.pin().repository_id().as_uuid())
+                .bind(pg_bigint(request.pin().revision().get()))
+                .bind(mapping.selector().as_str())
+                .bind(feature.as_str())
+                .execute(&mut **transaction)
+                .await
+                .map_err(operation_error)?
+                .rows_affected();
+                exact_one(rows, "workflow runtime policy runner feature insert")?;
+            }
         }
     }
     Ok(())
@@ -391,7 +430,18 @@ pub(super) async fn load_revision(
         r"
         SELECT mapping.selector, mapping.environment_profile_id,
                mapping.environment_profile_digest, mapping.operating_system,
-               mapping.architecture, mapping.feature_count, feature.feature
+               mapping.architecture, mapping.feature_count,
+               mapping.runner_feature_schema, mapping.runner_feature_count,
+               ARRAY(
+                   SELECT runner_feature.feature
+                   FROM workflow_runtime_policy_runner_features AS runner_feature
+                   WHERE runner_feature.tenant_id = mapping.tenant_id
+                     AND runner_feature.repository_id = mapping.repository_id
+                     AND runner_feature.policy_revision = mapping.policy_revision
+                     AND runner_feature.selector = mapping.selector
+                   ORDER BY runner_feature.feature
+               ) AS runner_features,
+               feature.feature
         FROM workflow_runtime_policy_mappings AS mapping
         LEFT JOIN workflow_runtime_policy_features AS feature
           ON feature.tenant_id = mapping.tenant_id
@@ -424,6 +474,13 @@ pub(super) async fn load_revision(
         let operating_system = row.try_get("operating_system").map_err(operation_error)?;
         let architecture = row.try_get("architecture").map_err(operation_error)?;
         let expected_features = row.try_get("feature_count").map_err(operation_error)?;
+        let runner_feature_schema = row
+            .try_get::<Option<i16>, _>("runner_feature_schema")
+            .map_err(operation_error)?;
+        let expected_runner_features = row
+            .try_get("runner_feature_count")
+            .map_err(operation_error)?;
+        let runner_features = row.try_get("runner_features").map_err(operation_error)?;
         let entry = grouped.entry(selector).or_insert_with(|| MappingParts {
             profile_id,
             profile_digest,
@@ -431,6 +488,9 @@ pub(super) async fn load_revision(
             architecture,
             expected_features,
             features: Vec::new(),
+            runner_feature_schema,
+            expected_runner_features,
+            runner_features,
         });
         if let Some(feature) = row
             .try_get::<Option<String>, _>("feature")
@@ -450,7 +510,12 @@ pub(super) async fn load_revision(
         .collect::<Result<Vec<_>, _>>()?;
     let workspace_root: String = header.try_get("workspace_root").map_err(operation_error)?;
     if canonical_policy.workspace_root() != workspace_root
-        || canonical_policy.mappings() != mappings
+        || canonical_policy.mappings().len() != mappings.len()
+        || canonical_policy
+            .mappings()
+            .iter()
+            .zip(&mappings)
+            .any(|(canonical, relational)| !relational.matches(canonical))
         || canonical_policy.digest() != expected_digest
         || serde_json::to_vec(&canonical_policy.resource_policy()).map_err(corrupt_value)?
             != expected_resource_policy
@@ -472,12 +537,35 @@ struct MappingParts {
     architecture: String,
     expected_features: i32,
     features: Vec<String>,
+    runner_feature_schema: Option<i16>,
+    expected_runner_features: i32,
+    runner_features: Vec<String>,
+}
+
+struct RelationalMapping {
+    selector: RunnerLabel,
+    environment: EnvironmentProfile,
+    operating_system: OperatingSystem,
+    architecture: Architecture,
+    container_features: std::collections::BTreeSet<ContainerFeature>,
+    runner_feature_policy: Option<WorkflowRunnerFeaturePolicy>,
+}
+
+impl RelationalMapping {
+    fn matches(&self, mapping: &WorkflowRuntimePolicyMapping) -> bool {
+        self.selector == *mapping.selector()
+            && self.environment == *mapping.environment()
+            && self.operating_system == *mapping.operating_system()
+            && self.architecture == *mapping.architecture()
+            && self.container_features == *mapping.container_features()
+            && self.runner_feature_policy.as_ref() == mapping.runner_feature_policy()
+    }
 }
 
 fn decode_mapping(
     selector: String,
     parts: MappingParts,
-) -> Result<WorkflowRuntimePolicyMapping, WorkflowRuntimePolicyStoreError> {
+) -> Result<RelationalMapping, WorkflowRuntimePolicyStoreError> {
     if i32::try_from(parts.features.len()).ok() != Some(parts.expected_features) {
         return Err(
             StoreError::corrupt_data("workflow runtime policy feature count disagrees").into(),
@@ -509,14 +597,55 @@ fn decode_mapping(
         .map(ContainerFeature::new)
         .collect::<Result<Vec<_>, _>>()
         .map_err(corrupt_value)?;
-    WorkflowRuntimePolicyMapping::new(
+    let container_features = features
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    if i32::try_from(parts.runner_features.len()).ok() != Some(parts.expected_runner_features) {
+        return Err(StoreError::corrupt_data(
+            "workflow runtime policy runner feature count disagrees",
+        )
+        .into());
+    }
+    let runner_feature_policy = match parts.runner_feature_schema {
+        None if parts.runner_features.is_empty() => None,
+        Some(schema)
+            if u16::try_from(schema).ok()
+                == Some(WORKFLOW_RUNTIME_POLICY_RUNNER_FEATURE_SCHEMA) =>
+        {
+            let features = parts
+                .runner_features
+                .into_iter()
+                .map(RunnerFeature::new)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(corrupt_value)?;
+            Some(WorkflowRunnerFeaturePolicy::new(features).map_err(corrupt_value)?)
+        }
+        _ => {
+            return Err(StoreError::corrupt_data(
+                "workflow runtime policy runner feature schema is invalid",
+            )
+            .into());
+        }
+    };
+    if let Some(policy) = &runner_feature_policy {
+        WorkflowRuntimePolicyMapping::new(
+            selector.clone(),
+            environment.clone(),
+            operating_system.clone(),
+            architecture.clone(),
+            policy.clone(),
+            container_features.iter().cloned(),
+        )
+        .map_err(corrupt_value)?;
+    }
+    Ok(RelationalMapping {
         selector,
         environment,
         operating_system,
         architecture,
-        features,
-    )
-    .map_err(corrupt_value)
+        container_features,
+        runner_feature_policy,
+    })
 }
 
 fn decode_revision(

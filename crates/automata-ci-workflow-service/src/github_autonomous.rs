@@ -3,6 +3,7 @@
 use std::{fmt, sync::Arc};
 
 use automata_ci_blob::ImmutableBlobStore;
+use automata_ci_job_executor_github::ActionPreparationPort;
 use automata_ci_protocol::ProtocolLimits;
 use automata_ci_store::{
     LogicalActivationPreparationStore, LogicalActivationRepository,
@@ -79,6 +80,44 @@ impl GithubAutonomousWorkflowPhaseExecutor {
             activations,
             Arc::clone(&clock),
             limits,
+        );
+        let materialization = LogicalInstanceMaterializationService::with_limits(
+            blobs,
+            materializations,
+            clock,
+            limits,
+        );
+        Self {
+            preparation,
+            activation,
+            materialization,
+        }
+    }
+
+    /// Composes all phases with repository-action metadata preparation at the
+    /// activation boundary, before executable jobs can reach scheduling.
+    #[must_use]
+    pub fn with_limits_and_action_preparer(
+        blobs: Arc<dyn ImmutableBlobStore>,
+        preparations: Arc<dyn LogicalActivationPreparationStore>,
+        activations: Arc<dyn LogicalActivationRepository>,
+        materializations: Arc<dyn LogicalMaterializationRepository>,
+        clock: Arc<dyn AdmissionClock>,
+        limits: ProtocolLimits,
+        actions: Arc<dyn ActionPreparationPort>,
+    ) -> Self {
+        let preparation = StoreBackedLogicalActivationPreparationRepository::with_limits(
+            preparations,
+            Arc::clone(&blobs),
+            Arc::clone(&clock),
+            limits,
+        );
+        let activation = GithubLogicalJobOrchestrationService::with_limits_and_action_preparer(
+            Arc::clone(&blobs),
+            activations,
+            Arc::clone(&clock),
+            limits,
+            actions,
         );
         let materialization = LogicalInstanceMaterializationService::with_limits(
             blobs,

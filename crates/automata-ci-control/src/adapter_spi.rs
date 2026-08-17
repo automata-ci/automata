@@ -117,14 +117,19 @@ pub fn rebase_try_claim_attempt(
     observed_at: UnixMillis,
     expires_at: UnixMillis,
 ) -> Result<crate::lease::TryClaimAttempt, crate::lease::ClaimCommandError> {
-    crate::lease::TryClaimAttempt::new(
-        request.request_key(),
-        request.attempt_id(),
-        request.lease_id(),
-        observed_at,
-        expires_at,
-        request.cursor(),
-    )
+    request.rebased(observed_at, expires_at)
+}
+
+/// Re-derives provider-specific placement authority from one locked current candidate.
+///
+/// First-party adapters call this after their authoritative clock rebase and
+/// immediately before transitioning the attempt out of `queued`.
+#[must_use]
+pub fn try_claim_attempt_matches_runnable(
+    request: &crate::lease::TryClaimAttempt,
+    candidate: &crate::lease::RunnableAttempt,
+) -> bool {
+    request.placement_matches(candidate)
 }
 
 /// Inspects the cursor embedded in a terminal no-work request.

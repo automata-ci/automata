@@ -144,6 +144,7 @@ fn control_values_and_ports_remain_backend_neutral_and_dyn_compatible() {
             ObjectKey::new("job-ir").expect("key"),
         )
         .expect("metadata"),
+        None,
     )
     .expect("candidate");
     assert_eq!(candidate.requirements(), &RunnerRequirements::default());

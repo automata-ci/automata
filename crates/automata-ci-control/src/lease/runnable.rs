@@ -1,9 +1,14 @@
 //! Runnable-queue scan values and opaque cursor proofs.
 
-use std::num::NonZeroU16;
+use std::num::{NonZeroU16, NonZeroU64};
 
-use automata_ci_core::{AttemptId, JobId, RunId, RunnerRequirements, Sha256Digest, UnixMillis};
+use automata_ci_core::{
+    Architecture, AttemptId, IsolationLevel, JobAuthorityProfile, JobId, OperatingSystem, RunId,
+    RunnerRequirements, SandboxFeature, Sha256Digest, TrustAuthorityDecision, TrustSnapshot,
+    TrustSourceClass, UnixMillis,
+};
 use automata_ci_store::{JobIrMetadata, RunnerSessionFence, StableRunnerSlot};
+use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
 /// Maximum records returned by one scheduler queue scan.
@@ -186,6 +191,109 @@ pub struct RunnableAttempt {
     queued_at: UnixMillis,
     requirements: RunnerRequirements,
     ir_metadata: JobIrMetadata,
+    placement_trust: Option<AuthenticatedPlacementTrust>,
+}
+
+/// Compact authenticated trust root used only for pre-lease placement.
+///
+/// The value is constructed from a fully decoded canonical [`TrustSnapshot`]
+/// plus immutable logical-materialization evidence. It deliberately carries no
+/// raw event facts, secret values, or externally supplied signature bytes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuthenticatedPlacementTrust {
+    snapshot_schema: u16,
+    policy_revision: NonZeroU64,
+    policy_digest: Sha256Digest,
+    snapshot_digest: Sha256Digest,
+    source: TrustSourceClass,
+    authority: TrustAuthorityDecision,
+    evidence_complete: bool,
+    authority_profile: JobAuthorityProfile,
+    requirements_digest: Sha256Digest,
+}
+
+impl AuthenticatedPlacementTrust {
+    /// Derives compact placement evidence from one canonical trust snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Rejects the local construction placeholder, which is never durable
+    /// authenticated evidence.
+    pub fn try_new(
+        snapshot: &TrustSnapshot,
+        authority_profile: JobAuthorityProfile,
+        requirements: &RunnerRequirements,
+    ) -> Result<Self, RunnableAttemptError> {
+        if snapshot.is_construction_placeholder() {
+            return Err(RunnableAttemptError::UnauthenticatedPlacementTrust);
+        }
+        let requirements_digest = placement_requirements_digest(requirements)?;
+        Ok(Self {
+            snapshot_schema: snapshot.schema(),
+            policy_revision: snapshot.policy_revision(),
+            policy_digest: snapshot.policy_digest(),
+            snapshot_digest: snapshot.digest(),
+            source: snapshot.source_class(),
+            authority: snapshot.authority(),
+            evidence_complete: snapshot.evidence_complete(),
+            authority_profile,
+            requirements_digest,
+        })
+    }
+
+    /// Returns the canonical trust-snapshot schema.
+    #[must_use]
+    pub const fn snapshot_schema(&self) -> u16 {
+        self.snapshot_schema
+    }
+
+    /// Returns the pinned trust-policy revision.
+    #[must_use]
+    pub const fn policy_revision(&self) -> NonZeroU64 {
+        self.policy_revision
+    }
+
+    /// Returns the pinned trust-policy digest.
+    #[must_use]
+    pub const fn policy_digest(&self) -> Sha256Digest {
+        self.policy_digest
+    }
+
+    /// Returns the canonical snapshot digest.
+    #[must_use]
+    pub const fn snapshot_digest(&self) -> Sha256Digest {
+        self.snapshot_digest
+    }
+
+    /// Returns the authenticated source classification.
+    #[must_use]
+    pub const fn source(&self) -> TrustSourceClass {
+        self.source
+    }
+
+    /// Returns the shared authority decision.
+    #[must_use]
+    pub const fn authority(&self) -> TrustAuthorityDecision {
+        self.authority
+    }
+
+    /// Reports whether all event-specific trust facts were authenticated.
+    #[must_use]
+    pub const fn evidence_complete(&self) -> bool {
+        self.evidence_complete
+    }
+
+    /// Returns the immutable job authority profile.
+    #[must_use]
+    pub const fn authority_profile(&self) -> JobAuthorityProfile {
+        self.authority_profile
+    }
+
+    /// Returns the immutable logical requirements digest.
+    #[must_use]
+    pub const fn requirements_digest(&self) -> Sha256Digest {
+        self.requirements_digest
+    }
 }
 
 impl RunnableAttempt {
@@ -201,12 +309,18 @@ impl RunnableAttempt {
         queued_at: UnixMillis,
         requirements: RunnerRequirements,
         ir_metadata: JobIrMetadata,
+        placement_trust: Option<AuthenticatedPlacementTrust>,
     ) -> Result<Self, RunnableAttemptError> {
         if ir_metadata.job_id() != job_id {
             return Err(RunnableAttemptError::JobMetadataMismatch);
         }
         if ir_metadata.run_id() != run_id {
             return Err(RunnableAttemptError::RunMetadataMismatch);
+        }
+        if let Some(trust) = placement_trust.as_ref()
+            && trust.requirements_digest() != placement_requirements_digest(&requirements)?
+        {
+            return Err(RunnableAttemptError::PlacementRequirementsMismatch);
         }
         Ok(Self {
             attempt_id,
@@ -215,6 +329,7 @@ impl RunnableAttempt {
             queued_at,
             requirements,
             ir_metadata,
+            placement_trust,
         })
     }
 
@@ -259,6 +374,43 @@ impl RunnableAttempt {
     pub const fn job_ir(&self) -> &JobIrMetadata {
         &self.ir_metadata
     }
+
+    /// Returns authenticated pre-lease trust evidence when the durable job has it.
+    #[must_use]
+    pub const fn placement_trust(&self) -> Option<&AuthenticatedPlacementTrust> {
+        self.placement_trust.as_ref()
+    }
+
+    /// Reports whether a Windows candidate has the complete local authority
+    /// inputs required before it may reach scheduling.
+    ///
+    /// Non-Windows candidates do not use the Windows-specific grant.
+    #[must_use]
+    pub fn windows_placement_is_authorizable(&self) -> bool {
+        if self.requirements.operating_system() != Some(&OperatingSystem::Windows) {
+            return true;
+        }
+        self.requirements.minimum_isolation() >= IsolationLevel::VirtualMachine
+            && self
+                .requirements
+                .sandbox_features()
+                .contains(&SandboxFeature::WINDOWS_HYPERV_CONTAINER)
+            && self.requirements.architecture() == Some(&Architecture::X86_64)
+            && self.requirements.environment_profile().is_some()
+            && self.placement_trust.as_ref().is_some_and(|trust| {
+                trust.evidence_complete() && trust.source() != TrustSourceClass::Incomplete
+            })
+    }
+}
+
+fn placement_requirements_digest(
+    requirements: &RunnerRequirements,
+) -> Result<Sha256Digest, RunnableAttemptError> {
+    let value = serde_json::to_value(requirements)
+        .map_err(|_| RunnableAttemptError::InvalidPlacementRequirements)?;
+    let bytes = serde_json::to_vec(&value)
+        .map_err(|_| RunnableAttemptError::InvalidPlacementRequirements)?;
+    Ok(Sha256Digest::from_bytes(Sha256::digest(bytes).into()))
 }
 
 /// One bounded queue page and the opaque proof needed to commit progress.
@@ -384,4 +536,13 @@ pub enum RunnableAttemptError {
     /// The candidate and job metadata identify different workflow runs.
     #[error("runnable attempt and JobIR metadata identify different runs")]
     RunMetadataMismatch,
+    /// A local construction placeholder was presented as authenticated trust.
+    #[error("runnable placement trust is not authenticated durable evidence")]
+    UnauthenticatedPlacementTrust,
+    /// Runner requirements could not be represented by the canonical JSON shape.
+    #[error("runnable placement requirements cannot be encoded canonically")]
+    InvalidPlacementRequirements,
+    /// Materialization trust was derived for different runner requirements.
+    #[error("runnable placement trust does not bind the current runner requirements")]
+    PlacementRequirementsMismatch,
 }
