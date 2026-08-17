@@ -612,6 +612,8 @@ elif arguments[:2] == ["llvm-cov", "report"]:
         ),
         None,
     )
+    # cargo-llvm-cov evaluates exclusions against this workspace-relative path
+    # after applying --remap-path-prefix.
     generated_source = (
         "target/llvm-cov-target/debug/build/automata-ci-provisioning-grpc-"
         "303a492b5e06c8cb/out/automata.management.v1.rs"
