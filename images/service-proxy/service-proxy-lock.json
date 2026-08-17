@@ -1,11 +1,11 @@
 {
-  "binary_sha256": "66c048257d6174871e349427f3dbd395d819037a904c8091061de4e7bc75a134",
-  "candidate_commit": "63ddac365dee923dda85c725b7a25909469a457e",
-  "containerfile_sha256": "fbf0a4c6dda5ec197b4c0da309e17be7e2245c1c38f0f46264c7caeab626d513",
-  "image": "ghcr.io/automata-ci/automata-service-proxy@sha256:0f7b47c580d76d5d391c8d942f260b06feb693fb5ffa21e3ee22e351d888e2ed",
-  "publisher_commit": "63ddac365dee923dda85c725b7a25909469a457e",
-  "sbom_sha256": "1d3b2669e6d16f4b8df9263a64e9f49e5c9f2e7efbbd96705bd04506214e8b93",
+  "binary_sha256": "9ae9dfd5a863a9fff1172400eb60959301424b2107f569c156cccd4cbe25f0ab",
+  "candidate_commit": "a731b9dfa43fb2414f5ed7747e689dda0ebab028",
+  "containerfile_sha256": "15606c3498005dd57c2ea3d65e4a5c53ef9a1b7135d27266a842b3fc5e656cf9",
+  "image": "ghcr.io/automata-ci/automata-service-proxy@sha256:fc53258caf20bf89e40e2ee2a8878d77fa2ab430027325069164be6753920cbb",
+  "publisher_commit": "a731b9dfa43fb2414f5ed7747e689dda0ebab028",
+  "sbom_sha256": "1402bc00ed17ac5b8c763b29b4db2a93132a17b5d2b3eff3eaaad36aed75aa35",
   "schema_version": 1,
-  "source_identity_sha256": "c6a6a293e200dfcfee1242c2e81c418496f70784434ab3607f48c5b782e95e9b",
-  "source_provenance_sha256": "4f62d77d0a1a9acedd94b2c0ecb97800cd492097763784072228bd33f96aa933"
+  "source_identity_sha256": "84474eeeaaeb26b9e409168ee49e27face665583765a7b2f4b1458e950b3808b",
+  "source_provenance_sha256": "ec713687867d4d754412fd1262013815d4e0f139ac4ddae30f6f218261ea5167"
 }
