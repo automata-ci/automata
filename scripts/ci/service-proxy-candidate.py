@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import gzip
 import hashlib
 import io
 import json
@@ -14,6 +15,7 @@ from typing import NoReturn
 
 
 IMAGE_NAME = "ghcr.io/automata-ci/automata-service-proxy"
+LOCAL_IMAGE_NAME = "automata.local/automata-ci-service-proxy"
 IMAGE_ARCHIVE_NAME = "automata-service-proxy.oci.tar"
 SBOM_NAME = "automata-ci-service-proxy.cdx.json"
 SOURCE_NAME = "source-provenance.json"
@@ -22,6 +24,13 @@ SHA256 = re.compile(r"[0-9a-f]{64}")
 OCI_DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 GIT_OBJECT = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
 MAX_ARCHIVE_SIZE = 128 * 1024 * 1024
+MAX_EXPANDED_LAYER_SIZE = 64 * 1024 * 1024
+
+
+def local_reference(manifest_digest: str) -> str:
+    if OCI_DIGEST.fullmatch(manifest_digest) is None:
+        fail("OCI manifest digest is invalid")
+    return f"{LOCAL_IMAGE_NAME}:manifest-{manifest_digest.removeprefix('sha256:')}"
 
 
 def fail(message: str) -> NoReturn:
@@ -218,6 +227,11 @@ def load_oci(archive_bytes: bytes, source: dict, source_sha256: str) -> tuple[st
         {
             "manifests": [
                 {
+                    "annotations": {
+                        "org.opencontainers.image.ref.name": local_reference(
+                            manifest_descriptor["digest"]
+                        )
+                    },
                     "digest": manifest_descriptor["digest"],
                     "mediaType": "application/vnd.oci.image.manifest.v1+json",
                     "size": manifest_descriptor["size"],
@@ -256,6 +270,152 @@ def add_tar_member(archive: tarfile.TarFile, name: str, contents: bytes, mtime: 
     info.uname = info.gname = ""
     info.mtime = mtime
     archive.addfile(info, io.BytesIO(contents))
+
+
+def docker_load_archive(
+    oci_archive: bytes, manifest_digest: str, source_date_epoch: int
+) -> tuple[bytes, str]:
+    """Derive the one portable Docker-load transport from a validated OCI image."""
+    try:
+        archive = tarfile.open(fileobj=io.BytesIO(oci_archive), mode="r:")
+    except tarfile.TarError:
+        fail("canonical OCI archive is invalid")
+    members: dict[str, bytes] = {}
+    directories: set[str] = set()
+    with archive:
+        for member in archive.getmembers():
+            if member.isdir():
+                directories.add(member.name.rstrip("/"))
+                continue
+            if not member.isfile() or member.name in members:
+                fail("canonical OCI archive member set is invalid")
+            stream = archive.extractfile(member)
+            if stream is None:
+                fail("canonical OCI archive member is unreadable")
+            members[member.name] = stream.read()
+    if directories != {"blobs", "blobs/sha256"}:
+        fail("canonical OCI archive directory set differs")
+    try:
+        index = json.loads(members["index.json"])
+        descriptor = index["manifests"][0]
+    except (KeyError, IndexError, TypeError, json.JSONDecodeError):
+        fail("canonical OCI index is invalid")
+    if (
+        not isinstance(descriptor, dict)
+        or descriptor.get("digest") != manifest_digest
+        or descriptor.get("annotations")
+        != {"org.opencontainers.image.ref.name": local_reference(manifest_digest)}
+    ):
+        fail("canonical OCI import identity differs")
+
+    def blob(value: object, label: str) -> tuple[dict, bytes]:
+        if not isinstance(value, dict):
+            fail(f"canonical OCI {label} descriptor is invalid")
+        value_digest = value.get("digest")
+        size = value.get("size")
+        if not isinstance(value_digest, str) or OCI_DIGEST.fullmatch(value_digest) is None:
+            fail(f"canonical OCI {label} digest is invalid")
+        contents = members.get(
+            f"blobs/sha256/{value_digest.removeprefix('sha256:')}"
+        )
+        if (
+            type(size) is not int
+            or contents is None
+            or len(contents) != size
+            or f"sha256:{digest(contents)}" != value_digest
+        ):
+            fail(f"canonical OCI {label} blob differs")
+        return value, contents
+
+    _, manifest_bytes = blob(descriptor, "manifest")
+    try:
+        manifest = json.loads(manifest_bytes)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        fail("canonical OCI manifest is invalid")
+    if not isinstance(manifest, dict):
+        fail("canonical OCI manifest is invalid")
+    config_descriptor, config_bytes = blob(manifest.get("config"), "config")
+    try:
+        config = json.loads(config_bytes)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        fail("canonical OCI config is invalid")
+    rootfs = config.get("rootfs") if isinstance(config, dict) else None
+    diff_ids = rootfs.get("diff_ids") if isinstance(rootfs, dict) else None
+    layers = manifest.get("layers")
+    if (
+        not isinstance(rootfs, dict)
+        or rootfs.get("type") != "layers"
+        or not isinstance(diff_ids, list)
+        or not isinstance(layers, list)
+        or len(diff_ids) != len(layers)
+    ):
+        fail("canonical OCI root filesystem differs")
+
+    docker_layers: list[str] = []
+    derived = dict(members)
+    expanded_size = len(oci_archive)
+    for position, (layer_value, diff_id) in enumerate(zip(layers, diff_ids, strict=True)):
+        layer, layer_bytes = blob(layer_value, f"layer {position}")
+        if not isinstance(diff_id, str) or OCI_DIGEST.fullmatch(diff_id) is None:
+            fail("canonical OCI layer diff ID is invalid")
+        media_type = layer.get("mediaType")
+        if media_type == "application/vnd.oci.image.layer.v1.tar":
+            expanded = layer_bytes
+        elif media_type == "application/vnd.oci.image.layer.v1.tar+gzip":
+            try:
+                with gzip.GzipFile(fileobj=io.BytesIO(layer_bytes), mode="rb") as stream:
+                    expanded = stream.read(MAX_EXPANDED_LAYER_SIZE + 1)
+            except (EOFError, OSError, gzip.BadGzipFile):
+                fail("canonical OCI gzip layer is invalid")
+        else:
+            fail("canonical OCI layer media type differs")
+        if (
+            len(expanded) > MAX_EXPANDED_LAYER_SIZE
+            or f"sha256:{digest(expanded)}" != diff_id
+        ):
+            fail("canonical OCI layer diff ID differs")
+        layer_name = f"blobs/sha256/{diff_id.removeprefix('sha256:')}"
+        existing = derived.get(layer_name)
+        if existing is not None and existing != expanded:
+            fail("canonical OCI layer blob conflicts with its diff ID")
+        if existing is None:
+            derived[layer_name] = expanded
+            expanded_size += len(expanded)
+        docker_layers.append(layer_name)
+
+    config_name = (
+        "blobs/sha256/"
+        f"{config_descriptor['digest'].removeprefix('sha256:')}"
+    )
+    docker_manifest = (
+        json.dumps(
+            [
+                {
+                    "Config": config_name,
+                    "Layers": docker_layers,
+                    "RepoTags": [local_reference(manifest_digest)],
+                }
+            ],
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode()
+    expanded_size += len(docker_manifest)
+    if expanded_size > MAX_ARCHIVE_SIZE:
+        fail("Docker load archive exceeds its size limit")
+    if "manifest.json" in derived:
+        fail("canonical OCI archive already contains a Docker manifest")
+    derived["manifest.json"] = docker_manifest
+
+    output = io.BytesIO()
+    with tarfile.open(fileobj=output, mode="w", format=tarfile.USTAR_FORMAT) as archive:
+        for name in ("blobs", "blobs/sha256"):
+            add_tar_directory(archive, name, source_date_epoch)
+        for name, contents in sorted(derived.items()):
+            add_tar_member(archive, name, contents, source_date_epoch)
+    if output.tell() > MAX_ARCHIVE_SIZE:
+        fail("Docker load archive exceeds its size limit")
+    return output.getvalue(), config_descriptor["digest"]
 
 
 def create(arguments: argparse.Namespace) -> None:

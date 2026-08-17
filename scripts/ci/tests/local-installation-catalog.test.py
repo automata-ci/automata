@@ -147,6 +147,11 @@ class LocalInstallationCatalogContract(unittest.TestCase):
         source = catalog.load_source(REPOSITORY_ROOT)
         self.assertEqual(set(source["images"]), catalog.ROLES)
         self.assertEqual(source["scope"], {"engine": "linux/amd64", "host": "unix"})
+        _, candidate_module = catalog.service_proxy_module()
+        self.assertEqual(
+            source["images"]["service-proxy"]["canonical_repository"],
+            candidate_module.LOCAL_IMAGE_NAME,
+        )
         profile = catalog.load_profile(REPOSITORY_ROOT, source)
         self.assertEqual(
             profile["manifest"]["sha256"],

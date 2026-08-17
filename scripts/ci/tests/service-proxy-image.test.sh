@@ -451,6 +451,11 @@ if candidate_step.find(policy_review) <= candidate_step.rfind(build):
     raise SystemExit(
         "service-proxy-image-test: publication policy review must follow candidate builds"
     )
+load_review = "python3 scripts/ci/verify-service-proxy-candidate-load.py"
+if candidate_step.find(load_review) <= candidate_step.find(policy_review):
+    raise SystemExit(
+        "service-proxy-image-test: Docker load verification must follow publication review"
+    )
 
 verify_tooling = step(ci, "Lint workflows and shell scripts")[1]
 for invocation in (
@@ -478,6 +483,10 @@ for relative in (".ci/workflows/release.yml", ".ci/workflows/service-proxy-image
     if "AUTOMATA_SERVICE_PROXY_CONTAINER_RUNTIME: podman" not in publication:
         raise SystemExit(
             f"service-proxy-image-test: {relative} does not pin the Podman runtime"
+        )
+    if load_review not in publication:
+        raise SystemExit(
+            f"service-proxy-image-test: {relative} does not verify Docker loading"
         )
 PY
 
