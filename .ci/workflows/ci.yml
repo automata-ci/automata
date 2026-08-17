@@ -62,9 +62,9 @@ jobs:
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: |
-            ~/.cargo/registry/cache
-            ~/.cargo/registry/index
-            ~/.cargo/registry/src
+            /opt/cargo/registry/cache
+            /opt/cargo/registry/index
+            /opt/cargo/registry/src
           key: cargo-ubuntu-24.04-rust-1.97.1-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             cargo-ubuntu-24.04-rust-1.97.1-
@@ -153,9 +153,9 @@ jobs:
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: |
-            ~/.cargo/registry/cache
-            ~/.cargo/registry/index
-            ~/.cargo/registry/src
+            /opt/cargo/registry/cache
+            /opt/cargo/registry/index
+            /opt/cargo/registry/src
           key: cargo-ubuntu-24.04-rust-1.97.1-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             cargo-ubuntu-24.04-rust-1.97.1-

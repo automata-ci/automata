@@ -70,13 +70,13 @@ def main() -> None:
         assert body.index(SHORT_STARTUP) < body.index(CACHE_ACTION), (
             f"{job} must start sccache before restoring build inputs"
         )
-        assert "~/.cargo/registry/cache" in body
-        assert "~/.cargo/registry/index" in body
-        assert "~/.cargo/registry/src" in body
+        assert "/opt/cargo/registry/cache" in body
+        assert "/opt/cargo/registry/index" in body
+        assert "/opt/cargo/registry/src" in body
         assert "target/" not in "\n".join(
             line.strip()
             for line in body.splitlines()
-            if line.strip().startswith("~/.cargo/")
+            if line.strip().startswith("/opt/cargo/")
         )
 
     for job in RUST_JOBS:
