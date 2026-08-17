@@ -7,13 +7,33 @@ use async_trait::async_trait;
 
 use crate::{
     BlobDescriptor, BlobPayload, BlobStoreError, BlobStoreErrorKind, ImmutableBlobStore,
-    PutBlobOutcome, VerifiedBlob,
+    PutBlobOutcome, ReclaimableBlobStore, VerifiedBlob,
 };
 
 /// Deterministic in-memory adapter for application and contract tests.
 #[derive(Clone, Debug, Default)]
 pub struct MemoryBlobStore {
     objects: Arc<RwLock<BTreeMap<String, BlobPayload>>>,
+}
+
+#[async_trait]
+impl ReclaimableBlobStore for MemoryBlobStore {
+    async fn delete_if_present(&self, descriptor: &BlobDescriptor) -> Result<(), BlobStoreError> {
+        let mut objects = self
+            .objects
+            .write()
+            .map_err(|_| BlobStoreError::new(BlobStoreErrorKind::Unavailable))?;
+        match objects.get(descriptor.key().as_str()) {
+            Some(payload) if payload.descriptor() != descriptor => {
+                Err(BlobStoreError::new(BlobStoreErrorKind::Conflict))
+            }
+            Some(_) => {
+                objects.remove(descriptor.key().as_str());
+                Ok(())
+            }
+            None => Ok(()),
+        }
+    }
 }
 
 #[async_trait]

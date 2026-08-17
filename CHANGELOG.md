@@ -82,6 +82,9 @@ structure of [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
 
 ### Changed
 
+- GitHub Actions cache eviction now durably reclaims unreachable S3 blocks with
+  crash-safe, replica-safe exact-object garbage collection.
+
 - `automata-runner enroll` now requires one explicit `--token-source` selector:
   `file:ABSOLUTE_PATH`, `env:NAME`, or `stdin`. The ambient environment/stdin
   fallback and former `--token-file` option were removed; enrollment tokens now

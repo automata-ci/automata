@@ -9,7 +9,7 @@ use std::{
     time::Duration,
 };
 
-use automata_ci_blob::ImmutableBlobStore;
+use automata_ci_blob::{ImmutableBlobStore, ReclaimableBlobStore};
 use automata_ci_blob_s3::{S3AtRestEncryption, S3BlobStoreConfig, StaticS3Credentials};
 use automata_ci_control::adapter_spi::{
     AcquireLease, InternalAttemptRepository as _, QueuedAttempt,
@@ -329,7 +329,7 @@ fn real_results_router(
     .with_at_rest_encryption(S3AtRestEncryption::aws_kms(
         environment.s3_kms_key_id.clone(),
     )?);
-    let objects: Arc<dyn ImmutableBlobStore> =
+    let objects: Arc<dyn ReclaimableBlobStore> =
         Arc::new(s3_config.connect(StaticS3Credentials::new(
             environment.s3_access_key.clone(),
             environment.s3_secret_key.clone(),
@@ -337,10 +337,12 @@ fn real_results_router(
         )?)?);
     let observer = Arc::new(RecordingObserver::default());
     let public_observer: Arc<dyn ResultsObserver> = observer.clone();
-    let objects: Arc<dyn ImmutableBlobStore> = Arc::new(ObservedResultsBlobStore::new(
+    let objects = Arc::new(ObservedResultsBlobStore::new(
         objects,
         Arc::clone(&public_observer),
     ));
+    let artifact_objects: Arc<dyn ImmutableBlobStore> = objects.clone();
+    let cache_objects: Arc<dyn ReclaimableBlobStore> = objects;
     let artifact_repository: Arc<dyn ArtifactRepository> =
         Arc::new(ObservedResultsArtifactRepository::new(
             Arc::new(PostgresArtifactRepository::new(database.pool().clone())),
@@ -353,7 +355,7 @@ fn real_results_router(
     let artifacts = Arc::new(
         ArtifactService::new(
             artifact_repository,
-            Arc::clone(&objects),
+            artifact_objects,
             Arc::clone(&clock),
             ids.clone(),
             ResultsLimits::default(),
@@ -362,7 +364,7 @@ fn real_results_router(
     );
     let caches = Arc::new(CacheService::new(
         cache_repository,
-        objects,
+        cache_objects,
         Arc::clone(&clock),
         ids,
         CacheLimits::default(),

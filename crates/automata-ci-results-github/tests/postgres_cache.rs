@@ -372,6 +372,19 @@ async fn cache_transactions_are_immutable_fenced_and_cross_run_readable() -> Tes
             .await
             .expect_err("quota evicts the least recently accessed entry");
         assert_eq!(evicted.kind(), CacheRepositoryErrorKind::NotFound);
+        let garbage = repository.list_garbage(10).await?;
+        let evicted_descriptor = descriptor("block-b", 3, 0x55);
+        assert!(
+            garbage.contains(&evicted_descriptor),
+            "quota eviction must durably queue its immutable block"
+        );
+        repository
+            .complete_garbage(vec![evicted_descriptor.clone()])
+            .await?;
+        assert!(
+            !repository.list_garbage(10).await?.contains(&evicted_descriptor),
+            "exact provider acknowledgement must retire the durable garbage row"
+        );
         assert_eq!(
             repository
                 .resolve_download(ResolveCacheDownload {

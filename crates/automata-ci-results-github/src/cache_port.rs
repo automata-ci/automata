@@ -1,6 +1,7 @@
 use std::{fmt, sync::Arc};
 
 use async_trait::async_trait;
+use automata_ci_blob::BlobDescriptor;
 use automata_ci_core::Sha256Digest;
 use thiserror::Error;
 use url::Url;
@@ -61,6 +62,18 @@ impl CacheRepositoryError {
 /// bounded request evidence and never cache-liveness authority.
 #[async_trait]
 pub trait CacheRepository: fmt::Debug + Send + Sync {
+    /// Returns a bounded deterministic batch of unreachable cache objects.
+    async fn list_garbage(
+        &self,
+        maximum: usize,
+    ) -> Result<Vec<BlobDescriptor>, CacheRepositoryError>;
+
+    /// Acknowledges exact objects after idempotent provider deletion.
+    async fn complete_garbage(
+        &self,
+        descriptors: Vec<BlobDescriptor>,
+    ) -> Result<(), CacheRepositoryError>;
+
     /// Creates a pending entry or returns the exact idempotent replay.
     async fn create(
         &self,

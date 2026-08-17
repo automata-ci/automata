@@ -19,6 +19,7 @@ const ACTIVE_CACHE_LIFECYCLES: &[&str] =
 const MAX_REPOSITORY_CACHE_ENTRIES: usize = 4_096;
 const CACHE_ENTRY_CENSUS_LIMIT: i64 = 4_097;
 const MAXIMUM_CACHE_CALLER_CLOCK_SKEW_SECONDS: u64 = 60;
+const MAXIMUM_CACHE_GARBAGE_BATCH: usize = 1_024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CacheRepositoryLimitRejection {
@@ -56,6 +57,61 @@ impl PostgresCacheRepository {
 
 #[async_trait]
 impl CacheRepository for PostgresCacheRepository {
+    async fn list_garbage(
+        &self,
+        maximum: usize,
+    ) -> Result<Vec<BlobDescriptor>, CacheRepositoryError> {
+        if maximum == 0 || maximum > MAXIMUM_CACHE_GARBAGE_BATCH {
+            return Err(error(CacheRepositoryErrorKind::ResourceExhausted));
+        }
+        let rows = sqlx::query(
+            r"
+            SELECT object_key, digest, size_bytes, media_type
+            FROM github_actions_cache_garbage
+            ORDER BY queued_at_seconds ASC, object_key ASC
+            LIMIT $1
+            ",
+        )
+        .bind(
+            i64::try_from(maximum)
+                .map_err(|_| error(CacheRepositoryErrorKind::ResourceExhausted))?,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(database_error)?;
+        rows.iter().map(decode_descriptor).collect()
+    }
+
+    async fn complete_garbage(
+        &self,
+        descriptors: Vec<BlobDescriptor>,
+    ) -> Result<(), CacheRepositoryError> {
+        if descriptors.len() > MAXIMUM_CACHE_GARBAGE_BATCH {
+            return Err(error(CacheRepositoryErrorKind::ResourceExhausted));
+        }
+        let mut transaction = begin_read_committed(&self.pool).await?;
+        for descriptor in descriptors {
+            let deleted = sqlx::query(
+                r"
+                DELETE FROM github_actions_cache_garbage
+                WHERE object_key = $1 AND digest = $2 AND size_bytes = $3
+                  AND media_type = $4
+                ",
+            )
+            .bind(descriptor.key().as_str())
+            .bind(descriptor.digest().as_bytes().as_slice())
+            .bind(size_i64(descriptor.size())?)
+            .bind(descriptor.media_type().as_str())
+            .execute(&mut *transaction)
+            .await
+            .map_err(database_error)?;
+            if deleted.rows_affected() > 1 {
+                return Err(error(CacheRepositoryErrorKind::CorruptData));
+            }
+        }
+        transaction.commit().await.map_err(database_error)
+    }
+
     async fn create(
         &self,
         request: CreateCacheEntry,
@@ -482,25 +538,26 @@ impl CacheRepository for PostgresCacheRepository {
         }
         enforce_repository_entry_ceiling(&mut transaction, repository.repository_id).await?;
         let inactivity_seconds = validated_inactivity_seconds(request.inactivity_seconds)?;
-        sqlx::query(
+        let inactive = sqlx::query_scalar::<_, Uuid>(
             r"
             WITH database_clock AS MATERIALIZED (
                 SELECT floor(extract(epoch FROM clock_timestamp()))::BIGINT AS now_seconds
             )
-            DELETE FROM github_actions_cache_entries
-            USING database_clock
+            SELECT id FROM github_actions_cache_entries, database_clock
             WHERE repository_id = $1 AND state = 'finalized'
               AND last_accessed_at_seconds <= greatest(
                     0::BIGINT,
                     database_clock.now_seconds - $2
               )
+            FOR UPDATE
             ",
         )
         .bind(repository.repository_id)
         .bind(seconds_i64(inactivity_seconds)?)
-        .execute(&mut *transaction)
+        .fetch_all(&mut *transaction)
         .await
         .map_err(database_error)?;
+        delete_entries_and_queue_garbage(&mut transaction, &inactive).await?;
         evict_to_fit(
             &mut transaction,
             repository.repository_id,
@@ -1164,25 +1221,27 @@ async fn delete_inactive_pending_entries(
     transaction: &mut Transaction<'_, sqlx::Postgres>,
     repository_id: Uuid,
 ) -> Result<(), CacheRepositoryError> {
-    sqlx::query(
+    let inactive = sqlx::query_scalar::<_, Uuid>(
         r"
-        DELETE FROM github_actions_cache_entries AS entry
-        USING job_attempts AS attempt
+        SELECT entry.id
+        FROM github_actions_cache_entries AS entry
+        JOIN job_attempts AS attempt
+          ON attempt.id = entry.attempt_id AND attempt.job_id = entry.job_id
         WHERE entry.repository_id = $1
           AND entry.state = 'pending'
-          AND attempt.id = entry.attempt_id
-          AND attempt.job_id = entry.job_id
           AND NOT (
               attempt.lifecycle = ANY($2::TEXT[])
               AND attempt.lease_id IS NOT NULL
           )
+        FOR UPDATE OF entry
         ",
     )
     .bind(repository_id)
     .bind(ACTIVE_CACHE_LIFECYCLES)
-    .execute(&mut **transaction)
+    .fetch_all(&mut **transaction)
     .await
     .map_err(database_error)?;
+    delete_entries_and_queue_garbage(transaction, &inactive).await?;
     Ok(())
 }
 
@@ -1231,26 +1290,24 @@ async fn reserve_repository_entry_slot(
     if count > MAX_REPOSITORY_CACHE_ENTRIES {
         return Err(error(CacheRepositoryErrorKind::ResourceExhausted));
     }
-    let deleted = sqlx::query(
+    let candidate = sqlx::query_scalar::<_, Uuid>(
         r"
-        DELETE FROM github_actions_cache_entries
-        WHERE id = (
-            SELECT id
-            FROM github_actions_cache_entries
-            WHERE repository_id = $1 AND state = 'finalized'
-            ORDER BY last_accessed_at_seconds ASC, finalized_at_seconds ASC, id ASC
-            LIMIT 1
-            FOR UPDATE
-        )
+        SELECT id
+        FROM github_actions_cache_entries
+        WHERE repository_id = $1 AND state = 'finalized'
+        ORDER BY last_accessed_at_seconds ASC, finalized_at_seconds ASC, id ASC
+        LIMIT 1
+        FOR UPDATE
         ",
     )
     .bind(repository_id)
-    .execute(&mut **transaction)
+    .fetch_optional(&mut **transaction)
     .await
     .map_err(database_error)?;
-    if deleted.rows_affected() != 1 {
+    let Some(candidate) = candidate else {
         return Err(error(CacheRepositoryErrorKind::ResourceExhausted));
-    }
+    };
+    delete_entries_and_queue_garbage(transaction, &[candidate]).await?;
     Ok(())
 }
 
@@ -1294,6 +1351,7 @@ async fn evict_to_fit(
         candidates.push((row.try_get::<Uuid, _>("id").map_err(corrupt_error)?, size));
     }
     let mut index = 0_usize;
+    let mut evicted = Vec::new();
     while total
         .checked_add(incoming_size)
         .is_none_or(|projected| projected > quota)
@@ -1301,22 +1359,49 @@ async fn evict_to_fit(
         let Some((entry_id, size)) = candidates.get(index).copied() else {
             return Err(error(CacheRepositoryErrorKind::ResourceExhausted));
         };
-        let deleted = sqlx::query(
-            "DELETE FROM github_actions_cache_entries WHERE id = $1 AND state = 'finalized'",
-        )
-        .bind(entry_id)
-        .execute(&mut **transaction)
-        .await
-        .map_err(database_error)?;
-        if deleted.rows_affected() != 1 {
-            return Err(error(CacheRepositoryErrorKind::Conflict));
-        }
+        evicted.push(entry_id);
         total = total
             .checked_sub(size)
             .ok_or_else(|| error(CacheRepositoryErrorKind::CorruptData))?;
         index = index
             .checked_add(1)
             .ok_or_else(|| error(CacheRepositoryErrorKind::CorruptData))?;
+    }
+    delete_entries_and_queue_garbage(transaction, &evicted).await?;
+    Ok(())
+}
+
+async fn delete_entries_and_queue_garbage(
+    transaction: &mut Transaction<'_, sqlx::Postgres>,
+    entry_ids: &[Uuid],
+) -> Result<(), CacheRepositoryError> {
+    if entry_ids.is_empty() {
+        return Ok(());
+    }
+    sqlx::query(
+        r"
+        INSERT INTO github_actions_cache_garbage (
+            object_key, digest, size_bytes, media_type, queued_at_seconds
+        )
+        SELECT DISTINCT ON (block.object_key)
+               block.object_key, block.digest, block.size_bytes, block.media_type,
+               floor(extract(epoch FROM clock_timestamp()))::BIGINT
+        FROM github_actions_cache_blocks AS block
+        WHERE block.entry_id = ANY($1)
+        ORDER BY block.object_key
+        ",
+    )
+    .bind(entry_ids)
+    .execute(&mut **transaction)
+    .await
+    .map_err(database_error)?;
+    let deleted = sqlx::query("DELETE FROM github_actions_cache_entries WHERE id = ANY($1)")
+        .bind(entry_ids)
+        .execute(&mut **transaction)
+        .await
+        .map_err(database_error)?;
+    if deleted.rows_affected() != u64::try_from(entry_ids.len()).unwrap_or(u64::MAX) {
+        return Err(error(CacheRepositoryErrorKind::Conflict));
     }
     Ok(())
 }

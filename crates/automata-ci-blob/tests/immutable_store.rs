@@ -1,12 +1,13 @@
 use automata_ci_blob::{
     BlobDescriptor, BlobKey, BlobPayload, BlobStoreErrorKind, ImmutableBlobStore, MediaType,
-    MemoryBlobStore, PutBlobOutcome,
+    MemoryBlobStore, PutBlobOutcome, ReclaimableBlobStore,
 };
 use automata_ci_core::Sha256Digest;
 use bytes::Bytes;
 use static_assertions::assert_obj_safe;
 
 assert_obj_safe!(ImmutableBlobStore);
+assert_obj_safe!(ReclaimableBlobStore);
 
 fn payload(key: &str, value: &'static [u8]) -> BlobPayload {
     BlobPayload::from_bytes(
@@ -108,4 +109,40 @@ async fn reads_fail_closed_on_limits_and_metadata_mismatch() {
         .await
         .expect_err("descriptor mismatch");
     assert_eq!(error.kind(), BlobStoreErrorKind::Integrity);
+}
+
+#[tokio::test]
+async fn reclamation_is_exact_and_idempotent() {
+    let store = MemoryBlobStore::default();
+    let first = payload("cache/unreachable", b"cache block");
+    store
+        .put_if_absent(first.clone())
+        .await
+        .expect("create fixture");
+
+    let wrong = BlobDescriptor::new(
+        first.descriptor().key().clone(),
+        Sha256Digest::from_bytes([9; 32]),
+        first.descriptor().size(),
+        first.descriptor().media_type().clone(),
+    );
+    let error = store
+        .delete_if_present(&wrong)
+        .await
+        .expect_err("mismatched descriptor must not delete");
+    assert_eq!(error.kind(), BlobStoreErrorKind::Conflict);
+
+    store
+        .delete_if_present(first.descriptor())
+        .await
+        .expect("delete unreachable object");
+    store
+        .delete_if_present(first.descriptor())
+        .await
+        .expect("deletion replay");
+    let error = store
+        .get_verified(first.descriptor(), first.descriptor().size())
+        .await
+        .expect_err("deleted object is absent");
+    assert_eq!(error.kind(), BlobStoreErrorKind::NotFound);
 }
