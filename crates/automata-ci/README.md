@@ -60,7 +60,7 @@ provides:
  | `GET` | `/internal/v2/workspaces/{workspace_id}/repositories` | Authorized repository directory |
  | `GET` | `/internal/v2/workspaces/{workspace_id}/repositories/{owner}/{repository}/runs` | Filtered workflow and run page |
  | `GET` | `/internal/v2/workspaces/{workspace_id}/repositories/{owner}/{repository}/runs/{run_id}` | Run, job, and artifact snapshot |
- | `GET` | `/internal/v2/workspaces/{workspace_id}/repositories/{owner}/{repository}/runs/{run_id}/jobs/{job_id}` | Job metadata and structured-stream state |
+ | `GET` | `/internal/v2/workspaces/{workspace_id}/repositories/{owner}/{repository}/runs/{run_id}/jobs/{job_id}` | Job metadata and structured-stream availability |
  | `POST` | `/internal/v2/workspaces/{workspace_id}/repositories/{owner}/{repository}/runs/{run_id}/jobs/{job_id}/live-ticket` | One-time, origin-bound direct log capability |
  | `POST` | `/internal/v2/workspaces/{workspace_id}/repositories/{repository_id}/workflows/{workflow_id}/dispatches` | Authorized, idempotent workflow dispatch with Core-owned source resolution |
 

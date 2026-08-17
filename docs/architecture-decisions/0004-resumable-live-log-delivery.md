@@ -1,7 +1,11 @@
 # ADR 0004: Deliver live logs through a resumable transport-neutral tail
 
-- Status: Accepted
+- Status: Superseded by [ADR 0005](0005-structured-execution-log-groups.md)
 - Date: 2026-08-15
+
+This ADR records the transport design that introduced resumable delivery.
+ADR 0005 replaced its snapshot fallback and flat-record assumptions with one
+schema-2 structured replay-and-tail protocol.
 
 ## Context
 

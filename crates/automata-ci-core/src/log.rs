@@ -196,7 +196,7 @@ impl LogGroup {
                 maximum: MAX_LOG_GROUP_NAME_BYTES,
             });
         }
-        if self.name.chars().any(char::is_control) {
+        if self.name.chars().any(invalid_log_group_name_character) {
             return Err(LogValidationError::InvalidGroupName);
         }
         if self.parent_id.as_ref() == Some(&self.id) {
@@ -234,6 +234,17 @@ impl LogGroup {
     pub const fn ordinal(&self) -> u32 {
         self.ordinal
     }
+}
+
+fn invalid_log_group_name_character(character: char) -> bool {
+    character.is_control()
+        || matches!(
+            character,
+            '\u{061c}'
+                | '\u{200e}'..='\u{200f}'
+                | '\u{202a}'..='\u{202e}'
+                | '\u{2066}'..='\u{2069}'
+        )
 }
 
 /// Typed payload of one ordered execution-log record.
@@ -624,8 +635,8 @@ pub enum LogValidationError {
         /// Maximum accepted display-name size.
         maximum: usize,
     },
-    /// A group display name contained a control character.
-    #[error("log group display name contains a control character")]
+    /// A group display name contained a control or directional formatting character.
+    #[error("log group display name contains a control or directional formatting character")]
     InvalidGroupName,
     /// A group named itself as its parent.
     #[error("a log group cannot contain itself")]

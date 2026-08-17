@@ -15,6 +15,7 @@ const MAX_TIMESTAMP_MS = 253_402_300_799_999;
 const STREAM_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const GROUP_ID = /^[A-Za-z0-9:._/-]{1,256}$/u;
 const DECIMAL = /^(0|[1-9][0-9]{0,19})$/u;
+const CONTROL_CHARACTER = /[\u0000-\u001f\u007f-\u009f]/u;
 const CONTROL_CHARACTER_EXCEPT_TAB = /[\u0000-\u0008\u000a-\u001f\u007f-\u009f]/u;
 const BIDI_FORMATTING_CHARACTER =
   /[\u061c\u200e-\u200f\u202a-\u202e\u2066-\u2069]/u;
@@ -82,7 +83,7 @@ export interface SseConnectionOptions {
 }
 
 export type SseConnectionResult =
-  | { readonly kind: "complete" }
+  | { readonly kind: "complete"; readonly checkpoint: string }
   | { readonly kind: "reconnect" };
 
 interface DecodedSseEvent {
@@ -191,8 +192,14 @@ export async function connectLiveLogSse(
             break;
           }
           case "complete":
+            if (event.id === null) {
+              throw new LiveLogSseError(
+                "protocol",
+                "the live-log completion has no checkpoint",
+              );
+            }
             parseProtocolEnvelope(event.data, "completion");
-            return { kind: "complete" };
+            return { kind: "complete", checkpoint: event.id };
           case "reconnect":
             parseProtocolEnvelope(event.data, "reconnect");
             return { kind: "reconnect" };
@@ -451,7 +458,8 @@ function parseLogGroup(value: unknown): LiveLogGroup {
     typeof group.name !== "string" ||
     group.name.trim().length === 0 ||
     new TextEncoder().encode(group.name).byteLength > 512 ||
-    CONTROL_CHARACTER_EXCEPT_TAB.test(group.name)
+    CONTROL_CHARACTER.test(group.name) ||
+    BIDI_FORMATTING_CHARACTER.test(group.name)
   ) {
     throw new LiveLogProtocolError("the log group name is invalid");
   }

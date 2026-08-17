@@ -1115,14 +1115,8 @@ pub(crate) struct JobLogPage {
     pub(crate) job: JobSummary,
     /// Authorization state for the independently protected log collection.
     pub(crate) log_visibility: CollectionVisibility,
-    /// Structured stream state, absent when logs are unavailable or restricted.
-    pub(crate) live: Option<JobLogLive>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct JobLogLive {
-    /// Whether the durable log stream has received its terminal record.
-    pub(crate) stream_closed: bool,
+    /// Whether the selected job has an authorized structured stream.
+    pub(crate) live_available: bool,
 }
 
 /// One exact authorized live-log resource returned without a bearer credential.

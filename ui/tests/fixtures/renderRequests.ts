@@ -338,7 +338,6 @@ export const jobLogRequest: RenderRequest = {
     logVisibility: "full",
     live: {
       ticketHref: `/automata-ci/automata/actions/runs/${PRIMARY_RUN_ID}/jobs/${PRIMARY_JOB_ID}/live-ticket`,
-      state: "open",
     },
     notice:
       "This job is still running. This page updates automatically as logs are committed.",

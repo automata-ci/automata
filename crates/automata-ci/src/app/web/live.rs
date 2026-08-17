@@ -33,9 +33,9 @@ use sha2::{Digest as _, Sha256};
 use super::{
     codec::{LogSegmentExpectation, decode_log_segment},
     data::{
-        ArtifactDownload, ArtifactSummary, AuthorizedLiveLog, CollectionVisibility, JobLogLive,
-        JobLogPage, JobNavigationItem, JobSummary, LiveLogBatch, LiveLogRecord, LogChannel,
-        LogGroup, LogGroupKind, LogLine, LogRecord, Repository, RepositoryDirectoryItem,
+        ArtifactDownload, ArtifactSummary, AuthorizedLiveLog, CollectionVisibility, JobLogPage,
+        JobNavigationItem, JobSummary, LiveLogBatch, LiveLogRecord, LogChannel, LogGroup,
+        LogGroupKind, LogLine, LogRecord, Repository, RepositoryDirectoryItem,
         RepositoryDirectoryPage, RepositoryDirectoryRequest, RepositoryPath,
         RepositorySettingsDestination, RepositorySettingsPage, RequestContext, RunDetailPage,
         RunDetailRequest, RunListPage, RunListRequest, RunSummary, Status, StatusFilter,
@@ -1905,7 +1905,7 @@ impl LiveWebData {
                 (vec![selected_navigation], None, None)
             };
         let run = map_run(&detail.run)?;
-        let live = if selected_log_access_allowed {
+        let live_available = if selected_log_access_allowed {
             match detail.log_stream {
                 Some(log_stream) => {
                     let Some(attempt) = detail.job.latest_attempt.as_ref() else {
@@ -1914,14 +1914,12 @@ impl LiveWebData {
                     if log_stream.attempt_id != attempt.id {
                         return Err(WebDataError::Corrupt);
                     }
-                    Some(JobLogLive {
-                        stream_closed: log_stream.closed_at.is_some(),
-                    })
+                    true
                 }
-                None => None,
+                None => false,
             }
         } else {
-            None
+            false
         };
         let settings_visible = dashboard_metadata_allowed
             && self.settings_visible(context, tenant, repository).await?;
@@ -1937,7 +1935,7 @@ impl LiveWebData {
             } else {
                 CollectionVisibility::Restricted
             },
-            live,
+            live_available,
         }))
     }
 }
@@ -3700,7 +3698,7 @@ mod tests {
             .expect("job detail lookup")
             .expect("dashboard-readable metadata remains visible");
         assert_eq!(page.log_visibility, CollectionVisibility::Restricted);
-        assert!(page.live.is_none());
+        assert!(!page.live_available);
     }
 
     #[tokio::test]
@@ -3826,7 +3824,7 @@ mod tests {
 
         assert_eq!(page.job.id, job_id);
         assert_eq!(page.log_visibility, CollectionVisibility::Restricted);
-        assert!(page.live.is_none());
+        assert!(!page.live_available);
     }
 
     #[tokio::test]
@@ -3876,7 +3874,7 @@ mod tests {
             .expect("authenticated private-log lookup")
             .expect("log-authorized viewer");
         assert_eq!(page.jobs.len(), 1);
-        assert!(page.live.is_some());
+        assert!(page.live_available);
 
         let (denied, _, repository, run_id, job_id, _) =
             fake_live_data_with_policy(FakeLivePolicy {
@@ -3923,7 +3921,7 @@ mod tests {
         .expect("authenticated masked-log lookup")
         .expect("log-authorized viewer");
 
-        assert!(page.live.is_some());
+        assert!(page.live_available);
     }
 
     #[tokio::test]
@@ -3946,7 +3944,7 @@ mod tests {
             .expect("public runner-redacted log page");
 
         assert_eq!(page.log_visibility, CollectionVisibility::Full);
-        assert!(page.live.is_some());
+        assert!(page.live_available);
         assert!(
             calls
                 .lock()
@@ -3981,7 +3979,7 @@ mod tests {
 
         assert_eq!(page.log_visibility, CollectionVisibility::Full);
         assert!(page.job.logs_available);
-        assert!(page.live.is_none());
+        assert!(!page.live_available);
         assert!(
             calls
                 .lock()

@@ -93,8 +93,7 @@ fn job_log_request(log_visibility: &str) -> Value {
     let mut request = valid_request();
     let live = if log_visibility == "full" {
         json!({
-            "ticketHref": "/automata-ci/automata/actions/runs/550e8400-e29b-41d4-a716-446655440000/jobs/11111111-1111-4111-8111-111111111111/live-ticket",
-            "state": "closed"
+            "ticketHref": "/automata-ci/automata/actions/runs/550e8400-e29b-41d4-a716-446655440000/jobs/11111111-1111-4111-8111-111111111111/live-ticket"
         })
     } else {
         Value::Null

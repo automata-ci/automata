@@ -97,3 +97,19 @@ fn deserialized_group_metadata_is_validated_at_the_frame_boundary() {
 
     assert_eq!(decoded.validate(), Err(LogValidationError::EmptyGroupName),);
 }
+
+#[test]
+fn log_group_names_reject_control_and_directional_formatting() {
+    for name in ["Build\tstep", "Build\u{202e}step"] {
+        assert_eq!(
+            LogGroup::new(
+                LogGroupId::new("step/build").expect("group ID"),
+                None,
+                name,
+                LogGroupKind::Step,
+                1,
+            ),
+            Err(LogValidationError::InvalidGroupName),
+        );
+    }
+}

@@ -68,12 +68,17 @@ export function JobLogPage({ model, shellUtility, initialRecords = [] }: JobLogP
       onStateChange: (state) => setConnection(state.kind),
       onFailure: (failure) => setStreamError(failure.message),
     });
+    const start = () => {
+      void controller.start().catch(() =>
+        setStreamError("The log stream could not be opened."),
+      );
+    };
     const visibilityChanged = () => {
-      if (document.visibilityState === "visible") void controller.start();
+      if (document.visibilityState === "visible") start();
       else controller.pause();
     };
     document.addEventListener("visibilitychange", visibilityChanged);
-    void controller.start().catch(() => setStreamError("The log stream could not be opened."));
+    visibilityChanged();
     return () => {
       document.removeEventListener("visibilitychange", visibilityChanged);
       controller.dispose();
@@ -216,7 +221,7 @@ function LogGroupPanel({ expanded, group, onToggle, query }: {
   readonly query: string;
 }) {
   const lines = query === "" ? group.lines : group.lines.filter((line) => lineMatches(line, query));
-  const panelId = `log-group-${domSafe(group.id)}`;
+  const panelId = groupPanelId(group.id);
   return (
     <article className="log-group" data-state={group.conclusion ?? "running"}>
       <button aria-controls={panelId} aria-expanded={expanded} className="log-group__summary" onClick={onToggle} type="button">
@@ -342,6 +347,10 @@ function formatLogTime(milliseconds: number): string {
   return new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }).format(milliseconds);
 }
 
-function domSafe(value: string): string {
-  return value.replace(/[^A-Za-z0-9_-]/gu, "-");
+function groupPanelId(value: string): string {
+  let encoded = "";
+  for (let index = 0; index < value.length; index += 1) {
+    encoded += value.charCodeAt(index).toString(16).padStart(2, "0");
+  }
+  return `log-group-${encoded}`;
 }

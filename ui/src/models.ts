@@ -244,7 +244,6 @@ interface JobLogJobModel {
 
 export interface JobLogLiveModel {
   readonly ticketHref: string;
-  readonly state: "open" | "closed";
 }
 
 export interface JobLogPageModel {

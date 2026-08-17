@@ -1328,7 +1328,7 @@ async fn job_log(
     let Ok(Path((owner, repository, run_id, job_id))) = path else {
         return bad_request();
     };
-    if raw_query.as_deref().is_some_and(|query| !query.is_empty()) {
+    if raw_query.is_some() {
         return bad_request();
     }
     let Some(repository_path) = repository_path(owner, repository) else {
@@ -2238,13 +2238,13 @@ mod tests {
 
     use super::*;
     use crate::app::web::data::{
-        ArtifactDownload, ArtifactSummary, CollectionVisibility, JobLogLive, JobLogPage,
-        JobNavigationItem, JobSummary, RBAC_BINDING_PAGE_SIZE, RBAC_ROLE_PAGE_SIZE,
-        RBAC_USER_DETAIL_BINDING_LIMIT, RBAC_USER_PAGE_SIZE, RbacDirectBindingListPage,
-        RbacRoleListPage, RbacUserDetailPage, RbacUserListPage, Repository as DataRepository,
-        RepositoryDirectoryItem, RepositoryDirectoryPage, RepositorySettingsDestination,
-        RepositorySettingsPage, RunDetailPage, RunListPage, RunSummary, Status, Viewer,
-        VisibleCollection, Workflow, WorkflowDefinition,
+        ArtifactDownload, ArtifactSummary, CollectionVisibility, JobLogPage, JobNavigationItem,
+        JobSummary, RBAC_BINDING_PAGE_SIZE, RBAC_ROLE_PAGE_SIZE, RBAC_USER_DETAIL_BINDING_LIMIT,
+        RBAC_USER_PAGE_SIZE, RbacDirectBindingListPage, RbacRoleListPage, RbacUserDetailPage,
+        RbacUserListPage, Repository as DataRepository, RepositoryDirectoryItem,
+        RepositoryDirectoryPage, RepositorySettingsDestination, RepositorySettingsPage,
+        RunDetailPage, RunListPage, RunSummary, Status, Viewer, VisibleCollection, Workflow,
+        WorkflowDefinition,
     };
 
     const WORKFLOW_ID: &str = "11111111-1111-4111-8111-11111111111a";
@@ -2956,9 +2956,7 @@ mod tests {
             next_navigation_job_id: None,
             job,
             log_visibility: CollectionVisibility::Full,
-            live: Some(JobLogLive {
-                stream_closed: false,
-            }),
+            live_available: true,
         }
     }
 
@@ -4688,7 +4686,15 @@ mod tests {
             page["page"]["live"]["ticketHref"],
             format!("{path}/live-ticket")
         );
-        assert_eq!(page["page"]["live"]["state"], "open");
+        assert_eq!(
+            page["page"]["live"]
+                .as_object()
+                .expect("live access metadata"),
+            &serde_json::Map::from_iter([(
+                "ticketHref".to_owned(),
+                serde_json::Value::String(format!("{path}/live-ticket")),
+            )]),
+        );
         assert!(
             page["page"]["notice"]
                 .as_str()
@@ -4863,6 +4869,7 @@ mod tests {
             "/acme-labs/payments-api/settings/access?notice=saved&notice=conflict".to_owned(),
             "/acme-labs/payments-api/settings/access?notice=%73aved".to_owned(),
             format!("/acme-labs/payments-api/actions/runs/{RUN_ID}/jobs/{JOB_ID}?q=bad%0Aquery"),
+            format!("/acme-labs/payments-api/actions/runs/{RUN_ID}/jobs/{JOB_ID}?"),
             format!("/acme-labs/payments-api/actions/runs/{RUN_ID}/jobs/{JOB_ID}?q=%E2%80%8B"),
             format!("/acme-labs/payments-api/actions/runs/{RUN_ID}/jobs/{JOB_ID}?q=build%E2%80%AE"),
             format!("/acme-labs/payments-api/actions/runs/{RUN_ID}/jobs/{JOB_ID}?q=one&q=two"),

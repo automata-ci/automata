@@ -4,6 +4,7 @@ import { renderToString } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { HtmlDocument } from "../../src/Document";
 import { JobLogPage } from "../../src/pages/JobLogPage";
+import type { LiveLogRecord } from "../../src/liveLogs";
 import { render, renderPage } from "../../src/entry-server";
 import type { RenderRequest } from "../../src/models";
 import {
@@ -513,6 +514,42 @@ describe("server rendering", () => {
 
     expect(rendered.querySelector('input[type="search"]')).not.toBeNull();
     expect(rendered.querySelector("form.log-search-form")).toBeNull();
+  });
+
+  it("gives distinct log panels injective accessible IDs", () => {
+    if (jobLogRequest.page.kind !== "job-log") {
+      throw new Error("The job-log fixture is unavailable");
+    }
+    const records: LiveLogRecord[] = ["step/a", "step-a"].map(
+      (id, index) => ({
+        streamId: "00000000-0000-4000-8000-000000000005",
+        sequence: String(index + 1),
+        fragment: null,
+        emittedAtMs: 1_777_890_010_000 + index,
+        type: "group_started",
+        group: {
+          id,
+          parentId: null,
+          name: id,
+          kind: "step",
+          ordinal: index,
+        },
+      }),
+    );
+    const model = { ...jobLogRequest.page, live: null };
+    const rendered = new DOMParser().parseFromString(
+      renderToString(<JobLogPage initialRecords={records} model={model} />),
+      "text/html",
+    );
+    const controls = [...rendered.querySelectorAll(".log-group__summary")].map(
+      (button) => button.getAttribute("aria-controls"),
+    );
+    const regions = [...rendered.querySelectorAll(".log-group__output")].map(
+      (region) => region.id,
+    );
+
+    expect(new Set(controls).size).toBe(2);
+    expect(regions).toEqual(controls);
   });
 
   it.each([

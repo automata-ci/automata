@@ -100,12 +100,11 @@ function validateLive(
 ): void {
   if (value === null) return;
   if (visibility === "restricted") invalid(path, "no live tail for restricted logs");
-  const live = expectObject(value, path, ["ticketHref", "state"]);
+  const live = expectObject(value, path, ["ticketHref"]);
   const ticketHref = expectRouteField(live, "ticketHref", path);
   if (ticketHref !== `${jobHref}/live-ticket`) {
     invalid(`${path}.ticketHref`, "the selected job live-ticket destination");
   }
-  expectOneOf(live.state, `${path}.state`, ["open", "closed"]);
 }
 
 function validateRun(value: unknown, path: string): void {

@@ -1,6 +1,6 @@
 import { createRoot } from "react-dom/client";
 import type { Root } from "react-dom/client";
-import { App } from "./App";
+import { App, PreviewApp } from "./App";
 import { EmptyState } from "./components/EmptyState";
 import { Shell } from "./components/Shell";
 import { ThemeToggle } from "./components/ThemeToggle";
@@ -76,7 +76,7 @@ if (view === null || view === "repositories" || view === "repositories-empty") {
   if (jobLog === null) {
     renderNotFound("Job not found", "That workflow job is not part of this demo.");
   } else {
-    renderPreviewPage(
+    renderPreviewJobLog(
       jobLog,
       previewJobLogRecords(requestedRunId, requestedJobId),
     );
@@ -125,14 +125,22 @@ if (view === null || view === "repositories" || view === "repositories-empty") {
   renderNotFound("Page not found", "That page is not part of this demo.");
 }
 
-function renderPreviewPage(
+function renderPreviewPage(page: PageModel): void {
+  document.title = page.shell.documentTitle;
+  reactRoot.render(
+    <App page={page} shellUtility={<PreviewTools />} />,
+  );
+  reconcilePreviewHashTarget();
+}
+
+function renderPreviewJobLog(
   page: PageModel,
-  initialJobLogRecords: readonly LiveLogRecord[] = [],
+  records: readonly LiveLogRecord[],
 ): void {
   document.title = page.shell.documentTitle;
   reactRoot.render(
-    <App
-      initialJobLogRecords={initialJobLogRecords}
+    <PreviewApp
+      initialJobLogRecords={records}
       page={page}
       shellUtility={<PreviewTools />}
     />,

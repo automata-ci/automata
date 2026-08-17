@@ -54,10 +54,11 @@ src/
 
 Production pages receive validated initial models and render ordinary links and
 forms; they do not own generic page-data loading or know how the static demo is
-routed. The active job-log page revalidates bounded JSON snapshots. The shared
-live-log package selects advertised transports, strictly decodes SSE, advances
-checkpoints, reconnects, and falls back to snapshot polling, as
-specified by [ADR 0004](../docs/architecture-decisions/0004-resumable-live-log-delivery.md).
+routed. The job-log page replays and tails one structured stream, with
+group-owned panels and in-memory search. The shared live-log package selects
+advertised transports, strictly decodes SSE, advances durable checkpoints, and
+reconnects through the same replay path, as specified by
+[ADR 0005](../docs/architecture-decisions/0005-structured-execution-log-groups.md).
 The demo owns its sample data and its small query-preserving GET adapter, and
 production source never imports test fixtures. The adapter is reinstalled on hot
 module replacement so routing changes do not leave a stale submit handler.

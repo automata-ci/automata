@@ -459,8 +459,11 @@ impl SseTail {
                 }
             }
             if batch.stream_closed && !batch.more_available && !self.finished {
-                self.pending
-                    .push_back(sse_complete_event(self.checkpoint.as_deref()));
+                if let Some(checkpoint) = self.checkpoint.as_deref() {
+                    self.pending.push_back(sse_complete_event(checkpoint));
+                } else {
+                    self.pending.push_back(sse_error_event("internal_error"));
+                }
                 self.finished = true;
             }
             if !self.pending.is_empty() || self.finished {
@@ -636,10 +639,9 @@ fn sse_log_group(group: &LogGroup) -> SseLogGroup<'_> {
     }
 }
 
-fn sse_complete_event(checkpoint: Option<&str>) -> Bytes {
-    let id = checkpoint.map_or_else(String::new, |checkpoint| format!("id: {checkpoint}\n"));
+fn sse_complete_event(checkpoint: &str) -> Bytes {
     Bytes::from(format!(
-        "{id}event: complete\ndata: {{\"protocolVersion\":{HUMAN_LIVE_LOG_PROTOCOL_VERSION}}}\n\n"
+        "id: {checkpoint}\nevent: complete\ndata: {{\"protocolVersion\":{HUMAN_LIVE_LOG_PROTOCOL_VERSION}}}\n\n"
     ))
 }
 
@@ -937,6 +939,16 @@ mod tests {
 
         assert!(json.contains(r#""sequence":"18446744073709551615""#));
         assert!(!json.contains(r#""sequence":18446744073709551615"#));
+    }
+
+    #[test]
+    fn sse_completion_carries_the_terminal_checkpoint() {
+        assert_eq!(
+            sse_complete_event("checkpoint_terminal"),
+            Bytes::from_static(
+                b"id: checkpoint_terminal\nevent: complete\ndata: {\"protocolVersion\":2}\n\n",
+            ),
+        );
     }
 
     #[test]

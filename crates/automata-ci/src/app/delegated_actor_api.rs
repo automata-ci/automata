@@ -27,7 +27,7 @@ use uuid::Uuid;
 
 use axum::{
     Json, Router,
-    extract::{Path, Query, State},
+    extract::{Path, Query, RawQuery, State},
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse as _, Response},
     routing::{get, post},
@@ -559,7 +559,7 @@ struct JobLogResponse {
     next_navigation_job_id: Option<String>,
     job: JobSummaryResponse,
     log_visibility: &'static str,
-    live: Option<JobLogLiveResponse>,
+    live_available: bool,
 }
 
 #[derive(Serialize)]
@@ -568,11 +568,6 @@ struct JobNavigationItemResponse {
     name: String,
     status: &'static str,
     logs_available: bool,
-}
-
-#[derive(Serialize)]
-struct JobLogLiveResponse {
-    stream_closed: bool,
 }
 
 /// Builds the Cloud-authenticated hosted Core API surface.
@@ -796,8 +791,12 @@ async fn workspace_job_log(
         String,
         String,
     )>,
+    RawQuery(raw_query): RawQuery,
     headers: HeaderMap,
 ) -> Response {
+    if raw_query.is_some() {
+        return status_response(StatusCode::BAD_REQUEST);
+    }
     let Some(repository) = repository_path(owner, repository) else {
         return status_response(StatusCode::NOT_FOUND);
     };
@@ -1061,9 +1060,7 @@ fn job_log_response(workspace_id: String, page: JobLogPage) -> JobLogResponse {
         next_navigation_job_id: page.next_navigation_job_id.map(|id| id.to_string()),
         job: job_summary_response(page.job),
         log_visibility: collection_visibility(page.log_visibility),
-        live: page.live.map(|live| JobLogLiveResponse {
-            stream_closed: live.stream_closed,
-        }),
+        live_available: page.live_available,
     }
 }
 

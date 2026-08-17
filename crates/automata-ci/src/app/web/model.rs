@@ -32,8 +32,8 @@ use crate::app::repository_secrets::{
 };
 
 use super::data::{
-    ArtifactSummary, CollectionVisibility, JobLogLive as JobLogLiveData, JobLogPage as JobLogData,
-    JobSummary, REPOSITORY_PAGE_SIZE, RbacDirectBindingListPage as RbacDirectBindingListData,
+    ArtifactSummary, CollectionVisibility, JobLogPage as JobLogData, JobSummary,
+    REPOSITORY_PAGE_SIZE, RbacDirectBindingListPage as RbacDirectBindingListData,
     RbacRoleListPage as RbacRoleListData, RbacUserDetailPage as RbacUserDetailData,
     RbacUserListPage as RbacUserListData, Repository as RepositoryData,
     RepositoryDirectoryItem as RepositoryDirectoryItemData,
@@ -473,14 +473,10 @@ struct JobLogPage {
 #[serde(rename_all = "camelCase")]
 struct JobLogLive {
     ticket_href: String,
-    state: &'static str,
 }
 
-fn job_log_live(live: &JobLogLiveData, ticket_href: String) -> JobLogLive {
-    JobLogLive {
-        ticket_href,
-        state: if live.stream_closed { "closed" } else { "open" },
-    }
+fn job_log_live(ticket_href: String) -> JobLogLive {
+    JobLogLive { ticket_href }
 }
 
 #[derive(Debug, Serialize)]
@@ -2021,9 +2017,8 @@ pub(super) fn job_log(
         label: pluralized(navigation.len(), "job", "jobs"),
     };
     let live = data
-        .live
-        .as_ref()
-        .map(|live| job_log_live(live, format!("{job_href}/live-ticket")));
+        .live_available
+        .then(|| job_log_live(format!("{job_href}/live-ticket")));
     let title = format!("{} logs · Automata", data.job.name);
     let notice = job_log_notice(data.job.status);
     let return_path = login_return_path(job_href.clone(), job_href.clone())?;
@@ -2102,7 +2097,7 @@ fn valid_job_log_data(data: &JobLogData) -> bool {
                 job.name == data.job.name && job.status == data.job.status && job.logs_available
             })
         && (data.log_visibility == CollectionVisibility::Full) == data.job.logs_available
-        && (data.log_visibility == CollectionVisibility::Full || data.live.is_none())
+        && (data.log_visibility == CollectionVisibility::Full || !data.live_available)
 }
 
 pub(super) fn repository_settings(

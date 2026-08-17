@@ -1453,10 +1453,10 @@ describe("render request validation", () => {
       "at $.page.live.ticketHref",
     );
 
-    const invalidState = cloneRequest(jobLogRequest);
-    setPath(invalidState, ["page", "live", "state"], "waiting");
-    expect(() => validateRenderRequest(invalidState)).toThrow(
-      "at $.page.live.state",
+    const legacyState = cloneRequest(jobLogRequest);
+    setPath(legacyState, ["page", "live", "state"], "open");
+    expect(() => validateRenderRequest(legacyState)).toThrow(
+      "at $.page.live.state: expected no unknown field",
     );
 
     const restricted = cloneRequest(jobLogRequest);

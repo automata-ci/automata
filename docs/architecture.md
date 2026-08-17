@@ -218,12 +218,12 @@ environment, or subprocess access. Node.js is a build dependency, not a server
 dependency.
 
 Every initial route returns complete server-rendered HTML. Browser JavaScript
-adds theme preference, log filtering, and form state, and active job logs
-revalidate bounded JSON snapshots. For resumable delivery, the shared UI
-selects advertised transports, strictly decodes SSE, advances checkpoints,
-reconnects, and falls back to snapshot polling. Rust retains authentication,
-authorization, and durable log-data authority. See
-[ADR 0004](architecture-decisions/0004-resumable-live-log-delivery.md).
+adds theme preference, form state, and in-memory filtering of replayed job
+logs. The shared UI strictly decodes the structured SSE stream, applies
+group-owned records, advances durable checkpoints, and reconnects through the
+same replay path. Rust retains authentication, authorization, and durable
+log-data authority. See
+[ADR 0005](architecture-decisions/0005-structured-execution-log-groups.md).
 
 ## Planned providers and topology
 
