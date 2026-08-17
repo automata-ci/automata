@@ -57,17 +57,6 @@ jobs:
         with:
           version: v0.17.0
 
-      - name: Restore Cargo cache
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
-        with:
-          path: |
-            /opt/cargo/registry/cache
-            /opt/cargo/registry/index
-            /opt/cargo/registry/src
-          key: cargo-v1-ubuntu-24.04-rust-1.97.1-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            cargo-v1-ubuntu-24.04-rust-1.97.1-
-
       - name: Run Rust checks
         run: |
           cargo fmt --all -- --check
@@ -137,17 +126,6 @@ jobs:
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: v0.17.0
-
-      - name: Restore Cargo cache
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
-        with:
-          path: |
-            /opt/cargo/registry/cache
-            /opt/cargo/registry/index
-            /opt/cargo/registry/src
-          key: cargo-v1-ubuntu-24.04-rust-1.97.1-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            cargo-v1-ubuntu-24.04-rust-1.97.1-
 
       - name: Run PostgreSQL tests
         run: ./scripts/ci/run-postgres-tests.sh
