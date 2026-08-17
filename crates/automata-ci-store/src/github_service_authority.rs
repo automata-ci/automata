@@ -1636,6 +1636,8 @@ pub enum GithubServerServiceAction {
     FetchPrivatePullRequestFiles,
     /// Resolve schedules from one exact claimed private default-branch revision.
     DiscoverPrivateRepositorySchedules,
+    /// Resolve one manually dispatched workflow from a claimed repository ref.
+    ResolveWorkflowDispatchSource,
     /// Observe one repository's effective workflow-permission defaults.
     ObserveWorkflowPermissionDefaults,
 }
@@ -1653,6 +1655,7 @@ impl GithubServerServiceAction {
             Self::FetchPrivateRepositoryChangedFiles => "fetch_private_repository_changed_files",
             Self::FetchPrivatePullRequestFiles => "fetch_private_pull_request_files",
             Self::DiscoverPrivateRepositorySchedules => "discover_private_repository_schedules",
+            Self::ResolveWorkflowDispatchSource => "resolve_workflow_dispatch_source",
             Self::ObserveWorkflowPermissionDefaults => "observe_workflow_permission_defaults",
         }
     }
@@ -1666,7 +1669,8 @@ impl GithubServerServiceAction {
             | Self::PublishCheckRun => GithubServerServiceScope::ChecksWrite,
             Self::FetchPrivateRepositoryRevision
             | Self::FetchPrivateRepositoryChangedFiles
-            | Self::DiscoverPrivateRepositorySchedules => {
+            | Self::DiscoverPrivateRepositorySchedules
+            | Self::ResolveWorkflowDispatchSource => {
                 GithubServerServiceScope::PrivateRepositorySourceRead
             }
             Self::ObserveWorkflowPermissionDefaults => {
@@ -1696,6 +1700,7 @@ impl GithubServerServiceAction {
             | Self::FetchPrivateRepositoryRevision
             | Self::FetchPrivateRepositoryChangedFiles
             | Self::DiscoverPrivateRepositorySchedules
+            | Self::ResolveWorkflowDispatchSource
             | Self::FetchPrivatePullRequestFiles
             | Self::ObserveWorkflowPermissionDefaults => MAX_GITHUB_SERVICE_CONSUMER_REQUEST_MILLIS,
         }

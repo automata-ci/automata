@@ -1,8 +1,16 @@
+use std::collections::BTreeSet;
+
 use crate::github_manifest_fixture;
 
 use automata_ci_auth::{
+    authorization::AuthorizationContext,
+    delegated_actor::{
+        DelegatedActorAssertion, DelegatedActorRequestSnapshot, DelegatedRepositoryMutationActor,
+        RepositoryMutationActor,
+    },
     human::{PrincipalId, TenantId},
     management::{ManagementActor, ManagementRevision},
+    request_auth::ViewerDisplayMetadata,
     session::SessionId,
     time::UnixTimestamp,
 };
@@ -18,19 +26,22 @@ use automata_ci_store::{
     AcceptManifestPinnedGithubDelivery, AcceptProviderDelivery, AdmissionObject,
     AdmissionRepository, AdmitLogicalWorkflowRun, AdmittedLogicalWorkflowJob,
     AuthenticatedGithubDeliveryClaim, AuthenticatedWorkflowDispatchClaim,
-    BindLogicalActivationPreparation, ClaimNextLogicalJobOrchestration, ClaimProviderDelivery,
-    ConsumeSelectedLogicalJobOrchestration, ConsumedLogicalJobOrchestrationAuthority,
-    EnsureGithubServerServiceAuthority, EventControlSubject, EventControlSubjectId, EventSubjectId,
-    EventSubjectOrigin, EventSubjectProgress, EventSubjectRepository as _, EventSubjectSelection,
+    BeginWorkflowDispatchSourceResolution, BindLogicalActivationPreparation,
+    ClaimNextLogicalJobOrchestration, ClaimProviderDelivery,
+    CompleteWorkflowDispatchSourceResolution, ConsumeSelectedLogicalJobOrchestration,
+    ConsumedLogicalJobOrchestrationAuthority, EnsureGithubServerServiceAuthority,
+    EventControlSubject, EventControlSubjectId, EventSubjectId, EventSubjectOrigin,
+    EventSubjectProgress, EventSubjectRepository as _, EventSubjectSelection,
     EventSubjectStoreError, EventSubjectTerminalOutcome, GithubCheckHeadSha, GithubCheckName,
     GithubInstallationBindingGeneration, GithubProviderManifest, GithubProviderManifestLimits,
     GithubProviderManifestRepository as _, GithubProviderManifestRevision, GithubProviderOrigins,
     GithubProviderWebhookVerifierFingerprint, GithubRepositoryName, GithubServerServiceAppClientId,
     GithubServerServiceAppId, GithubServerServiceAuthorityId, GithubServerServiceAuthorityIdentity,
     GithubServerServiceAuthorityRepository as _, GithubServerServiceJwtIssuer,
-    GithubServerServiceRevision, GithubServerServiceScope, GithubSubjectEvidenceRepository as _,
-    LogicalActivationPreparationStore as _, LogicalActivationPreparationTarget,
-    LogicalActivationWorkerId, LogicalJobOrchestrationSelectionOutcome, LogicalWorkSelectionId,
+    GithubServerServiceRevision, GithubServerServiceScope, GithubServerServiceWorkerId,
+    GithubSubjectEvidenceRepository as _, LogicalActivationPreparationStore as _,
+    LogicalActivationPreparationTarget, LogicalActivationWorkerId,
+    LogicalJobOrchestrationSelectionOutcome, LogicalWorkSelectionId,
     LogicalWorkSelectionRepository as _, LogicalWorkflowAdmissionRepository as _,
     LogicalWorkflowAdmissionStoreError, LogicalWorkflowInvocationId, LogicalWorkflowJobId,
     LogicalWorkflowJobKind, ObjectKey, ProviderConnectionId, ProviderDeliveryClaimOwnerId,
@@ -38,8 +49,10 @@ use automata_ci_store::{
     ProviderRepositoryCoordinates, ProviderRepositoryId, ProviderRepositoryOwnerId,
     ProviderRepositoryVisibility, RegisterEventSubject, ResolveAuthenticatedWorkflowDispatchSource,
     SetWorkflowEnableState, StoreError, TenantScope, WORKFLOW_PLAN_SCHEMA,
-    WorkflowAdmissionIdempotency, WorkflowEnableState, WorkflowEnableStateRecord,
-    WorkflowEnableStateRepository as _, WorkflowEnableStateRevision, WorkflowSnapshotId,
+    WorkflowAdmissionIdempotency, WorkflowDispatchSourceResolutionOutcome,
+    WorkflowDispatchSourceResolutionRepository as _, WorkflowDispatchSourceResolutionStoreError,
+    WorkflowEnableState, WorkflowEnableStateRecord, WorkflowEnableStateRepository as _,
+    WorkflowEnableStateRevision, WorkflowSnapshotId,
 };
 use uuid::Uuid;
 
@@ -1924,10 +1937,88 @@ async fn seed_dispatch_actor(
     Ok((actor, role_id))
 }
 
+async fn seed_delegated_dispatch_actor(
+    database: &TestDatabase,
+    actor: &ManagementActor,
+) -> TestResult<RepositoryMutationActor> {
+    let issuer = "https://cloud.automata.example";
+    let subject = Uuid::new_v4();
+    let principal_id = Uuid::parse_str(actor.principal_id().as_str())?;
+    sqlx::query(
+        r"
+        INSERT INTO delegated_actor_identities (
+            issuer, subject, principal_id, display_name, created_at_ms, updated_at_ms
+        ) VALUES ($1,$2,$3,'Delegated dispatcher',1,1)
+        ",
+    )
+    .bind(issuer)
+    .bind(subject)
+    .bind(principal_id)
+    .execute(database.pool())
+    .await?;
+    let now_seconds = u64::try_from(database_now_ms(database).await? / 1_000)?;
+    let assertion = DelegatedActorAssertion::new(
+        issuer,
+        subject,
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        UnixTimestamp::from_seconds(now_seconds.saturating_sub(10)),
+        UnixTimestamp::from_seconds(now_seconds),
+        UnixTimestamp::from_seconds(now_seconds.saturating_add(120)),
+    )?;
+    let authorization = AuthorizationContext::authenticated_at_revision(
+        actor.tenant_id().clone(),
+        actor.principal_id().clone(),
+        BTreeSet::new(),
+        actor.authorization_revision().value(),
+    )?;
+    let snapshot = DelegatedActorRequestSnapshot::new(
+        assertion,
+        actor.tenant_id(),
+        ViewerDisplayMetadata::new("Delegated dispatcher")?,
+        authorization,
+    )?;
+    Ok(DelegatedRepositoryMutationActor::from_snapshot(&snapshot)?.into())
+}
+
+async fn refresh_delegated_dispatch_actor(
+    database: &TestDatabase,
+    actor: &RepositoryMutationActor,
+) -> TestResult<RepositoryMutationActor> {
+    let current = actor
+        .delegated()
+        .ok_or("delegated mutation actor expected")?;
+    let current_assertion = current.assertion();
+    let now_seconds = u64::try_from(database_now_ms(database).await? / 1_000)?;
+    let assertion = DelegatedActorAssertion::new(
+        current_assertion.issuer(),
+        current_assertion.subject(),
+        current_assertion.session_id(),
+        Uuid::new_v4(),
+        current_assertion.authenticated_at(),
+        UnixTimestamp::from_seconds(now_seconds),
+        UnixTimestamp::from_seconds(now_seconds.saturating_add(120)),
+    )?;
+    let authorization = AuthorizationContext::authenticated_at_revision(
+        current.tenant_id().clone(),
+        current.principal_id().clone(),
+        BTreeSet::new(),
+        current.authorization_revision(),
+    )?;
+    let snapshot = DelegatedActorRequestSnapshot::new(
+        assertion,
+        current.tenant_id(),
+        ViewerDisplayMetadata::new("Delegated dispatcher")?,
+        authorization,
+    )?;
+    Ok(DelegatedRepositoryMutationActor::from_snapshot(&snapshot)?.into())
+}
+
 fn workflow_dispatch_trust_snapshot(
     signed: &AdmitLogicalWorkflowRun,
     actor: &ManagementActor,
     repository_owner_id: &str,
+    head_sha: &[u8],
 ) -> TrustSnapshot {
     let actor = TrustActorEvidence::new(
         actor.principal_id().as_str(),
@@ -1940,7 +2031,7 @@ fn workflow_dispatch_trust_snapshot(
         repository_owner_id,
     )
     .expect("workflow dispatch repository trust evidence");
-    let revision = lower_hex(signed.head_sha());
+    let revision = lower_hex(head_sha);
     TrustPolicy::current()
         .evaluate(
             TrustEvidence::new(
@@ -1964,6 +2055,33 @@ fn workflow_dispatch_fixture(
     actor: &ManagementActor,
     repository_owner_id: &str,
     source: AdmissionObject,
+    operation_id: OperationId,
+    digest: u8,
+    namespace: u128,
+    admitted_at: UnixMillis,
+) -> AdmitLogicalWorkflowRun {
+    workflow_dispatch_fixture_for_revision(
+        signed,
+        actor,
+        repository_owner_id,
+        source,
+        signed.head_sha(),
+        signed.snapshot_id(),
+        operation_id,
+        digest,
+        namespace,
+        admitted_at,
+    )
+}
+
+#[allow(clippy::too_many_arguments)] // Fixture keeps independently varied dispatch facts explicit.
+fn workflow_dispatch_fixture_for_revision(
+    signed: &AdmitLogicalWorkflowRun,
+    actor: &ManagementActor,
+    repository_owner_id: &str,
+    source: AdmissionObject,
+    head_sha: &[u8],
+    snapshot_id: WorkflowSnapshotId,
     operation_id: OperationId,
     digest: u8,
     namespace: u128,
@@ -2000,7 +2118,7 @@ fn workflow_dispatch_fixture(
         signed.workflow_path(),
         signed.workflow_name(),
         signed.git_ref(),
-        signed.snapshot_id(),
+        snapshot_id,
         source,
         signed.plan().clone(),
         RunId::from_uuid(Uuid::from_u128(namespace + 4)),
@@ -2012,7 +2130,7 @@ fn workflow_dispatch_fixture(
             0x91,
             "application/vnd.automata.workflow-dispatch-evidence.v1+json",
         ),
-        signed.head_sha().to_vec(),
+        head_sha.to_vec(),
         jobs,
         admitted_at,
     )
@@ -2021,6 +2139,7 @@ fn workflow_dispatch_fixture(
         signed,
         actor,
         repository_owner_id,
+        head_sha,
     ))
     .base_context(object_with_media(
         format!("logical/{namespace}/dispatch-context.pb"),
@@ -2029,6 +2148,259 @@ fn workflow_dispatch_fixture(
     ))
     .build()
     .expect("workflow dispatch command")
+}
+
+#[tokio::test]
+#[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
+#[allow(clippy::too_many_lines)] // One lifecycle test proves claim, pin, replay, and retry fencing.
+async fn workflow_dispatch_source_resolution_pins_replays_and_releases_claims() -> TestResult {
+    run_with_database(|database| async move {
+        const TENANT: &str = "logical-dispatch-source-resolution";
+        seed_tenant(&database, TENANT).await?;
+        let signed = fixture(TENANT, "delivery-dispatch-resolution", 0xa1, 710);
+        let (signed, github_claim) = stage_authenticated_admission(&database, &signed, 710).await?;
+        database
+            .store()
+            .admit_authenticated_github_delivery(signed.clone(), github_claim, signed.admitted_at())
+            .await?;
+        let (actor, _) =
+            seed_dispatch_actor(&database, TENANT, signed.repository().id().as_uuid()).await?;
+
+        let operation_id = OperationId::from_uuid(Uuid::from_u128(0xd15a_1001));
+        let first_worker = GithubServerServiceWorkerId::from_uuid(Uuid::from_u128(0xd15a_1002))?;
+        let second_worker = GithubServerServiceWorkerId::from_uuid(Uuid::from_u128(0xd15a_1003))?;
+        let observed_at = UnixMillis::new(database_now_ms(&database).await?);
+        let begin = |worker_id| {
+            BeginWorkflowDispatchSourceResolution::new(
+                actor.clone(),
+                signed.repository().id(),
+                signed.workflow_id(),
+                signed.git_ref(),
+                operation_id,
+                worker_id,
+                observed_at,
+                60_000,
+            )
+        };
+        let claim = match database
+            .store()
+            .begin_workflow_dispatch_source_resolution(begin(first_worker)?)
+            .await?
+        {
+            WorkflowDispatchSourceResolutionOutcome::Claimed(claim) => claim,
+            outcome @ WorkflowDispatchSourceResolutionOutcome::Resolved(_) => {
+                return Err(format!("expected source claim, got {outcome:?}").into());
+            }
+        };
+        assert_eq!(claim.tenant(), signed.tenant());
+        assert_eq!(claim.repository_id(), signed.repository().id());
+        assert_eq!(claim.workflow_id(), signed.workflow_id());
+        assert_eq!(claim.workflow_path(), signed.workflow_path());
+        assert_eq!(claim.git_ref(), signed.git_ref());
+        assert_eq!(claim.operation_id(), operation_id);
+        assert_eq!(claim.worker_id(), first_worker);
+        assert!(claim.private_source_authority().is_none());
+
+        assert!(matches!(
+            database
+                .store()
+                .begin_workflow_dispatch_source_resolution(begin(second_worker)?)
+                .await,
+            Err(WorkflowDispatchSourceResolutionStoreError::ClaimRejected)
+        ));
+
+        let commit_sha = "ab".repeat(20);
+        let resolved_source = object_with_media(
+            "workflow-dispatch/resolved-ci.yml".into(),
+            0xa2,
+            "application/vnd.github-actions.workflow+yaml",
+        );
+        let forged_claim = automata_ci_store::WorkflowDispatchSourceClaim::from_durable_parts(
+            claim.tenant().clone(),
+            claim.repository_id(),
+            claim.workflow_id(),
+            ".ci/workflows/forged.yml",
+            claim.git_ref(),
+            claim.operation_id(),
+            claim.connection_id(),
+            claim.manifest_revision(),
+            claim.manifest_digest(),
+            claim.private_source_authority().cloned(),
+            claim.worker_id(),
+            claim.fence(),
+            claim.claimed_at(),
+            claim.expires_at(),
+        )?;
+        assert!(matches!(
+            database
+                .store()
+                .complete_workflow_dispatch_source_resolution(
+                    CompleteWorkflowDispatchSourceResolution::new(
+                        forged_claim,
+                        &commit_sha,
+                        resolved_source.clone(),
+                    )?,
+                )
+                .await,
+            Err(WorkflowDispatchSourceResolutionStoreError::ClaimRejected)
+        ));
+        let resolved = database
+            .store()
+            .complete_workflow_dispatch_source_resolution(
+                CompleteWorkflowDispatchSourceResolution::new(
+                    claim,
+                    &commit_sha,
+                    resolved_source.clone(),
+                )?,
+            )
+            .await?;
+        assert_eq!(resolved.repository(), signed.repository());
+        assert_eq!(resolved.repository_owner_id(), "814");
+        assert_eq!(resolved.workflow_id(), signed.workflow_id());
+        assert_eq!(resolved.workflow_path(), signed.workflow_path());
+        assert_eq!(resolved.git_ref(), signed.git_ref());
+        assert_eq!(resolved.commit_sha(), commit_sha);
+        assert_eq!(resolved.source(), &resolved_source);
+
+        let replayed = match database
+            .store()
+            .begin_workflow_dispatch_source_resolution(begin(second_worker)?)
+            .await?
+        {
+            WorkflowDispatchSourceResolutionOutcome::Resolved(source) => source,
+            outcome @ WorkflowDispatchSourceResolutionOutcome::Claimed(_) => {
+                return Err(format!("expected resolved replay, got {outcome:?}").into());
+            }
+        };
+        assert_eq!(replayed, resolved);
+        assert!(matches!(
+            database
+                .store()
+                .begin_workflow_dispatch_source_resolution(
+                    BeginWorkflowDispatchSourceResolution::new(
+                        actor.clone(),
+                        signed.repository().id(),
+                        signed.workflow_id(),
+                        "refs/heads/different",
+                        operation_id,
+                        second_worker,
+                        observed_at,
+                        60_000,
+                    )?,
+                )
+                .await,
+            Err(WorkflowDispatchSourceResolutionStoreError::Conflict)
+        ));
+
+        let dispatched_at = UnixMillis::new(database_now_ms(&database).await?);
+        let resolved_head = [0xab; 20];
+        let dispatch = workflow_dispatch_fixture_for_revision(
+            &signed,
+            &actor,
+            resolved.repository_owner_id(),
+            resolved.source().clone(),
+            &resolved_head,
+            WorkflowSnapshotId::from_uuid(Uuid::from_u128(0xd15a_1020)),
+            operation_id,
+            0xa3,
+            790,
+            dispatched_at,
+        );
+        let dispatch_claim = AuthenticatedWorkflowDispatchClaim::new(
+            actor.clone(),
+            dispatch.repository().id(),
+            dispatch.workflow_id(),
+            dispatch.workflow_path(),
+            dispatch.git_ref(),
+            &commit_sha,
+            resolved.source().clone(),
+            operation_id,
+            dispatch.event().digest(),
+            dispatch
+                .base_context()
+                .ok_or("resolved dispatch base context missing")?
+                .digest(),
+        )?;
+        let receipt = database
+            .store()
+            .admit_authenticated_workflow_dispatch(dispatch, dispatch_claim)
+            .await?;
+        assert!(!receipt.is_replay());
+
+        let released_operation = OperationId::from_uuid(Uuid::from_u128(0xd15a_1010));
+        let released_claim = match database
+            .store()
+            .begin_workflow_dispatch_source_resolution(BeginWorkflowDispatchSourceResolution::new(
+                actor.clone(),
+                signed.repository().id(),
+                signed.workflow_id(),
+                signed.git_ref(),
+                released_operation,
+                first_worker,
+                UnixMillis::new(database_now_ms(&database).await?),
+                60_000,
+            )?)
+            .await?
+        {
+            WorkflowDispatchSourceResolutionOutcome::Claimed(claim) => claim,
+            outcome @ WorkflowDispatchSourceResolutionOutcome::Resolved(_) => {
+                return Err(format!("expected releasable claim, got {outcome:?}").into());
+            }
+        };
+        let released_fence = released_claim.fence();
+        database
+            .store()
+            .release_workflow_dispatch_source_resolution(released_claim)
+            .await?;
+        let released_state: String = sqlx::query_scalar(
+            "SELECT state FROM workflow_dispatch_source_resolutions WHERE operation_id = $1",
+        )
+        .bind(released_operation.as_uuid())
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(released_state, "retryable");
+        assert!(matches!(
+            database
+                .store()
+                .begin_workflow_dispatch_source_resolution(
+                    BeginWorkflowDispatchSourceResolution::new(
+                        actor.clone(),
+                        signed.repository().id(),
+                        signed.workflow_id(),
+                        "refs/heads/different",
+                        released_operation,
+                        second_worker,
+                        UnixMillis::new(database_now_ms(&database).await?),
+                        60_000,
+                    )?,
+                )
+                .await,
+            Err(WorkflowDispatchSourceResolutionStoreError::Conflict)
+        ));
+        let retried_claim = match database
+            .store()
+            .begin_workflow_dispatch_source_resolution(BeginWorkflowDispatchSourceResolution::new(
+                actor,
+                signed.repository().id(),
+                signed.workflow_id(),
+                signed.git_ref(),
+                released_operation,
+                second_worker,
+                UnixMillis::new(database_now_ms(&database).await?),
+                60_000,
+            )?)
+            .await?
+        {
+            WorkflowDispatchSourceResolutionOutcome::Claimed(claim) => claim,
+            outcome @ WorkflowDispatchSourceResolutionOutcome::Resolved(_) => {
+                return Err(format!("expected retried claim, got {outcome:?}").into());
+            }
+        };
+        assert_eq!(retried_claim.worker_id(), second_worker);
+        assert_eq!(retried_claim.fence().get(), released_fence.get() + 1);
+        Ok(())
+    })
+    .await
 }
 
 #[tokio::test]
@@ -2244,6 +2616,122 @@ async fn authenticated_dispatch_resolves_signed_source_audits_and_replays_exactl
         assert_eq!(
             audit[0].2,
             Some(i64::try_from(actor.authorization_revision().value())?)
+        );
+
+        let delegated_actor = seed_delegated_dispatch_actor(&database, &actor).await?;
+        let delegated_source = database
+            .store()
+            .resolve_authenticated_workflow_dispatch_source(
+                ResolveAuthenticatedWorkflowDispatchSource::new(
+                    delegated_actor.clone(),
+                    signed.repository().id(),
+                    signed.workflow_id(),
+                    signed.git_ref(),
+                    &commit_sha,
+                )?,
+            )
+            .await?
+            .ok_or("delegated signed source was not resolved")?;
+        assert_eq!(delegated_source.source(), signed.source());
+        let delegated_operation = OperationId::from_uuid(Uuid::from_u128(0xd15a_1002));
+        let delegated_dispatch = workflow_dispatch_fixture(
+            &signed,
+            &actor,
+            delegated_source.repository_owner_id(),
+            delegated_source.source().clone(),
+            delegated_operation,
+            0x94,
+            900,
+            UnixMillis::new(database_now_ms(&database).await?),
+        );
+        let delegated_claim = AuthenticatedWorkflowDispatchClaim::new(
+            delegated_actor.clone(),
+            delegated_dispatch.repository().id(),
+            delegated_dispatch.workflow_id(),
+            delegated_dispatch.workflow_path(),
+            delegated_dispatch.git_ref(),
+            &commit_sha,
+            delegated_dispatch.source().clone(),
+            delegated_operation,
+            delegated_dispatch.event().digest(),
+            delegated_dispatch
+                .base_context()
+                .ok_or("delegated dispatch base context missing")?
+                .digest(),
+        )?;
+        let delegated_receipt = database
+            .store()
+            .admit_authenticated_workflow_dispatch(
+                delegated_dispatch.clone(),
+                delegated_claim,
+            )
+            .await?;
+        let refreshed_delegated_actor =
+            refresh_delegated_dispatch_actor(&database, &delegated_actor).await?;
+        let refreshed_delegated_claim = AuthenticatedWorkflowDispatchClaim::new(
+            refreshed_delegated_actor.clone(),
+            delegated_dispatch.repository().id(),
+            delegated_dispatch.workflow_id(),
+            delegated_dispatch.workflow_path(),
+            delegated_dispatch.git_ref(),
+            &commit_sha,
+            delegated_dispatch.source().clone(),
+            delegated_operation,
+            delegated_dispatch.event().digest(),
+            delegated_dispatch
+                .base_context()
+                .ok_or("delegated dispatch base context missing")?
+                .digest(),
+        )?;
+        let delegated_replay = database
+            .store()
+            .admit_authenticated_workflow_dispatch(
+                logical_command_at(
+                    &delegated_dispatch,
+                        UnixMillis::new(database_now_ms(&database).await?),
+                    )?,
+                refreshed_delegated_claim,
+            )
+            .await?;
+        assert!(!delegated_receipt.is_replay());
+        assert!(delegated_replay.is_replay());
+        assert_eq!(delegated_receipt.run_id(), delegated_replay.run_id());
+        let delegated_audit: (Option<Uuid>, Option<Uuid>, Option<i64>, Uuid, Uuid) =
+            sqlx::query_as(
+                r"
+                SELECT audit.actor_principal_id, audit.actor_session_id,
+                       audit.authorization_revision, evidence.external_session_id,
+                       evidence.assertion_id
+                FROM security_audit_events AS audit
+                JOIN delegated_actor_audit_evidence AS evidence
+                  ON evidence.event_id = audit.event_id
+                WHERE audit.tenant_id=$1
+                  AND audit.action='workflow.dispatch'
+                  AND audit.resource_kind='workflow_run'
+                  AND audit.resource_id=$2
+                ",
+            )
+            .bind(TENANT)
+            .bind(delegated_receipt.run_id().to_string())
+            .fetch_one(database.pool())
+            .await?;
+        let delegated_assertion = delegated_actor
+            .delegated()
+            .ok_or("delegated mutation actor expected")?
+            .assertion();
+        assert_eq!(delegated_audit.0, Some(Uuid::parse_str(actor.principal_id().as_str())?));
+        assert_eq!(delegated_audit.1, None);
+        assert_eq!(delegated_audit.2, Some(i64::try_from(actor.authorization_revision().value())?));
+        assert_eq!(delegated_audit.3, delegated_assertion.session_id());
+        assert_eq!(delegated_audit.4, delegated_assertion.assertion_id());
+        assert_ne!(
+            delegated_audit.4,
+            refreshed_delegated_actor
+                .delegated()
+                .ok_or("refreshed delegated mutation actor expected")?
+                .assertion()
+                .assertion_id(),
+            "replay must retain the immutable assertion that admitted the run"
         );
         let runtime_pin: (i64, Vec<u8>, i64, i64, Vec<u8>) = sqlx::query_as(
             r"

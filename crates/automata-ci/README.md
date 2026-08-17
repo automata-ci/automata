@@ -62,6 +62,7 @@ provides:
 | `GET` | `/internal/v1/workspaces/{workspace_id}/repositories/{owner}/{repository}/runs/{run_id}` | Run, job, and artifact snapshot |
 | `GET` | `/internal/v1/workspaces/{workspace_id}/repositories/{owner}/{repository}/runs/{run_id}/jobs/{job_id}` | Durable job-log snapshot and live checkpoint |
 | `POST` | `/internal/v1/workspaces/{workspace_id}/repositories/{owner}/{repository}/runs/{run_id}/jobs/{job_id}/live-ticket` | One-time, origin-bound direct log capability |
+| `POST` | `/internal/v1/workspaces/{workspace_id}/repositories/{repository_id}/workflows/{workflow_id}/dispatches` | Authorized, idempotent workflow dispatch with Core-owned source resolution |
 
 Responses are `no-store` JSON and carry `protocol_version: 1` plus the exact
 workspace ID. Opaque pagination cursors must be returned unchanged. Run

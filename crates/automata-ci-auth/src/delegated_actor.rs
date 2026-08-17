@@ -11,8 +11,8 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::{
-    authorization::AuthorizationContext, human::TenantId, request_auth::ViewerDisplayMetadata,
-    time::UnixTimestamp,
+    authorization::AuthorizationContext, human::PrincipalId, human::TenantId,
+    management::ManagementActor, request_auth::ViewerDisplayMetadata, time::UnixTimestamp,
 };
 
 const MAX_ASSERTION_LIFETIME_SECONDS: u64 = 5 * 60;
@@ -151,6 +151,174 @@ pub struct DelegatedActorRequestSnapshot {
     assertion: DelegatedActorAssertion,
     viewer: ViewerDisplayMetadata,
     authorization: AuthorizationContext,
+}
+
+/// Minimal current authority retained for one delegated repository mutation.
+///
+/// Role grants from the request snapshot are deliberately not retained here.
+/// Durable mutation adapters must reload the identity mapping, membership,
+/// authorization revision, and exact repository permission transactionally.
+#[derive(Clone, Eq, PartialEq)]
+pub struct DelegatedRepositoryMutationActor {
+    assertion: DelegatedActorAssertion,
+    tenant_id: TenantId,
+    principal_id: PrincipalId,
+    authorization_revision: u64,
+}
+
+impl DelegatedRepositoryMutationActor {
+    /// Reduces one resolved request snapshot to mutation reauthorization evidence.
+    ///
+    /// # Errors
+    ///
+    /// Rejects anonymous, revisionless, or cross-workspace snapshots.
+    pub fn from_snapshot(
+        snapshot: &DelegatedActorRequestSnapshot,
+    ) -> Result<Self, DelegatedRepositoryMutationActorError> {
+        let authorization = snapshot.authorization();
+        let tenant_id = authorization
+            .tenant_id()
+            .cloned()
+            .ok_or(DelegatedRepositoryMutationActorError)?;
+        let principal_id = authorization
+            .principal_id()
+            .cloned()
+            .ok_or(DelegatedRepositoryMutationActorError)?;
+        let authorization_revision = authorization
+            .authorization_revision()
+            .filter(|revision| *revision > 0)
+            .ok_or(DelegatedRepositoryMutationActorError)?;
+        Ok(Self {
+            assertion: snapshot.assertion().clone(),
+            tenant_id,
+            principal_id,
+            authorization_revision,
+        })
+    }
+
+    /// Returns the verified external assertion to recheck transactionally.
+    #[must_use]
+    pub const fn assertion(&self) -> &DelegatedActorAssertion {
+        &self.assertion
+    }
+
+    /// Returns the exact Core workspace bounding the mutation.
+    #[must_use]
+    pub const fn tenant_id(&self) -> &TenantId {
+        &self.tenant_id
+    }
+
+    /// Returns the current Core principal mapped from the external identity.
+    #[must_use]
+    pub const fn principal_id(&self) -> &PrincipalId {
+        &self.principal_id
+    }
+
+    /// Returns the exact Core membership revision resolved for this request.
+    #[must_use]
+    pub const fn authorization_revision(&self) -> u64 {
+        self.authorization_revision
+    }
+}
+
+impl fmt::Debug for DelegatedRepositoryMutationActor {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DelegatedRepositoryMutationActor")
+            .field("assertion", &self.assertion)
+            .field("tenant_id", &self.tenant_id)
+            .field("principal_id", &self.principal_id)
+            .field("authorization_revision", &self.authorization_revision)
+            .finish()
+    }
+}
+
+/// Sanitized invalid delegated mutation snapshot.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+#[error("delegated repository mutation authority is invalid")]
+pub struct DelegatedRepositoryMutationActorError;
+
+/// Current Core-session or externally delegated repository mutation authority.
+///
+/// The variants remain explicit so storage adapters never interpret an
+/// external session identifier as a Core-owned `human_sessions` row.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RepositoryMutationActor {
+    /// A normal Core-owned browser or CLI session.
+    CoreSession(ManagementActor),
+    /// A short-lived assertion from an explicitly trusted external authority.
+    Delegated(DelegatedRepositoryMutationActor),
+}
+
+impl RepositoryMutationActor {
+    /// Returns the exact Core workspace bounding the mutation.
+    #[must_use]
+    pub const fn tenant_id(&self) -> &TenantId {
+        match self {
+            Self::CoreSession(actor) => actor.tenant_id(),
+            Self::Delegated(actor) => actor.tenant_id(),
+        }
+    }
+
+    /// Returns the current Core principal authorizing the mutation.
+    #[must_use]
+    pub const fn principal_id(&self) -> &PrincipalId {
+        match self {
+            Self::CoreSession(actor) => actor.principal_id(),
+            Self::Delegated(actor) => actor.principal_id(),
+        }
+    }
+
+    /// Returns the exact Core authorization revision resolved at ingress.
+    #[must_use]
+    pub const fn authorization_revision(&self) -> u64 {
+        match self {
+            Self::CoreSession(actor) => actor.authorization_revision().value(),
+            Self::Delegated(actor) => actor.authorization_revision(),
+        }
+    }
+
+    /// Returns the authority-local session identity used for event correlation.
+    ///
+    /// For delegated actors this is external evidence only; storage adapters
+    /// must not use it as a Core `human_sessions` identity.
+    #[must_use]
+    pub fn correlation_session_id(&self) -> String {
+        match self {
+            Self::CoreSession(actor) => actor.session_id().as_str().to_owned(),
+            Self::Delegated(actor) => actor.assertion().session_id().hyphenated().to_string(),
+        }
+    }
+
+    /// Returns the Core session variant, when the actor owns a Core session.
+    #[must_use]
+    pub const fn core_session(&self) -> Option<&ManagementActor> {
+        match self {
+            Self::CoreSession(actor) => Some(actor),
+            Self::Delegated(_) => None,
+        }
+    }
+
+    /// Returns delegated assertion evidence, when supplied by an external authority.
+    #[must_use]
+    pub const fn delegated(&self) -> Option<&DelegatedRepositoryMutationActor> {
+        match self {
+            Self::CoreSession(_) => None,
+            Self::Delegated(actor) => Some(actor),
+        }
+    }
+}
+
+impl From<ManagementActor> for RepositoryMutationActor {
+    fn from(actor: ManagementActor) -> Self {
+        Self::CoreSession(actor)
+    }
+}
+
+impl From<DelegatedRepositoryMutationActor> for RepositoryMutationActor {
+    fn from(actor: DelegatedRepositoryMutationActor) -> Self {
+        Self::Delegated(actor)
+    }
 }
 
 impl DelegatedActorRequestSnapshot {

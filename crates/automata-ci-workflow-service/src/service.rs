@@ -201,8 +201,8 @@ impl WorkflowAdmissionService {
     /// dispatch with exact repository/workflow/ref identity.
     ///
     /// This boundary does not represent a GitHub webhook. The durable adapter
-    /// reauthorizes the current human session for `runs:dispatch` and retains
-    /// exact digest and audit evidence for replay.
+    /// reauthorizes current Core or delegated authority for `runs:dispatch`
+    /// and retains exact digest and audit evidence for replay.
     ///
     /// # Errors
     ///
@@ -1765,19 +1765,17 @@ fn canonical_request_digest(
     }
     if let Some(claim) = dispatch_claim {
         let actor = claim.actor();
+        let session_id = actor.correlation_session_id();
         for value in [
             actor.tenant_id().as_str(),
             actor.principal_id().as_str(),
-            actor.session_id().as_str(),
+            session_id.as_str(),
             claim.workflow_path(),
             claim.git_ref(),
         ] {
             digest_field(&mut digest, value.as_bytes());
         }
-        digest_field(
-            &mut digest,
-            &actor.authorization_revision().value().to_be_bytes(),
-        );
+        digest_field(&mut digest, &actor.authorization_revision().to_be_bytes());
         digest_field(&mut digest, claim.repository_id().as_uuid().as_bytes());
         digest_field(&mut digest, claim.workflow_id().as_uuid().as_bytes());
         digest_field(&mut digest, claim.operation_id().as_uuid().as_bytes());

@@ -1354,6 +1354,30 @@ async fn inconsistent_returned_binding_is_released_and_never_delivered() {
 }
 
 #[tokio::test]
+async fn unrepresentable_dispatch_request_releases_acquired_handoff() {
+    let private = authority(GithubServerServiceScope::PrivateRepositorySourceRead, 0x661);
+    let fake = Arc::new(FakeHandoffs::new(FakeHandoffMode::Exact));
+    let selector = GithubServerServiceAuthoritySelector::from_identity(&private);
+    let consumer = consumer(GithubServerServiceAction::ResolveWorkflowDispatchSource);
+    let request = acquire_request(
+        selector,
+        consumer,
+        UnixMillis::new(OBSERVED_AT),
+        UnixMillis::new(REQUIRED_THROUGH),
+    )
+    .expect("valid workflow dispatch handoff request");
+    let handoff = fake.acquire(request).await.expect("fake handoff");
+
+    let result =
+        validate_workflow_dispatch_source_repository(handoff, None, "automata-ci/automata").await;
+    assert!(matches!(
+        result,
+        Err(GithubWorkflowDispatchSourceCredentialError::Inconsistent)
+    ));
+    assert_eq!(fake.releases.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
 async fn pending_release_is_replayed_exactly_and_drain_waits_for_confirmation() {
     let clock = Arc::new(FakeClock::new(OBSERVED_AT));
     let supervisor = Arc::new(

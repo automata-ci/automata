@@ -44,7 +44,7 @@ use automata_ci_store::{
     GithubWorkflowPermissionDefaultsObservationRepository,
     GithubWorkflowPermissionObservationCandidate, ProviderDeliveryIdentity,
     ProviderRepositoryOwnerId, ReconcileGithubWorkflowPermissionHandoff,
-    ReleaseGithubServerServiceHandoff,
+    ReleaseGithubServerServiceHandoff, WorkflowDispatchSourceClaim,
 };
 use thiserror::Error;
 use tokio::{
@@ -86,6 +86,67 @@ pub enum GithubWorkflowPermissionObservationError {
     /// Exact binding or provider response evidence was inconsistent.
     #[error("the GitHub workflow-permission observation was inconsistent")]
     Inconsistent,
+}
+
+/// Sanitized private-source credential failure for a manual dispatch.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub(crate) enum GithubWorkflowDispatchSourceCredentialError {
+    /// Credential or provider infrastructure is temporarily unavailable.
+    #[error("workflow dispatch source credential is unavailable")]
+    Unavailable,
+    /// The exact claim, manifest, or authority was rejected.
+    #[error("workflow dispatch source credential was rejected")]
+    Rejected,
+    /// Durable credential evidence was contradictory.
+    #[error("workflow dispatch source credential was inconsistent")]
+    Inconsistent,
+}
+
+/// Move-only `contents:read` handoff for one exact manual-dispatch claim.
+#[must_use = "the workflow dispatch credential must be used and exactly released"]
+pub(crate) struct GithubWorkflowDispatchSourceCredential {
+    selector: GithubServerServiceAuthoritySelector,
+    consumer: GithubServerServiceConsumerClaim,
+    repository: automata_ci_scm::RepositoryId,
+    required_through: UnixMillis,
+    token: SecretString,
+    release: Box<dyn GithubServerServiceCredentialRelease>,
+}
+
+impl fmt::Debug for GithubWorkflowDispatchSourceCredential {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GithubWorkflowDispatchSourceCredential")
+            .field("selector", &self.selector)
+            .field("consumer", &self.consumer)
+            .field("repository", &self.repository)
+            .field("required_through", &self.required_through)
+            .field("token", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
+}
+
+impl GithubWorkflowDispatchSourceCredential {
+    pub(crate) const fn token(&self) -> &SecretString {
+        &self.token
+    }
+
+    pub(crate) fn matches(
+        &self,
+        claim: &WorkflowDispatchSourceClaim,
+        manifest: &GithubProviderManifest,
+    ) -> bool {
+        claim.private_source_authority() == Some(&self.selector)
+            && claim.credential_consumer() == self.consumer
+            && self.repository.as_str() == manifest.github_repository_name().as_str()
+            && self.required_through > claim.expires_at()
+    }
+
+    pub(crate) async fn release(self) {
+        let Self { token, release, .. } = self;
+        drop(token);
+        release.release().await;
+    }
 }
 
 /// Provider result plus the sole exact release operation retained for atomic finalization.
@@ -1403,6 +1464,86 @@ impl GithubProviderCredentialAdapters {
         }
     }
 
+    /// Acquires one exact private-repository handoff for a live manual-dispatch claim.
+    pub(crate) async fn acquire_workflow_dispatch_source(
+        &self,
+        claim: &WorkflowDispatchSourceClaim,
+        manifest: &GithubProviderManifest,
+        observed_at: UnixMillis,
+    ) -> Result<GithubWorkflowDispatchSourceCredential, GithubWorkflowDispatchSourceCredentialError>
+    {
+        let selector = claim
+            .private_source_authority()
+            .ok_or(GithubWorkflowDispatchSourceCredentialError::Rejected)?;
+        if manifest.repository_visibility()
+            != automata_ci_store::ProviderRepositoryVisibility::Private
+            || manifest.tenant() != claim.tenant()
+            || manifest.repository_id() != claim.repository_id()
+            || manifest.connection_id() != claim.connection_id()
+            || manifest.revision() != claim.manifest_revision()
+            || manifest.digest() != claim.manifest_digest()
+        {
+            return Err(GithubWorkflowDispatchSourceCredentialError::Rejected);
+        }
+        let authority = self
+            .authority(
+                selector,
+                GithubServerServiceScope::PrivateRepositorySourceRead,
+            )
+            .await
+            .map_err(workflow_dispatch_source_handoff_error)?;
+        if !private_schedule_identity_matches(&authority, manifest) {
+            return Err(GithubWorkflowDispatchSourceCredentialError::Rejected);
+        }
+        let consumer = claim.credential_consumer();
+        if consumer.action() != GithubServerServiceAction::ResolveWorkflowDispatchSource {
+            return Err(GithubWorkflowDispatchSourceCredentialError::Inconsistent);
+        }
+        let required_through = claim
+            .expires_at()
+            .get()
+            .checked_add(consumer.action().provider_tail_millis())
+            .map(UnixMillis::new)
+            .ok_or(GithubWorkflowDispatchSourceCredentialError::Inconsistent)?;
+        let request = acquire_request(selector.clone(), consumer, observed_at, required_through)
+            .map_err(workflow_dispatch_source_handoff_error)?;
+        let handoff = self
+            .handoffs
+            .acquire(request)
+            .await
+            .map_err(workflow_dispatch_source_handoff_error)?;
+        let exact = handoff.selector == *selector
+            && handoff.consumer == consumer
+            && handoff.key.authority_id() == selector.authority_id()
+            && handoff.required_through == required_through
+            && handoff.acquired_at == observed_at
+            && handoff.usable_until >= required_through;
+        if !exact {
+            release_invalid_handoff(handoff).await;
+            return Err(GithubWorkflowDispatchSourceCredentialError::Inconsistent);
+        }
+        let canonical_repository = github_server_service_credential_request(&authority)
+            .ok()
+            .map(|request| request.repository().repository().clone());
+        let (handoff, repository) = validate_workflow_dispatch_source_repository(
+            handoff,
+            canonical_repository,
+            manifest.github_repository_name().as_str(),
+        )
+        .await?;
+        let drop_release_arm = handoff.drop_release_arm.clone();
+        let credential = GithubWorkflowDispatchSourceCredential {
+            selector: handoff.selector,
+            consumer: handoff.consumer,
+            repository,
+            required_through: handoff.required_through,
+            token: handoff.token,
+            release: handoff.release,
+        };
+        arm_drop_release(drop_release_arm);
+        Ok(credential)
+    }
+
     /// Borrows exactly `Administration: read` to observe one manifest's
     /// effective repository workflow-permission defaults.
     ///
@@ -1575,6 +1716,28 @@ impl GithubProviderCredentialAdapters {
     }
 }
 
+async fn validate_workflow_dispatch_source_repository(
+    handoff: GithubProviderCredentialHandoff,
+    canonical_repository: Option<automata_ci_scm::RepositoryId>,
+    expected_repository: &str,
+) -> Result<
+    (
+        GithubProviderCredentialHandoff,
+        automata_ci_scm::RepositoryId,
+    ),
+    GithubWorkflowDispatchSourceCredentialError,
+> {
+    let Some(repository) = canonical_repository else {
+        release_invalid_handoff(handoff).await;
+        return Err(GithubWorkflowDispatchSourceCredentialError::Inconsistent);
+    };
+    if repository.as_str() != expected_repository {
+        release_invalid_handoff(handoff).await;
+        return Err(GithubWorkflowDispatchSourceCredentialError::Inconsistent);
+    }
+    Ok((handoff, repository))
+}
+
 fn workflow_permission_identity_matches(
     authority: &GithubServerServiceAuthorityIdentity,
     manifest: &GithubProviderManifest,
@@ -1603,6 +1766,22 @@ const fn workflow_permission_handoff_error(
         }
         GithubProviderCredentialHandoffError::Inconsistent => {
             GithubWorkflowPermissionObservationError::Inconsistent
+        }
+    }
+}
+
+const fn workflow_dispatch_source_handoff_error(
+    error: GithubProviderCredentialHandoffError,
+) -> GithubWorkflowDispatchSourceCredentialError {
+    match error {
+        GithubProviderCredentialHandoffError::Unavailable => {
+            GithubWorkflowDispatchSourceCredentialError::Unavailable
+        }
+        GithubProviderCredentialHandoffError::Rejected => {
+            GithubWorkflowDispatchSourceCredentialError::Rejected
+        }
+        GithubProviderCredentialHandoffError::Inconsistent => {
+            GithubWorkflowDispatchSourceCredentialError::Inconsistent
         }
     }
 }
