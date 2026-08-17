@@ -2188,7 +2188,9 @@ async fn workflow_dispatch_source_resolution_pins_replays_and_releases_claims() 
             .await?
         {
             WorkflowDispatchSourceResolutionOutcome::Claimed(claim) => claim,
-            outcome => return Err(format!("expected source claim, got {outcome:?}").into()),
+            outcome @ WorkflowDispatchSourceResolutionOutcome::Resolved(_) => {
+                return Err(format!("expected source claim, got {outcome:?}").into());
+            }
         };
         assert_eq!(claim.tenant(), signed.tenant());
         assert_eq!(claim.repository_id(), signed.repository().id());
@@ -2266,7 +2268,9 @@ async fn workflow_dispatch_source_resolution_pins_replays_and_releases_claims() 
             .await?
         {
             WorkflowDispatchSourceResolutionOutcome::Resolved(source) => source,
-            outcome => return Err(format!("expected resolved replay, got {outcome:?}").into()),
+            outcome @ WorkflowDispatchSourceResolutionOutcome::Claimed(_) => {
+                return Err(format!("expected resolved replay, got {outcome:?}").into());
+            }
         };
         assert_eq!(replayed, resolved);
         assert!(matches!(
@@ -2327,7 +2331,7 @@ async fn workflow_dispatch_source_resolution_pins_replays_and_releases_claims() 
         let released_claim = match database
             .store()
             .begin_workflow_dispatch_source_resolution(BeginWorkflowDispatchSourceResolution::new(
-                actor,
+                actor.clone(),
                 signed.repository().id(),
                 signed.workflow_id(),
                 signed.git_ref(),
@@ -2339,7 +2343,9 @@ async fn workflow_dispatch_source_resolution_pins_replays_and_releases_claims() 
             .await?
         {
             WorkflowDispatchSourceResolutionOutcome::Claimed(claim) => claim,
-            outcome => return Err(format!("expected releasable claim, got {outcome:?}").into()),
+            outcome @ WorkflowDispatchSourceResolutionOutcome::Resolved(_) => {
+                return Err(format!("expected releasable claim, got {outcome:?}").into());
+            }
         };
         let released_fence = released_claim.fence();
         database
@@ -2386,7 +2392,9 @@ async fn workflow_dispatch_source_resolution_pins_replays_and_releases_claims() 
             .await?
         {
             WorkflowDispatchSourceResolutionOutcome::Claimed(claim) => claim,
-            outcome => return Err(format!("expected retried claim, got {outcome:?}").into()),
+            outcome @ WorkflowDispatchSourceResolutionOutcome::Resolved(_) => {
+                return Err(format!("expected retried claim, got {outcome:?}").into());
+            }
         };
         assert_eq!(retried_claim.worker_id(), second_worker);
         assert_eq!(retried_claim.fence().get(), released_fence.get() + 1);
