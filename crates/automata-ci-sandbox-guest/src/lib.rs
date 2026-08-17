@@ -2437,6 +2437,36 @@ mod tests {
         assert_eq!(immediate_rejection(&current), None);
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn local_id_map_is_one_canonical_nonroot_range_covering_every_control_identity() {
+        for valid in ["         0     231072      65534\n", "0 4294901762 65534\n"] {
+            assert!(valid_local_id_map(valid), "valid map: {valid:?}");
+        }
+
+        for invalid in [
+            "",
+            "0 231072 65534",
+            "0 0 65534\n",
+            "1 231072 65534\n",
+            "0 231072 65533\n",
+            "0 4294901763 65534\n",
+            "0 231072 65534 trailing\n",
+            "0 231072 65534\n1 296606 1\n",
+            "0 1000 1\n1 100000 65536\n",
+            "00 231072 65534\n",
+            "0 0231072 65534\n",
+            "0 231072 +65534\n",
+            "0 231072 -1\n",
+        ] {
+            assert!(!valid_local_id_map(invalid), "invalid map: {invalid:?}");
+        }
+        assert!(!valid_local_id_map(&format!(
+            "0 231072 {}\n",
+            "1".repeat(MAX_LOCAL_ID_MAP_BYTES)
+        )));
+    }
+
     #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn write_file_creates_the_attempt_scoped_parent_directory() {

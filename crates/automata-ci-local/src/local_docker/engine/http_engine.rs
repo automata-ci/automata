@@ -2063,3 +2063,520 @@ struct ContainerSummary {
     #[serde(rename = "Id")]
     id: String,
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use serde_json::{Value, json};
+
+    use super::{
+        ContainerCustodyResponse, ContainerDefinition, EngineContainerState, ExecInspectResponse,
+        ImageResponse, InfoResponse, MASKED_PATHS, READ_ONLY_PATHS, normalize_container,
+        normalize_container_custody, normalize_image, valid_object_id,
+    };
+    use super::{EngineExecRequest, PreparedEngineExec};
+
+    #[test]
+    fn accepts_only_full_canonical_container_ids() {
+        assert!(valid_object_id(&"a".repeat(64)));
+        assert!(!valid_object_id(&"a".repeat(63)));
+        assert!(!valid_object_id(&"g".repeat(64)));
+        assert!(!valid_object_id(&"A".repeat(64)));
+    }
+
+    #[test]
+    fn daemon_security_options_are_retained_as_bounded_engine_evidence() {
+        let value = json!({
+            "ID": "relay-engine",
+            "ServerVersion": "29.7.2",
+            "Architecture": "x86_64",
+            "OSType": "linux",
+            "SecurityOptions": [
+                "name=seccomp,profile=builtin",
+                "name=userns",
+                "name=cgroupns"
+            ],
+            "MemoryLimit": true,
+            "SwapLimit": true,
+            "CpuCfsPeriod": true,
+            "CpuCfsQuota": true,
+            "PidsLimit": true
+        });
+        let response: InfoResponse =
+            serde_json::from_value(value.clone()).expect("Docker info response");
+        assert_eq!(
+            response
+                .security_options
+                .expect("security options")
+                .as_slice(),
+            [
+                "name=seccomp,profile=builtin",
+                "name=userns",
+                "name=cgroupns"
+            ]
+        );
+        for field in [
+            "MemoryLimit",
+            "SwapLimit",
+            "CpuCfsPeriod",
+            "CpuCfsQuota",
+            "PidsLimit",
+        ] {
+            let mut missing = value.clone();
+            missing.as_object_mut().expect("info object").remove(field);
+            assert!(serde_json::from_value::<InfoResponse>(missing).is_err());
+            for invalid in [Value::Null, json!("true")] {
+                let mut wrong_type = value.clone();
+                wrong_type[field] = invalid;
+                assert!(serde_json::from_value::<InfoResponse>(wrong_type).is_err());
+            }
+        }
+    }
+
+    fn image_json(environment: &Value) -> Value {
+        json!({
+            "Id": format!("sha256:{}", "2".repeat(64)),
+            "RepoDigests": [format!("registry.example/job@sha256:{}", "1".repeat(64))],
+            "Os": "linux",
+            "Architecture": "amd64",
+            "Config": {
+                "Env": environment,
+                "Volumes": null,
+                "Labels": {"org.opencontainers.image.version": "1"}
+            }
+        })
+    }
+
+    #[test]
+    fn image_environment_is_reduced_to_unique_sorted_names() {
+        let response: ImageResponse =
+            serde_json::from_value(image_json(&json!(["Z=value", "PATH=/bin", "A="])))
+                .expect("image response");
+        assert_eq!(
+            normalize_image(response)
+                .expect("canonical image environment")
+                .environment_names,
+            ["A", "PATH", "Z"]
+        );
+        for environment in [json!(["PATH=/bin", "PATH=/usr/bin"]), json!(["bad-name=x"])] {
+            let response =
+                serde_json::from_value(image_json(&environment)).expect("image response");
+            assert!(normalize_image(response).is_err());
+        }
+    }
+
+    #[test]
+    fn image_port_and_healthcheck_defaults_are_captured_before_create() {
+        for exposed_ports in [Value::Null, json!({})] {
+            let mut value = image_json(&json!([]));
+            value["Config"]["ExposedPorts"] = exposed_ports;
+            let image = normalize_image(
+                serde_json::from_value(value).expect("typed empty exposed-port image"),
+            )
+            .expect("empty exposed ports");
+            assert!(image.declared_exposed_ports.is_empty());
+            assert!(!image.has_healthcheck);
+        }
+
+        let mut port = image_json(&json!([]));
+        port["Config"]["ExposedPorts"] = json!({"8080/tcp": {}});
+        assert_eq!(
+            normalize_image(serde_json::from_value(port).expect("typed exposed-port image"))
+                .expect("canonical exposed port")
+                .declared_exposed_ports,
+            ["8080/tcp"]
+        );
+
+        for healthcheck in [
+            json!({}),
+            json!({"Test": null}),
+            json!({"Test": ["NONE"]}),
+            json!({
+                "Test": ["CMD-SHELL", "exit 0"],
+                "Interval": 1_000_000_000_i64,
+                "Timeout": 2_000_000_000_i64,
+                "Retries": 3,
+                "StartPeriod": 4_000_000_000_i64,
+                "StartInterval": 5_000_000_000_i64
+            }),
+        ] {
+            let mut value = image_json(&json!([]));
+            value["Config"]["Healthcheck"] = healthcheck;
+            assert!(
+                normalize_image(serde_json::from_value(value).expect("typed image healthcheck"))
+                    .expect("canonical image")
+                    .has_healthcheck
+            );
+        }
+
+        let mut too_many_ports = image_json(&json!([]));
+        too_many_ports["Config"]["ExposedPorts"] = Value::Object(
+            (0..65)
+                .map(|port| (format!("{port}/tcp"), json!({})))
+                .collect(),
+        );
+        assert!(serde_json::from_value::<ImageResponse>(too_many_ports).is_err());
+
+        let mut too_many_tests = image_json(&json!([]));
+        too_many_tests["Config"]["Healthcheck"] = json!({"Test": vec!["x"; 9]});
+        assert!(serde_json::from_value::<ImageResponse>(too_many_tests).is_err());
+    }
+
+    fn expected_definition() -> ContainerDefinition {
+        ContainerDefinition {
+            name: "automata-exact-fixture".to_owned(),
+            image: format!("registry.example/job@sha256:{}", "1".repeat(64)),
+            entrypoint: "/automata/bin/automata-ci-sandbox-guest".to_owned(),
+            arguments: vec!["serve-local".to_owned()],
+            labels: BTreeMap::from([("io.automata.test".to_owned(), "true".to_owned())]),
+            environment: vec!["PATH=".to_owned()],
+            tmpfs: BTreeMap::from([
+                (
+                    "/workspace/repository".to_owned(),
+                    "rw,exec,nosuid,nodev,size=268435456,mode=0777,uid=0,gid=0".to_owned(),
+                ),
+                (
+                    "/automata-control".to_owned(),
+                    "rw,exec,nosuid,nodev,size=67108864,mode=0733,uid=65533,gid=65532".to_owned(),
+                ),
+            ]),
+            working_directory: "/workspace/repository".to_owned(),
+            user: "0:0".to_owned(),
+            read_only_root: false,
+            memory_bytes: 268_435_456,
+            nano_cpus: 1_000_000_000,
+            pids_limit: 128,
+        }
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn realized_container_json() -> Value {
+        let id = "a".repeat(64);
+        let definition = expected_definition();
+        let config = json!({
+            "Hostname": &id[..12],
+            "Domainname": "",
+            "User": definition.user,
+            "AttachStdin": false,
+            "AttachStdout": false,
+            "AttachStderr": false,
+            "Tty": false,
+            "OpenStdin": false,
+            "StdinOnce": false,
+            "ArgsEscaped": false,
+            "Env": definition.environment,
+            "Cmd": definition.arguments,
+            "Healthcheck": {"Test": ["NONE"]},
+            "Image": definition.image,
+            "ExposedPorts": {},
+            "Volumes": null,
+            "WorkingDir": definition.working_directory,
+            "Entrypoint": [definition.entrypoint],
+            "NetworkDisabled": true,
+            "Labels": definition.labels,
+            "OnBuild": [],
+            "Shell": [],
+            "StopSignal": "SIGKILL",
+            "StopTimeout": 0,
+            "MacAddress": ""
+        });
+        let mut host_config = json!({
+            "Binds": [],
+            "ContainerIDFile": "",
+            "LogConfig": {"Type": "none", "Config": {}},
+            "NetworkMode": "none",
+            "PortBindings": {},
+            "RestartPolicy": {"Name": "no", "MaximumRetryCount": 0},
+            "AutoRemove": false,
+            "VolumeDriver": "",
+            "VolumesFrom": [],
+            "CapAdd": [],
+            "CapDrop": ["ALL"],
+            "CgroupnsMode": "private",
+            "Dns": [],
+            "DnsOptions": [],
+            "DnsSearch": [],
+            "ExtraHosts": [],
+            "GroupAdd": [],
+            "IpcMode": "private",
+            "Cgroup": "",
+            "Links": null,
+            "OomScoreAdj": 0,
+            "PidMode": "",
+            "Privileged": false,
+            "PublishAllPorts": false,
+            "ReadonlyRootfs": false,
+            "SecurityOpt": ["no-new-privileges=true", "seccomp=builtin"],
+            "UTSMode": "",
+            "UsernsMode": "",
+            "Runtime": "runc",
+            "Isolation": "",
+            "ShmSize": 67_108_864,
+            "ConsoleSize": [0, 0]
+        });
+        let resource_config = json!({
+            "CpuShares": 0,
+            "CgroupParent": "",
+            "BlkioWeight": 0,
+            "BlkioWeightDevice": null,
+            "BlkioDeviceReadBps": null,
+            "BlkioDeviceWriteBps": null,
+            "BlkioDeviceReadIOps": null,
+            "BlkioDeviceWriteIOps": null,
+            "CpuPeriod": 0,
+            "CpuQuota": 0,
+            "CpuRealtimePeriod": 0,
+            "CpuRealtimeRuntime": 0,
+            "CpusetCpus": "",
+            "CpusetMems": "",
+            "Memory": 268_435_456,
+            "MemoryReservation": 0,
+            "MemorySwap": 268_435_456,
+            "MemorySwappiness": null,
+            "NanoCpus": 1_000_000_000,
+            "OomKillDisable": null,
+            "PidsLimit": 128,
+            "Ulimits": [],
+            "Devices": [],
+            "DeviceCgroupRules": [],
+            "DeviceRequests": [],
+            "Mounts": null,
+            "Tmpfs": definition.tmpfs,
+            "Init": false,
+            "CpuCount": 0,
+            "CpuPercent": 0,
+            "IOMaximumIOps": 0,
+            "IOMaximumBandwidth": 0,
+            "StorageOpt": {},
+            "Sysctls": {},
+            "MaskedPaths": MASKED_PATHS,
+            "ReadonlyPaths": READ_ONLY_PATHS
+        });
+        host_config.as_object_mut().expect("host object").extend(
+            resource_config
+                .as_object()
+                .expect("resource object")
+                .clone(),
+        );
+        json!({
+            "Id": id,
+            "Image": format!("sha256:{}", "2".repeat(64)),
+            "Name": format!("/{}", definition.name),
+            "Created": "2026-08-16T00:00:00Z",
+            "Path": definition.entrypoint,
+            "Args": definition.arguments,
+            "ResolvConfPath": "/var/lib/docker/containers/fixture/resolv.conf",
+            "HostnamePath": "/var/lib/docker/containers/fixture/hostname",
+            "HostsPath": "/var/lib/docker/containers/fixture/hosts",
+            "LogPath": "",
+            "RestartCount": 0,
+            "Driver": "overlay2",
+            "Platform": "linux",
+            "MountLabel": "",
+            "ProcessLabel": "",
+            "AppArmorProfile": "",
+            "ExecIDs": null,
+            "State": {
+                "Status": "running",
+                "Running": true,
+                "Paused": false,
+                "Restarting": false,
+                "OOMKilled": false,
+                "Dead": false,
+                "Pid": 42,
+                "ExitCode": 0,
+                "Error": "",
+                "StartedAt": "2026-08-16T00:00:01Z",
+                "FinishedAt": "0001-01-01T00:00:00Z"
+            },
+            "Config": config,
+            "HostConfig": host_config,
+            "Mounts": [],
+            "NetworkSettings": {
+                "SandboxID": "",
+                "SandboxKey": "",
+                "Ports": {},
+                "Networks": {}
+            },
+            "GraphDriver": {"Name": "overlay2", "Data": {}}
+        })
+    }
+
+    fn normalized(value: Value) -> Result<super::InspectedContainer, super::EngineApiError> {
+        let response =
+            serde_json::from_value(value).map_err(|_| super::EngineApiError::InvalidResponse)?;
+        normalize_container(response)
+    }
+
+    #[test]
+    fn exact_realized_configuration_matches_the_generated_contract() {
+        let container = normalized(realized_container_json()).expect("valid inspect fixture");
+        assert_eq!(container.definition, expected_definition());
+        assert_eq!(container.state, EngineContainerState::Running);
+        assert!(container.isolated);
+    }
+
+    #[test]
+    fn custody_parser_survives_runtime_defaults_that_execution_rejects() {
+        let mut value = realized_container_json();
+        value["AppArmorProfile"] = json!("docker-default");
+        value["MountLabel"] = json!("system_u:object_r:container_file_t:s0:c1,c2");
+        value["ProcessLabel"] = json!("system_u:system_r:container_t:s0:c1,c2");
+        value["LogPath"] = json!("/var/lib/docker/containers/fixture-json.log");
+        value["HostConfig"]["Ulimits"] = json!([{"Name": "nofile", "Soft": 1024, "Hard": 1024}]);
+        assert!(normalized(value.clone()).is_err());
+
+        let custody = normalize_container_custody(
+            serde_json::from_value::<ContainerCustodyResponse>(value)
+                .expect("minimal custody response"),
+        )
+        .expect("custody identity remains recoverable");
+        assert_eq!(custody.name, expected_definition().name);
+        assert_eq!(custody.id, "a".repeat(64));
+        assert_eq!(custody.state, EngineContainerState::Running);
+    }
+
+    #[test]
+    fn transient_exec_ids_must_be_bounded_canonical_and_unique() {
+        let mut value = realized_container_json();
+        *value.pointer_mut("/ExecIDs").expect("fixture pointer") =
+            json!(["a".repeat(64), "b".repeat(64)]);
+        assert!(normalized(value.clone()).is_ok());
+
+        for invalid in [
+            json!(["a".repeat(63)]),
+            json!(["A".repeat(64)]),
+            json!(["a".repeat(64), "a".repeat(64)]),
+        ] {
+            *value.pointer_mut("/ExecIDs").expect("fixture pointer") = invalid;
+            assert!(normalized(value.clone()).is_err());
+        }
+
+        *value.pointer_mut("/ExecIDs").expect("fixture pointer") = Value::Array(
+            (0..17)
+                .map(|index| json!(format!("{index:064x}")))
+                .collect(),
+        );
+        assert!(normalized(value).is_err());
+    }
+
+    #[test]
+    fn oom_kill_disable_accepts_only_the_two_v1_44_false_normalizations() {
+        for realized in [Value::Null, json!(false)] {
+            let mut value = realized_container_json();
+            *value
+                .pointer_mut("/HostConfig/OomKillDisable")
+                .expect("fixture pointer") = realized;
+            assert!(normalized(value).expect("false form").isolated);
+        }
+        let mut value = realized_container_json();
+        *value
+            .pointer_mut("/HostConfig/OomKillDisable")
+            .expect("fixture pointer") = json!(true);
+        assert!(!normalized(value).expect("typed true form").isolated);
+    }
+
+    fn exec_inspect_json(running: bool, exit_code: &Value, pid: i64) -> Value {
+        json!({
+            "ID": "a".repeat(64),
+            "Running": running,
+            "ExitCode": exit_code,
+            "ProcessConfig": {
+                "tty": false,
+                "entrypoint": "/automata-control/automata-ci-sandbox-guest",
+                "arguments": ["local-client"],
+                "privileged": false,
+                "user": "65532:65532"
+            },
+            "OpenStdin": true,
+            "OpenStderr": true,
+            "OpenStdout": true,
+            "CanRemove": false,
+            "ContainerID": "b".repeat(64),
+            "DetachKeys": "",
+            "Pid": pid
+        })
+    }
+
+    #[test]
+    fn exec_inspection_has_disjoint_exact_created_and_finished_states() {
+        let command = vec![
+            "/automata-control/automata-ci-sandbox-guest".to_owned(),
+            "local-client".to_owned(),
+        ];
+        let created: ExecInspectResponse =
+            serde_json::from_value(exec_inspect_json(false, &Value::Null, 0))
+                .expect("created exec");
+        assert!(
+            created.matches_created(&"a".repeat(64), &"b".repeat(64), &command, "65532:65532",)
+        );
+
+        let prepared = PreparedEngineExec {
+            id: "a".repeat(64),
+            container_id: "b".repeat(64),
+            command: command.clone(),
+            user: "65532:65532".to_owned(),
+        };
+        let request = EngineExecRequest {
+            container_id: prepared.container_id.clone(),
+            command,
+            user: prepared.user.clone(),
+            stdin: Vec::new(),
+            stdout_limit: 1,
+            stderr_limit: 1,
+            timeout: std::time::Duration::from_secs(1),
+        };
+        let finished: ExecInspectResponse =
+            serde_json::from_value(exec_inspect_json(false, &json!(0), 42)).expect("finished exec");
+        assert!(finished.matches_finished(&prepared, &request));
+        for invalid in [
+            exec_inspect_json(false, &json!(0), 0),
+            exec_inspect_json(true, &json!(0), 42),
+        ] {
+            let invalid: ExecInspectResponse =
+                serde_json::from_value(invalid).expect("typed invalid exec state");
+            assert!(!invalid.matches_finished(&prepared, &request));
+        }
+        let mut unknown = exec_inspect_json(false, &Value::Null, 0);
+        unknown
+            .as_object_mut()
+            .expect("exec object")
+            .insert("Unexpected".to_owned(), json!(true));
+        assert!(serde_json::from_value::<ExecInspectResponse>(unknown).is_err());
+    }
+
+    #[test]
+    fn high_risk_realized_configuration_tampering_fails_closed() {
+        for (pointer, replacement) in [
+            ("/Config/Env", json!(["PATH=", "SECRET=leaked"])),
+            ("/Config/Volumes", json!({"/host": {}})),
+            ("/Config/ExposedPorts", json!({"8080/tcp": {}})),
+            ("/HostConfig/NetworkMode", json!("host")),
+            ("/HostConfig/Privileged", json!(true)),
+            ("/HostConfig/Binds", json!(["/host:/guest"])),
+            ("/HostConfig/Tmpfs", json!({"/foreign": "rw"})),
+            (
+                "/HostConfig/Tmpfs/~1automata-control",
+                json!("rw,exec,size=33554432,mode=0733,uid=65533,gid=65532"),
+            ),
+            ("/HostConfig/Init", json!(true)),
+            ("/HostConfig/OomKillDisable", json!(true)),
+            ("/Mounts", json!([{"Type": "volume"}])),
+            ("/HostConfig/Devices", json!([{"PathOnHost": "/dev/kvm"}])),
+            ("/HostConfig/Sysctls", json!({"kernel.hostname": "foreign"})),
+            ("/HostConfig/SecurityOpt", json!(["seccomp=unconfined"])),
+            ("/HostConfig/ReadonlyRootfs", json!(true)),
+            ("/NetworkSettings/Networks", json!({"bridge": {}})),
+        ] {
+            let mut value = realized_container_json();
+            *value.pointer_mut(pointer).expect("fixture pointer") = replacement;
+            if let Ok(container) = normalized(value) {
+                assert!(
+                    !container.isolated || container.definition != expected_definition(),
+                    "accepted tamper at {pointer}"
+                );
+            }
+        }
+    }
+}

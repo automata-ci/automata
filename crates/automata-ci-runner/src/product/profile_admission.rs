@@ -1933,6 +1933,38 @@ mod tests {
     }
 
     #[test]
+    fn fixed_relay_local_docker_capabilities_reach_linux_profile_admission() {
+        let signals = ProbeCancellation::default();
+        let mut provider = FakeProvider::new(FakeBehavior::Happy, signals.clone());
+        provider.capabilities = ProviderCapabilities::new([
+            SandboxCapability::WholeJob,
+            SandboxCapability::Attach,
+            SandboxCapability::Inspect,
+            SandboxCapability::Exec,
+            SandboxCapability::CopyTo,
+            SandboxCapability::CopyFrom,
+            SandboxCapability::EnvironmentInjection,
+            SandboxCapability::NetworkDisabled,
+            SandboxCapability::WritableRootFilesystem,
+            SandboxCapability::Administrator,
+            SandboxCapability::UserNamespace,
+            SandboxCapability::ResourceLimits,
+            SandboxCapability::ProcessLimits,
+        ])
+        .expect("exact LocalDocker provider capabilities");
+        let (profile, sandbox) = environment("local-docker-tools", profile_digest(0x69), 0x7a);
+        let profiles = BTreeMap::from([(profile, sandbox)]);
+        let mut policy = linux_tool_policy();
+        policy.network = NetworkPolicy::Disabled;
+
+        assert_eq!(
+            admit_environment_profiles(&provider, runner_id(), &profiles, policy, &signals,),
+            Ok(ProfileAdmissionOutcome::Admitted)
+        );
+        assert!(matches!(provider.calls().first(), Some(Call::Create(_))));
+    }
+
+    #[test]
     fn windows_python_probe_is_present_only_when_the_tool_is_configured() {
         let resources = ResourceLimits::new(256 * 1024 * 1024, 1_000, 16).expect("resources");
         let without_python = ProfileAdmissionPolicy::new(

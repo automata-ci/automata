@@ -48,6 +48,9 @@ use engine::{
 
 use endpoint::LocalDockerEndpoint;
 
+#[cfg(test)]
+mod tests;
+
 pub(crate) const LOCAL_DOCKER_PROVIDER_ID: &str = "local-docker-v1";
 
 const MANAGED_LABEL_PREFIX: &str = "io.automata.local.";
@@ -189,6 +192,31 @@ impl LocalDockerProvider {
                 handle_locks: Mutex::new(BTreeMap::new()),
             }),
         })
+    }
+
+    #[cfg(test)]
+    fn with_test_engine(
+        pinned: PinnedDockerEngine,
+        engine: Arc<dyn SandboxEngineApi>,
+        installation: Installation,
+        guest_image: ImmutableImage,
+        guest_image_id: String,
+    ) -> Self {
+        Self {
+            inner: Arc::new(LocalDockerInner {
+                pinned,
+                engine,
+                installation,
+                guest_image,
+                guest_image_id,
+                guest_image_labels: BTreeMap::new(),
+                guest_image_environment: Vec::new(),
+                provider_id: ProviderId::new(LOCAL_DOCKER_PROVIDER_ID).expect("provider id"),
+                capabilities: ProviderCapabilities::new(PROVIDER_CAPABILITIES)
+                    .expect("capabilities"),
+                handle_locks: Mutex::new(BTreeMap::new()),
+            }),
+        }
     }
 }
 

@@ -781,3 +781,565 @@ where
         deserializer.deserialize_map(BoundedMapVisitor::<K, V, LIMIT>(PhantomData))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use serde::Serialize;
+
+    use super::{
+        BoundedMap, BoundedVec, REQUEST_BYTES, TransportError, encode_json, encode_path_component,
+    };
+    use super::{ERROR_BYTES, MAX_IN_FLIGHT_REQUESTS, MAX_RESPONSE_HEADERS, deadline};
+
+    #[test]
+    fn path_components_are_encoded_without_query_or_path_injection() {
+        assert_eq!(
+            encode_path_component("name/with?filters={\"x\":1}&nul=\0"),
+            "name%2Fwith%3Ffilters%3D%7B%22x%22%3A1%7D%26nul%3D%00"
+        );
+        assert_eq!(encode_path_component("AZaz09-._~"), "AZaz09-._~");
+    }
+
+    #[test]
+    fn bounded_arrays_reject_the_first_excess_entry() {
+        type Two = BoundedVec<u8, 2>;
+        assert_eq!(
+            serde_json::from_str::<Two>("[1,2]")
+                .expect("at-limit array")
+                .into_inner(),
+            vec![1, 2]
+        );
+        assert!(serde_json::from_str::<Two>("[1,2,3]").is_err());
+    }
+
+    #[test]
+    fn bounded_objects_reject_excess_and_duplicate_keys() {
+        type One = BoundedMap<String, u8, 1>;
+        type Two = BoundedMap<String, u8, 2>;
+
+        assert_eq!(
+            serde_json::from_str::<One>(r#"{"a":1}"#)
+                .expect("at-limit object")
+                .into_inner(),
+            std::collections::BTreeMap::from([("a".to_owned(), 1)])
+        );
+        assert!(serde_json::from_str::<One>(r#"{"a":1,"b":2}"#).is_err());
+
+        assert!(serde_json::from_str::<Two>(r#"{"a":1,"a":2}"#).is_err());
+    }
+
+    #[derive(Serialize)]
+    struct Request<'a> {
+        value: &'a str,
+    }
+
+    #[test]
+    fn request_serialization_refuses_growth_past_the_wire_limit() {
+        let oversized = "x".repeat(REQUEST_BYTES);
+        assert_eq!(
+            encode_json(&Request { value: &oversized }),
+            Err(TransportError::InvalidRequest)
+        );
+    }
+
+    #[cfg(unix)]
+    fn transport_with_one_response(
+        status: &str,
+        content_type: &str,
+        body: &[u8],
+        declared_length: usize,
+    ) -> (
+        super::DockerHttpTransport,
+        std::path::PathBuf,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let socket = std::env::temp_dir().join(format!(
+            "automata-docker-transport-{}.sock",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let listener = tokio::net::UnixListener::bind(&socket).expect("bind fake Docker socket");
+        let response = [
+            format!(
+                "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {declared_length}\r\nConnection: close\r\n\r\n"
+            )
+            .into_bytes(),
+            body.to_vec(),
+        ]
+        .concat();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept fake request");
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                let read = stream.read(&mut chunk).await.expect("read fake request");
+                assert_ne!(read, 0, "request ended before its headers");
+                request.extend_from_slice(&chunk[..read]);
+                assert!(request.len() <= 16 * 1024, "request headers are bounded");
+            }
+            stream
+                .write_all(&response)
+                .await
+                .expect("write fake response");
+            stream.shutdown().await.expect("close fake response");
+        });
+        let transport = super::DockerHttpTransport::connect_unix_socket(
+            &socket,
+            crate::ApiVersion {
+                major: 1,
+                minor: 53,
+            },
+        )
+        .expect("fake Docker transport");
+        (transport, socket, server)
+    }
+
+    async fn finish_fake_response(socket: &std::path::Path, server: tokio::task::JoinHandle<()>) {
+        server.await.expect("fake Docker server");
+        std::fs::remove_file(socket).expect("remove exact fake socket");
+    }
+
+    fn transport_with_raw_response(
+        response: Vec<u8>,
+    ) -> (
+        super::DockerHttpTransport,
+        std::path::PathBuf,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use tokio::io::AsyncWriteExt as _;
+
+        let socket = std::env::temp_dir().join(format!(
+            "automata-docker-transport-{}.sock",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let listener = tokio::net::UnixListener::bind(&socket).expect("bind fake Docker socket");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept fake request");
+            read_request_headers(&mut stream).await;
+            let _ignored = stream.write_all(&response).await;
+            let _ignored = stream.shutdown().await;
+        });
+        (fake_transport(&socket), socket, server)
+    }
+
+    fn fake_transport(socket: &std::path::Path) -> super::DockerHttpTransport {
+        super::DockerHttpTransport::connect_unix_socket(
+            socket,
+            crate::ApiVersion {
+                major: 1,
+                minor: 53,
+            },
+        )
+        .expect("fake Docker transport")
+    }
+
+    async fn read_request_headers(stream: &mut tokio::net::UnixStream) {
+        use tokio::io::AsyncReadExt as _;
+
+        let mut request = Vec::new();
+        let mut chunk = [0_u8; 1024];
+        while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+            let read = stream.read(&mut chunk).await.expect("read fake request");
+            assert_ne!(read, 0, "request ended before its headers");
+            request.extend_from_slice(&chunk[..read]);
+            assert!(request.len() <= 16 * 1024, "request headers are bounded");
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn response_content_length_is_rejected_before_body_collection() {
+        let (transport, socket, server) =
+            transport_with_one_response("200 OK", "application/json", b"{}", 4096);
+        let result = transport
+            .json::<serde_json::Value, ()>(
+                http::Method::GET,
+                "/bounded",
+                None,
+                http::StatusCode::OK,
+                16,
+            )
+            .await;
+        assert_eq!(result, Err(TransportError::ResponseTooLarge));
+        finish_fake_response(&socket, server).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn optional_responses_require_a_bounded_structured_docker_error() {
+        let body = br#"{"message":"missing"}"#;
+        let (transport, socket, server) =
+            transport_with_one_response("404 Not Found", "application/json", body, body.len());
+        assert_eq!(
+            transport
+                .optional_json::<serde_json::Value>("/missing", 16)
+                .await,
+            Ok(None)
+        );
+        finish_fake_response(&socket, server).await;
+
+        let body = b"{}";
+        let (transport, socket, server) =
+            transport_with_one_response("404 Not Found", "application/json", body, body.len());
+        assert_eq!(
+            transport
+                .optional_json::<serde_json::Value>("/malformed-error", 16)
+                .await,
+            Err(TransportError::InvalidResponse)
+        );
+        finish_fake_response(&socket, server).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn endpoint_json_cardinality_is_enforced() {
+        let body = b"[1,2,3]";
+        let (transport, socket, server) =
+            transport_with_one_response("200 OK", "application/json", body, body.len());
+        let result = transport
+            .json::<BoundedVec<u8, 2>, ()>(
+                http::Method::GET,
+                "/cardinality",
+                None,
+                http::StatusCode::OK,
+                body.len(),
+            )
+            .await;
+        assert_eq!(result, Err(TransportError::InvalidResponse));
+        finish_fake_response(&socket, server).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn chunked_success_and_error_bodies_are_bounded_while_streaming() {
+        let payload = "x".repeat(32);
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{:X}\r\n{}\r\n0\r\n\r\n",
+            payload.len(),
+            payload
+        )
+        .into_bytes();
+        let (transport, socket, server) = transport_with_raw_response(response);
+        assert_eq!(
+            transport
+                .json::<serde_json::Value, ()>(
+                    http::Method::GET,
+                    "/chunked-success-overflow",
+                    None,
+                    http::StatusCode::OK,
+                    16,
+                )
+                .await,
+            Err(TransportError::ResponseTooLarge)
+        );
+        finish_fake_response(&socket, server).await;
+
+        let payload = "x".repeat(ERROR_BYTES + 1);
+        let response = format!(
+            "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{:X}\r\n{}\r\n0\r\n\r\n",
+            payload.len(),
+            payload
+        )
+        .into_bytes();
+        let (transport, socket, server) = transport_with_raw_response(response);
+        assert_eq!(
+            transport
+                .optional_json::<serde_json::Value>("/chunked-error-overflow", 16)
+                .await,
+            Err(TransportError::ResponseTooLarge)
+        );
+        finish_fake_response(&socket, server).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn response_header_count_bytes_and_duplicate_content_type_fail_closed() {
+        use std::fmt::Write as _;
+
+        let mut many_headers = String::new();
+        for index in 0..MAX_RESPONSE_HEADERS {
+            write!(many_headers, "X-Test-{index}: x\r\n").expect("write response header");
+        }
+        for response in [
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n{many_headers}Content-Length: 2\r\nConnection: close\r\n\r\n{{}}"
+            )
+            .into_bytes(),
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nX-Wide: {}\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}",
+                "x".repeat(super::MAX_RESPONSE_HEADER_BYTES)
+            )
+            .into_bytes(),
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}".to_vec(),
+        ] {
+            let (transport, socket, server) = transport_with_raw_response(response);
+            assert!(
+                transport
+                    .json::<serde_json::Value, ()>(
+                        http::Method::GET,
+                        "/invalid-headers",
+                        None,
+                        http::StatusCode::OK,
+                        16,
+                    )
+                    .await
+                    .is_err()
+            );
+            finish_fake_response(&socket, server).await;
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ambiguous_response_framing_is_never_accepted() {
+        for response in [
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\nContent-Length: 2\r\nConnection: close\r\n\r\n2\r\n{}\r\n0\r\n\r\n".to_vec(),
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nContent-Length: 3\r\nConnection: close\r\n\r\n{}".to_vec(),
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: gzip, chunked\r\nConnection: close\r\n\r\n2\r\n{}\r\n0\r\n\r\n".to_vec(),
+        ] {
+            let (transport, socket, server) = transport_with_raw_response(response);
+            assert!(
+                transport
+                    .json::<serde_json::Value, ()>(
+                        http::Method::GET,
+                        "/ambiguous-framing",
+                        None,
+                        http::StatusCode::OK,
+                        16,
+                    )
+                    .await
+                    .is_err()
+            );
+            finish_fake_response(&socket, server).await;
+        }
+    }
+
+    #[cfg(unix)]
+    async fn assert_stalled_response_is_cancelled(prefix: &'static [u8]) {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let socket = std::env::temp_dir().join(format!(
+            "automata-docker-transport-stall-{}.sock",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let listener = tokio::net::UnixListener::bind(&socket).expect("bind stalled Docker socket");
+        let (stalled_tx, stalled_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept stalled request");
+            read_request_headers(&mut stream).await;
+            stream
+                .write_all(prefix)
+                .await
+                .expect("write stalled prefix");
+            stalled_tx
+                .send(())
+                .expect("report that the exact response is stalled");
+            let mut byte = [0_u8; 1];
+            let closed = tokio::time::timeout(Duration::from_secs(1), stream.read(&mut byte))
+                .await
+                .expect("cancelled client closes its exact socket")
+                .expect("read client close");
+            assert_eq!(closed, 0, "cancelled connection must not remain detached");
+        });
+        let transport = fake_transport(&socket);
+        let mut request = Box::pin(transport.json::<serde_json::Value, ()>(
+            http::Method::GET,
+            "/stalled",
+            None,
+            http::StatusCode::OK,
+            16,
+        ));
+        tokio::select! {
+            result = &mut request => panic!("request ended before cancellation: {result:?}"),
+            stalled = tokio::time::timeout(Duration::from_secs(1), stalled_rx) => {
+                stalled
+                    .expect("request reaches the stalled response boundary")
+                    .expect("fake server reports the stalled response");
+            }
+        }
+        assert_eq!(
+            deadline(Duration::from_millis(25), request.as_mut()).await,
+            Err(TransportError::RequestFailed)
+        );
+        drop(request);
+        finish_fake_response(&socket, server).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stalled_headers_and_bodies_are_cancelled_without_detached_connections() {
+        assert_stalled_response_is_cancelled(b"").await;
+        assert_stalled_response_is_cancelled(
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 8\r\nConnection: close\r\n\r\n{",
+        )
+        .await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancellation_during_driver_finish_aborts_the_task_and_closes_its_socket() {
+        use tokio::io::AsyncReadExt as _;
+
+        let (client, mut peer) = tokio::net::UnixStream::pair().expect("Unix socket pair");
+        let task = tokio::spawn(async move {
+            let result = std::future::pending::<Result<(), hyper::Error>>().await;
+            drop(client);
+            result
+        });
+        let driver = super::ConnectionDriver(Some(task));
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), driver.finish())
+                .await
+                .is_err(),
+            "the test driver remains pending until cancellation"
+        );
+        let mut byte = [0_u8; 1];
+        let closed = tokio::time::timeout(Duration::from_secs(1), peer.read(&mut byte))
+            .await
+            .expect("cancelled finish closes the driver socket")
+            .expect("read driver socket close");
+        assert_eq!(
+            closed, 0,
+            "driver task must not detach on finish cancellation"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn every_request_reconnects_to_the_exact_rebound_unix_socket() {
+        use tokio::io::AsyncWriteExt as _;
+
+        let socket = std::env::temp_dir().join(format!(
+            "automata-docker-transport-rebind-{}.sock",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let transport = fake_transport(&socket);
+        for expected in [1_u8, 2] {
+            let listener = tokio::net::UnixListener::bind(&socket).expect("bind rebound socket");
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.expect("accept rebound request");
+                read_request_headers(&mut stream).await;
+                let body = format!("{{\"server\":{expected}}}");
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("write rebound response");
+            });
+            let observed: serde_json::Value = transport
+                .json(
+                    http::Method::GET,
+                    "/rebind",
+                    None::<&()>,
+                    http::StatusCode::OK,
+                    64,
+                )
+                .await
+                .expect("request reaches current listener");
+            assert_eq!(observed["server"], expected);
+            server.await.expect("rebound server");
+            std::fs::remove_file(&socket).expect("remove rebound socket name");
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_connection_is_not_implicitly_retried() {
+        let socket = std::env::temp_dir().join(format!(
+            "automata-docker-transport-no-retry-{}.sock",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let listener = tokio::net::UnixListener::bind(&socket).expect("bind no-retry socket");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept first request");
+            drop(stream);
+            assert!(
+                tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                    .await
+                    .is_err(),
+                "one operation must open exactly one connection"
+            );
+        });
+        let transport = fake_transport(&socket);
+        assert_eq!(
+            transport
+                .json::<serde_json::Value, ()>(
+                    http::Method::GET,
+                    "/no-retry",
+                    None,
+                    http::StatusCode::OK,
+                    16,
+                )
+                .await,
+            Err(TransportError::RequestFailed)
+        );
+        finish_fake_response(&socket, server).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn concurrent_connection_cardinality_is_hard_bounded() {
+        let socket = std::env::temp_dir().join(format!(
+            "automata-docker-transport-cardinality-{}.sock",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let listener = tokio::net::UnixListener::bind(&socket).expect("bind cardinality socket");
+        let (accepted_tx, mut accepted_rx) = tokio::sync::mpsc::channel(MAX_IN_FLIGHT_REQUESTS);
+        let (checked_tx, checked_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let mut streams = Vec::with_capacity(MAX_IN_FLIGHT_REQUESTS);
+            for _ in 0..MAX_IN_FLIGHT_REQUESTS {
+                let (mut stream, _) = listener.accept().await.expect("accept bounded request");
+                read_request_headers(&mut stream).await;
+                streams.push(stream);
+                accepted_tx.send(()).await.expect("report accepted request");
+            }
+            assert!(
+                tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                    .await
+                    .is_err(),
+                "request cardinality exceeded the transport bound"
+            );
+            drop(listener);
+            checked_tx.send(()).expect("report cardinality check");
+            drop(streams);
+        });
+        let transport = fake_transport(&socket);
+        let mut requests = Vec::new();
+        for _ in 0..=MAX_IN_FLIGHT_REQUESTS {
+            let transport = transport.clone();
+            requests.push(tokio::spawn(async move {
+                transport
+                    .json::<serde_json::Value, ()>(
+                        http::Method::GET,
+                        "/cardinality",
+                        None,
+                        http::StatusCode::OK,
+                        16,
+                    )
+                    .await
+            }));
+        }
+        for _ in 0..MAX_IN_FLIGHT_REQUESTS {
+            tokio::time::timeout(Duration::from_secs(1), accepted_rx.recv())
+                .await
+                .expect("bounded request connects")
+                .expect("server reports bounded request");
+        }
+        checked_rx
+            .await
+            .expect("server completes cardinality check");
+        for request in requests {
+            request.abort();
+            let _ignored = request.await;
+        }
+        finish_fake_response(&socket, server).await;
+    }
+}

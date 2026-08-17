@@ -409,6 +409,42 @@ pub(crate) struct PinnedDockerEngine {
 
 #[cfg(unix)]
 impl PinnedDockerEngine {
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        architecture: crate::EngineArchitecture,
+        engine: Arc<dyn EngineApi>,
+    ) -> Self {
+        Self {
+            engine,
+            facts: EngineFacts {
+                engine_id: "engine-identity".to_owned(),
+                server_version: "29.7.2".to_owned(),
+                minimum_api_version: "1.40".to_owned(),
+                maximum_api_version: "1.55".to_owned(),
+                operating_system: "linux".to_owned(),
+                architecture: match architecture {
+                    crate::EngineArchitecture::Amd64 => "amd64".to_owned(),
+                    crate::EngineArchitecture::Arm64 => "arm64".to_owned(),
+                },
+                security_options: vec![
+                    SECURITY_OPTION_CGROUP_NAMESPACE.to_owned(),
+                    SECURITY_OPTION_SECCOMP_BUILTIN.to_owned(),
+                    SECURITY_OPTION_USER_NAMESPACE.to_owned(),
+                ],
+                memory_limit: true,
+                swap_limit: true,
+                cpu_cfs_period: true,
+                cpu_cfs_quota: true,
+                pids_limit: true,
+            },
+            api: ApiVersion {
+                major: 1,
+                minor: 44,
+            },
+            architecture,
+        }
+    }
+
     pub(crate) async fn verify(&self) -> Result<(), LocalDockerError> {
         let observed = self.engine.engine_facts().await.map_err(map_engine_call)?;
         validate_relay_facts(&observed, self.api)?;
@@ -525,6 +561,185 @@ fn validate_relay_facts(
         ));
     }
     Ok(architecture)
+}
+
+#[cfg(all(test, unix))]
+mod relay_tests {
+    use automata_ci_core::Architecture;
+
+    use super::{
+        ApiVersion, EngineFacts, LocalDockerErrorCode, SECURITY_OPTION_CGROUP_NAMESPACE,
+        SECURITY_OPTION_NO_NEW_PRIVILEGES, SECURITY_OPTION_ROOTLESS,
+        SECURITY_OPTION_SECCOMP_BUILTIN, SECURITY_OPTION_USER_NAMESPACE,
+        relay_matches_runner_architecture, validate_relay_facts,
+    };
+    use crate::EngineArchitecture;
+
+    fn facts(security_options: &[&str]) -> EngineFacts {
+        EngineFacts {
+            engine_id: "relay-engine".to_owned(),
+            server_version: "29.7.2".to_owned(),
+            minimum_api_version: "1.40".to_owned(),
+            maximum_api_version: "1.55".to_owned(),
+            operating_system: "linux".to_owned(),
+            architecture: "amd64".to_owned(),
+            security_options: security_options
+                .iter()
+                .map(|option| (*option).to_owned())
+                .collect(),
+            memory_limit: true,
+            swap_limit: true,
+            cpu_cfs_period: true,
+            cpu_cfs_quota: true,
+            pids_limit: true,
+        }
+    }
+
+    fn code(security_options: &[&str]) -> LocalDockerErrorCode {
+        validate_relay_facts(
+            &facts(security_options),
+            ApiVersion {
+                major: 1,
+                minor: 44,
+            },
+        )
+        .expect_err("security options must be rejected")
+        .code()
+    }
+
+    const fn api() -> ApiVersion {
+        ApiVersion {
+            major: 1,
+            minor: 44,
+        }
+    }
+
+    fn qualified_facts() -> EngineFacts {
+        facts(&[
+            SECURITY_OPTION_CGROUP_NAMESPACE,
+            SECURITY_OPTION_SECCOMP_BUILTIN,
+            SECURITY_OPTION_USER_NAMESPACE,
+        ])
+    }
+
+    #[test]
+    fn relay_requires_the_closed_rootful_security_envelope() {
+        assert!(validate_relay_facts(&qualified_facts(), api()).is_ok());
+        assert!(
+            validate_relay_facts(
+                &facts(&[
+                    SECURITY_OPTION_CGROUP_NAMESPACE,
+                    SECURITY_OPTION_NO_NEW_PRIVILEGES,
+                    SECURITY_OPTION_SECCOMP_BUILTIN,
+                    SECURITY_OPTION_USER_NAMESPACE,
+                ]),
+                api(),
+            )
+            .is_ok()
+        );
+        assert_eq!(code(&[]), LocalDockerErrorCode::InvalidEngineResponse);
+        for rejected in [
+            vec![
+                SECURITY_OPTION_SECCOMP_BUILTIN,
+                SECURITY_OPTION_USER_NAMESPACE,
+            ],
+            vec![
+                SECURITY_OPTION_CGROUP_NAMESPACE,
+                SECURITY_OPTION_USER_NAMESPACE,
+            ],
+            vec![
+                SECURITY_OPTION_CGROUP_NAMESPACE,
+                SECURITY_OPTION_SECCOMP_BUILTIN,
+            ],
+            vec![
+                SECURITY_OPTION_CGROUP_NAMESPACE,
+                SECURITY_OPTION_ROOTLESS,
+                SECURITY_OPTION_SECCOMP_BUILTIN,
+                SECURITY_OPTION_USER_NAMESPACE,
+            ],
+            vec![
+                "name=apparmor",
+                SECURITY_OPTION_CGROUP_NAMESPACE,
+                SECURITY_OPTION_SECCOMP_BUILTIN,
+                SECURITY_OPTION_USER_NAMESPACE,
+            ],
+            vec![
+                SECURITY_OPTION_CGROUP_NAMESPACE,
+                SECURITY_OPTION_SECCOMP_BUILTIN,
+                "name=selinux",
+                SECURITY_OPTION_USER_NAMESPACE,
+            ],
+            vec![
+                SECURITY_OPTION_CGROUP_NAMESPACE,
+                "name=future-security-feature",
+                SECURITY_OPTION_SECCOMP_BUILTIN,
+                SECURITY_OPTION_USER_NAMESPACE,
+            ],
+        ] {
+            assert_eq!(
+                code(&rejected),
+                LocalDockerErrorCode::EngineIsolationUnavailable
+            );
+        }
+        assert_eq!(
+            code(&[
+                SECURITY_OPTION_CGROUP_NAMESPACE,
+                SECURITY_OPTION_SECCOMP_BUILTIN,
+                SECURITY_OPTION_USER_NAMESPACE,
+                SECURITY_OPTION_USER_NAMESPACE,
+            ]),
+            LocalDockerErrorCode::InvalidEngineResponse
+        );
+        assert_eq!(
+            code(&[SECURITY_OPTION_USER_NAMESPACE, ""]),
+            LocalDockerErrorCode::InvalidEngineResponse
+        );
+    }
+
+    #[test]
+    fn relay_requires_every_advertised_resource_controller() {
+        for disabled in 0..5 {
+            let mut facts = qualified_facts();
+            match disabled {
+                0 => facts.memory_limit = false,
+                1 => facts.swap_limit = false,
+                2 => facts.cpu_cfs_period = false,
+                3 => facts.cpu_cfs_quota = false,
+                4 => facts.pids_limit = false,
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                validate_relay_facts(&facts, api())
+                    .expect_err("missing controller must reject the relay")
+                    .code(),
+                LocalDockerErrorCode::EngineIsolationUnavailable
+            );
+        }
+    }
+
+    #[test]
+    fn relay_architecture_must_equal_the_advertised_runner_architecture() {
+        assert!(relay_matches_runner_architecture(
+            EngineArchitecture::Amd64,
+            &Architecture::X86_64,
+        ));
+        assert!(relay_matches_runner_architecture(
+            EngineArchitecture::Arm64,
+            &Architecture::Aarch64,
+        ));
+        assert!(!relay_matches_runner_architecture(
+            EngineArchitecture::Amd64,
+            &Architecture::Aarch64,
+        ));
+        assert!(!relay_matches_runner_architecture(
+            EngineArchitecture::Arm64,
+            &Architecture::X86_64,
+        ));
+        assert!(!relay_matches_runner_architecture(
+            EngineArchitecture::Amd64,
+            &Architecture::Other("amd64".to_owned()),
+        ));
+    }
 }
 
 #[cfg(unix)]
