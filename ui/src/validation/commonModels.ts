@@ -160,13 +160,16 @@ export function validateRepositoryShell(
   if (repository.settingsHref !== null && !shell.authenticated) {
     invalid(`${path}.repository.settingsHref`, "null for an anonymous viewer");
   }
-  const [repositoriesNavigation, actionsNavigation, accessNavigation] = shell.navigation;
+  const [repositoriesNavigation, runnersNavigation, actionsNavigation, accessNavigation] = shell.navigation;
   if (
     shell.homeHref !== "/repositories" ||
-    (shell.navigation.length !== 2 && shell.navigation.length !== 3) ||
+    (shell.navigation.length !== 3 && shell.navigation.length !== 4) ||
     repositoriesNavigation?.label !== "Repositories" ||
     repositoriesNavigation.href !== "/repositories" ||
     repositoriesNavigation.current ||
+    runnersNavigation?.label !== "Runners" ||
+    runnersNavigation.href !== "/runners" ||
+    runnersNavigation.current ||
     actionsNavigation?.label !== "Actions" ||
     actionsNavigation.href !== repository.runsHref ||
     !actionsNavigation.current ||
@@ -177,7 +180,7 @@ export function validateRepositoryShell(
   ) {
     invalid(
       `${path}.shell.navigation`,
-      "coherent Repositories, current Actions, and optional Access navigation",
+      "coherent Repositories, Runners, current Actions, and optional Access navigation",
     );
   }
 }

@@ -305,6 +305,7 @@ function rbacShell(documentTitle: string): ShellModel {
     description: "Review tenant users, roles, permissions, and role bindings.",
     navigation: [
       { label: "Repositories", href: "?view=repositories" },
+      { label: "Runners", href: "?view=runners" },
       { label: "Access", href: USERS_HREF, current: true },
     ],
   };

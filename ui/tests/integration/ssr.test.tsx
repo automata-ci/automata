@@ -22,6 +22,7 @@ import {
   repositoryDirectoryRequest,
   repositorySecretsDirectoryRequest,
   repositorySettingsRequest,
+  runnerDirectoryRequest,
   roleDetailRequest,
   roleListRequest,
   runDetailRequest,
@@ -32,6 +33,25 @@ import {
 } from "../fixtures/renderRequests";
 
 describe("server rendering", () => {
+  it("renders public runner health without internal runner identities", () => {
+    const rendered = new DOMParser().parseFromString(
+      renderPage(runnerDirectoryRequest),
+      "text/html",
+    );
+
+    expect(rendered.title).toBe("Runners · Automata");
+    expect(rendered.querySelector("main h1")?.textContent).toBe("Runners");
+    expect(rendered.querySelector(".runner-directory__visibility")?.textContent).toContain(
+      "Public directory",
+    );
+    expect(rendered.querySelectorAll(".runner-directory__item")).toHaveLength(2);
+    expect(rendered.body.textContent).toContain("linux-01");
+    expect(rendered.body.textContent).toContain("1 / 4 busy");
+    expect(rendered.body.textContent).toContain("Draining");
+    expect(rendered.body.textContent).not.toContain("runnerId");
+    expect(rendered.body.textContent).not.toContain("sessionId");
+  });
+
   it("renders the generic deep-link handoff with an exact POST return path", () => {
     const rendered = new DOMParser().parseFromString(
       renderPage(deepLinkSignInRequest),
@@ -514,6 +534,38 @@ describe("server rendering", () => {
 
     expect(rendered.querySelector('input[type="search"]')).not.toBeNull();
     expect(rendered.querySelector("form.log-search-form")).toBeNull();
+  });
+
+  it("labels terminal jobs without a stream as unavailable", () => {
+    if (jobLogRequest.page.kind !== "job-log") {
+      throw new Error("The job-log fixture is unavailable");
+    }
+    const page = jobLogRequest.page;
+    const terminal = {
+      ...page,
+      live: null,
+      notice: "Logs are unavailable for this job.",
+      job: {
+        ...page.job,
+        status: { label: "Succeeded", tone: "success" } as const,
+      },
+      jobs: page.jobs.map((job) =>
+        job.id === page.job.id
+          ? { ...job, status: { label: "Succeeded", tone: "success" } as const }
+          : job,
+      ),
+    };
+    const rendered = new DOMParser().parseFromString(
+      renderToString(<JobLogPage model={terminal} />),
+      "text/html",
+    );
+
+    expect(rendered.querySelector(".log-stream-state")?.textContent).toBe("Unavailable");
+    expect(rendered.querySelector(".log-empty")?.textContent).toBe(
+      "Logs are unavailable for this job.",
+    );
+    expect(rendered.querySelector(".log-toolbar__actions")).toBeNull();
+    expect(rendered.body.textContent).not.toContain("Waiting for log output");
   });
 
   it("gives distinct log panels injective accessible IDs", () => {

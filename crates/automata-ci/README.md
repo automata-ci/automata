@@ -517,6 +517,16 @@ See the repository's
 [authentication and authorization guide](https://github.com/automata-ci/automata/blob/main/docs/authentication.md)
 for the complete session, RBAC, publication, and provider boundaries.
 
+## Runner directory
+
+The server exposes a fleet overview at `/runners`. By default it requires a
+current browser session with `runners:read` authority. Operators can explicitly
+publish the presentation-safe directory with `--runner-directory-public` or
+`AUTOMATA_RUNNER_DIRECTORY_PUBLIC=true`. Public rows include only runner name,
+group, scheduling labels, availability, desired state, capacity, and last
+contact time; durable runner/session identities, network metadata, and raw
+capabilities never cross the web-data boundary.
+
 ## Preview mode
 
 ```console

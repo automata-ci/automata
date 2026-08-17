@@ -29,18 +29,21 @@ export function validateRepositoryDirectoryPage(value: unknown, path: string): v
   if (shell.homeHref !== REPOSITORIES_PATH) {
     invalid(`${path}.shell.homeHref`, "the canonical repository directory");
   }
-  const [repositoriesNavigation, accessNavigation] = shell.navigation;
+  const [repositoriesNavigation, runnersNavigation, accessNavigation] = shell.navigation;
   if (
-    shell.navigation.length > 2 ||
+    (shell.navigation.length !== 2 && shell.navigation.length !== 3) ||
     repositoriesNavigation?.label !== "Repositories" ||
     repositoriesNavigation.href !== REPOSITORIES_PATH ||
     !repositoriesNavigation.current ||
+    runnersNavigation?.label !== "Runners" ||
+    runnersNavigation.href !== "/runners" ||
+    runnersNavigation.current ||
     (accessNavigation !== undefined &&
       (accessNavigation.label !== "Access" ||
         accessNavigation.href !== "/settings/access/users" ||
         accessNavigation.current))
   ) {
-    invalid(`${path}.shell.navigation`, "current Repositories and optional Access navigation");
+    invalid(`${path}.shell.navigation`, "current Repositories, Runners, and optional Access navigation");
   }
   expectTextField(page, "heading", path);
   expectTextField(page, "summary", path, RENDER_REQUEST_LIMITS.longTextLength);

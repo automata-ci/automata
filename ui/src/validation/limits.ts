@@ -40,6 +40,7 @@ export const RENDER_REQUEST_LIMITS = {
   navigationCount: 32,
   permissionCount: 500,
   repositoryCount: 25,
+  runnerCount: 500,
   roleCount: 500,
   runCount: 250,
   secretCount: 50,

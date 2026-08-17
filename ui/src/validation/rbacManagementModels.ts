@@ -694,13 +694,16 @@ function validateManagementPageHeader(
   if (!shell.authenticated) {
     invalid(`${path}.shell.viewer`, "an authenticated management viewer");
   }
-  const [repositoriesNavigation, accessNavigation] = shell.navigation;
+  const [repositoriesNavigation, runnersNavigation, accessNavigation] = shell.navigation;
   if (
-    shell.navigation.length !== 2 ||
+    shell.navigation.length !== 3 ||
     shell.homeHref !== "/repositories" ||
     repositoriesNavigation?.label !== "Repositories" ||
     repositoriesNavigation?.href !== "/repositories" ||
     repositoriesNavigation?.current !== false ||
+    runnersNavigation?.label !== "Runners" ||
+    runnersNavigation?.href !== "/runners" ||
+    runnersNavigation?.current !== false ||
     accessNavigation?.label !== "Access" ||
     accessNavigation?.href !== USERS_PATH ||
     accessNavigation?.current !== true

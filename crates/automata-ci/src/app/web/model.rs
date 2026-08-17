@@ -8,6 +8,8 @@ use automata_ci_auth::{
         ManagementRevision, ManagementRoleBindingCursor, ManagementRoleBindingRecord,
         ManagementRoleBindingSource, ManagementScopeRecord, MemberRecord, MemberStatus,
         RoleBindingStatus, RoleDetailRecord, RoleId, RoleKind, RoleRecord,
+        RunnerDirectoryDesiredState, RunnerDirectoryPage as RunnerDirectoryData,
+        RunnerDirectoryStatus,
     },
     secret::CsrfToken,
     time::UnixTimestamp,
@@ -65,6 +67,7 @@ const RBAC_SHELL_DESCRIPTION: &str =
 const SETUP_SHELL_DESCRIPTION: &str =
     "Complete the one-time administrator setup for this Automata installation.";
 const REPOSITORIES_PATH: &str = "/repositories";
+const RUNNERS_PATH: &str = "/runners";
 const SETUP_PATH: &str = "/setup";
 const SETUP_RETURN_PATH: &str = "/";
 const RBAC_USERS_PATH: &str = "/settings/access/users";
@@ -182,6 +185,41 @@ struct RepositoryDirectoryItem {
 struct RepositoryDirectoryPagination {
     next_href: Option<String>,
     label: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RunnerDirectoryPage {
+    kind: &'static str,
+    shell: Shell,
+    heading: &'static str,
+    summary: &'static str,
+    visibility: &'static str,
+    counts: RunnerDirectoryCounts,
+    runners: Vec<RunnerDirectoryItem>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RunnerDirectoryCounts {
+    total: usize,
+    online: usize,
+    busy_slots: u32,
+    total_slots: u32,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RunnerDirectoryItem {
+    name: String,
+    group: Option<String>,
+    labels: Vec<String>,
+    status: Status,
+    desired_state: &'static str,
+    desired_state_label: &'static str,
+    busy_slots: u16,
+    total_slots: u16,
+    last_seen_at: Option<Timestamp>,
 }
 
 #[derive(Debug, Serialize)]
@@ -892,6 +930,11 @@ fn rbac_shell(
             current: false,
         },
         NavigationItem {
+            label: "Runners",
+            href: RUNNERS_PATH.to_owned(),
+            current: false,
+        },
+        NavigationItem {
             label: "Access",
             href: RBAC_USERS_PATH.to_owned(),
             current: true,
@@ -1567,6 +1610,101 @@ fn management_timestamp(value: UnixTimestamp) -> Result<Timestamp, ModelError> {
     timestamp_seconds(seconds)
 }
 
+pub(super) fn runner_directory(
+    assets: ClientAssetManifest,
+    csp_nonce: String,
+    context: &RequestContext,
+    mutation: Option<ShellMutation<'_>>,
+    public: bool,
+    data: &RunnerDirectoryData,
+) -> Result<String, ModelError> {
+    let mut online = 0_usize;
+    let mut busy_slots = 0_u32;
+    let mut total_slots = 0_u32;
+    let runners = data
+        .runners()
+        .iter()
+        .map(|runner| {
+            if !is_safe_display_text(runner.name(), 255)
+                || runner
+                    .group()
+                    .is_some_and(|group| !is_safe_display_text(group, 255))
+                || runner.labels().len() > 64
+                || runner
+                    .labels()
+                    .iter()
+                    .any(|label| !is_safe_display_text(label, 255))
+                || runner.labels().iter().map(String::len).sum::<usize>() > 4_096
+                || runner.busy_slots() > runner.slots()
+            {
+                return Err(ModelError::InvalidData);
+            }
+            if runner.status() == RunnerDirectoryStatus::Online {
+                online = online.checked_add(1).ok_or(ModelError::InvalidData)?;
+            }
+            busy_slots = busy_slots
+                .checked_add(u32::from(runner.busy_slots()))
+                .ok_or(ModelError::InvalidData)?;
+            total_slots = total_slots
+                .checked_add(u32::from(runner.slots()))
+                .ok_or(ModelError::InvalidData)?;
+            let (desired_state, desired_state_label) = match runner.desired_state() {
+                RunnerDirectoryDesiredState::Active => ("active", "Accepting jobs"),
+                RunnerDirectoryDesiredState::Draining => ("draining", "Draining"),
+                RunnerDirectoryDesiredState::Disabled => ("disabled", "Disabled"),
+            };
+            Ok(RunnerDirectoryItem {
+                name: runner.name().to_owned(),
+                group: runner.group().map(str::to_owned),
+                labels: runner.labels().to_vec(),
+                status: match runner.status() {
+                    RunnerDirectoryStatus::Online => Status {
+                        label: "Online",
+                        tone: "success",
+                    },
+                    RunnerDirectoryStatus::Offline => Status {
+                        label: "Offline",
+                        tone: "neutral",
+                    },
+                },
+                desired_state,
+                desired_state_label,
+                busy_slots: runner.busy_slots(),
+                total_slots: runner.slots(),
+                last_seen_at: runner
+                    .last_seen_at_ms()
+                    .map(|value| timestamp_from_millis(value, false))
+                    .transpose()?,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let return_path = LoginReturnPath::new(RUNNERS_PATH).map_err(|_| ModelError::InvalidData)?;
+    serialize_request(
+        assets,
+        csp_nonce,
+        RunnerDirectoryPage {
+            kind: "runner-directory",
+            shell: global_shell(
+                context,
+                mutation,
+                RUNNERS_PATH,
+                &return_path,
+                "Runners · Automata".to_owned(),
+            )?,
+            heading: "Runners",
+            summary: "Review runner availability, scheduling state, labels, and capacity.",
+            visibility: if public { "public" } else { "private" },
+            counts: RunnerDirectoryCounts {
+                total: runners.len(),
+                online,
+                busy_slots,
+                total_slots,
+            },
+            runners,
+        },
+    )
+}
+
 pub(super) fn repository_directory(
     assets: ClientAssetManifest,
     csp_nonce: String,
@@ -2020,7 +2158,7 @@ pub(super) fn job_log(
         .live_available
         .then(|| job_log_live(format!("{job_href}/live-ticket")));
     let title = format!("{} logs · Automata", data.job.name);
-    let notice = job_log_notice(data.job.status);
+    let notice = job_log_notice(data.job.status, data.live_available);
     let return_path = login_return_path(job_href.clone(), job_href.clone())?;
 
     serialize_request(
@@ -2449,12 +2587,20 @@ fn global_shell(
         return Err(ModelError::InvalidData);
     }
     let on_repository_directory = current_actions_href == REPOSITORIES_PATH;
-    let mut navigation = vec![NavigationItem {
-        label: "Repositories",
-        href: REPOSITORIES_PATH.to_owned(),
-        current: on_repository_directory,
-    }];
-    if !on_repository_directory {
+    let on_runner_directory = current_actions_href == RUNNERS_PATH;
+    let mut navigation = vec![
+        NavigationItem {
+            label: "Repositories",
+            href: REPOSITORIES_PATH.to_owned(),
+            current: on_repository_directory,
+        },
+        NavigationItem {
+            label: "Runners",
+            href: RUNNERS_PATH.to_owned(),
+            current: on_runner_directory,
+        },
+    ];
+    if !on_repository_directory && !on_runner_directory {
         navigation.push(NavigationItem {
             label: "Actions",
             href: current_actions_href.to_owned(),
@@ -2651,12 +2797,13 @@ fn status(value: DataStatus) -> Status {
     }
 }
 
-const fn job_log_notice(status: DataStatus) -> Option<&'static str> {
+const fn job_log_notice(status: DataStatus, live_available: bool) -> Option<&'static str> {
     match status {
         DataStatus::Queued => Some("This job is queued. This page updates automatically."),
         DataStatus::InProgress => Some(
             "This job is still running. This page updates automatically as logs are committed.",
         ),
+        _ if !live_available => Some("Logs are unavailable for this job."),
         _ => None,
     }
 }
@@ -3335,9 +3482,14 @@ mod tests {
             value["page"]["shell"]["navigation"][0]["label"],
             "Repositories"
         );
-        assert_eq!(value["page"]["shell"]["navigation"][1]["label"], "Access");
+        assert_eq!(value["page"]["shell"]["navigation"][1]["label"], "Runners");
         assert_eq!(
             value["page"]["shell"]["navigation"][1]["href"],
+            RUNNERS_PATH
+        );
+        assert_eq!(value["page"]["shell"]["navigation"][2]["label"], "Access");
+        assert_eq!(
+            value["page"]["shell"]["navigation"][2]["href"],
             RBAC_USERS_PATH
         );
         assert_eq!(value["page"]["repositories"][0]["owner"], "automata-ci");
@@ -3597,8 +3749,10 @@ mod tests {
         assert_eq!(page["shell"]["homeHref"], REPOSITORIES_PATH);
         assert_eq!(page["shell"]["navigation"][0]["label"], "Repositories");
         assert_eq!(page["shell"]["navigation"][0]["href"], REPOSITORIES_PATH);
-        assert_eq!(page["shell"]["navigation"][1]["label"], "Access");
-        assert_eq!(page["shell"]["navigation"][1]["href"], RBAC_USERS_PATH);
+        assert_eq!(page["shell"]["navigation"][1]["label"], "Runners");
+        assert_eq!(page["shell"]["navigation"][1]["href"], RUNNERS_PATH);
+        assert_eq!(page["shell"]["navigation"][2]["label"], "Access");
+        assert_eq!(page["shell"]["navigation"][2]["href"], RBAC_USERS_PATH);
         assert_eq!(page["managementNav"]["current"], "users");
         assert_eq!(page["managementNav"]["rolesHref"], RBAC_ROLES_PATH);
         assert_eq!(
@@ -3792,6 +3946,7 @@ mod tests {
             user_detail["page"]["shell"]["navigation"],
             serde_json::json!([
                 {"label": "Repositories", "href": "/repositories", "current": false},
+                {"label": "Runners", "href": "/runners", "current": false},
                 {"label": "Access", "href": "/settings/access/users", "current": true}
             ])
         );
@@ -4607,11 +4762,11 @@ mod tests {
     #[test]
     fn job_log_notice_tracks_lifecycle_instead_of_pagination() {
         assert_eq!(
-            job_log_notice(DataStatus::Queued),
+            job_log_notice(DataStatus::Queued, false),
             Some("This job is queued. This page updates automatically.")
         );
         assert_eq!(
-            job_log_notice(DataStatus::InProgress),
+            job_log_notice(DataStatus::InProgress, false),
             Some(
                 "This job is still running. This page updates automatically as logs are committed."
             )
@@ -4624,7 +4779,11 @@ mod tests {
             DataStatus::Skipped,
             DataStatus::Lost,
         ] {
-            assert_eq!(job_log_notice(terminal), None);
+            assert_eq!(job_log_notice(terminal, true), None);
+            assert_eq!(
+                job_log_notice(terminal, false),
+                Some("Logs are unavailable for this job.")
+            );
         }
     }
 

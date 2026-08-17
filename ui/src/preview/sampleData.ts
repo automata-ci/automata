@@ -45,6 +45,7 @@ export const previewShell: ShellModel = {
   viewer: { displayName: "Ada" },
   navigation: [
     { label: "Repositories", href: "?view=repositories" },
+    { label: "Runners", href: "?view=runners" },
     { label: "Actions", href: "?view=runs", current: true },
     { label: "Access", href: "?view=users" },
   ],

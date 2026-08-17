@@ -1,0 +1,125 @@
+.runner-directory__heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.runner-directory__visibility,
+.runner-directory__desired,
+.runner-directory__labels li {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 2px 8px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-round);
+  color: var(--fg-muted);
+  background: var(--canvas-subtle);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.runner-directory__visibility--public {
+  color: var(--success-fg);
+}
+
+.runner-directory__stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 0;
+  overflow: hidden;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-control);
+}
+
+.runner-directory__stats > div {
+  padding: 14px 16px;
+  background: var(--canvas-subtle);
+}
+
+.runner-directory__stats > div + div {
+  border-left: 1px solid var(--border-default);
+}
+
+.runner-directory__stats dt,
+.runner-directory__facts dt {
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+
+.runner-directory__stats dd {
+  margin: 2px 0 0;
+  font-size: 20px;
+  font-weight: 600;
+}
+
+.runner-directory__list,
+.runner-directory__labels {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.runner-directory__item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(420px, auto);
+  gap: 24px;
+  padding: 16px;
+}
+
+.runner-directory__item + .runner-directory__item {
+  border-top: 1px solid var(--border-muted);
+}
+
+.runner-directory__name-line,
+.runner-directory__labels {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.runner-directory__name-line strong {
+  overflow-wrap: anywhere;
+}
+
+.runner-directory__group {
+  display: block;
+  margin-top: 3px;
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+
+.runner-directory__labels {
+  margin-top: 10px;
+}
+
+.runner-directory__labels li {
+  min-height: 20px;
+  padding: 1px 7px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.runner-directory__desired--draining {
+  color: var(--attention-fg);
+}
+
+.runner-directory__desired--disabled {
+  color: var(--danger-fg);
+}
+
+.runner-directory__facts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(110px, 1fr));
+  gap: 20px;
+  margin: 0;
+}
+
+.runner-directory__facts dd {
+  margin: 3px 0 0;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}

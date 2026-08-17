@@ -1659,6 +1659,7 @@ async fn build_human_api(
     live_log_service: Arc<LiveLogService>,
     runner_enrollment_repository: Option<Arc<PostgresRunnerEnrollmentRepository>>,
 ) -> Result<HumanApiComposition, ServerCompositionError> {
+    let runner_directory_public = config.runner_directory_public;
     let deployment_token = config.load_conformance_export_token()?;
     let mut router = match deployment_token.as_deref() {
         Some(token) => {
@@ -1806,10 +1807,10 @@ async fn build_human_api(
     ));
     let repository: Arc<dyn automata_ci_auth::management::HumanRbacManagementRepository> =
         management;
-    let rbac_web_data: Arc<dyn RbacWebData> = Arc::new(ManagementRbacWebData::new(
-        repository,
-        Arc::clone(runtime.clock()),
-    ));
+    let rbac_web_data: Arc<dyn RbacWebData> = Arc::new(
+        ManagementRbacWebData::new(repository, Arc::clone(runtime.clock()))
+            .with_public_runner_directory(runner_directory_public),
+    );
     let publication_reads: Arc<dyn HumanWorkflowReadRepository> = store.clone();
     let publications: Arc<dyn RepositoryPublicationRepository> = store.clone();
     router = router.merge(publication_settings_router(

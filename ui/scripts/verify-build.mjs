@@ -84,6 +84,7 @@ const smokeRequest = {
       viewer: null,
       navigation: [
         { label: "Repositories", href: "/repositories", current: false },
+        { label: "Runners", href: "/runners", current: false },
         { label: "Actions", href: "/automata-ci/automata/actions", current: true },
       ],
     },

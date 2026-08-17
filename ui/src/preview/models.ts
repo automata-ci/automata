@@ -4,6 +4,7 @@ import type {
   RepositoryDirectoryPageModel,
   RepositorySecretsPageModel,
   RepositorySettingsPageModel,
+  RunnerDirectoryPageModel,
   RunDetailPageModel,
   RunListItemModel,
   RunListPageModel,
@@ -54,6 +55,7 @@ export function previewRepositoryDirectory(
       description: "Browse repositories available under your current access.",
       navigation: [
         { label: "Repositories", href: "?view=repositories", current: true },
+        { label: "Runners", href: "?view=runners" },
         { label: "Access", href: "?view=users" },
       ],
     },
@@ -64,6 +66,61 @@ export function previewRepositoryDirectory(
       nextHref: null,
       label: `${repositories.length} ${repositories.length === 1 ? "repository" : "repositories"} on this page`,
     },
+  };
+}
+
+export function previewRunnerDirectory(): RunnerDirectoryPageModel {
+  return {
+    kind: "runner-directory",
+    shell: {
+      ...previewShell,
+      documentTitle: "Runners · Automata",
+      description: "Review runner availability, scheduling state, labels, and capacity.",
+      navigation: [
+        { label: "Repositories", href: "?view=repositories" },
+        { label: "Runners", href: "?view=runners", current: true },
+        { label: "Access", href: "?view=users" },
+      ],
+    },
+    heading: "Runners",
+    summary: "Review runner availability, scheduling state, labels, and capacity.",
+    visibility: "private",
+    counts: { total: 3, online: 2, busySlots: 3, totalSlots: 12 },
+    runners: [
+      {
+        name: "linux-01",
+        group: "general",
+        labels: ["self-hosted", "linux", "x64"],
+        status: { label: "Online", tone: "success" },
+        desiredState: "active",
+        desiredStateLabel: "Accepting jobs",
+        busySlots: 3,
+        totalSlots: 4,
+        lastSeenAt: { iso: "2026-08-18T01:30:00Z", label: "18 Aug 2026, 01:30 UTC" },
+      },
+      {
+        name: "arm64-01",
+        group: "release",
+        labels: ["self-hosted", "linux", "arm64"],
+        status: { label: "Online", tone: "success" },
+        desiredState: "active",
+        desiredStateLabel: "Accepting jobs",
+        busySlots: 0,
+        totalSlots: 4,
+        lastSeenAt: { iso: "2026-08-18T01:29:00Z", label: "18 Aug 2026, 01:29 UTC" },
+      },
+      {
+        name: "linux-02",
+        group: "general",
+        labels: ["self-hosted", "linux", "x64"],
+        status: { label: "Offline", tone: "neutral" },
+        desiredState: "draining",
+        desiredStateLabel: "Draining",
+        busySlots: 0,
+        totalSlots: 4,
+        lastSeenAt: { iso: "2026-08-18T01:20:00Z", label: "18 Aug 2026, 01:20 UTC" },
+      },
+    ],
   };
 }
 
