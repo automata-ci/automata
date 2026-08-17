@@ -120,8 +120,9 @@ The demo is explicitly marked as sample data and does not claim that its
 workflow runs were executed. Repository, branch, and commit links point to real
 allowlisted GitHub destinations; artifact downloads remain unavailable because
 the static site has no authenticated backend. The demo requires JavaScript,
-while the production application remains server-rendered. The same build is
-deployed at <https://automata-ci.github.io/automata/> from the default branch.
+while the production application remains server-rendered. The preview can be
+built and reviewed locally without adding a non-critical publication lane to
+pull-request CI.
 
 The browser suite uses Chromium to exercise the populated and empty repository
 directory, the full run-list → run-summary → job-log path, both read-only
@@ -144,8 +145,7 @@ of reusing an ambient process and serves the build from `/automata/`, matching
 the GitHub Pages project-site topology. The preview build verifier rejects
 root-relative executable/style URLs, missing assets, unexpected output, and
 other subpath-breaking output before the browser suite starts, then checks the
-exact non-empty PNG set before publication. The Pages workflow deploys this
-build from `main`; pull requests build and verify it without publishing.
+exact non-empty PNG set.
 
 The PNGs are human-review artifacts, not automated pixel-diff baselines. This is
 intentional: committing 72 browser-rendered goldens would make routine Chromium
@@ -153,9 +153,8 @@ and font rasterization changes noisy while obscuring meaningful regressions.
 The deterministic DOM, layout, theme, and runtime contracts are the automated
 gate; screenshots preserve broad visual review without pretending that file
 creation alone is an assertion. Each matrix case captures in its failure path,
-and the Pages workflow uploads any images produced before a failed browser run,
-so visual diagnostics remain available. They remain local or workflow artifacts
-and are not presented as executed-run evidence. The suite also checks native demo
+so visual diagnostics remain available locally and are not presented as
+executed-run evidence. The suite also checks native demo
 routing, keyboard focus, mobile disclosures, forced colors, reduced motion,
 theme persistence, and browser runtime errors.
 

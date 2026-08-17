@@ -20,7 +20,7 @@ fn provider_delivery_idempotency_is_exactly_namespaced_per_workflow() {
         "github",
         "1327738746",
         "44f04700-9910-11f1-8cb4-03166776c1d4",
-        ".ci/workflows/pages.yml",
+        ".ci/workflows/release.yml",
     )
     .expect("canonical provider delivery coordinates");
     assert_ne!(identity, other_workflow);
