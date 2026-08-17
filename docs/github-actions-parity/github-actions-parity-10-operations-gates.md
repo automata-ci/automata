@@ -341,10 +341,12 @@ Acceptance:
 **Owner:** X with R, P, and C. **Size:** XL. **Dependencies:** WIN-ISO-11,
 WIN-03, CACHE-03, ART-01, CAN-02, GATE-01, IT-09.
 
-Hosted Windows CI is intentionally absent from the audited main branch because
-Automata does not currently operate a Windows runner. This gate independently
-restores that hosted release evidence; it is not a dependency of the current
-Linux-only repository-CI `GATE-06`.
+Repository CI now includes a native `windows-2025` component lane that compiles,
+strictly lints, and tests the Windows broker and runner boundary. It does not
+run the shipped production path end to end or exercise physical HCS/Hyper-V
+isolation, and Automata does not currently operate an accepted Windows fleet.
+This gate independently establishes that hosted product-release evidence; the
+component lane does not satisfy it.
 
 Tasks:
 
@@ -486,8 +488,9 @@ Acceptance:
 
 This is the backlog's full unchanged-CI requirement. It follows rather than
 replaces the smaller Linux and container/daemon diagnostic gates. `GATE-02`
-restores hosted Windows independently because the checked-in repository CI no
-longer declares a Windows job.
+remains independent: the checked-in repository CI now declares a native Windows
+component job, but that job does not exercise the shipped product path or an
+accepted physical host.
 
 At the audited `4aa42c00e2651b5dd17f7a81931f57f5bb36a44a` baseline, the
 checked-in `.github/workflows/ci.yml` Git blob is
@@ -643,7 +646,8 @@ Before implementation starts, create issues in this order:
 - [ ] Review the critical path every week: `FND-01` → authority and scheduling;
   `FND-03` → logs/cancellation/actions; `RES-02` → Checks/UI; `GATE-01` →
   `DCK-01` → `GATE-06` → fleet and broader platform claims. `GATE-02`
-  independently restores hosted Windows evidence after its own dependencies.
+  independently establishes hosted Windows product evidence after its own
+  dependencies.
 
 The plan is complete only when accepted work updates
 [compatibility.md](../compatibility.md), the relevant gate in

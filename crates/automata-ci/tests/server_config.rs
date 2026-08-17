@@ -56,6 +56,20 @@ fn configured_human_auth_args() -> automata_ci::cli::ServerArgs {
     *args
 }
 
+fn standalone_server_args() -> automata_ci::cli::ServerArgs {
+    let cli = Cli::try_parse_from([
+        "automata",
+        "server",
+        "--results-public-url",
+        "https://results.example.test/",
+    ])
+    .expect("standalone server syntax must parse");
+    let Command::Server(args) = cli.command else {
+        panic!("server command expected");
+    };
+    *args
+}
+
 const TEST_OIDC_RSA_MODULUS: &str = "3EB2d40ghnbyGr9du8XI5MMt_dHBRJlGaIQzk_fgMxwAxiToz5Ck540SPVcosHkRC-YjGIXjhwDSOlSJ9kxsoQRM5venRhsZeQWeuo_82S95k6CFguafVLvOSmFKltf5obDHo6DBxum_C_1jc4ZTJGEi1K7AV33qhJ_qZfAMI8K8a6xIpkXtcpTDU-yxTrdFQF5yzW7cVqyoXjHbcxIIS2UMVZTMJ3Hv5pgDxe9eYhVlxkBO0oZn89jVVMSfKnThlsj02cd9N5doFuJEKB5NTYGG9E7uWnOEq_jddN-NNa8hU1PTSqpzwIdDs1ZBet2wmNl5Wr1KI981Rkp2FTvPkw";
 const TEST_OIDC_REPLACEMENT_RSA_MODULUS: &str = "o1A6wARhTiKLU_SKTdxcBDZK2gGqMoFS-fLEh_4fL-14V0JW5xRjwbzAO8m3oqzjCT9sDU1AZh-czgZ7QQQ8njEYrVykYLkapZOffcQvFt7rzsc2C9pbrkOnmbBq0b3_U53NPM1Fy1B3s1C_CRuOP7urc0VELeFaaEy3JFMTUpZDC-sti-JzY768ZfgwrcWkp703jEl2N7kkUoBQPZjpyymfm4ABPQJ6gObx95gAmV3p4XBIYxaxhoh7oSLUyF4solYC7N3mDCHmdf2CIbb8INdMfiqhLqOafdm9qCHT4wDNya94v7U7pHiggHyIkSa3RfMWomjDIEY39LSDgaFYSw";
 
@@ -1521,4 +1535,89 @@ fn private_management_listener_rejects_malformed_or_duplicate_leaf_pins() {
         ServerConfig::from_args(&args),
         Err(ServerConfigError::InvalidManagementConfiguration)
     ));
+}
+
+#[test]
+fn windows_hyperv_broker_signing_requires_a_complete_exact_registry() {
+    const RUNNER_ID: &str = "11111111-1111-4111-8111-111111111111";
+    let host_id = "a".repeat(64);
+    let mut args = standalone_server_args();
+
+    args.windows_hyperv_broker_hosts = vec![format!("{RUNNER_ID}={host_id}")];
+    assert!(matches!(
+        ServerConfig::from_args(&args),
+        Err(ServerConfigError::InvalidWindowsHyperVBrokerConfiguration)
+    ));
+
+    args.windows_hyperv_broker_hosts.clear();
+    args.windows_hyperv_broker_signing_seed_source =
+        Some(SecretSource::from_str("env:AUTOMATA_TEST_WINDOWS_BROKER_SIGNING_SEED").unwrap());
+    assert!(matches!(
+        ServerConfig::from_args(&args),
+        Err(ServerConfigError::InvalidWindowsHyperVBrokerConfiguration)
+    ));
+
+    args.windows_hyperv_broker_hosts = vec![format!("{RUNNER_ID}={host_id}")];
+    ServerConfig::from_args(&args).expect("complete Windows broker signing registry");
+}
+
+#[test]
+fn windows_hyperv_broker_signing_rejects_ambiguous_or_weakened_mappings() {
+    const RUNNER_ID: &str = "11111111-1111-4111-8111-111111111111";
+    let host_id = "a".repeat(64);
+    let mut args = standalone_server_args();
+    args.windows_hyperv_broker_signing_seed_source =
+        Some(SecretSource::from_str("env:AUTOMATA_TEST_WINDOWS_BROKER_SIGNING_SEED").unwrap());
+
+    for mappings in [
+        vec!["not-a-mapping".to_owned()],
+        vec![format!("not-a-runner={host_id}")],
+        vec![format!("00000000-0000-0000-0000-000000000000={host_id}")],
+        vec![format!("{RUNNER_ID}=not-a-host")],
+        vec![format!("{RUNNER_ID}={}", "0".repeat(64))],
+        vec![
+            format!("{RUNNER_ID}={host_id}"),
+            format!("{RUNNER_ID}={}", "b".repeat(64)),
+        ],
+    ] {
+        args.windows_hyperv_broker_hosts = mappings;
+        assert!(matches!(
+            ServerConfig::from_args(&args),
+            Err(ServerConfigError::InvalidWindowsHyperVBrokerConfiguration)
+        ));
+    }
+
+    args.windows_hyperv_broker_hosts = vec![format!("{RUNNER_ID}={host_id}"); 10_001];
+    assert!(matches!(
+        ServerConfig::from_args(&args),
+        Err(ServerConfigError::InvalidWindowsHyperVBrokerConfiguration)
+    ));
+}
+
+#[test]
+fn windows_hyperv_broker_host_registry_accepts_comma_and_repeated_cli_mappings() {
+    let first = format!("11111111-1111-4111-8111-111111111111={}", "a".repeat(64));
+    let second = format!("22222222-2222-4222-8222-222222222222={}", "b".repeat(64));
+    for arguments in [
+        vec![format!("{first},{second}")],
+        vec![first.clone(), second.clone()],
+    ] {
+        let mut command = vec![
+            "automata".to_owned(),
+            "server".to_owned(),
+            "--results-public-url".to_owned(),
+            "https://results.example.test/".to_owned(),
+            "--windows-hyperv-broker-signing-seed-source".to_owned(),
+            "env:AUTOMATA_TEST_WINDOWS_BROKER_SIGNING_SEED".to_owned(),
+        ];
+        for mapping in arguments {
+            command.push("--windows-hyperv-broker-host".to_owned());
+            command.push(mapping);
+        }
+        let cli = Cli::try_parse_from(command).expect("Windows broker registry syntax");
+        let Command::Server(args) = cli.command else {
+            panic!("server command expected");
+        };
+        ServerConfig::from_args(&args).expect("exact Windows broker host registry");
+    }
 }

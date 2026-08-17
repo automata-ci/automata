@@ -53,6 +53,32 @@ full-VM backend: `SandboxLaunch::WindowsHyperVContainer`, provider
 `windows-hyperv`, and the exact profile evidence distinguish the only Windows
 launch shape.
 
+## Current source status and non-claims
+
+The source tree contains the restricted broker protocol, service host,
+one-use-grant verifier, durable broker ledger, DPAPI custody boundary, and a
+schema-v7 runner client configuration. Those components are not an operable
+production Windows runner:
+
+- named-pipe client authentication is hard-fail closed:
+  `authenticate_impersonated_client` returns `false` until an audited safe
+  impersonated-thread token boundary exists;
+- production control-plane composition has no durable
+  `WindowsHyperVCurrentAdmissionReader`,
+  `WindowsHyperVPlacementRenewalRepository`, or
+  `WindowsHyperVBrokerGrantAuthorizationRepository`, so configuring the
+  signer and host map cannot issue a runnable broker grant;
+- `UnavailableWindowsBrokerSyntheticProbe` keeps broker admission
+  issue/resume/complete/renew unavailable;
+- broker-owned enrollment key generation, CSR completion, certificate
+  publication, and rustls signing remain unavailable; and
+- repository CI does not provide a physical HCS/Hyper-V host, qualified image,
+  installed service identities, or an end-to-end enrollment environment.
+
+These are intentional fail-closed gaps, not follow-up configuration steps.
+Component compilation, fakes, ACL tests, and protocol tests must not be
+reported as physical Windows execution or production acceptance.
+
 ## What the first Wave 1 pull request does
 
 The first pull request is a provider and product-composition foundation. Its
@@ -123,9 +149,11 @@ those release gates:
   extraction, reparse-tree inspection, and exact-generation Node execution.
 
 Candidate evidence that is internally consistent but lacks the external
-promotion signature remains shell-only. JavaScript, composite, repository,
-and Node-generation capabilities are composed only after both
-promotion verification and fresh profile probes succeed. The source-level
+promotion signature remains shell-only. A valid promotion verifies image and
+tool evidence but does not enable JavaScript, composite, repository, local, or
+Node-generation capabilities. Those remain unavailable until the broker can
+independently reconstruct and seal the exact server-admitted action graph and
+archives through a fully composed production authority path. The source-level
 pre-enrollment admission contract binds the runner, broker/provider identity,
 exact enrollment transaction, exact environment and
 resource/tool probe policy, image manifest/lock and signed-promotion identity,
@@ -138,25 +166,27 @@ promotion envelope, each bound to content digest, trusted owner, protected and
 non-inherited DACL, non-reparse stable file ID, and approved local volume.
 It requires that only an opaque broker-custody handle cross restart and that the
 runner write no Windows enrollment secret or receipt to local staging. The
-restricted-broker caller remains a separate integration gate. Once composed,
-missing, stale, expired, tampered, or mismatched custody fails closed, and
-runtime startup re-runs the full
+runtime provider is composed through the restricted-broker client, but
+production enrollment, current-admission, placement-renewal, broker-grant
+authorization, and the synthetic probe remain unavailable. Missing, stale,
+expired, tampered, or mismatched custody fails closed, and any future runtime
+startup must re-run the full
 profile probes independently; the receipt never substitutes for live evidence,
-and control-plane registered/live intersection retains only capabilities proved
-twice. Workspace-local actions remain omitted on Windows because user checkout
-bytes cannot enter the broker-owned pre-sandbox sealed graph. Missing,
+and control-plane registered/live intersection may retain only capabilities
+proved twice. Workspace-local actions remain omitted on Windows because user checkout
+bytes cannot yet enter a broker-authorized pre-sandbox sealed graph. Missing,
 mismatched, revoked, or substituted evidence and tools stop startup. The
 checked-in candidate files are contract fixtures: they do not claim a built,
 signed, scanned, patched, or physical-host-tested image, and they do not close
 WIN-ISO-03, WIN-ISO-10, or any production gate.
 
-The current direct CLI boundary is suitable for component development and an
-offline laboratory. It is not the final hostile-workload management boundary.
-A runner identity that can independently access the container-engine named pipe
-could bypass fixed argument construction after runner compromise. WIN-ISO-02
-must place that authority behind a narrow broker, or prove an equivalently
-restricted engine service identity and API surface, before hostile jobs are
-admitted.
+The runner-owned direct CLI boundary has been removed from production
+composition. The runner can start only the fixed-name, digest-pinned broker
+client, and the broker alone contains the fixed engine adapter. This is still
+not an operable hostile-workload boundary: pipe authentication returns `false`
+unconditionally until an audited impersonated-thread token check exists, and
+the missing production repositories and admission/enrollment boundaries listed
+above keep scheduling and dispatch fail closed.
 
 The current source tree now also has a local pre-lease admission increment. It
 rehydrates the canonical AUTH-02 trust snapshot and immutable materialization
@@ -169,11 +199,13 @@ from locked current state immediately before changing `queued` to `leased`, so
 a missing grant, a legacy direct-claim bypass, or stale trust/requirements state
 cannot fall through to another Windows boundary.
 
-That value is intentionally not a broker credential: it is not serialized,
-signed, or accepted from a runner. WIN-ISO-02 must define and independently
-verify the broker-consumable signed form. This increment therefore closes the
-local pre-placement seam without live-provider credentials, not the hostile-host
-acceptance gate.
+That value is intentionally not itself a broker credential: it is not accepted
+from a runner. The component boundary now defines a signed
+`WindowsHyperVBrokerGrant` and independently verifies it before dispatch, but
+production cannot mint or rehydrate that credential until the current-admission,
+placement-renewal, and broker-grant authorization repositories are composed.
+This closes the local pre-placement and signed-message seams, not the
+hostile-host acceptance gate.
 
 ## Non-negotiable invariants
 
@@ -220,7 +252,7 @@ The Windows profile is not releasable unless all of these hold:
 
 - the Windows host kernel, Hyper-V root partition, HCS/HCN services, container
   engine, registry, filesystem, network adapters, and management endpoints;
-- runner and future broker binaries, configuration, service identities,
+- runner and broker binaries, configuration, service identities,
   journals, enrollment material, and mTLS keys;
 - control-plane, source, Results, artifact, cache, and object-store authority;
 - other jobs' writable layers, workspaces, processes, caches, logs, artifacts,
@@ -385,13 +417,14 @@ administration.
 The provider configuration is closed:
 
 - an absolute private state root;
-- an absolute `.exe` path for the local runtime CLI;
-- the SHA-256 expected for that exact CLI file;
+- the absolute fixed-name `.exe` path for the restricted broker client;
+- the SHA-256 expected for that exact client file;
+- the exact broker-host identity digest;
 - a normalized drive-qualified path to the guest executable inside the image;
   and
 - a bounded lifecycle timeout.
 
-Current runner product schema v6 selects exactly one provider. The Windows
+Current runner product schema v7 selects exactly one provider. The Windows
 provider requires one or more digest-attested environment profiles with:
 
 - an immutable digest-qualified Windows image reference;
@@ -418,19 +451,23 @@ placeholder digest with evidence from their own build and host qualification.
 
 ### Runtime invocation
 
-The current adapter:
+The runner-side adapter:
 
-- starts only the configured absolute executable;
+- starts only the configured absolute fixed-name broker-client executable;
+- verifies that client's SHA-256 before use;
 - clears inherited environment variables;
-- passes an argument vector instead of a shell command;
-- selects the local Windows-engine named pipe explicitly;
+- sends one bounded typed request to the fixed broker pipe instead of exposing
+  an engine endpoint, raw HCS document, or arbitrary command surface;
 - bounds stdin, stdout, stderr, time, and retained output;
-- kills and reaps the CLI on cancellation or timeout; and
+- kills and reaps the client on cancellation or timeout; and
 - redacts argument and payload bytes from debug output.
 
-Runtime executable digest verification reduces accidental replacement and
+Broker-client digest verification reduces accidental replacement and
 path confusion. It is not code-signing validation, revocation checking, or a
-complete time-of-check/time-of-use guarantee. WIN-ISO-02 must define the final
+complete time-of-check/time-of-use guarantee. The broker service's fixed engine
+adapter remains separately privileged, and production dispatch stays disabled
+until the pipe-authentication and authority gaps above are closed. WIN-ISO-02
+must define the final
 binary trust and service-update contract.
 
 ### Create and inspect
@@ -463,13 +500,14 @@ an unexpected resource in place.
 
 ### Guest endpoint
 
-The guest executable is included in the immutable image. Each operation runs a
-fresh `container exec` as `ContainerUser`, carries one length-bounded
+Within the broker-owned component boundary, the guest executable is included in
+the immutable image. Each operation runs a fresh `container exec` as
+`ContainerUser`, carries one length-bounded
 versioned frame over anonymous stdin, and expects one bounded response on
 stdout with empty stderr.
 
 The protocol supports the provider-neutral probe, exec, file write, and file
-read requirements needed by the current runner. Every exec request carries the
+read requirements needed by the current broker provider. Every exec request carries the
 configured process ceiling, and the Windows guest creates the command inside a
 nested Job Object before it can run. The endpoint maps signal and wait to exact
 container-engine operations. Paths, environments, arguments, timeouts, output,
@@ -477,9 +515,10 @@ and file bytes remain bounded. Protocol failure is not interpreted as
 successful job output.
 
 This stdio transport does not expose a guest listener, host share, Docker pipe,
-or reusable session to the workload. The engine-mediated exec operation is
-still privileged management traffic and therefore belongs behind the future
-broker.
+or reusable session to the workload. The engine-mediated exec operation remains
+privileged management traffic and is owned only by the restricted broker
+component. Production dispatch remains disabled by the hard-false pipe
+authentication boundary.
 
 ### Destroy and known-handle retry
 
@@ -491,18 +530,19 @@ Create can recognize an existing exact resource for the same spec and
 generation. A changed digest, label, entrypoint, limit, image, or effective
 isolation is a conflict rather than a reuse opportunity.
 
-The provider includes component-level recovery: a versioned, checksummed,
-sequence-checked, synchronized append-only journal records create and destroy
-intent/completion. On open it removes each journal-owned live container,
-verifies absence, then enumerates Automata-labelled containers and fails if any
-remain unexplained. Corrupt interior records fail closed; only an unterminated
-tail is truncated.
+The broker provider includes component-level recovery through a versioned,
+checksummed, sequence-checked ledger that records create and destroy
+intent/completion. It retains every live or uncertain resource and unexpired
+one-use-grant tombstone across bounded compaction. A malformed checksum or
+truncated record fails closed; editing or truncating the live ledger is not a
+supported repair path.
 
-This is not production recovery. It has not passed real engine/host crash
-injection, it cannot act while the runner process is unavailable, and it does
-not provide a restricted broker, independent watchdog, external quarantine
-controller, evidence acknowledgement, journal compaction, or fleet
-return-to-service flow. Those remain blocking WIN-ISO-05 and WIN-ISO-09 work.
+This is not production recovery. The restricted broker and bounded journal
+compaction exist at the component boundary, but they have not passed real
+engine/host crash injection. The current source also lacks an independent
+watchdog, external quarantine controller, external evidence acknowledgement,
+and a proven fleet return-to-service flow. Those remain blocking WIN-ISO-05 and
+WIN-ISO-09 work.
 
 ## Windows API and runtime map
 
@@ -512,8 +552,8 @@ script, or HCS document crosses a privilege boundary.
 
 | Surface | What it provides | Automata use |
 | --- | --- | --- |
-| Container runtime CLI | Mature create, inspect, start, exec, wait, kill, remove, and image inspection | Implemented component adapter; absolute path and SHA-256 pinned |
-| Container engine API | Typed container/image operations over a local service endpoint | Candidate broker-to-engine boundary; endpoint never available to job or general runner code |
+| Container runtime CLI | Mature create, inspect, start, exec, wait, kill, remove, and image inspection | Legacy test-only adapter; not reachable from production runner composition |
+| Container engine API | Typed container/image operations over a local service endpoint | Implemented inside the restricted broker provider; endpoint never available to job or general runner code |
 | [Host Compute System](https://learn.microsoft.com/en-us/virtualization/api/hcs/overview) | Windows compute-system lifecycle beneath container runtimes | Underlying platform; direct integration only if the broker can own a smaller and more recoverable contract |
 | [Host Compute Network](https://learn.microsoft.com/en-us/windows-server/networking/technologies/hcn/hcn-top) | Endpoints, namespaces, networks, policies, and inventory | Future externally enforced disabled/private/managed-egress profiles |
 | [Windows Filtering Platform](https://learn.microsoft.com/en-us/windows/win32/fwp/windows-filtering-platform-start-page) | Host network filtering and ALE authorization | Defense in depth and destination enforcement outside the utility VM |
@@ -530,8 +570,8 @@ script, or HCS document crosses a privilege boundary.
   adding the runner account to a broad local container-administrator group?
 - What exact ACL protects the engine endpoint, broker IPC, state root, logs,
   update channel, and runtime executable?
-- Can the broker use a typed engine client without accepting ambient
-  environment configuration, contexts, plugins, credential helpers, or
+- How will physical-host validation prove that the typed broker engine client
+  accepts no ambient configuration, contexts, plugins, credential helpers, or
   arbitrary registry endpoints?
 - Which engine/HCS events provide exact create/start/exec/kill/remove outcomes
   after timeout, service restart, or host reboot?
@@ -715,15 +755,16 @@ WIN-ISO-01 fail-closed Windows placement
        WIN-ISO-12 production rollout
 ```
 
-Provider work can build offline component seams before AUTH-02 lands, as this
-pull request does. It cannot advertise, enroll, or receive hostile production
-work until the complete EVT-01 -> AUTH-02 -> WIN-ISO-01 path is accepted.
+Provider work can build offline component seams before AUTH-02 lands, as the
+initial provider-foundation increment did. It cannot advertise, enroll, or
+receive hostile production work until the complete EVT-01 -> AUTH-02 ->
+WIN-ISO-01 path is accepted.
 
 ## Work packages
 
 ### WIN-ISO-00 — Decision record and API spikes
 
-Current pull-request scope:
+Initial provider-foundation scope:
 
 - [x] Select Hyper-V-isolated Windows containers as the only Windows backend.
 - [x] Prohibit native and process-isolated fallback.
@@ -778,14 +819,16 @@ work reaches a runner through an unbound trust decision.
 The first PR implements fixed-argv CLI invocation and effective inspection but
 does not complete this package.
 
-- [x] Pin the absolute runtime executable by SHA-256 and clear its environment.
+- [x] Pin the absolute restricted-broker client by SHA-256 and clear its environment.
 - [x] Bound command time, stdin, stdout, stderr, and debug disclosure.
-- [ ] Move engine access behind a typed, authenticated local broker.
+- [x] Move engine access behind a typed, grant-gated local broker. Production
+      dispatch remains fail-closed until exact impersonated-thread identity can
+      be verified through the approved safe Windows boundary.
 - [ ] Give runner, broker, watchdog, and engine distinct service SIDs and exact
       endpoint/filesystem rights.
-- [ ] Reject raw CLI strings, engine JSON, HCS documents, image references,
+- [x] Reject raw CLI strings, engine JSON, HCS documents, image references,
       labels, names, paths, or filters supplied by the caller.
-- [ ] Validate a signed one-use admission grant independently.
+- [x] Validate a signed one-use admission grant independently.
 - [ ] Install, update, rollback, and attest broker/runtime binaries.
 - [ ] Prove runner compromise cannot open the engine endpoint or manage
       non-Automata containers.
@@ -826,7 +869,7 @@ for each advertised profile.
 First-PR component scope:
 
 - [x] Add the explicit Windows Hyper-V container launch variant.
-- [x] Keep the current schema-v6 `windows_hyperv` configuration and remove
+- [x] Keep the current schema-v7 `windows_hyperv` configuration and remove
       `windows_native`.
 - [x] Require disabled network, unprivileged workload, writable container root,
       no services, zero GPU, and no ephemeral-disk claim.
@@ -835,7 +878,7 @@ First-PR component scope:
       capabilities.
 - [x] Probe each configured profile through create, inspect, attach, shell
       execution, and destroy before runner startup.
-- [ ] Bind trust and one-use admission requirements from WIN-ISO-01.
+- [x] Bind trust and one-use admission requirements from WIN-ISO-01.
 - [ ] Add broker and host-security attestation to profile admission.
 - [ ] Version exact image/tool/network/authority evidence in the capability
       registry.
@@ -874,8 +917,9 @@ verified removal, or drained-host quarantine with no unexplained leak.
 - [x] Support guest probe, exec, copy-to, and copy-from plus endpoint signal,
       wait, output records, timeouts, cancellation, and bounded file content.
 - [x] Default guest execution to `ContainerUser`.
-- [ ] Bind every guest request to the signed admission grant and expected
-      container identity through the broker.
+- [x] Bind every guest request to the signed admission grant and expected
+      container identity through the broker at the component boundary;
+      production grant issuance and pipe authentication remain fail closed.
 - [ ] Add adversarial path, reparse, hard-link, alternate-stream, Unicode,
       case-folding, reserved-name, frame, environment, and process-tree tests
       on real Windows.
@@ -947,11 +991,11 @@ WIN-ISO-06 through WIN-ISO-09 as applicable.
       semantics at the component boundary.
 - [x] Implement exact-generation Node action pre/main/post and composite phase
       execution inside the same sandbox at the component boundary.
-- [x] Define action materialization without host extraction or host mounts:
-      JobIR carries the complete ordered, bounded repository-archive graph and
-      the broker materializes it before user code into generation-bound opaque
-      sealed trees. No post-start lazy fetch or workspace-local action enters
-      the Windows execution path.
+- [ ] Compose action materialization without host extraction or host mounts:
+      JobIR already carries the complete ordered, bounded repository-archive
+      graph, but the production broker does not yet reconstruct and seal those
+      archives into generation-bound opaque trees. No action capability may be
+      advertised until that boundary exists.
 - [ ] Prove those runtime and materialization paths in the shipped product on a
       promoted image and dedicated Windows Hyper-V host.
 - [ ] Support only product artifact/cache/source interfaces accepted by their
@@ -1000,7 +1044,7 @@ are public.
 
 ## Acceptance matrix
 
-### Component gate in this pull request
+### Initial provider-foundation component gate
 
 - provider-neutral types cannot express native Windows launch;
 - configuration accepts exactly one Windows Hyper-V provider and rejects old,
@@ -1064,7 +1108,7 @@ This gate demonstrates code shape. It does not demonstrate Hyper-V execution.
 
 ## Parallel implementation lanes
 
-Once the component contracts in this pull request settle, independent owners
+Once the initial component contracts settle, independent owners
 can work in parallel without claiming early completion:
 
 | Lane | Scope | Serialization points |

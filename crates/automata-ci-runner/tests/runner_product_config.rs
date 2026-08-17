@@ -324,9 +324,9 @@ fn object_store_tls_trust_is_mandatory_current_and_transport_exact() {
     );
 
     let mut obsolete = original.clone();
-    obsolete["schema_version"] = serde_json::json!(3);
+    obsolete["schema_version"] = serde_json::json!(4);
     assert_eq!(
-        parse_value(&obsolete).expect_err("schema 3 must not be interpreted as current"),
+        parse_value(&obsolete).expect_err("schema 4 must not be interpreted as current"),
         RunnerProductConfigError::UnsupportedSchema
     );
 
@@ -1492,7 +1492,7 @@ fn only_the_current_product_schema_is_accepted() {
     let current: serde_json::Value =
         serde_json::from_str(&valid_configuration()).expect("configuration JSON");
     assert!(parse_value(&current).is_ok());
-    for unsupported in [0, 1, 2, 3, 4, 5, u16::MAX] {
+    for unsupported in [0, 1, 2, 3, 4, 5, 6, u16::MAX] {
         let mut document = current.clone();
         document["schema_version"] = serde_json::json!(unsupported);
         assert_eq!(

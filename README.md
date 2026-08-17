@@ -98,7 +98,7 @@ exercise the complete control plane from a source checkout.
        rootless Podman  Local Docker*  Kubernetes Pod  macOS VM / Windows
 ```
 
-`Local Docker*` is an explicit schema-6 runner evaluation path through the
+`Local Docker*` is an explicit schema-7 runner evaluation path through the
 fixed installation relay; `automata local run` is not implemented yet.
 
 `automata` owns event admission, workflow planning, durable orchestration,

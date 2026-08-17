@@ -9,24 +9,31 @@
 
 mod admission;
 mod broker;
+mod broker_provider;
+#[cfg(windows)]
+mod broker_service_host;
+#[cfg(windows)]
+mod broker_service_protocol;
+// The former runner-owned Docker provider remains compilable only inside this
+// crate's Windows unit tests. Production builds expose the restricted broker
+// provider exclusively, so composition cannot fall back to a direct engine
+// or inherit its broader endpoint capabilities.
 #[cfg(windows)]
 mod command;
 mod custody;
-#[cfg(windows)]
+#[cfg(all(windows, test))]
 mod endpoint;
-#[cfg(windows)]
+#[cfg(all(windows, test))]
 mod error;
 #[cfg(windows)]
 mod hcs_engine;
 mod host_input;
-#[cfg(windows)]
+#[cfg(all(windows, test))]
 mod naming;
-#[cfg(windows)]
+#[cfg(all(windows, test))]
 mod persistence;
-#[cfg(windows)]
+#[cfg(all(windows, test))]
 mod provider;
-#[cfg(not(windows))]
-mod unsupported;
 
 pub use admission::{
     FileWindowsBrokerAdmissionAuthority, UnavailableWindowsBrokerAdmissionAuthority,
@@ -51,7 +58,18 @@ pub use broker::{
     WindowsHostComputeAdapter, WindowsHyperVAdmittedProfileContract,
     WindowsHyperVBrokerProfileAttestation,
 };
+pub use broker_provider::{
+    WINDOWS_HYPERV_BROKER_CLIENT_BASENAME, WindowsHyperVBrokerAuthorityClient,
+    WindowsHyperVBrokerClient, WindowsHyperVBrokerClientEffect, WindowsHyperVBrokerClientError,
+    WindowsHyperVBrokerProvider, WindowsHyperVBrokerProviderOptions, WindowsHyperVBrokerSandbox,
+};
 #[cfg(windows)]
+pub use broker_service_host::{
+    WINDOWS_HYPERV_BROKER_PIPE, WindowsHyperVBrokerServiceError,
+    install_windows_hyperv_broker_state_root, run_windows_hyperv_broker_service,
+    run_windows_hyperv_broker_service_with_ready,
+};
+#[cfg(all(windows, test))]
 pub use command::{
     RuntimeCommandExecutor, RuntimeCommandOutput, RuntimeCommandRequest,
     RuntimeCommandRequestError, RuntimeCommandTermination, SystemRuntimeCommandExecutor,
@@ -67,10 +85,8 @@ pub use host_input::{
     WindowsBrokerHostInputDescriptor, WindowsBrokerHostInputError, WindowsBrokerHostInputKind,
     WindowsBrokerHostInputObservation, WindowsBrokerHostInputRequest,
 };
-#[cfg(windows)]
+#[cfg(all(windows, test))]
 pub use provider::{WindowsHyperVContainerProvider, WindowsHyperVContainerProviderOptions};
-#[cfg(not(windows))]
-pub use unsupported::{WindowsHyperVContainerProvider, WindowsHyperVContainerProviderOptions};
 
 /// Stable provider identifier for Hyper-V-isolated Windows containers.
 pub const WINDOWS_HYPERV_PROVIDER_ID: &str = "windows-hyperv";

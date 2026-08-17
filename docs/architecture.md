@@ -51,11 +51,14 @@ before exposing a provider-neutral guest execution endpoint. Native and
 process-isolated Windows execution have been removed.
 
 That Windows path is a component foundation, not an accepted hostile-workload
-composition. It has a synchronized lifecycle journal and fail-closed startup
-reconciliation, but currently invokes a pinned local container CLI directly
-and has no independent watchdog. It also does not complete authenticated trust
-routing, a restricted container-management broker, signed image production,
-managed egress, or dedicated-host engine/host fault acceptance. The blocking
+composition. The runner can invoke only a digest-pinned restricted-broker
+client, and the service has typed operations, a synchronized ledger, and
+fail-closed startup reconciliation. Production dispatch nevertheless rejects
+every named-pipe request until audited impersonated-thread identity is
+implemented; current-admission, placement-renewal, and broker-grant
+authorization repositories, broker-owned enrollment, an independent watchdog,
+signed image production, managed egress, and dedicated-host engine/host fault
+acceptance are also incomplete. The blocking
 architecture and rollout gates are in the
 [Windows isolation plan](platforms/windows.md).
 

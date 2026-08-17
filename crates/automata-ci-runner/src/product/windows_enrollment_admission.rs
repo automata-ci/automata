@@ -430,7 +430,7 @@ impl WindowsEnrollmentAdmissionBinding {
             image,
             self.probe_policy.contract_sha256,
             self.probe_policy.network == NetworkPolicy::Disabled,
-            true,
+            false,
             windows_action_archive_policy_sha256(),
             self.probe_policy.resources.pids(),
         )
@@ -539,7 +539,7 @@ impl WindowsEnrollmentAdmissionBinding {
             self.probe_policy.root_filesystem == RootFilesystemPolicy::Writable,
             self.probe_policy.privilege == SandboxPrivilegePolicy::Unprivileged,
             true,
-            true,
+            false,
             windows_action_archive_policy_sha256(),
         )
         .map_err(|_| WindowsEnrollmentAdmissionError::InvalidRequest)?;
@@ -863,11 +863,10 @@ pub fn probe_windows_enrollment_request(
 ///
 /// # Errors
 ///
-/// Rejects missing promotion identity, an invalid broker-host digest, an
-/// ambiguous environment catalog, or an invalid derived capability set.
+/// Rejects missing promotion identity, an ambiguous environment catalog, or
+/// an invalid derived capability set.
 pub fn windows_enrollment_admission_request(
     config: &RunnerProductConfig,
-    backend_id: &str,
     intent: WindowsEnrollmentIntent,
 ) -> Result<Option<WindowsEnrollmentAdmissionRequest>, WindowsEnrollmentAdmissionError> {
     let Some(windows) = config.windows_hyperv() else {
@@ -876,7 +875,7 @@ pub fn windows_enrollment_admission_request(
     if !windows.image_admission().is_promotion_pending() {
         return Ok(None);
     }
-    if !valid_backend_id(backend_id) || config.executor().network() != NetworkPolicy::Disabled {
+    if config.executor().network() != NetworkPolicy::Disabled {
         return Err(WindowsEnrollmentAdmissionError::InvalidRequest);
     }
     let (profile, environment) = config
@@ -917,10 +916,10 @@ pub fn windows_enrollment_admission_request(
             runner_id: config.runner_id(),
             control_endpoint: config.control_endpoint().to_string(),
             intent,
-            backend_id: backend_id.to_owned(),
+            backend_id: windows.broker_host_id().to_string(),
             sandbox_provider_id: WINDOWS_HYPERV_PROVIDER_ID.to_owned(),
-            backend_executable: windows.runtime_executable().to_owned(),
-            backend_executable_sha256: windows.runtime_sha256(),
+            backend_executable: windows.broker_client_executable().to_owned(),
+            backend_executable_sha256: windows.broker_client_sha256(),
             backend_operation_timeout: windows.operation_timeout(),
             host_inputs,
             profile: profile.clone(),
@@ -977,8 +976,8 @@ fn windows_host_inputs(
         },
         WindowsHostInputDescriptor {
             kind: WindowsHostInputKind::BackendExecutable,
-            absolute_path: windows.runtime_executable().to_owned(),
-            expected_sha256: windows.runtime_sha256(),
+            absolute_path: windows.broker_client_executable().to_owned(),
+            expected_sha256: windows.broker_client_sha256(),
         },
         WindowsHostInputDescriptor {
             kind: WindowsHostInputKind::ImageManifest,
@@ -1572,13 +1571,6 @@ fn valid_id(value: &str) -> bool {
         && value.len() <= MAX_ID_BYTES
         && value.is_ascii()
         && value.bytes().all(|byte| byte.is_ascii_graphic())
-}
-
-fn valid_backend_id(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
 fn zero_digest(digest: Sha256Digest) -> bool {

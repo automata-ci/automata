@@ -226,7 +226,7 @@ pub struct WindowsBrokerHostInputObservation {
 }
 
 impl WindowsBrokerHostInputObservation {
-    #[cfg(test)]
+    #[cfg(any(windows, test))]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         descriptor: &WindowsBrokerHostInputDescriptor,
@@ -333,7 +333,7 @@ pub struct WindowsBrokerHostInputAttestation {
 }
 
 impl WindowsBrokerHostInputAttestation {
-    #[cfg(test)]
+    #[cfg(any(windows, test))]
     pub(crate) fn issue(
         host_id: Sha256Digest,
         request: &WindowsBrokerHostInputRequest,

@@ -38,7 +38,7 @@ structure of [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
   adapter can strictly inspect or create-and-adopt a repository-agnostic
   installation identity anchor without exposing a product mutation command.
 - Evaluation-only fixed-relay Local Docker runner execution on Linux. Runner
-  schema 6 binds the private provider to an exact existing installation anchor,
+  schema 7 binds the private provider to an exact existing installation anchor,
   already-present digest-pinned guest and Results-proxy images, and an exact
   pre-provisioned Results transit/target. Each job receives only a deterministic
   internal network and fixed-port credential-free proxy, with no public egress

@@ -25,7 +25,6 @@ use serde::Serialize;
 use sha2::{Digest as _, Sha256};
 
 static NEXT_EVIDENCE_ROOT: AtomicUsize = AtomicUsize::new(0);
-const BROKER_HOST_ID: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
 fn write_secure_fixture(path: &Path, bytes: &[u8]) {
     fs::write(path, bytes).expect("write Windows evidence fixture");
@@ -33,7 +32,7 @@ fn write_secure_fixture(path: &Path, bytes: &[u8]) {
         .expect("restrict Windows evidence fixture DACL");
 }
 
-fn assert_admitted_action_features(request: &WindowsEnrollmentAdmissionRequest) {
+fn assert_action_features_remain_unavailable(request: &WindowsEnrollmentAdmissionRequest) {
     for feature in [
         RunnerFeature::JAVASCRIPT_ACTIONS,
         RunnerFeature::COMPOSITE_ACTIONS,
@@ -41,12 +40,12 @@ fn assert_admitted_action_features(request: &WindowsEnrollmentAdmissionRequest) 
         RunnerFeature::NODE24_ACTIONS,
     ] {
         assert!(
-            request
+            !request
                 .binding()
                 .capabilities()
                 .features()
                 .contains(&feature),
-            "active admission must prove exact registration feature {feature}"
+            "active admission must not advertise unimplemented broker action feature {feature}"
         );
     }
     assert!(
@@ -378,8 +377,18 @@ fn internal_windows_fixture_selects_only_hyperv_containers() {
     assert!(config.kubernetes().is_none());
     assert!(config.macos_virtualization().is_none());
     assert_eq!(
-        windows.runtime_executable(),
-        std::path::Path::new(r"C:\Program Files\Docker\docker.exe")
+        windows.broker_client_executable(),
+        std::path::Path::new(
+            r"C:\Program Files\Automata\automata-windows-hyperv-broker-client.exe"
+        )
+    );
+    assert_eq!(
+        windows.broker_client_sha256().to_string(),
+        "3333333333333333333333333333333333333333333333333333333333333333"
+    );
+    assert_eq!(
+        windows.broker_host_id().to_string(),
+        "4444444444444444444444444444444444444444444444444444444444444444"
     );
     assert_eq!(
         windows.guest_agent_path().as_str(),
@@ -505,7 +514,7 @@ fn candidate_evidence_is_verified_but_does_not_publish_action_capabilities() {
         assert!(!config.inventory().features().contains(&feature));
     }
     assert!(
-        windows_enrollment_admission_request(&config, BROKER_HOST_ID, enrollment_intent(),)
+        windows_enrollment_admission_request(&config, enrollment_intent())
             .expect("candidate admission request")
             .is_none(),
         "unsigned candidate evidence must not create active enrollment authority"
@@ -575,21 +584,23 @@ fn exact_external_promotion_keeps_actions_pending_for_active_enrollment_admissio
         assert!(!config.inventory().features().contains(&feature));
     }
 
-    let request =
-        windows_enrollment_admission_request(&config, BROKER_HOST_ID, enrollment_intent())
-            .expect("build promoted active-admission request")
-            .expect("a promoted Windows image requires active admission");
+    let request = windows_enrollment_admission_request(&config, enrollment_intent())
+        .expect("build promoted active-admission request")
+        .expect("a promoted Windows image requires active admission");
     assert_eq!(request.binding().runner_id(), config.runner_id());
-    assert_eq!(request.binding().backend_id(), BROKER_HOST_ID);
     assert_eq!(request.binding().sandbox_provider_id(), "windows-hyperv");
     let windows = config.windows_hyperv().expect("Windows provider");
     assert_eq!(
+        request.binding().backend_id(),
+        windows.broker_host_id().to_string()
+    );
+    assert_eq!(
         request.binding().backend_executable(),
-        windows.runtime_executable()
+        windows.broker_client_executable()
     );
     assert_eq!(
         request.binding().backend_executable_sha256(),
-        windows.runtime_sha256()
+        windows.broker_client_sha256()
     );
     assert_eq!(
         request.binding().promotion_trust_bundle_id(),
@@ -627,12 +638,20 @@ fn exact_external_promotion_keeps_actions_pending_for_active_enrollment_admissio
             .expect("Hyper-V container image")
             .reference()
     );
-    assert_admitted_action_features(&request);
+    assert_action_features_remain_unavailable(&request);
     assert_host_input_contract(&request, &config_path);
 
     let issue = request
         .to_protocol_issue_request()
         .expect("build canonical broker issue request");
+    assert!(!issue.launch().sealed_action_trees());
+    assert_eq!(
+        issue.backend().executable_path(),
+        windows
+            .broker_client_executable()
+            .to_str()
+            .expect("ASCII broker client path")
+    );
     let canonical = issue.canonical_bytes().expect("canonical issue bytes");
     assert_eq!(
         WindowsRunnerAdmissionIssueRequest::from_canonical_bytes(&canonical)
@@ -730,10 +749,10 @@ fn legacy_and_alternate_windows_providers_are_rejected() {
         RunnerProductConfigError::InvalidDocument
     );
 
-    let mut schema_two = baseline();
-    schema_two["schema_version"] = serde_json::json!(2);
+    let mut schema_four = baseline();
+    schema_four["schema_version"] = serde_json::json!(4);
     assert_eq!(
-        parse(&schema_two).expect_err("schema v2 must not be migrated implicitly"),
+        parse(&schema_four).expect_err("schema v4 must not be migrated implicitly"),
         RunnerProductConfigError::UnsupportedSchema
     );
 
@@ -780,7 +799,7 @@ fn windows_configuration_rejects_every_weaker_boundary() {
 }
 
 #[test]
-fn windows_container_image_runtime_and_guest_agent_are_pinned() {
+fn windows_container_image_broker_and_guest_agent_are_pinned() {
     let mut mutable_image = baseline();
     mutable_image["inventory"]["environment_profiles"][0]["image"] =
         serde_json::json!("mcr.microsoft.com/windows/servercore:ltsc2025");
@@ -800,12 +819,22 @@ fn windows_container_image_runtime_and_guest_agent_are_pinned() {
     );
 
     for (field, invalid) in [
-        ("runtime_executable", serde_json::json!(r"docker.exe")),
         (
-            "runtime_executable",
-            serde_json::json!(r"C:\Program Files\Docker\container.exe"),
+            "broker_client_executable",
+            serde_json::json!(r"automata-windows-hyperv-broker-client.exe"),
         ),
-        ("runtime_sha256", serde_json::json!("not-a-digest")),
+        (
+            "broker_client_executable",
+            serde_json::json!(r"C:\Program Files\Automata\other-client.exe"),
+        ),
+        (
+            "broker_client_executable",
+            serde_json::json!(r"C:\%AUTOMATA_HOME%\automata-windows-hyperv-broker-client.exe"),
+        ),
+        ("broker_client_sha256", serde_json::json!("not-a-digest")),
+        ("broker_client_sha256", serde_json::json!("0".repeat(64))),
+        ("broker_host_id", serde_json::json!("not-a-digest")),
+        ("broker_host_id", serde_json::json!("0".repeat(64))),
         ("guest_agent_path", serde_json::json!(r"C:\guest\agent.cmd")),
         (
             "guest_agent_path",
@@ -817,9 +846,25 @@ fn windows_container_image_runtime_and_guest_agent_are_pinned() {
         let mut value = baseline();
         value["windows_hyperv"][field] = invalid;
         assert_eq!(
-            parse(&value).expect_err("runtime and guest configuration must be exact"),
+            parse(&value).expect_err("broker and guest configuration must be exact"),
             RunnerProductConfigError::InvalidProvider,
             "invalid {field}"
+        );
+    }
+
+    for (field, obsolete) in [
+        (
+            "runtime_executable",
+            serde_json::json!(r"C:\Program Files\Docker\docker.exe"),
+        ),
+        ("runtime_sha256", serde_json::json!("2".repeat(64))),
+    ] {
+        let mut value = baseline();
+        value["windows_hyperv"][field] = obsolete;
+        assert_eq!(
+            parse(&value).expect_err("direct runtime configuration must remain removed"),
+            RunnerProductConfigError::InvalidDocument,
+            "obsolete {field}"
         );
     }
 

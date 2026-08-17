@@ -32,17 +32,18 @@ container with explicit Hyper-V isolation, disabled networking,
 and an in-image one-request guest executable. It inspects the effective runtime
 state before returning a handle and rejects process isolation or policy drift.
 
-That code is not yet production acceptance. It currently reaches the local
-container engine through a pinned CLI. Its synchronized provider journal and
-startup orphan check are component recovery, but they do not replace a
-restricted management broker, independent watchdog, or real engine/host fault
-evidence. A broker-verifiable signed admission grant, managed egress,
-credential delivery, a signed image factory, and dedicated-host acceptance
-also remain open. The source tree has component support for Windows action
-materialization and JavaScript/composite execution, but the checked-in image
-evidence is an unsigned candidate. It therefore advertises shell-only
-capacity. Job and service containers, egress, devices, and parallel capacity
-remain unsupported.
+That code is not yet production acceptance. The runner reaches only a
+fixed-name, digest-pinned restricted-broker client; it does not receive an
+engine endpoint. The broker implements typed operations, a synchronized
+ledger, and startup reconciliation, but production pipe authentication is
+hard-false until an audited impersonated-thread token boundary exists.
+Current-admission, placement-renewal, and grant-authorization repositories,
+the synthetic admission probe, broker-owned enrollment, an independent
+watchdog, and real engine/host fault evidence remain unavailable. Promotion
+and action-materialization components do not make actions schedulable: the
+checked-in image is an unsigned candidate and the durable Windows ceiling
+remains shell-only. Job and service containers, egress, devices, and parallel
+capacity remain unsupported.
 
 The detailed
 [Windows runner isolation plan](../platforms/windows.md) makes one fresh
@@ -56,24 +57,24 @@ Image admission now verifies a digest-bound Windows Server 2025 Server Core
 manifest and lock together with provenance, SPDX SBOM, patch, and revocation
 metadata. It binds the exact guest/workspace and configured PowerShell, cmd,
 tar, hash-helper, and Node-generation paths. A canonical external Ed25519
-promotion envelope plus successful fresh-container probes are both required
-before runner composition adds JavaScript, composite, repository, local-action,
-or Node-generation features. Candidate, missing, mismatched, revoked, or
-substituted material never gains those features. These are component gates,
-not a signed image factory or physical-host evidence.
+promotion envelope and fresh-container probe contracts validate that evidence,
+but runner composition still withholds JavaScript, composite, repository,
+local-action, and Node-generation features. Enabling them additionally requires
+broker reconstruction and sealing of the exact admitted graph and archives.
+Candidate, missing, mismatched, revoked, or substituted material never gains
+those features. These are component gates, not a signed image factory or
+physical-host evidence.
 
 Windows enrollment now has a typed pre-enrollment admission contract. Its
 short-lived authenticated receipt binds the runner, broker/provider identity,
 exact enrollment operation, image/profile/promotion trust anchor and probe
 policy, and canonical capability set;
 only an opaque restricted-broker custody handle is durable across retries.
-The production broker caller is a separate integration gate. It must fail
-closed when custody is absent, stale, expired, or mismatched, and runtime startup
-must independently repeat profile/tool admission. Once composed,
-an admitted action/Node feature can exist in both durable registration and live
-observation instead of being removed by their least-authority intersection.
-This interface and its injected tests are not a promoted image or physical-host
-release claim.
+The runtime broker client is composed, but broker-owned enrollment and the
+synthetic admission probe are unavailable. Production admission must fail
+closed when custody is absent, stale, expired, or mismatched, and runtime
+startup must independently repeat profile/tool admission. This interface and
+its injected tests are not a promoted image or physical-host release claim.
 
 Current component placement foundation binds GitHub-projected Windows jobs to
 both VM-grade isolation and the exact
@@ -85,9 +86,10 @@ grant from the canonical AUTH-02 snapshot and immutable materialization
 authority. PostgreSQL re-derives the grant against locked current JobIR,
 requirements, trust, profile, operation, runner generation/session/slot, lease,
 and expiry state before leasing. Missing, incomplete, stale, or grant-free
-Windows claims fail closed. The value is neither serialized nor signed and is
-not the independently verified WIN-ISO-02 broker credential, so it does not
-make Windows schedulable in production.
+Windows claims fail closed. The source also defines the independently signed
+post-accept broker grant and its delivery path, but production does not compose
+the current-admission, placement-renewal, or grant-authorization repositories
+required to mint it. Windows therefore remains unschedulable in production.
 
 ## Work packages
 
@@ -127,8 +129,9 @@ Tasks:
   a fresh Windows sandbox.
 - [x] Bind exact tool versions, architecture, paths, and digests through the
   candidate manifest and externally signed promotion interface.
-- [x] Withhold all Windows action and Node capabilities unless image
-  verification and every configured live tool probe succeed.
+- [x] Keep all Windows action and Node capabilities unavailable. Image
+  verification and live tool probes are necessary evidence, but are not
+  sufficient authority without broker-sealed action graphs.
 - [x] Add a Windows-specific in-sandbox materialization path with exact archive
   digest verification and subpath provenance.
 - [x] Reject traversal, links, special entries, reserved/illegal Windows names,
@@ -145,10 +148,12 @@ Tasks:
 
 Acceptance:
 
-- [x] Product startup probes every configured action tool inside a fresh
-  sandbox before registration; injected component tests exercise this gate.
-- [x] Candidate or missing Node-generation evidence removes JavaScript and
-  exact Node capabilities without removing plain run steps.
+- [ ] Product startup probes every configured action tool inside a fresh
+  sandbox before registration. Component helpers define the gate, but production
+  grant issuance and the synthetic probe are not composed.
+- [x] Candidate, promoted, or missing Node-generation evidence cannot add
+  JavaScript or exact Node capabilities; plain run steps remain available at
+  the component ceiling.
 - [ ] Linux and Windows produce equivalent immutable action trees.
 
 ### WIN-02 — JavaScript and composite actions on Windows
@@ -158,10 +163,11 @@ WIN-ISO-08 managed data/credential boundary, RUN-01, ACT-01.
 
 Tasks:
 
-- [x] Replace blanket runner-side Windows action rejection with promotion- and
-  live-admission-gated granular capabilities.
-- [x] Execute metadata-selected Node 12/16/20/24 pre, main, and post through
-  exact configured paths; no generation or `PATH` fallback is allowed.
+- [ ] Replace blanket runner-side Windows action rejection only after the
+  production broker reconstructs and seals the admitted graph and archives.
+- [x] At the dormant executor component boundary, execute metadata-selected
+  Node 12/16/20/24 pre, main, and post through exact configured paths; no
+  generation or `PATH` fallback is allowed.
 - [x] Enable local, repository, composite, and nested-composite executor paths
   only when their exact runtime capabilities were admitted.
 - [x] Preserve the existing Windows phase-file, environment-casing, and CRLF
@@ -187,15 +193,17 @@ Tasks:
 - [ ] Prove upload-artifact, download-artifact, cache restore/save, and one
   representative setup action.
 - [ ] Test paths with spaces, cancellation, restart, and credential cleanup.
-- [ ] Restore a hosted Windows CI job and run the shipped control-plane and
-  runner binaries through the Windows product path before release acceptance.
+- [x] Restore native `windows-2025` component CI for sandbox and runner
+  compilation, strict Clippy, and focused broker, ACL, and admission tests.
+- [ ] Add Windows release CI that runs the shipped control-plane and runner
+  binaries through the Windows product path before release acceptance.
 
 Acceptance:
 
 - [ ] Tests launch the shipped Windows runner process rather than only
   executor fakes.
-- [ ] Hosted Windows CI exercises the feature matrix and cleanup path instead of
-  relying on the currently disabled job or local-only evidence.
+- [ ] Hosted Windows release CI exercises the feature matrix and cleanup path
+  through the shipped product; the native component lane is not this evidence.
 
 ### PLAT-01 — Exact Linux compatibility image contract
 
