@@ -862,6 +862,13 @@ mod tests {
             .expect("set executable fixture mode");
     }
 
+    fn make_non_administrator_owned(path: &Path) {
+        if rustix::process::geteuid().is_root() {
+            rustix::fs::chown(path, Some(rustix::fs::Uid::from_raw(1)), None)
+                .expect("make ownership fixture non-administrator controlled");
+        }
+    }
+
     #[test]
     fn configured_binary_rejects_symlinks_non_regular_files_and_runner_owned_files() {
         let fixture = TestDirectory::new();
@@ -869,6 +876,7 @@ mod tests {
         File::create(&target).expect("create target");
         fs::set_permissions(&target, fs::Permissions::from_mode(0o700))
             .expect("make target executable");
+        make_non_administrator_owned(&target);
         let link = fixture.child("podman-link");
         symlink(&target, &link).expect("create symlink");
 
@@ -898,6 +906,7 @@ mod tests {
         fs::create_dir_all(&helper_directory).expect("create helper-directory shape");
         fs::set_permissions(&helper_directory, fs::Permissions::from_mode(0o755))
             .expect("make helper directory traversable");
+        make_non_administrator_owned(&helper_directory);
         assert_eq!(
             inspect_approved_helper_directory(&helper_directory, &mut BTreeMap::new(), 0),
             Err(TrustError::Ownership)

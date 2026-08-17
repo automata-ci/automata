@@ -6,7 +6,10 @@ use automata_ci_execution::{
 };
 use thiserror::Error;
 
-const MAX_POST_JOB_CLEANUP_TIMEOUT: Duration = Duration::from_mins(5);
+// Cache and artifact actions may each need a bounded final network flush. The
+// aggregate budget must accommodate several posts without inheriting an
+// unbounded workflow timeout.
+const MAX_POST_JOB_CLEANUP_TIMEOUT: Duration = Duration::from_mins(15);
 
 /// Validated policy for one GitHub job executor instance.
 #[derive(Clone, Debug, Eq, PartialEq)]
