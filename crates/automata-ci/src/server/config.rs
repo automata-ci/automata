@@ -1475,11 +1475,16 @@ fn development_results_endpoint(
         .results_trusted_private_host
         .as_deref()
         .ok_or(automata_ci_results_github::TokenError::Policy)?;
-    ResultsPublicEndpoint::trusted_private_development(
+    let listener = match args.results_listen {
+        SocketAddr::V4(listener) => listener,
+        SocketAddr::V6(_) => return Err(automata_ci_results_github::TokenError::Policy),
+    };
+    automata_ci_results_github::PrivateNetworkResultsEndpoint::new(
         results_url,
-        args.results_listen,
+        listener,
         trusted_host,
     )
+    .map(automata_ci_results_github::PrivateNetworkResultsEndpoint::into_public_endpoint)
 }
 
 /// Invalid server deployment configuration.

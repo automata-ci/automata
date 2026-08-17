@@ -420,40 +420,42 @@ async fn fork_cache_is_read_only_and_incomplete_evidence_mints_no_authority() {
 }
 
 #[test]
-fn development_endpoint_requires_an_exact_safe_bind_and_host_assertion() {
-    let podman = ResultsPublicEndpoint::trusted_private_development(
-        Url::parse("http://host.containers.internal:8081/").expect("URL"),
-        "10.88.0.1:8081".parse().expect("private bind"),
-        "host.containers.internal",
+fn closed_private_network_endpoint_is_ipv4_and_results_port_exact() {
+    use automata_ci_results_github::PrivateNetworkResultsEndpoint;
+
+    let endpoint = PrivateNetworkResultsEndpoint::new(
+        Url::parse("http://results.automata.invalid:8081/").expect("URL"),
+        "10.91.0.2:8081".parse().expect("private IPv4 bind"),
+        "results.automata.invalid",
     )
-    .expect("trusted Podman bridge endpoint");
+    .expect("closed private Results endpoint");
+    assert_eq!(endpoint.listener().to_string(), "10.91.0.2:8081");
     assert_eq!(
-        podman.development_listener_bind(),
-        Some("10.88.0.1:8081".parse().expect("private bind"))
+        endpoint.public_endpoint().url().as_str(),
+        "http://results.automata.invalid:8081/"
     );
 
-    for rejected in [
-        ResultsPublicEndpoint::trusted_private_development(
-            Url::parse("http://host.containers.internal:8081/").expect("URL"),
-            "0.0.0.0:8081".parse().expect("wildcard bind"),
-            "host.containers.internal",
-        ),
-        ResultsPublicEndpoint::trusted_private_development(
-            Url::parse("http://host.containers.internal:8081/").expect("URL"),
-            "10.88.0.1:8082".parse().expect("private bind"),
-            "host.containers.internal",
-        ),
-        ResultsPublicEndpoint::trusted_private_development(
-            Url::parse("http://host.containers.internal:8081/").expect("URL"),
-            "10.88.0.1:8081".parse().expect("private bind"),
-            "different.internal",
-        ),
-        ResultsPublicEndpoint::trusted_private_development(
-            Url::parse("http://host.containers.internal:8081/").expect("URL"),
-            "203.0.113.10:8081".parse().expect("public bind"),
-            "host.containers.internal",
-        ),
+    for listener in [
+        "10.91.0.2:8080",
+        "0.0.0.0:8081",
+        "127.0.0.1:8081",
+        "203.0.113.2:8081",
     ] {
-        assert_eq!(rejected, Err(TokenError::Policy));
+        assert!(
+            PrivateNetworkResultsEndpoint::new(
+                Url::parse("http://results.automata.invalid:8081/").expect("URL"),
+                listener.parse().expect("IPv4 bind"),
+                "results.automata.invalid",
+            )
+            .is_err()
+        );
     }
+    assert_eq!(
+        PrivateNetworkResultsEndpoint::new(
+            Url::parse("http://results.automata.invalid:8081/").expect("URL"),
+            "10.91.0.2:8081".parse().expect("private IPv4 bind"),
+            "different.automata.invalid",
+        ),
+        Err(TokenError::Policy)
+    );
 }

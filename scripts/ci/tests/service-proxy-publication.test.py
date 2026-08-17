@@ -312,6 +312,14 @@ class PublicationContract(unittest.TestCase):
             lock["source_identity_sha256"], hashlib.sha256(identity_bytes).hexdigest()
         )
         self.assertEqual(identity["image"]["name"], publication.IMAGE_NAME)
+        self.assertEqual(
+            identity["runtime"],
+            {
+                "entrypoint": ["/usr/libexec/automata-ci-service-proxy"],
+                "protocol_version": "2",
+                "user": "65532:65532",
+            },
+        )
         self.assertTrue(lock["image"].startswith(f"{publication.IMAGE_NAME}@sha256:"))
         self.assertEqual(
             sorted(path.name for path in output.iterdir()),
@@ -325,6 +333,11 @@ class PublicationContract(unittest.TestCase):
                 ]
             ),
         )
+
+        stale_identity = json.loads(identity_bytes)
+        stale_identity["runtime"]["protocol_version"] = "1"
+        with self.assertRaisesRegex(SystemExit, "source runtime contract differs"):
+            publication.validate_source_identity(stale_identity, lock)
 
     def test_candidate_archive_and_requested_commit_fail_closed(self) -> None:
         trailing = self.root / "trailing.tar"
@@ -563,7 +576,7 @@ class PublicationContract(unittest.TestCase):
                     "io.automata.service-proxy.binary.sha256": artifacts[
                         "binary_sha256"
                     ],
-                    "io.automata.service-proxy.protocol-version": "1",
+                    "io.automata.service-proxy.protocol-version": "2",
                     "io.automata.service-proxy.sbom.sha256": artifacts[
                         "sbom_sha256"
                     ],
@@ -572,8 +585,8 @@ class PublicationContract(unittest.TestCase):
                     ],
                     "org.opencontainers.image.created": release["created"],
                     "org.opencontainers.image.description": (
-                        "Namespace-local bounded TCP and UDP proxy for job service "
-                        "containers"
+                        "Closed bounded service and Results proxy for Automata job "
+                        "sandboxes"
                     ),
                     "org.opencontainers.image.licenses": "MIT",
                     "org.opencontainers.image.revision": identity["build"][

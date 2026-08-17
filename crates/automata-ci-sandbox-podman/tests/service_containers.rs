@@ -40,6 +40,26 @@ fn service_capability_is_not_advertised_until_the_local_helper_is_verified() {
 }
 
 #[test]
+fn pre_results_service_proxy_protocol_is_rejected_before_any_mutation() {
+    let scratch = ScratchRoot::new("service-proxy-stale-protocol");
+    let fake = Arc::new(FakePodman::default());
+    fake.override_service_proxy_protocol("1");
+
+    let error = RootlessPodmanProvider::open_with_executor(
+        options_with_service_proxy(scratch.path()),
+        Arc::clone(&fake) as Arc<dyn PodmanCommandExecutor>,
+    )
+    .expect_err("protocol 1 predates Results and must not be admitted");
+
+    assert_eq!(
+        error,
+        PodmanOpenError::Configuration(PodmanConfigurationError::ServiceProxyUnavailable)
+    );
+    assert_only_helper_image_verification(&fake);
+    assert!(fake.is_empty());
+}
+
+#[test]
 fn services_use_one_job_network_hardened_argv_and_restart_durable_bindings() {
     let Fixture {
         provider,

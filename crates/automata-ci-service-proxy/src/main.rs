@@ -7,6 +7,7 @@ mod config;
 mod error;
 mod limit;
 mod proxy;
+mod results;
 mod status;
 
 use std::ffi::OsString;
@@ -29,16 +30,26 @@ fn main() -> ExitCode {
 }
 
 fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<(), ProxyError> {
-    let mappings = config::parse_command_line(arguments)?;
-    let mut proxy = proxy::PreparedProxy::prepare(&mappings)?;
-    let status = status::encode_startup_status(&proxy.ports()?);
+    match config::parse_command_line(arguments)? {
+        config::ProxyCommand::Services(mappings) => {
+            let mut proxy = proxy::PreparedProxy::prepare(&mappings)?;
+            write_status(&status::encode_startup_status(&proxy.ports()?))?;
+            proxy.run()
+        }
+        config::ProxyCommand::Results(configuration) => {
+            let proxy = results::ResultsProxy::prepare(configuration)?;
+            write_status(status::RESULTS_READY_STATUS)?;
+            proxy.run()
+        }
+    }
+}
+
+fn write_status(status: &str) -> Result<(), ProxyError> {
     let mut stdout = io::stdout().lock();
     stdout
         .write_all(status.as_bytes())
         .map_err(|_| ProxyError::Status)?;
-    stdout.flush().map_err(|_| ProxyError::Status)?;
-    drop(stdout);
-    proxy.run()
+    stdout.flush().map_err(|_| ProxyError::Status)
 }
 
 fn write_sanitized_error(code: &str) {

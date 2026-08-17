@@ -60,7 +60,19 @@ if [[ "$1" == run ]]; then
     success)
       exit 0
       ;;
-    usage-invalid)
+    protocol-v2)
+      if (( $# == 6 )); then
+        printf 'automata-ci-service-proxy: usage-invalid\n' >&2
+        exit 64
+      fi
+      if (( $# == 7 )) && [[ "$7" == serve-results-v1 ]]; then
+        printf 'automata-ci-service-proxy: configuration-invalid\n' >&2
+        exit 64
+      fi
+      printf 'fake-podman: unexpected protocol probe\n' >&2
+      exit 70
+      ;;
+    pre-v2)
       printf 'automata-ci-service-proxy: usage-invalid\n' >&2
       exit 64
       ;;
@@ -80,19 +92,22 @@ ln -s podman "${fake_bin}/buildah"
 valid_inspection="${scratch_directory}/valid-inspection.json"
 buildah_inspection="${scratch_directory}/buildah-inspection.json"
 bad_label_inspection="${scratch_directory}/bad-label-inspection.json"
+stale_protocol_inspection="${scratch_directory}/stale-protocol-inspection.json"
 bad_config_inspection="${scratch_directory}/bad-config-inspection.json"
-readonly valid_inspection buildah_inspection bad_label_inspection bad_config_inspection
+readonly valid_inspection buildah_inspection bad_label_inspection \
+  stale_protocol_inspection bad_config_inspection
 python3 - \
   "$valid_inspection" \
   "$buildah_inspection" \
   "$bad_label_inspection" \
+  "$stale_protocol_inspection" \
   "$bad_config_inspection" <<'PY'
 import copy
 import json
 import pathlib
 import sys
 
-valid_path, buildah_path, bad_label_path, bad_config_path = map(
+valid_path, buildah_path, bad_label_path, stale_protocol_path, bad_config_path = map(
     pathlib.Path, sys.argv[1:]
 )
 labels = {
@@ -101,7 +116,7 @@ labels = {
     "org.opencontainers.image.revision": "0123456789abcdef0123456789abcdef01234567",
     "org.opencontainers.image.source": "https://github.com/automata-ci/automata",
     "org.opencontainers.image.version": "0.1.0",
-    "io.automata.service-proxy.protocol-version": "1",
+    "io.automata.service-proxy.protocol-version": "2",
     "io.automata.service-proxy.binary.sha256": "0" * 64,
     "io.automata.service-proxy.sbom.sha256": "1" * 64,
     "io.automata.service-proxy.source.sha256": "2" * 64,
@@ -109,9 +124,15 @@ labels = {
 document = [
     {
         "Config": {
+            "Cmd": None,
             "Entrypoint": ["/usr/libexec/automata-ci-service-proxy"],
+            "Env": [
+                "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+            ],
             "Labels": labels,
             "User": "65532:65532",
+            "Volumes": None,
+            "WorkingDir": "/",
         }
     }
 ]
@@ -126,6 +147,11 @@ write(buildah_path, {"OCIv1": {"config": document[0]["Config"]}})
 bad_label = copy.deepcopy(document)
 bad_label[0]["Config"]["Labels"]["org.opencontainers.image.version"] = "9.9.9"
 write(bad_label_path, bad_label)
+stale_protocol = copy.deepcopy(document)
+stale_protocol[0]["Config"]["Labels"][
+    "io.automata.service-proxy.protocol-version"
+] = "1"
+write(stale_protocol_path, stale_protocol)
 bad_config = copy.deepcopy(document)
 bad_config[0]["Config"]["Entrypoint"] = ["/bin/not-the-service-proxy"]
 write(bad_config_path, bad_config)
@@ -219,8 +245,22 @@ expect_valid_buildah_metadata_log() {
 
 expect_required_log() {
   mapfile -t invocations <"$invocation_log"
+  (( ${#invocations[@]} == 3 )) || {
+    printf 'required verification did not inspect and run both probes\n' >&2
+    exit 1
+  }
+  [[ "${invocations[0]}" == \
+    'image inspect localhost/automata-ci/service-proxy:test' ]]
+  [[ "${invocations[1]}" == \
+    'run --rm --network none --read-only localhost/automata-ci/service-proxy:test' ]]
+  [[ "${invocations[2]}" == \
+    'run --rm --network none --read-only localhost/automata-ci/service-proxy:test serve-results-v1' ]]
+}
+
+expect_first_probe_log() {
+  mapfile -t invocations <"$invocation_log"
   (( ${#invocations[@]} == 2 )) || {
-    printf 'required verification did not inspect and run exactly once\n' >&2
+    printf 'failed first process probe used unexpected runtime commands\n' >&2
     exit 1
   }
   [[ "${invocations[0]}" == \
@@ -229,45 +269,51 @@ expect_required_log() {
     'run --rm --network none --read-only localhost/automata-ci/service-proxy:test' ]]
 }
 
-run_verifier metadata-only usage-invalid "$valid_inspection"
+run_verifier metadata-only protocol-v2 "$valid_inspection"
 expect_status 0
 expect_exact_stdout \
   'Service-proxy image metadata verified; process probe is covered by the static binary contract'
 [[ ! -s "$stderr_log" ]]
 expect_valid_metadata_log
 
-run_verifier metadata-only usage-invalid "$buildah_inspection" buildah
+run_verifier metadata-only protocol-v2 "$buildah_inspection" buildah
 expect_status 0
 expect_exact_stdout \
   'Service-proxy image metadata verified; process probe is covered by the static binary contract'
 [[ ! -s "$stderr_log" ]]
 expect_valid_buildah_metadata_log
 
-run_verifier default usage-invalid "$buildah_inspection" buildah
+run_verifier default protocol-v2 "$buildah_inspection" buildah
 expect_status 1
 [[ ! -s "$stdout_log" ]]
 expect_exact_stderr 'service-proxy-image: Buildah supports only metadata-only image verification'
 [[ ! -s "$invocation_log" ]]
 
-run_verifier metadata-only usage-invalid "$valid_inspection" buildah
+run_verifier metadata-only protocol-v2 "$valid_inspection" buildah
 expect_status 1
 [[ ! -s "$stdout_log" ]]
 expect_exact_stderr 'service-proxy-image: image configuration is missing'
 expect_valid_buildah_metadata_log
 
-run_verifier metadata-only usage-invalid "$bad_label_inspection"
+run_verifier metadata-only protocol-v2 "$bad_label_inspection"
 expect_status 1
 [[ ! -s "$stdout_log" ]]
 expect_exact_stderr 'service-proxy-image: candidate labels differ'
 expect_valid_metadata_log
 
-run_verifier metadata-only usage-invalid "$bad_config_inspection"
+run_verifier metadata-only protocol-v2 "$stale_protocol_inspection"
+expect_status 1
+[[ ! -s "$stdout_log" ]]
+expect_exact_stderr 'service-proxy-image: candidate labels differ'
+expect_valid_metadata_log
+
+run_verifier metadata-only protocol-v2 "$bad_config_inspection"
 expect_status 1
 [[ ! -s "$stdout_log" ]]
 expect_exact_stderr 'service-proxy-image: candidate entrypoint differs'
 expect_valid_metadata_log
 
-run_verifier default usage-invalid "$valid_inspection"
+run_verifier default protocol-v2 "$valid_inspection"
 expect_status 0
 expect_exact_stdout 'Service-proxy image process and metadata verified'
 [[ ! -s "$stderr_log" ]]
@@ -277,21 +323,28 @@ run_verifier default success "$valid_inspection"
 expect_status 1
 [[ ! -s "$stdout_log" ]]
 expect_exact_stderr 'service-proxy-image: candidate accepted an absent protocol command'
-expect_required_log
+expect_first_probe_log
 
 run_verifier default stdout "$valid_inspection"
 expect_status 1
 [[ ! -s "$stdout_log" ]]
 expect_exact_stderr 'service-proxy-image: candidate failure wrote to stdout'
-expect_required_log
+expect_first_probe_log
 
 run_verifier default cgroup "$valid_inspection"
 expect_status 1
 [[ ! -s "$stdout_log" ]]
 expect_exact_stderr 'service-proxy-image: candidate process diagnostic differs'
+expect_first_probe_log
+
+run_verifier default pre-v2 "$valid_inspection"
+expect_status 1
+[[ ! -s "$stdout_log" ]]
+expect_exact_stderr \
+  'service-proxy-image: candidate does not implement the protocol 2 Results capability'
 expect_required_log
 
-run_verifier unsupported usage-invalid "$valid_inspection"
+run_verifier unsupported protocol-v2 "$valid_inspection"
 expect_status 1
 [[ ! -s "$stdout_log" ]]
 expect_exact_stderr \
@@ -309,7 +362,7 @@ set +e
 env \
   "AUTOMATA_FAKE_PODMAN_INSPECTION=${valid_inspection}" \
   "AUTOMATA_FAKE_PODMAN_LOG=${invocation_log}" \
-  AUTOMATA_FAKE_PODMAN_RUN_RESULT=usage-invalid \
+  AUTOMATA_FAKE_PODMAN_RUN_RESULT=protocol-v2 \
   AUTOMATA_SERVICE_PROXY_CONTAINER_RUNTIME=podman \
   AUTOMATA_SERVICE_PROXY_OCI_BUILDER=buildah-chroot \
   AUTOMATA_SERVICE_PROXY_PROCESS_PROBE=metadata-only \
