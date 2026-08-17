@@ -9,7 +9,7 @@ BEGIN
         FROM runners
         WHERE capabilities #>> '{platform,operating_system,kind}' = 'windows'
     ) THEN
-        RAISE EXCEPTION 'existing Windows runners must be removed and re-enrolled through broker admission before migration 0047'
+        RAISE EXCEPTION 'existing Windows runners must be removed and re-enrolled through broker admission before migration 0048'
             USING ERRCODE = '23514',
                   CONSTRAINT = 'windows_runner_admission_upgrade_requires_reenrollment';
     END IF;
