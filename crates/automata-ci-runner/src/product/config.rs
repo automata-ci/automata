@@ -40,7 +40,7 @@ use super::windows_image::{
 };
 
 /// Current on-disk runner product configuration schema.
-pub const RUNNER_PRODUCT_CONFIG_SCHEMA_VERSION: u16 = 6;
+pub const RUNNER_PRODUCT_CONFIG_SCHEMA_VERSION: u16 = 7;
 /// Hard ceiling applied before parsing a runner configuration document.
 pub const MAX_RUNNER_CONFIG_BYTES: usize = 256 * 1024;
 const PODMAN_RUNTIME_ROOT_NAME: &str = "automata-ci-podman";
@@ -2242,10 +2242,19 @@ struct RawLocalDockerProductConfig {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawLocalDockerResultsTransport {
-    proxy_image: String,
+    proxy_image: RawLocalImportedImage,
+    plan_sha256: String,
     transit_network_id: String,
     results_container_id: String,
     results_address: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawLocalImportedImage {
+    reference: String,
+    config_image_id: String,
+    manifest_image_id: String,
 }
 
 impl RawLocalDockerProductConfig {
@@ -2270,8 +2279,18 @@ impl RawLocalDockerProductConfig {
             .map_err(|_| RunnerProductConfigError::InvalidLocalDocker)?;
         let guest_image = ImmutableImage::new(self.guest_image)
             .map_err(|_| RunnerProductConfigError::InvalidLocalDocker)?;
-        let proxy_image = ImmutableImage::new(self.results_transport.proxy_image)
-            .map_err(|_| RunnerProductConfigError::InvalidLocalDocker)?;
+        let proxy_image = automata_ci_local::LocalImportedImage::new(
+            self.results_transport.proxy_image.config_image_id,
+            self.results_transport.proxy_image.manifest_image_id,
+        )
+        .map_err(|_| RunnerProductConfigError::InvalidLocalDocker)?;
+        if proxy_image.reference() != self.results_transport.proxy_image.reference {
+            return Err(RunnerProductConfigError::InvalidLocalDocker);
+        }
+        let plan_digest = Sha256Digest::from_str(&self.results_transport.plan_sha256)
+            .ok()
+            .filter(|digest| digest.to_string() == self.results_transport.plan_sha256)
+            .ok_or(RunnerProductConfigError::InvalidLocalDocker)?;
         let results_address = self
             .results_transport
             .results_address
@@ -2281,6 +2300,7 @@ impl RawLocalDockerProductConfig {
             .ok_or(RunnerProductConfigError::InvalidLocalDocker)?;
         let results_transport = automata_ci_local::LocalDockerResultsTransport::new(
             proxy_image,
+            plan_digest,
             self.results_transport.transit_network_id,
             self.results_transport.results_container_id,
             results_address,

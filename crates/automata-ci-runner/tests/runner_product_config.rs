@@ -22,6 +22,13 @@ const PROFILE_ID: &str = "automata.dev/github-hosted-ubuntu-24-04-x64-v1";
 const PROFILE_DIGEST: &str = "f7a6f8e592a484f59330bf2cedd839adc75488618ee58efcc3c3d4957d186e21";
 const IMAGE: &str = "ghcr.io/automata-ci/automata-ubuntu-24.04-x64@sha256:e2c20ad25ff71fb61d9609e84daf8384a122b8f26a047836ac50d832c632e194";
 const SERVICE_PROXY_IMAGE: &str = "registry.example.test/automata/service-proxy@sha256:4d7a838e047d65bbf708d4fc315db9b3b91ae73c0d50459b519089c0713ff34b";
+const LOCAL_SERVICE_PROXY_REFERENCE: &str = "automata.local/automata-ci-service-proxy:manifest-5555555555555555555555555555555555555555555555555555555555555555";
+const LOCAL_SERVICE_PROXY_CONFIG_IMAGE_ID: &str =
+    "sha256:4444444444444444444444444444444444444444444444444444444444444444";
+const LOCAL_SERVICE_PROXY_MANIFEST_IMAGE_ID: &str =
+    "sha256:5555555555555555555555555555555555555555555555555555555555555555";
+const LOCAL_DESIRED_PLAN_SHA256: &str =
+    "6666666666666666666666666666666666666666666666666666666666666666";
 const BUILDKIT_RUNTIME_IMAGE: &str = "registry.example.test/buildkit/runtime@sha256:7777777777777777777777777777777777777777777777777777777777777777";
 
 #[allow(clippy::too_many_lines)] // One canonical JSON fixture keeps cross-field defaults coherent.
@@ -1255,7 +1262,12 @@ fn local_docker_configuration() -> serde_json::Value {
             "ab".repeat(32)
         ),
         "results_transport": {
-            "proxy_image": SERVICE_PROXY_IMAGE,
+            "proxy_image": {
+                "reference": LOCAL_SERVICE_PROXY_REFERENCE,
+                "config_image_id": LOCAL_SERVICE_PROXY_CONFIG_IMAGE_ID,
+                "manifest_image_id": LOCAL_SERVICE_PROXY_MANIFEST_IMAGE_ID
+            },
+            "plan_sha256": LOCAL_DESIRED_PLAN_SHA256,
             "transit_network_id": "cd".repeat(32),
             "results_container_id": "ef".repeat(32),
             "results_address": "10.91.0.2"
@@ -1384,7 +1396,19 @@ fn local_docker_results_transport_is_mandatory_exact_and_nonconfigurable() {
         .local_docker()
         .expect("local Docker policy")
         .results_transport();
-    assert_eq!(results.proxy_image().reference(), SERVICE_PROXY_IMAGE);
+    assert_eq!(
+        results.proxy_image().reference(),
+        LOCAL_SERVICE_PROXY_REFERENCE
+    );
+    assert_eq!(
+        results.proxy_image().config_image_id(),
+        LOCAL_SERVICE_PROXY_CONFIG_IMAGE_ID
+    );
+    assert_eq!(
+        results.proxy_image().manifest_image_id(),
+        LOCAL_SERVICE_PROXY_MANIFEST_IMAGE_ID
+    );
+    assert_eq!(results.plan_digest().to_string(), LOCAL_DESIRED_PLAN_SHA256);
     assert_eq!(results.transit_network_id(), "cd".repeat(32));
     assert_eq!(results.results_container_id(), "ef".repeat(32));
     assert_eq!(results.results_address().to_string(), "10.91.0.2");
@@ -1409,12 +1433,50 @@ fn local_docker_results_transport_is_mandatory_exact_and_nonconfigurable() {
         parse_value(&dynamic_port).expect_err("the fixed Results port is not configurable"),
         RunnerProductConfigError::InvalidDocument
     );
+}
+
+#[test]
+fn local_docker_imported_identity_and_plan_are_current_closed_and_canonical() {
+    let value = local_docker_configuration();
+    for field in [
+        "proxy_image",
+        "plan_sha256",
+        "transit_network_id",
+        "results_container_id",
+        "results_address",
+    ] {
+        let mut missing = value.clone();
+        missing["local_docker"]["results_transport"]
+            .as_object_mut()
+            .expect("Results transport object")
+            .remove(field);
+        assert_eq!(
+            parse_value(&missing).expect_err("every transport field is mandatory"),
+            RunnerProductConfigError::InvalidDocument
+        );
+    }
+
+    for field in ["reference", "config_image_id", "manifest_image_id"] {
+        let mut missing = value.clone();
+        missing["local_docker"]["results_transport"]["proxy_image"]
+            .as_object_mut()
+            .expect("imported proxy image object")
+            .remove(field);
+        assert_eq!(
+            parse_value(&missing).expect_err("every imported identity field is mandatory"),
+            RunnerProductConfigError::InvalidDocument
+        );
+    }
+
+    let mut imported_extension = value.clone();
+    imported_extension["local_docker"]["results_transport"]["proxy_image"]["repository"] =
+        serde_json::json!("automata.local/automata-ci-service-proxy");
+    assert_eq!(
+        parse_value(&imported_extension).expect_err("imported identity is closed"),
+        RunnerProductConfigError::InvalidDocument
+    );
 
     for (field, invalid) in [
-        (
-            "proxy_image",
-            serde_json::json!("registry.example/automata/proxy:latest"),
-        ),
         ("transit_network_id", serde_json::json!("cd".repeat(31))),
         ("results_container_id", serde_json::json!("EF".repeat(32))),
         ("results_address", serde_json::json!("203.0.113.2")),
@@ -1431,6 +1493,40 @@ fn local_docker_results_transport_is_mandatory_exact_and_nonconfigurable() {
             RunnerProductConfigError::InvalidLocalDocker
         );
     }
+
+    for (field, invalid) in [
+        (
+            "reference",
+            serde_json::json!("automata.local/proxy:latest"),
+        ),
+        ("config_image_id", serde_json::json!("sha256:short")),
+        ("manifest_image_id", serde_json::json!("sha256:short")),
+    ] {
+        let mut invalid_transport = value.clone();
+        invalid_transport["local_docker"]["results_transport"]["proxy_image"][field] = invalid;
+        assert_eq!(
+            parse_value(&invalid_transport).expect_err("imported proxy identity must stay exact"),
+            RunnerProductConfigError::InvalidLocalDocker
+        );
+    }
+
+    for plan in ["6".repeat(63), "G".repeat(64), "A".repeat(64)] {
+        let mut invalid_transport = value.clone();
+        invalid_transport["local_docker"]["results_transport"]["plan_sha256"] =
+            serde_json::json!(plan);
+        assert_eq!(
+            parse_value(&invalid_transport).expect_err("plan digest must be canonical"),
+            RunnerProductConfigError::InvalidLocalDocker
+        );
+    }
+
+    let mut generic_proxy = value.clone();
+    generic_proxy["local_docker"]["results_transport"]["proxy_image"] =
+        serde_json::json!(SERVICE_PROXY_IMAGE);
+    assert_eq!(
+        parse_value(&generic_proxy).expect_err("a registry image is not an imported identity"),
+        RunnerProductConfigError::InvalidDocument
+    );
 }
 
 #[test]

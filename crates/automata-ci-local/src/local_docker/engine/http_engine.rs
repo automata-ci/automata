@@ -46,6 +46,8 @@ const EXEC_BYTES: usize = 128 * 1024;
 #[cfg(unix)]
 const MAX_REPO_DIGESTS: usize = 128;
 #[cfg(unix)]
+const MAX_REPO_TAGS: usize = 128;
+#[cfg(unix)]
 const MAX_DECLARED_VOLUMES: usize = 64;
 #[cfg(unix)]
 const MAX_MOUNTS: usize = 16;
@@ -656,9 +658,11 @@ fn require_object_id(value: &str) -> Result<(), EngineApiError> {
 fn normalize_image(response: ImageResponse) -> Result<InspectedImage, EngineApiError> {
     require_image_id(&response.id)?;
     let config = response.config;
+    let mut repo_tags = response.repo_tags.into_inner();
+    repo_tags.sort();
     let mut repo_digests = response.repo_digests.into_inner();
     repo_digests.sort();
-    if repo_digests.is_empty() || repo_digests.iter().any(String::is_empty) {
+    if repo_tags.iter().any(String::is_empty) || repo_digests.iter().any(String::is_empty) {
         return Err(EngineApiError::InvalidResponse);
     }
     let mut declared_volumes = config.volumes.map_or_else(Vec::new, |volumes| {
@@ -694,6 +698,7 @@ fn normalize_image(response: ImageResponse) -> Result<InspectedImage, EngineApiE
     }
     Ok(InspectedImage {
         id: response.id,
+        repo_tags,
         repo_digests,
         operating_system: response.operating_system,
         architecture: response.architecture,
@@ -2189,6 +2194,8 @@ struct ContainerCreateResponse {
 struct ImageResponse {
     #[serde(rename = "Id")]
     id: String,
+    #[serde(rename = "RepoTags")]
+    repo_tags: BoundedVec<String, MAX_REPO_TAGS>,
     #[serde(rename = "RepoDigests")]
     repo_digests: BoundedVec<String, MAX_REPO_DIGESTS>,
     #[serde(rename = "Os")]
@@ -3153,6 +3160,7 @@ mod tests {
     fn image_json(environment: &Value) -> Value {
         json!({
             "Id": format!("sha256:{}", "2".repeat(64)),
+            "RepoTags": [],
             "RepoDigests": [format!("registry.example/job@sha256:{}", "1".repeat(64))],
             "Os": "linux",
             "Architecture": "amd64",
@@ -3182,6 +3190,39 @@ mod tests {
                 serde_json::from_value(image_json(&environment)).expect("image response");
             assert!(normalize_image(response).is_err());
         }
+    }
+
+    #[test]
+    fn image_references_preserve_classic_and_containerd_import_representations() {
+        let reference = format!(
+            "automata.local/automata-ci-service-proxy:manifest-{}",
+            "3".repeat(64)
+        );
+        let digest = format!(
+            "automata.local/automata-ci-service-proxy@sha256:{}",
+            "3".repeat(64)
+        );
+        let mut classic = image_json(&json!([]));
+        classic["RepoTags"] = json!([reference]);
+        classic["RepoDigests"] = json!([]);
+        let classic =
+            normalize_image(serde_json::from_value(classic).expect("typed classic imported image"))
+                .expect("classic imported image");
+        assert_eq!(
+            classic.repo_tags.as_slice(),
+            std::slice::from_ref(&reference)
+        );
+        assert!(classic.repo_digests.is_empty());
+
+        let mut containerd = image_json(&json!([]));
+        containerd["RepoTags"] = json!([reference]);
+        containerd["RepoDigests"] = json!([digest]);
+        let containerd = normalize_image(
+            serde_json::from_value(containerd).expect("typed containerd imported image"),
+        )
+        .expect("containerd imported image");
+        assert_eq!(containerd.repo_tags, [reference]);
+        assert_eq!(containerd.repo_digests, [digest]);
     }
 
     #[test]

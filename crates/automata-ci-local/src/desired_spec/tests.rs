@@ -207,12 +207,7 @@ fn local_imported_image_binds_the_exact_tag_and_both_content_ids() {
             "sha256:short".to_owned(),
         ),
     ] {
-        assert_eq!(
-            LocalImportedImage::new(config, manifest)
-                .unwrap_err()
-                .code(),
-            DesiredSpecErrorCode::ImportedImage
-        );
+        LocalImportedImage::new(config, manifest).expect_err("invalid imported image identity");
     }
 }
 

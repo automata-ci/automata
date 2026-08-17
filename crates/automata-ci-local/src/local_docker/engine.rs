@@ -198,6 +198,7 @@ pub(crate) struct InspectedVolume {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct InspectedImage {
     pub(crate) id: String,
+    pub(crate) repo_tags: Vec<String>,
     pub(crate) repo_digests: Vec<String>,
     pub(crate) operating_system: String,
     pub(crate) architecture: String,

@@ -23,7 +23,7 @@ from typing import NoReturn
 CATALOG_SCHEMA = "automata.local/release-catalog/v1"
 SOURCE_SCHEMA = "automata.local/release-catalog-source/v1"
 SOURCE_PATH = "images/local-installation/catalog-v1.json"
-SOURCE_SHA256 = "66bd4ce7f50e877632efa761e0a9ef55ff73c92c38829300882f796bc95cff41"
+SOURCE_SHA256 = "1cefc4cf91fcd0d2b4f1a7bcbed1c8179561ace9b4baff76febbf66aed7fcf48"
 CATALOG_PATH = "target/distribution/automata-local-installation-catalog.json"
 PROFILE_MANIFEST_PATH = (
     "images/github-hosted-ubuntu-24.04-x64/profile-manifest.json"

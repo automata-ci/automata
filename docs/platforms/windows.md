@@ -390,7 +390,7 @@ The provider configuration is closed:
   and
 - a bounded lifecycle timeout.
 
-Current runner product schema v6 selects exactly one provider. The Windows
+Current runner product schema v7 selects exactly one provider. The Windows
 provider requires one or more digest-attested environment profiles with:
 
 - an immutable digest-qualified Windows image reference;
@@ -820,7 +820,7 @@ for each advertised profile.
 First-PR component scope:
 
 - [x] Add the explicit Windows Hyper-V container launch variant.
-- [x] Keep the current schema-v6 `windows_hyperv` configuration and remove
+- [x] Keep the current schema-v7 `windows_hyperv` configuration and remove
       `windows_native`.
 - [x] Require disabled network, unprivileged workload, writable container root,
       no services, zero GPU, and no ephemeral-disk claim.

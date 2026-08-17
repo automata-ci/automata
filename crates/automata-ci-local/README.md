@@ -120,11 +120,13 @@ On Linux, the runner also consumes one evaluation-only sandbox-provider
 factory. The concrete Docker provider and engine API stay private. They connect
 only through the fixed `/run/automata-engine/docker.sock` relay, bind every
 operation to the exact daemon and installation anchor, and accept only
-already-present immutable guest, job, and Results-proxy images. The mandatory
+already-present immutable guest and job images plus the exact imported
+Results-proxy representation. The mandatory
 `LocalDockerResultsTransport` pins one externally provisioned transit-network
-ID, one running Results-container ID and private IPv4 address, and the proxy
-image; the per-sandbox provider never creates, replaces, or deletes the shared
-transport.
+ID, one running Results-container ID and private IPv4 address, the desired-plan
+digest, and the daemon-local imported proxy identity. That identity contains
+the sole canonical local tag plus the expected config and manifest IDs. The
+per-sandbox provider never creates, replaces, or deletes the shared transport.
 The fixed relay daemon must be rootful
 and report daemon-default user-namespace remapping, the built-in seccomp
 profile, and private cgroup namespaces. Rootless mode and daemons with AppArmor
@@ -135,10 +137,18 @@ requires each kernel `uid_map` and `gid_map` to contain one nonzero host range
 covering container identities 0 through 65533. Daemon security-option drift is
 part of the pinned identity and invalidates the provider. The relay architecture
 must exactly match the architecture already recorded in the runner inventory;
-the immutable guest, job, and proxy images must match that same relay
+the immutable guest and job images plus the imported proxy must match that same relay
 architecture and must not declare volumes, exposed ports, or a healthcheck. The
 proxy additionally has an exact credential-free runtime shape and must carry
 `io.automata.service-proxy.protocol-version=2`.
+
+The proxy representation is exact and storage-mode coupled. Classic Docker
+must expose the config ID, the sole canonical local tag, and no repository
+digest. Docker's containerd image store must expose the manifest ID, the same
+sole tag, and the sole canonical repository-at-manifest digest. Crossed IDs and
+digests, alternate or additional tags, and additional repository digests fail
+closed. Connect and every shared-transport operation recheck this live
+representation; cleanup-only destroy deliberately remains image-independent.
 
 The bounded Engine facts do not expose the daemon's `default-ulimits`
 configuration. An empty `default-ulimits` policy is therefore a trusted
@@ -157,9 +167,12 @@ custody deterministically maps profile admission plus job slots 1 through 256
 to disjoint front networks and transit addresses; collisions, overlap, or
 insufficient transit capacity fail without an alternate allocation scan.
 
-Create, attach, inspect, and endpoint operations re-attest the complete shared
-transit and all attached peer proxies under one cancellation-aware 30-second
-budget. Destroy skips shared-transit and container-runtime/image re-attestation,
+Create, attach, inspect, and endpoint operations re-attest the imported image,
+the complete shared transit, and all attached peer proxies under one
+cancellation-aware 30-second budget. The transit label set is exact, uses
+Results-transport schema 2, and binds installation ID, selector key, Compose
+project, resource kind, and the desired-plan digest. Destroy skips
+shared-transit and container-runtime/image re-attestation,
 so damage there does not by itself block removal of containers whose immutable
 custody remains exact. Exact front-network drift blocks destroy before mutation;
 a foreign endpoint prevents deletion of the front network after owned containers

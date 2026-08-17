@@ -380,8 +380,9 @@ checkpoints.
 
 The ignored fixed-relay Local Docker conformance fixture requires an existing
 installation anchor, the explicit `/run/automata-engine/docker.sock` relay,
-already-present digest-pinned Linux job, sandbox-guest, and service-proxy
-images, and the exact externally provisioned Results transit and target. The
+already-present digest-pinned Linux job and sandbox-guest images, the exact
+daemon-local imported service-proxy identity, and the desired-plan-bound,
+externally provisioned Results transit and target. The
 relay must front rootful Docker with daemon-default user-namespace remapping
 enabled; the
 built-in seccomp and private-cgroup-namespace security options must be reported,
@@ -401,7 +402,9 @@ AUTOMATA_LOCAL_DOCKER_INSTALLATION='evaluation' \
 AUTOMATA_LOCAL_DOCKER_INSTALLATION_ID='6e561f8b-9098-418d-b573-d82f5c73006e' \
 AUTOMATA_LOCAL_DOCKER_JOB_IMAGE='registry.example/automata/job@sha256:<64-lowercase-hex>' \
 AUTOMATA_LOCAL_DOCKER_GUEST_IMAGE='registry.example/automata/sandbox-guest@sha256:<64-lowercase-hex>' \
-AUTOMATA_LOCAL_DOCKER_RESULTS_PROXY_IMAGE='registry.example/automata/service-proxy@sha256:<64-lowercase-hex>' \
+AUTOMATA_LOCAL_DOCKER_RESULTS_PROXY_CONFIG_IMAGE_ID='sha256:<64-lowercase-hex>' \
+AUTOMATA_LOCAL_DOCKER_RESULTS_PROXY_MANIFEST_IMAGE_ID='sha256:<64-lowercase-hex>' \
+AUTOMATA_LOCAL_DOCKER_DESIRED_PLAN_SHA256='<64-lowercase-hex>' \
 AUTOMATA_LOCAL_DOCKER_RESULTS_TRANSIT_NETWORK_ID='<64-lowercase-hex>' \
 AUTOMATA_LOCAL_DOCKER_RESULTS_CONTAINER_ID='<64-lowercase-hex>' \
 AUTOMATA_LOCAL_DOCKER_RESULTS_ADDRESS='10.91.0.2' \

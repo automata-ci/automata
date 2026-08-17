@@ -4,7 +4,7 @@
 - Available slice: read-only `automata local doctor`, source-only
   `automata local check`, x86-64 Linux-only sealed `automata local init`,
   recorded-metadata `status`, exact confirmed `reset`, and explicit
-  runner-schema-6 evaluation through the fixed-relay `LocalDocker` provider;
+  runner-schema-7 evaluation through the fixed-relay `LocalDocker` provider;
   init starts no services and there is no `automata local run`, `up`, or `down`
   yet
 - Current implementation checkpoints: 2B.1 pinned Docker context and immutable
@@ -207,7 +207,7 @@ onboarding path:
 | `automata local doctor` | Cross-platform host, Docker, Compose, and architecture preflight | It is deliberately read-only; checkpoint 2A retired checkpoint 1's proposed native state-root input, and checkpoint 2B.1 makes installation identity engine-owned |
 | `automata local check` | Deterministic bounded live-worktree archive, exact `.github/workflows` selection, local-only manual event compilation, reachable same-snapshot reusable workflows with typed call-graph and root-secret propagation, and value-free external/built-in credential discovery | It is deliberately read-only and fails closed on Windows; repository identity, local admission, scheduling, execution, and GitHub Checks remain absent |
 | `automata local init`, `status`, and `reset` | x86-64 Linux-only exact-socket identity/image/volume adoption, host material and one-time certificate custody, fixed materialization, sealed canonical desired intent, read-only recorded-custody inspection, and exact confirmed teardown | Status does not live-attest volume contents; reset requires an authority-bound epoch plus complete post-guard Engine custody and retains images; convergence, bootstrap, `up`, and `down` remain absent |
-| `automata-ci-local` Docker boundary | Exact-endpoint anchor and sealed-init management plus a private fixed-relay provider with deterministic closed Results topology | Convergent lifecycle must provision and reattest the renderer-owned shared transit/listener |
+| `automata-ci-local` Docker boundary | Exact-endpoint anchor and sealed-init management plus a private fixed-relay provider with deterministic closed Results topology | Convergent lifecycle must provision and reattest the lifecycle-created, Compose-external shared transit and rendered Results listener |
 | Control-plane configuration and container build | Complete server configuration and product images | Configuration and bootstrap are manual and Unix-oriented |
 | GitHub workflow crates | Frontend, compiler, typed workflow contracts, reusable-workflow handling | They need a separately authorized local snapshot source |
 | Workflow service | Credential requirement discovery, admission, and orchestration boundaries | It needs local provenance as an additional source authority |
@@ -862,7 +862,7 @@ renderer does not invent a shell client, test helper, compatibility alias, or
 placeholder service-init command.
 The initializer and server share the production S3 connection parser and the
 sole validated-config-to-store AWS SDK construction boundary. Runner product
-schema 6 independently requires the same closed
+schema 7 independently requires the same closed
 trust choice for every runner-side S3 client. Local HTTPS rendering selects
 exact private-CA trust and mounted bounded `SecretSource` file references for
 the CA and credentials on all three surfaces; the private root is never merged
@@ -886,16 +886,20 @@ the desired `N`, profile, render inputs, data, and run history.
 ### 3A. `LocalDocker` provider
 
 Status: evaluation provider and its closed Results gateway foundation are
-implemented behind the existing sandbox/provider interfaces. The provider
+implemented behind the existing sandbox/provider interfaces. Runner product
+schema 7 binds the sealed desired-plan digest and the exact classic/config-ID
+or containerd/manifest-ID representation of the imported proxy. The provider
 requires Docker Engine 28/API 1.48 and consumes one externally provisioned
-transit network, running numeric Results target, and protocol-2 proxy image. It
+plan-labeled transit network, running numeric Results target, and protocol-2
+proxy image. It
 deterministically maps profile admission plus job slots 1 through 256 to
 disjoint `/29` front networks and transit addresses. Jobs join only their front
 network; the proxy alone bridges that front to the internal transit at fixed
 port 8081, with no public egress or external DNS.
 
-Create, attach, inspect, and endpoint operations re-attest the shared transport
-and every attached peer under one bounded cancellation-aware budget. Destroy
+Create, attach, inspect, and endpoint operations re-attest the imported-image
+representation, shared transport, and every attached peer under one bounded
+cancellation-aware budget. Destroy
 skips shared-transit and container-runtime/image re-attestation, so damage there
 does not by itself block removal of containers with exact immutable custody.
 Exact front-network drift blocks destroy before mutation; a foreign endpoint
@@ -906,9 +910,9 @@ Gate: shell and JavaScript-action sandboxes execute; restart attach and exact
 cancellation work; realized configuration is inspected; foreign collisions
 fail without mutation; prohibited privilege, namespace, bind, device, socket,
 and network requests fail closed; output/copy bounds hold; and destroy leaves no
-owned job resources. The renderer-owned transit/listener, local repository
-authority, Results/cache URL and token injection, and `automata local run`
-composition remain separate gates.
+owned job resources. The future lifecycle-created, Compose-external
+transit/listener, local repository authority, Results/cache URL and token
+injection, and `automata local run` composition remain separate gates.
 
 ### 3B. `LocalSnapshot` source adapter
 
