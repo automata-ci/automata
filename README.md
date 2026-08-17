@@ -1,147 +1,200 @@
 # Automata
 
-[![License: MIT](https://img.shields.io/badge/license-MIT-2f6f68.svg)](LICENSE)
+Automata runs GitHub Actions workflows on infrastructure you control. It
+accepts repository events, compiles workflow YAML into an immutable execution
+plan, schedules jobs, runs them in isolated sandboxes, streams logs, stores
+artifacts and caches, and reports results through its web interface and GitHub
+Checks.
 
-Automata is a self-hosted control plane and runner for GitHub Actions-compatible
-workflows. It accepts authenticated GitHub events, plans work from
-`.ci/workflows/`, schedules fenced job attempts, and executes them through an
-isolated runner provider on infrastructure you control.
+The end-to-end workflow path works from source. Automata has not published a
+release and has not completed its production-acceptance or full GitHub Actions
+conformance gates. Expect interfaces and deployment requirements to change,
+and check [GitHub Actions compatibility](docs/compatibility.md) before relying
+on a workflow feature.
 
-Public CI runs and runner-redacted logs for this repository are available on
-the [Automata CI dashboard](https://ci.automata-ci.com/automata-ci/automata/actions).
+Automata runs this repository's own CI. The
+[public dashboard](https://ci.automata-ci.com/automata-ci/automata/actions)
+shows push and pull-request runs, jobs, runner-redacted logs, and artifacts.
 
-> [!WARNING]
-> Automata is pre-1.0 software for development and evaluation. No public
-> release has been published, and the complete production composition has not
-> passed its end-to-end compatibility gate. Build from a reviewed source
-> checkout; do not use the documented crate or container names as if artifacts
-> had been published.
+## Try the interface
 
-## Implementation status
-
-Automata reads GitHub Actions workflow and action syntax, but parsing a feature
-does not make it compatible. The status below describes the strongest evidence
-in this repository; the [compatibility contract](docs/compatibility.md) owns the
-detailed feature matrix and acceptance criteria.
-
-| Product area | Status | Implemented boundary |
-| --- | --- | --- |
-| Workflow parsing and planning | Component complete | Strict YAML diagnostics, expressions, matrices, dependencies, conditions, outputs, workflow concurrency, reusable-workflow foundations, and per-job resource requests compile into immutable logical plans and JobIR. |
-| GitHub integration | Experimental | Signed `push`, `pull_request`, `merge_group`, and `repository_dispatch` ingress; public and private source delivery; scheduled-workflow foundations; scoped GitHub App credentials; and fenced Check Runs are composed. |
-| Scheduling and runner control | Experimental | PostgreSQL-backed orchestration, leases, fencing, cancellation, log replay, restart recovery, one-use runner enrollment, and direct HTTP/2 over mutual TLS are composed. |
-| Actions, artifacts, and cache | Component complete | JavaScript and nested composite action execution, exact-commit public action resolution with verified shared and runner-local caches, job summaries, annotations, the Results artifact protocol used by `actions/upload-artifact` v7.0.1, and CacheService v2 used by `actions/cache` 5.0.5 have focused coverage. |
-| Authentication and UI | Component complete | GitHub browser and device login, tenant RBAC, CLI sessions, repository visibility, management APIs, and server-rendered repository, run, job, and administration pages are composed. |
-| Secrets and workload identity | Experimental | Versioned managed-secret custody and delivery, protected-environment review contracts, and GitHub-compatible workload OIDC are implemented behind eligibility and capability gates. |
-| Operations | Component complete | Dependency-aware health and readiness, bounded Prometheus/OpenMetrics schemas, PostgreSQL migrations, immutable S3-compatible storage, optional private shard-management gRPC, workspace provisioning, and entitlement application have boundary or PostgreSQL coverage. |
-
-The primary Linux execution path creates rootless Podman sandboxes without
-giving jobs the host Podman socket or control-plane credentials. The workspace
-also contains an experimental Kubernetes provider, disposable
-Virtualization.framework macOS VMs, and Hyper-V-isolated Windows containers.
-Those platform paths still require the acceptance evidence described in their
-operator guides. The Windows path admits only `run:` steps and is not approved
-for hostile or production workloads.
-
-Notable unsupported workflow features include container actions, job
-containers, job-level concurrency, and deployment-environment syntax. Service
-containers, workflow reruns, scheduled workflows, reusable workflows, managed
-secrets, OIDC, and Buildx/BuildKit have narrower experimental or component-only
-boundaries. Check [Compatibility](docs/compatibility.md) before evaluating a
-workflow.
-
-## Check a local host and workflow
-
-Automata includes a read-only preflight for the planned disposable local
-installation. It checks the supported host tuple, Docker Engine, Docker Compose
-2.20.0 or newer without creating host state or any containers:
+You need Git, [rustup](https://rustup.rs/), and a native C/C++ build toolchain.
+The repository pins its Rust toolchain in `rust-toolchain.toml`.
 
 ```console
-cargo run --locked -p automata-ci -- local doctor
-cargo run --locked -p automata-ci -- local doctor --json
+git clone https://github.com/automata-ci/automata.git
+cd automata
+cargo run --locked --bin automata -- preview
 ```
 
-From a Git worktree, the source-only check seals tracked and non-ignored live
-bytes once, selects an explicit local `workflow_dispatch`, compiles reachable
-same-snapshot reusable workflows, validates their typed call contracts and call
-graph, propagates mapped or inherited root secret requirements, and reports
-static secret and variable names without admitting or running anything:
+Open <http://127.0.0.1:8080>. Verify the process from another terminal:
 
 ```console
-cargo run --locked -p automata-ci -- local check
-cargo run --locked -p automata-ci -- local check .github/workflows/ci.yml \
-  --input target=staging --json
+curl --fail http://127.0.0.1:8080/healthz
+curl --fail http://127.0.0.1:8080/readyz
 ```
 
-Omit the canonical repository-relative workflow path only when the repository
-contains exactly one direct workflow. Input values are used only in the
-bounded in-process compiler and are excluded from reports and debug output.
+Preview mode serves the server-rendered interface and health endpoints without
+external services. It does not accept webhooks, schedule jobs, connect to
+runners, or expose the Results API. The
+[hosted demo](https://automata-ci.github.io/automata/) shows the same interface
+with sample data and cannot execute workflows.
 
-`automata local run` and `automata local up` are planned and are not present in
-the command. The durable development assembly remains the supported way to
-exercise the complete control plane from a source checkout.
+To run workflows, configure the complete server and at least one runner. Start
+with the [`automata` configuration reference](crates/automata-ci/README.md) and
+the [Linux runner bootstrap guide](crates/automata-ci-runner/config/README.md).
 
-## How it works
+## What works
+
+Automata's complete path connects these components:
 
 ```text
- GitHub webhooks and source                 Browser / operator CLI
-              |                                      |
-              +-------------- automata --------------+
-                              |   |   |
-                       PostgreSQL | S3-compatible storage
-                                  |
-                  fenced JobIR leases over direct mTLS
-                                  |
-                         automata-runner
-                                  |
-                    configured sandbox provider
-                 /          |          |             \
-       rootless Podman  Local Docker*  Kubernetes Pod  macOS VM / Windows
+GitHub events                 Browser and operator CLI
+      |                                 |
+      +------------ automata -----------+
+                         |
+                  PostgreSQL and S3
+                         |
+               fenced leases over mTLS
+                         |
+                 automata-runner
+                         |
+             configured sandbox provider
 ```
 
-`Local Docker*` is an explicit schema-6 runner evaluation path through the
-fixed installation relay; `automata local run` is not implemented yet.
+The mainline source includes:
 
-`automata` owns event admission, workflow planning, durable orchestration,
-Results and management APIs, GitHub publication, and the web interface.
-`automata-runner` proves its live capabilities, accepts fenced leases, executes
-steps through one configured sandbox provider, streams redacted logs, and
-reconciles interrupted work.
+- authenticated GitHub App webhooks, source delivery, scheduled and manually
+  dispatched workflows, fenced Check Runs, and scoped repository credentials;
+- a loss-aware GitHub Actions workflow frontend with expressions, matrices,
+  dependencies, reusable-workflow foundations, JavaScript actions, composite
+  actions, workflow-level concurrency, outputs, and command files;
+- PostgreSQL-backed admission, scheduling, leases, reruns, runner enrollment,
+  authentication, authorization, managed-secret metadata, and result state;
+- S3-compatible immutable storage for workflow and action bundles, logs,
+  artifacts, and CacheService v2 data;
+- mutually authenticated runner sessions with fencing, certificate renewal,
+  cancellation, restart recovery, secret masking, and resumable live logs;
+- rootless Podman execution on Linux, plus experimental Kubernetes, local
+  Docker, macOS Virtualization.framework, and Windows Hyper-V-container
+  provider work at different qualification stages; and
+- a React interface rendered on the server inside a resource-limited WASI
+  component, with browser-side filtering and reconnecting live-log streams.
 
-PostgreSQL coordinates mutable state. S3-compatible storage holds immutable
-workflow and action bundles, log segments, artifacts, cache objects, and final
-manifests. The React interface renders on the server inside a resource-limited
-WASI component; Node.js is a build dependency, not a server dependency.
+These are not all at the same release stage. In particular:
 
-Read [Architecture](docs/architecture.md) for the workflow, storage, protocol,
-and trust boundaries.
+| Area | Status | Boundary |
+| --- | --- | --- |
+| Web preview | Available | Source-build UI and health endpoints only; no workflow execution |
+| Local host and workflow checks | Available | Read-only source-build inspection; no admission or execution |
+| GitHub-to-runner workflow execution | Experimental | Runs real workflows; operating requirements and supported syntax may change |
+| GitHub provider and Checks | Experimental | Authenticated ingress and result projection are composed; production acceptance remains open |
+| Workflow parsing and planning | Component complete | The supported subset feeds real execution; broader GitHub Actions parity remains open |
+| JavaScript and composite actions | Component complete | Exact-commit public actions and supported local composites have focused coverage |
+| Artifacts and CacheService v2 | Component complete | Durable upload, verified reads, signed downloads, and current/default-branch cache lookup have focused coverage |
+| Authentication and UI | Component complete | Tenant RBAC, management APIs, browser forms, repository visibility, and server-rendered run pages are composed |
+| Managed secrets and workload OIDC | Experimental | Implemented behind workflow-eligibility, deployment, and runner-capability gates |
+| Public packages and images | Not published | Build from a reviewed source checkout |
 
-## Documentation
+The [compatibility table](docs/compatibility.md) is the source of truth for
+supported events, syntax, actions, services, artifacts, caches, secrets, OIDC,
+and sandbox providers. Notable gaps include container actions, job containers,
+deployment-environment syntax, and job-level concurrency; Automata rejects
+unsupported behavior instead of silently sending work to GitHub-hosted
+runners.
 
-| Goal | Guide |
+Connected repositories keep Automata workflows under `.ci/workflows`.
+Automata does not use `.github/workflows` as an execution fallback, so a job is
+never routed to GitHub-hosted runners when Automata lacks a feature.
+
+## Commands
+
+The workspace builds two product commands:
+
+| Command | Purpose |
 | --- | --- |
-| Build from source and inspect the interface | [Getting started](docs/getting-started.md) |
-| Check support for a workflow feature | [Compatibility](docs/compatibility.md) |
-| Configure the control-plane command | [`automata` configuration](crates/automata-ci/README.md) |
-| Enroll and configure an execution host | [Runner bootstrap](crates/automata-ci-runner/config/README.md) |
-| Configure login, authorization, secrets, and repository visibility | [Authentication and authorization](docs/authentication.md) |
-| Monitor the control plane and runners | [Prometheus and OpenMetrics](docs/observability.md) |
-| Rerun a completed workflow | [Workflow reruns](docs/workflow-reruns.md) |
-| Understand the system design | [Architecture](docs/architecture.md) |
-| Build, test, or change the code | [Development](docs/development.md) |
-| Find every document | [Documentation index](docs/README.md) |
+| `automata` | Run the control plane and use its preview, local inspection, authentication, secret, environment-review, rerun, runner-management, and administration operations |
+| `automata-runner` | Enroll an execution host, inspect its capabilities, and execute leased jobs through one configured sandbox provider |
 
-Platform-specific guides document the current implementation contracts for
-[macOS VMs](docs/platforms/macos.md) and
-[Windows Hyper-V containers](docs/platforms/windows.md).
+Build and install both commands from the same reviewed checkout:
 
-## Contributing
+```console
+cargo install --path crates/automata-ci --locked
+cargo install --path crates/automata-ci-runner --locked
+automata --version
+automata-runner --version
+```
 
-Bug reports, compatibility fixtures, design feedback, and focused code changes
-are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) before changing the code
-and [SECURITY.md](SECURITY.md) to report a vulnerability privately. Larger
-changes should start with the open gates in the
-[implementation plan](docs/implementation-plan.md).
+No crates.io package, release archive, or GHCR product image is public until an
+exact version appears in that registry and in
+[GitHub Releases](https://github.com/automata-ci/automata/releases).
 
-## License
+### Inspect a local repository
 
-[MIT](LICENSE) © 2026 Alexander Dzhoganov.
+`automata local doctor` checks the supported host tuple, Docker Engine, and
+Compose plugin without creating containers or local state:
+
+```console
+automata local doctor
+automata local doctor --json
+```
+
+From a Git worktree, `automata local check` analyzes an exact snapshot without
+network access, a GitHub token, workflow admission, or execution:
+
+```console
+automata local check .github/workflows/ci.yml
+```
+
+The selected workflow must be a direct `.github/workflows/*.yml` or `.yaml`
+file with `workflow_dispatch`. The command validates reachable local reusable
+workflows and reports required credentials without exposing values. See the
+[local installation boundary](crates/automata-ci-local/README.md) for the
+snapshot and platform limits.
+
+## Architecture
+
+`automata` owns the human API, GitHub ingress, scheduler, Results gateway,
+runner control plane, and web interface. PostgreSQL is the authority for
+mutable state and coordination. S3-compatible storage holds immutable payloads;
+it is never used as a lock or queue.
+
+`automata-runner` accepts a job only after its configured provider passes host
+admission. Each attempt carries a lease ID, an increasing fencing token, and a
+negotiated capability snapshot. A delayed or restarted runner can replay an
+acknowledged operation, but it cannot commit through an expired lease.
+
+Workflow-specific behavior stops before scheduling. The GitHub frontend
+produces a logical plan, activation resolves run-dependent values and bounded
+matrix expansion, and the scheduler leases provider-neutral Job IR. Runners do
+not parse workflow YAML or evaluate provider syntax.
+
+Read the [architecture overview](docs/architecture.md) for the data flow,
+storage model, recovery behavior, protocol boundaries, and trust domains.
+
+## Develop Automata
+
+Automata is a Rust 2024 workspace. The embedded React interface uses Node.js
+only at build time.
+
+```console
+cargo build --workspace --locked
+cargo test -p automata-ci-core --locked
+```
+
+The full repository checks include Rust formatting, Clippy, unit and
+integration tests, documentation, workflow security checks, frontend tests,
+and production builds. Some suites require PostgreSQL, S3-compatible storage,
+Podman, platform-specific hosts, or extra build tools.
+
+- [Development guide](docs/development.md)
+- [Contributing guide](CONTRIBUTING.md)
+- [Documentation index](docs/README.md)
+- [Implementation and acceptance gates](docs/implementation-plan.md)
+- [Security policy](SECURITY.md)
+
+Report vulnerabilities through the private route in the security policy, not
+a public issue. Other contributions and compatibility reports are welcome
+under the [code of conduct](CODE_OF_CONDUCT.md).
+
+Automata is licensed under the [MIT License](LICENSE).
