@@ -398,6 +398,27 @@ impl HumanSignInFinalizer for PostgresHumanSignInFinalizer {
                 }
             };
             let now_ms = consumed.observed_at_ms();
+            let admitted_at_ms = database_time_milliseconds(&mut transaction)
+                .await
+                .map_err(map_database_error)?;
+            let admitted_at = validate_caller_time(now, admitted_at_ms)
+                .map_err(|()| SignInFinalizerError::InvalidRequest)?;
+            // Database time is the admission authority. Reject authority that
+            // is already dead before token encryption or any durable write;
+            // the second check immediately before commit closes the time spent
+            // performing those operations.
+            if consumed.expires_at_ms() <= admitted_at_ms
+                || retry
+                    .provider_tokens()
+                    .metadata()
+                    .access_expires_at()
+                    .is_none_or(|expires_at| expires_at <= admitted_at)
+                || retry.membership().valid_until() <= admitted_at
+                || session.idle_expires_at() <= admitted_at
+                || session.expires_at() <= admitted_at
+            {
+                return Ok(FinalizeSignInOutcome::Expired);
+            }
             if let Some(conflict) = pending_session_conflict(&mut transaction, &session).await? {
                 return Ok(FinalizeSignInOutcome::SessionConflict {
                     conflict,
@@ -552,14 +573,11 @@ impl HumanSignInFinalizer for PostgresHumanSignInFinalizer {
             let completed_at_ms = database_time_milliseconds(&mut transaction)
                 .await
                 .map_err(map_database_error)?;
-            validate_caller_time(now, completed_at_ms)
-                .map_err(|()| SignInFinalizerError::InvalidRequest)?;
             let completed_at = timestamp_from_milliseconds(completed_at_ms)
                 .map_err(|()| SignInFinalizerError::IntegrityFailure)?;
-            // The request clock is only skew evidence. Provider and membership
-            // authority must still be live at fresh database time after the KMS
-            // and membership writes, immediately before the session transaction
-            // is allowed to commit.
+            // Provider and membership authority must remain live at fresh
+            // database time after the KMS and membership writes, immediately
+            // before the session transaction is allowed to commit.
             if consumed.expires_at_ms() <= completed_at_ms
                 || retry
                     .provider_tokens()
