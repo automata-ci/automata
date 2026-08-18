@@ -241,6 +241,10 @@ const CANONICAL_MIGRATIONS: &[(&str, &str)] = &[
         "0059_provider_runner_policy_revision.sql",
         "16f98a4cbb0b60b6145787bc5a38b8f37228b52cb7e6512a6738fcd24b483542adbadbf0fbf59bd0fd4ba7e53c3e6f76",
     ),
+    (
+        "0060_provider_installation_binding_generation.sql",
+        "ce1b6174a6e19b1b67a090dbaeb3dfbd08b16bdd3c6253ec0be60a64ec9894f67cee662076ba3307a52f2ecc01b74573",
+    ),
 ];
 
 const BASELINE_MIGRATION_COUNT: u32 = 26;
@@ -417,6 +421,23 @@ fn provider_runner_policy_revision_is_independent_and_positive() {
         assert!(
             source.contains(required),
             "provider runner-policy revision migration lost required contract: {required}"
+        );
+    }
+}
+
+#[test]
+fn provider_installation_binding_generation_is_independent_and_durable() {
+    let source = include_str!("../migrations/0060_provider_installation_binding_generation.sql");
+
+    for required in [
+        "ADD COLUMN installation_binding_generation bigint NOT NULL DEFAULT 1",
+        "ALTER COLUMN installation_binding_generation DROP DEFAULT",
+        "CREATE TABLE workspace_github_repository_installation_bindings",
+        "CHECK (installation_binding_generation > 0)",
+    ] {
+        assert!(
+            source.contains(required),
+            "provider installation-binding migration lost required contract: {required}"
         );
     }
 }

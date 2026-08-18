@@ -499,6 +499,7 @@ impl fmt::Debug for AuthorizedApplyGithubProviderConfiguration {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GithubProviderRepositorySelection {
     installation_id: ProviderInstallationId,
+    installation_binding_generation: u64,
     repository_id: ProviderRepositoryId,
     repository_owner_id: ProviderRepositoryOwnerId,
     repository_name: GithubRepositoryName,
@@ -537,6 +538,7 @@ impl GithubProviderRepositorySelection {
         }
         Ok(Self {
             installation_id,
+            installation_binding_generation: 1,
             repository_id,
             repository_owner_id,
             repository_name,
@@ -550,6 +552,28 @@ impl GithubProviderRepositorySelection {
     #[must_use]
     pub const fn installation_id(&self) -> ProviderInstallationId {
         self.installation_id
+    }
+
+    /// Restores the independently versioned installation binding.
+    ///
+    /// # Errors
+    ///
+    /// Rejects zero, which is outside the durable generation domain.
+    pub fn with_installation_binding_generation(
+        mut self,
+        generation: u64,
+    ) -> Result<Self, GithubProviderValueError> {
+        if generation == 0 {
+            return Err(GithubProviderValueError::InvalidRepository);
+        }
+        self.installation_binding_generation = generation;
+        Ok(self)
+    }
+
+    /// Returns the independent installation-binding generation.
+    #[must_use]
+    pub const fn installation_binding_generation(&self) -> u64 {
+        self.installation_binding_generation
     }
 
     /// Returns the stable numeric GitHub repository identity.

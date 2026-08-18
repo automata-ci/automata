@@ -423,6 +423,13 @@ impl PostgresWorkspaceGithubRepositoriesApplier {
         .await
         .map_err(workspace_database_failure)?;
         for (ordinal, repository) in command.repositories().iter().enumerate() {
+            let installation_binding_generation = advance_installation_binding(
+                &mut transaction,
+                &workspace_text,
+                revision_i64,
+                repository,
+            )
+            .await?;
             insert_repository_selection(
                 &mut transaction,
                 &workspace_text,
@@ -430,6 +437,7 @@ impl PostgresWorkspaceGithubRepositoriesApplier {
                 revision_i64,
                 i32::try_from(ordinal).map_err(|_| workspace_internal())?,
                 repository,
+                installation_binding_generation,
             )
             .await?;
         }
@@ -537,6 +545,7 @@ impl PostgresGithubProviderDesiredStateReader {
             r"
             SELECT selections.workspace_id, selections.revision,
                    selections.provider_installation_id,
+                   selections.installation_binding_generation,
                    selections.provider_repository_id,
                    selections.provider_repository_owner_id,
                    selections.repository_name, selections.default_branch,
@@ -740,6 +749,7 @@ struct RepositorySelectionRow {
     workspace_id: String,
     revision: i64,
     provider_installation_id: i64,
+    installation_binding_generation: i64,
     provider_repository_id: i64,
     provider_repository_owner_id: i64,
     repository_name: String,
@@ -752,6 +762,7 @@ impl RepositorySelectionRow {
     fn decode(
         self,
     ) -> Result<GithubProviderRepositorySelection, GithubProviderDesiredStateFailure> {
+        let installation_binding_generation = positive_u64(self.installation_binding_generation)?;
         GithubProviderRepositorySelection::new(
             ProviderInstallationId::new(positive_u64(self.provider_installation_id)?)
                 .map_err(|_| desired_corrupt())?,
@@ -772,6 +783,9 @@ impl RepositorySelectionRow {
                 _ => return Err(desired_corrupt()),
             },
         )
+        .and_then(|selection| {
+            selection.with_installation_binding_generation(installation_binding_generation)
+        })
         .map_err(|_| desired_corrupt())
     }
 }
@@ -1148,6 +1162,7 @@ async fn insert_repository_selection(
     revision: i64,
     ordinal: i32,
     repository: &GithubProviderRepositorySelection,
+    installation_binding_generation: i64,
 ) -> Result<(), WorkspaceGithubRepositoriesFailure> {
     let visibility = match repository.visibility() {
         ProviderRepositoryVisibility::Public => "public",
@@ -1161,10 +1176,11 @@ async fn insert_repository_selection(
         r"
         INSERT INTO workspace_github_repository_selections (
             workspace_id, shard_id, revision, ordinal, provider_installation_id,
+            installation_binding_generation,
             provider_repository_id, provider_repository_owner_id,
             repository_name, default_branch, repository_visibility,
             authority_profile
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
         ",
     )
     .bind(workspace_id)
@@ -1172,6 +1188,7 @@ async fn insert_repository_selection(
     .bind(revision)
     .bind(ordinal)
     .bind(i64::try_from(repository.installation_id().get()).map_err(|_| workspace_internal())?)
+    .bind(installation_binding_generation)
     .bind(i64::try_from(repository.repository_id().get()).map_err(|_| workspace_internal())?)
     .bind(i64::try_from(repository.repository_owner_id().get()).map_err(|_| workspace_internal())?)
     .bind(repository.repository_name().as_str())
@@ -1182,6 +1199,88 @@ async fn insert_repository_selection(
     .await
     .map_err(workspace_database_failure)?;
     Ok(())
+}
+
+#[derive(FromRow)]
+struct InstallationBindingRow {
+    provider_installation_id: i64,
+    binding_generation: i64,
+}
+
+async fn advance_installation_binding(
+    transaction: &mut Transaction<'_, Postgres>,
+    workspace_id: &str,
+    workspace_revision: i64,
+    repository: &GithubProviderRepositorySelection,
+) -> Result<i64, WorkspaceGithubRepositoriesFailure> {
+    let repository_id =
+        i64::try_from(repository.repository_id().get()).map_err(|_| workspace_internal())?;
+    let installation_id =
+        i64::try_from(repository.installation_id().get()).map_err(|_| workspace_internal())?;
+    let current = sqlx::query_as::<_, InstallationBindingRow>(
+        r"
+        SELECT provider_installation_id, binding_generation
+        FROM workspace_github_repository_installation_bindings
+        WHERE workspace_id=$1 AND provider_repository_id=$2
+        FOR UPDATE
+        ",
+    )
+    .bind(workspace_id)
+    .bind(repository_id)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(workspace_database_failure)?;
+    let Some(current) = current else {
+        sqlx::query(
+            r"
+            INSERT INTO workspace_github_repository_installation_bindings (
+                workspace_id, provider_repository_id, provider_installation_id,
+                binding_generation, updated_at_revision
+            ) VALUES ($1,$2,$3,1,$4)
+            ",
+        )
+        .bind(workspace_id)
+        .bind(repository_id)
+        .bind(installation_id)
+        .bind(workspace_revision)
+        .execute(&mut **transaction)
+        .await
+        .map_err(workspace_database_failure)?;
+        return Ok(1);
+    };
+    if current.provider_installation_id == installation_id {
+        return Ok(current.binding_generation);
+    }
+    let next_generation = current
+        .binding_generation
+        .checked_add(1)
+        .ok_or_else(workspace_internal)?;
+    let updated = sqlx::query(
+        r"
+        UPDATE workspace_github_repository_installation_bindings
+        SET provider_installation_id=$3,
+            binding_generation=$4,
+            updated_at_revision=$5
+        WHERE workspace_id=$1
+          AND provider_repository_id=$2
+          AND provider_installation_id=$6
+          AND binding_generation=$7
+        ",
+    )
+    .bind(workspace_id)
+    .bind(repository_id)
+    .bind(installation_id)
+    .bind(next_generation)
+    .bind(workspace_revision)
+    .bind(current.provider_installation_id)
+    .bind(current.binding_generation)
+    .execute(&mut **transaction)
+    .await
+    .map_err(workspace_database_failure)?;
+    if updated.rows_affected() != 1 {
+        return Err(workspace_internal());
+    }
+    Ok(next_generation)
 }
 
 fn provider_configuration_digest(

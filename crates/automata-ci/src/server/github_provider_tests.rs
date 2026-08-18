@@ -655,6 +655,7 @@ fn database_desired_state_derives_stable_runtime_identities_and_revisions() {
     assert_eq!(first_repository.manifest_revision().get(), 5);
     assert_eq!(first_repository.policy_revision().get(), 5);
     assert_eq!(first_repository.runtime_policy_revision().get(), 2);
+    assert_eq!(first_repository.installation_binding_generation().get(), 1);
     assert_eq!(
         first_repository.connection_id(),
         second_repository.connection_id()
