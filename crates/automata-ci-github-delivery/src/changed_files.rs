@@ -3,7 +3,7 @@ use std::{fmt, time::Instant};
 use async_trait::async_trait;
 use automata_ci_core::GitObjectId;
 use automata_ci_core::Sha256Digest;
-use automata_ci_github::{
+use automata_ci_provider_github::{
     GithubHttpEndpoint, GithubPullRequestDiffAuthority, GithubPullRequestDiffOutcome,
     GithubPullRequestDiffRequest, GithubPushDiffAuthority, GithubPushDiffOutcome,
     GithubPushDiffRange, GithubPushDiffRequest, GithubPushRefKind, GithubRepositoryVisibility,
@@ -276,6 +276,7 @@ fn translate_pull_request_outcome(
 ) -> GithubChangedFilesDisposition {
     match outcome {
         GithubPullRequestDiffOutcome::Complete(evidence) => {
+            let evidence = *evidence;
             GithubChangedFilesDisposition::Complete {
                 evidence_digest: core_digest(evidence.evidence_digest()),
                 files: evidence
@@ -292,12 +293,14 @@ fn translate_pull_request_outcome(
     }
 }
 
-fn core_digest(digest: automata_ci_github::GithubChangedFilesEvidenceDigest) -> Sha256Digest {
+fn core_digest(
+    digest: automata_ci_provider_github::GithubChangedFilesEvidenceDigest,
+) -> Sha256Digest {
     Sha256Digest::from_bytes(*digest.as_bytes())
 }
 
 fn changed_file_selection(
-    file: &automata_ci_github::GithubChangedFile,
+    file: &automata_ci_provider_github::GithubChangedFile,
 ) -> GithubChangedFileSelection {
     match file.previous_path() {
         Some(previous_path) => {
@@ -310,7 +313,7 @@ fn changed_file_selection(
 #[cfg(test)]
 mod tests {
     use automata_ci_auth::secret::SecretString;
-    use automata_ci_github::{
+    use automata_ci_provider_github::{
         GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE, GithubPushDiffIncompleteReason,
         GithubRepositoryVisibility, GithubWebhookBodyDigest, StoredAuthenticatedGithubWebhook,
         VerifiedGithubWebhook, rehydrate_stored_authenticated_github_webhook,

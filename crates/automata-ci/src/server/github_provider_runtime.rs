@@ -40,7 +40,6 @@ use automata_ci_credential_github::{
     PendingGithubServerServiceMintCommit, PendingGithubServerServiceRevocationCommit,
     PinnedGithubRuntimeAuthorityMintBroker,
 };
-use automata_ci_github::{GithubHttpEndpoint, GithubHttpLimits, GithubWebhookVerifier};
 use automata_ci_github_delivery::{
     GithubChecksCredentialProvider, GithubChecksPublisher, GithubChecksPublisherConfig,
     GithubChecksPublisherError, GithubChecksPublisherOutcome, GithubDeliveryClock,
@@ -57,6 +56,7 @@ use automata_ci_github_delivery::{
 use automata_ci_key_management::{EnvelopeCodec, KeyEncryptionProvider};
 use automata_ci_protocol::RuntimeAuthorityEndpoint;
 use automata_ci_provider::ProviderConnectionId;
+use automata_ci_provider_github::{GithubHttpEndpoint, GithubHttpLimits, GithubWebhookVerifier};
 use automata_ci_scm::ScmProvider;
 use automata_ci_store::{
     GITHUB_PROVIDER_WEB_ORIGIN, GithubCheckProjectionOutbox, GithubCheckProjectionWorkerId,

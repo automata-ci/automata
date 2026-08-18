@@ -5,9 +5,16 @@ use std::{
     time::Instant,
 };
 
+use async_trait::async_trait;
 use automata_ci_auth::{github::GithubEndpointError, secret::SecretString};
 use automata_ci_core::GitObjectId;
-use automata_ci_scm::RepositoryId;
+use automata_ci_provider::{NormalizedTrigger, ProviderRepositoryPath, RepositoryVisibility};
+use automata_ci_scm::{
+    ChangedFile, ChangedFileIncompleteReason, ChangedFileNotApplicableReason,
+    ChangedFilePageAccumulator, ChangedFilePageEvidence, ChangedFileRead, ChangedFileReader,
+    ChangedFileRequest, RepositoryId, ScmError, ScmErrorKind,
+};
+use bytes::Bytes;
 use reqwest::{RequestBuilder, StatusCode, header::ACCEPT};
 use ring::digest::{Context as DigestContext, SHA256};
 use serde::Deserialize;
@@ -15,6 +22,7 @@ use url::Url;
 
 use crate::{
     endpoint::{GithubHttpEndpoint, authorization_header},
+    factory::decode_connection,
     repository_path,
     response::{JsonResponse, decode_json, read_json_response},
 };
@@ -296,6 +304,7 @@ pub struct GithubCompletePushDiff {
     selected_file_count: usize,
     changed_files: Vec<GithubChangedFile>,
     changed_paths: Vec<String>,
+    response_pages: Vec<Vec<u8>>,
     evidence_digest: GithubChangedFilesEvidenceDigest,
 }
 
@@ -310,6 +319,7 @@ pub struct GithubCompletePullRequestDiff {
     changed_paths: Vec<String>,
     total_changed_files: u64,
     page_digests: Vec<GithubChangedFilesEvidenceDigest>,
+    response_pages: Vec<Vec<u8>>,
     evidence_digest: GithubChangedFilesEvidenceDigest,
 }
 
@@ -398,9 +408,7 @@ impl fmt::Debug for GithubCompletePullRequestDiff {
 #[non_exhaustive]
 pub enum GithubPullRequestDiffOutcome {
     /// Complete evidence safe for path-filter evaluation.
-    Complete(GithubCompletePullRequestDiff),
-    /// Affirmative provider evidence says Actions bypassed path filters.
-    ProviderRunAll(GithubPushDiffIncompleteReason),
+    Complete(Box<GithubCompletePullRequestDiff>),
     /// Provider, transport, rate-limit budget, or deadline is temporarily unavailable.
     RetryableUnavailable,
     /// Evidence was malformed, mismatched, or unsupported and must fail closed.
@@ -474,8 +482,6 @@ impl fmt::Debug for GithubCompletePushDiff {
 pub enum GithubPushDiffOutcome {
     /// Complete evidence safe for path-filter evaluation.
     Complete(GithubCompletePushDiff),
-    /// Affirmative provider evidence says Actions bypassed path filters.
-    ProviderRunAll(GithubPushDiffIncompleteReason),
     /// Provider, transport, rate-limit budget, or deadline is temporarily unavailable.
     RetryableUnavailable,
     /// Evidence was malformed, mismatched, or unsupported and must fail closed.
@@ -653,7 +659,7 @@ impl GithubHttpEndpoint {
             deadline: request.deadline,
         };
         match self.compare_pull_request(request).await {
-            Ok(evidence) => GithubPullRequestDiffOutcome::Complete(evidence),
+            Ok(evidence) => GithubPullRequestDiffOutcome::Complete(Box::new(evidence)),
             Err(CompareFailure::Incomplete(reason)) => {
                 GithubPullRequestDiffOutcome::Invalid(reason)
             }
@@ -672,6 +678,7 @@ impl GithubHttpEndpoint {
             comparison_page_count(expected_commits.len(), self.trusted.limits().max_pages)?;
         let mut observed_commits = Vec::with_capacity(expected_commits.len());
         let mut changed_files = None;
+        let mut response_pages = Vec::with_capacity(page_count);
         for page_number in 1..=page_count {
             let endpoint = self.compare_url(
                 request.repository,
@@ -679,9 +686,10 @@ impl GithubHttpEndpoint {
                 request.after,
                 page_number,
             )?;
-            let response = self
+            let (response, response_body) = self
                 .fetch_compare_page(endpoint, request.authority, deadline)
                 .await?;
+            response_pages.push(response_body);
             validate_page_identity(&response, request.before, expected_commits.len())?;
             validate_page_length(&response, page_number, page_count, expected_commits.len())?;
             if page_number == 1 {
@@ -716,6 +724,7 @@ impl GithubHttpEndpoint {
             selected_file_count,
             changed_files,
             changed_paths,
+            response_pages,
             evidence_digest,
         })
     }
@@ -729,9 +738,10 @@ impl GithubHttpEndpoint {
         }
         let deadline = self.effective_compare_deadline(request.deadline)?;
         let snapshot_endpoint = self.pull_request_url(request.repository, request.number, None)?;
-        let initial = self
+        let (initial, initial_body) = self
             .fetch_pull_request_snapshot(snapshot_endpoint, request.authority, deadline)
             .await?;
+        let mut response_pages = vec![initial_body];
         validate_pull_request_snapshot(&initial, &request)?;
         let maximum_pull_request_files = u64::try_from(MAX_GITHUB_PULL_REQUEST_PATH_FILTER_FILES)
             .map_err(|_| invalid_evidence())?;
@@ -747,9 +757,10 @@ impl GithubHttpEndpoint {
         for page_number in 1..=page_count {
             let endpoint =
                 self.pull_request_url(request.repository, request.number, Some(page_number))?;
-            let files = self
+            let (files, page_body) = self
                 .fetch_pull_request_file_page(endpoint, request.authority, deadline)
                 .await?;
+            response_pages.push(page_body);
             let expected = if page_number < page_count {
                 PULL_REQUEST_FILES_PER_PAGE
             } else {
@@ -769,9 +780,10 @@ impl GithubHttpEndpoint {
             page_digests.push(page_digest);
         }
         let final_endpoint = self.pull_request_url(request.repository, request.number, None)?;
-        let final_snapshot = self
+        let (final_snapshot, final_body) = self
             .fetch_pull_request_snapshot(final_endpoint, request.authority, deadline)
             .await?;
+        response_pages.push(final_body);
         validate_pull_request_snapshot(&final_snapshot, &request)?;
         if final_snapshot != initial {
             return Err(invalid_evidence());
@@ -804,6 +816,7 @@ impl GithubHttpEndpoint {
             changed_paths,
             total_changed_files: initial.changed_files,
             page_digests,
+            response_pages,
             evidence_digest,
         })
     }
@@ -846,14 +859,15 @@ impl GithubHttpEndpoint {
         endpoint: Url,
         authority: &GithubPullRequestDiffAuthority<'_>,
         deadline: Instant,
-    ) -> Result<PullRequestSnapshot, CompareFailure> {
+    ) -> Result<(PullRequestSnapshot, Vec<u8>), CompareFailure> {
         let response = self
             .fetch_pull_request_json(endpoint, authority, deadline)
             .await?;
         if response.status != StatusCode::OK {
             return Err(invalid_evidence());
         }
-        decode_json(&response.body).map_err(classify_endpoint_error)
+        let decoded = decode_json(&response.body).map_err(classify_endpoint_error)?;
+        Ok((decoded, response.body.to_vec()))
     }
 
     async fn fetch_pull_request_file_page(
@@ -861,14 +875,15 @@ impl GithubHttpEndpoint {
         endpoint: Url,
         authority: &GithubPullRequestDiffAuthority<'_>,
         deadline: Instant,
-    ) -> Result<Vec<PullRequestFile>, CompareFailure> {
+    ) -> Result<(Vec<PullRequestFile>, Vec<u8>), CompareFailure> {
         let response = self
             .fetch_pull_request_json(endpoint, authority, deadline)
             .await?;
         if response.status != StatusCode::OK {
             return Err(invalid_evidence());
         }
-        decode_json(&response.body).map_err(classify_endpoint_error)
+        let decoded = decode_json(&response.body).map_err(classify_endpoint_error)?;
+        Ok((decoded, response.body.to_vec()))
     }
 
     async fn fetch_pull_request_json(
@@ -938,7 +953,7 @@ impl GithubHttpEndpoint {
         endpoint: Url,
         authority: &GithubPushDiffAuthority<'_>,
         deadline: Instant,
-    ) -> Result<ComparePage, CompareFailure> {
+    ) -> Result<(ComparePage, Vec<u8>), CompareFailure> {
         let remaining = deadline
             .checked_duration_since(Instant::now())
             .filter(|duration| !duration.is_zero())
@@ -952,8 +967,259 @@ impl GithubHttpEndpoint {
             read_json_response(response, self.trusted.limits().max_response_bytes, false)
                 .await
                 .map_err(classify_endpoint_error)?;
-        decode_compare_page(&response)
+        let decoded = decode_compare_page(&response)?;
+        Ok((decoded, response.body.to_vec()))
     }
+}
+
+#[async_trait]
+impl ChangedFileReader for GithubHttpEndpoint {
+    async fn read_changed_files(
+        &self,
+        request: ChangedFileRequest<'_>,
+    ) -> Result<ChangedFileRead, ScmError> {
+        let policy = decode_connection(request.connection().configuration().adapter_policy())
+            .map_err(|_| ScmError::new(ScmErrorKind::InvalidResponse))?;
+        if request
+            .trigger()
+            .trigger()
+            .target_repository()
+            .path()
+            .as_str()
+            != policy.repository().as_str()
+        {
+            return Err(ScmError::new(ScmErrorKind::InvalidResponse));
+        }
+        let deadline = Instant::now()
+            .checked_add(self.trusted.limits().request_timeout())
+            .ok_or_else(|| ScmError::new(ScmErrorKind::Unavailable))?;
+        match request.trigger().trigger() {
+            NormalizedTrigger::Push(push) => {
+                let range = match (push.before(), push.after(), push.forced()) {
+                    (_, _, true) => GithubPushDiffRange::Forced,
+                    (None, Some(_), false) => GithubPushDiffRange::Created,
+                    (Some(_), None, false) => GithubPushDiffRange::Deleted,
+                    (Some(before), Some(after), false) => GithubPushDiffRange::Existing {
+                        before,
+                        after,
+                        // The common trigger deliberately retains exact endpoints rather than
+                        // GitHub's provider-specific pushed-commit list. A multi-commit Compare
+                        // response therefore becomes explicit incomplete evidence below.
+                        pushed_commits: vec![after],
+                    },
+                    (None, None, false) => {
+                        return Err(ScmError::new(ScmErrorKind::InvalidResponse));
+                    }
+                };
+                let repository = RepositoryId::new(policy.repository().as_str())
+                    .map_err(|_| ScmError::new(ScmErrorKind::InvalidResponse))?;
+                let authority = push_authority(&request)?;
+                let outcome = self
+                    .push_changed_files(GithubPushDiffRequest::new(
+                        &repository,
+                        range,
+                        authority,
+                        deadline,
+                    ))
+                    .await;
+                translate_common_push(&request, outcome)
+            }
+            NormalizedTrigger::PullRequest(pull_request) => {
+                let repository = RepositoryId::new(policy.repository().as_str())
+                    .map_err(|_| ScmError::new(ScmErrorKind::InvalidResponse))?;
+                let head_repository =
+                    RepositoryId::new(pull_request.source_repository().path().as_str())
+                        .map_err(|_| ScmError::new(ScmErrorKind::InvalidResponse))?;
+                let number = pull_request
+                    .change_id()
+                    .as_str()
+                    .parse::<u64>()
+                    .ok()
+                    .and_then(NonZeroU64::new)
+                    .ok_or_else(|| ScmError::new(ScmErrorKind::InvalidResponse))?;
+                let base = pull_request.base_object();
+                let head = pull_request.head_object();
+                let authority = pull_request_authority(&request)?;
+                let outcome = self
+                    .pull_request_changed_files(GithubPullRequestDiffRequest::new(
+                        &repository,
+                        &head_repository,
+                        number,
+                        &base,
+                        &head,
+                        authority,
+                        deadline,
+                    ))
+                    .await;
+                translate_common_pull_request(&request, outcome)
+            }
+            NormalizedTrigger::MergeQueue(_) | NormalizedTrigger::RepositoryDispatch(_) => Ok(
+                ChangedFileRead::not_applicable(ChangedFileNotApplicableReason::EventClass),
+            ),
+        }
+    }
+}
+
+fn push_authority<'request>(
+    request: &'request ChangedFileRequest<'request>,
+) -> Result<GithubPushDiffAuthority<'request>, ScmError> {
+    match (
+        request.connection().configuration().visibility(),
+        request.credential(),
+    ) {
+        (RepositoryVisibility::Public, None) => Ok(GithubPushDiffAuthority::PublicAnonymous),
+        (RepositoryVisibility::Private | RepositoryVisibility::Internal, Some(credential)) => Ok(
+            GithubPushDiffAuthority::PrivateInstallationContentsRead(credential),
+        ),
+        _ => Err(ScmError::new(ScmErrorKind::Unauthorized)),
+    }
+}
+
+fn pull_request_authority<'request>(
+    request: &'request ChangedFileRequest<'request>,
+) -> Result<GithubPullRequestDiffAuthority<'request>, ScmError> {
+    match (
+        request.connection().configuration().visibility(),
+        request.credential(),
+    ) {
+        (RepositoryVisibility::Public, None) => Ok(GithubPullRequestDiffAuthority::PublicAnonymous),
+        (RepositoryVisibility::Private | RepositoryVisibility::Internal, Some(credential)) => {
+            Ok(GithubPullRequestDiffAuthority::PrivateInstallationPullRequestsRead(credential))
+        }
+        _ => Err(ScmError::new(ScmErrorKind::Unauthorized)),
+    }
+}
+
+fn translate_common_push(
+    request: &ChangedFileRequest<'_>,
+    outcome: GithubPushDiffOutcome,
+) -> Result<ChangedFileRead, ScmError> {
+    match outcome {
+        GithubPushDiffOutcome::Complete(complete) => {
+            let pages = common_page_evidence(request, &complete.response_pages)?;
+            let files = common_changed_files(complete.changed_files)?;
+            if files.len() > request.limits().maximum_files() {
+                return ChangedFileRead::incomplete(
+                    request,
+                    ChangedFileIncompleteReason::ProviderRecordLimit,
+                    complete.selected_file_count as u64,
+                    pages,
+                )
+                .map_err(common_evidence_error);
+            }
+            ChangedFileRead::complete(request, files, complete.selected_file_count as u64, pages)
+                .map_err(common_evidence_error)
+        }
+        GithubPushDiffOutcome::Invalid(reason) => translate_invalid(request, reason),
+        GithubPushDiffOutcome::RetryableUnavailable => {
+            Err(ScmError::new(ScmErrorKind::Unavailable))
+        }
+    }
+}
+
+fn translate_common_pull_request(
+    request: &ChangedFileRequest<'_>,
+    outcome: GithubPullRequestDiffOutcome,
+) -> Result<ChangedFileRead, ScmError> {
+    match outcome {
+        GithubPullRequestDiffOutcome::Complete(complete) => {
+            let complete = *complete;
+            let pages = common_page_evidence(request, &complete.response_pages)?;
+            if complete.total_changed_files
+                > u64::try_from(complete.selected_file_count).unwrap_or(u64::MAX)
+                || complete.selected_file_count > request.limits().maximum_files()
+            {
+                return ChangedFileRead::incomplete(
+                    request,
+                    ChangedFileIncompleteReason::ProviderRecordLimit,
+                    complete.total_changed_files,
+                    pages,
+                )
+                .map_err(common_evidence_error);
+            }
+            let files = common_changed_files(complete.changed_files)?;
+            ChangedFileRead::complete(request, files, complete.total_changed_files, pages)
+                .map_err(common_evidence_error)
+        }
+        GithubPullRequestDiffOutcome::Invalid(reason) => translate_invalid(request, reason),
+        GithubPullRequestDiffOutcome::RetryableUnavailable => {
+            Err(ScmError::new(ScmErrorKind::Unavailable))
+        }
+    }
+}
+
+fn common_changed_files(files: Vec<GithubChangedFile>) -> Result<Vec<ChangedFile>, ScmError> {
+    files
+        .into_iter()
+        .map(|file| {
+            let current = ProviderRepositoryPath::new(file.current_path)
+                .map_err(|_| ScmError::new(ScmErrorKind::InvalidResponse))?;
+            match file.previous_path {
+                Some(previous) => ChangedFile::renamed(
+                    ProviderRepositoryPath::new(previous)
+                        .map_err(|_| ScmError::new(ScmErrorKind::InvalidResponse))?,
+                    current,
+                )
+                .map_err(common_evidence_error),
+                None => Ok(ChangedFile::changed(current)),
+            }
+        })
+        .collect()
+}
+
+fn common_page_evidence(
+    request: &ChangedFileRequest<'_>,
+    pages: &[Vec<u8>],
+) -> Result<ChangedFilePageEvidence, ScmError> {
+    let mut evidence = ChangedFilePageAccumulator::new(request);
+    for page in pages {
+        evidence.begin_page().map_err(common_evidence_error)?;
+        evidence
+            .push_chunk(&Bytes::copy_from_slice(page))
+            .map_err(common_evidence_error)?;
+        evidence.finish_page().map_err(common_evidence_error)?;
+    }
+    evidence.finish().map_err(common_evidence_error)
+}
+
+fn incomplete_without_pages(
+    request: &ChangedFileRequest<'_>,
+    reason: ChangedFileIncompleteReason,
+) -> Result<ChangedFileRead, ScmError> {
+    let pages = ChangedFilePageAccumulator::new(request)
+        .finish()
+        .map_err(common_evidence_error)?;
+    ChangedFileRead::incomplete(request, reason, 0, pages).map_err(common_evidence_error)
+}
+
+fn translate_invalid(
+    request: &ChangedFileRequest<'_>,
+    reason: GithubPushDiffIncompleteReason,
+) -> Result<ChangedFileRead, ScmError> {
+    match reason {
+        GithubPushDiffIncompleteReason::CreatedPush => {
+            incomplete_without_pages(request, ChangedFileIncompleteReason::CreatedRef)
+        }
+        GithubPushDiffIncompleteReason::DeletedPush => {
+            incomplete_without_pages(request, ChangedFileIncompleteReason::DeletedRef)
+        }
+        GithubPushDiffIncompleteReason::DivergedPush => {
+            incomplete_without_pages(request, ChangedFileIncompleteReason::ForcedUpdate)
+        }
+        GithubPushDiffIncompleteReason::FileListCapped => {
+            incomplete_without_pages(request, ChangedFileIncompleteReason::ProviderRecordLimit)
+        }
+        GithubPushDiffIncompleteReason::InvalidEvidence => {
+            Err(ScmError::new(ScmErrorKind::InvalidResponse))
+        }
+        GithubPushDiffIncompleteReason::ProviderRejected => {
+            Err(ScmError::new(ScmErrorKind::Forbidden))
+        }
+    }
+}
+
+fn common_evidence_error(_error: automata_ci_scm::ChangedFileReadError) -> ScmError {
+    ScmError::new(ScmErrorKind::InvalidResponse)
 }
 
 fn invalid_evidence() -> CompareFailure {

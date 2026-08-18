@@ -1,5 +1,5 @@
 [package]
-name = "automata-ci-github"
+name = "automata-ci-provider-github"
 version.workspace = true
 edition.workspace = true
 autotests = false
@@ -26,6 +26,7 @@ automata-ci-auth.workspace = true
 automata-ci-blob.workspace = true
 automata-ci-core.workspace = true
 automata-ci-actions-permissions.workspace = true
+automata-ci-provider.workspace = true
 automata-ci-scm.workspace = true
 bytes.workspace = true
 reqwest.workspace = true

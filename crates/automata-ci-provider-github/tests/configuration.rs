@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use automata_ci_github::{
+use automata_ci_provider_github::{
     GithubHttpConfigurationError, GithubHttpEndpoint, GithubHttpLimits, GithubTrustedOrigins,
 };
 use url::Url;

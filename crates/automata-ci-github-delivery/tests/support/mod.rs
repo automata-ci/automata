@@ -12,13 +12,13 @@ use automata_ci_blob::{
     PutBlobOutcome, VerifiedBlob,
 };
 use automata_ci_core::UnixMillis;
-use automata_ci_github::{
+use automata_ci_github_delivery::GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE;
+use automata_ci_provider_github::{
     GITHUB_EVENT_ENVELOPE_V1_MEDIA_TYPE,
     GithubRepositoryVisibility as GithubRepositoryVisibilityFact, GithubSealedEventEnvelopeV1,
     GithubWebhookBodyDigest, StoredAuthenticatedGithubWebhook,
     rehydrate_stored_authenticated_github_webhook,
 };
-use automata_ci_github_delivery::GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE;
 use automata_ci_store::{
     CompleteProviderDelivery, ProviderDeliveryEventEnvelope, ProviderDeliveryId,
     ProviderDeliveryReceipt, ProviderDeliveryState, ProviderDeliveryStoreError,

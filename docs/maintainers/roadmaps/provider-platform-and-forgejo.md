@@ -3,7 +3,7 @@
 - Roadmap status: Active
 - Available provider: GitHub only
 - Target provider: Forgejo 16.0.x
-- Current checkpoint: A7 credential and identity foundation
+- Current checkpoint: B3 GitHub instance and source adapter
 - Date: 2026-08-18
 
 This roadmap owns the refactor that separates source-hosting providers from

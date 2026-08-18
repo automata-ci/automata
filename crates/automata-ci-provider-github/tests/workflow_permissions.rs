@@ -3,7 +3,7 @@ use crate::support;
 use std::time::{Duration, Instant};
 
 use automata_ci_auth::{github::GithubEndpointError, secret::SecretString};
-use automata_ci_github::{
+use automata_ci_provider_github::{
     ActionsDefaultWorkflowPermission, GithubHttpLimits, GithubWorkflowPermissionDefaultsRequest,
 };
 use automata_ci_scm::RepositoryId;

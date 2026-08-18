@@ -2,10 +2,12 @@ use crate::support;
 
 use automata_ci_auth::secret::SecretString;
 use automata_ci_core::GitObjectId;
-use automata_ci_github::GithubTrustedOrigins;
+use automata_ci_provider::{ExternalRepositoryId, ProviderConnectionId};
+use automata_ci_provider_github::GithubTrustedOrigins;
 use automata_ci_scm::{
-    ArchiveLimits, RepositoryId, RepositorySourcePort, RepositorySourceRequest, RevisionSpec,
-    ScmErrorKind, ScmProvider, SnapshotRequest,
+    ArchiveLimits, RepositoryId, RepositorySource, RepositorySourceConnection,
+    RepositorySourceRedirectPolicy, RepositorySourceRequest, RevisionSpec, ScmErrorKind,
+    ScmProvider, SnapshotRequest,
 };
 use axum::http::StatusCode;
 use support::{FixtureServer, ResponseSpec};
@@ -18,9 +20,27 @@ fn token() -> SecretString {
     SecretString::new("ghs_installation_secret").unwrap()
 }
 
+fn source_connection(repository: &RepositoryId, external_id: &str) -> RepositorySourceConnection {
+    RepositorySourceConnection::new(
+        "33333333-3333-4333-8333-333333333333"
+            .parse::<ProviderConnectionId>()
+            .unwrap(),
+        ExternalRepositoryId::new(external_id).unwrap(),
+        repository.clone(),
+    )
+}
+
+fn repository_response(id: u64, full_name: &str) -> ResponseSpec {
+    ResponseSpec::json(
+        StatusCode::OK,
+        format!(r#"{{"id":{id},"full_name":"{full_name}"}}"#),
+    )
+}
+
 #[tokio::test]
 async fn exact_source_proves_the_requested_commit_before_downloading() {
     let fixture = FixtureServer::spawn().await;
+    fixture.enqueue(repository_response(42, "automata-ci/automata"));
     fixture.enqueue(ResponseSpec::json(
         StatusCode::OK,
         format!(r#"{{"sha":"{SHA}","ignored":true}}"#),
@@ -36,35 +56,39 @@ async fn exact_source_proves_the_requested_commit_before_downloading() {
     ));
     let endpoint = fixture.endpoint();
     let repository = RepositoryId::new("automata-ci/automata").unwrap();
+    let connection = source_connection(&repository, "42");
     let revision = GitObjectId::from_provider_hex(SHA).unwrap();
     let token = token();
 
     let source = endpoint
         .fetch_repository_source(RepositorySourceRequest::authenticated(
-            &repository,
+            &connection,
             &revision,
             &token,
             ArchiveLimits::new(1024).unwrap(),
+            RepositorySourceRedirectPolicy::ConfiguredArchiveOrigin,
         ))
         .await
         .unwrap();
 
-    assert_eq!(source.provider().as_str(), "github");
+    assert_eq!(source.connection_id(), connection.connection_id());
+    assert_eq!(source.external_repository_id().as_str(), "42");
     assert_eq!(source.repository(), &repository);
     assert_eq!(source.revision(), &revision);
     assert_eq!(source.size(), 8);
 
     let requests = fixture.requests();
-    assert_eq!(requests.len(), 3);
+    assert_eq!(requests.len(), 4);
+    assert_eq!(requests[0].uri, "/api/repos/automata-ci/automata");
     assert_eq!(
-        requests[0].uri,
+        requests[1].uri,
         format!("/api/repos/automata-ci/automata/commits/{SHA}")
     );
     assert_eq!(
-        requests[1].uri,
+        requests[2].uri,
         format!("/api/repos/automata-ci/automata/tarball/{SHA}")
     );
-    assert_eq!(requests[2].uri, "/archive/exact-source.tar.gz");
+    assert_eq!(requests[3].uri, "/archive/exact-source.tar.gz");
     assert_eq!(
         requests[0].headers["authorization"],
         "Bearer ghs_installation_secret"
@@ -73,7 +97,11 @@ async fn exact_source_proves_the_requested_commit_before_downloading() {
         requests[1].headers["authorization"],
         "Bearer ghs_installation_secret"
     );
-    assert!(!requests[2].headers.contains_key("authorization"));
+    assert_eq!(
+        requests[2].headers["authorization"],
+        "Bearer ghs_installation_secret"
+    );
+    assert!(!requests[3].headers.contains_key("authorization"));
 }
 
 #[tokio::test]
@@ -84,6 +112,7 @@ async fn exact_source_rejects_malformed_or_mismatched_commit_evidence_without_fa
         "short".to_owned(),
     ] {
         let fixture = FixtureServer::spawn().await;
+        fixture.enqueue(repository_response(42, "automata-ci/automata"));
         fixture.enqueue(ResponseSpec::json(
             StatusCode::OK,
             format!(r#"{{"sha":"{returned_sha}"}}"#),
@@ -99,15 +128,17 @@ async fn exact_source_rejects_malformed_or_mismatched_commit_evidence_without_fa
         ));
         let endpoint = fixture.endpoint();
         let repository = RepositoryId::new("automata-ci/automata").unwrap();
+        let connection = source_connection(&repository, "42");
         let revision = GitObjectId::from_provider_hex(SHA).unwrap();
         let token = token();
 
         let error = endpoint
             .fetch_repository_source(RepositorySourceRequest::authenticated(
-                &repository,
+                &connection,
                 &revision,
                 &token,
                 ArchiveLimits::default(),
+                RepositorySourceRedirectPolicy::ConfiguredArchiveOrigin,
             ))
             .await
             .unwrap_err();
@@ -115,14 +146,73 @@ async fn exact_source_rejects_malformed_or_mismatched_commit_evidence_without_fa
         assert_eq!(error.kind(), ScmErrorKind::InvalidResponse);
         let diagnostic = format!("{error:?} {error}");
         assert!(!diagnostic.contains(&returned_sha));
-        assert_eq!(fixture.requests().len(), 1);
+        assert_eq!(fixture.requests().len(), 2);
         assert_eq!(fixture.remaining_responses(), 2);
     }
 }
 
 #[tokio::test]
+async fn exact_source_rejects_native_identity_or_route_rebinding_before_commit_io() {
+    for repository_evidence in [
+        repository_response(41, "automata-ci/automata"),
+        repository_response(42, "attacker/rebound"),
+    ] {
+        let fixture = FixtureServer::spawn().await;
+        fixture.enqueue(repository_evidence);
+        fixture.enqueue(ResponseSpec::json(
+            StatusCode::OK,
+            format!(r#"{{"sha":"{SHA}"}}"#),
+        ));
+        let endpoint = fixture.endpoint();
+        let repository = RepositoryId::new("automata-ci/automata").unwrap();
+        let connection = source_connection(&repository, "42");
+        let revision = GitObjectId::from_provider_hex(SHA).unwrap();
+        let error = endpoint
+            .fetch_repository_source(RepositorySourceRequest::public(
+                &connection,
+                &revision,
+                ArchiveLimits::default(),
+                RepositorySourceRedirectPolicy::Deny,
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), ScmErrorKind::InvalidResponse);
+        assert_eq!(fixture.requests().len(), 1);
+        assert_eq!(fixture.remaining_responses(), 1);
+    }
+}
+
+#[tokio::test]
+async fn authenticated_exact_source_requires_explicit_configured_redirect_authority() {
+    let fixture = FixtureServer::spawn().await;
+    fixture.enqueue(repository_response(42, "automata-ci/automata"));
+    fixture.enqueue(ResponseSpec::json(
+        StatusCode::OK,
+        format!(r#"{{"sha":"{SHA}"}}"#),
+    ));
+    let endpoint = fixture.endpoint();
+    let repository = RepositoryId::new("automata-ci/automata").unwrap();
+    let connection = source_connection(&repository, "42");
+    let revision = GitObjectId::from_provider_hex(SHA).unwrap();
+    let token = token();
+    let error = endpoint
+        .fetch_repository_source(RepositorySourceRequest::authenticated(
+            &connection,
+            &revision,
+            &token,
+            ArchiveLimits::default(),
+            RepositorySourceRedirectPolicy::Deny,
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), ScmErrorKind::InvalidResponse);
+    assert_eq!(fixture.requests().len(), 2);
+}
+
+#[tokio::test]
 async fn exact_source_rejects_untrusted_redirects_and_invalid_archive_media() {
     let untrusted = FixtureServer::spawn().await;
+    untrusted.enqueue(repository_response(42, "automata-ci/automata"));
     untrusted.enqueue(ResponseSpec::json(
         StatusCode::OK,
         format!(r#"{{"sha":"{SHA}"}}"#),
@@ -133,21 +223,24 @@ async fn exact_source_rejects_untrusted_redirects_and_invalid_archive_media() {
     );
     let endpoint = untrusted.endpoint();
     let repository = RepositoryId::new("automata-ci/automata").unwrap();
+    let connection = source_connection(&repository, "42");
     let revision = GitObjectId::from_provider_hex(SHA).unwrap();
     let token = token();
     let error = endpoint
         .fetch_repository_source(RepositorySourceRequest::authenticated(
-            &repository,
+            &connection,
             &revision,
             &token,
             ArchiveLimits::default(),
+            RepositorySourceRedirectPolicy::ConfiguredArchiveOrigin,
         ))
         .await
         .unwrap_err();
     assert_eq!(error.kind(), ScmErrorKind::InvalidResponse);
-    assert_eq!(untrusted.requests().len(), 2);
+    assert_eq!(untrusted.requests().len(), 3);
 
     let invalid_media = FixtureServer::spawn().await;
+    invalid_media.enqueue(repository_response(42, "automata-ci/automata"));
     invalid_media.enqueue(ResponseSpec::json(
         StatusCode::OK,
         format!(r#"{{"sha":"{SHA}"}}"#),
@@ -164,10 +257,11 @@ async fn exact_source_rejects_untrusted_redirects_and_invalid_archive_media() {
     let endpoint = invalid_media.endpoint();
     let error = endpoint
         .fetch_repository_source(RepositorySourceRequest::authenticated(
-            &repository,
+            &connection,
             &revision,
             &token,
             ArchiveLimits::default(),
+            RepositorySourceRedirectPolicy::ConfiguredArchiveOrigin,
         ))
         .await
         .unwrap_err();
@@ -177,6 +271,7 @@ async fn exact_source_rejects_untrusted_redirects_and_invalid_archive_media() {
 #[tokio::test]
 async fn exact_source_enforces_the_incremental_archive_byte_ceiling() {
     let fixture = FixtureServer::spawn().await;
+    fixture.enqueue(repository_response(42, "automata-ci/automata"));
     fixture.enqueue(ResponseSpec::json(
         StatusCode::OK,
         format!(r#"{{"sha":"{SHA}"}}"#),
@@ -194,15 +289,17 @@ async fn exact_source_enforces_the_incremental_archive_byte_ceiling() {
     ));
     let endpoint = fixture.endpoint();
     let repository = RepositoryId::new("automata-ci/automata").unwrap();
+    let connection = source_connection(&repository, "42");
     let revision = GitObjectId::from_provider_hex(SHA).unwrap();
     let token = token();
 
     let error = endpoint
         .fetch_repository_source(RepositorySourceRequest::authenticated(
-            &repository,
+            &connection,
             &revision,
             &token,
             ArchiveLimits::new(16).unwrap(),
+            RepositorySourceRedirectPolicy::ConfiguredArchiveOrigin,
         ))
         .await
         .unwrap_err();
@@ -249,8 +346,9 @@ async fn public_exact_revision_uses_the_immutable_archive_origin_without_api_req
 }
 
 #[tokio::test]
-async fn public_exact_source_uses_the_immutable_archive_origin_without_api_requests() {
+async fn public_exact_source_proves_identity_then_uses_the_immutable_archive_origin() {
     let fixture = FixtureServer::spawn().await;
+    fixture.enqueue(repository_response(42, "automata-ci/automata"));
     fixture.enqueue(ResponseSpec::binary(
         StatusCode::OK,
         "application/x-gzip",
@@ -258,13 +356,15 @@ async fn public_exact_source_uses_the_immutable_archive_origin_without_api_reque
     ));
     let endpoint = fixture.endpoint();
     let repository = RepositoryId::new("automata-ci/automata").unwrap();
+    let connection = source_connection(&repository, "42");
     let revision = GitObjectId::from_provider_hex(SHA).unwrap();
 
     let source = endpoint
         .fetch_repository_source(RepositorySourceRequest::public(
-            &repository,
+            &connection,
             &revision,
             ArchiveLimits::new(1024).unwrap(),
+            RepositorySourceRedirectPolicy::Deny,
         ))
         .await
         .unwrap();
@@ -272,12 +372,14 @@ async fn public_exact_source_uses_the_immutable_archive_origin_without_api_reque
     assert_eq!(source.revision(), &revision);
     assert_eq!(source.size(), 8);
     let requests = fixture.requests();
-    assert_eq!(requests.len(), 1);
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].uri, "/api/repos/automata-ci/automata");
     assert_eq!(
-        requests[0].uri,
+        requests[1].uri,
         format!("/automata-ci/automata/legacy.tar.gz/{SHA}")
     );
     assert!(!requests[0].headers.contains_key("authorization"));
+    assert!(!requests[1].headers.contains_key("authorization"));
 }
 
 #[tokio::test]
@@ -429,7 +531,7 @@ fn explicit_archive_origin_requires_a_safe_origin_url() {
         "https://codeload.github.com/path",
     ] {
         assert!(
-            automata_ci_github::GithubHttpEndpoint::new_with_archive_origin(
+            automata_ci_provider_github::GithubHttpEndpoint::new_with_archive_origin(
                 trusted.clone(),
                 Url::parse(invalid).unwrap(),
             )
@@ -438,7 +540,7 @@ fn explicit_archive_origin_requires_a_safe_origin_url() {
     }
 
     assert!(
-        automata_ci_github::GithubHttpEndpoint::new_with_archive_origin(
+        automata_ci_provider_github::GithubHttpEndpoint::new_with_archive_origin(
             trusted,
             Url::parse("https://codeload.github.com/").unwrap(),
         )

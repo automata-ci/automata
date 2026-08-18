@@ -6,7 +6,7 @@ use automata_ci_auth::{
     github::{GithubCurrentUserRequest, GithubEndpoint, GithubEndpointError},
     secret::SecretString,
 };
-use automata_ci_github::GithubHttpLimits;
+use automata_ci_provider_github::GithubHttpLimits;
 use axum::http::StatusCode;
 use support::{FixtureServer, ResponseSpec};
 

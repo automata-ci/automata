@@ -85,15 +85,15 @@ use std::{
 use automata_ci_blob::{BlobKey, BlobPayload, BlobStoreErrorKind, ImmutableBlobStore, MediaType};
 use automata_ci_core::GitObjectId;
 use automata_ci_core::{Sha256Digest, UnixMillis};
+use automata_ci_provider::ProviderConnectionId;
 #[cfg(test)]
-use automata_ci_github::VerifiedGithubPush;
-use automata_ci_github::{
+use automata_ci_provider_github::VerifiedGithubPush;
+use automata_ci_provider_github::{
     GITHUB_EVENT_ENVELOPE_V1_MEDIA_TYPE, GITHUB_RAW_EVENT_OBJECT_KEY_PREFIX, GithubCheckRunAction,
     GithubRepositoryVisibility, GithubSealedEventEnvelopeV1, GithubWebhookError,
     GithubWebhookVerifier, VerifiedGithubWebhook, X_GITHUB_DELIVERY, X_GITHUB_EVENT,
     X_HUB_SIGNATURE_256,
 };
-use automata_ci_provider::ProviderConnectionId;
 use automata_ci_store::{
     AcceptManifestPinnedGithubDelivery, AcceptManifestPinnedGithubRepositoryDispatch,
     AcceptProviderDelivery, AdmissionObject, GithubAuthenticatedEvent,
@@ -114,7 +114,7 @@ use thiserror::Error;
 
 /// Media type for a generic authenticated raw GitHub event.
 pub const GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE: &str =
-    automata_ci_github::GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE;
+    automata_ci_provider_github::GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE;
 /// Maximum exact repository connections accepted by one webhook verifier.
 pub const MAX_GITHUB_DELIVERY_CONNECTIONS: usize = 256;
 
@@ -269,7 +269,7 @@ impl GithubDeliveryConnection {
     fn matches_repository(
         &self,
         installation_id: u64,
-        repository: &automata_ci_github::GithubWebhookRepository,
+        repository: &automata_ci_provider_github::GithubWebhookRepository,
         signed_repository_owner_id: ProviderRepositoryOwnerId,
     ) -> bool {
         installation_id == self.installation_id.get()
@@ -756,7 +756,7 @@ impl GithubDeliveryIngress {
         let event = self
             .verifier
             .authenticate(headers, raw_body)
-            .and_then(automata_ci_github::AuthenticatedGithubWebhook::normalize)
+            .and_then(automata_ci_provider_github::AuthenticatedGithubWebhook::normalize)
             .map_err(GithubDeliveryIngressError::Webhook)?;
         let installation_id = ProviderInstallationId::new(event.installation_id().get())
             .map_err(|_| GithubDeliveryIngressError::InvariantViolation)?;

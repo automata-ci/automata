@@ -8,7 +8,6 @@ use automata_ci_auth::secret::SecretString;
 use automata_ci_blob::{BlobDescriptor, BlobKey, BlobStoreErrorKind, MediaType};
 use automata_ci_core::GitObjectId;
 use automata_ci_core::{Sha256Digest, UnixMillis};
-use automata_ci_github::{GITHUB_RAW_EVENT_OBJECT_KEY_PREFIX, GithubPushRefKind};
 use automata_ci_github_delivery::{
     GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE, GithubDeliveryClock, GithubDeliverySourceAuthority,
     GithubDeliveryWorker, GithubDeliveryWorkerConfig, GithubDeliveryWorkerConfigurationError,
@@ -16,11 +15,12 @@ use automata_ci_github_delivery::{
     GithubDeliveryWorkflowProcessor, GithubDeliveryWorkflowProcessorCompletion,
     GithubDeliveryWorkflowProcessorError, GithubDeliveryWorkflowRequest,
 };
-use automata_ci_provider::ProviderConnectionId;
+use automata_ci_provider::{ExternalRepositoryId, ProviderConnectionId};
+use automata_ci_provider_github::{GITHUB_RAW_EVENT_OBJECT_KEY_PREFIX, GithubPushRefKind};
 use automata_ci_scm::{
     ArchiveFormat, RepositoryId as ScmRepositoryId, RepositorySnapshot, RepositorySource,
-    RepositorySourcePort, RepositorySourceRequest, ScmError, ScmProvider, ScmProviderId,
-    SnapshotRequest,
+    RepositorySourceArchive, RepositorySourceConnection, RepositorySourceRequest, ScmError,
+    ScmProvider, ScmProviderId, SnapshotRequest,
 };
 use automata_ci_store::{
     AcceptManifestPinnedGithubRepositoryDispatch, AcceptProviderDelivery, AdmissionObject,
@@ -86,15 +86,13 @@ struct SourceObservation {
 
 #[derive(Debug)]
 struct RecordingSourcePort {
-    provider: ScmProviderId,
-    result: Mutex<Result<RepositorySource, ScmError>>,
+    result: Mutex<Result<RepositorySourceArchive, ScmError>>,
     observations: Mutex<Vec<SourceObservation>>,
 }
 
 impl RecordingSourcePort {
-    fn returning(source: RepositorySource) -> Self {
+    fn returning(source: RepositorySourceArchive) -> Self {
         Self {
-            provider: ScmProviderId::new("github").expect("provider"),
             result: Mutex::new(Ok(source)),
             observations: Mutex::new(Vec::new()),
         }
@@ -102,16 +100,7 @@ impl RecordingSourcePort {
 
     fn failing(error: ScmError) -> Self {
         Self {
-            provider: ScmProviderId::new("github").expect("provider"),
             result: Mutex::new(Err(error)),
-            observations: Mutex::new(Vec::new()),
-        }
-    }
-
-    fn with_provider(provider: &str, source: RepositorySource) -> Self {
-        Self {
-            provider: ScmProviderId::new(provider).expect("provider"),
-            result: Mutex::new(Ok(source)),
             observations: Mutex::new(Vec::new()),
         }
     }
@@ -125,15 +114,11 @@ impl RecordingSourcePort {
 }
 
 #[async_trait]
-impl RepositorySourcePort for RecordingSourcePort {
-    fn provider_id(&self) -> &ScmProviderId {
-        &self.provider
-    }
-
+impl RepositorySource for RecordingSourcePort {
     async fn fetch_repository_source(
         &self,
         request: RepositorySourceRequest<'_>,
-    ) -> Result<RepositorySource, ScmError> {
+    ) -> Result<RepositorySourceArchive, ScmError> {
         self.observations
             .lock()
             .expect("source observations lock")
@@ -147,7 +132,18 @@ impl RepositorySourcePort for RecordingSourcePort {
                 maximum_bytes: request.limits().maximum_bytes(),
                 debug: format!("{request:?}"),
             });
-        self.result.lock().expect("source result lock").clone()
+        self.result
+            .lock()
+            .expect("source result lock")
+            .clone()
+            .map(|source| {
+                RepositorySourceArchive::from_bytes(
+                    request.connection().clone(),
+                    *source.revision(),
+                    source.format(),
+                    source.bytes().clone(),
+                )
+            })
     }
 }
 
@@ -315,7 +311,7 @@ impl GithubDeliveryWorkflowProcessor for RecordingProcessor {
         &self,
         request: GithubDeliveryWorkflowRequest<'_>,
     ) -> GithubDeliveryWorkflowProcessorCompletion {
-        if let automata_ci_github::VerifiedGithubWebhook::Push(push) = request.event() {
+        if let automata_ci_provider_github::VerifiedGithubWebhook::Push(push) = request.event() {
             self.observations
                 .lock()
                 .expect("processor observations lock")
@@ -1040,10 +1036,13 @@ fn pending_repository_dispatch_evidence(
     .expect("pending repository dispatch")
 }
 
-fn repository_source(archive: Bytes) -> RepositorySource {
-    RepositorySource::from_bytes(
-        ScmProviderId::new("github").expect("provider"),
-        ScmRepositoryId::new(format!("{OWNER}/{REPOSITORY}")).expect("repository"),
+fn repository_source(archive: Bytes) -> RepositorySourceArchive {
+    RepositorySourceArchive::from_bytes(
+        RepositorySourceConnection::new(
+            ProviderConnectionId::from_uuid(Uuid::from_u128(3)).expect("connection"),
+            ExternalRepositoryId::new(REPOSITORY_ID.to_string()).expect("external repository ID"),
+            ScmRepositoryId::new(format!("{OWNER}/{REPOSITORY}")).expect("repository"),
+        ),
         GitObjectId::from_provider_hex(AFTER).expect("revision"),
         ArchiveFormat::TarGzip,
         archive,
@@ -2228,7 +2227,7 @@ async fn rejected_admitted_run_reuses_the_owned_terminal_operation() {
 }
 
 #[test]
-fn configuration_rejects_unrepresentable_outcome_and_provider_bounds() {
+fn configuration_rejects_unrepresentable_outcome_bounds() {
     let too_many =
         RepositoryWorkflowDiscoveryLimits::new(1_024, 4_096, 512, 4_096, 1_024, 257, 128)
             .expect("source discovery permits 257 workflows");
@@ -2236,27 +2235,4 @@ fn configuration_rejects_unrepresentable_outcome_and_provider_bounds() {
         GithubDeliveryWorkerConfig::new(too_many, 1_000),
         Err(GithubDeliveryWorkerConfigurationError::TooManyWorkflowOutcomes)
     );
-
-    let fixture = claimed_fixture("refs/heads/main", false, 1);
-    let subject_evidence = Arc::new(FixtureSubjectEvidence::from_claimed(
-        &fixture.claimed,
-        fixture.check_head_sha,
-    ));
-    let source = Arc::new(RecordingSourcePort::with_provider(
-        "gitlab",
-        repository_source(archive(BTreeMap::<&str, Vec<u8>>::new())),
-    ));
-    let result = GithubDeliveryWorker::new(
-        Arc::new(VerifiedBlobStore::exact(fixture.descriptor, fixture.body)),
-        source,
-        Arc::new(RecordingProcessor::returning(skipped())),
-        Arc::new(RecordingDeliveries::new(fixture.receipt)),
-        subject_evidence,
-        Arc::new(FixedClock(UnixMillis::new(500))),
-        GithubDeliveryWorkerConfig::default(),
-    );
-    assert!(matches!(
-        result,
-        Err(GithubDeliveryWorkerConfigurationError::SourceProviderMismatch)
-    ));
 }

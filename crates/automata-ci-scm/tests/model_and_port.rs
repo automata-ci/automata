@@ -2,16 +2,17 @@ mod credential;
 
 use automata_ci_auth::secret::SecretString;
 use automata_ci_core::GitObjectId;
+use automata_ci_provider::{ExternalRepositoryId, ProviderConnectionId};
 use automata_ci_scm::{
     ArchiveFormat, ArchiveLimits, RepositoryId, RepositorySnapshot, RepositorySource,
-    RepositorySourcePort, RepositorySourceRequest, RevisionSpec, ScmProvider, ScmProviderId,
-    SnapshotRequest,
+    RepositorySourceArchive, RepositorySourceConnection, RepositorySourceRedirectPolicy,
+    RepositorySourceRequest, RevisionSpec, ScmProvider, ScmProviderId, SnapshotRequest,
 };
 use bytes::Bytes;
 use static_assertions::assert_obj_safe;
 
 assert_obj_safe!(ScmProvider);
-assert_obj_safe!(RepositorySourcePort);
+assert_obj_safe!(RepositorySource);
 
 #[test]
 fn identifiers_are_strict_and_serde_revalidates() {
@@ -70,11 +71,19 @@ fn exact_source_request_redacts_credentials_and_source_binds_one_revision() {
     let revision =
         GitObjectId::from_provider_hex("de0fac2e4500dabe0009e67214ff5f5447ce83dd").unwrap();
     let credential = SecretString::new("exact-source-installation-secret").unwrap();
+    let connection = RepositorySourceConnection::new(
+        "33333333-3333-4333-8333-333333333333"
+            .parse::<ProviderConnectionId>()
+            .unwrap(),
+        ExternalRepositoryId::new("42").unwrap(),
+        repository.clone(),
+    );
     let request = RepositorySourceRequest::authenticated(
-        &repository,
+        &connection,
         &revision,
         &credential,
         ArchiveLimits::new(1024).unwrap(),
+        RepositorySourceRedirectPolicy::ConfiguredArchiveOrigin,
     );
     let rendered = format!("{request:?}");
     assert!(rendered.contains("[redacted]"));
@@ -83,14 +92,18 @@ fn exact_source_request_redacts_credentials_and_source_binds_one_revision() {
     assert_eq!(request.revision(), &revision);
     assert_eq!(request.limits().maximum_bytes(), 1024);
 
-    let source = RepositorySource::from_bytes(
-        ScmProviderId::new("github").unwrap(),
-        repository,
+    let source = RepositorySourceArchive::from_bytes(
+        connection.clone(),
         revision,
         ArchiveFormat::TarGzip,
         Bytes::from_static(b"exact source"),
     );
     assert_eq!(source.revision(), &revision);
+    assert_eq!(source.connection_id(), connection.connection_id());
+    assert_eq!(
+        source.external_repository_id(),
+        connection.external_repository_id()
+    );
     assert_eq!(source.size(), 12);
     assert_eq!(source.bytes(), &Bytes::from_static(b"exact source"));
     assert_eq!(source.digest().to_string().len(), 64);

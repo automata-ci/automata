@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use automata_ci_auth::secret::SecretString;
 use automata_ci_core::GitObjectId;
-use automata_ci_github::{
+use automata_ci_provider_github::{
     GithubCheckAnnotation, GithubCheckAnnotationLevel, GithubCheckAppId, GithubCheckCompletion,
     GithubCheckConclusion, GithubCheckCreateIndeterminateKind, GithubCheckDetailsUrl,
     GithubCheckExternalId, GithubCheckModelError, GithubCheckName, GithubCheckOutput,
@@ -1212,9 +1212,15 @@ async fn provider_http_failures_map_without_reading_or_exposing_bodies() {
         GithubChecksError::NotFound,
         GithubChecksError::Conflict,
         GithubChecksError::Rejected,
-        GithubChecksError::RateLimited(automata_ci_github::GithubCheckRetryEvidence::default()),
-        GithubChecksError::RateLimited(automata_ci_github::GithubCheckRetryEvidence::default()),
-        GithubChecksError::Unavailable(automata_ci_github::GithubCheckRetryEvidence::default()),
+        GithubChecksError::RateLimited(
+            automata_ci_provider_github::GithubCheckRetryEvidence::default(),
+        ),
+        GithubChecksError::RateLimited(
+            automata_ci_provider_github::GithubCheckRetryEvidence::default(),
+        ),
+        GithubChecksError::Unavailable(
+            automata_ci_provider_github::GithubCheckRetryEvidence::default(),
+        ),
     ];
     let endpoint = server.endpoint();
     for (index, expected_kind) in expected.into_iter().enumerate() {

@@ -20,7 +20,7 @@ AGGREGATES = {
     "automata-ci-core": "core",
     "automata-ci-execution": "execution",
     "automata-ci-expression-actions": "expression_actions",
-    "automata-ci-github": "github",
+    "automata-ci-provider-github": "github",
     "automata-ci-github-delivery": "github_delivery",
     "automata-ci-actions-runtime": "actions_runtime",
     "automata-ci-key-management": "key_management",
@@ -48,7 +48,7 @@ AGGREGATES = {
 LIVE_TARGETS = {
     "automata-ci-action": "live_github_rustfs",
     "automata-ci-action-actions": "live_checkout_pipeline",
-    "automata-ci-github": "live_repository_snapshot",
+    "automata-ci-provider-github": "live_repository_snapshot",
     "automata-ci-sandbox-podman": "live_rootless",
     "automata-ci-workflow-service": "live_admission",
 }

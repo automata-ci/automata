@@ -14,15 +14,17 @@ use automata_ci_blob::{
 };
 use automata_ci_core::GitObjectId;
 use automata_ci_core::{Sha256Digest, UnixMillis};
-use automata_ci_github::{
+use automata_ci_provider::ExternalRepositoryId;
+use automata_ci_provider_github::{
     GITHUB_EVENT_ENVELOPE_SCHEMA_V1, GITHUB_EVENT_ENVELOPE_V1_MEDIA_TYPE,
     GITHUB_EVENT_REGISTRY_SCHEMA_V1, GithubRepositoryVisibility, GithubSealedEventEnvelopeV1,
     GithubStoredWebhookError, GithubWebhookBodyDigest, StoredAuthenticatedGithubWebhook,
     VerifiedGithubPush, VerifiedGithubWebhook, rehydrate_stored_authenticated_github_webhook,
 };
 use automata_ci_scm::{
-    ArchiveFormat, ArchiveLimits, RepositoryId, RepositorySource, RepositorySourcePort,
-    RepositorySourceRequest, RevisionSpec, ScmError, ScmErrorKind, ScmProvider, SnapshotRequest,
+    ArchiveFormat, ArchiveLimits, RepositoryId, RepositorySource, RepositorySourceArchive,
+    RepositorySourceConnection, RepositorySourceRedirectPolicy, RepositorySourceRequest,
+    RevisionSpec, ScmError, ScmErrorKind, ScmProvider, SnapshotRequest,
 };
 use automata_ci_store::{
     AdmissionObject, AuthenticatedGithubDeliveryClaim, ClaimedProviderDelivery,
@@ -126,9 +128,9 @@ pub enum GithubDeliveryWorkerConfigurationError {
     /// Repository discovery could produce more outcomes than one completion.
     #[error("the GitHub workflow discovery limit exceeds the durable outcome bound")]
     TooManyWorkflowOutcomes,
-    /// The source adapter does not identify itself as GitHub.
-    #[error("the GitHub delivery source adapter has the wrong provider identity")]
-    SourceProviderMismatch,
+    /// The mutable repository-dispatch resolver does not identify itself as GitHub.
+    #[error("the GitHub repository-dispatch resolver has the wrong provider identity")]
+    RepositoryDispatchResolverMismatch,
 }
 
 /// A prerequisite that this worker deliberately cannot synthesize.
@@ -215,7 +217,7 @@ pub struct GithubDeliveryWorkflowRequest<'a> {
     raw_event: &'a AdmissionObject,
     event_envelope: &'a GithubSealedEventEnvelopeV1,
     event: &'a VerifiedGithubWebhook,
-    repository_source: &'a RepositorySource,
+    repository_source: &'a RepositorySourceArchive,
     workflow_path: &'a str,
     workflow_source: &'a [u8],
     evidence: &'a ManifestPinnedGithubDeliveryEvidence,
@@ -270,7 +272,7 @@ impl GithubDeliveryWorkflowRequest<'_> {
 
     /// Returns the exact-revision repository archive containing this path.
     #[must_use]
-    pub const fn repository_source(&self) -> &RepositorySource {
+    pub const fn repository_source(&self) -> &RepositorySourceArchive {
         self.repository_source
     }
 
@@ -903,7 +905,7 @@ pub(crate) enum PreparedGithubDeliveryClaim {
 /// Product-composed worker for one already claimed authenticated GitHub event.
 pub struct GithubDeliveryWorker {
     objects: Arc<dyn ImmutableBlobStore>,
-    repository_source: Arc<dyn RepositorySourcePort>,
+    repository_source: Arc<dyn RepositorySource>,
     workflow_processor: Arc<dyn GithubDeliveryWorkflowProcessor>,
     deliveries: Arc<dyn ProviderDeliveryRepository>,
     subject_evidence: Arc<dyn GithubSubjectEvidenceRepository>,
@@ -918,20 +920,16 @@ impl GithubDeliveryWorker {
     ///
     /// # Errors
     ///
-    /// Rejects a repository-source adapter whose stable provider is not
-    /// exactly `github`.
+    /// Retains the validated configuration error shape used by service composition.
     pub fn new(
         objects: Arc<dyn ImmutableBlobStore>,
-        repository_source: Arc<dyn RepositorySourcePort>,
+        repository_source: Arc<dyn RepositorySource>,
         workflow_processor: Arc<dyn GithubDeliveryWorkflowProcessor>,
         deliveries: Arc<dyn ProviderDeliveryRepository>,
         subject_evidence: Arc<dyn GithubSubjectEvidenceRepository>,
         clock: Arc<dyn GithubDeliveryClock>,
         config: GithubDeliveryWorkerConfig,
     ) -> Result<Self, GithubDeliveryWorkerConfigurationError> {
-        if repository_source.provider_id().as_str() != GITHUB_PROVIDER {
-            return Err(GithubDeliveryWorkerConfigurationError::SourceProviderMismatch);
-        }
         Ok(Self {
             objects,
             repository_source,
@@ -949,11 +947,11 @@ impl GithubDeliveryWorker {
     ///
     /// # Errors
     ///
-    /// Rejects either source adapter when its stable provider is not GitHub.
+    /// Rejects a mutable selector resolver that is not GitHub.
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_repository_dispatch(
         objects: Arc<dyn ImmutableBlobStore>,
-        repository_source: Arc<dyn RepositorySourcePort>,
+        repository_source: Arc<dyn RepositorySource>,
         repository_dispatch_resolver: Arc<dyn ScmProvider>,
         workflow_processor: Arc<dyn GithubDeliveryWorkflowProcessor>,
         deliveries: Arc<dyn ProviderDeliveryRepository>,
@@ -962,10 +960,8 @@ impl GithubDeliveryWorker {
         clock: Arc<dyn GithubDeliveryClock>,
         config: GithubDeliveryWorkerConfig,
     ) -> Result<Self, GithubDeliveryWorkerConfigurationError> {
-        if repository_source.provider_id().as_str() != GITHUB_PROVIDER
-            || repository_dispatch_resolver.provider_id().as_str() != GITHUB_PROVIDER
-        {
-            return Err(GithubDeliveryWorkerConfigurationError::SourceProviderMismatch);
+        if repository_dispatch_resolver.provider_id().as_str() != GITHUB_PROVIDER {
+            return Err(GithubDeliveryWorkerConfigurationError::RepositoryDispatchResolverMismatch);
         }
         Ok(Self {
             objects,
@@ -1088,7 +1084,7 @@ impl GithubDeliveryWorker {
         &self,
         lease: &GithubDeliveryClaimLease,
         prepared: &PreparedGithubDelivery,
-        source: &RepositorySource,
+        source: &RepositorySourceArchive,
         private_credentials: Option<&dyn GithubDeliverySourceCredentialProvider>,
     ) -> Result<GithubDeliveryWorkerOutcome, GithubDeliveryWorkerError> {
         self.require_live(lease)?;
@@ -1115,7 +1111,7 @@ impl GithubDeliveryWorker {
         &self,
         lease: &GithubDeliveryClaimLease,
         prepared: &PreparedGithubDelivery,
-        source: &RepositorySource,
+        source: &RepositorySourceArchive,
     ) -> Result<PreparedGithubDelivery, GithubDeliveryWorkerError> {
         let repository_dispatches = self
             .repository_dispatches
@@ -1231,7 +1227,7 @@ impl GithubDeliveryWorker {
         claimed: &ClaimedProviderDelivery,
         prepared: &PreparedGithubDelivery,
         authority: GithubDeliverySourceAuthority<'_>,
-    ) -> Result<RepositorySource, ProcessingFailure> {
+    ) -> Result<RepositorySourceArchive, ProcessingFailure> {
         if let Some(pending) = prepared.pending_repository_dispatch() {
             return self
                 .fetch_repository_dispatch_source(claimed, prepared.event(), pending, authority)
@@ -1243,6 +1239,7 @@ impl GithubDeliveryWorker {
                 "github.delivery.invalid_repository",
             ));
         };
+        let connection = source_connection(claimed, repository)?;
         let revision = match prepared.event() {
             VerifiedGithubWebhook::RepositoryDispatch(_) => prepared
                 .resolved_evidence()
@@ -1259,9 +1256,12 @@ impl GithubDeliveryWorker {
             (
                 ProviderRepositoryVisibility::Public,
                 GithubDeliverySourceAuthority::PublicAnonymous,
-            ) if prepared.private_source_authority().is_none() => {
-                RepositorySourceRequest::public(&repository, &revision, archive_limits(manifest)?)
-            }
+            ) if prepared.private_source_authority().is_none() => RepositorySourceRequest::public(
+                &connection,
+                &revision,
+                archive_limits(manifest)?,
+                RepositorySourceRedirectPolicy::Deny,
+            ),
             (
                 ProviderRepositoryVisibility::Private,
                 GithubDeliverySourceAuthority::PrivateInstallationContentsRead {
@@ -1269,10 +1269,11 @@ impl GithubDeliveryWorker {
                 },
             ) if prepared.private_source_authority().is_some() => {
                 RepositorySourceRequest::authenticated(
-                    &repository,
+                    &connection,
                     &revision,
                     credential,
                     archive_limits(manifest)?,
+                    RepositorySourceRedirectPolicy::ConfiguredArchiveOrigin,
                 )
             }
             _ => {
@@ -1296,7 +1297,7 @@ impl GithubDeliveryWorker {
             )
         })?
         .map_err(|error| source_failure(error, self.config.retry_backoff_millis()))?;
-        if !valid_source_response(&source, &repository, &revision, archive_limits(manifest)?) {
+        if !valid_source_response(&source, &connection, &revision, archive_limits(manifest)?) {
             return Err(ProcessingFailure::reject(
                 "github.repository_source.mismatch",
             ));
@@ -1310,7 +1311,7 @@ impl GithubDeliveryWorker {
         event: &VerifiedGithubWebhook,
         pending: &PendingGithubRepositoryDispatchEvidence,
         authority: GithubDeliverySourceAuthority<'_>,
-    ) -> Result<RepositorySource, ProcessingFailure> {
+    ) -> Result<RepositorySourceArchive, ProcessingFailure> {
         let resolver = self.repository_dispatch_resolver.as_ref().ok_or_else(|| {
             ProcessingFailure::reject("github.repository_dispatch.resolver_unsupported")
         })?;
@@ -1329,6 +1330,7 @@ impl GithubDeliveryWorker {
         }
         let repository = RepositoryId::new(claimed.identity().repository_identity())
             .map_err(|_| ProcessingFailure::reject("github.delivery.invalid_repository"))?;
+        let connection = source_connection(claimed, repository.clone())?;
         let revision = RevisionSpec::new(dispatch.git_ref())
             .map_err(|_| ProcessingFailure::reject("github.repository_dispatch.invalid_branch"))?;
         let limits = archive_limits(pending.manifest())?;
@@ -1379,13 +1381,10 @@ impl GithubDeliveryWorker {
             ));
         }
         let exact_revision = snapshot.resolved_revision();
-        let provider = snapshot.provider().clone();
-        let resolved_repository = snapshot.repository().clone();
         let format = snapshot.format();
         let digest = snapshot.digest();
-        let source = RepositorySource::from_bytes(
-            provider,
-            resolved_repository,
+        let source = RepositorySourceArchive::from_bytes(
+            connection,
             exact_revision,
             format,
             snapshot.into_bytes(),
@@ -1403,7 +1402,7 @@ impl GithubDeliveryWorker {
         lease: &GithubDeliveryClaimLease,
         claimed: &ClaimedProviderDelivery,
         prepared: &PreparedGithubDelivery,
-        source: &RepositorySource,
+        source: &RepositorySourceArchive,
         private_credentials: Option<&dyn GithubDeliverySourceCredentialProvider>,
     ) -> Result<GithubDeliveryWorkerOutcome, WorkerInterruption> {
         let evidence = prepared.resolved_evidence().ok_or_else(|| {
@@ -1430,7 +1429,7 @@ impl GithubDeliveryWorker {
         lease: &GithubDeliveryClaimLease,
         claimed: &ClaimedProviderDelivery,
         prepared: &PreparedGithubDelivery,
-        source: &RepositorySource,
+        source: &RepositorySourceArchive,
         private_credentials: Option<&dyn GithubDeliverySourceCredentialProvider>,
         workflows: Vec<RepositoryWorkflowDiscoveryOutcome>,
     ) -> Result<GithubDeliveryWorkerOutcome, WorkerInterruption> {
@@ -1596,7 +1595,7 @@ impl GithubDeliveryWorker {
         lease: &GithubDeliveryClaimLease,
         claimed: &ClaimedProviderDelivery,
         prepared: &PreparedGithubDelivery,
-        source: &RepositorySource,
+        source: &RepositorySourceArchive,
         workflow: (&str, &[u8]),
         private_credentials: Option<&dyn GithubDeliverySourceCredentialProvider>,
     ) -> Result<GithubDeliveryWorkflowProcessorCompletion, WorkerInterruption> {
@@ -2470,16 +2469,31 @@ fn retry_after_millis(error: ScmError, default_delay_millis: i64) -> i64 {
 }
 
 fn valid_source_response(
-    source: &RepositorySource,
-    repository: &RepositoryId,
+    source: &RepositorySourceArchive,
+    connection: &RepositorySourceConnection,
     revision: &GitObjectId,
     limits: ArchiveLimits,
 ) -> bool {
-    source.provider().as_str() == GITHUB_PROVIDER
-        && source.repository() == repository
+    source.connection_id() == connection.connection_id()
+        && source.external_repository_id() == connection.external_repository_id()
+        && source.repository() == connection.repository()
         && source.revision() == revision
         && source.format() == ArchiveFormat::TarGzip
         && source.size() <= limits.maximum_bytes()
+}
+
+fn source_connection(
+    claimed: &ClaimedProviderDelivery,
+    repository: RepositoryId,
+) -> Result<RepositorySourceConnection, ProcessingFailure> {
+    let external_repository_id =
+        ExternalRepositoryId::new(claimed.identity().repository_id().get().to_string())
+            .map_err(|_| ProcessingFailure::reject("github.delivery.invalid_repository"))?;
+    Ok(RepositorySourceConnection::new(
+        claimed.identity().connection_id(),
+        external_repository_id,
+        repository,
+    ))
 }
 
 const fn discovery_failure_kind(error: RepositoryWorkflowDiscoveryError) -> &'static str {
@@ -2525,7 +2539,7 @@ fn failed(failure_kind: &'static str) -> ProviderDeliveryWorkflowConclusion {
 fn prepare_all_direct_inventory(
     manifest: &GithubProviderManifest,
     manifest_digest: Sha256Digest,
-    source: &RepositorySource,
+    source: &RepositorySourceArchive,
     workflows: Vec<RepositoryWorkflowDiscoveryOutcome>,
 ) -> Result<
     (

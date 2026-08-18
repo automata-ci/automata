@@ -18,7 +18,6 @@ use automata_ci_core::{
     AttemptId, JobConclusion, JobId, JobResult, JobSecretExposure, RunId, Sha256Digest,
     StepAnnotation, StepAnnotationLevel, StepAnnotationProperty, StepId, StepResult, UnixMillis,
 };
-use automata_ci_github::{GithubHttpEndpoint, GithubHttpLimits};
 use automata_ci_github_delivery::{
     GithubChecksCredentialProvider, GithubChecksCredentialProviderError,
     GithubChecksCredentialRequest, GithubChecksCredentialValueError, GithubChecksPublisher,
@@ -26,6 +25,7 @@ use automata_ci_github_delivery::{
     GithubChecksServerServiceCredential, GithubServerServiceCredentialRelease,
 };
 use automata_ci_provider::ProviderConnectionId;
+use automata_ci_provider_github::{GithubHttpEndpoint, GithubHttpLimits};
 use automata_ci_scm::RepositoryId as ScmRepositoryId;
 use automata_ci_store::{
     AdvanceGithubCheckAnnotations, BeginGithubCheckAnnotationBatch, BeginGithubCheckRunCreate,

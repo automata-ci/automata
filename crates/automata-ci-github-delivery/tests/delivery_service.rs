@@ -25,10 +25,10 @@ use automata_ci_github_delivery::{
     GithubDeliveryWorkflowRequest, GithubPushChangedFilesAuthority, GithubPushChangedFilesProvider,
     GithubPushChangedFilesRequest, GithubServerServiceCredentialRelease,
 };
-use automata_ci_provider::ProviderConnectionId;
+use automata_ci_provider::{ExternalRepositoryId, ProviderConnectionId};
 use automata_ci_scm::{
-    ArchiveFormat, RepositoryId as ScmRepositoryId, RepositorySource, RepositorySourcePort,
-    RepositorySourceRequest, ScmError, ScmProviderId,
+    ArchiveFormat, RepositoryId as ScmRepositoryId, RepositorySource, RepositorySourceArchive,
+    RepositorySourceConnection, RepositorySourceRequest, ScmError,
 };
 use automata_ci_store::{
     AcceptManifestPinnedGithubDelivery, AcceptProviderDelivery, AdmissionObject,
@@ -75,6 +75,14 @@ const CLAIM_MILLIS: i64 = 50;
 const RENEWED_NOW: i64 = 120;
 const AFTER_INITIAL_EXPIRY: i64 = 155;
 const PATH_FILTER_WORKFLOW: &[u8] = b"name: Paths CI\non:\n  push:\n    paths: ['src/**']\njobs:\n  verify:\n    runs-on: linux\n    steps:\n      - run: echo paths\n";
+
+fn source_connection() -> RepositorySourceConnection {
+    RepositorySourceConnection::new(
+        ProviderConnectionId::from_uuid(Uuid::from_u128(3)).expect("connection"),
+        ExternalRepositoryId::new(REPOSITORY_ID.to_string()).expect("external repository ID"),
+        ScmRepositoryId::new(format!("{OWNER}/{REPOSITORY}")).expect("repository"),
+    )
+}
 
 #[derive(Debug)]
 struct ManualClock(AtomicI64);
@@ -202,7 +210,7 @@ impl Drop for SourceFutureGuard<'_> {
 
 #[derive(Debug)]
 struct RecordingSourcePort {
-    source: RepositorySource,
+    source: RepositorySourceArchive,
     gate: Option<Arc<SourceGate>>,
     calls: AtomicUsize,
     credential_present: AtomicBool,
@@ -210,7 +218,7 @@ struct RecordingSourcePort {
 }
 
 impl RecordingSourcePort {
-    fn new(source: RepositorySource, gate: Option<Arc<SourceGate>>) -> Self {
+    fn new(source: RepositorySourceArchive, gate: Option<Arc<SourceGate>>) -> Self {
         Self {
             source,
             gate,
@@ -222,15 +230,11 @@ impl RecordingSourcePort {
 }
 
 #[async_trait]
-impl RepositorySourcePort for RecordingSourcePort {
-    fn provider_id(&self) -> &ScmProviderId {
-        self.source.provider()
-    }
-
+impl RepositorySource for RecordingSourcePort {
     async fn fetch_repository_source(
         &self,
         request: RepositorySourceRequest<'_>,
-    ) -> Result<RepositorySource, ScmError> {
+    ) -> Result<RepositorySourceArchive, ScmError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.credential_present
             .store(request.credential().is_some(), Ordering::SeqCst);
@@ -1439,9 +1443,8 @@ fn snapshot_processor_harness_with_config(
         CredentialBehavior::Exact,
         renewal_apply_gate.clone(),
     ));
-    let source = RepositorySource::from_bytes(
-        ScmProviderId::new("github").expect("provider"),
-        ScmRepositoryId::new(format!("{OWNER}/{REPOSITORY}")).expect("repository"),
+    let source = RepositorySourceArchive::from_bytes(
+        source_connection(),
         GitObjectId::from_provider_hex(AFTER).expect("revision"),
         ArchiveFormat::TarGzip,
         archive(BTreeMap::from([(
@@ -1516,9 +1519,8 @@ fn changed_files_renewal_harness(
         credential_behavior,
         renewal_apply_gate.clone(),
     ));
-    let source = RepositorySource::from_bytes(
-        ScmProviderId::new("github").expect("provider"),
-        ScmRepositoryId::new(format!("{OWNER}/{REPOSITORY}")).expect("repository"),
+    let source = RepositorySourceArchive::from_bytes(
+        source_connection(),
         GitObjectId::from_provider_hex(AFTER).expect("revision"),
         ArchiveFormat::TarGzip,
         archive(BTreeMap::from([(
@@ -1716,10 +1718,9 @@ fn delivery_template(
     )
 }
 
-fn repository_source() -> RepositorySource {
-    RepositorySource::from_bytes(
-        ScmProviderId::new("github").expect("provider"),
-        ScmRepositoryId::new(format!("{OWNER}/{REPOSITORY}")).expect("repository"),
+fn repository_source() -> RepositorySourceArchive {
+    RepositorySourceArchive::from_bytes(
+        source_connection(),
         GitObjectId::from_provider_hex(AFTER).expect("revision"),
         ArchiveFormat::TarGzip,
         archive(BTreeMap::from([(

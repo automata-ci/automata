@@ -11,7 +11,8 @@ use async_trait::async_trait;
 use automata_ci_auth::secret::SecretString;
 use automata_ci_blob::{BlobStoreErrorKind, ImmutableBlobStore};
 use automata_ci_core::{JobConclusion, JobResult, UnixMillis};
-use automata_ci_github::{
+use automata_ci_provider::ProviderConnectionId;
+use automata_ci_provider_github::{
     GithubCheckAppId as HttpAppId, GithubCheckCompletion, GithubCheckConclusion as HttpConclusion,
     GithubCheckCreateIndeterminate, GithubCheckCreateIndeterminateKind, GithubCheckDetailsUrl,
     GithubCheckExternalId, GithubCheckName as HttpCheckName, GithubCheckRequestedAction,
@@ -20,7 +21,6 @@ use automata_ci_github::{
     GithubCheckRunState, GithubCheckSuiteCreateOutcome, GithubCheckSuiteId as HttpSuiteId,
     GithubCheckTimestamp, GithubChecksError, GithubHttpEndpoint, GithubObservedCheckConclusion,
 };
-use automata_ci_provider::ProviderConnectionId;
 use automata_ci_scm::RepositoryId as ScmRepositoryId;
 use automata_ci_store::{
     AdvanceGithubCheckAnnotations, BeginGithubCheckAnnotationBatch, BeginGithubCheckRunCreate,

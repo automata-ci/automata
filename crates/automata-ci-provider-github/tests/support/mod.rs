@@ -6,7 +6,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use automata_ci_github::{
+use automata_ci_provider_github::{
     GithubHttpEndpoint, GithubHttpLimits, GithubWebhookBodyDigest, X_GITHUB_DELIVERY,
     X_GITHUB_EVENT, X_HUB_SIGNATURE_256,
 };

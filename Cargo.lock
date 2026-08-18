@@ -227,7 +227,6 @@ dependencies = [
  "automata-ci-core",
  "automata-ci-credential-github",
  "automata-ci-execution",
- "automata-ci-github",
  "automata-ci-github-delivery",
  "automata-ci-job-executor-actions",
  "automata-ci-key-management",
@@ -237,6 +236,7 @@ dependencies = [
  "automata-ci-protocol",
  "automata-ci-protocol-protobuf",
  "automata-ci-provider",
+ "automata-ci-provider-github",
  "automata-ci-provisioning",
  "automata-ci-provisioning-grpc",
  "automata-ci-provisioning-postgres",
@@ -297,7 +297,7 @@ dependencies = [
  "automata-ci-blob",
  "automata-ci-blob-s3",
  "automata-ci-core",
- "automata-ci-github",
+ "automata-ci-provider-github",
  "automata-ci-scm",
  "bytes",
  "flate2",
@@ -318,7 +318,7 @@ dependencies = [
  "automata-ci-action",
  "automata-ci-blob-s3",
  "automata-ci-core",
- "automata-ci-github",
+ "automata-ci-provider-github",
  "automata-ci-scm",
  "bytes",
  "flate2",
@@ -520,30 +520,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "automata-ci-github"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "automata-ci-actions-permissions",
- "automata-ci-auth",
- "automata-ci-blob",
- "automata-ci-core",
- "automata-ci-scm",
- "axum",
- "bytes",
- "reqwest",
- "ring",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "thiserror",
- "time",
- "tokio",
- "url",
- "zeroize",
-]
-
-[[package]]
 name = "automata-ci-github-delivery"
 version = "0.1.0"
 dependencies = [
@@ -551,8 +527,8 @@ dependencies = [
  "automata-ci-auth",
  "automata-ci-blob",
  "automata-ci-core",
- "automata-ci-github",
  "automata-ci-provider",
+ "automata-ci-provider-github",
  "automata-ci-schedule",
  "automata-ci-scm",
  "automata-ci-store",
@@ -764,6 +740,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "automata-ci-provider-github"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "automata-ci-actions-permissions",
+ "automata-ci-auth",
+ "automata-ci-blob",
+ "automata-ci-core",
+ "automata-ci-provider",
+ "automata-ci-scm",
+ "axum",
+ "bytes",
+ "reqwest",
+ "ring",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror",
+ "time",
+ "tokio",
+ "url",
+ "zeroize",
+]
+
+[[package]]
 name = "automata-ci-provider-postgres"
 version = "0.1.0"
 dependencies = [
@@ -783,7 +784,7 @@ name = "automata-ci-provisioning"
 version = "0.1.0"
 dependencies = [
  "automata-ci-core",
- "automata-ci-github",
+ "automata-ci-provider-github",
  "automata-ci-store",
  "automata-ci-workflow-service",
  "thiserror",
@@ -850,12 +851,12 @@ dependencies = [
  "automata-ci-core",
  "automata-ci-execution",
  "automata-ci-expression-actions",
- "automata-ci-github",
  "automata-ci-job-executor-actions",
  "automata-ci-local",
  "automata-ci-metrics",
  "automata-ci-protocol",
  "automata-ci-protocol-protobuf",
+ "automata-ci-provider-github",
  "automata-ci-runner-journal",
  "automata-ci-runner-runtime",
  "automata-ci-runner-spool",

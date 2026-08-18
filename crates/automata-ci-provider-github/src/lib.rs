@@ -9,6 +9,7 @@ mod checks;
 mod config;
 mod endpoint;
 mod event;
+mod factory;
 mod pagination;
 mod repository;
 mod repository_path;
@@ -49,6 +50,9 @@ pub use event::{
     GithubMergeGroupEventFacts, GithubPullRequestEventFacts, GithubPushEventFacts,
     GithubRepositoryDispatchEventFacts, GithubSealedEventEnvelopeV1, GithubTrustDerivation,
     GithubWorkflowEventKind, MAX_GITHUB_EVENT_ENVELOPE_BYTES, derive_github_trust_snapshot,
+};
+pub use factory::{
+    GithubConnectionPolicy, GithubFactoryError, GithubInstanceConfiguration, GithubProviderFactory,
 };
 pub use webhook::{
     AuthenticatedGithubWebhook, GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE, GithubPushRef,

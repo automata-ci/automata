@@ -1665,7 +1665,7 @@ pub enum RunnerProductError {
     ObjectStore(#[from] automata_ci_blob_s3::S3BlobStoreConfigError),
     /// GitHub SCM endpoint construction failed.
     #[error("runner GitHub endpoint configuration failed")]
-    Github(#[from] automata_ci_github::GithubHttpConfigurationError),
+    Github(#[from] automata_ci_provider_github::GithubHttpConfigurationError),
     /// GitHub action preparation composition failed.
     #[error("runner action preparation configuration failed")]
     ActionPreparation(#[from] automata_ci_job_executor_actions::ActionPreparationError),

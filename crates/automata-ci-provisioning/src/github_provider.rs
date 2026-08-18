@@ -1,7 +1,7 @@
 use std::{collections::BTreeSet, fmt, num::NonZeroU64};
 
 use automata_ci_core::{JobAuthorityProfile, WorkspaceId};
-use automata_ci_github::GithubWebhookVerifier;
+use automata_ci_provider_github::GithubWebhookVerifier;
 use automata_ci_store::{
     GithubCheckName, GithubRepositoryName, GithubServerServiceAppClientId,
     GithubServerServiceAppId, GithubServerServiceJwtIssuer, ProviderInstallationId,

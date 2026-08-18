@@ -20,7 +20,7 @@ thiserror.workspace = true
 [dev-dependencies]
 automata-ci-blob-s3.workspace = true
 automata-ci-core.workspace = true
-automata-ci-github.workspace = true
+automata-ci-provider-github.workspace = true
 automata-ci-scm.workspace = true
 bytes.workspace = true
 flate2.workspace = true

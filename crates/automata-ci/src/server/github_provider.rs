@@ -20,9 +20,9 @@ use automata_ci_credential_github::{
     GithubServerServiceResolutionError, ResolvedGithubServerServiceCredentialRequest,
     github_server_service_credential_request,
 };
-use automata_ci_github::GithubWebhookVerifier;
 use automata_ci_github_delivery::GithubDeliveryConnection;
 use automata_ci_provider::ProviderConnectionId;
+use automata_ci_provider_github::GithubWebhookVerifier;
 use automata_ci_store::{
     AdmissionObject, BootstrapGithubProviderManifest, BootstrapGithubProviderRepository,
     EnsureGithubServerServiceAuthority, GITHUB_PROVIDER_API_ORIGIN,

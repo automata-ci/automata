@@ -13,7 +13,7 @@ use automata_ci_blob::ImmutableBlobStore;
 use automata_ci_core::UnixMillis;
 use automata_ci_provider::ProviderConnectionId;
 use automata_ci_scm::{
-    RepositoryId as ScmRepositoryId, RepositorySource, RepositorySourcePort, ScmProvider,
+    RepositoryId as ScmRepositoryId, RepositorySource, RepositorySourceArchive, ScmProvider,
 };
 use automata_ci_store::{
     ClaimProviderDelivery, GithubRepositoryDispatchEvidenceRepository, GithubServerServiceAction,
@@ -653,7 +653,7 @@ enum PrivateCredentialAcquisition {
 enum PrivateRevisionFetch {
     SnapshotRotated,
     Classified {
-        source: Result<RepositorySource, ProcessingFailure>,
+        source: Result<RepositorySourceArchive, ProcessingFailure>,
         operation: OwnedMutexGuard<()>,
     },
 }
@@ -680,7 +680,7 @@ impl GithubDeliveryService {
     #[allow(clippy::too_many_arguments)]
     pub fn new_public_only<R>(
         objects: Arc<dyn ImmutableBlobStore>,
-        repository_source: Arc<dyn RepositorySourcePort>,
+        repository_source: Arc<dyn RepositorySource>,
         workflow_processor: Arc<dyn GithubDeliveryWorkflowProcessor>,
         deliveries: Arc<R>,
         clock: Arc<dyn GithubDeliveryClock>,
@@ -716,7 +716,7 @@ impl GithubDeliveryService {
     #[allow(clippy::too_many_arguments)]
     pub fn new_public_only_with_repository_dispatch<R>(
         objects: Arc<dyn ImmutableBlobStore>,
-        repository_source: Arc<dyn RepositorySourcePort>,
+        repository_source: Arc<dyn RepositorySource>,
         repository_dispatch_resolver: Arc<dyn ScmProvider>,
         workflow_processor: Arc<dyn GithubDeliveryWorkflowProcessor>,
         deliveries: Arc<R>,
@@ -758,7 +758,7 @@ impl GithubDeliveryService {
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_private_source_credentials<R>(
         objects: Arc<dyn ImmutableBlobStore>,
-        repository_source: Arc<dyn RepositorySourcePort>,
+        repository_source: Arc<dyn RepositorySource>,
         workflow_processor: Arc<dyn GithubDeliveryWorkflowProcessor>,
         deliveries: Arc<R>,
         credentials: Arc<dyn GithubDeliverySourceCredentialProvider>,
@@ -798,7 +798,7 @@ impl GithubDeliveryService {
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_private_source_credentials_and_repository_dispatch<R>(
         objects: Arc<dyn ImmutableBlobStore>,
-        repository_source: Arc<dyn RepositorySourcePort>,
+        repository_source: Arc<dyn RepositorySource>,
         repository_dispatch_resolver: Arc<dyn ScmProvider>,
         workflow_processor: Arc<dyn GithubDeliveryWorkflowProcessor>,
         deliveries: Arc<R>,
@@ -832,7 +832,7 @@ impl GithubDeliveryService {
     #[allow(clippy::too_many_arguments)]
     fn new_with_source_policy<R>(
         objects: Arc<dyn ImmutableBlobStore>,
-        repository_source: Arc<dyn RepositorySourcePort>,
+        repository_source: Arc<dyn RepositorySource>,
         workflow_processor: Arc<dyn GithubDeliveryWorkflowProcessor>,
         deliveries: Arc<R>,
         source_policy: GithubDeliverySourcePolicy,

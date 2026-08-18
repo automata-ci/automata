@@ -18,7 +18,7 @@ use automata_ci_execution::{
     ImmutableImage, NetworkPolicy, ResourceLimits, RootFilesystemPolicy, SandboxEnvironment,
     SandboxLaunch, SandboxPrivilegePolicy, TargetPath, TargetPlatform,
 };
-use automata_ci_github::{
+use automata_ci_provider_github::{
     GithubHttpConfigurationError, GithubHttpEndpoint, GithubHttpLimits, GithubTrustedOrigins,
 };
 use automata_ci_runner_journal::StateRoot;

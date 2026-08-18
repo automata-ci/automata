@@ -2,6 +2,7 @@ use std::fmt;
 
 use automata_ci_auth::secret::SecretString;
 use automata_ci_core::{GitObjectId, Sha256Digest};
+use automata_ci_provider::{ExternalRepositoryId, ProviderConnectionId};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -310,6 +311,63 @@ impl fmt::Debug for SnapshotRequest<'_> {
     }
 }
 
+/// Provider-neutral routing evidence for one repository connection.
+///
+/// The provider-native ID is authoritative identity. `repository` is the
+/// provider-owned route currently associated with that identity; adapters must
+/// verify both before returning source. The configured provider instance is
+/// supplied by the selected [`RepositorySource`](crate::RepositorySource)
+/// adapter, so callers cannot route a request to an arbitrary instance.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepositorySourceConnection {
+    connection_id: ProviderConnectionId,
+    external_repository_id: ExternalRepositoryId,
+    repository: RepositoryId,
+}
+
+impl RepositorySourceConnection {
+    /// Binds one Automata connection to its provider-native identity and route.
+    #[must_use]
+    pub const fn new(
+        connection_id: ProviderConnectionId,
+        external_repository_id: ExternalRepositoryId,
+        repository: RepositoryId,
+    ) -> Self {
+        Self {
+            connection_id,
+            external_repository_id,
+            repository,
+        }
+    }
+
+    /// Returns the stable Automata connection identity.
+    #[must_use]
+    pub const fn connection_id(&self) -> ProviderConnectionId {
+        self.connection_id
+    }
+
+    /// Returns the provider-native repository identity.
+    #[must_use]
+    pub const fn external_repository_id(&self) -> &ExternalRepositoryId {
+        &self.external_repository_id
+    }
+
+    /// Returns the provider-owned repository route.
+    #[must_use]
+    pub const fn repository(&self) -> &RepositoryId {
+        &self.repository
+    }
+}
+
+/// Redirect authority for one source-archive request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RepositorySourceRedirectPolicy {
+    /// Reject every provider redirect.
+    Deny,
+    /// Permit one credential-free redirect to the adapter's configured archive origin.
+    ConfiguredArchiveOrigin,
+}
+
 /// One borrowed request for source at an already known exact revision.
 ///
 /// The revision is an immutable [`GitObjectId`], so an implementation must
@@ -317,10 +375,11 @@ impl fmt::Debug for SnapshotRequest<'_> {
 /// credential is borrowed for this request only and is redacted by the
 /// [`Debug`](fmt::Debug) implementation.
 pub struct RepositorySourceRequest<'a> {
-    repository: &'a RepositoryId,
+    connection: &'a RepositorySourceConnection,
     revision: &'a GitObjectId,
     credential: Option<&'a SecretString>,
     limits: ArchiveLimits,
+    redirect_policy: RepositorySourceRedirectPolicy,
 }
 
 impl<'a> RepositorySourceRequest<'a> {
@@ -330,15 +389,17 @@ impl<'a> RepositorySourceRequest<'a> {
     /// credentials when this request is used.
     #[must_use]
     pub const fn public(
-        repository: &'a RepositoryId,
+        connection: &'a RepositorySourceConnection,
         revision: &'a GitObjectId,
         limits: ArchiveLimits,
+        redirect_policy: RepositorySourceRedirectPolicy,
     ) -> Self {
         Self {
-            repository,
+            connection,
             revision,
             credential: None,
             limits,
+            redirect_policy,
         }
     }
 
@@ -349,23 +410,31 @@ impl<'a> RepositorySourceRequest<'a> {
     /// or included in returned source, errors, or diagnostics.
     #[must_use]
     pub const fn authenticated(
-        repository: &'a RepositoryId,
+        connection: &'a RepositorySourceConnection,
         revision: &'a GitObjectId,
         credential: &'a SecretString,
         limits: ArchiveLimits,
+        redirect_policy: RepositorySourceRedirectPolicy,
     ) -> Self {
         Self {
-            repository,
+            connection,
             revision,
             credential: Some(credential),
             limits,
+            redirect_policy,
         }
     }
 
-    /// Returns the exact provider-native repository requested by the caller.
+    /// Returns the exact repository connection requested by the caller.
+    #[must_use]
+    pub const fn connection(&self) -> &RepositorySourceConnection {
+        self.connection
+    }
+
+    /// Returns the provider-owned repository route requested by the caller.
     #[must_use]
     pub const fn repository(&self) -> &RepositoryId {
-        self.repository
+        self.connection.repository()
     }
 
     /// Returns the exact immutable revision requested by the caller.
@@ -388,16 +457,23 @@ impl<'a> RepositorySourceRequest<'a> {
     pub const fn limits(&self) -> ArchiveLimits {
         self.limits
     }
+
+    /// Returns the redirect authority granted for this operation.
+    #[must_use]
+    pub const fn redirect_policy(&self) -> RepositorySourceRedirectPolicy {
+        self.redirect_policy
+    }
 }
 
 impl fmt::Debug for RepositorySourceRequest<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("RepositorySourceRequest")
-            .field("repository", &self.repository)
+            .field("connection", &self.connection)
             .field("revision", &self.revision)
             .field("credential", &self.credential.map(|_| "[redacted]"))
             .field("limits", &self.limits)
+            .field("redirect_policy", &self.redirect_policy)
             .finish()
     }
 }
@@ -514,8 +590,9 @@ impl RepositorySnapshot {
 /// retains the exact bounded archive bytes and their local SHA-256 digest, and
 /// contains no credential material.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RepositorySource {
-    provider: ScmProviderId,
+pub struct RepositorySourceArchive {
+    connection_id: ProviderConnectionId,
+    external_repository_id: ExternalRepositoryId,
     repository: RepositoryId,
     revision: GitObjectId,
     format: ArchiveFormat,
@@ -523,7 +600,7 @@ pub struct RepositorySource {
     bytes: Bytes,
 }
 
-impl RepositorySource {
+impl RepositorySourceArchive {
     /// Builds exact-revision source and hashes the exact supplied archive bytes.
     ///
     /// The digest is SHA-256 over `bytes`, without decoding or normalization.
@@ -532,16 +609,16 @@ impl RepositorySource {
     /// this constructor.
     #[must_use]
     pub fn from_bytes(
-        provider: ScmProviderId,
-        repository: RepositoryId,
+        connection: RepositorySourceConnection,
         revision: GitObjectId,
         format: ArchiveFormat,
         bytes: Bytes,
     ) -> Self {
         let digest = Sha256Digest::from_bytes(Sha256::digest(&bytes).into());
         Self {
-            provider,
-            repository,
+            connection_id: connection.connection_id,
+            external_repository_id: connection.external_repository_id,
+            repository: connection.repository,
             revision,
             format,
             digest,
@@ -549,10 +626,16 @@ impl RepositorySource {
         }
     }
 
-    /// Returns the stable identifier of the provider that produced the bytes.
+    /// Returns the stable Automata connection that authorized the read.
     #[must_use]
-    pub const fn provider(&self) -> &ScmProviderId {
-        &self.provider
+    pub const fn connection_id(&self) -> ProviderConnectionId {
+        self.connection_id
+    }
+
+    /// Returns the provider-native repository identity proven by the adapter.
+    #[must_use]
+    pub const fn external_repository_id(&self) -> &ExternalRepositoryId {
+        &self.external_repository_id
     }
 
     /// Returns the provider-native repository represented by this source.

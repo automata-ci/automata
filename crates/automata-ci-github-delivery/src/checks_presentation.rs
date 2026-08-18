@@ -4,7 +4,7 @@ use automata_ci_core::{
     JobConclusion, JobResult, Sha256Digest, StepAnnotation, StepAnnotationLevel,
     StepAnnotationProperty, StepResult,
 };
-use automata_ci_github::{
+use automata_ci_provider_github::{
     GithubCheckAnnotation, GithubCheckAnnotationLevel, GithubCheckModelError, GithubCheckOutput,
 };
 use sha2::{Digest as _, Sha256};

@@ -29,8 +29,8 @@ use automata_ci_auth_postgres::{
     PostgresHumanSessionRepository, PostgresHumanSignInFinalizer, PostgresInstallationRepository,
     PostgresLoginTransactionRepository, PostgresRequestAuthenticationResolver,
 };
-use automata_ci_github::GithubHttpEndpoint;
 use automata_ci_key_management::KeyEncryptionProvider;
+use automata_ci_provider_github::GithubHttpEndpoint;
 use automata_ci_store_postgres::PostgresStore;
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
