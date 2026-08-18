@@ -5,7 +5,10 @@ use automata_ci_core::{
     AttemptId, JobConclusion, JobIrVersion, JobLifecycle, Lease, LeaseGuard, LogSequence,
     LogStreamId, RunnerId, RunnerSessionId, Sha256Digest, UnixMillis,
 };
-use automata_ci_protocol::{INITIAL_RUNTIME_AUTHORITY_GENERATION, RuntimeAuthorityDeliveryBinding};
+use automata_ci_protocol::{
+    INITIAL_RUNTIME_AUTHORITY_GENERATION, LeaseAuthorityPollContributions,
+    RuntimeAuthorityDeliveryBinding,
+};
 use automata_ci_store::{
     AcknowledgeRunnerCommands, CommandCursor, CommandSequence, DocumentSchema,
     DurableRunnerCommand, EnqueueRunnerCommand, JobIrMetadata, LeaseOfferCommandIdentity,
@@ -14,6 +17,11 @@ use automata_ci_store::{
     RunnerSessionFence, StableRunnerSlot, StoreError,
 };
 use thiserror::Error;
+
+use super::{
+    lease_authority::LeaseAuthorityEvidenceSet,
+    port::{durable_lease_authority_evidence, durable_managed_secret_bindings},
+};
 
 const MAX_UNCOMPRESSED_RUNNER_LOG_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_DURABLE_LOG_SEQUENCE: u64 = 9_223_372_036_854_775_807;
@@ -78,6 +86,9 @@ pub struct AcceptedRuntimeAuthorityOffer {
     job_ir: JobIrMetadata,
     offer_valid_until: UnixMillis,
     command: RuntimeAuthorityOfferCommand,
+    lease_authority_evidence: LeaseAuthorityEvidenceSet,
+    managed_secret_bindings_empty: bool,
+    command_projection_valid: bool,
 }
 
 impl AcceptedRuntimeAuthorityOffer {
@@ -104,6 +115,9 @@ impl AcceptedRuntimeAuthorityOffer {
             job_ir,
             offer_valid_until,
             command,
+            lease_authority_evidence: LeaseAuthorityEvidenceSet::empty(),
+            managed_secret_bindings_empty: true,
+            command_projection_valid: true,
         })
     }
 
@@ -147,6 +161,26 @@ impl AcceptedRuntimeAuthorityOffer {
     #[must_use]
     pub const fn command(&self) -> RuntimeAuthorityOfferCommand {
         self.command
+    }
+
+    /// Returns canonical provider-neutral authority evidence retained before
+    /// the encrypted lease-offer payload is erased.
+    #[must_use]
+    pub const fn lease_authority_evidence(&self) -> &LeaseAuthorityEvidenceSet {
+        &self.lease_authority_evidence
+    }
+
+    /// Reports whether the retained offer carried no managed-secret bindings.
+    #[must_use]
+    pub const fn managed_secret_bindings_empty(&self) -> bool {
+        self.managed_secret_bindings_empty
+    }
+
+    /// Reports whether every value-free security projection was decoded from
+    /// the exact durable command before its payload was erased.
+    #[must_use]
+    pub const fn command_projection_valid(&self) -> bool {
+        self.command_projection_valid
     }
 }
 
@@ -205,6 +239,7 @@ pub struct LeaseOfferClaim {
     slot: StableRunnerSlot,
     lease: Lease,
     job_ir: JobIrMetadata,
+    authority_contributions: LeaseAuthorityPollContributions,
 }
 
 impl LeaseOfferClaim {
@@ -218,6 +253,7 @@ impl LeaseOfferClaim {
         slot: StableRunnerSlot,
         lease: Lease,
         job_ir: JobIrMetadata,
+        authority_contributions: LeaseAuthorityPollContributions,
     ) -> Result<Self, RunnerControlValueError> {
         if lease.runner_id() != request.session().runner_id() {
             return Err(RunnerControlValueError::LeaseRunnerMismatch);
@@ -231,6 +267,7 @@ impl LeaseOfferClaim {
             slot,
             lease,
             job_ir,
+            authority_contributions,
         })
     }
 
@@ -263,6 +300,13 @@ impl LeaseOfferClaim {
     pub const fn job_ir(&self) -> &JobIrMetadata {
         &self.job_ir
     }
+
+    /// Returns the exact provider-neutral contribution bundle accepted with
+    /// the lease request and bound by its durable claim receipt.
+    #[must_use]
+    pub const fn authority_contributions(&self) -> &LeaseAuthorityPollContributions {
+        &self.authority_contributions
+    }
 }
 
 /// Durable state of one exact claimed lease poll before authority issuance.
@@ -289,19 +333,28 @@ impl PublishLeaseOffer {
     ///
     /// # Errors
     /// Returns an error for a cross-session command or a lease owned by another runner.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         request: RunnerOperationRequest,
         protocol_version: RunnerProtocolVersion,
         slot: StableRunnerSlot,
         lease: Lease,
         job_ir: JobIrMetadata,
+        authority_contributions: LeaseAuthorityPollContributions,
         offer_valid_until: UnixMillis,
         command: EnqueueRunnerCommand,
     ) -> Result<Self, RunnerControlValueError> {
         if request.session() != command.session() {
             return Err(RunnerControlValueError::SessionMismatch);
         }
-        let claim = LeaseOfferClaim::new(request, protocol_version, slot, lease, job_ir)?;
+        let claim = LeaseOfferClaim::new(
+            request,
+            protocol_version,
+            slot,
+            lease,
+            job_ir,
+            authority_contributions,
+        )?;
         validate_offer_validity_horizon(claim.lease(), command.created_at(), offer_valid_until)?;
         Ok(Self {
             claim,
@@ -344,6 +397,13 @@ impl PublishLeaseOffer {
     #[must_use]
     pub const fn job_ir(&self) -> &JobIrMetadata {
         self.claim.job_ir()
+    }
+
+    /// Returns the exact provider-neutral contribution bundle bound by the
+    /// claim receipt being consumed by this publication.
+    #[must_use]
+    pub const fn authority_contributions(&self) -> &LeaseAuthorityPollContributions {
+        self.claim.authority_contributions()
     }
 
     /// Returns the exclusive horizon shared by the lease and every delivered runtime authority.
@@ -449,6 +509,14 @@ impl PublishedLeaseOffer {
 
 impl From<PublishedLeaseOffer> for AcceptedRuntimeAuthorityOffer {
     fn from(offer: PublishedLeaseOffer) -> Self {
+        let (lease_authority_evidence, managed_secret_bindings_empty, command_projection_valid) =
+            match (
+                durable_lease_authority_evidence(&offer.command),
+                durable_managed_secret_bindings(&offer.command),
+            ) {
+                (Ok(evidence), Ok(bindings)) => (evidence, bindings.bindings().is_empty(), true),
+                _ => (LeaseAuthorityEvidenceSet::empty(), false, false),
+            };
         let command = RuntimeAuthorityOfferCommand::new(
             offer.command.request().operation_id(),
             offer.command.sequence(),
@@ -462,6 +530,9 @@ impl From<PublishedLeaseOffer> for AcceptedRuntimeAuthorityOffer {
             job_ir: offer.job_ir,
             offer_valid_until: offer.offer_valid_until,
             command,
+            lease_authority_evidence,
+            managed_secret_bindings_empty,
+            command_projection_valid,
         }
     }
 }

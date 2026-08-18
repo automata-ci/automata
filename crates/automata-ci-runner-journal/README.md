@@ -5,6 +5,10 @@ a bounded, canonical local format. It records semantic identifiers, immutable
 digests, operation intentions, and recovery cursors without retaining transport
 frames, provider credentials, or job payload bytes.
 
+A lease-poll response is one journal transaction: its nested command effect,
+carrier-slot successor, and pending provider-neutral authority receipts either
+all survive a crash or none do, even when the command targets another slot.
+
 `automata-ci-runner-runtime` uses the journal together with
 `automata-ci-runner-spool` to reconcile interrupted work.
 

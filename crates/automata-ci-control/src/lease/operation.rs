@@ -1,9 +1,7 @@
 //! Idempotent lease-poll operation values and durable claim outcomes.
 
-use automata_ci_core::{
-    Architecture, AttemptId, EnvironmentProfile, IsolationLevel, JobLifecycle, Lease, LeaseId,
-    OperatingSystem, OperationId, SandboxFeature, TrustSourceClass, UnixMillis,
-};
+use automata_ci_core::{AttemptId, JobLifecycle, Lease, LeaseId, OperationId, UnixMillis};
+use automata_ci_protocol::LeaseAuthorityPollContributions;
 use automata_ci_store::{
     AttemptAssignment, AttemptAssignmentError, DocumentSchema, JobIrMetadata,
     LeaseOfferCommandIdentity, RunnerOperationResponse, RunnerSessionFence, Sha256Digest,
@@ -12,11 +10,22 @@ use automata_ci_store::{
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
-use super::runnable::{AuthenticatedPlacementTrust, RunnableAttempt, RunnableCursorAdvance};
+use super::runnable::{RunnableAttempt, RunnableCursorAdvance};
 
 const LEASE_REQUEST_DIGEST_DOMAIN: &[u8] = b"automata.store.lease-request.v2\0";
-const WINDOWS_PLACEMENT_GRANT_DIGEST_DOMAIN: &[u8] =
-    b"automata.control.windows-hyperv-placement-grant.v1\0";
+const LEASE_POLL_DECISION_REQUEST_DIGEST_DOMAIN: &[u8] =
+    b"automata.control.lease-poll-decision-request.v3\0";
+
+pub(super) fn lease_poll_decision_request_digest(
+    request_key: LeaseRequestKey,
+    authority_contributions: &LeaseAuthorityPollContributions,
+) -> Sha256Digest {
+    let mut digest = Sha256::new();
+    digest.update(LEASE_POLL_DECISION_REQUEST_DIGEST_DOMAIN);
+    digest.update(request_key.request_digest().as_bytes());
+    digest.update(authority_contributions.sha256_digest().as_bytes());
+    Sha256Digest::from_bytes(digest.finalize().into())
+}
 
 /// Canonical identity of one runner lease poll before scheduling selects work.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -110,6 +119,16 @@ impl LeaseRequestKey {
             None => digest.update([0]),
         }
         Sha256Digest::from_bytes(digest.finalize().into())
+    }
+
+    /// Computes the canonical durable decision digest for this request and its
+    /// exact provider-neutral authority contribution bundle.
+    #[must_use]
+    pub fn decision_request_digest(
+        self,
+        authority_contributions: &LeaseAuthorityPollContributions,
+    ) -> Sha256Digest {
+        lease_poll_decision_request_digest(self, authority_contributions)
     }
 }
 
@@ -532,215 +551,7 @@ pub struct TryClaimAttempt {
     observed_at: UnixMillis,
     expires_at: UnixMillis,
     cursor: RunnableCursorAdvance,
-    windows_placement_grant: Option<WindowsHyperVPlacementGrant>,
-}
-
-/// Server-only one-use authority for one exact Windows Hyper-V placement.
-///
-/// The value is neither serialized nor accepted from a runner. It binds the
-/// authenticated trust root and immutable job plan to one poll operation,
-/// runner generation/session/slot, proposed lease, exact image-profile
-/// manifest, and half-open validity interval. A first-party durable adapter
-/// re-derives it from locked current state immediately before leasing.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct WindowsHyperVPlacementGrant {
-    attempt_id: AttemptId,
-    job_id: automata_ci_core::JobId,
-    run_id: automata_ci_core::RunId,
-    operation_id: OperationId,
-    session: RunnerSessionFence,
-    slot: StableRunnerSlot,
-    lease_id: LeaseId,
-    job_ir: JobIrMetadata,
-    trust: AuthenticatedPlacementTrust,
-    environment_profile: EnvironmentProfile,
-    issued_at: UnixMillis,
-    expires_at: UnixMillis,
-    binding_digest: Sha256Digest,
-}
-
-impl WindowsHyperVPlacementGrant {
-    fn for_candidate(
-        request_key: LeaseRequestKey,
-        lease_id: LeaseId,
-        issued_at: UnixMillis,
-        expires_at: UnixMillis,
-        candidate: &RunnableAttempt,
-    ) -> Result<Option<Self>, WindowsPlacementGrantError> {
-        let requirements = candidate.requirements();
-        if requirements.operating_system() != Some(&OperatingSystem::Windows) {
-            return Ok(None);
-        }
-        if requirements.minimum_isolation() < IsolationLevel::VirtualMachine
-            || !requirements
-                .sandbox_features()
-                .contains(&SandboxFeature::WINDOWS_HYPERV_CONTAINER)
-        {
-            return Err(WindowsPlacementGrantError::InexactIsolation);
-        }
-        if requirements.architecture() != Some(&Architecture::X86_64) {
-            return Err(WindowsPlacementGrantError::UnsupportedArchitecture);
-        }
-        let environment_profile = requirements
-            .environment_profile()
-            .cloned()
-            .ok_or(WindowsPlacementGrantError::MissingEnvironmentProfile)?;
-        let trust = candidate
-            .placement_trust()
-            .cloned()
-            .ok_or(WindowsPlacementGrantError::MissingAuthenticatedTrust)?;
-        if !trust.evidence_complete() || trust.source() == TrustSourceClass::Incomplete {
-            return Err(WindowsPlacementGrantError::IncompleteAuthenticatedTrust);
-        }
-        if expires_at <= issued_at {
-            return Err(WindowsPlacementGrantError::InvalidValidityInterval);
-        }
-        let mut grant = Self {
-            attempt_id: candidate.attempt_id(),
-            job_id: candidate.job_id(),
-            run_id: candidate.run_id(),
-            operation_id: request_key.operation_id(),
-            session: request_key.session(),
-            slot: request_key.slot(),
-            lease_id,
-            job_ir: candidate.job_ir().clone(),
-            trust,
-            environment_profile,
-            issued_at,
-            expires_at,
-            binding_digest: Sha256Digest::from_bytes([0; 32]),
-        };
-        grant.binding_digest = grant.compute_binding_digest();
-        Ok(Some(grant))
-    }
-
-    #[cfg(feature = "adapter-spi")]
-    fn rebased(
-        &self,
-        issued_at: UnixMillis,
-        expires_at: UnixMillis,
-    ) -> Result<Self, WindowsPlacementGrantError> {
-        if expires_at <= issued_at {
-            return Err(WindowsPlacementGrantError::InvalidValidityInterval);
-        }
-        let mut grant = self.clone();
-        grant.issued_at = issued_at;
-        grant.expires_at = expires_at;
-        grant.binding_digest = grant.compute_binding_digest();
-        Ok(grant)
-    }
-
-    fn compute_binding_digest(&self) -> Sha256Digest {
-        fn field(digest: &mut Sha256, value: &[u8]) {
-            digest.update(u64::try_from(value.len()).unwrap_or(u64::MAX).to_be_bytes());
-            digest.update(value);
-        }
-
-        let mut digest = Sha256::new();
-        digest.update(WINDOWS_PLACEMENT_GRANT_DIGEST_DOMAIN);
-        digest.update(self.attempt_id.as_uuid().as_bytes());
-        digest.update(self.job_id.as_uuid().as_bytes());
-        digest.update(self.run_id.as_uuid().as_bytes());
-        digest.update(self.operation_id.as_uuid().as_bytes());
-        digest.update(self.session.runner_id().as_uuid().as_bytes());
-        digest.update(self.session.session_id().as_uuid().as_bytes());
-        digest.update(self.session.runner_generation().get().to_be_bytes());
-        digest.update(self.session.session_epoch().get().to_be_bytes());
-        digest.update(self.slot.ordinal().to_be_bytes());
-        digest.update(self.lease_id.as_uuid().as_bytes());
-        digest.update(self.job_ir.version().get().to_be_bytes());
-        digest.update(self.job_ir.encoded_size().to_be_bytes());
-        digest.update(self.job_ir.digest().as_bytes());
-        field(&mut digest, self.job_ir.object_key().as_str().as_bytes());
-        digest.update(self.trust.snapshot_schema().to_be_bytes());
-        digest.update(self.trust.policy_revision().get().to_be_bytes());
-        digest.update(self.trust.policy_digest().as_bytes());
-        digest.update(self.trust.snapshot_digest().as_bytes());
-        digest.update(match self.trust.authority_profile() {
-            automata_ci_core::JobAuthorityProfile::Standard => [0],
-            automata_ci_core::JobAuthorityProfile::CredentialFree => [1],
-        });
-        digest.update(self.trust.requirements_digest().as_bytes());
-        field(
-            &mut digest,
-            self.environment_profile.id().as_str().as_bytes(),
-        );
-        digest.update(self.environment_profile.digest().as_bytes());
-        digest.update(self.issued_at.get().to_be_bytes());
-        digest.update(self.expires_at.get().to_be_bytes());
-        Sha256Digest::from_bytes(digest.finalize().into())
-    }
-
-    /// Returns the exact attempt authorized by this one-use value.
-    #[must_use]
-    pub const fn attempt_id(&self) -> AttemptId {
-        self.attempt_id
-    }
-
-    /// Returns the exact poll operation authorized by this one-use value.
-    #[must_use]
-    pub const fn operation_id(&self) -> OperationId {
-        self.operation_id
-    }
-
-    /// Returns the exact runner generation/session bound into this value.
-    #[must_use]
-    pub const fn session(&self) -> RunnerSessionFence {
-        self.session
-    }
-
-    /// Returns the exact stable slot bound into this value.
-    #[must_use]
-    pub const fn slot(&self) -> StableRunnerSlot {
-        self.slot
-    }
-
-    /// Returns the exact proposed lease identity.
-    #[must_use]
-    pub const fn lease_id(&self) -> LeaseId {
-        self.lease_id
-    }
-
-    /// Returns the immutable content-attested Windows environment profile.
-    #[must_use]
-    pub const fn environment_profile(&self) -> &EnvironmentProfile {
-        &self.environment_profile
-    }
-
-    /// Returns the exclusive authority horizon.
-    #[must_use]
-    pub const fn expires_at(&self) -> UnixMillis {
-        self.expires_at
-    }
-
-    /// Returns the canonical domain-separated binding digest.
-    #[must_use]
-    pub const fn binding_digest(&self) -> Sha256Digest {
-        self.binding_digest
-    }
-}
-
-/// Closed local reasons that prevent a Windows candidate becoming a lease.
-#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
-pub enum WindowsPlacementGrantError {
-    /// The candidate does not require the exact Hyper-V-container boundary.
-    #[error("Windows placement does not require exact Hyper-V-container isolation")]
-    InexactIsolation,
-    /// Wave 1 admits only native Windows AMD64 profiles.
-    #[error("Windows placement architecture is unsupported")]
-    UnsupportedArchitecture,
-    /// No immutable profile-manifest digest was selected.
-    #[error("Windows placement is missing an exact environment profile")]
-    MissingEnvironmentProfile,
-    /// The durable run has no authenticated trust/materialization lineage.
-    #[error("Windows placement is missing authenticated trust evidence")]
-    MissingAuthenticatedTrust,
-    /// Authenticated facts were incomplete and therefore cannot authorize execution.
-    #[error("Windows placement trust evidence is incomplete")]
-    IncompleteAuthenticatedTrust,
-    /// The proposed grant has an empty or reversed validity interval.
-    #[error("Windows placement grant validity interval is invalid")]
-    InvalidValidityInterval,
+    authority_contributions: LeaseAuthorityPollContributions,
 }
 
 impl TryClaimAttempt {
@@ -756,6 +567,7 @@ impl TryClaimAttempt {
         observed_at: UnixMillis,
         expires_at: UnixMillis,
         cursor: RunnableCursorAdvance,
+        authority_contributions: LeaseAuthorityPollContributions,
     ) -> Result<Self, ClaimCommandError> {
         if expires_at <= observed_at {
             return Err(ClaimCommandError::InvalidLeaseInterval);
@@ -775,17 +587,15 @@ impl TryClaimAttempt {
             observed_at,
             expires_at,
             cursor,
-            windows_placement_grant: None,
+            authority_contributions,
         })
     }
 
-    /// Creates a claim and derives any mandatory Windows placement authority.
+    /// Creates a claim for one exact durable runnable candidate.
     ///
     /// # Errors
     ///
-    /// Rejects cursor/attempt disagreement or a Windows candidate without
-    /// complete authenticated trust, an exact AMD64 environment profile, and
-    /// the non-fallback Hyper-V-container requirement.
+    /// Rejects cursor/attempt disagreement or an invalid lease interval.
     pub fn for_candidate(
         request_key: LeaseRequestKey,
         candidate: &RunnableAttempt,
@@ -793,24 +603,17 @@ impl TryClaimAttempt {
         observed_at: UnixMillis,
         expires_at: UnixMillis,
         cursor: RunnableCursorAdvance,
+        authority_contributions: LeaseAuthorityPollContributions,
     ) -> Result<Self, ClaimCommandError> {
-        let mut request = Self::new(
+        Self::new(
             request_key,
             candidate.attempt_id(),
             lease_id,
             observed_at,
             expires_at,
             cursor,
-        )?;
-        request.windows_placement_grant = WindowsHyperVPlacementGrant::for_candidate(
-            request_key,
-            lease_id,
-            observed_at,
-            expires_at,
-            candidate,
+            authority_contributions,
         )
-        .map_err(ClaimCommandError::InvalidWindowsPlacementGrant)?;
-        Ok(request)
     }
 
     /// Returns the claim operation identity.
@@ -861,16 +664,16 @@ impl TryClaimAttempt {
         self.request_key
     }
 
-    /// Returns the canonical pre-scheduling lease-request digest.
+    /// Returns the canonical claim-request digest, including exact authority contributions.
     #[must_use]
     pub fn request_digest(&self) -> Sha256Digest {
-        self.request_key.request_digest()
+        lease_poll_decision_request_digest(self.request_key, &self.authority_contributions)
     }
 
-    /// Returns a server-only Windows placement grant when this is a Windows claim.
+    /// Returns the exact bounded authority contributions admitted with this poll.
     #[must_use]
-    pub const fn windows_placement_grant(&self) -> Option<&WindowsHyperVPlacementGrant> {
-        self.windows_placement_grant.as_ref()
+    pub const fn authority_contributions(&self) -> &LeaseAuthorityPollContributions {
+        &self.authority_contributions
     }
 
     #[cfg(feature = "adapter-spi")]
@@ -879,33 +682,15 @@ impl TryClaimAttempt {
         observed_at: UnixMillis,
         expires_at: UnixMillis,
     ) -> Result<Self, ClaimCommandError> {
-        let mut request = Self::new(
+        Self::new(
             self.request_key,
             self.attempt_id,
             self.lease_id,
             observed_at,
             expires_at,
             self.cursor,
-        )?;
-        request.windows_placement_grant = self
-            .windows_placement_grant
-            .as_ref()
-            .map(|grant| grant.rebased(observed_at, expires_at))
-            .transpose()
-            .map_err(ClaimCommandError::InvalidWindowsPlacementGrant)?;
-        Ok(request)
-    }
-
-    #[cfg(feature = "adapter-spi")]
-    pub(crate) fn placement_matches(&self, candidate: &RunnableAttempt) -> bool {
-        WindowsHyperVPlacementGrant::for_candidate(
-            self.request_key,
-            self.lease_id,
-            self.observed_at,
-            self.expires_at,
-            candidate,
+            self.authority_contributions.clone(),
         )
-        .is_ok_and(|expected| expected.as_ref() == self.windows_placement_grant.as_ref())
     }
 
     /// Returns the opaque authoritative scan cursor used by an adapter.
@@ -922,6 +707,7 @@ pub struct NoWorkLeaseRequest {
     request_key: LeaseRequestKey,
     observed_at: UnixMillis,
     cursor: RunnableCursorAdvance,
+    authority_contributions: LeaseAuthorityPollContributions,
 }
 
 impl NoWorkLeaseRequest {
@@ -934,6 +720,7 @@ impl NoWorkLeaseRequest {
         request_key: LeaseRequestKey,
         observed_at: UnixMillis,
         cursor: RunnableCursorAdvance,
+        authority_contributions: LeaseAuthorityPollContributions,
     ) -> Result<Self, ClaimCommandError> {
         if cursor.session() != request_key.session() || cursor.slot() != request_key.slot() {
             return Err(ClaimCommandError::CursorMismatch);
@@ -942,6 +729,7 @@ impl NoWorkLeaseRequest {
             request_key,
             observed_at,
             cursor,
+            authority_contributions,
         })
     }
 
@@ -955,6 +743,18 @@ impl NoWorkLeaseRequest {
     #[must_use]
     pub const fn observed_at(&self) -> UnixMillis {
         self.observed_at
+    }
+
+    /// Returns the canonical poll-decision digest, including exact authority contributions.
+    #[must_use]
+    pub fn request_digest(&self) -> Sha256Digest {
+        lease_poll_decision_request_digest(self.request_key, &self.authority_contributions)
+    }
+
+    /// Returns the exact bounded authority contributions admitted with this poll.
+    #[must_use]
+    pub const fn authority_contributions(&self) -> &LeaseAuthorityPollContributions {
+        &self.authority_contributions
     }
 
     /// Returns the opaque authoritative scan cursor used by an adapter.
@@ -974,9 +774,6 @@ pub enum ClaimCommandError {
     /// The cursor proof belongs to another request, slot, or attempt.
     #[error("queue cursor proof does not match the lease request")]
     CursorMismatch,
-    /// Mandatory Windows placement evidence is missing or invalid.
-    #[error("invalid Windows Hyper-V placement grant: {0}")]
-    InvalidWindowsPlacementGrant(WindowsPlacementGrantError),
 }
 
 /// Successfully fenced claim and its stable connection assignment.
@@ -985,6 +782,7 @@ pub struct ClaimedAttempt {
     lease: Lease,
     assignment: AttemptAssignment,
     job_ir: JobIrMetadata,
+    authority_contributions: LeaseAuthorityPollContributions,
 }
 
 impl ClaimedAttempt {
@@ -997,12 +795,14 @@ impl ClaimedAttempt {
         lease: Lease,
         assignment: AttemptAssignment,
         job_ir: JobIrMetadata,
+        authority_contributions: LeaseAuthorityPollContributions,
     ) -> Result<Self, AttemptAssignmentError> {
         assignment.validate_lease(&lease)?;
         Ok(Self {
             lease,
             assignment,
             job_ir,
+            authority_contributions,
         })
     }
 
@@ -1022,6 +822,12 @@ impl ClaimedAttempt {
     #[must_use]
     pub const fn job_ir(&self) -> &JobIrMetadata {
         &self.job_ir
+    }
+
+    /// Returns the exact bounded authority contributions admitted with the claim.
+    #[must_use]
+    pub const fn authority_contributions(&self) -> &LeaseAuthorityPollContributions {
+        &self.authority_contributions
     }
 }
 
@@ -1079,6 +885,7 @@ impl TryClaimOutcome {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TryClaimReceipt {
     request_key: LeaseRequestKey,
+    request_digest: Sha256Digest,
     outcome: TryClaimOutcome,
     replayed: bool,
 }
@@ -1088,11 +895,13 @@ impl TryClaimReceipt {
     #[must_use]
     pub const fn new(
         request_key: LeaseRequestKey,
+        request_digest: Sha256Digest,
         outcome: TryClaimOutcome,
         replayed: bool,
     ) -> Self {
         Self {
             request_key,
+            request_digest,
             outcome,
             replayed,
         }
@@ -1112,8 +921,8 @@ impl TryClaimReceipt {
 
     /// Returns the canonical lease-request digest.
     #[must_use]
-    pub fn request_digest(&self) -> Sha256Digest {
-        self.request_key.request_digest()
+    pub const fn request_digest(&self) -> Sha256Digest {
+        self.request_digest
     }
 
     /// Returns the canonical lease-request key.

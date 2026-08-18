@@ -42,7 +42,9 @@ pub use observer::{
 pub use port::{
     AdmissionRejection, CleanupFuture, CleanupRequest, ExecutionAdmission, ExecutionCancellation,
     ExecutionCancellationReason, ExecutionEventError, ExecutionEvents, ExecutionRequest,
-    ExecutorError, ExecutorErrorKind, ExecutorFuture, JobExecutor, LogEvent, RuntimeClock,
+    ExecutorError, ExecutorErrorKind, ExecutorFuture, JobExecutor,
+    LeaseAuthorityAcknowledgementFuture, LeaseAuthorityExtension, LeaseAuthorityExtensionError,
+    LeaseAuthorityExtensionRegistry, LeaseAuthorityPollFuture, LogEvent, RuntimeClock,
     RuntimeIdSource, RuntimeSleeper, SleepFuture, StableIdDomain, SystemRuntimeClock,
     SystemRuntimeIds, TokioRuntimeSleeper,
 };

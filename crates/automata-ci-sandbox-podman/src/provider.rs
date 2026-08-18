@@ -4354,6 +4354,7 @@ fn validate_spec(spec: &SandboxSpec) -> Result<(), ProviderError> {
     };
     if spec.profile().image().is_none()
         || spec.scratch().is_some()
+        || !spec.sandbox_authorizations().as_slice().is_empty()
         || !spec.runtime_service_routes().is_empty()
         || spec.network() == NetworkPolicy::Host
         || spec.root_filesystem() == RootFilesystemPolicy::Host
@@ -5237,6 +5238,11 @@ pub(crate) fn endpoint_error_from_provider(
 #[cfg(test)]
 mod capability_contract_tests {
     use super::*;
+    use automata_ci_execution::{
+        EnvironmentProfileId, ExecutionArgv, ImmutableImage, OperationId, ResourceLimits, RunnerId,
+        SandboxAuthorization, SandboxAuthorizationName, SandboxAuthorizations, SandboxEnvironment,
+        SandboxGeneration, TargetPath,
+    };
 
     #[test]
     fn service_configuration_reads_create_command_from_container_config() {
@@ -5270,5 +5276,52 @@ mod capability_contract_tests {
         assert_eq!(parse_service_health_interval(br#"{"Interval":0}"#), None);
         assert_eq!(parse_service_health_interval(br#"{"Interval":"5s"}"#), None);
         assert_eq!(parse_service_health_interval(b"null"), None);
+    }
+
+    #[test]
+    fn podman_rejects_sandbox_authorizations_at_validation() {
+        let workspace = TargetPath::posix("/workspace").expect("workspace");
+        let environment = SandboxEnvironment::new(
+            EnvironmentProfile::new(
+                EnvironmentProfileId::new("example.com/podman").expect("profile id"),
+                Sha256Digest::from_bytes([7; 32]),
+            ),
+            ImmutableImage::new(format!("registry.example/job@sha256:{}", "11".repeat(32)))
+                .expect("image"),
+            ExecutionArgv::new(
+                TargetPath::posix("/bin/sleep").expect("keepalive"),
+                vec!["infinity".to_owned()],
+            )
+            .expect("keepalive"),
+            workspace.clone(),
+            ExecutionEnvironment::empty(),
+        )
+        .expect("environment");
+        let authorization = SandboxAuthorization::new(
+            SandboxAuthorizationName::new("another-provider").expect("authorization name"),
+            1,
+            b"opaque-authority".to_vec(),
+        )
+        .expect("authorization");
+        let spec = SandboxSpec::new(
+            OperationId::new(),
+            SandboxGeneration::new(1).expect("generation"),
+            SandboxCustody::ProfileAdmission {
+                runner_id: RunnerId::new(),
+            },
+            environment,
+            workspace,
+            NetworkPolicy::Disabled,
+            RootFilesystemPolicy::Writable,
+            ResourceLimits::new(512 * 1024 * 1024, 1_000, 64).expect("limits"),
+        )
+        .with_sandbox_authorizations(
+            SandboxAuthorizations::new(vec![authorization]).expect("authorization set"),
+        );
+
+        let error = validate_spec(&spec).expect_err("Podman cannot consume the authorization");
+
+        assert_eq!(error.kind(), ProviderErrorKind::UnsupportedCapability);
+        assert_eq!(error.stage(), ProviderStage::Validate);
     }
 }

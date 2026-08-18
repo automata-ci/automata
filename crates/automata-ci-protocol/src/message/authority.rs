@@ -5,14 +5,15 @@ use std::{fmt, sync::Arc};
 use automata_ci_auth::secret::SecretString;
 use automata_ci_core::{
     AttemptId, FencingToken, JobAuthorityProfile, JobId, JobIrEnvelope, Lease, LeaseGuard,
-    OperationId, RunId, Sha256Digest, TrustPermissionAuthority, UnixMillis,
+    OperationId, RunId, SandboxAuthorizationError, SandboxAuthorizations, Sha256Digest,
+    TrustPermissionAuthority, UnixMillis,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 use url::{Host, Url};
 
 /// Schema of the protected runtime-authority bundle.
-pub const RUNTIME_AUTHORITY_SCHEMA_VERSION: u16 = 1;
+pub const RUNTIME_AUTHORITY_SCHEMA_VERSION: u16 = 2;
 /// Maximum number of independent authorities carried by one job.
 pub const MAX_RUNTIME_AUTHORITIES: usize = 16;
 /// Maximum UTF-8 bytes in one authority name.
@@ -443,6 +444,7 @@ impl JobRuntimeAuthority {
 pub struct JobRuntimeAuthorities {
     schema_version: u16,
     authorities: Vec<JobRuntimeAuthority>,
+    sandbox_authorizations: SandboxAuthorizations,
 }
 
 impl JobRuntimeAuthorities {
@@ -457,10 +459,12 @@ impl JobRuntimeAuthorities {
     /// Rejects oversized, duplicate, or non-canonical material.
     pub fn from_unbound(
         authorities: Vec<JobRuntimeAuthority>,
+        sandbox_authorizations: SandboxAuthorizations,
     ) -> Result<Self, RuntimeAuthorityError> {
         let bundle = Self {
             schema_version: RUNTIME_AUTHORITY_SCHEMA_VERSION,
             authorities,
+            sandbox_authorizations,
         };
         bundle.validate_structure()?;
         Ok(bundle)
@@ -476,12 +480,14 @@ impl JobRuntimeAuthorities {
     /// or execution-mismatched material is rejected in every case.
     pub fn new(
         authorities: Vec<JobRuntimeAuthority>,
+        sandbox_authorizations: SandboxAuthorizations,
         job: &JobIrEnvelope,
         lease: &Lease,
     ) -> Result<Self, RuntimeAuthorityError> {
         let bundle = Self {
             schema_version: RUNTIME_AUTHORITY_SCHEMA_VERSION,
             authorities,
+            sandbox_authorizations,
         };
         bundle.validate_for(job, lease)?;
         Ok(bundle)
@@ -506,6 +512,12 @@ impl JobRuntimeAuthorities {
             .binary_search_by(|authority| authority.name().as_str().cmp(name))
             .ok()
             .map(|index| &self.authorities[index])
+    }
+
+    /// Returns provider-owned sandbox authorizations carried in this protected object.
+    #[must_use]
+    pub const fn sandbox_authorizations(&self) -> &SandboxAuthorizations {
+        &self.sandbox_authorizations
     }
 
     /// Validates schema, canonical order, bounds, and execution binding.
@@ -544,6 +556,7 @@ impl JobRuntimeAuthorities {
         if self.schema_version != RUNTIME_AUTHORITY_SCHEMA_VERSION {
             return Err(RuntimeAuthorityError::UnsupportedSchema);
         }
+        self.sandbox_authorizations.validate()?;
         if self.authorities.len() > MAX_RUNTIME_AUTHORITIES {
             return Err(RuntimeAuthorityError::InvalidCount);
         }
@@ -588,6 +601,9 @@ pub enum RuntimeAuthorityError {
     /// Cleartext delivery binding contradicts `JobIR` or lease identity.
     #[error("runtime authority execution binding does not match the lease offer")]
     ExecutionBindingMismatch,
+    /// Provider-owned sandbox authorizations are structurally invalid.
+    #[error(transparent)]
+    SandboxAuthorization(#[from] SandboxAuthorizationError),
 }
 
 /// First and only initial runtime-authority delivery generation.
@@ -853,7 +869,8 @@ impl RuntimeAuthorityGrant {
         }
         self.authorities
             .validate_for(job, lease)
-            .map_err(|_| RuntimeAuthorityDeliveryError::InvalidAuthorities)
+            .map_err(|_| RuntimeAuthorityDeliveryError::InvalidAuthorities)?;
+        Ok(())
     }
 }
 

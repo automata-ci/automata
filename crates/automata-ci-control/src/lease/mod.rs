@@ -28,6 +28,7 @@ pub mod routing;
 mod runnable;
 mod service;
 
+pub use automata_ci_protocol::LeaseAuthorityPollContributions;
 pub use config::{LeasePollConfig, LeaseTimeToLive, LeaseTimeToLiveError};
 pub use error::{CapabilityDocument, LeasePollError, LeasePollInvariant, RequestCorrelationError};
 pub(crate) use observer::NoopLeasePollObserver;
@@ -38,7 +39,7 @@ pub use operation::{
     BeginLeaseRequest, BegunLeaseRequest, ClaimCommandError, ClaimRejection, ClaimedAttempt,
     CompleteLeaseRequest, LeaseOfferCompletionError, LeaseRequestCompletion, LeaseRequestKey,
     LeaseRequestKeyError, NoWorkLeaseRequest, RevokedLeaseOfferFallback, TryClaimAttempt,
-    TryClaimOutcome, TryClaimReceipt, WindowsHyperVPlacementGrant, WindowsPlacementGrantError,
+    TryClaimOutcome, TryClaimReceipt,
 };
 pub use port::{
     LeaseClock, LeaseIdGenerator, LeasePollRepository, RandomLeaseIdGenerator, RunnableAttemptGate,

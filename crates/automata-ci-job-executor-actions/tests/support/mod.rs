@@ -36,10 +36,11 @@ use automata_ci_execution::{
     ExecutionErrorKind, ExecutionOutput, ExecutionOutputRecord, ExecutionOutputStream,
     ExecutionStage, ExecutionTermination, ImmutableImage, NetworkPolicy, OperationOutcome,
     ProviderCapabilities, ProviderError, ProviderErrorKind, ProviderId, ProviderStage,
-    ResourceLimits, RootFilesystemPolicy, SandboxCapability, SandboxCustody, SandboxEnvironment,
-    SandboxGeneration, SandboxHandle, SandboxInspection, SandboxPrivilegePolicy, SandboxProvider,
-    SandboxRecord, SandboxSpec, SandboxState, ServiceContainerBinding, ServiceContainerBindings,
-    ServiceNetwork, ServicePortBinding, SignalRequest, TargetPath, TargetPlatform, WaitRequest,
+    ResourceLimits, RootFilesystemPolicy, SandboxAuthorizations, SandboxCapability, SandboxCustody,
+    SandboxEnvironment, SandboxGeneration, SandboxHandle, SandboxInspection,
+    SandboxPrivilegePolicy, SandboxProvider, SandboxRecord, SandboxSpec, SandboxState,
+    ServiceContainerBinding, ServiceContainerBindings, ServiceNetwork, ServicePortBinding,
+    SignalRequest, TargetPath, TargetPlatform, WaitRequest,
 };
 use automata_ci_expression_actions::{
     ExtensionFunctionResult, GithubEvaluationContext, GithubExpressionEvaluator,
@@ -55,8 +56,9 @@ use automata_ci_job_executor_actions::{
     SecretCustodyAcknowledger, SecretPort, StaticActionsToolchain,
 };
 use automata_ci_protocol::{
-    JobRuntimeAuthorities, JobRuntimeAuthority, ProtocolLimits, RunnerSlotOrdinal,
-    RuntimeAuthorityCredential, RuntimeAuthorityEndpoint, RuntimeAuthorityName,
+    CommandSequence, JobRuntimeAuthorities, JobRuntimeAuthority, ProtocolLimits, RunnerSlotOrdinal,
+    RuntimeAuthorityCredential, RuntimeAuthorityDeliveryBinding, RuntimeAuthorityEndpoint,
+    RuntimeAuthorityGeneration, RuntimeAuthorityName,
 };
 use automata_ci_protocol_protobuf::encode_job_runtime_context;
 use automata_ci_runner_journal::{
@@ -687,11 +689,27 @@ impl Fixture {
     }
 
     pub fn request(&self, job: JobIrEnvelope) -> ExecutionRequest {
-        execution_request(self.environment.clone(), job)
+        execution_request(
+            self.environment.clone(),
+            job,
+            SandboxAuthorizations::empty(),
+        )
+    }
+
+    pub fn request_with_sandbox_authorizations(
+        &self,
+        job: JobIrEnvelope,
+        sandbox_authorizations: SandboxAuthorizations,
+    ) -> ExecutionRequest {
+        execution_request(self.environment.clone(), job, sandbox_authorizations)
     }
 }
 
-fn execution_request(environment: SandboxEnvironment, job: JobIrEnvelope) -> ExecutionRequest {
+fn execution_request(
+    environment: SandboxEnvironment,
+    job: JobIrEnvelope,
+    sandbox_authorizations: SandboxAuthorizations,
+) -> ExecutionRequest {
     let attempt_id = AttemptId::new();
     let lease = Lease::new(
         LeaseId::new(),
@@ -709,6 +727,19 @@ fn execution_request(environment: SandboxEnvironment, job: JobIrEnvelope) -> Exe
         ProtectionId::new("tests").expect("valid protection"),
     )
     .expect("valid content");
+    let session_id = RunnerSessionId::new();
+    let slot = RunnerSlotOrdinal::new(1).expect("valid slot");
+    let authority_binding = RuntimeAuthorityDeliveryBinding::new(
+        lease.attempt_id(),
+        slot,
+        lease.guard(),
+        OperationId::new(),
+        CommandSequence::new(1).expect("valid offer sequence"),
+        content
+            .public_plaintext_sha256()
+            .expect("JobIR content is public"),
+        RuntimeAuthorityGeneration::new(1).expect("valid authority generation"),
+    );
     let authorities = match job.job().authority_profile() {
         JobAuthorityProfile::Standard => {
             let authority = JobRuntimeAuthority::new(
@@ -724,23 +755,27 @@ fn execution_request(environment: SandboxEnvironment, job: JobIrEnvelope) -> Exe
                 UnixMillis::new(1_000_000),
             )
             .expect("valid authority");
-            JobRuntimeAuthorities::new(vec![authority], &job, &lease)
+            JobRuntimeAuthorities::new(vec![authority], sandbox_authorizations, &job, &lease)
                 .expect("valid standard authority bundle")
         }
-        JobAuthorityProfile::CredentialFree => JobRuntimeAuthorities::new(Vec::new(), &job, &lease)
-            .expect("valid credential-free authority bundle"),
+        JobAuthorityProfile::CredentialFree => {
+            JobRuntimeAuthorities::new(Vec::new(), sandbox_authorizations, &job, &lease)
+                .expect("valid credential-free authority bundle")
+        }
     };
     ExecutionRequest::new(
-        RunnerSessionId::new(),
-        RunnerSlotOrdinal::new(1).expect("valid slot"),
+        session_id,
+        slot,
         lease,
         job,
         authorities,
+        authority_binding,
         content,
         environment,
         JobLifecycle::Preparing,
         None,
     )
+    .expect("valid execution request")
 }
 
 pub fn recovered_request(request: &ExecutionRequest) -> ExecutionRequest {
@@ -750,11 +785,13 @@ pub fn recovered_request(request: &ExecutionRequest) -> ExecutionRequest {
         request.lease().clone(),
         request.job().clone(),
         request.runtime_authorities().clone(),
+        request.runtime_authority_delivery_binding(),
         request.job_content().clone(),
         request.environment().clone(),
         request.recovery_lifecycle(),
         Some(journal_identity()),
     )
+    .expect("valid recovered execution request")
 }
 
 pub fn run_job(command: &str) -> JobIrEnvelope {

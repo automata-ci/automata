@@ -6,38 +6,6 @@ use serde::{Deserialize, Serialize};
 
 use super::MessageHeader;
 
-/// Poll response indicating that no compatible work is currently available.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct NoWork {
-    header: MessageHeader,
-    retry_after_millis: u32,
-}
-
-impl NoWork {
-    /// Creates a correlated idle response with a server-selected backoff.
-    ///
-    /// Envelope validation rejects a zero delay.
-    #[must_use]
-    pub const fn new(header: MessageHeader, retry_after_millis: u32) -> Self {
-        Self {
-            header,
-            retry_after_millis,
-        }
-    }
-
-    #[must_use]
-    /// Returns the response header correlated to the lease request.
-    pub const fn header(&self) -> MessageHeader {
-        self.header
-    }
-
-    #[must_use]
-    /// Returns the minimum delay before this slot should poll again.
-    pub const fn retry_after_millis(&self) -> u32 {
-        self.retry_after_millis
-    }
-}
-
 /// Stable remote error codes; callers must not parse the human message.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]

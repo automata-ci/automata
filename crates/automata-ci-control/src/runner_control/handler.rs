@@ -13,17 +13,18 @@ use automata_ci_blob::{
 };
 use automata_ci_core::{
     JobAuthorityProfile, JobIrEnvelope, JobIrVersionRange, JobLifecycle, LogAck, OperationId,
-    Sha256Digest, TrustSecretAuthority, UnixMillis,
+    SandboxAuthorizations, Sha256Digest, TrustSecretAuthority, UnixMillis,
 };
 use automata_ci_protocol::{
     CommandAck, CommandCursor, CommandSequence, ErrorMessage, HandshakeErrorCode,
     HandshakeRejected, JobRuntimeAuthorities, LeaseDisposition, LeaseHeartbeat, LeaseOffer,
-    LeaseRenewal, LogAckMessage, ManagedSecretBindingOverlay, MessageHeader, NegotiatedSession,
-    NoWork, OperationAck, OrphanDeliveryPermissions, ProtocolLimits, RemoteErrorCode, RunnerHello,
-    RunnerToServer, RuntimeAuthorityAck, RuntimeAuthorityGrant, RuntimeAuthorityRequest,
-    SUPPORTED_PROTOCOL_RANGE, ServerCommandHeader, ServerHello, ServerTiming, ServerToRunner,
-    SessionDisposition, SessionOrphanAuthorization, SessionResume, ValidatedRunnerToServer,
-    negotiate_job_ir, negotiate_protocol,
+    LeasePollOutcome as ProtocolLeasePollOutcome, LeasePollResponse, LeaseRenewal, LogAckMessage,
+    ManagedSecretBindingOverlay, MessageHeader, NegotiatedSession, OperationAck,
+    OrphanDeliveryPermissions, ProtocolLimits, RemoteErrorCode, RunnerHello, RunnerToServer,
+    RuntimeAuthorityAck, RuntimeAuthorityGrant, RuntimeAuthorityRequest, SUPPORTED_PROTOCOL_RANGE,
+    ServerCommandHeader, ServerHello, ServerTiming, ServerToRunner, SessionDisposition,
+    SessionOrphanAuthorization, SessionResume, ValidatedRunnerToServer, negotiate_job_ir,
+    negotiate_protocol,
 };
 use automata_ci_protocol_protobuf::{
     decode_server_frame as decode_server_protobuf, encode_runtime_authorities, encode_server_frame,
@@ -52,6 +53,9 @@ use super::durable::{
     CommitLeaseResponse, CommitRunnerLogSegment, CommitRunnerTerminalResult,
     CommitRuntimeAuthorityDelivery, LeaseResponseAction, RunnerControlTransactionRepository,
     RunnerLogAdmissionRequest, RuntimeAuthorityDeliveryRepository,
+};
+use super::lease_authority::{
+    LeaseAuthorityExtensionRegistry, LeaseAuthorityOfferRequest, LeaseAuthorityPollAcceptance,
 };
 use super::observer::NoopRunnerControlObserver;
 use super::port::{
@@ -365,6 +369,7 @@ pub struct RunnerControlPorts {
     durability: RunnerDurabilityPorts,
     runtime_authorities: Option<Arc<dyn RuntimeAuthorityIssuer>>,
     managed_secret_bindings: Option<Arc<dyn ManagedSecretBindingIssuer>>,
+    lease_authority_extensions: LeaseAuthorityExtensionRegistry,
     clock: Arc<dyn LeaseClock>,
     ids: Arc<dyn ControlIdGenerator>,
 }
@@ -391,6 +396,7 @@ impl RunnerControlPorts {
             durability,
             runtime_authorities: None,
             managed_secret_bindings: None,
+            lease_authority_extensions: LeaseAuthorityExtensionRegistry::empty(),
             clock,
             ids,
         }
@@ -416,6 +422,16 @@ impl RunnerControlPorts {
         issuer: Arc<dyn ManagedSecretBindingIssuer>,
     ) -> Self {
         self.managed_secret_bindings = Some(issuer);
+        self
+    }
+
+    /// Installs the canonical provider-neutral lease-authority extensions.
+    #[must_use]
+    pub fn with_lease_authority_extensions(
+        mut self,
+        extensions: LeaseAuthorityExtensionRegistry,
+    ) -> Self {
+        self.lease_authority_extensions = extensions;
         self
     }
 }
@@ -1005,8 +1021,21 @@ impl DurableRunnerControlHandler {
             if let Some(completion) = admission.completion() {
                 stage = RunnerLeaseRequestStage::CompletedRequestReplay;
                 return self
-                    .resolve_lease_request_completion(fence, request.header(), completion)
+                    .resolve_lease_request_completion(fence, request, completion)
                     .await;
+            }
+
+            if !request.authority_contributions().as_slice().is_empty() {
+                stage = RunnerLeaseRequestStage::LeaseAuthorityAcceptance;
+                Self::not_cancelled(cancellation)?;
+                self.ports
+                    .lease_authority_extensions
+                    .accept_poll_contributions(
+                        LeaseAuthorityPollAcceptance::new(fence, self.ports.clock.now()),
+                        request.authority_contributions(),
+                    )
+                    .await
+                    .map_err(port_application_error)?;
             }
 
             stage = RunnerLeaseRequestStage::PrePollCommandReplay;
@@ -1016,9 +1045,8 @@ impl DurableRunnerControlHandler {
             {
                 PendingCommand::Found(command) => {
                     stage = RunnerLeaseRequestStage::DurableCompletion;
-                    return self
-                        .complete_lease_request(begin, request.header(), command)
-                        .await;
+                    let response = self.wrap_lease_poll_command(request, command)?;
+                    return self.complete_lease_request(begin, request, response).await;
                 }
                 PendingCommand::Empty => {}
                 PendingCommand::Saturated => {
@@ -1044,7 +1072,7 @@ impl DurableRunnerControlHandler {
                 .map_err(lease_poll_application_error)?;
             let response = match outcome {
                 LeasePollOutcome::NoWork { .. } | LeasePollOutcome::Rejected { .. } => {
-                    self.no_work_response(request.header())
+                    self.no_work_response(request)
                 }
                 LeasePollOutcome::Claimed(claimed) => {
                     stage = RunnerLeaseRequestStage::OfferBuild;
@@ -1072,14 +1100,15 @@ impl DurableRunnerControlHandler {
                     return Err(app(ApplicationErrorKind::Unavailable));
                 }
             };
+            let actual_response = self.wrap_lease_poll_command(request, actual_response)?;
 
             stage = RunnerLeaseRequestStage::ResponseValidation;
             let actual_response = self
-                .validate_lease_offer_response(fence, request.header(), actual_response, None, true)
+                .validate_lease_offer_response(fence, request, actual_response, None, true)
                 .await?;
 
             stage = RunnerLeaseRequestStage::DurableCompletion;
-            self.complete_lease_request(begin, request.header(), actual_response)
+            self.complete_lease_request(begin, request, actual_response)
                 .await
         }
         .await;
@@ -1106,22 +1135,27 @@ impl DurableRunnerControlHandler {
     async fn complete_lease_request(
         &self,
         begin: BeginLeaseRequest,
-        header: MessageHeader,
+        request: &automata_ci_protocol::LeaseRequest,
         response: ServerToRunner,
     ) -> Result<ServerToRunner, ApplicationError> {
         let durable = self.durable_response(&response)?;
-        let completion = if let ServerToRunner::LeaseOffer(offer) = &response {
+        let completion = if let ServerToRunner::LeasePollResponse(poll) = &response
+            && let ProtocolLeasePollOutcome::LeaseOffer(offer) = poll.outcome()
+        {
             let sequence = StoreCommandSequence::new(offer.header().sequence().get())
                 .map_err(|_| app(ApplicationErrorKind::Internal))?;
             let revoked_message =
-                self.revoked_offer_no_work_response(header, offer.header().operation_id());
-            let ServerToRunner::NoWork(no_work) = &revoked_message else {
+                self.revoked_offer_no_work_response(request, offer.header().operation_id());
+            let ServerToRunner::LeasePollResponse(no_work) = &revoked_message else {
+                return Err(app(ApplicationErrorKind::Internal));
+            };
+            let ProtocolLeasePollOutcome::NoWork { retry_after_millis } = no_work.outcome() else {
                 return Err(app(ApplicationErrorKind::Internal));
             };
             let revoked_response = self.durable_response(&revoked_message)?;
             let revoked_fallback = RevokedLeaseOfferFallback::new(
                 no_work.header().operation_id(),
-                no_work.retry_after_millis(),
+                *retry_after_millis,
                 revoked_response.schema(),
                 revoked_response.digest(),
             )
@@ -1152,37 +1186,31 @@ impl DurableRunnerControlHandler {
             Ok(completed) => completed,
             Err(error) => return Err(store_application_error(error)),
         };
-        self.resolve_lease_request_completion(begin.request_key().session(), header, &completed)
+        self.resolve_lease_request_completion(begin.request_key().session(), request, &completed)
             .await
     }
 
     async fn resolve_lease_request_completion(
         &self,
         fence: RunnerSessionFence,
-        request_header: MessageHeader,
+        request: &automata_ci_protocol::LeaseRequest,
         completion: &LeaseRequestCompletion,
     ) -> Result<ServerToRunner, ApplicationError> {
         match completion {
             LeaseRequestCompletion::Response(response) => {
                 let response =
-                    decode_receipt(response, request_header, &self.config.protocol_limits)?;
-                self.validate_lease_offer_response(fence, request_header, response, None, false)
+                    decode_receipt(response, request.header(), &self.config.protocol_limits)?;
+                self.validate_lease_offer_response(fence, request, response, None, false)
                     .await
             }
             LeaseRequestCompletion::LiveLeaseOffer { response, fallback } => {
                 let response =
-                    decode_receipt(response, request_header, &self.config.protocol_limits)?;
-                self.validate_lease_offer_response(
-                    fence,
-                    request_header,
-                    response,
-                    Some(*fallback),
-                    false,
-                )
-                .await
+                    decode_receipt(response, request.header(), &self.config.protocol_limits)?;
+                self.validate_lease_offer_response(fence, request, response, Some(*fallback), false)
+                    .await
             }
             LeaseRequestCompletion::RevokedLeaseOffer { fallback, .. } => {
-                self.revoked_offer_no_work_from_fallback(request_header, *fallback)
+                self.revoked_offer_no_work_from_fallback(request, *fallback)
             }
         }
     }
@@ -1190,23 +1218,28 @@ impl DurableRunnerControlHandler {
     async fn validate_lease_offer_response(
         &self,
         fence: RunnerSessionFence,
-        request_header: MessageHeader,
+        request: &automata_ci_protocol::LeaseRequest,
         response: ServerToRunner,
         revoked_fallback: Option<RevokedLeaseOfferFallback>,
         allow_store_revocation_resolution: bool,
     ) -> Result<ServerToRunner, ApplicationError> {
-        let (operation_id, sequence, revoked_offer_operation_id) = match &response {
-            ServerToRunner::LeaseOffer(offer) => (
+        let ServerToRunner::LeasePollResponse(poll) = &response else {
+            return Err(app(ApplicationErrorKind::Internal));
+        };
+        poll.validate_for(request)
+            .map_err(|_| app(ApplicationErrorKind::Internal))?;
+        let (operation_id, sequence, revoked_offer_operation_id) = match poll.outcome() {
+            ProtocolLeasePollOutcome::LeaseOffer(offer) => (
                 offer.header().operation_id(),
                 offer.header().sequence(),
                 Some(offer.header().operation_id()),
             ),
-            ServerToRunner::CancelJob(cancel) => (
+            ProtocolLeasePollOutcome::CancelJob(cancel) => (
                 cancel.header().operation_id(),
                 cancel.header().sequence(),
                 None,
             ),
-            _ => return Ok(response),
+            ProtocolLeasePollOutcome::NoWork { .. } => return Ok(response),
         };
         let resolved = self
             .ports
@@ -1221,7 +1254,7 @@ impl DurableRunnerControlHandler {
                 return if revoked_offer_operation_id.is_some()
                     && let Some(fallback) = revoked_fallback
                 {
-                    self.revoked_offer_no_work_from_fallback(request_header, fallback)
+                    self.revoked_offer_no_work_from_fallback(request, fallback)
                 } else if revoked_offer_operation_id.is_some() && allow_store_revocation_resolution
                 {
                     // This is a newly built offer, not a replay. Preserve its typed offer
@@ -1239,11 +1272,20 @@ impl DurableRunnerControlHandler {
         };
         let durable = decode_durable_server_command(
             &command,
-            request_header.protocol_version(),
+            request.header().protocol_version(),
             &self.config.protocol_limits,
         )
         .map_err(port_application_error)?;
-        if durable != response {
+        let durable_matches = match (durable, poll.outcome()) {
+            (ServerToRunner::LeaseOffer(durable), ProtocolLeasePollOutcome::LeaseOffer(actual)) => {
+                durable == *actual
+            }
+            (ServerToRunner::CancelJob(durable), ProtocolLeasePollOutcome::CancelJob(actual)) => {
+                durable == *actual
+            }
+            _ => false,
+        };
+        if !durable_matches {
             return Err(app(ApplicationErrorKind::Internal));
         }
         Ok(response)
@@ -1302,6 +1344,7 @@ impl DurableRunnerControlHandler {
             claimed.slot(),
             claimed.lease().clone(),
             metadata.clone(),
+            claimed.authority_contributions().clone(),
         );
         *stage = RunnerLeaseRequestStage::OfferClaimInspection;
         let claim_status = self
@@ -1330,7 +1373,7 @@ impl DurableRunnerControlHandler {
             LeaseOfferClaimStatus::ClaimSuperseded => {
                 self.observer
                     .observe_lease_offer(LeaseOfferObservation::Superseded);
-                return Ok(self.no_work_response(request.header()));
+                return Ok(self.no_work_response(request));
             }
             LeaseOfferClaimStatus::Current => {}
         }
@@ -1351,6 +1394,12 @@ impl DurableRunnerControlHandler {
         )
         .map_err(|_| app(ApplicationErrorKind::Internal))?;
         Self::not_cancelled(cancellation)?;
+        let lease_authority_evidence = self
+            .ports
+            .lease_authority_extensions
+            .prepare_offer_evidence(LeaseAuthorityOfferRequest::new(fence, &claimed, &job))
+            .await
+            .map_err(port_application_error)?;
         let authority_slot = StableRunnerSlot::new(claim.slot().get())
             .map_err(|_| app(ApplicationErrorKind::Internal))?;
         *stage = RunnerLeaseRequestStage::OfferRuntimeAuthorityRequest;
@@ -1398,6 +1447,7 @@ impl DurableRunnerControlHandler {
             .and_then(|command| {
                 command.with_managed_secret_bindings(managed_secret_bindings.clone())
             })
+            .and_then(|command| command.with_lease_authority_evidence(lease_authority_evidence))
             .map_err(|_| app(ApplicationErrorKind::Internal))?;
         *stage = RunnerLeaseRequestStage::OfferCommandPublication;
         let publication = self
@@ -1410,7 +1460,7 @@ impl DurableRunnerControlHandler {
         let LeaseOfferPublishOutcome::Published(published) = publication else {
             self.observer
                 .observe_lease_offer(LeaseOfferObservation::Superseded);
-            return Ok(self.no_work_response(request.header()));
+            return Ok(self.no_work_response(request));
         };
         self.observer
             .observe_lease_offer(if published.was_replayed() {
@@ -1495,8 +1545,33 @@ impl DurableRunnerControlHandler {
 
             stage = RunnerRuntimeAuthorityRequestStage::AuthorityIssue;
             let offer = admission.offer();
-            let authorities = self.issue_runtime_authorities(&job, offer).await?;
-
+            if !offer.command_projection_valid() {
+                return Err(app(ApplicationErrorKind::Unavailable));
+            }
+            let credential_authorities = self.issue_runtime_authorities(&job, offer).await?;
+            if !credential_authorities
+                .sandbox_authorizations()
+                .as_slice()
+                .is_empty()
+            {
+                return Err(app(ApplicationErrorKind::Internal));
+            }
+            let prepared = self
+                .ports
+                .lease_authority_extensions
+                .prepare_sandbox_authorization(offer.lease_authority_evidence(), &job, &admission)
+                .await
+                .map_err(port_application_error)?;
+            let sandbox_authorizations =
+                LeaseAuthorityExtensionRegistry::authorizations(prepared.as_deref())
+                    .map_err(port_application_error)?;
+            let authorities = JobRuntimeAuthorities::new(
+                credential_authorities.as_slice().to_vec(),
+                sandbox_authorizations,
+                &job,
+                offer.lease(),
+            )
+            .map_err(|_| app(ApplicationErrorKind::Internal))?;
             stage = RunnerRuntimeAuthorityRequestStage::AuthorityValidation;
             authorities
                 .validate_for(&job, offer.lease())
@@ -1521,20 +1596,20 @@ impl DurableRunnerControlHandler {
             Self::not_cancelled(cancellation)?;
 
             stage = RunnerRuntimeAuthorityRequestStage::DurableCommit;
-            self.ports
-                .durability
-                .runtime_authority_deliveries
-                .commit_runtime_authority_delivery(commit)
-                .await
-                .map_err(store_application_error)?;
-            Ok(ServerToRunner::RuntimeAuthorityGrant(Box::new(
-                RuntimeAuthorityGrant::new(
-                    self.reply_header(request.header()),
-                    request.binding(),
-                    bundle_digest,
-                    authorities,
-                ),
-            )))
+            if let Some(prepared) = prepared {
+                prepared
+                    .commit(commit)
+                    .await
+                    .map_err(port_application_error)?;
+            } else {
+                self.ports
+                    .durability
+                    .runtime_authority_deliveries
+                    .commit_runtime_authority_delivery(commit)
+                    .await
+                    .map_err(store_application_error)?;
+            }
+            Ok(self.runtime_authority_response(request, bundle_digest, authorities))
         }
         .await;
         if let Err(error) = &result {
@@ -1562,6 +1637,21 @@ impl DurableRunnerControlHandler {
         Ok(sha256(&encoded))
     }
 
+    fn runtime_authority_response(
+        &self,
+        request: &RuntimeAuthorityRequest,
+        bundle_digest: Sha256Digest,
+        authorities: JobRuntimeAuthorities,
+    ) -> ServerToRunner {
+        let grant = RuntimeAuthorityGrant::new(
+            self.reply_header(request.header()),
+            request.binding(),
+            bundle_digest,
+            authorities,
+        );
+        ServerToRunner::RuntimeAuthorityGrant(Box::new(grant))
+    }
+
     async fn issue_runtime_authorities(
         &self,
         job: &JobIrEnvelope,
@@ -1584,8 +1674,13 @@ impl DurableRunnerControlHandler {
             | (
                 JobAuthorityProfile::Standard,
                 automata_ci_core::TrustPermissionAuthority::DenyAll,
-            ) => JobRuntimeAuthorities::new(Vec::new(), job, offer.lease())
-                .map_err(|_| app(ApplicationErrorKind::Internal)),
+            ) => JobRuntimeAuthorities::new(
+                Vec::new(),
+                SandboxAuthorizations::empty(),
+                job,
+                offer.lease(),
+            )
+            .map_err(|_| app(ApplicationErrorKind::Internal)),
             (JobAuthorityProfile::Standard, _) => self
                 .ports
                 .runtime_authorities
@@ -2164,52 +2259,82 @@ impl DurableRunnerControlHandler {
         )
     }
 
-    fn no_work_response(&self, request: MessageHeader) -> ServerToRunner {
-        ServerToRunner::NoWork(NoWork::new(
-            self.reply_header(request),
+    fn no_work_response(&self, request: &automata_ci_protocol::LeaseRequest) -> ServerToRunner {
+        ServerToRunner::LeasePollResponse(Box::new(LeasePollResponse::no_work(
+            self.reply_header(request.header()),
+            request.authority_contributions().sha256_digest(),
             self.config.no_work_retry_after_millis,
-        ))
+        )))
+    }
+
+    fn wrap_lease_poll_command(
+        &self,
+        request: &automata_ci_protocol::LeaseRequest,
+        response: ServerToRunner,
+    ) -> Result<ServerToRunner, ApplicationError> {
+        let response = match response {
+            ServerToRunner::LeasePollResponse(response) => {
+                response
+                    .validate_for(request)
+                    .map_err(|_| app(ApplicationErrorKind::Internal))?;
+                return Ok(ServerToRunner::LeasePollResponse(response));
+            }
+            ServerToRunner::LeaseOffer(offer) => LeasePollResponse::lease_offer(
+                self.reply_header(request.header()),
+                request.authority_contributions().sha256_digest(),
+                *offer,
+            ),
+            ServerToRunner::CancelJob(cancel) => LeasePollResponse::cancel_job(
+                self.reply_header(request.header()),
+                request.authority_contributions().sha256_digest(),
+                cancel,
+            ),
+            _ => return Err(app(ApplicationErrorKind::Internal)),
+        };
+        Ok(ServerToRunner::LeasePollResponse(Box::new(response)))
     }
 
     fn revoked_offer_no_work_response(
         &self,
-        request: MessageHeader,
+        request: &automata_ci_protocol::LeaseRequest,
         offer_operation_id: OperationId,
     ) -> ServerToRunner {
         let mut digest = Sha256::new();
         digest.update(b"automata.runner.revoked-lease-offer-no-work.v1");
         digest.update(offer_operation_id.as_uuid().as_bytes());
-        digest.update(request.operation_id().as_uuid().as_bytes());
+        digest.update(request.header().operation_id().as_uuid().as_bytes());
         let digest = Sha256Digest::from_bytes(digest.finalize().into());
         let encoded_operation_id = digest.to_string();
         let operation_id: OperationId = encoded_operation_id[..32]
             .parse()
             .expect("a SHA-256 prefix is a valid UUID representation");
-        ServerToRunner::NoWork(NoWork::new(
+        ServerToRunner::LeasePollResponse(Box::new(LeasePollResponse::no_work(
             MessageHeader::reply(
-                request.protocol_version(),
-                request.session_id(),
+                request.header().protocol_version(),
+                request.header().session_id(),
                 operation_id,
-                request.operation_id(),
+                request.header().operation_id(),
             ),
+            request.authority_contributions().sha256_digest(),
             self.config.no_work_retry_after_millis,
-        ))
+        )))
     }
 
     fn revoked_offer_no_work_from_fallback(
         &self,
-        request: MessageHeader,
+        request: &automata_ci_protocol::LeaseRequest,
         fallback: RevokedLeaseOfferFallback,
     ) -> Result<ServerToRunner, ApplicationError> {
-        let response = ServerToRunner::NoWork(NoWork::new(
+        let response = ServerToRunner::LeasePollResponse(Box::new(LeasePollResponse::no_work(
             MessageHeader::reply(
-                request.protocol_version(),
-                request.session_id(),
+                request.header().protocol_version(),
+                request.header().session_id(),
                 fallback.response_operation_id(),
-                request.operation_id(),
+                request.header().operation_id(),
             ),
+            request.authority_contributions().sha256_digest(),
             fallback.retry_after_millis(),
-        ));
+        )));
         let canonical = self.durable_response(&response)?;
         if canonical.schema() != fallback.response_schema()
             || canonical.digest() != fallback.response_digest()
@@ -2438,6 +2563,9 @@ fn decode_operation_receipt(
 
 fn response_correlates(response: &ServerToRunner, request: MessageHeader) -> bool {
     match response {
+        ServerToRunner::LeasePollResponse(value) => {
+            value.header().validate_reply_for(request).is_ok()
+        }
         ServerToRunner::LeaseOffer(value) => value
             .header()
             .validate_for(request.protocol_version(), request.session_id())
@@ -2452,7 +2580,6 @@ fn response_correlates(response: &ServerToRunner, request: MessageHeader) -> boo
         ServerToRunner::LeaseRenewal(value) => value.header().validate_reply_for(request).is_ok(),
         ServerToRunner::LogAck(value) => value.header().validate_reply_for(request).is_ok(),
         ServerToRunner::OperationAck(value) => value.header().validate_reply_for(request).is_ok(),
-        ServerToRunner::NoWork(value) => value.header().validate_reply_for(request).is_ok(),
         ServerToRunner::Error(value) => value.header().validate_reply_for(request).is_ok(),
         ServerToRunner::Hello(_) | ServerToRunner::HandshakeRejected(_) => false,
     }

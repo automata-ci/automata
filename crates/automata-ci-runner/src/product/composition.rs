@@ -289,7 +289,13 @@ async fn run_podman(
     let Some(composition) = started else {
         return Ok(SupervisionDisposition::Complete);
     };
-    supervise_composition(config, composition, metrics_listener, shutdown).await
+    Box::pin(supervise_composition(
+        config,
+        composition,
+        metrics_listener,
+        shutdown,
+    ))
+    .await
 }
 
 async fn run_kubernetes(
@@ -334,7 +340,13 @@ async fn run_kubernetes(
     let Some(composition) = composition else {
         return Ok(SupervisionDisposition::Complete);
     };
-    supervise_composition(config, composition, metrics_listener, shutdown).await
+    Box::pin(supervise_composition(
+        config,
+        composition,
+        metrics_listener,
+        shutdown,
+    ))
+    .await
 }
 
 async fn run_windows_hyperv(
@@ -363,7 +375,13 @@ async fn run_windows_hyperv(
     let Some(composition) = composition else {
         return Ok(SupervisionDisposition::Complete);
     };
-    supervise_composition(config, composition, metrics_listener, shutdown).await
+    Box::pin(supervise_composition(
+        config,
+        composition,
+        metrics_listener,
+        shutdown,
+    ))
+    .await
 }
 
 async fn run_macos_virtualization(
@@ -392,7 +410,13 @@ async fn run_macos_virtualization(
     let Some(composition) = composition else {
         return Ok(SupervisionDisposition::Complete);
     };
-    supervise_composition(config, composition, metrics_listener, shutdown).await
+    Box::pin(supervise_composition(
+        config,
+        composition,
+        metrics_listener,
+        shutdown,
+    ))
+    .await
 }
 
 async fn supervise_composition(

@@ -1,4 +1,4 @@
-use automata_ci_core::{Lease, OperationId, Sha256Digest, UnixMillis};
+use automata_ci_core::{Lease, LeaseGuard, OperationId, Sha256Digest, UnixMillis};
 use automata_ci_protocol::{
     CommandSequence, LeaseRejectionReason, ManagedSecretBindingOverlay, RunnerSlotOrdinal,
     RuntimeAuthorityDeliveryBinding, RuntimeAuthorityGeneration,
@@ -73,6 +73,38 @@ pub enum CommandDisposition {
     Applied,
     /// The cursor advanced with a durable reason and no application effect.
     Ignored(CommandIgnoredReason),
+}
+
+/// Semantic command effect committed atomically with one lease-poll successor.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LeasePollCommandRecord {
+    /// The poll returned no durable command.
+    NoCommand,
+    /// The exact command effect is already durable and must only be verified.
+    Recorded {
+        /// Stable command identity expected in the durable replay window.
+        command: DurableCommand,
+        /// Exact disposition already committed for the command.
+        disposition: CommandDisposition,
+    },
+    /// A new command is intentionally ignored with no application effect.
+    Ignored {
+        /// Stable identity of the command being retired.
+        command: DurableCommand,
+        /// Durable reason the command has no application effect.
+        reason: CommandIgnoredReason,
+    },
+    /// A new lease offer and its applied command disposition.
+    LeaseOffer(Box<LeaseOfferRecord>),
+    /// A new cancellation and its applied command disposition.
+    Cancellation {
+        /// Stable slot containing the cancellation target.
+        slot: RunnerSlotOrdinal,
+        /// Exact lease fence named by the cancellation.
+        guard: LeaseGuard,
+        /// Durable cancellation record.
+        cancellation: CancellationRecord,
+    },
 }
 
 /// Bounded exact-replay tombstone for a durable command.

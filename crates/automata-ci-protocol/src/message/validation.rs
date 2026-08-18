@@ -11,7 +11,8 @@ use automata_ci_core::{
 use thiserror::Error;
 
 use super::{
-    ErrorMessage, LogBatch, ProtocolLimits, RunnerSlotOrdinal, RunnerToServer, ServerToRunner,
+    CancelJob, ErrorMessage, LeaseOffer, LeasePollOutcome, LogBatch, ProtocolLimits,
+    RunnerSlotOrdinal, RunnerToServer, ServerToRunner,
 };
 use crate::{MESSAGE_SCHEMA_VERSION, ProtocolRange, ProtocolRangeError, ProtocolVersion};
 
@@ -37,7 +38,22 @@ pub(super) fn validate_runner_message(
             hello.validate()?;
             validate_capabilities(hello.runner(), limits)
         }
-        RunnerToServer::LeaseRequest(request) => request.validate(),
+        RunnerToServer::LeaseRequest(request) => {
+            request.validate()?;
+            validate_collection(
+                "lease authority contributions",
+                request.authority_contributions().as_slice().len(),
+                limits.max_collection_items(),
+            )?;
+            for contribution in request.authority_contributions().as_slice() {
+                validate_nonempty_text(
+                    "lease authority name",
+                    contribution.name().as_str(),
+                    limits,
+                )?;
+            }
+            Ok(())
+        }
         RunnerToServer::LeaseResponse(response) => response.header().validate_request(),
         RunnerToServer::RuntimeAuthorityRequest(request) => request.validate(),
         RunnerToServer::RuntimeAuthorityAck(acknowledgement) => acknowledgement.validate(),
@@ -75,36 +91,71 @@ pub(super) fn validate_server_message(
             rejection.validate()?;
             validate_control_text("handshake rejection message", rejection.message(), limits)
         }
-        ServerToRunner::LeaseOffer(offer) => {
-            offer.header().validate()?;
-            offer.lease().validate()?;
-            validate_job(offer.job(), limits)?;
-            if let Some(overlay) = offer.managed_secret_bindings() {
-                overlay.validate_for(offer.lease())?;
+        ServerToRunner::LeasePollResponse(response) => {
+            response.validate()?;
+            match response.outcome() {
+                LeasePollOutcome::NoWork { .. } => Ok(()),
+                LeasePollOutcome::LeaseOffer(offer) => validate_lease_offer(offer, limits),
+                LeasePollOutcome::CancelJob(cancel) => validate_cancel_job(cancel, limits),
+            }
+        }
+        ServerToRunner::LeaseOffer(offer) => validate_lease_offer(offer, limits),
+        ServerToRunner::RuntimeAuthorityGrant(grant) => {
+            grant.validate()?;
+            validate_collection(
+                "runtime authorities",
+                grant.authorities().as_slice().len(),
+                limits.max_collection_items(),
+            )?;
+            validate_collection(
+                "sandbox authorizations",
+                grant
+                    .authorities()
+                    .sandbox_authorizations()
+                    .as_slice()
+                    .len(),
+                limits.max_collection_items(),
+            )?;
+            for authorization in grant.authorities().sandbox_authorizations().as_slice() {
+                validate_nonempty_text(
+                    "sandbox authorization name",
+                    authorization.name().as_str(),
+                    limits,
+                )?;
             }
             Ok(())
         }
-        ServerToRunner::RuntimeAuthorityGrant(grant) => grant.validate(),
         ServerToRunner::LeaseRenewal(renewal) => renewal.header().validate_reply(),
-        ServerToRunner::CancelJob(cancel) => {
-            cancel.header().validate()?;
-            validate_control_text("cancellation reason", cancel.reason(), limits)
-        }
+        ServerToRunner::CancelJob(cancel) => validate_cancel_job(cancel, limits),
         ServerToRunner::LogAck(acknowledgement) => {
             acknowledgement.header().validate_reply()?;
             acknowledgement.ack().validate()?;
             Ok(())
         }
         ServerToRunner::OperationAck(acknowledgement) => acknowledgement.header().validate_reply(),
-        ServerToRunner::NoWork(no_work) => {
-            no_work.header().validate_reply()?;
-            if no_work.retry_after_millis() == 0 {
-                return Err(MessageValidationError::ZeroValue("retry_after_millis"));
-            }
-            Ok(())
-        }
         ServerToRunner::Error(error) => validate_error(error, limits),
     }
+}
+
+fn validate_lease_offer(
+    offer: &LeaseOffer,
+    limits: &ProtocolLimits,
+) -> Result<(), MessageValidationError> {
+    offer.header().validate()?;
+    offer.lease().validate()?;
+    validate_job(offer.job(), limits)?;
+    if let Some(overlay) = offer.managed_secret_bindings() {
+        overlay.validate_for(offer.lease())?;
+    }
+    Ok(())
+}
+
+fn validate_cancel_job(
+    cancel: &CancelJob,
+    limits: &ProtocolLimits,
+) -> Result<(), MessageValidationError> {
+    cancel.header().validate()?;
+    validate_control_text("cancellation reason", cancel.reason(), limits)
 }
 
 /// Validates a standalone durable `JobIR` envelope with transport resource limits.
@@ -789,6 +840,9 @@ pub enum MessageValidationError {
         /// Self-referential lease-request operation identity.
         operation_id: OperationId,
     },
+    /// A lease-poll response acknowledged a different contribution bundle.
+    #[error("lease authority contribution acceptance does not match the request")]
+    LeaseAuthorityAcceptanceMismatch,
     /// A server response omits the request operation it answers.
     #[error("server response headers must carry request correlation")]
     MissingResponseCorrelation,
@@ -924,6 +978,9 @@ pub enum MessageValidationError {
     /// Runtime-authority delivery metadata is invalid or conflicting.
     #[error(transparent)]
     RuntimeAuthorityDelivery(#[from] super::RuntimeAuthorityDeliveryError),
+    /// Lease-authority contribution material violates its bounded canonical contract.
+    #[error(transparent)]
+    LeaseAuthorityPollContribution(#[from] super::LeaseAuthorityPollContributionError),
     /// A managed-secret overlay violates canonical form, digest, or lease binding.
     #[error(transparent)]
     ManagedSecretBindingOverlay(#[from] super::ManagedSecretBindingOverlayError),

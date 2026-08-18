@@ -2,9 +2,9 @@ use crate::support;
 
 use automata_ci_core::{JobIrVersion, OperationId, RunnerSessionId};
 use automata_ci_protocol::{
-    CommandCursor, LeaseRequest, MessageHeader, NegotiatedSession, ProtocolLimits, RemoteErrorCode,
-    RunnerSlotOrdinal, RunnerToServer, SUPPORTED_PROTOCOL_RANGE, ServerToRunner,
-    SessionDisposition,
+    CommandCursor, LeaseAuthorityPollContributions, LeaseRequest, MessageHeader, NegotiatedSession,
+    ProtocolLimits, RemoteErrorCode, RunnerSlotOrdinal, RunnerToServer, SUPPORTED_PROTOCOL_RANGE,
+    ServerToRunner, SessionDisposition,
 };
 use automata_ci_runner_transport::{
     AuthenticatedRunnerEphemeralRequest, ClientErrorKind, PrepareError, PreparedEphemeralRequest,
@@ -46,6 +46,7 @@ fn sync_preparation_rejects_a_cross_session_header() {
             OperationId::new(),
         ),
         RunnerSlotOrdinal::new(1).expect("slot"),
+        LeaseAuthorityPollContributions::empty(),
     ));
     assert!(matches!(
         PreparedRequest::for_session(request, negotiated, &ProtocolLimits::default()),

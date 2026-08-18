@@ -7,7 +7,7 @@ use automata_ci_control::lease::{
     LeasePollRepository, LeasePollService, LeaseRequestKey, LeaseTimeToLive, NoWorkLeaseRequest,
     RunnableAttempt, RunnableAttemptError, RunnableAttemptGate, RunnableAttemptGateDisposition,
     RunnableScanLimit, RunnableScanPage, RunnableScanRequest, TryClaimAttempt, TryClaimOutcome,
-    TryClaimReceipt, WindowsHyperVPlacementGrant,
+    TryClaimReceipt,
     repository::{RunnableAttemptRepository, RunnerClaimRepository},
     routing::{
         RunnerGroupId, RunnerRoutingRepository, RunnerRoutingSnapshot, RunnerSlotAvailability,
@@ -24,11 +24,43 @@ use automata_ci_core::{
     TrustAutomationKind, TrustEventKind, TrustEvidence, TrustOriginKind, TrustPolicy,
     TrustRepositoryEvidence, TrustSnapshot, TrustTokenRecursion, UnixMillis,
 };
-use automata_ci_protocol::{LeaseRequest, MessageHeader, PROTOCOL_MAX_VERSION, RunnerSlotOrdinal};
+use automata_ci_protocol::{
+    LeaseAuthorityName, LeaseAuthorityPollContribution, LeaseAuthorityPollContributions,
+    LeaseRequest, MessageHeader, PROTOCOL_MAX_VERSION, RunnerSlotOrdinal,
+};
 use automata_ci_store::{
     AttemptAssignment, JobIrMetadata, ObjectKey, RoutingDocument, RoutingLabel, RunnerGeneration,
     RunnerSessionFence, RunnerSlotCount, SessionEpoch, StableRunnerSlot, StoreError,
 };
+
+fn empty_lease_request(header: MessageHeader, slot: RunnerSlotOrdinal) -> LeaseRequest {
+    LeaseRequest::first(header, slot, LeaseAuthorityPollContributions::empty())
+}
+
+fn successor_lease_request(
+    header: MessageHeader,
+    slot: RunnerSlotOrdinal,
+    predecessor: OperationId,
+) -> LeaseRequest {
+    LeaseRequest::successor(
+        header,
+        slot,
+        predecessor,
+        LeaseAuthorityPollContributions::empty(),
+    )
+}
+
+fn test_authority_contributions(payload: u8) -> LeaseAuthorityPollContributions {
+    LeaseAuthorityPollContributions::new(vec![
+        LeaseAuthorityPollContribution::new(
+            LeaseAuthorityName::new("automata.test.authority").expect("authority name"),
+            1,
+            vec![payload],
+        )
+        .expect("authority contribution"),
+    ])
+    .expect("authority contribution bundle")
+}
 
 #[derive(Debug)]
 struct FixedClock(UnixMillis);
@@ -109,7 +141,7 @@ struct FakeRepository {
     availability: RunnerSlotAvailability,
     candidates: Vec<RunnableAttempt>,
     metadata: JobIrMetadata,
-    windows_grants: Mutex<Vec<Option<WindowsHyperVPlacementGrant>>>,
+    authority_contributions: Mutex<Vec<LeaseAuthorityPollContributions>>,
 }
 
 impl FakeRepository {
@@ -127,6 +159,7 @@ impl RunnerClaimRepository for FakeRepository {
     async fn lookup_lease_request(
         &self,
         request: LeaseRequestKey,
+        _authority_contributions: &LeaseAuthorityPollContributions,
     ) -> Result<Option<TryClaimReceipt>, StoreError> {
         self.called("lookup");
         self.lease_keys
@@ -138,10 +171,12 @@ impl RunnerClaimRepository for FakeRepository {
 
     async fn try_claim(&self, request: TryClaimAttempt) -> Result<TryClaimReceipt, StoreError> {
         self.called("claim");
-        self.windows_grants
+        self.authority_contributions
             .lock()
-            .expect("Windows grant observations")
-            .push(request.windows_placement_grant().cloned());
+            .expect("authority contribution observations")
+            .push(request.authority_contributions().clone());
+        let request_digest = request.request_digest();
+        let authority_contributions = request.authority_contributions().clone();
         let lease = Lease::new(
             request.lease_id(),
             request.attempt_id(),
@@ -155,10 +190,12 @@ impl RunnerClaimRepository for FakeRepository {
             lease,
             AttemptAssignment::new(request.session(), request.slot()),
             self.metadata.clone(),
+            authority_contributions,
         )
         .expect("fake assignment");
         Ok(TryClaimReceipt::new(
             request.request_key(),
+            request_digest,
             TryClaimOutcome::Claimed(Box::new(claimed)),
             false,
         ))
@@ -169,8 +206,10 @@ impl RunnerClaimRepository for FakeRepository {
         request: NoWorkLeaseRequest,
     ) -> Result<TryClaimReceipt, StoreError> {
         self.called("no_work");
+        let request_digest = request.request_digest();
         Ok(TryClaimReceipt::new(
             request.request_key(),
+            request_digest,
             TryClaimOutcome::NoWork,
             false,
         ))
@@ -330,7 +369,7 @@ fn fixture(availability: RunnerSlotAvailability, with_candidates: bool) -> Fixtu
         Vec::new()
     };
     let operation_id = OperationId::new();
-    let request = LeaseRequest::first(
+    let request = empty_lease_request(
         MessageHeader::request(PROTOCOL_MAX_VERSION, fence.session_id(), operation_id),
         RunnerSlotOrdinal::new(1).expect("slot"),
     );
@@ -344,7 +383,7 @@ fn fixture(availability: RunnerSlotAvailability, with_candidates: bool) -> Fixtu
             availability,
             candidates,
             metadata,
-            windows_grants: Mutex::new(Vec::new()),
+            authority_contributions: Mutex::new(Vec::new()),
         },
         authenticated: AuthenticatedRunnerSession::new(
             fence,
@@ -504,10 +543,11 @@ fn capability_document(capabilities: &RunnerCapabilities) -> RoutingDocument {
         .expect("routing document")
 }
 
-fn windows_claim_request(
+fn claim_request(
     fixture: &Fixture,
     candidate: &RunnableAttempt,
     operation_id: OperationId,
+    authority_contributions: LeaseAuthorityPollContributions,
 ) -> TryClaimAttempt {
     let page = RunnableScanPage::try_new(
         fixture.authenticated.fence(),
@@ -531,8 +571,9 @@ fn windows_claim_request(
         UnixMillis::new(1_500),
         page.claim_advance(candidate.attempt_id())
             .expect("claim cursor"),
+        authority_contributions,
     )
-    .expect("Windows claim")
+    .expect("claim")
 }
 
 fn service(fixture: &Fixture) -> LeasePollService<'_> {
@@ -603,59 +644,45 @@ async fn temporarily_no_eligible_runner_for_admitted_features_remains_no_work() 
 }
 
 #[tokio::test]
-async fn windows_claim_carries_one_use_trust_profile_and_generation_binding() {
-    let fixture = windows_fixture(true);
+async fn claim_carries_exact_provider_neutral_authority_contributions() {
+    let mut fixture = windows_fixture(true);
+    let authority_contributions = test_authority_contributions(0x41);
+    fixture.request = LeaseRequest::first(
+        fixture.request.header(),
+        fixture.request.slot(),
+        authority_contributions.clone(),
+    );
 
     let outcome = service(&fixture)
         .poll(fixture.authenticated, &fixture.request)
         .await
-        .expect("authenticated Windows placement succeeds");
+        .expect("provider-neutral authority contribution is admitted");
 
     let LeasePollOutcome::Claimed(claimed) = outcome else {
-        panic!("authenticated exact-profile Windows work must be claimed");
+        panic!("matching work must be claimed");
     };
-    let grants = fixture
+    assert_eq!(claimed.authority_contributions(), &authority_contributions);
+    let recorded = fixture
         .repository
-        .windows_grants
+        .authority_contributions
         .lock()
-        .expect("Windows grant observations");
-    let grant = grants[0].as_ref().expect("Windows placement grant");
-    assert_eq!(grant.attempt_id(), claimed.lease().attempt_id());
-    assert_eq!(
-        grant.operation_id(),
-        fixture.request.header().operation_id()
-    );
-    assert_eq!(grant.session(), fixture.authenticated.fence());
-    assert_eq!(grant.lease_id(), fixture.lease_id);
-    assert_eq!(grant.expires_at(), UnixMillis::new(1_500));
-    assert_eq!(
-        grant.environment_profile().id().as_str(),
-        "automata.test/windows-2025"
-    );
-    assert_ne!(grant.binding_digest(), Sha256Digest::from_bytes([0; 32]));
+        .expect("authority contribution observations");
+    assert_eq!(recorded.as_slice(), [authority_contributions]);
 }
 
 #[tokio::test]
-async fn windows_candidate_without_authenticated_trust_is_no_work_before_claim() {
+async fn generic_lease_does_not_interpret_provider_specific_windows_trust() {
     let fixture = windows_fixture(false);
 
     let outcome = service(&fixture)
         .poll(fixture.authenticated, &fixture.request)
         .await
-        .expect("missing Windows trust is a fail-closed no-work result");
+        .expect("generic lease service does not own provider admission");
 
-    assert_eq!(outcome, LeasePollOutcome::NoWork { replayed: false });
+    assert!(matches!(outcome, LeasePollOutcome::Claimed(_)));
     assert_eq!(
         fixture.repository.calls(),
-        ["lookup", "routing", "availability", "scan", "no_work"]
-    );
-    assert!(
-        fixture
-            .repository
-            .windows_grants
-            .lock()
-            .expect("Windows grant observations")
-            .is_empty()
+        ["lookup", "routing", "availability", "scan", "claim"]
     );
 }
 
@@ -684,61 +711,37 @@ async fn unavailable_service_container_requirement_never_creates_a_lease() {
 }
 
 #[test]
-fn windows_grant_changes_across_operations_and_trust_snapshots() {
+fn claim_digest_binds_operation_and_exact_authority_contribution_bundle() {
     let fixture = windows_fixture(true);
     let candidate = &fixture.repository.candidates[0];
-    let first = windows_claim_request(&fixture, candidate, OperationId::new());
-    let second = windows_claim_request(&fixture, candidate, OperationId::new());
-    assert_ne!(
-        first
-            .windows_placement_grant()
-            .expect("first Windows grant")
-            .binding_digest(),
-        second
-            .windows_placement_grant()
-            .expect("second Windows grant")
-            .binding_digest()
+    let operation_id = OperationId::new();
+    let first = claim_request(
+        &fixture,
+        candidate,
+        operation_id,
+        test_authority_contributions(0x41),
     );
-
-    let changed_trust = AuthenticatedPlacementTrust::try_new(
-        &trusted_snapshot("actor-2"),
-        JobAuthorityProfile::Standard,
-        candidate.requirements(),
-    )
-    .expect("changed placement trust");
-    let changed_candidate = RunnableAttempt::try_new(
-        candidate.attempt_id(),
-        candidate.job_id(),
-        candidate.run_id(),
-        candidate.queued_at(),
-        candidate.requirements().clone(),
-        candidate.job_ir().clone(),
-        Some(changed_trust),
-    )
-    .expect("changed candidate");
-    let changed = windows_claim_request(&fixture, &changed_candidate, first.operation_id());
-    assert_ne!(
-        first
-            .windows_placement_grant()
-            .expect("first Windows grant")
-            .binding_digest(),
-        changed
-            .windows_placement_grant()
-            .expect("changed Windows grant")
-            .binding_digest()
+    let changed_operation = claim_request(
+        &fixture,
+        candidate,
+        OperationId::new(),
+        test_authority_contributions(0x41),
     );
-    #[cfg(feature = "adapter-spi")]
-    {
-        assert!(
-            automata_ci_control::adapter_spi::try_claim_attempt_matches_runnable(&first, candidate)
-        );
-        assert!(
-            !automata_ci_control::adapter_spi::try_claim_attempt_matches_runnable(
-                &first,
-                &changed_candidate,
-            )
-        );
-    }
+    let changed_contribution = claim_request(
+        &fixture,
+        candidate,
+        operation_id,
+        test_authority_contributions(0x42),
+    );
+    assert_ne!(first.request_digest(), changed_operation.request_digest());
+    assert_ne!(
+        first.request_digest(),
+        changed_contribution.request_digest()
+    );
+    assert_eq!(
+        first.authority_contributions(),
+        &test_authority_contributions(0x41)
+    );
 }
 
 #[test]
@@ -840,7 +843,7 @@ async fn configured_slot_beyond_negotiated_capacity_is_no_work_not_corrupt_state
         JobIrVersion::current(),
     )
     .expect("routing snapshot");
-    fixture.request = LeaseRequest::first(
+    fixture.request = empty_lease_request(
         fixture.request.header(),
         RunnerSlotOrdinal::new(2).expect("second slot"),
     );
@@ -865,7 +868,13 @@ async fn exact_no_work_retry_returns_before_every_scheduling_read() {
         fixture.request.header().operation_id(),
         StableRunnerSlot::new(fixture.request.slot().get()).expect("slot"),
     );
-    fixture.repository.lookup = Some(TryClaimReceipt::new(key, TryClaimOutcome::NoWork, false));
+    let request_digest = key.decision_request_digest(fixture.request.authority_contributions());
+    fixture.repository.lookup = Some(TryClaimReceipt::new(
+        key,
+        request_digest,
+        TryClaimOutcome::NoWork,
+        false,
+    ));
 
     let outcome = service(&fixture)
         .poll(fixture.authenticated, &fixture.request)
@@ -880,7 +889,7 @@ async fn exact_no_work_retry_returns_before_every_scheduling_read() {
 async fn protocol_successor_is_carried_into_the_durable_key_and_digest() {
     let mut fixture = fixture(RunnerSlotAvailability::Available, false);
     let predecessor = OperationId::new();
-    fixture.request = LeaseRequest::successor(
+    fixture.request = successor_lease_request(
         fixture.request.header(),
         fixture.request.slot(),
         predecessor,
@@ -928,10 +937,16 @@ async fn exact_claim_retry_uses_self_contained_receipt_and_never_reschedules() {
         fixture.authenticated.fence(),
         StableRunnerSlot::new(1).expect("slot"),
     );
-    let claimed = ClaimedAttempt::try_new(lease, assignment, fixture.repository.metadata.clone())
-        .expect("claimed attempt");
+    let claimed = ClaimedAttempt::try_new(
+        lease,
+        assignment,
+        fixture.repository.metadata.clone(),
+        fixture.request.authority_contributions().clone(),
+    )
+    .expect("claimed attempt");
     fixture.repository.lookup = Some(TryClaimReceipt::new(
         key,
+        key.decision_request_digest(fixture.request.authority_contributions()),
         TryClaimOutcome::Claimed(Box::new(claimed)),
         false,
     ));
@@ -982,10 +997,12 @@ async fn observer_separates_physical_replay_from_one_new_claim_transition() {
             StableRunnerSlot::new(1).expect("slot"),
         ),
         replay.repository.metadata.clone(),
+        replay.request.authority_contributions().clone(),
     )
     .expect("claimed attempt");
     replay.repository.lookup = Some(TryClaimReceipt::new(
         key,
+        key.decision_request_digest(replay.request.authority_contributions()),
         TryClaimOutcome::Claimed(Box::new(claimed)),
         false,
     ));

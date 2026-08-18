@@ -42,6 +42,7 @@ use automata_ci_core::{
 };
 use automata_ci_protocol::{
     CommandSequence as ProtocolCommandSequence, INITIAL_RUNTIME_AUTHORITY_GENERATION,
+    LeaseAuthorityName, LeaseAuthorityPollContribution, LeaseAuthorityPollContributions,
     RunnerSlotOrdinal, RuntimeAuthorityDeliveryBinding,
 };
 use automata_ci_store::{
@@ -59,8 +60,8 @@ use crate::support::{
 };
 
 const LEASE_REQUEST_KIND: &str = "automata.runner.lease-request.v1";
-const LEASE_OFFER_KIND: &str = "automata.runner.lease-offer.v2";
-const RUNTIME_AUTHORITY_PROTOCOL_VERSION: u16 = 2;
+const LEASE_OFFER_KIND: &str = "automata.runner.lease-offer.v3";
+const RUNTIME_AUTHORITY_PROTOCOL_VERSION: u16 = 3;
 const RUNTIME_AUTHORITY_REQUEST_KIND: &str = "automata.runner.runtime-authority-request.v2";
 const RUNTIME_AUTHORITY_ACK_KIND: &str = "automata.runner.runtime-authority-ack.v2";
 const ACTIVE_LEASE_DURATION_MILLIS: i64 = 300_000;
@@ -79,7 +80,7 @@ async fn expired_unpublished_claim_becomes_one_terminal_replay_without_maintenan
 
         let first = database
             .store()
-            .lookup_lease_request(request)
+            .lookup_lease_request(request, &LeaseAuthorityPollContributions::empty())
             .await?
             .expect("the admitted request retains one terminal receipt");
         assert!(matches!(
@@ -90,7 +91,7 @@ async fn expired_unpublished_claim_becomes_one_terminal_replay_without_maintenan
 
         let second = database
             .store()
-            .lookup_lease_request(request)
+            .lookup_lease_request(request, &LeaseAuthorityPollContributions::empty())
             .await?
             .expect("the terminal receipt replays exactly");
         assert_eq!(second.outcome(), first.outcome());
@@ -190,7 +191,7 @@ async fn superseded_unpublished_claim_becomes_one_terminal_replay() -> TestResul
 
         let first = database
             .store()
-            .lookup_lease_request(request)
+            .lookup_lease_request(request, &LeaseAuthorityPollContributions::empty())
             .await?
             .expect("the admitted request retains one terminal receipt");
         assert!(matches!(
@@ -201,7 +202,7 @@ async fn superseded_unpublished_claim_becomes_one_terminal_replay() -> TestResul
 
         let second = database
             .store()
-            .lookup_lease_request(request)
+            .lookup_lease_request(request, &LeaseAuthorityPollContributions::empty())
             .await?
             .expect("the terminal receipt replays exactly");
         assert_eq!(second.outcome(), first.outcome());
@@ -258,6 +259,7 @@ async fn lease_request_chains_bound_retry_state_per_live_slot() -> TestResult {
                         key,
                         observed_at,
                         page.no_work_advance(),
+                        LeaseAuthorityPollContributions::empty(),
                     )?)
                     .await?;
                 assert!(matches!(receipt.outcome(), TryClaimOutcome::NoWork));
@@ -382,8 +384,12 @@ async fn lease_request_drop_retry_predecessor_and_late_handler_are_fenced() -> T
                 UnixMillis::new(10),
             ))
             .await?;
-        let no_work =
-            NoWorkLeaseRequest::new(first_key, UnixMillis::new(10), page.no_work_advance())?;
+        let no_work = NoWorkLeaseRequest::new(
+            first_key,
+            UnixMillis::new(10),
+            page.no_work_advance(),
+            LeaseAuthorityPollContributions::empty(),
+        )?;
         database.store().record_no_work(no_work.clone()).await?;
 
         let dropped_retry = database.store().begin_lease_request(first_begin).await?;
@@ -391,7 +397,7 @@ async fn lease_request_drop_retry_predecessor_and_late_handler_are_fenced() -> T
         assert!(
             database
                 .store()
-                .lookup_lease_request(first_key)
+                .lookup_lease_request(first_key, &LeaseAuthorityPollContributions::empty())
                 .await?
                 .expect("semantic receipt")
                 .was_replayed()
@@ -549,6 +555,7 @@ async fn lease_request_rpc_failpoint_recovers_without_losing_head_or_semantic_re
                 key,
                 UnixMillis::new(10),
                 page.no_work_advance(),
+                LeaseAuthorityPollContributions::empty(),
             )?)
             .await?;
 
@@ -971,6 +978,75 @@ async fn lease_offer_publication_is_atomic_concurrent_and_exactly_replayed() -> 
             database.store().publish_lease_offer(stale).await,
             Err(StoreError::SessionFenceRejected(id)) if id == fence.session_id()
         ));
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
+async fn lease_offer_publication_rejects_authority_contribution_substitution_without_writes()
+-> TestResult {
+    run_with_database(|database| async move {
+        let accepted = lease_authority_contributions("test-sandbox", 0x31)?;
+        let substituted = lease_authority_contributions("test-sandbox", 0x32)?;
+        let (seed, lease, metadata, slot, request_operation_id, request_digest) =
+            active_lease_with_duration_protocol_and_authority(
+                &database,
+                ACTIVE_LEASE_DURATION_MILLIS,
+                Some(RUNTIME_AUTHORITY_PROTOCOL_VERSION),
+                accepted.clone(),
+            )
+            .await?;
+        let fence = seed.session_fences[0];
+        let exact = runtime_authority_offer_with_contributions(
+            fence,
+            &lease,
+            &metadata,
+            slot,
+            request_operation_id,
+            request_digest,
+            accepted,
+            OperationId::new(),
+        )?;
+        database.store().publish_lease_offer(exact).await?;
+        let published_state = offer_state(&database, fence.session_id()).await?;
+        assert_eq!(published_state, (1, 1, 1));
+
+        let conflicting = runtime_authority_offer_with_contributions(
+            fence,
+            &lease,
+            &metadata,
+            slot,
+            request_operation_id,
+            request_digest,
+            substituted,
+            OperationId::new(),
+        )?;
+        assert!(matches!(
+            database
+                .store()
+                .inspect_lease_offer_claim(conflicting.claim().clone())
+                .await,
+            Err(StoreError::OperationConflict { operation_id, .. })
+                if operation_id == request_operation_id
+        ));
+        assert_eq!(
+            offer_state(&database, fence.session_id()).await?,
+            published_state,
+            "a substituted inspection must not mutate the published offer or outbox"
+        );
+
+        assert!(matches!(
+            database.store().publish_lease_offer(conflicting).await,
+            Err(StoreError::OperationConflict { operation_id, .. })
+                if operation_id == request_operation_id
+        ));
+        assert_eq!(
+            offer_state(&database, fence.session_id()).await?,
+            published_state,
+            "a substituted publication retry must not append an offer or outbox command"
+        );
         Ok(())
     })
     .await
@@ -1957,7 +2033,7 @@ async fn runtime_authority_delivery_is_post_accept_value_free_exact_and_replayab
                 command_operation_id,
             )?)
             .await
-            .map_err(|error| std::io::Error::other(format!("publish v2 offer: {error}")))?;
+            .map_err(|error| std::io::Error::other(format!("publish v3 offer: {error}")))?;
         let binding = RuntimeAuthorityDeliveryBinding::new(
             lease.attempt_id(),
             RunnerSlotOrdinal::new(slot.ordinal())?,
@@ -2754,6 +2830,29 @@ async fn active_lease_with_duration_and_protocol(
     OperationId,
     Sha256Digest,
 )> {
+    active_lease_with_duration_protocol_and_authority(
+        database,
+        duration_millis,
+        protocol_version,
+        LeaseAuthorityPollContributions::empty(),
+    )
+    .await
+}
+
+async fn active_lease_with_duration_protocol_and_authority(
+    database: &TestDatabase,
+    duration_millis: i64,
+    protocol_version: Option<u16>,
+    authority_contributions: LeaseAuthorityPollContributions,
+) -> TestResult<(
+    SeedData,
+    Lease,
+    JobIrMetadata,
+    StableRunnerSlot,
+    OperationId,
+    Sha256Digest,
+)> {
+    let expected_authority_contributions = authority_contributions.clone();
     let seed = seed_control_plane(database.pool(), 1).await?;
     if let Some(protocol_version) = protocol_version {
         let updated = sqlx::query("UPDATE runner_sessions SET protocol_version = $2 WHERE id = $1")
@@ -2808,11 +2907,17 @@ async fn active_lease_with_duration_and_protocol(
             observed_at,
             expires_at,
             page.claim_advance(attempt_id)?,
+            authority_contributions,
         )?)
         .await?;
     let TryClaimOutcome::Claimed(claimed) = receipt.outcome() else {
         panic!("fixture attempt was not claimed");
     };
+    assert_eq!(
+        claimed.authority_contributions(),
+        &expected_authority_contributions,
+        "the durable claim must replay the exact accepted authority contributions"
+    );
     Ok((
         seed,
         claimed.lease().clone(),
@@ -2855,6 +2960,7 @@ fn offer(
         slot,
         lease.clone(),
         metadata.clone(),
+        LeaseAuthorityPollContributions::empty(),
         lease.expires_at(),
         command,
     )?)
@@ -2870,6 +2976,29 @@ fn runtime_authority_offer(
     request_digest: Sha256Digest,
     command_operation_id: OperationId,
 ) -> TestResult<PublishLeaseOffer> {
+    runtime_authority_offer_with_contributions(
+        fence,
+        lease,
+        metadata,
+        slot,
+        request_operation_id,
+        request_digest,
+        LeaseAuthorityPollContributions::empty(),
+        command_operation_id,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn runtime_authority_offer_with_contributions(
+    fence: automata_ci_store::RunnerSessionFence,
+    lease: &Lease,
+    metadata: &JobIrMetadata,
+    slot: StableRunnerSlot,
+    request_operation_id: OperationId,
+    request_digest: Sha256Digest,
+    authority_contributions: LeaseAuthorityPollContributions,
+    command_operation_id: OperationId,
+) -> TestResult<PublishLeaseOffer> {
     let request = RunnerOperationRequest::new(
         fence,
         request_operation_id,
@@ -2879,7 +3008,7 @@ fn runtime_authority_offer(
     let command = EnqueueRunnerCommand::new(
         fence,
         command_operation_id,
-        RunnerOperationKind::new("automata.runner.lease-offer.v2")?,
+        RunnerOperationKind::new(LEASE_OFFER_KIND)?,
         RunnerCommandPayload::new(
             DocumentSchema::new(RUNTIME_AUTHORITY_PROTOCOL_VERSION)?,
             b"value-free lease offer body".to_vec(),
@@ -2892,9 +3021,23 @@ fn runtime_authority_offer(
         slot,
         lease.clone(),
         metadata.clone(),
+        authority_contributions,
         lease.expires_at(),
         command,
     )?)
+}
+
+fn lease_authority_contributions(
+    name: &str,
+    payload_byte: u8,
+) -> TestResult<LeaseAuthorityPollContributions> {
+    Ok(LeaseAuthorityPollContributions::new(vec![
+        LeaseAuthorityPollContribution::new(
+            LeaseAuthorityName::new(name)?,
+            1,
+            vec![payload_byte; 32],
+        )?,
+    ])?)
 }
 
 fn operation_request(
@@ -3118,6 +3261,7 @@ async fn install_completed_no_work_head(
             key,
             observed_at,
             page.no_work_advance(),
+            LeaseAuthorityPollContributions::empty(),
         )?)
         .await?;
     database

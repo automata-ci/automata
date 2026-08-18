@@ -16,7 +16,8 @@ use automata_ci_execution::{
     Cancellation, CancellationDisposition, CopyFromRequest, CopyToRequest, EnvironmentProfile,
     EnvironmentProfileId, ExecutionArgv, ExecutionCommand, ExecutionEnvironment,
     ExecutionErrorKind, ExecutionTermination, NeverCancelled, ResourceLimits, RootFilesystemPolicy,
-    SandboxCustody, SandboxGeneration, SandboxProvider, SandboxState, TargetPath,
+    SandboxAuthorization, SandboxAuthorizationName, SandboxAuthorizations, SandboxCustody,
+    SandboxGeneration, SandboxProvider, SandboxState, TargetPath,
 };
 use automata_ci_sandbox_guest::{
     GUEST_PROTOCOL_VERSION, GuestRequest, GuestResponse, decode_frame, encode_frame,
@@ -1194,6 +1195,25 @@ fn verified_results_transport(installation: &Installation) -> VerifiedResultsTra
 
 fn sandbox_spec() -> SandboxSpec {
     sandbox_spec_with_resources(ResourceLimits::new(256 * 1024 * 1024, 2_000, 128).expect("limits"))
+}
+
+#[test]
+fn local_docker_rejects_sandbox_authorizations_at_validation() {
+    let authorization = SandboxAuthorization::new(
+        SandboxAuthorizationName::new("another-provider").expect("authorization name"),
+        1,
+        b"opaque-authority".to_vec(),
+    )
+    .expect("authorization");
+    let spec = sandbox_spec().with_sandbox_authorizations(
+        SandboxAuthorizations::new(vec![authorization]).expect("authorization set"),
+    );
+
+    let error = validate_spec(&spec, RunnerId::from_uuid(Uuid::from_u128(2)))
+        .expect_err("local Docker cannot consume the authorization");
+
+    assert_eq!(error.kind(), ProviderErrorKind::UnsupportedCapability);
+    assert_eq!(error.stage(), ProviderStage::Validate);
 }
 
 fn sandbox_spec_with_resources(resources: ResourceLimits) -> SandboxSpec {

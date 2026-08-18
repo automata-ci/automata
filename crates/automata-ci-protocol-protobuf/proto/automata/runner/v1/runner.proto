@@ -26,6 +26,8 @@ message RunnerFrame {
 }
 
 message ServerFrame {
+  reserved 8;
+  reserved "no_work";
   oneof payload {
     ServerHello hello = 1;
     HandshakeRejected handshake_rejected = 2;
@@ -34,9 +36,9 @@ message ServerFrame {
     CancelJob cancel_job = 5;
     LogAckMessage log_ack = 6;
     OperationAck operation_ack = 7;
-    NoWork no_work = 8;
     ErrorMessage error = 9;
     RuntimeAuthorityGrant runtime_authority_grant = 10;
+    LeasePollResponse lease_poll_response = 11;
   }
 }
 
@@ -236,10 +238,46 @@ message RunnerRequirements {
 }
 
 message LeaseRequest {
+  reserved 4;
+  reserved "windows_placement_renewal";
   MessageHeader header = 1;
   uint32 slot = 2;
   // Present on every successor and absent only on the first request for a slot.
   optional bytes acknowledges_operation_id = 3;
+  // Required even when empty. The server must acknowledge this bundle's exact
+  // canonical digest before the runner adopts a poll outcome.
+  LeaseAuthorityPollContributions authority_contributions = 5;
+}
+
+message LeaseAuthorityPollContribution {
+  string name = 1;
+  uint32 payload_schema_version = 2;
+  bytes payload_sha256 = 3;
+  bytes payload = 4;
+}
+
+message LeaseAuthorityPollContributions {
+  uint32 schema_version = 1;
+  // Canonical set: strictly ascending and duplicate-free by name.
+  repeated LeaseAuthorityPollContribution contributions = 2;
+  bytes sha256_digest = 3;
+}
+
+message LeasePollResponse {
+  MessageHeader header = 1;
+  bytes accepted_contributions_sha256 = 2;
+  oneof outcome {
+    uint32 no_work_retry_after_millis = 3;
+    LeaseOffer lease_offer = 4;
+    CancelJob cancel_job = 5;
+  }
+}
+
+message WindowsRunnerPlacementRenewalEnvelope {
+  uint32 schema_version = 1;
+  string issuer_key_id = 2;
+  bytes signed_payload = 3;
+  bytes authenticator = 4;
 }
 
 message Lease {
@@ -278,7 +316,50 @@ message LeaseOffer {
   Lease lease = 3;
   JobIrEnvelope job = 4;
   reserved 5;
+  reserved "windows_hyperv_broker_grant";
   ManagedSecretBindingOverlay managed_secret_bindings = 6;
+}
+
+// Signed, value-free authority for one exact restricted host placement. It
+// contains no credential, engine endpoint, host path, command, or HCS document.
+message WindowsHyperVBrokerGrant {
+  uint32 schema = 1;
+  bytes key_id_sha256 = 2;
+  WindowsHyperVBrokerGrantClaims claims = 3;
+  bytes ed25519_signature = 4;
+}
+
+message WindowsHyperVBrokerGrantClaims {
+  bytes host_id_sha256 = 1;
+  bytes placement_binding_sha256 = 2;
+  bytes attempt_id = 3;
+  bytes job_id = 4;
+  bytes run_id = 5;
+  bytes poll_operation_id = 6;
+  bytes runner_id = 7;
+  bytes runner_session_id = 8;
+  uint64 runner_generation = 9;
+  uint64 session_epoch = 10;
+  uint32 slot = 11;
+  bytes lease_id = 12;
+  uint64 fencing_token = 13;
+  uint32 job_ir_version = 14;
+  uint64 job_ir_encoded_size = 15;
+  bytes job_ir_sha256 = 16;
+  bytes job_ir_object_key_sha256 = 17;
+  bytes trust_binding_sha256 = 18;
+  string environment_profile_id = 19;
+  bytes environment_profile_sha256 = 20;
+  int64 issued_at_unix_millis = 21;
+  int64 expires_at_unix_millis = 22;
+  bytes accepted_offer_operation_id = 23;
+  uint64 accepted_offer_sequence = 24;
+  bytes post_accept_operation_id = 25;
+  bytes post_accept_request_sha256 = 26;
+  JobResourceAllocation job_resource_allocation = 27;
+  bytes profile_contract_sha256 = 28;
+  uint32 sandbox_pids_limit = 29;
+  bytes sandbox_spec_sha256 = 30;
 }
 
 message ManagedSecretBindingOverlayEntry {
@@ -326,6 +407,20 @@ message JobRuntimeAuthorities {
   uint32 schema_version = 1;
   // Canonical map: strictly ascending and duplicate-free by authority name.
   repeated JobRuntimeAuthority authorities = 2;
+  SandboxAuthorizations sandbox_authorizations = 3;
+}
+
+message SandboxAuthorization {
+  string name = 1;
+  uint32 payload_schema_version = 2;
+  bytes payload_sha256 = 3;
+  bytes payload = 4;
+}
+
+message SandboxAuthorizations {
+  uint32 schema_version = 1;
+  // Canonical set: strictly ascending and duplicate-free by name.
+  repeated SandboxAuthorization authorizations = 2;
 }
 
 message LeaseResponse {
@@ -815,6 +910,8 @@ message RuntimeAuthorityRequest {
 }
 
 message RuntimeAuthorityGrant {
+  reserved 5;
+  reserved "windows_hyperv_broker_grant";
   MessageHeader header = 1;
   RuntimeAuthorityDeliveryBinding binding = 2;
   bytes bundle_sha256 = 3;
@@ -990,11 +1087,6 @@ message CommandAck {
 
 message OperationAck {
   MessageHeader header = 1;
-}
-
-message NoWork {
-  MessageHeader header = 1;
-  uint32 retry_after_millis = 2;
 }
 
 enum RemoteErrorCode {

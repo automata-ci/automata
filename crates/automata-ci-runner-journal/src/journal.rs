@@ -1,11 +1,13 @@
 use automata_ci_core::{
     JobLifecycle, LeaseGuard, LogStreamId, OperationId, RunnerSessionId, Sha256Digest, UnixMillis,
 };
-use automata_ci_protocol::{LeaseRejectionReason, RunnerSlotOrdinal, RuntimeAuthorityGeneration};
+use automata_ci_protocol::{
+    LeaseAuthorityPollReceipt, LeaseRejectionReason, RunnerSlotOrdinal, RuntimeAuthorityGeneration,
+};
 
 use crate::{
     CancellationRecord, CommandDisposition, DurableCommand, DurableContentRef, EndpointOperation,
-    EndpointResultContentRef, JournalError, JournalSnapshot, LeaseOfferRecord,
+    EndpointResultContentRef, JournalError, JournalSnapshot, LeaseOfferRecord, LeasePollCompletion,
     LogSegmentAcknowledgement, LogSegmentPublication, OrphanAbandonmentReason,
     OrphanAuthorityProof, OrphanAuthorityVerifier, OrphanDelivery, OutboundOperationSequence,
     ProviderFailureOutcome, ProviderOperation, RuntimeAuthorityDeliveryRecord, SandboxIdentity,
@@ -52,23 +54,36 @@ pub trait RunnerJournal: Send + Sync {
         operation_id: OperationId,
     ) -> Result<JournalSnapshot, JournalError>;
 
-    /// Durably replaces a completed current lease request with its exact
-    /// successor, which acknowledges `expected_current`.
+    /// Atomically commits one complete lease-poll result.
     ///
-    /// The mutation is compare-and-swap fenced. Replaying it after the same
-    /// predecessor was already advanced is a no-op and returns the actual
-    /// durable successor, even if the caller generated a different candidate.
+    /// A nested command disposition and its application effect, when present,
+    /// become durable in the same physical commit as the carrier poll's exact
+    /// successor and pending authority receipts. Commands may target a slot
+    /// other than the carrier. Exact replay after an uncertain commit is a
+    /// no-op that returns the already durable state.
     ///
     /// # Errors
     ///
     /// Returns [`JournalError`] for a missing or unrelated checkpoint, stale
-    /// session, operation-identity conflict, or failed commit.
-    fn advance_lease_poll(
+    /// or conflicting command, operation-identity conflict, or failed commit.
+    fn complete_lease_poll(
+        &self,
+        session_id: RunnerSessionId,
+        completion: LeasePollCompletion,
+    ) -> Result<JournalSnapshot, JournalError>;
+
+    /// Clears the exact accepted contribution receipts after every source has
+    /// durably acknowledged them. Repeating an already completed clear is a no-op.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`JournalError`] for a stale session, missing checkpoint,
+    /// substituted receipt set, or failed commit.
+    fn acknowledge_lease_authority_receipts(
         &self,
         session_id: RunnerSessionId,
         slot: RunnerSlotOrdinal,
-        expected_current: OperationId,
-        successor_operation_id: OperationId,
+        expected: &[LeaseAuthorityPollReceipt],
     ) -> Result<JournalSnapshot, JournalError>;
 
     /// Atomically records a generic command disposition and advances the

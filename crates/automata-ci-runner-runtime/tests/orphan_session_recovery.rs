@@ -13,7 +13,7 @@ use automata_ci_core::{
     UnixMillis,
 };
 use automata_ci_protocol::{
-    CommandCursor, HandshakeErrorCode, HandshakeRejected, NegotiatedSession,
+    CommandCursor, HandshakeErrorCode, HandshakeRejected, LeasePollResponse, NegotiatedSession,
     OrphanDeliveryPermissions, RunnerToServer, SUPPORTED_PROTOCOL_RANGE, ServerHello, ServerTiming,
     ServerToRunner, SessionDisposition, SessionOrphanAuthorization,
 };
@@ -146,15 +146,16 @@ impl RunnerRuntimeControlClient for OrphanControlClient {
                 }
                 RunnerToServer::LeaseRequest(request) => {
                     self.shutdown.cancel();
-                    ServerToRunner::NoWork(automata_ci_protocol::NoWork::new(
+                    ServerToRunner::LeasePollResponse(Box::new(LeasePollResponse::no_work(
                         automata_ci_protocol::MessageHeader::reply(
                             request.header().protocol_version(),
                             request.header().session_id(),
                             OperationId::new(),
                             request.header().operation_id(),
                         ),
+                        request.authority_contributions().sha256_digest(),
                         1,
-                    ))
+                    )))
                 }
                 _ => return Err(invalid_control_response()),
             };

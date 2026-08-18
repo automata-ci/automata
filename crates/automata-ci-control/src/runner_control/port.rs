@@ -15,13 +15,13 @@ use automata_ci_blob::{
     BlobDescriptor, BlobKey, BlobStoreErrorKind, ImmutableBlobStore, MediaType,
 };
 use automata_ci_core::{
-    JobIrEnvelope, JobIrVersion, Lease, OperationId, RunnerId, RunnerSessionId, Sha256Digest,
-    UnixMillis,
+    JobIrEnvelope, JobIrVersion, Lease, OperationId, RunnerId, RunnerSessionId,
+    SandboxAuthorizations, Sha256Digest, UnixMillis,
 };
 use automata_ci_protocol::{
-    CancelJob, CommandSequence, JobRuntimeAuthorities, LeaseOffer, LeaseRequest,
-    MAX_CONFIGURABLE_FRAME_BYTES, ManagedSecretBindingOverlay, ProtocolLimits, ProtocolVersion,
-    RunnerSlotOrdinal, ServerCommandHeader, ServerToRunner,
+    CancelJob, CommandSequence, JobRuntimeAuthorities, LeaseAuthorityPollContributions, LeaseOffer,
+    LeaseRequest, MAX_CONFIGURABLE_FRAME_BYTES, ManagedSecretBindingOverlay, ProtocolLimits,
+    ProtocolVersion, RunnerSlotOrdinal, ServerCommandHeader, ServerToRunner,
 };
 use automata_ci_protocol_protobuf::encode_job_ir;
 use automata_ci_store::{
@@ -40,19 +40,21 @@ use super::durable::{
     LeaseOfferClaimStatus as StoreLeaseOfferClaimStatus, PublishLeaseOffer, PublishedLeaseOffer,
     RunnerLeaseOfferRepository,
 };
+use super::lease_authority::LeaseAuthorityEvidenceSet;
 
 /// Immutable media type used for standalone protobuf `JobIR` objects.
 pub const JOB_IR_PROTOBUF_MEDIA_TYPE: &str = "application/vnd.automata.job-ir.protobuf";
 
 const LEASE_REQUEST_KIND: &str = "automata.runner.lease-request.v1";
-const LEASE_OFFER_COMMAND_KIND: &str = "automata.runner.lease-offer.v2";
-const LEASE_OFFER_COMMAND_SCHEMA: u16 = 2;
+const LEASE_OFFER_COMMAND_KIND: &str = "automata.runner.lease-offer.v3";
+const LEASE_OFFER_COMMAND_SCHEMA: u16 = 3;
 
 #[derive(serde::Serialize)]
 struct LeaseOfferCommandPayloadRef<'a> {
     job: &'a JobIrEnvelope,
     lease: &'a Lease,
     managed_secret_bindings: &'a ManagedSecretBindingOverlay,
+    lease_authority_evidence: &'a LeaseAuthorityEvidenceSet,
     protocol_version: u16,
     schema: u16,
     slot: u16,
@@ -64,6 +66,7 @@ struct DurableLeaseOfferCommandPayload {
     job: JobIrEnvelope,
     lease: Lease,
     managed_secret_bindings: ManagedSecretBindingOverlay,
+    lease_authority_evidence: LeaseAuthorityEvidenceSet,
     protocol_version: u16,
     schema: u16,
     slot: u16,
@@ -442,6 +445,9 @@ impl RuntimeAuthorityIssuer for CompositeRuntimeAuthorityIssuer {
             bundle
                 .validate_for(request.job(), request.lease())
                 .map_err(|_| ControlPortError::Corrupt)?;
+            if !bundle.sandbox_authorizations().as_slice().is_empty() {
+                return Err(ControlPortError::Corrupt);
+            }
             authorities.extend(bundle.as_slice().iter().cloned());
             if authorities.len() > automata_ci_protocol::MAX_RUNTIME_AUTHORITIES {
                 return Err(ControlPortError::Corrupt);
@@ -454,14 +460,22 @@ impl RuntimeAuthorityIssuer for CompositeRuntimeAuthorityIssuer {
             bundle
                 .validate_for(request.job(), request.lease())
                 .map_err(|_| ControlPortError::Corrupt)?;
+            if !bundle.sandbox_authorizations().as_slice().is_empty() {
+                return Err(ControlPortError::Corrupt);
+            }
             authorities.extend(bundle.as_slice().iter().cloned());
             if authorities.len() > automata_ci_protocol::MAX_RUNTIME_AUTHORITIES {
                 return Err(ControlPortError::Corrupt);
             }
         }
         authorities.sort_by(|left, right| left.name().cmp(right.name()));
-        JobRuntimeAuthorities::new(authorities, request.job(), request.lease())
-            .map_err(|_| ControlPortError::Corrupt)
+        JobRuntimeAuthorities::new(
+            authorities,
+            SandboxAuthorizations::empty(),
+            request.job(),
+            request.lease(),
+        )
+        .map_err(|_| ControlPortError::Corrupt)
     }
 }
 
@@ -575,6 +589,7 @@ pub struct LeaseOfferClaim {
     slot: RunnerSlotOrdinal,
     lease: automata_ci_core::Lease,
     job_ir_metadata: JobIrMetadata,
+    authority_contributions: LeaseAuthorityPollContributions,
 }
 
 impl LeaseOfferClaim {
@@ -589,6 +604,7 @@ impl LeaseOfferClaim {
         slot: RunnerSlotOrdinal,
         lease: automata_ci_core::Lease,
         job_ir_metadata: JobIrMetadata,
+        authority_contributions: LeaseAuthorityPollContributions,
     ) -> Self {
         Self {
             session,
@@ -598,6 +614,7 @@ impl LeaseOfferClaim {
             slot,
             lease,
             job_ir_metadata,
+            authority_contributions,
         }
     }
 
@@ -642,6 +659,13 @@ impl LeaseOfferClaim {
     pub const fn job_ir_metadata(&self) -> &JobIrMetadata {
         &self.job_ir_metadata
     }
+
+    /// Returns the exact provider-neutral contribution bundle accepted with
+    /// the lease request and bound by its durable claim receipt.
+    #[must_use]
+    pub const fn authority_contributions(&self) -> &LeaseAuthorityPollContributions {
+        &self.authority_contributions
+    }
 }
 
 /// Recovery state of one exact claimed lease poll.
@@ -661,6 +685,7 @@ pub struct LeaseOfferCommand {
     claim: LeaseOfferClaim,
     job: JobIrEnvelope,
     managed_secret_bindings: ManagedSecretBindingOverlay,
+    lease_authority_evidence: LeaseAuthorityEvidenceSet,
     offer_valid_until: UnixMillis,
     created_at: UnixMillis,
 }
@@ -680,6 +705,12 @@ pub enum LeaseOfferCommandError {
     /// Secret-binding metadata is not bound to the exact leased attempt.
     #[error("lease-offer managed-secret bindings are invalid")]
     InvalidManagedSecretBindings,
+    /// Lease-authority evidence does not match the exact claim and `JobIR`.
+    #[error("lease-offer authority evidence is invalid")]
+    InvalidLeaseAuthorityEvidence,
+    /// The complete durable command representation exceeds its storage budget.
+    #[error("lease-offer durable command payload is invalid")]
+    InvalidDurablePayload,
     /// The command was created outside the lease validity interval.
     #[error("lease-offer creation time is outside its validity interval")]
     InvalidCreationTime,
@@ -711,13 +742,34 @@ impl LeaseOfferCommand {
             return Err(LeaseOfferCommandError::InvalidCreationTime);
         }
         let offer_valid_until = claim.lease().expires_at();
-        Ok(Self {
+        let command = Self {
             managed_secret_bindings: ManagedSecretBindingOverlay::empty(claim.lease()),
+            lease_authority_evidence: LeaseAuthorityEvidenceSet::empty(),
             claim,
             job,
             offer_valid_until,
             created_at,
-        })
+        };
+        encode_lease_offer_command_payload(&command)?;
+        Ok(command)
+    }
+
+    /// Retains value-free evidence for post-accept provider authorization.
+    ///
+    /// # Errors
+    ///
+    /// Rejects every cross-binding disagreement with the durable claim,
+    /// verified `JobIR`, environment profile, session, slot, or lease fence.
+    pub fn with_lease_authority_evidence(
+        mut self,
+        evidence: LeaseAuthorityEvidenceSet,
+    ) -> Result<Self, LeaseOfferCommandError> {
+        evidence
+            .validate()
+            .map_err(|_| LeaseOfferCommandError::InvalidLeaseAuthorityEvidence)?;
+        self.lease_authority_evidence = evidence;
+        encode_lease_offer_command_payload(&self)?;
+        Ok(self)
     }
 
     /// Replaces the empty default with the exact lease-scoped binding overlay.
@@ -733,6 +785,7 @@ impl LeaseOfferCommand {
             .validate_for(self.claim.lease())
             .map_err(|_| LeaseOfferCommandError::InvalidManagedSecretBindings)?;
         self.managed_secret_bindings = overlay;
+        encode_lease_offer_command_payload(&self)?;
         Ok(self)
     }
 
@@ -771,6 +824,12 @@ impl LeaseOfferCommand {
     pub const fn job_ir_metadata(&self) -> &JobIrMetadata {
         self.claim.job_ir_metadata()
     }
+    /// Returns the exact provider-neutral contribution bundle accepted with
+    /// the lease request and bound by its durable claim receipt.
+    #[must_use]
+    pub const fn authority_contributions(&self) -> &LeaseAuthorityPollContributions {
+        self.claim.authority_contributions()
+    }
     /// Returns the validated `JobIR` envelope.
     #[must_use]
     pub const fn job(&self) -> &JobIrEnvelope {
@@ -780,6 +839,11 @@ impl LeaseOfferCommand {
     #[must_use]
     pub const fn managed_secret_bindings(&self) -> &ManagedSecretBindingOverlay {
         &self.managed_secret_bindings
+    }
+    /// Returns server-retained evidence for post-accept provider authorization.
+    #[must_use]
+    pub const fn lease_authority_evidence(&self) -> &LeaseAuthorityEvidenceSet {
+        &self.lease_authority_evidence
     }
     /// Returns the exclusive minimum of the lease and runtime-authority expiries.
     #[must_use]
@@ -918,6 +982,7 @@ fn store_lease_offer_claim(
         slot,
         claim.lease().clone(),
         claim.job_ir_metadata().clone(),
+        claim.authority_contributions().clone(),
     )
     .map_err(|_| ControlPortError::Corrupt)?;
     Ok((store_claim, request_kind))
@@ -941,52 +1006,54 @@ fn published_claim_matches(
 
 fn durable_lease_offer_payload_matches(published: &PublishedLeaseOffer) -> bool {
     let command = published.command().request();
-    if command.session() != published.request().session() {
+    if command.session() != published.request().session()
+        || command.kind().as_str() != LEASE_OFFER_COMMAND_KIND
+        || command.payload().schema().get() != LEASE_OFFER_COMMAND_SCHEMA
+    {
         return false;
     }
-    match (command.kind().as_str(), command.payload().schema().get()) {
-        (LEASE_OFFER_COMMAND_KIND, LEASE_OFFER_COMMAND_SCHEMA) => {
-            let Ok(payload) = serde_json::from_slice::<DurableLeaseOfferCommandPayload>(
-                command.payload().bytes(),
-            ) else {
-                return false;
-            };
-            let mut canonical = Zeroizing::new(Vec::new());
-            if serde_json::to_writer(
-                &mut *canonical,
-                &LeaseOfferCommandPayloadRef {
-                    job: &payload.job,
-                    lease: &payload.lease,
-                    managed_secret_bindings: &payload.managed_secret_bindings,
-                    protocol_version: payload.protocol_version,
-                    schema: payload.schema,
-                    slot: payload.slot,
-                },
-            )
-            .is_err()
-                || canonical.as_slice() != command.payload().bytes()
-            {
-                return false;
-            }
-            durable_payload_matches(
-                published,
-                &payload.job,
-                &payload.lease,
-                &payload.managed_secret_bindings,
-                payload.protocol_version,
-                payload.schema,
-                payload.slot,
-            )
-        }
-        _ => false,
+    let Ok(payload) =
+        serde_json::from_slice::<DurableLeaseOfferCommandPayload>(command.payload().bytes())
+    else {
+        return false;
+    };
+    let mut canonical = Zeroizing::new(Vec::new());
+    if serde_json::to_writer(
+        &mut *canonical,
+        &LeaseOfferCommandPayloadRef {
+            job: &payload.job,
+            lease: &payload.lease,
+            managed_secret_bindings: &payload.managed_secret_bindings,
+            lease_authority_evidence: &payload.lease_authority_evidence,
+            protocol_version: payload.protocol_version,
+            schema: payload.schema,
+            slot: payload.slot,
+        },
+    )
+    .is_err()
+        || canonical.as_slice() != command.payload().bytes()
+    {
+        return false;
     }
+    durable_payload_matches(
+        published,
+        &payload.job,
+        &payload.lease,
+        &payload.managed_secret_bindings,
+        &payload.lease_authority_evidence,
+        payload.protocol_version,
+        payload.schema,
+        payload.slot,
+    )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn durable_payload_matches(
     published: &PublishedLeaseOffer,
     job: &JobIrEnvelope,
     lease: &Lease,
     managed_secret_bindings: &ManagedSecretBindingOverlay,
+    lease_authority_evidence: &LeaseAuthorityEvidenceSet,
     protocol_version: u16,
     schema: u16,
     slot: u16,
@@ -1001,6 +1068,9 @@ fn durable_payload_matches(
     if validate_lease_offer_payload(job, lease, managed_secret_bindings, published.job_ir())
         .is_err()
     {
+        return false;
+    }
+    if lease_authority_evidence.validate().is_err() {
         return false;
     }
     let created_at = published.command().request().created_at();
@@ -1123,27 +1193,13 @@ impl LeaseOfferCommandPublisher for StoreLeaseOfferCommandPublisher {
             command.slot(),
             command.lease().clone(),
             command.job_ir_metadata().clone(),
+            command.authority_contributions().clone(),
         );
         let (store_claim, request_kind) = store_lease_offer_claim(&claim)?;
         let command_kind = RunnerOperationKind::new(LEASE_OFFER_COMMAND_KIND)
             .map_err(|_| ControlPortError::Corrupt)?;
-        let schema = DocumentSchema::new(LEASE_OFFER_COMMAND_SCHEMA)
-            .map_err(|_| ControlPortError::Corrupt)?;
-        let mut payload = Zeroizing::new(Vec::new());
-        serde_json::to_writer(
-            &mut *payload,
-            &LeaseOfferCommandPayloadRef {
-                job: command.job(),
-                lease: command.lease(),
-                managed_secret_bindings: command.managed_secret_bindings(),
-                protocol_version: command.protocol_version().get(),
-                schema: LEASE_OFFER_COMMAND_SCHEMA,
-                slot: command.slot().get(),
-            },
-        )
-        .map_err(|_| ControlPortError::Corrupt)?;
-        let payload = RunnerCommandPayload::new(schema, std::mem::take(&mut *payload))
-            .map_err(|_| ControlPortError::Corrupt)?;
+        let payload =
+            encode_lease_offer_command_payload(&command).map_err(|_| ControlPortError::Corrupt)?;
         let durable_command = EnqueueRunnerCommand::new(
             command.session(),
             self.ids.next_operation_id(),
@@ -1157,6 +1213,7 @@ impl LeaseOfferCommandPublisher for StoreLeaseOfferCommandPublisher {
             store_claim.slot(),
             store_claim.lease().clone(),
             store_claim.job_ir().clone(),
+            store_claim.authority_contributions().clone(),
             command.offer_valid_until(),
             durable_command,
         )
@@ -1185,6 +1242,29 @@ impl LeaseOfferCommandPublisher for StoreLeaseOfferCommandPublisher {
             published.was_replayed(),
         )))
     }
+}
+
+fn encode_lease_offer_command_payload(
+    command: &LeaseOfferCommand,
+) -> Result<RunnerCommandPayload, LeaseOfferCommandError> {
+    let schema = DocumentSchema::new(LEASE_OFFER_COMMAND_SCHEMA)
+        .map_err(|_| LeaseOfferCommandError::InvalidDurablePayload)?;
+    let mut payload = Zeroizing::new(Vec::new());
+    serde_json::to_writer(
+        &mut *payload,
+        &LeaseOfferCommandPayloadRef {
+            job: command.job(),
+            lease: command.lease(),
+            managed_secret_bindings: command.managed_secret_bindings(),
+            lease_authority_evidence: command.lease_authority_evidence(),
+            protocol_version: command.protocol_version().get(),
+            schema: LEASE_OFFER_COMMAND_SCHEMA,
+            slot: command.slot().get(),
+        },
+    )
+    .map_err(|_| LeaseOfferCommandError::InvalidDurablePayload)?;
+    RunnerCommandPayload::new(schema, std::mem::take(&mut *payload))
+        .map_err(|_| LeaseOfferCommandError::InvalidDurablePayload)
 }
 
 pub(crate) fn decode_durable_server_command(
@@ -1216,6 +1296,7 @@ pub(crate) fn decode_durable_server_command(
                     .managed_secret_bindings
                     .validate_for(&payload.lease)
                     .is_err()
+                || payload.lease_authority_evidence.validate().is_err()
             {
                 return Err(ControlPortError::Corrupt);
             }
@@ -1249,6 +1330,41 @@ pub(crate) fn decode_durable_server_command(
         .validate(limits)
         .map_err(|_| ControlPortError::Corrupt)?;
     Ok(message)
+}
+
+/// Loads the server-retained lease-authority evidence from an exact durable offer.
+///
+/// This value is deliberately omitted from [`LeaseOffer`] and becomes
+/// runner-visible only through the accepted runtime-authority delivery path.
+pub(crate) fn durable_lease_authority_evidence(
+    command: &DurableRunnerCommand,
+) -> Result<LeaseAuthorityEvidenceSet, ControlPortError> {
+    if command.request().kind().as_str() != LEASE_OFFER_COMMAND_KIND
+        || command.request().payload().schema().get() != LEASE_OFFER_COMMAND_SCHEMA
+    {
+        return Err(ControlPortError::Corrupt);
+    }
+    let payload: DurableLeaseOfferCommandPayload =
+        serde_json::from_slice(command.request().payload().bytes())
+            .map_err(|_| ControlPortError::Corrupt)?;
+    Ok(payload.lease_authority_evidence)
+}
+
+/// Loads the exact value-free managed-secret overlay committed to a durable
+/// lease offer. This is rechecked before any post-accept sandbox authorization
+/// is minted so a substituted durable command cannot reach an issuer.
+pub(crate) fn durable_managed_secret_bindings(
+    command: &DurableRunnerCommand,
+) -> Result<ManagedSecretBindingOverlay, ControlPortError> {
+    if command.request().kind().as_str() != LEASE_OFFER_COMMAND_KIND
+        || command.request().payload().schema().get() != LEASE_OFFER_COMMAND_SCHEMA
+    {
+        return Err(ControlPortError::Corrupt);
+    }
+    let payload: DurableLeaseOfferCommandPayload =
+        serde_json::from_slice(command.request().payload().bytes())
+            .map_err(|_| ControlPortError::Corrupt)?;
+    Ok(payload.managed_secret_bindings)
 }
 
 pub(crate) fn is_durable_lease_offer_command(command: &DurableRunnerCommand) -> bool {

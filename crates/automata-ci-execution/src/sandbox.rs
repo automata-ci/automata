@@ -1,13 +1,20 @@
-use std::{fmt, num::NonZeroU16};
+use std::{
+    fmt,
+    num::{NonZeroU16, NonZeroU64},
+};
 
-use automata_ci_core::{JobResourceAllocation, RunnerId};
+use automata_ci_core::{
+    AttemptId, JobId, JobIrVersion, JobResourceAllocation, LeaseGuard, RunId, RunnerId,
+    RunnerSessionId, Sha256Digest,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::{
     Cancellation, EnvironmentProfile, ExecutionEndpoint, NetworkPolicy, OperationId,
     ProviderCapabilities, ProviderError, ProviderId, ResourceLimits, RootFilesystemPolicy,
-    RuntimeServiceRoutes, SandboxEnvironment, SandboxGeneration, SandboxHandle,
-    SandboxPrivilegePolicy, ServiceContainerBindings, ServiceContainerSpecs, TargetPath,
+    RuntimeServiceRoutes, SandboxAuthorizations, SandboxEnvironment, SandboxGeneration,
+    SandboxHandle, SandboxPrivilegePolicy, ServiceContainerBindings, ServiceContainerSpecs,
+    TargetPath,
 };
 
 /// Runner custody coordinates for one sandbox request.
@@ -33,6 +40,108 @@ pub enum SandboxCustody {
     },
 }
 
+/// Exact provider-neutral execution coordinates for one job sandbox.
+///
+/// This value lets a restricted provider adapter correlate an opaque signed
+/// authorization with the job, lease, session, accepted offer, and immutable
+/// `JobIR` that the runner is actually executing. Profile-admission sandboxes
+/// have no execution binding.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SandboxExecutionBinding {
+    runner_session_id: RunnerSessionId,
+    run_id: RunId,
+    job_id: JobId,
+    attempt_id: AttemptId,
+    guard: LeaseGuard,
+    accepted_offer_operation_id: OperationId,
+    accepted_offer_sequence: NonZeroU64,
+    job_ir_version: JobIrVersion,
+    job_ir_digest: Sha256Digest,
+}
+
+impl SandboxExecutionBinding {
+    /// Creates the complete execution binding for an accepted job offer.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)] // The boundary deliberately binds every independent identity.
+    pub const fn new(
+        runner_session_id: RunnerSessionId,
+        run_id: RunId,
+        job_id: JobId,
+        attempt_id: AttemptId,
+        guard: LeaseGuard,
+        accepted_offer_operation_id: OperationId,
+        accepted_offer_sequence: NonZeroU64,
+        job_ir_version: JobIrVersion,
+        job_ir_digest: Sha256Digest,
+    ) -> Self {
+        Self {
+            runner_session_id,
+            run_id,
+            job_id,
+            attempt_id,
+            guard,
+            accepted_offer_operation_id,
+            accepted_offer_sequence,
+            job_ir_version,
+            job_ir_digest,
+        }
+    }
+
+    /// Returns the authenticated runner-session identity.
+    #[must_use]
+    pub const fn runner_session_id(self) -> RunnerSessionId {
+        self.runner_session_id
+    }
+
+    /// Returns the workflow-run identity.
+    #[must_use]
+    pub const fn run_id(self) -> RunId {
+        self.run_id
+    }
+
+    /// Returns the logical job identity.
+    #[must_use]
+    pub const fn job_id(self) -> JobId {
+        self.job_id
+    }
+
+    /// Returns the exact attempt identity.
+    #[must_use]
+    pub const fn attempt_id(self) -> AttemptId {
+        self.attempt_id
+    }
+
+    /// Returns the exact lease identity and fencing token.
+    #[must_use]
+    pub const fn guard(self) -> LeaseGuard {
+        self.guard
+    }
+
+    /// Returns the accepted lease-offer operation identity.
+    #[must_use]
+    pub const fn accepted_offer_operation_id(self) -> OperationId {
+        self.accepted_offer_operation_id
+    }
+
+    /// Returns the accepted lease-offer command sequence.
+    #[must_use]
+    pub const fn accepted_offer_sequence(self) -> NonZeroU64 {
+        self.accepted_offer_sequence
+    }
+
+    /// Returns the immutable `JobIR` schema version.
+    #[must_use]
+    pub const fn job_ir_version(self) -> JobIrVersion {
+        self.job_ir_version
+    }
+
+    /// Returns the immutable canonical `JobIR` digest.
+    #[must_use]
+    pub const fn job_ir_digest(self) -> Sha256Digest {
+        self.job_ir_digest
+    }
+}
+
 /// Immutable whole-job sandbox request. The profile is exact and contains no
 /// hosted-label resolution or mutable image reference.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -50,6 +159,8 @@ pub struct SandboxSpec {
     resource_allocation: Option<JobResourceAllocation>,
     services: ServiceContainerSpecs,
     runtime_service_routes: RuntimeServiceRoutes,
+    sandbox_authorizations: SandboxAuthorizations,
+    execution_binding: Option<SandboxExecutionBinding>,
 }
 
 impl SandboxSpec {
@@ -85,6 +196,8 @@ impl SandboxSpec {
             resource_allocation: None,
             services: ServiceContainerSpecs::empty(),
             runtime_service_routes: RuntimeServiceRoutes::empty(),
+            sandbox_authorizations: SandboxAuthorizations::empty(),
+            execution_binding: None,
         }
     }
 
@@ -229,6 +342,35 @@ impl SandboxSpec {
     #[must_use]
     pub const fn runtime_service_routes(&self) -> &RuntimeServiceRoutes {
         &self.runtime_service_routes
+    }
+
+    /// Attaches the exact provider-owned authorizations delivered for this job.
+    #[must_use]
+    pub fn with_sandbox_authorizations(
+        mut self,
+        sandbox_authorizations: SandboxAuthorizations,
+    ) -> Self {
+        self.sandbox_authorizations = sandbox_authorizations;
+        self
+    }
+
+    /// Returns the complete canonical authorization set for provider admission.
+    #[must_use]
+    pub const fn sandbox_authorizations(&self) -> &SandboxAuthorizations {
+        &self.sandbox_authorizations
+    }
+
+    /// Attaches the exact accepted-job identity visible to provider adapters.
+    #[must_use]
+    pub const fn with_execution_binding(mut self, binding: SandboxExecutionBinding) -> Self {
+        self.execution_binding = Some(binding);
+        self
+    }
+
+    /// Returns the accepted-job identity, absent for profile admission.
+    #[must_use]
+    pub const fn execution_binding(&self) -> Option<SandboxExecutionBinding> {
+        self.execution_binding
     }
 }
 
@@ -440,7 +582,9 @@ pub trait SandboxProvider: fmt::Debug + Send + Sync {
     /// fail closed. A successful replay returns the same generation-fenced
     /// resource rather than creating another sandbox. Providers which do not
     /// advertise [`crate::SandboxCapability::RuntimeServiceProxy`] must reject
-    /// a nonempty [`SandboxSpec::runtime_service_routes`] request.
+    /// a nonempty [`SandboxSpec::runtime_service_routes`] request. Providers
+    /// without an exact authorization consumer must likewise reject nonempty
+    /// [`SandboxSpec::sandbox_authorizations`] before mutation.
     ///
     /// # Errors
     ///

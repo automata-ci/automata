@@ -3,8 +3,8 @@ use automata_ci_core::{
     IsolationLevel, JobId, JobInstanceIdentity, JobIr, JobIrEnvelope, JobIrVersionRange, JobSource,
     Lease, LeaseId, OperatingSystem, OperationId, RequirementMismatch, RunId, RunValueTemplates,
     RunnerCapabilities, RunnerFeature, RunnerId, RunnerPlatform, RunnerRequirements,
-    RuntimeBoolean, SandboxCapabilities, SandboxFeature, Sha256Digest, ShellTemplate, StepId,
-    StepIr, UnixMillis, ValueTemplate, WorkflowId,
+    RuntimeBoolean, SandboxAuthorizations, SandboxCapabilities, SandboxFeature, Sha256Digest,
+    ShellTemplate, StepId, StepIr, UnixMillis, ValueTemplate, WorkflowId,
 };
 use automata_ci_protocol::{
     CommandSequence, JobRuntimeAuthorities, JobRuntimeAuthority, LeaseOffer,
@@ -259,8 +259,13 @@ fn runtime_authority_bundle_rejects_forward_schema() {
         UnixMillis::new(3_600_010),
     )
     .expect("runtime authority");
-    let authorities = JobRuntimeAuthorities::new(vec![authority], offer.job(), offer.lease())
-        .expect("runtime authorities");
+    let authorities = JobRuntimeAuthorities::new(
+        vec![authority],
+        SandboxAuthorizations::default(),
+        offer.job(),
+        offer.lease(),
+    )
+    .expect("runtime authorities");
     let mut value = serde_json::to_value(authorities).expect("serialize authority bundle");
     value["schema_version"] = serde_json::json!(
         RUNTIME_AUTHORITY_SCHEMA_VERSION

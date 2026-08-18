@@ -19,11 +19,13 @@ pub mod capability_admission;
 /// Durable models and repositories for authenticated runner-control operations.
 pub mod durable;
 mod handler;
+mod lease_authority;
 mod observer;
 mod port;
 /// Durable runner sessions, operation receipts, and command delivery repositories.
 pub mod repository;
 mod verify;
+mod windows_lease_authority;
 
 pub use automata_ci_protocol::{
     INITIAL_RUNTIME_AUTHORITY_GENERATION, RuntimeAuthorityDeliveryBinding,
@@ -39,6 +41,11 @@ pub use handler::{
     MAX_LEASE_DURATION_MILLIS, MAX_NO_WORK_RETRY_AFTER_MILLIS, RunnerControlConfig,
     RunnerControlConfigError, RunnerControlPorts, RunnerDurabilityPorts, RunnerIdentityPorts,
     RunnerLeasePorts,
+};
+pub use lease_authority::{
+    LeaseAuthorityEvidence, LeaseAuthorityEvidenceError, LeaseAuthorityEvidenceSet,
+    LeaseAuthorityExtension, LeaseAuthorityExtensionRegistry, LeaseAuthorityOfferRequest,
+    LeaseAuthorityPollAcceptance, LeaseAuthorityRegistryError, PreparedSandboxAuthorization,
 };
 pub use observer::{
     LeaseOfferObservation, RunnerControlFailure, RunnerControlMessageKind,
@@ -58,3 +65,13 @@ pub use port::{
     StoreRunnerSessionFenceResolver,
 };
 pub use verify::{JobIrBlobError, verify_job_ir_blob};
+pub use windows_lease_authority::{
+    AuthorizeWindowsHyperVBrokerGrant, CommitWindowsHyperVBrokerGrantDelivery,
+    CommitWindowsHyperVPlacementRenewal, Ed25519WindowsHyperVBrokerGrantIssuer,
+    WindowsHyperVBrokerGrantAuthorizationRepository, WindowsHyperVBrokerGrantIssuanceAuthorization,
+    WindowsHyperVBrokerGrantIssueRequest, WindowsHyperVBrokerGrantIssuer,
+    WindowsHyperVBrokerGrantIssuerError, WindowsHyperVBrokerGrantProposal,
+    WindowsHyperVCurrentAdmission, WindowsHyperVCurrentAdmissionReader,
+    WindowsHyperVLeaseAuthorityExtension, WindowsHyperVPlacementEvidence,
+    WindowsHyperVPlacementRenewalDisposition, WindowsHyperVPlacementRenewalRepository,
+};

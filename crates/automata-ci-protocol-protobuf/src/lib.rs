@@ -28,11 +28,13 @@ mod wire {
 
 pub use decode::{
     decode_job_ir, decode_job_runtime_context, decode_runner_frame, decode_runtime_authorities,
-    decode_server_frame,
+    decode_server_frame, decode_windows_hyperv_broker_grant_payload,
+    decode_windows_runner_placement_renewal_payload,
 };
 pub use encode::{
     encode_job_ir, encode_job_runtime_context, encode_runner_frame, encode_runtime_authorities,
-    encode_server_frame,
+    encode_server_frame, encode_windows_hyperv_broker_grant_payload,
+    encode_windows_runner_placement_renewal_payload,
 };
 pub use error::{DecodeError, EncodeError};
 

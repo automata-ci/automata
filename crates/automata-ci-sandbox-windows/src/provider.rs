@@ -16,9 +16,9 @@ use automata_ci_execution::{
     Cancellation, DestroyDisposition, DestroySandbox, EnvironmentProfile, EnvironmentProfileId,
     NeverCancelled, OperationId, OperationOutcome, ProviderCapabilities, ProviderError,
     ProviderErrorKind, ProviderId, ProviderStage, RootFilesystemPolicy, RunnerId,
-    SandboxCapability, SandboxCustody, SandboxHandle, SandboxInspection, SandboxLaunch,
-    SandboxPrivilegePolicy, SandboxProvider, SandboxRecord, SandboxSpec, SandboxState,
-    Sha256Digest, TargetPath, TargetPlatform,
+    SandboxAuthorization, SandboxCapability, SandboxCustody, SandboxHandle, SandboxInspection,
+    SandboxLaunch, SandboxPrivilegePolicy, SandboxProvider, SandboxRecord, SandboxSpec,
+    SandboxState, Sha256Digest, TargetPath, TargetPlatform,
 };
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
@@ -26,6 +26,7 @@ use sha2::{Digest as _, Sha256};
 use crate::{
     RuntimeCommandExecutor, RuntimeCommandOutput, RuntimeCommandRequest, RuntimeCommandTermination,
     SystemRuntimeCommandExecutor, WINDOWS_HYPERV_PROVIDER_ID,
+    WindowsHyperVSandboxAuthorizationConsumer, WindowsHyperVSandboxAuthorizationRequest,
     endpoint::{EndpointReplayCache, WindowsHyperVExecutionEndpoint},
     error,
     naming::ResourceName,
@@ -174,7 +175,26 @@ impl WindowsHyperVContainerProvider {
     /// Fails when the pinned runtime binary or dedicated state root cannot be
     /// verified. No container is created during open.
     pub fn open(options: WindowsHyperVContainerProviderOptions) -> Result<Self, ProviderError> {
-        Self::open_with_executor(options, Arc::new(SystemRuntimeCommandExecutor))
+        Self::open_with_boundaries(options, Arc::new(SystemRuntimeCommandExecutor), None)
+    }
+
+    /// Opens the provider with a restricted authorization-consumer boundary.
+    ///
+    /// Job-custody creates require this boundary. Profile-admission creates may
+    /// use [`Self::open`] because they carry no workload placement authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized configuration or local-storage failure.
+    pub fn open_with_authorization_consumer(
+        options: WindowsHyperVContainerProviderOptions,
+        authorization_consumer: Arc<dyn WindowsHyperVSandboxAuthorizationConsumer>,
+    ) -> Result<Self, ProviderError> {
+        Self::open_with_boundaries(
+            options,
+            Arc::new(SystemRuntimeCommandExecutor),
+            Some(authorization_consumer),
+        )
     }
 
     /// Opens the provider with an injected runtime boundary.
@@ -188,6 +208,31 @@ impl WindowsHyperVContainerProvider {
     pub fn open_with_executor(
         options: WindowsHyperVContainerProviderOptions,
         executor: Arc<dyn RuntimeCommandExecutor>,
+    ) -> Result<Self, ProviderError> {
+        Self::open_with_boundaries(options, executor, None)
+    }
+
+    /// Opens the provider with injected runtime and authorization boundaries.
+    ///
+    /// This is intended for shipped conformance tests. Future broker composition
+    /// may use [`Self::open_with_authorization_consumer`]; current product wiring
+    /// leaves job custody fail closed.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized configuration or local-storage failure.
+    pub fn open_with_executor_and_authorization_consumer(
+        options: WindowsHyperVContainerProviderOptions,
+        executor: Arc<dyn RuntimeCommandExecutor>,
+        authorization_consumer: Arc<dyn WindowsHyperVSandboxAuthorizationConsumer>,
+    ) -> Result<Self, ProviderError> {
+        Self::open_with_boundaries(options, executor, Some(authorization_consumer))
+    }
+
+    fn open_with_boundaries(
+        options: WindowsHyperVContainerProviderOptions,
+        executor: Arc<dyn RuntimeCommandExecutor>,
+        authorization_consumer: Option<Arc<dyn WindowsHyperVSandboxAuthorizationConsumer>>,
     ) -> Result<Self, ProviderError> {
         prepare_state_root(options.state_root())?;
         prepare_empty_runtime_config(options.state_root())?;
@@ -233,6 +278,7 @@ impl WindowsHyperVContainerProvider {
         let inner = Arc::new(ProviderInner {
             options,
             executor,
+            authorization_consumer,
             provider_id,
             capabilities,
             _runtime_guard: runtime_guard,
@@ -270,7 +316,7 @@ impl SandboxProvider for WindowsHyperVContainerProvider {
         spec: &SandboxSpec,
         cancellation: &dyn Cancellation,
     ) -> Result<SandboxRecord, ProviderError> {
-        validate_spec(spec)?;
+        validate_spec(spec, self.inner.authorization_consumer.is_some())?;
         let names = ResourceName::for_create(spec.operation_id(), spec.generation());
         let fingerprint = spec_fingerprint(spec);
         self.inner.runtime_request(
@@ -356,6 +402,7 @@ impl SandboxProvider for WindowsHyperVContainerProvider {
 pub(crate) struct ProviderInner {
     pub(crate) options: WindowsHyperVContainerProviderOptions,
     executor: Arc<dyn RuntimeCommandExecutor>,
+    authorization_consumer: Option<Arc<dyn WindowsHyperVSandboxAuthorizationConsumer>>,
     provider_id: ProviderId,
     capabilities: ProviderCapabilities,
     _runtime_guard: File,
@@ -507,6 +554,44 @@ impl ProviderInner {
         Ok(lock)
     }
 
+    fn consume_sandbox_authorization(&self, spec: &SandboxSpec) -> Result<(), ProviderError> {
+        let Some(authorization) =
+            sandbox_authorization(spec, self.authorization_consumer.is_some())?
+        else {
+            return Ok(());
+        };
+        let consumer = self.authorization_consumer.as_ref().ok_or_else(|| {
+            error::known(
+                ProviderErrorKind::InvalidConfiguration,
+                ProviderStage::Validate,
+            )
+        })?;
+        let allocation = spec.resource_allocation().ok_or_else(|| {
+            error::known(
+                ProviderErrorKind::InvalidConfiguration,
+                ProviderStage::Validate,
+            )
+        })?;
+        let execution_binding = spec.execution_binding().ok_or_else(|| {
+            error::known(
+                ProviderErrorKind::InvalidConfiguration,
+                ProviderStage::Validate,
+            )
+        })?;
+        consumer.consume(
+            authorization,
+            WindowsHyperVSandboxAuthorizationRequest::new(
+                spec.operation_id(),
+                spec.custody(),
+                execution_binding,
+                spec.profile().attestation(),
+                spec.generation(),
+                allocation,
+                spec.resources().pids(),
+            ),
+        )
+    }
+
     #[allow(clippy::too_many_lines)] // One locked durable transition is easier to audit intact.
     fn create(
         &self,
@@ -572,6 +657,7 @@ impl ProviderInner {
             }
             false
         } else {
+            self.consume_sandbox_authorization(spec)?;
             if self.inspect_optional(names, cancellation)?.is_some() {
                 return Err(error::known(
                     ProviderErrorKind::Conflict,
@@ -1519,7 +1605,10 @@ fn expected_labels(
     ])
 }
 
-fn validate_spec(spec: &SandboxSpec) -> Result<(), ProviderError> {
+fn validate_spec(
+    spec: &SandboxSpec,
+    authorization_consumer_configured: bool,
+) -> Result<(), ProviderError> {
     let SandboxLaunch::WindowsHyperVContainer { .. } = spec.profile().launch() else {
         return Err(error::known(
             ProviderErrorKind::UnsupportedCapability,
@@ -1544,7 +1633,37 @@ fn validate_spec(spec: &SandboxSpec) -> Result<(), ProviderError> {
             ProviderStage::Validate,
         ));
     }
+    sandbox_authorization(spec, authorization_consumer_configured)?;
     Ok(())
+}
+
+fn sandbox_authorization(
+    spec: &SandboxSpec,
+    authorization_consumer_configured: bool,
+) -> Result<Option<&SandboxAuthorization>, ProviderError> {
+    let authorizations = spec.sandbox_authorizations().as_slice();
+    match spec.custody() {
+        SandboxCustody::ProfileAdmission { .. } if authorizations.is_empty() => Ok(None),
+        SandboxCustody::Job { .. } if authorization_consumer_configured => {
+            let [authorization] = authorizations else {
+                return Err(error::known(
+                    ProviderErrorKind::InvalidConfiguration,
+                    ProviderStage::Validate,
+                ));
+            };
+            if spec.resource_allocation().is_none() || spec.execution_binding().is_none() {
+                return Err(error::known(
+                    ProviderErrorKind::InvalidConfiguration,
+                    ProviderStage::Validate,
+                ));
+            }
+            Ok(Some(authorization))
+        }
+        SandboxCustody::ProfileAdmission { .. } | SandboxCustody::Job { .. } => Err(error::known(
+            ProviderErrorKind::InvalidConfiguration,
+            ProviderStage::Validate,
+        )),
+    }
 }
 
 fn resource_from_durable(
@@ -1866,7 +1985,7 @@ fn record(names: &ResourceName, profile: EnvironmentProfile, state: SandboxState
 
 fn spec_fingerprint(spec: &SandboxSpec) -> String {
     let mut hash = Sha256::new();
-    hash_field(&mut hash, b"automata-windows-hyperv-spec-v2");
+    hash_field(&mut hash, b"automata-windows-hyperv-spec-v3");
     hash_custody(&mut hash, spec.custody());
     for value in [
         spec.profile().id().as_str(),
@@ -1908,6 +2027,38 @@ fn spec_fingerprint(spec: &SandboxSpec) -> String {
         }
     } else {
         hash_field(&mut hash, b"allocation-absent");
+    }
+    if let Some(binding) = spec.execution_binding() {
+        hash_field(&mut hash, b"execution-binding-present");
+        hash_field(&mut hash, binding.runner_session_id().as_uuid().as_bytes());
+        hash_field(&mut hash, binding.run_id().as_uuid().as_bytes());
+        hash_field(&mut hash, binding.job_id().as_uuid().as_bytes());
+        hash_field(&mut hash, binding.attempt_id().as_uuid().as_bytes());
+        hash_field(&mut hash, binding.guard().lease_id().as_uuid().as_bytes());
+        hash_field(
+            &mut hash,
+            &binding.guard().fencing_token().get().to_be_bytes(),
+        );
+        hash_field(
+            &mut hash,
+            binding.accepted_offer_operation_id().as_uuid().as_bytes(),
+        );
+        hash_field(
+            &mut hash,
+            &binding.accepted_offer_sequence().get().to_be_bytes(),
+        );
+        hash_field(&mut hash, &binding.job_ir_version().get().to_be_bytes());
+        hash_field(&mut hash, binding.job_ir_digest().as_bytes());
+    } else {
+        hash_field(&mut hash, b"execution-binding-absent");
+    }
+    for authorization in spec.sandbox_authorizations().as_slice() {
+        hash_field(&mut hash, authorization.name().as_str().as_bytes());
+        hash_field(
+            &mut hash,
+            &authorization.payload_schema_version().to_be_bytes(),
+        );
+        hash_field(&mut hash, authorization.payload_sha256().as_bytes());
     }
     hex_digest(hash.finalize().into())
 }
@@ -2458,17 +2609,23 @@ mod tests {
     use std::{
         collections::VecDeque,
         env, fs,
-        num::NonZeroU16,
+        num::{NonZeroU16, NonZeroU64},
         path::PathBuf,
         sync::{Arc, Mutex},
     };
 
     use super::*;
     use automata_ci_execution::{
-        ExecutionArgv, ExecutionEnvironment, ImmutableImage, NetworkPolicy, ResourceLimits,
-        RunnerId, SandboxEnvironment, SandboxGeneration, SandboxPrivilegePolicy,
+        AttemptId, ExecutionArgv, ExecutionEnvironment, ImmutableImage, JobId, JobIrVersion,
+        JobResourceAllocation, LeaseGuard, LeaseId, NetworkPolicy, ResourceCapacity,
+        ResourceLimits, RunId, RunnerId, RunnerSessionId, SandboxAuthorization,
+        SandboxAuthorizationName, SandboxAuthorizations, SandboxEnvironment,
+        SandboxExecutionBinding, SandboxGeneration, SandboxPrivilegePolicy,
     };
     use serde_json::{Value, json};
+
+    const TEST_WINDOWS_AUTHORIZATION_NAME: &str = "windows-hyperv";
+    const TEST_WINDOWS_AUTHORIZATION_SCHEMA: u16 = 4;
 
     #[derive(Debug)]
     struct ScriptedExecutor {
@@ -2507,6 +2664,142 @@ mod tests {
                 .expect("outputs lock")
                 .pop_front()
                 .expect("one scripted output per runtime call")
+        }
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    struct ConsumedAuthorization {
+        authorization: SandboxAuthorization,
+        operation_id: OperationId,
+        custody: SandboxCustody,
+        execution_binding: SandboxExecutionBinding,
+        environment_profile: EnvironmentProfile,
+        generation: SandboxGeneration,
+        resource_allocation: JobResourceAllocation,
+        pids_limit: u32,
+        network_disabled: bool,
+    }
+
+    #[derive(Debug)]
+    struct RecordingAuthorizationConsumer {
+        runtime: Arc<ScriptedExecutor>,
+        calls: Mutex<Vec<ConsumedAuthorization>>,
+    }
+
+    impl RecordingAuthorizationConsumer {
+        fn new(runtime: Arc<ScriptedExecutor>) -> Self {
+            Self {
+                runtime,
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn calls(&self) -> Vec<ConsumedAuthorization> {
+            self.calls.lock().expect("consumer calls lock").clone()
+        }
+    }
+
+    impl WindowsHyperVSandboxAuthorizationConsumer for RecordingAuthorizationConsumer {
+        fn consume(
+            &self,
+            authorization: &SandboxAuthorization,
+            request: WindowsHyperVSandboxAuthorizationRequest<'_>,
+        ) -> Result<(), ProviderError> {
+            assert_eq!(
+                self.runtime.calls.lock().expect("runtime calls lock").len(),
+                1,
+                "authorization must be consumed before any create-path runtime call"
+            );
+            self.calls
+                .lock()
+                .expect("consumer calls lock")
+                .push(ConsumedAuthorization {
+                    authorization: authorization.clone(),
+                    operation_id: request.operation_id(),
+                    custody: request.custody(),
+                    execution_binding: request.execution_binding(),
+                    environment_profile: request.environment_profile().clone(),
+                    generation: request.generation(),
+                    resource_allocation: request.resource_allocation(),
+                    pids_limit: request.pids_limit(),
+                    network_disabled: request.network_disabled(),
+                });
+            if authorization.name().as_str() != TEST_WINDOWS_AUTHORIZATION_NAME
+                || authorization.payload_schema_version() != TEST_WINDOWS_AUTHORIZATION_SCHEMA
+                || authorization.payload() != b"valid-grant"
+            {
+                return Err(error::known(
+                    ProviderErrorKind::InvalidConfiguration,
+                    ProviderStage::Validate,
+                ));
+            }
+            Ok(())
+        }
+    }
+
+    #[derive(Debug)]
+    struct LedgerAuthorizationConsumer {
+        runtime: Arc<ScriptedExecutor>,
+        retained: Mutex<Option<ConsumedAuthorization>>,
+        calls: Mutex<Vec<ConsumedAuthorization>>,
+    }
+
+    impl LedgerAuthorizationConsumer {
+        fn new(runtime: Arc<ScriptedExecutor>) -> Self {
+            Self {
+                runtime,
+                retained: Mutex::new(None),
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn calls(&self) -> Vec<ConsumedAuthorization> {
+            self.calls.lock().expect("consumer calls lock").clone()
+        }
+    }
+
+    impl WindowsHyperVSandboxAuthorizationConsumer for LedgerAuthorizationConsumer {
+        fn consume(
+            &self,
+            authorization: &SandboxAuthorization,
+            request: WindowsHyperVSandboxAuthorizationRequest<'_>,
+        ) -> Result<(), ProviderError> {
+            assert!(
+                !self
+                    .runtime
+                    .calls
+                    .lock()
+                    .expect("runtime calls lock")
+                    .is_empty(),
+                "provider must complete startup before authorization consumption"
+            );
+            let consumed = ConsumedAuthorization {
+                authorization: authorization.clone(),
+                operation_id: request.operation_id(),
+                custody: request.custody(),
+                execution_binding: request.execution_binding(),
+                environment_profile: request.environment_profile().clone(),
+                generation: request.generation(),
+                resource_allocation: request.resource_allocation(),
+                pids_limit: request.pids_limit(),
+                network_disabled: request.network_disabled(),
+            };
+            self.calls
+                .lock()
+                .expect("consumer calls lock")
+                .push(consumed.clone());
+            let mut retained = self.retained.lock().expect("authorization ledger lock");
+            match retained.as_ref() {
+                None => {
+                    *retained = Some(consumed);
+                    Ok(())
+                }
+                Some(existing) if existing == &consumed => Ok(()),
+                Some(_) => Err(error::known(
+                    ProviderErrorKind::Conflict,
+                    ProviderStage::Validate,
+                )),
+            }
         }
     }
 
@@ -2561,6 +2854,335 @@ mod tests {
             RootFilesystemPolicy::Writable,
             ResourceLimits::new(2 * 1024 * 1024 * 1024, 2_500, 384).expect("limits"),
         )
+    }
+
+    fn sandbox_authorizations(
+        name: &str,
+        payload_schema_version: u16,
+        payload: &[u8],
+    ) -> SandboxAuthorizations {
+        SandboxAuthorizations::new(vec![
+            SandboxAuthorization::new(
+                SandboxAuthorizationName::new(name).expect("authorization name"),
+                payload_schema_version,
+                payload.to_vec(),
+            )
+            .expect("authorization"),
+        ])
+        .expect("authorization set")
+    }
+
+    fn job_hyperv_spec(authorizations: SandboxAuthorizations) -> SandboxSpec {
+        job_hyperv_spec_without_execution_binding(authorizations)
+            .with_execution_binding(test_execution_binding())
+    }
+
+    fn job_hyperv_spec_without_execution_binding(
+        authorizations: SandboxAuthorizations,
+    ) -> SandboxSpec {
+        let resources = ResourceCapacity::new(2_500, 2 * 1024 * 1024 * 1024, 0, 0);
+        hyperv_spec_with_custody(
+            vec!["keepalive".to_owned()],
+            SandboxCustody::Job {
+                runner_id: RunnerId::new(),
+                slot_ordinal: NonZeroU16::new(1).expect("non-zero slot"),
+            },
+        )
+        .with_resource_allocation(
+            JobResourceAllocation::new(resources, resources).expect("resource allocation"),
+        )
+        .with_sandbox_authorizations(authorizations)
+    }
+
+    fn test_execution_binding() -> SandboxExecutionBinding {
+        SandboxExecutionBinding::new(
+            RunnerSessionId::new(),
+            RunId::new(),
+            JobId::new(),
+            AttemptId::new(),
+            LeaseGuard::new(
+                LeaseId::new(),
+                automata_ci_execution::FencingToken::new(3).expect("fencing token"),
+            ),
+            OperationId::new(),
+            NonZeroU64::new(1).expect("offer sequence"),
+            JobIrVersion::current(),
+            Sha256Digest::from_bytes([0x5a; 32]),
+        )
+    }
+
+    fn clone_job_spec_with_operation_id(
+        spec: &SandboxSpec,
+        operation_id: OperationId,
+    ) -> SandboxSpec {
+        let mut cloned = SandboxSpec::new(
+            operation_id,
+            spec.generation(),
+            spec.custody(),
+            spec.profile().clone(),
+            spec.workspace().clone(),
+            spec.network(),
+            spec.root_filesystem(),
+            spec.resources(),
+        )
+        .with_privilege(spec.privilege())
+        .with_services(spec.services().clone())
+        .with_runtime_service_routes(spec.runtime_service_routes().clone())
+        .with_sandbox_authorizations(spec.sandbox_authorizations().clone())
+        .with_execution_binding(spec.execution_binding().expect("execution binding"));
+        if let Some(scratch) = spec.scratch() {
+            cloned = cloned.with_scratch(scratch.clone());
+        }
+        if let Some(allocation) = spec.resource_allocation() {
+            cloned = cloned.with_resource_allocation(allocation);
+        }
+        cloned
+    }
+
+    fn assert_no_durable_create(root: &TestRoot) {
+        let (journal, snapshot) =
+            LifecycleJournal::open(&root.path).expect("reopen lifecycle journal");
+        assert!(snapshot.creates.is_empty());
+        assert!(snapshot.entries.is_empty());
+        drop(journal);
+    }
+
+    #[test]
+    fn job_custody_without_consumer_or_exact_authorization_fails_before_provider_work() {
+        for (label, authorizations, expected_consumer_calls) in [
+            ("missing", SandboxAuthorizations::empty(), 0),
+            (
+                "wrong-name",
+                sandbox_authorizations(
+                    "another-provider",
+                    TEST_WINDOWS_AUTHORIZATION_SCHEMA,
+                    b"valid-grant",
+                ),
+                1,
+            ),
+            (
+                "wrong-schema",
+                sandbox_authorizations(
+                    TEST_WINDOWS_AUTHORIZATION_NAME,
+                    TEST_WINDOWS_AUTHORIZATION_SCHEMA - 1,
+                    b"valid-grant",
+                ),
+                1,
+            ),
+        ] {
+            let root = TestRoot::new(&format!("authorization-{label}"));
+            let runtime = Arc::new(ScriptedExecutor::new([RuntimeCommandOutput::success(
+                Vec::new(),
+            )]));
+            let consumer = Arc::new(RecordingAuthorizationConsumer::new(runtime.clone()));
+            let provider =
+                WindowsHyperVContainerProvider::open_with_executor_and_authorization_consumer(
+                    root.options(),
+                    runtime.clone(),
+                    consumer.clone(),
+                )
+                .expect("open provider");
+            let error = provider
+                .create(&job_hyperv_spec(authorizations), &NeverCancelled)
+                .expect_err("invalid job authorization must fail closed");
+            assert_eq!(error.kind(), ProviderErrorKind::InvalidConfiguration);
+            assert_eq!(error.stage(), ProviderStage::Validate);
+            assert_eq!(consumer.calls().len(), expected_consumer_calls);
+            runtime.assert_drained();
+            assert_eq!(runtime.calls.lock().expect("runtime calls lock").len(), 1);
+            drop(provider);
+            assert_no_durable_create(&root);
+        }
+
+        let root = TestRoot::new("authorization-no-consumer");
+        let runtime = Arc::new(ScriptedExecutor::new([RuntimeCommandOutput::success(
+            Vec::new(),
+        )]));
+        let provider =
+            WindowsHyperVContainerProvider::open_with_executor(root.options(), runtime.clone())
+                .expect("open provider");
+        let spec = job_hyperv_spec(sandbox_authorizations(
+            TEST_WINDOWS_AUTHORIZATION_NAME,
+            TEST_WINDOWS_AUTHORIZATION_SCHEMA,
+            b"valid-grant",
+        ));
+        assert_eq!(
+            provider
+                .create(&spec, &NeverCancelled)
+                .expect_err("direct job provider must fail closed")
+                .kind(),
+            ProviderErrorKind::InvalidConfiguration
+        );
+        runtime.assert_drained();
+        assert_eq!(runtime.calls.lock().expect("runtime calls lock").len(), 1);
+        drop(provider);
+        assert_no_durable_create(&root);
+
+        let root = TestRoot::new("authorization-missing-execution-binding");
+        let runtime = Arc::new(ScriptedExecutor::new([RuntimeCommandOutput::success(
+            Vec::new(),
+        )]));
+        let consumer = Arc::new(RecordingAuthorizationConsumer::new(runtime.clone()));
+        let provider =
+            WindowsHyperVContainerProvider::open_with_executor_and_authorization_consumer(
+                root.options(),
+                runtime.clone(),
+                consumer.clone(),
+            )
+            .expect("open provider");
+        let spec = job_hyperv_spec_without_execution_binding(sandbox_authorizations(
+            TEST_WINDOWS_AUTHORIZATION_NAME,
+            TEST_WINDOWS_AUTHORIZATION_SCHEMA,
+            b"valid-grant",
+        ));
+        let error = provider
+            .create(&spec, &NeverCancelled)
+            .expect_err("job custody requires an exact execution binding");
+        assert_eq!(error.kind(), ProviderErrorKind::InvalidConfiguration);
+        assert_eq!(error.stage(), ProviderStage::Validate);
+        assert!(consumer.calls().is_empty());
+        runtime.assert_drained();
+        assert_eq!(runtime.calls.lock().expect("runtime calls lock").len(), 1);
+        drop(provider);
+        assert_no_durable_create(&root);
+    }
+
+    #[test]
+    fn consumer_receives_exact_stable_request_and_rejects_malformed_payload_before_provider_work() {
+        let root = TestRoot::new("authorization-malformed");
+        let runtime = Arc::new(ScriptedExecutor::new([RuntimeCommandOutput::success(
+            Vec::new(),
+        )]));
+        let consumer = Arc::new(RecordingAuthorizationConsumer::new(runtime.clone()));
+        let provider =
+            WindowsHyperVContainerProvider::open_with_executor_and_authorization_consumer(
+                root.options(),
+                runtime.clone(),
+                consumer.clone(),
+            )
+            .expect("open provider");
+        let spec = job_hyperv_spec(sandbox_authorizations(
+            TEST_WINDOWS_AUTHORIZATION_NAME,
+            TEST_WINDOWS_AUTHORIZATION_SCHEMA,
+            b"malformed-protobuf",
+        ));
+        let error = provider
+            .create(&spec, &NeverCancelled)
+            .expect_err("malformed broker payload must fail closed");
+        assert_eq!(error.kind(), ProviderErrorKind::InvalidConfiguration);
+        assert_eq!(error.stage(), ProviderStage::Validate);
+        let calls = consumer.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].authorization,
+            spec.sandbox_authorizations().as_slice()[0]
+        );
+        assert_eq!(calls[0].operation_id, spec.operation_id());
+        assert_eq!(calls[0].custody, spec.custody());
+        assert_eq!(
+            calls[0].execution_binding,
+            spec.execution_binding().expect("execution binding")
+        );
+        assert_eq!(calls[0].environment_profile, *spec.profile().attestation());
+        assert_eq!(calls[0].generation, spec.generation());
+        assert_eq!(
+            calls[0].resource_allocation,
+            spec.resource_allocation().expect("allocation")
+        );
+        assert_eq!(calls[0].pids_limit, spec.resources().pids());
+        assert!(calls[0].network_disabled);
+        runtime.assert_drained();
+        assert_eq!(runtime.calls.lock().expect("runtime calls lock").len(), 1);
+        drop(provider);
+        assert_no_durable_create(&root);
+    }
+
+    #[test]
+    fn accepted_authorization_is_consumed_before_the_first_create_path_runtime_call() {
+        let root = TestRoot::new("authorization-accepted");
+        let runtime = Arc::new(ScriptedExecutor::new([
+            RuntimeCommandOutput::success(Vec::new()),
+            RuntimeCommandOutput::failure(1, b"runtime unavailable".to_vec()),
+        ]));
+        let consumer = Arc::new(RecordingAuthorizationConsumer::new(runtime.clone()));
+        let provider =
+            WindowsHyperVContainerProvider::open_with_executor_and_authorization_consumer(
+                root.options(),
+                runtime.clone(),
+                consumer.clone(),
+            )
+            .expect("open provider");
+        let spec = job_hyperv_spec(sandbox_authorizations(
+            TEST_WINDOWS_AUTHORIZATION_NAME,
+            TEST_WINDOWS_AUTHORIZATION_SCHEMA,
+            b"valid-grant",
+        ));
+        let error = provider
+            .create(&spec, &NeverCancelled)
+            .expect_err("scripted runtime failure stops before create mutation");
+        assert_eq!(error.kind(), ProviderErrorKind::BackendRejected);
+        assert_eq!(error.stage(), ProviderStage::Inspect);
+        assert_eq!(consumer.calls().len(), 1);
+        runtime.assert_drained();
+        assert_eq!(runtime.calls.lock().expect("runtime calls lock").len(), 2);
+        drop(provider);
+        assert_no_durable_create(&root);
+    }
+
+    #[test]
+    fn authorization_ledger_replays_exact_consumption_and_rejects_attempt_substitution() {
+        let root = TestRoot::new("authorization-ledger");
+        let runtime = Arc::new(ScriptedExecutor::new([
+            RuntimeCommandOutput::success(Vec::new()),
+            RuntimeCommandOutput::failure(1, b"runtime unavailable".to_vec()),
+            RuntimeCommandOutput::failure(1, b"runtime unavailable".to_vec()),
+        ]));
+        let consumer = Arc::new(LedgerAuthorizationConsumer::new(runtime.clone()));
+        let provider =
+            WindowsHyperVContainerProvider::open_with_executor_and_authorization_consumer(
+                root.options(),
+                runtime.clone(),
+                consumer.clone(),
+            )
+            .expect("open provider");
+        let spec = job_hyperv_spec(sandbox_authorizations(
+            TEST_WINDOWS_AUTHORIZATION_NAME,
+            TEST_WINDOWS_AUTHORIZATION_SCHEMA,
+            b"valid-grant",
+        ));
+
+        for _ in 0..2 {
+            let error = provider
+                .create(&spec, &NeverCancelled)
+                .expect_err("scripted failure occurs after authorization consumption");
+            assert_eq!(error.kind(), ProviderErrorKind::BackendRejected);
+            assert_eq!(error.stage(), ProviderStage::Inspect);
+        }
+        assert_eq!(consumer.calls().len(), 2);
+        assert_eq!(runtime.calls.lock().expect("runtime calls lock").len(), 3);
+
+        let substituted = spec
+            .clone()
+            .with_execution_binding(test_execution_binding());
+        let error = provider
+            .create(&substituted, &NeverCancelled)
+            .expect_err("one grant cannot be first-spent for another execution binding");
+        assert_eq!(error.kind(), ProviderErrorKind::Conflict);
+        assert_eq!(error.stage(), ProviderStage::Validate);
+        assert_eq!(consumer.calls().len(), 3);
+        assert_eq!(runtime.calls.lock().expect("runtime calls lock").len(), 3);
+
+        let substituted = clone_job_spec_with_operation_id(&spec, OperationId::new());
+        let error = provider
+            .create(&substituted, &NeverCancelled)
+            .expect_err("one grant cannot be first-spent for another create operation");
+        assert_eq!(error.kind(), ProviderErrorKind::Conflict);
+        assert_eq!(error.stage(), ProviderStage::Validate);
+        assert_eq!(consumer.calls().len(), 4);
+        assert_eq!(runtime.calls.lock().expect("runtime calls lock").len(), 3);
+        runtime.assert_drained();
+        drop(provider);
+        assert_no_durable_create(&root);
     }
 
     #[test]
@@ -2686,13 +3308,20 @@ mod tests {
     #[test]
     fn provider_rejects_every_non_hyperv_or_weakened_spec() {
         let spec = hyperv_spec();
-        assert!(validate_spec(&spec).is_ok());
-        assert!(validate_spec(&spec.clone().with_privilege(SandboxPrivilegePolicy::Host)).is_err());
+        assert!(validate_spec(&spec, false).is_ok());
+        assert!(
+            validate_spec(
+                &spec.clone().with_privilege(SandboxPrivilegePolicy::Host),
+                false
+            )
+            .is_err()
+        );
         assert!(
             validate_spec(
                 &spec
                     .clone()
-                    .with_root_filesystem(RootFilesystemPolicy::ReadOnly)
+                    .with_root_filesystem(RootFilesystemPolicy::ReadOnly),
+                false,
             )
             .is_err()
         );
@@ -2725,7 +3354,7 @@ mod tests {
             ResourceLimits::new(2 * 1024 * 1024 * 1024, 2_500, 384).expect("limits"),
         );
         assert_eq!(
-            validate_spec(&generic)
+            validate_spec(&generic, false)
                 .expect_err("generic container must be rejected")
                 .kind(),
             ProviderErrorKind::UnsupportedCapability

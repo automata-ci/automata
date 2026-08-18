@@ -100,6 +100,11 @@ scheme/host/port routes on `SandboxSpec`. Credentials remain in the execution
 context and never enter the provider route contract. Providers without that
 capability receive no routes.
 
+The executor also copies the leased request's exact canonical
+`SandboxAuthorizations` set into `SandboxSpec` without interpreting provider
+payloads. Provider adapters remain responsible for fail-closed namespace,
+schema, policy-binding, and one-use consumption.
+
 ## Action metadata and runtime contract
 
 Repository action metadata is recursively prepared and cached after runtime

@@ -2614,6 +2614,7 @@ fn validate_spec(spec: &SandboxSpec, runner_id: RunnerId) -> Result<(), Provider
         || workspace_conflicts_with_control
         || spec.scratch().is_some()
         || !spec.services().is_empty()
+        || !spec.sandbox_authorizations().as_slice().is_empty()
         || !spec.runtime_service_routes().is_empty()
         || spec.network() != NetworkPolicy::PrivateEgress
         || spec.root_filesystem() != RootFilesystemPolicy::Writable

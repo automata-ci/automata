@@ -3,9 +3,8 @@
 use std::num::{NonZeroU16, NonZeroU64};
 
 use automata_ci_core::{
-    Architecture, AttemptId, IsolationLevel, JobAuthorityProfile, JobId, OperatingSystem, RunId,
-    RunnerRequirements, SandboxFeature, Sha256Digest, TrustAuthorityDecision, TrustSnapshot,
-    TrustSourceClass, UnixMillis,
+    AttemptId, JobAuthorityProfile, JobId, RunId, RunnerRequirements, Sha256Digest,
+    TrustAuthorityDecision, TrustSnapshot, TrustSourceClass, UnixMillis,
 };
 use automata_ci_store::{JobIrMetadata, RunnerSessionFence, StableRunnerSlot};
 use sha2::{Digest as _, Sha256};
@@ -379,27 +378,6 @@ impl RunnableAttempt {
     #[must_use]
     pub const fn placement_trust(&self) -> Option<&AuthenticatedPlacementTrust> {
         self.placement_trust.as_ref()
-    }
-
-    /// Reports whether a Windows candidate has the complete local authority
-    /// inputs required before it may reach scheduling.
-    ///
-    /// Non-Windows candidates do not use the Windows-specific grant.
-    #[must_use]
-    pub fn windows_placement_is_authorizable(&self) -> bool {
-        if self.requirements.operating_system() != Some(&OperatingSystem::Windows) {
-            return true;
-        }
-        self.requirements.minimum_isolation() >= IsolationLevel::VirtualMachine
-            && self
-                .requirements
-                .sandbox_features()
-                .contains(&SandboxFeature::WINDOWS_HYPERV_CONTAINER)
-            && self.requirements.architecture() == Some(&Architecture::X86_64)
-            && self.requirements.environment_profile().is_some()
-            && self.placement_trust.as_ref().is_some_and(|trust| {
-                trust.evidence_complete() && trust.source() != TrustSourceClass::Incomplete
-            })
     }
 }
 

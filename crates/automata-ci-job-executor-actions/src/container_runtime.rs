@@ -154,6 +154,8 @@ pub(super) fn sandbox_spec(
     )
     .with_privilege(config.privilege())
     .with_services(service_specs.clone())
+    .with_sandbox_authorizations(request.sandbox_authorizations().clone())
+    .with_execution_binding(request.sandbox_execution_binding())
     .with_resource_allocation(
         request
             .job()

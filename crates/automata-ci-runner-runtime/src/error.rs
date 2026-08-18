@@ -55,6 +55,9 @@ pub enum RunnerRuntimeError {
     /// Protected payload storage failed.
     #[error("runner protected content operation failed")]
     Spool(#[source] SpoolError),
+    /// A runner-side lease-authority extension failed closed.
+    #[error("lease authority extension failed")]
+    LeaseAuthority(#[source] crate::LeaseAuthorityExtensionError),
     /// A standalone or durable protobuf payload was invalid.
     #[error("runner durable protobuf payload is invalid")]
     InvalidDurablePayload,

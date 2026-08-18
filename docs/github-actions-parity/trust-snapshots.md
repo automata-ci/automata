@@ -221,8 +221,9 @@ the snapshot's exact authority decision:
 - Job outputs from restricted sources are marked untrusted; secret-derived
   output values are not published as plaintext.
 - Results credentials preserve standard, untrusted, or denied authority
-  exactly. A valid deny-all job may therefore carry an intentionally empty
-  runtime-authority bundle rather than receiving fallback authority.
+  exactly. A valid deny-all job therefore carries no credential authority
+  rather than receiving fallback repository access. Its provider-owned sandbox
+  authorization set remains a separate contract.
 - Runner context decoding and protocol boundaries reject missing, mismatched,
   malformed, or noncanonical snapshot evidence before user work begins.
 

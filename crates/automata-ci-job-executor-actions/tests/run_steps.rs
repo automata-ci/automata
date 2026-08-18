@@ -7,7 +7,10 @@ use automata_ci_core::{
     JobConclusion, JobSecretExposure, LogGroupKind, MAX_JOB_RESULT_ATTACHMENT_BYTES,
     MAX_STEP_ATTACHMENT_TEXT_BYTES, RunnerId, StepAnnotationLevel, StepIr, ValueSource,
 };
-use automata_ci_execution::{RootFilesystemPolicy, SandboxCustody, SandboxPrivilegePolicy};
+use automata_ci_execution::{
+    RootFilesystemPolicy, SandboxAuthorization, SandboxAuthorizationName, SandboxAuthorizations,
+    SandboxCustody, SandboxPrivilegePolicy,
+};
 use automata_ci_runner_runtime::{
     ExecutionCancellation, ExecutionEvents, ExecutorErrorKind, JobExecutor,
 };
@@ -76,6 +79,37 @@ async fn credential_free_execution_has_no_authority_or_secret_and_emits_public_o
             "unexpected {forbidden}"
         );
     }
+}
+
+#[tokio::test]
+async fn sandbox_authorizations_reach_the_provider_as_the_exact_canonical_set() {
+    let fixture = Fixture::secretless(Vec::new(), vec![PhaseResponse::success()]);
+    let authorization = SandboxAuthorization::new(
+        SandboxAuthorizationName::new("example.provider").expect("authorization name"),
+        7,
+        b"opaque-provider-payload".to_vec(),
+    )
+    .expect("authorization");
+    let authorizations =
+        SandboxAuthorizations::new(vec![authorization]).expect("canonical authorization set");
+    let request = fixture.request_with_sandbox_authorizations(
+        credential_free_envelope(vec![run_step("authorized", "Authorized", "true")]),
+        authorizations.clone(),
+    );
+    let execution_binding = request.sandbox_execution_binding();
+    let events: Arc<dyn ExecutionEvents> = fixture.events.clone();
+
+    let result = fixture
+        .executor
+        .execute(request, events, ExecutionCancellation::new())
+        .await
+        .expect("job executes");
+
+    assert_eq!(result.conclusion(), JobConclusion::Success);
+    let specs = fixture.provider.specs();
+    assert_eq!(specs.len(), 1);
+    assert_eq!(specs[0].sandbox_authorizations(), &authorizations);
+    assert_eq!(specs[0].execution_binding(), Some(execution_binding));
 }
 
 #[tokio::test]
@@ -933,6 +967,7 @@ fn assert_sandbox_spec(fixture: &Fixture, runner_id: RunnerId, slot_ordinal: u16
     assert_eq!(specs[0].privilege(), SandboxPrivilegePolicy::Administrator);
     assert_eq!(specs[0].workspace().as_str(), "/__w/automata/automata");
     assert_eq!(specs[0].scratch(), None);
+    assert!(specs[0].sandbox_authorizations().as_slice().is_empty());
     assert!(matches!(
         specs[0].custody(),
         SandboxCustody::Job {

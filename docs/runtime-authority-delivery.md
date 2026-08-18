@@ -3,8 +3,9 @@
 Automata delivers workload credentials only after the runner has durably
 accepted an exact lease offer. The lease offer and its persisted outbox payload
 contain authority metadata, never bearer values. A separate versioned exchange
-binds any credential bundle to the accepted attempt, protects it on the runner,
-and records runner custody before user code can start.
+binds the complete runtime-authority bundle, including any credentials and
+provider-owned sandbox authorizations, to the accepted attempt, protects it on
+the runner, and records runner custody before user code can start.
 
 This contract is component complete across the protocol, control handler,
 PostgreSQL adapter, runner journal, runner supervisor, and GitHub repository
@@ -25,13 +26,16 @@ The delivery design enforces these invariants:
 - Request, grant, and acknowledgement carry one identical delivery binding.
 - The control database stores request and custody evidence plus SHA-256
   digests. It stores neither credential plaintext nor an encoded grant.
-- The runner protects the complete canonical authority bundle in its encrypted
-  spool before sending a custody acknowledgement.
+- The runner protects the complete canonical `JobRuntimeAuthorities` bundle in
+  its encrypted spool before sending a custody acknowledgement. Schema v2
+  covers both credential authorities and provider-owned sandbox authorizations.
 - The journal records the protected content reference and exact digest before
   acknowledgement. The execution adapter receives authorities only after the
   acknowledgement is durably marked complete.
-- A credential-free job receives an empty bundle. Explicit repository denial
-  and OIDC-only permission maps do not call the GitHub repository-token issuer.
+- A credential-free job receives no credential authority. Its canonical
+  sandbox-authorization set is separate and cannot grant repository access.
+  Explicit repository denial and OIDC-only permission maps do not call the
+  GitHub repository-token issuer.
 - A cancellation observed during request or acknowledgement stops the delivery
   exchange and terminalizes the attempt without invoking user code.
 - Missing, stale, conflicting, transitive, or unsupported-generation evidence
@@ -43,17 +47,19 @@ does not make an untrusted transport safe.
 
 ## Version and exact binding
 
-Runtime-authority delivery is defined only for runner protocol version 2 and
-delivery generation 1. Generation zero is invalid. A later generation is
-rejected until refresh, predecessor, and revocation semantics are specified for
-that generation. A protocol-1 runner cannot deserialize the new exchange as a
-compatible legacy offer and is rejected during negotiation or message
-validation.
+Runtime-authority delivery uses runner protocol version 3, protected
+`JobRuntimeAuthorities` schema version 2, and delivery generation 1. Generation
+zero is invalid. A later delivery generation is rejected until refresh,
+predecessor, and revocation semantics are specified for that generation. The
+current build negotiates only protocol 3, so protocol-1 and protocol-2 runners
+are rejected before lease traffic.
 
-Migration 0037 retains protocol-1 session rows as historical control-plane
-evidence while admitting protocol-2 sessions. This is not a protocol-1 delivery
-path: runtime-authority custody rows require protocol 2, and negotiation and
-message validation reject protocol-1 execution.
+Migration 0037 introduced protocol-2 runtime-authority custody. Migration 0061
+retains protocol-1 and protocol-2 session rows, and protocol-2 custody rows, as
+historical control-plane evidence while admitting protocol 3. The database
+therefore permits historical runtime-authority rows for protocols 2 and 3, but
+the current negotiation range is min=max 3; this is not a protocol-2 execution
+path.
 
 Every delivery is bound to all of these coordinates:
 
@@ -74,6 +80,54 @@ coordinates. The all-exact row is the only admitted row. A future generation is
 rejected by the authorization constructor before it can reach offer admission;
 every other mismatch returns a binding conflict.
 
+## Lease-poll authority acceptance
+
+Protocol 3 requires every `LeaseRequest` to carry a canonical
+`LeaseAuthorityPollContributions` schema-1 bundle. A runner with no extensions
+sends the canonical empty bundle. Otherwise, each extension owns one bounded,
+nonempty, versioned payload under a lowercase namespace; entries are strictly
+ordered by unique namespace, and the bundle digest commits to the schema,
+names, payload schemas, payload digests, and exact payload bytes. The runner
+retains each source value and retries one byte-identical prepared request until
+it receives a valid response.
+
+Every successful poll result is nested in `LeasePollResponse`. Its outer reply
+header must correlate to the exact request, and its
+`accepted_contributions_sha256` must equal that request's canonical bundle
+digest. `NoWork`, a lease offer, and a cancellation are outcomes inside this
+wrapper; a durable command may still be replayed on another slot's poll.
+
+The runner validates the wrapper and accepted digest before changing durable
+state. It applies a nested command, advances the carrier poll checkpoint,
+flushes the command acknowledgement, and only then acknowledges each extension
+source. `NoWork` advances the checkpoint and then acknowledges the sources.
+A missing wrapper, a correlation or digest mismatch, or a direct legacy poll
+outcome advances neither the checkpoint nor a source acknowledgement.
+
+Poll contributions and sandbox authorizations are separate contracts. A poll
+contribution lets a server-side extension validate and durably retain
+provider-owned lease evidence. Any job-bound authorization derived from that
+evidence is delivered only after exact offer acceptance through the protected
+runtime-authority exchange. The canonical evidence set has an 8 MiB encoded
+durability budget, and complete lease-offer commands are size-checked before
+publication, so an accepted extension projection cannot fail only when the
+store adapter serializes it.
+
+## Provider-owned sandbox authorizations
+
+`JobRuntimeAuthorities` schema 2 contains the canonical credential-authority
+list and a canonical `SandboxAuthorizations` schema-1 set. Each sandbox
+authorization has a unique provider namespace, a nonzero payload schema, exact
+bounded opaque bytes, and their SHA-256 digest. The digest acknowledged by the
+runtime-authority exchange covers the canonical encoding of the whole protected
+bundle, including this set.
+
+The runner validates and protects that whole bundle, then passes the exact
+sandbox-authorization set through `ExecutionRequest` and `SandboxSpec` without
+interpreting provider payloads. A provider consumes only its own namespace and
+schema before mutation. Providers without a matching consumer reject a
+nonempty set instead of ignoring it.
+
 ## State machine
 
 | Durable state | Allowed next action | Failure behavior |
@@ -81,10 +135,10 @@ every other mismatch returns a binding conflict.
 | Value-free offer published | Runner validates and records the exact offer. | Unknown fields, unsupported protocol, invalid `JobIR`, or command conflict reject the offer. |
 | Offer accepted locally | Runner replays the deterministic accepted response until the server acknowledges it. | Restart reuses the same operation ID and canonical bytes. |
 | Acceptance acknowledged | Runner sends `RuntimeAuthorityRequest` with the exact binding. | Cancellation stops delivery. A stale session, fence, offer, or digest fails closed. |
-| Grant returned ephemerally | Runner validates binding, authorities, lease, canonical encoding, and bundle digest. | A malformed, over-broad, mismatched, expired, or differently encoded grant is discarded. |
+| Grant returned ephemerally | Runner validates binding, `JobRuntimeAuthorities` schema 2, lease, canonical encoding, and whole-bundle digest. | A malformed, over-broad, mismatched, expired, or differently encoded grant is discarded. |
 | Protected bundle journaled | Runner sends `RuntimeAuthorityAck` with the same binding and bundle digest. | Restart skips minting and replays only the stable acknowledgement. |
 | Server custody committed | Runner marks the delivery acknowledged in its journal. | A premature, different-operation, or different-digest acknowledgement conflicts. |
-| Delivery acknowledged | Runner loads and decodes the protected bundle, applies authority aliases and secret masking, then admits execution. | Missing content, digest drift, decode failure, expiry, or credential-free contamination terminalizes or fails the attempt before user code. |
+| Delivery acknowledged | Runner loads and decodes the protected bundle, applies credential aliases and secret masking, and passes sandbox authorizations unchanged into provider admission before execution. | Missing content, digest drift, decode failure, expiry, unsupported provider authorization, or credential contamination terminalizes or fails the attempt before user code. |
 
 The request and acknowledgement operation IDs are deterministic functions of
 the accepted offer, attempt, lease guard, `JobIR` digest, and generation. A
@@ -112,8 +166,9 @@ binds the offer operation ID and that same session/sequence to one command
 outbox record. The shared session/sequence proves both keys describe the same
 published command. The table does not use independent existence-only foreign
 keys that could assemble a delivery from unrelated publications. Check
-constraints require protocol 2, generation 1, positive fences and sequences,
-32-byte digests, and an all-null or all-complete acknowledgement tuple.
+constraints permit historical protocol 2 and current protocol 3 rows, require
+generation 1, positive fences and sequences, 32-byte digests, and an all-null
+or all-complete acknowledgement tuple.
 
 The following data is forbidden from the table, command outbox, operation
 response receipts, audit records, metrics, and debug output:
@@ -149,8 +204,9 @@ The control handler performs authorization in this order:
 Explicit `none` permissions, an empty explicit map, and `id-token: write`
 without repository permissions produce no GitHub repository token. They do not
 fall back to provider defaults. `CredentialFree` jobs must have an empty
-authority bundle and cannot receive secret environment values. Provider-default
-or broad read/write requests still require an exact resolver result and fail
+credential-authority list and cannot receive secret environment values; their
+provider-owned sandbox authorization set remains separate. Provider-default or
+broad read/write requests still require an exact resolver result and fail
 closed when the service authority is unavailable.
 
 Fork and Dependabot authority reductions happen when the immutable trust policy
@@ -193,9 +249,11 @@ retry with changed coordinates.
 | After server ACK, before local ACK commit | Replay the same ACK, then mark the exact digest acknowledged. |
 | After local ACK commit | Decode the protected bundle and recover execution subject to lease, authority expiry, and supported lifecycle rules. |
 
-The runner journal schema is version 2. Old journal generations that cannot
+The runner journal schema is version 6. Old journal generations that cannot
 represent protected delivery custody fail closed instead of treating a legacy
-lease-offer bearer field as authority.
+lease-offer bearer field as authority. Schema 6 also retains pending
+lease-authority source receipts across a crash between poll acceptance and
+local source acknowledgement.
 
 ## Verification
 

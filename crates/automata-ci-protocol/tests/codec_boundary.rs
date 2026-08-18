@@ -7,21 +7,21 @@ use automata_ci_core::{
     JobSecretExposure, JobSource, Lease, LeaseGuard, LeaseId, LogAck, LogChannel, LogFrame,
     LogSequence, LogStreamId, OperatingSystem, OperationId, PermissionLevel, RunId,
     RunValueTemplates, RunnerCapabilities, RunnerId, RunnerPlatform, RunnerRequirements,
-    RunnerSessionId, RuntimeBoolean, SandboxCapabilities, Sha256Digest, ShellTemplate, StepId,
-    StepIr, StepResult, TrustActorEvidence, TrustActorKind, TrustAutomationKind, TrustEventKind,
-    TrustEvidence, TrustOriginKind, TrustPolicy, TrustRepositoryEvidence, TrustTokenRecursion,
-    UnixMillis, ValueTemplate, WorkflowId,
+    RunnerSessionId, RuntimeBoolean, SandboxAuthorizations, SandboxCapabilities, Sha256Digest,
+    ShellTemplate, StepId, StepIr, StepResult, TrustActorEvidence, TrustActorKind,
+    TrustAutomationKind, TrustEventKind, TrustEvidence, TrustOriginKind, TrustPolicy,
+    TrustRepositoryEvidence, TrustTokenRecursion, UnixMillis, ValueTemplate, WorkflowId,
 };
 use automata_ci_protocol::{
     CancelJob, CommandAck, CommandCursor, CommandSequence, ErrorMessage, HandshakeErrorCode,
     HandshakeRejected, JobResultMessage, JobRuntimeAuthorities, JobRuntimeAuthority,
-    JobStateUpdate, LeaseDisposition, LeaseHeartbeat, LeaseOffer, LeaseRenewal, LeaseRequest,
-    LeaseResponse, LogAckMessage, LogBatch, MAX_CONFIGURABLE_FRAME_BYTES, MessageHeader,
-    MessageValidationError, NegotiatedSession, NoWork, OperationAck, ProtocolLimits,
-    ProtocolLimitsError, RemoteErrorCode, RunnerHello, RunnerSlotOrdinal, RunnerToServer,
-    RuntimeAuthorityCredential, RuntimeAuthorityEndpoint, RuntimeAuthorityName,
-    SUPPORTED_PROTOCOL_RANGE, ServerCommandHeader, ServerHello, ServerTiming, ServerToRunner,
-    SessionDisposition, ValidatedRunnerToServer, ValidatedServerToRunner,
+    JobStateUpdate, LeaseAuthorityPollContributions, LeaseDisposition, LeaseHeartbeat, LeaseOffer,
+    LeasePollResponse, LeaseRenewal, LeaseRequest, LeaseResponse, LogAckMessage, LogBatch,
+    MAX_CONFIGURABLE_FRAME_BYTES, MessageHeader, MessageValidationError, NegotiatedSession,
+    OperationAck, ProtocolLimits, ProtocolLimitsError, RemoteErrorCode, RunnerHello,
+    RunnerSlotOrdinal, RunnerToServer, RuntimeAuthorityCredential, RuntimeAuthorityEndpoint,
+    RuntimeAuthorityName, SUPPORTED_PROTOCOL_RANGE, ServerCommandHeader, ServerHello, ServerTiming,
+    ServerToRunner, SessionDisposition, ValidatedRunnerToServer, ValidatedServerToRunner,
 };
 
 fn header() -> MessageHeader {
@@ -171,7 +171,12 @@ fn authority_bundle_emptiness_must_match_the_immutable_job_profile() {
     let lease = lease(attempt_id, runner_id);
     let standard = job_envelope(RunnerRequirements::default());
     assert!(matches!(
-        JobRuntimeAuthorities::new(Vec::new(), &standard, &lease),
+        JobRuntimeAuthorities::new(
+            Vec::new(),
+            SandboxAuthorizations::default(),
+            &standard,
+            &lease,
+        ),
         Err(automata_ci_protocol::RuntimeAuthorityError::AuthorityProfileMismatch)
     ));
 
@@ -194,11 +199,21 @@ fn authority_bundle_emptiness_must_match_the_immutable_job_profile() {
     )
     .expect("authority");
     assert!(matches!(
-        JobRuntimeAuthorities::new(vec![authority], &credential_free, &lease),
+        JobRuntimeAuthorities::new(
+            vec![authority],
+            SandboxAuthorizations::default(),
+            &credential_free,
+            &lease,
+        ),
         Err(automata_ci_protocol::RuntimeAuthorityError::AuthorityProfileMismatch)
     ));
-    JobRuntimeAuthorities::new(Vec::new(), &credential_free, &lease)
-        .expect("credential-free empty authority bundle");
+    JobRuntimeAuthorities::new(
+        Vec::new(),
+        SandboxAuthorizations::default(),
+        &credential_free,
+        &lease,
+    )
+    .expect("credential-free empty authority bundle");
     let offer = LeaseOffer::new(command_header(), slot(), lease, credential_free);
     ValidatedServerToRunner::new(
         ServerToRunner::LeaseOffer(Box::new(offer)),
@@ -286,7 +301,11 @@ fn every_runner_envelope_variant_passes_the_validated_boundary() {
             runner_capabilities(),
             UnixMillis::new(1),
         )),
-        RunnerToServer::LeaseRequest(LeaseRequest::first(header(), slot())),
+        RunnerToServer::LeaseRequest(LeaseRequest::first(
+            header(),
+            slot(),
+            LeaseAuthorityPollContributions::default(),
+        )),
         RunnerToServer::LeaseResponse(LeaseResponse::new(
             header(),
             attempt_id,
@@ -383,7 +402,11 @@ fn every_server_envelope_variant_passes_the_validated_boundary() {
             LogAck::new(stream_id, Some(LogSequence::new(0))),
         )),
         ServerToRunner::OperationAck(OperationAck::new(reply_header())),
-        ServerToRunner::NoWork(NoWork::new(reply_header(), 1_000)),
+        ServerToRunner::LeasePollResponse(Box::new(LeasePollResponse::no_work(
+            reply_header(),
+            LeaseAuthorityPollContributions::default().sha256_digest(),
+            1_000,
+        ))),
         ServerToRunner::Error(ErrorMessage::new(
             reply_header(),
             RemoteErrorCode::RetryLater,
@@ -427,7 +450,11 @@ fn unvalidated_message_cannot_enter_the_validated_handler_boundary() {
         OperationId::new(),
         OperationId::new(),
     );
-    let raw = RunnerToServer::LeaseRequest(LeaseRequest::first(invalid_header, slot()));
+    let raw = RunnerToServer::LeaseRequest(LeaseRequest::first(
+        invalid_header,
+        slot(),
+        LeaseAuthorityPollContributions::default(),
+    ));
 
     assert!(matches!(
         ValidatedRunnerToServer::try_from(raw),

@@ -12,7 +12,8 @@ use automata_ci_core::{
 };
 use automata_ci_protocol::{
     CancelJob, CommandAck, ErrorMessage, HandshakeErrorCode, INITIAL_RUNTIME_AUTHORITY_GENERATION,
-    JobRuntimeAuthorities, LeaseDisposition, LeaseHeartbeat, LeaseOffer, LeaseRejectionReason,
+    JobRuntimeAuthorities, LeaseAuthorityPollContributions, LeaseAuthorityPollReceipt,
+    LeaseDisposition, LeaseHeartbeat, LeaseOffer, LeasePollOutcome, LeaseRejectionReason,
     LeaseRequest, LeaseResponse, LogBatch, MessageHeader, NegotiatedSession, OperationAck,
     RemoteErrorCode, RunnerHello, RunnerSlotOrdinal, RunnerToServer, RuntimeAuthorityAck,
     RuntimeAuthorityDeliveryBinding, RuntimeAuthorityRequest, SUPPORTED_PROTOCOL_RANGE,
@@ -25,10 +26,10 @@ use automata_ci_protocol_protobuf::{
 use automata_ci_runner_journal::{
     CancellationRecord, CommandDisposition, CommandIgnoredReason, DurableCommand,
     EndpointOperationState, JobIrContentRef, JournalContentRetainSet, JournalInvariantError,
-    LeaseOfferRecord, LeaseOfferStatus, LeasePollCheckpoint, LogSegmentAcknowledgement,
-    ProviderOperationKind, RunnerJournal, RuntimeAuthorityContentRef,
-    RuntimeAuthorityDeliveryRecord, SessionBinding as JournalSessionBinding, SlotSnapshot,
-    TerminalResultRecord,
+    LeaseOfferRecord, LeaseOfferStatus, LeasePollCheckpoint, LeasePollCommandRecord,
+    LeasePollCompletion, LogSegmentAcknowledgement, ProviderOperationKind, RunnerJournal,
+    RuntimeAuthorityContentRef, RuntimeAuthorityDeliveryRecord,
+    SessionBinding as JournalSessionBinding, SlotSnapshot, TerminalResultRecord,
 };
 use automata_ci_runner_spool::{ContentKind, DurableContentStore};
 use automata_ci_runner_transport::PreparedRequest;
@@ -45,15 +46,16 @@ use crate::outbox::validate_log_segment_records;
 use crate::retry::{exchange_exact, sleep_or_shutdown};
 use crate::{
     AdmissionRejection, CleanupRequest, ExecutionCancellation, ExecutionCancellationReason,
-    ExecutionEvents, ExecutionRequest, ExecutorErrorKind, JobExecutor, LeaseWatchdog,
-    MonotonicMillis, NoopRunnerRuntimeObserver, RemotePhase, RunnerRuntimeConfig,
-    RunnerRuntimeControlClient, RunnerRuntimeError, RunnerRuntimeEvent, RunnerRuntimeObserver,
-    RuntimeCancellationReason, RuntimeClock, RuntimeCommandKind, RuntimeCommandOutcome,
-    RuntimeControlReply, RuntimeExchangeKind, RuntimeIdSource, RuntimeInfrastructureFailure,
-    RuntimeJobConclusion, RuntimeJobStartMode, RuntimeLeaseDisposition, RuntimeLeasePollOutcome,
-    RuntimeOperationOutcome, RuntimeReconnectReason, RuntimeRemoteErrorDisposition,
-    RuntimeRemoteErrorKind, RuntimeRetryCause, RuntimeSessionMode, RuntimeSessionOutcome,
-    RuntimeSleeper, RuntimeTerminalResultStage, StableIdDomain,
+    ExecutionEvents, ExecutionRequest, ExecutorErrorKind, JobExecutor,
+    LeaseAuthorityExtensionRegistry, LeaseWatchdog, MonotonicMillis, NoopRunnerRuntimeObserver,
+    RemotePhase, RunnerRuntimeConfig, RunnerRuntimeControlClient, RunnerRuntimeError,
+    RunnerRuntimeEvent, RunnerRuntimeObserver, RuntimeCancellationReason, RuntimeClock,
+    RuntimeCommandKind, RuntimeCommandOutcome, RuntimeControlReply, RuntimeExchangeKind,
+    RuntimeIdSource, RuntimeInfrastructureFailure, RuntimeJobConclusion, RuntimeJobStartMode,
+    RuntimeLeaseDisposition, RuntimeLeasePollOutcome, RuntimeOperationOutcome,
+    RuntimeReconnectReason, RuntimeRemoteErrorDisposition, RuntimeRemoteErrorKind,
+    RuntimeRetryCause, RuntimeSessionMode, RuntimeSessionOutcome, RuntimeSleeper,
+    RuntimeTerminalResultStage, StableIdDomain,
 };
 
 /// Dependency-injected boundaries used by [`RunnerSessionSupervisor`].
@@ -66,6 +68,7 @@ pub struct RunnerRuntimePorts {
     sleeper: Arc<dyn RuntimeSleeper>,
     ids: Arc<dyn RuntimeIdSource>,
     observer: Arc<dyn RunnerRuntimeObserver>,
+    lease_authorities: LeaseAuthorityExtensionRegistry,
 }
 
 impl RunnerRuntimePorts {
@@ -90,6 +93,7 @@ impl RunnerRuntimePorts {
             sleeper,
             ids,
             observer: Arc::new(NoopRunnerRuntimeObserver),
+            lease_authorities: LeaseAuthorityExtensionRegistry::empty(),
         }
     }
 
@@ -97,6 +101,16 @@ impl RunnerRuntimePorts {
     #[must_use]
     pub fn with_observer(mut self, observer: Arc<dyn RunnerRuntimeObserver>) -> Self {
         self.observer = observer;
+        self
+    }
+
+    /// Installs the canonical provider-neutral lease-authority extension registry.
+    #[must_use]
+    pub fn with_lease_authority_extensions(
+        mut self,
+        extensions: LeaseAuthorityExtensionRegistry,
+    ) -> Self {
+        self.lease_authorities = extensions;
         self
     }
 }
@@ -113,6 +127,7 @@ impl fmt::Debug for RunnerRuntimePorts {
             .field("sleeper", &"configured")
             .field("ids", &"configured")
             .field("observer", &"configured")
+            .field("lease_authorities", &self.lease_authorities)
             .finish()
     }
 }
@@ -468,6 +483,24 @@ impl RunnerSessionSupervisor {
                 return Err(RunnerRuntimeError::Shutdown);
             }
             let snapshot = self.inner.ports.journal.snapshot()?;
+            let durable_session = snapshot.session().ok_or(RunnerRuntimeError::StaleSession)?;
+            if durable_session.session_id() != session.negotiated.session_id() {
+                return Err(RunnerRuntimeError::StaleSession);
+            }
+            if let Some(checkpoint) = durable_session
+                .lease_poll_checkpoints()
+                .iter()
+                .find(|checkpoint| !checkpoint.pending_authority_receipts().is_empty())
+            {
+                self.drain_lease_authority_receipts(
+                    session,
+                    checkpoint.slot(),
+                    checkpoint.pending_authority_receipts().to_vec(),
+                    cancellation.clone(),
+                )
+                .await?;
+                continue;
+            }
             let Some(durable) = snapshot.slot(slot).cloned() else {
                 self.poll_slot(session, slot, cancellation.clone()).await?;
                 continue;
@@ -543,43 +576,44 @@ impl RunnerSessionSupervisor {
         cancellation: CancellationToken,
     ) -> Result<(), RunnerRuntimeError> {
         let started = self.inner.ports.clock.monotonic_now();
-        let (checkpoint, prepared) = self.prepare_lease_poll(session, slot)?;
+        let authority_contributions = self
+            .inner
+            .ports
+            .lease_authorities
+            .current_or_refresh(self.inner.ports.clock.wall_now(), cancellation.clone())
+            .await
+            .map_err(RunnerRuntimeError::LeaseAuthority)?;
+        let (checkpoint, prepared) =
+            self.prepare_lease_poll(session, slot, authority_contributions.clone())?;
         loop {
             let reply = self.exchange(&prepared, cancellation.clone()).await?;
             match reply.message().message() {
-                ServerToRunner::NoWork(no_work) => {
-                    self.advance_lease_poll(session, slot, checkpoint.current_operation_id())?;
-                    self.observe(RunnerRuntimeEvent::LeasePoll {
-                        outcome: RuntimeLeasePollOutcome::NoWork,
-                        duration: self.elapsed_since(started),
-                    });
-                    let delay = Duration::from_millis(u64::from(no_work.retry_after_millis()))
-                        .min(self.inner.config.limits().idle_delay_ceiling());
-                    sleep_or_shutdown(&self.inner.ports.sleeper, delay, &cancellation).await?;
-                    return Ok(());
-                }
-                ServerToRunner::LeaseOffer(_) => {
-                    self.process_command(session, &reply, cancellation.clone())
-                        .await?;
-                    self.advance_lease_poll(session, slot, checkpoint.current_operation_id())?;
-                    self.flush_command_ack(session, cancellation.clone())
-                        .await?;
-                    self.observe(RunnerRuntimeEvent::LeasePoll {
-                        outcome: RuntimeLeasePollOutcome::LeaseOffer,
-                        duration: self.elapsed_since(started),
-                    });
-                    return Ok(());
-                }
-                ServerToRunner::CancelJob(_) => {
-                    self.process_command(session, &reply, cancellation.clone())
-                        .await?;
-                    self.advance_lease_poll(session, slot, checkpoint.current_operation_id())?;
-                    self.flush_command_ack(session, cancellation.clone())
+                ServerToRunner::LeasePollResponse(response) => {
+                    let RunnerToServer::LeaseRequest(request) = prepared.message() else {
+                        return Err(RunnerRuntimeError::ExecutorContract);
+                    };
+                    response
+                        .validate_for(request)
+                        .map_err(|_| RunnerRuntimeError::UnexpectedSyncResponse)?;
+                    let (outcome, retry_after_millis) = self
+                        .complete_lease_poll_response(
+                            session,
+                            slot,
+                            checkpoint,
+                            &authority_contributions,
+                            response.outcome(),
+                            cancellation.clone(),
+                        )
                         .await?;
                     self.observe(RunnerRuntimeEvent::LeasePoll {
-                        outcome: RuntimeLeasePollOutcome::Cancellation,
+                        outcome,
                         duration: self.elapsed_since(started),
                     });
+                    if let Some(retry_after_millis) = retry_after_millis {
+                        let delay = Duration::from_millis(u64::from(retry_after_millis))
+                            .min(self.inner.config.limits().idle_delay_ceiling());
+                        sleep_or_shutdown(&self.inner.ports.sleeper, delay, &cancellation).await?;
+                    }
                     return Ok(());
                 }
                 ServerToRunner::Error(error) => {
@@ -596,10 +630,97 @@ impl RunnerSessionSupervisor {
         }
     }
 
+    async fn complete_lease_poll_response(
+        &self,
+        session: RuntimeSession,
+        slot: RunnerSlotOrdinal,
+        checkpoint: LeasePollCheckpoint,
+        authority_contributions: &LeaseAuthorityPollContributions,
+        outcome: &LeasePollOutcome,
+        cancellation: CancellationToken,
+    ) -> Result<(RuntimeLeasePollOutcome, Option<u32>), RunnerRuntimeError> {
+        let receipts = authority_contributions
+            .as_slice()
+            .iter()
+            .map(LeaseAuthorityPollReceipt::for_contribution)
+            .collect::<Vec<_>>();
+        let completion = PendingLeasePollCompletion {
+            slot,
+            expected_current: checkpoint.current_operation_id(),
+            successor_operation_id: self.inner.ports.ids.fresh_operation_id(),
+            pending_authority_receipts: receipts.clone(),
+        };
+        let (runtime_outcome, retry_after_millis) = match outcome {
+            LeasePollOutcome::NoWork { retry_after_millis } => {
+                self.inner.ports.journal.complete_lease_poll(
+                    session.negotiated.session_id(),
+                    completion.record(LeasePollCommandRecord::NoCommand),
+                )?;
+                (RuntimeLeasePollOutcome::NoWork, Some(*retry_after_millis))
+            }
+            LeasePollOutcome::LeaseOffer(_) => {
+                self.process_lease_poll_command(session, outcome, completion, cancellation.clone())
+                    .await?;
+                (RuntimeLeasePollOutcome::LeaseOffer, None)
+            }
+            LeasePollOutcome::CancelJob(_) => {
+                self.process_lease_poll_command(session, outcome, completion, cancellation.clone())
+                    .await?;
+                (RuntimeLeasePollOutcome::Cancellation, None)
+            }
+        };
+        if !matches!(outcome, LeasePollOutcome::NoWork { .. }) {
+            self.flush_command_ack(session, cancellation.clone())
+                .await?;
+        }
+        self.inner
+            .ports
+            .lease_authorities
+            .acknowledge(&receipts, cancellation)
+            .await
+            .map_err(RunnerRuntimeError::LeaseAuthority)?;
+        self.inner
+            .ports
+            .journal
+            .acknowledge_lease_authority_receipts(
+                session.negotiated.session_id(),
+                slot,
+                &receipts,
+            )?;
+        Ok((runtime_outcome, retry_after_millis))
+    }
+
+    async fn drain_lease_authority_receipts(
+        &self,
+        session: RuntimeSession,
+        slot: RunnerSlotOrdinal,
+        receipts: Vec<LeaseAuthorityPollReceipt>,
+        cancellation: CancellationToken,
+    ) -> Result<(), RunnerRuntimeError> {
+        self.flush_command_ack(session, cancellation.clone())
+            .await?;
+        self.inner
+            .ports
+            .lease_authorities
+            .acknowledge(&receipts, cancellation)
+            .await
+            .map_err(RunnerRuntimeError::LeaseAuthority)?;
+        self.inner
+            .ports
+            .journal
+            .acknowledge_lease_authority_receipts(
+                session.negotiated.session_id(),
+                slot,
+                &receipts,
+            )?;
+        Ok(())
+    }
+
     fn prepare_lease_poll(
         &self,
         session: RuntimeSession,
         slot: RunnerSlotOrdinal,
+        authority_contributions: LeaseAuthorityPollContributions,
     ) -> Result<(LeasePollCheckpoint, PreparedRequest), RunnerRuntimeError> {
         let snapshot = self.inner.ports.journal.prepare_lease_poll(
             session.negotiated.session_id(),
@@ -610,13 +731,16 @@ impl RunnerSessionSupervisor {
         if durable_session.session_id() != session.negotiated.session_id() {
             return Err(RunnerRuntimeError::StaleSession);
         }
-        let checkpoint = *durable_session
+        let checkpoint = durable_session
             .lease_poll_checkpoint(slot)
+            .cloned()
             .ok_or(RunnerRuntimeError::ExecutorContract)?;
         let header = Self::request_header(session, checkpoint.current_operation_id());
         let request = match checkpoint.acknowledges_operation_id() {
-            Some(predecessor) => LeaseRequest::successor(header, slot, predecessor),
-            None => LeaseRequest::first(header, slot),
+            Some(predecessor) => {
+                LeaseRequest::successor(header, slot, predecessor, authority_contributions)
+            }
+            None => LeaseRequest::first(header, slot, authority_contributions),
         };
         let prepared = PreparedRequest::for_session(
             RunnerToServer::LeaseRequest(request),
@@ -624,21 +748,6 @@ impl RunnerSessionSupervisor {
             self.inner.config.protocol_limits(),
         )?;
         Ok((checkpoint, prepared))
-    }
-
-    fn advance_lease_poll(
-        &self,
-        session: RuntimeSession,
-        slot: RunnerSlotOrdinal,
-        expected_current: OperationId,
-    ) -> Result<(), RunnerRuntimeError> {
-        self.inner.ports.journal.advance_lease_poll(
-            session.negotiated.session_id(),
-            slot,
-            expected_current,
-            self.inner.ports.ids.fresh_operation_id(),
-        )?;
-        Ok(())
     }
 
     async fn process_command(
@@ -674,6 +783,48 @@ impl RunnerSessionSupervisor {
             ServerToRunner::CancelJob(cancel) => {
                 self.record_cancellation(session, cancel, reply.canonical_bytes())
             }
+            _ => Err(RunnerRuntimeError::UnexpectedSyncResponse),
+        }
+    }
+
+    async fn process_lease_poll_command(
+        &self,
+        session: RuntimeSession,
+        outcome: &LeasePollOutcome,
+        completion: PendingLeasePollCompletion,
+        cancellation: CancellationToken,
+    ) -> Result<(), RunnerRuntimeError> {
+        let message = match outcome {
+            LeasePollOutcome::LeaseOffer(offer) => ServerToRunner::LeaseOffer(offer.clone()),
+            LeasePollOutcome::CancelJob(cancel) => ServerToRunner::CancelJob(cancel.clone()),
+            LeasePollOutcome::NoWork { .. } => {
+                return Err(RunnerRuntimeError::UnexpectedSyncResponse);
+            }
+        };
+        let reply = RuntimeControlReply::from_message(message, self.inner.config.protocol_limits())
+            .map_err(|_| RunnerRuntimeError::InvalidDurablePayload)?;
+        let header = match reply.message().message() {
+            ServerToRunner::LeaseOffer(offer) => offer.header(),
+            ServerToRunner::CancelJob(cancel) => cancel.header(),
+            _ => return Err(RunnerRuntimeError::UnexpectedSyncResponse),
+        };
+        self.await_command_turn(header.session_id(), header.sequence(), &cancellation)
+            .await?;
+        let _record_guard = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => return Err(RunnerRuntimeError::Shutdown),
+            guard = self.inner.command_record_lock.lock() => guard,
+        };
+        match reply.message().message() {
+            ServerToRunner::LeaseOffer(offer) => {
+                self.record_lease_poll_offer(session, offer, reply.canonical_bytes(), completion)
+            }
+            ServerToRunner::CancelJob(cancel) => self.record_lease_poll_cancellation(
+                session,
+                cancel,
+                reply.canonical_bytes(),
+                completion,
+            ),
             _ => Err(RunnerRuntimeError::UnexpectedSyncResponse),
         }
     }
@@ -778,6 +929,144 @@ impl RunnerSessionSupervisor {
             },
         });
         Ok(())
+    }
+
+    fn record_lease_poll_offer(
+        &self,
+        session: RuntimeSession,
+        offer: &LeaseOffer,
+        canonical: &[u8],
+        completion: PendingLeasePollCompletion,
+    ) -> Result<(), RunnerRuntimeError> {
+        let header = offer.header();
+        let command = durable_command(header, canonical);
+        if let Some(disposition) =
+            self.replayed_command_disposition(header.session_id(), command)?
+        {
+            self.inner.ports.journal.complete_lease_poll(
+                header.session_id(),
+                completion.record(LeasePollCommandRecord::Recorded {
+                    command,
+                    disposition,
+                }),
+            )?;
+            self.observe(RunnerRuntimeEvent::Command {
+                kind: RuntimeCommandKind::LeaseOffer,
+                outcome: RuntimeCommandOutcome::Replayed,
+            });
+            return Ok(());
+        }
+        if offer.slot().get() > self.inner.config.capabilities().max_parallel_jobs() {
+            self.inner.ports.journal.complete_lease_poll(
+                header.session_id(),
+                completion.record(LeasePollCommandRecord::Ignored {
+                    command,
+                    reason: CommandIgnoredReason::InvalidCommand,
+                }),
+            )?;
+            self.observe(RunnerRuntimeEvent::Command {
+                kind: RuntimeCommandKind::LeaseOffer,
+                outcome: RuntimeCommandOutcome::IgnoredInvalid,
+            });
+            return Ok(());
+        }
+        let snapshot = self.inner.ports.journal.snapshot()?;
+        if let Some(existing) = snapshot.slot(offer.slot())
+            && existing.offer().command() != command
+        {
+            self.inner.ports.journal.complete_lease_poll(
+                header.session_id(),
+                completion.record(LeasePollCommandRecord::Ignored {
+                    command,
+                    reason: CommandIgnoredReason::SlotUnavailable,
+                }),
+            )?;
+            self.observe(RunnerRuntimeEvent::Command {
+                kind: RuntimeCommandKind::LeaseOffer,
+                outcome: RuntimeCommandOutcome::IgnoredSlotUnavailable,
+            });
+            return Ok(());
+        }
+        let encoded_job = encode_job_ir(offer.job(), self.inner.config.protocol_limits())
+            .map_err(|_| RunnerRuntimeError::InvalidDurablePayload)?;
+        let (durable, expected_job_ir) = self.publish_lease_poll_offer_content(
+            session,
+            offer,
+            command,
+            &encoded_job,
+            &completion,
+        )?;
+        match durable.slot(offer.slot()) {
+            Some(slot)
+                if slot.offer().job_ir() == &expected_job_ir
+                    && slot.offer().managed_secret_bindings()
+                        == offer.managed_secret_bindings() => {}
+            Some(_) | None => return Err(RunnerRuntimeError::CommandReplayConflict),
+        }
+        self.observe(RunnerRuntimeEvent::Command {
+            kind: RuntimeCommandKind::LeaseOffer,
+            outcome: RuntimeCommandOutcome::Applied,
+        });
+        Ok(())
+    }
+
+    fn publish_lease_poll_offer_content(
+        &self,
+        session: RuntimeSession,
+        offer: &LeaseOffer,
+        command: DurableCommand,
+        encoded_job: &[u8],
+        completion: &PendingLeasePollCompletion,
+    ) -> Result<(automata_ci_runner_journal::JournalSnapshot, JobIrContentRef), RunnerRuntimeError>
+    {
+        self.inner.content_operations.publish_reclaiming_capacity(
+            self.inner.ports.journal.as_ref(),
+            self.inner.ports.spool.as_ref(),
+            || {
+                let job_publication = self
+                    .inner
+                    .ports
+                    .spool
+                    .persist(ContentKind::JobIr, encoded_job)
+                    .map_err(RunnerRuntimeError::from)?;
+                let completion = completion.clone();
+                let committed = job_publication.commit_with(|job_content| {
+                    let job_ir = JobIrContentRef::new(
+                        session.negotiated.selected_job_ir(),
+                        job_content.clone(),
+                    )
+                    .map_err(automata_ci_runner_journal::JournalError::Invariant)?;
+                    let mut record = LeaseOfferRecord::new(
+                        offer.slot(),
+                        offer.lease().clone(),
+                        job_ir.clone(),
+                        command,
+                    )
+                    .map_err(automata_ci_runner_journal::JournalError::Invariant)?;
+                    if let Some(overlay) = offer.managed_secret_bindings() {
+                        record = record
+                            .with_managed_secret_bindings(overlay.clone())
+                            .map_err(automata_ci_runner_journal::JournalError::Invariant)?;
+                    }
+                    self.inner
+                        .ports
+                        .journal
+                        .complete_lease_poll(
+                            offer.header().session_id(),
+                            completion.record(LeasePollCommandRecord::LeaseOffer(Box::new(record))),
+                        )
+                        .map(|snapshot| (snapshot, job_ir))
+                });
+                match committed {
+                    Ok(committed) => Ok::<_, RunnerRuntimeError>(committed),
+                    Err(failure) => {
+                        let (error, publication) = failure.into_parts();
+                        publication.abort();
+                        Err(error.into())
+                    }
+                }
+            },
+        )
     }
 
     fn publish_lease_offer_content(
@@ -900,6 +1189,81 @@ impl RunnerSessionSupervisor {
             slot,
             cancel.guard(),
             CancellationRecord::new(command, cancel.requested_at()),
+        )?;
+        self.observe(RunnerRuntimeEvent::Command {
+            kind: RuntimeCommandKind::Cancellation,
+            outcome: RuntimeCommandOutcome::Applied,
+        });
+        if let Some(signal) = self
+            .inner
+            .executions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&cancel.attempt_id())
+            .cloned()
+        {
+            signal.signal(ExecutionCancellationReason::ServerRequest);
+            self.observe(RunnerRuntimeEvent::Cancellation {
+                reason: RuntimeCancellationReason::ServerRequest,
+            });
+        }
+        Ok(())
+    }
+
+    fn record_lease_poll_cancellation(
+        &self,
+        _session: RuntimeSession,
+        cancel: &CancelJob,
+        canonical: &[u8],
+        completion: PendingLeasePollCompletion,
+    ) -> Result<(), RunnerRuntimeError> {
+        let header = cancel.header();
+        let command = durable_command(header, canonical);
+        if let Some(disposition) =
+            self.replayed_command_disposition(header.session_id(), command)?
+        {
+            self.inner.ports.journal.complete_lease_poll(
+                header.session_id(),
+                completion.record(LeasePollCommandRecord::Recorded {
+                    command,
+                    disposition,
+                }),
+            )?;
+            self.observe(RunnerRuntimeEvent::Command {
+                kind: RuntimeCommandKind::Cancellation,
+                outcome: RuntimeCommandOutcome::Replayed,
+            });
+            return Ok(());
+        }
+        let snapshot = self.inner.ports.journal.snapshot()?;
+        let target = snapshot.slots().iter().find(|slot| {
+            slot.offer().lease().attempt_id() == cancel.attempt_id()
+                && slot.offer().lease().guard() == cancel.guard()
+                && !slot.lifecycle().is_terminal()
+                && slot.offer_status() != LeaseOfferStatus::Rejected
+        });
+        let Some(target) = target else {
+            self.inner.ports.journal.complete_lease_poll(
+                header.session_id(),
+                completion.record(LeasePollCommandRecord::Ignored {
+                    command,
+                    reason: CommandIgnoredReason::StaleLease,
+                }),
+            )?;
+            self.observe(RunnerRuntimeEvent::Command {
+                kind: RuntimeCommandKind::Cancellation,
+                outcome: RuntimeCommandOutcome::IgnoredStaleLease,
+            });
+            return Ok(());
+        };
+        let slot = target.slot();
+        self.inner.ports.journal.complete_lease_poll(
+            header.session_id(),
+            completion.record(LeasePollCommandRecord::Cancellation {
+                slot,
+                guard: cancel.guard(),
+                cancellation: CancellationRecord::new(command, cancel.requested_at()),
+            }),
         )?;
         self.observe(RunnerRuntimeEvent::Command {
             kind: RuntimeCommandKind::Cancellation,
@@ -1312,7 +1676,6 @@ impl RunnerSessionSupervisor {
                     }
                     return self.persist_runtime_authority_delivery(
                         session,
-                        durable,
                         binding,
                         request_operation_id,
                         acknowledgement_operation_id,
@@ -1406,11 +1769,9 @@ impl RunnerSessionSupervisor {
             .is_some_and(|slot| slot.cancellation().is_some()))
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn persist_runtime_authority_delivery(
         &self,
         session: RuntimeSession,
-        durable: &SlotSnapshot,
         binding: RuntimeAuthorityDeliveryBinding,
         request_operation_id: OperationId,
         acknowledgement_operation_id: OperationId,
@@ -1439,8 +1800,8 @@ impl RunnerSessionSupervisor {
                     .map_err(automata_ci_runner_journal::JournalError::Invariant)?;
                     self.inner.ports.journal.record_runtime_authority_delivery(
                         session.negotiated.session_id(),
-                        durable.slot(),
-                        durable.offer().lease().guard(),
+                        binding.slot(),
+                        binding.guard(),
                         delivery,
                     )?;
                     Ok(())
@@ -1787,17 +2148,24 @@ impl RunnerSessionSupervisor {
             authority_expired.clone(),
             watchdog_stop.clone(),
         );
+        let authority_binding = durable
+            .runtime_authority_delivery()
+            .filter(|delivery| delivery.is_acknowledged())
+            .ok_or(RunnerRuntimeError::InvalidDurablePayload)?
+            .binding();
         let mut request = ExecutionRequest::new(
             session.negotiated.session_id(),
             durable.slot(),
             lease.clone(),
             job,
             runtime_authorities,
+            authority_binding,
             durable.offer().job_ir().content().clone(),
             environment,
             durable.lifecycle(),
             durable.sandbox().cloned(),
-        );
+        )
+        .map_err(|_| RunnerRuntimeError::InvalidDurablePayload)?;
         if let Some(overlay) = durable.offer().managed_secret_bindings() {
             request = request
                 .with_managed_secret_bindings(overlay.clone())
@@ -3571,6 +3939,26 @@ fn executor_join_result(
         Ok(Ok(result)) => Ok(result),
         Ok(Err(error)) => Err(ExecutorFailure::Adapter(error.kind())),
         Err(_) => Err(ExecutorFailure::TaskTerminated),
+    }
+}
+
+#[derive(Clone, Debug)]
+struct PendingLeasePollCompletion {
+    slot: RunnerSlotOrdinal,
+    expected_current: OperationId,
+    successor_operation_id: OperationId,
+    pending_authority_receipts: Vec<LeaseAuthorityPollReceipt>,
+}
+
+impl PendingLeasePollCompletion {
+    fn record(self, command: LeasePollCommandRecord) -> LeasePollCompletion {
+        LeasePollCompletion::new(
+            self.slot,
+            self.expected_current,
+            self.successor_operation_id,
+            self.pending_authority_receipts,
+            command,
+        )
     }
 }
 

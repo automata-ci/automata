@@ -4,7 +4,10 @@ use automata_ci_core::{
     IsolationLevel, JobResourceAllocation, OperatingSystem, OperationId, ResourceCapacity,
     RunnerRequirements, SandboxFeature,
 };
-use automata_ci_protocol::{LeaseRequest, ProtocolLimits, RunnerToServer, ServerToRunner};
+use automata_ci_protocol::{
+    LeaseAuthorityName, LeaseAuthorityPollContribution, LeaseAuthorityPollContributions,
+    LeasePollResponse, LeaseRequest, ProtocolLimits, RunnerToServer, ServerToRunner,
+};
 use automata_ci_protocol_protobuf::{
     PROTOBUF_PACKAGE, decode_job_ir, decode_runner_frame, decode_server_frame, encode_job_ir,
     encode_runner_frame, encode_server_frame,
@@ -25,15 +28,26 @@ fn every_runner_envelope_variant_round_trips_losslessly() {
 fn first_and_successor_lease_requests_round_trip_with_exact_chain_position() {
     let limits = ProtocolLimits::default();
     let acknowledged = OperationId::new();
+    let contributions = LeaseAuthorityPollContributions::new(vec![
+        LeaseAuthorityPollContribution::new(
+            LeaseAuthorityName::new("windows-hyperv").expect("authority name"),
+            2,
+            vec![0x5a; 64],
+        )
+        .expect("poll contribution"),
+    ])
+    .expect("contribution bundle");
     let messages = [
         RunnerToServer::LeaseRequest(LeaseRequest::first(
             common::request_header(101),
             common::slot(),
+            LeaseAuthorityPollContributions::default(),
         )),
         RunnerToServer::LeaseRequest(LeaseRequest::successor(
             common::request_header(102),
             common::slot(),
             acknowledged,
+            contributions,
         )),
     ];
 
@@ -41,6 +55,51 @@ fn first_and_successor_lease_requests_round_trip_with_exact_chain_position() {
         let encoded = encode_runner_frame(&message, &limits).expect("encode lease request");
         let decoded = decode_runner_frame(&encoded, &limits)
             .expect("decode lease request")
+            .into_message();
+        assert_eq!(decoded, message);
+    }
+}
+
+#[test]
+fn every_correlated_poll_outcome_round_trips_inside_its_receipt() {
+    let limits = ProtocolLimits::default();
+    let accepted = LeaseAuthorityPollContributions::default().sha256_digest();
+    let offer = common::server_messages()
+        .into_iter()
+        .find_map(|(_, message)| match message {
+            ServerToRunner::LeaseOffer(offer) => Some(*offer),
+            _ => None,
+        })
+        .expect("lease offer fixture");
+    let cancel = common::server_messages()
+        .into_iter()
+        .find_map(|(_, message)| match message {
+            ServerToRunner::CancelJob(cancel) => Some(cancel),
+            _ => None,
+        })
+        .expect("cancel fixture");
+    let messages = [
+        ServerToRunner::LeasePollResponse(Box::new(LeasePollResponse::no_work(
+            common::reply_header(201, 101),
+            accepted,
+            1_000,
+        ))),
+        ServerToRunner::LeasePollResponse(Box::new(LeasePollResponse::lease_offer(
+            common::reply_header(202, 102),
+            accepted,
+            offer,
+        ))),
+        ServerToRunner::LeasePollResponse(Box::new(LeasePollResponse::cancel_job(
+            common::reply_header(203, 103),
+            accepted,
+            cancel,
+        ))),
+    ];
+
+    for message in messages {
+        let encoded = encode_server_frame(&message, &limits).expect("encode poll response");
+        let decoded = decode_server_frame(&encoded, &limits)
+            .expect("decode poll response")
             .into_message();
         assert_eq!(decoded, message);
     }

@@ -4,9 +4,9 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     CancelJob, CommandAck, ErrorMessage, HandshakeRejected, JobResultMessage, JobStateUpdate,
-    LeaseHeartbeat, LeaseOffer, LeaseRenewal, LeaseRequest, LeaseResponse, LogAckMessage, LogBatch,
-    NoWork, OperationAck, ProtocolLimits, RunnerHello, RuntimeAuthorityAck, RuntimeAuthorityGrant,
-    RuntimeAuthorityRequest, ServerHello,
+    LeaseHeartbeat, LeaseOffer, LeasePollResponse, LeaseRenewal, LeaseRequest, LeaseResponse,
+    LogAckMessage, LogBatch, OperationAck, ProtocolLimits, RunnerHello, RuntimeAuthorityAck,
+    RuntimeAuthorityGrant, RuntimeAuthorityRequest, ServerHello,
     validation::{validate_runner_message, validate_server_message},
 };
 
@@ -64,6 +64,8 @@ pub enum ServerToRunner {
     Hello(ServerHello),
     /// Rejects a pre-negotiation hello with a stable reason code.
     HandshakeRejected(HandshakeRejected),
+    /// Returns one explicitly acknowledged lease-poll result.
+    LeasePollResponse(Box<LeasePollResponse>),
     /// Offers one immutable job and lease fence without credential values.
     LeaseOffer(Box<LeaseOffer>),
     /// Delivers one exact post-accept runtime-authority generation.
@@ -76,8 +78,6 @@ pub enum ServerToRunner {
     LogAck(LogAckMessage),
     /// Confirms an idempotent runner operation with no richer response.
     OperationAck(OperationAck),
-    /// Directs an idle slot to back off before polling again.
-    NoWork(NoWork),
     /// Reports a typed, sanitized remote failure.
     Error(ErrorMessage),
 }

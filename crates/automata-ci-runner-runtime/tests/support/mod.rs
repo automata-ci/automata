@@ -17,10 +17,10 @@ use automata_ci_core::{
     JobIrEnvelope, JobLifecycle, JobPermissionRequest, JobResult, JobSecretExposure, JobSource,
     Lease, LeaseId, LogAck, LogChannel, LogFrame, LogGroupId, OperationId, RunId,
     RunValueTemplates, RunnerCapabilities, RunnerId, RunnerPlatform, RunnerRequirements,
-    RuntimeBoolean, SandboxCapabilities, SemanticStep, Sha256Digest, ShellTemplate, StepId, StepIr,
-    TrustActorEvidence, TrustActorKind, TrustAutomationKind, TrustEventKind, TrustEvidence,
-    TrustOriginKind, TrustPolicy, TrustRepositoryEvidence, TrustTokenRecursion, UnixMillis,
-    ValueTemplate, WorkflowId,
+    RuntimeBoolean, SandboxAuthorizations, SandboxCapabilities, SemanticStep, Sha256Digest,
+    ShellTemplate, StepId, StepIr, TrustActorEvidence, TrustActorKind, TrustAutomationKind,
+    TrustEventKind, TrustEvidence, TrustOriginKind, TrustPolicy, TrustRepositoryEvidence,
+    TrustTokenRecursion, UnixMillis, ValueTemplate, WorkflowId,
 };
 use automata_ci_execution::{
     ExecutionArgv, ExecutionEnvironment, ImmutableImage, SandboxEnvironment, TargetPath,
@@ -28,11 +28,12 @@ use automata_ci_execution::{
 use automata_ci_protocol::{
     CancelJob, CommandCursor, CommandSequence, ErrorMessage, HandshakeErrorCode, HandshakeRejected,
     INITIAL_RUNTIME_AUTHORITY_GENERATION, JobResultMessage, JobRuntimeAuthorities,
-    JobRuntimeAuthority, LeaseOffer, LeaseRenewal, LogAckMessage, MessageHeader, NegotiatedSession,
-    NoWork, OperationAck, RemoteErrorCode, RunnerSlotOrdinal, RunnerToServer,
-    RuntimeAuthorityCredential, RuntimeAuthorityDeliveryBinding, RuntimeAuthorityEndpoint,
-    RuntimeAuthorityGrant, RuntimeAuthorityName, RuntimeAuthorityRequest, SUPPORTED_PROTOCOL_RANGE,
-    ServerCommandHeader, ServerHello, ServerTiming, ServerToRunner, SessionDisposition,
+    JobRuntimeAuthority, LeaseOffer, LeasePollResponse, LeaseRenewal, LeaseRequest, LogAckMessage,
+    MessageHeader, NegotiatedSession, OperationAck, RemoteErrorCode, RunnerSlotOrdinal,
+    RunnerToServer, RuntimeAuthorityCredential, RuntimeAuthorityDeliveryBinding,
+    RuntimeAuthorityEndpoint, RuntimeAuthorityGrant, RuntimeAuthorityName, RuntimeAuthorityRequest,
+    SUPPORTED_PROTOCOL_RANGE, ServerCommandHeader, ServerHello, ServerTiming, ServerToRunner,
+    SessionDisposition,
 };
 use automata_ci_protocol_protobuf::{decode_job_ir, encode_job_ir, encode_runtime_authorities};
 use automata_ci_runner_journal::{
@@ -2552,10 +2553,7 @@ impl RunnerRuntimeControlClient for RecoveringPollClient {
                     if let Some(shutdown) = &self.shutdown_after_recovery {
                         shutdown.cancel();
                     }
-                    control_reply(
-                        ServerToRunner::NoWork(NoWork::new(reply_header(poll.header()), 1)),
-                        &self.limits,
-                    )
+                    control_reply(lease_poll_no_work(poll, 1), &self.limits)
                 }
                 _ => Err(invalid_control_response()),
             }
@@ -2694,7 +2692,7 @@ impl RunnerRuntimeControlClient for ResumeFallbackClient {
                 }
                 RunnerToServer::LeaseRequest(poll) => {
                     self.shutdown.cancel();
-                    ServerToRunner::NoWork(NoWork::new(reply_header(poll.header()), 1))
+                    lease_poll_no_work(poll, 1)
                 }
                 _ => return Err(invalid_control_response()),
             };
@@ -2807,7 +2805,7 @@ impl RunnerRuntimeControlClient for MaintenanceReapClient {
                         1 => {
                             assert_eq!(poll.header().session_id(), self.fresh_session_id);
                             self.shutdown.cancel();
-                            ServerToRunner::NoWork(NoWork::new(reply_header(poll.header()), 1))
+                            lease_poll_no_work(poll, 1)
                         }
                         _ => panic!("fresh session must stop after its first successful poll"),
                     }
@@ -2933,10 +2931,7 @@ impl RunnerRuntimeControlClient for CrossSlotReplayClient {
                             ));
                         }
                     }
-                    control_reply(
-                        ServerToRunner::LeaseOffer(Box::new(self.offer.clone())),
-                        &self.limits,
-                    )
+                    control_reply(lease_poll_offer(poll, self.offer.clone()), &self.limits)
                 }
                 RunnerToServer::CommandAck(ack) => {
                     assert_eq!(
@@ -3134,7 +3129,7 @@ impl RunnerRuntimeControlClient for CommandDuringAckClient {
                             ));
                         }
                     }
-                    ServerToRunner::LeaseOffer(Box::new(self.offers[0].clone()))
+                    lease_poll_offer(poll, self.offers[0].clone())
                 }
                 RunnerToServer::CommandAck(ack) => {
                     let cursor = ack
@@ -3291,7 +3286,7 @@ impl RunnerRuntimeControlClient for DelayedPredecessorClient {
                             RuntimeControlRetry::Never,
                         ));
                     }
-                    ServerToRunner::LeaseOffer(Box::new(offer.clone()))
+                    lease_poll_offer(poll, offer.clone())
                 }
                 RunnerToServer::CommandAck(ack) => {
                     let cursor = ack
@@ -3389,14 +3384,14 @@ impl RunnerRuntimeControlClient for IgnoredOfferReplayClient {
                 )),
                 RunnerToServer::LeaseRequest(poll) => {
                     match self.poll_calls.fetch_add(1, Ordering::SeqCst) {
-                        0 => ServerToRunner::LeaseOffer(Box::new(self.offers[0].clone())),
+                        0 => lease_poll_offer(poll, self.offers[0].clone()),
                         1 => {
                             self.replay_seen.store(true, Ordering::SeqCst);
-                            ServerToRunner::LeaseOffer(Box::new(self.offers[1].clone()))
+                            lease_poll_offer(poll, self.offers[1].clone())
                         }
                         _ => {
                             self.shutdown.cancel();
-                            ServerToRunner::NoWork(NoWork::new(reply_header(poll.header()), 1))
+                            lease_poll_no_work(poll, 1)
                         }
                     }
                 }
@@ -3542,16 +3537,13 @@ impl RunnerRuntimeControlClient for ScriptedControlClient {
                         });
                     }
                     self.shutdown.cancel();
-                    RuntimeControlReply::from_message(
-                        ServerToRunner::NoWork(NoWork::new(reply_header(poll.header()), 1)),
-                        &self.limits,
-                    )
-                    .map_err(|_| {
-                        RuntimeControlError::new(
-                            RuntimeControlErrorKind::InvalidResponse,
-                            RuntimeControlRetry::Never,
-                        )
-                    })
+                    RuntimeControlReply::from_message(lease_poll_no_work(poll, 1), &self.limits)
+                        .map_err(|_| {
+                            RuntimeControlError::new(
+                                RuntimeControlErrorKind::InvalidResponse,
+                                RuntimeControlRetry::Never,
+                            )
+                        })
                 }
                 _ => Err(RuntimeControlError::new(
                     RuntimeControlErrorKind::InvalidResponse,
@@ -4019,10 +4011,10 @@ impl RunnerRuntimeControlClient for CancellationFlowClient {
                     let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
                     if state.cancel_replayed_after_release {
                         self.shutdown.cancel();
-                        ServerToRunner::NoWork(NoWork::new(reply_header(poll.header()), 1))
+                        lease_poll_no_work(poll, 1)
                     } else {
                         state.cancel_replayed_after_release = true;
-                        ServerToRunner::CancelJob(self.cancellation.clone())
+                        lease_poll_cancel(poll, self.cancellation.clone())
                     }
                 }
                 _ => return Err(invalid_control_response()),
@@ -4190,7 +4182,7 @@ impl RunnerRuntimeControlClient for CancellationContentRaceClient {
                             .released_slot_polled = true;
                         self.changed.notify_waiters();
                     }
-                    ServerToRunner::NoWork(NoWork::new(reply_header(poll.header()), 1))
+                    lease_poll_no_work(poll, 1)
                 }
                 _ => return Err(invalid_control_response()),
             };
@@ -4483,7 +4475,7 @@ impl RunnerRuntimeControlClient for FailureIsolationClient {
                     if poll.slot().get() == 1 {
                         self.released_slot_poll.notify_one();
                     }
-                    ServerToRunner::NoWork(NoWork::new(reply_header(poll.header()), 1))
+                    lease_poll_no_work(poll, 1)
                 }
                 _ => return Err(invalid_control_response()),
             };
@@ -4640,7 +4632,7 @@ impl RunnerRuntimeControlClient for CleanupIsolationClient {
                         }
                         self.released_slot_poll.notify_one();
                     }
-                    ServerToRunner::NoWork(NoWork::new(reply_header(poll.header()), 1))
+                    lease_poll_no_work(poll, 1)
                 }
                 _ => return Err(invalid_control_response()),
             };
@@ -4956,9 +4948,7 @@ impl RunnerRuntimeControlClient for ActiveBacklogClient {
                         LogAck::new(last.stream_id(), Some(last.sequence())),
                     ))
                 }
-                RunnerToServer::LeaseRequest(poll) => {
-                    ServerToRunner::NoWork(NoWork::new(reply_header(poll.header()), 1))
-                }
+                RunnerToServer::LeaseRequest(poll) => lease_poll_no_work(poll, 1),
                 _ => return Err(invalid_control_response()),
             };
             control_reply(response, &self.limits)
@@ -5110,9 +5100,7 @@ impl RunnerRuntimeControlClient for LogSegmentRaceClient {
                     self.changed.notify_waiters();
                     return Ok(reply);
                 }
-                RunnerToServer::LeaseRequest(poll) => {
-                    ServerToRunner::NoWork(NoWork::new(reply_header(poll.header()), 1))
-                }
+                RunnerToServer::LeaseRequest(poll) => lease_poll_no_work(poll, 1),
                 _ => return Err(invalid_control_response()),
             };
             control_reply(response, &self.limits)
@@ -5290,9 +5278,7 @@ impl RunnerRuntimeControlClient for BlockedLogClient {
                         LogAck::new(last.stream_id(), Some(last.sequence())),
                     ))
                 }
-                RunnerToServer::LeaseRequest(poll) => {
-                    ServerToRunner::NoWork(NoWork::new(reply_header(poll.header()), 1))
-                }
+                RunnerToServer::LeaseRequest(poll) => lease_poll_no_work(poll, 1),
                 _ => return Err(invalid_control_response()),
             };
             control_reply(response, &self.limits)
@@ -5498,9 +5484,7 @@ impl RunnerRuntimeControlClient for SlowLogClient {
                     self.shutdown.cancel();
                     ServerToRunner::OperationAck(OperationAck::new(reply_header(result.header())))
                 }
-                RunnerToServer::LeaseRequest(poll) => {
-                    ServerToRunner::NoWork(NoWork::new(reply_header(poll.header()), 1))
-                }
+                RunnerToServer::LeaseRequest(poll) => lease_poll_no_work(poll, 1),
                 _ => return Err(invalid_control_response()),
             };
             control_reply(response, &self.limits)
@@ -5651,7 +5635,7 @@ impl RunnerRuntimeControlClient for RecoveredFinalizationClient {
                 }
                 RunnerToServer::LeaseRequest(poll) => {
                     self.shutdown.cancel();
-                    ServerToRunner::NoWork(NoWork::new(reply_header(poll.header()), 1))
+                    lease_poll_no_work(poll, 1)
                 }
                 _ => return Err(invalid_control_response()),
             };
@@ -6019,8 +6003,13 @@ fn record_test_authority_delivery_with_expiries_and_acknowledgement(
         .expect("load accepted JobIR");
     let job = decode_job_ir(&encoded_job, &limits).expect("decode accepted JobIR");
     let authorities = if job.job().authority_profile() == JobAuthorityProfile::CredentialFree {
-        JobRuntimeAuthorities::new(Vec::new(), &job, &fixture.lease)
-            .expect("credential-free authority bundle")
+        JobRuntimeAuthorities::new(
+            Vec::new(),
+            SandboxAuthorizations::empty(),
+            &job,
+            &fixture.lease,
+        )
+        .expect("credential-free authority bundle")
     } else {
         test_runtime_authorities_with_expiries(&job, &fixture.lease, authority_expiries)
     };
@@ -6140,6 +6129,7 @@ fn test_runtime_authorities_with_expiries(
                 .expect("runtime authority")
             })
             .collect(),
+        SandboxAuthorizations::empty(),
         job,
         lease,
     )
@@ -6242,6 +6232,30 @@ fn reply_header(request: MessageHeader) -> MessageHeader {
         OperationId::new(),
         request.operation_id(),
     )
+}
+
+fn lease_poll_no_work(request: &LeaseRequest, retry_after_millis: u32) -> ServerToRunner {
+    ServerToRunner::LeasePollResponse(Box::new(LeasePollResponse::no_work(
+        reply_header(request.header()),
+        request.authority_contributions().sha256_digest(),
+        retry_after_millis,
+    )))
+}
+
+fn lease_poll_offer(request: &LeaseRequest, offer: LeaseOffer) -> ServerToRunner {
+    ServerToRunner::LeasePollResponse(Box::new(LeasePollResponse::lease_offer(
+        reply_header(request.header()),
+        request.authority_contributions().sha256_digest(),
+        offer,
+    )))
+}
+
+fn lease_poll_cancel(request: &LeaseRequest, cancel: CancelJob) -> ServerToRunner {
+    ServerToRunner::LeasePollResponse(Box::new(LeasePollResponse::cancel_job(
+        reply_header(request.header()),
+        request.authority_contributions().sha256_digest(),
+        cancel,
+    )))
 }
 
 fn observe(request: &PreparedRequest) -> ObservedRequest {

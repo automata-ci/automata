@@ -84,6 +84,7 @@ fn validated_allocation(
 ) -> Result<JobResourceAllocation, automata_ci_execution::ProviderError> {
     if spec.network() != SandboxNetworkPolicy::Disabled
         || !spec.services().is_empty()
+        || !spec.sandbox_authorizations().as_slice().is_empty()
         || !spec.runtime_service_routes().is_empty()
         || spec.privilege() != automata_ci_execution::SandboxPrivilegePolicy::Unprivileged
         || !spec.has_coherent_resource_contract()
@@ -538,7 +539,8 @@ mod tests {
     use automata_ci_core::{EnvironmentProfile, EnvironmentProfileId, OperationId, Sha256Digest};
     use automata_ci_execution::{
         ExecutionArgv, ExecutionEnvironment, ImmutableImage, NetworkPolicy, ResourceLimits,
-        RootFilesystemPolicy, SandboxEnvironment, SandboxGeneration, SandboxSpec, TargetPath,
+        RootFilesystemPolicy, SandboxAuthorization, SandboxAuthorizationName,
+        SandboxAuthorizations, SandboxEnvironment, SandboxGeneration, SandboxSpec, TargetPath,
     };
 
     use super::*;
@@ -606,6 +608,31 @@ mod tests {
             ResourceLimits::new(1024 * 1024 * 1024, 1_500, 512).expect("limits"),
         )
         .with_resource_allocation(allocation)
+    }
+
+    #[test]
+    fn rejects_provider_authorizations_before_rendering_kubernetes_objects() {
+        let authorization = SandboxAuthorization::new(
+            SandboxAuthorizationName::new("another-provider").expect("authorization name"),
+            1,
+            b"opaque-authority".to_vec(),
+        )
+        .expect("authorization");
+        let spec = sandbox_spec().with_sandbox_authorizations(
+            SandboxAuthorizations::new(vec![authorization]).expect("authorization set"),
+        );
+
+        let error = build_objects("a-test-7", &spec, &config())
+            .expect_err("Kubernetes cannot consume provider-specific authorization");
+
+        assert_eq!(
+            error.kind(),
+            automata_ci_execution::ProviderErrorKind::InvalidConfiguration
+        );
+        assert_eq!(
+            error.stage(),
+            automata_ci_execution::ProviderStage::Validate
+        );
     }
 
     #[test]

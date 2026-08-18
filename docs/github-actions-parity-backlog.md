@@ -18,11 +18,11 @@ fail during logical projection, compile without scheduler enforcement, work
 only in focused component tests, work only on Linux, lack production ingress or
 credentials, or deliberately diverge from GitHub.
 
-The 2026-08-12 refresh includes the runtime restoration merged in PR #29:
-runner protocol v2, message schema v1, JobIR schema v1, runner-requirements
-schema v1, a frozen additive PostgreSQL migration lineage, three isolated
-single-slot Linux runner processes, the Kubernetes product configuration path,
-durable rerun and protected-environment authority,
+The current baseline builds on the 2026-08-12 runtime restoration merged in
+PR #29 and uses runner protocol v3, message schema v1, JobIR schema v1,
+runner-requirements schema v1, a frozen additive PostgreSQL migration lineage,
+three isolated single-slot Linux runner processes, the Kubernetes product
+configuration path, durable rerun and protected-environment authority,
 value-safe managed-secret delivery, and immutable multi-workflow fanout. The
 lineage is gap-free, checksum-verified, and extended only through a new
 migration. These are component or experimental foundations unless a later item
@@ -1117,7 +1117,7 @@ runner.
 - [x] Remove privileged static fleet bootstrap rather than retaining a
   migration or break-glass compatibility path.
 - [x] Negotiate the runner protocol and JobIR ranges before a session or lease;
-  the current baseline admits protocol v2 only.
+  the current baseline admits protocol v3 only.
 - [x] Add a runner enrollment and registration API.
 - [ ] Add credential rotation.
 - [ ] Add disable and enable.

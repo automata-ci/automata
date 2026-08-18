@@ -149,6 +149,14 @@ token. Every state change and published result compares that token. A delayed
 runner may repeat a request, but it cannot commit after a newer lease takes
 ownership.
 
+Runner protocol 3 carries provider-owned lease evidence through a required
+canonical contribution bundle, not provider-specific lease fields. A poll
+result must correlate to the exact request and accept that bundle's digest
+before the runner changes its poll checkpoint. Extension sources are
+acknowledged only after the nested outcome reaches its required durable state.
+See [Runtime-authority delivery](runtime-authority-delivery.md) for the exact
+ordering and retry contract.
+
 The runner journals a lease and sandbox handle before acknowledging the work.
 After a restart it reattaches to a live attempt or terminates and removes an
 orphan. Cancellation is stored first, prevents another step from starting,
@@ -197,9 +205,13 @@ bindings from the built-in provider at exact pinned versions. Durable lease
 state records only a value-free binding overlay; the runner fetches values over
 a direct mTLS-bound ephemeral channel after leasing, holds them in zeroizing
 custody, and installs every log mask before acknowledging delivery or starting
-work. External or dynamic providers and variable-value delivery remain
-unsupported. This path does not make every workflow eligible, and protected-
-environment acceptance remains a separate boundary. See
+work. The protected `JobRuntimeAuthorities` schema-2 bundle also carries
+canonical, opaque `SandboxAuthorizations`; the generic runner and executor pass
+them unchanged, and an isolation provider must consume its own exact namespace
+and schema before mutation or reject the job. External or dynamic providers
+and variable-value delivery remain unsupported. This path does not make every
+workflow eligible, and protected-environment acceptance remains a separate
+boundary. See
 [Authentication and authorization](authentication.md) for the current
 interfaces and limits.
 
