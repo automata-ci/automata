@@ -24,6 +24,7 @@ mod observer;
 mod orchestration;
 mod port;
 mod provider_result;
+mod provider_result_projection;
 mod provider_trigger;
 mod result_projection;
 mod reusable_runtime;
@@ -43,6 +44,7 @@ pub use activation::{
     MAX_ACTIVATION_OUTPUT_BYTES, MAX_MATRIX_CANDIDATE_COMBINATIONS, MAX_MATRIX_EXPANSION_WORK,
     ValidatedLogicalJob, ValidatedLogicalPlan,
 };
+pub use automata_ci_provider::ProviderWorkflowRunState;
 pub use automata_ci_store::ProviderProcessingClaimSource;
 pub use automata_ci_workflow_actions::{
     GithubWorkflowDispatchInputValue, GithubWorkflowDispatchInputs,
@@ -89,6 +91,10 @@ pub use observer::{
 pub use port::{AdmissionClock, AdmissionIdGenerator, WorkflowPlanVerifier};
 pub(crate) use provider_result::ProviderWorkflowResultRequest;
 pub use provider_result::{ProviderWorkflowResultService, ProviderWorkflowResultServiceError};
+pub use provider_result_projection::{
+    ProviderWorkflowResultProjectionError, ProviderWorkflowResultProjectionOutcome,
+    ProviderWorkflowResultProjectionService,
+};
 pub use provider_trigger::{
     ProviderWorkflowApplicationError, ProviderWorkflowApplicationOutcome,
     ProviderWorkflowApplicationReport, ProviderWorkflowApplicationRequest,

@@ -285,7 +285,8 @@ const fn provider_result_error(
         | ProviderWorkflowResultServiceError::InvalidEvidence => {
             ProviderWorkflowApplicationError::InvalidEvidence
         }
-        ProviderWorkflowResultServiceError::Inconsistent => {
+        ProviderWorkflowResultServiceError::SubjectNotReady
+        | ProviderWorkflowResultServiceError::Inconsistent => {
             ProviderWorkflowApplicationError::Inconsistent
         }
     }

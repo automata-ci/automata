@@ -2,14 +2,14 @@
 
 use std::{fmt, sync::Arc};
 
-use automata_ci_core::{GitObjectId, UnixMillis};
+use automata_ci_core::{GitObjectId, RunId, UnixMillis};
 use automata_ci_provider::{
     ProviderConnectionManifest, ProviderRepositoryPath, ProviderResultConclusion,
     ProviderResultDetailsUrl, ProviderResultModelError, ProviderResultName, ProviderResultPhase,
     ProviderResultProjection, ProviderResultRepository, ProviderResultRepositoryError,
     ProviderResultSaveOutcome, ProviderResultSubject, ProviderResultSubjectId,
     ProviderResultSubjectKind, ProviderResultSummary, ProviderResultTitle,
-    SaveDesiredProviderResult, VerifiedProviderTriggerDelivery,
+    ProviderWorkflowRunState, SaveDesiredProviderResult, VerifiedProviderTriggerDelivery,
 };
 use thiserror::Error;
 use url::Url;
@@ -136,6 +136,35 @@ impl ProviderWorkflowResultService {
             .map_err(repository_error)
     }
 
+    /// Reconciles one durable workflow-run lifecycle observation into the
+    /// provider result outbox.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed error when the initial immutable subject is not yet
+    /// visible, the lifecycle evidence is invalid, or result storage fails.
+    pub async fn reconcile_workflow_run(
+        &self,
+        run_id: RunId,
+        lifecycle: ProviderWorkflowRunState,
+        updated_at: UnixMillis,
+    ) -> Result<ProviderResultSaveOutcome, ProviderWorkflowResultServiceError> {
+        let subject = self
+            .results
+            .load_workflow_subject(run_id)
+            .await
+            .map_err(repository_error)?
+            .ok_or(ProviderWorkflowResultServiceError::SubjectNotReady)?;
+        if subject.subject() != &(ProviderResultSubjectKind::WorkflowRun { run_id }) {
+            return Err(ProviderWorkflowResultServiceError::Inconsistent);
+        }
+        let projection = lifecycle_projection(subject.name().as_str(), lifecycle, updated_at)?;
+        self.results
+            .save_desired(SaveDesiredProviderResult::new(subject, projection).map_err(model_error)?)
+            .await
+            .map_err(repository_error)
+    }
+
     fn details_url(
         &self,
         repository: &ProviderRepositoryPath,
@@ -187,6 +216,37 @@ fn bounded_name(path: &str) -> String {
     name
 }
 
+fn lifecycle_projection(
+    name: &str,
+    lifecycle: ProviderWorkflowRunState,
+    updated_at: UnixMillis,
+) -> Result<ProviderResultProjection, ProviderWorkflowResultServiceError> {
+    let (phase, conclusion, summary) = match lifecycle {
+        ProviderWorkflowRunState::Queued => {
+            (ProviderResultPhase::Queued, None, "Workflow run queued.")
+        }
+        ProviderWorkflowRunState::Running => (
+            ProviderResultPhase::Running,
+            None,
+            "Workflow run in progress.",
+        ),
+        ProviderWorkflowRunState::Completed(conclusion) => (
+            ProviderResultPhase::Completed,
+            Some(conclusion),
+            "Workflow run completed.",
+        ),
+    };
+    ProviderResultProjection::new(
+        phase,
+        conclusion,
+        ProviderResultTitle::new(name.to_owned()).map_err(model_error)?,
+        ProviderResultSummary::new(summary).map_err(model_error)?,
+        Vec::new(),
+        updated_at,
+    )
+    .map_err(model_error)
+}
+
 const fn model_error(_: ProviderResultModelError) -> ProviderWorkflowResultServiceError {
     ProviderWorkflowResultServiceError::InvalidEvidence
 }
@@ -216,6 +276,9 @@ pub enum ProviderWorkflowResultServiceError {
     /// Workflow or provider evidence cannot form one exact result subject.
     #[error("provider workflow result evidence is invalid")]
     InvalidEvidence,
+    /// The workflow was observed before its immutable provider result subject.
+    #[error("provider workflow result subject is not ready")]
+    SubjectNotReady,
     /// Result storage is temporarily unavailable.
     #[error("provider workflow result storage is unavailable")]
     Unavailable,
@@ -228,7 +291,7 @@ pub enum ProviderWorkflowResultServiceError {
 mod tests {
     use std::sync::Arc;
 
-    use automata_ci_core::RunId;
+    use automata_ci_core::{RunId, UnixMillis};
     use automata_ci_provider::{
         ProviderRepositoryPath, ProviderResultFuture, ProviderResultRepository,
         ProviderResultRepositoryError, ProviderResultSubjectKind, SaveDesiredProviderResult,
@@ -236,7 +299,10 @@ mod tests {
     use url::Url;
     use uuid::Uuid;
 
-    use super::{ProviderWorkflowResultService, ProviderWorkflowResultServiceError, bounded_name};
+    use super::{
+        ProviderWorkflowResultService, ProviderWorkflowResultServiceError, bounded_name,
+        lifecycle_projection,
+    };
 
     #[derive(Debug)]
     struct UnusedResults;
@@ -344,6 +410,66 @@ mod tests {
         assert_eq!(
             run.as_url().as_str(),
             format!("https://ci.example/group/subgroup/repository/actions/runs/{run_id}")
+        );
+    }
+
+    #[test]
+    fn lifecycle_projection_is_provider_independent_and_closed() {
+        let cases = [
+            (
+                automata_ci_provider::ProviderWorkflowRunState::Queued,
+                automata_ci_provider::ProviderResultPhase::Queued,
+                None,
+            ),
+            (
+                automata_ci_provider::ProviderWorkflowRunState::Running,
+                automata_ci_provider::ProviderResultPhase::Running,
+                None,
+            ),
+            (
+                automata_ci_provider::ProviderWorkflowRunState::Completed(
+                    automata_ci_provider::ProviderResultConclusion::Success,
+                ),
+                automata_ci_provider::ProviderResultPhase::Completed,
+                Some(automata_ci_provider::ProviderResultConclusion::Success),
+            ),
+            (
+                automata_ci_provider::ProviderWorkflowRunState::Completed(
+                    automata_ci_provider::ProviderResultConclusion::TimedOut,
+                ),
+                automata_ci_provider::ProviderResultPhase::Completed,
+                Some(automata_ci_provider::ProviderResultConclusion::TimedOut),
+            ),
+            (
+                automata_ci_provider::ProviderWorkflowRunState::Completed(
+                    automata_ci_provider::ProviderResultConclusion::Cancelled,
+                ),
+                automata_ci_provider::ProviderResultPhase::Completed,
+                Some(automata_ci_provider::ProviderResultConclusion::Cancelled),
+            ),
+        ];
+        for (lifecycle, phase, conclusion) in cases {
+            let projection =
+                lifecycle_projection("Automata CI / build", lifecycle, UnixMillis::new(42))
+                    .unwrap();
+            assert_eq!(projection.phase(), phase);
+            assert_eq!(projection.conclusion(), conclusion);
+            assert_eq!(projection.updated_at(), UnixMillis::new(42));
+        }
+    }
+
+    #[tokio::test]
+    async fn lifecycle_waits_for_the_initial_subject() {
+        assert_eq!(
+            service("https://ci.example/")
+                .unwrap()
+                .reconcile_workflow_run(
+                    RunId::from_uuid(Uuid::from_u128(42)),
+                    automata_ci_provider::ProviderWorkflowRunState::Running,
+                    UnixMillis::new(42),
+                )
+                .await,
+            Err(ProviderWorkflowResultServiceError::SubjectNotReady)
         );
     }
 }

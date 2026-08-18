@@ -117,9 +117,9 @@ pub use result::{
     ProviderResultPhase, ProviderResultProjection, ProviderResultPublicationEvidence,
     ProviderResultPublicationModel, ProviderResultRepository, ProviderResultRepositoryError,
     ProviderResultRetryAfter, ProviderResultSaveOutcome, ProviderResultSubject,
-    ProviderResultSubjectKind, ProviderResultSummary, ProviderResultTitle, RenewProviderResult,
-    ResultPublisherError,
-    RetryProviderResult, SaveDesiredProviderResult,
+    ProviderResultSubjectKind, ProviderResultSummary, ProviderResultTitle,
+    ProviderWorkflowResultObservation, ProviderWorkflowResultSource, ProviderWorkflowRunState,
+    RenewProviderResult, ResultPublisherError, RetryProviderResult, SaveDesiredProviderResult,
 };
 pub use storage::{
     ProviderInstanceRecord, ProviderManifestRepository, ProviderRepositoryError,

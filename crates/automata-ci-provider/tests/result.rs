@@ -742,6 +742,43 @@ fn result_subject_ids_are_deterministic_connection_scoped_version_eight() {
 }
 
 #[test]
+fn workflow_result_observations_are_exact_and_non_nil() {
+    let run_id = RunId::from_uuid(Uuid::from_u128(42));
+    let observation = automata_ci_provider::ProviderWorkflowResultObservation::new(
+        run_id,
+        automata_ci_provider::ProviderWorkflowRunState::Completed(
+            ProviderResultConclusion::Success,
+        ),
+        UnixMillis::new(2_000),
+    )
+    .unwrap();
+    assert_eq!(observation.run_id(), run_id);
+    assert_eq!(
+        observation.state(),
+        automata_ci_provider::ProviderWorkflowRunState::Completed(
+            ProviderResultConclusion::Success
+        )
+    );
+    assert_eq!(observation.updated_at(), UnixMillis::new(2_000));
+    assert_eq!(
+        automata_ci_provider::ProviderWorkflowResultObservation::new(
+            RunId::from_uuid(Uuid::nil()),
+            automata_ci_provider::ProviderWorkflowRunState::Queued,
+            UnixMillis::new(2_000),
+        ),
+        Err(ProviderResultModelError::InvalidRun)
+    );
+    assert_eq!(
+        automata_ci_provider::ProviderWorkflowResultObservation::new(
+            run_id,
+            automata_ci_provider::ProviderWorkflowRunState::Running,
+            UnixMillis::new(-1),
+        ),
+        Err(ProviderResultModelError::InvalidTimestamp)
+    );
+}
+
+#[test]
 fn evidence_is_bound_to_the_exact_claim_fence() {
     let claimed = ClaimedProviderResult::new(
         subject(),

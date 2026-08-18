@@ -548,6 +548,65 @@ pub enum ProviderResultConclusion {
     ActionRequired,
 }
 
+/// Provider-independent aggregate workflow lifecycle observed from durable CI state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProviderWorkflowRunState {
+    /// The workflow is admitted but has not started executing.
+    Queued,
+    /// At least one part of the workflow has started executing.
+    Running,
+    /// The workflow reached one exact aggregate conclusion.
+    Completed(ProviderResultConclusion),
+}
+
+/// One durable workflow lifecycle newer than its current desired provider result.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProviderWorkflowResultObservation {
+    run_id: RunId,
+    state: ProviderWorkflowRunState,
+    updated_at: UnixMillis,
+}
+
+impl ProviderWorkflowResultObservation {
+    /// Creates one exact provider-result reconciliation observation.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a nil run identity or a timestamp before the Unix epoch.
+    pub fn new(
+        run_id: RunId,
+        state: ProviderWorkflowRunState,
+        updated_at: UnixMillis,
+    ) -> Result<Self, ProviderResultModelError> {
+        if run_id.as_uuid().is_nil() {
+            return Err(ProviderResultModelError::InvalidRun);
+        }
+        if updated_at.get() < 0 {
+            return Err(ProviderResultModelError::InvalidTimestamp);
+        }
+        Ok(Self {
+            run_id,
+            state,
+            updated_at,
+        })
+    }
+    /// Returns the exact workflow run.
+    #[must_use]
+    pub const fn run_id(self) -> RunId {
+        self.run_id
+    }
+    /// Returns the aggregate lifecycle.
+    #[must_use]
+    pub const fn state(self) -> ProviderWorkflowRunState {
+        self.state
+    }
+    /// Returns the durable lifecycle update time.
+    #[must_use]
+    pub const fn updated_at(self) -> UnixMillis {
+        self.updated_at
+    }
+}
+
 /// Provider-independent state to reconcile at a native provider.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProviderResultProjection {
@@ -1518,6 +1577,17 @@ pub enum ProviderResultSaveOutcome {
 pub type ProviderResultFuture<'a, T> =
     Pin<Box<dyn Future<Output = Result<T, ProviderResultRepositoryError>> + Send + 'a>>;
 
+/// Read-side source of workflow lifecycles newer than desired provider results.
+pub trait ProviderWorkflowResultSource: fmt::Debug + Send + Sync {
+    /// Selects at most one stale aggregate without taking exclusive custody.
+    ///
+    /// Concurrent readers are safe because desired-result reconciliation is
+    /// atomic, monotonic, and idempotent.
+    fn next_workflow_result(
+        &self,
+    ) -> ProviderResultFuture<'_, Option<ProviderWorkflowResultObservation>>;
+}
+
 /// Durable current-only desired result and fenced publication outbox.
 pub trait ProviderResultRepository: fmt::Debug + Send + Sync {
     /// Loads the immutable provider result subject for one workflow run.
@@ -1604,6 +1674,9 @@ pub enum ProviderResultModelError {
     /// New results require an active connection.
     #[error("result connection is not active")]
     InactiveConnection,
+    /// Workflow run identity is invalid.
+    #[error("result workflow run is invalid")]
+    InvalidRun,
     /// A durable timestamp is invalid.
     #[error("result timestamp is invalid")]
     InvalidTimestamp,

@@ -19,7 +19,8 @@ use automata_ci_provider::{
     ProviderProcessingRepository, ProviderRepositoryError, ProviderRepositoryFuture,
     ProviderResultFuture, ProviderResultRepository, ProviderResultSaveOutcome, ProviderSaveOutcome,
     ProviderWebhookEndpointId, ProviderWebhookEndpointManifest, ProviderWebhookEndpointRecord,
-    ProviderWebhookEndpointRepository, ProviderWebhookEndpointRevision, RenewProviderProcessing,
+    ProviderWebhookEndpointRepository, ProviderWebhookEndpointRevision,
+    ProviderWorkflowResultObservation, ProviderWorkflowResultSource, RenewProviderProcessing,
     RenewProviderResult, RetryProviderProcessing,
 };
 use sqlx::{PgPool, Postgres, Transaction};
@@ -248,6 +249,14 @@ impl ProviderResultRepository for PostgresProviderManifestRepository {
         request: automata_ci_provider::FailProviderResult,
     ) -> ProviderResultFuture<'_, ()> {
         Box::pin(self.fail_result_inner(request))
+    }
+}
+
+impl ProviderWorkflowResultSource for PostgresProviderManifestRepository {
+    fn next_workflow_result(
+        &self,
+    ) -> ProviderResultFuture<'_, Option<ProviderWorkflowResultObservation>> {
+        Box::pin(self.next_workflow_result_inner())
     }
 }
 

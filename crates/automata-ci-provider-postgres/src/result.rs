@@ -10,7 +10,8 @@ use automata_ci_provider::{
     ProviderResultPublicationModel, ProviderResultRepositoryError, ProviderResultSaveOutcome,
     ProviderResultSubject, ProviderResultSubjectId, ProviderResultSubjectKind,
     ProviderResultSummary, ProviderResultTitle, ProviderResultWorkerId, ProviderSchemaVersion,
-    RenewProviderResult, RetryProviderResult, SaveDesiredProviderResult,
+    ProviderWorkflowResultObservation, ProviderWorkflowRunState, RetryProviderResult,
+    RenewProviderResult, SaveDesiredProviderResult,
 };
 use sqlx::{FromRow, Postgres, Transaction};
 
@@ -63,7 +64,46 @@ struct AnnotationRow {
     message: String,
 }
 
+#[derive(FromRow)]
+struct WorkflowResultObservationRow {
+    run_id: uuid::Uuid,
+    status: String,
+    effective_conclusion: Option<String>,
+    updated_at_ms: i64,
+}
+
 impl PostgresProviderManifestRepository {
+    pub(crate) async fn next_workflow_result_inner(
+        &self,
+    ) -> Result<Option<ProviderWorkflowResultObservation>, ProviderResultRepositoryError> {
+        let row = sqlx::query_as::<_, WorkflowResultObservationRow>(
+            r"
+            SELECT subject.run_id, run.status,
+                   result.effective_conclusion, run.updated_at_ms
+            FROM provider_result_subjects AS subject
+            JOIN provider_result_outbox AS outbox
+              ON outbox.subject_id = subject.subject_id
+            JOIN workflow_runs AS run ON run.id = subject.run_id
+            LEFT JOIN logical_workflow_run_results AS result
+              ON result.run_id = run.id
+            WHERE subject.subject_kind = 'workflow-run'
+              AND run.updated_at_ms > outbox.updated_at_ms
+              AND (
+                run.status IN ('queued', 'in_progress', 'cancelled')
+                OR (run.status = 'completed' AND result.run_id IS NOT NULL)
+              )
+            ORDER BY run.updated_at_ms, subject.subject_id
+            LIMIT 1
+            ",
+        )
+        .fetch_optional(self.pool())
+        .await
+        .map_err(unavailable)?;
+        row.as_ref()
+            .map(decode_workflow_result_observation)
+            .transpose()
+    }
+
     pub(crate) async fn load_workflow_subject_inner(
         &self,
         run_id: RunId,
@@ -525,6 +565,37 @@ impl PostgresProviderManifestRepository {
         }
         Ok(subject)
     }
+}
+
+fn decode_workflow_result_observation(
+    row: &WorkflowResultObservationRow,
+) -> Result<ProviderWorkflowResultObservation, ProviderResultRepositoryError> {
+    let state = match row.status.as_str() {
+        "queued" => ProviderWorkflowRunState::Queued,
+        "in_progress" => ProviderWorkflowRunState::Running,
+        "cancelled" => ProviderWorkflowRunState::Completed(ProviderResultConclusion::Cancelled),
+        "completed" => ProviderWorkflowRunState::Completed(
+            match row
+                .effective_conclusion
+                .as_deref()
+                .ok_or(ProviderResultRepositoryError::Corrupt)?
+            {
+                "success" => ProviderResultConclusion::Success,
+                "failure" => ProviderResultConclusion::Failure,
+                "cancelled" => ProviderResultConclusion::Cancelled,
+                "timed_out" => ProviderResultConclusion::TimedOut,
+                "skipped" => ProviderResultConclusion::Skipped,
+                _ => return Err(ProviderResultRepositoryError::Corrupt),
+            },
+        ),
+        _ => return Err(ProviderResultRepositoryError::Corrupt),
+    };
+    ProviderWorkflowResultObservation::new(
+        RunId::from_uuid(row.run_id),
+        state,
+        UnixMillis::new(row.updated_at_ms),
+    )
+    .map_err(model_corrupt)
 }
 
 #[derive(FromRow)]
@@ -1027,4 +1098,60 @@ const fn map_manifest_error(
 
 fn unavailable(_: sqlx::Error) -> ProviderResultRepositoryError {
     ProviderResultRepositoryError::Unavailable
+}
+
+#[cfg(test)]
+mod tests {
+    use automata_ci_provider::{ProviderResultConclusion, ProviderWorkflowRunState};
+    use uuid::Uuid;
+
+    use super::{WorkflowResultObservationRow, decode_workflow_result_observation};
+
+    #[test]
+    fn workflow_lifecycle_rows_decode_without_provider_specific_state() {
+        let cases = [
+            ("queued", None, ProviderWorkflowRunState::Queued),
+            ("in_progress", None, ProviderWorkflowRunState::Running),
+            (
+                "cancelled",
+                None,
+                ProviderWorkflowRunState::Completed(ProviderResultConclusion::Cancelled),
+            ),
+            (
+                "completed",
+                Some("success"),
+                ProviderWorkflowRunState::Completed(ProviderResultConclusion::Success),
+            ),
+            (
+                "completed",
+                Some("timed_out"),
+                ProviderWorkflowRunState::Completed(ProviderResultConclusion::TimedOut),
+            ),
+        ];
+        for (status, conclusion, expected) in cases {
+            let observation = decode_workflow_result_observation(&WorkflowResultObservationRow {
+                run_id: Uuid::from_u128(42),
+                status: status.to_owned(),
+                effective_conclusion: conclusion.map(str::to_owned),
+                updated_at_ms: 2_000,
+            })
+            .unwrap();
+            assert_eq!(observation.state(), expected);
+        }
+    }
+
+    #[test]
+    fn completed_lifecycle_requires_exact_aggregate_evidence() {
+        for conclusion in [None, Some("unknown")] {
+            assert!(
+                decode_workflow_result_observation(&WorkflowResultObservationRow {
+                    run_id: Uuid::from_u128(42),
+                    status: "completed".to_owned(),
+                    effective_conclusion: conclusion.map(str::to_owned),
+                    updated_at_ms: 2_000,
+                })
+                .is_err()
+            );
+        }
+    }
 }
