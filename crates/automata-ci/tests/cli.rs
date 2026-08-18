@@ -150,6 +150,29 @@ fn local_init_requires_explicit_canonical_host_custody_and_catalog_evidence() {
     assert_eq!(args.catalog_source, "file:/srv/releases/catalog.json");
     assert!(!args.recover_stopped_lock);
 
+    let cli = Cli::try_parse_from([
+        "automata",
+        "local",
+        "init",
+        "--state-directory",
+        "/var/lib/automata-local/team",
+        "--installation",
+        "team-2",
+        "--workers",
+        "3",
+        "--catalog-source",
+        "file:/srv/releases/catalog.json",
+        "--recover-stopped-lock",
+    ])
+    .expect("explicit stopped initialization lock recovery must parse");
+    let Command::Local(local) = cli.command else {
+        panic!("local command expected");
+    };
+    let LocalCommand::Init(args) = local.command else {
+        panic!("local init command expected");
+    };
+    assert!(args.recover_stopped_lock);
+
     for invalid in [
         vec![
             "automata",
@@ -209,6 +232,12 @@ fn local_lifecycle_commands_are_public_exact_state_directory_operations() {
     let init = local.find_subcommand_mut("init").expect("init command");
     let help = init.render_long_help().to_string();
     assert!(help.contains("without starting services"));
+    assert!(help.contains("--recover-stopped-lock"));
+    assert!(help.contains("Stopped evidence is refused by default"));
+    assert!(help.contains("fails closed"));
+    assert!(help.contains("Engine restart"));
+    assert!(help.contains("positive Engine/process quiescence"));
+    assert!(help.contains("initialization replay"));
     let up = local.find_subcommand_mut("up").expect("up command");
     let help = up.render_long_help().to_string();
     assert!(help.contains("exact running topology"));

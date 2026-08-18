@@ -277,6 +277,10 @@ pub struct LocalInitArgs {
     #[arg(long, value_name = "file:ABS", value_parser = parse_catalog_source)]
     pub catalog_source: String,
     /// Explicitly authorize recovery of one exact stopped initialization lock.
+    ///
+    /// Stopped evidence is refused by default, and unavailable proof fails
+    /// closed. When set, recovery requires an Engine restart and positive
+    /// Engine/process quiescence before exact-ID removal and initialization replay.
     #[arg(long)]
     pub recover_stopped_lock: bool,
 }
