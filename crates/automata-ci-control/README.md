@@ -12,7 +12,8 @@ runner messages.
 Runner lease-authority integrations cross one provider-neutral extension
 boundary. Every canonical poll contribution is accepted before scheduling and
 its exact bundle digest is acknowledged in the durable poll response. Offer
-evidence is bounded, canonical, and retained in the durable command; after
+evidence is canonical, retained in the durable command, and limited to an
+8 MiB encoded budget that leaves capacity for the rest of that command; after
 acceptance, the matching extension prepares a sandbox authorization whose
 commit is atomic with delivery of the complete runtime-authority bundle.
 Unknown or unconfigured authorities fail closed. Provider-specific admission,

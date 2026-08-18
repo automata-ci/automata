@@ -108,7 +108,10 @@ Poll contributions and sandbox authorizations are separate contracts. A poll
 contribution lets a server-side extension validate and durably retain
 provider-owned lease evidence. Any job-bound authorization derived from that
 evidence is delivered only after exact offer acceptance through the protected
-runtime-authority exchange.
+runtime-authority exchange. The canonical evidence set has an 8 MiB encoded
+durability budget, and complete lease-offer commands are size-checked before
+publication, so an accepted extension projection cannot fail only when the
+store adapter serializes it.
 
 ## Provider-owned sandbox authorizations
 

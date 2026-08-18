@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, fmt, sync::Arc};
+use std::{collections::BTreeMap, fmt, io, sync::Arc};
 
 use async_trait::async_trait;
 use automata_ci_core::{
@@ -27,6 +27,12 @@ use super::{
 pub const LEASE_AUTHORITY_EVIDENCE_SCHEMA_VERSION: u16 = 1;
 /// Maximum number of independent authority extensions retained by one offer.
 pub const MAX_LEASE_AUTHORITY_EVIDENCE: usize = MAX_LEASE_AUTHORITY_POLL_CONTRIBUTIONS;
+/// Maximum encoded bytes reserved for authority evidence in one durable offer.
+///
+/// This is deliberately below the 16 MiB durable command ceiling so evidence
+/// cannot consume the entire command budget needed by the verified `JobIR`,
+/// lease, and secret-binding metadata.
+pub const MAX_DURABLE_LEASE_AUTHORITY_EVIDENCE_BYTES: usize = 8 * 1024 * 1024;
 
 /// One bounded, value-free provider-owned authority projection.
 #[derive(Clone, Eq, PartialEq)]
@@ -44,6 +50,14 @@ struct LeaseAuthorityEvidenceDocument {
     payload_schema_version: u16,
     payload_sha256: Sha256Digest,
     payload: Box<[u8]>,
+}
+
+#[derive(Serialize)]
+struct LeaseAuthorityEvidenceDocumentRef<'a> {
+    name: &'a LeaseAuthorityName,
+    payload_schema_version: u16,
+    payload_sha256: Sha256Digest,
+    payload: &'a [u8],
 }
 
 impl LeaseAuthorityEvidence {
@@ -134,11 +148,11 @@ impl Serialize for LeaseAuthorityEvidence {
     where
         S: serde::Serializer,
     {
-        LeaseAuthorityEvidenceDocument {
-            name: self.name.clone(),
+        LeaseAuthorityEvidenceDocumentRef {
+            name: &self.name,
             payload_schema_version: self.payload_schema_version,
             payload_sha256: self.payload_sha256,
-            payload: self.payload.clone(),
+            payload: &self.payload,
         }
         .serialize(serializer)
     }
@@ -172,6 +186,12 @@ pub struct LeaseAuthorityEvidenceSet {
 struct LeaseAuthorityEvidenceSetDocument {
     schema_version: u16,
     evidence: Vec<LeaseAuthorityEvidence>,
+}
+
+#[derive(Serialize)]
+struct LeaseAuthorityEvidenceSetDocumentRef<'a> {
+    schema_version: u16,
+    evidence: &'a [LeaseAuthorityEvidence],
 }
 
 impl LeaseAuthorityEvidenceSet {
@@ -232,6 +252,18 @@ impl LeaseAuthorityEvidenceSet {
             }
             previous = Some(evidence.name());
         }
+        let document = LeaseAuthorityEvidenceSetDocumentRef {
+            schema_version: self.schema_version,
+            evidence: &self.evidence,
+        };
+        if serde_json::to_writer(
+            EncodedSizeWriter::new(MAX_DURABLE_LEASE_AUTHORITY_EVIDENCE_BYTES),
+            &document,
+        )
+        .is_err()
+        {
+            return Err(LeaseAuthorityEvidenceError::EncodedPayloadTooLarge);
+        }
         Ok(())
     }
 }
@@ -247,9 +279,9 @@ impl Serialize for LeaseAuthorityEvidenceSet {
     where
         S: serde::Serializer,
     {
-        LeaseAuthorityEvidenceSetDocument {
+        LeaseAuthorityEvidenceSetDocumentRef {
             schema_version: self.schema_version,
-            evidence: self.evidence.clone(),
+            evidence: &self.evidence,
         }
         .serialize(serializer)
     }
@@ -288,9 +320,90 @@ pub enum LeaseAuthorityEvidenceError {
     /// The evidence set exceeds its hard entry limit.
     #[error("lease authority evidence count is invalid")]
     InvalidCount,
+    /// The canonical durable JSON representation exceeds its reserved budget.
+    #[error("lease authority evidence exceeds its durable encoded-byte budget")]
+    EncodedPayloadTooLarge,
     /// Evidence is duplicated or not in canonical namespace order.
     #[error("lease authority evidence is not in canonical order")]
     NonCanonicalOrder,
+}
+
+struct EncodedSizeWriter {
+    remaining: usize,
+}
+
+impl EncodedSizeWriter {
+    const fn new(maximum: usize) -> Self {
+        Self { remaining: maximum }
+    }
+}
+
+impl io::Write for EncodedSizeWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if bytes.len() > self.remaining {
+            return Err(io::Error::other(
+                "encoded evidence exceeds its durable budget",
+            ));
+        }
+        self.remaining -= bytes.len();
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn maximal_evidence(name: &str, byte: u8) -> LeaseAuthorityEvidence {
+        LeaseAuthorityEvidence::new(
+            LeaseAuthorityName::new(name).expect("authority name"),
+            1,
+            vec![byte; MAX_LEASE_AUTHORITY_POLL_PAYLOAD_BYTES],
+        )
+        .expect("maximal evidence")
+    }
+
+    #[test]
+    fn one_maximal_evidence_payload_always_fits_the_durable_budget() {
+        for byte in [0, u8::MAX] {
+            let set = LeaseAuthorityEvidenceSet::new(vec![maximal_evidence("extension", byte)])
+                .expect("one maximal evidence payload");
+            assert!(
+                serde_json::to_vec(&set).expect("encoded evidence").len()
+                    <= MAX_DURABLE_LEASE_AUTHORITY_EVIDENCE_BYTES
+            );
+        }
+    }
+
+    #[test]
+    fn aggregate_durable_evidence_budget_rejects_wire_valid_amplification() {
+        let within_budget = LeaseAuthorityEvidenceSet::new(vec![
+            maximal_evidence("extension-1", 0),
+            maximal_evidence("extension-2", 0),
+            maximal_evidence("extension-3", 0),
+        ])
+        .expect("three zero-filled payloads fit the encoded budget");
+        assert!(
+            serde_json::to_vec(&within_budget)
+                .expect("encoded evidence")
+                .len()
+                <= MAX_DURABLE_LEASE_AUTHORITY_EVIDENCE_BYTES
+        );
+
+        assert_eq!(
+            LeaseAuthorityEvidenceSet::new(vec![
+                maximal_evidence("extension-1", 0),
+                maximal_evidence("extension-2", 0),
+                maximal_evidence("extension-3", 0),
+                maximal_evidence("extension-4", 0),
+            ]),
+            Err(LeaseAuthorityEvidenceError::EncodedPayloadTooLarge)
+        );
+    }
 }
 
 /// Trusted server context for accepting one runner poll contribution.

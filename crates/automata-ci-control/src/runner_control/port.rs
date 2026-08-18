@@ -708,6 +708,9 @@ pub enum LeaseOfferCommandError {
     /// Lease-authority evidence does not match the exact claim and `JobIR`.
     #[error("lease-offer authority evidence is invalid")]
     InvalidLeaseAuthorityEvidence,
+    /// The complete durable command representation exceeds its storage budget.
+    #[error("lease-offer durable command payload is invalid")]
+    InvalidDurablePayload,
     /// The command was created outside the lease validity interval.
     #[error("lease-offer creation time is outside its validity interval")]
     InvalidCreationTime,
@@ -739,14 +742,16 @@ impl LeaseOfferCommand {
             return Err(LeaseOfferCommandError::InvalidCreationTime);
         }
         let offer_valid_until = claim.lease().expires_at();
-        Ok(Self {
+        let command = Self {
             managed_secret_bindings: ManagedSecretBindingOverlay::empty(claim.lease()),
             lease_authority_evidence: LeaseAuthorityEvidenceSet::empty(),
             claim,
             job,
             offer_valid_until,
             created_at,
-        })
+        };
+        encode_lease_offer_command_payload(&command)?;
+        Ok(command)
     }
 
     /// Retains value-free evidence for post-accept provider authorization.
@@ -763,6 +768,7 @@ impl LeaseOfferCommand {
             .validate()
             .map_err(|_| LeaseOfferCommandError::InvalidLeaseAuthorityEvidence)?;
         self.lease_authority_evidence = evidence;
+        encode_lease_offer_command_payload(&self)?;
         Ok(self)
     }
 
@@ -779,6 +785,7 @@ impl LeaseOfferCommand {
             .validate_for(self.claim.lease())
             .map_err(|_| LeaseOfferCommandError::InvalidManagedSecretBindings)?;
         self.managed_secret_bindings = overlay;
+        encode_lease_offer_command_payload(&self)?;
         Ok(self)
     }
 
@@ -1191,24 +1198,8 @@ impl LeaseOfferCommandPublisher for StoreLeaseOfferCommandPublisher {
         let (store_claim, request_kind) = store_lease_offer_claim(&claim)?;
         let command_kind = RunnerOperationKind::new(LEASE_OFFER_COMMAND_KIND)
             .map_err(|_| ControlPortError::Corrupt)?;
-        let schema = DocumentSchema::new(LEASE_OFFER_COMMAND_SCHEMA)
-            .map_err(|_| ControlPortError::Corrupt)?;
-        let mut payload = Zeroizing::new(Vec::new());
-        serde_json::to_writer(
-            &mut *payload,
-            &LeaseOfferCommandPayloadRef {
-                job: command.job(),
-                lease: command.lease(),
-                managed_secret_bindings: command.managed_secret_bindings(),
-                lease_authority_evidence: command.lease_authority_evidence(),
-                protocol_version: command.protocol_version().get(),
-                schema: LEASE_OFFER_COMMAND_SCHEMA,
-                slot: command.slot().get(),
-            },
-        )
-        .map_err(|_| ControlPortError::Corrupt)?;
-        let payload = RunnerCommandPayload::new(schema, std::mem::take(&mut *payload))
-            .map_err(|_| ControlPortError::Corrupt)?;
+        let payload =
+            encode_lease_offer_command_payload(&command).map_err(|_| ControlPortError::Corrupt)?;
         let durable_command = EnqueueRunnerCommand::new(
             command.session(),
             self.ids.next_operation_id(),
@@ -1251,6 +1242,29 @@ impl LeaseOfferCommandPublisher for StoreLeaseOfferCommandPublisher {
             published.was_replayed(),
         )))
     }
+}
+
+fn encode_lease_offer_command_payload(
+    command: &LeaseOfferCommand,
+) -> Result<RunnerCommandPayload, LeaseOfferCommandError> {
+    let schema = DocumentSchema::new(LEASE_OFFER_COMMAND_SCHEMA)
+        .map_err(|_| LeaseOfferCommandError::InvalidDurablePayload)?;
+    let mut payload = Zeroizing::new(Vec::new());
+    serde_json::to_writer(
+        &mut *payload,
+        &LeaseOfferCommandPayloadRef {
+            job: command.job(),
+            lease: command.lease(),
+            managed_secret_bindings: command.managed_secret_bindings(),
+            lease_authority_evidence: command.lease_authority_evidence(),
+            protocol_version: command.protocol_version().get(),
+            schema: LEASE_OFFER_COMMAND_SCHEMA,
+            slot: command.slot().get(),
+        },
+    )
+    .map_err(|_| LeaseOfferCommandError::InvalidDurablePayload)?;
+    RunnerCommandPayload::new(schema, std::mem::take(&mut *payload))
+        .map_err(|_| LeaseOfferCommandError::InvalidDurablePayload)
 }
 
 pub(crate) fn decode_durable_server_command(
