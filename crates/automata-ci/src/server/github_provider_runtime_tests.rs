@@ -906,6 +906,67 @@ async fn workflow_permission_convergence_contention_is_rate_limited_and_cancella
 }
 
 #[tokio::test(start_paused = true)]
+async fn workflow_permission_startup_converges_after_replica_contention() {
+    let owner = GithubServerServiceWorkerId::from_uuid(Uuid::from_u128(95)).expect("worker");
+    let calls = Arc::new(AtomicUsize::new(0));
+    let task_calls = Arc::clone(&calls);
+    let driver = tokio::spawn(async move {
+        converge_initial_workflow_permission_defaults(
+            move || {
+                let calls = Arc::clone(&task_calls);
+                async move {
+                    let call = calls.fetch_add(1, Ordering::AcqRel);
+                    if call < 2 {
+                        Err(GithubProviderRuntimeBuildError::WorkflowPermissionObservation)
+                    } else {
+                        Ok(WorkflowPermissionRefreshOutcome::Ready)
+                    }
+                }
+            },
+            owner,
+        )
+        .await
+    });
+
+    while calls.load(Ordering::Acquire) == 0 {
+        tokio::task::yield_now().await;
+    }
+    let first_delay = jittered_workflow_permission_retry_delay(
+        WORKFLOW_PERMISSION_OBSERVATION_STARTUP_RETRY_DELAY,
+        owner,
+        0,
+        WORKFLOW_PERMISSION_OBSERVATION_STARTUP_DEADLINE,
+    );
+    advance_until_call_count(&calls, first_delay, 2).await;
+    let second_delay = jittered_workflow_permission_retry_delay(
+        WORKFLOW_PERMISSION_OBSERVATION_STARTUP_RETRY_DELAY,
+        owner,
+        1,
+        WORKFLOW_PERMISSION_OBSERVATION_STARTUP_DEADLINE,
+    );
+    assert!(first_delay + second_delay < WORKFLOW_PERMISSION_OBSERVATION_STARTUP_DEADLINE);
+    advance_until_call_count(&calls, second_delay, 3).await;
+    assert!(driver.await.expect("startup convergence task").is_ok());
+}
+
+#[tokio::test(start_paused = true)]
+async fn workflow_permission_startup_rejects_a_policy_mismatch_without_retrying() {
+    let owner = GithubServerServiceWorkerId::from_uuid(Uuid::from_u128(96)).expect("worker");
+    let calls = AtomicUsize::new(0);
+    let result = converge_initial_workflow_permission_defaults(
+        || async {
+            calls.fetch_add(1, Ordering::AcqRel);
+            Ok(WorkflowPermissionRefreshOutcome::PolicyMismatch)
+        },
+        owner,
+    )
+    .await;
+
+    assert!(result.is_err());
+    assert_eq!(calls.load(Ordering::Acquire), 1);
+}
+
+#[tokio::test(start_paused = true)]
 async fn transient_workflow_permission_refresh_does_not_hot_loop() {
     let owner = GithubServerServiceWorkerId::from_uuid(Uuid::from_u128(91)).expect("worker");
     let calls = Arc::new(AtomicUsize::new(0));

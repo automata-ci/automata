@@ -109,6 +109,8 @@ const MAX_SUPERVISED_SERVICE_CREDENTIAL_COMMITS: usize =
     MAX_WORKFLOW_PERMISSION_OBSERVATION_CONCURRENCY;
 const WORKFLOW_PERMISSION_CREDENTIAL_STARTUP_DEADLINE: Duration = Duration::from_mins(10);
 const WORKFLOW_PERMISSION_CREDENTIAL_RETRY_DELAY: Duration = Duration::from_millis(100);
+const WORKFLOW_PERMISSION_OBSERVATION_STARTUP_DEADLINE: Duration = Duration::from_secs(15);
+const WORKFLOW_PERMISSION_OBSERVATION_STARTUP_RETRY_DELAY: Duration = Duration::from_secs(5);
 const WORKFLOW_PERMISSION_REFRESH_SAFETY_MARGIN_MILLIS: i64 = 60_000;
 const WORKFLOW_PERMISSION_REFRESH_RETRY_MIN: Duration = Duration::from_mins(1);
 const WORKFLOW_PERMISSION_REFRESH_RETRY_MAX: Duration = Duration::from_secs(7 * 60 + 30);
@@ -907,9 +909,11 @@ impl GithubProviderRuntimeBuilder {
             owner: observation_owner,
             targets: workflow_permission_targets,
         });
-        if permission_defaults.refresh_all().await? != WorkflowPermissionRefreshOutcome::Ready {
-            return Err(GithubProviderRuntimeBuildError::WorkflowPermissionObservation);
-        }
+        converge_initial_workflow_permission_defaults(
+            || permission_defaults.refresh_all(),
+            observation_owner,
+        )
+        .await?;
         let _ready = plan.bootstrap(store.as_ref(), applied_at).await?;
         let cleanup_authorities = retire_superseded_server_service_authorities(
             credential_authority_repository.as_ref(),
@@ -2481,6 +2485,51 @@ async fn run_workflow_permission_refresh_loop(
         stop,
     )
     .await
+}
+
+/// Establishes one current permission head while treating cross-replica claim
+/// contention exactly like the live refresher: bounded and retryable. A stable
+/// provider-policy mismatch remains an immediate startup failure.
+async fn converge_initial_workflow_permission_defaults<Refresh, RefreshFuture>(
+    mut refresh_all: Refresh,
+    owner: GithubServerServiceWorkerId,
+) -> Result<(), GithubProviderRuntimeBuildError>
+where
+    Refresh: FnMut() -> RefreshFuture,
+    RefreshFuture:
+        Future<Output = Result<WorkflowPermissionRefreshOutcome, GithubProviderRuntimeBuildError>>,
+{
+    let deadline = tokio::time::Instant::now()
+        .checked_add(WORKFLOW_PERMISSION_OBSERVATION_STARTUP_DEADLINE)
+        .ok_or(GithubProviderRuntimeBuildError::WorkflowPermissionObservation)?;
+    let mut attempt = 0_u64;
+    loop {
+        let outcome = tokio::time::timeout_at(deadline, refresh_all())
+            .await
+            .map_err(|_| GithubProviderRuntimeBuildError::WorkflowPermissionObservation)?;
+        match outcome {
+            Ok(WorkflowPermissionRefreshOutcome::Ready) => return Ok(()),
+            Ok(WorkflowPermissionRefreshOutcome::PolicyMismatch) => {
+                return Err(GithubProviderRuntimeBuildError::WorkflowPermissionObservation);
+            }
+            Err(_) => {}
+        }
+
+        let remaining = deadline
+            .checked_duration_since(tokio::time::Instant::now())
+            .ok_or(GithubProviderRuntimeBuildError::WorkflowPermissionObservation)?;
+        let retry_delay = jittered_workflow_permission_retry_delay(
+            WORKFLOW_PERMISSION_OBSERVATION_STARTUP_RETRY_DELAY,
+            owner,
+            attempt,
+            WORKFLOW_PERMISSION_OBSERVATION_STARTUP_DEADLINE,
+        );
+        if retry_delay >= remaining {
+            return Err(GithubProviderRuntimeBuildError::WorkflowPermissionObservation);
+        }
+        tokio::time::sleep(retry_delay).await;
+        attempt = attempt.saturating_add(1);
+    }
 }
 
 fn jittered_workflow_permission_retry_delay(
