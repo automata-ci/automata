@@ -768,9 +768,26 @@ name = "automata-ci-provider"
 version = "0.1.0"
 dependencies = [
  "automata-ci-core",
+ "automata-ci-key-management",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "thiserror",
+ "url",
+ "uuid",
+]
+
+[[package]]
+name = "automata-ci-provider-postgres"
+version = "0.1.0"
+dependencies = [
+ "automata-ci-core",
+ "automata-ci-key-management",
+ "automata-ci-postgres",
+ "automata-ci-provider",
+ "sha2 0.11.0",
+ "sqlx",
+ "tokio",
  "uuid",
 ]
 

@@ -567,11 +567,11 @@ fn database_desired_state(
     workspace_revision: u64,
 ) -> automata_ci_provisioning::GithubProviderDesiredState {
     use automata_ci_core::JobAuthorityProfile;
+    use automata_ci_core::WorkspaceId;
     use automata_ci_provisioning::{
         GithubProviderConfiguration, GithubProviderConfigurationRevision,
         GithubProviderRepositorySelection, GithubProviderSchedulePolicy, GithubProviderSecret,
         ShardId, WorkspaceGithubRepositoriesDesiredState, WorkspaceGithubRepositoriesRevision,
-        WorkspaceId,
     };
     use automata_ci_store::{
         GithubCheckName, GithubRepositoryName, GithubServerServiceAppClientId,

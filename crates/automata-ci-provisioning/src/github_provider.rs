@@ -1,6 +1,6 @@
 use std::{collections::BTreeSet, fmt, num::NonZeroU64};
 
-use automata_ci_core::JobAuthorityProfile;
+use automata_ci_core::{JobAuthorityProfile, WorkspaceId};
 use automata_ci_github::GithubWebhookVerifier;
 use automata_ci_store::{
     GithubCheckName, GithubRepositoryName, GithubServerServiceAppClientId,
@@ -12,7 +12,7 @@ use thiserror::Error;
 use url::Url;
 use zeroize::Zeroizing;
 
-use crate::{OperationId, ProvisioningAuthority, ShardId, WorkspaceId};
+use crate::{OperationId, ProvisioningAuthority, ShardId};
 
 /// Maximum private-key PEM accepted through the management boundary.
 pub const MAX_GITHUB_PROVIDER_PRIVATE_KEY_BYTES: usize = 32 * 1_024;

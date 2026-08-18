@@ -25,6 +25,7 @@ members = [
     "crates/automata-ci-oidc-github",
     "crates/automata-ci-postgres",
     "crates/automata-ci-provider",
+    "crates/automata-ci-provider-postgres",
     "crates/automata-ci-protocol",
     "crates/automata-ci-protocol-protobuf",
     "crates/automata-ci-provisioning",
@@ -101,6 +102,7 @@ automata-ci-metrics = { path = "crates/automata-ci-metrics", version = "0.1.0" }
 automata-ci-oidc-github = { path = "crates/automata-ci-oidc-github", version = "0.1.0" }
 automata-ci-postgres = { path = "crates/automata-ci-postgres", version = "0.1.0" }
 automata-ci-provider = { path = "crates/automata-ci-provider", version = "0.1.0" }
+automata-ci-provider-postgres = { path = "crates/automata-ci-provider-postgres", version = "0.1.0" }
 automata-ci-protocol = { path = "crates/automata-ci-protocol", version = "0.1.0" }
 automata-ci-protocol-protobuf = { path = "crates/automata-ci-protocol-protobuf", version = "0.1.0" }
 automata-ci-provisioning = { path = "crates/automata-ci-provisioning", version = "0.1.0" }

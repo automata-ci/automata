@@ -76,6 +76,77 @@ uuid_id!(/// Idempotency key for a mutating operation.
 uuid_id!(/// Identifies a durable stream of log frames.
     LogStreamId);
 
+/// Canonical non-nil identity of one Automata workspace.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct WorkspaceId(Uuid);
+
+impl WorkspaceId {
+    /// Parses an exact lower-case hyphenated non-nil workspace UUID.
+    ///
+    /// # Errors
+    ///
+    /// Rejects nil, non-hyphenated, upper-case, or otherwise noncanonical text.
+    pub fn parse(value: &str) -> Result<Self, WorkspaceIdError> {
+        let parsed = Uuid::parse_str(value).map_err(|_| WorkspaceIdError)?;
+        if parsed.is_nil() || parsed.hyphenated().to_string() != value {
+            return Err(WorkspaceIdError);
+        }
+        Ok(Self(parsed))
+    }
+
+    /// Constructs a workspace identity from a non-nil UUID.
+    ///
+    /// # Errors
+    ///
+    /// Rejects the nil UUID.
+    pub const fn from_uuid(value: Uuid) -> Result<Self, WorkspaceIdError> {
+        if value.is_nil() {
+            return Err(WorkspaceIdError);
+        }
+        Ok(Self(value))
+    }
+
+    /// Returns the underlying UUID.
+    #[must_use]
+    pub const fn as_uuid(self) -> Uuid {
+        self.0
+    }
+}
+
+impl fmt::Display for WorkspaceId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}", self.0.hyphenated())
+    }
+}
+
+impl FromStr for WorkspaceId {
+    type Err = WorkspaceIdError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::parse(value)
+    }
+}
+
+impl TryFrom<String> for WorkspaceId {
+    type Error = WorkspaceIdError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::parse(&value)
+    }
+}
+
+impl From<WorkspaceId> for String {
+    fn from(value: WorkspaceId) -> Self {
+        value.to_string()
+    }
+}
+
+/// Invalid canonical workspace identity.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+#[error("workspace ID is invalid")]
+pub struct WorkspaceIdError;
+
 /// Stable positive numeric alias for a workflow run.
 ///
 /// [`RunId`] remains the internal identity. This compact alias exists for

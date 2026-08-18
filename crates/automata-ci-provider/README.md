@@ -1,9 +1,9 @@
 # automata-ci-provider
 
-`automata-ci-provider` owns source-hosting provider identity and capability
-contracts for Automata. GitHub, Forgejo, and future provider adapters implement
-these contracts without entering the workflow, scheduler, store, or runner
-domains.
+`automata-ci-provider` owns source-hosting provider identity, capability,
+configuration, connection, factory-registry, and persistence-port contracts for
+Automata. GitHub, Forgejo, and future provider adapters implement these
+contracts without entering the workflow, scheduler, store, or runner domains.
 
 The crate contains no network client and no concrete provider implementation.
 

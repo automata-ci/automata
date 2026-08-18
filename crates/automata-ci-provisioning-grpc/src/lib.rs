@@ -10,6 +10,7 @@
 use std::{fmt, sync::Arc};
 
 use automata_ci_core::JobAuthorityProfile;
+use automata_ci_core::WorkspaceId;
 use automata_ci_provisioning::{
     ApplyGithubProviderConfigurationCommand, ApplyGithubProviderConfigurationResult,
     ApplyWorkspaceEntitlementCommand, ApplyWorkspaceEntitlementResult,
@@ -26,7 +27,7 @@ use automata_ci_provisioning::{
     ProvisioningFailureKind, ProvisioningWorkloadAuthenticator, ShardId,
     WorkloadAuthenticationEvidence, WorkspaceEntitlementApplier, WorkspaceExecutionEntitlement,
     WorkspaceGithubRepositoriesApplier, WorkspaceGithubRepositoriesFailure,
-    WorkspaceGithubRepositoriesFailureKind, WorkspaceGithubRepositoriesRevision, WorkspaceId,
+    WorkspaceGithubRepositoriesFailureKind, WorkspaceGithubRepositoriesRevision,
     WorkspaceProvisioner,
 };
 use automata_ci_store::{

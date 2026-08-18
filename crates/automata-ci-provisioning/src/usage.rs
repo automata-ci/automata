@@ -1,9 +1,10 @@
 use std::fmt;
 
+use automata_ci_core::WorkspaceId;
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::{EntitlementRevision, ProvisioningAuthority, ShardId, WorkspaceId};
+use crate::{EntitlementRevision, ProvisioningAuthority, ShardId};
 
 const MAX_CURSOR_BYTES: usize = 512;
 const MAX_PAGE_SIZE: u32 = 1_000;

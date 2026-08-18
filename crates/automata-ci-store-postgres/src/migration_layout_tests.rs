@@ -205,6 +205,10 @@ const CANONICAL_MIGRATIONS: &[(&str, &str)] = &[
         "0050_structured_live_logs.sql",
         "43e00572f617031aff81bcfb6711c9712a6b755038bc6f662a6f801665eadbc4069178d57642cc14b8b25f1cf08939dd",
     ),
+    (
+        "0051_provider_configuration_registry.sql",
+        "314b9c9aa3ab29764b579c1e61f2fa33dedee2acd7e6198838fc00f74643774230fd4bf1b45a614d2288ae0ad6bcdf2c",
+    ),
 ];
 
 const BASELINE_MIGRATION_COUNT: u32 = 26;

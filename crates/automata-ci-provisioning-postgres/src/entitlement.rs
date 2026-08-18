@@ -299,7 +299,7 @@ impl StoredOperation {
         self,
         operation_id: automata_ci_provisioning::OperationId,
         shard_id: automata_ci_provisioning::ShardId,
-        workspace_id: automata_ci_provisioning::WorkspaceId,
+        workspace_id: automata_ci_core::WorkspaceId,
     ) -> Result<ApplyWorkspaceEntitlementResult, EntitlementFailure> {
         result(
             operation_id,
@@ -340,7 +340,7 @@ async fn load_operation(
 fn result(
     operation_id: automata_ci_provisioning::OperationId,
     shard_id: automata_ci_provisioning::ShardId,
-    workspace_id: automata_ci_provisioning::WorkspaceId,
+    workspace_id: automata_ci_core::WorkspaceId,
     revision: automata_ci_provisioning::EntitlementRevision,
     applied_at_ms: i64,
     expires_at_ms: Option<i64>,
