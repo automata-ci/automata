@@ -1,3 +1,5 @@
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+use automata_ci::cli::InternalLocalCommand;
 use automata_ci::cli::{
     AuthCommand, Cli, Command, DatabaseTransport, EnvironmentReviewDecision, InternalCommand,
     InternalObjectStoreCommand, LocalCommand, LocalContainerEngine, OutputFormat, RepositoryRef,
@@ -111,6 +113,140 @@ fn local_check_is_explicit_source_only_workflow_dispatch_validation() {
     );
 }
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn local_init_requires_explicit_canonical_host_custody_and_catalog_evidence() {
+    let cli = Cli::try_parse_from([
+        "automata",
+        "local",
+        "init",
+        "--state-directory",
+        "/var/lib/automata-local/team",
+        "--installation",
+        "team-2",
+        "--workers",
+        "3",
+        "--catalog-source",
+        "file:/srv/releases/catalog.json",
+    ])
+    .expect("complete local init syntax must parse");
+    let Command::Local(local) = cli.command else {
+        panic!("local command expected");
+    };
+    let LocalCommand::Init(args) = local.command else {
+        panic!("local init command expected");
+    };
+    assert_eq!(
+        args.state_directory,
+        std::path::Path::new("/var/lib/automata-local/team")
+    );
+    assert_eq!(args.installation.as_str(), "team-2");
+    assert_eq!(args.workers.get(), 3);
+    assert_eq!(args.catalog_source, "file:/srv/releases/catalog.json");
+
+    for invalid in [
+        vec![
+            "automata",
+            "local",
+            "init",
+            "--catalog-source",
+            "file:/srv/catalog.json",
+        ],
+        vec![
+            "automata",
+            "local",
+            "init",
+            "--state-directory",
+            "relative",
+            "--catalog-source",
+            "file:/srv/catalog.json",
+        ],
+        vec![
+            "automata",
+            "local",
+            "init",
+            "--state-directory",
+            "/var/lib/automata",
+            "--catalog-source",
+            "https://example.test/catalog.json",
+        ],
+        vec![
+            "automata",
+            "local",
+            "init",
+            "--state-directory",
+            "/var/lib/automata",
+            "--catalog-source",
+            "file:/srv/catalog.json",
+            "--image",
+            "foreign",
+        ],
+    ] {
+        assert!(Cli::try_parse_from(invalid).is_err());
+    }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn local_init_stops_at_sealed_desired_state_without_hidden_lifecycle_commands() {
+    let mut command = Cli::command();
+    let local = command.find_subcommand_mut("local").expect("local command");
+    let names = local
+        .get_subcommands()
+        .map(clap::Command::get_name)
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["doctor", "check", "init"]);
+
+    let init = local.find_subcommand_mut("init").expect("init command");
+    let help = init.render_long_help().to_string();
+    assert!(help.contains("without starting services"));
+    for hidden_lifecycle in ["up", "down", "status", "reset", "bootstrap", "relay"] {
+        assert!(
+            Cli::try_parse_from(["automata", "local", hidden_lifecycle]).is_err(),
+            "{hidden_lifecycle} must not leak into the v1 init-only boundary"
+        );
+    }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn internal_local_materializer_is_one_fixed_argument_free_operation() {
+    let cli = Cli::try_parse_from(["automata", "internal", "local", "materialize"])
+        .expect("fixed internal materializer must parse");
+    let Command::Internal(internal) = cli.command else {
+        panic!("internal command expected");
+    };
+    let InternalCommand::Local(local) = internal.command else {
+        panic!("internal local command expected");
+    };
+    assert!(matches!(local.command, InternalLocalCommand::Materialize));
+    assert!(
+        Cli::try_parse_from([
+            "automata",
+            "internal",
+            "local",
+            "materialize",
+            "--path",
+            "/tmp/foreign",
+        ])
+        .is_err()
+    );
+}
+
+#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+#[test]
+fn local_init_and_its_internal_materializer_are_not_advertised() {
+    let mut command = Cli::command();
+    let local = command.find_subcommand_mut("local").expect("local command");
+    let names = local
+        .get_subcommands()
+        .map(clap::Command::get_name)
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["doctor", "check"]);
+    assert!(Cli::try_parse_from(["automata", "local", "init"]).is_err());
+    assert!(Cli::try_parse_from(["automata", "internal", "local", "materialize"]).is_err());
+}
+
 #[test]
 fn internal_object_store_bucket_initialization_is_hidden_exact_and_redacted() {
     let marker = "AUTOMATA_INTERNAL_PRIVATE_CA_MARKER";
@@ -136,7 +272,9 @@ fn internal_object_store_bucket_initialization_is_hidden_exact_and_redacted() {
     let Command::Internal(internal) = cli.command else {
         panic!("internal command expected");
     };
-    let InternalCommand::ObjectStore(object_store) = internal.command;
+    let InternalCommand::ObjectStore(object_store) = internal.command else {
+        panic!("internal object-store command expected");
+    };
     let InternalObjectStoreCommand::EnsureBucket(args) = object_store.command;
     assert_eq!(args.s3.s3_tls_trust, S3TlsTrustMode::PrivateCa);
     let debug = format!("{args:?}");
@@ -193,7 +331,9 @@ fn internal_private_ca_raw_values_become_redacted_invalid_sources() {
     let Command::Internal(internal) = cli.command else {
         panic!("internal command expected");
     };
-    let InternalCommand::ObjectStore(object_store) = internal.command;
+    let InternalCommand::ObjectStore(object_store) = internal.command else {
+        panic!("internal object-store command expected");
+    };
     let InternalObjectStoreCommand::EnsureBucket(args) = object_store.command;
     assert!(matches!(
         args.s3.s3_private_ca_source,

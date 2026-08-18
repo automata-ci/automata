@@ -157,6 +157,27 @@ workflows and reports required credentials without exposing values. See the
 [local installation boundary](crates/automata-ci-local/README.md) for the
 snapshot and platform limits.
 
+### Seal a local Docker installation
+
+On x86-64 Linux, `local init` seals an immutable installation into an explicit
+private state directory and twelve owner-specific Docker volumes:
+
+```console
+automata local init \
+  --state-directory /var/lib/automata-local/default \
+  --catalog-source file:/srv/automata-release/local-installation-catalog.json
+```
+
+Init accepts only the fixed local Docker socket and an operator-selected local
+release catalog with its exact catalog-declared sibling candidate. It verifies
+their canonical structure and digests, but does not independently authenticate
+their release provenance. Exact replay reattests the same state and Engine
+custody. Init generates no Compose document, invokes no Compose operation, and
+starts no service. Public `local up`, `down`, `status`, and `reset` commands are
+not part of this slice; `ResetRequired` is detectable but has no remediation
+command yet. See the [local installation boundary](crates/automata-ci-local/README.md)
+for the complete custody and platform contract.
+
 ## Architecture
 
 `automata` owns the human API, GitHub ingress, scheduler, Results gateway,

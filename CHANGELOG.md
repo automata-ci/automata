@@ -38,7 +38,20 @@ structure of [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
   pinned to the exact endpoint resolved from the context selected first;
   stable JSON schema 3 and human output report its bounded name. The internal
   adapter can strictly inspect or create-and-adopt a repository-agnostic
-  installation identity anchor without exposing a product mutation command.
+  installation identity anchor and is consumed by the x86-64 Linux init
+  boundary.
+- x86-64 Linux-only `automata local init --state-directory ABS
+  --catalog-source file:ABS` for a Docker Engine at exactly
+  `unix:///var/run/docker.sock`. It structurally and digest verifies the
+  operator-selected catalog and its exact sibling service-proxy candidate,
+  pulls/imports only the catalog-bound images, creates or exactly adopts the
+  installation identity and twelve owner-specific persistent volumes, retains
+  one-time certificate custody, and runs one fixed networkless, read-only-root
+  materializer with a bounded canonical stdin request. Init seals the immutable
+  epoch plus credential-free canonical desired intent and supports exact
+  replay; it does not independently authenticate catalog OIDC provenance,
+  generate or invoke Compose, or start services. `ResetRequired` is detectable,
+  while `local up`, `down`, `status`, and `reset` remain absent.
 - Evaluation-only fixed-relay Local Docker runner execution on Linux. Runner
   schema 6 binds the private provider to an exact existing installation anchor,
   already-present digest-pinned guest and Results-proxy images, and an exact

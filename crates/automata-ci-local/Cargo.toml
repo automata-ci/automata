@@ -41,7 +41,15 @@ tokio-util.workspace = true
 uuid.workspace = true
 
 [target.'cfg(unix)'.dependencies]
+automata-ci-runner-journal.workspace = true
+getrandom.workspace = true
+p256.workspace = true
+rcgen.workspace = true
+ring.workspace = true
 rustix.workspace = true
+time.workspace = true
+x509-parser.workspace = true
+zeroize.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 processkit.workspace = true
