@@ -149,11 +149,9 @@ async fn lifecycle_boundary_preserves_holder_loss_over_caller_cancellation() {
             holder_lost.cancel();
         }
 
-        let result = holder_bounded(
-            &holder_lost,
-            cancellation_bounded(&transaction_cancellation, async { Ok(()) }),
-        )
-        .await;
+        let result =
+            lifecycle_operation_bounded(&holder_lost, &transaction_cancellation, async { Ok(()) })
+                .await;
 
         assert_eq!(result.unwrap_err().code(), expected);
     }
@@ -179,21 +177,30 @@ fn public_up_and_down_use_the_holder_dominant_boundary() {
                 .count(),
             1
         );
-        assert_eq!(operation.matches("holder_bounded(").count(), 1);
+        assert_eq!(operation.matches("lifecycle_operation_bounded(").count(), 1);
     }
 }
 
-#[test]
-fn running_replay_attests_exact_cas_material_once() {
-    let source = include_str!("../lifecycle.rs");
-    let (_, running_and_later) = source
-        .split_once("if let LifecycleTopology::Running { transit_id } = &initial {")
-        .expect("up has a Running replay branch");
-    let (running, _) = running_and_later
-        .split_once("if initial == LifecycleTopology::Partial {")
-        .expect("Running replay precedes Partial convergence");
+#[tokio::test]
+async fn running_replay_invokes_exact_cas_attestation_once() {
+    let calls = std::cell::Cell::new(0);
+    let initial = LifecycleTopology::Running {
+        transit_id: "transit-id".to_owned(),
+    };
 
-    assert_eq!(running.matches("attest_exact_cas_material(").count(), 1);
+    complete_running_replay(
+        &initial,
+        &CancellationToken::new(),
+        || async {
+            calls.set(calls.get() + 1);
+            Ok(())
+        },
+        || async { Ok(initial.clone()) },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(calls.get(), 1);
 }
 
 #[test]

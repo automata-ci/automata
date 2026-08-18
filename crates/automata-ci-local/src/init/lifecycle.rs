@@ -382,34 +382,36 @@ pub async fn up_local(request: LocalUpRequest) -> Result<LocalUpOutcome, LocalIn
                 transit_id,
                 &control_id,
             )?;
-            attest_exact_cas_material(
-                &engine,
-                &established,
-                &artifacts,
-                &relay,
-                &runner_config,
-                &relay_id,
-                &runner_container_id,
-                &mutation_fence,
-            )
-            .await?;
             // A running runner owns the TLS custody lock for its full
             // lifetime. Completion replay is therefore a read-only
             // attestation branch: it must never rerun enrollment or any other
             // mutating one-off beside the admitted steady services.
-            let repeated = engine
-                .inspect_lifecycle_topology(
-                    &established.installation,
-                    &established.epoch,
-                    &desired,
-                    &rendered.expected,
-                    expected_runner_id,
-                )
-                .await?;
-            if repeated != initial {
-                return Err(reset_required());
-            }
-            cancellation_checkpoint(&transaction_cancellation)?;
+            complete_running_replay(
+                &initial,
+                &transaction_cancellation,
+                || {
+                    attest_exact_cas_material(
+                        &engine,
+                        &established,
+                        &artifacts,
+                        &relay,
+                        &runner_config,
+                        &relay_id,
+                        &runner_container_id,
+                        &mutation_fence,
+                    )
+                },
+                || {
+                    engine.inspect_lifecycle_topology(
+                        &established.installation,
+                        &established.epoch,
+                        &desired,
+                        &rendered.expected,
+                        expected_runner_id,
+                    )
+                },
+            )
+            .await?;
             return Ok((desired, resumed));
         }
 
@@ -689,11 +691,8 @@ pub async fn up_local(request: LocalUpRequest) -> Result<LocalUpOutcome, LocalIn
         cancellation_checkpoint(&transaction_cancellation)?;
         Ok((desired, resumed))
     };
-    let operation = holder_bounded(
-        &holder_lost,
-        cancellation_bounded(&transaction_cancellation, operation),
-    )
-    .await;
+    let operation =
+        lifecycle_operation_bounded(&holder_lost, &transaction_cancellation, operation).await;
 
     watcher.abort();
     let (desired, resumed) = match operation {
@@ -938,11 +937,8 @@ pub async fn down_local(request: LocalDownRequest) -> Result<LocalDownOutcome, L
         cancellation_checkpoint(&transaction_cancellation)?;
         Ok((desired, resumed))
     };
-    let operation = holder_bounded(
-        &holder_lost,
-        cancellation_bounded(&transaction_cancellation, operation),
-    )
-    .await;
+    let operation =
+        lifecycle_operation_bounded(&holder_lost, &transaction_cancellation, operation).await;
 
     watcher.abort();
     let (desired, resumed) = match operation {
@@ -1184,6 +1180,26 @@ async fn attest_exact_cas_material(
     Ok(())
 }
 
+async fn complete_running_replay<Attest, Attestation, Inspect, Inspection>(
+    initial: &LifecycleTopology,
+    cancellation: &CancellationToken,
+    attest_exact_material: Attest,
+    inspect_topology: Inspect,
+) -> Result<(), LocalInitError>
+where
+    Attest: FnOnce() -> Attestation,
+    Attestation: Future<Output = Result<(), LocalInitError>>,
+    Inspect: FnOnce() -> Inspection,
+    Inspection: Future<Output = Result<LifecycleTopology, LocalInitError>>,
+{
+    attest_exact_material().await?;
+    let repeated = inspect_topology().await?;
+    if &repeated != initial {
+        return Err(reset_required());
+    }
+    cancellation_checkpoint(cancellation)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_oneoff(
     cli: &QualifiedDockerCli,
@@ -1379,13 +1395,15 @@ async fn cancellation_bounded<T>(
     }
 }
 
-async fn holder_bounded<T>(
+async fn lifecycle_operation_bounded<T>(
     holder_lost: &CancellationToken,
+    transaction_cancellation: &CancellationToken,
     operation: impl Future<Output = Result<T, LocalInitError>>,
 ) -> Result<T, LocalInitError> {
     if holder_lost.is_cancelled() {
         return Err(reset_required());
     }
+    let operation = cancellation_bounded(transaction_cancellation, operation);
     tokio::pin!(operation);
     tokio::select! {
         biased;
