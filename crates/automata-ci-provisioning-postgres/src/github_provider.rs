@@ -168,6 +168,7 @@ impl PostgresGithubProviderConfigurationApplier {
         )?;
         let webhook_verifier_revision =
             next_webhook_revision(current.as_ref(), webhook_secret_hash.as_slice())?;
+        let runner_policy_revision = next_runner_policy_revision(current.as_ref(), &runner_policy)?;
         let applied_at_ms = database_time_milliseconds(&mut transaction)
             .await
             .map_err(provider_database_failure)?;
@@ -209,14 +210,14 @@ impl PostgresGithubProviderConfigurationApplier {
                 webhook_secret_sha256, webhook_secret_envelope_schema,
                 webhook_secret_wrapping_key_id, webhook_secret_wrapped_data_key,
                 webhook_secret_nonce, webhook_secret_ciphertext, check_name,
-                runner_policy, schedule_poll_millis,
+                runner_policy_revision, runner_policy, schedule_poll_millis,
                 schedule_discovery_claim_millis, schedule_fire_claim_millis,
                 schedule_retry_millis, schedule_staleness_millis,
                 schedule_maximum_manifests, schedule_maximum_fires_per_pass,
                 applied_at_ms
             ) VALUES (
                 true,$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
-                $17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32
+                $17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33
             )
             ",
         )
@@ -243,6 +244,7 @@ impl PostgresGithubProviderConfigurationApplier {
         .bind(webhook_secret.nonce)
         .bind(webhook_secret.ciphertext)
         .bind(configuration.check_name().as_str())
+        .bind(runner_policy_revision)
         .bind(runner_policy)
         .bind(schedule.poll_millis())
         .bind(schedule.discovery_claim_millis())
@@ -648,6 +650,7 @@ impl PostgresGithubProviderDesiredStateReader {
             GithubProviderConfigurationRevision::new(revision).map_err(|_| desired_corrupt())?,
             positive_u64(provider.app_configuration_revision)?,
             positive_u64(provider.webhook_verifier_revision)?,
+            positive_u64(provider.runner_policy_revision)?,
             configuration,
             workspaces,
         )
@@ -693,6 +696,7 @@ struct ProviderDesiredStateRow {
     webhook_secret_nonce: Vec<u8>,
     webhook_secret_ciphertext: Vec<u8>,
     check_name: String,
+    runner_policy_revision: i64,
     runner_policy: Vec<u8>,
     schedule_poll_millis: i64,
     schedule_discovery_claim_millis: i64,
@@ -951,6 +955,8 @@ struct CurrentProviderEvidence {
     app_private_key_sha256: Vec<u8>,
     webhook_verifier_revision: i64,
     webhook_secret_sha256: Vec<u8>,
+    runner_policy_revision: i64,
+    runner_policy: Vec<u8>,
 }
 
 async fn load_current_provider_evidence(
@@ -960,7 +966,8 @@ async fn load_current_provider_evidence(
         r"
         SELECT github_app_id, github_app_client_id, github_app_jwt_issuer_kind,
                app_configuration_revision, app_private_key_sha256,
-               webhook_verifier_revision, webhook_secret_sha256
+               webhook_verifier_revision, webhook_secret_sha256,
+               runner_policy_revision, runner_policy
         FROM github_provider_configuration_current WHERE singleton=true
         ",
     )
@@ -1006,6 +1013,23 @@ fn next_webhook_revision(
     } else {
         current
             .webhook_verifier_revision
+            .checked_add(1)
+            .ok_or_else(provider_internal)
+    }
+}
+
+fn next_runner_policy_revision(
+    current: Option<&CurrentProviderEvidence>,
+    runner_policy: &[u8],
+) -> Result<i64, GithubProviderConfigurationFailure> {
+    let Some(current) = current else {
+        return Ok(1);
+    };
+    if current.runner_policy == runner_policy {
+        Ok(current.runner_policy_revision)
+    } else {
+        current
+            .runner_policy_revision
             .checked_add(1)
             .ok_or_else(provider_internal)
     }

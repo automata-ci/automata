@@ -242,6 +242,7 @@ impl GithubProviderConfig {
             configuration_revision,
             app_configuration_revision,
             webhook_verifier_revision,
+            runner_policy_revision,
             configuration,
             workspaces,
         ) = desired.into_parts();
@@ -287,6 +288,7 @@ impl GithubProviderConfig {
                 repositories.push(database_repository_config(
                     workspace_id,
                     projected_revision,
+                    runner_policy_revision,
                     selected,
                     &runner_policy,
                     &check_name,
@@ -422,6 +424,7 @@ impl fmt::Debug for DatabaseGithubProviderConfig {
 fn database_repository_config(
     workspace_id: WorkspaceId,
     projected_revision: u64,
+    runner_policy_revision: u64,
     selected: &GithubProviderRepositorySelection,
     runner_policy: &GithubRunnerPolicy,
     check_name: &GithubCheckName,
@@ -463,7 +466,7 @@ fn database_repository_config(
             .map_err(|_| GithubProviderConfigError)?;
     let manifest_revision = GithubProviderManifestRevision::new(projected_revision)
         .map_err(|_| GithubProviderConfigError)?;
-    let runtime_policy_revision = WorkflowRuntimePolicyRevision::new(projected_revision)
+    let runtime_policy_revision = WorkflowRuntimePolicyRevision::new(runner_policy_revision)
         .map_err(|_| GithubProviderConfigError)?;
     let visibility = selected.visibility();
     Ok(GithubProviderRepositoryConfig {
