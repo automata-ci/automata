@@ -1582,12 +1582,12 @@ mod renewal_tests {
         LogicalWorkflowAdmissionReceipt, LogicalWorkflowAdmissionRepository,
         LogicalWorkflowAdmissionStoreError, ManifestPinnedGithubDeliveryEvidence,
         ManifestPinnedGithubDeliveryReceipt, ObjectKey, ProviderDeliveryClaimFence,
-        ProviderDeliveryClaimOwnerId, ProviderDeliveryEventEnvelope, ProviderDeliveryId,
-        ProviderDeliveryIdentity, ProviderDeliveryReceipt, ProviderDeliveryRepository,
-        ProviderDeliveryState, ProviderDeliveryStoreError, ProviderDeliveryWorkflowInventory,
+        ProviderDeliveryEventEnvelope, ProviderDeliveryId, ProviderDeliveryIdentity,
+        ProviderDeliveryReceipt, ProviderDeliveryRepository, ProviderDeliveryState,
+        ProviderDeliveryStoreError, ProviderDeliveryWorkflowInventory,
         ProviderDeliveryWorkflowInventoryReceipt, ProviderDeliveryWorkflowOutcome,
-        ProviderInstallationId, ProviderRepositoryCoordinates, ProviderRepositoryId,
-        ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
+        ProviderInstallationId, ProviderProcessingWorkerId, ProviderRepositoryCoordinates,
+        ProviderRepositoryId, ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
         RecordProviderDeliveryWorkflowProgress, RegisterProviderDeliveryWorkflowInventory,
         RejectProviderDelivery, RenewedProviderDeliveryClaim, RepositoryId as StoreRepositoryId,
         RetryProviderDelivery, TenantScope,
@@ -2318,7 +2318,7 @@ mod renewal_tests {
         .expect("claim receipt");
         let claim = ProviderDeliveryClaimFence::from_durable_parts(
             delivery_id,
-            ProviderDeliveryClaimOwnerId::from_uuid(Uuid::from_u128(2)).expect("claim owner"),
+            ProviderProcessingWorkerId::from_uuid(Uuid::from_u128(2)).expect("claim owner"),
             7,
         )
         .expect("claim fence");

@@ -42,13 +42,13 @@ use automata_ci_store::{
     MAX_GITHUB_SERVICE_CONSUMER_REQUEST_MILLIS, MAX_PROVIDER_DELIVERY_CLAIM_MILLIS,
     MAX_PROVIDER_DELIVERY_TOTAL_CLAIM_MILLIS, ManifestPinnedGithubDeliveryEvidence,
     ManifestPinnedGithubDeliveryReceipt, ObjectKey, ProviderDeliveryClaimFence,
-    ProviderDeliveryClaimOwnerId, ProviderDeliveryClaimRenewalRepository,
-    ProviderDeliveryEventEnvelope, ProviderDeliveryFailureKind, ProviderDeliveryId,
-    ProviderDeliveryIdentity, ProviderDeliveryReceipt, ProviderDeliveryRepository,
-    ProviderDeliveryState, ProviderDeliveryStoreError, ProviderDeliveryWorkflowConclusion,
+    ProviderDeliveryClaimRenewalRepository, ProviderDeliveryEventEnvelope,
+    ProviderDeliveryFailureKind, ProviderDeliveryId, ProviderDeliveryIdentity,
+    ProviderDeliveryReceipt, ProviderDeliveryRepository, ProviderDeliveryState,
+    ProviderDeliveryStoreError, ProviderDeliveryWorkflowConclusion,
     ProviderDeliveryWorkflowInventoryReceipt, ProviderDeliveryWorkflowOutcome,
-    ProviderInstallationId, ProviderRepositoryCoordinates, ProviderRepositoryId,
-    ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
+    ProviderInstallationId, ProviderProcessingWorkerId, ProviderRepositoryCoordinates,
+    ProviderRepositoryId, ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
     RecordProviderDeliveryWorkflowProgress, RegisterProviderDeliveryWorkflowInventory,
     RejectProviderDelivery, RenewProviderDeliveryClaim, RenewedProviderDeliveryClaim,
     RepositoryId as StoreRepositoryId, RetryProviderDelivery, TenantScope,
@@ -1199,7 +1199,7 @@ struct Harness {
     credentials: Arc<RecordingCredentialProvider>,
     source: Arc<RecordingSourcePort>,
     clock: Arc<ManualClock>,
-    worker_id: ProviderDeliveryClaimOwnerId,
+    worker_id: ProviderProcessingWorkerId,
     renewal_apply_gate: Arc<RenewalApplyGate>,
 }
 
@@ -1240,7 +1240,7 @@ fn blocking_clock_harness(
         Some(source_gate.clone()),
     ));
     let worker_id =
-        ProviderDeliveryClaimOwnerId::from_uuid(Uuid::from_u128(2)).expect("worker identity");
+        ProviderProcessingWorkerId::from_uuid(Uuid::from_u128(2)).expect("worker identity");
     let objects = Arc::new(VerifiedBlobStore::exact(descriptor, body));
     let service = GithubDeliveryService::new_public_only(
         objects,
@@ -1359,7 +1359,7 @@ fn harness_with_stored_visibility(
     let source = Arc::new(RecordingSourcePort::new(repository_source(), gate));
     let clock = Arc::new(ManualClock::new(INITIAL_NOW));
     let worker_id =
-        ProviderDeliveryClaimOwnerId::from_uuid(Uuid::from_u128(2)).expect("worker identity");
+        ProviderProcessingWorkerId::from_uuid(Uuid::from_u128(2)).expect("worker identity");
     let objects = Arc::new(VerifiedBlobStore::exact(descriptor, body));
     let service = if private_source_enabled {
         GithubDeliveryService::new_with_private_source_credentials(
@@ -1460,7 +1460,7 @@ fn snapshot_processor_harness_with_config(
     });
     let clock = Arc::new(ManualClock::new(INITIAL_NOW));
     let worker_id =
-        ProviderDeliveryClaimOwnerId::from_uuid(Uuid::from_u128(2)).expect("worker identity");
+        ProviderProcessingWorkerId::from_uuid(Uuid::from_u128(2)).expect("worker identity");
     let objects = Arc::new(VerifiedBlobStore::exact(descriptor, body));
     let service = GithubDeliveryService::new_with_private_source_credentials(
         objects.clone(),
@@ -1531,7 +1531,7 @@ fn changed_files_renewal_harness(
     let source = Arc::new(RecordingSourcePort::new(source, None));
     let clock = Arc::new(ManualClock::new(INITIAL_NOW));
     let worker_id =
-        ProviderDeliveryClaimOwnerId::from_uuid(Uuid::from_u128(2)).expect("worker identity");
+        ProviderProcessingWorkerId::from_uuid(Uuid::from_u128(2)).expect("worker identity");
     let objects = Arc::new(VerifiedBlobStore::exact(descriptor, body));
     let changed_files = Arc::new(match first_disposition {
         Some(disposition) => {
@@ -2818,7 +2818,7 @@ async fn delayed_renewal_is_cancelled_before_reclaim_can_overlap_provider_work()
         .reclaim_enabled
         .store(true, Ordering::SeqCst);
     let reclaim_owner =
-        ProviderDeliveryClaimOwnerId::from_uuid(Uuid::from_u128(0x44)).expect("reclaim owner");
+        ProviderProcessingWorkerId::from_uuid(Uuid::from_u128(0x44)).expect("reclaim owner");
     let observed_at = UnixMillis::new(INITIAL_NOW + claim_millis);
     let expires_at = UnixMillis::new(INITIAL_NOW + claim_millis * 2);
     let repository = harness.repository.clone();
@@ -2913,7 +2913,7 @@ async fn one_hour_claim_cap_expires_exactly_before_reclaim_and_without_extra_wor
         .reclaim_enabled
         .store(true, Ordering::SeqCst);
     let reclaim_owner =
-        ProviderDeliveryClaimOwnerId::from_uuid(Uuid::from_u128(0x45)).expect("reclaim owner");
+        ProviderProcessingWorkerId::from_uuid(Uuid::from_u128(0x45)).expect("reclaim owner");
     let hard_deadline = claim_started_at
         .checked_add(Duration::from_millis(
             u64::try_from(MAX_PROVIDER_DELIVERY_TOTAL_CLAIM_MILLIS)

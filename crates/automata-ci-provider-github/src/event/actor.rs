@@ -34,10 +34,8 @@ impl GithubEventActorKind {
 
 /// Stable actor facts retained from an authenticated GitHub webhook body.
 ///
-/// Older synthetic and replay fixtures may only provide the durable numeric
-/// identity. Production GitHub payloads additionally retain the bounded login
-/// and closed account kind so authorization can fail closed without reparsing
-/// the raw JSON object.
+/// The bounded login and closed account kind are retained when GitHub supplies
+/// them so authorization can fail closed without reparsing the raw JSON object.
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct GithubEventActor {
@@ -54,9 +52,8 @@ impl GithubEventActor {
     ) -> Result<Self, GithubWebhookError> {
         let id = durable_provider_id(id)?;
         let login = login.map(normalize_login).transpose()?;
-        // A future provider kind remains incomplete classification. AUTH-02
-        // can deny trust without making event normalization incompatible with
-        // a provider-side enum extension.
+        // A future provider kind remains incomplete classification, allowing
+        // authorization to deny trust without treating signed bytes as malformed.
         let kind = kind.and_then(GithubEventActorKind::from_webhook);
         Ok(Self { id, login, kind })
     }

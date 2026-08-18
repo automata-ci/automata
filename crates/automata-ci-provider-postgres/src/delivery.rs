@@ -1,18 +1,22 @@
 use automata_ci_blob::{BlobDescriptor, BlobKey, MediaType};
-use automata_ci_core::{Sha256Digest, UnixMillis};
+use automata_ci_core::{GitObjectId, Sha256Digest, UnixMillis};
 use automata_ci_provider::{
-    AcceptProviderDelivery, ClaimProviderDelivery, ClaimedProviderDelivery,
-    CompleteProviderDelivery, ExternalDeliveryId, ExternalDeliveryIdentity, ExternalRepositoryId,
-    ExternalRepositoryIdentity, FailProviderDelivery, MAX_PROVIDER_DELIVERY_ATTEMPTS,
-    ProviderConfigurationRevision, ProviderConnectionId, ProviderConnectionRevision,
-    ProviderDelivery, ProviderDeliveryAcceptOutcome, ProviderDeliveryClaimFence,
-    ProviderDeliveryFailure, ProviderDeliveryId, ProviderDeliveryObservations,
-    ProviderDeliveryReceipt, ProviderDeliveryRejection, ProviderDeliveryRepositoryError,
-    ProviderDeliveryState, ProviderEventName, ProviderInstanceId, ProviderSecretGeneration,
-    ProviderSecretName, ProviderTypeId, ProviderWebhookEndpointId, ProviderWebhookEndpointRevision,
-    ProviderWebhookSecretReference, ProviderWebhookSignatureEvidence, RejectedProviderDelivery,
-    RenewProviderDelivery, RetryProviderDelivery, SealedNormalizedTrigger,
-    VerifiedProviderDelivery,
+    AcceptProviderDelivery, BindProviderProcessingSource, ClaimProviderProcessing,
+    ClaimedProviderProcessing, CompleteProviderProcessing, ExternalDeliveryId,
+    ExternalDeliveryIdentity, ExternalRepositoryId, ExternalRepositoryIdentity, ExternalSubjectId,
+    ExternalSubjectIdentity, ExternalSubjectKind, FailProviderProcessing,
+    MAX_PROVIDER_PROCESSING_ATTEMPTS, ProviderConfigurationRevision, ProviderConnectionId,
+    ProviderConnectionRevision, ProviderControl, ProviderControlDocument, ProviderControlKind,
+    ProviderDelivery, ProviderDeliveryAcceptOutcome, ProviderDeliveryEvidence, ProviderDeliveryId,
+    ProviderDeliveryObservations, ProviderDeliveryReceipt, ProviderDeliveryRejection,
+    ProviderDeliveryRepositoryError, ProviderEventName, ProviderInstanceId,
+    ProviderProcessingClaimFence, ProviderProcessingFailure, ProviderProcessingInvocationId,
+    ProviderProcessingReceipt, ProviderProcessingRepositoryError, ProviderProcessingState,
+    ProviderSchemaVersion, ProviderSecretGeneration, ProviderSecretName, ProviderTypeId,
+    ProviderWebhookEndpointId, ProviderWebhookEndpointRevision, ProviderWebhookSecretReference,
+    ProviderWebhookSignatureEvidence, RejectedProviderDelivery, RenewProviderProcessing,
+    RetryProviderProcessing, SealedNormalizedTrigger, VerifiedProviderControlDelivery,
+    VerifiedProviderTriggerDelivery,
 };
 use sqlx::{FromRow, Postgres, Transaction};
 
@@ -43,29 +47,37 @@ struct DeliveryRow {
     signature_secret_generation: i64,
     disposition: String,
     repository_external_id: Option<String>,
-    normalized_trigger: Option<Vec<u8>>,
-    normalized_trigger_digest: Option<Vec<u8>>,
+    normalized_payload: Option<Vec<u8>>,
+    normalized_payload_digest: Option<Vec<u8>>,
+    control_kind: Option<String>,
+    control_object_id: Option<Vec<u8>>,
+    control_actor_kind: Option<String>,
+    control_actor_external_id: Option<String>,
+    control_document_schema: Option<i64>,
     rejection_reason: Option<String>,
     observations: Vec<u8>,
     observations_digest: Vec<u8>,
-    state: String,
-    attempts: i16,
-    available_at_ms: i64,
     accepted_at_ms: i64,
-    claim_worker_id: Option<uuid::Uuid>,
+}
+
+#[derive(FromRow)]
+struct ProcessingRow {
+    invocation_id: uuid::Uuid,
+    cause_delivery_id: uuid::Uuid,
+    source_delivery_id: Option<uuid::Uuid>,
+    attempts: i16,
+    created_at_ms: i64,
     claim_fence: Option<i64>,
-    claim_started_at_ms: Option<i64>,
-    claim_expires_at_ms: Option<i64>,
-    completed_at_ms: Option<i64>,
-    failure_kind: Option<String>,
 }
 
 #[derive(FromRow)]
 struct ReceiptRow {
-    delivery_id: uuid::Uuid,
+    invocation_id: uuid::Uuid,
+    cause_delivery_id: uuid::Uuid,
+    source_delivery_id: Option<uuid::Uuid>,
     state: String,
     attempts: i16,
-    accepted_at_ms: i64,
+    created_at_ms: i64,
 }
 
 impl PostgresProviderManifestRepository {
@@ -73,7 +85,7 @@ impl PostgresProviderManifestRepository {
         &self,
         request: AcceptProviderDelivery,
     ) -> Result<ProviderDeliveryAcceptOutcome, ProviderDeliveryRepositoryError> {
-        let (delivery, accepted_at) = request.into_parts();
+        let (delivery, invocation_id, accepted_at) = request.into_parts();
         let fingerprint = delivery.replay_fingerprint();
         let mut transaction = self.pool.begin().await.map_err(unavailable)?;
         let inserted = insert_delivery(
@@ -84,25 +96,32 @@ impl PostgresProviderManifestRepository {
         )
         .await?;
         if inserted {
+            if let Some(invocation_id) = invocation_id {
+                insert_initial_invocation(
+                    &mut transaction,
+                    invocation_id,
+                    delivery.delivery_id(),
+                    matches!(delivery, ProviderDelivery::Trigger(_)),
+                    accepted_at,
+                )
+                .await?;
+            }
             transaction.commit().await.map_err(unavailable)?;
-            let receipt = ProviderDeliveryReceipt::new(
-                delivery.delivery_id(),
-                match delivery {
-                    ProviderDelivery::Trigger(_) => ProviderDeliveryState::Pending,
-                    ProviderDelivery::Rejected(_) => ProviderDeliveryState::Discarded,
-                },
-                0,
-                accepted_at,
-            )
-            .map_err(|_| ProviderDeliveryRepositoryError::Corrupt)?;
+            let receipt =
+                ProviderDeliveryReceipt::new(delivery.delivery_id(), invocation_id, accepted_at)
+                    .map_err(|_| ProviderDeliveryRepositoryError::Corrupt)?;
             return Ok(ProviderDeliveryAcceptOutcome::Inserted(receipt));
         }
 
         let row = sqlx::query_as::<_, ReceiptReplayRow>(
             r"
-            SELECT delivery_id, state, attempts, accepted_at_ms, replay_fingerprint
-            FROM provider_delivery_records
-            WHERE provider_instance_id = $1 AND external_delivery_id = $2
+            SELECT delivery.delivery_id, delivery.accepted_at_ms,
+                   delivery.replay_fingerprint, invocation.invocation_id
+            FROM provider_deliveries AS delivery
+            LEFT JOIN provider_processing_invocations AS invocation
+              ON invocation.cause_delivery_id = delivery.delivery_id
+            WHERE delivery.provider_instance_id = $1
+              AND delivery.external_delivery_id = $2
             ",
         )
         .bind(delivery.external_delivery().instance_id().as_uuid())
@@ -117,46 +136,50 @@ impl PostgresProviderManifestRepository {
         if digest(row.replay_fingerprint)? != fingerprint.digest() {
             return Err(ProviderDeliveryRepositoryError::ReplayConflict);
         }
-        Ok(ProviderDeliveryAcceptOutcome::Duplicate(decode_receipt(
-            ReceiptRow {
-                delivery_id: row.delivery_id,
-                state: row.state,
-                attempts: row.attempts,
-                accepted_at_ms: row.accepted_at_ms,
-            },
-        )?))
+        let invocation_id = row
+            .invocation_id
+            .map(ProviderProcessingInvocationId::from_uuid)
+            .transpose()
+            .map_err(|_| ProviderDeliveryRepositoryError::Corrupt)?;
+        let receipt = ProviderDeliveryReceipt::new(
+            ProviderDeliveryId::from_uuid(row.delivery_id)
+                .map_err(|_| ProviderDeliveryRepositoryError::Corrupt)?,
+            invocation_id,
+            UnixMillis::new(row.accepted_at_ms),
+        )
+        .map_err(|_| ProviderDeliveryRepositoryError::Corrupt)?;
+        Ok(ProviderDeliveryAcceptOutcome::Duplicate(receipt))
     }
 
     pub(crate) async fn load_delivery_inner(
         &self,
         delivery_id: ProviderDeliveryId,
     ) -> Result<Option<ProviderDelivery>, ProviderDeliveryRepositoryError> {
-        sqlx::query_as::<_, DeliveryRow>(
-            "SELECT * FROM provider_delivery_records WHERE delivery_id = $1",
-        )
-        .bind(delivery_id.as_uuid())
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(unavailable)?
-        .map(decode_delivery)
-        .transpose()
+        sqlx::query_as::<_, DeliveryRow>("SELECT * FROM provider_deliveries WHERE delivery_id = $1")
+            .bind(delivery_id.as_uuid())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(unavailable)?
+            .map(decode_delivery)
+            .transpose()
     }
 
-    pub(crate) async fn claim_delivery_inner(
+    pub(crate) async fn claim_processing_inner(
         &self,
-        request: ClaimProviderDelivery,
-    ) -> Result<Option<ClaimedProviderDelivery>, ProviderDeliveryRepositoryError> {
-        let mut transaction = self.pool.begin().await.map_err(unavailable)?;
-        let row = sqlx::query_as::<_, DeliveryRow>(
+        request: ClaimProviderProcessing,
+    ) -> Result<Option<ClaimedProviderProcessing>, ProviderProcessingRepositoryError> {
+        let mut transaction = self.pool.begin().await.map_err(processing_unavailable)?;
+        let row = sqlx::query_as::<_, ProcessingRow>(
             r"
-            SELECT * FROM provider_delivery_records
-            WHERE disposition = 'trigger'
-              AND attempts < 16
+            SELECT invocation_id, cause_delivery_id, source_delivery_id,
+                   attempts, created_at_ms, claim_fence
+            FROM provider_processing_invocations
+            WHERE attempts < 16
               AND (
                 (state IN ('pending', 'retry-pending') AND available_at_ms <= $1)
                 OR (state = 'claimed' AND claim_expires_at_ms <= $1)
               )
-            ORDER BY available_at_ms, accepted_at_ms, delivery_id
+            ORDER BY available_at_ms, created_at_ms, invocation_id
             FOR UPDATE SKIP LOCKED
             LIMIT 1
             ",
@@ -164,21 +187,21 @@ impl PostgresProviderManifestRepository {
         .bind(request.claimed_at().get())
         .fetch_optional(&mut *transaction)
         .await
-        .map_err(unavailable)?;
+        .map_err(processing_unavailable)?;
         let Some(row) = row else {
-            transaction.commit().await.map_err(unavailable)?;
+            transaction.commit().await.map_err(processing_unavailable)?;
             return Ok(None);
         };
-        let next_attempt = positive_u16(row.attempts)?
+        let next_attempt = processing_positive_u16(row.attempts)?
             .checked_add(1)
-            .ok_or(ProviderDeliveryRepositoryError::AttemptLimitReached)?;
-        if next_attempt > MAX_PROVIDER_DELIVERY_ATTEMPTS {
-            return Err(ProviderDeliveryRepositoryError::AttemptLimitReached);
+            .ok_or(ProviderProcessingRepositoryError::AttemptLimitReached)?;
+        if next_attempt > MAX_PROVIDER_PROCESSING_ATTEMPTS {
+            return Err(ProviderProcessingRepositoryError::AttemptLimitReached);
         }
         let next_fence = match row.claim_fence {
-            Some(value) => positive_u64(value)?
+            Some(value) => processing_positive_u64(value)?
                 .checked_add(1)
-                .ok_or(ProviderDeliveryRepositoryError::Corrupt)?,
+                .ok_or(ProviderProcessingRepositoryError::Corrupt)?,
             None => 1,
         };
         let expires_at = request
@@ -186,58 +209,50 @@ impl PostgresProviderManifestRepository {
             .get()
             .checked_add(
                 i64::try_from(request.lease_millis())
-                    .map_err(|_| ProviderDeliveryRepositoryError::Corrupt)?,
+                    .map_err(|_| ProviderProcessingRepositoryError::Corrupt)?,
             )
-            .ok_or(ProviderDeliveryRepositoryError::Corrupt)?;
+            .ok_or(ProviderProcessingRepositoryError::Corrupt)?;
         sqlx::query(
             r"
-            UPDATE provider_delivery_records
+            UPDATE provider_processing_invocations
             SET state = 'claimed', attempts = $2, claim_worker_id = $3,
                 claim_fence = $4, claim_started_at_ms = $6,
                 claim_expires_at_ms = $5, failure_kind = NULL
-            WHERE delivery_id = $1
+            WHERE invocation_id = $1
             ",
         )
-        .bind(row.delivery_id)
-        .bind(i16::try_from(next_attempt).map_err(|_| ProviderDeliveryRepositoryError::Corrupt)?)
+        .bind(row.invocation_id)
+        .bind(i16::try_from(next_attempt).map_err(|_| ProviderProcessingRepositoryError::Corrupt)?)
         .bind(request.worker_id().as_uuid())
-        .bind(durable_u64(next_fence)?)
+        .bind(processing_durable_u64(next_fence)?)
         .bind(expires_at)
         .bind(request.claimed_at().get())
         .execute(&mut *transaction)
         .await
-        .map_err(unavailable)?;
-        transaction.commit().await.map_err(unavailable)?;
-
-        let accepted_at = row.accepted_at_ms;
-        let delivery = match decode_delivery(row)? {
-            ProviderDelivery::Trigger(value) => *value,
-            ProviderDelivery::Rejected(_) => return Err(ProviderDeliveryRepositoryError::Corrupt),
-        };
-        let receipt = ProviderDeliveryReceipt::new(
-            delivery.delivery_id(),
-            ProviderDeliveryState::Claimed,
+        .map_err(processing_unavailable)?;
+        let delivery_row = sqlx::query_as::<_, DeliveryRow>(
+            "SELECT * FROM provider_deliveries WHERE delivery_id = $1",
+        )
+        .bind(row.source_delivery_id.unwrap_or(row.cause_delivery_id))
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(processing_unavailable)?;
+        transaction.commit().await.map_err(processing_unavailable)?;
+        decode_claim(
+            &row,
+            delivery_row,
+            request,
             next_attempt,
-            UnixMillis::new(accepted_at),
-        )
-        .map_err(|_| ProviderDeliveryRepositoryError::Corrupt)?;
-        let fence = ProviderDeliveryClaimFence::new(
-            delivery.delivery_id(),
-            request.worker_id(),
             next_fence,
-            request.claimed_at(),
-            UnixMillis::new(expires_at),
+            expires_at,
         )
-        .map_err(|_| ProviderDeliveryRepositoryError::Corrupt)?;
-        ClaimedProviderDelivery::new(receipt, delivery, fence)
-            .map(Some)
-            .map_err(|_| ProviderDeliveryRepositoryError::Corrupt)
+        .map(Some)
     }
 
-    pub(crate) async fn complete_delivery_inner(
+    pub(crate) async fn complete_processing_inner(
         &self,
-        request: CompleteProviderDelivery,
-    ) -> Result<ProviderDeliveryReceipt, ProviderDeliveryRepositoryError> {
+        request: CompleteProviderProcessing,
+    ) -> Result<ProviderProcessingReceipt, ProviderProcessingRepositoryError> {
         mutate_claim(
             &self.pool,
             request.fence(),
@@ -249,23 +264,23 @@ impl PostgresProviderManifestRepository {
         .await
     }
 
-    pub(crate) async fn renew_delivery_inner(
+    pub(crate) async fn renew_processing_inner(
         &self,
-        request: RenewProviderDelivery,
-    ) -> Result<ProviderDeliveryClaimFence, ProviderDeliveryRepositoryError> {
+        request: RenewProviderProcessing,
+    ) -> Result<ProviderProcessingClaimFence, ProviderProcessingRepositoryError> {
         let fence = request.fence();
         let extension = i64::try_from(request.lease_millis())
-            .map_err(|_| ProviderDeliveryRepositoryError::Corrupt)?;
+            .map_err(|_| ProviderProcessingRepositoryError::Corrupt)?;
         let expires_at = request
             .renewed_at()
             .get()
             .checked_add(extension)
-            .ok_or(ProviderDeliveryRepositoryError::Corrupt)?;
+            .ok_or(ProviderProcessingRepositoryError::Corrupt)?;
         let renewed = sqlx::query_scalar::<_, i64>(
             r"
-            UPDATE provider_delivery_records
+            UPDATE provider_processing_invocations
             SET claim_expires_at_ms = $5
-            WHERE delivery_id = $1 AND state = 'claimed'
+            WHERE invocation_id = $1 AND state = 'claimed'
               AND claim_worker_id = $2 AND claim_fence = $3
               AND claim_started_at_ms <= $4
               AND claim_expires_at_ms > $4
@@ -274,30 +289,30 @@ impl PostgresProviderManifestRepository {
             RETURNING claim_expires_at_ms
             ",
         )
-        .bind(fence.delivery_id().as_uuid())
+        .bind(fence.invocation_id().as_uuid())
         .bind(fence.worker_id().as_uuid())
-        .bind(durable_u64(fence.token())?)
+        .bind(processing_durable_u64(fence.token())?)
         .bind(request.renewed_at().get())
         .bind(expires_at)
         .bind(fence.expires_at().get())
         .fetch_optional(&self.pool)
         .await
-        .map_err(unavailable)?
-        .ok_or(ProviderDeliveryRepositoryError::ClaimRejected)?;
-        ProviderDeliveryClaimFence::new(
-            fence.delivery_id(),
+        .map_err(processing_unavailable)?
+        .ok_or(ProviderProcessingRepositoryError::ClaimRejected)?;
+        ProviderProcessingClaimFence::new(
+            fence.invocation_id(),
             fence.worker_id(),
             fence.token(),
             fence.claimed_at(),
             UnixMillis::new(renewed),
         )
-        .map_err(|_| ProviderDeliveryRepositoryError::Corrupt)
+        .map_err(|_| ProviderProcessingRepositoryError::Corrupt)
     }
 
-    pub(crate) async fn retry_delivery_inner(
+    pub(crate) async fn retry_processing_inner(
         &self,
-        request: RetryProviderDelivery,
-    ) -> Result<ProviderDeliveryReceipt, ProviderDeliveryRepositoryError> {
+        request: RetryProviderProcessing,
+    ) -> Result<ProviderProcessingReceipt, ProviderProcessingRepositoryError> {
         mutate_claim(
             &self.pool,
             request.fence(),
@@ -309,10 +324,10 @@ impl PostgresProviderManifestRepository {
         .await
     }
 
-    pub(crate) async fn fail_delivery_inner(
+    pub(crate) async fn fail_processing_inner(
         &self,
-        request: FailProviderDelivery,
-    ) -> Result<ProviderDeliveryReceipt, ProviderDeliveryRepositoryError> {
+        request: FailProviderProcessing,
+    ) -> Result<ProviderProcessingReceipt, ProviderProcessingRepositoryError> {
         mutate_claim(
             &self.pool,
             request.fence(),
@@ -323,15 +338,112 @@ impl PostgresProviderManifestRepository {
         )
         .await
     }
+
+    pub(crate) async fn bind_processing_source_inner(
+        &self,
+        request: BindProviderProcessingSource,
+    ) -> Result<ClaimedProviderProcessing, ProviderProcessingRepositoryError> {
+        let fence = request.fence();
+        let row = sqlx::query_as::<_, ReceiptRow>(
+            r"
+            UPDATE provider_processing_invocations AS invocation
+            SET source_delivery_id = source.delivery_id,
+                source_disposition = source.disposition
+            FROM provider_deliveries AS source
+            WHERE invocation.invocation_id = $1
+              AND invocation.state = 'claimed'
+              AND invocation.claim_worker_id = $2
+              AND invocation.claim_fence = $3
+              AND invocation.claim_started_at_ms <= $4
+              AND invocation.claim_expires_at_ms > $4
+              AND invocation.source_delivery_id IS NULL
+              AND source.delivery_id = $5
+              AND source.disposition = 'trigger'
+            RETURNING invocation.invocation_id, invocation.cause_delivery_id,
+                      invocation.source_delivery_id, invocation.state,
+                      invocation.attempts, invocation.created_at_ms
+            ",
+        )
+        .bind(fence.invocation_id().as_uuid())
+        .bind(fence.worker_id().as_uuid())
+        .bind(processing_durable_u64(fence.token())?)
+        .bind(request.bound_at().get())
+        .bind(request.source_delivery_id().as_uuid())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(processing_unavailable)?
+        .ok_or(ProviderProcessingRepositoryError::ClaimRejected)?;
+        let receipt = decode_receipt(row)?;
+        let input = match self
+            .load_delivery_inner(request.source_delivery_id())
+            .await
+            .map_err(processing_from_delivery)?
+            .ok_or(ProviderProcessingRepositoryError::NotFound)?
+        {
+            ProviderDelivery::Trigger(delivery) => {
+                automata_ci_provider::ProviderProcessingInput::Trigger(delivery)
+            }
+            ProviderDelivery::Control(_) | ProviderDelivery::Rejected(_) => {
+                return Err(ProviderProcessingRepositoryError::Corrupt);
+            }
+        };
+        ClaimedProviderProcessing::new(receipt, input, fence)
+            .map_err(|_| ProviderProcessingRepositoryError::Corrupt)
+    }
+}
+
+fn decode_claim(
+    row: &ProcessingRow,
+    delivery_row: DeliveryRow,
+    request: ClaimProviderProcessing,
+    attempt: u16,
+    fence_token: u64,
+    expires_at: i64,
+) -> Result<ClaimedProviderProcessing, ProviderProcessingRepositoryError> {
+    let input = match decode_delivery(delivery_row).map_err(processing_from_delivery)? {
+        ProviderDelivery::Trigger(value) => {
+            automata_ci_provider::ProviderProcessingInput::Trigger(value)
+        }
+        ProviderDelivery::Control(value) => {
+            automata_ci_provider::ProviderProcessingInput::Control(value)
+        }
+        ProviderDelivery::Rejected(_) => {
+            return Err(ProviderProcessingRepositoryError::Corrupt);
+        }
+    };
+    let invocation_id = ProviderProcessingInvocationId::from_uuid(row.invocation_id)
+        .map_err(|_| ProviderProcessingRepositoryError::Corrupt)?;
+    let receipt = ProviderProcessingReceipt::new(
+        invocation_id,
+        ProviderDeliveryId::from_uuid(row.cause_delivery_id)
+            .map_err(|_| ProviderProcessingRepositoryError::Corrupt)?,
+        row.source_delivery_id
+            .map(ProviderDeliveryId::from_uuid)
+            .transpose()
+            .map_err(|_| ProviderProcessingRepositoryError::Corrupt)?,
+        ProviderProcessingState::Claimed,
+        attempt,
+        UnixMillis::new(row.created_at_ms),
+    )
+    .map_err(|_| ProviderProcessingRepositoryError::Corrupt)?;
+    let fence = ProviderProcessingClaimFence::new(
+        invocation_id,
+        request.worker_id(),
+        fence_token,
+        request.claimed_at(),
+        UnixMillis::new(expires_at),
+    )
+    .map_err(|_| ProviderProcessingRepositoryError::Corrupt)?;
+    ClaimedProviderProcessing::new(receipt, input, fence)
+        .map_err(|_| ProviderProcessingRepositoryError::Corrupt)
 }
 
 #[derive(FromRow)]
 struct ReceiptReplayRow {
     delivery_id: uuid::Uuid,
-    state: String,
-    attempts: i16,
     accepted_at_ms: i64,
     replay_fingerprint: Vec<u8>,
+    invocation_id: Option<uuid::Uuid>,
 }
 
 #[allow(clippy::too_many_lines)] // Ordered bindings mirror one immutable delivery record.
@@ -341,44 +453,24 @@ async fn insert_delivery(
     accepted_at: UnixMillis,
     fingerprint: Sha256Digest,
 ) -> Result<bool, ProviderDeliveryRepositoryError> {
+    let evidence = match delivery {
+        ProviderDelivery::Trigger(value) => value.evidence(),
+        ProviderDelivery::Control(value) => value.evidence(),
+        ProviderDelivery::Rejected(value) => value.evidence(),
+    };
     let (
-        delivery_id,
-        endpoint_id,
-        endpoint_revision,
-        provider_type,
-        instance_id,
-        provider_revision,
-        connection_id,
-        connection_revision,
-        external_delivery,
-        event_type,
-        received_at,
-        raw_body,
-        raw_retain_until,
-        signature,
         disposition,
         repository_id,
-        trigger_bytes,
-        trigger_digest,
+        normalized_bytes,
+        normalized_digest,
+        control_kind,
+        control_object_id,
+        control_actor_kind,
+        control_actor_id,
+        control_document_schema,
         rejection,
-        observations,
-        state,
     ) = match delivery {
         ProviderDelivery::Trigger(value) => (
-            value.delivery_id(),
-            value.endpoint_id(),
-            value.endpoint_revision(),
-            value.provider_type(),
-            value.instance_id(),
-            value.provider_revision(),
-            value.connection_id(),
-            value.connection_revision(),
-            value.external_delivery(),
-            value.event_type(),
-            value.received_at(),
-            value.raw_body(),
-            value.raw_retain_until(),
-            value.signature(),
             "trigger",
             Some(
                 value
@@ -392,38 +484,48 @@ async fn insert_delivery(
             Some(value.trigger().canonical_bytes()),
             Some(value.trigger().digest()),
             None,
-            value.observations(),
-            "pending",
+            None,
+            None,
+            None,
+            None,
+            None,
+        ),
+        ProviderDelivery::Control(value) => (
+            "control",
+            Some(value.control().repository().external_id().as_str()),
+            Some(value.control().document().bytes()),
+            Some(value.control().document().digest()),
+            Some(control_kind(value.control().kind())),
+            Some(value.control().object().as_bytes().to_vec()),
+            value
+                .control()
+                .actor()
+                .map(|actor| subject_kind(actor.kind())),
+            value
+                .control()
+                .actor()
+                .map(|actor| actor.external_id().as_str()),
+            Some(i64::from(value.control().document().schema().get())),
+            None,
         ),
         ProviderDelivery::Rejected(value) => (
-            value.delivery_id(),
-            value.endpoint_id(),
-            value.endpoint_revision(),
-            value.provider_type(),
-            value.instance_id(),
-            value.provider_revision(),
-            value.connection_id(),
-            value.connection_revision(),
-            value.external_delivery(),
-            value.event_type(),
-            value.received_at(),
-            value.raw_body(),
-            value.raw_retain_until(),
-            value.signature(),
             "rejected",
             value
                 .repository()
                 .map(|identity| identity.external_id().as_str()),
             None,
             None,
+            None,
+            None,
+            None,
+            None,
+            None,
             Some(rejection_text(value.reason())),
-            value.observations(),
-            "discarded",
         ),
     };
     let result = sqlx::query(
         r"
-        INSERT INTO provider_delivery_records (
+        INSERT INTO provider_deliveries (
             delivery_id, provider_instance_id, external_delivery_id,
             replay_fingerprint, endpoint_id, endpoint_revision, provider_type,
             provider_revision, connection_id, connection_revision, event_type,
@@ -431,46 +533,54 @@ async fn insert_delivery(
             raw_media_type, raw_retain_until_ms, signature_scheme,
             signature_configuration_revision,
             signature_secret_name, signature_secret_generation, disposition,
-            repository_external_id, normalized_trigger, normalized_trigger_digest,
-            rejection_reason, observations, observations_digest, state, attempts,
-            available_at_ms, accepted_at_ms
+            repository_external_id, normalized_payload, normalized_payload_digest,
+            control_kind, control_object_id, control_actor_kind,
+            control_actor_external_id, control_document_schema,
+            rejection_reason, observations, observations_digest, accepted_at_ms
         ) VALUES (
             $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
-            $18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,0,$30,$30
+            $18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,
+            $33,$34
         ) ON CONFLICT DO NOTHING
         ",
     )
-    .bind(delivery_id.as_uuid())
-    .bind(instance_id.as_uuid())
-    .bind(external_delivery.external_id().as_str())
+    .bind(evidence.delivery_id().as_uuid())
+    .bind(evidence.instance_id().as_uuid())
+    .bind(evidence.external_delivery().external_id().as_str())
     .bind(fingerprint.as_bytes().as_slice())
-    .bind(endpoint_id.as_uuid())
-    .bind(durable_u64(endpoint_revision.get())?)
-    .bind(provider_type.as_str())
-    .bind(durable_u64(provider_revision.get())?)
-    .bind(connection_id.as_uuid())
-    .bind(durable_u64(connection_revision.get())?)
-    .bind(event_type.as_str())
-    .bind(received_at.get())
-    .bind(raw_body.key().as_str())
-    .bind(raw_body.digest().as_bytes().as_slice())
-    .bind(durable_u64(raw_body.size())?)
-    .bind(raw_body.media_type().as_str())
-    .bind(raw_retain_until.get())
-    .bind(signature.scheme())
+    .bind(evidence.endpoint_id().as_uuid())
+    .bind(durable_u64(evidence.endpoint_revision().get())?)
+    .bind(evidence.provider_type().as_str())
+    .bind(durable_u64(evidence.provider_revision().get())?)
+    .bind(evidence.connection_id().as_uuid())
+    .bind(durable_u64(evidence.connection_revision().get())?)
+    .bind(evidence.event_type().as_str())
+    .bind(evidence.received_at().get())
+    .bind(evidence.raw_body().key().as_str())
+    .bind(evidence.raw_body().digest().as_bytes().as_slice())
+    .bind(durable_u64(evidence.raw_body().size())?)
+    .bind(evidence.raw_body().media_type().as_str())
+    .bind(evidence.raw_retain_until().get())
+    .bind(evidence.signature().scheme())
     .bind(durable_u64(
-        signature.secret().configuration_revision().get(),
+        evidence.signature().secret().configuration_revision().get(),
     )?)
-    .bind(signature.secret().name().as_str())
-    .bind(durable_u64(signature.secret().generation().get())?)
+    .bind(evidence.signature().secret().name().as_str())
+    .bind(durable_u64(
+        evidence.signature().secret().generation().get(),
+    )?)
     .bind(disposition)
     .bind(repository_id)
-    .bind(trigger_bytes)
-    .bind(trigger_digest.map(|value| value.as_bytes().to_vec()))
+    .bind(normalized_bytes)
+    .bind(normalized_digest.map(|value| value.as_bytes().to_vec()))
+    .bind(control_kind)
+    .bind(control_object_id)
+    .bind(control_actor_kind)
+    .bind(control_actor_id)
+    .bind(control_document_schema)
     .bind(rejection)
-    .bind(observations.canonical_bytes())
-    .bind(observations.digest().as_bytes().as_slice())
-    .bind(state)
+    .bind(evidence.observations().canonical_bytes())
+    .bind(evidence.observations().digest().as_bytes().as_slice())
     .bind(accepted_at.get())
     .execute(&mut **transaction)
     .await
@@ -478,32 +588,62 @@ async fn insert_delivery(
     Ok(result.rows_affected() == 1)
 }
 
+async fn insert_initial_invocation(
+    transaction: &mut Transaction<'_, Postgres>,
+    invocation_id: ProviderProcessingInvocationId,
+    delivery_id: ProviderDeliveryId,
+    has_source: bool,
+    created_at: UnixMillis,
+) -> Result<(), ProviderDeliveryRepositoryError> {
+    let inserted = sqlx::query(
+        r"
+        INSERT INTO provider_processing_invocations (
+            invocation_id, cause_delivery_id, source_delivery_id,
+            source_disposition, state, attempts, available_at_ms, created_at_ms
+        ) VALUES ($1, $2, $3, $4, 'pending', 0, $5, $5)
+        ",
+    )
+    .bind(invocation_id.as_uuid())
+    .bind(delivery_id.as_uuid())
+    .bind(has_source.then(|| delivery_id.as_uuid()))
+    .bind(has_source.then_some("trigger"))
+    .bind(created_at.get())
+    .execute(&mut **transaction)
+    .await
+    .map_err(unavailable)?;
+    if inserted.rows_affected() != 1 {
+        return Err(ProviderDeliveryRepositoryError::Corrupt);
+    }
+    Ok(())
+}
+
 async fn mutate_claim(
     pool: &sqlx::PgPool,
-    fence: ProviderDeliveryClaimFence,
+    fence: ProviderProcessingClaimFence,
     mutation_at: UnixMillis,
     state: &'static str,
     available_or_completed_at: UnixMillis,
-    failure: Option<ProviderDeliveryFailure>,
-) -> Result<ProviderDeliveryReceipt, ProviderDeliveryRepositoryError> {
+    failure: Option<ProviderProcessingFailure>,
+) -> Result<ProviderProcessingReceipt, ProviderProcessingRepositoryError> {
     let completed_at =
         matches!(state, "completed" | "failed").then_some(available_or_completed_at.get());
     let row = sqlx::query_as::<_, ReceiptRow>(
         r"
-        UPDATE provider_delivery_records
+        UPDATE provider_processing_invocations
         SET state = $5, available_at_ms = $6, claim_worker_id = NULL,
             claim_started_at_ms = NULL, claim_expires_at_ms = NULL,
             completed_at_ms = $7, failure_kind = $8
-        WHERE delivery_id = $1 AND state = 'claimed'
+        WHERE invocation_id = $1 AND state = 'claimed'
           AND claim_worker_id = $2 AND claim_fence = $3
           AND claim_started_at_ms <= $4
           AND claim_expires_at_ms > $4
-        RETURNING delivery_id, state, attempts, accepted_at_ms
+        RETURNING invocation_id, cause_delivery_id, source_delivery_id,
+                  state, attempts, created_at_ms
         ",
     )
-    .bind(fence.delivery_id().as_uuid())
+    .bind(fence.invocation_id().as_uuid())
     .bind(fence.worker_id().as_uuid())
-    .bind(durable_u64(fence.token())?)
+    .bind(processing_durable_u64(fence.token())?)
     .bind(mutation_at.get())
     .bind(state)
     .bind(available_or_completed_at.get())
@@ -511,27 +651,14 @@ async fn mutate_claim(
     .bind(failure.map(failure_text))
     .fetch_optional(pool)
     .await
-    .map_err(unavailable)?
-    .ok_or(ProviderDeliveryRepositoryError::ClaimRejected)?;
+    .map_err(processing_unavailable)?
+    .ok_or(ProviderProcessingRepositoryError::ClaimRejected)?;
     decode_receipt(row)
 }
 
 #[allow(clippy::too_many_lines)] // Strict decoding validates every durable evidence field.
 fn decode_delivery(row: DeliveryRow) -> Result<ProviderDelivery, ProviderDeliveryRepositoryError> {
-    // Lifecycle-only columns are decoded separately by receipt operations.
-    let _ = (
-        &row.replay_fingerprint,
-        &row.state,
-        row.attempts,
-        row.available_at_ms,
-        row.accepted_at_ms,
-        row.claim_worker_id,
-        row.claim_fence,
-        row.claim_started_at_ms,
-        row.claim_expires_at_ms,
-        row.completed_at_ms,
-        &row.failure_kind,
-    );
+    let _ = (&row.replay_fingerprint, row.accepted_at_ms);
     let instance_id = ProviderInstanceId::from_uuid(row.provider_instance_id)
         .map_err(|_| ProviderDeliveryRepositoryError::Corrupt)?;
     let external_delivery = ExternalDeliveryIdentity::new(
@@ -581,37 +708,95 @@ fn decode_delivery(row: DeliveryRow) -> Result<ProviderDelivery, ProviderDeliver
             .map_err(|_| ProviderDeliveryRepositoryError::Corrupt)?;
     let event_type = ProviderEventName::new(row.event_type)
         .map_err(|_| ProviderDeliveryRepositoryError::Corrupt)?;
+    let evidence = ProviderDeliveryEvidence::rehydrate(
+        delivery_id,
+        endpoint_id,
+        endpoint_revision,
+        provider_type,
+        instance_id,
+        provider_revision,
+        connection_id,
+        connection_revision,
+        external_delivery,
+        event_type,
+        UnixMillis::new(row.received_at_ms),
+        raw_body,
+        UnixMillis::new(row.raw_retain_until_ms),
+        signature,
+        observations,
+    )
+    .map_err(|_| ProviderDeliveryRepositoryError::Corrupt)?;
     match row.disposition.as_str() {
         "trigger" => {
             let trigger = SealedNormalizedTrigger::from_canonical_bytes(
-                row.normalized_trigger
+                row.normalized_payload
                     .ok_or(ProviderDeliveryRepositoryError::Corrupt)?,
             )
             .map_err(|_| ProviderDeliveryRepositoryError::Corrupt)?;
-            if Some(trigger.digest()) != row.normalized_trigger_digest.map(digest).transpose()? {
+            if Some(trigger.digest()) != row.normalized_payload_digest.map(digest).transpose()? {
                 return Err(ProviderDeliveryRepositoryError::Corrupt);
             }
-            VerifiedProviderDelivery::rehydrate(
-                delivery_id,
-                endpoint_id,
-                endpoint_revision,
-                provider_type,
+            VerifiedProviderTriggerDelivery::rehydrate(evidence, trigger)
+                .map(Box::new)
+                .map(ProviderDelivery::Trigger)
+                .map_err(|_| ProviderDeliveryRepositoryError::Corrupt)
+        }
+        "control" => {
+            let repository = ExternalRepositoryIdentity::new(
                 instance_id,
-                provider_revision,
-                connection_id,
-                connection_revision,
-                external_delivery,
-                event_type,
-                UnixMillis::new(row.received_at_ms),
-                raw_body,
-                UnixMillis::new(row.raw_retain_until_ms),
-                signature,
-                trigger,
-                observations,
+                ExternalRepositoryId::new(
+                    row.repository_external_id
+                        .ok_or(ProviderDeliveryRepositoryError::Corrupt)?,
+                )
+                .map_err(|_| ProviderDeliveryRepositoryError::Corrupt)?,
+            );
+            if row.control_kind.as_deref() != Some("rerun") {
+                return Err(ProviderDeliveryRepositoryError::Corrupt);
+            }
+            let document = ProviderControlDocument::new(
+                ProviderSchemaVersion::new(
+                    u16::try_from(
+                        row.control_document_schema
+                            .ok_or(ProviderDeliveryRepositoryError::Corrupt)?,
+                    )
+                    .ok()
+                    .filter(|value| *value > 0)
+                    .ok_or(ProviderDeliveryRepositoryError::Corrupt)?,
+                )
+                .map_err(|_| ProviderDeliveryRepositoryError::Corrupt)?,
+                row.normalized_payload
+                    .ok_or(ProviderDeliveryRepositoryError::Corrupt)?,
             )
-            .map(Box::new)
-            .map(ProviderDelivery::Trigger)
-            .map_err(|_| ProviderDeliveryRepositoryError::Corrupt)
+            .map_err(|_| ProviderDeliveryRepositoryError::Corrupt)?;
+            if Some(document.digest()) != row.normalized_payload_digest.map(digest).transpose()? {
+                return Err(ProviderDeliveryRepositoryError::Corrupt);
+            }
+            let actor = match (row.control_actor_kind, row.control_actor_external_id) {
+                (Some(kind), Some(external_id)) => Some(ExternalSubjectIdentity::new(
+                    instance_id,
+                    decode_subject_kind(&kind)?,
+                    ExternalSubjectId::new(external_id)
+                        .map_err(|_| ProviderDeliveryRepositoryError::Corrupt)?,
+                )),
+                (None, None) => None,
+                _ => return Err(ProviderDeliveryRepositoryError::Corrupt),
+            };
+            let control = ProviderControl::new(
+                ProviderControlKind::Rerun,
+                repository,
+                GitObjectId::from_durable_bytes(
+                    &row.control_object_id
+                        .ok_or(ProviderDeliveryRepositoryError::Corrupt)?,
+                )
+                .map_err(|_| ProviderDeliveryRepositoryError::Corrupt)?,
+                actor,
+                document,
+            )
+            .map_err(|_| ProviderDeliveryRepositoryError::Corrupt)?;
+            VerifiedProviderControlDelivery::rehydrate(evidence, control)
+                .map(Box::new)
+                .map(ProviderDelivery::Control)
+                .map_err(|_| ProviderDeliveryRepositoryError::Corrupt)
         }
         "rejected" => {
             let repository = row
@@ -628,28 +813,10 @@ fn decode_delivery(row: DeliveryRow) -> Result<ProviderDelivery, ProviderDeliver
                     .as_deref()
                     .ok_or(ProviderDeliveryRepositoryError::Corrupt)?,
             )?;
-            RejectedProviderDelivery::rehydrate(
-                delivery_id,
-                endpoint_id,
-                endpoint_revision,
-                provider_type,
-                instance_id,
-                provider_revision,
-                connection_id,
-                connection_revision,
-                external_delivery,
-                event_type,
-                UnixMillis::new(row.received_at_ms),
-                raw_body,
-                UnixMillis::new(row.raw_retain_until_ms),
-                signature,
-                repository,
-                reason,
-                observations,
-            )
-            .map(Box::new)
-            .map(ProviderDelivery::Rejected)
-            .map_err(|_| ProviderDeliveryRepositoryError::Corrupt)
+            RejectedProviderDelivery::rehydrate(evidence, repository, reason)
+                .map(Box::new)
+                .map(ProviderDelivery::Rejected)
+                .map_err(|_| ProviderDeliveryRepositoryError::Corrupt)
         }
         _ => Err(ProviderDeliveryRepositoryError::Corrupt),
     }
@@ -657,21 +824,29 @@ fn decode_delivery(row: DeliveryRow) -> Result<ProviderDelivery, ProviderDeliver
 
 fn decode_receipt(
     row: ReceiptRow,
-) -> Result<ProviderDeliveryReceipt, ProviderDeliveryRepositoryError> {
+) -> Result<ProviderProcessingReceipt, ProviderProcessingRepositoryError> {
     let ReceiptRow {
-        delivery_id,
+        invocation_id,
+        cause_delivery_id,
+        source_delivery_id,
         state: durable_state,
         attempts,
-        accepted_at_ms,
+        created_at_ms,
     } = row;
-    ProviderDeliveryReceipt::new(
-        ProviderDeliveryId::from_uuid(delivery_id)
-            .map_err(|_| ProviderDeliveryRepositoryError::Corrupt)?,
+    ProviderProcessingReceipt::new(
+        ProviderProcessingInvocationId::from_uuid(invocation_id)
+            .map_err(|_| ProviderProcessingRepositoryError::Corrupt)?,
+        ProviderDeliveryId::from_uuid(cause_delivery_id)
+            .map_err(|_| ProviderProcessingRepositoryError::Corrupt)?,
+        source_delivery_id
+            .map(ProviderDeliveryId::from_uuid)
+            .transpose()
+            .map_err(|_| ProviderProcessingRepositoryError::Corrupt)?,
         state(&durable_state)?,
-        positive_u16(attempts)?,
-        UnixMillis::new(accepted_at_ms),
+        processing_positive_u16(attempts)?,
+        UnixMillis::new(created_at_ms),
     )
-    .map_err(|_| ProviderDeliveryRepositoryError::Corrupt)
+    .map_err(|_| ProviderProcessingRepositoryError::Corrupt)
 }
 
 fn digest(value: Vec<u8>) -> Result<Sha256Digest, ProviderDeliveryRepositoryError> {
@@ -681,15 +856,14 @@ fn digest(value: Vec<u8>) -> Result<Sha256Digest, ProviderDeliveryRepositoryErro
         .map_err(|_| ProviderDeliveryRepositoryError::Corrupt)
 }
 
-fn state(value: &str) -> Result<ProviderDeliveryState, ProviderDeliveryRepositoryError> {
+fn state(value: &str) -> Result<ProviderProcessingState, ProviderProcessingRepositoryError> {
     match value {
-        "pending" => Ok(ProviderDeliveryState::Pending),
-        "retry-pending" => Ok(ProviderDeliveryState::RetryPending),
-        "claimed" => Ok(ProviderDeliveryState::Claimed),
-        "completed" => Ok(ProviderDeliveryState::Completed),
-        "failed" => Ok(ProviderDeliveryState::Failed),
-        "discarded" => Ok(ProviderDeliveryState::Discarded),
-        _ => Err(ProviderDeliveryRepositoryError::Corrupt),
+        "pending" => Ok(ProviderProcessingState::Pending),
+        "retry-pending" => Ok(ProviderProcessingState::RetryPending),
+        "claimed" => Ok(ProviderProcessingState::Claimed),
+        "completed" => Ok(ProviderProcessingState::Completed),
+        "failed" => Ok(ProviderProcessingState::Failed),
+        _ => Err(ProviderProcessingRepositoryError::Corrupt),
     }
 }
 
@@ -700,6 +874,33 @@ const fn rejection_text(value: ProviderDeliveryRejection) -> &'static str {
         ProviderDeliveryRejection::IncompleteEvent => "incomplete-event",
         ProviderDeliveryRejection::PayloadIdentityMismatch => "payload-identity-mismatch",
         ProviderDeliveryRejection::InvalidPayload => "invalid-payload",
+    }
+}
+
+const fn control_kind(value: ProviderControlKind) -> &'static str {
+    match value {
+        ProviderControlKind::Rerun => "rerun",
+    }
+}
+
+const fn subject_kind(value: ExternalSubjectKind) -> &'static str {
+    match value {
+        ExternalSubjectKind::User => "user",
+        ExternalSubjectKind::Organization => "organization",
+        ExternalSubjectKind::Team => "team",
+        ExternalSubjectKind::ServiceAccount => "service-account",
+    }
+}
+
+fn decode_subject_kind(
+    value: &str,
+) -> Result<ExternalSubjectKind, ProviderDeliveryRepositoryError> {
+    match value {
+        "user" => Ok(ExternalSubjectKind::User),
+        "organization" => Ok(ExternalSubjectKind::Organization),
+        "team" => Ok(ExternalSubjectKind::Team),
+        "service-account" => Ok(ExternalSubjectKind::ServiceAccount),
+        _ => Err(ProviderDeliveryRepositoryError::Corrupt),
     }
 }
 
@@ -714,11 +915,11 @@ fn rejection(value: &str) -> Result<ProviderDeliveryRejection, ProviderDeliveryR
     }
 }
 
-const fn failure_text(value: ProviderDeliveryFailure) -> &'static str {
+const fn failure_text(value: ProviderProcessingFailure) -> &'static str {
     match value {
-        ProviderDeliveryFailure::DependencyUnavailable => "dependency-unavailable",
-        ProviderDeliveryFailure::PolicyRejected => "policy-rejected",
-        ProviderDeliveryFailure::InvalidEvidence => "invalid-evidence",
+        ProviderProcessingFailure::DependencyUnavailable => "dependency-unavailable",
+        ProviderProcessingFailure::PolicyRejected => "policy-rejected",
+        ProviderProcessingFailure::InvalidEvidence => "invalid-evidence",
     }
 }
 
@@ -733,10 +934,39 @@ fn positive_u64(value: i64) -> Result<u64, ProviderDeliveryRepositoryError> {
         .ok_or(ProviderDeliveryRepositoryError::Corrupt)
 }
 
-fn positive_u16(value: i16) -> Result<u16, ProviderDeliveryRepositoryError> {
-    u16::try_from(value).map_err(|_| ProviderDeliveryRepositoryError::Corrupt)
-}
-
 fn unavailable(_: sqlx::Error) -> ProviderDeliveryRepositoryError {
     ProviderDeliveryRepositoryError::Unavailable
+}
+
+fn processing_durable_u64(value: u64) -> Result<i64, ProviderProcessingRepositoryError> {
+    i64::try_from(value).map_err(|_| ProviderProcessingRepositoryError::Corrupt)
+}
+
+fn processing_positive_u64(value: i64) -> Result<u64, ProviderProcessingRepositoryError> {
+    u64::try_from(value)
+        .ok()
+        .filter(|value| *value > 0)
+        .ok_or(ProviderProcessingRepositoryError::Corrupt)
+}
+
+fn processing_positive_u16(value: i16) -> Result<u16, ProviderProcessingRepositoryError> {
+    u16::try_from(value).map_err(|_| ProviderProcessingRepositoryError::Corrupt)
+}
+
+const fn processing_from_delivery(
+    error: ProviderDeliveryRepositoryError,
+) -> ProviderProcessingRepositoryError {
+    match error {
+        ProviderDeliveryRepositoryError::NotFound => ProviderProcessingRepositoryError::NotFound,
+        ProviderDeliveryRepositoryError::Unavailable => {
+            ProviderProcessingRepositoryError::Unavailable
+        }
+        ProviderDeliveryRepositoryError::EndpointConflict
+        | ProviderDeliveryRepositoryError::ReplayConflict
+        | ProviderDeliveryRepositoryError::Corrupt => ProviderProcessingRepositoryError::Corrupt,
+    }
+}
+
+fn processing_unavailable(_: sqlx::Error) -> ProviderProcessingRepositoryError {
+    ProviderProcessingRepositoryError::Unavailable
 }

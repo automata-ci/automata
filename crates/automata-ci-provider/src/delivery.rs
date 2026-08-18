@@ -1,4 +1,4 @@
-//! Replay-safe provider delivery inbox and worker ports.
+//! Replay-safe provider delivery evidence and processing-invocation ports.
 
 use std::{fmt, future::Future, num::NonZeroU64, pin::Pin};
 
@@ -8,20 +8,21 @@ use thiserror::Error;
 
 use crate::{
     ExternalDeliveryIdentity, ProviderConnectionManifest, ProviderDeliveryId,
-    ProviderDeliveryRejection, ProviderDeliveryWorkerId, ProviderLifecycleState,
-    ProviderSaveOutcome, ProviderWebhookEndpointId, ProviderWebhookEndpointManifest,
-    ProviderWebhookEndpointRevision, ProviderWebhookError, ProviderWebhookSecretCandidates,
-    RejectedProviderDelivery, VerifiedProviderDelivery,
+    ProviderDeliveryRejection, ProviderLifecycleState, ProviderProcessingInvocationId,
+    ProviderProcessingWorkerId, ProviderSaveOutcome, ProviderWebhookEndpointId,
+    ProviderWebhookEndpointManifest, ProviderWebhookEndpointRevision, ProviderWebhookError,
+    ProviderWebhookSecretCandidates, RejectedProviderDelivery, VerifiedProviderControlDelivery,
+    VerifiedProviderTriggerDelivery,
 };
 
 /// Maximum processing attempts for one admitted provider delivery.
-pub const MAX_PROVIDER_DELIVERY_ATTEMPTS: u16 = 16;
-/// Maximum duration of one delivery worker lease.
-pub const MAX_PROVIDER_DELIVERY_LEASE_MILLIS: i64 = 15 * 60 * 1_000;
-/// Maximum total lifetime of one delivery claim across all renewals.
-pub const MAX_PROVIDER_DELIVERY_TOTAL_CLAIM_MILLIS: i64 = 60 * 60 * 1_000;
-/// Maximum delay before a transiently failed delivery becomes eligible again.
-pub const MAX_PROVIDER_DELIVERY_RETRY_MILLIS: i64 = 24 * 60 * 60 * 1_000;
+pub const MAX_PROVIDER_PROCESSING_ATTEMPTS: u16 = 16;
+/// Maximum duration of one processing-worker lease.
+pub const MAX_PROVIDER_PROCESSING_LEASE_MILLIS: i64 = 15 * 60 * 1_000;
+/// Maximum total lifetime of one processing claim across all renewals.
+pub const MAX_PROVIDER_PROCESSING_TOTAL_CLAIM_MILLIS: i64 = 60 * 60 * 1_000;
+/// Maximum delay before a transiently failed invocation becomes eligible again.
+pub const MAX_PROVIDER_PROCESSING_RETRY_MILLIS: i64 = 24 * 60 * 60 * 1_000;
 
 const DELIVERY_FINGERPRINT_DOMAIN: &[u8] = b"automata.provider.delivery-fingerprint.v1\0";
 
@@ -105,7 +106,9 @@ impl fmt::Debug for ProviderWebhookEndpointRecord {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProviderDelivery {
     /// A complete normalized trigger eligible for workflow admission.
-    Trigger(Box<VerifiedProviderDelivery>),
+    Trigger(Box<VerifiedProviderTriggerDelivery>),
+    /// An authenticated provider-native control request.
+    Control(Box<VerifiedProviderControlDelivery>),
     /// An authenticated unknown, unsupported, incomplete, or conflicting event.
     Rejected(Box<RejectedProviderDelivery>),
 }
@@ -115,8 +118,9 @@ impl ProviderDelivery {
     #[must_use]
     pub const fn delivery_id(&self) -> ProviderDeliveryId {
         match self {
-            Self::Trigger(value) => value.delivery_id(),
-            Self::Rejected(value) => value.delivery_id(),
+            Self::Trigger(value) => value.evidence().delivery_id(),
+            Self::Control(value) => value.evidence().delivery_id(),
+            Self::Rejected(value) => value.evidence().delivery_id(),
         }
     }
 
@@ -124,8 +128,9 @@ impl ProviderDelivery {
     #[must_use]
     pub const fn external_delivery(&self) -> &ExternalDeliveryIdentity {
         match self {
-            Self::Trigger(value) => value.external_delivery(),
-            Self::Rejected(value) => value.external_delivery(),
+            Self::Trigger(value) => value.evidence().external_delivery(),
+            Self::Control(value) => value.evidence().external_delivery(),
+            Self::Rejected(value) => value.evidence().external_delivery(),
         }
     }
 
@@ -133,8 +138,9 @@ impl ProviderDelivery {
     #[must_use]
     pub const fn endpoint_id(&self) -> ProviderWebhookEndpointId {
         match self {
-            Self::Trigger(value) => value.endpoint_id(),
-            Self::Rejected(value) => value.endpoint_id(),
+            Self::Trigger(value) => value.evidence().endpoint_id(),
+            Self::Control(value) => value.evidence().endpoint_id(),
+            Self::Rejected(value) => value.evidence().endpoint_id(),
         }
     }
 
@@ -142,8 +148,9 @@ impl ProviderDelivery {
     #[must_use]
     pub const fn raw_body_digest(&self) -> Sha256Digest {
         match self {
-            Self::Trigger(value) => value.raw_body().digest(),
-            Self::Rejected(value) => value.raw_body().digest(),
+            Self::Trigger(value) => value.evidence().raw_body().digest(),
+            Self::Control(value) => value.evidence().raw_body().digest(),
+            Self::Rejected(value) => value.evidence().raw_body().digest(),
         }
     }
 
@@ -151,8 +158,9 @@ impl ProviderDelivery {
     #[must_use]
     pub const fn received_at(&self) -> UnixMillis {
         match self {
-            Self::Trigger(value) => value.received_at(),
-            Self::Rejected(value) => value.received_at(),
+            Self::Trigger(value) => value.evidence().received_at(),
+            Self::Control(value) => value.evidence().received_at(),
+            Self::Rejected(value) => value.evidence().received_at(),
         }
     }
 
@@ -175,7 +183,7 @@ impl ProviderDelivery {
         match self {
             Self::Trigger(value) => {
                 part(&mut hash, b"trigger");
-                part(&mut hash, value.event_type().as_str().as_bytes());
+                part(&mut hash, value.evidence().event_type().as_str().as_bytes());
                 part(
                     &mut hash,
                     value
@@ -189,9 +197,23 @@ impl ProviderDelivery {
                 );
                 part(&mut hash, value.trigger().digest().as_bytes());
             }
+            Self::Control(value) => {
+                part(&mut hash, b"control");
+                part(&mut hash, value.evidence().event_type().as_str().as_bytes());
+                part(
+                    &mut hash,
+                    value
+                        .control()
+                        .repository()
+                        .external_id()
+                        .as_str()
+                        .as_bytes(),
+                );
+                part(&mut hash, value.control().digest().as_bytes());
+            }
             Self::Rejected(value) => {
                 part(&mut hash, b"rejected");
-                part(&mut hash, value.event_type().as_str().as_bytes());
+                part(&mut hash, value.evidence().event_type().as_str().as_bytes());
                 match value.repository() {
                     Some(repository) => {
                         hash.update([1]);
@@ -210,6 +232,7 @@ impl ProviderDelivery {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AcceptProviderDelivery {
     delivery: ProviderDelivery,
+    invocation_id: Option<ProviderProcessingInvocationId>,
     accepted_at: UnixMillis,
 }
 
@@ -226,8 +249,14 @@ impl AcceptProviderDelivery {
         if accepted_at.get() < 0 || accepted_at < delivery.received_at() {
             return Err(ProviderDeliveryModelError::InvalidAcceptanceTime);
         }
+        let invocation_id = matches!(
+            delivery,
+            ProviderDelivery::Trigger(_) | ProviderDelivery::Control(_)
+        )
+        .then(ProviderProcessingInvocationId::new);
         Ok(Self {
             delivery,
+            invocation_id,
             accepted_at,
         })
     }
@@ -244,10 +273,22 @@ impl AcceptProviderDelivery {
         self.accepted_at
     }
 
+    /// Returns the new invocation identity reserved for actionable evidence.
+    #[must_use]
+    pub const fn invocation_id(&self) -> Option<ProviderProcessingInvocationId> {
+        self.invocation_id
+    }
+
     /// Consumes the command into evidence and acceptance time.
     #[must_use]
-    pub fn into_parts(self) -> (ProviderDelivery, UnixMillis) {
-        (self.delivery, self.accepted_at)
+    pub fn into_parts(
+        self,
+    ) -> (
+        ProviderDelivery,
+        Option<ProviderProcessingInvocationId>,
+        UnixMillis,
+    ) {
+        (self.delivery, self.invocation_id, self.accepted_at)
     }
 }
 
@@ -263,9 +304,9 @@ impl ProviderDeliveryReplayFingerprint {
     }
 }
 
-/// Durable provider delivery lifecycle.
+/// Durable lifecycle of one processing invocation.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum ProviderDeliveryState {
+pub enum ProviderProcessingState {
     /// A normalized trigger is ready for a worker.
     Pending,
     /// A previous transient attempt is waiting for its retry deadline.
@@ -276,68 +317,128 @@ pub enum ProviderDeliveryState {
     Completed,
     /// A complete trigger was terminally rejected by processing policy.
     Failed,
-    /// Authenticated event evidence was recorded without admission.
-    Discarded,
 }
 
-/// Durable receipt returned by inbox mutations.
+/// Immutable receipt for one accepted provider delivery.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ProviderDeliveryReceipt {
     delivery_id: ProviderDeliveryId,
-    state: ProviderDeliveryState,
-    attempts: u16,
+    invocation_id: Option<ProviderProcessingInvocationId>,
     accepted_at: UnixMillis,
 }
 
 impl ProviderDeliveryReceipt {
+    /// Rehydrates delivery acceptance and its optional processing invocation.
+    ///
+    /// # Errors
+    ///
+    /// Rejects pre-epoch acceptance evidence.
+    pub fn new(
+        delivery_id: ProviderDeliveryId,
+        invocation_id: Option<ProviderProcessingInvocationId>,
+        accepted_at: UnixMillis,
+    ) -> Result<Self, ProviderDeliveryModelError> {
+        if accepted_at.get() < 0 {
+            return Err(ProviderDeliveryModelError::InvalidReceipt);
+        }
+        Ok(Self {
+            delivery_id,
+            invocation_id,
+            accepted_at,
+        })
+    }
+
+    /// Returns the immutable delivery identity.
+    #[must_use]
+    pub const fn delivery_id(self) -> ProviderDeliveryId {
+        self.delivery_id
+    }
+
+    /// Returns the invocation created for actionable evidence.
+    #[must_use]
+    pub const fn invocation_id(self) -> Option<ProviderProcessingInvocationId> {
+        self.invocation_id
+    }
+
+    /// Returns the durable acceptance timestamp.
+    #[must_use]
+    pub const fn accepted_at(self) -> UnixMillis {
+        self.accepted_at
+    }
+}
+
+/// Durable receipt returned by processing-invocation mutations.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProviderProcessingReceipt {
+    invocation_id: ProviderProcessingInvocationId,
+    cause_delivery_id: ProviderDeliveryId,
+    source_delivery_id: Option<ProviderDeliveryId>,
+    state: ProviderProcessingState,
+    attempts: u16,
+    created_at: UnixMillis,
+}
+
+impl ProviderProcessingReceipt {
     /// Rehydrates a validated durable receipt.
     ///
     /// # Errors
     ///
     /// Rejects negative time, excessive attempts, or state/attempt disagreement.
     pub fn new(
-        delivery_id: ProviderDeliveryId,
-        state: ProviderDeliveryState,
+        invocation_id: ProviderProcessingInvocationId,
+        cause_delivery_id: ProviderDeliveryId,
+        source_delivery_id: Option<ProviderDeliveryId>,
+        state: ProviderProcessingState,
         attempts: u16,
-        accepted_at: UnixMillis,
+        created_at: UnixMillis,
     ) -> Result<Self, ProviderDeliveryModelError> {
-        if accepted_at.get() < 0 || attempts > MAX_PROVIDER_DELIVERY_ATTEMPTS {
+        if created_at.get() < 0 || attempts > MAX_PROVIDER_PROCESSING_ATTEMPTS {
+            return Err(ProviderDeliveryModelError::InvalidReceipt);
+        }
+        if state == ProviderProcessingState::Pending && attempts != 0 {
             return Err(ProviderDeliveryModelError::InvalidReceipt);
         }
         if matches!(
             state,
-            ProviderDeliveryState::Pending | ProviderDeliveryState::Discarded
-        ) && attempts != 0
-        {
-            return Err(ProviderDeliveryModelError::InvalidReceipt);
-        }
-        if matches!(
-            state,
-            ProviderDeliveryState::RetryPending
-                | ProviderDeliveryState::Claimed
-                | ProviderDeliveryState::Completed
-                | ProviderDeliveryState::Failed
+            ProviderProcessingState::RetryPending
+                | ProviderProcessingState::Claimed
+                | ProviderProcessingState::Completed
+                | ProviderProcessingState::Failed
         ) && attempts == 0
         {
             return Err(ProviderDeliveryModelError::InvalidReceipt);
         }
         Ok(Self {
-            delivery_id,
+            invocation_id,
+            cause_delivery_id,
+            source_delivery_id,
             state,
             attempts,
-            accepted_at,
+            created_at,
         })
     }
 
-    /// Returns the server-owned delivery identity.
+    /// Returns the server-owned invocation identity.
     #[must_use]
-    pub const fn delivery_id(self) -> ProviderDeliveryId {
-        self.delivery_id
+    pub const fn invocation_id(self) -> ProviderProcessingInvocationId {
+        self.invocation_id
+    }
+
+    /// Returns the immutable delivery that requested this invocation.
+    #[must_use]
+    pub const fn cause_delivery_id(self) -> ProviderDeliveryId {
+        self.cause_delivery_id
+    }
+
+    /// Returns the resolved immutable trigger delivery, if one is already bound.
+    #[must_use]
+    pub const fn source_delivery_id(self) -> Option<ProviderDeliveryId> {
+        self.source_delivery_id
     }
 
     /// Returns current durable state.
     #[must_use]
-    pub const fn state(self) -> ProviderDeliveryState {
+    pub const fn state(self) -> ProviderProcessingState {
         self.state
     }
 
@@ -349,8 +450,8 @@ impl ProviderDeliveryReceipt {
 
     /// Returns initial durable acceptance time.
     #[must_use]
-    pub const fn accepted_at(self) -> UnixMillis {
-        self.accepted_at
+    pub const fn created_at(self) -> UnixMillis {
+        self.created_at
     }
 }
 
@@ -365,25 +466,25 @@ pub enum ProviderDeliveryAcceptOutcome {
 
 /// Bounded request to claim one eligible normalized trigger.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ClaimProviderDelivery {
-    worker_id: ProviderDeliveryWorkerId,
+pub struct ClaimProviderProcessing {
+    worker_id: ProviderProcessingWorkerId,
     claimed_at: UnixMillis,
     lease_millis: NonZeroU64,
 }
 
-impl ClaimProviderDelivery {
+impl ClaimProviderProcessing {
     /// Constructs a worker claim request.
     ///
     /// # Errors
     ///
     /// Rejects negative time or zero/excessive lease duration.
     pub fn new(
-        worker_id: ProviderDeliveryWorkerId,
+        worker_id: ProviderProcessingWorkerId,
         claimed_at: UnixMillis,
         lease_millis: u64,
     ) -> Result<Self, ProviderDeliveryModelError> {
         let lease_millis = NonZeroU64::new(lease_millis)
-            .filter(|value| value.get() <= MAX_PROVIDER_DELIVERY_LEASE_MILLIS as u64)
+            .filter(|value| value.get() <= MAX_PROVIDER_PROCESSING_LEASE_MILLIS as u64)
             .ok_or(ProviderDeliveryModelError::InvalidLease)?;
         let lease_i64 = i64::try_from(lease_millis.get())
             .map_err(|_| ProviderDeliveryModelError::InvalidLease)?;
@@ -399,7 +500,7 @@ impl ClaimProviderDelivery {
 
     /// Returns the worker requesting ownership.
     #[must_use]
-    pub const fn worker_id(self) -> ProviderDeliveryWorkerId {
+    pub const fn worker_id(self) -> ProviderProcessingWorkerId {
         self.worker_id
     }
 
@@ -418,23 +519,23 @@ impl ClaimProviderDelivery {
 
 /// Exact worker ownership and fencing evidence.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ProviderDeliveryClaimFence {
-    delivery_id: ProviderDeliveryId,
-    worker_id: ProviderDeliveryWorkerId,
+pub struct ProviderProcessingClaimFence {
+    invocation_id: ProviderProcessingInvocationId,
+    worker_id: ProviderProcessingWorkerId,
     token: NonZeroU64,
     claimed_at: UnixMillis,
     expires_at: UnixMillis,
 }
 
-impl ProviderDeliveryClaimFence {
+impl ProviderProcessingClaimFence {
     /// Rehydrates a positive, unexpired-at-issuance fence.
     ///
     /// # Errors
     ///
     /// Rejects zero token or negative expiry.
     pub fn new(
-        delivery_id: ProviderDeliveryId,
-        worker_id: ProviderDeliveryWorkerId,
+        invocation_id: ProviderProcessingInvocationId,
+        worker_id: ProviderProcessingWorkerId,
         token: u64,
         claimed_at: UnixMillis,
         expires_at: UnixMillis,
@@ -444,12 +545,12 @@ impl ProviderDeliveryClaimFence {
             .ok_or(ProviderDeliveryModelError::InvalidFence)?;
         if claimed_at.get() < 0
             || expires_at <= claimed_at
-            || expires_at.get() - claimed_at.get() > MAX_PROVIDER_DELIVERY_TOTAL_CLAIM_MILLIS
+            || expires_at.get() - claimed_at.get() > MAX_PROVIDER_PROCESSING_TOTAL_CLAIM_MILLIS
         {
             return Err(ProviderDeliveryModelError::InvalidFence);
         }
         Ok(Self {
-            delivery_id,
+            invocation_id,
             worker_id,
             token,
             claimed_at,
@@ -457,15 +558,15 @@ impl ProviderDeliveryClaimFence {
         })
     }
 
-    /// Returns the claimed delivery.
+    /// Returns the claimed processing invocation.
     #[must_use]
-    pub const fn delivery_id(self) -> ProviderDeliveryId {
-        self.delivery_id
+    pub const fn invocation_id(self) -> ProviderProcessingInvocationId {
+        self.invocation_id
     }
 
     /// Returns the owning worker.
     #[must_use]
-    pub const fn worker_id(self) -> ProviderDeliveryWorkerId {
+    pub const fn worker_id(self) -> ProviderProcessingWorkerId {
         self.worker_id
     }
 
@@ -488,66 +589,141 @@ impl ProviderDeliveryClaimFence {
     }
 }
 
-/// One normalized trigger and its exact live worker fence.
+/// Immutable actionable input that caused or supplies one processing invocation.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ClaimedProviderDelivery {
-    receipt: ProviderDeliveryReceipt,
-    delivery: VerifiedProviderDelivery,
-    fence: ProviderDeliveryClaimFence,
+pub enum ProviderProcessingInput {
+    /// A normalized trigger ready for admission.
+    Trigger(Box<VerifiedProviderTriggerDelivery>),
+    /// An authenticated control whose trigger target must be resolved exactly.
+    Control(Box<VerifiedProviderControlDelivery>),
 }
 
-impl ClaimedProviderDelivery {
+impl ProviderProcessingInput {
+    /// Returns the input delivery identity.
+    #[must_use]
+    pub const fn delivery_id(&self) -> ProviderDeliveryId {
+        match self {
+            Self::Trigger(value) => value.evidence().delivery_id(),
+            Self::Control(value) => value.evidence().delivery_id(),
+        }
+    }
+}
+
+/// One actionable input and its exact live worker fence.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClaimedProviderProcessing {
+    receipt: ProviderProcessingReceipt,
+    input: ProviderProcessingInput,
+    fence: ProviderProcessingClaimFence,
+}
+
+impl ClaimedProviderProcessing {
     /// Rehydrates mutually consistent claim evidence.
     ///
     /// # Errors
     ///
     /// Rejects identity or state disagreement.
     pub fn new(
-        receipt: ProviderDeliveryReceipt,
-        delivery: VerifiedProviderDelivery,
-        fence: ProviderDeliveryClaimFence,
+        receipt: ProviderProcessingReceipt,
+        input: ProviderProcessingInput,
+        fence: ProviderProcessingClaimFence,
     ) -> Result<Self, ProviderDeliveryModelError> {
-        if receipt.state() != ProviderDeliveryState::Claimed
-            || receipt.delivery_id() != delivery.delivery_id()
-            || receipt.delivery_id() != fence.delivery_id()
+        let identity_is_consistent = match &input {
+            ProviderProcessingInput::Trigger(delivery) => {
+                receipt.source_delivery_id() == Some(delivery.evidence().delivery_id())
+            }
+            ProviderProcessingInput::Control(delivery) => {
+                receipt.source_delivery_id().is_none()
+                    && receipt.cause_delivery_id() == delivery.evidence().delivery_id()
+            }
+        };
+        if receipt.state() != ProviderProcessingState::Claimed
+            || !identity_is_consistent
+            || receipt.invocation_id() != fence.invocation_id()
         {
             return Err(ProviderDeliveryModelError::InvalidClaim);
         }
         Ok(Self {
             receipt,
-            delivery,
+            input,
             fence,
         })
     }
 
     /// Returns claimed receipt state.
     #[must_use]
-    pub const fn receipt(&self) -> ProviderDeliveryReceipt {
+    pub const fn receipt(&self) -> ProviderProcessingReceipt {
         self.receipt
     }
 
-    /// Returns immutable normalized delivery evidence.
+    /// Returns the immutable actionable input.
     #[must_use]
-    pub const fn delivery(&self) -> &VerifiedProviderDelivery {
-        &self.delivery
+    pub const fn input(&self) -> &ProviderProcessingInput {
+        &self.input
     }
 
     /// Returns exact live fencing evidence.
     #[must_use]
-    pub const fn fence(&self) -> ProviderDeliveryClaimFence {
+    pub const fn fence(&self) -> ProviderProcessingClaimFence {
         self.fence
+    }
+}
+
+/// Exact-fence command that resolves an unresolved control to one trigger delivery.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BindProviderProcessingSource {
+    fence: ProviderProcessingClaimFence,
+    source_delivery_id: ProviderDeliveryId,
+    bound_at: UnixMillis,
+}
+
+impl BindProviderProcessingSource {
+    /// Constructs a source binding under a live processing claim.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a binding timestamp outside the exact live lease.
+    pub fn new(
+        fence: ProviderProcessingClaimFence,
+        source_delivery_id: ProviderDeliveryId,
+        bound_at: UnixMillis,
+    ) -> Result<Self, ProviderDeliveryModelError> {
+        validate_fenced_time(fence, bound_at)?;
+        Ok(Self {
+            fence,
+            source_delivery_id,
+            bound_at,
+        })
+    }
+
+    /// Returns exact live claim ownership.
+    #[must_use]
+    pub const fn fence(self) -> ProviderProcessingClaimFence {
+        self.fence
+    }
+
+    /// Returns the resolved immutable trigger delivery.
+    #[must_use]
+    pub const fn source_delivery_id(self) -> ProviderDeliveryId {
+        self.source_delivery_id
+    }
+
+    /// Returns trusted resolution time.
+    #[must_use]
+    pub const fn bound_at(self) -> UnixMillis {
+        self.bound_at
     }
 }
 
 /// Command that extends one exact live claim without changing its fence token.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct RenewProviderDelivery {
-    fence: ProviderDeliveryClaimFence,
+pub struct RenewProviderProcessing {
+    fence: ProviderProcessingClaimFence,
     renewed_at: UnixMillis,
     lease_millis: NonZeroU64,
 }
 
-impl RenewProviderDelivery {
+impl RenewProviderProcessing {
     /// Constructs a strictly extending live-lease renewal.
     ///
     /// # Errors
@@ -555,13 +731,13 @@ impl RenewProviderDelivery {
     /// Rejects renewal outside the current lease, excessive per-renewal or
     /// total duration, overflow, or a deadline that would not extend the claim.
     pub fn new(
-        fence: ProviderDeliveryClaimFence,
+        fence: ProviderProcessingClaimFence,
         renewed_at: UnixMillis,
         lease_millis: u64,
     ) -> Result<Self, ProviderDeliveryModelError> {
         validate_fenced_time(fence, renewed_at)?;
         let lease_millis = NonZeroU64::new(lease_millis)
-            .filter(|value| value.get() <= MAX_PROVIDER_DELIVERY_LEASE_MILLIS as u64)
+            .filter(|value| value.get() <= MAX_PROVIDER_PROCESSING_LEASE_MILLIS as u64)
             .ok_or(ProviderDeliveryModelError::InvalidLease)?;
         let extension = i64::try_from(lease_millis.get())
             .map_err(|_| ProviderDeliveryModelError::InvalidLease)?;
@@ -573,7 +749,7 @@ impl RenewProviderDelivery {
             .checked_sub(fence.claimed_at().get())
             .ok_or(ProviderDeliveryModelError::InvalidLease)?;
         if expires_at <= fence.expires_at().get()
-            || total_lifetime > MAX_PROVIDER_DELIVERY_TOTAL_CLAIM_MILLIS
+            || total_lifetime > MAX_PROVIDER_PROCESSING_TOTAL_CLAIM_MILLIS
         {
             return Err(ProviderDeliveryModelError::InvalidLease);
         }
@@ -586,7 +762,7 @@ impl RenewProviderDelivery {
 
     /// Returns exact current claim ownership.
     #[must_use]
-    pub const fn fence(self) -> ProviderDeliveryClaimFence {
+    pub const fn fence(self) -> ProviderProcessingClaimFence {
         self.fence
     }
 
@@ -605,7 +781,7 @@ impl RenewProviderDelivery {
 
 /// Sanitized terminal or transient processing failure category.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum ProviderDeliveryFailure {
+pub enum ProviderProcessingFailure {
     /// A required dependent service was temporarily unavailable.
     DependencyUnavailable,
     /// Current configuration or policy cannot admit the trigger.
@@ -616,19 +792,19 @@ pub enum ProviderDeliveryFailure {
 
 /// Command that closes an exact live claim successfully.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct CompleteProviderDelivery {
-    fence: ProviderDeliveryClaimFence,
+pub struct CompleteProviderProcessing {
+    fence: ProviderProcessingClaimFence,
     completed_at: UnixMillis,
 }
 
-impl CompleteProviderDelivery {
+impl CompleteProviderProcessing {
     /// Constructs a completion command.
     ///
     /// # Errors
     ///
     /// Rejects time outside the live lease.
     pub fn new(
-        fence: ProviderDeliveryClaimFence,
+        fence: ProviderProcessingClaimFence,
         completed_at: UnixMillis,
     ) -> Result<Self, ProviderDeliveryModelError> {
         validate_fenced_time(fence, completed_at)?;
@@ -640,7 +816,7 @@ impl CompleteProviderDelivery {
 
     /// Returns exact ownership evidence.
     #[must_use]
-    pub const fn fence(self) -> ProviderDeliveryClaimFence {
+    pub const fn fence(self) -> ProviderProcessingClaimFence {
         self.fence
     }
 
@@ -653,31 +829,31 @@ impl CompleteProviderDelivery {
 
 /// Command that releases an exact live claim into delayed retry.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct RetryProviderDelivery {
-    fence: ProviderDeliveryClaimFence,
+pub struct RetryProviderProcessing {
+    fence: ProviderProcessingClaimFence,
     failed_at: UnixMillis,
     retry_at: UnixMillis,
-    failure: ProviderDeliveryFailure,
+    failure: ProviderProcessingFailure,
 }
 
-impl RetryProviderDelivery {
+impl RetryProviderProcessing {
     /// Constructs a bounded delayed retry.
     ///
     /// # Errors
     ///
     /// Rejects time outside the lease, a nonfuture deadline, or excessive delay.
     pub fn new(
-        fence: ProviderDeliveryClaimFence,
+        fence: ProviderProcessingClaimFence,
         failed_at: UnixMillis,
         retry_at: UnixMillis,
-        failure: ProviderDeliveryFailure,
+        failure: ProviderProcessingFailure,
     ) -> Result<Self, ProviderDeliveryModelError> {
         validate_fenced_time(fence, failed_at)?;
         let delay = retry_at
             .get()
             .checked_sub(failed_at.get())
             .ok_or(ProviderDeliveryModelError::InvalidRetry)?;
-        if delay <= 0 || delay > MAX_PROVIDER_DELIVERY_RETRY_MILLIS {
+        if delay <= 0 || delay > MAX_PROVIDER_PROCESSING_RETRY_MILLIS {
             return Err(ProviderDeliveryModelError::InvalidRetry);
         }
         Ok(Self {
@@ -690,7 +866,7 @@ impl RetryProviderDelivery {
 
     /// Returns exact ownership evidence.
     #[must_use]
-    pub const fn fence(self) -> ProviderDeliveryClaimFence {
+    pub const fn fence(self) -> ProviderProcessingClaimFence {
         self.fence
     }
 
@@ -708,29 +884,29 @@ impl RetryProviderDelivery {
 
     /// Returns the sanitized failure category.
     #[must_use]
-    pub const fn failure(self) -> ProviderDeliveryFailure {
+    pub const fn failure(self) -> ProviderProcessingFailure {
         self.failure
     }
 }
 
 /// Command that terminally rejects an exact live claim.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct FailProviderDelivery {
-    fence: ProviderDeliveryClaimFence,
+pub struct FailProviderProcessing {
+    fence: ProviderProcessingClaimFence,
     failed_at: UnixMillis,
-    failure: ProviderDeliveryFailure,
+    failure: ProviderProcessingFailure,
 }
 
-impl FailProviderDelivery {
+impl FailProviderProcessing {
     /// Constructs a terminal processing failure.
     ///
     /// # Errors
     ///
     /// Rejects time outside the live lease.
     pub fn new(
-        fence: ProviderDeliveryClaimFence,
+        fence: ProviderProcessingClaimFence,
         failed_at: UnixMillis,
-        failure: ProviderDeliveryFailure,
+        failure: ProviderProcessingFailure,
     ) -> Result<Self, ProviderDeliveryModelError> {
         validate_fenced_time(fence, failed_at)?;
         Ok(Self {
@@ -742,7 +918,7 @@ impl FailProviderDelivery {
 
     /// Returns exact ownership evidence.
     #[must_use]
-    pub const fn fence(self) -> ProviderDeliveryClaimFence {
+    pub const fn fence(self) -> ProviderProcessingClaimFence {
         self.fence
     }
 
@@ -754,7 +930,7 @@ impl FailProviderDelivery {
 
     /// Returns the sanitized failure category.
     #[must_use]
-    pub const fn failure(self) -> ProviderDeliveryFailure {
+    pub const fn failure(self) -> ProviderProcessingFailure {
         self.failure
     }
 }
@@ -762,6 +938,10 @@ impl FailProviderDelivery {
 /// Boxed future returned by provider delivery repository operations.
 pub type ProviderDeliveryFuture<'a, T> =
     Pin<Box<dyn Future<Output = Result<T, ProviderDeliveryRepositoryError>> + Send + 'a>>;
+
+/// Boxed future returned by processing-invocation repository operations.
+pub type ProviderProcessingFuture<'a, T> =
+    Pin<Box<dyn Future<Output = Result<T, ProviderProcessingRepositoryError>> + Send + 'a>>;
 
 /// Durable opaque endpoint repository with secret-generation custody.
 pub trait ProviderWebhookEndpointRepository: fmt::Debug + Send + Sync {
@@ -785,7 +965,7 @@ pub trait ProviderWebhookEndpointRepository: fmt::Debug + Send + Sync {
     ) -> ProviderDeliveryFuture<'_, Option<ProviderWebhookEndpointRecord>>;
 }
 
-/// Durable replay-safe provider delivery inbox and worker queue.
+/// Durable replay-safe immutable provider delivery inbox.
 pub trait ProviderDeliveryRepository: fmt::Debug + Send + Sync {
     /// Inserts new authenticated evidence or returns an exact replay receipt.
     /// Reusing an instance-scoped external delivery ID with a different replay
@@ -800,36 +980,45 @@ pub trait ProviderDeliveryRepository: fmt::Debug + Send + Sync {
         &self,
         delivery_id: ProviderDeliveryId,
     ) -> ProviderDeliveryFuture<'_, Option<ProviderDelivery>>;
+}
 
-    /// Claims at most one eligible normalized trigger with skip-locked semantics.
-    fn claim_delivery(
+/// Durable queue of processing invocations derived from immutable deliveries.
+pub trait ProviderProcessingRepository: fmt::Debug + Send + Sync {
+    /// Claims at most one eligible processing invocation with skip-locked semantics.
+    fn claim_processing(
         &self,
-        request: ClaimProviderDelivery,
-    ) -> ProviderDeliveryFuture<'_, Option<ClaimedProviderDelivery>>;
+        request: ClaimProviderProcessing,
+    ) -> ProviderProcessingFuture<'_, Option<ClaimedProviderProcessing>>;
+
+    /// Binds one unresolved control invocation to an immutable trigger exactly once.
+    fn bind_processing_source(
+        &self,
+        request: BindProviderProcessingSource,
+    ) -> ProviderProcessingFuture<'_, ClaimedProviderProcessing>;
 
     /// Extends one exact live claim while preserving its fencing token.
-    fn renew_delivery(
+    fn renew_processing(
         &self,
-        request: RenewProviderDelivery,
-    ) -> ProviderDeliveryFuture<'_, ProviderDeliveryClaimFence>;
+        request: RenewProviderProcessing,
+    ) -> ProviderProcessingFuture<'_, ProviderProcessingClaimFence>;
 
     /// Closes an exact live claim successfully.
-    fn complete_delivery(
+    fn complete_processing(
         &self,
-        request: CompleteProviderDelivery,
-    ) -> ProviderDeliveryFuture<'_, ProviderDeliveryReceipt>;
+        request: CompleteProviderProcessing,
+    ) -> ProviderProcessingFuture<'_, ProviderProcessingReceipt>;
 
     /// Releases an exact live claim into bounded delayed retry.
-    fn retry_delivery(
+    fn retry_processing(
         &self,
-        request: RetryProviderDelivery,
-    ) -> ProviderDeliveryFuture<'_, ProviderDeliveryReceipt>;
+        request: RetryProviderProcessing,
+    ) -> ProviderProcessingFuture<'_, ProviderProcessingReceipt>;
 
     /// Terminally fails an exact live claim.
-    fn fail_delivery(
+    fn fail_processing(
         &self,
-        request: FailProviderDelivery,
-    ) -> ProviderDeliveryFuture<'_, ProviderDeliveryReceipt>;
+        request: FailProviderProcessing,
+    ) -> ProviderProcessingFuture<'_, ProviderProcessingReceipt>;
 }
 
 /// Invalid delivery values rejected before repository access.
@@ -845,7 +1034,7 @@ pub enum ProviderDeliveryModelError {
     #[error("provider delivery lease is invalid")]
     InvalidLease,
     /// Fencing token or expiry was invalid.
-    #[error("provider delivery claim fence is invalid")]
+    #[error("provider processing claim fence is invalid")]
     InvalidFence,
     /// Claimed receipt, delivery, and fence identities disagreed.
     #[error("claimed provider delivery evidence is inconsistent")]
@@ -870,12 +1059,6 @@ pub enum ProviderDeliveryRepositoryError {
     /// An external delivery replay key was reused with different immutable evidence.
     #[error("provider delivery replay evidence conflicts with durable state")]
     ReplayConflict,
-    /// A claim fence was stale, expired, or owned by another worker.
-    #[error("provider delivery claim was rejected")]
-    ClaimRejected,
-    /// The hard attempt bound was reached.
-    #[error("provider delivery attempt limit was reached")]
-    AttemptLimitReached,
     /// Durable rows violated provider model invariants.
     #[error("provider delivery storage is corrupt")]
     Corrupt,
@@ -884,8 +1067,28 @@ pub enum ProviderDeliveryRepositoryError {
     Unavailable,
 }
 
+/// Sanitized durable processing-invocation repository failure.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum ProviderProcessingRepositoryError {
+    /// A referenced processing invocation or source delivery does not exist.
+    #[error("provider processing reference does not exist")]
+    NotFound,
+    /// A processing claim fence was stale, expired, or owned by another worker.
+    #[error("provider processing claim was rejected")]
+    ClaimRejected,
+    /// The hard processing attempt bound was reached.
+    #[error("provider processing attempt limit was reached")]
+    AttemptLimitReached,
+    /// Durable rows violated processing model invariants.
+    #[error("provider processing storage is corrupt")]
+    Corrupt,
+    /// The durable processing repository was unavailable.
+    #[error("provider processing repository is unavailable")]
+    Unavailable,
+}
+
 fn validate_fenced_time(
-    fence: ProviderDeliveryClaimFence,
+    fence: ProviderProcessingClaimFence,
     timestamp: UnixMillis,
 ) -> Result<(), ProviderDeliveryModelError> {
     if timestamp < fence.claimed_at() || timestamp >= fence.expires_at() {

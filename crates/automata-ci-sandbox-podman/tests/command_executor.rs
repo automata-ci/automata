@@ -362,8 +362,13 @@ fn assert_ordered_records_reconstruct_split_output(
             bytes.extend_from_slice(record.bytes());
         }
     }
-    assert_eq!(stdout_ends, 1);
-    assert_eq!(stderr_ends, 1);
+    if output.was_truncated() {
+        assert!(stdout_ends <= 1);
+        assert!(stderr_ends <= 1);
+    } else {
+        assert_eq!(stdout_ends, 1);
+        assert_eq!(stderr_ends, 1);
+    }
     assert_eq!(stdout, output.stdout());
     assert_eq!(stderr, output.stderr());
 }

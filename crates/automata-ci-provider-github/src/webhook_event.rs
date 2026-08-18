@@ -160,6 +160,19 @@ pub enum GithubCheckRunAction {
     RerunJob,
 }
 
+impl GithubCheckRunAction {
+    /// Returns the canonical GitHub/Automata action spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Rerequested => "rerequested",
+            Self::RerunAll => "rerun_all",
+            Self::RerunFailed => "rerun_failed",
+            Self::RerunJob => "rerun_job",
+        }
+    }
+}
+
 impl GithubMergeGroupAction {
     /// Returns GitHub's canonical activity spelling.
     #[must_use]
@@ -291,7 +304,7 @@ pub struct VerifiedGithubCheckRun {
     authenticated: AuthenticatedGithubWebhook,
     installation_id: NonZeroU64,
     repository: GithubWebhookRepository,
-    sender_id: NonZeroU64,
+    actor: GithubEventActor,
     app_id: NonZeroU64,
     run_id: NonZeroU64,
     suite_id: NonZeroU64,
@@ -331,10 +344,10 @@ impl VerifiedGithubCheckRun {
     pub const fn repository(&self) -> &GithubWebhookRepository {
         &self.repository
     }
-    /// Returns the nonzero GitHub sender identity to reauthorize.
+    /// Returns the authenticated GitHub sender facts to reauthorize.
     #[must_use]
-    pub const fn sender_id(&self) -> NonZeroU64 {
-        self.sender_id
+    pub const fn actor(&self) -> &GithubEventActor {
+        &self.actor
     }
     /// Returns the GitHub App that owns the Check Run.
     #[must_use]
@@ -377,7 +390,7 @@ impl fmt::Debug for VerifiedGithubCheckRun {
             .field("body_sha256", &self.authenticated.body_sha256())
             .field("installation_id", &self.installation_id)
             .field("repository", &self.repository)
-            .field("sender_id", &self.sender_id)
+            .field("actor", &self.actor)
             .field("app_id", &self.app_id)
             .field("run_id", &self.run_id)
             .field("suite_id", &self.suite_id)
@@ -394,7 +407,7 @@ pub struct VerifiedGithubCheckSuite {
     authenticated: AuthenticatedGithubWebhook,
     installation_id: NonZeroU64,
     repository: GithubWebhookRepository,
-    sender_id: NonZeroU64,
+    actor: GithubEventActor,
     app_id: NonZeroU64,
     suite_id: NonZeroU64,
     head_revision: GitObjectId,
@@ -431,10 +444,10 @@ impl VerifiedGithubCheckSuite {
     pub const fn repository(&self) -> &GithubWebhookRepository {
         &self.repository
     }
-    /// Returns the nonzero GitHub sender identity to reauthorize.
+    /// Returns the authenticated GitHub sender facts to reauthorize.
     #[must_use]
-    pub const fn sender_id(&self) -> NonZeroU64 {
-        self.sender_id
+    pub const fn actor(&self) -> &GithubEventActor {
+        &self.actor
     }
     /// Returns the GitHub App that owns the Check Suite.
     #[must_use]
@@ -462,7 +475,7 @@ impl fmt::Debug for VerifiedGithubCheckSuite {
             .field("body_sha256", &self.authenticated.body_sha256())
             .field("installation_id", &self.installation_id)
             .field("repository", &self.repository)
-            .field("sender_id", &self.sender_id)
+            .field("actor", &self.actor)
             .field("app_id", &self.app_id)
             .field("suite_id", &self.suite_id)
             .field("head_revision", &"[redacted]")
@@ -1077,11 +1090,12 @@ pub(crate) fn normalize_check_run(
     if head_revision != suite_revision {
         return Err(GithubWebhookError::InvalidPayload);
     }
+    let actor = payload.sender.normalize()?;
     Ok(VerifiedGithubCheckRun {
         authenticated,
         installation_id: durable_provider_id(payload.installation.id)?,
         repository: payload.repository.normalize()?,
-        sender_id: durable_provider_id(payload.sender.id)?,
+        actor,
         app_id: durable_provider_id(payload.check_run.app.id)?,
         run_id: durable_provider_id(payload.check_run.id)?,
         suite_id: durable_provider_id(payload.check_run.check_suite.id)?,
@@ -1102,11 +1116,12 @@ pub(crate) fn normalize_check_suite(
     {
         return Err(GithubWebhookError::InvalidPayload);
     }
+    let actor = payload.sender.normalize()?;
     Ok(VerifiedGithubCheckSuite {
         authenticated,
         installation_id: durable_provider_id(payload.installation.id)?,
         repository: payload.repository.normalize()?,
-        sender_id: durable_provider_id(payload.sender.id)?,
+        actor,
         app_id: durable_provider_id(payload.check_suite.app.id)?,
         suite_id: durable_provider_id(payload.check_suite.id)?,
         head_revision: exact_revision(payload.check_suite.head_sha)?,

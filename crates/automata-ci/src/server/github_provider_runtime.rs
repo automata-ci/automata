@@ -69,7 +69,7 @@ use automata_ci_store::{
     GithubServerServiceWorkerId, GithubSubjectEvidenceRepository,
     GithubWorkflowPermissionDefaultsObservation,
     GithubWorkflowPermissionDefaultsObservationRepository, LogicalWorkflowAdmissionRepository,
-    MAX_GITHUB_SERVICE_CONSUMER_REQUEST_MILLIS, ProviderDeliveryClaimOwnerId,
+    MAX_GITHUB_SERVICE_CONSUMER_REQUEST_MILLIS, ProviderProcessingWorkerId,
     ProviderRepositoryVisibility, RetireGithubServerServiceAuthority, TenantScope,
 };
 use automata_ci_store_postgres::PostgresStore;
@@ -978,7 +978,7 @@ impl GithubProviderRuntimeBuilder {
         let repository_dispatch_resolver = Arc::new(endpoint.clone());
         let repository_dispatch_evidence: Arc<dyn GithubRepositoryDispatchEvidenceRepository> =
             store.clone();
-        let delivery_worker = ProviderDeliveryClaimOwnerId::from_uuid(Uuid::new_v4())
+        let delivery_worker = ProviderProcessingWorkerId::from_uuid(Uuid::new_v4())
             .map_err(|_| GithubProviderRuntimeBuildError::InvalidWorkerIdentity)?;
         let delivery = match shape.source_mode() {
             GithubProviderSourceMode::PublicOnly => {

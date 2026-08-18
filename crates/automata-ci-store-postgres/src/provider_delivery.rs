@@ -9,16 +9,17 @@ use automata_ci_store::{
     AcceptProviderDelivery, AdmissionObject, ClaimProviderDelivery, ClaimedProviderDelivery,
     CompleteProviderDelivery, GithubCheckTerminalCause, MAX_PROVIDER_DELIVERY_ATTEMPTS,
     MAX_PROVIDER_DELIVERY_CLAIM_MILLIS, MAX_PROVIDER_DELIVERY_TOTAL_CLAIM_MILLIS, ObjectKey,
-    ProviderDeliveryClaimFence, ProviderDeliveryClaimOwnerId,
-    ProviderDeliveryClaimRenewalRepository, ProviderDeliveryEventEnvelope, ProviderDeliveryId,
-    ProviderDeliveryIdentity, ProviderDeliveryReceipt, ProviderDeliveryRepository,
-    ProviderDeliveryState, ProviderDeliveryStoreError, ProviderDeliveryWorkflowConclusion,
+    ProviderDeliveryClaimFence, ProviderDeliveryClaimRenewalRepository,
+    ProviderDeliveryEventEnvelope, ProviderDeliveryId, ProviderDeliveryIdentity,
+    ProviderDeliveryReceipt, ProviderDeliveryRepository, ProviderDeliveryState,
+    ProviderDeliveryStoreError, ProviderDeliveryWorkflowConclusion,
     ProviderDeliveryWorkflowInventory, ProviderDeliveryWorkflowInventoryEntry,
     ProviderDeliveryWorkflowInventoryReceipt, ProviderDeliveryWorkflowOutcome,
-    ProviderDeliveryWorkflowSourceState, ProviderInstallationId, ProviderRepositoryCoordinates,
-    ProviderRepositoryId, ProviderRepositoryVisibility, RecordProviderDeliveryWorkflowProgress,
-    RegisterProviderDeliveryWorkflowInventory, RejectProviderDelivery, RenewProviderDeliveryClaim,
-    RenewedProviderDeliveryClaim, RetryProviderDelivery, Sha256Digest, TenantScope,
+    ProviderDeliveryWorkflowSourceState, ProviderInstallationId, ProviderProcessingWorkerId,
+    ProviderRepositoryCoordinates, ProviderRepositoryId, ProviderRepositoryVisibility,
+    RecordProviderDeliveryWorkflowProgress, RegisterProviderDeliveryWorkflowInventory,
+    RejectProviderDelivery, RenewProviderDeliveryClaim, RenewedProviderDeliveryClaim,
+    RetryProviderDelivery, Sha256Digest, TenantScope,
 };
 
 use super::{
@@ -756,7 +757,7 @@ fn caller_time_is_admissible(observed_at: UnixMillis, database_time: UnixMillis)
 /// work while ensuring it can never be claimed and interpreted from raw JSON.
 async fn quarantine_legacy_unsealed_deliveries(
     transaction: &mut Transaction<'_, Postgres>,
-    owner: ProviderDeliveryClaimOwnerId,
+    owner: ProviderProcessingWorkerId,
     observed_at: UnixMillis,
 ) -> Result<(), ProviderDeliveryStoreError> {
     sqlx::query(
@@ -1010,7 +1011,7 @@ fn decode_exact_renewal(
         .map_err(operation_error)?;
     let claim = ProviderDeliveryClaimFence::from_durable_parts(
         request.claim().delivery_id(),
-        ProviderDeliveryClaimOwnerId::from_uuid(returned_owner)
+        ProviderProcessingWorkerId::from_uuid(returned_owner)
             .map_err(|_| ProviderDeliveryStoreError::CorruptData)?,
         u64::try_from(returned_fence).map_err(|_| ProviderDeliveryStoreError::CorruptData)?,
     )
@@ -1221,7 +1222,7 @@ fn decode_claimed_delivery(
     let expires_at: i64 = row
         .try_get("claim_expires_at_ms")
         .map_err(operation_error)?;
-    let owner = ProviderDeliveryClaimOwnerId::from_uuid(owner)
+    let owner = ProviderProcessingWorkerId::from_uuid(owner)
         .map_err(|_| ProviderDeliveryStoreError::CorruptData)?;
     let claim = ProviderDeliveryClaimFence::from_durable_parts(
         durable.receipt.id(),

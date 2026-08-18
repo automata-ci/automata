@@ -225,6 +225,10 @@ const FROZEN_MIGRATIONS: &[(&str, &str)] = &[
         "0055_terminal_log_output_v3.sql",
         "aad28f96b40e06578af7609ef1ef9073315c4a2cf3e9b04d464eb44762ce59f4b3613e73c18710c491ca3d6e1064571f",
     ),
+    (
+        "0056_provider_processing_invocations.sql",
+        "47302f91ed241062d1d9366a326d48d804bd6bbf7daba589501f6c2b92dbf6ef23707fea7999f27398bc1ef7b54203f5",
+    ),
 ];
 
 const BASELINE_MIGRATION_COUNT: u32 = 26;
@@ -685,6 +689,46 @@ fn canonical_git_object_ids_are_a_forward_only_exact_transition() {
         assert!(
             !source.contains(forbidden),
             "canonical Git object migration retained ambiguous transition surface: {forbidden}",
+        );
+    }
+}
+
+#[test]
+fn provider_processing_cutover_is_destructive_single_path_and_fenced() {
+    let source = include_str!("../migrations/0056_provider_processing_invocations.sql");
+
+    for required in [
+        "DROP TABLE provider_delivery_records;",
+        "DROP FUNCTION automata_enforce_provider_delivery_transition();",
+        "CREATE TABLE provider_deliveries (",
+        "CREATE TABLE provider_processing_invocations (",
+        "disposition IN ('trigger', 'control', 'rejected')",
+        "control_kind = 'rerun'",
+        "cause_delivery_id UUID NOT NULL UNIQUE",
+        "source_delivery_id UUID",
+        "source_disposition TEXT",
+        "NEW.source_disposition = 'trigger'",
+        "provider delivery evidence is immutable",
+        "provider processing source binding is invalid",
+        "provider processing source binding changed lifecycle state",
+        "CREATE TRIGGER provider_deliveries_immutable",
+        "CREATE TRIGGER provider_processing_invocations_transition",
+    ] {
+        assert!(
+            source.contains(required),
+            "provider processing cutover lost required contract: {required}",
+        );
+    }
+    for forbidden in [
+        "CREATE TABLE provider_delivery_records",
+        "CREATE FUNCTION automata_enforce_provider_delivery_transition",
+        "IF EXISTS",
+        "IF NOT EXISTS",
+        " CASCADE",
+    ] {
+        assert!(
+            !source.contains(forbidden),
+            "provider processing cutover retained a second schema path: {forbidden}",
         );
     }
 }

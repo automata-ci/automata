@@ -10,16 +10,16 @@ use automata_ci_key_management::{
     KeyPurpose, WrappedDataKey,
 };
 use automata_ci_provider::{
-    AcceptProviderDelivery, ClaimProviderDelivery, ClaimedProviderDelivery,
-    CompleteProviderDelivery, FailProviderDelivery, ProviderConnectionId,
+    AcceptProviderDelivery, ClaimProviderProcessing, ClaimedProviderProcessing,
+    CompleteProviderProcessing, FailProviderProcessing, ProviderConnectionId,
     ProviderConnectionManifest, ProviderConnectionRevision, ProviderDelivery,
     ProviderDeliveryAcceptOutcome, ProviderDeliveryFuture, ProviderDeliveryId,
-    ProviderDeliveryReceipt, ProviderDeliveryRepository, ProviderInstanceId,
-    ProviderInstanceRecord, ProviderManifestRepository, ProviderRepositoryError,
-    ProviderRepositoryFuture, ProviderSaveOutcome, ProviderWebhookEndpointId,
-    ProviderWebhookEndpointManifest, ProviderWebhookEndpointRecord,
-    ProviderWebhookEndpointRepository, ProviderWebhookEndpointRevision, RenewProviderDelivery,
-    RetryProviderDelivery,
+    ProviderDeliveryRepository, ProviderInstanceId, ProviderInstanceRecord,
+    ProviderManifestRepository, ProviderProcessingFuture, ProviderProcessingReceipt,
+    ProviderProcessingRepository, ProviderRepositoryError, ProviderRepositoryFuture,
+    ProviderSaveOutcome, ProviderWebhookEndpointId, ProviderWebhookEndpointManifest,
+    ProviderWebhookEndpointRecord, ProviderWebhookEndpointRepository,
+    ProviderWebhookEndpointRevision, RenewProviderProcessing, RetryProviderProcessing,
 };
 use sqlx::{PgPool, Postgres, Transaction};
 
@@ -151,40 +151,49 @@ impl ProviderDeliveryRepository for PostgresProviderManifestRepository {
     ) -> ProviderDeliveryFuture<'_, Option<ProviderDelivery>> {
         Box::pin(self.load_delivery_inner(delivery_id))
     }
+}
 
-    fn claim_delivery(
+impl ProviderProcessingRepository for PostgresProviderManifestRepository {
+    fn claim_processing(
         &self,
-        request: ClaimProviderDelivery,
-    ) -> ProviderDeliveryFuture<'_, Option<ClaimedProviderDelivery>> {
-        Box::pin(self.claim_delivery_inner(request))
+        request: ClaimProviderProcessing,
+    ) -> ProviderProcessingFuture<'_, Option<ClaimedProviderProcessing>> {
+        Box::pin(self.claim_processing_inner(request))
     }
 
-    fn complete_delivery(
+    fn bind_processing_source(
         &self,
-        request: CompleteProviderDelivery,
-    ) -> ProviderDeliveryFuture<'_, ProviderDeliveryReceipt> {
-        Box::pin(self.complete_delivery_inner(request))
+        request: automata_ci_provider::BindProviderProcessingSource,
+    ) -> ProviderProcessingFuture<'_, ClaimedProviderProcessing> {
+        Box::pin(self.bind_processing_source_inner(request))
     }
 
-    fn renew_delivery(
+    fn complete_processing(
         &self,
-        request: RenewProviderDelivery,
-    ) -> ProviderDeliveryFuture<'_, automata_ci_provider::ProviderDeliveryClaimFence> {
-        Box::pin(self.renew_delivery_inner(request))
+        request: CompleteProviderProcessing,
+    ) -> ProviderProcessingFuture<'_, ProviderProcessingReceipt> {
+        Box::pin(self.complete_processing_inner(request))
     }
 
-    fn retry_delivery(
+    fn renew_processing(
         &self,
-        request: RetryProviderDelivery,
-    ) -> ProviderDeliveryFuture<'_, ProviderDeliveryReceipt> {
-        Box::pin(self.retry_delivery_inner(request))
+        request: RenewProviderProcessing,
+    ) -> ProviderProcessingFuture<'_, automata_ci_provider::ProviderProcessingClaimFence> {
+        Box::pin(self.renew_processing_inner(request))
     }
 
-    fn fail_delivery(
+    fn retry_processing(
         &self,
-        request: FailProviderDelivery,
-    ) -> ProviderDeliveryFuture<'_, ProviderDeliveryReceipt> {
-        Box::pin(self.fail_delivery_inner(request))
+        request: RetryProviderProcessing,
+    ) -> ProviderProcessingFuture<'_, ProviderProcessingReceipt> {
+        Box::pin(self.retry_processing_inner(request))
+    }
+
+    fn fail_processing(
+        &self,
+        request: FailProviderProcessing,
+    ) -> ProviderProcessingFuture<'_, ProviderProcessingReceipt> {
+        Box::pin(self.fail_processing_inner(request))
     }
 }
 

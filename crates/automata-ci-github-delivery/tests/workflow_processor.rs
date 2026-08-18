@@ -43,11 +43,11 @@ use automata_ci_store::{
     LogicalWorkflowAdmissionRepository, LogicalWorkflowAdmissionStoreError,
     MAX_GITHUB_SERVICE_CONSUMER_REQUEST_MILLIS, ManifestPinnedGithubDeliveryEvidence,
     ManifestPinnedGithubDeliveryReceipt, ObjectKey, ProviderDeliveryClaimFence,
-    ProviderDeliveryClaimOwnerId, ProviderDeliveryEventEnvelope, ProviderDeliveryFailureKind,
-    ProviderDeliveryId, ProviderDeliveryIdentity, ProviderDeliveryReceipt,
-    ProviderDeliveryRepository, ProviderDeliveryState, ProviderDeliveryStoreError,
-    ProviderDeliveryWorkflowConclusion, ProviderDeliveryWorkflowInventoryReceipt,
-    ProviderDeliveryWorkflowOutcome, ProviderInstallationId, ProviderRepositoryCoordinates,
+    ProviderDeliveryEventEnvelope, ProviderDeliveryFailureKind, ProviderDeliveryId,
+    ProviderDeliveryIdentity, ProviderDeliveryReceipt, ProviderDeliveryRepository,
+    ProviderDeliveryState, ProviderDeliveryStoreError, ProviderDeliveryWorkflowConclusion,
+    ProviderDeliveryWorkflowInventoryReceipt, ProviderDeliveryWorkflowOutcome,
+    ProviderInstallationId, ProviderProcessingWorkerId, ProviderRepositoryCoordinates,
     ProviderRepositoryId, ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
     RecordProviderDeliveryWorkflowProgress, RegisterProviderDeliveryWorkflowInventory,
     RejectProviderDelivery, RepositoryId as StoreRepositoryId, RetryProviderDelivery, TenantScope,
@@ -763,7 +763,7 @@ fn claimed(
     .expect("receipt");
     let claim = ProviderDeliveryClaimFence::from_durable_parts(
         delivery_id,
-        ProviderDeliveryClaimOwnerId::from_uuid(Uuid::from_u128(2)).expect("owner"),
+        ProviderProcessingWorkerId::from_uuid(Uuid::from_u128(2)).expect("owner"),
         7,
     )
     .expect("claim");

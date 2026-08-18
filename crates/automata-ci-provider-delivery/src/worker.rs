@@ -3,9 +3,11 @@ use std::{fmt, sync::Arc};
 use async_trait::async_trait;
 use automata_ci_core::UnixMillis;
 use automata_ci_provider::{
-    ClaimProviderDelivery, ClaimedProviderDelivery, CompleteProviderDelivery, FailProviderDelivery,
-    ProviderDeliveryFailure, ProviderDeliveryRepository, ProviderDeliveryRepositoryError,
-    ProviderDeliveryWorkerId, RenewProviderDelivery, RetryProviderDelivery,
+    BindProviderProcessingSource, ClaimProviderProcessing, ClaimedProviderProcessing,
+    CompleteProviderProcessing, FailProviderProcessing, ProviderDeliveryId,
+    ProviderProcessingFailure, ProviderProcessingInput, ProviderProcessingRepository,
+    ProviderProcessingRepositoryError, ProviderProcessingWorkerId, RenewProviderProcessing,
+    RetryProviderProcessing,
 };
 use thiserror::Error;
 use tokio::time::{Duration, sleep};
@@ -14,31 +16,33 @@ use crate::ProviderDeliveryClock;
 
 /// Final disposition returned by provider-neutral workflow admission.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ProviderDeliveryProcessOutcome {
+pub enum ProviderProcessingOutcome {
     /// All idempotent workflow-admission work completed.
     Complete,
+    /// Resolve an authenticated control to this immutable trigger delivery.
+    ResolveControl(ProviderDeliveryId),
     /// A transient dependency failure should use the worker retry policy.
-    Retry(ProviderDeliveryFailure),
+    Retry(ProviderProcessingFailure),
     /// Policy or evidence terminally rejects this delivery.
-    Fail(ProviderDeliveryFailure),
+    Fail(ProviderProcessingFailure),
 }
 
 /// Provider-independent workflow admission port invoked under a live claim fence.
 #[async_trait]
-pub trait ProviderDeliveryProcessor: fmt::Debug + Send + Sync {
+pub trait ProviderProcessingProcessor: fmt::Debug + Send + Sync {
     /// Performs idempotent admission for one normalized provider trigger.
-    async fn process(&self, delivery: &ClaimedProviderDelivery) -> ProviderDeliveryProcessOutcome;
+    async fn process(&self, delivery: &ClaimedProviderProcessing) -> ProviderProcessingOutcome;
 }
 
-/// Bounded generic delivery-worker lease and retry policy.
+/// Bounded generic processing-worker lease and retry policy.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ProviderDeliveryWorkerConfig {
+pub struct ProviderProcessingWorkerConfig {
     lease_millis: u64,
     retry_millis: i64,
 }
 
-impl ProviderDeliveryWorkerConfig {
-    /// Constructs worker timing policy accepted by the common delivery model.
+impl ProviderProcessingWorkerConfig {
+    /// Constructs worker timing policy accepted by the common processing model.
     ///
     /// # Errors
     ///
@@ -46,13 +50,13 @@ impl ProviderDeliveryWorkerConfig {
     pub const fn new(
         lease_millis: u64,
         retry_millis: i64,
-    ) -> Result<Self, ProviderDeliveryWorkerError> {
+    ) -> Result<Self, ProviderProcessingWorkerError> {
         if lease_millis == 0
-            || lease_millis > automata_ci_provider::MAX_PROVIDER_DELIVERY_LEASE_MILLIS as u64
+            || lease_millis > automata_ci_provider::MAX_PROVIDER_PROCESSING_LEASE_MILLIS as u64
             || retry_millis <= 0
-            || retry_millis > automata_ci_provider::MAX_PROVIDER_DELIVERY_RETRY_MILLIS
+            || retry_millis > automata_ci_provider::MAX_PROVIDER_PROCESSING_RETRY_MILLIS
         {
-            return Err(ProviderDeliveryWorkerError::InvalidConfiguration);
+            return Err(ProviderProcessingWorkerError::InvalidConfiguration);
         }
         Ok(Self {
             lease_millis,
@@ -73,24 +77,24 @@ impl ProviderDeliveryWorkerConfig {
     }
 }
 
-/// One provider-neutral fenced delivery worker.
-pub struct ProviderDeliveryWorker {
-    worker_id: ProviderDeliveryWorkerId,
-    repository: Arc<dyn ProviderDeliveryRepository>,
-    processor: Arc<dyn ProviderDeliveryProcessor>,
+/// One provider-neutral fenced processing worker.
+pub struct ProviderProcessingWorker {
+    worker_id: ProviderProcessingWorkerId,
+    repository: Arc<dyn ProviderProcessingRepository>,
+    processor: Arc<dyn ProviderProcessingProcessor>,
     clock: Arc<dyn ProviderDeliveryClock>,
-    config: ProviderDeliveryWorkerConfig,
+    config: ProviderProcessingWorkerConfig,
 }
 
-impl ProviderDeliveryWorker {
+impl ProviderProcessingWorker {
     /// Composes a stable worker identity, durable queue, processor, and clock.
     #[must_use]
     pub fn new(
-        worker_id: ProviderDeliveryWorkerId,
-        repository: Arc<dyn ProviderDeliveryRepository>,
-        processor: Arc<dyn ProviderDeliveryProcessor>,
+        worker_id: ProviderProcessingWorkerId,
+        repository: Arc<dyn ProviderProcessingRepository>,
+        processor: Arc<dyn ProviderProcessingProcessor>,
         clock: Arc<dyn ProviderDeliveryClock>,
-        config: ProviderDeliveryWorkerConfig,
+        config: ProviderProcessingWorkerConfig,
     ) -> Self {
         Self {
             worker_id,
@@ -101,92 +105,115 @@ impl ProviderDeliveryWorker {
         }
     }
 
-    /// Claims and processes at most one provider delivery.
+    /// Claims and processes at most one provider invocation.
     ///
     /// # Errors
     ///
     /// Returns sanitized clock, model, repository, or stale-claim failures.
     pub async fn run_once(
         &self,
-    ) -> Result<ProviderDeliveryWorkerOutcome, ProviderDeliveryWorkerError> {
+    ) -> Result<ProviderProcessingWorkerOutcome, ProviderProcessingWorkerError> {
         let claimed_at = self.now()?;
         let claim =
-            ClaimProviderDelivery::new(self.worker_id, claimed_at, self.config.lease_millis)
-                .map_err(|_| ProviderDeliveryWorkerError::InvalidConfiguration)?;
-        let Some(delivery) = self
+            ClaimProviderProcessing::new(self.worker_id, claimed_at, self.config.lease_millis)
+                .map_err(|_| ProviderProcessingWorkerError::InvalidConfiguration)?;
+        let Some(mut invocation) = self
             .repository
-            .claim_delivery(claim)
+            .claim_processing(claim)
             .await
             .map_err(repository_error)?
         else {
-            return Ok(ProviderDeliveryWorkerOutcome::Idle);
+            return Ok(ProviderProcessingWorkerOutcome::Idle);
         };
-        let disposition = self.process_with_renewal(&delivery).await?;
-        let finished_at = self.now()?;
-        match disposition.outcome {
-            ProviderDeliveryProcessOutcome::Complete => {
-                let command = CompleteProviderDelivery::new(disposition.fence, finished_at)
-                    .map_err(|_| ProviderDeliveryWorkerError::ClaimExpired)?;
-                self.repository
-                    .complete_delivery(command)
-                    .await
-                    .map_err(repository_error)?;
-                Ok(ProviderDeliveryWorkerOutcome::Completed)
-            }
-            ProviderDeliveryProcessOutcome::Retry(failure) => {
-                let retry_at = finished_at
-                    .get()
-                    .checked_add(self.config.retry_millis)
-                    .map(UnixMillis::new)
-                    .ok_or(ProviderDeliveryWorkerError::Clock)?;
-                let command =
-                    RetryProviderDelivery::new(disposition.fence, finished_at, retry_at, failure)
-                        .map_err(|_| ProviderDeliveryWorkerError::ClaimExpired)?;
-                self.repository
-                    .retry_delivery(command)
-                    .await
-                    .map_err(repository_error)?;
-                Ok(ProviderDeliveryWorkerOutcome::Retried)
-            }
-            ProviderDeliveryProcessOutcome::Fail(failure) => {
-                let command = FailProviderDelivery::new(disposition.fence, finished_at, failure)
-                    .map_err(|_| ProviderDeliveryWorkerError::ClaimExpired)?;
-                self.repository
-                    .fail_delivery(command)
-                    .await
-                    .map_err(repository_error)?;
-                Ok(ProviderDeliveryWorkerOutcome::Failed)
+        loop {
+            let disposition = self.process_with_renewal(&invocation).await?;
+            let finished_at = self.now()?;
+            match disposition.outcome {
+                ProviderProcessingOutcome::ResolveControl(source_delivery_id) => {
+                    if !matches!(invocation.input(), ProviderProcessingInput::Control(_)) {
+                        return Err(ProviderProcessingWorkerError::InvalidResolution);
+                    }
+                    let command = BindProviderProcessingSource::new(
+                        disposition.fence,
+                        source_delivery_id,
+                        finished_at,
+                    )
+                    .map_err(|_| ProviderProcessingWorkerError::ClaimExpired)?;
+                    invocation = self
+                        .repository
+                        .bind_processing_source(command)
+                        .await
+                        .map_err(repository_error)?;
+                }
+                ProviderProcessingOutcome::Complete => {
+                    let command = CompleteProviderProcessing::new(disposition.fence, finished_at)
+                        .map_err(|_| ProviderProcessingWorkerError::ClaimExpired)?;
+                    self.repository
+                        .complete_processing(command)
+                        .await
+                        .map_err(repository_error)?;
+                    return Ok(ProviderProcessingWorkerOutcome::Completed);
+                }
+                ProviderProcessingOutcome::Retry(failure) => {
+                    let retry_at = finished_at
+                        .get()
+                        .checked_add(self.config.retry_millis)
+                        .map(UnixMillis::new)
+                        .ok_or(ProviderProcessingWorkerError::Clock)?;
+                    let command = RetryProviderProcessing::new(
+                        disposition.fence,
+                        finished_at,
+                        retry_at,
+                        failure,
+                    )
+                    .map_err(|_| ProviderProcessingWorkerError::ClaimExpired)?;
+                    self.repository
+                        .retry_processing(command)
+                        .await
+                        .map_err(repository_error)?;
+                    return Ok(ProviderProcessingWorkerOutcome::Retried);
+                }
+                ProviderProcessingOutcome::Fail(failure) => {
+                    let command =
+                        FailProviderProcessing::new(disposition.fence, finished_at, failure)
+                            .map_err(|_| ProviderProcessingWorkerError::ClaimExpired)?;
+                    self.repository
+                        .fail_processing(command)
+                        .await
+                        .map_err(repository_error)?;
+                    return Ok(ProviderProcessingWorkerOutcome::Failed);
+                }
             }
         }
     }
 
-    fn now(&self) -> Result<UnixMillis, ProviderDeliveryWorkerError> {
+    fn now(&self) -> Result<UnixMillis, ProviderProcessingWorkerError> {
         self.clock
             .now()
-            .map_err(|_| ProviderDeliveryWorkerError::Clock)
+            .map_err(|_| ProviderProcessingWorkerError::Clock)
     }
 
     async fn process_with_renewal(
         &self,
-        delivery: &ClaimedProviderDelivery,
-    ) -> Result<ProcessedDelivery, ProviderDeliveryWorkerError> {
+        delivery: &ClaimedProviderProcessing,
+    ) -> Result<ProcessedInvocation, ProviderProcessingWorkerError> {
         let mut fence = delivery.fence();
         let process = self.processor.process(delivery);
         tokio::pin!(process);
         let heartbeat = Duration::from_millis((self.config.lease_millis / 3).max(1));
         loop {
             tokio::select! {
-                outcome = &mut process => return Ok(ProcessedDelivery { outcome, fence }),
+                outcome = &mut process => return Ok(ProcessedInvocation { outcome, fence }),
                 () = sleep(heartbeat) => {
                     let renewed_at = self.now()?;
-                    let renewal = RenewProviderDelivery::new(
+                    let renewal = RenewProviderProcessing::new(
                         fence,
                         renewed_at,
                         self.config.lease_millis,
                     )
-                    .map_err(|_| ProviderDeliveryWorkerError::ClaimExpired)?;
+                    .map_err(|_| ProviderProcessingWorkerError::ClaimExpired)?;
                     fence = self.repository
-                        .renew_delivery(renewal)
+                        .renew_processing(renewal)
                         .await
                         .map_err(repository_error)?;
                 }
@@ -195,15 +222,15 @@ impl ProviderDeliveryWorker {
     }
 }
 
-struct ProcessedDelivery {
-    outcome: ProviderDeliveryProcessOutcome,
-    fence: automata_ci_provider::ProviderDeliveryClaimFence,
+struct ProcessedInvocation {
+    outcome: ProviderProcessingOutcome,
+    fence: automata_ci_provider::ProviderProcessingClaimFence,
 }
 
-impl fmt::Debug for ProviderDeliveryWorker {
+impl fmt::Debug for ProviderProcessingWorker {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("ProviderDeliveryWorker")
+            .debug_struct("ProviderProcessingWorker")
             .field("worker_id", &self.worker_id)
             .field("repository", &self.repository)
             .field("processor", &self.processor)
@@ -215,7 +242,7 @@ impl fmt::Debug for ProviderDeliveryWorker {
 
 /// Result of one bounded generic worker pass.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ProviderDeliveryWorkerOutcome {
+pub enum ProviderProcessingWorkerOutcome {
     /// No eligible delivery existed.
     Idle,
     /// One delivery completed.
@@ -226,35 +253,42 @@ pub enum ProviderDeliveryWorkerOutcome {
     Failed,
 }
 
-/// Sanitized generic delivery-worker failure.
+/// Sanitized generic processing-worker failure.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
-pub enum ProviderDeliveryWorkerError {
-    /// Timing policy violates common delivery bounds.
-    #[error("provider delivery worker configuration is invalid")]
+pub enum ProviderProcessingWorkerError {
+    /// Timing policy violates common processing bounds.
+    #[error("provider processing worker configuration is invalid")]
     InvalidConfiguration,
     /// Trusted time could not be obtained or represented.
-    #[error("provider delivery worker clock is unavailable")]
+    #[error("provider processing worker clock is unavailable")]
     Clock,
     /// Processing outlived or lost its exact claim fence.
-    #[error("provider delivery worker claim expired")]
+    #[error("provider processing worker claim expired")]
     ClaimExpired,
-    /// Durable delivery storage is unavailable.
-    #[error("provider delivery repository is unavailable")]
+    /// A handler attempted to resolve an already resolved trigger invocation.
+    #[error("provider processing control resolution is invalid")]
+    InvalidResolution,
+    /// Durable processing storage is unavailable.
+    #[error("provider processing repository is unavailable")]
     Unavailable,
-    /// Durable delivery state violated queue invariants.
-    #[error("provider delivery repository rejected the operation")]
+    /// Durable processing state violated queue invariants.
+    #[error("provider processing repository rejected the operation")]
     Repository,
 }
 
-const fn repository_error(error: ProviderDeliveryRepositoryError) -> ProviderDeliveryWorkerError {
+const fn repository_error(
+    error: ProviderProcessingRepositoryError,
+) -> ProviderProcessingWorkerError {
     match error {
-        ProviderDeliveryRepositoryError::Unavailable => ProviderDeliveryWorkerError::Unavailable,
-        ProviderDeliveryRepositoryError::ClaimRejected => ProviderDeliveryWorkerError::ClaimExpired,
-        ProviderDeliveryRepositoryError::EndpointConflict
-        | ProviderDeliveryRepositoryError::NotFound
-        | ProviderDeliveryRepositoryError::ReplayConflict
-        | ProviderDeliveryRepositoryError::AttemptLimitReached
-        | ProviderDeliveryRepositoryError::Corrupt => ProviderDeliveryWorkerError::Repository,
+        ProviderProcessingRepositoryError::Unavailable => {
+            ProviderProcessingWorkerError::Unavailable
+        }
+        ProviderProcessingRepositoryError::ClaimRejected => {
+            ProviderProcessingWorkerError::ClaimExpired
+        }
+        ProviderProcessingRepositoryError::NotFound
+        | ProviderProcessingRepositoryError::AttemptLimitReached
+        | ProviderProcessingRepositoryError::Corrupt => ProviderProcessingWorkerError::Repository,
     }
 }
 
@@ -267,17 +301,18 @@ mod tests {
 
     use automata_ci_core::{GitObjectId, Sha256Digest};
     use automata_ci_provider::{
-        AcceptProviderDelivery, ExternalDeliveryId, ExternalDeliveryIdentity, ExternalRepositoryId,
+        ExternalDeliveryId, ExternalDeliveryIdentity, ExternalRepositoryId,
         ExternalRepositoryIdentity, NormalizedTrigger, ProviderConfigurationRevision,
-        ProviderConnectionId, ProviderConnectionRevision, ProviderDelivery,
-        ProviderDeliveryAcceptOutcome, ProviderDeliveryClaimFence, ProviderDeliveryFuture,
-        ProviderDeliveryId, ProviderDeliveryObservations, ProviderDeliveryReceipt,
-        ProviderDeliveryState, ProviderEventName, ProviderGitRef, ProviderGitRefKind,
-        ProviderInstanceId, ProviderRepository, ProviderRepositoryPath, ProviderSecretGeneration,
-        ProviderSecretName, ProviderTypeId, ProviderWebhookEndpointId,
+        ProviderConnectionId, ProviderConnectionRevision, ProviderControl, ProviderControlDocument,
+        ProviderControlKind, ProviderDeliveryId, ProviderDeliveryObservations, ProviderEventName,
+        ProviderGitRef, ProviderGitRefKind, ProviderInstanceId, ProviderProcessingClaimFence,
+        ProviderProcessingFuture, ProviderProcessingInvocationId, ProviderProcessingReceipt,
+        ProviderProcessingState, ProviderRepository, ProviderRepositoryPath, ProviderSchemaVersion,
+        ProviderSecretGeneration, ProviderSecretName, ProviderTypeId, ProviderWebhookEndpointId,
         ProviderWebhookEndpointRevision, ProviderWebhookSecretReference,
         ProviderWebhookSignatureEvidence, PushCommitEvidence, PushTrigger, RepositoryVisibility,
-        RetryProviderDelivery, VerifiedProviderDelivery, provider_raw_webhook_descriptor,
+        RetryProviderProcessing, VerifiedProviderControlDelivery, VerifiedProviderTriggerDelivery,
+        provider_raw_webhook_descriptor,
     };
 
     use super::*;
@@ -296,54 +331,69 @@ mod tests {
     struct SlowProcessor;
 
     #[async_trait]
-    impl ProviderDeliveryProcessor for SlowProcessor {
+    impl ProviderProcessingProcessor for SlowProcessor {
         async fn process(
             &self,
-            _delivery: &ClaimedProviderDelivery,
-        ) -> ProviderDeliveryProcessOutcome {
+            _delivery: &ClaimedProviderProcessing,
+        ) -> ProviderProcessingOutcome {
             sleep(Duration::from_millis(25)).await;
-            ProviderDeliveryProcessOutcome::Complete
+            ProviderProcessingOutcome::Complete
+        }
+    }
+
+    #[derive(Debug)]
+    struct ResolvingProcessor {
+        source_delivery_id: ProviderDeliveryId,
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl ProviderProcessingProcessor for ResolvingProcessor {
+        async fn process(&self, delivery: &ClaimedProviderProcessing) -> ProviderProcessingOutcome {
+            match (self.calls.fetch_add(1, Ordering::SeqCst), delivery.input()) {
+                (0, ProviderProcessingInput::Control(_)) => {
+                    ProviderProcessingOutcome::ResolveControl(self.source_delivery_id)
+                }
+                (1, ProviderProcessingInput::Trigger(source)) => {
+                    assert_eq!(source.evidence().delivery_id(), self.source_delivery_id);
+                    ProviderProcessingOutcome::Complete
+                }
+                _ => panic!("rerun processing escaped the control-to-trigger sequence"),
+            }
         }
     }
 
     #[derive(Debug)]
     struct RecordingRepository {
-        claim: Mutex<Option<ClaimedProviderDelivery>>,
+        claim: Mutex<Option<ClaimedProviderProcessing>>,
         renewals: AtomicUsize,
-        completed: Mutex<Option<ProviderDeliveryClaimFence>>,
+        completed: Mutex<Option<ProviderProcessingClaimFence>>,
     }
 
-    impl ProviderDeliveryRepository for RecordingRepository {
-        fn accept_delivery(
+    impl ProviderProcessingRepository for RecordingRepository {
+        fn claim_processing(
             &self,
-            _request: AcceptProviderDelivery,
-        ) -> ProviderDeliveryFuture<'_, ProviderDeliveryAcceptOutcome> {
-            Box::pin(async { Err(ProviderDeliveryRepositoryError::Corrupt) })
-        }
-
-        fn load_delivery(
-            &self,
-            _delivery_id: ProviderDeliveryId,
-        ) -> ProviderDeliveryFuture<'_, Option<ProviderDelivery>> {
-            Box::pin(async { Err(ProviderDeliveryRepositoryError::Corrupt) })
-        }
-
-        fn claim_delivery(
-            &self,
-            _request: ClaimProviderDelivery,
-        ) -> ProviderDeliveryFuture<'_, Option<ClaimedProviderDelivery>> {
+            _request: ClaimProviderProcessing,
+        ) -> ProviderProcessingFuture<'_, Option<ClaimedProviderProcessing>> {
             Box::pin(async move { Ok(self.claim.lock().expect("claim lock").take()) })
         }
 
-        fn renew_delivery(
+        fn bind_processing_source(
             &self,
-            request: RenewProviderDelivery,
-        ) -> ProviderDeliveryFuture<'_, ProviderDeliveryClaimFence> {
+            _request: automata_ci_provider::BindProviderProcessingSource,
+        ) -> ProviderProcessingFuture<'_, ClaimedProviderProcessing> {
+            Box::pin(async { Err(ProviderProcessingRepositoryError::Corrupt) })
+        }
+
+        fn renew_processing(
+            &self,
+            request: RenewProviderProcessing,
+        ) -> ProviderProcessingFuture<'_, ProviderProcessingClaimFence> {
             Box::pin(async move {
                 self.renewals.fetch_add(1, Ordering::SeqCst);
                 let fence = request.fence();
-                ProviderDeliveryClaimFence::new(
-                    fence.delivery_id(),
+                ProviderProcessingClaimFence::new(
+                    fence.invocation_id(),
                     fence.worker_id(),
                     fence.token(),
                     fence.claimed_at(),
@@ -352,60 +402,134 @@ mod tests {
                             + i64::try_from(request.lease_millis()).expect("lease"),
                     ),
                 )
-                .map_err(|_| ProviderDeliveryRepositoryError::Corrupt)
+                .map_err(|_| ProviderProcessingRepositoryError::Corrupt)
             })
         }
 
-        fn complete_delivery(
+        fn complete_processing(
             &self,
-            request: CompleteProviderDelivery,
-        ) -> ProviderDeliveryFuture<'_, ProviderDeliveryReceipt> {
+            request: CompleteProviderProcessing,
+        ) -> ProviderProcessingFuture<'_, ProviderProcessingReceipt> {
             Box::pin(async move {
                 *self.completed.lock().expect("completion lock") = Some(request.fence());
-                ProviderDeliveryReceipt::new(
-                    request.fence().delivery_id(),
-                    ProviderDeliveryState::Completed,
+                ProviderProcessingReceipt::new(
+                    request.fence().invocation_id(),
+                    ProviderDeliveryId::new(),
+                    Some(ProviderDeliveryId::new()),
+                    ProviderProcessingState::Completed,
                     1,
                     UnixMillis::new(1_000),
                 )
-                .map_err(|_| ProviderDeliveryRepositoryError::Corrupt)
+                .map_err(|_| ProviderProcessingRepositoryError::Corrupt)
             })
         }
 
-        fn retry_delivery(
+        fn retry_processing(
             &self,
-            _request: RetryProviderDelivery,
-        ) -> ProviderDeliveryFuture<'_, ProviderDeliveryReceipt> {
-            Box::pin(async { Err(ProviderDeliveryRepositoryError::Corrupt) })
+            _request: RetryProviderProcessing,
+        ) -> ProviderProcessingFuture<'_, ProviderProcessingReceipt> {
+            Box::pin(async { Err(ProviderProcessingRepositoryError::Corrupt) })
         }
 
-        fn fail_delivery(
+        fn fail_processing(
             &self,
-            _request: FailProviderDelivery,
-        ) -> ProviderDeliveryFuture<'_, ProviderDeliveryReceipt> {
-            Box::pin(async { Err(ProviderDeliveryRepositoryError::Corrupt) })
+            _request: FailProviderProcessing,
+        ) -> ProviderProcessingFuture<'_, ProviderProcessingReceipt> {
+            Box::pin(async { Err(ProviderProcessingRepositoryError::Corrupt) })
+        }
+    }
+
+    #[derive(Debug)]
+    struct ResolvingRepository {
+        claim: Mutex<Option<ClaimedProviderProcessing>>,
+        bound: ClaimedProviderProcessing,
+        bindings: AtomicUsize,
+        completed: Mutex<Option<ProviderProcessingClaimFence>>,
+    }
+
+    impl ProviderProcessingRepository for ResolvingRepository {
+        fn claim_processing(
+            &self,
+            _request: ClaimProviderProcessing,
+        ) -> ProviderProcessingFuture<'_, Option<ClaimedProviderProcessing>> {
+            Box::pin(async move { Ok(self.claim.lock().expect("claim lock").take()) })
+        }
+
+        fn bind_processing_source(
+            &self,
+            request: BindProviderProcessingSource,
+        ) -> ProviderProcessingFuture<'_, ClaimedProviderProcessing> {
+            Box::pin(async move {
+                assert_eq!(
+                    request.source_delivery_id(),
+                    self.bound.receipt().source_delivery_id().expect("source")
+                );
+                assert_eq!(request.fence(), self.bound.fence());
+                self.bindings.fetch_add(1, Ordering::SeqCst);
+                Ok(self.bound.clone())
+            })
+        }
+
+        fn renew_processing(
+            &self,
+            _request: RenewProviderProcessing,
+        ) -> ProviderProcessingFuture<'_, ProviderProcessingClaimFence> {
+            Box::pin(async { Err(ProviderProcessingRepositoryError::Corrupt) })
+        }
+
+        fn complete_processing(
+            &self,
+            request: CompleteProviderProcessing,
+        ) -> ProviderProcessingFuture<'_, ProviderProcessingReceipt> {
+            Box::pin(async move {
+                *self.completed.lock().expect("completion lock") = Some(request.fence());
+                let receipt = self.bound.receipt();
+                ProviderProcessingReceipt::new(
+                    receipt.invocation_id(),
+                    receipt.cause_delivery_id(),
+                    receipt.source_delivery_id(),
+                    ProviderProcessingState::Completed,
+                    receipt.attempts(),
+                    receipt.created_at(),
+                )
+                .map_err(|_| ProviderProcessingRepositoryError::Corrupt)
+            })
+        }
+
+        fn retry_processing(
+            &self,
+            _request: RetryProviderProcessing,
+        ) -> ProviderProcessingFuture<'_, ProviderProcessingReceipt> {
+            Box::pin(async { Err(ProviderProcessingRepositoryError::Corrupt) })
+        }
+
+        fn fail_processing(
+            &self,
+            _request: FailProviderProcessing,
+        ) -> ProviderProcessingFuture<'_, ProviderProcessingReceipt> {
+            Box::pin(async { Err(ProviderProcessingRepositoryError::Corrupt) })
         }
     }
 
     #[tokio::test]
     async fn long_processing_renews_and_completes_with_the_latest_fence() {
-        let worker_id = ProviderDeliveryWorkerId::new();
+        let worker_id = ProviderProcessingWorkerId::new();
         let repository = Arc::new(RecordingRepository {
             claim: Mutex::new(Some(claimed(worker_id))),
             renewals: AtomicUsize::new(0),
             completed: Mutex::new(None),
         });
-        let worker = ProviderDeliveryWorker::new(
+        let worker = ProviderProcessingWorker::new(
             worker_id,
-            Arc::clone(&repository) as Arc<dyn ProviderDeliveryRepository>,
+            Arc::clone(&repository) as Arc<dyn ProviderProcessingRepository>,
             Arc::new(SlowProcessor),
             Arc::new(StepClock(AtomicI64::new(1_000))),
-            ProviderDeliveryWorkerConfig::new(30, 30).expect("config"),
+            ProviderProcessingWorkerConfig::new(30, 30).expect("config"),
         );
 
         assert_eq!(
             worker.run_once().await.expect("worker pass"),
-            ProviderDeliveryWorkerOutcome::Completed
+            ProviderProcessingWorkerOutcome::Completed
         );
         assert!(repository.renewals.load(Ordering::SeqCst) >= 1);
         assert!(
@@ -419,7 +543,145 @@ mod tests {
         );
     }
 
-    fn claimed(worker_id: ProviderDeliveryWorkerId) -> ClaimedProviderDelivery {
+    #[tokio::test]
+    async fn rerun_control_resolves_and_processes_a_fresh_trigger_invocation() {
+        let worker_id = ProviderProcessingWorkerId::new();
+        let (control, bound, source_delivery_id) = rerun_claims(worker_id);
+        let repository = Arc::new(ResolvingRepository {
+            claim: Mutex::new(Some(control)),
+            bound,
+            bindings: AtomicUsize::new(0),
+            completed: Mutex::new(None),
+        });
+        let processor = Arc::new(ResolvingProcessor {
+            source_delivery_id,
+            calls: AtomicUsize::new(0),
+        });
+        let worker = ProviderProcessingWorker::new(
+            worker_id,
+            Arc::clone(&repository) as Arc<dyn ProviderProcessingRepository>,
+            Arc::clone(&processor) as Arc<dyn ProviderProcessingProcessor>,
+            Arc::new(StepClock(AtomicI64::new(1_000))),
+            ProviderProcessingWorkerConfig::new(60, 30).expect("config"),
+        );
+
+        assert_eq!(
+            worker.run_once().await.expect("worker pass"),
+            ProviderProcessingWorkerOutcome::Completed
+        );
+        assert_eq!(repository.bindings.load(Ordering::SeqCst), 1);
+        assert_eq!(processor.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            repository
+                .completed
+                .lock()
+                .expect("completion lock")
+                .expect("completion fence"),
+            repository.bound.fence()
+        );
+    }
+
+    fn rerun_claims(
+        worker_id: ProviderProcessingWorkerId,
+    ) -> (
+        ClaimedProviderProcessing,
+        ClaimedProviderProcessing,
+        ProviderDeliveryId,
+    ) {
+        let source_claim = claimed(worker_id);
+        let ProviderProcessingInput::Trigger(source) = source_claim.input().clone() else {
+            unreachable!("fixture is a trigger");
+        };
+        let source_delivery_id = source.evidence().delivery_id();
+        let cause_delivery_id = ProviderDeliveryId::new();
+        let source_evidence = source.evidence();
+        let control_evidence = automata_ci_provider::ProviderDeliveryEvidence::rehydrate(
+            cause_delivery_id,
+            source_evidence.endpoint_id(),
+            source_evidence.endpoint_revision(),
+            source_evidence.provider_type().clone(),
+            source_evidence.instance_id(),
+            source_evidence.provider_revision(),
+            source_evidence.connection_id(),
+            source_evidence.connection_revision(),
+            ExternalDeliveryIdentity::new(
+                source_evidence.instance_id(),
+                ExternalDeliveryId::new("delivery-rerequested").expect("delivery"),
+            ),
+            ProviderEventName::new("check_run").expect("event"),
+            source_evidence.received_at(),
+            source_evidence.raw_body().clone(),
+            source_evidence.raw_retain_until(),
+            source_evidence.signature().clone(),
+            source_evidence.observations().clone(),
+        )
+        .expect("control evidence");
+        let repository = source
+            .trigger()
+            .trigger()
+            .target_repository()
+            .identity()
+            .clone();
+        let control = ProviderControl::new(
+            ProviderControlKind::Rerun,
+            repository,
+            GitObjectId::from_provider_hex("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+                .expect("object"),
+            None,
+            ProviderControlDocument::new(
+                ProviderSchemaVersion::new(1).expect("schema"),
+                br#"{"schema":1,"target":{"kind":"check_run","run_id":601}}"#.to_vec(),
+            )
+            .expect("document"),
+        )
+        .expect("control");
+        let control = VerifiedProviderControlDelivery::rehydrate(control_evidence, control)
+            .expect("verified control");
+        let invocation_id = source_claim.receipt().invocation_id();
+        let fence = ProviderProcessingClaimFence::new(
+            invocation_id,
+            worker_id,
+            source_claim.fence().token(),
+            UnixMillis::new(1_000),
+            UnixMillis::new(1_060),
+        )
+        .expect("claim fence");
+        let control_receipt = ProviderProcessingReceipt::new(
+            invocation_id,
+            cause_delivery_id,
+            None,
+            ProviderProcessingState::Claimed,
+            1,
+            source_claim.receipt().created_at(),
+        )
+        .expect("control receipt");
+        let bound_receipt = ProviderProcessingReceipt::new(
+            invocation_id,
+            cause_delivery_id,
+            Some(source_delivery_id),
+            ProviderProcessingState::Claimed,
+            1,
+            source_claim.receipt().created_at(),
+        )
+        .expect("bound receipt");
+        (
+            ClaimedProviderProcessing::new(
+                control_receipt,
+                ProviderProcessingInput::Control(Box::new(control)),
+                fence,
+            )
+            .expect("control claim"),
+            ClaimedProviderProcessing::new(
+                bound_receipt,
+                ProviderProcessingInput::Trigger(source),
+                fence,
+            )
+            .expect("bound trigger claim"),
+            source_delivery_id,
+        )
+    }
+
+    fn claimed(worker_id: ProviderProcessingWorkerId) -> ClaimedProviderProcessing {
         let instance_id = ProviderInstanceId::new();
         let delivery_id = ProviderDeliveryId::new();
         let repository = ProviderRepository::new(
@@ -456,7 +718,7 @@ mod tests {
         let connection_revision = ProviderConnectionRevision::new(1).expect("connection revision");
         let raw = provider_raw_webhook_descriptor(Sha256Digest::from_bytes([7; 32]), 1)
             .expect("raw descriptor");
-        let delivery = VerifiedProviderDelivery::rehydrate(
+        let evidence = automata_ci_provider::ProviderDeliveryEvidence::rehydrate(
             delivery_id,
             endpoint_id,
             endpoint_revision,
@@ -482,25 +744,34 @@ mod tests {
                 ),
             )
             .expect("signature"),
-            trigger,
             ProviderDeliveryObservations::new(Vec::new()).expect("observations"),
         )
-        .expect("delivery");
-        let receipt = ProviderDeliveryReceipt::new(
+        .expect("evidence");
+        let delivery =
+            VerifiedProviderTriggerDelivery::rehydrate(evidence, trigger).expect("delivery");
+        let invocation_id = ProviderProcessingInvocationId::new();
+        let receipt = ProviderProcessingReceipt::new(
+            invocation_id,
             delivery_id,
-            ProviderDeliveryState::Claimed,
+            Some(delivery_id),
+            ProviderProcessingState::Claimed,
             1,
             UnixMillis::new(950),
         )
         .expect("receipt");
-        let fence = ProviderDeliveryClaimFence::new(
-            delivery_id,
+        let fence = ProviderProcessingClaimFence::new(
+            invocation_id,
             worker_id,
             1,
             UnixMillis::new(1_000),
             UnixMillis::new(1_030),
         )
         .expect("fence");
-        ClaimedProviderDelivery::new(receipt, delivery, fence).expect("claim")
+        ClaimedProviderProcessing::new(
+            receipt,
+            automata_ci_provider::ProviderProcessingInput::Trigger(Box::new(delivery)),
+            fence,
+        )
+        .expect("claim")
     }
 }

@@ -16,9 +16,9 @@ use automata_ci_provider_github::{
 };
 use automata_ci_store::{
     AdmissionObject, ClaimedProviderDelivery, ObjectKey, ProviderDeliveryClaimFence,
-    ProviderDeliveryClaimOwnerId, ProviderDeliveryEventEnvelope, ProviderDeliveryId,
-    ProviderDeliveryIdentity, ProviderDeliveryReceipt, ProviderDeliveryState,
-    ProviderInstallationId, ProviderRepositoryCoordinates, ProviderRepositoryId,
+    ProviderDeliveryEventEnvelope, ProviderDeliveryId, ProviderDeliveryIdentity,
+    ProviderDeliveryReceipt, ProviderDeliveryState, ProviderInstallationId,
+    ProviderProcessingWorkerId, ProviderRepositoryCoordinates, ProviderRepositoryId,
     ProviderRepositoryVisibility, TenantScope,
 };
 use bytes::Bytes;
@@ -208,7 +208,7 @@ fn delivery_fixture(visibility: ProviderRepositoryVisibility) -> DeliveryFixture
     .expect("claim receipt");
     let claim = ProviderDeliveryClaimFence::from_durable_parts(
         delivery_id,
-        ProviderDeliveryClaimOwnerId::from_uuid(Uuid::from_u128(2)).expect("claim owner"),
+        ProviderProcessingWorkerId::from_uuid(Uuid::from_u128(2)).expect("claim owner"),
         7,
     )
     .expect("claim fence");

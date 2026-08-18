@@ -36,16 +36,16 @@ use automata_ci_store::{
     GithubSubjectEvidenceStoreError, GithubWorkflowRunSubjectEvidence,
     ManifestPinnedGithubDeliveryEvidence, ManifestPinnedGithubDeliveryReceipt, ObjectKey,
     PendingGithubRepositoryDispatchEvidence, PendingGithubRepositoryDispatchReceipt,
-    ProviderDeliveryClaimFence, ProviderDeliveryClaimOwnerId, ProviderDeliveryEventEnvelope,
-    ProviderDeliveryFailureKind, ProviderDeliveryId, ProviderDeliveryIdentity,
-    ProviderDeliveryReceipt, ProviderDeliveryRepository, ProviderDeliveryState,
-    ProviderDeliveryStoreError, ProviderDeliveryWorkflowConclusion,
-    ProviderDeliveryWorkflowInventoryReceipt, ProviderDeliveryWorkflowOutcome,
-    ProviderInstallationId, ProviderRepositoryCoordinates, ProviderRepositoryId,
-    ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
-    RecordProviderDeliveryWorkflowProgress, RegisterProviderDeliveryWorkflowInventory,
-    RejectProviderDelivery, RepositoryId as StoreRepositoryId, ResolveGithubRepositoryDispatch,
-    RetryProviderDelivery, TenantScope,
+    ProviderDeliveryClaimFence, ProviderDeliveryEventEnvelope, ProviderDeliveryFailureKind,
+    ProviderDeliveryId, ProviderDeliveryIdentity, ProviderDeliveryReceipt,
+    ProviderDeliveryRepository, ProviderDeliveryState, ProviderDeliveryStoreError,
+    ProviderDeliveryWorkflowConclusion, ProviderDeliveryWorkflowInventoryReceipt,
+    ProviderDeliveryWorkflowOutcome, ProviderInstallationId, ProviderProcessingWorkerId,
+    ProviderRepositoryCoordinates, ProviderRepositoryId, ProviderRepositoryOwnerId,
+    ProviderRepositoryVisibility, RecordProviderDeliveryWorkflowProgress,
+    RegisterProviderDeliveryWorkflowInventory, RejectProviderDelivery,
+    RepositoryId as StoreRepositoryId, ResolveGithubRepositoryDispatch, RetryProviderDelivery,
+    TenantScope,
 };
 use automata_ci_workflow_actions::RepositoryWorkflowDiscoveryLimits;
 use bytes::Bytes;
@@ -830,7 +830,7 @@ fn claimed_fixture_with_visibility(
         UnixMillis::new(50),
     )
     .expect("claimed receipt");
-    let owner = ProviderDeliveryClaimOwnerId::from_uuid(Uuid::from_u128(2)).expect("owner");
+    let owner = ProviderProcessingWorkerId::from_uuid(Uuid::from_u128(2)).expect("owner");
     let claim =
         ProviderDeliveryClaimFence::from_durable_parts(delivery_id, owner, 7).expect("claim fence");
     let repository = ProviderRepositoryCoordinates::new(
@@ -895,7 +895,7 @@ fn pull_request_claimed_fixture() -> ClaimedFixture {
         UnixMillis::new(50),
     )
     .expect("claimed receipt");
-    let owner = ProviderDeliveryClaimOwnerId::from_uuid(Uuid::from_u128(12)).expect("owner");
+    let owner = ProviderProcessingWorkerId::from_uuid(Uuid::from_u128(12)).expect("owner");
     let claim =
         ProviderDeliveryClaimFence::from_durable_parts(delivery_id, owner, 7).expect("claim fence");
     let repository = ProviderRepositoryCoordinates::new(
@@ -970,7 +970,7 @@ fn repository_dispatch_claimed_fixture(visibility: ProviderRepositoryVisibility)
         UnixMillis::new(50),
     )
     .expect("claimed receipt");
-    let owner = ProviderDeliveryClaimOwnerId::from_uuid(Uuid::from_u128(22)).expect("owner");
+    let owner = ProviderProcessingWorkerId::from_uuid(Uuid::from_u128(22)).expect("owner");
     let claim =
         ProviderDeliveryClaimFence::from_durable_parts(delivery_id, owner, 7).expect("claim fence");
     let repository = ProviderRepositoryCoordinates::new(

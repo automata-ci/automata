@@ -2647,8 +2647,8 @@ fn processor_lease_error(error: GithubDeliveryWorkerError) -> GithubDeliveryWork
 mod lease_tests {
     use automata_ci_provider::ProviderConnectionId;
     use automata_ci_store::{
-        ObjectKey, ProviderDeliveryClaimOwnerId, ProviderDeliveryEventEnvelope, ProviderDeliveryId,
-        ProviderDeliveryReceipt, ProviderInstallationId, ProviderRepositoryCoordinates,
+        ObjectKey, ProviderDeliveryEventEnvelope, ProviderDeliveryId, ProviderDeliveryReceipt,
+        ProviderInstallationId, ProviderProcessingWorkerId, ProviderRepositoryCoordinates,
         ProviderRepositoryId, TenantScope,
     };
     use uuid::Uuid;
@@ -2778,7 +2778,7 @@ mod lease_tests {
         .expect("raw event");
         let claim = ProviderDeliveryClaimFence::from_durable_parts(
             delivery_id,
-            ProviderDeliveryClaimOwnerId::from_uuid(Uuid::from_u128(5)).expect("claim owner"),
+            ProviderProcessingWorkerId::from_uuid(Uuid::from_u128(5)).expect("claim owner"),
             7,
         )
         .expect("claim");

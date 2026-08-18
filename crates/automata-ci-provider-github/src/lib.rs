@@ -7,6 +7,7 @@
 mod changed_files;
 mod checks;
 mod config;
+mod control;
 mod delivery_adapter;
 mod endpoint;
 mod event;
@@ -40,6 +41,7 @@ pub use checks::{
 pub use config::{
     GITHUB_API_VERSION, GithubHttpConfigurationError, GithubHttpLimits, GithubTrustedOrigins,
 };
+pub use control::{GithubCheckRunControl, GithubControlError};
 pub use delivery_adapter::GithubDeliveryAdapter;
 pub use endpoint::GithubHttpEndpoint;
 pub use event::{
