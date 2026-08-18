@@ -545,7 +545,7 @@ impl EngineSelection {
 }
 
 impl ValidatedEngineSelection {
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux"))]
     pub(crate) fn connection_host(&self) -> &str {
         self.connection.host()
     }

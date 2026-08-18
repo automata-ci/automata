@@ -1299,7 +1299,9 @@ mod tests {
     #[test]
     fn secret_file_input_is_absolute_owner_only_regular_and_nofollow() {
         const MARKER: &[u8] = b"unique-file-secret-marker";
-        let directory = std::env::temp_dir().join(format!("automata-secret-{}", RunId::new()));
+        let temporary_directory =
+            fs::canonicalize(std::env::temp_dir()).expect("canonical temporary directory");
+        let directory = temporary_directory.join(format!("automata-secret-{}", RunId::new()));
         fs::create_dir(&directory).expect("test directory");
         let path = directory.join("value");
         let mut file = OpenOptions::new()

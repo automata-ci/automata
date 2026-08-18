@@ -94,7 +94,7 @@ fn validate_root_metadata(_path: &Path) -> Result<(), PodmanStateRootError> {
     Err(PodmanStateRootError::UnsupportedPlatform)
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 mod local {
     use std::{
         fmt,
@@ -953,19 +953,19 @@ mod local {
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 pub(crate) use local::{JobEnginePaths, LocalState, prepare};
 
-#[cfg(not(unix))]
+#[cfg(not(target_os = "linux"))]
 pub(crate) fn prepare(_options: &crate::PodmanOptions) -> Result<(), PodmanStateRootError> {
     Err(PodmanStateRootError::UnsupportedPlatform)
 }
 
-#[cfg(not(unix))]
+#[cfg(not(target_os = "linux"))]
 #[derive(Debug)]
 pub(crate) struct LocalState(std::convert::Infallible);
 
-#[cfg(not(unix))]
+#[cfg(not(target_os = "linux"))]
 impl LocalState {
     pub(crate) fn ensure_workspace(&self, _name: &str) -> Result<PathBuf, PodmanStateRootError> {
         match self.0 {}
@@ -1023,13 +1023,13 @@ impl LocalState {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(not(target_os = "linux"))]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct JobEnginePaths {
     root: PathBuf,
 }
 
-#[cfg(not(unix))]
+#[cfg(not(target_os = "linux"))]
 impl JobEnginePaths {
     pub(crate) fn graph_root(&self) -> &Path {
         &self.root
