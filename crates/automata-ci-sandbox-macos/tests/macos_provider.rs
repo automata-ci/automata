@@ -80,14 +80,18 @@ fn virtualization_options_require_a_pinned_bounded_apfs_quota() {
 
 #[test]
 fn virtualization_options_require_absolute_normalized_paths_and_bounded_timeouts() {
-    let valid = options("/Users/automata-runner/Library/Application Support/Automata/vm")
-        .expect("valid VM provider options");
+    let valid = options("/Volumes/AutomataVM/state").expect("valid VM provider options");
     assert_eq!(
         valid.provider_root(),
-        std::path::Path::new("/Users/automata-runner/Library/Application Support/Automata/vm")
+        std::path::Path::new("/Volumes/AutomataVM/state")
     );
 
-    for invalid in ["relative", "/", "/Users/runner/../runner/vm"] {
+    for invalid in [
+        "relative",
+        "/",
+        "/Users/runner/../runner/vm",
+        "/Users/automata-runner/Library/Application Support/Automata/vm",
+    ] {
         assert_eq!(
             options(invalid).expect_err("invalid root must fail").kind(),
             ProviderErrorKind::InvalidConfiguration
@@ -98,8 +102,7 @@ fn virtualization_options_require_absolute_normalized_paths_and_bounded_timeouts
 #[test]
 fn provider_open_fails_closed_before_accepting_unpinned_artifacts() {
     let error = MacosVirtualizationProvider::open(
-        options("/Users/automata-runner/Library/Application Support/Automata/test-vm")
-            .expect("syntactically valid options"),
+        options("/Volumes/AutomataVM/test-state").expect("syntactically valid options"),
     )
     .expect_err("uninstalled pinned helper and template must be rejected");
     assert_eq!(error.kind(), ProviderErrorKind::InvalidConfiguration);

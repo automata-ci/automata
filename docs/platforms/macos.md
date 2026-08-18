@@ -48,10 +48,14 @@ Provider startup and each job use this sequence:
 6. Challenge the guest over Virtio socket with a fresh nonce. The guest proves
    its profile, agent digest, macOS version/build, architecture, and job UID/GID.
 7. Apply the process ceiling inside the guest before accepting workflow traffic.
-8. Create the attempt's private workspace and command roots inside the fresh
+8. When the validated job runtime names HTTP(S) origins, bind an owner-only
+   attempt proxy, pass that exact socket to the helper, and inject the fixed
+   guest-loopback proxy address into commands. Otherwise leave the relay
+   closed.
+9. Create the attempt's private workspace and command roots inside the fresh
    guest, then forward bounded exec/copy frames. Closing the anonymous runner
    pipe is watched independently of blocked guest I/O and terminates the VM.
-   Destroy removes the clone under an exclusive lock.
+   Destroy stops the proxy and removes the clone under an exclusive lock.
 
 The host macOS kernel, Virtualization.framework, signed helper, Rust provider,
 and immutable template are trusted. Workflow code is not. The dedicated
@@ -60,24 +64,33 @@ workspace, runner, temp, home, and tool-cache paths. Runner TLS, object-store
 credentials, spool keys, host Keychain, and host files are never mounted or
 sent into the VM.
 
-Only `network: "disabled"` is implemented. Private egress is intentionally
-rejected until a separate authenticated host broker exists; attaching a NAT
-device would weaken the current contract.
+Only `network: "disabled"` is implemented. The VM has no NIC and cannot make
+general, private, or service-container network connections. A narrow host
+broker supports only the credential-free HTTP(S) origins derived from the
+control plane's already validated repository, Results, and OIDC authorities.
 
-The protocol-2 host helper and newly provisioned guest bridge contain the
-closed transport primitive for that broker. The guest bridge owns only
+The protocol-2 host helper and provisioned guest bridge carry this traffic. The
+guest bridge owns only
 `127.0.0.1:18081`, permits at most 16 concurrent relays, and connects to the
 host only through fixed Virtio socket port 10251. The helper registers that
 port only when its launch request names the owner-only Unix socket
 `runtime-proxy.sock` directly inside the current attempt directory. It rejects
 another path, owner, file type, link count, or group/other permission.
 
-The current runner deliberately sends `null`, so no host listener or runtime
-service route is available and no network capability is advertised. A later
-slice must supply an attempt-scoped broker that authenticates and restricts
-exact GitHub and Results routes before the runner may expose the guest
-loopback endpoint. This transport is not a generic TCP proxy and does not
-justify adding a VM network device.
+The provider advertises `RuntimeServiceProxy` and opens that transport only for
+a nonempty route set. It injects uppercase and lowercase `HTTP_PROXY` and
+`HTTPS_PROXY` variables pointing at the guest loopback endpoint. HTTPS uses
+`CONNECT` without TLS termination, keeping credentials encrypted between the
+guest and the configured origin. Plain HTTP is accepted only for authorities
+whose validated runtime URL already permits it; the proxy checks both the
+absolute request target and `Host`, rewrites to origin form, and removes proxy
+credentials. Every unmatched protocol, host, or effective port is rejected.
+The broker and bridge each cap concurrent sessions at 16 and the broker applies
+bounded headers, connection timeouts, and idle timeouts.
+
+Jobs with no runtime-service routes receive no proxy variables, the helper gets
+no socket, and the host Virtio listener remains absent. This transport is not a
+generic TCP proxy and does not justify adding a VM network device.
 
 ## Build and sign the host tools
 
@@ -151,6 +164,11 @@ sudo install -d -o root -g wheel -m 0755 \
 sudo install -d -o "$template_builder" -g "$(id -gn "$template_builder")" -m 0700 \
   /Volumes/AutomataVM/templates/macos-15-arm64-v1
 ```
+
+Keep the provider root short. Darwin Unix sockets permit at most 103 path
+bytes, and Automata appends `/attempts/<opaque-handle>/runtime-proxy.sock`.
+Provider configuration checks that worst-case suffix at startup; the path
+above is within the bound.
 
 At startup Automata independently resolves `df` and `diskutil -plist` data. It
 rejects the startup container, sibling volumes, virtual or disk-image backing
@@ -381,4 +399,20 @@ AUTOMATA_MACOS_VM_STORAGE_QUOTA_BYTES=107374182400 \
 cargo test --locked -p automata-ci-runner --test runner -- \
   macos_vm_runner_process_e2e::shipped_runner_process_executes_a_claimed_isolated_shell_job \
   --ignored --nocapture --test-threads=1
+```
+
+The runtime proxy has a separate physical contract test. It starts a temporary
+loopback HTTP origin on the host, boots the sealed NIC-less guest through the
+helper, executes guest `curl` with the fixed proxy address, and verifies that
+the request crossed the allowlisted Rust broker. The attempt root must already
+be an owner-only directory on the dedicated VM volume and short enough for its
+Unix socket suffix:
+
+```console
+AUTOMATA_MACOS_PHYSICAL_HELPER=/absolute/path/automata-macos-vm-helper \
+AUTOMATA_MACOS_PHYSICAL_MANIFEST=/Volumes/AutomataVM/templates/macos-15-arm64-v1/manifest.json \
+AUTOMATA_MACOS_PHYSICAL_ATTEMPT_ROOT=/Volumes/AutomataVM/proxy-tests \
+cargo test -p automata-ci-sandbox-macos --lib \
+  runtime_proxy::tests::physical_guest_reaches_an_allowlisted_origin_through_the_vsock_proxy -- \
+  --ignored --exact --nocapture
 ```

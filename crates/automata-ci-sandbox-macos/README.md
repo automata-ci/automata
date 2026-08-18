@@ -24,11 +24,20 @@ macOS version/build, architecture, dedicated non-admin UID/GID, and sealed
 process ceiling. The root guest bridge admits only that exact configuration;
 the agent applies it before executing commands as the dedicated guest identity.
 
-The bridge also contains a closed, bounded guest-loopback relay for future
-runtime services. The host helper exposes its fixed Virtio socket port only
-when given an owner-only Unix socket inside the current attempt directory. The
-runner currently supplies no socket, so the relay cannot reach the host and
-does not add a network capability.
+For jobs whose validated runtime authority contains HTTP(S) origins, the
+provider starts an owner-only proxy socket inside the current attempt directory
+and opens the bridge's fixed guest-loopback relay. Every command receives
+`HTTP_PROXY` and `HTTPS_PROXY` (including their lowercase forms) pointing to
+`127.0.0.1:18081`. HTTPS remains encrypted end to end through an exact-authority
+`CONNECT` tunnel; plain HTTP is forwarded only to an exact configured origin.
+The broker rejects every other host, port, protocol, and malformed request,
+limits concurrent sessions, strips proxy credentials before plain-HTTP
+forwarding, and stops with the VM. Jobs with no runtime-service routes retain a
+closed relay. The VM still has no virtual NIC and no general network access.
+
+macOS limits Unix socket paths to 103 bytes, so provider configuration rejects
+a state root which cannot fit the fixed attempt and proxy-socket suffix. The
+documented `/Volumes/AutomataVM/state` layout is within that bound.
 
 Lifecycle mutations remain replay-safe and generation-fenced. A new journal
 namespace deliberately rejects the deleted native provider's state instead of

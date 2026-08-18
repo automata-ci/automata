@@ -128,6 +128,7 @@ impl VmProcess {
         template: &VerifiedTemplate,
         attempt_id: &str,
         attempt_directory: &Path,
+        runtime_proxy_socket: Option<&Path>,
         resources: ResourceLimits,
         cancellation: &dyn Cancellation,
     ) -> io::Result<Self> {
@@ -175,9 +176,7 @@ impl VmProcess {
             handshake_nonce: &nonce,
             boot_timeout_millis: duration_millis(options.boot_timeout())?,
             stop_timeout_millis: duration_millis(options.stop_timeout())?,
-            // The transport is present in protocol 2 but remains closed until
-            // the runner supplies an attempt-scoped, route-restricted broker.
-            runtime_proxy_socket: None,
+            runtime_proxy_socket,
         };
         write_json_frame(&mut input, &request)?;
         let response = read_frame_controlled(

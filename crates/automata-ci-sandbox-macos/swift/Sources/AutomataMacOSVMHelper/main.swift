@@ -721,7 +721,11 @@ private func run(lockPath: String) throws {
     stopTimeoutMillis: request.stopTimeoutMillis
   )
   defer { stopVM(machine, queue: queue, timeoutMillis: request.stopTimeoutMillis) }
-  guard let device = machine.socketDevices.first as? VZVirtioSocketDevice else {
+  guard
+    let device = queue.sync(execute: {
+      machine.socketDevices.first as? VZVirtioSocketDevice
+    })
+  else {
     throw HelperFailure(rejection: .invalidConfiguration)
   }
   var runtimeProxyListener: RuntimeProxyListener?
@@ -729,7 +733,9 @@ private func run(lockPath: String) throws {
     let delegate = RuntimeProxyListener(socketPath: socketPath)
     let listener = VZVirtioSocketListener()
     listener.delegate = delegate
-    device.setSocketListener(listener, forPort: runtimeProxyHostPort)
+    queue.sync {
+      device.setSocketListener(listener, forPort: runtimeProxyHostPort)
+    }
     runtimeProxyListener = delegate
   }
   let deadline = DispatchTime.now() + .milliseconds(Int(clamping: request.bootTimeoutMillis))

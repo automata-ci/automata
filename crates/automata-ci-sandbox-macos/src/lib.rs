@@ -18,6 +18,8 @@ mod persistence;
 #[cfg(target_os = "macos")]
 mod provider;
 #[cfg(target_os = "macos")]
+mod runtime_proxy;
+#[cfg(target_os = "macos")]
 mod template;
 #[cfg(not(target_os = "macos"))]
 mod unsupported;
