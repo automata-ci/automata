@@ -2449,38 +2449,51 @@ fn normalized_volume_uuid(value: &str) -> Option<String> {
 
 fn valid_helper_code_requirement(value: &str) -> bool {
     const PREFIX: &str = "identifier \"";
-    const MIDDLE: &str = "\" and anchor apple generic and certificate leaf[subject.OU] = \"";
+    const DEVELOPER_ID_MIDDLE: &str =
+        "\" and anchor apple generic and certificate leaf[subject.OU] = \"";
+    const PRIVATE_LEAF_MIDDLE: &str = "\" and certificate leaf = H\"";
     let Some(remainder) = value.strip_prefix(PREFIX) else {
         return false;
     };
-    let Some((identifier, team)) = remainder.split_once(MIDDLE) else {
-        return false;
+    let identifier_valid = |identifier: &str| {
+        identifier.len() <= 255
+            && identifier.split('.').count() >= 2
+            && identifier.split('.').all(|component| {
+                !component.is_empty()
+                    && component.len() <= 63
+                    && component
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                    && component
+                        .as_bytes()
+                        .first()
+                        .is_some_and(u8::is_ascii_alphanumeric)
+                    && component
+                        .as_bytes()
+                        .last()
+                        .is_some_and(u8::is_ascii_alphanumeric)
+            })
     };
-    let Some(team) = team.strip_suffix('"') else {
-        return false;
-    };
-    let identifier_valid = identifier.len() <= 255
-        && identifier.split('.').count() >= 2
-        && identifier.split('.').all(|component| {
-            !component.is_empty()
-                && component.len() <= 63
-                && component
+    if let Some((identifier, team)) = remainder.split_once(DEVELOPER_ID_MIDDLE) {
+        return team.strip_suffix('"').is_some_and(|team| {
+            identifier_valid(identifier)
+                && team.len() == 10
+                && team
                     .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-                && component
-                    .as_bytes()
-                    .first()
-                    .is_some_and(u8::is_ascii_alphanumeric)
-                && component
-                    .as_bytes()
-                    .last()
-                    .is_some_and(u8::is_ascii_alphanumeric)
+                    .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
         });
-    identifier_valid
-        && team.len() == 10
-        && team
-            .bytes()
-            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+    }
+    remainder
+        .split_once(PRIVATE_LEAF_MIDDLE)
+        .is_some_and(|(identifier, certificate_hash)| {
+            certificate_hash.strip_suffix('"').is_some_and(|hash| {
+                identifier_valid(identifier)
+                    && hash.len() == 40
+                    && hash
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || matches!(byte, b'A'..=b'F'))
+            })
+        })
 }
 
 #[derive(Clone, Copy, Deserialize)]

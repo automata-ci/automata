@@ -191,6 +191,8 @@ fn macos_template_and_state_boundaries_are_pinned_and_disjoint() {
     for weak_requirement in [
         "identifier \"dev.automata.macos-vm-helper\" and anchor apple generic",
         "identifier \"dev.automata.macos-vm-helper\" or anchor apple generic and certificate leaf[subject.OU] = \"ABCDEFGHIJ\"",
+        "identifier \"dev.automata.macos-vm-helper\" and certificate leaf = H\"0123456789abcdeffedcba98765432100a2bc5da\"",
+        "identifier \"dev.automata.macos-vm-helper\" or certificate leaf = H\"0123456789ABCDEFFEDCBA98765432100A2BC5DA\"",
     ] {
         let mut weak_helper = baseline();
         weak_helper["macos_virtualization"]["helper_code_requirement"] =
@@ -200,4 +202,10 @@ fn macos_template_and_state_boundaries_are_pinned_and_disjoint() {
             RunnerProductConfigError::InvalidProvider
         );
     }
+
+    let mut private_identity = baseline();
+    private_identity["macos_virtualization"]["helper_code_requirement"] = serde_json::json!(
+        "identifier \"dev.automata.macos-vm-helper\" and certificate leaf = H\"0123456789ABCDEFFEDCBA98765432100A2BC5DA\""
+    );
+    parse(&private_identity).expect("exact private signing leaf is accepted");
 }

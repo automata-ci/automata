@@ -112,9 +112,44 @@ and a strict designated requirement, for example
 `identifier "dev.automata.macos-vm-helper" and anchor apple generic and
 certificate leaf[subject.OU] = "ABCDEFGHIJ"`. Replace `ABCDEFGHIJ` with the
 exact ten-character signing Team ID; this conjunctive grammar is the only
-accepted configured requirement. Production must use a reviewed Developer ID
-signature. An ad-hoc signature may be used only to inspect build and entitlement
-shape and is intentionally rejected by product configuration.
+accepted Developer ID requirement.
+
+A private fleet may instead sign with a reviewed private code-signing identity
+and pin the exact leaf certificate SHA-1 used by Apple's
+[requirement language](https://developer.apple.com/library/archive/documentation/Security/Conceptual/CodeSigningGuide/RequirementLang/RequirementLang.html):
+
+```text
+identifier "dev.automata.macos-vm-helper" and certificate leaf = H"0123456789ABCDEFFEDCBA98765432100A2BC5DA"
+```
+
+The hash is exactly 40 uppercase hexadecimal characters. It identifies the
+certificate, not the helper bytes; `helper_sha256` independently pins the
+complete executable. The private key must remain outside the runner service
+identity, and rotating the certificate requires an explicit configuration
+update. Apple trust-store installation is neither required nor consulted by
+this exact-leaf requirement. A signer that reads the private key directly can
+produce the Mach-O signature without adding that certificate to the host trust
+store. For example, `rcodesign` accepts a password file rather than exposing
+the PKCS#12 password in the process arguments:
+
+```console
+rcodesign sign \
+  --p12-file /offline/path/helper-signing.p12 \
+  --p12-password-file /offline/path/helper-signing.password \
+  --binary-identifier dev.automata.macos-vm-helper \
+  --code-signature-flags runtime \
+  --entitlements-xml-file crates/automata-ci-sandbox-macos/swift/virtualization.entitlements \
+  --timestamp-url none \
+  crates/automata-ci-sandbox-macos/swift/.build/release/automata-macos-vm-helper
+```
+
+`rcodesign` is an independently distributed tool, not an Automata runtime
+dependency. Pin and verify the reviewed release before using it. Developer ID
+remains the distribution profile for
+software delivered to third-party Macs because it supplies Apple/Gatekeeper
+identity and notarization. An ad-hoc signature may be used only to inspect
+build and entitlement shape and is intentionally rejected by both accepted
+product grammars.
 
 ## Provision bounded host storage
 
