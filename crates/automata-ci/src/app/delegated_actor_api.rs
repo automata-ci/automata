@@ -1307,12 +1307,98 @@ fn unix_time() -> UnixTimestamp {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex as StdMutex;
+
     use super::*;
+    use automata_ci_auth::{
+        authorization::AuthorizationContext, delegated_actor::DelegatedActorResolutionFuture,
+        human::PrincipalId, request_auth::ViewerDisplayMetadata,
+    };
     use automata_ci_core::{RunId, UnixMillis};
+    use automata_ci_store::{
+        HumanLiveLogTicketRepository, HumanLogCommitNotificationHub, IssueHumanLiveLogTicket,
+        IssueHumanLiveLogTicketOutcome, RedeemHumanLiveLogTicket, RedeemedHumanLiveLogTicket,
+        StoreError,
+    };
+    use axum::{
+        body::{Body, to_bytes},
+        http::Request,
+    };
     use ring::{
         rand::SystemRandom,
         signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair, KeyPair as _},
     };
+    use tower::ServiceExt as _;
+
+    #[derive(Debug)]
+    struct RecordingPermissionResolver {
+        observed: StdMutex<Vec<(TenantId, BTreeSet<Permission>)>>,
+        granted: BTreeSet<Permission>,
+    }
+
+    impl DelegatedActorResolver for RecordingPermissionResolver {
+        fn resolve<'a>(
+            &'a self,
+            request: &'a ResolveDelegatedActorRequest,
+        ) -> DelegatedActorResolutionFuture<'a> {
+            Box::pin(async move {
+                self.observed
+                    .lock()
+                    .expect("resolver observation lock")
+                    .push((
+                        request.tenant_id().clone(),
+                        request.requested_tenant_permissions().clone(),
+                    ));
+                let principal_id =
+                    PrincipalId::new("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee".to_owned())
+                        .map_err(|_| DelegatedActorResolverError::CorruptData)?;
+                let authorization = AuthorizationContext::authenticated_at_revision(
+                    request.tenant_id().clone(),
+                    principal_id,
+                    BTreeSet::new(),
+                    17,
+                )
+                .map_err(|_| DelegatedActorResolverError::CorruptData)?;
+                let granted = request
+                    .requested_tenant_permissions()
+                    .intersection(&self.granted)
+                    .cloned()
+                    .collect();
+                let snapshot = DelegatedActorRequestSnapshot::new(
+                    request.assertion().clone(),
+                    request.tenant_id(),
+                    ViewerDisplayMetadata::new("Cloud User")
+                        .map_err(|_| DelegatedActorResolverError::CorruptData)?,
+                    authorization,
+                    granted,
+                )
+                .map_err(|_| DelegatedActorResolverError::CorruptData)?;
+                Ok(ResolveDelegatedActorOutcome::Authenticated(Box::new(
+                    snapshot,
+                )))
+            })
+        }
+    }
+
+    #[derive(Debug)]
+    struct UnusedLiveLogTickets;
+
+    #[async_trait::async_trait]
+    impl HumanLiveLogTicketRepository for UnusedLiveLogTickets {
+        async fn issue(
+            &self,
+            _request: &IssueHumanLiveLogTicket,
+        ) -> Result<IssueHumanLiveLogTicketOutcome, StoreError> {
+            Ok(IssueHumanLiveLogTicketOutcome::DigestCollision)
+        }
+
+        async fn redeem(
+            &self,
+            _request: &RedeemHumanLiveLogTicket,
+        ) -> Result<Option<RedeemedHumanLiveLogTicket>, StoreError> {
+            Ok(None)
+        }
+    }
 
     #[test]
     fn jwks_parser_accepts_only_unique_exact_es256_keys() {
@@ -1457,6 +1543,105 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn authorization_check_route_resolves_and_returns_exact_permission_decisions() {
+        let random = SystemRandom::new();
+        let document = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &random)
+            .expect("test key document");
+        let key =
+            EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, document.as_ref(), &random)
+                .expect("test signing key");
+        let mut public_key = [0_u8; 65];
+        public_key.copy_from_slice(key.public_key().as_ref());
+        let verifier = Arc::new(
+            DelegatedActorVerifier::new(DelegatedActorVerifierConfig {
+                issuer: "https://cloud.automata.example".to_owned(),
+                audience: "prod-us-east-1".to_owned(),
+                jwks_url: Url::parse("https://cloud.automata.example/.well-known/jwks.json")
+                    .expect("JWKS URL"),
+            })
+            .expect("verifier"),
+        );
+        *verifier.cache.lock().await = Some(CachedJwks {
+            fetched_at: Instant::now(),
+            keys: BTreeMap::from([("key_1".to_owned(), public_key)]),
+        });
+
+        let billing_read = Permission::new("billing:read").expect("read permission");
+        let billing_manage = Permission::new("billing:manage").expect("manage permission");
+        let resolver = Arc::new(RecordingPermissionResolver {
+            observed: StdMutex::new(Vec::new()),
+            granted: BTreeSet::from([billing_read.clone()]),
+        });
+        let web_data: Arc<dyn WebData> = Arc::new(crate::app::web::EmptyWebData);
+        let live_logs = Arc::new(LiveLogService::new(
+            Arc::clone(&web_data),
+            Arc::new(UnusedLiveLogTickets),
+            Arc::new(HumanLogCommitNotificationHub::default()),
+        ));
+        let application = router(
+            verifier,
+            resolver.clone(),
+            web_data,
+            live_logs,
+            HumanLiveLogBrowserOrigin::new("https://cloud.automata.example")
+                .expect("browser origin"),
+            None,
+        );
+
+        let workspace_id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+        let token = sign_current_test_token(&key, &random, workspace_id);
+        let request = Request::builder()
+            .method("POST")
+            .uri(format!(
+                "/internal/v2/workspaces/{workspace_id}/authorization-checks"
+            ))
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "protocol_version": 2,
+                    "permissions": [billing_manage.as_str(), billing_read.as_str()]
+                }))
+                .expect("request JSON"),
+            ))
+            .expect("request");
+
+        let response = application.oneshot(request).await.expect("route response");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some("no-store")
+        );
+        let body = to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .expect("response body");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("response JSON");
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "protocol_version": 2,
+                "workspace_id": workspace_id,
+                "principal_id": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+                "authorization_revision": 17,
+                "decisions": [
+                    {"permission": "billing:manage", "allowed": false},
+                    {"permission": "billing:read", "allowed": true}
+                ]
+            })
+        );
+        assert_eq!(
+            *resolver.observed.lock().expect("resolver observation lock"),
+            vec![(
+                TenantId::new(workspace_id).expect("tenant ID"),
+                BTreeSet::from([billing_manage, billing_read])
+            )]
+        );
+    }
+
+    #[tokio::test]
     async fn verifier_accepts_only_the_configured_signed_claim_shape() {
         let random = SystemRandom::new();
         let document = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &random)
@@ -1536,5 +1721,27 @@ mod tests {
             "{signing_input}.{}",
             URL_SAFE_NO_PAD.encode(signature.as_ref())
         )
+    }
+
+    fn sign_current_test_token(
+        key: &EcdsaKeyPair,
+        random: &SystemRandom,
+        workspace_id: &str,
+    ) -> String {
+        let now = unix_time().as_seconds();
+        let header = serde_json::json!({"alg": "ES256", "kid": "key_1", "typ": "at+jwt"});
+        let claims = serde_json::json!({
+            "ver": 1,
+            "iss": "https://cloud.automata.example",
+            "sub": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "aud": "prod-us-east-1",
+            "workspace_id": workspace_id,
+            "session_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+            "auth_time": now.saturating_sub(10),
+            "iat": now,
+            "exp": now.saturating_add(120),
+            "jti": "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+        });
+        sign_test_token(key, random, &header, &claims)
     }
 }

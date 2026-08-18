@@ -255,7 +255,7 @@ const CANONICAL_MIGRATIONS: &[(&str, &str)] = &[
     ),
     (
         "0063_workspace_billing_permissions.sql",
-        "31dec0b3f5a4735a540c11fb56a7da0d6f6179394f7583311fc0d134e9465faf7ba9cdc1d1595182e5351e5740b884ae",
+        "f819ade01646fb633b7d741816b0f75e772585dc1b244017dfea118e88746efaa89e4ef8ebc488c3d2ff67a0b984af7d",
     ),
 ];
 

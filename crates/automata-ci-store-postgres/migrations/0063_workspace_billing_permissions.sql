@@ -1,3 +1,7 @@
+-- Serialize the pre-migration provisioner's owner-role insert with both the
+-- catalog change and backfill so no committed owner can fall between them.
+LOCK TABLE rbac_roles IN SHARE MODE;
+
 INSERT INTO rbac_permissions (
     name, description, critical, created_at_ms
 ) VALUES

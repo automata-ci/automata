@@ -208,18 +208,18 @@ const ACTIVE_GRANTS_SELECT: &str = r"
 ";
 
 const ACTIVE_TENANT_PERMISSIONS_SELECT: &str = r"
-    SELECT DISTINCT grant.permission_name
+    SELECT DISTINCT permission_grant.permission_name
     FROM rbac_role_bindings AS binding
-    JOIN rbac_role_permissions AS grant
-      ON grant.tenant_id = binding.tenant_id
-     AND grant.role_id = binding.role_id
+    JOIN rbac_role_permissions AS permission_grant
+      ON permission_grant.tenant_id = binding.tenant_id
+     AND permission_grant.role_id = binding.role_id
     WHERE binding.tenant_id = $1
       AND binding.principal_id = $2
       AND binding.scope_kind = 'tenant'
       AND binding.status = 'active'
       AND (binding.valid_until_ms IS NULL OR binding.valid_until_ms > $3)
-      AND grant.permission_name = ANY($4::text[])
-    ORDER BY grant.permission_name
+      AND permission_grant.permission_name = ANY($4::text[])
+    ORDER BY permission_grant.permission_name
     LIMIT $5
 ";
 

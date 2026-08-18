@@ -1,9 +1,10 @@
 # PostgreSQL integration tests
 
-The explicit `postgres` target covers the three database boundaries exercised
+The explicit `postgres` target covers the database boundaries exercised
 by production CI:
 
 - GitHub sign-in and durable session creation;
+- delegated-actor permission resolution and concurrent authorization migration;
 - runner lease, command, log, and terminal-result transactions;
 - authenticated public workflow, job, log, and artifact reads.
 
