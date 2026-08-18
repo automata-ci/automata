@@ -553,7 +553,11 @@ async fn exec_and_copy_round_trips_preserve_exact_guest_requests_and_results() {
     .expect("copy-from request");
 
     let output = endpoint
-        .exec(&command, &NeverCancelled)
+        .exec(
+            &command,
+            &NeverCancelled,
+            automata_ci_execution::discard_execution_output(),
+        )
         .expect("execute command");
     endpoint
         .copy_to(&copy_to, &NeverCancelled)
@@ -758,7 +762,11 @@ async fn malformed_exec_response_shapes_fail_closed() {
     ] {
         assert_execution_error(
             endpoint
-                .exec(&execution_command(limit), &NeverCancelled)
+                .exec(
+                    &execution_command(limit),
+                    &NeverCancelled,
+                    automata_ci_execution::discard_execution_output(),
+                )
                 .expect_err(message),
             expected,
             ExecutionStage::Exec,
@@ -786,7 +794,11 @@ async fn operational_guest_rejections_remain_bounded_backend_failures() {
     for _ in rejections {
         assert_execution_error(
             endpoint
-                .exec(&execution_command(64), &NeverCancelled)
+                .exec(
+                    &execution_command(64),
+                    &NeverCancelled,
+                    automata_ci_execution::discard_execution_output(),
+                )
                 .expect_err("operational guest rejection"),
             ExecutionErrorKind::BackendRejected,
             ExecutionStage::Exec,
@@ -831,14 +843,22 @@ async fn requested_exec_limit_and_transport_stderr_fail_closed() {
     let endpoint = attach_endpoint(&server);
     assert_execution_error(
         endpoint
-            .exec(&execution_command(1024 * 1024), &NeverCancelled)
+            .exec(
+                &execution_command(1024 * 1024),
+                &NeverCancelled,
+                automata_ci_execution::discard_execution_output(),
+            )
             .expect_err("one guest record must respect its hard bound"),
         ExecutionErrorKind::OutputLimitExceeded,
         ExecutionStage::Exec,
     );
     assert_execution_error(
         endpoint
-            .exec(&execution_command(3), &NeverCancelled)
+            .exec(
+                &execution_command(3),
+                &NeverCancelled,
+                automata_ci_execution::discard_execution_output(),
+            )
             .expect_err("guest must not exceed the caller output limit"),
         ExecutionErrorKind::OutputLimitExceeded,
         ExecutionStage::Exec,
@@ -932,7 +952,11 @@ async fn cancellation_and_unsupported_operations_stop_before_exec_transport() {
     let cancellation = TestCancellation::cancelled();
     assert_execution_error(
         endpoint
-            .exec(&execution_command(64), &cancellation)
+            .exec(
+                &execution_command(64),
+                &cancellation,
+                automata_ci_execution::discard_execution_output(),
+            )
             .expect_err("cancelled exec"),
         ExecutionErrorKind::Cancelled,
         ExecutionStage::Exec,

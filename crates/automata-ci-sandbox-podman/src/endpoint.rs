@@ -7,15 +7,18 @@ use std::{
 use automata_ci_execution::{
     Cancellation, CopyFromRequest, CopyToRequest, EnvironmentVariable, ExecutionCommand,
     ExecutionEndpoint, ExecutionEnvironment, ExecutionError, ExecutionErrorKind, ExecutionOutput,
-    ExecutionSignal, ExecutionStage, ExecutionTermination, NeverCancelled, SandboxCapability,
-    SandboxHandle, SandboxState, SignalRequest, TargetPath, TargetPlatform, WaitRequest,
+    ExecutionOutputSink, ExecutionSignal, ExecutionStage, ExecutionTermination, NeverCancelled,
+    SandboxCapability, SandboxHandle, SandboxState, SignalRequest, TargetPath, TargetPlatform,
+    WaitRequest,
 };
 
 use crate::{
     CommandOutput, CommandTermination,
     command::provider_control_environment_name,
     naming::ResourceNames,
-    provider::{PodmanInner, endpoint_capabilities, endpoint_error_from_provider},
+    provider::{
+        EndpointExecution, PodmanInner, endpoint_capabilities, endpoint_error_from_provider,
+    },
 };
 
 const MAX_PODMAN_ENV_DOCUMENT_LINE_BYTES: usize = 64 * 1024 - 1;
@@ -125,32 +128,6 @@ impl PodmanExecutionEndpoint {
         }
     }
 
-    fn run_with_environment(
-        &self,
-        arguments: Vec<OsString>,
-        environment_document: EnvironmentDocument<'_>,
-        timeout: std::time::Duration,
-        output_limit: usize,
-        cancellation: &dyn Cancellation,
-        stage: ExecutionStage,
-    ) -> Result<CommandOutput, ExecutionError> {
-        let output = self.inner.run_endpoint_with_environment(
-            arguments,
-            environment_document,
-            timeout,
-            output_limit,
-            cancellation,
-            stage,
-        );
-        match output.termination() {
-            CommandTermination::FailedToStart => Err(ExecutionError::new(
-                ExecutionErrorKind::BackendRejected,
-                stage,
-            )),
-            _ => Ok(output),
-        }
-    }
-
     fn run_transport(
         &self,
         arguments: Vec<OsString>,
@@ -241,6 +218,7 @@ impl ExecutionEndpoint for PodmanExecutionEndpoint {
         &self,
         request: &ExecutionCommand,
         cancellation: &dyn Cancellation,
+        output: Arc<dyn ExecutionOutputSink>,
     ) -> Result<ExecutionOutput, ExecutionError> {
         let _operation = self.acquire(ExecutionStage::Exec)?;
         if request.argv().program().platform() != TargetPlatform::Posix
@@ -275,14 +253,29 @@ impl ExecutionEndpoint for PodmanExecutionEndpoint {
         arguments.push(self.names.container().into());
         arguments.push(request.argv().program().as_str().into());
         arguments.extend(request.argv().arguments().iter().map(OsString::from));
-        let output = self.run_with_environment(
-            arguments,
-            environment_document,
-            request.timeout(),
-            request.output_limit(),
+        let output = self.inner.run_endpoint_execution(
+            EndpointExecution::new(
+                arguments,
+                environment_document,
+                request.timeout(),
+                request.output_limit(),
+                ExecutionStage::Exec,
+                output,
+            ),
             cancellation,
-            ExecutionStage::Exec,
-        )?;
+        );
+        if output.termination() == CommandTermination::FailedToStart {
+            return Err(ExecutionError::new(
+                ExecutionErrorKind::BackendRejected,
+                ExecutionStage::Exec,
+            ));
+        }
+        if output.output_was_rejected() {
+            return Err(ExecutionError::new(
+                ExecutionErrorKind::OutputRejected,
+                ExecutionStage::Exec,
+            ));
+        }
         let termination = self.execution_termination(output.termination())?;
         if !output.stdin_was_fully_written()
             && !matches!(

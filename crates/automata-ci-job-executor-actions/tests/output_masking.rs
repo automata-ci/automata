@@ -10,6 +10,7 @@ impl ExecutorAdapterError {
 }
 
 pub(crate) mod error {
+    #[allow(dead_code)]
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub(crate) enum ExecutorAdapterErrorKind {
         InvalidJob,
@@ -23,11 +24,9 @@ pub(crate) mod error {
 #[path = "../src/output.rs"]
 mod output;
 
-use automata_ci_actions_runtime::{WorkflowCommandLimits, WorkflowCommandPolicy};
 use automata_ci_auth::output_policy::SecretExposureClass;
-use automata_ci_core::{JobSecretExposure, LogChannel};
-use automata_ci_execution::{ExecutionOutputRecord, ExecutionOutputStream};
-use output::{SecretMasker, parse_output};
+use automata_ci_core::JobSecretExposure;
+use output::SecretMasker;
 
 #[test]
 fn registering_a_readable_secret_permanently_narrows_output_safety() {
@@ -147,142 +146,4 @@ fn aggregate_mask_bytes_are_bounded() {
 
     masker.register(&maximum).expect("register maximum bytes");
     assert!(masker.register("t").is_err());
-}
-
-#[test]
-fn ordered_parse_finds_a_later_cross_stream_mask_before_emission() {
-    let secret = "cross-stream-secret";
-    let mut masker = SecretMasker::new();
-
-    parse_output(
-        &records([
-            (ExecutionOutputStream::Stdout, format!("{secret}\n")),
-            (
-                ExecutionOutputStream::Stderr,
-                format!("::add-mask::{secret}\n"),
-            ),
-        ]),
-        WorkflowCommandLimits::default(),
-        WorkflowCommandPolicy::new(false),
-        &mut masker,
-    )
-    .expect("ordered discovery");
-
-    assert_eq!(masker.exposure_class(), SecretExposureClass::ReadableSecret);
-    assert!(masker.contains_secret(secret).expect("secret mask"));
-}
-
-#[test]
-fn ordered_parse_rejects_invalid_recognized_stop_commands() {
-    let mut masker = SecretMasker::new();
-
-    assert!(
-        parse_output(
-            &records([
-                (
-                    ExecutionOutputStream::Stdout,
-                    "ordinary output\n".to_owned()
-                ),
-                (
-                    ExecutionOutputStream::Stderr,
-                    "::stop-commands::add-mask\n".to_owned(),
-                ),
-            ]),
-            WorkflowCommandLimits::default(),
-            WorkflowCommandPolicy::default(),
-            &mut masker,
-        )
-        .is_err()
-    );
-}
-
-#[test]
-fn ordered_line_assembly_uses_line_completion_and_stream_end_order() {
-    let mut masker = SecretMasker::new();
-    let parsed = parse_output(
-        &[
-            ExecutionOutputRecord::data(ExecutionOutputStream::Stdout, b"out-".to_vec())
-                .expect("stdout fragment"),
-            ExecutionOutputRecord::data(ExecutionOutputStream::Stderr, b"err\n".to_vec())
-                .expect("stderr line"),
-            ExecutionOutputRecord::data(ExecutionOutputStream::Stdout, b"tail".to_vec())
-                .expect("stdout fragment"),
-            ExecutionOutputRecord::end_of_stream(ExecutionOutputStream::Stdout),
-            ExecutionOutputRecord::end_of_stream(ExecutionOutputStream::Stderr),
-        ],
-        WorkflowCommandLimits::default(),
-        WorkflowCommandPolicy::new(false),
-        &mut masker,
-    )
-    .expect("ordered line assembly");
-
-    assert_eq!(
-        parsed.output_lines(),
-        [
-            (LogChannel::Stderr, true, "err".to_owned()),
-            (LogChannel::Stdout, false, "out-tail".to_owned()),
-        ]
-    );
-}
-
-#[test]
-fn stop_and_resume_state_crosses_streams_in_record_order() {
-    let token = "resume-token-123";
-    let mut masker = SecretMasker::new();
-    let stopped = parse_output(
-        &records([
-            (
-                ExecutionOutputStream::Stdout,
-                format!("::stop-commands::{token}\n"),
-            ),
-            (
-                ExecutionOutputStream::Stderr,
-                "::debug::visible while commands are stopped\n".to_owned(),
-            ),
-            (ExecutionOutputStream::Stdout, format!("::{token}::\n")),
-        ]),
-        WorkflowCommandLimits::default(),
-        WorkflowCommandPolicy::new(false),
-        &mut masker,
-    )
-    .expect("stopped sequence");
-    assert_eq!(stopped.output_lines().len(), 1);
-
-    let mut masker = SecretMasker::new();
-    let resumed = parse_output(
-        &records([
-            (
-                ExecutionOutputStream::Stdout,
-                format!("::stop-commands::{token}\n"),
-            ),
-            (ExecutionOutputStream::Stderr, format!("::{token}::\n")),
-            (
-                ExecutionOutputStream::Stdout,
-                "::debug::recognized after resume\n".to_owned(),
-            ),
-        ]),
-        WorkflowCommandLimits::default(),
-        WorkflowCommandPolicy::new(false),
-        &mut masker,
-    )
-    .expect("resumed sequence");
-    assert!(resumed.output_lines().is_empty());
-}
-
-fn records<const N: usize>(
-    output: [(ExecutionOutputStream, String); N],
-) -> Vec<ExecutionOutputRecord> {
-    let mut records = output
-        .into_iter()
-        .map(|(stream, bytes)| {
-            ExecutionOutputRecord::data(stream, bytes.into_bytes()).expect("bounded test record")
-        })
-        .collect::<Vec<_>>();
-    records.push(ExecutionOutputRecord::end_of_stream(
-        ExecutionOutputStream::Stdout,
-    ));
-    records.push(ExecutionOutputRecord::end_of_stream(
-        ExecutionOutputStream::Stderr,
-    ));
-    records
 }

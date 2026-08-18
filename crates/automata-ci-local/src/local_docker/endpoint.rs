@@ -3,8 +3,8 @@ use std::{collections::BTreeMap, fmt, future::Future, sync::Arc, time::Duration}
 use automata_ci_execution::{
     Cancellation, CopyFromRequest, CopyToRequest, ExecutionCommand, ExecutionEndpoint,
     ExecutionError, ExecutionErrorKind, ExecutionOutput, ExecutionOutputRecord,
-    ExecutionOutputStream, ExecutionStage, ExecutionTermination, NeverCancelled, ProviderStage,
-    SandboxCapability, SandboxHandle, SignalRequest, WaitRequest,
+    ExecutionOutputSink, ExecutionOutputStream, ExecutionStage, ExecutionTermination,
+    NeverCancelled, ProviderStage, SandboxCapability, SandboxHandle, SignalRequest, WaitRequest,
 };
 use automata_ci_sandbox_guest::{
     GUEST_PROTOCOL_VERSION, GuestOutputStream, GuestRejection, GuestRequest, GuestResponse,
@@ -192,6 +192,7 @@ impl ExecutionEndpoint for LocalDockerEndpoint {
         &self,
         request: &ExecutionCommand,
         cancellation: &dyn Cancellation,
+        output: Arc<dyn ExecutionOutputSink>,
     ) -> Result<ExecutionOutput, ExecutionError> {
         let timeout = request
             .timeout()
@@ -203,7 +204,13 @@ impl ExecutionEndpoint for LocalDockerEndpoint {
             cancellation,
             ExecutionStage::Exec,
         )?;
-        execution_output(response, request.output_limit())
+        let result = execution_output(response, request.output_limit())?;
+        for record in result.records() {
+            output.observe(record).map_err(|_| {
+                execution_error(ExecutionErrorKind::OutputRejected, ExecutionStage::Exec)
+            })?;
+        }
+        Ok(result)
     }
 
     fn signal(

@@ -1,10 +1,10 @@
-use std::{collections::BTreeMap, time::Duration};
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use automata_ci_execution::{
     Cancellation, CopyFromRequest, CopyToRequest, ExecutionCommand, ExecutionEndpoint,
     ExecutionError, ExecutionErrorKind, ExecutionOutput, ExecutionOutputRecord,
-    ExecutionOutputStream, ExecutionStage, ExecutionTermination, SandboxCapability, SandboxHandle,
-    SignalRequest, WaitRequest,
+    ExecutionOutputSink, ExecutionOutputStream, ExecutionStage, ExecutionTermination,
+    SandboxCapability, SandboxHandle, SignalRequest, WaitRequest,
 };
 use automata_ci_sandbox_guest::{
     GUEST_PROTOCOL_VERSION, GuestOutputStream, GuestRejection, GuestRequest, GuestResponse,
@@ -223,6 +223,7 @@ impl ExecutionEndpoint for KubernetesExecutionEndpoint {
         &self,
         request: &ExecutionCommand,
         cancellation: &dyn Cancellation,
+        output: Arc<dyn ExecutionOutputSink>,
     ) -> Result<ExecutionOutput, ExecutionError> {
         let guest_request = exec_request(request)?;
         let response = self.exchange(
@@ -236,7 +237,13 @@ impl ExecutionEndpoint for KubernetesExecutionEndpoint {
             cancellation,
             ExecutionStage::Exec,
         )?;
-        execution_output(response, request.output_limit())
+        let result = execution_output(response, request.output_limit())?;
+        for record in result.records() {
+            output.observe(record).map_err(|_| {
+                execution_error(ExecutionErrorKind::OutputRejected, ExecutionStage::Exec)
+            })?;
+        }
+        Ok(result)
     }
 
     fn signal(

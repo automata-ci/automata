@@ -783,7 +783,7 @@ async fn safe_posix_command_templates_execute_as_direct_argv_without_an_outer_sh
 }
 
 #[tokio::test]
-async fn stderr_mask_registration_redacts_a_secret_captured_on_stdout() {
+async fn dynamic_masks_apply_only_after_their_ordered_registration() {
     let secret = "cross-stream-dynamic-secret";
     let response = PhaseResponse::success()
         .with_stdout(format!("{secret}\n"))
@@ -805,7 +805,7 @@ async fn stderr_mask_registration_redacts_a_secret_captured_on_stdout() {
     let logs = fixture.events.logs();
     assert_eq!(logs.len(), 1);
     assert_eq!(logs[0].channel(), automata_ci_core::LogChannel::Stdout);
-    assert_eq!(logs[0].payload(), b"***\n");
+    assert_eq!(logs[0].payload(), format!("{secret}\n").as_bytes());
 }
 
 #[tokio::test]
@@ -835,7 +835,7 @@ async fn long_stop_command_token_is_redacted_without_hiding_adjacent_output() {
 }
 
 #[tokio::test]
-async fn truncated_output_is_rejected_before_user_bytes_or_command_files_are_consumed() {
+async fn truncated_output_retains_its_bounded_prefix_but_rejects_command_files() {
     let sentinel = "truncated-output-secret-sentinel";
     let response = PhaseResponse::success()
         .with_stdout(format!("{sentinel}\n"))
@@ -860,14 +860,15 @@ async fn truncated_output_is_rejected_before_user_bytes_or_command_files_are_con
 
     assert_eq!(error.kind(), ExecutorErrorKind::ResourceExhausted);
     let logs = fixture.events.logs();
-    assert_eq!(logs.len(), 1);
-    assert_eq!(logs[0].channel(), automata_ci_core::LogChannel::System);
-    let diagnostic = std::str::from_utf8(logs[0].payload()).expect("system diagnostic is UTF-8");
+    assert_eq!(logs.len(), 2);
+    assert_eq!(logs[0].channel(), automata_ci_core::LogChannel::Stdout);
+    assert_eq!(logs[0].payload(), format!("{sentinel}\n").as_bytes());
+    assert_eq!(logs[1].channel(), automata_ci_core::LogChannel::System);
+    let diagnostic = std::str::from_utf8(logs[1].payload()).expect("system diagnostic is UTF-8");
     assert_eq!(
         diagnostic,
-        "command output exceeded the configured capture limit; user output was suppressed\n"
+        "command output exceeded the configured capture limit\n"
     );
-    assert!(!diagnostic.contains(sentinel));
     assert_eq!(
         fixture
             .endpoint_state

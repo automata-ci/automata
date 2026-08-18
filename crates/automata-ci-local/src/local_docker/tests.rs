@@ -1602,7 +1602,13 @@ fn lifecycle_uses_zero_volumes_and_exact_replay_cleanup() {
         1024,
     )
     .expect("command");
-    let output = endpoint.exec(&command, &NeverCancelled).expect("exec");
+    let output = endpoint
+        .exec(
+            &command,
+            &NeverCancelled,
+            automata_ci_execution::discard_execution_output(),
+        )
+        .expect("exec");
     assert_eq!(output.termination(), ExecutionTermination::Exited(0));
     assert_eq!(output.stdout(), b"ok");
     let path = TargetPath::posix("/workspace/repository/result.txt").expect("path");
@@ -1699,10 +1705,18 @@ fn raw_endpoint_duplicate_operation_ids_are_attempted_twice() {
     let before = raw_guest_attempts();
 
     endpoint
-        .exec(&request, &NeverCancelled)
+        .exec(
+            &request,
+            &NeverCancelled,
+            automata_ci_execution::discard_execution_output(),
+        )
         .expect("first raw attempt");
     endpoint
-        .exec(&request, &NeverCancelled)
+        .exec(
+            &request,
+            &NeverCancelled,
+            automata_ci_execution::discard_execution_output(),
+        )
         .expect("second raw attempt");
 
     assert_eq!(raw_guest_attempts() - before, 2);
@@ -1957,7 +1971,11 @@ fn endpoint_cancellation_is_prechecked_then_kills_only_the_exact_running_contain
     let pre_cancelled = ToggleCancellation::active();
     pre_cancelled.cancel();
     let error = endpoint
-        .exec(&true_command(&spec, 300), &pre_cancelled)
+        .exec(
+            &true_command(&spec, 300),
+            &pre_cancelled,
+            automata_ci_execution::discard_execution_output(),
+        )
         .expect_err("pre-cancelled exec");
     assert_eq!(error.kind(), ExecutionErrorKind::Cancelled);
     assert_eq!(fixture.engine.mutation_count(), mutations_before_pre_cancel);
@@ -1978,7 +1996,13 @@ fn endpoint_cancellation_is_prechecked_then_kills_only_the_exact_running_contain
     let cancellation = ToggleCancellation::active();
     let request = true_command(&spec, 301);
     let error = std::thread::scope(|scope| {
-        let call = scope.spawn(|| endpoint.exec(&request, &cancellation));
+        let call = scope.spawn(|| {
+            endpoint.exec(
+                &request,
+                &cancellation,
+                automata_ci_execution::discard_execution_output(),
+            )
+        });
         wait_for_test(
             || fixture.engine.guest_exec_blocked.load(Ordering::SeqCst),
             "endpoint did not reach the controlled guest start",
@@ -2072,14 +2096,26 @@ fn queued_endpoint_cancellation_returns_before_holder_release_and_mutates_nothin
     let cancellation = ToggleCancellation::active();
 
     std::thread::scope(|scope| {
-        let first_call = scope.spawn(|| first.exec(&first_command, &NeverCancelled));
+        let first_call = scope.spawn(|| {
+            first.exec(
+                &first_command,
+                &NeverCancelled,
+                automata_ci_execution::discard_execution_output(),
+            )
+        });
         wait_for_test(
             || fixture.engine.guest_exec_blocked.load(Ordering::SeqCst),
             "first endpoint operation did not reach the controlled exec",
         );
 
         let queued_cancellation = cancellation.clone();
-        let second_call = scope.spawn(move || second.exec(&second_command, &queued_cancellation));
+        let second_call = scope.spawn(move || {
+            second.exec(
+                &second_command,
+                &queued_cancellation,
+                automata_ci_execution::discard_execution_output(),
+            )
+        });
         wait_for_test(
             || cancellation.observations.load(Ordering::SeqCst) > 0,
             "second endpoint operation did not reach its pre-lock cancellation check",
@@ -2155,7 +2191,13 @@ fn queued_provider_cancellation_returns_before_holder_release_and_mutates_nothin
     let cancellation = ToggleCancellation::active();
 
     std::thread::scope(|scope| {
-        let first_call = scope.spawn(|| endpoint.exec(&first_command, &NeverCancelled));
+        let first_call = scope.spawn(|| {
+            endpoint.exec(
+                &first_command,
+                &NeverCancelled,
+                automata_ci_execution::discard_execution_output(),
+            )
+        });
         wait_for_test(
             || fixture.engine.guest_exec_blocked.load(Ordering::SeqCst),
             "endpoint operation did not reach the controlled exec",
@@ -2244,7 +2286,13 @@ fn cancellation_dominates_a_simultaneous_guest_transport_failure_and_stops_exact
     let cancellation = ToggleCancellation::active();
 
     let error = std::thread::scope(|scope| {
-        let call = scope.spawn(|| endpoint.exec(&command, &cancellation));
+        let call = scope.spawn(|| {
+            endpoint.exec(
+                &command,
+                &cancellation,
+                automata_ci_execution::discard_execution_output(),
+            )
+        });
         wait_for_test(
             || fixture.engine.guest_exec_blocked.load(Ordering::SeqCst),
             "guest transport did not reach the controlled failure",
@@ -2315,7 +2363,13 @@ fn uncertain_guest_transport_failure_stops_exact_job_and_never_restarts_it() {
         .store(true, Ordering::SeqCst);
 
     let error = std::thread::scope(|scope| {
-        let call = scope.spawn(|| endpoint.exec(&command, &NeverCancelled));
+        let call = scope.spawn(|| {
+            endpoint.exec(
+                &command,
+                &NeverCancelled,
+                automata_ci_execution::discard_execution_output(),
+            )
+        });
         wait_for_test(
             || fixture.engine.guest_exec_blocked.load(Ordering::SeqCst),
             "guest transport did not reach the controlled failure",
@@ -2385,7 +2439,11 @@ fn cancellation_during_final_custody_reinspection_stops_exact_job() {
     .expect("command");
 
     let error = endpoint
-        .exec(&command, &cancellation)
+        .exec(
+            &command,
+            &cancellation,
+            automata_ci_execution::discard_execution_output(),
+        )
         .expect_err("final verification cancellation");
     assert_eq!(error.kind(), ExecutionErrorKind::Cancelled);
     assert!(
@@ -3446,7 +3504,11 @@ fn endpoint_exchange_reattests_missing_or_drifted_imported_proxy_before_exec_mut
         let mutations = fixture.engine.mutation_count();
 
         let error = endpoint
-            .exec(&true_command(&spec, 0x172), &NeverCancelled)
+            .exec(
+                &true_command(&spec, 0x172),
+                &NeverCancelled,
+                automata_ci_execution::discard_execution_output(),
+            )
             .expect_err("endpoint exchange must reattest the imported image");
         assert_eq!(
             error.kind(),
@@ -4566,7 +4628,11 @@ async fn fixed_relay_live_shell_and_javascript_conformance() {
             Duration::from_secs(10),
             64 * 1024,
         )?;
-            let output = endpoint.exec(&attenuated_identity, &NeverCancelled)?;
+            let output = endpoint.exec(
+                &attenuated_identity,
+                &NeverCancelled,
+                automata_ci_execution::discard_execution_output(),
+            )?;
             assert_eq!(output.termination(), ExecutionTermination::Exited(0));
             assert_eq!(output.stdout(), b"attenuated-live");
 
@@ -4593,7 +4659,11 @@ async fn fixed_relay_live_shell_and_javascript_conformance() {
                     Duration::from_secs(10),
                     64 * 1024,
                 )?;
-                let output = endpoint.exec(&command, &NeverCancelled)?;
+                let output = endpoint.exec(
+                    &command,
+                    &NeverCancelled,
+                    automata_ci_execution::discard_execution_output(),
+                )?;
                 assert_eq!(output.termination(), ExecutionTermination::Exited(0));
                 assert_eq!(output.stdout(), expected);
             }
@@ -4620,7 +4690,11 @@ async fn fixed_relay_live_shell_and_javascript_conformance() {
                 Duration::from_secs(10),
                 64 * 1024,
             )?;
-            let output = endpoint.exec(&protected_envelope, &NeverCancelled)?;
+            let output = endpoint.exec(
+                &protected_envelope,
+                &NeverCancelled,
+                automata_ci_execution::discard_execution_output(),
+            )?;
             assert_eq!(output.termination(), ExecutionTermination::Exited(0));
             assert_eq!(output.stdout(), b"protected-live");
 
@@ -4653,7 +4727,11 @@ async fn fixed_relay_live_shell_and_javascript_conformance() {
             )?;
             assert_eq!(
                 endpoint
-                    .exec(&direct_broker, &NeverCancelled)?
+                    .exec(
+                        &direct_broker,
+                        &NeverCancelled,
+                        automata_ci_execution::discard_execution_output()
+                    )?
                     .termination(),
                 ExecutionTermination::Exited(0),
                 "capless root must not receive a broker response"
@@ -4688,7 +4766,11 @@ async fn fixed_relay_live_shell_and_javascript_conformance() {
             Duration::from_secs(10),
             64 * 1024,
         )?;
-            let output = endpoint.exec(&network_gate, &NeverCancelled)?;
+            let output = endpoint.exec(
+                &network_gate,
+                &NeverCancelled,
+                automata_ci_execution::discard_execution_output(),
+            )?;
             assert_eq!(output.termination(), ExecutionTermination::Exited(0));
             assert_eq!(output.stdout(), b"closed-results-live");
 
@@ -4705,7 +4787,11 @@ async fn fixed_relay_live_shell_and_javascript_conformance() {
             )?;
             assert_eq!(
                 endpoint
-                    .exec(&forbidden_bootstrap, &NeverCancelled)?
+                    .exec(
+                        &forbidden_bootstrap,
+                        &NeverCancelled,
+                        automata_ci_execution::discard_execution_output()
+                    )?
                     .termination(),
                 ExecutionTermination::Exited(1),
                 "capless root cannot reopen the one-shot sealer"
@@ -4722,7 +4808,11 @@ async fn fixed_relay_live_shell_and_javascript_conformance() {
                 Duration::from_secs(5),
                 64 * 1024,
             )?;
-            let output = endpoint.exec(&after_signal, &NeverCancelled)?;
+            let output = endpoint.exec(
+                &after_signal,
+                &NeverCancelled,
+                automata_ci_execution::discard_execution_output(),
+            )?;
             assert_eq!(output.termination(), ExecutionTermination::Exited(0));
             assert_eq!(output.stdout(), b"broker-still-ready");
             Ok(())

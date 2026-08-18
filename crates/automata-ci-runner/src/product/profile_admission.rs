@@ -1024,7 +1024,11 @@ impl ProfileAdmissionContext<'_> {
                     cleanup_error,
                 ));
             };
-            let output = match endpoint.exec(&command, &self.provisioning_cancellation) {
+            let output = match endpoint.exec(
+                &command,
+                &self.provisioning_cancellation,
+                automata_ci_execution::discard_execution_output(),
+            ) {
                 Ok(output) => output,
                 Err(error) => {
                     let (cleanup, cleanup_error) =
@@ -1623,6 +1627,7 @@ mod tests {
             &self,
             request: &ExecutionCommand,
             cancellation: &dyn Cancellation,
+            output: Arc<dyn automata_ci_execution::ExecutionOutputSink>,
         ) -> Result<ExecutionOutput, ExecutionError> {
             self.state
                 .lock()
@@ -1678,14 +1683,20 @@ mod tests {
             records.push(ExecutionOutputRecord::end_of_stream(
                 ExecutionOutputStream::Stderr,
             ));
-            ExecutionOutput::new(
+            let result = ExecutionOutput::new(
                 termination,
                 records,
                 self.behavior == FakeBehavior::ExecTruncated,
             )
             .map_err(|_| {
                 ExecutionError::new(ExecutionErrorKind::LocalStorage, ExecutionStage::Exec)
-            })
+            })?;
+            for record in result.records() {
+                output.observe(record).map_err(|_| {
+                    ExecutionError::new(ExecutionErrorKind::OutputRejected, ExecutionStage::Exec)
+                })?;
+            }
+            Ok(result)
         }
 
         fn signal(

@@ -16,7 +16,9 @@ use std::{
 #[cfg(any(unix, test))]
 use std::sync::mpsc;
 
-use automata_ci_execution::{Cancellation, ExecutionOutputRecord, ExecutionOutputStream};
+use automata_ci_execution::{
+    Cancellation, ExecutionOutputRecord, ExecutionOutputSink, ExecutionOutputStream,
+};
 #[cfg(any(unix, test))]
 use automata_ci_execution::{MAX_EXECUTION_OUTPUT_RECORD_BYTES, MAX_EXECUTION_OUTPUT_RECORDS};
 
@@ -870,6 +872,7 @@ pub struct CommandOutput {
     stdout: Vec<u8>,
     stderr: Vec<u8>,
     truncated: bool,
+    output_rejected: bool,
     stdin_fully_written: bool,
 }
 
@@ -884,6 +887,7 @@ impl CommandOutput {
             stdout,
             stderr: Vec::new(),
             truncated: false,
+            output_rejected: false,
             stdin_fully_written: true,
         }
     }
@@ -898,6 +902,7 @@ impl CommandOutput {
             stdout: Vec::new(),
             stderr,
             truncated: false,
+            output_rejected: false,
             stdin_fully_written: true,
         }
     }
@@ -915,6 +920,7 @@ impl CommandOutput {
             stdout: Vec::new(),
             stderr: Vec::new(),
             truncated: false,
+            output_rejected: false,
             stdin_fully_written: true,
         }
     }
@@ -981,6 +987,12 @@ impl CommandOutput {
         self.truncated
     }
 
+    /// Reports whether the incremental output consumer rejected a record.
+    #[must_use]
+    pub const fn output_was_rejected(&self) -> bool {
+        self.output_rejected
+    }
+
     /// Returns whether every supplied standard-input byte reached the child.
     ///
     /// This is always `true` for requests without a standard-input payload.
@@ -1004,6 +1016,7 @@ impl fmt::Debug for CommandOutput {
             .field("stderr_bytes", &self.stderr.len())
             .field("output", &"[REDACTED]")
             .field("truncated", &self.truncated)
+            .field("output_rejected", &self.output_rejected)
             .field("stdin_fully_written", &self.stdin_fully_written)
             .finish()
     }
@@ -1022,6 +1035,7 @@ pub trait PodmanCommandExecutor: fmt::Debug + Send + Sync {
         request: &CommandRequest,
         environment: &PodmanProcessEnvironment,
         cancellation: &dyn Cancellation,
+        output: Arc<dyn ExecutionOutputSink>,
     ) -> CommandOutput;
 
     /// Returns the empty delegated cgroup beneath which Podman may create jobs.
@@ -1049,8 +1063,9 @@ impl PodmanCommandExecutor for SystemCommandExecutor {
         request: &CommandRequest,
         environment: &PodmanProcessEnvironment,
         cancellation: &dyn Cancellation,
+        output: Arc<dyn ExecutionOutputSink>,
     ) -> CommandOutput {
-        execute_system(request, environment, cancellation)
+        execute_system(request, environment, cancellation, output)
     }
 
     fn delegated_no_swap_cgroup(&self) -> Option<String> {
@@ -1366,6 +1381,7 @@ fn execute_system(
     request: &CommandRequest<'_>,
     environment: &PodmanProcessEnvironment,
     cancellation: &dyn Cancellation,
+    output: Arc<dyn ExecutionOutputSink>,
 ) -> CommandOutput {
     if cancellation.disposition().requires_termination() {
         return interrupted_before_stdin(request, CommandTermination::Cancelled);
@@ -1381,7 +1397,8 @@ fn execute_system(
     let Ok((mut child, stdin, stdout, stderr)) = spawn_child(request, environment) else {
         return interrupted_before_stdin(request, CommandTermination::FailedToStart);
     };
-    let Ok(output_capture) = OutputCapture::spawn(stdout, stderr, request.output_limit()) else {
+    let Ok(output_capture) = OutputCapture::spawn(stdout, stderr, request.output_limit(), output)
+    else {
         terminate_process_group(&mut child, Duration::ZERO);
         return interrupted_before_stdin(request, CommandTermination::FailedToStart);
     };
@@ -1400,7 +1417,7 @@ fn execute_system(
                 return interrupted_before_stdin(request, CommandTermination::FailedToStart);
             }
         };
-        let termination = wait_for_child(&mut child, deadline, cancellation);
+        let termination = wait_for_child(&mut child, deadline, cancellation, &output_capture);
         #[cfg(target_os = "linux")]
         if matches!(termination, CommandTermination::Exited(_)) {
             terminate_remaining_process_group(&child);
@@ -1417,7 +1434,8 @@ fn execute_system(
             records: captured.records,
             stdout: captured.stdout,
             stderr: captured.stderr,
-            truncated: captured.incomplete,
+            truncated: captured.status != CaptureStatus::Complete,
+            output_rejected: captured.status == CaptureStatus::Rejected,
             stdin_fully_written,
         }
     })
@@ -1506,6 +1524,7 @@ fn wait_for_child(
     child: &mut Child,
     deadline: Instant,
     cancellation: &dyn Cancellation,
+    output: &OutputCapture,
 ) -> CommandTermination {
     loop {
         match poll_child_exit(child) {
@@ -1516,6 +1535,10 @@ fn wait_for_child(
                 if cancellation.disposition().requires_termination() =>
             {
                 terminate_process_group(child, TERMINATION_GRACE);
+                return CommandTermination::Cancelled;
+            }
+            Ok(ChildExitObservation::Running) if output.was_rejected() => {
+                terminate_process_group(child, Duration::ZERO);
                 return CommandTermination::Cancelled;
             }
             Ok(ChildExitObservation::Running) if Instant::now() >= deadline => {
@@ -2081,12 +2104,13 @@ impl OutputCapture {
         stdout: Stdout,
         stderr: Stderr,
         output_limit: usize,
+        output: Arc<dyn ExecutionOutputSink>,
     ) -> Result<Self, ()>
     where
         Stdout: std::io::Read + std::os::fd::AsFd + Send + 'static,
         Stderr: std::io::Read + std::os::fd::AsFd + Send + 'static,
     {
-        let state = Arc::new(Mutex::new(OutputCaptureState::new(output_limit)));
+        let state = Arc::new(Mutex::new(OutputCaptureState::new(output_limit, output)));
         let stop = Arc::new(AtomicBool::new(false));
         let stdout = OutputReader::spawn(
             stdout,
@@ -2112,6 +2136,7 @@ impl OutputCapture {
         _stdout: Stdout,
         _stderr: Stderr,
         _output_limit: usize,
+        _output: Arc<dyn ExecutionOutputSink>,
     ) -> Result<Self, ()>
     where
         Stdout: std::io::Read + Send + 'static,
@@ -2146,6 +2171,10 @@ impl OutputCapture {
             }
         }
         capture_state(&self.state).take_output()
+    }
+
+    fn was_rejected(&self) -> bool {
+        capture_state(&self.state).status == CaptureStatus::Rejected
     }
 }
 
@@ -2220,62 +2249,50 @@ impl Drop for OutputReader {
 
 struct OutputCaptureState {
     remaining: usize,
-    records: Vec<CapturedRecord>,
+    records: Vec<ExecutionOutputRecord>,
     stdout: Vec<u8>,
     stderr: Vec<u8>,
-    stdout_ended: bool,
-    stderr_ended: bool,
-    incomplete: bool,
+    ended: [bool; 2],
+    status: CaptureStatus,
+    output: Arc<dyn ExecutionOutputSink>,
 }
 
 impl OutputCaptureState {
     #[cfg(any(unix, test))]
-    const fn new(output_limit: usize) -> Self {
+    fn new(output_limit: usize, output: Arc<dyn ExecutionOutputSink>) -> Self {
         Self {
             remaining: output_limit,
             records: Vec::new(),
             stdout: Vec::new(),
             stderr: Vec::new(),
-            stdout_ended: false,
-            stderr_ended: false,
-            incomplete: false,
+            ended: [false; 2],
+            status: CaptureStatus::Complete,
+            output,
         }
     }
 
     #[cfg(any(unix, test))]
-    fn observe_data(&mut self, stream: ExecutionOutputStream, source: &[u8]) {
+    fn observe_data(&mut self, stream: ExecutionOutputStream, source: &[u8]) -> bool {
         if self.stream_ended(stream) {
-            self.incomplete = true;
-            return;
+            self.mark_incomplete();
+            return false;
         }
         let allowed = self.remaining.min(source.len());
         let mut retained = 0;
         while retained < allowed {
-            let extended = match self.records.last_mut() {
-                Some(CapturedRecord::Data {
-                    stream: previous,
-                    bytes,
-                }) if *previous == stream && bytes.len() < MAX_EXECUTION_OUTPUT_RECORD_BYTES => {
-                    let count =
-                        (MAX_EXECUTION_OUTPUT_RECORD_BYTES - bytes.len()).min(allowed - retained);
-                    bytes.extend_from_slice(&source[retained..retained + count]);
-                    retained += count;
-                    true
-                }
-                Some(CapturedRecord::Data { .. } | CapturedRecord::End(_)) | None => false,
-            };
-            if extended {
-                continue;
-            }
-            let remaining_ends = usize::from(!self.stdout_ended) + usize::from(!self.stderr_ended);
+            let remaining_ends = self.ended.iter().filter(|ended| !**ended).count();
             if self.records.len() >= MAX_EXECUTION_OUTPUT_RECORDS.saturating_sub(remaining_ends) {
                 break;
             }
             let count = MAX_EXECUTION_OUTPUT_RECORD_BYTES.min(allowed - retained);
-            self.records.push(CapturedRecord::Data {
-                stream,
-                bytes: source[retained..retained + count].to_vec(),
-            });
+            let record =
+                ExecutionOutputRecord::data(stream, source[retained..retained + count].to_vec())
+                    .expect("captured output chunks are non-empty and bounded");
+            if self.output.observe(&record).is_err() {
+                self.status = CaptureStatus::Rejected;
+                return false;
+            }
+            self.records.push(record);
             retained += count;
         }
         let bytes = &source[..retained];
@@ -2285,47 +2302,47 @@ impl OutputCaptureState {
         }
         self.remaining -= retained;
         if retained < source.len() {
-            self.incomplete = true;
+            self.mark_incomplete();
         }
+        retained == source.len()
     }
 
     #[cfg(any(unix, test))]
-    fn observe_end(&mut self, stream: ExecutionOutputStream) {
+    fn observe_end(&mut self, stream: ExecutionOutputStream) -> bool {
         if self.stream_ended(stream) || self.records.len() >= MAX_EXECUTION_OUTPUT_RECORDS {
-            self.incomplete = true;
-            return;
+            self.mark_incomplete();
+            return false;
         }
-        match stream {
-            ExecutionOutputStream::Stdout => self.stdout_ended = true,
-            ExecutionOutputStream::Stderr => self.stderr_ended = true,
+        let record = ExecutionOutputRecord::end_of_stream(stream);
+        if self.output.observe(&record).is_err() {
+            self.status = CaptureStatus::Rejected;
+            return false;
         }
-        self.records.push(CapturedRecord::End(stream));
+        self.ended[stream_index(stream)] = true;
+        self.records.push(record);
+        true
     }
 
     #[cfg(any(unix, test))]
     fn stream_ended(&self, stream: ExecutionOutputStream) -> bool {
-        match stream {
-            ExecutionOutputStream::Stdout => self.stdout_ended,
-            ExecutionOutputStream::Stderr => self.stderr_ended,
-        }
+        self.ended[stream_index(stream)]
     }
 
     const fn mark_incomplete(&mut self) {
-        self.incomplete = true;
+        if matches!(self.status, CaptureStatus::Complete) {
+            self.status = CaptureStatus::Incomplete;
+        }
     }
 
     fn take_output(&mut self) -> CapturedOutput {
-        if !(self.stdout_ended && self.stderr_ended) {
-            self.incomplete = true;
+        if !self.ended.into_iter().all(|ended| ended) {
+            self.mark_incomplete();
         }
         CapturedOutput {
-            records: std::mem::take(&mut self.records)
-                .into_iter()
-                .map(CapturedRecord::into_execution_record)
-                .collect(),
+            records: std::mem::take(&mut self.records),
             stdout: std::mem::take(&mut self.stdout),
             stderr: std::mem::take(&mut self.stderr),
-            incomplete: self.incomplete,
+            status: self.status,
         }
     }
 }
@@ -2339,32 +2356,9 @@ impl fmt::Debug for OutputCaptureState {
             .field("stdout_bytes", &self.stdout.len())
             .field("stderr_bytes", &self.stderr.len())
             .field("output", &"[REDACTED]")
-            .field("stdout_ended", &self.stdout_ended)
-            .field("stderr_ended", &self.stderr_ended)
-            .field("incomplete", &self.incomplete)
+            .field("ended", &self.ended)
+            .field("status", &self.status)
             .finish()
-    }
-}
-
-enum CapturedRecord {
-    #[cfg(any(unix, test))]
-    Data {
-        stream: ExecutionOutputStream,
-        bytes: Vec<u8>,
-    },
-    #[cfg(any(unix, test))]
-    End(ExecutionOutputStream),
-}
-
-impl CapturedRecord {
-    fn into_execution_record(self) -> ExecutionOutputRecord {
-        match self {
-            #[cfg(any(unix, test))]
-            Self::Data { stream, bytes } => ExecutionOutputRecord::data(stream, bytes)
-                .expect("captured record bytes are non-empty and bounded"),
-            #[cfg(any(unix, test))]
-            Self::End(stream) => ExecutionOutputRecord::end_of_stream(stream),
-        }
     }
 }
 
@@ -2372,7 +2366,21 @@ struct CapturedOutput {
     records: Vec<ExecutionOutputRecord>,
     stdout: Vec<u8>,
     stderr: Vec<u8>,
-    incomplete: bool,
+    status: CaptureStatus,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CaptureStatus {
+    Complete,
+    Incomplete,
+    Rejected,
+}
+
+const fn stream_index(stream: ExecutionOutputStream) -> usize {
+    match stream {
+        ExecutionOutputStream::Stdout => 0,
+        ExecutionOutputStream::Stderr => 1,
+    }
 }
 
 fn capture_state(
@@ -2396,10 +2404,17 @@ fn read_ordered<R>(
     while !stop.load(Ordering::Acquire) {
         match reader.read(&mut buffer) {
             Ok(0) => {
-                capture_state(state).observe_end(stream);
+                if !capture_state(state).observe_end(stream) {
+                    stop.store(true, Ordering::Release);
+                }
                 return;
             }
-            Ok(count) => capture_state(state).observe_data(stream, &buffer[..count]),
+            Ok(count) => {
+                if !capture_state(state).observe_data(stream, &buffer[..count]) {
+                    stop.store(true, Ordering::Release);
+                    return;
+                }
+            }
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 thread::park_timeout(POLL_INTERVAL);
@@ -2563,8 +2578,8 @@ mod process_supervision_tests {
 
 #[cfg(test)]
 mod ordered_capture_tests {
-    use super::{OutputCaptureState, capture_state, read_ordered};
-    use automata_ci_execution::ExecutionOutputStream;
+    use super::{CaptureStatus, OutputCaptureState, capture_state, read_ordered};
+    use automata_ci_execution::{ExecutionOutputRecord, ExecutionOutputStream};
     use std::{
         io::{self, Read},
         sync::{Arc, Mutex, atomic::AtomicBool},
@@ -2572,7 +2587,8 @@ mod ordered_capture_tests {
 
     #[test]
     fn capture_state_preserves_one_observation_order_and_both_stream_ends() {
-        let mut state = OutputCaptureState::new(32);
+        let mut state =
+            OutputCaptureState::new(32, automata_ci_execution::discard_execution_output());
         state.observe_data(ExecutionOutputStream::Stdout, b"out-1");
         state.observe_data(ExecutionOutputStream::Stderr, b"err");
         state.observe_data(ExecutionOutputStream::Stdout, b"out-2");
@@ -2584,7 +2600,7 @@ mod ordered_capture_tests {
 
         let captured = state.take_output();
 
-        assert!(!captured.incomplete);
+        assert_eq!(captured.status, CaptureStatus::Complete);
         assert_eq!(captured.stdout, b"out-1out-2");
         assert_eq!(captured.stderr, b"err");
         assert_eq!(captured.records.len(), 5);
@@ -2605,22 +2621,37 @@ mod ordered_capture_tests {
     }
 
     #[test]
-    fn capture_state_distinguishes_exact_limit_from_omitted_bytes() {
-        let mut exact = OutputCaptureState::new(4);
+    fn capture_state_preserves_observation_boundaries_at_the_exact_limit() {
+        let mut exact =
+            OutputCaptureState::new(4, automata_ci_execution::discard_execution_output());
         exact.observe_data(ExecutionOutputStream::Stdout, b"12");
         exact.observe_data(ExecutionOutputStream::Stdout, b"34");
         exact.observe_end(ExecutionOutputStream::Stdout);
         exact.observe_end(ExecutionOutputStream::Stderr);
         let exact = exact.take_output();
-        assert!(!exact.incomplete);
-        assert_eq!(exact.records.len(), 3, "adjacent data must coalesce");
+        assert_eq!(exact.status, CaptureStatus::Complete);
+        assert_eq!(
+            exact
+                .records
+                .iter()
+                .map(ExecutionOutputRecord::bytes)
+                .collect::<Vec<_>>(),
+            [
+                b"12".as_slice(),
+                b"34".as_slice(),
+                b"".as_slice(),
+                b"".as_slice()
+            ],
+            "the durable replay records must preserve live observation boundaries"
+        );
 
-        let mut over = OutputCaptureState::new(4);
+        let mut over =
+            OutputCaptureState::new(4, automata_ci_execution::discard_execution_output());
         over.observe_data(ExecutionOutputStream::Stdout, b"12345");
         over.observe_end(ExecutionOutputStream::Stdout);
         over.observe_end(ExecutionOutputStream::Stderr);
         let over = over.take_output();
-        assert!(over.incomplete);
+        assert_eq!(over.status, CaptureStatus::Incomplete);
         assert_eq!(over.stdout, b"1234");
     }
 
@@ -2639,7 +2670,10 @@ mod ordered_capture_tests {
             }
         }
 
-        let state = Arc::new(Mutex::new(OutputCaptureState::new(16)));
+        let state = Arc::new(Mutex::new(OutputCaptureState::new(
+            16,
+            automata_ci_execution::discard_execution_output(),
+        )));
         read_ordered(
             FailingReader(false),
             ExecutionOutputStream::Stdout,
@@ -2648,7 +2682,7 @@ mod ordered_capture_tests {
         );
         let captured = capture_state(&state).take_output();
 
-        assert!(captured.incomplete);
+        assert_eq!(captured.status, CaptureStatus::Incomplete);
         assert_eq!(captured.stdout, b"data");
         assert!(
             captured

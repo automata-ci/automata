@@ -129,7 +129,11 @@ fn exited_zero_with_incomplete_environment_input_is_never_observed_as_success() 
     .expect("execution command");
 
     let error = endpoint
-        .exec(&command, &NeverCancelled)
+        .exec(
+            &command,
+            &NeverCancelled,
+            automata_ci_execution::discard_execution_output(),
+        )
         .expect_err("incomplete environment input must fail closed");
     assert_eq!(error.kind(), ExecutionErrorKind::BackendRejected);
     assert!(observer.events().iter().any(|event| matches!(

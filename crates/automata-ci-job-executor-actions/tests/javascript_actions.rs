@@ -458,7 +458,7 @@ async fn registered_post_does_not_start_when_execution_is_cancelled_before_posts
 }
 
 #[tokio::test]
-async fn cancellation_after_post_exec_prevents_copy_output_and_later_posts() {
+async fn cancellation_after_post_exec_keeps_live_output_but_prevents_files_and_later_posts() {
     let cancellation = ExecutionCancellation::new();
     let fixture = Fixture::new(
         vec![prepared_node24_action(), prepared_node24_action()],
@@ -507,10 +507,10 @@ async fn cancellation_after_post_exec_prevents_copy_output_and_later_posts() {
         .flat_map(|event| event.payload().to_vec())
         .collect::<Vec<_>>();
     assert!(
-        !String::from_utf8(logs)
+        String::from_utf8(logs)
             .expect("UTF-8 logs")
             .contains("post output after cancellation"),
-        "cancelled post output must not be re-published"
+        "output published while the command was active remains durable"
     );
 }
 

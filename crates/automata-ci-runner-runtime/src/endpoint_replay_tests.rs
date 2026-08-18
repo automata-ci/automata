@@ -350,16 +350,45 @@ impl ExecutionEndpoint for FakeEndpoint {
     }
 
     fn capabilities(&self) -> &[SandboxCapability] {
-        const CAPABILITIES: &[SandboxCapability] = &[SandboxCapability::CopyFrom];
+        const CAPABILITIES: &[SandboxCapability] =
+            &[SandboxCapability::Exec, SandboxCapability::CopyFrom];
         CAPABILITIES
     }
 
     fn exec(
         &self,
-        _request: &ExecutionCommand,
+        request: &ExecutionCommand,
         _cancellation: &dyn Cancellation,
+        output: Arc<dyn automata_ci_execution::ExecutionOutputSink>,
     ) -> Result<ExecutionOutput, ExecutionError> {
-        Err(endpoint_error(ExecutionStage::Exec))
+        if request.argv().program().as_str() != "/usr/bin/live-output" {
+            return Err(endpoint_error(ExecutionStage::Exec));
+        }
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let result = ExecutionOutput::new(
+            automata_ci_execution::ExecutionTermination::Exited(0),
+            vec![
+                automata_ci_execution::ExecutionOutputRecord::data(
+                    automata_ci_execution::ExecutionOutputStream::Stdout,
+                    b"live output\n".to_vec(),
+                )
+                .expect("bounded output"),
+                automata_ci_execution::ExecutionOutputRecord::end_of_stream(
+                    automata_ci_execution::ExecutionOutputStream::Stdout,
+                ),
+                automata_ci_execution::ExecutionOutputRecord::end_of_stream(
+                    automata_ci_execution::ExecutionOutputStream::Stderr,
+                ),
+            ],
+            false,
+        )
+        .map_err(|_| endpoint_error(ExecutionStage::Exec))?;
+        for record in result.records() {
+            output.observe(record).map_err(|_| {
+                ExecutionError::new(ExecutionErrorKind::OutputRejected, ExecutionStage::Exec)
+            })?;
+        }
+        Ok(result)
     }
 
     fn signal(
@@ -406,6 +435,22 @@ impl ExecutionEndpoint for FakeEndpoint {
 
 fn endpoint_error(stage: ExecutionStage) -> ExecutionError {
     ExecutionError::new(ExecutionErrorKind::UnsupportedCapability, stage)
+}
+
+#[derive(Debug, Default)]
+struct RecordingOutput(Mutex<Vec<automata_ci_execution::ExecutionOutputRecord>>);
+
+impl automata_ci_execution::ExecutionOutputSink for RecordingOutput {
+    fn observe(
+        &self,
+        record: &automata_ci_execution::ExecutionOutputRecord,
+    ) -> Result<(), automata_ci_execution::ExecutionOutputSinkError> {
+        self.0
+            .lock()
+            .expect("recording output")
+            .push(record.clone());
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -712,6 +757,54 @@ fn completed_result_replays_without_backend_and_result_wins_later_cancellation()
 }
 
 #[test]
+fn completed_exec_replays_the_exact_output_records_without_reinvoking_the_backend() {
+    let fixture = Fixture::new("completed-exec-output");
+    let command = ExecutionCommand::new(
+        OperationId::new(),
+        ExecutionArgv::new(
+            TargetPath::posix("/usr/bin/live-output").expect("program"),
+            Vec::new(),
+        )
+        .expect("argv"),
+        TargetPath::posix("/workspace").expect("working directory"),
+        ExecutionEnvironment::empty(),
+        Duration::from_secs(30),
+        1_024,
+    )
+    .expect("command");
+    let first_sink = Arc::new(RecordingOutput::default());
+    let first = fixture
+        .endpoint()
+        .exec(
+            &command,
+            &automata_ci_execution::NeverCancelled,
+            first_sink.clone(),
+        )
+        .expect("fresh execution");
+    assert_eq!(fixture.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        *first_sink.0.lock().expect("fresh records"),
+        first.records()
+    );
+
+    let replay_sink = Arc::new(RecordingOutput::default());
+    let replay = fixture
+        .endpoint()
+        .exec(
+            &command,
+            &automata_ci_execution::NeverCancelled,
+            replay_sink.clone(),
+        )
+        .expect("replayed execution");
+    assert_eq!(fixture.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(replay, first);
+    assert_eq!(
+        *replay_sink.0.lock().expect("replayed records"),
+        replay.records()
+    );
+}
+
+#[test]
 fn secret_bearing_requests_never_serialize_into_journal_spool_identity_or_debug() {
     let fixture = Fixture::new("request-secret-redaction");
     let secret = "pin-0427";
@@ -734,7 +827,11 @@ fn secret_bearing_requests_never_serialize_into_journal_spool_identity_or_debug(
     .expect("command");
     let error = fixture
         .endpoint()
-        .exec(&command, &automata_ci_execution::NeverCancelled)
+        .exec(
+            &command,
+            &automata_ci_execution::NeverCancelled,
+            automata_ci_execution::discard_execution_output(),
+        )
         .expect_err("fake endpoint reports unsupported exec");
     assert!(!format!("{command:?}{error:?}").contains(secret));
 

@@ -12,6 +12,7 @@ impl ExecutorAdapterError {
 }
 
 pub(crate) mod error {
+    #[allow(dead_code)]
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub(crate) enum ExecutorAdapterErrorKind {
         InvalidJob,

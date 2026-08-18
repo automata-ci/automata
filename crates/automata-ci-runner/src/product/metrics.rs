@@ -9,10 +9,10 @@ use automata_ci_core::JobLifecycle;
 use automata_ci_execution::{
     Cancellation, CopyFromRequest, CopyToRequest, DestroyDisposition, DestroySandbox,
     ExecutionCommand, ExecutionEndpoint, ExecutionError, ExecutionErrorKind, ExecutionOutput,
-    ExecutionStage, ExecutionTermination, ProviderCapabilities, ProviderError, ProviderErrorKind,
-    ProviderId, ProviderStage, SandboxCapability, SandboxHandle, SandboxInspection,
-    SandboxProvider, SandboxRecord, SandboxSpec, ServiceContainerBindings, SignalRequest,
-    WaitRequest,
+    ExecutionOutputSink, ExecutionStage, ExecutionTermination, ProviderCapabilities, ProviderError,
+    ProviderErrorKind, ProviderId, ProviderStage, SandboxCapability, SandboxHandle,
+    SandboxInspection, SandboxProvider, SandboxRecord, SandboxSpec, ServiceContainerBindings,
+    SignalRequest, WaitRequest,
 };
 use automata_ci_metrics::{
     BuildInfo as MetricsBuildInfo, BuildInfoError, Counter, ExporterLimits, Family, Gauge,
@@ -2325,9 +2325,10 @@ impl ExecutionEndpoint for ObservedExecutionEndpoint {
         &self,
         request: &ExecutionCommand,
         cancellation: &dyn Cancellation,
+        output: Arc<dyn ExecutionOutputSink>,
     ) -> Result<ExecutionOutput, ExecutionError> {
         let result = self.call(SandboxEndpointOperation::Exec, || {
-            self.inner.exec(request, cancellation)
+            self.inner.exec(request, cancellation, output)
         });
         if let Ok(output) = &result {
             self.metrics
@@ -2480,6 +2481,7 @@ const fn endpoint_error_label(value: ExecutionErrorKind) -> &'static str {
         ExecutionErrorKind::OutputLimitExceeded => "output_limit_exceeded",
         ExecutionErrorKind::BackendRejected => "backend_rejected",
         ExecutionErrorKind::LocalStorage => "local_storage",
+        ExecutionErrorKind::OutputRejected => "output_rejected",
     }
 }
 
@@ -3684,8 +3686,9 @@ mod tests {
             &self,
             _request: &ExecutionCommand,
             _cancellation: &dyn Cancellation,
+            output: Arc<dyn ExecutionOutputSink>,
         ) -> Result<ExecutionOutput, ExecutionError> {
-            ExecutionOutput::new(
+            let result = ExecutionOutput::new(
                 ExecutionTermination::Exited(0),
                 vec![
                     automata_ci_execution::ExecutionOutputRecord::data(
@@ -3712,7 +3715,13 @@ mod tests {
                     ExecutionErrorKind::OutputLimitExceeded,
                     ExecutionStage::Exec,
                 )
-            })
+            })?;
+            for record in result.records() {
+                output.observe(record).map_err(|_| {
+                    ExecutionError::new(ExecutionErrorKind::OutputRejected, ExecutionStage::Exec)
+                })?;
+            }
+            Ok(result)
         }
 
         fn signal(
@@ -4325,7 +4334,11 @@ mod tests {
         )
         .expect("command");
         let output = endpoint
-            .exec(&command, &NeverCancelled)
+            .exec(
+                &command,
+                &NeverCancelled,
+                automata_ci_execution::discard_execution_output(),
+            )
             .expect("truncated bounded output");
         assert!(output.was_truncated());
         assert!(matches!(

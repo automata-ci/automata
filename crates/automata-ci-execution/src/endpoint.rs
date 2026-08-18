@@ -1,4 +1,4 @@
-use std::{collections::BTreeSet, fmt, time::Duration};
+use std::{collections::BTreeSet, fmt, sync::Arc, time::Duration};
 
 use crate::{
     MAX_COPY_BYTES, MAX_EXECUTION_ARGUMENTS, MAX_EXECUTION_ARGV_BYTES, MAX_EXECUTION_OUTPUT_BYTES,
@@ -451,6 +451,42 @@ pub struct ExecutionOutputRecord {
     end_of_stream: bool,
 }
 
+/// Incremental consumer for one command's ordered process-output records.
+///
+/// Endpoints call this boundary as each stdout or stderr record is observed,
+/// before the command completes. The same ordered records remain present in
+/// the terminal [`ExecutionOutput`] for exact durable replay. Implementations
+/// must apply secret policy before publishing bytes outside runner custody.
+pub trait ExecutionOutputSink: fmt::Debug + Send + Sync {
+    /// Accepts the next record in canonical cross-pipe observation order.
+    ///
+    /// # Errors
+    ///
+    /// Rejecting a record terminates execution and fails the endpoint call.
+    fn observe(&self, record: &ExecutionOutputRecord) -> Result<(), ExecutionOutputSinkError>;
+}
+
+/// Sanitized rejection from an [`ExecutionOutputSink`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ExecutionOutputSinkError;
+
+/// Output sink used by endpoint operations whose output is consumed only from
+/// their terminal result.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DiscardExecutionOutput;
+
+impl ExecutionOutputSink for DiscardExecutionOutput {
+    fn observe(&self, _record: &ExecutionOutputRecord) -> Result<(), ExecutionOutputSinkError> {
+        Ok(())
+    }
+}
+
+/// Returns a shared sink that deliberately discards incremental observations.
+#[must_use]
+pub fn discard_execution_output() -> Arc<dyn ExecutionOutputSink> {
+    Arc::new(DiscardExecutionOutput)
+}
+
 impl ExecutionOutputRecord {
     /// Constructs one non-empty bounded data record.
     ///
@@ -870,6 +906,7 @@ pub trait ExecutionEndpoint: fmt::Debug + Send + Sync {
         &self,
         request: &ExecutionCommand,
         cancellation: &dyn Cancellation,
+        output: Arc<dyn ExecutionOutputSink>,
     ) -> Result<ExecutionOutput, ExecutionError>;
 
     /// Signals the sandbox's primary workload.

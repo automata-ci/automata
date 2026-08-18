@@ -8,8 +8,9 @@ use std::{
 use automata_ci_execution::{
     Cancellation, CopyFromRequest, CopyToRequest, ExecutionCommand, ExecutionEndpoint,
     ExecutionError, ExecutionErrorKind, ExecutionOutput, ExecutionOutputRecord,
-    ExecutionOutputStream, ExecutionStage, ExecutionTermination, SandboxCapability, SandboxHandle,
-    SandboxState, SignalRequest, TargetPath, TargetPlatform, WaitRequest,
+    ExecutionOutputSink, ExecutionOutputStream, ExecutionStage, ExecutionTermination,
+    SandboxCapability, SandboxHandle, SandboxState, SignalRequest, TargetPath, TargetPlatform,
+    WaitRequest,
 };
 use automata_ci_sandbox_guest::{
     GUEST_PROTOCOL_VERSION, GuestOutputStream, GuestRejection, GuestRequest, GuestResponse,
@@ -23,6 +24,18 @@ use crate::{
 };
 
 const COPY_OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn publish_output(
+    result: Result<ExecutionOutput, ExecutionError>,
+    sink: &dyn ExecutionOutputSink,
+) -> Result<ExecutionOutput, ExecutionError> {
+    let output = result?;
+    for record in output.records() {
+        sink.observe(record)
+            .map_err(|_| error(ExecutionErrorKind::OutputRejected, ExecutionStage::Exec))?;
+    }
+    Ok(output)
+}
 
 #[derive(Default)]
 pub(crate) struct EndpointState {
@@ -93,6 +106,7 @@ impl ExecutionEndpoint for MacosVirtualizationEndpoint {
         &self,
         request: &ExecutionCommand,
         cancellation: &dyn Cancellation,
+        output: Arc<dyn ExecutionOutputSink>,
     ) -> Result<ExecutionOutput, ExecutionError> {
         let _operation = self
             .entry
@@ -107,7 +121,7 @@ impl ExecutionEndpoint for MacosVirtualizationEndpoint {
                 .map_err(|_| error(ExecutionErrorKind::LocalStorage, ExecutionStage::Exec))?;
             if let Some(replay) = state.exec.get(&request.operation_id()) {
                 return if replay.request == *request {
-                    replay.result.clone()
+                    publish_output(replay.result.clone(), output.as_ref())
                 } else {
                     Err(error(
                         ExecutionErrorKind::BackendRejected,
@@ -129,7 +143,7 @@ impl ExecutionEndpoint for MacosVirtualizationEndpoint {
                     result: result.clone(),
                 },
             );
-        result
+        publish_output(result, output.as_ref())
     }
 
     fn signal(

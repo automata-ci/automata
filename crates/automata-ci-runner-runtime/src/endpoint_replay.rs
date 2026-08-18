@@ -11,9 +11,9 @@ use std::{
 use automata_ci_core::{LeaseGuard, OperationId, RunnerSessionId};
 use automata_ci_execution::{
     Cancellation, CancellationDisposition, CopyFromRequest, CopyToRequest, ExecutionCommand,
-    ExecutionEndpoint, ExecutionError, ExecutionErrorKind, ExecutionOutput, ExecutionSignal,
-    ExecutionStage, SandboxCapability, SandboxCustody, SandboxInspection, SandboxProvider,
-    SandboxState, SignalRequest, TargetPath, TargetPlatform, WaitRequest,
+    ExecutionEndpoint, ExecutionError, ExecutionErrorKind, ExecutionOutput, ExecutionOutputSink,
+    ExecutionSignal, ExecutionStage, SandboxCapability, SandboxCustody, SandboxInspection,
+    SandboxProvider, SandboxState, SignalRequest, TargetPath, TargetPlatform, WaitRequest,
 };
 use automata_ci_protocol::RunnerSlotOrdinal;
 use automata_ci_runner_journal::{
@@ -31,7 +31,7 @@ use zeroize::Zeroizing;
 
 use crate::{ExecutionEventError, content::ContentOperationCoordinator, endpoint_result};
 
-const ENDPOINT_REPLAY_SCHEMA_VERSION: u16 = 2;
+const ENDPOINT_REPLAY_SCHEMA_VERSION: u16 = 3;
 const FINGERPRINT_DOMAIN: &[u8] = b"automata-ci/runner/endpoint-request";
 
 pub(crate) struct DurableExecutionEndpoint {
@@ -50,6 +50,19 @@ pub(crate) struct DurableExecutionEndpoint {
 enum PreparedOperation {
     Replay(Vec<u8>),
     Invoke,
+}
+
+enum RunResult<T> {
+    Invoked(T),
+    Replayed(T),
+}
+
+impl<T> RunResult<T> {
+    fn into_inner(self) -> T {
+        match self {
+            Self::Invoked(value) | Self::Replayed(value) => value,
+        }
+    }
 }
 
 impl DurableExecutionEndpoint {
@@ -123,15 +136,16 @@ impl DurableExecutionEndpoint {
         invoke: impl FnOnce(&dyn Cancellation) -> Result<T, ExecutionError>,
         encode: impl FnOnce(&Result<T, ExecutionError>) -> Result<Vec<u8>, ()>,
         decode: impl FnOnce(&[u8]) -> Result<Result<T, ExecutionError>, ()>,
-    ) -> Result<T, ExecutionError> {
+    ) -> Result<RunResult<T>, ExecutionError> {
         let _serial = self
             .serial
             .lock()
             .map_err(|_| execution_error(ExecutionErrorKind::LocalStorage, stage))?;
         let prepared = self.prepare(operation_id, kind, &request_digest, reservation, stage)?;
         if let PreparedOperation::Replay(bytes) = prepared {
-            return decode(&bytes)
+            let decoded = decode(&bytes)
                 .map_err(|()| execution_error(ExecutionErrorKind::LocalStorage, stage))?;
+            return decoded.map(RunResult::Replayed);
         }
         let PreparedOperation::Invoke = prepared else {
             unreachable!("replay returned above")
@@ -201,7 +215,7 @@ impl DurableExecutionEndpoint {
             return Err(execution_error(ExecutionErrorKind::InvalidState, stage));
         }
         self.publish_result(operation_id, &encoded, result_capacity, stage)?;
-        result
+        result.map(RunResult::Invoked)
     }
 
     fn prepare(
@@ -508,6 +522,7 @@ impl ExecutionEndpoint for DurableExecutionEndpoint {
         &self,
         request: &ExecutionCommand,
         cancellation: &dyn Cancellation,
+        output: Arc<dyn ExecutionOutputSink>,
     ) -> Result<ExecutionOutput, ExecutionError> {
         let mut fingerprint = self.fingerprint(EndpointOperationKind::Exec, request.operation_id());
         fingerprint.target_path(request.argv().program());
@@ -528,17 +543,28 @@ impl ExecutionEndpoint for DurableExecutionEndpoint {
         let reservation = endpoint_result::exec_reservation(request).ok_or_else(|| {
             execution_error(ExecutionErrorKind::InvalidState, ExecutionStage::Exec)
         })?;
-        self.run(
+        let result = self.run(
             request.operation_id(),
             EndpointOperationKind::Exec,
             request_digest,
             reservation,
             ExecutionStage::Exec,
             cancellation,
-            |observed| self.inner.exec(request, observed),
+            |observed| self.inner.exec(request, observed, Arc::clone(&output)),
             |result| endpoint_result::encode_exec(result, request),
             |encoded| endpoint_result::decode_exec(encoded, request),
-        )
+        )?;
+        match result {
+            RunResult::Invoked(result) => Ok(result),
+            RunResult::Replayed(result) => {
+                for record in result.records() {
+                    output.observe(record).map_err(|_| {
+                        execution_error(ExecutionErrorKind::OutputRejected, ExecutionStage::Exec)
+                    })?;
+                }
+                Ok(result)
+            }
+        }
     }
 
     fn signal(
@@ -564,6 +590,7 @@ impl ExecutionEndpoint for DurableExecutionEndpoint {
             |result| endpoint_result::encode_unit(1, ExecutionStage::Signal, *result),
             |encoded| endpoint_result::decode_unit(encoded, 1, ExecutionStage::Signal),
         )
+        .map(RunResult::into_inner)
     }
 
     fn wait(
@@ -584,6 +611,7 @@ impl ExecutionEndpoint for DurableExecutionEndpoint {
             |result| endpoint_result::encode_wait(*result),
             endpoint_result::decode_wait,
         )
+        .map(RunResult::into_inner)
     }
 
     fn copy_to(
@@ -608,6 +636,7 @@ impl ExecutionEndpoint for DurableExecutionEndpoint {
             |result| endpoint_result::encode_unit(3, ExecutionStage::CopyTo, *result),
             |encoded| endpoint_result::decode_unit(encoded, 3, ExecutionStage::CopyTo),
         )
+        .map(RunResult::into_inner)
     }
 
     fn copy_from(
@@ -633,6 +662,7 @@ impl ExecutionEndpoint for DurableExecutionEndpoint {
             |result| endpoint_result::encode_bytes(result, request),
             |encoded| endpoint_result::decode_bytes(encoded, request),
         )
+        .map(RunResult::into_inner)
     }
 }
 

@@ -39,7 +39,7 @@ use automata_ci_execution::{
     ExecutionOutput, ExecutionTermination, NetworkPolicy, ProviderCapabilities, ProviderError,
     ProviderErrorKind, RootFilesystemPolicy, SandboxCapability, SandboxGeneration, SandboxHandle,
     SandboxLaunch, SandboxProvider, SandboxState, ServiceContainerBindings, ServiceContainerSpecs,
-    TargetPath, TargetPlatform,
+    TargetPath, TargetPlatform, discard_execution_output,
 };
 use automata_ci_expression_actions::{
     ExtensionFunctionResult, GithubEvaluationContext, GithubExpressionEvaluator,
@@ -73,8 +73,7 @@ use crate::{
     },
     error::{ExecutorAdapterError, ExecutorAdapterErrorKind, PortErrorKind},
     output::{
-        DIAGNOSTICS_LOG_GROUP_ID, SecretMasker, emit_system, emit_system_for_group,
-        parse_output_with_cancellation, process_output,
+        DIAGNOSTICS_LOG_GROUP_ID, PhaseOutputSink, SecretMasker, emit_system, emit_system_for_group,
     },
     shell::{
         ShellAdmissionRejection, admit_shell_template, composite_shell, resolve_shell_template,
@@ -90,8 +89,7 @@ const MAX_ACTION_INVOCATIONS: u32 = 10_000;
 const MAX_COMPOSITE_DERIVED_BYTES: usize = 16_777_216;
 const MAX_EVENT_DEPTH: usize = 128;
 const COMPOSITE_ORDINAL_BASE: u32 = 1 << 24;
-const TRUNCATED_OUTPUT_DIAGNOSTIC: &str =
-    "command output exceeded the configured capture limit; user output was suppressed";
+const TRUNCATED_OUTPUT_DIAGNOSTIC: &str = "command output exceeded the configured capture limit";
 const MASKED_SUMMARY_LIMIT_DIAGNOSTIC: &str = "$GITHUB_STEP_SUMMARY content was omitted after secret masking exceeded the retained text limit";
 const STEP_SUMMARY_LIMIT_DIAGNOSTIC: &str =
     "$GITHUB_STEP_SUMMARY content was omitted after the cumulative step summary limit was reached";
@@ -314,7 +312,11 @@ impl SandboxExpressionFunctions {
         .ok()?;
         let output = self
             .endpoint
-            .exec(&command, &ProviderCancellationBridge(&self.cancellation))
+            .exec(
+                &command,
+                &ProviderCancellationBridge(&self.cancellation),
+                discard_execution_output(),
+            )
             .ok()?;
         if self.cancellation.is_cancelled()
             || output.was_truncated()
@@ -3089,7 +3091,11 @@ impl ActionsJobExecutor {
         )
         .map_err(|_| ActionLoadError::Executor(invalid_job()))?;
         let output = endpoint
-            .exec(&command, &ProviderCancellationBridge(cancellation))
+            .exec(
+                &command,
+                &ProviderCancellationBridge(cancellation),
+                discard_execution_output(),
+            )
             .map_err(map_execution_error)
             .map_err(ActionLoadError::Executor)?;
         let selected = match (
@@ -3949,7 +3955,11 @@ impl ActionsJobExecutor {
             )?,
         };
         let output = endpoint
-            .exec(&command, &ProviderCancellationBridge(cancellation))
+            .exec(
+                &command,
+                &ProviderCancellationBridge(cancellation),
+                discard_execution_output(),
+            )
             .map_err(map_execution_error)?;
         require_success(&output)?;
         let request = action_content::copy_archive_request(
@@ -3982,7 +3992,11 @@ impl ActionsJobExecutor {
                 128,
             )?;
             let output = endpoint
-                .exec(&command, &ProviderCancellationBridge(cancellation))
+                .exec(
+                    &command,
+                    &ProviderCancellationBridge(cancellation),
+                    discard_execution_output(),
+                )
                 .map_err(map_execution_error)?;
             require_success(&output)?;
             let stdout = output
@@ -4010,7 +4024,11 @@ impl ActionsJobExecutor {
             self.config.maximum_output_bytes(),
         )?;
         let output = endpoint
-            .exec(&command, &ProviderCancellationBridge(cancellation))
+            .exec(
+                &command,
+                &ProviderCancellationBridge(cancellation),
+                discard_execution_output(),
+            )
             .map_err(map_execution_error)?;
         require_success(&output)?;
         if paths.workspace.platform() == TargetPlatform::Windows {
@@ -4027,7 +4045,11 @@ impl ActionsJobExecutor {
                 self.config.maximum_output_bytes(),
             )?;
             let output = endpoint
-                .exec(&command, &ProviderCancellationBridge(cancellation))
+                .exec(
+                    &command,
+                    &ProviderCancellationBridge(cancellation),
+                    discard_execution_output(),
+                )
                 .map_err(map_execution_error)?;
             require_success(&output)?;
             if !output.stdout().is_empty() || !output.stderr().is_empty() {
@@ -4970,7 +4992,11 @@ impl ActionsJobExecutor {
         )
         .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::Internal))?;
         let output = endpoint
-            .exec(&command, &ProviderCancellationBridge(cancellation))
+            .exec(
+                &command,
+                &ProviderCancellationBridge(cancellation),
+                discard_execution_output(),
+            )
             .map_err(map_execution_error)?;
         require_success(&output)
     }
@@ -5083,12 +5109,38 @@ impl ActionsJobExecutor {
             .map_err(|error| {
                 observe_phase_failure(error, attempt_id, execution.phase, "build_phase_command")
             })?;
+        let phase_output = Arc::new(PhaseOutputSink::new(
+            self.workflow_command_limits,
+            self.workflow_command_policy,
+            std::mem::replace(masker, SecretMasker::new()),
+            group_id.clone(),
+            Arc::clone(events),
+            cancellation.owned_check(),
+        ));
         let output = endpoint
-            .exec(&command, &ProviderCancellationBridge(cancellation))
+            .exec(
+                &command,
+                &ProviderCancellationBridge(cancellation),
+                phase_output.clone(),
+            )
             .map_err(map_execution_error)
             .map_err(|error| {
                 observe_phase_failure(error, attempt_id, execution.phase, "execute_phase")
             });
+        let completed_output = phase_output.finish();
+        *masker = completed_output.masker;
+        if let Some(error) = completed_output.failure {
+            let failure = Err(observe_phase_failure(
+                error,
+                attempt_id,
+                execution.phase,
+                "stream_phase_output",
+            ));
+            let Some(()) = reconcile_cancelled_operation(failure, cancellation)? else {
+                return Ok(CommandOutcome::Cancelled);
+            };
+        }
+        let annotations = completed_output.annotations;
         let Some(output) = reconcile_cancelled_operation(output, cancellation)? else {
             return Ok(CommandOutcome::Cancelled);
         };
@@ -5113,11 +5165,8 @@ impl ActionsJobExecutor {
                     execution.phase,
                     &command_paths,
                     commands.platform(),
-                    &output,
-                    group_id,
-                    masker,
-                    events,
                     cancellation,
+                    annotations,
                 )
                 .map_err(|error| {
                     observe_phase_failure(
@@ -5218,11 +5267,8 @@ impl ActionsJobExecutor {
         phase: u32,
         paths: &CommandFilePaths,
         platform: CommandFilePlatform,
-        output: &ExecutionOutput,
-        group_id: &LogGroupId,
-        masker: &mut SecretMasker,
-        events: &Arc<dyn ExecutionEvents>,
         cancellation: &dyn ExecutorCancellation,
+        annotations: Vec<automata_ci_actions_runtime::Annotation>,
     ) -> Result<CollectedPhase, ExecutorAdapterError> {
         let completed = self
             .read_command_files(endpoint, attempt_id, phase, paths, platform, cancellation)
@@ -5234,30 +5280,6 @@ impl ActionsJobExecutor {
                 ExecutorAdapterErrorKind::Cancelled,
             ));
         }
-        let parsed = parse_output_with_cancellation(
-            output.records(),
-            self.workflow_command_limits,
-            self.workflow_command_policy,
-            masker,
-            &|| cancellation.is_cancelled(),
-        )
-        .map_err(|error| observe_phase_failure(error, attempt_id, phase, "parse_output"))?;
-        if cancellation.is_cancelled() {
-            return Err(ExecutorAdapterError::new(
-                ExecutorAdapterErrorKind::Cancelled,
-            ));
-        }
-        let mut annotations = Vec::new();
-        let processed = process_output(parsed, group_id, masker, events, &mut annotations, &|| {
-            cancellation.is_cancelled()
-        });
-        if cancellation.is_cancelled() {
-            return Err(ExecutorAdapterError::new(
-                ExecutorAdapterErrorKind::Cancelled,
-            ));
-        }
-        processed
-            .map_err(|error| observe_phase_failure(error, attempt_id, phase, "process_output"))?;
         Ok(CollectedPhase {
             commands: completed.commands,
             artifacts: completed.artifacts,
@@ -5592,7 +5614,11 @@ impl ActionsJobExecutor {
         )
         .map_err(|_| invalid_job())?;
         let output = endpoint
-            .exec(&command, &ProviderCancellationBridge(cancellation))
+            .exec(
+                &command,
+                &ProviderCancellationBridge(cancellation),
+                discard_execution_output(),
+            )
             .map_err(map_execution_error)?;
         if cancellation.is_cancelled() || output.termination() == ExecutionTermination::Cancelled {
             return Err(cancelled());
@@ -5771,11 +5797,17 @@ impl JobExecutor for ActionsJobExecutor {
 
 trait ExecutorCancellation: Send + Sync {
     fn is_cancelled(&self) -> bool;
+    fn owned_check(&self) -> Arc<dyn Fn() -> bool + Send + Sync>;
 }
 
 impl ExecutorCancellation for ExecutionCancellation {
     fn is_cancelled(&self) -> bool {
         ExecutionCancellation::is_cancelled(self)
+    }
+
+    fn owned_check(&self) -> Arc<dyn Fn() -> bool + Send + Sync> {
+        let cancellation = self.clone();
+        Arc::new(move || cancellation.is_cancelled())
     }
 }
 
@@ -5820,6 +5852,12 @@ impl<'a> CleanupCancellation<'a> {
 impl ExecutorCancellation for CleanupCancellation<'_> {
     fn is_cancelled(&self) -> bool {
         self.execution_is_cancelled() || self.deadline_expired()
+    }
+
+    fn owned_check(&self) -> Arc<dyn Fn() -> bool + Send + Sync> {
+        let execution = self.execution.clone();
+        let deadline = self.deadline;
+        Arc::new(move || execution.is_cancelled() || Instant::now() >= deadline)
     }
 }
 
@@ -8199,6 +8237,7 @@ fn map_execution_error(error: ExecutionError) -> ExecutorAdapterError {
         | ExecutionErrorKind::OwnershipMismatch
         | ExecutionErrorKind::InvalidState
         | ExecutionErrorKind::BackendRejected
+        | ExecutionErrorKind::OutputRejected
         | ExecutionErrorKind::LocalStorage => ExecutorAdapterErrorKind::Unavailable,
     };
     ExecutorAdapterError::new(kind)
@@ -8236,20 +8275,16 @@ fn provider_failure_outcome(error: &ProviderError) -> ProviderFailureOutcome {
 #[cfg(test)]
 mod tests {
     use std::{
-        cell::Cell,
         collections::BTreeSet,
         time::{Duration, Instant},
     };
 
     use automata_ci_actions_runtime::{
         ActionsCommandFileDecoder, CommandFileDecoder, CommandFileKind, CommandFilePlatform,
-        ParsedCommandFile, WorkflowCommandLimits, WorkflowCommandPolicy,
+        ParsedCommandFile,
     };
     use automata_ci_core::AttemptId;
-    use automata_ci_execution::{
-        Cancellation, CancellationDisposition, ExecutionOutputRecord, ExecutionOutputStream,
-        TargetPath,
-    };
+    use automata_ci_execution::{Cancellation, CancellationDisposition, TargetPath};
     use automata_ci_expression_actions::GithubValue;
     use automata_ci_runner_runtime::{ExecutionCancellation, ExecutionCancellationReason};
 
@@ -8257,10 +8292,9 @@ mod tests {
         ActionBudgetRejection, ActionExecutionBudget, AttemptPaths, CleanupCancellation,
         ExecutorAdapterErrorKind, GithubStatus, JobConclusion, MAX_ACTION_INVOCATIONS,
         MAX_ACTION_NESTING_DEPTH, MAX_COMPOSITE_CHILD_STEPS, MAX_COMPOSITE_DERIVED_BYTES,
-        MAX_EVENT_DEPTH, ProviderCancellationBridge, SecretMasker,
-        action_invocation_count_rejection, composite_child_step_rejection,
-        composite_derived_bytes_rejection, encode_action_outputs, event_depth_rejection,
-        github_value_from_json, parse_output_with_cancellation, reconcile_cancelled_operation,
+        MAX_EVENT_DEPTH, ProviderCancellationBridge, action_invocation_count_rejection,
+        composite_child_step_rejection, composite_derived_bytes_rejection, encode_action_outputs,
+        event_depth_rejection, github_value_from_json, reconcile_cancelled_operation,
         reconcile_post_operation, resource_exhausted,
     };
 
@@ -8468,35 +8502,6 @@ mod tests {
             .collect::<std::collections::BTreeMap<_, _>>();
         assert_eq!(values["scalar"], "value");
         assert_eq!(values["multiline"], "line one\nline two");
-    }
-
-    #[test]
-    fn parser_cancellation_dominates_the_next_invalid_workflow_command() {
-        let records = [ExecutionOutputRecord::data(
-            ExecutionOutputStream::Stdout,
-            b"::add-mask::first-secret\n::stop-commands::add-mask\n".to_vec(),
-        )
-        .expect("bounded output record")];
-        let checks = Cell::new(0_usize);
-        let cancellation = || {
-            let observed = checks.get();
-            checks.set(observed + 1);
-            observed >= 2
-        };
-        let mut masker = SecretMasker::new();
-
-        let error = parse_output_with_cancellation(
-            &records,
-            WorkflowCommandLimits::default(),
-            WorkflowCommandPolicy::default(),
-            &mut masker,
-            &cancellation,
-        )
-        .err()
-        .expect("cancellation wins before the invalid second command is parsed");
-
-        assert!(matches!(error.kind(), ExecutorAdapterErrorKind::Cancelled));
-        assert!(masker.contains_secret("first-secret").expect("first mask"));
     }
 
     #[test]

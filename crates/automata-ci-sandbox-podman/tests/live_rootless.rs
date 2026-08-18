@@ -127,7 +127,13 @@ fn opt_in_rootless_contract_leaves_no_owned_resources() {
         .attach(created.handle(), &NeverCancelled)
         .expect("attach live endpoint");
     let echo = command("/bin/echo", vec!["automata-live".to_owned()], 5);
-    let output = endpoint.exec(&echo, &NeverCancelled).expect("live exec");
+    let output = endpoint
+        .exec(
+            &echo,
+            &NeverCancelled,
+            automata_ci_execution::discard_execution_output(),
+        )
+        .expect("live exec");
     assert_eq!(output.termination(), ExecutionTermination::Exited(0));
     assert_eq!(output.stdout(), b"automata-live\n");
 
@@ -247,7 +253,11 @@ fn opt_in_rootless_services_are_healthy_discoverable_recoverable_and_exactly_rem
         10,
     );
     let output = endpoint
-        .exec(&request, &NeverCancelled)
+        .exec(
+            &request,
+            &NeverCancelled,
+            automata_ci_execution::discard_execution_output(),
+        )
         .expect("reach service through job-local loopback proxy");
     assert_eq!(output.termination(), ExecutionTermination::Exited(0));
     drop(endpoint);
@@ -328,7 +338,11 @@ fn opt_in_rootless_administrator_is_confined_and_writable() {
         10,
     );
     let output = endpoint
-        .exec(&verify, &NeverCancelled)
+        .exec(
+            &verify,
+            &NeverCancelled,
+            automata_ci_execution::discard_execution_output(),
+        )
         .expect("execute confined administrator contract");
     assert_eq!(output.termination(), ExecutionTermination::Exited(0));
     assert_eq!(output.stdout(), b"65534\n");
@@ -396,6 +410,7 @@ printf 'libclang-profile-ok\n'
         .exec(
             &command("/usr/bin/bash", vec!["-c".to_owned(), script], 10),
             &NeverCancelled,
+            automata_ci_execution::discard_execution_output(),
         )
         .expect("execute libclang profile contract");
     assert_eq!(
@@ -463,7 +478,11 @@ fn opt_in_host_gateway_alias_reaches_local_git_without_a_host_socket() {
         20,
     );
     let output = endpoint
-        .exec(&ls_remote, &NeverCancelled)
+        .exec(
+            &ls_remote,
+            &NeverCancelled,
+            automata_ci_execution::discard_execution_output(),
+        )
         .expect("execute git ls-remote through mapped host alias");
     assert_eq!(
         output.termination(),
@@ -534,7 +553,11 @@ fn opt_in_attempt_scoped_docker_api_runs_the_distribution_command_surface() {
     install_docker_live_fixture(endpoint.as_ref(), &helper);
     let execute = docker_distribution_surface_command();
     let output = endpoint
-        .exec(&execute, &NeverCancelled)
+        .exec(
+            &execute,
+            &NeverCancelled,
+            automata_ci_execution::discard_execution_output(),
+        )
         .expect("execute Docker-compatible live command");
     assert_eq!(
         output.termination(),
@@ -618,7 +641,11 @@ fn opt_in_attempt_scoped_buildx_runs_the_pinned_buildkit_container_driver() {
     install_buildx_live_fixture(endpoint.as_ref());
     let execute = buildx_live_command();
     let output = endpoint
-        .exec(&execute, &NeverCancelled)
+        .exec(
+            &execute,
+            &NeverCancelled,
+            automata_ci_execution::discard_execution_output(),
+        )
         .expect("execute Buildx live command");
     assert_eq!(
         output.termination(),
@@ -861,7 +888,11 @@ fn assert_live_environment(endpoint: &dyn automata_ci_execution::ExecutionEndpoi
     .expect("live environment");
     let print_environment = environment_command(job_environment);
     let output = endpoint
-        .exec(&print_environment, &NeverCancelled)
+        .exec(
+            &print_environment,
+            &NeverCancelled,
+            automata_ci_execution::discard_execution_output(),
+        )
         .expect("live environment exec");
     assert!(contains_bytes(
         output.stdout(),
@@ -880,7 +911,11 @@ fn assert_live_environment(endpoint: &dyn automata_ci_execution::ExecutionEndpoi
     )])
     .expect("core-valid multiline environment");
     let error = endpoint
-        .exec(&environment_command(multiline), &NeverCancelled)
+        .exec(
+            &environment_command(multiline),
+            &NeverCancelled,
+            automata_ci_execution::discard_execution_output(),
+        )
         .expect_err("Podman environment documents reject multiline values");
     assert_eq!(error.kind(), ExecutionErrorKind::InvalidEnvironment);
 }
@@ -915,7 +950,11 @@ fn assert_live_cancellation(endpoint: &dyn automata_ci_execution::ExecutionEndpo
     });
     let sleep = command("/bin/sleep", vec!["30".to_owned()], 10);
     let interrupted = endpoint
-        .exec(&sleep, cancellation.as_ref())
+        .exec(
+            &sleep,
+            cancellation.as_ref(),
+            automata_ci_execution::discard_execution_output(),
+        )
         .expect("cancelled live exec is a terminal output");
     worker.join().expect("cancellation trigger");
     assert_eq!(interrupted.termination(), ExecutionTermination::Cancelled);
@@ -1078,7 +1117,12 @@ fn assert_no_resources(
         Instant::now() + Duration::from_secs(30),
         64 * 1024,
     );
-    let output = SystemCommandExecutor.execute(&request, environment, &NeverCancelled);
+    let output = SystemCommandExecutor.execute(
+        &request,
+        environment,
+        &NeverCancelled,
+        automata_ci_execution::discard_execution_output(),
+    );
     assert_eq!(output.termination(), CommandTermination::Exited(Some(0)));
     assert!(output.stdout().iter().all(u8::is_ascii_whitespace));
 }

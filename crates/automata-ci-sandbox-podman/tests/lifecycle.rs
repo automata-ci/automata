@@ -143,7 +143,13 @@ fn whole_job_create_replay_exec_and_destroy_are_exact() {
         4_096,
     )
     .expect("command");
-    let output = endpoint.exec(&command, &cancellation).expect("exec");
+    let output = endpoint
+        .exec(
+            &command,
+            &cancellation,
+            automata_ci_execution::discard_execution_output(),
+        )
+        .expect("exec");
     assert_eq!(output.stdout(), b"executed\n");
 
     let disposition = fixture
@@ -448,7 +454,11 @@ fn exec_honors_validated_step_timeout_and_output_limit() {
     .expect("command");
 
     let result = endpoint
-        .exec(&command, &NeverCancelled)
+        .exec(
+            &command,
+            &NeverCancelled,
+            automata_ci_execution::discard_execution_output(),
+        )
         .expect("bounded exec");
     let captured = fixture
         .fake
@@ -950,7 +960,11 @@ fn environment_values_are_exact_redacted_and_do_not_control_the_podman_client() 
     )
     .expect("command");
     endpoint
-        .exec(&command, &NeverCancelled)
+        .exec(
+            &command,
+            &NeverCancelled,
+            automata_ci_execution::discard_execution_output(),
+        )
         .expect("environment injection");
 
     let captured = fixture.fake.last_exec_environment();
@@ -1002,7 +1016,11 @@ fn environment_values_are_exact_redacted_and_do_not_control_the_podman_client() 
         automata_ci_sandbox_podman::CommandTermination::Cancelled,
     ));
     let output = endpoint
-        .exec(&command, &NeverCancelled)
+        .exec(
+            &command,
+            &NeverCancelled,
+            automata_ci_execution::discard_execution_output(),
+        )
         .expect("cancelled exec is a terminal result");
     assert_eq!(
         output.termination(),
@@ -1030,7 +1048,11 @@ fn provider_control_environment_and_unrepresentable_document_values_fail_closed(
     ] {
         let command = execution_command(environment(&[(name, value)]));
         let error = endpoint
-            .exec(&command, &NeverCancelled)
+            .exec(
+                &command,
+                &NeverCancelled,
+                automata_ci_execution::discard_execution_output(),
+            )
             .expect_err("unsafe environment must be rejected");
         assert_eq!(error.kind(), ExecutionErrorKind::InvalidEnvironment);
         assert!(
@@ -1046,7 +1068,11 @@ fn provider_control_environment_and_unrepresentable_document_values_fail_closed(
     let command = execution_command(environment(&[("HOME", &oversized)]));
     assert_eq!(
         endpoint
-            .exec(&command, &NeverCancelled)
+            .exec(
+                &command,
+                &NeverCancelled,
+                automata_ci_execution::discard_execution_output()
+            )
             .expect_err("Podman environment-document line bound must be enforced")
             .kind(),
         ExecutionErrorKind::InvalidEnvironment
@@ -1270,7 +1296,11 @@ fn interrupted_exec_stops_the_owned_whole_job() {
     .expect("command");
     assert_eq!(
         endpoint
-            .exec(&command, &NeverCancelled)
+            .exec(
+                &command,
+                &NeverCancelled,
+                automata_ci_execution::discard_execution_output()
+            )
             .expect("timeout is a terminal output")
             .termination(),
         automata_ci_execution::ExecutionTermination::TimedOut
