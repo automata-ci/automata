@@ -93,15 +93,19 @@ if [[ "$plan" != true ]]; then
   fi
 fi
 
-printf 'PostgreSQL tests: authentication, runner, and web reads\n' >&2
+printf 'PostgreSQL tests: application and storage behavior\n' >&2
 run_bounded_tests cargo test \
   -p automata-ci-postgres \
+  -p automata-ci-provider-postgres \
+  -p automata-ci-results-github \
   --test postgres \
+  --test postgres_artifacts \
+  --test postgres_cache \
   --all-features \
   --locked \
   -- \
   --ignored \
-  --test-threads=2
+  --test-threads=4
 
 printf 'PostgreSQL tests: database harness\n' >&2
 run_bounded_tests cargo test \
@@ -113,23 +117,3 @@ run_bounded_tests cargo test \
   test_support::tests:: \
   --ignored \
   --test-threads=1
-
-printf 'PostgreSQL tests: provider manifests\n' >&2
-run_bounded_tests cargo test \
-  -p automata-ci-provider-postgres \
-  --test postgres \
-  --locked \
-  -- \
-  --ignored \
-  --test-threads=2
-
-printf 'PostgreSQL tests: artifacts and cache\n' >&2
-run_bounded_tests cargo test \
-  -p automata-ci-results-github \
-  --test postgres_artifacts \
-  --test postgres_cache \
-  --all-features \
-  --locked \
-  -- \
-  --ignored \
-  --test-threads=2
