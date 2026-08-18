@@ -314,10 +314,12 @@ impl fmt::Debug for SnapshotRequest<'_> {
 /// Provider-neutral routing evidence for one repository connection.
 ///
 /// The provider-native ID is authoritative identity. `repository` is the
-/// provider-owned route currently associated with that identity; adapters must
-/// verify both before returning source. The configured provider instance is
-/// supplied by the selected [`RepositorySource`](crate::RepositorySource)
-/// adapter, so callers cannot route a request to an arbitrary instance.
+/// provider-owned route authenticated for that identity by the caller's
+/// admission boundary. Adapters must preserve both values in returned source
+/// and prove the requested exact revision through the provider's trusted
+/// archive boundary. The configured provider instance is supplied by the
+/// selected [`RepositorySource`](crate::RepositorySource) adapter, so callers
+/// cannot route a request to an arbitrary instance.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepositorySourceConnection {
     connection_id: ProviderConnectionId,
@@ -370,10 +372,11 @@ pub enum RepositorySourceRedirectPolicy {
 
 /// One borrowed request for source at an already known exact revision.
 ///
-/// The revision is an immutable [`GitObjectId`], so an implementation must
-/// prove that the provider resolved the request to that byte-exact commit. Any
-/// credential is borrowed for this request only and is redacted by the
-/// [`Debug`](fmt::Debug) implementation.
+/// The connection coordinates must have been authenticated by the caller's
+/// admission boundary. The revision is an immutable [`GitObjectId`], so an
+/// implementation must prove that the provider returned source for that
+/// byte-exact commit. Any credential is borrowed for this request only and is
+/// redacted by the [`Debug`](fmt::Debug) implementation.
 pub struct RepositorySourceRequest<'a> {
     connection: &'a RepositorySourceConnection,
     revision: &'a GitObjectId,
@@ -385,8 +388,9 @@ pub struct RepositorySourceRequest<'a> {
 impl<'a> RepositorySourceRequest<'a> {
     /// Creates an exact-revision source request without an explicit credential.
     ///
-    /// Providers must not substitute ambient process, filesystem, or host
-    /// credentials when this request is used.
+    /// The caller must have authenticated `connection` before constructing the
+    /// request. Providers must not substitute ambient process, filesystem, or
+    /// host credentials when this request is used.
     #[must_use]
     pub const fn public(
         connection: &'a RepositorySourceConnection,
@@ -405,9 +409,10 @@ impl<'a> RepositorySourceRequest<'a> {
 
     /// Creates an exact-revision request with one provider credential.
     ///
-    /// The credential may be presented only to the selected provider during
-    /// this operation. It must not be retained, forwarded to an archive origin,
-    /// or included in returned source, errors, or diagnostics.
+    /// The caller must have authenticated `connection` before constructing the
+    /// request. The credential may be presented only to the selected provider
+    /// during this operation. It must not be retained, forwarded to an archive
+    /// origin, or included in returned source, errors, or diagnostics.
     #[must_use]
     pub const fn authenticated(
         connection: &'a RepositorySourceConnection,

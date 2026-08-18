@@ -5,7 +5,7 @@ use automata_ci_core::GitObjectId;
 use automata_ci_scm::RepositoryId;
 use reqwest::{
     Response, StatusCode,
-    header::{ACCEPT, AUTHORIZATION, HeaderMap, RETRY_AFTER},
+    header::{ACCEPT, AUTHORIZATION, HeaderMap},
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
@@ -15,7 +15,9 @@ use url::Url;
 use crate::{
     config::same_origin,
     endpoint::{GithubHttpEndpoint, authorization_header},
-    pagination, repository_path,
+    pagination,
+    rate_limit::{MAX_RETRY_AFTER_SECONDS, is_rate_limited, rate_limit_headers},
+    repository_path,
     response::{decode_json, read_json_response},
 };
 
@@ -38,10 +40,6 @@ const CHECK_ANNOTATIONS_PER_PAGE: usize = 100;
 const CHECK_SUITES_PER_PAGE: usize = 100;
 const CHECK_RUNS_PER_PAGE: usize = 100;
 const MAX_GITHUB_ID: u64 = 9_223_372_036_854_775_807;
-const MAX_RETRY_AFTER_SECONDS: u64 = 86_400;
-const MAX_RATE_LIMIT_RESET_SECONDS: u64 = 253_402_300_799;
-const X_RATE_LIMIT_REMAINING: &str = "x-ratelimit-remaining";
-const X_RATE_LIMIT_RESET: &str = "x-ratelimit-reset";
 
 /// A positive GitHub App identifier used to confine Check Run responses.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -1949,42 +1947,13 @@ fn map_endpoint_error(error: GithubEndpointError) -> GithubChecksError {
     }
 }
 
-fn is_rate_limited(headers: &HeaderMap) -> bool {
-    headers.contains_key(RETRY_AFTER)
-        || unique_header(headers, X_RATE_LIMIT_REMAINING)
-            .is_some_and(|value| value.as_bytes() == b"0")
-}
-
 fn retry_evidence(headers: &HeaderMap) -> GithubCheckRetryEvidence {
-    let retry_after_seconds = unique_header(headers, RETRY_AFTER.as_str())
-        .and_then(|value| parse_bounded_decimal(value.as_bytes(), MAX_RETRY_AFTER_SECONDS));
-    let rate_limit_reset_at = unique_header(headers, X_RATE_LIMIT_RESET)
-        .and_then(|value| parse_bounded_decimal(value.as_bytes(), MAX_RATE_LIMIT_RESET_SECONDS));
-    let rate_limit_remaining_zero = unique_header(headers, X_RATE_LIMIT_REMAINING)
-        .is_some_and(|value| value.as_bytes() == b"0");
+    let evidence = rate_limit_headers(headers);
     GithubCheckRetryEvidence {
-        retry_after_seconds,
-        rate_limit_reset_at,
-        rate_limit_remaining_zero,
+        retry_after_seconds: evidence.retry_after_seconds,
+        rate_limit_reset_at: evidence.rate_limit_reset_at,
+        rate_limit_remaining_zero: evidence.rate_limit_remaining_zero,
     }
-}
-
-fn unique_header<'a>(
-    headers: &'a HeaderMap,
-    name: &str,
-) -> Option<&'a reqwest::header::HeaderValue> {
-    let mut values = headers.get_all(name).iter();
-    let first = values.next()?;
-    values.next().is_none().then_some(first)
-}
-
-fn parse_bounded_decimal(bytes: &[u8], maximum: u64) -> Option<u64> {
-    if bytes.is_empty() || bytes.len() > 15 || !bytes.iter().all(u8::is_ascii_digit) {
-        return None;
-    }
-    let raw = std::str::from_utf8(bytes).ok()?;
-    let value = raw.parse::<u64>().ok()?;
-    (value <= maximum && value.to_string() == raw).then_some(value)
 }
 
 fn validate_annotation(

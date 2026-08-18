@@ -12,6 +12,7 @@ mod endpoint;
 mod event;
 mod factory;
 mod pagination;
+mod rate_limit;
 mod repository;
 mod repository_path;
 mod response;

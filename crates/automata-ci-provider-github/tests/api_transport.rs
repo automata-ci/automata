@@ -1,6 +1,6 @@
 use crate::support;
 
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use automata_ci_auth::{
     github::{GithubCurrentUserRequest, GithubEndpoint, GithubEndpointError},
@@ -53,6 +53,16 @@ async fn authentication_and_rate_limit_statuses_are_mapped_without_reading_bodie
         .enqueue(ResponseSpec::status(StatusCode::FORBIDDEN).header("x-ratelimit-remaining", "0"));
     fixture
         .enqueue(ResponseSpec::status(StatusCode::TOO_MANY_REQUESTS).header("retry-after", "17"));
+    let reset_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time")
+        .as_secs()
+        + 120;
+    fixture.enqueue(
+        ResponseSpec::status(StatusCode::FORBIDDEN)
+            .header("x-ratelimit-remaining", "0")
+            .header("x-ratelimit-reset", reset_at.to_string()),
+    );
     let endpoint = fixture.endpoint();
     let token = token();
     let request = || GithubCurrentUserRequest {
@@ -79,6 +89,13 @@ async fn authentication_and_rate_limit_statuses_are_mapped_without_reading_bodie
             retry_after_seconds: Some(17)
         }
     );
+    let GithubEndpointError::RateLimited {
+        retry_after_seconds: Some(delay),
+    } = endpoint.current_user(request()).await.unwrap_err()
+    else {
+        panic!("expected a reset-aware rate-limit error");
+    };
+    assert!((115..=121).contains(&delay), "unexpected delay: {delay}");
 }
 
 #[tokio::test]

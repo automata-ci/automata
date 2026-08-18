@@ -8,7 +8,7 @@ use automata_ci_scm::{
 use bytes::{Bytes, BytesMut};
 use reqwest::{
     Response, StatusCode,
-    header::{ACCEPT, AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, LOCATION, RETRY_AFTER},
+    header::{ACCEPT, AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, LOCATION},
 };
 use serde::Deserialize;
 use url::Url;
@@ -16,23 +16,16 @@ use url::Url;
 use crate::{
     config::same_origin,
     endpoint::{GithubHttpEndpoint, authorization_header},
+    rate_limit::{is_rate_limited as headers_are_rate_limited, retry_delay_seconds},
     repository_path::{self, has_ascii_case_insensitive_suffix},
     response::{decode_json, read_json_response},
 };
 
 const ACCEPT_API_JSON: &str = "application/vnd.github+json";
 const ACCEPT_ARCHIVE: &str = "application/octet-stream";
-const X_RATE_LIMIT_REMAINING: &str = "x-ratelimit-remaining";
-
 #[derive(Deserialize)]
 struct CommitResponse {
     sha: String,
-}
-
-#[derive(Deserialize)]
-struct RepositoryResponse {
-    id: u64,
-    full_name: String,
 }
 
 impl GithubHttpEndpoint {
@@ -95,57 +88,6 @@ impl GithubHttpEndpoint {
                 .map_err(map_endpoint_error)?;
         let commit: CommitResponse = decode_json(&response.body).map_err(map_endpoint_error)?;
         validate_commit_sha(&commit.sha)
-    }
-
-    async fn prove_exact_revision(
-        &self,
-        request: &RepositorySourceRequest<'_>,
-    ) -> Result<(), ScmError> {
-        let revision = request.revision().to_string();
-        let endpoint = self.repository_url(request.repository(), &["commits", &revision])?;
-        let response = self
-            .authenticated_get(endpoint, request.credential())?
-            .send()
-            .await
-            .map_err(|_| ScmError::new(ScmErrorKind::Unavailable))?;
-        reject_api_status(&response)?;
-        let response =
-            read_json_response(response, self.trusted.limits().max_response_bytes, false)
-                .await
-                .map_err(map_endpoint_error)?;
-        let commit: CommitResponse = decode_json(&response.body).map_err(map_endpoint_error)?;
-        let resolved = GitObjectId::from_provider_hex(commit.sha)
-            .map_err(|_| ScmError::new(ScmErrorKind::InvalidResponse))?;
-        if &resolved != request.revision() {
-            return Err(ScmError::new(ScmErrorKind::InvalidResponse));
-        }
-        Ok(())
-    }
-
-    async fn prove_repository_identity(
-        &self,
-        request: &RepositorySourceRequest<'_>,
-    ) -> Result<(), ScmError> {
-        let endpoint = self.repository_url(request.repository(), &[])?;
-        let response = self
-            .authenticated_get(endpoint, request.credential())?
-            .send()
-            .await
-            .map_err(|_| ScmError::new(ScmErrorKind::Unavailable))?;
-        reject_api_status(&response)?;
-        let response =
-            read_json_response(response, self.trusted.limits().max_response_bytes, false)
-                .await
-                .map_err(map_endpoint_error)?;
-        let repository: RepositoryResponse =
-            decode_json(&response.body).map_err(map_endpoint_error)?;
-        if repository.id == 0
-            || repository.id.to_string() != request.connection().external_repository_id().as_str()
-            || repository.full_name != request.repository().as_str()
-        {
-            return Err(ScmError::new(ScmErrorKind::InvalidResponse));
-        }
-        Ok(())
     }
 
     async fn archive_redirect(
@@ -284,6 +226,11 @@ impl RepositorySource for GithubHttpEndpoint {
         &self,
         request: RepositorySourceRequest<'_>,
     ) -> Result<RepositorySourceArchive, ScmError> {
+        // The caller's authenticated admission evidence already binds the
+        // provider-native repository ID to this route. The immutable archive
+        // path proves the exact commit without a redundant repository or
+        // commit lookup. Public deliveries therefore consume no REST quota;
+        // private deliveries consume only the authenticated redirect request.
         if request.credential().is_none() {
             let location =
                 self.exact_public_archive_location(request.repository(), request.revision())?;
@@ -297,8 +244,6 @@ impl RepositorySource for GithubHttpEndpoint {
                 bytes,
             ));
         }
-        self.prove_repository_identity(&request).await?;
-        self.prove_exact_revision(&request).await?;
         let location = self.exact_archive_redirect(&request).await?;
         let bytes = self
             .download_archive(location, request.limits().maximum_bytes())
@@ -371,10 +316,12 @@ fn map_status(response: &Response) -> ScmError {
         StatusCode::NOT_FOUND => ScmError::new(ScmErrorKind::NotFound),
         StatusCode::UNAUTHORIZED => ScmError::new(ScmErrorKind::Unauthorized),
         StatusCode::FORBIDDEN if is_rate_limited(response) => {
-            ScmError::rate_limited(retry_after_seconds(response))
+            ScmError::rate_limited(retry_delay_seconds(response.headers()))
         }
         StatusCode::FORBIDDEN => ScmError::new(ScmErrorKind::Forbidden),
-        StatusCode::TOO_MANY_REQUESTS => ScmError::rate_limited(retry_after_seconds(response)),
+        StatusCode::TOO_MANY_REQUESTS => {
+            ScmError::rate_limited(retry_delay_seconds(response.headers()))
+        }
         StatusCode::REQUEST_TIMEOUT => ScmError::new(ScmErrorKind::Unavailable),
         _ if status.is_server_error() => ScmError::new(ScmErrorKind::Unavailable),
         _ => ScmError::new(ScmErrorKind::InvalidResponse),
@@ -382,19 +329,7 @@ fn map_status(response: &Response) -> ScmError {
 }
 
 fn is_rate_limited(response: &Response) -> bool {
-    response.headers().contains_key(RETRY_AFTER)
-        || response
-            .headers()
-            .get(X_RATE_LIMIT_REMAINING)
-            .is_some_and(|value| value.as_bytes() == b"0")
-}
-
-fn retry_after_seconds(response: &Response) -> Option<u64> {
-    response
-        .headers()
-        .get(RETRY_AFTER)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse().ok())
+    headers_are_rate_limited(response.headers())
 }
 
 fn validate_archive_content_type(response: &Response) -> Result<(), ScmError> {
