@@ -41,6 +41,7 @@ zeroize.workspace = true
 
 [dev-dependencies]
 axum.workspace = true
+automata-ci-key-management.workspace = true
 tokio.workspace = true
 
 [lints]

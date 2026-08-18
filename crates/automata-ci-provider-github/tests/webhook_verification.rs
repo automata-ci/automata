@@ -1,9 +1,10 @@
 use crate::support::{json_body, signed_webhook_headers};
 
 use automata_ci_provider_github::{
-    GithubPushRefKind, GithubRepositoryVisibility, GithubWebhookError, GithubWebhookEventMetadata,
-    GithubWebhookVerifier, MAX_GITHUB_PUSH_COMMITS, MAX_GITHUB_WEBHOOK_BODY_BYTES,
-    MAX_GITHUB_WEBHOOK_SECRET_BYTES, X_GITHUB_DELIVERY, X_GITHUB_EVENT, X_HUB_SIGNATURE_256,
+    GithubRepositoryVisibility, GithubWebhookError, GithubWebhookEventMetadata,
+    GithubWebhookRefKind, GithubWebhookVerifier, MAX_GITHUB_PUSH_COMMITS,
+    MAX_GITHUB_WEBHOOK_BODY_BYTES, MAX_GITHUB_WEBHOOK_SECRET_BYTES, X_GITHUB_DELIVERY,
+    X_GITHUB_EVENT, X_HUB_SIGNATURE_256,
 };
 use bytes::Bytes;
 use reqwest::header::HeaderValue;
@@ -51,7 +52,7 @@ fn valid_push_preserves_exact_authenticated_and_provider_evidence() {
     assert_eq!(push.repository().full_name(), "octocat/automata");
     assert_eq!(push.git_ref().full(), "refs/heads/main");
     assert_eq!(push.git_ref().short_name(), "main");
-    assert_eq!(push.git_ref().kind(), GithubPushRefKind::Branch);
+    assert_eq!(push.git_ref().kind(), GithubWebhookRefKind::Branch);
     assert_eq!(push.before_commit_sha(), BEFORE);
     assert_eq!(push.after_commit_sha(), AFTER);
     assert_eq!(push.commit_count(), 2);
@@ -397,7 +398,7 @@ fn only_canonical_full_head_and_tag_refs_are_admitted() {
     let mut tag = valid_payload();
     tag["ref"] = json!("refs/tags/v1.2.3");
     let push = verify_payload(&tag).expect("canonical tag");
-    assert_eq!(push.git_ref().kind(), GithubPushRefKind::Tag);
+    assert_eq!(push.git_ref().kind(), GithubWebhookRefKind::Tag);
     assert_eq!(push.git_ref().short_name(), "v1.2.3");
 }
 

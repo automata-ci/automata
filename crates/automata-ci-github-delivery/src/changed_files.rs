@@ -6,7 +6,7 @@ use automata_ci_core::Sha256Digest;
 use automata_ci_provider_github::{
     GithubHttpEndpoint, GithubPullRequestDiffAuthority, GithubPullRequestDiffOutcome,
     GithubPullRequestDiffRequest, GithubPushDiffAuthority, GithubPushDiffOutcome,
-    GithubPushDiffRange, GithubPushDiffRequest, GithubPushRefKind, GithubRepositoryVisibility,
+    GithubPushDiffRange, GithubPushDiffRequest, GithubRepositoryVisibility, GithubWebhookRefKind,
     VerifiedGithubPullRequest, VerifiedGithubPush,
 };
 use automata_ci_scm::RepositoryId;
@@ -219,7 +219,7 @@ fn validate_common_delivery_binding(
 }
 
 fn push_range(push: &VerifiedGithubPush) -> Result<GithubPushDiffRange, ()> {
-    if push.git_ref().kind() != GithubPushRefKind::Branch {
+    if push.git_ref().kind() != GithubWebhookRefKind::Branch {
         return Err(());
     }
     if push.deleted() {

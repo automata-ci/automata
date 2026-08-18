@@ -273,6 +273,32 @@ pub struct AuthenticatedGithubWebhook {
 }
 
 impl AuthenticatedGithubWebhook {
+    pub(crate) fn from_authenticated_parts(
+        delivery_id: &[u8],
+        event_name: &[u8],
+        raw_body: Bytes,
+    ) -> Result<Self, GithubWebhookError> {
+        if raw_body.len() > MAX_GITHUB_WEBHOOK_BODY_BYTES
+            || !valid_delivery_id(delivery_id)
+            || !valid_event_name(event_name)
+        {
+            return Err(GithubWebhookError::InvalidHeaders);
+        }
+        let delivery_id = std::str::from_utf8(delivery_id)
+            .map_err(|_| GithubWebhookError::InvalidHeaders)?
+            .into();
+        let event_name = std::str::from_utf8(event_name)
+            .map_err(|_| GithubWebhookError::InvalidHeaders)?
+            .into();
+        let body_sha256 = webhook_body_digest(&raw_body);
+        Ok(Self {
+            delivery_id,
+            event_name,
+            raw_body,
+            body_sha256,
+        })
+    }
+
     /// Returns the validated singleton `X-GitHub-Delivery` value.
     pub fn delivery_id(&self) -> &str {
         &self.delivery_id
@@ -550,7 +576,7 @@ impl fmt::Debug for GithubWebhookBodyDigest {
 /// Canonical kind of a full GitHub push reference.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum GithubPushRefKind {
+pub enum GithubWebhookRefKind {
     /// A `refs/heads/...` branch reference.
     Branch,
     /// A `refs/tags/...` tag reference.
@@ -559,13 +585,13 @@ pub enum GithubPushRefKind {
 
 /// Validated, unambiguous full GitHub push reference.
 #[derive(Clone, Eq, PartialEq)]
-pub struct GithubPushRef {
+pub struct GithubWebhookRef {
     full: Box<str>,
-    kind: GithubPushRefKind,
+    kind: GithubWebhookRefKind,
     short_name_offset: usize,
 }
 
-impl GithubPushRef {
+impl GithubWebhookRef {
     /// Returns the exact canonical full reference.
     pub fn full(&self) -> &str {
         &self.full
@@ -577,15 +603,15 @@ impl GithubPushRef {
     }
 
     /// Returns whether this is a branch or tag reference.
-    pub const fn kind(&self) -> GithubPushRefKind {
+    pub const fn kind(&self) -> GithubWebhookRefKind {
         self.kind
     }
 }
 
-impl fmt::Debug for GithubPushRef {
+impl fmt::Debug for GithubWebhookRef {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("GithubPushRef")
+            .debug_struct("GithubWebhookRef")
             .field("kind", &self.kind)
             .field("full", &"[redacted]")
             .finish_non_exhaustive()
@@ -594,7 +620,7 @@ impl fmt::Debug for GithubPushRef {
 
 /// Normalized repository identity from the authenticated push body.
 #[derive(Clone, Eq, PartialEq)]
-pub struct GithubPushRepository {
+pub struct GithubWebhookRepository {
     id: NonZeroU64,
     owner_id: NonZeroU64,
     visibility: GithubRepositoryVisibility,
@@ -603,7 +629,7 @@ pub struct GithubPushRepository {
     full_name: Box<str>,
 }
 
-impl GithubPushRepository {
+impl GithubWebhookRepository {
     pub(crate) fn from_webhook_fields(
         id: u64,
         owner_id: u64,
@@ -666,10 +692,10 @@ impl GithubPushRepository {
     }
 }
 
-impl fmt::Debug for GithubPushRepository {
+impl fmt::Debug for GithubWebhookRepository {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("GithubPushRepository")
+            .debug_struct("GithubWebhookRepository")
             .field("id", &self.id)
             .field("owner_id", &self.owner_id)
             .field("visibility", &self.visibility)
@@ -713,8 +739,8 @@ pub struct VerifiedGithubPush {
     body_sha256: GithubWebhookBodyDigest,
     installation_id: NonZeroU64,
     actor: Option<GithubEventActor>,
-    repository: GithubPushRepository,
-    git_ref: GithubPushRef,
+    repository: GithubWebhookRepository,
+    git_ref: GithubWebhookRef,
     before_commit_sha: Box<str>,
     after_commit_sha: Box<str>,
     metadata: GithubWebhookEventMetadata,
@@ -761,12 +787,12 @@ impl VerifiedGithubPush {
     }
 
     /// Returns the internally consistent provider repository identity.
-    pub const fn repository(&self) -> &GithubPushRepository {
+    pub const fn repository(&self) -> &GithubWebhookRepository {
         &self.repository
     }
 
     /// Returns the canonical full branch or tag reference.
-    pub const fn git_ref(&self) -> &GithubPushRef {
+    pub const fn git_ref(&self) -> &GithubWebhookRef {
         &self.git_ref
     }
 
@@ -1114,7 +1140,7 @@ fn normalize_push(
             GithubEventActor::from_webhook_fields(actor.id, actor.login, actor.kind.as_deref())
         })
         .transpose()?;
-    let repository = GithubPushRepository::from_webhook_fields(
+    let repository = GithubWebhookRepository::from_webhook_fields(
         payload.repository.id,
         payload.repository.owner.id,
         payload.repository.private,
@@ -1236,14 +1262,14 @@ fn validate_repository_component(value: &str) -> Result<(), GithubWebhookError> 
     Ok(())
 }
 
-pub(crate) fn parse_git_ref(value: String) -> Result<GithubPushRef, GithubWebhookError> {
+pub(crate) fn parse_git_ref(value: String) -> Result<GithubWebhookRef, GithubWebhookError> {
     if git_ref_byte_rejection(value.len()).is_some() {
         return Err(GithubWebhookError::InvalidPayload);
     }
     let (kind, short_name_offset) = if value.starts_with("refs/heads/") {
-        (GithubPushRefKind::Branch, "refs/heads/".len())
+        (GithubWebhookRefKind::Branch, "refs/heads/".len())
     } else if value.starts_with("refs/tags/") {
-        (GithubPushRefKind::Tag, "refs/tags/".len())
+        (GithubWebhookRefKind::Tag, "refs/tags/".len())
     } else {
         return Err(GithubWebhookError::InvalidPayload);
     };
@@ -1251,7 +1277,7 @@ pub(crate) fn parse_git_ref(value: String) -> Result<GithubPushRef, GithubWebhoo
     if !valid_git_ref_name(short_name) {
         return Err(GithubWebhookError::InvalidPayload);
     }
-    Ok(GithubPushRef {
+    Ok(GithubWebhookRef {
         full: value.into_boxed_str(),
         kind,
         short_name_offset,

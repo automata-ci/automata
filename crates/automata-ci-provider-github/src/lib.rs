@@ -7,6 +7,7 @@
 mod changed_files;
 mod checks;
 mod config;
+mod delivery_adapter;
 mod endpoint;
 mod event;
 mod factory;
@@ -38,6 +39,7 @@ pub use checks::{
 pub use config::{
     GITHUB_API_VERSION, GithubHttpConfigurationError, GithubHttpLimits, GithubTrustedOrigins,
 };
+pub use delivery_adapter::GithubDeliveryAdapter;
 pub use endpoint::GithubHttpEndpoint;
 pub use event::{
     GITHUB_EVENT_ENVELOPE_SCHEMA_V1, GITHUB_EVENT_ENVELOPE_V1_MEDIA_TYPE,
@@ -55,19 +57,18 @@ pub use factory::{
     GithubConnectionPolicy, GithubFactoryError, GithubInstanceConfiguration, GithubProviderFactory,
 };
 pub use webhook::{
-    AuthenticatedGithubWebhook, GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE, GithubPushRef,
-    GithubPushRefKind, GithubPushRepository, GithubRepositoryVisibility, GithubStoredWebhookError,
-    GithubWebhookBodyDigest, GithubWebhookError, GithubWebhookEventMetadata, GithubWebhookVerifier,
-    GithubWebhookVerifierFingerprint, MAX_GITHUB_PUSH_COMMITS, MAX_GITHUB_WEBHOOK_BODY_BYTES,
-    MAX_GITHUB_WEBHOOK_SECRET_BYTES, StoredAuthenticatedGithubWebhook, VerifiedGithubPush,
-    X_GITHUB_DELIVERY, X_GITHUB_EVENT, X_HUB_SIGNATURE_256,
-    rehydrate_stored_authenticated_github_webhook,
+    AuthenticatedGithubWebhook, GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE, GithubRepositoryVisibility,
+    GithubStoredWebhookError, GithubWebhookBodyDigest, GithubWebhookError,
+    GithubWebhookEventMetadata, GithubWebhookRef, GithubWebhookRefKind, GithubWebhookRepository,
+    GithubWebhookVerifier, GithubWebhookVerifierFingerprint, MAX_GITHUB_PUSH_COMMITS,
+    MAX_GITHUB_WEBHOOK_BODY_BYTES, MAX_GITHUB_WEBHOOK_SECRET_BYTES,
+    StoredAuthenticatedGithubWebhook, VerifiedGithubPush, X_GITHUB_DELIVERY, X_GITHUB_EVENT,
+    X_HUB_SIGNATURE_256, rehydrate_stored_authenticated_github_webhook,
 };
 pub use webhook_event::{
-    GithubCheckRunAction, GithubMergeGroupAction, GithubPullRequestAction, GithubWebhookRef,
-    GithubWebhookRepository, VerifiedGithubCheckRun, VerifiedGithubCheckSuite,
-    VerifiedGithubMergeGroup, VerifiedGithubPullRequest, VerifiedGithubRepositoryDispatch,
-    VerifiedGithubWebhook,
+    GithubCheckRunAction, GithubMergeGroupAction, GithubPullRequestAction, VerifiedGithubCheckRun,
+    VerifiedGithubCheckSuite, VerifiedGithubMergeGroup, VerifiedGithubPullRequest,
+    VerifiedGithubRepositoryDispatch, VerifiedGithubWebhook,
 };
 pub use workflow_permissions::{
     ActionsDefaultWorkflowPermission, GithubWorkflowPermissionDefaults,

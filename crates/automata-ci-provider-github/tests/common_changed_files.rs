@@ -18,6 +18,7 @@ use axum::http::StatusCode;
 use serde_json::json;
 
 const BEFORE: &str = "1111111111111111111111111111111111111111";
+const MIDDLE: &str = "3333333333333333333333333333333333333333";
 const AFTER: &str = "2222222222222222222222222222222222222222";
 
 fn revision(value: &str) -> GitObjectId {
@@ -78,6 +79,20 @@ fn push(
     after: Option<GitObjectId>,
     forced: bool,
 ) -> automata_ci_provider::SealedNormalizedTrigger {
+    push_with_evidence(
+        before,
+        after,
+        automata_ci_provider::PushCommitEvidence::complete(after).expect("commit evidence"),
+        forced,
+    )
+}
+
+fn push_with_evidence(
+    before: Option<GitObjectId>,
+    after: Option<GitObjectId>,
+    commit_evidence: automata_ci_provider::PushCommitEvidence,
+    forced: bool,
+) -> automata_ci_provider::SealedNormalizedTrigger {
     NormalizedTrigger::Push(
         PushTrigger::new(
             ProviderRepository::new(
@@ -88,6 +103,7 @@ fn push(
             ProviderGitRef::new("refs/heads/main", ProviderGitRefKind::Branch).expect("ref"),
             before,
             after,
+            commit_evidence,
             forced,
             None,
         )
@@ -99,6 +115,71 @@ fn push(
 
 fn limits() -> ChangedFileLimits {
     ChangedFileLimits::new(100, 10, 1_000_000).expect("changed-file limits")
+}
+
+#[tokio::test]
+async fn common_reader_uses_the_complete_multi_commit_observation() {
+    let fixture = FixtureServer::spawn().await;
+    fixture.enqueue(ResponseSpec::json(
+        StatusCode::OK,
+        serde_json::to_string(&json!({
+            "status": "ahead",
+            "ahead_by": 2,
+            "behind_by": 0,
+            "total_commits": 2,
+            "base_commit": {"sha": BEFORE},
+            "merge_base_commit": {"sha": BEFORE},
+            "commits": [{"sha": MIDDLE}, {"sha": AFTER}],
+            "files": [{"filename": "src/lib.rs", "status": "modified"}]
+        }))
+        .expect("compare JSON"),
+    ));
+    let connection = connection();
+    let trigger = push_with_evidence(
+        Some(revision(BEFORE)),
+        Some(revision(AFTER)),
+        automata_ci_provider::PushCommitEvidence::complete([revision(MIDDLE), revision(AFTER)])
+            .expect("commit evidence"),
+        false,
+    );
+    let request =
+        ChangedFileRequest::public(&connection, &trigger, limits(), UnixMillis::new(2_000))
+            .expect("request");
+
+    assert!(matches!(
+        fixture
+            .endpoint()
+            .read_changed_files(request)
+            .await
+            .expect("complete multi-commit evidence"),
+        ChangedFileRead::Complete { .. }
+    ));
+}
+
+#[tokio::test]
+async fn provider_commit_limit_short_circuits_without_partial_comparison() {
+    let fixture = FixtureServer::spawn().await;
+    let connection = connection();
+    let trigger = push_with_evidence(
+        Some(revision(BEFORE)),
+        Some(revision(AFTER)),
+        automata_ci_provider::PushCommitEvidence::ProviderLimitExceeded,
+        false,
+    );
+    let request =
+        ChangedFileRequest::public(&connection, &trigger, limits(), UnixMillis::new(2_000))
+            .expect("request");
+
+    let ChangedFileRead::Incomplete { reason, .. } = fixture
+        .endpoint()
+        .read_changed_files(request)
+        .await
+        .expect("explicit provider limit")
+    else {
+        panic!("expected incomplete evidence")
+    };
+    assert_eq!(reason, ChangedFileIncompleteReason::ProviderRecordLimit);
+    assert!(fixture.requests().is_empty());
 }
 
 #[tokio::test]

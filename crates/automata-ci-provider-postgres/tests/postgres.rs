@@ -21,9 +21,9 @@ use automata_ci_provider::{
     ProviderWebhookEndpointId, ProviderWebhookEndpointManifest,
     ProviderWebhookEndpointRepository as _, ProviderWebhookEndpointRevision,
     ProviderWebhookEndpointState, ProviderWebhookSecretReference, ProviderWebhookSignatureEvidence,
-    ProviderWorkflowSource, PushTrigger, RepositoryVisibility, RetryProviderDelivery,
-    SourceReadCapability, VerifiedProviderDelivery, provider_capability_digest,
-    provider_raw_webhook_descriptor,
+    ProviderWorkflowSource, PushCommitEvidence, PushTrigger, RepositoryVisibility,
+    RetryProviderDelivery, SourceReadCapability, VerifiedProviderDelivery,
+    provider_capability_digest, provider_raw_webhook_descriptor,
 };
 use automata_ci_provider_postgres::PostgresProviderManifestRepository;
 use sha2::{Digest as _, Sha256};
@@ -414,6 +414,7 @@ fn verified_delivery(
             ProviderGitRef::new("refs/heads/main", ProviderGitRefKind::Branch).expect("branch"),
             Some(before),
             Some(after),
+            PushCommitEvidence::complete([after]).expect("commit evidence"),
             false,
             None,
         )
@@ -513,6 +514,7 @@ async fn endpoint_secrets_replay_conflicts_and_worker_fences_are_exact() -> Test
             .resolve_endpoint(endpoint.endpoint_id())
             .await?
             .expect("resolved endpoint");
+        assert_eq!(resolved.connection(), &connection);
         assert_eq!(
             resolved
                 .secrets()

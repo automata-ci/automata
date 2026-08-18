@@ -7,7 +7,7 @@ use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
 use crate::{
-    GithubPushRef, GithubPushRefKind, GithubPushRepository, GithubRepositoryVisibility,
+    GithubRepositoryVisibility, GithubWebhookRef, GithubWebhookRefKind, GithubWebhookRepository,
     VerifiedGithubWebhook,
     webhook::{
         GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE, MAX_GITHUB_WEBHOOK_BODY_BYTES, durable_provider_id,
@@ -126,7 +126,7 @@ pub struct GithubEventRepositoryFacts {
 }
 
 impl GithubEventRepositoryFacts {
-    pub(crate) fn from_repository(repository: &GithubPushRepository) -> Self {
+    pub(crate) fn from_repository(repository: &GithubWebhookRepository) -> Self {
         Self {
             id: repository.id(),
             owner_id: repository.owner_id(),
@@ -142,7 +142,7 @@ impl GithubEventRepositoryFacts {
             GithubRepositoryVisibility::Public => (false, "public"),
             GithubRepositoryVisibility::Private => (true, "private"),
         };
-        GithubPushRepository::from_webhook_fields(
+        GithubWebhookRepository::from_webhook_fields(
             self.id.get(),
             self.owner_id.get(),
             private,
@@ -210,11 +210,11 @@ impl fmt::Debug for GithubEventRepositoryFacts {
 #[serde(deny_unknown_fields)]
 pub struct GithubEventRefFacts {
     full: Box<str>,
-    kind: GithubPushRefKind,
+    kind: GithubWebhookRefKind,
 }
 
 impl GithubEventRefFacts {
-    pub(crate) fn from_ref(git_ref: &GithubPushRef) -> Self {
+    pub(crate) fn from_ref(git_ref: &GithubWebhookRef) -> Self {
         Self {
             full: git_ref.full().into(),
             kind: git_ref.kind(),
@@ -236,14 +236,14 @@ impl GithubEventRefFacts {
     #[must_use]
     pub fn short_name(&self) -> Option<&str> {
         match self.kind {
-            GithubPushRefKind::Branch => self.full.strip_prefix("refs/heads/"),
-            GithubPushRefKind::Tag => self.full.strip_prefix("refs/tags/"),
+            GithubWebhookRefKind::Branch => self.full.strip_prefix("refs/heads/"),
+            GithubWebhookRefKind::Tag => self.full.strip_prefix("refs/tags/"),
         }
     }
 
     /// Returns whether the reference is a branch or tag.
     #[must_use]
-    pub const fn kind(&self) -> GithubPushRefKind {
+    pub const fn kind(&self) -> GithubWebhookRefKind {
         self.kind
     }
 }

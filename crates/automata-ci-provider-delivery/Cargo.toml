@@ -1,0 +1,27 @@
+[package]
+name = "automata-ci-provider-delivery"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+description = "Provider-neutral webhook ingress and delivery worker"
+
+[dependencies]
+async-trait.workspace = true
+automata-ci-blob.workspace = true
+automata-ci-core.workspace = true
+automata-ci-provider.workspace = true
+bytes.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+automata-ci-key-management.workspace = true
+sha2.workspace = true
+
+[lints]
+workspace = true

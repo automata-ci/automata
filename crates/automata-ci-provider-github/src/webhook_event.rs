@@ -10,8 +10,8 @@ use serde_json::{Map as JsonMap, Value as JsonValue};
 
 use crate::event::GithubEventActor;
 use crate::webhook::{
-    AuthenticatedGithubWebhook, GithubPushRef, GithubPushRefKind, GithubPushRepository,
-    GithubWebhookBodyDigest, GithubWebhookError, VerifiedGithubPush, durable_provider_id,
+    AuthenticatedGithubWebhook, GithubWebhookBodyDigest, GithubWebhookError, GithubWebhookRef,
+    GithubWebhookRefKind, GithubWebhookRepository, VerifiedGithubPush, durable_provider_id,
     normalize_branch_name, parse_git_ref,
 };
 
@@ -53,18 +53,6 @@ const fn repository_dispatch_payload_character_rejection(
     }
     None
 }
-
-/// Repository identity retained by normalized non-push webhook evidence.
-///
-/// This is an event-neutral alias of the repository type already exposed by
-/// the stable push API.
-pub type GithubWebhookRepository = GithubPushRepository;
-
-/// Validated full reference retained by normalized webhook evidence.
-///
-/// This is an event-neutral alias of the full-reference type already exposed
-/// by the stable push API.
-pub type GithubWebhookRef = GithubPushRef;
 
 /// A currently documented GitHub `pull_request` webhook activity.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -598,9 +586,10 @@ pub struct VerifiedGithubPullRequest {
     number: NonZeroU64,
     action: GithubPullRequestAction,
     merged: bool,
+    draft: bool,
     head_revision: GitObjectId,
     base_revision: GitObjectId,
-    merge_revision: GitObjectId,
+    merge_revision: Option<GitObjectId>,
     head_ref: Box<str>,
     base_ref: Box<str>,
     git_ref: Box<str>,
@@ -680,6 +669,12 @@ impl VerifiedGithubPullRequest {
         self.merged
     }
 
+    /// Returns whether the pull request is currently a draft.
+    #[must_use]
+    pub const fn draft(&self) -> bool {
+        self.draft
+    }
+
     /// Returns the canonical pull-request head commit.
     #[must_use]
     pub const fn head_revision(&self) -> &GitObjectId {
@@ -695,11 +690,10 @@ impl VerifiedGithubPullRequest {
     /// Returns the merge-branch commit used as `GITHUB_SHA` for this event.
     ///
     /// GitHub may send `null` before it has materialized the pull-request merge
-    /// commit. In that case an unmerged event uses the exact head revision as
-    /// the deterministic execution fallback.
+    /// commit; absence remains explicit rather than inventing an object identity.
     #[must_use]
-    pub const fn merge_revision(&self) -> &GitObjectId {
-        &self.merge_revision
+    pub const fn merge_revision(&self) -> Option<GitObjectId> {
+        self.merge_revision
     }
 
     /// Returns the validated unqualified pull-request head branch.
@@ -738,6 +732,7 @@ impl fmt::Debug for VerifiedGithubPullRequest {
             .field("number", &self.number)
             .field("action", &self.action)
             .field("merged", &self.merged)
+            .field("draft", &self.draft)
             .field("head_revision", &"[redacted]")
             .field("base_revision", &"[redacted]")
             .field("merge_revision", &"[redacted]")
@@ -872,6 +867,7 @@ struct PullRequestPayload {
 struct PullRequestObjectPayload {
     number: u64,
     merged: bool,
+    draft: bool,
     #[serde(default)]
     merge_commit_sha: PullRequestMergeCommitShaPayload,
     #[serde(default)]
@@ -943,7 +939,7 @@ struct RepositoryPayload {
 
 impl RepositoryPayload {
     fn normalize(self) -> Result<GithubWebhookRepository, GithubWebhookError> {
-        GithubPushRepository::from_webhook_fields(
+        GithubWebhookRepository::from_webhook_fields(
             self.id,
             self.owner.id,
             self.private,
@@ -1137,8 +1133,8 @@ pub(crate) fn normalize_pull_request(
     let head_revision = exact_revision(payload.pull_request.head.sha)?;
     let base_revision = exact_revision(payload.pull_request.base.sha)?;
     let merge_revision = match payload.pull_request.merge_commit_sha {
-        PullRequestMergeCommitShaPayload::Revision(revision) => exact_revision(revision)?,
-        PullRequestMergeCommitShaPayload::Null(()) if !payload.pull_request.merged => head_revision,
+        PullRequestMergeCommitShaPayload::Revision(revision) => Some(exact_revision(revision)?),
+        PullRequestMergeCommitShaPayload::Null(()) if !payload.pull_request.merged => None,
         PullRequestMergeCommitShaPayload::Null(()) | PullRequestMergeCommitShaPayload::Missing => {
             return Err(GithubWebhookError::InvalidPayload);
         }
@@ -1171,6 +1167,7 @@ pub(crate) fn normalize_pull_request(
         number,
         action,
         merged: payload.pull_request.merged,
+        draft: payload.pull_request.draft,
         head_revision,
         base_revision,
         merge_revision,
@@ -1316,7 +1313,7 @@ fn exact_revision(value: String) -> Result<GitObjectId, GithubWebhookError> {
 
 fn full_branch_ref(value: String) -> Result<GithubWebhookRef, GithubWebhookError> {
     let git_ref = parse_git_ref(value)?;
-    if git_ref.kind() != GithubPushRefKind::Branch {
+    if git_ref.kind() != GithubWebhookRefKind::Branch {
         return Err(GithubWebhookError::InvalidPayload);
     }
     Ok(git_ref)

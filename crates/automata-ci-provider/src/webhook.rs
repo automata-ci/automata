@@ -10,10 +10,10 @@ use thiserror::Error;
 
 use crate::{
     ExternalDeliveryIdentity, ExternalRepositoryIdentity, NormalizedTrigger,
-    ProviderConfigurationRevision, ProviderConnectionId, ProviderConnectionRevision,
-    ProviderDeliveryId, ProviderEventName, ProviderInstanceId, ProviderSecret,
-    ProviderSecretGeneration, ProviderSecretName, ProviderTriggerError, ProviderTypeId,
-    ProviderWebhookEndpointId, SealedNormalizedTrigger,
+    ProviderConfigurationRevision, ProviderConnectionId, ProviderConnectionManifest,
+    ProviderConnectionRevision, ProviderDeliveryId, ProviderEventName, ProviderInstanceId,
+    ProviderLifecycleState, ProviderSecret, ProviderSecretGeneration, ProviderSecretName,
+    ProviderTriggerError, ProviderTypeId, ProviderWebhookEndpointId, SealedNormalizedTrigger,
 };
 
 /// Hard upper bound for any provider webhook body.
@@ -587,6 +587,7 @@ pub enum ProviderWebhookMethod {
 /// Bounded raw request passed to a delivery adapter before payload parsing.
 pub struct ProviderWebhookRequest {
     endpoint: ProviderWebhookEndpointManifest,
+    connection: ProviderConnectionManifest,
     method: ProviderWebhookMethod,
     headers: ProviderWebhookHeaders,
     body: Vec<u8>,
@@ -599,9 +600,11 @@ impl ProviderWebhookRequest {
     ///
     /// # Errors
     ///
-    /// Rejects disabled endpoints, excessive body bytes, or pre-epoch receipt time.
+    /// Rejects disabled endpoints, mismatched connection policy, excessive body
+    /// bytes, or pre-epoch receipt time.
     pub fn new(
         endpoint: ProviderWebhookEndpointManifest,
+        connection: ProviderConnectionManifest,
         method: ProviderWebhookMethod,
         headers: ProviderWebhookHeaders,
         body: Vec<u8>,
@@ -609,6 +612,15 @@ impl ProviderWebhookRequest {
     ) -> Result<Self, ProviderWebhookError> {
         if endpoint.state() != ProviderWebhookEndpointState::Active {
             return Err(ProviderWebhookError::EndpointInactive);
+        }
+        let configuration = connection.configuration();
+        if connection.connection_id() != endpoint.connection_id()
+            || connection.revision() != endpoint.connection_revision()
+            || connection.state() != ProviderLifecycleState::Active
+            || configuration.repository().instance_id() != endpoint.instance_id()
+            || configuration.provider_revision() != endpoint.provider_revision()
+        {
+            return Err(ProviderWebhookError::EndpointConnectionMismatch);
         }
         if body.len() as u64 > endpoint.body_limit() {
             return Err(ProviderWebhookError::BodyTooLarge);
@@ -619,6 +631,7 @@ impl ProviderWebhookRequest {
         let body_digest = Sha256Digest::from_bytes(Sha256::digest(&body).into());
         Ok(Self {
             endpoint,
+            connection,
             method,
             headers,
             body,
@@ -631,6 +644,12 @@ impl ProviderWebhookRequest {
     #[must_use]
     pub const fn endpoint(&self) -> &ProviderWebhookEndpointManifest {
         &self.endpoint
+    }
+
+    /// Returns the exact connection and adapter policy bound to this endpoint.
+    #[must_use]
+    pub const fn connection(&self) -> &ProviderConnectionManifest {
+        &self.connection
     }
 
     /// Returns the exact request method.
@@ -669,6 +688,7 @@ impl fmt::Debug for ProviderWebhookRequest {
         formatter
             .debug_struct("ProviderWebhookRequest")
             .field("endpoint", &self.endpoint)
+            .field("connection", &self.connection)
             .field("method", &self.method)
             .field("headers", &self.headers)
             .field("body", &"[REDACTED]")
@@ -1619,6 +1639,9 @@ pub enum ProviderWebhookError {
     /// A successor changed immutable binding or violated revision/lifecycle rules.
     #[error("provider webhook endpoint successor is invalid")]
     InvalidEndpointSuccessor,
+    /// The resolved connection disagreed with the endpoint's exact binding.
+    #[error("provider webhook endpoint connection binding is invalid")]
+    EndpointConnectionMismatch,
     /// The selected endpoint is disabled or retired.
     #[error("provider webhook endpoint is inactive")]
     EndpointInactive,
