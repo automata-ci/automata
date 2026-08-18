@@ -262,10 +262,11 @@ pub async fn up_local(request: LocalUpRequest) -> Result<LocalUpOutcome, LocalIn
             OperationId::new(),
         )
         .await?;
+    let holder_lost = holder.holder_lost();
     let (transaction_cancellation, watcher) = linked_cancellation(&request.cancellation, &holder);
     let mutation_fence = holder.mutation_fence(&request.cancellation);
 
-    let operation = cancellation_bounded(&transaction_cancellation, async {
+    let operation = async {
         engine
             .attest_lifecycle_lock(&established.installation, &established.epoch, &holder)
             .await?;
@@ -396,17 +397,6 @@ pub async fn up_local(request: LocalUpRequest) -> Result<LocalUpOutcome, LocalIn
             // lifetime. Completion replay is therefore a read-only
             // attestation branch: it must never rerun enrollment or any other
             // mutating one-off beside the admitted steady services.
-            attest_exact_cas_material(
-                &engine,
-                &established,
-                &artifacts,
-                &relay,
-                &runner_config,
-                &relay_id,
-                &runner_container_id,
-                &mutation_fence,
-            )
-            .await?;
             let repeated = engine
                 .inspect_lifecycle_topology(
                     &established.installation,
@@ -698,7 +688,11 @@ pub async fn up_local(request: LocalUpRequest) -> Result<LocalUpOutcome, LocalIn
             .await?;
         cancellation_checkpoint(&transaction_cancellation)?;
         Ok((desired, resumed))
-    })
+    };
+    let operation = holder_bounded(
+        &holder_lost,
+        cancellation_bounded(&transaction_cancellation, operation),
+    )
     .await;
 
     watcher.abort();
@@ -804,10 +798,11 @@ pub async fn down_local(request: LocalDownRequest) -> Result<LocalDownOutcome, L
             OperationId::new(),
         )
         .await?;
+    let holder_lost = holder.holder_lost();
     let (transaction_cancellation, watcher) = linked_cancellation(&request.cancellation, &holder);
     let mutation_fence = holder.mutation_fence(&request.cancellation);
 
-    let operation = cancellation_bounded(&transaction_cancellation, async {
+    let operation = async {
         engine
             .attest_lifecycle_lock(&established.installation, &established.epoch, &holder)
             .await?;
@@ -942,7 +937,11 @@ pub async fn down_local(request: LocalDownRequest) -> Result<LocalDownOutcome, L
         }
         cancellation_checkpoint(&transaction_cancellation)?;
         Ok((desired, resumed))
-    })
+    };
+    let operation = holder_bounded(
+        &holder_lost,
+        cancellation_bounded(&transaction_cancellation, operation),
+    )
     .await;
 
     watcher.abort();
@@ -1377,6 +1376,21 @@ async fn cancellation_bounded<T>(
         () = cancellation.cancelled() => {
             Err(LocalInitError::new(LocalInitErrorCode::Cancelled))
         }
+    }
+}
+
+async fn holder_bounded<T>(
+    holder_lost: &CancellationToken,
+    operation: impl Future<Output = Result<T, LocalInitError>>,
+) -> Result<T, LocalInitError> {
+    if holder_lost.is_cancelled() {
+        return Err(reset_required());
+    }
+    tokio::pin!(operation);
+    tokio::select! {
+        biased;
+        () = holder_lost.cancelled() => Err(reset_required()),
+        result = &mut operation => result,
     }
 }
 

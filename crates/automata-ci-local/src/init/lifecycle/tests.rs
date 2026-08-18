@@ -133,6 +133,69 @@ fn cancellation_checkpoint_is_fail_closed() {
     );
 }
 
+#[tokio::test]
+async fn lifecycle_boundary_preserves_holder_loss_over_caller_cancellation() {
+    for (cancel_caller, lose_holder, expected) in [
+        (true, false, LocalInitErrorCode::Cancelled),
+        (false, true, LocalInitErrorCode::ResetRequired),
+        (true, true, LocalInitErrorCode::ResetRequired),
+    ] {
+        let holder_lost = CancellationToken::new();
+        let transaction_cancellation = CancellationToken::new();
+        if cancel_caller {
+            transaction_cancellation.cancel();
+        }
+        if lose_holder {
+            holder_lost.cancel();
+        }
+
+        let result = holder_bounded(
+            &holder_lost,
+            cancellation_bounded(&transaction_cancellation, async { Ok(()) }),
+        )
+        .await;
+
+        assert_eq!(result.unwrap_err().code(), expected);
+    }
+}
+
+#[test]
+fn public_up_and_down_use_the_holder_dominant_boundary() {
+    let source = include_str!("../lifecycle.rs");
+    let (_, up_and_later) = source
+        .split_once("pub async fn up_local(")
+        .expect("public up entry point exists");
+    let (up, down_and_later) = up_and_later
+        .split_once("pub async fn down_local(")
+        .expect("public down entry point exists");
+    let (down, _) = down_and_later
+        .split_once("async fn recover_stopped_lock_if_authorized(")
+        .expect("down entry point has a trailing helper boundary");
+
+    for operation in [up, down] {
+        assert_eq!(
+            operation
+                .matches("let holder_lost = holder.holder_lost();")
+                .count(),
+            1
+        );
+        assert_eq!(operation.matches("holder_bounded(").count(), 1);
+    }
+}
+
+#[test]
+fn running_replay_attests_exact_cas_material_once() {
+    let source = include_str!("../lifecycle.rs");
+    let (_, running_and_later) = source
+        .split_once("if let LifecycleTopology::Running { transit_id } = &initial {")
+        .expect("up has a Running replay branch");
+    let (running, _) = running_and_later
+        .split_once("if initial == LifecycleTopology::Partial {")
+        .expect("Running replay precedes Partial convergence");
+
+    assert_eq!(running.matches("attest_exact_cas_material(").count(), 1);
+}
+
 #[test]
 fn lower_hex_is_exact_and_lowercase() {
     assert_eq!(lower_hex(&[0x00, 0x0f, 0x10, 0xab, 0xff]), "000f10abff");
