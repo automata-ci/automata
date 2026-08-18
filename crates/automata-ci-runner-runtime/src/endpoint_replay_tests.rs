@@ -11,7 +11,8 @@ use std::{
 
 use automata_ci_core::{
     AttemptId, EnvironmentProfile, EnvironmentProfileId, FencingToken, JobIrVersion, Lease,
-    LeaseId, OperationId, RunnerId, RunnerSessionId, Sha256Digest, UnixMillis,
+    LeaseId, LogChannel, LogGroup, LogGroupId, LogGroupKind, OperationId, RunnerId,
+    RunnerSessionId, Sha256Digest, UnixMillis,
 };
 use automata_ci_execution::{
     Cancellation, CancellationDisposition, CopyFromRequest, CopyToRequest, DestroyDisposition,
@@ -23,8 +24,9 @@ use automata_ci_execution::{
     TargetPath, WaitRequest,
 };
 use automata_ci_protocol::{
-    CommandSequence, PROTOCOL_MAX_VERSION, RunnerSlotOrdinal, RuntimeAuthorityDeliveryBinding,
-    RuntimeAuthorityGeneration,
+    CommandCursor, CommandSequence, NegotiatedSession, PROTOCOL_MAX_VERSION, ProtocolLimits,
+    RunnerSlotOrdinal, RuntimeAuthorityDeliveryBinding, RuntimeAuthorityGeneration,
+    SessionDisposition,
 };
 use automata_ci_runner_journal::{
     CommitFault, CommitFaultInjector, CommitStage, ContentKind, DurableCommand, DurableContentRef,
@@ -40,7 +42,12 @@ use automata_ci_runner_spool::{
 };
 use sha2::{Digest as _, Sha256};
 
-use crate::{content::ContentOperationCoordinator, endpoint_replay::DurableExecutionEndpoint};
+use crate::{
+    ExecutionCancellation, ExecutionEvents, LogEvent, SystemRuntimeClock, SystemRuntimeIds,
+    content::ContentOperationCoordinator,
+    endpoint_replay::DurableExecutionEndpoint,
+    events::{DurableExecutionEvents, OperationSerialization},
+};
 
 struct Scratch(PathBuf);
 
@@ -454,6 +461,33 @@ impl automata_ci_execution::ExecutionOutputSink for RecordingOutput {
 }
 
 #[derive(Debug)]
+struct DurableLogOutput {
+    events: Arc<DurableExecutionEvents>,
+    group_id: LogGroupId,
+}
+
+impl automata_ci_execution::ExecutionOutputSink for DurableLogOutput {
+    fn observe(
+        &self,
+        record: &automata_ci_execution::ExecutionOutputRecord,
+    ) -> Result<(), automata_ci_execution::ExecutionOutputSinkError> {
+        if !record.is_end_of_stream() {
+            self.events
+                .emit_log(LogEvent::new(
+                    self.group_id.clone(),
+                    match record.stream() {
+                        automata_ci_execution::ExecutionOutputStream::Stdout => LogChannel::Stdout,
+                        automata_ci_execution::ExecutionOutputStream::Stderr => LogChannel::Stderr,
+                    },
+                    record.bytes().to_vec(),
+                ))
+                .map_err(|_| automata_ci_execution::ExecutionOutputSinkError)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
 struct SequencedCancellation {
     observations: AtomicUsize,
     trigger_after: usize,
@@ -486,11 +520,12 @@ struct Fixture {
     journal: Arc<FileJournal>,
     spool: Arc<FileSpool>,
     coordinator: Arc<ContentOperationCoordinator>,
-    serial: Arc<Mutex<()>>,
+    operation_serial: Arc<OperationSerialization>,
     provider: Arc<FakeProvider>,
     inspection: SandboxInspection,
     session_id: RunnerSessionId,
     slot: RunnerSlotOrdinal,
+    attempt_id: AttemptId,
     guard: automata_ci_core::LeaseGuard,
     calls: Arc<AtomicUsize>,
     terminations: Arc<AtomicUsize>,
@@ -670,11 +705,12 @@ impl Fixture {
             journal,
             spool,
             coordinator: Arc::new(ContentOperationCoordinator::default()),
-            serial: Arc::new(Mutex::new(())),
+            operation_serial: Arc::new(OperationSerialization::default()),
             provider,
             inspection,
             session_id,
             slot,
+            attempt_id: lease.attempt_id(),
             guard: lease.guard(),
             calls: Arc::new(AtomicUsize::new(0)),
             terminations: Arc::new(AtomicUsize::new(0)),
@@ -688,7 +724,7 @@ impl Fixture {
             self.journal.clone(),
             self.spool.clone(),
             self.coordinator.clone(),
-            self.serial.clone(),
+            self.operation_serial.clone(),
             self.session_id,
             self.slot,
             self.guard,
@@ -701,6 +737,53 @@ impl Fixture {
             }),
         )
         .expect("bind durable endpoint")
+    }
+
+    fn endpoint_with_live_log_output(
+        &self,
+    ) -> (
+        Box<dyn ExecutionEndpoint>,
+        Arc<DurableExecutionEvents>,
+        LogGroupId,
+    ) {
+        let events = Arc::new(DurableExecutionEvents::new(
+            self.journal.clone(),
+            self.spool.clone(),
+            Arc::new(SystemRuntimeIds),
+            Arc::new(SystemRuntimeClock::new()),
+            NegotiatedSession::new(
+                PROTOCOL_MAX_VERSION,
+                JobIrVersion::current(),
+                self.session_id,
+                SessionDisposition::Opened,
+                CommandCursor::initial(),
+            ),
+            self.slot,
+            self.attempt_id,
+            self.guard,
+            ProtocolLimits::default(),
+            self.coordinator.clone(),
+            ExecutionCancellation::new(),
+        ));
+        let group_id = LogGroupId::new("job/live-output").expect("log group id");
+        events
+            .begin_log_group(
+                LogGroup::new(group_id.clone(), None, "Live output", LogGroupKind::Step, 0)
+                    .expect("log group"),
+            )
+            .expect("begin log group");
+        let endpoint = events
+            .bind_endpoint(
+                self.provider.clone(),
+                self.inspection.clone(),
+                Box::new(FakeEndpoint {
+                    handle: self.inspection.handle().clone(),
+                    calls: self.calls.clone(),
+                    terminations: self.terminations.clone(),
+                }),
+            )
+            .expect("bind durable endpoint");
+        (endpoint, events, group_id)
     }
 
     fn request(operation_id: OperationId, source: &str) -> CopyFromRequest {
@@ -802,6 +885,35 @@ fn completed_exec_replays_the_exact_output_records_without_reinvoking_the_backen
         *replay_sink.0.lock().expect("replayed records"),
         replay.records()
     );
+}
+
+#[test]
+fn live_output_is_durable_while_a_replay_protected_command_is_running() {
+    let fixture = Fixture::new("live-output-lock-domains");
+    let (endpoint, events, group_id) = fixture.endpoint_with_live_log_output();
+    let command = ExecutionCommand::new(
+        OperationId::new(),
+        ExecutionArgv::new(
+            TargetPath::posix("/usr/bin/live-output").expect("program"),
+            Vec::new(),
+        )
+        .expect("argv"),
+        TargetPath::posix("/workspace").expect("working directory"),
+        ExecutionEnvironment::empty(),
+        Duration::from_secs(30),
+        1_024,
+    )
+    .expect("command");
+    let output = Arc::new(DurableLogOutput { events, group_id });
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let result = endpoint.exec(&command, &automata_ci_execution::NeverCancelled, output);
+        let _ = sender.send(result);
+    });
+    receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("live output must not deadlock endpoint replay")
+        .expect("live-output command");
 }
 
 #[test]
