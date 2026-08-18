@@ -9,21 +9,27 @@ use automata_ci_provider::{
 };
 use thiserror::Error;
 
-use crate::{ProviderProcessingOutcome, ProviderProcessingProcessor};
+use crate::{ProviderProcessingLease, ProviderProcessingOutcome, ProviderProcessingProcessor};
 
-const MAX_PROVIDER_CONTROL_RESOLVERS: usize = 32;
+const MAX_PROVIDER_CONTROL_HANDLERS: usize = 32;
 
-/// Provider-specific authority that resolves native result identity to its trigger delivery.
+/// Provider-specific authority that idempotently handles one native control.
+///
+/// Implementations must reauthorize current actor and result identity, perform
+/// the requested operation idempotently, and return the originating trigger
+/// delivery when one exists. A crash may cause the same control to be handled
+/// again before its processing invocation is durably completed.
 #[async_trait]
-pub trait ProviderControlResolver: fmt::Debug + Send + Sync {
-    /// Returns the exact provider adapter type handled by this resolver.
+pub trait ProviderControlHandler: fmt::Debug + Send + Sync {
+    /// Returns the exact provider adapter type handled by this handler.
     fn provider_type(&self) -> &ProviderTypeId;
 
-    /// Reauthorizes and resolves one authenticated control to an immutable trigger.
-    async fn resolve(
+    /// Reauthorizes and idempotently executes one authenticated control.
+    async fn handle(
         &self,
         control: &VerifiedProviderControlDelivery,
-    ) -> Result<ProviderDeliveryId, ProviderControlResolutionError>;
+        lease: &ProviderProcessingLease,
+    ) -> Result<Option<ProviderDeliveryId>, ProviderControlHandlingError>;
 }
 
 /// Provider-independent workflow admission invoked only for a resolved trigger.
@@ -33,74 +39,72 @@ pub trait ProviderTriggerProcessor: fmt::Debug + Send + Sync {
     async fn process_trigger(
         &self,
         invocation: &ClaimedProviderProcessing,
+        lease: &ProviderProcessingLease,
     ) -> ProviderProcessingOutcome;
 }
 
-/// Exact duplicate-free registry of statically linked provider control resolvers.
+/// Exact duplicate-free registry of statically linked provider control handlers.
 #[derive(Clone)]
-pub struct ProviderControlResolverRegistry {
-    resolvers: BTreeMap<ProviderTypeId, Arc<dyn ProviderControlResolver>>,
+pub struct ProviderControlHandlerRegistry {
+    handlers: BTreeMap<ProviderTypeId, Arc<dyn ProviderControlHandler>>,
 }
 
-impl ProviderControlResolverRegistry {
-    /// Builds a bounded nonempty resolver registry.
+impl ProviderControlHandlerRegistry {
+    /// Builds a bounded nonempty handler registry.
     ///
     /// # Errors
     ///
-    /// Rejects an empty, excessive, duplicate, or self-inconsistent resolver set.
+    /// Rejects an empty, excessive, duplicate, or self-inconsistent handler set.
     pub fn new(
-        resolvers: impl IntoIterator<Item = Arc<dyn ProviderControlResolver>>,
-    ) -> Result<Self, ProviderControlResolverRegistryError> {
+        handlers: impl IntoIterator<Item = Arc<dyn ProviderControlHandler>>,
+    ) -> Result<Self, ProviderControlHandlerRegistryError> {
         let mut values = BTreeMap::new();
-        for resolver in resolvers {
-            let key = resolver.provider_type().clone();
-            if values.insert(key, resolver).is_some() {
-                return Err(ProviderControlResolverRegistryError::Duplicate);
+        for handler in handlers {
+            let key = handler.provider_type().clone();
+            if values.insert(key, handler).is_some() {
+                return Err(ProviderControlHandlerRegistryError::Duplicate);
             }
         }
-        if values.is_empty() || values.len() > MAX_PROVIDER_CONTROL_RESOLVERS {
-            return Err(ProviderControlResolverRegistryError::InvalidSize);
+        if values.is_empty() || values.len() > MAX_PROVIDER_CONTROL_HANDLERS {
+            return Err(ProviderControlHandlerRegistryError::InvalidSize);
         }
         if values
             .iter()
-            .any(|(key, resolver)| resolver.provider_type() != key)
+            .any(|(key, handler)| handler.provider_type() != key)
         {
-            return Err(ProviderControlResolverRegistryError::Inconsistent);
+            return Err(ProviderControlHandlerRegistryError::Inconsistent);
         }
-        Ok(Self { resolvers: values })
+        Ok(Self { handlers: values })
     }
 
-    fn resolve(&self, provider_type: &ProviderTypeId) -> Option<&dyn ProviderControlResolver> {
-        self.resolvers.get(provider_type).map(Arc::as_ref)
+    fn handler(&self, provider_type: &ProviderTypeId) -> Option<&dyn ProviderControlHandler> {
+        self.handlers.get(provider_type).map(Arc::as_ref)
     }
 }
 
-impl fmt::Debug for ProviderControlResolverRegistry {
+impl fmt::Debug for ProviderControlHandlerRegistry {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("ProviderControlResolverRegistry")
-            .field("provider_types", &self.resolvers.keys().collect::<Vec<_>>())
+            .debug_struct("ProviderControlHandlerRegistry")
+            .field("provider_types", &self.handlers.keys().collect::<Vec<_>>())
             .finish()
     }
 }
 
-/// Processing handler that resolves controls before invoking common trigger admission.
+/// Processing dispatcher for idempotent controls and ordinary trigger admission.
 pub struct ProviderProcessingDispatcher {
-    resolvers: ProviderControlResolverRegistry,
+    handlers: ProviderControlHandlerRegistry,
     triggers: Arc<dyn ProviderTriggerProcessor>,
 }
 
 impl ProviderProcessingDispatcher {
-    /// Composes exact provider control resolution with provider-independent admission.
+    /// Composes exact provider control handling with provider-independent admission.
     #[must_use]
     pub fn new(
-        resolvers: ProviderControlResolverRegistry,
+        handlers: ProviderControlHandlerRegistry,
         triggers: Arc<dyn ProviderTriggerProcessor>,
     ) -> Self {
-        Self {
-            resolvers,
-            triggers,
-        }
+        Self { handlers, triggers }
     }
 }
 
@@ -108,7 +112,7 @@ impl fmt::Debug for ProviderProcessingDispatcher {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ProviderProcessingDispatcher")
-            .field("resolvers", &self.resolvers)
+            .field("handlers", &self.handlers)
             .field("triggers", &self.triggers)
             .finish()
     }
@@ -116,35 +120,51 @@ impl fmt::Debug for ProviderProcessingDispatcher {
 
 #[async_trait]
 impl ProviderProcessingProcessor for ProviderProcessingDispatcher {
-    async fn process(&self, invocation: &ClaimedProviderProcessing) -> ProviderProcessingOutcome {
+    async fn process(
+        &self,
+        invocation: &ClaimedProviderProcessing,
+        lease: &ProviderProcessingLease,
+    ) -> ProviderProcessingOutcome {
         let ProviderProcessingInput::Control(control) = invocation.input() else {
-            return self.triggers.process_trigger(invocation).await;
+            // A control handler has already performed its idempotent operation.
+            // Binding an originating trigger is durable provenance only; it
+            // must never replay the original webhook admission side effects.
+            let Some(source_delivery_id) = invocation.receipt().source_delivery_id() else {
+                return ProviderProcessingOutcome::Fail(ProviderProcessingFailure::InvalidEvidence);
+            };
+            if invocation.receipt().cause_delivery_id() != source_delivery_id {
+                return ProviderProcessingOutcome::Complete;
+            }
+            return self.triggers.process_trigger(invocation, lease).await;
         };
-        let Some(resolver) = self.resolvers.resolve(control.evidence().provider_type()) else {
+        let Some(handler) = self.handlers.handler(control.evidence().provider_type()) else {
             return ProviderProcessingOutcome::Fail(ProviderProcessingFailure::InvalidEvidence);
         };
-        match resolver.resolve(control).await {
-            Ok(source_delivery_id) => ProviderProcessingOutcome::ResolveControl(source_delivery_id),
-            Err(ProviderControlResolutionError::Unavailable) => {
+        match handler.handle(control, lease).await {
+            Ok(Some(source_delivery_id)) => {
+                ProviderProcessingOutcome::ResolveControl(source_delivery_id)
+            }
+            Ok(None) => ProviderProcessingOutcome::Complete,
+            Err(ProviderControlHandlingError::Unavailable) => {
                 ProviderProcessingOutcome::Retry(ProviderProcessingFailure::DependencyUnavailable)
             }
             Err(
-                ProviderControlResolutionError::Unauthorized
-                | ProviderControlResolutionError::NotFound
-                | ProviderControlResolutionError::Conflict,
+                ProviderControlHandlingError::Unauthorized
+                | ProviderControlHandlingError::NotFound
+                | ProviderControlHandlingError::Conflict,
             ) => ProviderProcessingOutcome::Fail(ProviderProcessingFailure::PolicyRejected),
-            Err(ProviderControlResolutionError::InvalidEvidence) => {
+            Err(ProviderControlHandlingError::InvalidEvidence) => {
                 ProviderProcessingOutcome::Fail(ProviderProcessingFailure::InvalidEvidence)
             }
         }
     }
 }
 
-/// Sanitized provider-native control resolution failure.
+/// Sanitized provider-native control handling failure.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
-pub enum ProviderControlResolutionError {
-    /// Provider or durable resolution dependencies were unavailable.
-    #[error("provider control resolution is unavailable")]
+pub enum ProviderControlHandlingError {
+    /// Provider or durable handling dependencies were unavailable.
+    #[error("provider control handling is unavailable")]
     Unavailable,
     /// The authenticated actor lacks current Automata authority.
     #[error("provider control actor is unauthorized")]
@@ -160,17 +180,17 @@ pub enum ProviderControlResolutionError {
     InvalidEvidence,
 }
 
-/// Invalid control-resolver registry construction.
+/// Invalid control-handler registry construction.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
-pub enum ProviderControlResolverRegistryError {
+pub enum ProviderControlHandlerRegistryError {
     /// Registry was empty or exceeded its hard bound.
-    #[error("provider control resolver registry size is invalid")]
+    #[error("provider control handler registry size is invalid")]
     InvalidSize,
-    /// Two resolvers registered the same provider type.
-    #[error("provider control resolver type is duplicated")]
+    /// Two handlers registered the same provider type.
+    #[error("provider control handler type is duplicated")]
     Duplicate,
-    /// A resolver's declared provider type changed during construction.
-    #[error("provider control resolver identity is inconsistent")]
+    /// A handler's declared provider type changed during construction.
+    #[error("provider control handler identity is inconsistent")]
     Inconsistent,
 }
 
@@ -181,14 +201,14 @@ mod tests {
     use super::*;
 
     #[derive(Debug)]
-    struct Resolver {
+    struct Handler {
         first: ProviderTypeId,
         subsequent: ProviderTypeId,
         calls: AtomicUsize,
     }
 
     #[async_trait]
-    impl ProviderControlResolver for Resolver {
+    impl ProviderControlHandler for Handler {
         fn provider_type(&self) -> &ProviderTypeId {
             if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
                 &self.first
@@ -197,16 +217,17 @@ mod tests {
             }
         }
 
-        async fn resolve(
+        async fn handle(
             &self,
             _control: &VerifiedProviderControlDelivery,
-        ) -> Result<ProviderDeliveryId, ProviderControlResolutionError> {
+            _lease: &ProviderProcessingLease,
+        ) -> Result<Option<ProviderDeliveryId>, ProviderControlHandlingError> {
             unreachable!("registry construction never resolves controls")
         }
     }
 
-    fn resolver(first: &str, subsequent: &str) -> Arc<dyn ProviderControlResolver> {
-        Arc::new(Resolver {
+    fn handler(first: &str, subsequent: &str) -> Arc<dyn ProviderControlHandler> {
+        Arc::new(Handler {
             first: ProviderTypeId::new(first).expect("first provider type"),
             subsequent: ProviderTypeId::new(subsequent).expect("subsequent provider type"),
             calls: AtomicUsize::new(0),
@@ -216,29 +237,29 @@ mod tests {
     #[test]
     fn registry_rejects_empty_duplicate_oversized_and_changing_identities() {
         assert!(matches!(
-            ProviderControlResolverRegistry::new([]),
-            Err(ProviderControlResolverRegistryError::InvalidSize)
+            ProviderControlHandlerRegistry::new([]),
+            Err(ProviderControlHandlerRegistryError::InvalidSize)
         ));
         assert!(matches!(
-            ProviderControlResolverRegistry::new([
-                resolver("github", "github"),
-                resolver("github", "github"),
+            ProviderControlHandlerRegistry::new([
+                handler("github", "github"),
+                handler("github", "github"),
             ]),
-            Err(ProviderControlResolverRegistryError::Duplicate)
+            Err(ProviderControlHandlerRegistryError::Duplicate)
         ));
-        let oversized = (0..=MAX_PROVIDER_CONTROL_RESOLVERS)
+        let oversized = (0..=MAX_PROVIDER_CONTROL_HANDLERS)
             .map(|index| {
                 let provider_type = format!("provider-{index}");
-                resolver(&provider_type, &provider_type)
+                handler(&provider_type, &provider_type)
             })
             .collect::<Vec<_>>();
         assert!(matches!(
-            ProviderControlResolverRegistry::new(oversized),
-            Err(ProviderControlResolverRegistryError::InvalidSize)
+            ProviderControlHandlerRegistry::new(oversized),
+            Err(ProviderControlHandlerRegistryError::InvalidSize)
         ));
         assert!(matches!(
-            ProviderControlResolverRegistry::new([resolver("github", "forgejo")]),
-            Err(ProviderControlResolverRegistryError::Inconsistent)
+            ProviderControlHandlerRegistry::new([handler("github", "forgejo")]),
+            Err(ProviderControlHandlerRegistryError::Inconsistent)
         ));
     }
 }

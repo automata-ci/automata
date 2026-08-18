@@ -10,11 +10,12 @@ mod worker;
 
 pub use clock::{ProviderDeliveryClock, ProviderDeliveryClockError, SystemProviderDeliveryClock};
 pub use control::{
-    ProviderControlResolutionError, ProviderControlResolver, ProviderControlResolverRegistry,
-    ProviderControlResolverRegistryError, ProviderProcessingDispatcher, ProviderTriggerProcessor,
+    ProviderControlHandler, ProviderControlHandlerRegistry, ProviderControlHandlerRegistryError,
+    ProviderControlHandlingError, ProviderProcessingDispatcher, ProviderTriggerProcessor,
 };
 pub use ingress::{PreparedProviderWebhook, ProviderDeliveryIngress, ProviderDeliveryIngressError};
 pub use worker::{
-    ProviderProcessingOutcome, ProviderProcessingProcessor, ProviderProcessingWorker,
-    ProviderProcessingWorkerConfig, ProviderProcessingWorkerError, ProviderProcessingWorkerOutcome,
+    ProviderProcessingLease, ProviderProcessingOutcome, ProviderProcessingProcessor,
+    ProviderProcessingWorker, ProviderProcessingWorkerConfig, ProviderProcessingWorkerError,
+    ProviderProcessingWorkerOutcome,
 };
