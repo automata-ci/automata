@@ -58,6 +58,26 @@ def sanitized_connection() -> tuple[str, str | None]:
     return sanitized, password
 
 
+def psql_binary(environment: dict[str, str]) -> pathlib.Path:
+    configured = environment.get("AUTOMATA_PSQL_BINARY")
+    if configured is not None:
+        binary = pathlib.Path(configured)
+        if not binary.is_absolute():
+            fail("AUTOMATA_PSQL_BINARY must be an absolute path")
+        return binary
+
+    candidates = [pathlib.Path("/usr/bin/psql")]
+    if sys.platform == "darwin":
+        candidates = [
+            pathlib.Path("/opt/homebrew/opt/postgresql@18/bin/psql"),
+            pathlib.Path("/usr/local/opt/postgresql@18/bin/psql"),
+            *candidates,
+        ]
+    return next(
+        (candidate for candidate in candidates if candidate.is_file()), candidates[0]
+    )
+
+
 def main() -> NoReturn:
     for argument in sys.argv[1:]:
         if argument == "-d" or argument.startswith("--dbname"):
@@ -69,16 +89,17 @@ def main() -> NoReturn:
     if password is not None:
         environment["PGPASSWORD"] = password
 
-    binary = pathlib.Path(
-        environment.get("AUTOMATA_PSQL_BINARY", "/usr/bin/psql")
-    )
-    if not binary.is_absolute():
-        fail("AUTOMATA_PSQL_BINARY must be an absolute path")
-    os.execve(
-        binary,
-        [str(binary), f"--dbname={connection}", *sys.argv[1:]],
-        environment,
-    )
+    binary = psql_binary(environment)
+    try:
+        os.execve(
+            binary,
+            [str(binary), f"--dbname={connection}", *sys.argv[1:]],
+            environment,
+        )
+    except FileNotFoundError:
+        fail("psql was not found; set AUTOMATA_PSQL_BINARY to its absolute path")
+    except PermissionError:
+        fail("the configured psql binary is not executable")
 
 
 if __name__ == "__main__":

@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if (( BASH_VERSINFO[0] < 4 )); then
+  printf '%s\n' \
+    'error: PostgreSQL tests require Bash 4 or newer; on macOS install Homebrew bash and put /opt/homebrew/bin first in PATH' \
+    >&2
+  exit 2
+fi
+
 usage() {
   printf 'usage: %s [--plan] [--defer-cleanup]\n' "$0" >&2
 }
