@@ -1280,11 +1280,529 @@ fn request_timeout_millis(endpoint: &GithubHttpEndpoint) -> i64 {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    use automata_ci_core::{GitObjectId, RunId, UnixMillis, WorkspaceId};
+    use automata_ci_provider::{
+        ClaimedProviderResult, DesiredProviderResult, ExternalRepositoryIdentity,
+        ProviderArchiveLimits, ProviderConfigurationRevision, ProviderConnectionConfiguration,
+        ProviderConnectionManifest, ProviderConnectionRevision, ProviderDefaultBranch,
+        ProviderInstanceId, ProviderInstanceManifest, ProviderInstanceRecord,
+        ProviderLifecycleState, ProviderOrigins, ProviderRepositoryPath, ProviderResultClaimFence,
+        ProviderResultDetailsUrl, ProviderResultPhase, ProviderResultProjection,
+        ProviderResultSubject, ProviderResultSubjectId, ProviderResultSubjectKind,
+        ProviderResultSummary, ProviderResultTitle, ProviderResultWorkerId,
+        ProviderRunnerPolicyBinding, ProviderSecretBindings, ProviderSecretSet,
+        ProviderWorkflowSource, RepositoryVisibility, provider_capability_digest,
+    };
     use automata_ci_provider::{
         ProviderResultBinding, ProviderResultModelError, ProviderResultName,
     };
+    use automata_ci_provider_delivery::ProviderRuntimeContext;
+    use automata_ci_provider_github::{
+        GithubConnectionPolicy, GithubInstanceConfiguration, GithubJwtIssuer, GithubProviderFactory,
+    };
+    use tokio::{
+        io::{AsyncReadExt as _, AsyncWriteExt as _},
+        net::TcpListener,
+    };
+    use url::Url;
+    use uuid::Uuid;
 
     use super::*;
+
+    const SHA: &str = "1111111111111111111111111111111111111111";
+    const RESULT_NAME: &str = "Automata CI / build";
+
+    #[derive(Debug)]
+    struct ExactCredentials {
+        operations: Mutex<Vec<GithubResultOperation>>,
+        releases: Arc<AtomicUsize>,
+    }
+
+    #[derive(Debug)]
+    struct Release(Arc<AtomicUsize>);
+
+    #[async_trait]
+    impl GithubResultCredentialRelease for Release {
+        async fn release(self: Box<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait]
+    impl GithubResultCredentialProvider for ExactCredentials {
+        async fn acquire(
+            &self,
+            request: GithubResultCredentialRequest<'_>,
+        ) -> Result<GithubResultCredential, GithubResultCredentialProviderError> {
+            self.operations
+                .lock()
+                .expect("operation lock")
+                .push(request.operation());
+            GithubResultCredential::new(
+                request.context().connection().connection_id(),
+                request.context().connection().revision(),
+                request
+                    .context()
+                    .connection()
+                    .configuration()
+                    .repository()
+                    .external_id()
+                    .clone(),
+                request.claimed().claim(),
+                request.operation(),
+                request.app_id(),
+                request.installation_id(),
+                request.repository().clone(),
+                SecretString::new("github-result-test-token".to_owned()).expect("test credential"),
+                request.required_through(),
+                UnixMillis::new(request.required_through().get() + 1),
+                Box::new(Release(Arc::clone(&self.releases))),
+            )
+            .map_err(|_| GithubResultCredentialProviderError::InvariantViolation)
+        }
+    }
+
+    #[derive(Debug)]
+    struct RecordedRequest {
+        method: String,
+        target: String,
+        headers: String,
+        body: Vec<u8>,
+    }
+
+    #[tokio::test]
+    async fn queued_result_converges_through_exact_least_authority_operations() {
+        let (api, requests, server) = http_server(vec![
+            (
+                "201 Created",
+                format!(r#"{{"id":701,"head_sha":"{SHA}","app":{{"id":501}}}}"#),
+            ),
+            ("201 Created", run_json(601, "queued", None)),
+            ("200 OK", run_json(601, "queued", None)),
+        ])
+        .await;
+        let context = context(&api);
+        let releases = Arc::new(AtomicUsize::new(0));
+        let credentials = Arc::new(ExactCredentials {
+            operations: Mutex::new(Vec::new()),
+            releases: Arc::clone(&releases),
+        });
+        let adapter = GithubResultProviderAdapter::new(
+            credentials.clone(),
+            "automata-result-test/1",
+            GithubHttpLimits::default(),
+        )
+        .expect("result adapter");
+        let (subject, desired, claim) = queued_result(context.connection());
+        let mut continuation = None;
+
+        for expected in [
+            GithubResultOperation::EnsureSuite,
+            GithubResultOperation::CreateRun,
+        ] {
+            let claimed = ClaimedProviderResult::new(
+                subject.clone(),
+                desired.clone(),
+                claim,
+                1,
+                None,
+                continuation.take(),
+            )
+            .expect("claimed result");
+            let ProviderResultAdapterOutcome::Retry {
+                continuation: Some(next),
+                retry_after: None,
+            } = adapter.publish_result(&context, &claimed).await
+            else {
+                panic!("{expected:?} must advance durable adapter state");
+            };
+            continuation = Some(next);
+        }
+
+        let claimed = ClaimedProviderResult::new(subject, desired, claim, 1, None, continuation)
+            .expect("bound result");
+        let ProviderResultAdapterOutcome::Published(observation) =
+            adapter.publish_result(&context, &claimed).await
+        else {
+            panic!("queued native result must converge");
+        };
+        assert_eq!(
+            observation.external_id().map(ExternalResultId::as_str),
+            Some("github-check:701:601")
+        );
+        assert_eq!(
+            credentials
+                .operations
+                .lock()
+                .expect("operation lock")
+                .as_slice(),
+            &[
+                GithubResultOperation::EnsureSuite,
+                GithubResultOperation::CreateRun,
+                GithubResultOperation::ReadRun,
+            ]
+        );
+
+        server.await.expect("result server");
+        wait_for_releases(&releases, 3).await;
+        let requests = requests.lock().expect("request lock");
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[0].method, "POST");
+        assert_eq!(
+            requests[0].target,
+            "/api/v3/repos/owner/repository/check-suites"
+        );
+        assert_eq!(requests[1].method, "POST");
+        assert_eq!(
+            requests[1].target,
+            "/api/v3/repos/owner/repository/check-runs"
+        );
+        assert_eq!(requests[2].method, "GET");
+        assert_eq!(
+            requests[2].target,
+            "/api/v3/repos/owner/repository/check-runs/601"
+        );
+        assert!(
+            requests
+                .iter()
+                .all(|request| request.headers.contains("authorization: Bearer [REDACTED]"))
+        );
+        let create: serde_json::Value =
+            serde_json::from_slice(&requests[1].body).expect("create body");
+        assert_eq!(create["name"], RESULT_NAME);
+        assert_eq!(create["external_id"], claimed.marker().as_str());
+        assert_eq!(
+            create["details_url"],
+            "https://ci.automata.example/actions/runs/1"
+        );
+    }
+
+    #[tokio::test]
+    async fn completed_result_reconciles_one_bound_run_without_recreating_it() {
+        let (api, requests, server) = http_server(vec![
+            ("200 OK", run_json(601, "in_progress", None)),
+            ("200 OK", run_json(601, "completed", Some("success"))),
+        ])
+        .await;
+        let context = context(&api);
+        let releases = Arc::new(AtomicUsize::new(0));
+        let credentials = Arc::new(ExactCredentials {
+            operations: Mutex::new(Vec::new()),
+            releases: Arc::clone(&releases),
+        });
+        let adapter = GithubResultProviderAdapter::new(
+            credentials.clone(),
+            "automata-result-test/1",
+            GithubHttpLimits::default(),
+        )
+        .expect("result adapter");
+        let (subject, _, _) = queued_result(context.connection());
+        let projection = ProviderResultProjection::new(
+            ProviderResultPhase::Completed,
+            Some(ProviderResultConclusion::Success),
+            ProviderResultTitle::new("build passed").expect("title"),
+            ProviderResultSummary::new("all jobs passed").expect("summary"),
+            Vec::new(),
+            UnixMillis::new(10_000),
+        )
+        .expect("completed projection");
+        let desired = DesiredProviderResult::new(2, projection).expect("desired result");
+        let claim = ProviderResultClaimFence::new(
+            subject.subject_id(),
+            2,
+            ProviderResultWorkerId::from_uuid(
+                Uuid::parse_str("50000000-0000-4000-8000-000000000002").expect("worker UUID"),
+            )
+            .expect("worker ID"),
+            2,
+            UnixMillis::new(11_000),
+            UnixMillis::new(311_000),
+        )
+        .expect("result claim");
+        let binding = ProviderResultBinding::new(
+            ExternalResultId::new("github-check:701:601").expect("external result"),
+        );
+        let first = ClaimedProviderResult::new(
+            subject.clone(),
+            desired.clone(),
+            claim,
+            1,
+            Some(binding.clone()),
+            None,
+        )
+        .expect("claimed result");
+        let ProviderResultAdapterOutcome::Retry {
+            continuation: Some(continuation),
+            retry_after: None,
+        } = adapter.publish_result(&context, &first).await
+        else {
+            panic!("nonterminal native run must advance to completion");
+        };
+        let second = ClaimedProviderResult::new(
+            subject,
+            desired,
+            claim,
+            1,
+            Some(binding),
+            Some(continuation),
+        )
+        .expect("continued result");
+        assert!(matches!(
+            adapter.publish_result(&context, &second).await,
+            ProviderResultAdapterOutcome::Published(_)
+        ));
+
+        server.await.expect("result server");
+        wait_for_releases(&releases, 2).await;
+        assert_eq!(
+            credentials
+                .operations
+                .lock()
+                .expect("operation lock")
+                .as_slice(),
+            &[
+                GithubResultOperation::ReadRun,
+                GithubResultOperation::CompleteRun,
+            ]
+        );
+        let requests = requests.lock().expect("request lock");
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].method, "GET");
+        assert_eq!(requests[1].method, "PATCH");
+        assert!(
+            requests
+                .iter()
+                .all(|request| !request.target.contains("check-suites"))
+        );
+        let completion: serde_json::Value =
+            serde_json::from_slice(&requests[1].body).expect("completion body");
+        assert_eq!(completion["status"], "completed");
+        assert_eq!(completion["conclusion"], "success");
+        assert_eq!(completion["output"]["title"], "build passed");
+        assert_eq!(completion["output"]["summary"], "all jobs passed");
+    }
+
+    fn context(api: &Url) -> ProviderRuntimeContext {
+        let instance_id = ProviderInstanceId::from_uuid(
+            Uuid::parse_str("10000000-0000-4000-8000-000000000001").expect("instance UUID"),
+        )
+        .expect("instance ID");
+        let revision = ProviderConfigurationRevision::new(1).expect("provider revision");
+        let mut web = api.clone();
+        web.set_path("/");
+        let capabilities = GithubProviderFactory::capabilities().expect("capabilities");
+        let manifest = ProviderInstanceManifest::new(
+            instance_id,
+            ProviderTypeId::new("github").expect("provider type"),
+            revision,
+            ProviderLifecycleState::Active,
+            ProviderOrigins::new(web.as_str(), api.as_str()).expect("provider origins"),
+            GithubInstanceConfiguration::new(
+                501,
+                "Iv1.automata",
+                GithubJwtIssuer::AppClientId,
+                web,
+            )
+            .expect("instance configuration")
+            .document()
+            .expect("configuration document"),
+            ProviderSecretBindings::empty(),
+            provider_capability_digest(&capabilities).expect("capability digest"),
+            UnixMillis::new(100),
+            Some(UnixMillis::new(100)),
+            None,
+        )
+        .expect("provider manifest");
+        let secrets = ProviderSecretSet::new(manifest.secrets(), []).expect("empty secrets");
+        let provider = ProviderInstanceRecord::new(manifest, secrets).expect("provider record");
+        let policy = GithubConnectionPolicy::new(
+            71,
+            RepositoryId::new("owner/repository").expect("repository route"),
+        )
+        .expect("connection policy")
+        .document()
+        .expect("connection document");
+        let configuration = ProviderConnectionConfiguration::new(
+            WorkspaceId::parse("11111111-1111-4111-8111-111111111111").expect("workspace"),
+            ExternalRepositoryIdentity::new(
+                instance_id,
+                ExternalRepositoryId::new("42").expect("repository ID"),
+            ),
+            revision,
+            provider.manifest().configuration().digest(),
+            provider.manifest().capability_digest(),
+            RepositoryVisibility::Private,
+            ProviderDefaultBranch::new("main").expect("default branch"),
+            ProviderWorkflowSource::Directory(
+                ProviderRepositoryPath::new(".ci/workflows").expect("workflow root"),
+            ),
+            ProviderRunnerPolicyBinding::new(
+                ProviderSchemaVersion::new(1).expect("runner schema"),
+                Sha256Digest::from_bytes([5; 32]),
+            ),
+            ProviderArchiveLimits::new(1_024, 8_192, 100, 1_024, 10, 1_024)
+                .expect("archive limits"),
+            policy,
+        );
+        let connection = ProviderConnectionManifest::new(
+            ProviderConnectionId::from_uuid(
+                Uuid::parse_str("20000000-0000-4000-8000-000000000001").expect("connection UUID"),
+            )
+            .expect("connection ID"),
+            ProviderConnectionRevision::new(1).expect("connection revision"),
+            ProviderLifecycleState::Active,
+            configuration,
+            UnixMillis::new(100),
+            Some(UnixMillis::new(100)),
+            None,
+        )
+        .expect("connection manifest");
+        ProviderRuntimeContext::new(provider, connection).expect("runtime context")
+    }
+
+    fn queued_result(
+        connection: &ProviderConnectionManifest,
+    ) -> (
+        ProviderResultSubject,
+        DesiredProviderResult,
+        ProviderResultClaimFence,
+    ) {
+        let run_id = RunId::from_uuid(
+            Uuid::parse_str("30000000-0000-4000-8000-000000000001").expect("run UUID"),
+        );
+        let subject_id = ProviderResultSubjectId::from_uuid(
+            Uuid::parse_str("40000000-0000-8000-8000-000000000001").expect("subject UUID"),
+        )
+        .expect("subject ID");
+        let subject = ProviderResultSubject::new(
+            subject_id,
+            connection,
+            GitObjectId::from_provider_hex(SHA).expect("object"),
+            ProviderResultName::new(RESULT_NAME).expect("result name"),
+            ProviderResultDetailsUrl::new(
+                "https://ci.automata.example/actions/runs/1"
+                    .parse()
+                    .expect("details URL"),
+            )
+            .expect("details URL"),
+            ProviderResultSubjectKind::WorkflowRun { run_id },
+            1,
+            UnixMillis::new(1_000),
+        )
+        .expect("result subject");
+        let projection = ProviderResultProjection::new(
+            ProviderResultPhase::Queued,
+            None,
+            ProviderResultTitle::new("build").expect("title"),
+            ProviderResultSummary::new("queued").expect("summary"),
+            Vec::new(),
+            UnixMillis::new(1_000),
+        )
+        .expect("projection");
+        let desired = DesiredProviderResult::new(1, projection).expect("desired result");
+        let worker_id = ProviderResultWorkerId::from_uuid(
+            Uuid::parse_str("50000000-0000-4000-8000-000000000001").expect("worker UUID"),
+        )
+        .expect("worker ID");
+        let claim = ProviderResultClaimFence::new(
+            subject_id,
+            1,
+            worker_id,
+            1,
+            UnixMillis::new(2_000),
+            UnixMillis::new(302_000),
+        )
+        .expect("result claim");
+        (subject, desired, claim)
+    }
+
+    async fn http_server(
+        responses: Vec<(&'static str, String)>,
+    ) -> (
+        Url,
+        Arc<Mutex<Vec<RecordedRequest>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+        let address = listener.local_addr().expect("listener address");
+        let api = Url::parse(&format!("http://{address}/api/v3/")).expect("API URL");
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&requests);
+        let server = tokio::spawn(async move {
+            for (status, body) in responses {
+                let (mut stream, _) = listener.accept().await.expect("connection");
+                let request = read_request(&mut stream).await;
+                recorded.lock().expect("request lock").push(request);
+                let response = format!(
+                    "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("response");
+            }
+        });
+        (api, requests, server)
+    }
+
+    fn run_json(id: u64, status: &str, conclusion: Option<&str>) -> String {
+        let conclusion =
+            conclusion.map_or_else(|| "null".to_owned(), |value| format!(r#""{value}""#));
+        format!(
+            r#"{{"id":{id},"head_sha":"{SHA}","external_id":"automata-result:40000000-0000-8000-8000-000000000001","details_url":"https://ci.automata.example/actions/runs/1","status":"{status}","conclusion":{conclusion},"name":"{RESULT_NAME}","check_suite":{{"id":701}},"app":{{"id":501}}}}"#
+        )
+    }
+
+    async fn read_request(stream: &mut tokio::net::TcpStream) -> RecordedRequest {
+        let mut bytes = Vec::new();
+        let header_end = loop {
+            let mut chunk = [0_u8; 1_024];
+            let count = stream.read(&mut chunk).await.expect("request read");
+            assert_ne!(count, 0, "request ended before headers");
+            bytes.extend_from_slice(&chunk[..count]);
+            if let Some(offset) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+                break offset + 4;
+            }
+        };
+        let headers = String::from_utf8(bytes[..header_end].to_vec()).expect("request headers");
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("content-length: ")
+                    .and_then(|value| value.parse::<usize>().ok())
+            })
+            .unwrap_or(0);
+        while bytes.len() - header_end < content_length {
+            let mut chunk = [0_u8; 1_024];
+            let count = stream.read(&mut chunk).await.expect("request body");
+            assert_ne!(count, 0, "request ended before body");
+            bytes.extend_from_slice(&chunk[..count]);
+        }
+        let request_line = headers.lines().next().expect("request line");
+        let mut parts = request_line.split_ascii_whitespace();
+        RecordedRequest {
+            method: parts.next().expect("method").to_owned(),
+            target: parts.next().expect("target").to_owned(),
+            headers: headers.replace("github-result-test-token", "[REDACTED]"),
+            body: bytes[header_end..header_end + content_length].to_vec(),
+        }
+    }
+
+    async fn wait_for_releases(releases: &AtomicUsize, expected: usize) {
+        for _ in 0..100 {
+            if releases.load(Ordering::SeqCst) == expected {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(releases.load(Ordering::SeqCst), expected);
+    }
 
     #[test]
     fn binding_round_trip_is_exact_and_provider_owned() {
