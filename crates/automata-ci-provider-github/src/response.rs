@@ -1,12 +1,12 @@
 use automata_ci_auth::github::GithubEndpointError;
 use reqwest::{
     Response, StatusCode,
-    header::{CONTENT_LENGTH, CONTENT_TYPE, HeaderMap, RETRY_AFTER},
+    header::{CONTENT_LENGTH, CONTENT_TYPE, HeaderMap},
 };
 use serde::de::DeserializeOwned;
 use zeroize::Zeroizing;
 
-const X_RATE_LIMIT_REMAINING: &str = "x-ratelimit-remaining";
+use crate::rate_limit::{is_rate_limited, retry_delay_seconds};
 
 pub(crate) struct JsonResponse {
     pub(crate) status: StatusCode,
@@ -151,26 +151,12 @@ fn map_status(status: StatusCode, headers: &HeaderMap) -> GithubEndpointError {
     match status {
         StatusCode::UNAUTHORIZED => GithubEndpointError::Unauthorized,
         StatusCode::FORBIDDEN if is_rate_limited(headers) => GithubEndpointError::RateLimited {
-            retry_after_seconds: retry_after_seconds(headers),
+            retry_after_seconds: retry_delay_seconds(headers),
         },
         StatusCode::FORBIDDEN => GithubEndpointError::Forbidden,
         StatusCode::TOO_MANY_REQUESTS => GithubEndpointError::RateLimited {
-            retry_after_seconds: retry_after_seconds(headers),
+            retry_after_seconds: retry_delay_seconds(headers),
         },
         _ => GithubEndpointError::InvalidResponse,
     }
-}
-
-fn is_rate_limited(headers: &HeaderMap) -> bool {
-    headers.contains_key(RETRY_AFTER)
-        || headers
-            .get(X_RATE_LIMIT_REMAINING)
-            .is_some_and(|value| value.as_bytes() == b"0")
-}
-
-fn retry_after_seconds(headers: &HeaderMap) -> Option<u64> {
-    headers
-        .get(RETRY_AFTER)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse().ok())
 }
