@@ -1152,42 +1152,45 @@ impl ProviderResultPublicationEvidence {
     }
 }
 
-/// Saves one first or contiguous desired generation.
+/// Reconciles one provider-independent projection under an immutable subject.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SaveDesiredProviderResult {
     subject: ProviderResultSubject,
-    desired: DesiredProviderResult,
+    projection: ProviderResultProjection,
 }
 
 impl SaveDesiredProviderResult {
-    /// Binds an immutable subject to one desired generation.
+    /// Binds an immutable subject to one desired projection.
     ///
     /// # Errors
     ///
     /// Rejects desired state predating the subject.
     pub fn new(
         subject: ProviderResultSubject,
-        desired: DesiredProviderResult,
+        projection: ProviderResultProjection,
     ) -> Result<Self, ProviderResultModelError> {
-        if desired.updated_at() < subject.created_at {
+        if projection.updated_at() < subject.created_at {
             return Err(ProviderResultModelError::InvalidTimestamp);
         }
-        Ok(Self { subject, desired })
+        Ok(Self {
+            subject,
+            projection,
+        })
     }
     /// Returns the immutable subject.
     #[must_use]
     pub const fn subject(&self) -> &ProviderResultSubject {
         &self.subject
     }
-    /// Returns the desired generation.
+    /// Returns the provider-independent desired projection.
     #[must_use]
-    pub const fn desired(&self) -> &DesiredProviderResult {
-        &self.desired
+    pub const fn projection(&self) -> &ProviderResultProjection {
+        &self.projection
     }
     /// Consumes the command into its durable parts.
     #[must_use]
-    pub fn into_parts(self) -> (ProviderResultSubject, DesiredProviderResult) {
-        (self.subject, self.desired)
+    pub fn into_parts(self) -> (ProviderResultSubject, ProviderResultProjection) {
+        (self.subject, self.projection)
     }
 }
 
@@ -1488,7 +1491,8 @@ pub type ProviderResultFuture<'a, T> =
 
 /// Durable current-only desired result and fenced publication outbox.
 pub trait ProviderResultRepository: fmt::Debug + Send + Sync {
-    /// Stores a first or contiguous desired generation and invalidates older claims.
+    /// Reconciles desired state, assigning its next generation atomically and
+    /// invalidating older claims only when the projection changed.
     fn save_desired(
         &self,
         request: SaveDesiredProviderResult,

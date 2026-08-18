@@ -40,6 +40,7 @@ struct ResultRow {
     title: String,
     summary: String,
     updated_at_ms: i64,
+    projection_digest: Vec<u8>,
     desired_digest: Vec<u8>,
     attempts: i16,
     claim_worker_id: Option<uuid::Uuid>,
@@ -67,12 +68,13 @@ impl PostgresProviderManifestRepository {
         &self,
         request: SaveDesiredProviderResult,
     ) -> Result<ProviderResultSaveOutcome, ProviderResultRepositoryError> {
-        let (subject, desired) = request.into_parts();
+        let (subject, projection) = request.into_parts();
         let mut transaction = self.pool().begin().await.map_err(unavailable)?;
         result_lock(&mut transaction, subject.subject_id()).await?;
         let current = sqlx::query_as::<_, CurrentResultRow>(
             r"
-            SELECT subject.subject_digest, outbox.generation, outbox.desired_digest
+            SELECT subject.subject_digest, outbox.generation,
+                   outbox.projection_digest
             FROM provider_result_subjects AS subject
             JOIN provider_result_outbox AS outbox ON outbox.subject_id = subject.subject_id
             WHERE subject.subject_id = $1
@@ -84,29 +86,28 @@ impl PostgresProviderManifestRepository {
         .await
         .map_err(unavailable)?;
         let outcome = match current {
-            None if desired.generation() == 1 => {
+            None => {
+                let desired = DesiredProviderResult::new(1, projection).map_err(model_corrupt)?;
                 ensure_subject_connection(&mut transaction, &subject).await?;
                 insert_subject(&mut transaction, &subject).await?;
                 insert_outbox(&mut transaction, &subject, &desired).await?;
                 insert_annotations(&mut transaction, subject.subject_id(), &desired).await?;
                 ProviderResultSaveOutcome::Inserted
             }
-            None => return Err(ProviderResultRepositoryError::Conflict),
             Some(current) => {
                 let generation = positive_u64(current.generation)?;
-                if current.subject_digest != subject.digest().as_bytes()
-                    || desired.generation() < generation
-                    || desired.generation() > generation.saturating_add(1)
-                {
+                if current.subject_digest != subject.digest().as_bytes() {
                     return Err(ProviderResultRepositoryError::Conflict);
                 }
-                if desired.generation() == generation {
-                    if current.desired_digest == desired.digest().as_bytes() {
-                        transaction.commit().await.map_err(unavailable)?;
-                        return Ok(ProviderResultSaveOutcome::Unchanged);
-                    }
-                    return Err(ProviderResultRepositoryError::Conflict);
+                if current.projection_digest == projection.digest().as_bytes() {
+                    transaction.commit().await.map_err(unavailable)?;
+                    return Ok(ProviderResultSaveOutcome::Unchanged);
                 }
+                let next = generation
+                    .checked_add(1)
+                    .ok_or(ProviderResultRepositoryError::Conflict)?;
+                let desired =
+                    DesiredProviderResult::new(next, projection).map_err(model_corrupt)?;
                 sqlx::query("DELETE FROM provider_result_annotations WHERE subject_id = $1")
                     .bind(subject.subject_id().as_uuid())
                     .execute(&mut *transaction)
@@ -451,7 +452,9 @@ impl PostgresProviderManifestRepository {
             .map_err(model_corrupt)?,
         )
         .map_err(model_corrupt)?;
-        if digest(&row.desired_digest)? != desired.digest() {
+        if digest(&row.projection_digest)? != desired.projection().digest()
+            || digest(&row.desired_digest)? != desired.digest()
+        {
             return Err(ProviderResultRepositoryError::Corrupt);
         }
         let worker_id = ProviderResultWorkerId::from_uuid(
@@ -493,7 +496,7 @@ impl PostgresProviderManifestRepository {
 struct CurrentResultRow {
     subject_digest: Vec<u8>,
     generation: i64,
-    desired_digest: Vec<u8>,
+    projection_digest: Vec<u8>,
 }
 
 async fn result_lock(
@@ -617,8 +620,8 @@ async fn insert_outbox(
         r"
         INSERT INTO provider_result_outbox (
             subject_id, generation, phase, conclusion, title, summary,
-            updated_at_ms, desired_digest, state, available_at_ms
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'pending',$7)
+            updated_at_ms, projection_digest, desired_digest, state, available_at_ms
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'pending',$7)
         ",
     )
     .bind(subject.subject_id().as_uuid())
@@ -628,6 +631,7 @@ async fn insert_outbox(
     .bind(desired.title().as_str())
     .bind(desired.summary().as_str())
     .bind(desired.updated_at().get())
+    .bind(desired.projection().digest().as_bytes().as_slice())
     .bind(desired.digest().as_bytes().as_slice())
     .execute(&mut **transaction)
     .await
@@ -645,7 +649,8 @@ async fn update_outbox(
         UPDATE provider_result_outbox
         SET generation = $2, phase = $3, conclusion = $4, title = $5,
             summary = $6, updated_at_ms = $7,
-            desired_digest = $8, state = 'pending', available_at_ms = $7,
+            projection_digest = $8, desired_digest = $9,
+            state = 'pending', available_at_ms = $7,
             attempts = 0, claim_worker_id = NULL, claim_fence = NULL,
             claim_started_at_ms = NULL, claim_expires_at_ms = NULL,
             publication_model = NULL, external_result_id = NULL,
@@ -664,6 +669,7 @@ async fn update_outbox(
     .bind(desired.title().as_str())
     .bind(desired.summary().as_str())
     .bind(desired.updated_at().get())
+    .bind(desired.projection().digest().as_bytes().as_slice())
     .bind(desired.digest().as_bytes().as_slice())
     .execute(&mut **transaction)
     .await
@@ -716,7 +722,8 @@ async fn load_result_row(
                subject.created_at_ms, subject.subject_digest,
                outbox.generation, outbox.phase, outbox.conclusion,
                outbox.title, outbox.summary,
-               outbox.updated_at_ms, outbox.desired_digest, outbox.attempts,
+               outbox.updated_at_ms, outbox.projection_digest,
+               outbox.desired_digest, outbox.attempts,
                outbox.claim_worker_id, outbox.claim_fence,
                outbox.claim_started_at_ms, outbox.claim_expires_at_ms,
                outbox.binding_external_result_id,

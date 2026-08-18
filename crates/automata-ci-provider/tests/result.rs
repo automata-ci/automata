@@ -77,20 +77,20 @@ fn subject() -> ProviderResultSubject {
     .unwrap()
 }
 
-fn desired(generation: u64, updated_at: i64) -> DesiredProviderResult {
-    DesiredProviderResult::new(
-        generation,
-        ProviderResultProjection::new(
-            ProviderResultPhase::Running,
-            None,
-            ProviderResultTitle::new("build").unwrap(),
-            ProviderResultSummary::new("running").unwrap(),
-            Vec::new(),
-            UnixMillis::new(updated_at),
-        )
-        .unwrap(),
+fn projection(updated_at: i64) -> ProviderResultProjection {
+    ProviderResultProjection::new(
+        ProviderResultPhase::Running,
+        None,
+        ProviderResultTitle::new("build").unwrap(),
+        ProviderResultSummary::new("running").unwrap(),
+        Vec::new(),
+        UnixMillis::new(updated_at),
     )
     .unwrap()
+}
+
+fn desired(generation: u64, updated_at: i64) -> DesiredProviderResult {
+    DesiredProviderResult::new(generation, projection(updated_at)).unwrap()
 }
 
 fn claim(generation: u64, claimed_at: i64) -> ProviderResultClaimFence {
@@ -137,26 +137,24 @@ impl ProviderResultRepository for MemoryOutbox {
         request: SaveDesiredProviderResult,
     ) -> ProviderResultFuture<'_, ProviderResultSaveOutcome> {
         Box::pin(async move {
-            let (subject, desired) = request.into_parts();
+            let (subject, projection) = request.into_parts();
             let mut state = self.0.lock().unwrap();
             let outcome = match &state.value {
-                None if desired.generation() == 1 => ProviderResultSaveOutcome::Inserted,
-                None => return Err(ProviderResultRepositoryError::Conflict),
-                Some(current)
-                    if current.subject != subject
-                        || desired.generation() < current.desired.generation()
-                        || desired.generation() > current.desired.generation() + 1 =>
-                {
+                None => ProviderResultSaveOutcome::Inserted,
+                Some(current) if current.subject != subject => {
                     return Err(ProviderResultRepositoryError::Conflict);
                 }
-                Some(current) if desired.generation() == current.desired.generation() => {
-                    if current.desired == desired {
-                        return Ok(ProviderResultSaveOutcome::Unchanged);
-                    }
-                    return Err(ProviderResultRepositoryError::Conflict);
+                Some(current) if current.desired.projection() == &projection => {
+                    return Ok(ProviderResultSaveOutcome::Unchanged);
                 }
                 Some(_) => ProviderResultSaveOutcome::Superseded,
             };
+            let generation = state
+                .value
+                .as_ref()
+                .map_or(1, |current| current.desired.generation() + 1);
+            let desired = DesiredProviderResult::new(generation, projection)
+                .map_err(|_| ProviderResultRepositoryError::Corrupt)?;
             let available_at = desired.updated_at();
             state.value = Some(MemoryValue {
                 subject,
@@ -409,7 +407,7 @@ async fn newer_generation_supersedes_and_fences_old_claim_without_a_bridge() {
     let outbox = MemoryOutbox::default();
     assert_eq!(
         outbox
-            .save_desired(SaveDesiredProviderResult::new(subject(), desired(1, 2_001)).unwrap())
+            .save_desired(SaveDesiredProviderResult::new(subject(), projection(2_001)).unwrap())
             .await
             .unwrap(),
         ProviderResultSaveOutcome::Inserted
@@ -429,7 +427,7 @@ async fn newer_generation_supersedes_and_fences_old_claim_without_a_bridge() {
         .unwrap();
     assert_eq!(
         outbox
-            .save_desired(SaveDesiredProviderResult::new(subject(), desired(2, 2_003)).unwrap())
+            .save_desired(SaveDesiredProviderResult::new(subject(), projection(2_003)).unwrap())
             .await
             .unwrap(),
         ProviderResultSaveOutcome::Superseded
@@ -469,7 +467,7 @@ async fn newer_generation_supersedes_and_fences_old_claim_without_a_bridge() {
 async fn retries_and_terminal_failures_consume_only_the_exact_fence() {
     let outbox = MemoryOutbox::default();
     outbox
-        .save_desired(SaveDesiredProviderResult::new(subject(), desired(1, 2_001)).unwrap())
+        .save_desired(SaveDesiredProviderResult::new(subject(), projection(2_001)).unwrap())
         .await
         .unwrap();
     let worker = ProviderResultWorkerId::from_uuid(Uuid::from_u128(9)).unwrap();

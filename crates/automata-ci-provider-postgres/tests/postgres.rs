@@ -9,23 +9,22 @@ use automata_ci_key_management::{KeyId, LocalAes256GcmKeyring, LocalKeyMaterial,
 use automata_ci_postgres::test_support::{TestResult, run_with_database};
 use automata_ci_provider::{
     AcceptProviderDelivery, BindProviderProcessingSource, ClaimProviderProcessing,
-    ClaimProviderResult, CompleteProviderProcessing, CompleteProviderResult, DesiredProviderResult,
-    ExternalDeliveryId, ExternalDeliveryIdentity, ExternalRepositoryId, ExternalRepositoryIdentity,
-    ExternalResultId, ExternalSubjectId, ExternalSubjectIdentity, ExternalSubjectKind,
-    NormalizedTrigger, ProviderArchiveLimits, ProviderCapabilities, ProviderCapability,
-    ProviderConfigurationDocument, ProviderConfigurationRevision, ProviderConnectionConfiguration,
-    ProviderConnectionId, ProviderConnectionManifest, ProviderConnectionPolicyDocument,
-    ProviderConnectionRevision, ProviderControl, ProviderControlDocument, ProviderControlKind,
-    ProviderDefaultBranch, ProviderDelivery, ProviderDeliveryAcceptOutcome,
-    ProviderDeliveryEvidence, ProviderDeliveryId, ProviderDeliveryObservations,
-    ProviderDeliveryRepository as _, ProviderDeliveryRepositoryError, ProviderEventName,
-    ProviderGitRef, ProviderGitRefKind, ProviderInstanceId, ProviderInstanceManifest,
-    ProviderInstanceRecord, ProviderLifecycleState, ProviderManifestRepository as _,
-    ProviderOrigins, ProviderProcessingFailure, ProviderProcessingInput,
-    ProviderProcessingRepository as _, ProviderProcessingRepositoryError, ProviderProcessingState,
-    ProviderProcessingWorkerId, ProviderRepository, ProviderRepositoryError,
-    ProviderRepositoryPath, ProviderResultContinuation, ProviderResultDetailsUrl,
-    ProviderResultName, ProviderResultPhase, ProviderResultProjection,
+    ClaimProviderResult, CompleteProviderProcessing, CompleteProviderResult, ExternalDeliveryId,
+    ExternalDeliveryIdentity, ExternalRepositoryId, ExternalRepositoryIdentity, ExternalResultId,
+    ExternalSubjectId, ExternalSubjectIdentity, ExternalSubjectKind, NormalizedTrigger,
+    ProviderArchiveLimits, ProviderCapabilities, ProviderCapability, ProviderConfigurationDocument,
+    ProviderConfigurationRevision, ProviderConnectionConfiguration, ProviderConnectionId,
+    ProviderConnectionManifest, ProviderConnectionPolicyDocument, ProviderConnectionRevision,
+    ProviderControl, ProviderControlDocument, ProviderControlKind, ProviderDefaultBranch,
+    ProviderDelivery, ProviderDeliveryAcceptOutcome, ProviderDeliveryEvidence, ProviderDeliveryId,
+    ProviderDeliveryObservations, ProviderDeliveryRepository as _, ProviderDeliveryRepositoryError,
+    ProviderEventName, ProviderGitRef, ProviderGitRefKind, ProviderInstanceId,
+    ProviderInstanceManifest, ProviderInstanceRecord, ProviderLifecycleState,
+    ProviderManifestRepository as _, ProviderOrigins, ProviderProcessingFailure,
+    ProviderProcessingInput, ProviderProcessingRepository as _, ProviderProcessingRepositoryError,
+    ProviderProcessingState, ProviderProcessingWorkerId, ProviderRepository,
+    ProviderRepositoryError, ProviderRepositoryPath, ProviderResultContinuation,
+    ProviderResultDetailsUrl, ProviderResultName, ProviderResultPhase, ProviderResultProjection,
     ProviderResultPublicationEvidence, ProviderResultPublicationModel,
     ProviderResultRepository as _, ProviderResultRepositoryError, ProviderResultSaveOutcome,
     ProviderResultSubject, ProviderResultSubjectId, ProviderResultSubjectKind,
@@ -521,25 +520,22 @@ async fn provider_results_are_contiguous_fenced_and_rehydratable() -> TestResult
             1,
             UnixMillis::new(3_000),
         )?;
-        let desired = |generation, updated_at, summary| {
-            DesiredProviderResult::new(
-                generation,
-                ProviderResultProjection::new(
-                    ProviderResultPhase::Running,
-                    None,
-                    ProviderResultTitle::new("Automata CI")?,
-                    ProviderResultSummary::new(summary)?,
-                    Vec::new(),
-                    UnixMillis::new(updated_at),
-                )?,
+        let projection = |updated_at, summary| {
+            ProviderResultProjection::new(
+                ProviderResultPhase::Running,
+                None,
+                ProviderResultTitle::new("Automata CI")?,
+                ProviderResultSummary::new(summary)?,
+                Vec::new(),
+                UnixMillis::new(updated_at),
             )
         };
-        let first_desired = desired(1, 3_001, "queued")?;
+        let first_projection = projection(3_001, "queued")?;
         assert_eq!(
             repository
                 .save_desired(SaveDesiredProviderResult::new(
                     subject.clone(),
-                    first_desired.clone(),
+                    first_projection.clone(),
                 )?)
                 .await?,
             ProviderResultSaveOutcome::Inserted
@@ -548,7 +544,7 @@ async fn provider_results_are_contiguous_fenced_and_rehydratable() -> TestResult
             repository
                 .save_desired(SaveDesiredProviderResult::new(
                     subject.clone(),
-                    first_desired,
+                    first_projection,
                 )?)
                 .await?,
             ProviderResultSaveOutcome::Unchanged
@@ -567,12 +563,12 @@ async fn provider_results_are_contiguous_fenced_and_rehydratable() -> TestResult
         assert_eq!(first_claim.subject(), &subject);
         assert_eq!(first_claim.attempts(), 1);
 
-        let second_desired = desired(2, 3_003, "running")?;
+        let second_projection = projection(3_003, "running")?;
         assert_eq!(
             repository
                 .save_desired(SaveDesiredProviderResult::new(
                     subject.clone(),
-                    second_desired.clone(),
+                    second_projection.clone(),
                 )?)
                 .await?,
             ProviderResultSaveOutcome::Superseded
@@ -603,7 +599,8 @@ async fn provider_results_are_contiguous_fenced_and_rehydratable() -> TestResult
             )?)
             .await?
             .expect("second result claim");
-        assert_eq!(second_claim.desired(), &second_desired);
+        assert_eq!(second_claim.desired().generation(), 2);
+        assert_eq!(second_claim.desired().projection(), &second_projection);
         assert!(second_claim.claim().fence() > first_claim.claim().fence());
         let continuation = ProviderResultContinuation::new(
             ProviderSchemaVersion::new(1)?,
@@ -700,11 +697,11 @@ async fn provider_results_are_contiguous_fenced_and_rehydratable() -> TestResult
                 .await?
                 .is_none()
         );
-        let third_desired = desired(3, 4_001, "still running")?;
+        let third_projection = projection(4_001, "still running")?;
         repository
             .save_desired(SaveDesiredProviderResult::new(
                 subject.clone(),
-                third_desired,
+                third_projection,
             )?)
             .await?;
         let exhausted_claim = repository
