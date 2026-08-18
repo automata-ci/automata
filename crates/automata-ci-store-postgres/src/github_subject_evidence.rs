@@ -8,14 +8,14 @@ use uuid::Uuid;
 use automata_ci_provider::ProviderConnectionId;
 use automata_ci_store::{
     AcceptManifestPinnedGithubDelivery, AcceptManifestPinnedGithubRepositoryDispatch,
-    AdmissionObject, AuthenticatedGithubDeliveryClaim, EventControlSubjectId, EventSubjectId,
-    EventSubjectOrigin, GithubAuthenticatedEvent, GithubAuthenticatedEventKind, GithubCheckName,
-    GithubCheckSubjectId, GithubCheckSubjectKey, GithubDeliveryCheckKind, GithubProviderManifest,
-    GithubProviderManifestLimits, GithubProviderManifestRevision, GithubProviderOrigins,
-    GithubProviderRunnerPolicyObject, GithubProviderWebhookVerifierFingerprint,
-    GithubProviderWorkflowSelection, GithubRepositoryDispatchEvidenceRepository,
-    GithubRepositoryDispatchResolution, GithubRepositoryName, GithubServerServiceAppClientId,
-    GithubServerServiceAppId, GithubServerServiceAuthorityId, GithubServerServiceAuthoritySelector,
+    AdmissionObject, AuthenticatedGithubDeliveryClaim, GithubAuthenticatedEvent,
+    GithubAuthenticatedEventKind, GithubCheckName, GithubCheckSubjectId, GithubCheckSubjectKey,
+    GithubDeliveryCheckKind, GithubProviderManifest, GithubProviderManifestLimits,
+    GithubProviderManifestRevision, GithubProviderOrigins, GithubProviderRunnerPolicyObject,
+    GithubProviderWebhookVerifierFingerprint, GithubProviderWorkflowSelection,
+    GithubRepositoryDispatchEvidenceRepository, GithubRepositoryDispatchResolution,
+    GithubRepositoryName, GithubServerServiceAppClientId, GithubServerServiceAppId,
+    GithubServerServiceAuthorityId, GithubServerServiceAuthoritySelector,
     GithubServerServiceJwtIssuer, GithubServerServiceRevision, GithubServerServiceScope,
     GithubSubjectEvidenceRepository, GithubSubjectEvidenceStoreError,
     GithubWorkflowRunSubjectEvidence, LogicalWorkflowInvocationId,
@@ -273,20 +273,7 @@ pub(crate) async fn validate_github_workflow_selection_in_transaction(
     request: &RecordGithubWorkflowRunSubjectEvidence,
 ) -> Result<(), GithubSubjectEvidenceStoreError> {
     validate_provider_delivery_idempotency(transaction, request).await?;
-    // All-direct ingress initially owns one aggregate discovery Check. Derive
-    // the exact per-workflow Check inside this transaction before policy may
-    // admit or terminalize that workflow; any failed authority check rolls the
-    // derivation back with the transaction.
-    insert_all_direct_workflow_check_subject(transaction, request).await?;
     let claim = request.admission_claim();
-    let event_subject_id = EventSubjectId::derive(
-        request.tenant(),
-        request.repository_id(),
-        EventSubjectOrigin::ProviderDelivery(request.delivery_id()),
-        request.workflow_path().as_str(),
-    )
-    .map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)?;
-    let event_control_id = EventControlSubjectId::derive(event_subject_id);
     let exact = sqlx::query_scalar::<_, bool>(
         r"
         SELECT TRUE
@@ -346,33 +333,24 @@ pub(crate) async fn validate_github_workflow_selection_in_transaction(
            AND subject.origin_kind = 'provider_delivery'
            AND subject.schedule_fire_id IS NULL
            AND subject.subject_kind = 'workflow'
-           AND subject.subject_key = entry.workflow_path
+           AND subject.id = evidence.github_check_subject_id
+           AND subject.subject_key = manifest.check_subject_key
            AND subject.provider_connection_id = evidence.provider_connection_id
            AND subject.provider_installation_id = evidence.provider_installation_id
            AND subject.github_repository_id = evidence.github_repository_id
            AND subject.github_repository_name = evidence.github_repository_name
            AND subject.github_app_id = manifest.github_app_id
            AND subject.head_sha = evidence.github_check_head_sha
-           AND subject.check_name = automata_github_workflow_check_name(
-                   manifest.check_name, entry.workflow_path
-               )
+           AND subject.check_name = manifest.check_name
            AND subject.created_at_ms = inbox.accepted_at_ms
            AND subject.workflow_run_id IS NULL
            AND subject.linked_at_ms IS NULL
-           AND (
-                (subject.event_control_subject_id IS NULL
-                 AND subject.desired_state = 'queued'
-                 AND subject.desired_conclusion IS NULL
-                 AND subject.terminal_cause IS NULL
-                 AND subject.desired_revision = 1
-                 AND subject.desired_updated_at_ms = inbox.accepted_at_ms)
-             OR (subject.event_control_subject_id = $16
-                 AND subject.desired_state = 'completed'
-                 AND subject.desired_conclusion = 'skipped'
-                 AND subject.terminal_cause = 'workflow_skipped'
-                 AND subject.desired_revision = 2
-                 AND subject.desired_updated_at_ms <= $15)
-           )
+           AND subject.event_control_subject_id IS NULL
+           AND subject.desired_state = 'queued'
+           AND subject.desired_conclusion IS NULL
+           AND subject.terminal_cause IS NULL
+           AND subject.desired_revision = 1
+           AND subject.desired_updated_at_ms = inbox.accepted_at_ms
         FOR SHARE OF evidence, inbox, manifest, repository, inventory, entry, subject
         ",
     )
@@ -391,7 +369,6 @@ pub(crate) async fn validate_github_workflow_selection_in_transaction(
     .bind(claim.claimed_at().get())
     .bind(claim.expires_at().get())
     .bind(request.admitted_at().get())
-    .bind(event_control_id.as_uuid())
     .fetch_optional(&mut **transaction)
     .await
     .map_err(operation_error)?;
@@ -457,16 +434,15 @@ async fn validate_provider_delivery_idempotency(
     Ok(())
 }
 
-/// Links the delivery's database-derived Check and inserts its run receipt
-/// inside the caller's logical-admission transaction.
+/// Binds the delivery aggregate to one admitted workflow-run receipt without
+/// manufacturing a provider-visible workflow Check.
 #[allow(clippy::too_many_lines)] // One exact SQL statement binds the full admission aggregate.
 pub(crate) async fn record_github_workflow_run_subject_evidence_in_transaction(
     transaction: &mut Transaction<'_, Postgres>,
     request: &RecordGithubWorkflowRunSubjectEvidence,
 ) -> Result<GithubWorkflowRunSubjectEvidence, GithubSubjectEvidenceStoreError> {
     require_exact_github_record_authority(transaction, request).await?;
-    let subject_id = ensure_workflow_check_subject(transaction, request).await?;
-    let subject_id = link_exact_check_to_run(transaction, request, subject_id).await?;
+    let subject_id = load_delivery_aggregate_subject(transaction, request).await?;
     let schemas = current_durable_schemas();
     let inserted = sqlx::query(
         r"
@@ -572,18 +548,19 @@ pub(crate) async fn record_github_workflow_run_subject_evidence_in_transaction(
           AND marker.root_invocation_id = $6
           AND subject.id = $8
           AND subject.provider_delivery_id = $7
-          AND subject.workflow_run_id = $5
-          AND subject.linked_at_ms = $15
-          AND subject.desired_state = 'in_progress'
+          AND subject.workflow_run_id IS NULL
+          AND subject.linked_at_ms IS NULL
+          AND subject.desired_state = 'queued'
           AND subject.desired_conclusion IS NULL
           AND subject.terminal_cause IS NULL
-          AND subject.desired_revision = 2
-          AND subject.desired_updated_at_ms = $15
+          AND subject.desired_revision = 1
+          AND subject.desired_updated_at_ms = inbox.accepted_at_ms
           AND subject.head_sha = $9
           AND evidence.github_check_head_sha = $9
           AND run.head_sha = $9
           AND workflow.path = $10
-          AND subject.subject_key = workflow.path
+          AND subject.subject_key = manifest.check_subject_key
+          AND subject.check_name = manifest.check_name
           AND (
               manifest.workflow_selection_kind = 'all_direct'
               AND EXISTS (
@@ -847,95 +824,14 @@ async fn require_exact_github_replay_authority(
     }
 }
 
-async fn ensure_workflow_check_subject(
+async fn load_delivery_aggregate_subject(
     transaction: &mut Transaction<'_, Postgres>,
     request: &RecordGithubWorkflowRunSubjectEvidence,
 ) -> Result<GithubCheckSubjectId, GithubSubjectEvidenceStoreError> {
-    insert_all_direct_workflow_check_subject(transaction, request).await?;
-    load_queued_workflow_check_subject(transaction, request).await
+    load_delivery_aggregate_subject_id(transaction, request).await
 }
 
-async fn insert_all_direct_workflow_check_subject(
-    transaction: &mut Transaction<'_, Postgres>,
-    request: &RecordGithubWorkflowRunSubjectEvidence,
-) -> Result<(), GithubSubjectEvidenceStoreError> {
-    let candidate_id = Uuid::new_v4();
-    let external_id = format!("automata-check:{candidate_id}");
-    sqlx::query(
-        r"
-        INSERT INTO github_check_subjects (
-            id, tenant_id, repository_id, provider_delivery_id, subject_key,
-            provider_connection_id, provider_installation_id,
-            github_repository_id, github_repository_name, github_app_id,
-            head_sha, check_name, external_id, created_at_ms,
-            desired_updated_at_ms
-        )
-        SELECT $1, evidence.tenant_id, evidence.repository_id,
-               evidence.provider_delivery_id, entry.workflow_path,
-               evidence.provider_connection_id, evidence.provider_installation_id,
-               evidence.github_repository_id, evidence.github_repository_name,
-               manifest.github_app_id, evidence.github_check_head_sha,
-               automata_github_workflow_check_name(
-                   manifest.check_name, entry.workflow_path
-               ), $2, inbox.accepted_at_ms,
-               inbox.accepted_at_ms
-        FROM github_provider_delivery_evidence AS evidence
-        JOIN provider_delivery_inbox AS inbox
-          ON inbox.id = evidence.provider_delivery_id
-         AND inbox.tenant_id = evidence.tenant_id
-        JOIN github_provider_manifest_revisions AS manifest
-          ON manifest.tenant_id = evidence.tenant_id
-         AND manifest.repository_id = evidence.repository_id
-         AND manifest.provider_connection_id = evidence.provider_connection_id
-         AND manifest.manifest_revision = evidence.provider_manifest_revision
-         AND manifest.manifest_digest = evidence.provider_manifest_digest
-        JOIN provider_delivery_workflow_inventories AS inventory
-          ON inventory.inbox_id = evidence.provider_delivery_id
-         AND inventory.tenant_id = evidence.tenant_id
-         AND inventory.manifest_digest = manifest.manifest_digest
-        JOIN provider_delivery_workflow_inventory_entries AS entry
-          ON entry.inbox_id = inventory.inbox_id
-         AND entry.tenant_id = inventory.tenant_id
-        WHERE evidence.tenant_id = $3
-          AND evidence.repository_id = $4
-          AND evidence.provider_delivery_id = $5
-          AND manifest.workflow_selection_kind = 'all_direct'
-          AND entry.workflow_path = $6
-          AND entry.source_state = 'ready'
-          AND entry.source_digest = $7
-          AND evidence.github_check_head_sha = $8
-          AND inbox.state = 'claimed'
-          AND inbox.claim_owner_id = $9
-          AND inbox.attempt_count = $10
-          AND inbox.claim_fence = $11
-          AND inbox.claimed_at_ms = $12
-          AND inbox.claim_expires_at_ms = $13
-          AND $14 >= $12
-          AND $14 < $13
-        ON CONFLICT (provider_delivery_id, subject_key) DO NOTHING
-        ",
-    )
-    .bind(candidate_id)
-    .bind(external_id)
-    .bind(request.tenant().as_str())
-    .bind(request.repository_id().as_uuid())
-    .bind(request.delivery_id().as_uuid())
-    .bind(request.workflow_path().as_str())
-    .bind(request.source_digest().as_bytes().as_slice())
-    .bind(request.head_sha().as_bytes())
-    .bind(request.admission_claim().claim().owner().as_uuid())
-    .bind(i16::try_from(request.admission_claim().attempt()).expect("attempt fits SMALLINT"))
-    .bind(pg_bigint(request.admission_claim().claim().fence()))
-    .bind(request.admission_claim().claimed_at().get())
-    .bind(request.admission_claim().expires_at().get())
-    .bind(request.admitted_at().get())
-    .execute(&mut **transaction)
-    .await
-    .map_err(operation_error)?;
-    Ok(())
-}
-
-async fn load_queued_workflow_check_subject(
+async fn load_delivery_aggregate_subject_id(
     transaction: &mut Transaction<'_, Postgres>,
     request: &RecordGithubWorkflowRunSubjectEvidence,
 ) -> Result<GithubCheckSubjectId, GithubSubjectEvidenceStoreError> {
@@ -959,7 +855,8 @@ async fn load_queued_workflow_check_subject(
         WHERE evidence.tenant_id = $1
           AND evidence.repository_id = $2
           AND evidence.provider_delivery_id = $3
-          AND subject.subject_key = $4
+          AND subject.id = evidence.github_check_subject_id
+          AND subject.subject_key = manifest.check_subject_key
           AND subject.provider_connection_id = evidence.provider_connection_id
           AND subject.provider_installation_id = evidence.provider_installation_id
           AND subject.github_repository_id = evidence.github_repository_id
@@ -967,9 +864,7 @@ async fn load_queued_workflow_check_subject(
           AND subject.github_app_id = manifest.github_app_id
           AND subject.head_sha = $5
           AND subject.head_sha = evidence.github_check_head_sha
-          AND subject.check_name = automata_github_workflow_check_name(
-                  manifest.check_name, subject.subject_key
-              )
+          AND subject.check_name = manifest.check_name
           AND subject.created_at_ms = inbox.accepted_at_ms
           AND subject.workflow_run_id IS NULL
           AND subject.linked_at_ms IS NULL
@@ -995,7 +890,7 @@ async fn load_queued_workflow_check_subject(
                   WHERE inventory.inbox_id = evidence.provider_delivery_id
                     AND inventory.tenant_id = evidence.tenant_id
                     AND inventory.manifest_digest = manifest.manifest_digest
-                    AND entry.workflow_path = subject.subject_key
+                    AND entry.workflow_path = $4
                     AND entry.source_state = 'ready'
                     AND entry.source_digest = $6
               )
@@ -1014,166 +909,6 @@ async fn load_queued_workflow_check_subject(
     .bind(pg_bigint(request.admission_claim().claim().fence()))
     .bind(request.admission_claim().claimed_at().get())
     .bind(request.admission_claim().expires_at().get())
-    .fetch_optional(&mut **transaction)
-    .await
-    .map_err(operation_error)?
-    .ok_or(GithubSubjectEvidenceStoreError::AuthorityRejected)?;
-    GithubCheckSubjectId::from_uuid(subject_id)
-        .map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)
-}
-
-#[allow(clippy::too_many_lines)] // One transition exact-matches the full run and claim authority.
-async fn link_exact_check_to_run(
-    transaction: &mut Transaction<'_, Postgres>,
-    request: &RecordGithubWorkflowRunSubjectEvidence,
-    subject_id: GithubCheckSubjectId,
-) -> Result<GithubCheckSubjectId, GithubSubjectEvidenceStoreError> {
-    let schemas = current_durable_schemas();
-    let subject_id = sqlx::query_scalar::<_, Uuid>(
-        r"
-        UPDATE github_check_subjects AS subject
-        SET workflow_run_id = $3,
-            linked_at_ms = $4,
-            desired_state = 'in_progress',
-            desired_revision = desired_revision + 1,
-            desired_updated_at_ms = $4
-        FROM github_provider_delivery_evidence AS evidence,
-             provider_delivery_inbox AS inbox,
-             repositories AS repository,
-             github_provider_manifest_revisions AS manifest,
-             workflow_runs AS run,
-             workflow_definitions AS workflow,
-             workflow_snapshots AS snapshot,
-             logical_workflow_runs AS marker,
-             logical_workflow_invocations AS invocation,
-             workflow_admission_receipts AS admission_receipt
-        WHERE evidence.tenant_id = $1
-          AND evidence.repository_id = $2
-          AND evidence.provider_delivery_id = $5
-          AND inbox.id = evidence.provider_delivery_id
-          AND inbox.tenant_id = evidence.tenant_id
-          AND repository.tenant_id = evidence.tenant_id
-          AND repository.id = evidence.repository_id
-          AND repository.scm_provider = 'github'
-          AND repository.provider_repository_id =
-              evidence.github_repository_id::TEXT
-          AND repository.owner = split_part(evidence.github_repository_name, '/', 1)
-          AND repository.name = split_part(evidence.github_repository_name, '/', 2)
-          AND manifest.tenant_id = evidence.tenant_id
-          AND manifest.repository_id = evidence.repository_id
-          AND manifest.provider_connection_id = evidence.provider_connection_id
-          AND manifest.manifest_revision = evidence.provider_manifest_revision
-          AND manifest.manifest_digest = evidence.provider_manifest_digest
-          AND subject.id = $23
-          AND subject.tenant_id = evidence.tenant_id
-          AND subject.provider_delivery_id = evidence.provider_delivery_id
-          AND subject.repository_id = evidence.repository_id
-          AND subject.workflow_run_id IS NULL
-          AND subject.linked_at_ms IS NULL
-          AND subject.desired_state = 'queued'
-          AND subject.desired_conclusion IS NULL
-          AND subject.terminal_cause IS NULL
-          AND subject.desired_revision = 1
-          AND subject.desired_updated_at_ms <= $4
-          AND subject.head_sha = evidence.github_check_head_sha
-          AND subject.head_sha = $6
-          AND subject.subject_key = $13
-          AND run.repository_id = evidence.repository_id
-          AND run.id = $3
-          AND run.workflow_id = $7
-          AND run.snapshot_id = $8
-          AND run.head_sha = subject.head_sha
-          AND run.event_name = COALESCE(
-              evidence.authenticated_event_name,
-              manifest.event_name
-          )
-          AND run.event_name = $9
-          AND run.event_digest = inbox.raw_event_digest
-          AND run.event_digest = $10
-          AND run.git_ref = COALESCE(
-              evidence.authenticated_event_git_ref,
-              manifest.git_ref
-          )
-          AND run.git_ref = $11
-          AND run.admission_epoch = $25
-          AND run.plan_schema = $24
-          AND run.plan_digest = $12
-          AND run.created_at_ms = $4
-          AND workflow.repository_id = run.repository_id
-          AND workflow.id = run.workflow_id
-          AND workflow.path = $13
-          AND (
-              manifest.workflow_selection_kind = 'all_direct'
-              AND EXISTS (
-                  SELECT 1
-                  FROM provider_delivery_workflow_inventories AS inventory
-                  JOIN provider_delivery_workflow_inventory_entries AS entry
-                    ON entry.inbox_id = inventory.inbox_id
-                   AND entry.tenant_id = inventory.tenant_id
-                  WHERE inventory.inbox_id = evidence.provider_delivery_id
-                    AND inventory.tenant_id = evidence.tenant_id
-                    AND inventory.manifest_digest = manifest.manifest_digest
-                    AND entry.workflow_path = workflow.path
-                    AND entry.source_state = 'ready'
-                    AND entry.source_digest = snapshot.source_digest
-              )
-          )
-          AND snapshot.id = run.snapshot_id
-          AND snapshot.workflow_id = run.workflow_id
-          AND snapshot.source_digest = $14
-          AND marker.run_id = run.id
-          AND marker.root_invocation_id = $15
-          AND marker.admission_digest = $16
-          AND marker.admitted_at_ms = $4
-          AND invocation.run_id = run.id
-          AND invocation.id = marker.root_invocation_id
-          AND invocation.plan_schema = run.plan_schema
-          AND invocation.plan_digest = run.plan_digest
-          AND admission_receipt.tenant_id = evidence.tenant_id
-          AND admission_receipt.idempotency_kind = 'provider_delivery'
-          AND admission_receipt.idempotency_key = $17
-          AND admission_receipt.request_digest = marker.admission_digest
-          AND admission_receipt.github_subject_evidence_required
-          AND admission_receipt.repository_id = $2
-          AND admission_receipt.run_id = $3
-          AND admission_receipt.committed_at_ms = $4
-          AND inbox.state = 'claimed'
-          AND inbox.claim_owner_id = $18
-          AND inbox.attempt_count = $19
-          AND inbox.claim_fence = $20
-          AND inbox.claimed_at_ms = $21
-          AND inbox.claim_expires_at_ms = $22
-          AND run.created_at_ms >= $21
-          AND run.created_at_ms < $22
-          AND run.created_at_ms >= inbox.accepted_at_ms
-        RETURNING subject.id
-        ",
-    )
-    .bind(request.tenant().as_str())
-    .bind(request.repository_id().as_uuid())
-    .bind(request.run_id().as_uuid())
-    .bind(request.admitted_at().get())
-    .bind(request.delivery_id().as_uuid())
-    .bind(request.head_sha().as_bytes())
-    .bind(request.workflow_id().as_uuid())
-    .bind(request.snapshot_id().as_uuid())
-    .bind(request.event_name())
-    .bind(request.event_digest().as_bytes().as_slice())
-    .bind(request.git_ref())
-    .bind(request.plan_digest().as_bytes().as_slice())
-    .bind(request.workflow_path().as_str())
-    .bind(request.source_digest().as_bytes().as_slice())
-    .bind(request.root_invocation_id().as_uuid())
-    .bind(request.logical_admission_digest().as_bytes().as_slice())
-    .bind(request.provider_delivery_idempotency_key())
-    .bind(request.admission_claim().claim().owner().as_uuid())
-    .bind(i16::try_from(request.admission_claim().attempt()).expect("attempt fits SMALLINT"))
-    .bind(pg_bigint(request.admission_claim().claim().fence()))
-    .bind(request.admission_claim().claimed_at().get())
-    .bind(request.admission_claim().expires_at().get())
-    .bind(subject_id.as_uuid())
-    .bind(schemas.workflow_plan_i16)
-    .bind(schemas.admission_epoch_i32)
     .fetch_optional(&mut **transaction)
     .await
     .map_err(operation_error)?
@@ -1520,7 +1255,7 @@ async fn insert_resolved_repository_dispatch_evidence(
         ) VALUES (
             $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$26,
             'repository_dispatch',$14,$15,$16,$17,$18,$19,$20,$21,$22,
-            $23,$24,'auxiliary',$25,$15
+            $23,$24,'jobs_only',$25,$15
         )
         ",
     )
@@ -1574,8 +1309,6 @@ async fn insert_resolved_repository_dispatch_check(
 ) -> Result<(), GithubSubjectEvidenceStoreError> {
     let pending = request.pending();
     let manifest = pending.manifest();
-    let check_name = GithubCheckName::for_auxiliary_delivery(manifest.check_name())
-        .map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)?;
     let external_id = format!("automata-check:{subject_id}");
     let result = sqlx::query(
         r"
@@ -1599,7 +1332,7 @@ async fn insert_resolved_repository_dispatch_check(
     .bind(pg_bigint(manifest.github_repository_id().get()))
     .bind(pg_bigint(manifest.github_app_id().get()))
     .bind(request.resolution().source_revision().as_bytes())
-    .bind(check_name.as_str())
+    .bind(manifest.check_name().as_str())
     .bind(external_id)
     .bind(pending.accepted_at().get())
     .execute(&mut **transaction)
@@ -1761,16 +1494,6 @@ async fn insert_queued_check(
     let identity = request.delivery().identity();
     let external_id = format!("automata-check:{subject_id}");
     let manifest = &pin.manifest;
-    let check_name = match request.check_kind() {
-        automata_ci_store::GithubDeliveryCheckKind::Required => {
-            GithubCheckName::for_required_delivery(manifest.check_name())
-                .map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)?
-        }
-        automata_ci_store::GithubDeliveryCheckKind::Auxiliary => {
-            GithubCheckName::for_auxiliary_delivery(manifest.check_name())
-                .map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)?
-        }
-    };
     let result = sqlx::query(
         r"
         INSERT INTO github_check_subjects (
@@ -1793,7 +1516,7 @@ async fn insert_queued_check(
     .bind(pg_bigint(identity.repository_id().get()))
     .bind(pg_bigint(manifest.github_app_id().get()))
     .bind(request.head_sha().as_bytes())
-    .bind(check_name.as_str())
+    .bind(manifest.check_name().as_str())
     .bind(external_id)
     .bind(request.delivery().accepted_at().get())
     .execute(&mut **transaction)
@@ -2371,7 +2094,7 @@ fn decode_delivery_event_evidence(
             Some(source_revision),
             Some(source_authority),
         ) if authenticated_event_envelope_schema_is_current(version) => {
-            if check_kind != GithubDeliveryCheckKind::Auxiliary {
+            if check_kind != GithubDeliveryCheckKind::JobsOnly {
                 return Err(GithubSubjectEvidenceStoreError::CorruptData);
             }
             let kind = decode_github_authenticated_event_kind(&event_name)
@@ -3218,11 +2941,18 @@ const EVIDENCE_SELECT: &str = r"
      AND subject.repository_id = evidence.repository_id
      AND subject.subject_key = manifest.check_subject_key
      AND subject.head_sha = evidence.github_check_head_sha
-    JOIN github_check_projection_outbox AS outbox ON outbox.subject_id = subject.id
+    LEFT JOIN github_check_projection_outbox AS outbox
+      ON outbox.subject_id = subject.id
 ";
 
 const EVIDENCE_VISIBILITY_AUTHORITY_EXACT: &str = r"
     AND repository_contents_authority.id IS NOT NULL
+    AND (
+        evidence.aggregate_check_kind = 'required'
+        AND outbox.subject_id IS NOT NULL
+        OR evidence.aggregate_check_kind = 'jobs_only'
+        AND outbox.subject_id IS NULL
+    )
     AND (
         evidence.authenticated_event_name = 'pull_request'
         AND pull_requests_authority.id IS NOT NULL

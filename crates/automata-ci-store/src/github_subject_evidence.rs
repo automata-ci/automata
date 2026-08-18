@@ -28,14 +28,14 @@ use automata_ci_provider::ProviderConnectionId;
 
 const MAX_EVIDENCE_TEXT_BYTES: usize = 1_024;
 
-/// Whether one webhook delivery may own the repository's configured required
-/// Check name.
+/// Provider-facing Check topology for one webhook delivery.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GithubDeliveryCheckKind {
     /// A revision-testing event whose aggregate is eligible to gate merging.
     Required,
-    /// Any other supported event, projected under a distinct Check name.
-    Auxiliary,
+    /// Any other supported event. Its workflows may publish job Checks, but
+    /// delivery bookkeeping never becomes a Check Run.
+    JobsOnly,
 }
 
 impl GithubDeliveryCheckKind {
@@ -44,7 +44,7 @@ impl GithubDeliveryCheckKind {
     pub const fn as_durable_str(self) -> &'static str {
         match self {
             Self::Required => "required",
-            Self::Auxiliary => "auxiliary",
+            Self::JobsOnly => "jobs_only",
         }
     }
 
@@ -53,7 +53,7 @@ impl GithubDeliveryCheckKind {
     pub fn from_durable_str(value: &str) -> Option<Self> {
         match value {
             "required" => Some(Self::Required),
-            "auxiliary" => Some(Self::Auxiliary),
+            "jobs_only" => Some(Self::JobsOnly),
             _ => None,
         }
     }
@@ -434,7 +434,7 @@ impl ManifestPinnedGithubDeliveryEvidence {
             check_subject_id,
             check_head_sha,
             authenticated_event,
-            GithubDeliveryCheckKind::Auxiliary,
+            GithubDeliveryCheckKind::JobsOnly,
             accepted_at,
         )?;
         evidence.repository_dispatch_resolution = Some(resolution);

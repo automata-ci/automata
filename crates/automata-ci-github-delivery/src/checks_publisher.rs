@@ -1557,10 +1557,11 @@ fn requested_actions(
     claimed: &ClaimedGithubCheckProjection,
 ) -> Result<Vec<GithubCheckRequestedAction>, GithubChecksPublisherError> {
     let mut actions = Vec::with_capacity(3);
-    if matches!(
+    let job = matches!(
         claimed.details_target(),
         GithubCheckDetailsTarget::Job { .. }
-    ) {
+    );
+    if job {
         actions.push(
             GithubCheckRequestedAction::new(
                 "Re-run this job",
@@ -1569,6 +1570,12 @@ fn requested_actions(
             )
             .map_err(|_| GithubChecksPublisherError::InvariantViolation)?,
         );
+    }
+    if matches!(
+        claimed.details_target(),
+        GithubCheckDetailsTarget::Repository
+    ) {
+        return Ok(actions);
     }
     actions.push(
         GithubCheckRequestedAction::new(

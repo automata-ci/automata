@@ -55,8 +55,8 @@ pub const GITHUB_PROVIDER_SOURCE_REVISION: &str = "exact_sha";
 pub const GITHUB_PROVIDER_ARCHIVE_FORMAT: &str = "tar_gzip";
 /// Durable aggregate selector used by repository-wide direct-workflow discovery.
 ///
-/// This is a server-owned policy key, not a workflow filename. Individual
-/// workflow Check subjects continue to use their canonical direct paths.
+/// This is a server-owned policy key, not a workflow filename. Concrete job
+/// Checks retain their evaluated display names; workflows have no Check name.
 pub const GITHUB_PROVIDER_ALL_DIRECT_WORKFLOWS_KEY: &str = ".ci/workflows";
 /// The only provider event admitted by the initial dogfood manifest.
 pub const GITHUB_PROVIDER_EVENT: &str = "push";

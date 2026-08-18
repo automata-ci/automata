@@ -42,7 +42,7 @@ pub enum GithubCheckRerunTarget {
         /// Requested rerun mode.
         action: GithubCheckRerunAction,
     },
-    /// Every Automata workflow Check in one Check Suite.
+    /// Every Automata workflow represented by job Checks in one Check Suite.
     Suite {
         /// Provider Check Suite identity.
         suite_id: GithubCheckSuiteId,

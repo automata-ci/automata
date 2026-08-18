@@ -7,17 +7,17 @@ and the rerun service owns admission. Only Check Runs project results: no produc
 
 ## User-visible lifecycle
 
-- The configured Check name is a base namespace. Its `/ required` projection
-  belongs only to the delivery-wide required aggregate. In
-  `all_direct` mode it remains nonterminal while any admitted workflow is
-  running and derives its terminal conclusion from every admitted workflow;
-  per-workflow Checks use distinct path-qualified names. Each concrete job
-  attempt has a child Check, and a physical rerun gets fresh Checks.
+- The configured Check name is the one delivery-wide aggregate (`Automata` in
+  production). In `all_direct` mode it remains nonterminal while any admitted
+  workflow is running and derives its terminal conclusion from every admitted
+  workflow. Workflow discovery and lifecycle subjects are internal and never
+  become Check Runs. Each concrete job attempt has its own Check named from the
+  evaluated job display name, and a physical rerun gets fresh job Checks.
 - Required-name ownership is event-isolated. Only the configured default-branch
   push, `pull_request` `opened`/`reopened`/`synchronize`, and `merge_group`
-  `checks_requested` deliveries may publish it. Other deliveries use the
-  distinct `/ auxiliary event` aggregate name. No delivery publishes the bare
-  configured base. A required aggregate never
+  `checks_requested` deliveries may publish it. Other deliveries publish only
+  the concrete jobs they run; webhook bookkeeping never becomes a Check Run.
+  A required aggregate never
   concludes `skipped`; zero selected workflows or an all-skipped result fails.
 - Delivery, schedule, and rerun origins share the same fenced projection contract.
 - Identity is immutable: tenant, repository, connection, installation, App, head SHA,
@@ -35,7 +35,10 @@ and the rerun service owns admission. Only Check Runs project results: no produc
 - A visible nonterminal page polls its same-origin snapshot every two seconds, pauses
   while hidden, stops when terminal, and backs off to 30 seconds with manual refresh.
 - `frame-ancestors 'none'` and `X-Frame-Options: DENY` are Automata invariants.
-- Job Check names are bounded projections of evaluated display names; required job checks need unique projected names across workflows.
+- Job Check names are bounded projections of evaluated display names. The exact
+  aggregate name is reserved and rejected as a job name so no job, schedule, or
+  rerun can satisfy the merge gate. Other required job names must be unique
+  after projection across workflows.
 
 ## GitHub platform boundary
 
@@ -125,12 +128,13 @@ present cross-site Fetch Metadata is rejected. The closed JSON body is capped at
 Webhook processing verifies HMAC over the raw body before parsing configured provider
 identity, then reauthorizes the sender against current Automata repository authority.
 Check admission matches exact App, suite, run, head SHA, external ID, terminal state,
-and durable binding; suite admission matches its App, suite, SHA, and terminal aggregate.
-A job Check `rerequested` or `rerun_job` selects that job and its dependents.
-A workflow Check `rerequested` or `rerun_all` selects all jobs; `rerun_failed` selects
-failed jobs and dependents. A suite rerequest selects matching terminal aggregate workflows.
-Completed job Checks offer `rerun_job`, `rerun_failed`, and `rerun_all`; a completed
-aggregate offers failed/all. Eligibility is terminality, not viewer-prefiltered buttons.
+and durable binding; suite admission matches its App, suite, SHA, and terminal job
+Checks, then deduplicates their workflow runs.
+On a job Check, `rerequested` or `rerun_job` selects that job and its dependents,
+`rerun_all` selects the workflow, and `rerun_failed` selects failed jobs and dependents.
+A suite rerequest selects the workflows represented by its terminal job Checks.
+Completed job Checks offer `rerun_job`, `rerun_failed`, and `rerun_all`; the merge
+aggregate offers no rerun action because it represents multiple workflows.
 The durable operation identity combines GitHub delivery ID, SHA-256 of the raw body, and
 source run. Exact delivery replay is idempotent; a distinct click/delivery may create a run.
 Rerun success means durable admission succeeded, not that the new execution completed.

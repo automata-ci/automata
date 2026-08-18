@@ -13,19 +13,19 @@ impl From<sqlx::Error> for GithubCheckAggregationError {
     }
 }
 
-/// Serializes child finalization through its delivery-wide all-direct Check.
+/// Serializes run finalization through its delivery-wide all-direct Check.
 pub(super) async fn lock_all_direct_check_for_run(
     transaction: &mut Transaction<'_, Postgres>,
     run_id: Uuid,
 ) -> Result<Option<Uuid>, GithubCheckAggregationError> {
     let delivery_id = sqlx::query_scalar::<_, Uuid>(
         r"
-        SELECT child.provider_delivery_id
-        FROM github_check_subjects AS child
+        SELECT run_evidence.provider_delivery_id
+        FROM github_workflow_run_subject_evidence AS run_evidence
         JOIN github_provider_delivery_evidence AS evidence
-          ON evidence.provider_delivery_id = child.provider_delivery_id
-         AND evidence.tenant_id = child.tenant_id
-         AND evidence.repository_id = child.repository_id
+          ON evidence.provider_delivery_id = run_evidence.provider_delivery_id
+         AND evidence.tenant_id = run_evidence.tenant_id
+         AND evidence.repository_id = run_evidence.repository_id
         JOIN github_provider_manifest_revisions AS manifest
           ON manifest.tenant_id = evidence.tenant_id
          AND manifest.repository_id = evidence.repository_id
@@ -36,8 +36,7 @@ pub(super) async fn lock_all_direct_check_for_run(
           ON aggregate.id = evidence.github_check_subject_id
          AND aggregate.provider_delivery_id = evidence.provider_delivery_id
          AND aggregate.tenant_id = evidence.tenant_id
-        WHERE child.workflow_run_id = $1
-          AND child.subject_kind = 'workflow'
+        WHERE run_evidence.run_id = $1
           AND manifest.workflow_selection_kind = 'all_direct'
         FOR UPDATE OF aggregate
         ",
@@ -96,37 +95,45 @@ pub(super) async fn reconcile_all_direct_check(
                count(*) FILTER (
                    WHERE outcome.outcome_kind = 'admitted'
                ) AS admitted_count,
-               count(child.id) FILTER (
+               count(run_evidence.run_id) FILTER (
                    WHERE outcome.outcome_kind = 'admitted'
                ) AS child_count,
                count(*) FILTER (
                    WHERE outcome.outcome_kind = 'admitted'
-                     AND child.desired_state = 'completed'
+                     AND (
+                         result.run_id IS NOT NULL
+                         OR run.status = 'cancelled'
+                     )
                ) AS terminal_count,
                count(*) FILTER (
-                   WHERE child.desired_conclusion = 'failure'
+                   WHERE result.effective_conclusion = 'failure'
                ) AS failure_count,
                count(*) FILTER (
-                   WHERE child.desired_conclusion = 'timed_out'
+                   WHERE result.effective_conclusion = 'timed_out'
                ) AS timed_out_count,
                count(*) FILTER (
-                   WHERE child.desired_conclusion = 'cancelled'
+                   WHERE result.effective_conclusion = 'cancelled'
+                      OR (result.run_id IS NULL AND run.status = 'cancelled')
                ) AS cancelled_count,
                count(*) FILTER (
-                   WHERE child.desired_conclusion = 'action_required'
+                   WHERE result.effective_conclusion = 'action_required'
                ) AS action_required_count,
                count(*) FILTER (
-                   WHERE child.desired_conclusion = 'success'
+                   WHERE result.effective_conclusion = 'success'
                ) AS success_count,
                count(*) FILTER (
-                   WHERE child.desired_conclusion = 'skipped'
+                   WHERE result.effective_conclusion = 'skipped'
                ) AS skipped_count
         FROM provider_delivery_workflow_outcomes AS outcome
-        LEFT JOIN github_check_subjects AS child
-          ON child.provider_delivery_id = outcome.inbox_id
-         AND child.tenant_id = outcome.tenant_id
-         AND child.workflow_run_id = outcome.run_id
-         AND child.subject_kind = 'workflow'
+        LEFT JOIN github_workflow_run_subject_evidence AS run_evidence
+          ON run_evidence.provider_delivery_id = outcome.inbox_id
+         AND run_evidence.tenant_id = outcome.tenant_id
+         AND run_evidence.run_id = outcome.run_id
+        LEFT JOIN workflow_runs AS run
+          ON run.repository_id = run_evidence.repository_id
+         AND run.id = run_evidence.run_id
+        LEFT JOIN logical_workflow_run_results AS result
+          ON result.run_id = run_evidence.run_id
         WHERE outcome.inbox_id = $1
         ",
     )
@@ -137,7 +144,7 @@ pub(super) async fn reconcile_all_direct_check(
     let aggregate_check_kind: String = aggregate.try_get("aggregate_check_kind")?;
     let required = match aggregate_check_kind.as_str() {
         "required" => true,
-        "auxiliary" => false,
+        "jobs_only" => false,
         _ => return Err(GithubCheckAggregationError::CorruptData),
     };
     let desired = desired_aggregate(
@@ -401,7 +408,7 @@ mod tests {
                 DesiredAggregate::Terminal("failure", "workflow_failure")
             );
             assert_eq!(
-                desired_aggregate(counts, false).expect("consistent auxiliary aggregate"),
+                desired_aggregate(counts, false).expect("consistent jobs-only aggregate"),
                 DesiredAggregate::Terminal("skipped", "workflow_skipped")
             );
         }

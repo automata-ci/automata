@@ -95,55 +95,9 @@ fn static_and_evaluated_job_names_project_without_mutating_durable_text() {
 }
 
 #[test]
-fn discovered_workflow_check_names_cannot_collide_with_the_aggregate() {
-    let aggregate = GithubCheckName::new("Automata CI").expect("aggregate name");
-    let rust = GithubCheckName::from_workflow_path(&aggregate, ".ci/workflows/rust.yml")
-        .expect("workflow name");
-    let frontend = GithubCheckName::from_workflow_path(&aggregate, ".ci/workflows/frontend.yml")
-        .expect("workflow name");
-
-    assert_eq!(rust.as_str(), "Automata CI / .ci/workflows/rust.yml");
-    assert_ne!(rust, aggregate);
-    assert_ne!(rust, frontend);
-
-    let maximum = GithubCheckName::new("x".repeat(255)).expect("maximum aggregate name");
-    let long_path = format!(".ci/workflows/{}.yml", "workflow".repeat(128));
-    let bounded =
-        GithubCheckName::from_workflow_path(&maximum, &long_path).expect("bounded workflow name");
-    assert_eq!(bounded.as_str().len(), 255);
-    assert!(bounded.as_str().contains(" / workflow-"));
-    assert_ne!(bounded, maximum);
-}
-
-#[test]
-fn auxiliary_event_check_names_cannot_satisfy_the_required_aggregate() {
-    let configured = GithubCheckName::new("Automata CI").expect("configured base");
-    let required =
-        GithubCheckName::for_required_delivery(&configured).expect("required event name");
-    let auxiliary =
-        GithubCheckName::for_auxiliary_delivery(&configured).expect("auxiliary event name");
-
-    assert_eq!(required.as_str(), "Automata CI / required");
-    assert_eq!(auxiliary.as_str(), "Automata CI / auxiliary event");
-    assert_ne!(required, configured);
-    assert_ne!(auxiliary, configured);
-    assert_ne!(auxiliary, required);
-
-    let maximum = GithubCheckName::new("x".repeat(255)).expect("maximum configured base");
-    for (bounded, suffix) in [
-        (
-            GithubCheckName::for_required_delivery(&maximum).expect("bounded required name"),
-            " / required",
-        ),
-        (
-            GithubCheckName::for_auxiliary_delivery(&maximum).expect("bounded auxiliary name"),
-            " / auxiliary event",
-        ),
-    ] {
-        assert_eq!(bounded.as_str().len(), 255);
-        assert!(bounded.as_str().ends_with(suffix));
-        assert_ne!(bounded, maximum);
-    }
+fn configured_check_name_is_the_single_aggregate_identity() {
+    let aggregate = GithubCheckName::new("Automata").expect("aggregate name");
+    assert_eq!(aggregate.as_str(), "Automata");
 }
 
 #[test]
