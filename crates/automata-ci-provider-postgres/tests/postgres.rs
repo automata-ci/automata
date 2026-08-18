@@ -4,16 +4,26 @@ use automata_ci_core::{GitObjectAlgorithm, Sha256Digest, UnixMillis, WorkspaceId
 use automata_ci_key_management::{KeyId, LocalAes256GcmKeyring, LocalKeyMaterial, SecretBytes};
 use automata_ci_postgres::test_support::{TestResult, run_with_database};
 use automata_ci_provider::{
-    ExternalRepositoryId, ExternalRepositoryIdentity, ProviderArchiveLimits, ProviderCapabilities,
-    ProviderCapability, ProviderConfigurationDocument, ProviderConfigurationRevision,
-    ProviderConnectionConfiguration, ProviderConnectionId, ProviderConnectionManifest,
-    ProviderConnectionPolicyDocument, ProviderConnectionRevision, ProviderDefaultBranch,
+    AcceptProviderDelivery, ClaimProviderDelivery, CompleteProviderDelivery, ExternalDeliveryId,
+    ExternalDeliveryIdentity, ExternalRepositoryId, ExternalRepositoryIdentity, NormalizedTrigger,
+    ProviderArchiveLimits, ProviderCapabilities, ProviderCapability, ProviderConfigurationDocument,
+    ProviderConfigurationRevision, ProviderConnectionConfiguration, ProviderConnectionId,
+    ProviderConnectionManifest, ProviderConnectionPolicyDocument, ProviderConnectionRevision,
+    ProviderDefaultBranch, ProviderDelivery, ProviderDeliveryAcceptOutcome,
+    ProviderDeliveryFailure, ProviderDeliveryId, ProviderDeliveryObservations,
+    ProviderDeliveryRepository as _, ProviderDeliveryRepositoryError, ProviderDeliveryState,
+    ProviderDeliveryWorkerId, ProviderEventName, ProviderGitRef, ProviderGitRefKind,
     ProviderInstanceId, ProviderInstanceManifest, ProviderInstanceRecord, ProviderLifecycleState,
-    ProviderManifestRepository as _, ProviderOrigins, ProviderRepositoryError,
+    ProviderManifestRepository as _, ProviderOrigins, ProviderRepository, ProviderRepositoryError,
     ProviderRepositoryPath, ProviderRunnerPolicyBinding, ProviderSaveOutcome,
     ProviderSchemaVersion, ProviderSecret, ProviderSecretBinding, ProviderSecretBindings,
     ProviderSecretGeneration, ProviderSecretName, ProviderSecretSet, ProviderTypeId,
-    ProviderWorkflowSource, RepositoryVisibility, SourceReadCapability, provider_capability_digest,
+    ProviderWebhookEndpointId, ProviderWebhookEndpointManifest,
+    ProviderWebhookEndpointRepository as _, ProviderWebhookEndpointRevision,
+    ProviderWebhookEndpointState, ProviderWebhookSecretReference, ProviderWebhookSignatureEvidence,
+    ProviderWorkflowSource, PushTrigger, RepositoryVisibility, RetryProviderDelivery,
+    SourceReadCapability, VerifiedProviderDelivery, provider_capability_digest,
+    provider_raw_webhook_descriptor,
 };
 use automata_ci_provider_postgres::PostgresProviderManifestRepository;
 use sha2::{Digest as _, Sha256};
@@ -373,6 +383,260 @@ async fn stale_missing_and_tampered_state_fail_closed() -> TestResult {
                 .await,
             Err(ProviderRepositoryError::SecretCustody)
         ));
+        Ok(())
+    })
+    .await
+}
+
+fn verified_delivery(
+    endpoint: &ProviderWebhookEndpointManifest,
+    delivery_id: ProviderDeliveryId,
+    raw_body: &[u8],
+) -> VerifiedProviderDelivery {
+    let digest = secret_digest(raw_body);
+    let raw =
+        provider_raw_webhook_descriptor(digest, raw_body.len() as u64).expect("raw descriptor");
+    let repository = ProviderRepository::new(
+        ExternalRepositoryIdentity::new(
+            endpoint.instance_id(),
+            ExternalRepositoryId::new("42").expect("repository ID"),
+        ),
+        ProviderRepositoryPath::new("owner/repository").expect("repository path"),
+        RepositoryVisibility::Private,
+    );
+    let before = automata_ci_core::GitObjectId::from_hex(GitObjectAlgorithm::Sha1, &"a".repeat(40))
+        .expect("before object");
+    let after = automata_ci_core::GitObjectId::from_hex(GitObjectAlgorithm::Sha1, &"b".repeat(40))
+        .expect("after object");
+    let trigger = NormalizedTrigger::Push(
+        PushTrigger::new(
+            repository,
+            ProviderGitRef::new("refs/heads/main", ProviderGitRefKind::Branch).expect("branch"),
+            Some(before),
+            Some(after),
+            false,
+            None,
+        )
+        .expect("push"),
+    )
+    .seal()
+    .expect("sealed trigger");
+    VerifiedProviderDelivery::rehydrate(
+        delivery_id,
+        endpoint.endpoint_id(),
+        endpoint.revision(),
+        endpoint.provider_type().clone(),
+        endpoint.instance_id(),
+        endpoint.provider_revision(),
+        endpoint.connection_id(),
+        endpoint.connection_revision(),
+        ExternalDeliveryIdentity::new(
+            endpoint.instance_id(),
+            ExternalDeliveryId::new("delivery-100").expect("external delivery"),
+        ),
+        ProviderEventName::new("push").expect("event type"),
+        UnixMillis::new(4_000),
+        raw,
+        UnixMillis::new(
+            4_000
+                + i64::try_from(endpoint.raw_retention_millis())
+                    .expect("retention is in signed range"),
+        ),
+        ProviderWebhookSignatureEvidence::new(
+            "fake-sha256",
+            endpoint.secret_references()[0].clone(),
+        )
+        .expect("signature evidence"),
+        trigger,
+        ProviderDeliveryObservations::new(br#"{"fixture":"postgres"}"#.to_vec())
+            .expect("observations"),
+    )
+    .expect("verified delivery")
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL 18 via AUTOMATA_TEST_DATABASE_URL"]
+#[allow(clippy::too_many_lines)]
+async fn endpoint_secrets_replay_conflicts_and_worker_fences_are_exact() -> TestResult {
+    run_with_database(|database| async move {
+        let repository = repository(database.pool().clone());
+        let instance_id = ProviderInstanceId::from_uuid(Uuid::from_u128(101))?;
+        repository
+            .save_instance(instance_record(
+                instance_id,
+                "forgejo",
+                1,
+                TOKEN,
+                1,
+                ProviderLifecycleState::Active,
+                Some(UnixMillis::new(1_000)),
+            ))
+            .await?;
+        let instance = repository
+            .current_instance(instance_id)
+            .await?
+            .expect("instance");
+        let workspace = WorkspaceId::parse("22222222-2222-4222-8222-222222222222")?;
+        sqlx::query(
+            "INSERT INTO tenants (id, display_name, created_at_ms, updated_at_ms) VALUES ($1, 'Delivery test', 1, 1)",
+        )
+        .bind(workspace.to_string())
+        .execute(database.pool())
+        .await?;
+        let connection = connection(workspace, instance.manifest());
+        repository.save_connection(connection.clone()).await?;
+
+        let endpoint = ProviderWebhookEndpointManifest::new(
+            ProviderWebhookEndpointId::from_uuid(Uuid::from_u128(102))?,
+            ProviderWebhookEndpointRevision::new(1)?,
+            ProviderWebhookEndpointState::Active,
+            ProviderTypeId::new("forgejo")?,
+            instance_id,
+            instance.manifest().revision(),
+            connection.connection_id(),
+            connection.revision(),
+            1_024,
+            30 * 24 * 60 * 60 * 1_000,
+            vec![ProviderWebhookSecretReference::new(
+                instance.manifest().revision(),
+                ProviderSecretName::new("control-token")?,
+                ProviderSecretGeneration::new(1)?,
+            )],
+            UnixMillis::new(3_000),
+            None,
+        )?;
+        assert_eq!(
+            repository.save_endpoint(endpoint.clone()).await?,
+            ProviderSaveOutcome::Inserted
+        );
+        let resolved = repository
+            .resolve_endpoint(endpoint.endpoint_id())
+            .await?
+            .expect("resolved endpoint");
+        assert_eq!(
+            resolved
+                .secrets()
+                .iter()
+                .next()
+                .expect("candidate")
+                .expose_secret(),
+            TOKEN
+        );
+
+        let first_id = ProviderDeliveryId::from_uuid(Uuid::from_u128(103))?;
+        let first = ProviderDelivery::Trigger(Box::new(verified_delivery(
+            &endpoint,
+            first_id,
+            b"body-one",
+        )));
+        let acceptance = AcceptProviderDelivery::new(first, UnixMillis::new(4_100))?;
+        assert!(matches!(
+            repository.accept_delivery(acceptance).await?,
+            ProviderDeliveryAcceptOutcome::Inserted(receipt)
+                if receipt.delivery_id() == first_id
+                    && receipt.state() == ProviderDeliveryState::Pending
+        ));
+        let immutable_update = sqlx::query(
+            "UPDATE provider_delivery_records SET event_type = 'tampered' WHERE delivery_id = $1",
+        )
+        .bind(first_id.as_uuid())
+        .execute(database.pool())
+        .await;
+        assert!(immutable_update.is_err(), "raw delivery evidence is immutable");
+
+        let duplicate = ProviderDelivery::Trigger(Box::new(verified_delivery(
+            &endpoint,
+            ProviderDeliveryId::from_uuid(Uuid::from_u128(104))?,
+            b"body-one",
+        )));
+        assert!(matches!(
+            repository
+                .accept_delivery(AcceptProviderDelivery::new(
+                    duplicate,
+                    UnixMillis::new(4_200),
+                )?)
+                .await?,
+            ProviderDeliveryAcceptOutcome::Duplicate(receipt)
+                if receipt.delivery_id() == first_id
+        ));
+
+        let conflict = ProviderDelivery::Trigger(Box::new(verified_delivery(
+            &endpoint,
+            ProviderDeliveryId::from_uuid(Uuid::from_u128(105))?,
+            b"different-body",
+        )));
+        assert_eq!(
+            repository
+                .accept_delivery(AcceptProviderDelivery::new(
+                    conflict,
+                    UnixMillis::new(4_300),
+                )?)
+                .await,
+            Err(ProviderDeliveryRepositoryError::ReplayConflict)
+        );
+
+        let worker = ProviderDeliveryWorkerId::from_uuid(Uuid::from_u128(106))?;
+        let first_claim = repository
+            .claim_delivery(ClaimProviderDelivery::new(
+                worker,
+                UnixMillis::new(5_000),
+                1_000,
+            )?)
+            .await?
+            .expect("first claim");
+        let retry = repository
+            .retry_delivery(RetryProviderDelivery::new(
+                first_claim.fence(),
+                UnixMillis::new(5_500),
+                UnixMillis::new(7_000),
+                ProviderDeliveryFailure::DependencyUnavailable,
+            )?)
+            .await?;
+        assert_eq!(retry.state(), ProviderDeliveryState::RetryPending);
+        assert!(
+            repository
+                .claim_delivery(ClaimProviderDelivery::new(
+                    worker,
+                    UnixMillis::new(6_999),
+                    1_000,
+                )?)
+                .await?
+                .is_none()
+        );
+        let second_claim = repository
+            .claim_delivery(ClaimProviderDelivery::new(
+                worker,
+                UnixMillis::new(7_000),
+                1_000,
+            )?)
+            .await?
+            .expect("second claim");
+        assert!(second_claim.fence().token() > first_claim.fence().token());
+        let completed = repository
+            .complete_delivery(CompleteProviderDelivery::new(
+                second_claim.fence(),
+                UnixMillis::new(7_500),
+            )?)
+            .await?;
+        assert_eq!(completed.state(), ProviderDeliveryState::Completed);
+
+        let disabled_connection = ProviderConnectionManifest::new(
+            connection.connection_id(),
+            ProviderConnectionRevision::new(2)?,
+            ProviderLifecycleState::Disabled,
+            connection.configuration().clone(),
+            connection.created_at(),
+            connection.activated_at(),
+            None,
+        )?;
+        repository.save_connection(disabled_connection).await?;
+        assert!(
+            repository
+                .resolve_endpoint(endpoint.endpoint_id())
+                .await?
+                .is_none(),
+            "connection disablement closes ingress without a fallback revision"
+        );
         Ok(())
     })
     .await

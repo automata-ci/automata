@@ -767,8 +767,10 @@ dependencies = [
 name = "automata-ci-provider"
 version = "0.1.0"
 dependencies = [
+ "automata-ci-blob",
  "automata-ci-core",
  "automata-ci-key-management",
+ "base64 0.23.1",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -781,6 +783,7 @@ dependencies = [
 name = "automata-ci-provider-postgres"
 version = "0.1.0"
 dependencies = [
+ "automata-ci-blob",
  "automata-ci-core",
  "automata-ci-key-management",
  "automata-ci-postgres",

@@ -10,9 +10,12 @@
 mod capability;
 mod configuration;
 mod connection;
+mod delivery;
 mod factory;
 mod identity;
 mod storage;
+mod trigger;
+mod webhook;
 
 pub use capability::{
     AuthorizationCodeLoginCapability, ChangedFileCapability, ChangedFileCompleteness,
@@ -40,18 +43,52 @@ pub use connection::{
     ProviderRepositoryPath, ProviderRunnerPolicyBinding, ProviderWorkflowSource,
     RepositoryVisibility,
 };
+pub use delivery::{
+    AcceptProviderDelivery, ClaimProviderDelivery, ClaimedProviderDelivery,
+    CompleteProviderDelivery, FailProviderDelivery, MAX_PROVIDER_DELIVERY_ATTEMPTS,
+    MAX_PROVIDER_DELIVERY_LEASE_MILLIS, MAX_PROVIDER_DELIVERY_RETRY_MILLIS, ProviderDelivery,
+    ProviderDeliveryAcceptOutcome, ProviderDeliveryClaimFence, ProviderDeliveryFailure,
+    ProviderDeliveryFuture, ProviderDeliveryModelError, ProviderDeliveryReceipt,
+    ProviderDeliveryReplayFingerprint, ProviderDeliveryRepository, ProviderDeliveryRepositoryError,
+    ProviderDeliveryState, ProviderWebhookEndpointRecord, ProviderWebhookEndpointRepository,
+    RetryProviderDelivery,
+};
 pub use factory::{
     MAX_PROVIDER_FACTORIES, ProviderConfigurationFactory, ProviderConnectionFactoryRequest,
     ProviderDescriptor, ProviderFactoryRegistry, ProviderFactoryRegistryError,
     ProviderFactoryRequest, ProviderFactoryValidationError,
 };
 pub use identity::{
-    ExternalDeliveryId, ExternalDeliveryIdentity, ExternalRepositoryId, ExternalRepositoryIdentity,
-    ExternalSubjectId, ExternalSubjectIdentity, ExternalSubjectKind, MAX_EXTERNAL_ID_BYTES,
-    MAX_PROVIDER_TYPE_ID_BYTES, ProviderConnectionId, ProviderIdentityError, ProviderInstanceId,
-    ProviderTypeId,
+    ExternalChangeId, ExternalDeliveryId, ExternalDeliveryIdentity, ExternalMergeQueueId,
+    ExternalRepositoryId, ExternalRepositoryIdentity, ExternalSubjectId, ExternalSubjectIdentity,
+    ExternalSubjectKind, MAX_EXTERNAL_ID_BYTES, MAX_PROVIDER_TYPE_ID_BYTES, ProviderConnectionId,
+    ProviderDeliveryId, ProviderDeliveryWorkerId, ProviderIdentityError, ProviderInstanceId,
+    ProviderTypeId, ProviderWebhookEndpointId,
 };
 pub use storage::{
     ProviderInstanceRecord, ProviderManifestRepository, ProviderRepositoryError,
     ProviderRepositoryFuture, ProviderSaveOutcome,
+};
+pub use trigger::{
+    MAX_NORMALIZED_TRIGGER_BYTES, MAX_PROVIDER_DISPATCH_INPUT_BYTES, MAX_PROVIDER_EVENT_NAME_BYTES,
+    MergeQueueActivity, MergeQueueTrigger, NormalizedTrigger, ProviderDispatchInput,
+    ProviderEventName, ProviderGitRef, ProviderGitRefKind, ProviderRepository,
+    ProviderTriggerError, PullRequestActivity, PullRequestTrigger, PushTrigger,
+    RepositoryDispatchTrigger, SealedNormalizedTrigger,
+};
+pub use webhook::{
+    AuthenticatedProviderWebhook, DeliveryAdapter, DeliveryAdapterRegistry,
+    DeliveryAdapterRegistryError, MAX_PROVIDER_DELIVERY_OBSERVATION_BYTES,
+    MAX_PROVIDER_RAW_WEBHOOK_RETENTION_MILLIS, MAX_PROVIDER_WEBHOOK_BODY_BYTES,
+    MAX_PROVIDER_WEBHOOK_HEADER_BYTES, MAX_PROVIDER_WEBHOOK_HEADER_NAME_BYTES,
+    MAX_PROVIDER_WEBHOOK_HEADER_VALUE_BYTES, MAX_PROVIDER_WEBHOOK_HEADERS,
+    MAX_PROVIDER_WEBHOOK_SECRET_CANDIDATES, PROVIDER_RAW_WEBHOOK_KEY_PREFIX,
+    PROVIDER_RAW_WEBHOOK_MEDIA_TYPE, ProviderDeliveryDraft, ProviderDeliveryNormalization,
+    ProviderDeliveryObservations, ProviderDeliveryRejection, ProviderWebhookAuthenticationError,
+    ProviderWebhookAuthenticationRequest, ProviderWebhookEndpointManifest,
+    ProviderWebhookEndpointRevision, ProviderWebhookEndpointState, ProviderWebhookError,
+    ProviderWebhookHeaderName, ProviderWebhookHeaders, ProviderWebhookMethod,
+    ProviderWebhookRequest, ProviderWebhookSecretCandidate, ProviderWebhookSecretCandidates,
+    ProviderWebhookSecretReference, ProviderWebhookSignatureEvidence, RejectedProviderDelivery,
+    RejectedProviderDeliveryDraft, VerifiedProviderDelivery, provider_raw_webhook_descriptor,
 };

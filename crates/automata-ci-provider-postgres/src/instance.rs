@@ -6,6 +6,7 @@ use automata_ci_provider::{
     ProviderSecretBindings, ProviderSecretGeneration, ProviderSecretName, ProviderSecretSet,
     ProviderTypeId,
 };
+use sha2::{Digest as _, Sha256};
 use sqlx::{FromRow, Postgres, Transaction};
 
 use crate::{
@@ -52,6 +53,55 @@ struct SealedSecret {
 }
 
 impl PostgresProviderManifestRepository {
+    pub(crate) async fn load_secret_inner(
+        &self,
+        instance_id: ProviderInstanceId,
+        revision: ProviderConfigurationRevision,
+        name: ProviderSecretName,
+        generation: ProviderSecretGeneration,
+    ) -> Result<Option<ProviderSecret>, ProviderRepositoryError> {
+        let row = sqlx::query_as::<_, SecretRow>(
+            r"
+            SELECT secret_name, secret_generation, plaintext_digest,
+                   envelope_schema, wrapping_key_id, wrapped_data_key,
+                   nonce, ciphertext
+            FROM provider_instance_secret_bindings
+            WHERE instance_id = $1 AND revision = $2
+              AND secret_name = $3 AND secret_generation = $4
+            ",
+        )
+        .bind(instance_id.as_uuid())
+        .bind(i64::try_from(revision.get()).map_err(|_| ProviderRepositoryError::Corrupt)?)
+        .bind(name.as_str())
+        .bind(i64::try_from(generation.get()).map_err(|_| ProviderRepositoryError::Corrupt)?)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(unavailable)?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let encrypted = envelope(
+            row.envelope_schema,
+            row.wrapping_key_id,
+            row.wrapped_data_key,
+            row.nonce,
+            row.ciphertext,
+        )?;
+        let context = secret_context(instance_id, revision.get(), name.as_str(), generation.get())?;
+        let plaintext = self
+            .envelopes
+            .open(&context, &encrypted)
+            .await
+            .map_err(encryption_failure)?;
+        let plaintext_digest = automata_ci_core::Sha256Digest::from_bytes(
+            Sha256::digest(plaintext.expose_secret()).into(),
+        );
+        if digest(row.plaintext_digest)? != plaintext_digest {
+            return Err(ProviderRepositoryError::SecretCustody);
+        }
+        Ok(Some(ProviderSecret::new(name, generation, plaintext)))
+    }
+
     pub(crate) async fn save_instance_inner(
         &self,
         record: ProviderInstanceRecord,

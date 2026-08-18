@@ -181,6 +181,21 @@ uuid_identity!(
     ProviderConnectionId,
     "provider connection ID"
 );
+uuid_identity!(
+    /// Opaque public identity of one connection-bound webhook endpoint.
+    ProviderWebhookEndpointId,
+    "provider webhook endpoint ID"
+);
+uuid_identity!(
+    /// Durable server-owned identity of one authenticated provider delivery.
+    ProviderDeliveryId,
+    "provider delivery ID"
+);
+uuid_identity!(
+    /// Durable identity of one provider-delivery worker.
+    ProviderDeliveryWorkerId,
+    "provider delivery worker ID"
+);
 
 macro_rules! external_identity {
     ($(#[$meta:meta])* $name:ident, $field:literal) => {
@@ -258,6 +273,16 @@ external_identity!(
     /// Provider-native webhook delivery identity, interpreted within one provider instance.
     ExternalDeliveryId,
     "external delivery ID"
+);
+external_identity!(
+    /// Provider-native pull-request or merge-request identity.
+    ExternalChangeId,
+    "external change ID"
+);
+external_identity!(
+    /// Provider-native merge-queue entry or candidate identity.
+    ExternalMergeQueueId,
+    "external merge-queue ID"
 );
 
 /// Instance-scoped provider-native repository identity.
