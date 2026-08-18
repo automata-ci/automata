@@ -37,9 +37,9 @@ pub fn run() -> Result<()> {
     };
     init_tracing();
     if let Command::Internal(args) = &cli.command
-        && internal::is_synchronous_engine_operation(args)
+        && internal::is_synchronous_operation(args)
     {
-        return internal::run_synchronous_engine_operation(args);
+        return internal::run_synchronous_operation(args);
     }
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()

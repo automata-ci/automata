@@ -155,7 +155,8 @@ pub enum InstallationBootstrapRunnerEnrollmentTokenOutcome {
     Replayed(RunnerEnrollmentTokenRecord),
     /// The exact expired token received a new one-hour window and audit event.
     Refreshed(RunnerEnrollmentTokenRecord),
-    /// The exact token was already consumed and can never be refreshed.
+    /// The exact token was consumed into one internally consistent active
+    /// runner identity with one current certificate; it can never be refreshed.
     Consumed(RunnerEnrollmentTokenRecord),
     /// The operation identity or token digest was already bound differently.
     Conflict,
@@ -756,6 +757,28 @@ struct CreatedEnrollmentRow {
     last_refreshed_at_ms: Option<i64>,
     expires_at_ms: i64,
     consumed_at_ms: Option<i64>,
+}
+
+#[derive(FromRow)]
+struct ConsumedRunnerRow {
+    id: Uuid,
+    tenant_id: String,
+    group_id: Option<Uuid>,
+    name: String,
+    normalized_name: String,
+    labels: Vec<String>,
+    capabilities: serde_json::Value,
+    slots: i32,
+    generation: i64,
+    external_identity: Option<String>,
+    desired_state: String,
+}
+
+#[derive(FromRow)]
+struct ConsumedRunnerCertificateRow {
+    leaf_sha256: Vec<u8>,
+    expires_at_seconds: i64,
+    revoked_at_seconds: Option<i64>,
 }
 
 #[derive(Clone, Copy)]
@@ -1935,10 +1958,16 @@ async fn create_runner_enrollment_token(
         return match issuer {
             EnrollmentIssuer::Human(_) => Ok(EnrollmentTokenCreateDecision::Replayed(record)),
             EnrollmentIssuer::Installation(_) if existing.consumed_at_ms.is_some() => {
+                validate_consumed_installation_enrollment(
+                    transaction,
+                    &existing,
+                    request.token_sha256,
+                )
+                .await?;
                 Ok(EnrollmentTokenCreateDecision::Consumed(record))
             }
             EnrollmentIssuer::Installation(_) => {
-                let now_ms = database_time_milliseconds(transaction)
+                let now_ms = enrollment_database_time_milliseconds(transaction)
                     .await
                     .map_err(map_database_error)?;
                 if existing.expires_at_ms > now_ms {
@@ -2113,6 +2142,113 @@ async fn load_created_enrollment(
     .map_err(map_database_error)
 }
 
+async fn validate_consumed_installation_enrollment(
+    transaction: &mut Transaction<'_, Postgres>,
+    created: &CreatedEnrollmentRow,
+    token_sha256: &[u8; 32],
+) -> Result<(), ManagementRepositoryError> {
+    let consumed = load_enrollment(transaction, token_sha256, true)
+        .await?
+        .ok_or(ManagementRepositoryError::CorruptData)?;
+    consumed.validate()?;
+    let runner_id = consumed
+        .consumed_runner_id
+        .ok_or(ManagementRepositoryError::CorruptData)?;
+    if consumed.id != created.id
+        || consumed.tenant_id != created.tenant_id
+        || consumed.runner_group_id != created.runner_group_id
+        || consumed.runner_group != created.runner_group
+        || consumed.expires_at_ms != created.expires_at_ms
+    {
+        return Err(ManagementRepositoryError::CorruptData);
+    }
+
+    let runner = sqlx::query_as::<_, ConsumedRunnerRow>(
+        r"
+        SELECT id,tenant_id,group_id,name,normalized_name,labels,capabilities,
+               slots,generation,external_identity,desired_state
+        FROM runners
+        WHERE id=$1
+        FOR SHARE
+        ",
+    )
+    .bind(runner_id)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(map_database_error)?
+    .ok_or(ManagementRepositoryError::CorruptData)?;
+    let capabilities: RunnerCapabilities = serde_json::from_value(runner.capabilities.clone())
+        .map_err(|_| ManagementRepositoryError::CorruptData)?;
+    let expected_group = RunnerGroup::new(&consumed.runner_group)
+        .map_err(|_| ManagementRepositoryError::CorruptData)?;
+    let expected_labels = capabilities
+        .labels()
+        .iter()
+        .map(|label| label.as_str().to_owned())
+        .collect::<Vec<_>>();
+    let expected_external_identity = enrolled_runner_external_identity(runner_id);
+    if runner.id != runner_id
+        || runner.tenant_id != consumed.tenant_id
+        || runner.group_id != Some(consumed.runner_group_id)
+        || !valid_runner_name(&runner.name)
+        || runner.normalized_name != runner.name.to_lowercase()
+        || runner.labels != expected_labels
+        || capabilities.validate().is_err()
+        || capabilities.runner_id().as_uuid() != runner_id
+        || capabilities.groups() != &std::collections::BTreeSet::from([expected_group])
+        || runner.slots != i32::from(capabilities.max_parallel_jobs())
+        || runner.generation <= 0
+        || runner.external_identity.as_deref() != Some(expected_external_identity.as_str())
+        || runner.desired_state != "active"
+    {
+        return Err(ManagementRepositoryError::CorruptData);
+    }
+
+    let certificates = sqlx::query_as::<_, ConsumedRunnerCertificateRow>(
+        r"
+        SELECT leaf_sha256,expires_at_seconds,revoked_at_seconds
+        FROM runner_machine_certificates
+        WHERE runner_id=$1
+        FOR SHARE
+        ",
+    )
+    .bind(runner_id)
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(map_database_error)?;
+    let now_seconds = enrollment_database_time_milliseconds(transaction)
+        .await
+        .map_err(map_database_error)?
+        .div_euclid(1_000);
+    let original_expiry = consumed
+        .redeem_certificate_expires_at_seconds
+        .ok_or(ManagementRepositoryError::CorruptData)?;
+    let mut current = 0_usize;
+    let mut original = 0_usize;
+    for certificate in certificates {
+        if certificate.leaf_sha256.len() != 32
+            || certificate.leaf_sha256.as_slice() == [0; 32]
+            || certificate.expires_at_seconds <= 0
+            || certificate
+                .revoked_at_seconds
+                .is_some_and(|revoked| revoked <= 0 || revoked > certificate.expires_at_seconds)
+        {
+            return Err(ManagementRepositoryError::CorruptData);
+        }
+        if certificate.expires_at_seconds == original_expiry {
+            original = original.saturating_add(1);
+        }
+        if certificate.revoked_at_seconds.is_none() && certificate.expires_at_seconds > now_seconds
+        {
+            current = current.saturating_add(1);
+        }
+    }
+    if original == 0 || current != 1 {
+        return Err(ManagementRepositoryError::CorruptData);
+    }
+    Ok(())
+}
+
 async fn try_insert_enrollment(
     transaction: &mut Transaction<'_, Postgres>,
     issuer: EnrollmentIssuer<'_>,
@@ -2194,7 +2330,7 @@ async fn append_installation_bootstrap_audit_event(
     enrollment_id: Uuid,
     outcome: &'static str,
 ) -> Result<(), ManagementRepositoryError> {
-    let occurred_at_ms = database_time_milliseconds(transaction)
+    let occurred_at_ms = enrollment_database_time_milliseconds(transaction)
         .await
         .map_err(map_database_error)?;
     sqlx::query(

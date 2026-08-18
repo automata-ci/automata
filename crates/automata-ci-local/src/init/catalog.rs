@@ -16,7 +16,7 @@ use super::{LocalInitError, LocalInitErrorCode};
 
 const CATALOG_SCHEMA: &str = "automata.local/release-catalog/v1";
 const SOURCE_SCHEMA: &str = "automata.local/release-catalog-source/v1";
-const SOURCE_SHA256: &str = "9f4e07ea39c6ba4231796579e11f6fb5ff0514eb0fd2eeca0047e11c3f0b4a62";
+const SOURCE_SHA256: &str = "9c490bed48e90a18e7161a31ab7b1f085f7fabc609fe3f04127d5ea5d867d5eb";
 const CANDIDATE_BASENAME: &str = "automata-service-proxy-candidate-x86_64-unknown-linux-musl.tar";
 const CANDIDATE_PATH: &str = concat!(
     "target/service-proxy-publication/",
@@ -352,6 +352,12 @@ fn validate_lifecycle_runtime(value: &Value) -> Result<(), LocalInitError> {
     )?;
     let materialize = object(commands.get("materialize").ok_or_else(invalid_catalog)?)?;
     let control_ready = object(commands.get("check_ready").ok_or_else(invalid_catalog)?)?;
+    let hold_lock = object(commands.get("hold_lock").ok_or_else(invalid_catalog)?)?;
+    let read_cas_digest = object(
+        commands
+            .get("read_cas_digest")
+            .ok_or_else(invalid_catalog)?,
+    )?;
     let read_desired = object(commands.get("read_desired").ok_or_else(invalid_catalog)?)?;
     let write_cas = object(commands.get("write_cas").ok_or_else(invalid_catalog)?)?;
     let compose = object(runtime.get("compose").ok_or_else(invalid_catalog)?)?;
@@ -406,6 +412,14 @@ fn validate_lifecycle_runtime(value: &Value) -> Result<(), LocalInitError> {
             != Some(crate::LOCAL_CONTROL_READY_RESPONSE_SUFFIX)
         || control_ready.get("timeout_seconds").and_then(Value::as_u64)
             != Some(crate::LOCAL_CONTROL_READY_TIMEOUT_SECONDS)
+        || hold_lock.get("argv")
+            != Some(&serde_json::json!(
+                crate::LOCAL_LIFECYCLE_LOCK_HOLDER_COMMAND
+            ))
+        || hold_lock.get("release").and_then(Value::as_str) != Some("stdin-eof")
+        || read_cas_digest.get("argv")
+            != Some(&serde_json::json!(["internal", "local", "read-cas-digest"]))
+        || read_cas_digest.get("purpose").and_then(Value::as_str) != Some("expected-old-sha256")
         || compose.get("minimum_version").and_then(Value::as_str) != Some(&minimum_compose)
         || compose.get("named_volume_nocopy").and_then(Value::as_bool) != Some(true)
         || compose.get("project_directory").and_then(Value::as_str)

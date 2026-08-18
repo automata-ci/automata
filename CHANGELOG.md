@@ -64,8 +64,21 @@ structure of [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
   Missing or malformed non-authority material/certificate records do not strand
   exact cleanup; canonically valid conflicting selector/commit records do.
   Imported images, the state directory, and its original operation lock are
-  retained; missing retained images do not block custody deletion. `local up`
-  and `down` remain absent.
+  retained; missing retained images do not block custody deletion.
+- x86-64 Linux-only `automata local up --state-directory ABS` and
+  `automata local down --state-directory ABS` lifecycle commands. Up reattests
+  the sealed release and Engine authority, renders the exact Compose topology,
+  and synchronously converges dependencies, bootstrap, control plane, fixed relay,
+  and runner. Down removes
+  replaceable topology while retaining sealed custody, persistent data, and
+  images. Both commands synchronously converge from sealed Desired plus fresh
+  Engine and Compose inspection under the exact sticky lock; there is no host
+  lifecycle journal. Stopped interruption evidence is refused by default;
+  `--recover-stopped-lock` explicitly authorizes positive-quiescence
+  revalidation after a Docker Engine restart and exact stopped-ID removal
+  before init/up/down convergence.
+  status now distinguishes exact running topology and lifecycle recovery from
+  recorded sealed and reset states.
 - Evaluation-only fixed-relay Local Docker runner execution on Linux. Runner
   schema 8 binds the private provider to an exact existing installation anchor,
   an already-present digest-pinned guest image, the sealed desired-plan digest,

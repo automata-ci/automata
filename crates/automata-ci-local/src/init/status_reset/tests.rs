@@ -666,6 +666,7 @@ fn reset_intent_is_canonical_self_contained_and_binds_the_closed_topology() {
     let established = EstablishedState {
         installation,
         epoch,
+        material_root: Some(root),
     };
     let authority = Sha256Digest::from_bytes([0x22; 32]);
     let intent = ResetIntent::new(authority, &established, Some(helper()));
@@ -729,6 +730,7 @@ fn published_reset_intent_remains_authoritative_after_host_record_loss_or_corrup
         &EstablishedState {
             installation,
             epoch,
+            material_root: Some([0x61; 32]),
         },
         None,
     );
@@ -777,6 +779,7 @@ fn every_replay_phase_rejects_any_unreadable_staged_intent_evidence() {
         &EstablishedState {
             installation,
             epoch,
+            material_root: Some([0x62; 32]),
         },
         None,
     );
@@ -822,6 +825,7 @@ fn restored_old_intent_rejects_new_generation_final_and_staged_evidence_before_e
             &EstablishedState {
                 installation: old_installation.clone(),
                 epoch: old_epoch,
+                material_root: Some([0x71; 32]),
             },
             None,
         );
@@ -904,6 +908,7 @@ fn staged_intent_rejection_fixture(case: &str) -> TestDirectory {
             &EstablishedState {
                 installation: old_installation,
                 epoch: old_epoch,
+                material_root: Some([0x81; 32]),
             },
             None,
         );
@@ -943,6 +948,7 @@ fn staged_intent_rejection_fixture(case: &str) -> TestDirectory {
             &EstablishedState {
                 installation,
                 epoch,
+                material_root: Some([0x86; 32]),
             },
             None,
         )
@@ -1020,6 +1026,7 @@ async fn valid_staged_reset_intent_is_published_and_bypasses_entry_cancellation(
         &EstablishedState {
             installation,
             epoch,
+            material_root: Some([0x83; 32]),
         },
         None,
     );
@@ -1094,6 +1101,7 @@ async fn status_api_rejects_a_restored_old_intent_against_new_canonical_custody(
         &EstablishedState {
             installation: old_installation,
             epoch: old_epoch,
+            material_root: Some([0x84; 32]),
         },
         None,
     );
@@ -1205,6 +1213,15 @@ fn public_status_reports(
         }),
     };
     (recorded, incomplete, resetting)
+}
+
+#[test]
+fn current_reset_os_credential_selector_union_is_exactly_empty() {
+    let installation = Installation::verified(InstallationName::default(), InstallationId::new());
+    assert!(LOCAL_OS_CREDENTIAL_SELECTORS.is_empty());
+    assert!(preflight_empty_os_credential_selectors(&installation).is_ok());
+    assert!(delete_empty_os_credential_selectors(&installation).is_ok());
+    assert!(requery_empty_os_credential_selectors(&installation).is_ok());
 }
 
 #[test]

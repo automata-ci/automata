@@ -513,13 +513,17 @@ BEGIN
                AND NEW.redeem_response IS NULL
                AND NEW.redeem_certificate_expires_at_seconds IS NULL
                AND OLD.expires_at_ms <=
-                   floor(extract(epoch FROM clock_timestamp()))::bigint * 1000
+                   floor(
+                       extract(epoch FROM clock_timestamp()) * 1000
+                   )::bigint
                AND NEW.last_refreshed_at_ms IS NOT NULL
                AND NEW.last_refreshed_at_ms >= OLD.expires_at_ms
                AND NEW.last_refreshed_at_ms >
                    COALESCE(OLD.last_refreshed_at_ms, OLD.issued_at_ms)
                AND NEW.last_refreshed_at_ms <=
-                   floor(extract(epoch FROM clock_timestamp()))::bigint * 1000
+                   floor(
+                       extract(epoch FROM clock_timestamp()) * 1000
+                   )::bigint
                AND NEW.expires_at_ms - NEW.last_refreshed_at_ms = 3600000
            )
        )

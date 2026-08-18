@@ -83,6 +83,9 @@ impl CredentialDestinations {
         if read_bounded_file(&self.server_roots, MAX_STAGE_BYTES, false)?.is_some()
             || read_bounded_file(&self.certificate_chain, MAX_STAGE_BYTES, false)?.is_some()
             || read_bounded_file(&self.private_key, MAX_STAGE_BYTES, true)?.is_some()
+            || read_bounded_temporary(&self.server_roots, MAX_STAGE_BYTES, false)?.is_some()
+            || read_bounded_temporary(&self.certificate_chain, MAX_STAGE_BYTES, false)?.is_some()
+            || read_bounded_temporary(&self.private_key, MAX_STAGE_BYTES, true)?.is_some()
         {
             bail!("runner TLS credential destination already exists");
         }
@@ -111,10 +114,106 @@ impl CredentialDestinations {
             publish_temporary(&self.request_stage)?;
             return Ok(Some(stage));
         }
-        if read_bounded_file(&self.response_stage, MAX_RESPONSE_BYTES, true)?.is_some() {
-            bail!("runner enrollment response stage has no matching request stage");
-        }
         Ok(None)
+    }
+
+    /// Recognizes only a fully published, currently usable enrollment identity.
+    ///
+    /// This path deliberately does not repair, replace, or remove anything. It
+    /// is used after the secret-bearing request stage has been durably retired
+    /// and the exact non-secret server response retained as the completion
+    /// receipt. Partial credentials, dangling writes, receipt drift, malformed
+    /// roots, an expired leaf, or a key/profile mismatch all fail closed.
+    pub(super) fn attest_completed(
+        &self,
+        config: &RunnerProductConfig,
+        response: &RedeemResponse,
+        receipt: &[u8],
+        validation_time_seconds: i64,
+    ) -> Result<()> {
+        let expected_group = automata_ci_core::RunnerGroup::new(&response.runner_group)
+            .context("runner enrollment completion receipt has an invalid group")?;
+        if response.runner_id != config.runner_id().as_uuid()
+            || response.control_endpoint != config.control_endpoint().to_string()
+            || config.inventory().groups() != &std::collections::BTreeSet::from([expected_group])
+            || response.certificate_chain_pem.is_empty()
+            || response.server_ca_pem.is_empty()
+            || response.certificate_expires_at_seconds <= 0
+        {
+            bail!("runner enrollment completion receipt does not match the local configuration");
+        }
+        let server_roots = read_bounded_file(&self.server_roots, MAX_STAGE_BYTES, false)?;
+        let certificate_chain = read_bounded_file(&self.certificate_chain, MAX_STAGE_BYTES, false)?;
+        let private_key = read_bounded_file(&self.private_key, MAX_STAGE_BYTES, true)?;
+        for (path, private) in [
+            (&self.server_roots, false),
+            (&self.certificate_chain, false),
+            (&self.private_key, true),
+        ] {
+            if read_bounded_temporary(path, MAX_STAGE_BYTES, private)?.is_some() {
+                bail!("runner TLS credential custody has a dangling staging write");
+            }
+        }
+        match (&server_roots, &certificate_chain, &private_key) {
+            (Some(_), Some(_), Some(_)) => {}
+            _ => bail!("runner TLS credential custody is not completely published"),
+        }
+        let (Some(server_roots), Some(certificate_chain), Some(private_key)) =
+            (server_roots, certificate_chain, private_key)
+        else {
+            unreachable!("complete credential tuple was established above");
+        };
+        let roots_text = std::str::from_utf8(&server_roots)
+            .context("runner enrollment server roots are invalid")?;
+        let chain_text = std::str::from_utf8(&certificate_chain)
+            .context("runner enrollment certificate chain is invalid")?;
+        let key_text = std::str::from_utf8(&private_key)
+            .context("runner enrollment private key is invalid")?;
+        let canonical_receipt = serde_json::to_vec(response)
+            .context("runner enrollment completion receipt is invalid")?;
+        if receipt != canonical_receipt
+            || server_roots.as_slice() != response.server_ca_pem.as_bytes()
+        {
+            bail!("runner TLS credential custody does not match its completion receipt");
+        }
+        let receipt_certificates = rustls::pki_types::CertificateDer::pem_slice_iter(
+            response.certificate_chain_pem.as_bytes(),
+        )
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .context("runner enrollment completion receipt is invalid")?;
+        let [receipt_leaf, receipt_issuer] = receipt_certificates.as_slice() else {
+            bail!("runner enrollment completion receipt is invalid");
+        };
+        let (receipt_remainder, receipt_leaf) = parse_x509_certificate(receipt_leaf.as_ref())
+            .context("runner enrollment completion receipt is invalid")?;
+        if !receipt_remainder.is_empty()
+            || receipt_leaf.validity().not_after.timestamp()
+                != response.certificate_expires_at_seconds
+        {
+            bail!("runner enrollment completion receipt is invalid");
+        }
+        let receipt_issuer_sha256: [u8; 32] = Sha256::digest(receipt_issuer.as_ref()).into();
+        let certificates = rustls::pki_types::CertificateDer::pem_slice_iter(chain_text.as_bytes())
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .context("runner enrollment certificate chain is invalid")?;
+        let [leaf, _issuer] = certificates.as_slice() else {
+            bail!("runner enrollment certificate chain is invalid");
+        };
+        let (remainder, leaf) = parse_x509_certificate(leaf.as_ref())
+            .context("runner enrollment certificate chain is invalid")?;
+        if !remainder.is_empty() {
+            bail!("runner enrollment certificate chain is invalid");
+        }
+        validate_issued_runner_certificate(
+            config.runner_id().as_uuid(),
+            chain_text,
+            leaf.validity().not_after.timestamp(),
+            key_text,
+            validation_time_seconds,
+            Some(receipt_issuer_sha256),
+        )?;
+        validate_server_roots(roots_text, validation_time_seconds)?;
+        Ok(())
     }
 
     pub(super) fn create_stage(
@@ -137,8 +236,7 @@ impl CredentialDestinations {
         if let Some(response) = read_bounded_file(&self.response_stage, MAX_RESPONSE_BYTES, true)? {
             sync_parent(&self.response_stage)?;
             if serde_json::from_slice::<RedeemResponse>(&response).is_err() {
-                remove_durable(&self.response_stage)?;
-                return Ok(None);
+                bail!("runner enrollment completion receipt is invalid");
             }
             return Ok(Some(response));
         }
@@ -148,8 +246,7 @@ impl CredentialDestinations {
             return Ok(None);
         };
         if serde_json::from_slice::<RedeemResponse>(&response).is_err() {
-            remove_temporary_durable(&self.response_stage)?;
-            return Ok(None);
+            bail!("runner enrollment completion receipt is invalid");
         }
         publish_temporary(&self.response_stage)?;
         Ok(Some(response))
@@ -168,7 +265,6 @@ impl CredentialDestinations {
     }
 
     pub(super) fn complete(&self) -> Result<()> {
-        remove_durable(&self.response_stage)?;
         remove_durable(&self.request_stage)
     }
 }
@@ -350,6 +446,7 @@ pub(crate) fn validate_issued_runner_certificate(
     let issuer_sha256: [u8; 32] = Sha256::digest(issuer_der.as_ref()).into();
     if !leaf_remainder.is_empty()
         || !issuer_remainder.is_empty()
+        || key.algorithm() != &PKCS_ECDSA_P256_SHA256
         || leaf_constraints.is_some_and(|constraints| constraints.value.ca)
         || leaf_usage.value.flags != 1
         || leaf_extended_usage.value.any
@@ -955,8 +1052,6 @@ mod tests {
     };
     use uuid::Uuid;
 
-    #[cfg(target_os = "linux")]
-    use super::remove_durable;
     #[cfg(windows)]
     use super::validate_destination_set;
     #[cfg(unix)]
@@ -1059,7 +1154,7 @@ mod tests {
 
     #[test]
     #[cfg(target_os = "linux")]
-    fn completion_keeps_replay_authority_until_the_response_receipt_is_gone() {
+    fn completion_retires_the_secret_request_and_preserves_the_response_receipt() {
         let root = std::env::current_dir()
             .expect("current directory")
             .join(format!(
@@ -1073,14 +1168,12 @@ mod tests {
         fs::write(&destinations.request_stage, b"request authority").expect("request stage");
         fs::write(&destinations.response_stage, b"response receipt").expect("response stage");
 
-        remove_durable(&destinations.response_stage).expect("remove response first");
-        assert!(
-            destinations.request_stage.exists(),
-            "a crash after response cleanup must retain database replay authority"
-        );
         destinations.complete().expect("finish completion cleanup");
-        assert!(!destinations.response_stage.exists());
         assert!(!destinations.request_stage.exists());
+        assert_eq!(
+            fs::read(&destinations.response_stage).expect("preserved completion receipt"),
+            b"response receipt"
+        );
         fs::remove_dir_all(&root).expect("remove completion test root");
     }
 
@@ -1238,6 +1331,105 @@ mod tests {
         stage
             .validate_schema()
             .expect_err("forward stage schema must be rejected");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn completed_identity_is_accepted_only_when_the_full_tls_custody_is_exact() {
+        let root = std::env::current_dir()
+            .expect("current directory")
+            .join(format!(
+                ".automata-enroll-completed-test-{}",
+                Uuid::new_v4()
+            ));
+        fs::create_dir(&root).expect("test root");
+        let runner_id = Uuid::new_v4();
+        let config = product_config(&root, runner_id);
+        let destinations =
+            CredentialDestinations::from_config(&config).expect("credential destinations");
+
+        let ca_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).expect("CA key");
+        let mut ca_params = CertificateParams::default();
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        let issuer = CertifiedIssuer::self_signed(ca_params, ca_key).expect("CA");
+        let runner_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).expect("runner key");
+        let expires_at = 1_900_000_000;
+        let mut leaf_params = CertificateParams::default();
+        leaf_params
+            .distinguished_name
+            .push(DnType::CommonName, runner_id.to_string());
+        leaf_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+        leaf_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+        leaf_params.not_after =
+            time::OffsetDateTime::from_unix_timestamp(expires_at).expect("expiry");
+        let leaf = leaf_params
+            .signed_by(&runner_key, &issuer)
+            .expect("runner leaf");
+        let roots = issuer.pem();
+        let chain = format!("{}{roots}", leaf.pem());
+        let key = runner_key.serialize_pem();
+        let response = RedeemResponse {
+            runner_id,
+            runner_group: "default".to_owned(),
+            control_endpoint: config.control_endpoint().to_string(),
+            certificate_chain_pem: chain.clone(),
+            server_ca_pem: roots.clone(),
+            certificate_expires_at_seconds: expires_at,
+        };
+        let receipt = serde_json::to_vec(&response).expect("canonical completion receipt");
+        destinations
+            .persist_response(&receipt)
+            .expect("persist completion receipt");
+        destinations
+            .persist_exact(roots.as_bytes(), chain.as_bytes(), key.as_bytes())
+            .expect("complete credentials");
+
+        destinations
+            .attest_completed(&config, &response, &receipt, expires_at - 1)
+            .expect("exact completed identity");
+
+        let renewed_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).expect("renewed key");
+        let renewed_expires_at = expires_at + 10_000;
+        let mut renewed_params = CertificateParams::default();
+        renewed_params
+            .distinguished_name
+            .push(DnType::CommonName, runner_id.to_string());
+        renewed_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+        renewed_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+        renewed_params.not_after =
+            time::OffsetDateTime::from_unix_timestamp(renewed_expires_at).expect("renewed expiry");
+        let renewed_leaf = renewed_params
+            .signed_by(&renewed_key, &issuer)
+            .expect("renewed runner leaf");
+        let renewed_chain = format!("{}{roots}", renewed_leaf.pem());
+        let renewed_key = renewed_key.serialize_pem();
+        fs::write(&destinations.certificate_chain, renewed_chain.as_bytes())
+            .expect("publish simulated renewal chain");
+        fs::write(&destinations.private_key, renewed_key.as_bytes())
+            .expect("publish simulated renewal key");
+        destinations
+            .attest_completed(&config, &response, &receipt, expires_at - 1)
+            .expect("current same-issuer renewal remains enrolled");
+
+        let original_chain = fs::read(&destinations.certificate_chain).expect("chain");
+        fs::write(&destinations.private_key, b"not a private key")
+            .expect("simulate private-key drift");
+        destinations
+            .attest_completed(&config, &response, &receipt, expires_at - 1)
+            .expect_err("a drifted private key must fail closed");
+        assert_eq!(
+            fs::read(&destinations.certificate_chain).expect("preserved chain"),
+            original_chain
+        );
+
+        fs::write(&destinations.private_key, renewed_key.as_bytes()).expect("restore test key");
+        fs::remove_file(&destinations.certificate_chain).expect("simulate partial custody");
+        destinations
+            .attest_completed(&config, &response, &receipt, expires_at - 1)
+            .expect_err("partial TLS custody must fail closed");
+        drop(destinations);
+        fs::remove_dir_all(&root).expect("remove completed identity test root");
     }
 
     #[test]

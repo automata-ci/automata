@@ -49,8 +49,6 @@
         "working_directory": ""
       },
       "runtime": {
-        "preowned_gid": 999,
-        "preowned_uid": 999,
         "cap_drop": [
           "ALL"
         ],
@@ -64,6 +62,8 @@
         "pg_isready": "/usr/bin/pg_isready",
         "pgdata": "/var/lib/postgresql/18/docker",
         "postgres": "/usr/lib/postgresql/18/bin/postgres",
+        "preowned_gid": 999,
+        "preowned_uid": 999,
         "read_only_root": true,
         "security_opt": [
           "no-new-privileges:true"
@@ -172,10 +172,10 @@
       "runtime": {
         "access_key_file_environment": "RUSTFS_ACCESS_KEY_FILE",
         "ca_certificate_name": "ca.crt",
-        "cat": "/usr/bin/cat",
         "cap_drop": [
           "ALL"
         ],
+        "cat": "/usr/bin/cat",
         "data_gid": 10001,
         "data_mode": "0750",
         "data_mount": "/data",
@@ -183,15 +183,15 @@
         "entrypoint": "/entrypoint.sh",
         "gid": 10001,
         "health_client": "/usr/bin/curl",
-        "read_only_root": true,
         "health_path": "/health",
+        "read_only_root": true,
         "secret_key_file_environment": "RUSTFS_SECRET_KEY_FILE",
-        "server": "/usr/bin/rustfs",
-        "server_certificate_name": "rustfs_cert.pem",
-        "server_private_key_name": "rustfs_key.pem",
         "security_opt": [
           "no-new-privileges:true"
         ],
+        "server": "/usr/bin/rustfs",
+        "server_certificate_name": "rustfs_cert.pem",
+        "server_private_key_name": "rustfs_key.pem",
         "shell": "/bin/sh",
         "sse_master_key_environment": "RUSTFS_SSE_S3_MASTER_KEY",
         "tls_path_environment": "RUSTFS_TLS_PATH",
@@ -304,6 +304,14 @@
           "relay"
         ]
       },
+      "hold_lock": {
+        "argv": [
+          "internal",
+          "local",
+          "hold-lock"
+        ],
+        "release": "stdin-eof"
+      },
       "materialize": {
         "argv": [
           "internal",
@@ -320,6 +328,14 @@
           "object-store",
           "ensure-bucket"
         ]
+      },
+      "read_cas_digest": {
+        "argv": [
+          "internal",
+          "local",
+          "read-cas-digest"
+        ],
+        "purpose": "expected-old-sha256"
       },
       "read_desired": {
         "argv": [
@@ -346,7 +362,7 @@
       "named_volume_nocopy": true,
       "project_directory": "/"
     },
-    "database_migration_ceiling": 48,
+    "database_migration_ceiling": 52,
     "engine_relay": {
       "architecture": "amd64",
       "binding_directory": "/run/automata-engine-binding",

@@ -60,9 +60,9 @@ same operational evidence.
 | Status | Scope |
 | --- | --- |
 | Available | GitHub `push` and `pull_request` ingress; workflow admission; expressions and workflow concurrency used by this repository; per-job CPU and memory limits; exact-commit `actions/checkout`; `run:` steps; rootless Podman execution; service containers; fenced GitHub Checks; and server-rendered run and job pages. The [successful Checks on main commit `280cd4f9`](https://github.com/automata-ci/automata/commit/280cd4f9e685ac022c65a920ba24f4f019b0fd25/checks) exercise this path with Rust, PostgreSQL, and frontend jobs. |
-| Available locally | `automata local doctor`, `automata local check`, and the Linux-only sealed `local init`, read-only `local status`, and confirmed `local reset` custody commands. These commands inspect or prepare state; they do not run a local workflow. |
+| Available locally | `automata local doctor`, `automata local check`, and the Linux-only sealed `local init`, convergent `local up`/`local down`, read-only `local status`, and confirmed `local reset` custody commands. These commands manage the fixed local service lifecycle; they do not run a workflow directly. |
 | Work in progress | Broader dispatch and schedule paths, reusable workflows, artifact/cache client coverage, managed-secret delivery, workload OIDC, reruns, Buildx, Kubernetes, local Docker execution, and macOS VM execution have implemented boundaries with narrower evidence or missing deployment gates. |
-| Planned or unavailable | Public versioned distribution, standalone GitHub-provider onboarding, `automata local run`/`up`, production Windows runner deployment, container actions, job containers, deployment-environment syntax, and job-level concurrency. |
+| Planned or unavailable | Public versioned distribution, standalone GitHub-provider onboarding, `automata local run`, production Windows runner deployment, container actions, job containers, deployment-environment syntax, and job-level concurrency. |
 
 The [compatibility reference](docs/compatibility.md) owns the detailed status,
 limits, and evidence for each feature. A parser, schema, or component test does

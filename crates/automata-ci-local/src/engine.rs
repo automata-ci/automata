@@ -270,6 +270,46 @@ impl DockerInstallationAdapter {
         Ok(installation)
     }
 
+    /// Creates an absent anchor for one caller-selected immutable identity, or
+    /// re-attests that exact identity after an ambiguous create response.
+    /// A concurrent creator with any other UUID is never adopted.
+    pub(crate) async fn create_or_adopt_exact_identity(
+        &self,
+        requested: &Installation,
+    ) -> Result<Installation, LocalEngineError> {
+        self.verify_engine().await?;
+        if let Some(existing) = self.inspect_verified_identity(requested.name()).await? {
+            self.verify_engine().await?;
+            return if existing == *requested {
+                Ok(existing)
+            } else {
+                Err(LocalEngineError::new(
+                    LocalEngineErrorCode::IdentityCollision,
+                ))
+            };
+        }
+
+        let _create_outcome = self
+            .engine
+            .create_volume(CreateVolume {
+                name: requested.anchor_volume_name().to_owned(),
+                labels: identity_labels(requested),
+            })
+            .await;
+        let inspected = self.inspect_verified_identity(requested.name()).await;
+        let Ok(Some(installation)) = inspected else {
+            return Err(LocalEngineError::new(
+                LocalEngineErrorCode::MutationOutcomeUncertain,
+            ));
+        };
+        if installation != *requested || self.verify_engine().await.is_err() {
+            return Err(LocalEngineError::new(
+                LocalEngineErrorCode::MutationOutcomeUncertain,
+            ));
+        }
+        Ok(installation)
+    }
+
     async fn verify_engine(&self) -> Result<(), LocalEngineError> {
         let facts = self.engine.engine_facts().await.map_err(map_engine_call)?;
         let expected_api = adapter_api_version(self.selection.api_version())?;

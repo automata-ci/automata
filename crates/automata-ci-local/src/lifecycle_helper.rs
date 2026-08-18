@@ -27,8 +27,25 @@ const DESIRED_ROOT: &str = "/run/automata-desired";
 const DESIRED_FILE: &str = "desired.json";
 const CAS_ROOT: &str = "/run/automata-lifecycle-cas";
 pub(crate) const CAS_SCHEMA: &str = "automata.local/lifecycle-cas/v1";
+pub(crate) const CAS_DIGEST_SCHEMA: &str = "automata.local/lifecycle-cas-digest/v1";
 pub(crate) const MAX_CAS_REQUEST_BYTES: usize = 512 * 1024;
+pub(crate) const MAX_CAS_DIGEST_REQUEST_BYTES: usize = 4 * 1024;
 pub(crate) const MAX_CAS_CONTENT_BYTES: usize = 256 * 1024;
+
+/// Holds the exact Engine mutation lock until the manager closes stdin.
+///
+/// The lock protocol has no heartbeat or elapsed-time lease. Any input byte is
+/// a contract violation; an orderly EOF is the sole successful release signal.
+pub fn hold_lock() -> Result<(), LocalInitError> {
+    let mut byte = [0_u8; 1];
+    loop {
+        match std::io::stdin().lock().read(&mut byte) {
+            Ok(0) => return Ok(()),
+            Ok(_) | Err(_) => return Err(helper_failed()),
+        }
+    }
+}
+
 /// Emits the exact sealed Desired bytes from the sole read-only mount.
 pub fn read_desired() -> Result<(), LocalInitError> {
     let directory = open_exact_root(DESIRED_ROOT, 0, 0, 0o555)?;
@@ -88,6 +105,57 @@ pub fn write_cas() -> Result<(), LocalInitError> {
         contract.1,
         contract.3,
     )
+}
+
+/// Reads only the exact current SHA-256 of a lifecycle-managed generated file.
+///
+/// The helper rejects any staged CAS frontier rather than repairing it and
+/// never emits the generated file contents. Its request and response are
+/// canonical closed JSON documents over the fixed mounted volume.
+pub fn read_cas_digest() -> Result<(), LocalInitError> {
+    let mut request_bytes = Vec::new();
+    std::io::stdin()
+        .lock()
+        .take(
+            u64::try_from(MAX_CAS_DIGEST_REQUEST_BYTES + 1).expect("digest request bound fits u64"),
+        )
+        .read_to_end(&mut request_bytes)
+        .map_err(|_| helper_failed())?;
+    let request = CasDigestRequest::from_canonical_bytes(&request_bytes)?;
+    let contract = request.target.root_contract();
+    let directory = open_exact_root(CAS_ROOT, contract.0, contract.1, contract.2)?;
+    let name = request.target.file_name();
+    let temporary = format!(".{name}.automata-write");
+    if !matches!(
+        observe_staged_file(
+            &directory,
+            &temporary,
+            MAX_CAS_CONTENT_BYTES,
+            contract.0,
+            contract.1,
+            contract.3,
+        )?,
+        StagedFile::Absent
+    ) {
+        return Err(helper_failed());
+    }
+    let bytes = read_exact_file(
+        &directory,
+        name,
+        MAX_CAS_CONTENT_BYTES,
+        contract.0,
+        contract.1,
+        contract.3,
+    )?;
+    let response = CasDigestResponse {
+        schema: CAS_DIGEST_SCHEMA.to_owned(),
+        target: request.target,
+        sha256: bytes.as_deref().map(digest),
+    };
+    std::io::stdout()
+        .lock()
+        .write_all(&canonical_bytes(&response)?)
+        .map_err(|_| helper_failed())
 }
 
 /// Checks the fixed in-container control-plane readiness endpoint.
@@ -169,6 +237,72 @@ impl CasTarget {
             | Self::RunnerS3SecretKey
             | Self::RunnerSpoolKey => (65_532, 65_532, 0o700, 0o400),
         }
+    }
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CasDigestRequest {
+    schema: String,
+    target: CasTarget,
+}
+
+impl CasDigestRequest {
+    pub(crate) fn new(target: CasTarget) -> Result<Self, LocalInitError> {
+        Ok(Self {
+            schema: CAS_DIGEST_SCHEMA.to_owned(),
+            target,
+        })
+    }
+
+    pub(crate) fn canonical_bytes(&self) -> Result<Vec<u8>, LocalInitError> {
+        canonical_bytes(self)
+    }
+
+    fn from_canonical_bytes(bytes: &[u8]) -> Result<Self, LocalInitError> {
+        if bytes.is_empty() || bytes.len() > MAX_CAS_DIGEST_REQUEST_BYTES {
+            return Err(helper_failed());
+        }
+        let request: Self = serde_json::from_slice(bytes).map_err(|_| helper_failed())?;
+        if request.schema != CAS_DIGEST_SCHEMA || request.canonical_bytes()?.as_slice() != bytes {
+            return Err(helper_failed());
+        }
+        Ok(request)
+    }
+
+    pub(crate) const fn target(&self) -> CasTarget {
+        self.target
+    }
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CasDigestResponse {
+    schema: String,
+    target: CasTarget,
+    sha256: Option<Sha256Digest>,
+}
+
+impl CasDigestResponse {
+    pub(crate) fn from_canonical_bytes(
+        bytes: &[u8],
+        expected_target: CasTarget,
+    ) -> Result<Self, LocalInitError> {
+        if bytes.is_empty() || bytes.len() > MAX_CAS_DIGEST_REQUEST_BYTES {
+            return Err(helper_failed());
+        }
+        let response: Self = serde_json::from_slice(bytes).map_err(|_| helper_failed())?;
+        if response.schema != CAS_DIGEST_SCHEMA
+            || response.target != expected_target
+            || canonical_bytes(&response)?.as_slice() != bytes
+        {
+            return Err(helper_failed());
+        }
+        Ok(response)
+    }
+
+    pub(crate) const fn sha256(&self) -> Option<Sha256Digest> {
+        self.sha256
     }
 }
 

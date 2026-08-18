@@ -148,6 +148,7 @@ fn local_init_requires_explicit_canonical_host_custody_and_catalog_evidence() {
     assert_eq!(args.installation.as_str(), "team-2");
     assert_eq!(args.workers.get(), 3);
     assert_eq!(args.catalog_source, "file:/srv/releases/catalog.json");
+    assert!(!args.recover_stopped_lock);
 
     for invalid in [
         vec![
@@ -193,29 +194,93 @@ fn local_init_requires_explicit_canonical_host_custody_and_catalog_evidence() {
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
-fn local_init_status_and_reset_stop_before_service_lifecycle_commands() {
+fn local_lifecycle_commands_are_public_exact_state_directory_operations() {
     let mut command = Cli::command();
     let local = command.find_subcommand_mut("local").expect("local command");
     let names = local
         .get_subcommands()
         .map(clap::Command::get_name)
         .collect::<Vec<_>>();
-    assert_eq!(names, ["doctor", "check", "init", "status", "reset"]);
+    assert_eq!(
+        names,
+        ["doctor", "check", "init", "up", "down", "status", "reset"]
+    );
 
     let init = local.find_subcommand_mut("init").expect("init command");
     let help = init.render_long_help().to_string();
     assert!(help.contains("without starting services"));
+    let up = local.find_subcommand_mut("up").expect("up command");
+    let help = up.render_long_help().to_string();
+    assert!(help.contains("exact running topology"));
+    assert!(help.contains("--recover-stopped-lock"));
+    assert!(help.contains("Stopped evidence is refused by default"));
+    assert!(help.contains("positive Engine/process quiescence"));
+    let down = local.find_subcommand_mut("down").expect("down command");
+    let help = down.render_long_help().to_string();
+    assert!(help.contains("retaining sealed custody and data"));
+    assert!(help.contains("--recover-stopped-lock"));
+    assert!(help.contains("Stopped evidence is refused by default"));
+    assert!(help.contains("positive Engine/process quiescence"));
     let status = local.find_subcommand_mut("status").expect("status command");
     let help = status.render_long_help().to_string();
-    assert!(help.contains("recorded custody or reset progress"));
+    assert!(help.contains("sealed, running, recovery, or reset state"));
     let reset = local.find_subcommand_mut("reset").expect("reset command");
     let help = reset.render_long_help().to_string();
     assert!(help.contains("retaining images and the state root"));
-    for hidden_lifecycle in ["up", "down", "bootstrap", "relay"] {
+    for hidden_lifecycle in ["bootstrap", "relay"] {
         assert!(
             Cli::try_parse_from(["automata", "local", hidden_lifecycle]).is_err(),
             "{hidden_lifecycle} must not leak into the current sealed-custody boundary"
         );
+    }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn local_up_and_down_require_exact_custody_and_explicit_stopped_lock_recovery() {
+    for command in ["up", "down"] {
+        for recover_stopped_lock in [false, true] {
+            let mut invocation = vec![
+                "automata",
+                "local",
+                command,
+                "--state-directory",
+                "/var/lib/automata-local/team",
+            ];
+            if recover_stopped_lock {
+                invocation.push("--recover-stopped-lock");
+            }
+            let cli = Cli::try_parse_from(invocation)
+                .expect("complete local lifecycle syntax must parse");
+            let Command::Local(local) = cli.command else {
+                panic!("local command expected");
+            };
+            let (state_directory, parsed_recovery) = match local.command {
+                LocalCommand::Up(args) => (args.state_directory, args.recover_stopped_lock),
+                LocalCommand::Down(args) => (args.state_directory, args.recover_stopped_lock),
+                _ => panic!("local up or down command expected"),
+            };
+            assert_eq!(
+                state_directory,
+                std::path::Path::new("/var/lib/automata-local/team")
+            );
+            assert_eq!(parsed_recovery, recover_stopped_lock);
+        }
+    }
+
+    for invalid in [
+        vec!["automata", "local", "up"],
+        vec!["automata", "local", "up", "--state-directory", "relative"],
+        vec!["automata", "local", "down"],
+        vec![
+            "automata",
+            "local",
+            "down",
+            "--state-directory",
+            "/var/lib/automata-local/team/../other",
+        ],
+    ] {
+        assert!(Cli::try_parse_from(invalid).is_err());
     }
 }
 
@@ -306,6 +371,56 @@ fn internal_local_materializer_is_one_fixed_argument_free_operation() {
     );
 }
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn internal_local_lock_holder_is_one_fixed_argument_free_operation() {
+    let cli = Cli::try_parse_from(["automata", "internal", "local", "hold-lock"])
+        .expect("fixed internal lifecycle lock holder must parse");
+    let Command::Internal(internal) = cli.command else {
+        panic!("internal command expected");
+    };
+    let InternalCommand::Local(local) = internal.command else {
+        panic!("internal local command expected");
+    };
+    assert!(matches!(local.command, InternalLocalCommand::HoldLock));
+    assert!(
+        Cli::try_parse_from([
+            "automata",
+            "internal",
+            "local",
+            "hold-lock",
+            "--timeout",
+            "30",
+        ])
+        .is_err()
+    );
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn internal_local_cas_digest_reader_is_one_fixed_argument_free_operation() {
+    let cli = Cli::try_parse_from(["automata", "internal", "local", "read-cas-digest"])
+        .expect("fixed internal lifecycle CAS digest reader must parse");
+    let Command::Internal(internal) = cli.command else {
+        panic!("internal command expected");
+    };
+    let InternalCommand::Local(local) = internal.command else {
+        panic!("internal local command expected");
+    };
+    assert!(matches!(local.command, InternalLocalCommand::ReadCasDigest));
+    assert!(
+        Cli::try_parse_from([
+            "automata",
+            "internal",
+            "local",
+            "read-cas-digest",
+            "--target",
+            "foreign",
+        ])
+        .is_err()
+    );
+}
+
 #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
 #[test]
 fn linux_x86_64_local_mutations_and_internal_materializer_are_not_advertised() {
@@ -316,10 +431,12 @@ fn linux_x86_64_local_mutations_and_internal_materializer_are_not_advertised() {
         .map(clap::Command::get_name)
         .collect::<Vec<_>>();
     assert_eq!(names, ["doctor", "check"]);
-    for command in ["init", "status", "reset"] {
+    for command in ["init", "up", "down", "status", "reset"] {
         assert!(Cli::try_parse_from(["automata", "local", command]).is_err());
     }
     assert!(Cli::try_parse_from(["automata", "internal", "local", "materialize"]).is_err());
+    assert!(Cli::try_parse_from(["automata", "internal", "local", "hold-lock"]).is_err());
+    assert!(Cli::try_parse_from(["automata", "internal", "local", "read-cas-digest"]).is_err());
 }
 
 #[test]

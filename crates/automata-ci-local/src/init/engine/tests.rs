@@ -693,6 +693,8 @@ fn contract(installation: &Installation) -> HelperContract<'static> {
         volumes,
         labels: helper_labels(installation, fingerprint()),
         volume_labels: expected_volume_labels(installation, fingerprint()),
+        baseline_attachments: BTreeMap::new(),
+        mode: HelperMode::Mutating,
     }
 }
 
@@ -700,7 +702,12 @@ fn valid_helper_inspect(
     contract: &HelperContract<'_>,
     container_id: &str,
 ) -> bollard::models::ContainerInspectResponse {
-    let body = helper_body(contract.image, contract.volumes, &contract.labels);
+    let body = helper_body(
+        contract.image,
+        contract.volumes,
+        &contract.labels,
+        contract.mode,
+    );
     let mut config: bollard::models::ContainerConfig =
         serde_json::from_value(serde_json::to_value(&body).unwrap()).unwrap();
     config.exposed_ports = Some(vec![HELPER_EXPOSED_PORT.to_owned()]);
@@ -1345,6 +1352,31 @@ async fn helper_request_transport_is_attach_then_start_then_eof_before_wait_and_
 }
 
 #[tokio::test]
+async fn lifecycle_attestation_preserves_exact_preexisting_volume_attachments() {
+    let installation = installation();
+    let mut contract = contract(&installation);
+    let existing = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_owned();
+    contract.baseline_attachments = VolumeRole::ALL
+        .into_iter()
+        .map(|role| (role, BTreeSet::from([existing.clone()])))
+        .collect();
+    let request = request(&installation);
+    let cancellation = CancellationToken::new();
+    let driver = FakeHelperDriver::new(InjectedAction::None, cancellation.clone(), &contract);
+    driver.state.lock().unwrap().extra_attachment = true;
+
+    run_materializer_with_driver(&driver, &contract, &request, fingerprint(), &cancellation)
+        .await
+        .unwrap();
+
+    let state = driver.state.lock().unwrap();
+    assert!(state.by_id.is_none());
+    assert!(state.by_name.is_none());
+    assert!(state.extra_attachment);
+    assert_eq!(state.removed, [CONTAINER_ID]);
+}
+
+#[tokio::test]
 async fn helper_may_exit_immediately_after_request_eof_before_wait_observes_it() {
     let installation = installation();
     let contract = contract(&installation);
@@ -1536,6 +1568,8 @@ async fn live_read_only_helper_consumes_stdin_eof_and_rejects_a_truncated_prefix
         volumes: &names,
         labels: helper_labels(&installation, epoch.fingerprint()),
         volume_labels: expected_volume_labels(&installation, epoch.fingerprint()),
+        baseline_attachments: BTreeMap::new(),
+        mode: HelperMode::Mutating,
     };
     let cancellation = CancellationToken::new();
 
@@ -1833,7 +1867,7 @@ fn fixed_helper_body_has_no_ambient_authority_or_extensible_inputs() {
     let names = volume_names(&installation);
     let labels = helper_labels(&installation, fingerprint());
     let image = "registry.example.invalid/automata@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    let body = helper_body(image, &names, &labels);
+    let body = helper_body(image, &names, &labels, HelperMode::Mutating);
     let request_bytes = request(&installation).canonical_bytes().unwrap();
     assert!(
         request_bytes
@@ -1960,7 +1994,7 @@ fn helper_inspect_recovery_rejects_ambient_authority_and_realized_networks() {
     let image = "registry.example.invalid/automata@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     let image_id = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     let name = helper_name(&installation);
-    let body = helper_body(image, &names, &labels);
+    let body = helper_body(image, &names, &labels, HelperMode::Mutating);
     let mut config: bollard::models::ContainerConfig =
         serde_json::from_value(serde_json::to_value(&body).unwrap()).unwrap();
     config.exposed_ports = Some(vec![HELPER_EXPOSED_PORT.to_owned()]);

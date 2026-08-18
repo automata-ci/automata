@@ -9,7 +9,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::cli::{LocalArgs, LocalCheckArgs, LocalCommand, LocalContainerEngine, LocalDoctorArgs};
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-use crate::cli::{LocalInitArgs, LocalResetArgs, LocalStatusArgs};
+use crate::cli::{LocalDownArgs, LocalInitArgs, LocalResetArgs, LocalStatusArgs, LocalUpArgs};
 
 pub(crate) async fn execute(args: &LocalArgs) -> Result<()> {
     match &args.command {
@@ -18,10 +18,72 @@ pub(crate) async fn execute(args: &LocalArgs) -> Result<()> {
         #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
         LocalCommand::Init(args) => Box::pin(init(args)).await,
         #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        LocalCommand::Up(args) => Box::pin(up(args)).await,
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        LocalCommand::Down(args) => Box::pin(down(args)).await,
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
         LocalCommand::Status(args) => Box::pin(status(args)).await,
         #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
         LocalCommand::Reset(args) => Box::pin(reset(args)).await,
     }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+async fn up(args: &LocalUpArgs) -> Result<()> {
+    use automata_ci_local::{LocalUpRequest, up_local};
+
+    let cancellation = CancellationToken::new();
+    let request = LocalUpRequest::new(args.state_directory.clone(), cancellation.clone())
+        .with_stopped_lock_recovery(args.recover_stopped_lock);
+    let mut convergence = Box::pin(up_local(request));
+    let outcome = tokio::select! {
+        biased;
+        () = crate::shutdown::wait_without_logging() => {
+            cancellation.cancel();
+            convergence.await.map_err(anyhow::Error::from)?
+        }
+        result = &mut convergence => result.map_err(anyhow::Error::from)?,
+    };
+    println!(
+        "Automata local installation '{}' is running at plan {}{}",
+        outcome.installation(),
+        outcome.plan_sha256(),
+        if outcome.resumed() {
+            "; reconciled exact existing topology"
+        } else {
+            ""
+        }
+    );
+    Ok(())
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+async fn down(args: &LocalDownArgs) -> Result<()> {
+    use automata_ci_local::{LocalDownRequest, down_local};
+
+    let cancellation = CancellationToken::new();
+    let request = LocalDownRequest::new(args.state_directory.clone(), cancellation.clone())
+        .with_stopped_lock_recovery(args.recover_stopped_lock);
+    let mut convergence = Box::pin(down_local(request));
+    let outcome = tokio::select! {
+        biased;
+        () = crate::shutdown::wait_without_logging() => {
+            cancellation.cancel();
+            convergence.await.map_err(anyhow::Error::from)?
+        }
+        result = &mut convergence => result.map_err(anyhow::Error::from)?,
+    };
+    println!(
+        "Automata local installation '{}' is stopped at plan {}; sealed custody, persistent data, and images were retained{}",
+        outcome.installation(),
+        outcome.plan_sha256(),
+        if outcome.resumed() {
+            "; reconciled exact existing topology"
+        } else {
+            ""
+        }
+    );
+    Ok(())
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -97,6 +159,12 @@ fn write_local_status_presentation(
     let status = match report.status {
         automata_ci_local::LocalInstallationStatus::Incomplete => "incomplete",
         automata_ci_local::LocalInstallationStatus::RecordedSealed => "recorded sealed",
+        automata_ci_local::LocalInstallationStatus::Running => "running",
+        automata_ci_local::LocalInstallationStatus::LifecycleInProgress => "lifecycle busy",
+        automata_ci_local::LocalInstallationStatus::LifecycleRecoveryRequired => {
+            "lifecycle recovery required"
+        }
+        automata_ci_local::LocalInstallationStatus::Degraded => "degraded",
         automata_ci_local::LocalInstallationStatus::ResetInProgress => "reset in progress",
     };
     writeln!(writer, "Automata local installation: {status}")?;
@@ -119,6 +187,33 @@ fn write_local_status_presentation(
             report.image_count, report.volume_count
         )?;
         writeln!(writer, "Volume contents: not inspected")?;
+    }
+    if report.status == automata_ci_local::LocalInstallationStatus::Running {
+        writeln!(writer, "Engine topology: exact running lifecycle")?;
+        writeln!(
+            writer,
+            "Sealed custody: {} image representations, {} owned volumes",
+            report.image_count, report.volume_count
+        )?;
+        writeln!(writer, "Volume contents: not inspected")?;
+    }
+    if report.status == automata_ci_local::LocalInstallationStatus::LifecycleInProgress {
+        writeln!(
+            writer,
+            "Lifecycle operation: another exact live holder is active"
+        )?;
+    }
+    if report.status == automata_ci_local::LocalInstallationStatus::LifecycleRecoveryRequired {
+        writeln!(
+            writer,
+            "Lifecycle recovery: establish Engine/process quiescence, then rerun local up or local down with --recover-stopped-lock"
+        )?;
+    }
+    if report.status == automata_ci_local::LocalInstallationStatus::Degraded {
+        writeln!(
+            writer,
+            "Engine topology: exact but incomplete; rerun local up or local down"
+        )?;
     }
     if let Some((removed, total)) = report.reset_progress {
         writeln!(
@@ -169,7 +264,8 @@ async fn init(args: &LocalInitArgs) -> Result<()> {
         args.installation.clone(),
         args.workers,
         cancellation.clone(),
-    );
+    )
+    .with_stopped_lock_recovery(args.recover_stopped_lock);
     let mut initialization = Box::pin(initialize_local(request));
     let outcome = tokio::select! {
         biased;
@@ -413,6 +509,68 @@ mod tests {
     #[test]
     fn local_status_human_presentation_is_exact_for_every_public_state() {
         let cases = [
+            (
+                LocalStatusPresentation {
+                    status: automata_ci_local::LocalInstallationStatus::Running,
+                    installation: Some("default".to_owned()),
+                    installation_id: Some("11111111-1111-4111-8111-111111111111".to_owned()),
+                    workers: Some(2),
+                    epoch_fingerprint: Some("sha256:fixture".to_owned()),
+                    image_count: 4,
+                    volume_count: 12,
+                    reset_progress: None,
+                },
+                concat!(
+                    "Automata local installation: running\n",
+                    "Installation: default\n",
+                    "Installation identity: 11111111-1111-4111-8111-111111111111\n",
+                    "Worker slots: 2\n",
+                    "Epoch fingerprint: sha256:fixture\n",
+                    "Engine topology: exact running lifecycle\n",
+                    "Sealed custody: 4 image representations, 12 owned volumes\n",
+                    "Volume contents: not inspected\n",
+                ),
+            ),
+            (
+                LocalStatusPresentation {
+                    status: automata_ci_local::LocalInstallationStatus::LifecycleInProgress,
+                    installation: Some("default".to_owned()),
+                    installation_id: Some("11111111-1111-4111-8111-111111111111".to_owned()),
+                    workers: Some(2),
+                    epoch_fingerprint: Some("sha256:fixture".to_owned()),
+                    image_count: 4,
+                    volume_count: 12,
+                    reset_progress: None,
+                },
+                concat!(
+                    "Automata local installation: lifecycle busy\n",
+                    "Installation: default\n",
+                    "Installation identity: 11111111-1111-4111-8111-111111111111\n",
+                    "Worker slots: 2\n",
+                    "Epoch fingerprint: sha256:fixture\n",
+                    "Lifecycle operation: another exact live holder is active\n",
+                ),
+            ),
+            (
+                LocalStatusPresentation {
+                    status: automata_ci_local::LocalInstallationStatus::LifecycleRecoveryRequired,
+                    installation: Some("default".to_owned()),
+                    installation_id: Some("11111111-1111-4111-8111-111111111111".to_owned()),
+                    workers: Some(2),
+                    epoch_fingerprint: Some("sha256:fixture".to_owned()),
+                    image_count: 4,
+                    volume_count: 12,
+                    reset_progress: None,
+                },
+                concat!(
+                    "Automata local installation: lifecycle recovery required\n",
+                    "Installation: default\n",
+                    "Installation identity: 11111111-1111-4111-8111-111111111111\n",
+                    "Worker slots: 2\n",
+                    "Epoch fingerprint: sha256:fixture\n",
+                    "Lifecycle recovery: establish Engine/process quiescence, then rerun local up or local down with --recover-stopped-lock\n",
+                ),
+            ),
             (
                 LocalStatusPresentation {
                     status: automata_ci_local::LocalInstallationStatus::Incomplete,

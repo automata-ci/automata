@@ -56,11 +56,6 @@ impl LocalProfile {
     }
 
     #[must_use]
-    pub(crate) const fn architecture(&self) -> EngineArchitecture {
-        self.architecture
-    }
-
-    #[must_use]
     pub(crate) const fn attestation(&self) -> &EnvironmentProfile {
         &self.attestation
     }
@@ -68,6 +63,11 @@ impl LocalProfile {
     #[must_use]
     pub(crate) const fn image(&self) -> &ImmutableImage {
         &self.image
+    }
+
+    #[must_use]
+    pub(crate) const fn architecture(&self) -> EngineArchitecture {
+        self.architecture
     }
 }
 

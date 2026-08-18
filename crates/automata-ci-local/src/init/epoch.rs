@@ -1,13 +1,18 @@
-use std::{collections::BTreeMap, str::FromStr as _};
+use std::{collections::BTreeMap, net::Ipv4Addr, num::NonZeroU16, str::FromStr as _};
 
-use automata_ci_core::Sha256Digest;
+use automata_ci_core::{EnvironmentProfile, EnvironmentProfileId, Sha256Digest};
+use automata_ci_execution::ImmutableImage;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ring::hkdf;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use zeroize::Zeroizing;
 
-use crate::{Installation, InstallationId, InstallationName, MAXIMUM_LOCAL_DOCKER_JOB_SLOTS};
+use crate::{
+    DesiredSpec, DesiredSpecImages, DesiredSpecInput, EngineArchitecture, Installation,
+    InstallationId, InstallationName, LocalImportedImage, LocalProfile,
+    MAXIMUM_LOCAL_DOCKER_JOB_SLOTS, ResultsTransit,
+};
 
 use super::{
     LocalInitError, LocalInitErrorCode,
@@ -182,6 +187,70 @@ impl ImmutableEpoch {
             return Err(reset_required());
         }
         Ok(installation)
+    }
+
+    /// Reconstructs the sole current Desired v1 document from immutable epoch
+    /// evidence without reading or mutating a named volume.
+    ///
+    /// Desired v1 is entirely determined by the current source contract, the
+    /// installation identity, and the worker count. Both the canonical-byte
+    /// digest and plan digest are checked against the epoch before the result
+    /// is usable for read-only live topology inspection.
+    pub(super) fn desired_spec(&self) -> Result<DesiredSpec, LocalInitError> {
+        self.require_current_lifecycle_contract()?;
+        let installation = self.installation()?;
+        let workers = NonZeroU16::new(self.capacity.workers).ok_or_else(reset_required)?;
+        let image = |role: &str| {
+            self.image_expectations()
+                .find(|image| image.role == role)
+                .ok_or_else(reset_required)
+        };
+        let immutable = |role: &str| -> Result<ImmutableImage, LocalInitError> {
+            ImmutableImage::new(image(role)?.inspection_reference()?).map_err(|_| reset_required())
+        };
+        let profile = LocalProfile::new(
+            EngineArchitecture::Amd64,
+            EnvironmentProfile::new(
+                EnvironmentProfileId::new(self.profile.id.clone()).map_err(|_| reset_required())?,
+                self.profile.manifest_sha256,
+            ),
+            immutable("profile")?,
+        )
+        .map_err(|_| reset_required())?;
+        let service_proxy = image("service-proxy")?;
+        let service_proxy =
+            LocalImportedImage::new(service_proxy.config_digest, service_proxy.manifest_digest)
+                .map_err(|_| reset_required())?;
+        let selector = installation.selector_key().digest();
+        let third_octet = selector.as_bytes()[4] & 0xfe;
+        let results = ResultsTransit::new(
+            format!("192.168.{third_octet}.0/23"),
+            Ipv4Addr::new(192, 168, third_octet, 1),
+            Ipv4Addr::new(192, 168, third_octet, 2),
+        )
+        .map_err(|_| reset_required())?;
+        let input = DesiredSpecInput::new(
+            workers,
+            NonZeroU16::new(8080).expect("the fixed human port is nonzero"),
+            profile,
+            DesiredSpecImages::new(
+                immutable("automata")?,
+                immutable("runner")?,
+                immutable("postgres")?,
+                immutable("rustfs")?,
+                immutable("sandbox-guest")?,
+                service_proxy,
+            ),
+            results,
+        )
+        .map_err(|_| reset_required())?;
+        let desired = DesiredSpec::new(&installation, input).map_err(|_| reset_required())?;
+        if digest(&desired.canonical_bytes()) != self.initial_desired_sha256
+            || Some(desired.plan_digest()) != self.desired_plan_sha256
+        {
+            return Err(reset_required());
+        }
+        Ok(desired)
     }
 
     pub(super) fn image_expectations(&self) -> impl Iterator<Item = EpochImageExpectation<'_>> {

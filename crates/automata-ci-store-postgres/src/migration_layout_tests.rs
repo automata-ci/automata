@@ -279,7 +279,7 @@ const CANONICAL_MIGRATIONS: &[(&str, &str)] = &[
     ),
     (
         "0052_installation_runner_bootstrap.sql",
-        "db3b304e34e7aa4082aca161d945333253a64983a1bad76d48f48145c006c27715f2926ed916e076d1156dd648da7831",
+        "ab4603f4d0d722f9d897bc2039d25fa17aafefa96e1c0aef315574b4eacaf4d0449bd87f73f250b6520075b14eafdecc",
     ),
 ];
 
@@ -1054,6 +1054,7 @@ fn installation_runner_bootstrap_has_closed_authority_and_refresh_contracts() {
         "OLD.issuer_kind = 'installation_bootstrap'",
         "OLD.consumed_at_ms IS NULL",
         "OLD.expires_at_ms <=",
+        "extract(epoch FROM clock_timestamp()) * 1000",
         "NEW.last_refreshed_at_ms IS NOT NULL",
         "NEW.last_refreshed_at_ms >= OLD.expires_at_ms",
         "NEW.expires_at_ms - NEW.last_refreshed_at_ms = 3600000",
@@ -1070,6 +1071,7 @@ fn installation_runner_bootstrap_has_closed_authority_and_refresh_contracts() {
         "CREATE TABLE IF NOT EXISTS",
         "DROP CONSTRAINT IF EXISTS",
         "DROP TRIGGER IF EXISTS",
+        "floor(extract(epoch FROM clock_timestamp()))::bigint * 1000",
     ] {
         assert!(
             !source.contains(forbidden),

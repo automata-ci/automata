@@ -106,10 +106,10 @@ pub fn check_fixed_engine_relay() -> Result<(), LocalEngineRelayError> {
 }
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub use init::{
-    LocalInitError, LocalInitErrorCode, LocalInitOutcome, LocalInitRequest,
-    LocalInstallationStatus, LocalResetOutcome, LocalResetRequest, LocalStatusReport,
-    LocalStatusRequest, LocalUpOutcome, LocalUpRequest, initialize_local, inspect_local_status,
-    reset_local, up_local,
+    LocalDownOutcome, LocalDownRequest, LocalInitError, LocalInitErrorCode, LocalInitOutcome,
+    LocalInitRequest, LocalInstallationStatus, LocalResetOutcome, LocalResetRequest,
+    LocalStatusReport, LocalStatusRequest, LocalUpOutcome, LocalUpRequest, down_local,
+    initialize_local, inspect_local_status, reset_local, up_local,
 };
 pub use installation::{
     ComposeProjectName, Installation, InstallationBinding, InstallationId, InstallationIdError,
@@ -134,6 +134,20 @@ pub fn run_local_desired_reader() -> Result<(), LocalInitError> {
 #[doc(hidden)]
 pub fn run_local_lifecycle_cas() -> Result<(), LocalInitError> {
     lifecycle_helper::write_cas()
+}
+
+/// Emits the current expected-old digest for one fixed replaceable CAS target.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[doc(hidden)]
+pub fn run_local_lifecycle_cas_digest_reader() -> Result<(), LocalInitError> {
+    lifecycle_helper::read_cas_digest()
+}
+
+/// Holds the fixed Engine mutation lock until the supervising manager closes stdin.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[doc(hidden)]
+pub fn run_local_lifecycle_lock_holder() -> Result<(), LocalInitError> {
+    lifecycle_helper::hold_lock()
 }
 
 /// Checks the fixed in-container control-plane readiness endpoint.
@@ -238,6 +252,11 @@ pub const LOCAL_CONTROL_READY_RESPONSE_PREFIX: &str = "HTTP/1.1 200 ";
 #[doc(hidden)]
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub const LOCAL_CONTROL_READY_RESPONSE_SUFFIX: &str = "\r\n\r\nready\n";
+
+/// Hidden command tokens for the fixed stdin-held Engine mutation lock.
+#[doc(hidden)]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub const LOCAL_LIFECYCLE_LOCK_HOLDER_COMMAND: [&str; 3] = ["internal", "local", "hold-lock"];
 
 /// Hidden command token for the fixed local runner readiness check.
 #[doc(hidden)]

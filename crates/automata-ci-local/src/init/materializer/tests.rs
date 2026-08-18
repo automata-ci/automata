@@ -130,6 +130,50 @@ fn fresh_dynamic_roots_must_be_empty() {
 }
 
 #[test]
+fn completed_materialization_never_repairs_drifted_root_metadata() {
+    let directory = TestDirectory::new();
+    let descriptor = directory.descriptor();
+    let before = fstat(&descriptor).unwrap();
+    assert_eq!(before.st_mode & 0o7777, 0o700);
+    assert_eq!(
+        prepare_volume_root(&descriptor, VolumeRole::RelayBinding, false)
+            .unwrap_err()
+            .code(),
+        LocalInitErrorCode::MaterializationFailed
+    );
+    let after = fstat(&descriptor).unwrap();
+    assert_eq!(after.st_uid, before.st_uid);
+    assert_eq!(after.st_gid, before.st_gid);
+    assert_eq!(after.st_mode, before.st_mode);
+}
+
+#[test]
+fn generated_dynamic_roots_have_closed_namespaces() {
+    let directory = TestDirectory::new();
+    let descriptor = directory.descriptor();
+    directory.file("binding.json", b"{}\n", 0o444);
+    directory.file(".binding.json.automata-write", b"{}\n", 0o444);
+    verify_dynamic_root_shape(&descriptor, VolumeRole::RelayBinding).unwrap();
+    directory.file("foreign", b"x", 0o444);
+    assert_eq!(
+        verify_dynamic_root_shape(&descriptor, VolumeRole::RelayBinding)
+            .unwrap_err()
+            .code(),
+        LocalInitErrorCode::MaterializationFailed
+    );
+
+    let bootstrap = TestDirectory::new();
+    let bootstrap_descriptor = bootstrap.descriptor();
+    bootstrap.file("request.json", b"{}\n", 0o400);
+    bootstrap.file(
+        ".automata-bootstrap-receipt-123e4567-e89b-12d3-a456-426614174000.tmp",
+        b"{}\n",
+        0o400,
+    );
+    verify_dynamic_root_shape(&bootstrap_descriptor, VolumeRole::BootstrapState).unwrap();
+}
+
+#[test]
 fn volume_roots_and_static_files_match_the_exact_consumer_role_table() {
     let expected = [
         (VolumeRole::BootstrapState, 65_532, 65_532, 0o700, false),

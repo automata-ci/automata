@@ -31,6 +31,7 @@ http.workspace = true
 http-body-util.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
+processkit.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -50,9 +51,6 @@ rustix = { workspace = true, features = ["net", "thread"] }
 time.workspace = true
 x509-parser.workspace = true
 zeroize.workspace = true
-
-[target.'cfg(windows)'.dependencies]
-processkit.workspace = true
 
 [lints]
 workspace = true

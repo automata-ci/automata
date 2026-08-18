@@ -24,7 +24,7 @@ CATALOG_SCHEMA = "automata.local/release-catalog/v1"
 SOURCE_SCHEMA = "automata.local/release-catalog-source/v1"
 SOURCE_PATH = "images/local-installation/catalog-v1.json"
 PACKAGED_SOURCE_PATH = "crates/automata-ci-local/src/init/catalog-v1.source.json"
-SOURCE_SHA256 = "9f4e07ea39c6ba4231796579e11f6fb5ff0514eb0fd2eeca0047e11c3f0b4a62"
+SOURCE_SHA256 = "9c490bed48e90a18e7161a31ab7b1f085f7fabc609fe3f04127d5ea5d867d5eb"
 CATALOG_PATH = "target/distribution/automata-local-installation-catalog.json"
 PROFILE_MANIFEST_PATH = (
     "images/github-hosted-ubuntu-24.04-x64/profile-manifest.json"
@@ -300,6 +300,10 @@ def require_lifecycle_runtime(value: object) -> dict:
             "engine_relay": {
                 "argv": ["internal", "engine", "relay"],
             },
+            "hold_lock": {
+                "argv": ["internal", "local", "hold-lock"],
+                "release": "stdin-eof",
+            },
             "materialize": {
                 "argv": ["internal", "local", "materialize"],
                 "maximum_request_bytes": 524288,
@@ -308,6 +312,10 @@ def require_lifecycle_runtime(value: object) -> dict:
             },
             "object_store_ensure_bucket": {
                 "argv": ["internal", "object-store", "ensure-bucket"],
+            },
+            "read_cas_digest": {
+                "argv": ["internal", "local", "read-cas-digest"],
+                "purpose": "expected-old-sha256",
             },
             "read_desired": {
                 "argv": ["internal", "local", "read-desired"],
@@ -326,7 +334,7 @@ def require_lifecycle_runtime(value: object) -> dict:
             "named_volume_nocopy": True,
             "project_directory": "/",
         },
-        "database_migration_ceiling": 48,
+        "database_migration_ceiling": 52,
         "engine_relay": {
             "architecture": "amd64",
             "binding_directory": "/run/automata-engine-binding",

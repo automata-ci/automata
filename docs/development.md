@@ -347,8 +347,12 @@ boundary:
 cargo run --locked -p automata-ci -- local init \
   --state-directory /var/lib/automata-local/default \
   --catalog-source file:/srv/automata-release/local-installation-catalog.json
+cargo run --locked -p automata-ci -- local up \
+  --state-directory /var/lib/automata-local/default
 cargo run --locked -p automata-ci -- local status \
   --state-directory /var/lib/automata-local/default --json
+cargo run --locked -p automata-ci -- local down \
+  --state-directory /var/lib/automata-local/default
 cargo run --locked -p automata-ci -- local reset \
   --state-directory /var/lib/automata-local/default --yes
 ```
@@ -367,24 +371,36 @@ records/resources.
 
 Init stops after sealing material and desired intent. It has no renderer,
 generates no Compose document, invokes no Compose operation, and starts no
-control plane, relay, bootstrap, database, object store, or runner.
+control plane, relay, bootstrap, database, object store, or runner. `local up`
+reattests the sealed epoch and exact Docker/Compose authority, renders the
+canonical topology, and synchronously converges dependencies, bootstrap,
+control, relay, and runner services. `local down` synchronously removes that
+replaceable topology while preserving sealed custody, persistent data, and
+images. Repeating either command re-inspects and reconciles current Engine and
+Compose truth.
+
+A stopped exact-ID lifecycle lock is sticky interruption evidence, so ordinary
+`init`, `up`, and `down` refuse it. Restart Docker Engine so the accepting daemon
+generation can be proven absent, then rerun the intended command with
+`--recover-stopped-lock`; that
+explicitly authorizes removal of only the reattested stopped ID before normal
+convergence. A live, drifting, or unknown holder is never recovered this way.
+
 `local status` opens only existing custody under a shared, nonrepairing lock and
-validates canonical host records plus exact Engine metadata. It does not run a
-volume inspector, so `recorded_sealed` explicitly means that volume contents
-and manifests were not live-attested. `local reset` never prompts and requires
-`--yes`; it requires an authority-bound canonical epoch and complete exact
-post-Desired Engine custody, then reconciles its self-contained durable deletion
-transaction despite cancellation. Safe malformed or missing non-authority
-material/certificate records do not strand cleanup, but copied/pre-guard,
-conflicting canonical, mismatched, unexpectedly managed, or foreign-attached
-custody is refused before mutation. Images, the state directory, and its
-original operation lock remain. Status and reset connect directly to the fixed
-Docker socket; they do not depend on the Docker CLI, current context,
-`DOCKER_API_VERSION`, or Compose plugin. Reset does not require retained image
-representations to remain present. `local up` and `down`
-remain planned. Follow the
-[local installation and deployment roadmap](maintainers/roadmaps/local-installation.md) for
-their merge and host-qualification gates.
+distinguishes recorded sealed, exact running, lifecycle-recovery, and reset
+states from canonical host and live Engine evidence. It does not run a volume
+inspector. `local reset` never prompts and requires `--yes`; it requires an
+authority-bound canonical epoch plus complete exact Engine custody, then
+reconciles its self-contained durable deletion transaction despite
+cancellation. Safe malformed or missing non-authority material/certificate
+records do not strand cleanup, but copied/pre-guard, conflicting canonical,
+mismatched, unexpectedly managed, or foreign-attached custody is refused before
+mutation. Images, the state directory, and its original operation lock remain.
+Status and reset connect directly to the fixed Docker socket; they do not depend
+on the Docker CLI, current context, `DOCKER_API_VERSION`, or Compose plugin.
+Reset does not require retained image representations to remain present. Follow
+the [local installation and deployment roadmap](maintainers/roadmaps/local-installation.md)
+for the remaining host-qualification gates.
 
 The local-source path seals tracked and non-ignored live bytes through pinned,
 no-follow ancestor handles and feeds the exact digest-bound archive through the
@@ -521,7 +537,9 @@ export SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
 
 This path requires the pinned Node/npm versions, `cargo-cyclonedx` 0.5.9, musl
 build tools, `readelf`, and Docker or Podman for the separate static-release
-container smoke check. The result is
+container smoke check. Static verification also checks public local up/down and
+the exact hidden lifecycle command surface in both the host executable and its
+scratch image. The result is
 `target/distribution/automata-x86_64-unknown-linux-musl.tar.gz` plus its
 checksum. Test its installer contract with:
 

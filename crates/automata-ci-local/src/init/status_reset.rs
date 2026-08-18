@@ -1,22 +1,30 @@
 use std::{fmt, future::Future, path::PathBuf, str::FromStr as _};
 
-use automata_ci_core::Sha256Digest;
+use automata_ci_core::{OperationId, Sha256Digest};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use tokio_util::sync::CancellationToken;
 
-use crate::{DockerInstallationAdapter, Installation, InstallationId, InstallationName};
+use crate::{
+    DesiredSpec, DockerInstallationAdapter, Installation, InstallationId, InstallationName,
+};
 
 use super::{
     LocalInitError, LocalInitErrorCode, StateInstallationSelection, StateMaterialization,
     certificates,
-    engine::{InitEngine, ResetHelperBinding, SealedEngineStatus, reset_volume_order},
+    compose::attest_no_project_compose_processes,
+    engine::{
+        InitEngine, LifecycleLockHolder, LifecycleLockObservation, LifecycleTopology,
+        ResetHelperBinding, SealedEngineStatus, reset_volume_order,
+    },
     epoch::{ImmutableEpoch, MaterialDeriver},
+    renderer::{ExpectedLifecycleTopology, render_compose},
     state::{ResetStateSnapshot, StateRecord, StateRoot, StateSnapshot},
 };
 
 const STATUS_SCHEMA: &str = "automata.local/status/v1";
 const RESET_INTENT_SCHEMA: &str = "automata.local/reset-intent/v1";
+const LOCAL_OS_CREDENTIAL_SELECTORS: [&str; 0] = [];
 const HOST_RESET_ORDER: [StateRecord; 5] = [
     StateRecord::Materialization,
     StateRecord::Certificates,
@@ -33,6 +41,14 @@ pub enum LocalInstallationStatus {
     Incomplete,
     /// Host records and Engine metadata are exact; volume contents were not live-inspected.
     RecordedSealed,
+    /// The exact complete lifecycle topology is running.
+    Running,
+    /// Another manager retains the exact live lifecycle mutation lock.
+    LifecycleInProgress,
+    /// Exact sticky stopped-lock evidence requires explicit quiescent recovery.
+    LifecycleRecoveryRequired,
+    /// Exact but incomplete lifecycle topology exists without a live holder.
+    Degraded,
     /// An authority-bound reset transaction is durably completing or replaying.
     ResetInProgress,
 }
@@ -268,6 +284,16 @@ impl LocalResetOutcome {
 struct EstablishedState {
     installation: Installation,
     epoch: ImmutableEpoch,
+    material_root: Option<[u8; 32]>,
+}
+
+struct ActiveLifecycleReset {
+    epoch: ImmutableEpoch,
+    desired: DesiredSpec,
+    expected: ExpectedLifecycleTopology,
+    runner_id: uuid::Uuid,
+    holder: LifecycleLockHolder,
+    topology_removed: bool,
 }
 
 enum ValidatedHostState {
@@ -301,44 +327,131 @@ pub async fn inspect_local_status(
         cancellation_checkpoint(&request.cancellation)?;
         let adapter = connect_adapter().await?;
         let engine = InitEngine::connect(&adapter).await?;
-        let (persistent_removed, helper_present) = match engine
-            .inspect_reset_progress(&intent.installation, intent.epoch_fingerprint)
-            .await
-        {
-            Ok(removed) => (removed, false),
-            Err(error) if intent.helper.is_some() => {
-                let Some(epoch_bytes) = snapshot.epoch.as_deref() else {
-                    return Err(error);
-                };
-                let epoch = ImmutableEpoch::from_authority_bound_bytes(
-                    epoch_bytes,
-                    state.authority_sha256(),
-                )?;
-                let preflight = engine.preflight_reset(&intent.installation, &epoch).await?;
-                if preflight.helper != intent.helper {
-                    return Err(error);
+        let mut status = LocalInstallationStatus::ResetInProgress;
+        let mut volume_contents = "not_inspected";
+        let mut workers = None;
+        let reset = if intent.helper.is_some() {
+            let (persistent_removed, helper_present) = match engine
+                .inspect_reset_progress(&intent.installation, intent.epoch_fingerprint)
+                .await
+            {
+                Ok(removed) => (removed, false),
+                Err(error) => {
+                    let Some(epoch_bytes) = snapshot.epoch.as_deref() else {
+                        return Err(error);
+                    };
+                    let epoch = ImmutableEpoch::from_authority_bound_bytes(
+                        epoch_bytes,
+                        state.authority_sha256(),
+                    )?;
+                    let preflight = engine.preflight_reset(&intent.installation, &epoch).await?;
+                    if preflight.helper != intent.helper {
+                        return Err(error);
+                    }
+                    (0, true)
                 }
-                (0, true)
+            };
+            let helper_recorded = intent.helper.is_some();
+            Some(StatusReset {
+                removed_resources: persistent_removed
+                    + usize::from(helper_recorded && !helper_present),
+                total_resources: 13 + usize::from(helper_recorded),
+            })
+        } else {
+            let identity = adapter
+                .inspect_identity(intent.installation.name())
+                .await
+                .map_err(super::map_engine_error)?;
+            if identity
+                .as_ref()
+                .is_some_and(|actual| actual != &intent.installation)
+            {
+                return Err(reset_required());
             }
-            Err(error) => return Err(error),
+            let epoch = snapshot
+                .epoch
+                .as_deref()
+                .map(|bytes| {
+                    ImmutableEpoch::from_authority_bound_bytes(bytes, state.authority_sha256())
+                })
+                .transpose()?;
+            if let Some(epoch) = epoch.as_ref() {
+                epoch.require_current_lifecycle_contract()?;
+                if epoch.installation()? != intent.installation
+                    || epoch.fingerprint() != intent.epoch_fingerprint
+                {
+                    return Err(reset_required());
+                }
+                workers = Some(epoch.workers());
+            }
+            if identity.is_some() {
+                let epoch = epoch.as_ref().ok_or_else(reset_required)?;
+                match engine
+                    .inspect_lifecycle_lock(&intent.installation, epoch)
+                    .await?
+                {
+                    LifecycleLockObservation::Live { .. } => {
+                        // A live writer owns the exact mutation stream, so a
+                        // read-only status call deliberately does not race its
+                        // changing deletion prefix.
+                        volume_contents = "indeterminate_while_busy";
+                        None
+                    }
+                    LifecycleLockObservation::Stopped { id, .. } => {
+                        let removed = engine
+                            .inspect_stopped_lifecycle_reset_volume_progress(
+                                &intent.installation,
+                                epoch,
+                                &id,
+                            )
+                            .await?;
+                        status = LocalInstallationStatus::LifecycleRecoveryRequired;
+                        volume_contents = "stopped_lock_recovery_required";
+                        Some(StatusReset {
+                            removed_resources: removed,
+                            total_resources: 14,
+                        })
+                    }
+                    LifecycleLockObservation::Absent => return Err(reset_required()),
+                }
+            } else {
+                if let Some(epoch) = epoch.as_ref()
+                    && engine
+                        .inspect_orphaned_stopped_reset_lock(&intent.installation, epoch)
+                        .await?
+                {
+                    status = LocalInstallationStatus::LifecycleRecoveryRequired;
+                    volume_contents = "stopped_lock_recovery_required";
+                    Some(StatusReset {
+                        removed_resources: 13,
+                        total_resources: 14,
+                    })
+                } else {
+                    let removed = engine
+                        .inspect_reset_progress(&intent.installation, intent.epoch_fingerprint)
+                        .await?;
+                    if removed != 13 {
+                        return Err(reset_required());
+                    }
+                    Some(StatusReset {
+                        removed_resources: 14,
+                        total_resources: 14,
+                    })
+                }
+            }
         };
-        let helper_recorded = intent.helper.is_some();
-        let removed = persistent_removed + usize::from(helper_recorded && !helper_present);
         cancellation_checkpoint(&request.cancellation)?;
         return Ok(LocalStatusReport {
             schema: STATUS_SCHEMA,
-            status: LocalInstallationStatus::ResetInProgress,
+            status,
             installation: Some(intent.installation.name().as_str().to_owned()),
             installation_id: Some(intent.installation.id().to_string()),
-            workers: None,
+            workers,
             epoch_fingerprint: Some(intent.epoch_fingerprint),
             records,
             engine: None,
-            volume_contents: "not_inspected",
-            reset: Some(StatusReset {
-                removed_resources: removed,
-                total_resources: 13 + usize::from(helper_recorded),
-            }),
+            volume_contents,
+            reset,
         });
     }
 
@@ -366,13 +479,91 @@ pub async fn inspect_local_status(
         }
         ValidatedHostState::Established(established) => {
             cancellation_checkpoint(&request.cancellation)?;
+            established.epoch.require_current_lifecycle_contract()?;
             let adapter = connect_adapter().await?;
             let engine = InitEngine::connect(&adapter).await?;
-            let engine = engine
-                .inspect_sealed(&established.installation, &established.epoch)
+            match engine
+                .inspect_lifecycle_lock(&established.installation, &established.epoch)
+                .await?
+            {
+                LifecycleLockObservation::Live { .. } => {
+                    cancellation_checkpoint(&request.cancellation)?;
+                    return Ok(lifecycle_report(
+                        records,
+                        &established,
+                        None,
+                        LocalInstallationStatus::LifecycleInProgress,
+                        "indeterminate_while_busy",
+                    ));
+                }
+                LifecycleLockObservation::Stopped { .. } => {
+                    cancellation_checkpoint(&request.cancellation)?;
+                    return Ok(lifecycle_report(
+                        records,
+                        &established,
+                        None,
+                        LocalInstallationStatus::LifecycleRecoveryRequired,
+                        "stopped_lock_recovery_required",
+                    ));
+                }
+                LifecycleLockObservation::Absent => {}
+            }
+            let custody = engine
+                .preflight_lifecycle_volumes(&established.installation, &established.epoch)
                 .await?;
+            let desired = established.epoch.desired_spec()?;
+            let runner_id = MaterialDeriver::new(
+                established.material_root.ok_or_else(reset_required)?,
+                &established.installation,
+                &established.epoch,
+            )
+            .uuid(b"lifecycle/runner-id");
+            let rendered = render_compose(&desired);
+            let topology = engine
+                .inspect_lifecycle_topology(
+                    &established.installation,
+                    &established.epoch,
+                    &desired,
+                    &rendered.expected,
+                    runner_id,
+                )
+                .await?;
+            let status = match engine
+                .inspect_lifecycle_lock(&established.installation, &established.epoch)
+                .await?
+            {
+                LifecycleLockObservation::Live { .. } => {
+                    LocalInstallationStatus::LifecycleInProgress
+                }
+                LifecycleLockObservation::Stopped { .. } => {
+                    LocalInstallationStatus::LifecycleRecoveryRequired
+                }
+                LifecycleLockObservation::Absent => match topology {
+                    LifecycleTopology::Empty => LocalInstallationStatus::RecordedSealed,
+                    LifecycleTopology::Running { .. } => LocalInstallationStatus::Running,
+                    LifecycleTopology::Partial => LocalInstallationStatus::Degraded,
+                },
+            };
             cancellation_checkpoint(&request.cancellation)?;
-            Ok(sealed_report(records, &established, engine))
+            let attachments = match status {
+                LocalInstallationStatus::RecordedSealed => "absent",
+                LocalInstallationStatus::Running => "exact_running_topology",
+                LocalInstallationStatus::Degraded => "exact_partial_topology",
+                LocalInstallationStatus::LifecycleInProgress => "indeterminate_while_busy",
+                LocalInstallationStatus::LifecycleRecoveryRequired => {
+                    "stopped_lock_recovery_required"
+                }
+                LocalInstallationStatus::Incomplete | LocalInstallationStatus::ResetInProgress => {
+                    return Err(reset_required());
+                }
+            };
+            Ok(lifecycle_report(
+                records,
+                &established,
+                Some(custody),
+                status,
+                attachments,
+            ))
         }
     }
 }
@@ -435,19 +626,199 @@ where
     } else {
         None
     };
+    preflight_empty_os_credential_selectors(
+        replay_intent
+            .as_ref()
+            .map(|intent| &intent.installation)
+            .or_else(|| fresh.as_ref().map(|state| &state.installation))
+            .ok_or_else(reset_required)?,
+    )?;
 
     let adapter = connect().await?;
     let engine = InitEngine::connect(&adapter).await?;
+    let mut active_lifecycle = None;
     let intent = if let Some(intent) = replay_intent {
+        if let Some(epoch_bytes) = snapshot.epoch.completed() {
+            let epoch =
+                ImmutableEpoch::from_authority_bound_bytes(epoch_bytes, state.authority_sha256())?;
+            epoch.require_current_lifecycle_contract()?;
+            if epoch.installation()? != intent.installation
+                || epoch.fingerprint() != intent.epoch_fingerprint
+            {
+                return Err(reset_required());
+            }
+            let identity = adapter
+                .inspect_identity(intent.installation.name())
+                .await
+                .map_err(super::map_engine_error)?;
+            if identity.as_ref() == Some(&intent.installation) {
+                let desired = epoch.desired_spec()?;
+                let rendered = render_compose(&desired);
+                let material_root = <[u8; 32]>::try_from(
+                    snapshot
+                        .material_root
+                        .completed()
+                        .ok_or_else(reset_required)?,
+                )
+                .map_err(|_| reset_required())?;
+                let runner_id = MaterialDeriver::new(material_root, &intent.installation, &epoch)
+                    .uuid(b"lifecycle/runner-id");
+                let recovered_removed = match engine
+                    .inspect_lifecycle_lock(&intent.installation, &epoch)
+                    .await?
+                {
+                    LifecycleLockObservation::Live { .. } => {
+                        return Err(LocalInitError::new(LocalInitErrorCode::OperationInProgress));
+                    }
+                    LifecycleLockObservation::Stopped { id, .. } => Some({
+                        attest_no_project_compose_processes(&intent.installation)?;
+                        let recovered = engine
+                            .recover_stopped_lifecycle_reset_lock(
+                                &intent.installation,
+                                &epoch,
+                                &desired,
+                                &rendered.expected,
+                                runner_id,
+                                &id,
+                            )
+                            .await?;
+                        attest_no_project_compose_processes(&intent.installation)?;
+                        recovered
+                    }),
+                    LifecycleLockObservation::Absent => None,
+                };
+                let holder = engine
+                    .acquire_lifecycle_lock(&intent.installation, &epoch, OperationId::new())
+                    .await?;
+                let removed = if let Some(removed) = recovered_removed {
+                    removed
+                } else {
+                    match engine
+                        .preflight_lifecycle_volumes(&intent.installation, &epoch)
+                        .await
+                    {
+                        Ok(_) => {
+                            engine
+                                .inspect_lifecycle_topology(
+                                    &intent.installation,
+                                    &epoch,
+                                    &desired,
+                                    &rendered.expected,
+                                    runner_id,
+                                )
+                                .await?;
+                            0
+                        }
+                        Err(preflight_error) => {
+                            let removed = engine
+                                .inspect_lifecycle_reset_volume_progress(
+                                    &intent.installation,
+                                    &epoch,
+                                    &holder,
+                                )
+                                .await?;
+                            if removed == 0 {
+                                return Err(preflight_error);
+                            }
+                            removed
+                        }
+                    }
+                };
+                active_lifecycle = Some(ActiveLifecycleReset {
+                    epoch,
+                    desired,
+                    expected: rendered.expected,
+                    runner_id,
+                    holder,
+                    topology_removed: removed > 0,
+                });
+            } else if identity.is_some() {
+                return Err(reset_required());
+            } else {
+                attest_no_project_compose_processes(&intent.installation)?;
+                engine
+                    .recover_orphaned_stopped_reset_lock(&intent.installation, &epoch)
+                    .await?;
+                attest_no_project_compose_processes(&intent.installation)?;
+            }
+        }
         intent
     } else {
         let established = fresh.ok_or_else(reset_required)?;
+        established.epoch.require_current_lifecycle_contract()?;
         cancellation_checkpoint(&request.cancellation)?;
-        let preflight = engine
-            .preflight_reset(&established.installation, &established.epoch)
+        let desired = established.epoch.desired_spec()?;
+        let rendered = render_compose(&desired);
+        let runner_id = MaterialDeriver::new(
+            established.material_root.ok_or_else(reset_required)?,
+            &established.installation,
+            &established.epoch,
+        )
+        .uuid(b"lifecycle/runner-id");
+        engine
+            .preflight_lifecycle_volumes(&established.installation, &established.epoch)
+            .await?;
+        engine
+            .inspect_lifecycle_topology(
+                &established.installation,
+                &established.epoch,
+                &desired,
+                &rendered.expected,
+                runner_id,
+            )
+            .await?;
+        match engine
+            .inspect_lifecycle_lock(&established.installation, &established.epoch)
+            .await?
+        {
+            LifecycleLockObservation::Absent => {}
+            LifecycleLockObservation::Live { .. } => {
+                return Err(LocalInitError::new(LocalInitErrorCode::OperationInProgress));
+            }
+            LifecycleLockObservation::Stopped { id, .. } => {
+                attest_no_project_compose_processes(&established.installation)?;
+                engine
+                    .recover_stopped_lifecycle_reset_lock(
+                        &established.installation,
+                        &established.epoch,
+                        &desired,
+                        &rendered.expected,
+                        runner_id,
+                        &id,
+                    )
+                    .await?;
+                attest_no_project_compose_processes(&established.installation)?;
+            }
+        }
+        cancellation_checkpoint(&request.cancellation)?;
+        let holder = engine
+            .acquire_lifecycle_lock(
+                &established.installation,
+                &established.epoch,
+                OperationId::new(),
+            )
+            .await?;
+        engine
+            .preflight_lifecycle_volumes(&established.installation, &established.epoch)
+            .await?;
+        engine
+            .inspect_lifecycle_topology(
+                &established.installation,
+                &established.epoch,
+                &desired,
+                &rendered.expected,
+                runner_id,
+            )
             .await?;
         cancellation_checkpoint(&request.cancellation)?;
-        let proposed = ResetIntent::new(state.authority_sha256(), &established, preflight.helper);
+        if holder.holder_lost().is_cancelled() {
+            return Err(reset_required());
+        }
+        engine
+            .attest_lifecycle_lock(&established.installation, &established.epoch, &holder)
+            .await?;
+        cancellation_checkpoint(&request.cancellation)?;
+        let proposed = ResetIntent::new(state.authority_sha256(), &established, None);
         state.store_reset_intent(&proposed.canonical_bytes()?)?;
         snapshot = state.snapshot_for_reset()?;
         let intent = ResetIntent::from_canonical_bytes(
@@ -458,19 +829,77 @@ where
             state.authority_sha256(),
         )?;
         intent.validate_reset_snapshot(&snapshot)?;
+        active_lifecycle = Some(ActiveLifecycleReset {
+            runner_id,
+            epoch: established.epoch,
+            desired,
+            expected: rendered.expected,
+            holder,
+            topology_removed: false,
+        });
         intent
     };
 
     snapshot = state.snapshot_for_reset()?;
     intent.validate_reset_snapshot(&snapshot)?;
-    let mut cancellation_latched = drive_engine_reset(
-        &engine,
-        &intent.installation,
-        intent.epoch_fingerprint,
-        intent.helper.as_ref(),
-        &request.cancellation,
-    )
-    .await?;
+    let mut cancellation_latched = request.cancellation.is_cancelled();
+    delete_empty_os_credential_selectors(&intent.installation)?;
+    if let Some(active) = active_lifecycle {
+        let holder_lost = active.holder.holder_lost();
+        holder_bounded(&holder_lost, async {
+            if !active.topology_removed {
+                engine
+                    .remove_lifecycle_topology_for_reset(
+                        &intent.installation,
+                        &active.epoch,
+                        &active.desired,
+                        &active.expected,
+                        active.runner_id,
+                        &active.holder,
+                    )
+                    .await?;
+            }
+            let removed = engine
+                .inspect_lifecycle_reset_volume_progress(
+                    &intent.installation,
+                    &active.epoch,
+                    &active.holder,
+                )
+                .await?;
+            for role in reset_volume_order().into_iter().skip(removed) {
+                engine
+                    .remove_lifecycle_reset_volume(
+                        &intent.installation,
+                        &active.epoch,
+                        &active.holder,
+                        role,
+                    )
+                    .await?;
+            }
+            Ok(())
+        })
+        .await?;
+        cancellation_latched |= request.cancellation.is_cancelled();
+        if holder_lost.is_cancelled() {
+            return Err(reset_required());
+        }
+        let stopped = engine
+            .stop_lifecycle_lock_for_reset(&intent.installation, &active.epoch, active.holder)
+            .await?;
+        engine
+            .remove_reset_anchor_and_lock(&intent.installation, stopped)
+            .await?;
+        cancellation_latched |= request.cancellation.is_cancelled();
+    } else {
+        cancellation_latched |= drive_engine_reset(
+            &engine,
+            &intent.installation,
+            intent.epoch_fingerprint,
+            intent.helper.as_ref(),
+            &request.cancellation,
+        )
+        .await?;
+    }
     drop(engine);
     drop(adapter);
 
@@ -481,12 +910,33 @@ where
         intent: &intent,
     };
     cancellation_latched = erase_host_records(&host, &request.cancellation, cancellation_latched)?;
+    requery_empty_os_credential_selectors(&intent.installation)?;
     Ok(LocalResetOutcome {
         installation: intent.installation.name().clone(),
         removed_volumes: 12,
         images_retained: true,
         completed_after_cancellation: cancellation_latched,
     })
+}
+
+fn preflight_empty_os_credential_selectors(
+    _installation: &Installation,
+) -> Result<(), LocalInitError> {
+    if LOCAL_OS_CREDENTIAL_SELECTORS.is_empty() {
+        Ok(())
+    } else {
+        Err(reset_required())
+    }
+}
+
+fn delete_empty_os_credential_selectors(installation: &Installation) -> Result<(), LocalInitError> {
+    preflight_empty_os_credential_selectors(installation)
+}
+
+fn requery_empty_os_credential_selectors(
+    installation: &Installation,
+) -> Result<(), LocalInitError> {
+    preflight_empty_os_credential_selectors(installation)
 }
 
 trait ResetHostDriver {
@@ -536,6 +986,21 @@ fn erase_host_records<D: ResetHostDriver>(
     driver.verify_empty()?;
     cancellation_latched |= cancellation.is_cancelled();
     Ok(cancellation_latched)
+}
+
+async fn holder_bounded<T>(
+    holder_lost: &CancellationToken,
+    operation: impl Future<Output = Result<T, LocalInitError>>,
+) -> Result<T, LocalInitError> {
+    if holder_lost.is_cancelled() {
+        return Err(reset_required());
+    }
+    tokio::pin!(operation);
+    tokio::select! {
+        biased;
+        result = &mut operation => result,
+        () = holder_lost.cancelled() => Err(reset_required()),
+    }
 }
 
 #[async_trait::async_trait]
@@ -646,14 +1111,20 @@ fn validate_reset_host_state(
     state: &StateRoot,
     snapshot: &ResetStateSnapshot,
 ) -> Result<EstablishedState, LocalInitError> {
-    if snapshot.lifecycle_operation.present() {
-        return Err(reset_required());
-    }
-    let epoch = ImmutableEpoch::from_authority_bound_bytes(
-        snapshot.epoch.completed().ok_or_else(reset_required)?,
-        state.authority_sha256(),
-    )?;
+    let epoch_bytes = snapshot.epoch.completed().ok_or_else(reset_required)?;
+    let epoch = ImmutableEpoch::from_authority_bound_bytes(epoch_bytes, state.authority_sha256())?;
     let installation = epoch.installation()?;
+    // The authority-bound epoch remains sufficient reset authority when a
+    // non-authoritative host record is absent or malformed. Retain the
+    // material root only when it also proves the epoch's sealed form; callers
+    // that need lifecycle/LocalDocker exactness then require this `Some` value.
+    let material_root = snapshot
+        .material_root
+        .completed()
+        .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok())
+        .filter(|root| {
+            ImmutableEpoch::from_sealed_bytes(epoch_bytes, state.authority_sha256(), root).is_ok()
+        });
     validate_reset_candidate_conflicts(
         snapshot,
         state.authority_sha256(),
@@ -663,6 +1134,7 @@ fn validate_reset_host_state(
     Ok(EstablishedState {
         installation,
         epoch,
+        material_root,
     })
 }
 
@@ -767,9 +1239,6 @@ fn validate_host_state(
     state: &StateRoot,
     snapshot: &StateSnapshot,
 ) -> Result<ValidatedHostState, LocalInitError> {
-    if snapshot.lifecycle_operation.is_some() {
-        return Err(reset_required());
-    }
     let installation = snapshot
         .installation_selection
         .as_deref()
@@ -833,6 +1302,7 @@ fn validate_host_state(
         return Ok(ValidatedHostState::Established(EstablishedState {
             installation: epoch.installation()?,
             epoch,
+            material_root,
         }));
     }
     Ok(ValidatedHostState::Incomplete {
@@ -841,27 +1311,33 @@ fn validate_host_state(
     })
 }
 
-fn sealed_report(
+fn lifecycle_report(
     records: StatusRecords,
     established: &EstablishedState,
-    engine: SealedEngineStatus,
+    engine: Option<SealedEngineStatus>,
+    status: LocalInstallationStatus,
+    attachments: &'static str,
 ) -> LocalStatusReport {
     let images = engine
-        .images
+        .as_ref()
+        .map(|engine| engine.images.as_slice())
+        .unwrap_or_default()
         .into_iter()
         .map(|image| StatusImage {
-            role: image.role,
-            source_kind: image.source_kind,
-            inspection_reference: image.inspection_reference,
-            image_id: image.image_id,
+            role: image.role.clone(),
+            source_kind: image.source_kind.clone(),
+            inspection_reference: image.inspection_reference.clone(),
+            image_id: image.image_id.clone(),
         })
         .collect();
     let volumes = engine
-        .volumes
+        .as_ref()
+        .map(|engine| engine.volumes.as_slice())
+        .unwrap_or_default()
         .into_iter()
         .map(|volume| StatusVolume {
             role: volume.role.name().to_owned(),
-            name: volume.name,
+            name: volume.name.clone(),
             static_material: volume.static_material,
             manifest: if volume.static_material {
                 "recorded_not_live_attested"
@@ -872,19 +1348,19 @@ fn sealed_report(
         .collect();
     LocalStatusReport {
         schema: STATUS_SCHEMA,
-        status: LocalInstallationStatus::RecordedSealed,
+        status,
         installation: Some(established.installation.name().as_str().to_owned()),
         installation_id: Some(established.installation.id().to_string()),
         workers: Some(established.epoch.workers()),
         epoch_fingerprint: Some(established.epoch.fingerprint()),
         records,
-        engine: Some(StatusEngine {
+        engine: engine.map(|_| StatusEngine {
             identity: "exact",
             image_representations: "exact",
             images,
             owned_union: "exact",
             volumes,
-            attachments: "absent",
+            attachments,
             unknown_managed_resources: "absent",
         }),
         volume_contents: "not_inspected",
@@ -991,9 +1467,6 @@ impl ValidatedResetIntent {
         &self,
         snapshot: &ResetStateSnapshot,
     ) -> Result<(), LocalInitError> {
-        if snapshot.lifecycle_operation.present() {
-            return Err(reset_required());
-        }
         validate_reset_candidate_conflicts(
             snapshot,
             self.state_authority_sha256,

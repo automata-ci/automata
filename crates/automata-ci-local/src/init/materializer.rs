@@ -480,10 +480,7 @@ fn materialize(request: &MaterializeRequest) -> Result<(), LocalInitError> {
     validate_cross_file_material(&plans)?;
     for role in VolumeRole::ALL {
         let directory = open_volume(role)?;
-        if request.fresh_dynamic_roots && !role.is_static() {
-            verify_empty_directory(&directory)?;
-        }
-        initialize_root(&directory, role)?;
+        prepare_volume_root(&directory, role, request.fresh_dynamic_roots)?;
         if role.is_static() {
             seal_static_volume(
                 &directory,
@@ -493,8 +490,90 @@ fn materialize(request: &MaterializeRequest) -> Result<(), LocalInitError> {
                 &plans,
                 request.fresh_dynamic_roots,
             )?;
+        } else if !request.fresh_dynamic_roots {
+            verify_dynamic_root_shape(&directory, role)?;
         }
         verify_root(&directory, role)?;
+    }
+    Ok(())
+}
+
+fn prepare_volume_root(
+    directory: &OwnedFd,
+    role: VolumeRole,
+    fresh_dynamic_roots: bool,
+) -> Result<(), LocalInitError> {
+    if fresh_dynamic_roots {
+        if !role.is_static() {
+            verify_empty_directory(directory)?;
+        }
+        initialize_root(directory, role)
+    } else {
+        // Completed materialization is an attestation boundary, never a
+        // repair boundary. In particular, do not normalize root ownership or
+        // mode after the durable host record says materialization completed.
+        verify_root(directory, role)
+    }
+}
+
+fn verify_dynamic_root_shape(directory: &OwnedFd, role: VolumeRole) -> Result<(), LocalInitError> {
+    debug_assert!(!role.is_static());
+    for entry in Dir::read_from(directory).map_err(|_| materialization_failed())? {
+        let entry = entry.map_err(|_| materialization_failed())?;
+        let name = entry
+            .file_name()
+            .to_str()
+            .map_err(|_| materialization_failed())?;
+        if matches!(name, "." | "..") {
+            continue;
+        }
+        let allowed = match role {
+            VolumeRole::BootstrapState => {
+                matches!(
+                    name,
+                    "request.json"
+                        | ".request.json.automata-write"
+                        | "runner-enrollment-token"
+                        | ".runner-enrollment-token.automata-write"
+                        | "receipt.json"
+                ) || name
+                    .strip_prefix(".automata-bootstrap-receipt-")
+                    .and_then(|suffix| suffix.strip_suffix(".tmp"))
+                    .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok())
+            }
+            VolumeRole::RelayBinding => {
+                matches!(name, "binding.json" | ".binding.json.automata-write")
+            }
+            VolumeRole::RunnerConfig => {
+                matches!(name, "runner.json" | ".runner.json.automata-write")
+            }
+            VolumeRole::RunnerSecrets => matches!(
+                name,
+                "s3-access-key"
+                    | ".s3-access-key.automata-write"
+                    | "s3-ca.pem"
+                    | ".s3-ca.pem.automata-write"
+                    | "s3-secret-key"
+                    | ".s3-secret-key.automata-write"
+                    | "spool-key-v1.hex"
+                    | ".spool-key-v1.hex.automata-write"
+            ),
+            // These are service-owned data roots. Their internal schemas are
+            // attested by the owning production service; this boundary still
+            // rejects the static-material namespace and fixed writer staging
+            // namespace, which can never be legitimate in these roots.
+            VolumeRole::EngineRelay
+            | VolumeRole::ObjectData
+            | VolumeRole::PostgresData
+            | VolumeRole::RunnerData => name != MANIFEST_FILE && !name.ends_with(".automata-write"),
+            VolumeRole::ControlMaterial
+            | VolumeRole::Desired
+            | VolumeRole::PostgresConfig
+            | VolumeRole::RustfsConfig => false,
+        };
+        if !allowed {
+            return Err(materialization_failed());
+        }
     }
     Ok(())
 }

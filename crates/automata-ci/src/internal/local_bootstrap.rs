@@ -169,8 +169,14 @@ enum BootstrapResult {
     Ready {
         bootstrap_operation_id: Uuid,
         record: RunnerEnrollmentTokenRecord,
+        receipt_update: ReceiptUpdate,
     },
-    Consumed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReceiptUpdate {
+    EnsureExact,
+    RefreshExpiration,
 }
 
 #[derive(Debug, Eq, PartialEq, Serialize)]
@@ -180,6 +186,17 @@ struct BootstrapReceipt<'a> {
     enrollment_id: Uuid,
     runner_group: &'a str,
     status: &'static str,
+    expires_at_ms: i64,
+}
+
+#[derive(Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct StoredBootstrapReceipt {
+    schema: String,
+    bootstrap_operation_id: Uuid,
+    enrollment_id: Uuid,
+    runner_group: String,
+    status: String,
     expires_at_ms: i64,
 }
 
@@ -285,13 +302,14 @@ async fn bootstrap_runner(
     .await
     .map_err(|_| BootstrapRunnerError::TransactionOutcomeUncertain)?
     .map_err(map_management_repository_error)?;
-    let record = match enrollment {
-        InstallationBootstrapRunnerEnrollmentTokenOutcome::Applied(record)
-        | InstallationBootstrapRunnerEnrollmentTokenOutcome::Replayed(record)
-        | InstallationBootstrapRunnerEnrollmentTokenOutcome::Refreshed(record) => record,
-        InstallationBootstrapRunnerEnrollmentTokenOutcome::Consumed(record) => {
-            validate_record(&record, expected_enrollment_id, &expected_runner_group)?;
-            return Ok(BootstrapResult::Consumed);
+    let (record, receipt_update) = match enrollment {
+        InstallationBootstrapRunnerEnrollmentTokenOutcome::Applied(record) => {
+            (record, ReceiptUpdate::EnsureExact)
+        }
+        InstallationBootstrapRunnerEnrollmentTokenOutcome::Replayed(record)
+        | InstallationBootstrapRunnerEnrollmentTokenOutcome::Refreshed(record)
+        | InstallationBootstrapRunnerEnrollmentTokenOutcome::Consumed(record) => {
+            (record, ReceiptUpdate::RefreshExpiration)
         }
         InstallationBootstrapRunnerEnrollmentTokenOutcome::Conflict => {
             return Err(BootstrapRunnerError::EnrollmentConflict);
@@ -301,6 +319,7 @@ async fn bootstrap_runner(
     Ok(BootstrapResult::Ready {
         bootstrap_operation_id,
         record,
+        receipt_update,
     })
 }
 
@@ -354,6 +373,7 @@ fn finalize_bootstrap(
         BootstrapResult::Ready {
             bootstrap_operation_id,
             record,
+            receipt_update,
         } => persist_receipt(
             target,
             &BootstrapReceipt {
@@ -364,46 +384,115 @@ fn finalize_bootstrap(
                 status: "ready",
                 expires_at_ms: record.expires_at_ms,
             },
+            receipt_update,
         ),
-        BootstrapResult::Consumed => {
-            clear_receipt(target)?;
-            Err(BootstrapRunnerError::EnrollmentConsumed)
-        }
     }
 }
 
 fn persist_receipt(
     target: &InternalBootstrapFileSource,
     receipt: &BootstrapReceipt<'_>,
+    update: ReceiptUpdate,
 ) -> Result<(), BootstrapRunnerError> {
     let path = target.path().ok_or(BootstrapRunnerError::InvalidInput)?;
-    persist_receipt_bytes(path, &receipt.canonical_bytes()?, receipt.enrollment_id)
+    persist_receipt_bytes(
+        path,
+        &receipt.canonical_bytes()?,
+        receipt.enrollment_id,
+        update,
+    )
 }
 
-fn clear_receipt(target: &InternalBootstrapFileSource) -> Result<(), BootstrapRunnerError> {
-    clear_receipt_path(target.path().ok_or(BootstrapRunnerError::InvalidInput)?)
+fn decode_stored_receipt(bytes: &[u8]) -> Result<StoredBootstrapReceipt, BootstrapRunnerError> {
+    let receipt: StoredBootstrapReceipt =
+        serde_json::from_slice(bytes).map_err(|_| BootstrapRunnerError::Output)?;
+    let mut canonical = serde_json::to_vec(&receipt).map_err(|_| BootstrapRunnerError::Output)?;
+    canonical.push(b'\n');
+    if bytes != canonical
+        || receipt.schema != RECEIPT_SCHEMA
+        || receipt.bootstrap_operation_id.is_nil()
+        || receipt.enrollment_id.is_nil()
+        || receipt.runner_group != "default"
+        || receipt.status != "ready"
+        || receipt.expires_at_ms <= 0
+    {
+        return Err(BootstrapRunnerError::Output);
+    }
+    Ok(receipt)
+}
+
+fn receipt_refresh_is_exact_predecessor(current: &[u8], replacement: &[u8]) -> bool {
+    let Ok(current) = decode_stored_receipt(current) else {
+        return false;
+    };
+    let Ok(replacement) = decode_stored_receipt(replacement) else {
+        return false;
+    };
+    current.schema == replacement.schema
+        && current.bootstrap_operation_id == replacement.bootstrap_operation_id
+        && current.enrollment_id == replacement.enrollment_id
+        && current.runner_group == replacement.runner_group
+        && current.status == replacement.status
+        && replacement.expires_at_ms > current.expires_at_ms
 }
 
 #[cfg(unix)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the locked no-follow receipt replacement protocol must remain auditable as one operation"
+)]
 fn persist_receipt_bytes(
     path: &std::path::Path,
     bytes: &[u8],
     enrollment_id: Uuid,
+    update: ReceiptUpdate,
 ) -> Result<(), BootstrapRunnerError> {
-    use rustix::fs::{FlockOperation, Mode, OFlags, fchmod, flock, fsync, openat, renameat};
-    use std::{fs::File, io::Write as _};
+    use rustix::fs::{
+        AtFlags, FlockOperation, Mode, OFlags, RenameFlags, fchmod, flock, fsync, openat, renameat,
+        renameat_with, unlinkat,
+    };
+    use std::{
+        fs::File,
+        io::{Read as _, Seek as _, SeekFrom, Write as _},
+    };
 
+    let _replacement = decode_stored_receipt(bytes)?;
     let (parent, target_name) = open_private_parent(path)?;
-    match openat(
+    let mut replace_existing = false;
+    let target_lock = match openat(
         &parent,
         &target_name,
-        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+        OFlags::RDWR | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
         Mode::empty(),
     ) {
-        Ok(existing) => verify_private_regular(&existing)?,
-        Err(rustix::io::Errno::NOENT) => {}
+        Ok(existing) => {
+            verify_private_regular(&existing)?;
+            flock(&existing, FlockOperation::NonBlockingLockExclusive)
+                .map_err(|_| BootstrapRunnerError::Output)?;
+            let mut file = File::from(existing);
+            let mut current = Vec::with_capacity(MAX_REQUEST_BYTES.min(8 * 1_024));
+            (&mut file)
+                .take(
+                    u64::try_from(MAX_REQUEST_BYTES)
+                        .map_err(|_| BootstrapRunnerError::Output)?
+                        .saturating_add(1),
+                )
+                .read_to_end(&mut current)
+                .map_err(|_| BootstrapRunnerError::Output)?;
+            if current == bytes {
+                return fsync(&parent).map_err(|_| BootstrapRunnerError::Output);
+            }
+            if update != ReceiptUpdate::RefreshExpiration
+                || !receipt_refresh_is_exact_predecessor(&current, bytes)
+            {
+                return Err(BootstrapRunnerError::Output);
+            }
+            replace_existing = true;
+            Some(file)
+        }
+        Err(rustix::io::Errno::NOENT) => None,
         Err(_) => return Err(BootstrapRunnerError::Output),
-    }
+    };
 
     let temporary = format!(".automata-bootstrap-receipt-{enrollment_id}.tmp");
     let (staging, created) = match openat(
@@ -437,35 +526,76 @@ fn persist_receipt_bytes(
     flock(&staging, FlockOperation::NonBlockingLockExclusive)
         .map_err(|_| BootstrapRunnerError::Output)?;
     let mut file = File::from(staging);
-    file.set_len(0).map_err(|_| BootstrapRunnerError::Output)?;
-    file.write_all(bytes)
-        .and_then(|()| file.sync_all())
-        .map_err(|_| BootstrapRunnerError::Output)?;
-    renameat(&parent, temporary.as_str(), &parent, &target_name)
-        .map_err(|_| BootstrapRunnerError::Output)?;
-    fsync(&parent).map_err(|_| BootstrapRunnerError::Output)
-}
-
-#[cfg(unix)]
-fn clear_receipt_path(path: &std::path::Path) -> Result<(), BootstrapRunnerError> {
-    use rustix::fs::{AtFlags, Mode, OFlags, fsync, openat, unlinkat};
-
-    let (parent, target_name) = open_private_parent(path)?;
-    match openat(
+    if created {
+        file.write_all(bytes)
+            .and_then(|()| file.sync_all())
+            .map_err(|_| BootstrapRunnerError::Output)?;
+    } else {
+        let mut current = Vec::with_capacity(MAX_REQUEST_BYTES.min(8 * 1_024));
+        (&mut file)
+            .take(
+                u64::try_from(MAX_REQUEST_BYTES)
+                    .map_err(|_| BootstrapRunnerError::Output)?
+                    .saturating_add(1),
+            )
+            .read_to_end(&mut current)
+            .map_err(|_| BootstrapRunnerError::Output)?;
+        if current != bytes {
+            if update != ReceiptUpdate::RefreshExpiration
+                || !receipt_refresh_is_exact_predecessor(&current, bytes)
+            {
+                return Err(BootstrapRunnerError::Output);
+            }
+            file.set_len(0).map_err(|_| BootstrapRunnerError::Output)?;
+            file.seek(SeekFrom::Start(0))
+                .map_err(|_| BootstrapRunnerError::Output)?;
+            file.write_all(bytes)
+                .map_err(|_| BootstrapRunnerError::Output)?;
+        }
+        file.sync_all().map_err(|_| BootstrapRunnerError::Output)?;
+    }
+    if replace_existing {
+        renameat(&parent, temporary.as_str(), &parent, &target_name)
+            .map_err(|_| BootstrapRunnerError::Output)?;
+        drop(target_lock);
+        return fsync(&parent).map_err(|_| BootstrapRunnerError::Output);
+    }
+    match renameat_with(
+        &parent,
+        temporary.as_str(),
         &parent,
         &target_name,
-        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
-        Mode::empty(),
+        RenameFlags::NOREPLACE,
     ) {
-        Ok(existing) => {
+        Ok(()) => {}
+        Err(rustix::io::Errno::EXIST) => {
+            let existing = openat(
+                &parent,
+                &target_name,
+                OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+                Mode::empty(),
+            )
+            .map_err(|_| BootstrapRunnerError::Output)?;
             verify_private_regular(&existing)?;
-            unlinkat(&parent, target_name, AtFlags::empty())
+            let mut existing = File::from(existing);
+            let mut current = Vec::with_capacity(bytes.len().saturating_add(1));
+            (&mut existing)
+                .take(
+                    u64::try_from(bytes.len())
+                        .map_err(|_| BootstrapRunnerError::Output)?
+                        .saturating_add(1),
+                )
+                .read_to_end(&mut current)
                 .map_err(|_| BootstrapRunnerError::Output)?;
-            fsync(&parent).map_err(|_| BootstrapRunnerError::Output)
+            if current != bytes {
+                return Err(BootstrapRunnerError::Output);
+            }
+            unlinkat(&parent, temporary.as_str(), AtFlags::empty())
+                .map_err(|_| BootstrapRunnerError::Output)?;
         }
-        Err(rustix::io::Errno::NOENT) => Ok(()),
-        Err(_) => Err(BootstrapRunnerError::Output),
+        Err(_) => return Err(BootstrapRunnerError::Output),
     }
+    fsync(&parent).map_err(|_| BootstrapRunnerError::Output)
 }
 
 #[cfg(unix)]
@@ -523,12 +653,8 @@ fn persist_receipt_bytes(
     _path: &std::path::Path,
     _bytes: &[u8],
     _enrollment_id: Uuid,
+    _update: ReceiptUpdate,
 ) -> Result<(), BootstrapRunnerError> {
-    Err(BootstrapRunnerError::Output)
-}
-
-#[cfg(not(unix))]
-fn clear_receipt_path(_path: &std::path::Path) -> Result<(), BootstrapRunnerError> {
     Err(BootstrapRunnerError::Output)
 }
 
@@ -544,8 +670,6 @@ enum BootstrapRunnerError {
     InstallationConflict,
     #[error("local runner enrollment identity conflicts with durable state")]
     EnrollmentConflict,
-    #[error("the persisted local runner enrollment token was already consumed")]
-    EnrollmentConsumed,
     #[error("local runner bootstrap storage is unavailable")]
     Storage,
     #[error(
@@ -626,5 +750,137 @@ mod tests {
             serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["status"],
             "ready"
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn receipt_replay_preserves_exact_bytes_and_rejects_drift() {
+        use std::{fs, os::unix::fs::PermissionsExt as _};
+
+        let root = std::env::current_dir()
+            .expect("current directory")
+            .join(format!(
+                ".automata-bootstrap-receipt-test-{}",
+                Uuid::new_v4()
+            ));
+        fs::create_dir(&root).expect("receipt test root");
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700))
+            .expect("private receipt test root");
+        let path = root.join("receipt.json");
+        let request = request();
+        let exact = BootstrapReceipt {
+            schema: RECEIPT_SCHEMA,
+            bootstrap_operation_id: request.bootstrap_operation_id,
+            enrollment_id: request.enrollment_id,
+            runner_group: request.runner_group.as_str(),
+            status: "ready",
+            expires_at_ms: 100,
+        }
+        .canonical_bytes()
+        .expect("exact receipt");
+        persist_receipt_bytes(
+            &path,
+            &exact,
+            request.enrollment_id,
+            ReceiptUpdate::EnsureExact,
+        )
+        .expect("first receipt publication");
+        persist_receipt_bytes(
+            &path,
+            &exact,
+            request.enrollment_id,
+            ReceiptUpdate::EnsureExact,
+        )
+        .expect("exact receipt replay");
+        assert_eq!(fs::read(&path).expect("published receipt"), exact);
+
+        let drifted = BootstrapReceipt {
+            schema: RECEIPT_SCHEMA,
+            bootstrap_operation_id: Uuid::new_v4(),
+            enrollment_id: request.enrollment_id,
+            runner_group: request.runner_group.as_str(),
+            status: "ready",
+            expires_at_ms: 100,
+        }
+        .canonical_bytes()
+        .expect("drifted receipt");
+
+        assert_eq!(
+            persist_receipt_bytes(
+                &path,
+                &drifted,
+                request.enrollment_id,
+                ReceiptUpdate::EnsureExact,
+            ),
+            Err(BootstrapRunnerError::Output)
+        );
+        assert_eq!(
+            fs::read(&path).expect("preserved receipt"),
+            exact,
+            "a replay must never replace an existing receipt"
+        );
+        fs::remove_dir_all(&root).expect("remove receipt test root");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn receipt_refresh_changes_only_the_database_authorized_expiration() {
+        use std::{fs, os::unix::fs::PermissionsExt as _};
+
+        let root = std::env::current_dir()
+            .expect("current directory")
+            .join(format!(
+                ".automata-bootstrap-refresh-test-{}",
+                Uuid::new_v4()
+            ));
+        fs::create_dir(&root).expect("receipt test root");
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700))
+            .expect("private receipt test root");
+        let path = root.join("receipt.json");
+        let request = request();
+        let receipt = |expires_at_ms| BootstrapReceipt {
+            schema: RECEIPT_SCHEMA,
+            bootstrap_operation_id: request.bootstrap_operation_id,
+            enrollment_id: request.enrollment_id,
+            runner_group: request.runner_group.as_str(),
+            status: "ready",
+            expires_at_ms,
+        };
+        let old = receipt(100).canonical_bytes().expect("old receipt");
+        let refreshed = receipt(200).canonical_bytes().expect("refreshed receipt");
+        persist_receipt_bytes(
+            &path,
+            &old,
+            request.enrollment_id,
+            ReceiptUpdate::EnsureExact,
+        )
+        .expect("initial receipt");
+        persist_receipt_bytes(
+            &path,
+            &refreshed,
+            request.enrollment_id,
+            ReceiptUpdate::RefreshExpiration,
+        )
+        .expect("authorized expiration refresh");
+        assert_eq!(fs::read(&path).expect("refreshed receipt"), refreshed);
+
+        let drifted = BootstrapReceipt {
+            runner_group: "drifted",
+            expires_at_ms: 300,
+            ..receipt(200)
+        }
+        .canonical_bytes()
+        .expect("drifted receipt");
+        assert_eq!(
+            persist_receipt_bytes(
+                &path,
+                &drifted,
+                request.enrollment_id,
+                ReceiptUpdate::RefreshExpiration,
+            ),
+            Err(BootstrapRunnerError::Output)
+        );
+        assert_eq!(fs::read(&path).expect("preserved receipt"), refreshed);
+        fs::remove_dir_all(&root).expect("remove receipt test root");
     }
 }

@@ -55,8 +55,9 @@ use engine::{
     EngineContainerState, EngineExecRequest, InspectedContainer, InspectedContainerCustody,
     InspectedImage, InspectedNetwork, Ipv4Network, LOCAL_DOCKER_GUEST_ARCHIVE_BYTES,
     LOCAL_DOCKER_GUEST_IMAGE_BINARY, LOCAL_DOCKER_SANDBOX_GUEST_BINARY, NetworkEndpoint,
-    PinnedDockerEngine, SandboxEngineApi, connect_relay_sandbox_engine, map_engine_call,
-    resolve_installation_binding, verify_installation_identity,
+    PinnedDockerEngine, SandboxEngineApi, connect_host_sandbox_engine,
+    connect_relay_sandbox_engine, map_engine_call, resolve_installation_binding,
+    verify_installation_identity,
 };
 
 use endpoint::LocalDockerEndpoint;
@@ -65,6 +66,21 @@ use endpoint::LocalDockerEndpoint;
 mod tests;
 
 pub(crate) const LOCAL_DOCKER_PROVIDER_ID: &str = "local-docker-v1";
+
+/// Immutable IDs from the lifecycle's installation-wide discovery union.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct LifecycleSiblingContainer {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) kind: String,
+}
+
+/// Immutable network IDs from the lifecycle's installation-wide discovery union.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct LifecycleSiblingNetwork {
+    pub(crate) id: String,
+    pub(crate) name: String,
+}
 
 const MANAGED_LABEL_PREFIX: &str = "io.automata.local.";
 const LABEL_MANAGED: &str = "io.automata.local.managed";
@@ -80,6 +96,7 @@ const LABEL_GENERATION: &str = "io.automata.local.generation";
 const LABEL_PROFILE: &str = "io.automata.local.profile";
 const LABEL_PROFILE_DIGEST: &str = "io.automata.local.profile-sha256";
 const LABEL_SPEC_DIGEST: &str = "io.automata.local.spec-sha256";
+const LABEL_REALIZED_DIGEST: &str = "io.automata.local.realized-sha256";
 const LABEL_RESOURCE_KIND: &str = "io.automata.local.resource-kind";
 const MANAGED_VALUE: &str = "true";
 const JOB_SCHEMA: &str = "2";
@@ -224,6 +241,385 @@ impl ResultsTransportBudget {
     fn bounded_deadline(self, duration: Duration) -> tokio::time::Instant {
         self.deadline.min(tokio::time::Instant::now() + duration)
     }
+}
+
+#[derive(Default)]
+struct LifecycleSiblingGroup {
+    names: Option<ResourceNames>,
+    identity: Option<BaseIdentity>,
+    job: Option<InspectedContainer>,
+    helper: Option<InspectedContainer>,
+    proxy: Option<InspectedContainer>,
+    front: Option<InspectedNetwork>,
+}
+
+/// Read-only, field-for-field attestation of the LocalDocker sibling union
+/// before lifecycle teardown. This deliberately reuses the production HTTP
+/// normalizer and provider definitions instead of trusting discovery labels.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub(crate) async fn attest_lifecycle_sibling_union(
+    installation: &Installation,
+    desired: &crate::DesiredSpec,
+    runner_id: uuid::Uuid,
+    transit_network_id: &str,
+    results_container_id: &str,
+    containers: &[LifecycleSiblingContainer],
+    networks: &[LifecycleSiblingNetwork],
+) -> Result<(), LocalDockerError> {
+    if containers.is_empty() && networks.is_empty() {
+        return Ok(());
+    }
+    let runner_id = RunnerId::from_str(&runner_id.hyphenated().to_string())
+        .map_err(|_| results_transport_mismatch())?;
+    let (pinned, engine) = connect_host_sandbox_engine(desired.profile().architecture()).await?;
+    verify_installation_identity(engine.as_ref(), installation).await?;
+
+    let guest = engine
+        .inspect_image(desired.images().sandbox_guest().reference())
+        .await
+        .map_err(map_engine_call)?
+        .ok_or_else(results_transport_mismatch)?;
+    verify_image(&pinned, desired.images().sandbox_guest(), &guest)
+        .map_err(|_| results_transport_mismatch())?;
+    let proxy_image = engine
+        .inspect_image(desired.images().service_proxy().reference())
+        .await
+        .map_err(map_engine_call)?
+        .ok_or_else(results_transport_mismatch)?;
+    verify_results_proxy_image(&pinned, desired.images().service_proxy(), &proxy_image)
+        .map_err(|_| results_transport_mismatch())?;
+    let requested = LocalDockerResultsTransport::new(
+        desired.images().service_proxy().clone(),
+        desired.plan_digest(),
+        transit_network_id.to_owned(),
+        results_container_id.to_owned(),
+        desired.results_transit().results_address(),
+    )?;
+    let transit = inspect_exact_results_transit(engine.as_ref(), installation, &requested).await?;
+    let verified_results = VerifiedResultsTransport {
+        requested,
+        transit_name: results_transit_name(installation),
+        transit_network: transit.ipv4_network.clone(),
+        transit_gateway: transit.ipv4_gateway,
+        proxy_image_id: proxy_image.id.clone(),
+        proxy_image_labels: proxy_image.labels.clone(),
+    };
+
+    let mut groups = BTreeMap::<String, LifecycleSiblingGroup>::new();
+    let mut seen_container_ids = BTreeSet::new();
+    for candidate in containers {
+        if !canonical_object_id(&candidate.id) || !seen_container_ids.insert(candidate.id.clone()) {
+            return Err(results_transport_mismatch());
+        }
+        let container = engine
+            .inspect_container(&candidate.id)
+            .await
+            .map_err(map_engine_call)?
+            .ok_or_else(results_transport_mismatch)?;
+        let by_name = engine
+            .inspect_container(&candidate.name)
+            .await
+            .map_err(map_engine_call)?
+            .ok_or_else(results_transport_mismatch)?;
+        if container != by_name
+            || container.id != candidate.id
+            || container.definition.name != candidate.name
+            || !container.isolated
+            || !exact_realized_container_digest(&container)
+        {
+            return Err(results_transport_mismatch());
+        }
+        let (names, identity) = lifecycle_sibling_identity(
+            &container.definition.labels,
+            installation,
+            runner_id,
+            &candidate.kind,
+        )?;
+        let expected_name = match candidate.kind.as_str() {
+            KIND_JOB => &names.job,
+            KIND_GUEST_SOURCE => &names.helper,
+            KIND_RESULTS_PROXY => &names.results_proxy,
+            _ => return Err(results_transport_mismatch()),
+        };
+        if &candidate.name != expected_name || identity.profile != *desired.profile().attestation()
+        {
+            return Err(results_transport_mismatch());
+        }
+        let group = groups.entry(names.results_front.clone()).or_default();
+        merge_lifecycle_sibling_identity(group, &names, &identity)?;
+        let slot = match candidate.kind.as_str() {
+            KIND_JOB => &mut group.job,
+            KIND_GUEST_SOURCE => &mut group.helper,
+            KIND_RESULTS_PROXY => &mut group.proxy,
+            _ => unreachable!("kind checked above"),
+        };
+        if slot.replace(container).is_some() {
+            return Err(results_transport_mismatch());
+        }
+    }
+
+    let mut seen_network_ids = BTreeSet::new();
+    for candidate in networks {
+        if !canonical_object_id(&candidate.id) || !seen_network_ids.insert(candidate.id.clone()) {
+            return Err(results_transport_mismatch());
+        }
+        let network = engine
+            .inspect_network(&candidate.id)
+            .await
+            .map_err(map_engine_call)?
+            .ok_or_else(results_transport_mismatch)?;
+        let by_name = engine
+            .inspect_network(&candidate.name)
+            .await
+            .map_err(map_engine_call)?
+            .ok_or_else(results_transport_mismatch)?;
+        if network != by_name || network.id != candidate.id || network.name != candidate.name {
+            return Err(results_transport_mismatch());
+        }
+        let (names, identity) = lifecycle_sibling_identity(
+            &network.labels,
+            installation,
+            runner_id,
+            KIND_RESULTS_FRONT,
+        )?;
+        if candidate.name != names.results_front
+            || identity.profile != *desired.profile().attestation()
+        {
+            return Err(results_transport_mismatch());
+        }
+        let group = groups.entry(names.results_front.clone()).or_default();
+        merge_lifecycle_sibling_identity(group, &names, &identity)?;
+        if group.front.replace(network).is_some() {
+            return Err(results_transport_mismatch());
+        }
+    }
+
+    let mut expected_transit_members = BTreeMap::from([(results_container_id.to_owned(), None)]);
+    let mut seen_custody = BTreeSet::new();
+    for group in groups.values() {
+        let names = group
+            .names
+            .as_ref()
+            .ok_or_else(results_transport_mismatch)?;
+        let identity = group
+            .identity
+            .as_ref()
+            .ok_or_else(results_transport_mismatch)?;
+        let front = group
+            .front
+            .as_ref()
+            .ok_or_else(results_transport_mismatch)?;
+        let custody_key = match identity.custody {
+            SandboxCustody::ProfileAdmission { .. } => "admission".to_owned(),
+            SandboxCustody::Job { slot_ordinal, .. }
+                if slot_ordinal.get() <= desired.max_parallel_jobs().get() =>
+            {
+                format!("job:{}", slot_ordinal.get())
+            }
+            SandboxCustody::Job { .. } => return Err(results_transport_mismatch()),
+        };
+        if !seen_custody.insert(custody_key) {
+            return Err(results_transport_mismatch());
+        }
+        let expected_front =
+            front_network_definition(names, &identity.base_labels, installation, identity.custody)
+                .map_err(|_| results_transport_mismatch())?;
+        if front.ipv4_network != expected_front.ipv4_network
+            || front.ipv4_gateway != expected_front.ipv4_gateway
+            || !exact_closed_network(front, &names.results_front, &expected_front.labels)
+        {
+            return Err(results_transport_mismatch());
+        }
+
+        if let Some(helper) = &group.helper {
+            let definition = helper_definition(
+                names,
+                desired.images().sandbox_guest().reference(),
+                &guest.labels,
+                &neutral_environment(&guest.environment_names),
+                &identity.base_labels,
+            );
+            if verify_container(helper, &definition, &guest.id, None).is_err()
+                || !matches!(
+                    helper.state,
+                    EngineContainerState::Created
+                        | EngineContainerState::Running
+                        | EngineContainerState::Exited(0)
+                )
+            {
+                return Err(results_transport_mismatch());
+            }
+        }
+        if let Some(job) = &group.job {
+            let job_image = engine
+                .inspect_image(desired.profile().image().reference())
+                .await
+                .map_err(map_engine_call)?
+                .ok_or_else(results_transport_mismatch)?;
+            if job.definition.image != desired.profile().image().reference()
+                || verify_image(&pinned, desired.profile().image(), &job_image).is_err()
+                || job.image_id != job_image.id
+                || !matches!(
+                    job.state,
+                    EngineContainerState::Created | EngineContainerState::Running
+                )
+                || verify_job_definition(
+                    job,
+                    names,
+                    &job_image.labels,
+                    &job_image.environment_names,
+                    &identity.base_labels,
+                    front,
+                    ProviderStage::VerifyOwnership,
+                )
+                .is_err()
+            {
+                return Err(results_transport_mismatch());
+            }
+        }
+        if let Some(proxy) = &group.proxy {
+            let transit_address = transit_proxy_address(
+                &transit.ipv4_network,
+                transit.ipv4_gateway,
+                desired.results_transit().results_address(),
+                identity.custody,
+            )
+            .map_err(|_| results_transport_mismatch())?;
+            let definition = results_proxy_definition(
+                names,
+                &identity.base_labels,
+                &verified_results,
+                front,
+                transit_address,
+            )
+            .map_err(|_| results_transport_mismatch())?;
+            if verify_container(proxy, &definition, &proxy_image.id, None).is_err()
+                || !matches!(
+                    proxy.state,
+                    EngineContainerState::Created | EngineContainerState::Running
+                )
+            {
+                return Err(results_transport_mismatch());
+            }
+            expected_transit_members.insert(
+                proxy.id.clone(),
+                Some((names.results_proxy.clone(), transit_address)),
+            );
+        }
+        attest_lifecycle_front_members(group, front)?;
+    }
+
+    if transit.containers.len() != expected_transit_members.len() {
+        return Err(results_transport_mismatch());
+    }
+    for (id, expectation) in expected_transit_members {
+        let endpoint = transit
+            .containers
+            .get(&id)
+            .ok_or_else(results_transport_mismatch)?;
+        if let Some((name, address)) = expectation
+            && (endpoint.name != name
+                || endpoint.ipv4_address != address
+                || endpoint.ipv4_prefix != transit.ipv4_network.prefix)
+        {
+            return Err(results_transport_mismatch());
+        }
+    }
+    pinned.verify().await?;
+    verify_installation_identity(engine.as_ref(), installation).await
+}
+
+fn lifecycle_sibling_identity(
+    labels: &BTreeMap<String, String>,
+    installation: &Installation,
+    runner_id: RunnerId,
+    kind: &str,
+) -> Result<(ResourceNames, BaseIdentity), LocalDockerError> {
+    let managed = managed_labels(labels);
+    let operation = managed
+        .get(LABEL_OPERATION_ID)
+        .and_then(|value| OperationId::from_str(value).ok())
+        .filter(|value| value.to_string() == managed[LABEL_OPERATION_ID]);
+    let generation = managed
+        .get(LABEL_GENERATION)
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| value.to_string() == managed[LABEL_GENERATION]);
+    let names = operation
+        .zip(generation)
+        .and_then(|(operation, generation)| {
+            ResourceNames::new(installation, operation, generation).ok()
+        })
+        .ok_or_else(results_transport_mismatch)?;
+    let identity = parse_identity(
+        labels,
+        &names,
+        installation,
+        runner_id,
+        kind,
+        ProviderStage::VerifyOwnership,
+    )
+    .map_err(|_| results_transport_mismatch())?;
+    Ok((names, identity))
+}
+
+fn merge_lifecycle_sibling_identity(
+    group: &mut LifecycleSiblingGroup,
+    names: &ResourceNames,
+    identity: &BaseIdentity,
+) -> Result<(), LocalDockerError> {
+    if group.names.as_ref().is_some_and(|current| current != names)
+        || group
+            .identity
+            .as_ref()
+            .is_some_and(|current| current != identity)
+    {
+        return Err(results_transport_mismatch());
+    }
+    group.names.get_or_insert_with(|| names.clone());
+    group.identity.get_or_insert_with(|| identity.clone());
+    Ok(())
+}
+
+fn attest_lifecycle_front_members(
+    group: &LifecycleSiblingGroup,
+    front: &InspectedNetwork,
+) -> Result<(), LocalDockerError> {
+    let names = group
+        .names
+        .as_ref()
+        .ok_or_else(results_transport_mismatch)?;
+    let mut expected = BTreeMap::new();
+    if let Some(proxy) = &group.proxy {
+        expected.insert(
+            proxy.id.as_str(),
+            (
+                names.results_proxy.as_str(),
+                front_proxy_address(front).map_err(|_| results_transport_mismatch())?,
+            ),
+        );
+    }
+    if let Some(job) = &group.job {
+        expected.insert(
+            job.id.as_str(),
+            (
+                names.job.as_str(),
+                front_job_address(front).map_err(|_| results_transport_mismatch())?,
+            ),
+        );
+    }
+    if front.containers.len() != expected.len() {
+        return Err(results_transport_mismatch());
+    }
+    for (id, (name, address)) in expected {
+        if !front.containers.get(id).is_some_and(|endpoint| {
+            endpoint.name == name
+                && endpoint.ipv4_address == address
+                && endpoint.ipv4_prefix == front.ipv4_network.prefix
+        }) {
+            return Err(results_transport_mismatch());
+        }
+    }
+    Ok(())
 }
 
 impl LocalDockerProvider {
@@ -1793,11 +2189,17 @@ impl LocalDockerInner {
             .await
             .map_err(|error| map_provider_engine(error, stage, None))?
             .ok_or_else(|| known(ProviderErrorKind::OwnershipMismatch, stage))?;
+        let expected_front = front_network_definition(
+            names,
+            &identity.base_labels,
+            &self.installation,
+            identity.custody,
+        )?;
         verify_front_network(
             &front,
             names,
-            &front_network_labels(&identity.base_labels),
-            &results_front_network(&self.installation, identity.custody)?,
+            &expected_front.labels,
+            &expected_front.ipv4_network,
             &names.handle(&self.provider_id)?,
         )?;
         verify_job_definition(
@@ -1828,11 +2230,17 @@ impl LocalDockerInner {
             .await
             .map_err(|error| map_provider_engine(error, stage, None))?
             .ok_or_else(|| known(ProviderErrorKind::OwnershipMismatch, stage))?;
+        let expected_front = front_network_definition(
+            names,
+            &identity.base_labels,
+            &self.installation,
+            identity.custody,
+        )?;
         verify_front_network(
             &front,
             names,
-            &front_network_labels(&identity.base_labels),
-            &results_front_network(&self.installation, identity.custody)?,
+            &expected_front.labels,
+            &expected_front.ipv4_network,
             &handle,
         )?;
         let proxy = self
@@ -2315,11 +2723,17 @@ impl LocalDockerInner {
             ));
         }
         if let Some(front) = front.as_ref() {
+            let expected_front = front_network_definition(
+                names,
+                &identity.base_labels,
+                &self.installation,
+                identity.custody,
+            )?;
             verify_front_network(
                 front,
                 names,
-                &front_network_labels(&identity.base_labels),
-                &results_front_network(&self.installation, identity.custody)?,
+                &expected_front.labels,
+                &expected_front.ipv4_network,
                 request.handle(),
             )?;
         }
@@ -2719,6 +3133,80 @@ fn resource_labels(
     labels
 }
 
+fn seal_container_definition(mut definition: ContainerDefinition) -> ContainerDefinition {
+    reseal_container_definition(&mut definition);
+    definition
+}
+
+fn reseal_container_definition(definition: &mut ContainerDefinition) {
+    definition.labels.remove(LABEL_REALIZED_DIGEST);
+    let digest = realized_container_digest(definition);
+    definition
+        .labels
+        .insert(LABEL_REALIZED_DIGEST.to_owned(), digest.to_string());
+}
+
+fn realized_container_digest(definition: &ContainerDefinition) -> Sha256Digest {
+    let mut digest = Sha256::new();
+    hash_field(&mut digest, b"automata-local-docker-realized-container-v1");
+    for value in [
+        definition.name.as_str(),
+        definition.image.as_str(),
+        definition.entrypoint.as_str(),
+        definition.working_directory.as_str(),
+        definition.user.as_str(),
+    ] {
+        hash_field(&mut digest, value.as_bytes());
+    }
+    for value in &definition.arguments {
+        hash_field(&mut digest, value.as_bytes());
+    }
+    for (key, value) in &definition.labels {
+        if key != LABEL_REALIZED_DIGEST {
+            hash_field(&mut digest, key.as_bytes());
+            hash_field(&mut digest, value.as_bytes());
+        }
+    }
+    for value in &definition.environment {
+        hash_field(&mut digest, value.as_bytes());
+    }
+    for (path, options) in &definition.tmpfs {
+        hash_field(&mut digest, path.as_bytes());
+        hash_field(&mut digest, options.as_bytes());
+    }
+    hash_field(&mut digest, &[u8::from(definition.read_only_root)]);
+    hash_field(&mut digest, &definition.memory_bytes.to_be_bytes());
+    hash_field(&mut digest, &definition.nano_cpus.to_be_bytes());
+    hash_field(&mut digest, &definition.pids_limit.to_be_bytes());
+    hash_field(
+        &mut digest,
+        definition
+            .primary_network
+            .as_deref()
+            .unwrap_or("")
+            .as_bytes(),
+    );
+    for (name, attachment) in &definition.networks {
+        hash_field(&mut digest, name.as_bytes());
+        hash_field(&mut digest, attachment.network_id.as_bytes());
+        hash_field(&mut digest, &attachment.ipv4_address.octets());
+        for alias in &attachment.aliases {
+            hash_field(&mut digest, alias.as_bytes());
+        }
+    }
+    hash_field(&mut digest, &[u8::from(definition.capture_logs)]);
+    Sha256Digest::from_bytes(digest.finalize().into())
+}
+
+fn exact_realized_container_digest(container: &InspectedContainer) -> bool {
+    container
+        .definition
+        .labels
+        .get(LABEL_REALIZED_DIGEST)
+        .and_then(|value| Sha256Digest::from_str(value).ok())
+        .is_some_and(|value| value == realized_container_digest(&container.definition))
+}
+
 fn helper_definition(
     names: &ResourceNames,
     guest_image: &str,
@@ -2726,7 +3214,7 @@ fn helper_definition(
     environment: &[String],
     base_labels: &BTreeMap<String, String>,
 ) -> ContainerDefinition {
-    ContainerDefinition {
+    seal_container_definition(ContainerDefinition {
         name: names.helper.clone(),
         image: guest_image.to_owned(),
         entrypoint: LOCAL_DOCKER_GUEST_IMAGE_BINARY.to_owned(),
@@ -2743,7 +3231,7 @@ fn helper_definition(
         primary_network: None,
         networks: BTreeMap::new(),
         capture_logs: false,
-    }
+    })
 }
 
 fn job_definition(
@@ -2761,7 +3249,7 @@ fn job_definition(
     let nano_cpus = i64::from(resources.cpu_millis())
         .checked_mul(1_000_000)
         .ok_or_else(invalid_configuration)?;
-    Ok(ContainerDefinition {
+    Ok(seal_container_definition(ContainerDefinition {
         name: names.job.clone(),
         image: image.to_owned(),
         entrypoint: LOCAL_DOCKER_SANDBOX_GUEST_BINARY.to_owned(),
@@ -2794,7 +3282,7 @@ fn job_definition(
             },
         )]),
         capture_logs: false,
-    })
+    }))
 }
 
 fn results_proxy_definition(
@@ -2845,7 +3333,7 @@ fn results_proxy_definition_for_front(
 ) -> Result<ContainerDefinition, ProviderError> {
     let front_address = network_host_address(front_network, 2)?;
     let job_address = network_host_address(front_network, 3)?;
-    Ok(ContainerDefinition {
+    Ok(seal_container_definition(ContainerDefinition {
         name: names.results_proxy.clone(),
         image: results.requested.proxy_image.reference().to_owned(),
         entrypoint: RESULTS_PROXY_ENTRYPOINT.to_owned(),
@@ -2886,7 +3374,7 @@ fn results_proxy_definition_for_front(
             ),
         ]),
         capture_logs: true,
-    })
+    }))
 }
 
 fn bind_front_network(definition: &mut ContainerDefinition, front: &InspectedNetwork) {
@@ -2896,6 +3384,7 @@ fn bind_front_network(definition: &mut ContainerDefinition, front: &InspectedNet
         .expect("the precomputed definition contains the deterministic front network");
     debug_assert!(attachment.network_id.is_empty());
     attachment.network_id.clone_from(&front.id);
+    reseal_container_definition(definition);
 }
 
 fn front_proxy_address(network: &InspectedNetwork) -> Result<Ipv4Addr, ProviderError> {
@@ -2964,12 +3453,12 @@ fn front_network_definition(
 ) -> Result<FrontNetworkDefinition, ProviderError> {
     let ipv4_network = results_front_network(installation, custody)?;
     let ipv4_gateway = network_host_address(&ipv4_network, 1)?;
-    Ok(FrontNetworkDefinition {
+    Ok(seal_front_network_definition(FrontNetworkDefinition {
         name: names.results_front.clone(),
         labels: front_network_labels(base_labels),
         ipv4_network,
         ipv4_gateway,
-    })
+    }))
 }
 
 fn transit_proxy_address(
@@ -2997,6 +3486,27 @@ fn front_network_labels(base_labels: &BTreeMap<String, String>) -> BTreeMap<Stri
         KIND_RESULTS_FRONT.to_owned(),
     );
     labels
+}
+
+fn seal_front_network_definition(mut definition: FrontNetworkDefinition) -> FrontNetworkDefinition {
+    definition.labels.remove(LABEL_REALIZED_DIGEST);
+    let mut digest = Sha256::new();
+    hash_field(&mut digest, b"automata-local-docker-realized-network-v1");
+    hash_field(&mut digest, definition.name.as_bytes());
+    for (key, value) in &definition.labels {
+        if key != LABEL_REALIZED_DIGEST {
+            hash_field(&mut digest, key.as_bytes());
+            hash_field(&mut digest, value.as_bytes());
+        }
+    }
+    hash_field(&mut digest, &definition.ipv4_network.network.octets());
+    hash_field(&mut digest, &[definition.ipv4_network.prefix]);
+    hash_field(&mut digest, &definition.ipv4_gateway.octets());
+    definition.labels.insert(
+        LABEL_REALIZED_DIGEST.to_owned(),
+        Sha256Digest::from_bytes(digest.finalize().into()).to_string(),
+    );
+    definition
 }
 
 fn verify_front_network(
@@ -3362,7 +3872,7 @@ fn parse_identity(
         .ok_or_else(|| known(ProviderErrorKind::OwnershipMismatch, stage))?;
     let custody = match required(LABEL_CUSTODY_KIND)? {
         CUSTODY_ADMISSION if !managed.contains_key(LABEL_SLOT) => {
-            if managed.len() != 13 {
+            if managed.len() != 14 {
                 return Err(known(ProviderErrorKind::OwnershipMismatch, stage));
             }
             SandboxCustody::ProfileAdmission { runner_id }
@@ -3376,7 +3886,7 @@ fn parse_identity(
                 .filter(|value| value.get().to_string() == slot_text)
                 .filter(|value| value.get() <= crate::MAXIMUM_LOCAL_DOCKER_JOB_SLOTS)
                 .ok_or_else(|| known(ProviderErrorKind::OwnershipMismatch, stage))?;
-            if managed.len() != 14 {
+            if managed.len() != 15 {
                 return Err(known(ProviderErrorKind::OwnershipMismatch, stage));
             }
             SandboxCustody::Job {
@@ -3392,8 +3902,11 @@ fn parse_identity(
         .ok_or_else(|| known(ProviderErrorKind::OwnershipMismatch, stage))?;
     canonical_digest(required(LABEL_SPEC_DIGEST)?)
         .ok_or_else(|| known(ProviderErrorKind::OwnershipMismatch, stage))?;
+    canonical_digest(required(LABEL_REALIZED_DIGEST)?)
+        .ok_or_else(|| known(ProviderErrorKind::OwnershipMismatch, stage))?;
     let mut base_labels = managed;
     base_labels.remove(LABEL_RESOURCE_KIND);
+    base_labels.remove(LABEL_REALIZED_DIGEST);
     Ok(BaseIdentity {
         base_labels,
         custody,
@@ -3556,6 +4069,8 @@ fn verify_job_definition(
     stage: ProviderStage,
 ) -> Result<(), ProviderError> {
     let definition = &container.definition;
+    let mut base_realized_labels = definition.labels.clone();
+    base_realized_labels.remove(LABEL_REALIZED_DIGEST);
     let workspace = automata_ci_execution::TargetPath::posix(definition.working_directory.clone())
         .map_err(|_| known(ProviderErrorKind::OwnershipMismatch, stage))?;
     let resource_limits_valid = definition.memory_bytes > 0
@@ -3574,7 +4089,8 @@ fn verify_job_definition(
         || definition.name != names.job
         || definition.entrypoint != LOCAL_DOCKER_SANDBOX_GUEST_BINARY
         || definition.arguments != ["serve-local"]
-        || definition.labels != resource_labels(image_labels, base_labels, KIND_JOB)
+        || base_realized_labels != resource_labels(image_labels, base_labels, KIND_JOB)
+        || !exact_realized_container_digest(container)
         || definition.environment != neutral_environment(image_environment_names)
         || definition.tmpfs
             != BTreeMap::from([
@@ -4023,8 +4539,13 @@ impl TransitPeerVerifier<'_> {
             identity.custody,
         )
         .map_err(|_| results_transport_mismatch())?;
-        let expected_front = results_front_network(self.installation, identity.custody)
-            .map_err(|_| results_transport_mismatch())?;
+        let expected_front = front_network_definition(
+            &names,
+            &identity.base_labels,
+            self.installation,
+            identity.custody,
+        )
+        .map_err(|_| results_transport_mismatch())?;
         let expected_definition = results_proxy_definition(
             &names,
             &identity.base_labels,
@@ -4053,15 +4574,9 @@ impl TransitPeerVerifier<'_> {
             || front.id != front_attachment.network_id
             || front.id == self.transit.id
             || ipv4_networks_overlap(&front.ipv4_network, &self.transit.ipv4_network)
-            || front.ipv4_network != expected_front
-            || front.ipv4_gateway
-                != network_host_address(&expected_front, 1)
-                    .map_err(|_| results_transport_mismatch())?
-            || !exact_closed_network(
-                &front,
-                &names.results_front,
-                &front_network_labels(&identity.base_labels),
-            )
+            || front.ipv4_network != expected_front.ipv4_network
+            || front.ipv4_gateway != expected_front.ipv4_gateway
+            || !exact_closed_network(&front, &names.results_front, &expected_front.labels)
         {
             return Err(results_transport_mismatch());
         }

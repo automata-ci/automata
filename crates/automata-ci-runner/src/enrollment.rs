@@ -34,9 +34,18 @@ pub(super) async fn enroll(args: &EnrollArgs) -> Result<()> {
         .context("runner enrollment could not load the product configuration")?;
     let destinations = CredentialDestinations::from_config(&config)?;
     let origin = enrollment_origin(&args.server)?;
-    let stage = match destinations.load_stage(&config, &origin, &args.name)? {
-        Some(stage) => stage,
-        None => destinations.create_stage(&config, &origin, &args.name, load_token(args)?)?,
+    let stage = if let Some(stage) = destinations.load_stage(&config, &origin, &args.name)? {
+        stage
+    } else {
+        if let Some(receipt) = destinations.load_response()? {
+            let validation_time_seconds = current_unix_time_seconds()?;
+            let enrolled: RedeemResponse =
+                serde_json::from_slice(&receipt).context("runner enrollment receipt is invalid")?;
+            destinations.attest_completed(&config, &enrolled, &receipt, validation_time_seconds)?;
+            println!("runner {} is already enrolled", config.runner_id());
+            return Ok(());
+        }
+        destinations.create_stage(&config, &origin, &args.name, load_token(args)?)?
     };
     let staged_response = destinations.load_response()?;
     let endpoint = origin

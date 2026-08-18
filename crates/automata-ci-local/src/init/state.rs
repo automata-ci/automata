@@ -9,8 +9,7 @@ use std::{
 };
 
 use rustix::fs::{
-    self, Dir, FileType, FlockOperation, Mode, OFlags, fstat, mkdirat, openat, renameat,
-    renameat_with,
+    self, Dir, FileType, FlockOperation, Mode, OFlags, fstat, mkdirat, openat, renameat_with,
 };
 use sha2::{Digest as _, Sha256};
 
@@ -31,7 +30,6 @@ const INIT_RECORDS: [&str; 5] = [
     CERTIFICATE_RECORD,
     MATERIALIZATION_RECORD,
 ];
-const LIFECYCLE_OPERATION_RECORD: &str = "lifecycle-operation.json";
 const RESET_INTENT_RECORD: &str = "reset-intent.json";
 const MAX_EPOCH_BYTES: usize = 64 * 1024;
 const MAX_CERTIFICATE_RECORD_BYTES: usize = 128 * 1024;
@@ -52,7 +50,6 @@ pub(super) struct StateSnapshot {
     pub(super) certificates: Option<Vec<u8>>,
     pub(super) installation_selection: Option<Vec<u8>>,
     pub(super) materialization: Option<Vec<u8>>,
-    pub(super) lifecycle_operation: Option<Vec<u8>>,
     pub(super) reset_intent: Option<Vec<u8>>,
 }
 
@@ -94,7 +91,6 @@ pub(super) struct ResetStateSnapshot {
     pub(super) certificates: ResetRecordObservation,
     pub(super) installation_selection: ResetRecordObservation,
     pub(super) materialization: ResetRecordObservation,
-    pub(super) lifecycle_operation: ResetRecordObservation,
     pub(super) reset_intent: ResetRecordObservation,
 }
 
@@ -105,7 +101,6 @@ impl ResetStateSnapshot {
             && !self.certificates.present()
             && !self.installation_selection.present()
             && !self.materialization.present()
-            && !self.lifecycle_operation.present()
             && !self.reset_intent.present()
     }
 }
@@ -117,18 +112,16 @@ pub(super) enum StateRecord {
     MaterialRoot,
     InstallationSelection,
     Epoch,
-    LifecycleOperation,
     ResetIntent,
 }
 
 impl StateRecord {
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 6] = [
         Self::Materialization,
         Self::Certificates,
         Self::MaterialRoot,
         Self::InstallationSelection,
         Self::Epoch,
-        Self::LifecycleOperation,
         Self::ResetIntent,
     ];
 
@@ -139,7 +132,6 @@ impl StateRecord {
             Self::MaterialRoot => MATERIAL_ROOT,
             Self::InstallationSelection => INSTALLATION_SELECTION,
             Self::Epoch => EPOCH_RECORD,
-            Self::LifecycleOperation => LIFECYCLE_OPERATION_RECORD,
             Self::ResetIntent => RESET_INTENT_RECORD,
         }
     }
@@ -151,7 +143,6 @@ impl StateRecord {
             Self::Materialization
             | Self::InstallationSelection
             | Self::Epoch
-            | Self::LifecycleOperation
             | Self::ResetIntent => MAX_EPOCH_BYTES,
         }
     }
@@ -247,85 +238,24 @@ impl StateRoot {
             || self.read_private(&temporary, MAX_EPOCH_BYTES)?.is_some())
     }
 
-    pub(super) fn lifecycle_operation_present(&self) -> Result<bool, LocalInitError> {
-        let temporary = temporary_name(LIFECYCLE_OPERATION_RECORD);
-        Ok(self
-            .read_private(LIFECYCLE_OPERATION_RECORD, MAX_EPOCH_BYTES)?
-            .is_some()
-            || self.read_private(&temporary, MAX_EPOCH_BYTES)?.is_some())
-    }
-
     pub(super) fn snapshot_read_only(&self) -> Result<StateSnapshot, LocalInitError> {
         let names = self.exact_entry_names(false)?;
-        let snapshot = self.read_state_snapshot()?;
-        let repeated = self.exact_entry_names(false)?;
-        if repeated != names {
-            return Err(reset_required());
-        }
-        if snapshot.reset_intent.is_none() {
-            validate_observed_state_layout(&repeated, false)?;
-        }
-        Ok(snapshot)
-    }
-
-    /// Reads the established state while allowing only the lifecycle record's
-    /// fixed staged sibling. The caller validates both lifecycle candidates
-    /// before this module publishes or removes either one.
-    pub(super) fn snapshot_for_lifecycle(&self) -> Result<StateSnapshot, LocalInitError> {
-        let names = self.exact_entry_names_for_lifecycle()?;
-        validate_observed_state_layout(&names, true)?;
-        let snapshot = self.read_state_snapshot()?;
-        let repeated = self.exact_entry_names_for_lifecycle()?;
-        if repeated != names || snapshot.reset_intent.is_some() {
-            return Err(reset_required());
-        }
-        Ok(snapshot)
-    }
-
-    fn read_state_snapshot(&self) -> Result<StateSnapshot, LocalInitError> {
-        Ok(StateSnapshot {
+        let snapshot = StateSnapshot {
             material_root: self.read_private(MATERIAL_ROOT, 32)?,
             epoch: self.read_private(EPOCH_RECORD, MAX_EPOCH_BYTES)?,
             certificates: self.read_private(CERTIFICATE_RECORD, MAX_CERTIFICATE_RECORD_BYTES)?,
             installation_selection: self.read_private(INSTALLATION_SELECTION, MAX_EPOCH_BYTES)?,
             materialization: self.read_private(MATERIALIZATION_RECORD, MAX_EPOCH_BYTES)?,
-            lifecycle_operation: self.read_private(LIFECYCLE_OPERATION_RECORD, MAX_EPOCH_BYTES)?,
             reset_intent: self.read_private(RESET_INTENT_RECORD, MAX_EPOCH_BYTES)?,
-        })
-    }
-
-    pub(super) fn observe_lifecycle_operation(
-        &self,
-    ) -> Result<ResetRecordObservation, LocalInitError> {
-        let (completed_present, completed) =
-            self.observe_lifecycle_private(LIFECYCLE_OPERATION_RECORD)?;
-        let (staged_present, staged) =
-            self.observe_lifecycle_private(&temporary_name(LIFECYCLE_OPERATION_RECORD))?;
-        Ok(ResetRecordObservation {
-            present: completed_present || staged_present,
-            completed_present,
-            staged_present,
-            completed,
-            staged,
-        })
-    }
-
-    pub(super) fn remove_malformed_lifecycle_stage(
-        &self,
-        expected: Option<&[u8]>,
-    ) -> Result<(), LocalInitError> {
-        let temporary = temporary_name(LIFECYCLE_OPERATION_RECORD);
-        let (present, bytes) = self.observe_lifecycle_private(&temporary)?;
-        if !present || bytes.as_deref() != expected {
+        };
+        let repeated = self.exact_entry_names(false)?;
+        if repeated != names {
             return Err(reset_required());
         }
-        fs::unlinkat(&self.directory, &temporary, fs::AtFlags::empty())
-            .and_then(|()| fs::fsync(&self.directory))
-            .map_err(|_| reset_required())?;
-        if self.observe_lifecycle_private(&temporary)?.0 {
-            return Err(reset_required());
+        if snapshot.reset_intent.is_none() {
+            validate_init_record_layout(&repeated, None)?;
         }
-        Ok(())
+        Ok(snapshot)
     }
 
     pub(super) fn snapshot_for_reset(&self) -> Result<ResetStateSnapshot, LocalInitError> {
@@ -337,7 +267,6 @@ impl StateRoot {
             installation_selection: self
                 .observe_record_for_reset(StateRecord::InstallationSelection)?,
             materialization: self.observe_record_for_reset(StateRecord::Materialization)?,
-            lifecycle_operation: self.observe_record_for_reset(StateRecord::LifecycleOperation)?,
             reset_intent: self.observe_record_for_reset(StateRecord::ResetIntent)?,
         };
         if self.exact_entry_names(true)? != names {
@@ -505,21 +434,6 @@ impl StateRoot {
         Ok(names)
     }
 
-    fn exact_entry_names_for_lifecycle(&self) -> Result<BTreeSet<String>, LocalInitError> {
-        let mut allowed = BTreeSet::from([
-            OPERATION_LOCK.to_owned(),
-            temporary_name(LIFECYCLE_OPERATION_RECORD),
-        ]);
-        for record in StateRecord::ALL {
-            allowed.insert(record.name().to_owned());
-        }
-        let names = self.entry_names()?;
-        if !names.contains(OPERATION_LOCK) || names.iter().any(|name| !allowed.contains(name)) {
-            return Err(reset_required());
-        }
-        Ok(names)
-    }
-
     fn observe_record_for_reset(
         &self,
         record: StateRecord,
@@ -595,31 +509,6 @@ impl StateRoot {
         self.create_or_match_private(MATERIALIZATION_RECORD, bytes, MAX_EPOCH_BYTES)
     }
 
-    pub(super) fn load_lifecycle_operation(&self) -> Result<Option<Vec<u8>>, LocalInitError> {
-        self.load_private_record(LIFECYCLE_OPERATION_RECORD, MAX_EPOCH_BYTES)
-    }
-
-    pub(super) fn store_lifecycle_operation(&self, bytes: &[u8]) -> Result<(), LocalInitError> {
-        self.create_or_match_private(LIFECYCLE_OPERATION_RECORD, bytes, MAX_EPOCH_BYTES)
-    }
-
-    pub(super) fn replace_lifecycle_operation(
-        &self,
-        expected: &[u8],
-        replacement: &[u8],
-    ) -> Result<(), LocalInitError> {
-        self.replace_private(
-            LIFECYCLE_OPERATION_RECORD,
-            expected,
-            replacement,
-            MAX_EPOCH_BYTES,
-        )
-    }
-
-    pub(super) fn remove_lifecycle_operation(&self) -> Result<(), LocalInitError> {
-        self.remove_record(StateRecord::LifecycleOperation)
-    }
-
     fn create_or_match_private(
         &self,
         name: &str,
@@ -666,82 +555,6 @@ impl StateRoot {
         let result = completed.or(recovered);
         self.validate_replay_layout()?;
         Ok(result)
-    }
-
-    fn replace_private(
-        &self,
-        name: &str,
-        expected: &[u8],
-        replacement: &[u8],
-        maximum: usize,
-    ) -> Result<(), LocalInitError> {
-        if expected.is_empty()
-            || replacement.is_empty()
-            || expected.len() > maximum
-            || replacement.len() > maximum
-        {
-            return Err(reset_required());
-        }
-        let temporary = temporary_name(name);
-        let completed = self.read_private(name, maximum)?;
-        let staged = self.read_private(&temporary, maximum)?;
-        if completed.as_deref() == Some(replacement) {
-            if let Some(staged) = staged {
-                if staged != replacement {
-                    return Err(reset_required());
-                }
-                fs::unlinkat(&self.directory, &temporary, fs::AtFlags::empty())
-                    .and_then(|()| fs::fsync(&self.directory))
-                    .map_err(|_| reset_required())?;
-            }
-            return Ok(());
-        }
-        if completed.as_deref() != Some(expected) {
-            return Err(reset_required());
-        }
-        if let Some(staged) = staged {
-            if staged != replacement {
-                return Err(reset_required());
-            }
-        } else {
-            self.write_private_temporary(&temporary, replacement)?;
-        }
-        if self.read_private(name, maximum)?.as_deref() != Some(expected)
-            || self.read_private(&temporary, maximum)?.as_deref() != Some(replacement)
-        {
-            return Err(reset_required());
-        }
-        renameat(&self.directory, &temporary, &self.directory, name)
-            .and_then(|()| fs::fsync(&self.directory))
-            .map_err(|_| reset_required())?;
-        if self.read_private(name, maximum)?.as_deref() != Some(replacement)
-            || self.read_private(&temporary, maximum)?.is_some()
-        {
-            return Err(reset_required());
-        }
-        Ok(())
-    }
-
-    fn write_private_temporary(&self, temporary: &str, bytes: &[u8]) -> Result<(), LocalInitError> {
-        let descriptor = openat(
-            &self.directory,
-            temporary,
-            OFlags::WRONLY
-                | OFlags::CREATE
-                | OFlags::EXCL
-                | OFlags::CLOEXEC
-                | OFlags::NOFOLLOW
-                | OFlags::NONBLOCK,
-            Mode::from_raw_mode(0o600),
-        )
-        .map_err(|_| reset_required())?;
-        fs::fchmod(&descriptor, Mode::from_raw_mode(0o600)).map_err(|_| reset_required())?;
-        let mut file = File::from(descriptor);
-        file.write_all(bytes)
-            .and_then(|()| file.sync_all())
-            .map_err(|_| reset_required())?;
-        drop(file);
-        fs::fsync(&self.directory).map_err(|_| reset_required())
     }
 
     fn recover_temporary(
@@ -808,53 +621,6 @@ impl StateRoot {
             return Err(reset_required());
         }
         Ok(Some(bytes))
-    }
-
-    fn observe_lifecycle_private(
-        &self,
-        name: &str,
-    ) -> Result<(bool, Option<Vec<u8>>), LocalInitError> {
-        let descriptor = match openat(
-            &self.directory,
-            name,
-            OFlags::PATH | OFlags::CLOEXEC | OFlags::NOFOLLOW,
-            Mode::empty(),
-        ) {
-            Ok(descriptor) => descriptor,
-            Err(rustix::io::Errno::NOENT) => return Ok((false, None)),
-            Err(_) => return Err(reset_required()),
-        };
-        let before = verify_private_regular(&descriptor, None)?;
-        let size = usize::try_from(before.st_size).map_err(|_| reset_required())?;
-        if size == 0 || size > MAX_EPOCH_BYTES {
-            let after = fstat(&descriptor).map_err(|_| reset_required())?;
-            if !same_file(&before, &after) {
-                return Err(reset_required());
-            }
-            return Ok((true, None));
-        }
-        let readable = openat(
-            &self.directory,
-            name,
-            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
-            Mode::empty(),
-        )
-        .map_err(|_| reset_required())?;
-        let readable_before = verify_private_regular(&readable, None)?;
-        if !same_file(&before, &readable_before) {
-            return Err(reset_required());
-        }
-        let mut file = File::from(readable);
-        let mut bytes = Vec::with_capacity(size);
-        std::io::Read::by_ref(&mut file)
-            .take(u64::try_from(MAX_EPOCH_BYTES + 1).expect("lifecycle state bound fits u64"))
-            .read_to_end(&mut bytes)
-            .map_err(|_| reset_required())?;
-        let after = fstat(&file).map_err(|_| reset_required())?;
-        if bytes.len() != size || !same_file(&readable_before, &after) {
-            return Err(reset_required());
-        }
-        Ok((true, Some(bytes)))
     }
 
     fn observe_private_for_reset(
@@ -1059,28 +825,6 @@ fn validate_init_record_layout(
         return Err(reset_required());
     }
     Ok(())
-}
-
-fn validate_observed_state_layout(
-    names: &BTreeSet<String>,
-    allow_lifecycle_temporary: bool,
-) -> Result<(), LocalInitError> {
-    let lifecycle_temporary = temporary_name(LIFECYCLE_OPERATION_RECORD);
-    if names.contains(RESET_INTENT_RECORD)
-        || names.contains(&temporary_name(RESET_INTENT_RECORD))
-        || (!allow_lifecycle_temporary && names.contains(&lifecycle_temporary))
-    {
-        return Err(reset_required());
-    }
-    let lifecycle_present =
-        names.contains(LIFECYCLE_OPERATION_RECORD) || names.contains(&lifecycle_temporary);
-    let mut init_names = names.clone();
-    init_names.remove(LIFECYCLE_OPERATION_RECORD);
-    init_names.remove(&lifecycle_temporary);
-    validate_init_record_layout(
-        &init_names,
-        (allow_lifecycle_temporary || lifecycle_present).then_some(INIT_RECORDS.len()),
-    )
 }
 
 fn temporary_name(name: &str) -> String {

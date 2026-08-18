@@ -11,7 +11,9 @@ mod renderer;
 mod state;
 mod status_reset;
 
-pub use lifecycle::{LocalUpOutcome, LocalUpRequest, up_local};
+pub use lifecycle::{
+    LocalDownOutcome, LocalDownRequest, LocalUpOutcome, LocalUpRequest, down_local, up_local,
+};
 pub(crate) use materializer::run_fixed_materializer;
 pub use status_reset::{
     LocalInstallationStatus, LocalResetOutcome, LocalResetRequest, LocalStatusReport,
@@ -20,7 +22,7 @@ pub use status_reset::{
 
 use std::{fmt, future::Future, net::Ipv4Addr, num::NonZeroU16, path::PathBuf};
 
-use automata_ci_core::{EnvironmentProfile, EnvironmentProfileId, Sha256Digest};
+use automata_ci_core::{EnvironmentProfile, EnvironmentProfileId, OperationId, Sha256Digest};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
@@ -28,8 +30,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     DesiredSpec, DesiredSpecImages, DesiredSpecInput, DockerInstallationAdapter, DoctorRequest,
-    EngineArchitecture, EngineRequest, Installation, InstallationName, LocalEngineError,
-    LocalEngineErrorCode, LocalProfile, ResultsTransit, inspect,
+    EngineArchitecture, EngineRequest, Installation, InstallationId, InstallationName,
+    LocalEngineError, LocalEngineErrorCode, LocalProfile, ResultsTransit, inspect,
 };
 
 const LOCAL_INIT_DOCKER_HOST: &str = "unix:///var/run/docker.sock";
@@ -139,6 +141,7 @@ pub struct LocalInitRequest {
     installation: InstallationName,
     workers: NonZeroU16,
     cancellation: CancellationToken,
+    recover_stopped_lock: bool,
 }
 
 impl LocalInitRequest {
@@ -157,7 +160,16 @@ impl LocalInitRequest {
             installation,
             workers,
             cancellation,
+            recover_stopped_lock: false,
         }
+    }
+
+    /// Explicitly authorizes recovery of one exact stopped initialization lock
+    /// after stable, fully validated Engine quiescence is established.
+    #[must_use]
+    pub const fn with_stopped_lock_recovery(mut self, recover: bool) -> Self {
+        self.recover_stopped_lock = recover;
+        self
     }
 }
 
@@ -169,6 +181,7 @@ impl fmt::Debug for LocalInitRequest {
             .field("catalog_source", &self.catalog_source)
             .field("installation", &self.installation)
             .field("workers", &self.workers)
+            .field("recover_stopped_lock", &self.recover_stopped_lock)
             .finish_non_exhaustive()
     }
 }
@@ -297,7 +310,7 @@ pub async fn initialize_local(
     request: LocalInitRequest,
 ) -> Result<LocalInitOutcome, LocalInitError> {
     let state = state::StateRoot::acquire(&request.state_directory)?;
-    if state.reset_intent_present()? || state.lifecycle_operation_present()? {
+    if state.reset_intent_present()? {
         return Err(LocalInitError::new(LocalInitErrorCode::ResetRequired));
     }
     let evidence = state::EvidenceDirectory::open(&request.catalog_source)?;
@@ -344,34 +357,18 @@ pub async fn initialize_local(
         .map_err(map_engine_error)?;
     let expected = Installation::expected(&request.installation);
     let init_engine = engine::InitEngine::connect(&adapter).await?;
-    let initial_union = init_engine
-        .inspect_owned_union(&expected, existing_identity.as_ref())
-        .await?;
-    if initial_union.anchor_present != existing_identity.is_some() {
-        return Err(LocalInitError::new(
-            LocalInitErrorCode::EngineResourceMismatch,
-        ));
-    }
-    let existing_volumes = &initial_union.roles;
-    let persistent_volumes = !existing_volumes.is_empty();
-    let allow_volume_creation =
-        volume_creation_allowed(existing_volumes.len(), existing_materialization.is_some())?;
-    if persistent_volumes
-        && (existing_identity.is_none()
-            || existing_epoch.is_none()
-            || existing_certificates.is_none()
-            || material_root.is_none()
-            || existing_selection.is_none())
-        || existing_materialization.is_some() && !persistent_volumes
-        || existing_identity.is_none()
-            && (existing_epoch.is_some() || existing_certificates.is_some())
-        || material_root.is_some() && existing_selection.is_none()
+    if material_root.is_some() && existing_selection.is_none()
         || material_root.is_none()
             && (existing_identity.is_some()
-                || persistent_volumes
                 || existing_epoch.is_some()
-                || existing_certificates.is_some())
-        || existing_epoch.is_none() && existing_certificates.is_some()
+                || existing_certificates.is_some()
+                || existing_materialization.is_some())
+        || existing_epoch.is_none()
+            && (existing_identity.is_some()
+                || existing_certificates.is_some()
+                || existing_materialization.is_some())
+        || existing_identity.is_none()
+            && (existing_certificates.is_some() || existing_materialization.is_some())
     {
         return Err(LocalInitError::new(LocalInitErrorCode::ResetRequired));
     }
@@ -385,13 +382,27 @@ pub async fn initialize_local(
         Some(root) => root,
         None => state.create_material_root()?,
     };
-    let installation = match existing_identity {
-        Some(installation) => installation,
-        None => adapter
-            .create_or_adopt_identity(&request.installation)
-            .await
-            .map_err(map_engine_error)?,
+    let sealed_epoch = existing_epoch
+        .as_deref()
+        .map(|bytes| {
+            epoch::ImmutableEpoch::from_sealed_bytes(
+                bytes,
+                state.authority_sha256(),
+                &material_root,
+            )
+        })
+        .transpose()?;
+    let installation = match (existing_identity.as_ref(), sealed_epoch.as_ref()) {
+        (Some(identity), Some(sealed)) if sealed.installation()? != *identity => {
+            return Err(LocalInitError::new(LocalInitErrorCode::ResetRequired));
+        }
+        (Some(identity), _) => identity.clone(),
+        (None, Some(sealed)) => sealed.installation()?,
+        (None, None) => Installation::verified(request.installation.clone(), InstallationId::new()),
     };
+    if installation.name() != &request.installation {
+        return Err(LocalInitError::new(LocalInitErrorCode::ResetRequired));
+    }
 
     let desired = desired_from_catalog(&catalog, &installation, request.workers)?;
     let desired_bytes = desired.canonical_bytes();
@@ -404,8 +415,8 @@ pub async fn initialize_local(
         digest(&desired_bytes),
         desired.plan_digest(),
     );
-    let epoch = if let Some(bytes) = existing_epoch {
-        epoch::ImmutableEpoch::from_canonical_bytes(&bytes, &expected_epoch)?
+    let epoch = if let Some(bytes) = existing_epoch.as_deref() {
+        epoch::ImmutableEpoch::from_canonical_bytes(bytes, &expected_epoch)?
     } else {
         state.store_epoch(&expected_epoch.canonical_bytes())?;
         let stored = state
@@ -417,84 +428,233 @@ pub async fn initialize_local(
     if let Some(bytes) = existing_materialization.as_deref() {
         StateMaterialization::validate(bytes, &expected_materialization)?;
     }
-    let preflight_roles = cancellation_bounded(
+    // Only the exact helper image needed to construct the inert lock may be
+    // admitted before election. Every other pull/import is deferred until the
+    // retained lock is live.
+    let lock_helper = cancellation_bounded(
         &request.cancellation,
-        init_engine.preflight_owned_union(
-            &catalog,
-            &installation,
-            epoch.fingerprint(),
-            &initial_union,
-            &request.cancellation,
-        ),
+        init_engine.qualify_lock_image(&catalog, &candidate_load_archive, &request.cancellation),
     )
     .await?;
-    if preflight_roles != *existing_volumes {
+
+    match init_engine
+        .inspect_lifecycle_lock_before_identity(&installation, &epoch)
+        .await?
+    {
+        engine::LifecycleLockObservation::Absent => {}
+        engine::LifecycleLockObservation::Live { .. } => {
+            return Err(LocalInitError::new(LocalInitErrorCode::OperationInProgress));
+        }
+        engine::LifecycleLockObservation::Stopped { id, .. } => {
+            if !request.recover_stopped_lock {
+                return Err(LocalInitError::new(LocalInitErrorCode::ResetRequired));
+            }
+            let lock_name = format!("{}-lifecycle-lock", installation.compose_project());
+            init_engine
+                .preflight_initialization_recovery_union(
+                    &catalog,
+                    &installation,
+                    epoch.fingerprint(),
+                    (&lock_name, &id),
+                )
+                .await?;
+            init_engine
+                .attest_engine_quiescence(&id, Some(&request.cancellation))
+                .await?;
+            init_engine
+                .preflight_initialization_recovery_union(
+                    &catalog,
+                    &installation,
+                    epoch.fingerprint(),
+                    (&lock_name, &id),
+                )
+                .await?;
+            cancellation_checkpoint(&request.cancellation)?;
+            init_engine
+                .remove_stopped_initialization_lock_after_quiescence(&installation, &epoch, &id)
+                .await?;
+            if init_engine
+                .inspect_lifecycle_lock_before_identity(&installation, &epoch)
+                .await?
+                != engine::LifecycleLockObservation::Absent
+            {
+                return Err(LocalInitError::new(
+                    LocalInitErrorCode::EngineResourceMismatch,
+                ));
+            }
+        }
+    }
+
+    let initial_union = init_engine
+        .inspect_owned_union(&expected, existing_identity.as_ref())
+        .await?;
+    let repeated_identity = adapter
+        .inspect_identity(&request.installation)
+        .await
+        .map_err(map_engine_error)?;
+    if repeated_identity != existing_identity
+        || initial_union.anchor_present != existing_identity.is_some()
+    {
         return Err(LocalInitError::new(
             LocalInitErrorCode::EngineResourceMismatch,
         ));
     }
-    let deriver = epoch::MaterialDeriver::new(material_root, &installation, &epoch);
-    let certificates = certificates::load_or_issue(&state, &deriver, &epoch, persistent_volumes)?;
-    cancellation_bounded(
-        &request.cancellation,
-        init_engine.elect_desired_and_recover_owned_union(
-            &catalog,
-            &installation,
-            epoch.fingerprint(),
-            &initial_union,
-            allow_volume_creation,
-            &request.cancellation,
-        ),
-    )
-    .await?;
-    let helper = cancellation_bounded(
-        &request.cancellation,
-        init_engine.qualify_images(&catalog, &candidate_load_archive, &request.cancellation),
-    )
-    .await?;
-    let volumes = cancellation_bounded(
-        &request.cancellation,
-        init_engine.create_or_adopt_volumes(
-            &installation,
-            epoch.fingerprint(),
-            &helper.reference,
-            &helper.id,
-            allow_volume_creation,
-            &request.cancellation,
-        ),
-    )
-    .await?;
-    let materialize = materializer::MaterializeRequest::build(
-        &epoch,
-        &deriver,
-        &certificates,
-        &desired_bytes,
-        existing_materialization.is_none(),
-    );
-    Box::pin(cancellation_bounded(
-        &request.cancellation,
-        init_engine.run_materializer(
-            &installation,
-            epoch.fingerprint(),
-            &helper.reference,
-            &helper.id,
-            &volumes,
-            &materialize,
-            &request.cancellation,
-        ),
-    ))
-    .await?;
-    attest_installation_identity(&adapter, &request.installation, &installation).await?;
-    init_engine
-        .verify_final_owned_union(&installation, epoch.fingerprint())
-        .await?;
-    if existing_materialization.is_none() {
-        state.validate_before_materialization()?;
-        state.store_materialization(&expected_materialization.canonical_bytes()?)?;
+    let existing_volumes = initial_union.roles.clone();
+    let persistent_volumes = !existing_volumes.is_empty();
+    let allow_volume_creation =
+        volume_creation_allowed(existing_volumes.len(), existing_materialization.is_some())?;
+    if persistent_volumes
+        && (existing_identity.is_none()
+            || existing_epoch.is_none()
+            || existing_certificates.is_none()
+            || existing_selection.is_none())
+        || existing_materialization.is_some() && !persistent_volumes
+    {
+        return Err(LocalInitError::new(LocalInitErrorCode::ResetRequired));
     }
-    state.validate_complete()?;
+    if request.cancellation.is_cancelled() {
+        return Err(LocalInitError::new(LocalInitErrorCode::Cancelled));
+    }
+
+    let holder = if existing_identity.is_some() {
+        init_engine
+            .acquire_lifecycle_lock(&installation, &epoch, OperationId::new())
+            .await?
+    } else {
+        init_engine
+            .acquire_lifecycle_lock_before_identity(&installation, &epoch, OperationId::new())
+            .await?
+    };
+    let (transaction_cancellation, watcher) =
+        lifecycle::linked_cancellation(&request.cancellation, &holder);
+    let holder_lost = holder.holder_lost();
+    let operation = holder_bounded(&holder_lost, async {
+        cancellation_checkpoint(&transaction_cancellation)?;
+        if existing_identity.is_none() {
+            let created = adapter
+                .create_or_adopt_exact_identity(&installation)
+                .await
+                .map_err(map_engine_error)?;
+            exact_installation_identity(Some(&created), &installation)?;
+        } else {
+            attest_installation_identity(&adapter, &request.installation, &installation).await?;
+        }
+        init_engine
+            .attest_lifecycle_lock(&installation, &epoch, &holder)
+            .await?;
+        let helper = cancellation_bounded(
+            &transaction_cancellation,
+            init_engine.qualify_images(
+                &catalog,
+                &candidate_load_archive,
+                &transaction_cancellation,
+            ),
+        )
+        .await?;
+        if helper.reference != lock_helper.reference || helper.id != lock_helper.id {
+            return Err(LocalInitError::new(
+                LocalInitErrorCode::EngineResourceMismatch,
+            ));
+        }
+        let lock_identity = Some(holder.exact_identity());
+        let preflight_roles = cancellation_bounded(
+            &transaction_cancellation,
+            init_engine.preflight_owned_union(
+                &catalog,
+                &installation,
+                epoch.fingerprint(),
+                &initial_union,
+                lock_identity,
+                &transaction_cancellation,
+            ),
+        )
+        .await?;
+        if preflight_roles != existing_volumes {
+            return Err(LocalInitError::new(
+                LocalInitErrorCode::EngineResourceMismatch,
+            ));
+        }
+        let deriver = epoch::MaterialDeriver::new(material_root, &installation, &epoch);
+        let certificates =
+            certificates::load_or_issue(&state, &deriver, &epoch, persistent_volumes)?;
+        cancellation_bounded(
+            &transaction_cancellation,
+            init_engine.elect_desired_and_recover_owned_union(
+                &catalog,
+                &installation,
+                epoch.fingerprint(),
+                &initial_union,
+                allow_volume_creation,
+                lock_identity,
+                &transaction_cancellation,
+            ),
+        )
+        .await?;
+        let volumes = cancellation_bounded(
+            &transaction_cancellation,
+            init_engine.create_or_adopt_volumes(
+                &installation,
+                epoch.fingerprint(),
+                &helper.reference,
+                &helper.id,
+                allow_volume_creation,
+                &transaction_cancellation,
+            ),
+        )
+        .await?;
+        let materialize = materializer::MaterializeRequest::build(
+            &epoch,
+            &deriver,
+            &certificates,
+            &desired_bytes,
+            existing_materialization.is_none(),
+        );
+        Box::pin(cancellation_bounded(
+            &transaction_cancellation,
+            init_engine.run_materializer(
+                &installation,
+                epoch.fingerprint(),
+                &helper.reference,
+                &helper.id,
+                &volumes,
+                &materialize,
+                &transaction_cancellation,
+            ),
+        ))
+        .await?;
+        attest_installation_identity(&adapter, &request.installation, &installation).await?;
+        init_engine
+            .verify_final_owned_union(&installation, epoch.fingerprint(), lock_identity)
+            .await?;
+        if existing_materialization.is_none() {
+            state.validate_before_materialization()?;
+            state.store_materialization(&expected_materialization.canonical_bytes()?)?;
+        }
+        state.validate_complete()?;
+        init_engine
+            .verify_final_owned_union(&installation, epoch.fingerprint(), lock_identity)
+            .await?;
+        init_engine
+            .attest_lifecycle_lock(&installation, &epoch, &holder)
+            .await?;
+        attest_installation_identity(&adapter, &request.installation, &installation).await?;
+        state.validate_complete()?;
+        cancellation_checkpoint(&transaction_cancellation)
+    })
+    .await;
+    watcher.abort();
+    if let Err(error) = operation {
+        drop(holder);
+        return Err(error);
+    }
     init_engine
-        .verify_final_owned_union(&installation, epoch.fingerprint())
+        .release_lifecycle_lock(&installation, &epoch, holder)
+        .await?;
+    init_engine
+        .attest_lifecycle_lock_absent(&installation)
+        .await?;
+    init_engine
+        .verify_final_owned_union(&installation, epoch.fingerprint(), None)
         .await?;
     attest_installation_identity(&adapter, &request.installation, &installation).await?;
     state.validate_complete()?;
@@ -544,6 +704,31 @@ async fn cancellation_bounded<T>(
     match operation.await {
         Ok(_) => Err(LocalInitError::new(LocalInitErrorCode::Cancelled)),
         Err(error) => Err(error),
+    }
+}
+
+async fn holder_bounded<T>(
+    holder_lost: &CancellationToken,
+    operation: impl Future<Output = Result<T, LocalInitError>>,
+) -> Result<T, LocalInitError> {
+    if holder_lost.is_cancelled() {
+        return Err(LocalInitError::new(LocalInitErrorCode::ResetRequired));
+    }
+    tokio::pin!(operation);
+    tokio::select! {
+        biased;
+        () = holder_lost.cancelled() => {
+            Err(LocalInitError::new(LocalInitErrorCode::ResetRequired))
+        }
+        result = &mut operation => result,
+    }
+}
+
+fn cancellation_checkpoint(cancellation: &CancellationToken) -> Result<(), LocalInitError> {
+    if cancellation.is_cancelled() {
+        Err(LocalInitError::new(LocalInitErrorCode::Cancelled))
+    } else {
+        Ok(())
     }
 }
 

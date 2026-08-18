@@ -312,3 +312,11 @@ bash scripts/ci/tests/container-context.test.sh
 
 See [Development](development.md#static-linux-distribution) for the required
 Rust, musl, ELF, Buildah, Node.js, and SBOM tooling.
+
+The exact tool prerequisites are listed in the
+[development guide](development.md). These scripts write only under `target/`;
+none of the commands above publishes a crate, image, or release. Static
+verification requires the packaged `automata` binary and its scratch-image copy
+to expose public `local up`/`down` plus every exact hidden relay, bootstrap,
+materialization, Desired-read, CAS-digest-read, CAS, lock-holder, and readiness
+command.

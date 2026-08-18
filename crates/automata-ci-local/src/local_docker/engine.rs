@@ -595,6 +595,38 @@ pub(crate) async fn connect_relay_sandbox_engine(
     Ok((pinned, engine))
 }
 
+/// Connects to the lifecycle-qualified host Engine for a read-only exact
+/// sibling audit. The caller has already pinned the same daemon through the
+/// installation adapter; this boundary independently normalizes the complete
+/// LocalDocker container/network bodies with the provider's production parser.
+pub(crate) async fn connect_host_sandbox_engine(
+    expected_architecture: crate::EngineArchitecture,
+) -> Result<(PinnedDockerEngine, Arc<dyn SandboxEngineApi>), LocalDockerError> {
+    let api = ApiVersion {
+        major: 1,
+        minor: 48,
+    };
+    let engine = Arc::new(
+        HttpEngine::connect_unix_socket(std::path::Path::new("/var/run/docker.sock"), api)
+            .map_err(|_| LocalDockerError::new(LocalDockerErrorCode::InvalidEngineResponse))?,
+    );
+    let facts = engine.engine_facts().await.map_err(map_engine_call)?;
+    let architecture = validate_relay_facts(&facts, api)?;
+    if architecture != expected_architecture {
+        return Err(LocalDockerError::new(
+            LocalDockerErrorCode::EngineArchitectureMismatch,
+        ));
+    }
+    let pinned = PinnedDockerEngine {
+        engine: engine.clone(),
+        facts,
+        api,
+        architecture,
+    };
+    pinned.verify().await?;
+    Ok((pinned, engine))
+}
+
 #[cfg(unix)]
 fn relay_matches_runner_architecture(
     relay: crate::EngineArchitecture,

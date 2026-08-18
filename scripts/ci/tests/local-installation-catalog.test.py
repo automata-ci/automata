@@ -395,7 +395,7 @@ class LocalInstallationCatalogContract(unittest.TestCase):
             lifecycle["results_transit"]["schema"],
             int(
                 rust_string_constant(
-                    "crates/automata-ci-local/src/local_docker/mod.rs",
+                    "crates/automata-ci-local/src/results_transport.rs",
                     "RESULTS_TRANSPORT_SCHEMA",
                 )
             ),
@@ -439,18 +439,18 @@ class LocalInstallationCatalogContract(unittest.TestCase):
         for command in lifecycle["automata_commands"].values():
             invocation = " ".join(command["argv"])
             self.assertIn(
-                f'verify_hidden_help "$automata" {invocation}', static_verifier
+                f'verify_command_help "$automata" {invocation}', static_verifier
             )
             self.assertIn(
-                f"container_hidden_help /automata {invocation}", static_verifier
+                f"container_command_help /automata {invocation}", static_verifier
             )
         for command in lifecycle["runner_commands"].values():
             invocation = " ".join(command["argv"])
             self.assertIn(
-                f'verify_hidden_help "$runner" {invocation}', static_verifier
+                f'verify_command_help "$runner" {invocation}', static_verifier
             )
             self.assertIn(
-                f"container_hidden_help /automata-runner {invocation}", static_verifier
+                f"container_command_help /automata-runner {invocation}", static_verifier
             )
         self.assertEqual(
             runner["provider_control_directory"],

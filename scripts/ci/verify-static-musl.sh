@@ -94,27 +94,31 @@ verify_elf() {
 verify_elf "$automata_binary" automata
 verify_elf "$runner_binary" automata-runner
 
-verify_hidden_help() {
+verify_command_help() {
   local binary="$1"
   shift
   "$binary" "$@" --help >/dev/null \
-    || die "$binary did not parse the exact hidden command: $*"
+    || die "$binary did not parse the exact lifecycle command: $*"
 }
 
 verify_lifecycle_commands() {
   local automata="$1"
   local runner="$2"
-  verify_hidden_help "$automata" internal engine relay
-  verify_hidden_help "$automata" internal engine check
-  verify_hidden_help "$automata" internal local materialize
-  verify_hidden_help "$automata" internal local read-desired
-  verify_hidden_help "$automata" internal local write-cas
-  verify_hidden_help "$automata" internal local check-ready
-  verify_hidden_help "$automata" internal local bootstrap-runner
-  verify_hidden_help "$automata" internal object-store ensure-bucket
-  verify_hidden_help "$runner" enroll
-  verify_hidden_help "$runner" __local-check-ready
-  verify_hidden_help "$runner" run
+  verify_command_help "$automata" local up
+  verify_command_help "$automata" local down
+  verify_command_help "$automata" internal engine relay
+  verify_command_help "$automata" internal engine check
+  verify_command_help "$automata" internal local materialize
+  verify_command_help "$automata" internal local read-desired
+  verify_command_help "$automata" internal local read-cas-digest
+  verify_command_help "$automata" internal local write-cas
+  verify_command_help "$automata" internal local hold-lock
+  verify_command_help "$automata" internal local check-ready
+  verify_command_help "$automata" internal local bootstrap-runner
+  verify_command_help "$automata" internal object-store ensure-bucket
+  verify_command_help "$runner" enroll
+  verify_command_help "$runner" __local-check-ready
+  verify_command_help "$runner" run
   if "$automata" internal local engine-relay --help >/dev/null 2>&1; then
     die "automata still accepts the retired internal local engine-relay command"
   fi
@@ -183,24 +187,28 @@ printf '%s\n' \
 
 "$runtime" run --rm --entrypoint /automata "$image_tag" --version
 "$runtime" run --rm --entrypoint /automata-runner "$image_tag" --version
-container_hidden_help() {
+container_command_help() {
   local entrypoint="$1"
   shift
   "$runtime" run --rm --entrypoint "$entrypoint" "$image_tag" "$@" --help >/dev/null \
-    || die "$entrypoint did not parse the exact hidden command in the scratch image: $*"
+    || die "$entrypoint did not parse the exact lifecycle command in the scratch image: $*"
 }
 
-container_hidden_help /automata internal engine relay
-container_hidden_help /automata internal engine check
-container_hidden_help /automata internal local materialize
-container_hidden_help /automata internal local read-desired
-container_hidden_help /automata internal local write-cas
-container_hidden_help /automata internal local check-ready
-container_hidden_help /automata internal local bootstrap-runner
-container_hidden_help /automata internal object-store ensure-bucket
-container_hidden_help /automata-runner enroll
-container_hidden_help /automata-runner __local-check-ready
-container_hidden_help /automata-runner run
+container_command_help /automata local up
+container_command_help /automata local down
+container_command_help /automata internal engine relay
+container_command_help /automata internal engine check
+container_command_help /automata internal local materialize
+container_command_help /automata internal local read-desired
+container_command_help /automata internal local read-cas-digest
+container_command_help /automata internal local write-cas
+container_command_help /automata internal local hold-lock
+container_command_help /automata internal local check-ready
+container_command_help /automata internal local bootstrap-runner
+container_command_help /automata internal object-store ensure-bucket
+container_command_help /automata-runner enroll
+container_command_help /automata-runner __local-check-ready
+container_command_help /automata-runner run
 if "$runtime" run --rm --entrypoint /automata "$image_tag" \
   internal local engine-relay --help >/dev/null 2>&1; then
   die "scratch image accepts the retired internal local engine-relay command"

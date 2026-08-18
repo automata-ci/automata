@@ -118,8 +118,12 @@ pub enum InternalLocalCommand {
     Materialize,
     /// Emit the exact mounted sealed Desired document.
     ReadDesired,
+    /// Emit the exact expected-old SHA-256 digest for one fixed CAS target.
+    ReadCasDigest,
     /// Commit one fixed generated file by expected-old-digest CAS.
     WriteCas,
+    /// Hold the exact lifecycle Engine lock until the manager closes stdin.
+    HoldLock,
     /// Check the fixed in-container control-plane readiness endpoint.
     CheckReady,
 }
@@ -242,7 +246,13 @@ pub enum LocalCommand {
     /// Seal or replay one x86-64 Linux epoch without starting services.
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     Init(LocalInitArgs),
-    /// Inspect recorded custody or reset progress without changing host or Engine state.
+    /// Converge one sealed installation to its exact running topology.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    Up(LocalUpArgs),
+    /// Stop and remove replaceable topology while retaining sealed custody and data.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    Down(LocalDownArgs),
+    /// Inspect sealed, running, recovery, or reset state without mutating custody.
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     Status(LocalStatusArgs),
     /// Remove exact sealed Engine custody while retaining images and the state root.
@@ -266,6 +276,39 @@ pub struct LocalInitArgs {
     /// Operator-selected canonical release evidence; init verifies structure and digests, not OIDC authenticity.
     #[arg(long, value_name = "file:ABS", value_parser = parse_catalog_source)]
     pub catalog_source: String,
+    /// Explicitly authorize recovery of one exact stopped initialization lock.
+    #[arg(long)]
+    pub recover_stopped_lock: bool,
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[derive(Debug, Args)]
+/// Running local-installation convergence inputs.
+pub struct LocalUpArgs {
+    /// Explicit absolute host directory containing sealed installation custody.
+    #[arg(long, value_name = "ABS", value_parser = parse_absolute_state_directory)]
+    pub state_directory: PathBuf,
+    /// Explicitly authorize recovery of one exact stopped lifecycle lock.
+    ///
+    /// Stopped evidence is refused by default. When set, positive Engine/process
+    /// quiescence is verified before exact-ID removal and normal convergence.
+    #[arg(long)]
+    pub recover_stopped_lock: bool,
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[derive(Debug, Args)]
+/// Stopped local-installation convergence inputs.
+pub struct LocalDownArgs {
+    /// Explicit absolute host directory containing running or stopped installation custody.
+    #[arg(long, value_name = "ABS", value_parser = parse_absolute_state_directory)]
+    pub state_directory: PathBuf,
+    /// Explicitly authorize recovery of one exact stopped lifecycle lock.
+    ///
+    /// Stopped evidence is refused by default. When set, positive Engine/process
+    /// quiescence is verified before exact-ID removal and normal convergence.
+    #[arg(long)]
+    pub recover_stopped_lock: bool,
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
