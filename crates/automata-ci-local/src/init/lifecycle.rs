@@ -5,6 +5,10 @@
 //! Compose inspection; there is deliberately no host lifecycle journal or
 //! second phase state machine.
 
+// These futures retain one visible transaction boundary so cancellation and sticky-lock
+// ordering can be audited without hopping across artificial helper layers.
+#![allow(clippy::large_futures, clippy::too_many_arguments)]
+
 use std::{collections::BTreeSet, fmt, future::Future, path::PathBuf};
 
 use automata_ci_core::{OperationId, Sha256Digest};

@@ -450,6 +450,7 @@ async fn run_held(
     Ok(captured.into_stdout())
 }
 
+#[allow(clippy::too_many_lines)]
 fn append_step(step: &ComposeStep<'_>, arguments: &mut Vec<String>) -> Duration {
     match step {
         ComposeStep::Validate => {
@@ -770,8 +771,7 @@ mod tests {
 
         let error = authority
             .process_command()
-            .err()
-            .expect("swapped path must be rejected");
+            .expect_err("swapped path must be rejected");
         assert_eq!(error.code(), LocalInitErrorCode::EngineUnavailable);
     }
 

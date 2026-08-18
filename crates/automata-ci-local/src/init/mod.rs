@@ -306,6 +306,7 @@ impl LocalInitOutcome {
 /// Returns a redacted error when the explicit host custody, release evidence,
 /// Docker identity/resources, or fixed materialization protocol fails closed.
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::large_futures)]
 pub async fn initialize_local(
     request: LocalInitRequest,
 ) -> Result<LocalInitOutcome, LocalInitError> {

@@ -343,6 +343,7 @@ impl VerifiedCatalog {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn validate_lifecycle_runtime(value: &Value) -> Result<(), LocalInitError> {
     let runtime = object(value)?;
     let commands = object(
@@ -2298,6 +2299,7 @@ pub(super) fn desired_test_catalog() -> VerifiedCatalog {
     let digest = |value: u8| format!("sha256:{value:064x}");
     let mut images = BTreeMap::new();
     for (index, role) in ALL_ROLES[..ALL_ROLES.len() - 1].iter().enumerate() {
+        let index = u8::try_from(index).expect("the closed image role set fits in u8");
         let repository = format!("registry.example.invalid/{role}");
         images.insert(
             (*role).to_owned(),
@@ -2306,10 +2308,10 @@ pub(super) fn desired_test_catalog() -> VerifiedCatalog {
                 config: Value::Null,
                 runtime: Value::Null,
                 source: ImageSource::Registry(RegistryBinding {
-                    reference: format!("{repository}@{}", digest(index as u8 + 1)),
-                    top_level_digest: digest(index as u8 + 1),
-                    platform_manifest_digest: digest(index as u8 + 17),
-                    config_digest: digest(index as u8 + 33),
+                    reference: format!("{repository}@{}", digest(index + 1)),
+                    top_level_digest: digest(index + 1),
+                    platform_manifest_digest: digest(index + 17),
+                    config_digest: digest(index + 33),
                 }),
             },
         );

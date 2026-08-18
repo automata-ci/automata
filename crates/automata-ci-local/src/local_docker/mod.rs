@@ -544,6 +544,7 @@ pub(crate) async fn attest_lifecycle_sibling_union(
 /// those replaceable dependencies are damaged, while every sibling is still
 /// bound to its immutable ID, deterministic name, realized custody labels,
 /// profile, and exact private-front membership.
+#[allow(clippy::too_many_lines)]
 pub(crate) async fn attest_lifecycle_sibling_custody_union(
     installation: &Installation,
     desired: &crate::DesiredSpec,

@@ -1439,7 +1439,7 @@ fn base_service(
         "cgroup": "private",
         "runtime": "runc",
         "userns_mode": "host",
-        "shm_size": 67108864_u64,
+        "shm_size": 67_108_864_u64,
         "cap_add": [],
         "cap_drop": [],
         "security_opt": ["no-new-privileges:true", "seccomp=builtin"],

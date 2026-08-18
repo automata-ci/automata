@@ -254,11 +254,11 @@ pub(crate) struct CasDigestRequest {
 }
 
 impl CasDigestRequest {
-    pub(crate) fn new(target: CasTarget) -> Result<Self, LocalInitError> {
-        Ok(Self {
+    pub(crate) fn new(target: CasTarget) -> Self {
+        Self {
             schema: CAS_DIGEST_SCHEMA.to_owned(),
             target,
-        })
+        }
     }
 
     pub(crate) fn canonical_bytes(&self) -> Result<Vec<u8>, LocalInitError> {
@@ -363,6 +363,7 @@ impl Drop for CasRequest {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compare_and_swap(
     directory: &OwnedFd,
     name: &str,
@@ -464,6 +465,7 @@ impl StagedFile {
     }
 }
 
+#[allow(clippy::similar_names)]
 fn observe_staged_file(
     directory: &OwnedFd,
     name: &str,
@@ -647,6 +649,7 @@ fn stage_replacement(
     fs::fsync(directory).map_err(|_| helper_failed())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn verify_cas_postcondition(
     directory: &OwnedFd,
     name: &str,
@@ -668,6 +671,7 @@ fn verify_cas_postcondition(
     Ok(())
 }
 
+#[allow(clippy::similar_names)]
 fn open_exact_root(
     path: &str,
     expected_uid: u32,
@@ -691,6 +695,7 @@ fn open_exact_root(
     Ok(directory)
 }
 
+#[allow(clippy::similar_names)]
 fn read_exact_file(
     directory: &OwnedFd,
     name: &str,

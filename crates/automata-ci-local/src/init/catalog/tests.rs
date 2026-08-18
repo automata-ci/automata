@@ -4,7 +4,6 @@ use super::*;
 fn outer_candidate_bound_includes_inner_archive_overhead() {
     assert_eq!(MAX_CANDIDATE_BYTES, 160 * 1024 * 1024);
     assert_eq!(MAX_CANDIDATE_MEMBER_BYTES, 128 * 1024 * 1024);
-    assert!(MAX_CANDIDATE_BYTES > MAX_CANDIDATE_MEMBER_BYTES);
 }
 use std::io::Write as _;
 

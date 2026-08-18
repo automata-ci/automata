@@ -1,3 +1,6 @@
+// Status/reset keeps each durable authorization and deletion transaction in one auditable flow.
+#![allow(clippy::large_futures, clippy::too_many_lines)]
+
 use std::{fmt, future::Future, path::PathBuf, str::FromStr as _};
 
 use automata_ci_core::{OperationId, Sha256Digest};
@@ -434,30 +437,28 @@ pub async fn inspect_local_status(
                     }
                     LifecycleLockObservation::Absent => return Err(reset_required()),
                 }
+            } else if let Some(epoch) = epoch.as_ref()
+                && engine
+                    .inspect_orphaned_stopped_reset_lock(&intent.installation, epoch)
+                    .await?
+            {
+                status = LocalInstallationStatus::LifecycleRecoveryRequired;
+                volume_contents = "stopped_lock_recovery_required";
+                Some(StatusReset {
+                    removed_resources: 13,
+                    total_resources: 14,
+                })
             } else {
-                if let Some(epoch) = epoch.as_ref()
-                    && engine
-                        .inspect_orphaned_stopped_reset_lock(&intent.installation, epoch)
-                        .await?
-                {
-                    status = LocalInstallationStatus::LifecycleRecoveryRequired;
-                    volume_contents = "stopped_lock_recovery_required";
-                    Some(StatusReset {
-                        removed_resources: 13,
-                        total_resources: 14,
-                    })
-                } else {
-                    let removed = engine
-                        .inspect_reset_progress(&intent.installation, intent.epoch_fingerprint)
-                        .await?;
-                    if removed != 13 {
-                        return Err(reset_required());
-                    }
-                    Some(StatusReset {
-                        removed_resources: 14,
-                        total_resources: 14,
-                    })
+                let removed = engine
+                    .inspect_reset_progress(&intent.installation, intent.epoch_fingerprint)
+                    .await?;
+                if removed != 13 {
+                    return Err(reset_required());
                 }
+                Some(StatusReset {
+                    removed_resources: 14,
+                    total_resources: 14,
+                })
             }
         };
         cancellation_checkpoint(&request.cancellation)?;
@@ -1291,7 +1292,7 @@ fn validate_reset_candidate_conflicts(
     epoch_fingerprint: Sha256Digest,
 ) -> Result<(), LocalInitError> {
     for bytes in [snapshot.epoch.completed(), snapshot.epoch.staged()]
-        .into_iter()
+        .iter()
         .flatten()
     {
         if let Ok(candidate) =
@@ -1421,7 +1422,7 @@ fn lifecycle_report(
         .as_ref()
         .map(|engine| engine.images.as_slice())
         .unwrap_or_default()
-        .into_iter()
+        .iter()
         .map(|image| StatusImage {
             role: image.role.clone(),
             source_kind: image.source_kind.clone(),
@@ -1433,7 +1434,7 @@ fn lifecycle_report(
         .as_ref()
         .map(|engine| engine.volumes.as_slice())
         .unwrap_or_default()
-        .into_iter()
+        .iter()
         .map(|volume| StatusVolume {
             role: volume.role.name().to_owned(),
             name: volume.name.clone(),

@@ -860,6 +860,7 @@ impl<'a> InitEngine<'a> {
         .await
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn qualify_image_roles<Roles>(
         &self,
         catalog: &VerifiedCatalog,
@@ -974,6 +975,7 @@ impl<'a> InitEngine<'a> {
             .ok_or_else(engine_resource_mismatch)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn create_or_adopt_volumes(
         &self,
         installation: &Installation,
@@ -1348,6 +1350,7 @@ impl<'a> InitEngine<'a> {
         Ok(Some(qualified))
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn recover_owned_union_after_desired(
         &self,
         catalog: &VerifiedCatalog,
@@ -3319,6 +3322,7 @@ fn validate_helper_image_ids(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 fn helper_has_ambient_authority(host: &HostConfig) -> bool {
     let nonzero = |value: Option<i64>| value.is_some_and(|value| value != 0);
     host.cgroup_parent

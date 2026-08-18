@@ -1,3 +1,12 @@
+// Recovery and mutation transaction boundaries stay visible in one place; splitting these
+// functions purely for generic lint thresholds would obscure their ordering invariants.
+#![allow(
+    clippy::large_futures,
+    clippy::struct_excessive_bools,
+    clippy::too_many_arguments,
+    clippy::too_many_lines
+)]
+
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     fs,
@@ -371,13 +380,11 @@ where
                         }
                     }
                 }
-                return match output.next().await {
-                    None => Ok(()),
-                    Some(_) => {
-                        holder_lost.cancel();
-                        Err(engine_resource_mismatch())
-                    }
-                };
+                if output.next().await.is_none() {
+                    return Ok(());
+                }
+                holder_lost.cancel();
+                return Err(engine_resource_mismatch());
             }
         }
     }
@@ -1003,7 +1010,7 @@ impl InitEngine<'_> {
         }
         let mut containers = BTreeSet::new();
         for summary in listed {
-            let labels = summary.labels.as_ref().cloned().unwrap_or_default();
+            let labels = summary.labels.clone().unwrap_or_default();
             let names = summary.names.as_deref().unwrap_or_default();
             let related = names.iter().any(|name| {
                 let name = name.trim_start_matches('/');
@@ -1041,7 +1048,7 @@ impl InitEngine<'_> {
         }
         let mut networks = BTreeSet::new();
         for network in listed_networks {
-            let labels = network.labels.as_ref().cloned().unwrap_or_default();
+            let labels = network.labels.clone().unwrap_or_default();
             let name = network.name.as_deref().unwrap_or_default();
             if name.starts_with(&project_prefix)
                 || name.starts_with(&local_prefix)
@@ -2858,7 +2865,7 @@ impl InitEngine<'_> {
         {
             return Err(engine_resource_mismatch());
         }
-        let request = CasDigestRequest::new(target)?;
+        let request = CasDigestRequest::new(target);
         let target = request.target();
         self.verify_selected_engine().await?;
         self.verify_installation(installation).await?;
@@ -3972,7 +3979,7 @@ impl InitEngine<'_> {
         Ok((pinned_containers, pinned_networks))
     }
 
-    /// Recovers the sole runner authority from already-present LocalDocker
+    /// Recovers the sole runner authority from already-present `LocalDocker`
     /// custody when non-authority host material is missing during reset. The
     /// full sibling parser revalidates this value before any deletion.
     pub(in crate::init) async fn discover_lifecycle_runner_id_for_reset(
@@ -4027,7 +4034,7 @@ impl InitEngine<'_> {
         sole_local_docker_runner_id(runner_ids)
     }
 
-    /// Performs the production-parser LocalDocker union audit without repair.
+    /// Performs the production-parser `LocalDocker` union audit without repair.
     pub(in crate::init) async fn attest_local_docker_children(
         &self,
         installation: &Installation,
@@ -4071,7 +4078,7 @@ impl InitEngine<'_> {
         .map_err(|_| engine_resource_mismatch())
     }
 
-    /// Discovers, validates, and removes every exact LocalDocker sibling for
+    /// Discovers, validates, and removes every exact `LocalDocker` sibling for
     /// this installation. Validation of the complete container/network union
     /// finishes before the first delete, and every delete is reconciled by
     /// exact ID plus deterministic-name absence.
@@ -4285,7 +4292,7 @@ impl InitEngine<'_> {
         }
         let mut helpers = BTreeSet::new();
         for summary in listed {
-            let labels = summary.labels.as_ref().cloned().unwrap_or_default();
+            let labels = summary.labels.clone().unwrap_or_default();
             let names = summary.names.as_deref().unwrap_or_default();
             let related = labels.get(LABEL_INSTALLATION_ID) == Some(&installation.id().to_string())
                 || labels.get(LABEL_INSTALLATION_KEY)
@@ -4403,7 +4410,7 @@ impl InitEngine<'_> {
         }
         let mut containers = BTreeSet::new();
         for summary in listed {
-            let labels = summary.labels.as_ref().cloned().unwrap_or_default();
+            let labels = summary.labels.clone().unwrap_or_default();
             let names = summary.names.as_deref().unwrap_or_default();
             if !related(&labels)
                 && !names.iter().any(|name| {
@@ -4447,7 +4454,7 @@ impl InitEngine<'_> {
         }
         let mut networks = BTreeSet::new();
         for network in listed_networks {
-            let labels = network.labels.as_ref().cloned().unwrap_or_default();
+            let labels = network.labels.clone().unwrap_or_default();
             let name = network.name.unwrap_or_default();
             if !related(&labels)
                 && !name.starts_with(&project_prefix)
@@ -5235,13 +5242,7 @@ fn validate_rendered_network(
     {
         return Err(engine_resource_mismatch());
     }
-    for endpoint in network
-        .containers
-        .as_ref()
-        .into_iter()
-        .flatten()
-        .map(|(id, endpoint)| (id, endpoint))
-    {
+    for endpoint in network.containers.as_ref().into_iter().flatten() {
         let name = endpoint
             .1
             .name
@@ -6570,10 +6571,7 @@ fn lifecycle_oneoff_contract(
     service: &'static str,
 ) -> Result<LifecycleOneoffContract, LocalInitError> {
     let contract = match service {
-        "object-store-init" => LifecycleOneoffContract {
-            image_role: "automata",
-        },
-        "bootstrap-runner" => LifecycleOneoffContract {
+        "object-store-init" | "bootstrap-runner" => LifecycleOneoffContract {
             image_role: "automata",
         },
         "runner-enroll" => LifecycleOneoffContract {
@@ -6939,7 +6937,7 @@ fn probe_engine_daemon_generation() -> Result<EngineDaemonGeneration, LocalInitE
     if credentials.uid.as_raw() != 0 || credentials.gid.as_raw() != 0 || pid == 0 {
         return Err(engine_unavailable());
     }
-    let boot_id = read_boot_id().map_err(|_| engine_unavailable())?;
+    let boot_id = read_boot_id().map_err(|()| engine_unavailable())?;
     let start_ticks = read_process_start_ticks(pid).map_err(|_| engine_unavailable())?;
     Ok(EngineDaemonGeneration {
         boot_id,
@@ -6988,8 +6986,7 @@ fn read_process_start_ticks(pid: u32) -> Result<u64, ErrorKind> {
     if text[..open]
         .parse::<u32>()
         .ok()
-        .filter(|observed| *observed == pid)
-        .is_none()
+        .is_none_or(|observed| observed != pid)
     {
         return Err(ErrorKind::InvalidData);
     }
@@ -7009,7 +7006,7 @@ fn prove_daemon_generation_absent(
     generation: &EngineDaemonGeneration,
 ) -> Result<(), LocalInitError> {
     let current_boot =
-        read_boot_id().map_err(|_| LocalInitError::new(LocalInitErrorCode::ResetRequired))?;
+        read_boot_id().map_err(|()| LocalInitError::new(LocalInitErrorCode::ResetRequired))?;
     daemon_generation_absence_from_observation(
         generation,
         current_boot,

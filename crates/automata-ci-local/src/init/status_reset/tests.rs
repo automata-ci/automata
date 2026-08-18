@@ -1,3 +1,5 @@
+#![allow(clippy::large_futures)]
+
 use std::{
     fs::{self, OpenOptions},
     io::Write as _,
