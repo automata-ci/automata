@@ -14,9 +14,8 @@ use automata_ci_store::{
     GithubProviderManifestLimits, GithubProviderManifestRevision, GithubProviderOrigins,
     GithubProviderRunnerPolicyObject, GithubProviderWebhookVerifierFingerprint,
     GithubProviderWorkflowSelection, GithubRepositoryDispatchEvidenceRepository,
-    GithubRepositoryDispatchResolution, GithubRepositoryDispatchResolutionAuthority,
-    GithubRepositoryName, GithubServerServiceAppClientId, GithubServerServiceAppId,
-    GithubServerServiceAuthorityId, GithubServerServiceAuthoritySelector,
+    GithubRepositoryDispatchResolution, GithubRepositoryName, GithubServerServiceAppClientId,
+    GithubServerServiceAppId, GithubServerServiceAuthorityId, GithubServerServiceAuthoritySelector,
     GithubServerServiceJwtIssuer, GithubServerServiceRevision, GithubServerServiceScope,
     GithubSubjectEvidenceRepository, GithubSubjectEvidenceStoreError,
     GithubWorkflowRunSubjectEvidence, LogicalWorkflowInvocationId,
@@ -45,8 +44,8 @@ fn workflow_plan_schema_is_current(version: i16) -> bool {
 struct CurrentManifestPin {
     manifest: GithubProviderManifest,
     checks_authority: GithubServerServiceAuthoritySelector,
-    private_source_authority: Option<GithubServerServiceAuthoritySelector>,
-    private_pull_request_files_authority: Option<GithubServerServiceAuthoritySelector>,
+    repository_contents_authority: GithubServerServiceAuthoritySelector,
+    pull_requests_authority: Option<GithubServerServiceAuthoritySelector>,
 }
 
 #[derive(Debug)]
@@ -505,10 +504,10 @@ pub(crate) async fn record_github_workflow_run_subject_evidence_in_transaction(
                 evidence.checks_authority_identity_digest,
                 evidence.checks_authority_app_configuration_revision,
                 evidence.checks_authority_policy_revision,
-                evidence.private_source_authority_id,
-                evidence.private_source_authority_identity_digest,
-                evidence.private_source_authority_app_configuration_revision,
-                evidence.private_source_authority_policy_revision,
+                evidence.repository_contents_authority_id,
+                evidence.repository_contents_authority_identity_digest,
+                evidence.repository_contents_authority_app_configuration_revision,
+                evidence.repository_contents_authority_policy_revision,
                 inbox.request_digest, inbox.raw_event_digest,
                 inbox.accepted_at_ms, workflow.path, snapshot.source_digest,
                 run.event_name, run.event_digest, run.git_ref,
@@ -1216,7 +1215,7 @@ async fn load_matching_current_manifest_for_delivery(
     delivery: &automata_ci_store::AcceptProviderDelivery,
     verifier_fingerprint: GithubProviderWebhookVerifierFingerprint,
     verifier_revision: GithubServerServiceRevision,
-    require_private_pull_request_files: bool,
+    require_pull_requests_authority: bool,
 ) -> Result<Option<CurrentManifestPin>, GithubSubjectEvidenceStoreError> {
     let identity = delivery.identity();
     let row = sqlx::query(CURRENT_MANIFEST_SELECT)
@@ -1248,46 +1247,36 @@ async fn load_matching_current_manifest_for_delivery(
     let Some(checks_authority) = checks_authority else {
         return Ok(None);
     };
-    let private_source_authority = match manifest.repository_visibility() {
-        ProviderRepositoryVisibility::Public => None,
-        ProviderRepositoryVisibility::Private => {
-            let authority = load_current_authority_selector(
-                transaction,
-                &manifest,
-                GithubServerServiceScope::PrivateRepositorySourceRead,
-                delivery.accepted_at(),
-            )
-            .await?;
-            let Some(authority) = authority else {
-                return Ok(None);
-            };
-            Some(authority)
-        }
+    let repository_contents_authority = load_current_authority_selector(
+        transaction,
+        &manifest,
+        GithubServerServiceScope::RepositoryContentsRead,
+        delivery.accepted_at(),
+    )
+    .await?;
+    let Some(repository_contents_authority) = repository_contents_authority else {
+        return Ok(None);
     };
-    let private_pull_request_files_authority = match (
-        manifest.repository_visibility(),
-        require_private_pull_request_files,
-    ) {
-        (ProviderRepositoryVisibility::Private, true) => {
-            let authority = load_current_authority_selector(
-                transaction,
-                &manifest,
-                GithubServerServiceScope::PrivatePullRequestFilesRead,
-                delivery.accepted_at(),
-            )
-            .await?;
-            let Some(authority) = authority else {
-                return Ok(None);
-            };
-            Some(authority)
-        }
-        _ => None,
+    let pull_requests_authority = if require_pull_requests_authority {
+        let authority = load_current_authority_selector(
+            transaction,
+            &manifest,
+            GithubServerServiceScope::PullRequestsRead,
+            delivery.accepted_at(),
+        )
+        .await?;
+        let Some(authority) = authority else {
+            return Ok(None);
+        };
+        Some(authority)
+    } else {
+        None
     };
     Ok(Some(CurrentManifestPin {
         manifest,
         checks_authority,
-        private_source_authority,
-        private_pull_request_files_authority,
+        repository_contents_authority,
+        pull_requests_authority,
     }))
 }
 
@@ -1408,22 +1397,7 @@ async fn insert_pending_repository_dispatch(
     pin: &CurrentManifestPin,
 ) -> Result<(), GithubSubjectEvidenceStoreError> {
     let identity = request.delivery().identity();
-    let private_id = pin
-        .private_source_authority
-        .as_ref()
-        .map(|selector| selector.authority_id().as_uuid());
-    let private_digest = pin
-        .private_source_authority
-        .as_ref()
-        .map(|selector| selector.identity_digest().as_bytes().to_vec());
-    let private_app_revision = pin
-        .private_source_authority
-        .as_ref()
-        .map(|selector| pg_bigint(selector.app_configuration_revision().get()));
-    let private_policy_revision = pin
-        .private_source_authority
-        .as_ref()
-        .map(|selector| pg_bigint(selector.policy_revision().get()));
+    let source_authority = &pin.repository_contents_authority;
     let result = sqlx::query(
         r"
         INSERT INTO github_repository_dispatch_pending_evidence (
@@ -1437,10 +1411,10 @@ async fn insert_pending_repository_dispatch(
             checks_authority_id, checks_authority_identity_digest,
             checks_authority_app_configuration_revision,
             checks_authority_policy_revision,
-            private_source_authority_id,
-            private_source_authority_identity_digest,
-            private_source_authority_app_configuration_revision,
-            private_source_authority_policy_revision
+            repository_contents_authority_id,
+            repository_contents_authority_identity_digest,
+            repository_contents_authority_app_configuration_revision,
+            repository_contents_authority_policy_revision
         ) VALUES (
             $1,$2,$3,$4,$5,$6,$7,$8,$9,$19,'repository_dispatch',$10,
             $11,$12,$13,$14,$15,$16,$17,$18
@@ -1471,10 +1445,12 @@ async fn insert_pending_repository_dispatch(
         pin.checks_authority.app_configuration_revision().get(),
     ))
     .bind(pg_bigint(pin.checks_authority.policy_revision().get()))
-    .bind(private_id)
-    .bind(private_digest)
-    .bind(private_app_revision)
-    .bind(private_policy_revision)
+    .bind(source_authority.authority_id().as_uuid())
+    .bind(source_authority.identity_digest().as_bytes().to_vec())
+    .bind(pg_bigint(
+        source_authority.app_configuration_revision().get(),
+    ))
+    .bind(pg_bigint(source_authority.policy_revision().get()))
     .bind(AUTHENTICATED_EVENT_ENVELOPE_SCHEMA_VERSION)
     .execute(&mut **transaction)
     .await
@@ -1499,7 +1475,7 @@ fn pending_evidence_from_request(
         request.authenticated_webhook_verifier_fingerprint(),
         request.authenticated_webhook_verifier_revision(),
         pin.checks_authority.clone(),
-        pin.private_source_authority.clone(),
+        pin.repository_contents_authority.clone(),
         request.event().clone(),
         request.delivery().accepted_at(),
     )
@@ -1517,18 +1493,7 @@ async fn insert_resolved_repository_dispatch_evidence(
         .authenticated_webhook_verifier_fingerprint()
         .sha256();
     let checks_authority = pending.checks_authority();
-    let private_id = pending
-        .private_source_authority()
-        .map(|selector| selector.authority_id().as_uuid());
-    let private_digest = pending
-        .private_source_authority()
-        .map(|selector| selector.identity_digest().as_bytes().to_vec());
-    let private_app_revision = pending
-        .private_source_authority()
-        .map(|selector| pg_bigint(selector.app_configuration_revision().get()));
-    let private_policy_revision = pending
-        .private_source_authority()
-        .map(|selector| pg_bigint(selector.policy_revision().get()));
+    let source_authority = pending.repository_contents_authority();
     let result = sqlx::query(
         r"
         INSERT INTO github_provider_delivery_evidence (
@@ -1546,10 +1511,10 @@ async fn insert_resolved_repository_dispatch_evidence(
             checks_authority_id, checks_authority_identity_digest,
             checks_authority_app_configuration_revision,
             checks_authority_policy_revision,
-            private_source_authority_id,
-            private_source_authority_identity_digest,
-            private_source_authority_app_configuration_revision,
-            private_source_authority_policy_revision,
+            repository_contents_authority_id,
+            repository_contents_authority_identity_digest,
+            repository_contents_authority_app_configuration_revision,
+            repository_contents_authority_policy_revision,
             github_check_subject_id, github_check_head_sha
         ) VALUES (
             $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$26,
@@ -1577,17 +1542,19 @@ async fn insert_resolved_repository_dispatch_evidence(
     ))
     .bind(pending.event().git_ref())
     .bind(request.resolution().source_revision().as_bytes())
-    .bind(request.resolution().authority().as_str())
+    .bind("repository_contents_read")
     .bind(checks_authority.authority_id().as_uuid())
     .bind(checks_authority.identity_digest().as_bytes().as_slice())
     .bind(pg_bigint(
         checks_authority.app_configuration_revision().get(),
     ))
     .bind(pg_bigint(checks_authority.policy_revision().get()))
-    .bind(private_id)
-    .bind(private_digest)
-    .bind(private_app_revision)
-    .bind(private_policy_revision)
+    .bind(source_authority.authority_id().as_uuid())
+    .bind(source_authority.identity_digest().as_bytes().to_vec())
+    .bind(pg_bigint(
+        source_authority.app_configuration_revision().get(),
+    ))
+    .bind(pg_bigint(source_authority.policy_revision().get()))
     .bind(subject_id)
     .bind(AUTHENTICATED_EVENT_ENVELOPE_SCHEMA_VERSION)
     .execute(&mut **transaction)
@@ -1655,7 +1622,7 @@ fn resolved_repository_dispatch_evidence(
         pending.authenticated_webhook_verifier_fingerprint(),
         pending.authenticated_webhook_verifier_revision(),
         pending.checks_authority().clone(),
-        pending.private_source_authority().cloned(),
+        pending.repository_contents_authority().clone(),
         subject_id,
         request.resolution().source_revision(),
         pending.event().clone(),
@@ -1673,14 +1640,13 @@ async fn insert_delivery_evidence(
     pin: &CurrentManifestPin,
 ) -> Result<(), GithubSubjectEvidenceStoreError> {
     let identity = request.delivery().identity();
-    let (private_id, private_digest, private_app_revision, private_policy_revision) =
-        optional_authority_columns(pin.private_source_authority.as_ref());
+    let source_authority = &pin.repository_contents_authority;
     let (
-        private_pull_request_files_id,
-        private_pull_request_files_digest,
-        private_pull_request_files_app_revision,
-        private_pull_request_files_policy_revision,
-    ) = optional_authority_columns(pin.private_pull_request_files_authority.as_ref());
+        pull_requests_authority_id,
+        pull_requests_authority_digest,
+        pull_requests_authority_app_revision,
+        pull_requests_authority_policy_revision,
+    ) = optional_authority_columns(pin.pull_requests_authority.as_ref());
     let authenticated_event = request.authenticated_event();
     let authenticated_event_name = authenticated_event.kind().as_str();
     let authenticated_event_git_ref = authenticated_event.git_ref();
@@ -1699,14 +1665,14 @@ async fn insert_delivery_evidence(
             checks_authority_id, checks_authority_identity_digest,
             checks_authority_app_configuration_revision,
             checks_authority_policy_revision,
-            private_source_authority_id,
-            private_source_authority_identity_digest,
-            private_source_authority_app_configuration_revision,
-            private_source_authority_policy_revision,
-            private_pull_request_files_authority_id,
-            private_pull_request_files_authority_identity_digest,
-            private_pull_request_files_authority_app_configuration_revision,
-            private_pull_request_files_authority_policy_revision,
+            repository_contents_authority_id,
+            repository_contents_authority_identity_digest,
+            repository_contents_authority_app_configuration_revision,
+            repository_contents_authority_policy_revision,
+            pull_requests_authority_id,
+            pull_requests_authority_identity_digest,
+            pull_requests_authority_app_configuration_revision,
+            pull_requests_authority_policy_revision,
             github_check_subject_id, github_check_head_sha
         ) VALUES (
             $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,
@@ -1746,14 +1712,16 @@ async fn insert_delivery_evidence(
         pin.checks_authority.app_configuration_revision().get(),
     ))
     .bind(pg_bigint(pin.checks_authority.policy_revision().get()))
-    .bind(private_id)
-    .bind(private_digest)
-    .bind(private_app_revision)
-    .bind(private_policy_revision)
-    .bind(private_pull_request_files_id)
-    .bind(private_pull_request_files_digest)
-    .bind(private_pull_request_files_app_revision)
-    .bind(private_pull_request_files_policy_revision)
+    .bind(source_authority.authority_id().as_uuid())
+    .bind(source_authority.identity_digest().as_bytes().to_vec())
+    .bind(pg_bigint(
+        source_authority.app_configuration_revision().get(),
+    ))
+    .bind(pg_bigint(source_authority.policy_revision().get()))
+    .bind(pull_requests_authority_id)
+    .bind(pull_requests_authority_digest)
+    .bind(pull_requests_authority_app_revision)
+    .bind(pull_requests_authority_policy_revision)
     .bind(subject_id)
     .bind(request.head_sha().as_bytes())
     .execute(&mut **transaction)
@@ -1833,15 +1801,15 @@ fn evidence_from_request(
     let subject_id = GithubCheckSubjectId::from_uuid(subject_id)
         .map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)?;
     let result =
-        ManifestPinnedGithubDeliveryEvidence::from_durable_parts_with_pull_request_files_authority(
+        ManifestPinnedGithubDeliveryEvidence::from_durable_parts_with_pull_requests_authority(
             delivery_id,
             request.repository_owner_id(),
             pin.manifest.clone(),
             request.authenticated_webhook_verifier_fingerprint(),
             request.authenticated_webhook_verifier_revision(),
             pin.checks_authority.clone(),
-            pin.private_source_authority.clone(),
-            pin.private_pull_request_files_authority.clone(),
+            pin.repository_contents_authority.clone(),
+            pin.pull_requests_authority.clone(),
             subject_id,
             request.head_sha(),
             request.authenticated_event().clone(),
@@ -2034,8 +2002,11 @@ fn decode_pending_repository_dispatch(
     let manifest = decode_manifest(row)?;
     let checks_authority =
         decode_authority_selector(row, manifest.tenant().clone(), "checks_authority")?;
-    let private_source_authority =
-        optional_authority_selector(row, manifest.tenant().clone(), "private_source_authority")?;
+    let repository_contents_authority = decode_authority_selector(
+        row,
+        manifest.tenant().clone(),
+        "repository_contents_authority",
+    )?;
     let delivery_id =
         ProviderDeliveryId::from_uuid(row.try_get("inbox_id").map_err(operation_error)?)
             .map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)?;
@@ -2078,7 +2049,7 @@ fn decode_pending_repository_dispatch(
         verifier_fingerprint,
         verifier_revision,
         checks_authority,
-        private_source_authority,
+        repository_contents_authority,
         event,
         UnixMillis::new(accepted_at),
     )
@@ -2224,13 +2195,13 @@ fn decode_delivery_evidence(
     let manifest = decode_manifest(row)?;
     let checks_authority =
         decode_authority_selector(row, manifest.tenant().clone(), "checks_authority")?;
-    let private_source_authority =
-        optional_authority_selector(row, manifest.tenant().clone(), "private_source_authority")?;
-    let private_pull_request_files_authority = optional_authority_selector(
+    let repository_contents_authority = decode_authority_selector(
         row,
         manifest.tenant().clone(),
-        "private_pull_request_files_authority",
+        "repository_contents_authority",
     )?;
+    let pull_requests_authority =
+        optional_authority_selector(row, manifest.tenant().clone(), "pull_requests_authority")?;
     let delivery_id: Uuid = row.try_get("inbox_id").map_err(operation_error)?;
     let owner_id: i64 = row
         .try_get("github_repository_owner_id")
@@ -2268,8 +2239,8 @@ fn decode_delivery_evidence(
             authenticated_verifier_fingerprint,
             authenticated_verifier_revision,
             checks_authority,
-            private_source_authority,
-            private_pull_request_files_authority,
+            repository_contents_authority,
+            pull_requests_authority,
             subject_id,
             head_sha,
             accepted_at: UnixMillis::new(accepted_at),
@@ -2284,8 +2255,8 @@ struct DecodedDeliveryEvidenceParts {
     authenticated_verifier_fingerprint: GithubProviderWebhookVerifierFingerprint,
     authenticated_verifier_revision: GithubServerServiceRevision,
     checks_authority: GithubServerServiceAuthoritySelector,
-    private_source_authority: Option<GithubServerServiceAuthoritySelector>,
-    private_pull_request_files_authority: Option<GithubServerServiceAuthoritySelector>,
+    repository_contents_authority: GithubServerServiceAuthoritySelector,
+    pull_requests_authority: Option<GithubServerServiceAuthoritySelector>,
     subject_id: GithubCheckSubjectId,
     head_sha: GitObjectId,
     accepted_at: UnixMillis,
@@ -2327,8 +2298,8 @@ fn decode_delivery_event_evidence(
         authenticated_verifier_fingerprint,
         authenticated_verifier_revision,
         checks_authority,
-        private_source_authority,
-        private_pull_request_files_authority,
+        repository_contents_authority,
+        pull_requests_authority,
         subject_id,
         head_sha,
         accepted_at,
@@ -2352,15 +2323,15 @@ fn decode_delivery_event_evidence(
             }
             let event = GithubAuthenticatedEvent::new(kind, git_ref)
                 .map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)?;
-            ManifestPinnedGithubDeliveryEvidence::from_durable_parts_with_pull_request_files_authority(
+            ManifestPinnedGithubDeliveryEvidence::from_durable_parts_with_pull_requests_authority(
                 delivery_id,
                 owner_id,
                 manifest,
                 authenticated_verifier_fingerprint,
                 authenticated_verifier_revision,
                 checks_authority,
-                private_source_authority,
-                private_pull_request_files_authority,
+                repository_contents_authority,
+                pull_requests_authority,
                 subject_id,
                 head_sha,
                 event,
@@ -2381,9 +2352,9 @@ fn decode_delivery_event_evidence(
                 .map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)?;
             let revision = GitObjectId::from_durable_bytes(&source_revision)
                 .map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)?;
-            let authority =
-                decode_github_repository_dispatch_resolution_authority(&source_authority)
-                    .ok_or(GithubSubjectEvidenceStoreError::CorruptData)?;
+            if source_authority != "repository_contents_read" {
+                return Err(GithubSubjectEvidenceStoreError::CorruptData);
+            }
             ManifestPinnedGithubDeliveryEvidence::from_durable_parts_resolved_repository_dispatch(
                 delivery_id,
                 owner_id,
@@ -2391,11 +2362,11 @@ fn decode_delivery_event_evidence(
                 authenticated_verifier_fingerprint,
                 authenticated_verifier_revision,
                 checks_authority,
-                private_source_authority,
+                repository_contents_authority,
                 subject_id,
                 head_sha,
                 event,
-                GithubRepositoryDispatchResolution::new(revision, authority),
+                GithubRepositoryDispatchResolution::new(revision),
                 accepted_at,
             )
         }
@@ -2847,18 +2818,6 @@ fn decode_github_authenticated_event_kind(value: &str) -> Option<GithubAuthentic
     }
 }
 
-fn decode_github_repository_dispatch_resolution_authority(
-    value: &str,
-) -> Option<GithubRepositoryDispatchResolutionAuthority> {
-    match value {
-        "public_anonymous" => Some(GithubRepositoryDispatchResolutionAuthority::PublicAnonymous),
-        "private_source_authority" => {
-            Some(GithubRepositoryDispatchResolutionAuthority::PrivateSourceAuthority)
-        }
-        _ => None,
-    }
-}
-
 fn decode_github_server_service_jwt_issuer(value: &str) -> Option<GithubServerServiceJwtIssuer> {
     match value {
         "app_client_id" => Some(GithubServerServiceJwtIssuer::AppClientId),
@@ -2984,10 +2943,10 @@ const PENDING_EVIDENCE_SELECT: &str = r"
         pending.checks_authority_identity_digest,
         pending.checks_authority_app_configuration_revision,
         pending.checks_authority_policy_revision,
-        pending.private_source_authority_id,
-        pending.private_source_authority_identity_digest,
-        pending.private_source_authority_app_configuration_revision,
-        pending.private_source_authority_policy_revision,
+        pending.repository_contents_authority_id,
+        pending.repository_contents_authority_identity_digest,
+        pending.repository_contents_authority_app_configuration_revision,
+        pending.repository_contents_authority_policy_revision,
         manifest.tenant_id, manifest.repository_id,
         manifest.provider_connection_id, manifest.manifest_revision,
         manifest.manifest_digest, manifest.provider_installation_id,
@@ -3057,31 +3016,26 @@ const PENDING_EVIDENCE_SELECT: &str = r"
      AND checks_authority.app_configuration_revision =
          pending.checks_authority_app_configuration_revision
      AND checks_authority.policy_revision = pending.checks_authority_policy_revision
-    LEFT JOIN github_server_service_authorities AS private_source_authority
-      ON private_source_authority.id = pending.private_source_authority_id
-     AND private_source_authority.tenant_id = pending.tenant_id
-     AND private_source_authority.repository_id = pending.repository_id
-     AND private_source_authority.provider_connection_id = pending.provider_connection_id
-     AND private_source_authority.provider_installation_id = manifest.provider_installation_id
-     AND private_source_authority.github_app_id = manifest.github_app_id
-     AND private_source_authority.github_repository_id = manifest.github_repository_id
-     AND private_source_authority.github_repository_name = manifest.github_repository_name
-     AND private_source_authority.service_scope = 'private_repository_source_read'
-     AND private_source_authority.identity_digest =
-         pending.private_source_authority_identity_digest
-     AND private_source_authority.app_configuration_revision =
-         pending.private_source_authority_app_configuration_revision
-     AND private_source_authority.policy_revision =
-         pending.private_source_authority_policy_revision
+    JOIN github_server_service_authorities AS repository_contents_authority
+      ON repository_contents_authority.id = pending.repository_contents_authority_id
+     AND repository_contents_authority.tenant_id = pending.tenant_id
+     AND repository_contents_authority.repository_id = pending.repository_id
+     AND repository_contents_authority.provider_connection_id = pending.provider_connection_id
+     AND repository_contents_authority.provider_installation_id = manifest.provider_installation_id
+     AND repository_contents_authority.github_app_id = manifest.github_app_id
+     AND repository_contents_authority.github_repository_id = manifest.github_repository_id
+     AND repository_contents_authority.github_repository_name = manifest.github_repository_name
+     AND repository_contents_authority.service_scope = 'repository_contents_read'
+     AND repository_contents_authority.identity_digest =
+         pending.repository_contents_authority_identity_digest
+     AND repository_contents_authority.app_configuration_revision =
+         pending.repository_contents_authority_app_configuration_revision
+     AND repository_contents_authority.policy_revision =
+         pending.repository_contents_authority_policy_revision
 ";
 
 const PENDING_EVIDENCE_VISIBILITY_AUTHORITY_EXACT: &str = r"
-    AND (
-        manifest.repository_visibility = 'public'
-        AND pending.private_source_authority_id IS NULL
-        OR manifest.repository_visibility = 'private'
-        AND private_source_authority.id IS NOT NULL
-    )
+    AND repository_contents_authority.id IS NOT NULL
 ";
 
 const EVIDENCE_SELECT: &str = r"
@@ -3111,14 +3065,14 @@ const EVIDENCE_SELECT: &str = r"
         evidence.checks_authority_identity_digest,
         evidence.checks_authority_app_configuration_revision,
         evidence.checks_authority_policy_revision,
-        evidence.private_source_authority_id,
-        evidence.private_source_authority_identity_digest,
-        evidence.private_source_authority_app_configuration_revision,
-        evidence.private_source_authority_policy_revision,
-        evidence.private_pull_request_files_authority_id,
-        evidence.private_pull_request_files_authority_identity_digest,
-        evidence.private_pull_request_files_authority_app_configuration_revision,
-        evidence.private_pull_request_files_authority_policy_revision,
+        evidence.repository_contents_authority_id,
+        evidence.repository_contents_authority_identity_digest,
+        evidence.repository_contents_authority_app_configuration_revision,
+        evidence.repository_contents_authority_policy_revision,
+        evidence.pull_requests_authority_id,
+        evidence.pull_requests_authority_identity_digest,
+        evidence.pull_requests_authority_app_configuration_revision,
+        evidence.pull_requests_authority_policy_revision,
         evidence.github_check_subject_id, evidence.github_check_head_sha,
         manifest.tenant_id, manifest.repository_id,
         manifest.provider_connection_id, manifest.manifest_revision,
@@ -3189,44 +3143,44 @@ const EVIDENCE_SELECT: &str = r"
      AND checks_authority.app_configuration_revision =
          evidence.checks_authority_app_configuration_revision
      AND checks_authority.policy_revision = evidence.checks_authority_policy_revision
-    LEFT JOIN github_server_service_authorities AS private_source_authority
-      ON private_source_authority.id = evidence.private_source_authority_id
-     AND private_source_authority.tenant_id = evidence.tenant_id
-     AND private_source_authority.repository_id = evidence.repository_id
-     AND private_source_authority.provider_connection_id = evidence.provider_connection_id
-     AND private_source_authority.provider_installation_id = evidence.provider_installation_id
-     AND private_source_authority.github_app_id = manifest.github_app_id
-     AND private_source_authority.github_repository_id = evidence.github_repository_id
-     AND private_source_authority.github_repository_name = evidence.github_repository_name
-     AND private_source_authority.service_scope = 'private_repository_source_read'
-     AND private_source_authority.identity_digest =
-         evidence.private_source_authority_identity_digest
-     AND private_source_authority.app_configuration_revision =
-         evidence.private_source_authority_app_configuration_revision
-     AND private_source_authority.policy_revision =
-         evidence.private_source_authority_policy_revision
-    LEFT JOIN github_server_service_authorities AS private_pull_request_files_authority
-      ON private_pull_request_files_authority.id =
-         evidence.private_pull_request_files_authority_id
-     AND private_pull_request_files_authority.tenant_id = evidence.tenant_id
-     AND private_pull_request_files_authority.repository_id = evidence.repository_id
-     AND private_pull_request_files_authority.provider_connection_id =
+    JOIN github_server_service_authorities AS repository_contents_authority
+      ON repository_contents_authority.id = evidence.repository_contents_authority_id
+     AND repository_contents_authority.tenant_id = evidence.tenant_id
+     AND repository_contents_authority.repository_id = evidence.repository_id
+     AND repository_contents_authority.provider_connection_id = evidence.provider_connection_id
+     AND repository_contents_authority.provider_installation_id = evidence.provider_installation_id
+     AND repository_contents_authority.github_app_id = manifest.github_app_id
+     AND repository_contents_authority.github_repository_id = evidence.github_repository_id
+     AND repository_contents_authority.github_repository_name = evidence.github_repository_name
+     AND repository_contents_authority.service_scope = 'repository_contents_read'
+     AND repository_contents_authority.identity_digest =
+         evidence.repository_contents_authority_identity_digest
+     AND repository_contents_authority.app_configuration_revision =
+         evidence.repository_contents_authority_app_configuration_revision
+     AND repository_contents_authority.policy_revision =
+         evidence.repository_contents_authority_policy_revision
+    LEFT JOIN github_server_service_authorities AS pull_requests_authority
+      ON pull_requests_authority.id =
+         evidence.pull_requests_authority_id
+     AND pull_requests_authority.tenant_id = evidence.tenant_id
+     AND pull_requests_authority.repository_id = evidence.repository_id
+     AND pull_requests_authority.provider_connection_id =
          evidence.provider_connection_id
-     AND private_pull_request_files_authority.provider_installation_id =
+     AND pull_requests_authority.provider_installation_id =
          evidence.provider_installation_id
-     AND private_pull_request_files_authority.github_app_id = manifest.github_app_id
-     AND private_pull_request_files_authority.github_repository_id =
+     AND pull_requests_authority.github_app_id = manifest.github_app_id
+     AND pull_requests_authority.github_repository_id =
          evidence.github_repository_id
-     AND private_pull_request_files_authority.github_repository_name =
+     AND pull_requests_authority.github_repository_name =
          evidence.github_repository_name
-     AND private_pull_request_files_authority.service_scope =
-         'private_pull_request_files_read'
-     AND private_pull_request_files_authority.identity_digest =
-         evidence.private_pull_request_files_authority_identity_digest
-     AND private_pull_request_files_authority.app_configuration_revision =
-         evidence.private_pull_request_files_authority_app_configuration_revision
-     AND private_pull_request_files_authority.policy_revision =
-         evidence.private_pull_request_files_authority_policy_revision
+     AND pull_requests_authority.service_scope =
+         'pull_requests_read'
+     AND pull_requests_authority.identity_digest =
+         evidence.pull_requests_authority_identity_digest
+     AND pull_requests_authority.app_configuration_revision =
+         evidence.pull_requests_authority_app_configuration_revision
+     AND pull_requests_authority.policy_revision =
+         evidence.pull_requests_authority_policy_revision
     JOIN github_check_subjects AS subject
       ON subject.id = evidence.github_check_subject_id
      AND subject.tenant_id = evidence.tenant_id
@@ -3238,18 +3192,12 @@ const EVIDENCE_SELECT: &str = r"
 ";
 
 const EVIDENCE_VISIBILITY_AUTHORITY_EXACT: &str = r"
+    AND repository_contents_authority.id IS NOT NULL
     AND (
-        manifest.repository_visibility = 'public'
-        AND evidence.private_source_authority_id IS NULL
-        AND evidence.private_pull_request_files_authority_id IS NULL
-        OR manifest.repository_visibility = 'private'
-        AND private_source_authority.id IS NOT NULL
-        AND (
-            evidence.authenticated_event_name = 'pull_request'
-            AND private_pull_request_files_authority.id IS NOT NULL
-            OR evidence.authenticated_event_name <> 'pull_request'
-            AND evidence.private_pull_request_files_authority_id IS NULL
-        )
+        evidence.authenticated_event_name = 'pull_request'
+        AND pull_requests_authority.id IS NOT NULL
+        OR evidence.authenticated_event_name <> 'pull_request'
+        AND evidence.pull_requests_authority_id IS NULL
     )
 ";
 

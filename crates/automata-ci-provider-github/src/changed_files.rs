@@ -8,9 +8,7 @@ use std::{
 use async_trait::async_trait;
 use automata_ci_auth::{github::GithubEndpointError, secret::SecretString};
 use automata_ci_core::GitObjectId;
-use automata_ci_provider::{
-    NormalizedTrigger, ProviderRepositoryPath, PushCommitEvidence, RepositoryVisibility,
-};
+use automata_ci_provider::{NormalizedTrigger, ProviderRepositoryPath, PushCommitEvidence};
 use automata_ci_scm::{
     ChangedFile, ChangedFileIncompleteReason, ChangedFileNotApplicableReason,
     ChangedFilePageAccumulator, ChangedFilePageEvidence, ChangedFileRead, ChangedFileReader,
@@ -73,20 +71,26 @@ const fn changed_path_byte_rejection(observed: usize) -> Option<GithubChangedFil
     None
 }
 
-/// Least-authority authentication for one GitHub push comparison.
-pub enum GithubPushDiffAuthority<'credential> {
-    /// Read a public repository without an Authorization header.
-    PublicAnonymous,
-    /// Read a private repository with an exact installation `contents: read` token.
-    PrivateInstallationContentsRead(&'credential SecretString),
+/// Installation authentication for one GitHub push comparison.
+pub struct GithubPushDiffAuthority<'credential>(&'credential SecretString);
+
+impl<'credential> GithubPushDiffAuthority<'credential> {
+    /// Binds the comparison to an installation token with `contents: read`.
+    #[must_use]
+    pub const fn new(credential: &'credential SecretString) -> Self {
+        Self(credential)
+    }
 }
 
-/// Least-authority authentication for one GitHub pull-request comparison.
-pub enum GithubPullRequestDiffAuthority<'credential> {
-    /// Read a public pull request without an Authorization header.
-    PublicAnonymous,
-    /// Read a private pull request with exact installation `pull requests: read` authority.
-    PrivateInstallationPullRequestsRead(&'credential SecretString),
+/// Installation authentication for one GitHub pull-request comparison.
+pub struct GithubPullRequestDiffAuthority<'credential>(&'credential SecretString);
+
+impl<'credential> GithubPullRequestDiffAuthority<'credential> {
+    /// Binds the comparison to an installation token with `pull requests: read`.
+    #[must_use]
+    pub const fn new(credential: &'credential SecretString) -> Self {
+        Self(credential)
+    }
 }
 
 /// One bounded, exact GitHub pull-request three-dot comparison.
@@ -141,23 +145,13 @@ impl fmt::Debug for GithubPullRequestDiffRequest<'_> {
 
 impl fmt::Debug for GithubPushDiffAuthority<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::PublicAnonymous => formatter.write_str("PublicAnonymous"),
-            Self::PrivateInstallationContentsRead(_) => {
-                formatter.write_str("PrivateInstallationContentsRead([redacted])")
-            }
-        }
+        formatter.write_str("GithubPushDiffAuthority([redacted])")
     }
 }
 
 impl fmt::Debug for GithubPullRequestDiffAuthority<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::PublicAnonymous => formatter.write_str("PublicAnonymous"),
-            Self::PrivateInstallationPullRequestsRead(_) => {
-                formatter.write_str("PrivateInstallationPullRequestsRead([redacted])")
-            }
-        }
+        formatter.write_str("GithubPullRequestDiffAuthority([redacted])")
     }
 }
 
@@ -1023,7 +1017,7 @@ impl ChangedFileReader for GithubHttpEndpoint {
                 };
                 let repository = RepositoryId::new(policy.repository().as_str())
                     .map_err(|_| ScmError::new(ScmErrorKind::InvalidResponse))?;
-                let authority = push_authority(&request)?;
+                let authority = push_authority(&request);
                 let outcome = self
                     .push_changed_files(GithubPushDiffRequest::new(
                         &repository,
@@ -1049,7 +1043,7 @@ impl ChangedFileReader for GithubHttpEndpoint {
                     .ok_or_else(|| ScmError::new(ScmErrorKind::InvalidResponse))?;
                 let base = pull_request.base_object();
                 let head = pull_request.head_object();
-                let authority = pull_request_authority(&request)?;
+                let authority = pull_request_authority(&request);
                 let outcome = self
                     .pull_request_changed_files(GithubPullRequestDiffRequest::new(
                         &repository,
@@ -1072,32 +1066,14 @@ impl ChangedFileReader for GithubHttpEndpoint {
 
 fn push_authority<'request>(
     request: &'request ChangedFileRequest<'request>,
-) -> Result<GithubPushDiffAuthority<'request>, ScmError> {
-    match (
-        request.connection().configuration().visibility(),
-        request.credential(),
-    ) {
-        (RepositoryVisibility::Public, None) => Ok(GithubPushDiffAuthority::PublicAnonymous),
-        (RepositoryVisibility::Private | RepositoryVisibility::Internal, Some(credential)) => Ok(
-            GithubPushDiffAuthority::PrivateInstallationContentsRead(credential),
-        ),
-        _ => Err(ScmError::new(ScmErrorKind::Unauthorized)),
-    }
+) -> GithubPushDiffAuthority<'request> {
+    GithubPushDiffAuthority::new(request.credential())
 }
 
 fn pull_request_authority<'request>(
     request: &'request ChangedFileRequest<'request>,
-) -> Result<GithubPullRequestDiffAuthority<'request>, ScmError> {
-    match (
-        request.connection().configuration().visibility(),
-        request.credential(),
-    ) {
-        (RepositoryVisibility::Public, None) => Ok(GithubPullRequestDiffAuthority::PublicAnonymous),
-        (RepositoryVisibility::Private | RepositoryVisibility::Internal, Some(credential)) => {
-            Ok(GithubPullRequestDiffAuthority::PrivateInstallationPullRequestsRead(credential))
-        }
-        _ => Err(ScmError::new(ScmErrorKind::Unauthorized)),
-    }
+) -> GithubPullRequestDiffAuthority<'request> {
+    GithubPullRequestDiffAuthority::new(request.credential())
 }
 
 fn translate_common_push(
@@ -1282,13 +1258,8 @@ fn compare_request(
     authority: &GithubPushDiffAuthority<'_>,
 ) -> Result<RequestBuilder, CompareFailure> {
     let request = request.header(ACCEPT, ACCEPT_API_JSON);
-    match authority {
-        GithubPushDiffAuthority::PublicAnonymous => Ok(request),
-        GithubPushDiffAuthority::PrivateInstallationContentsRead(token) => {
-            let authorization = authorization_header(token).map_err(classify_endpoint_error)?;
-            Ok(request.header(reqwest::header::AUTHORIZATION, authorization))
-        }
-    }
+    let authorization = authorization_header(authority.0).map_err(classify_endpoint_error)?;
+    Ok(request.header(reqwest::header::AUTHORIZATION, authorization))
 }
 
 fn pull_request_request(
@@ -1296,13 +1267,8 @@ fn pull_request_request(
     authority: &GithubPullRequestDiffAuthority<'_>,
 ) -> Result<RequestBuilder, CompareFailure> {
     let request = request.header(ACCEPT, ACCEPT_API_JSON);
-    match authority {
-        GithubPullRequestDiffAuthority::PublicAnonymous => Ok(request),
-        GithubPullRequestDiffAuthority::PrivateInstallationPullRequestsRead(token) => {
-            let authorization = authorization_header(token).map_err(classify_endpoint_error)?;
-            Ok(request.header(reqwest::header::AUTHORIZATION, authorization))
-        }
-    }
+    let authorization = authorization_header(authority.0).map_err(classify_endpoint_error)?;
+    Ok(request.header(reqwest::header::AUTHORIZATION, authorization))
 }
 
 fn validate_pull_request_snapshot(

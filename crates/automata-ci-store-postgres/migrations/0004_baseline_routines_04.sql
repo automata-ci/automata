@@ -1,4 +1,4 @@
--- Frozen greenfield baseline. Add a new migration instead of editing this stage.
+-- Canonical greenfield schema stage.
 SET check_function_bodies = false;
 
 CREATE FUNCTION automata_github_provider_delivery_evidence_immutable() RETURNS trigger
@@ -19,7 +19,7 @@ DECLARE
     repository repositories%ROWTYPE;
     manifest_pin RECORD;
     checks_authority github_server_service_authorities%ROWTYPE;
-    private_authority github_server_service_authorities%ROWTYPE;
+    contents_authority github_server_service_authorities%ROWTYPE;
 BEGIN
 
     IF NEW.authenticated_event_name = 'repository_dispatch' THEN
@@ -58,14 +58,14 @@ BEGIN
                   NEW.checks_authority_app_configuration_revision
               AND pending.checks_authority_policy_revision =
                   NEW.checks_authority_policy_revision
-              AND pending.private_source_authority_id IS NOT DISTINCT FROM
-                  NEW.private_source_authority_id
-              AND pending.private_source_authority_identity_digest IS NOT DISTINCT FROM
-                  NEW.private_source_authority_identity_digest
-              AND pending.private_source_authority_app_configuration_revision IS NOT DISTINCT FROM
-                  NEW.private_source_authority_app_configuration_revision
-              AND pending.private_source_authority_policy_revision IS NOT DISTINCT FROM
-                  NEW.private_source_authority_policy_revision
+              AND pending.repository_contents_authority_id IS NOT DISTINCT FROM
+                  NEW.repository_contents_authority_id
+              AND pending.repository_contents_authority_identity_digest IS NOT DISTINCT FROM
+                  NEW.repository_contents_authority_identity_digest
+              AND pending.repository_contents_authority_app_configuration_revision IS NOT DISTINCT FROM
+                  NEW.repository_contents_authority_app_configuration_revision
+              AND pending.repository_contents_authority_policy_revision IS NOT DISTINCT FROM
+                  NEW.repository_contents_authority_policy_revision
         ) THEN
             RAISE EXCEPTION 'resolved repository dispatch does not match pending authority'
                 USING ERRCODE = 'integrity_constraint_violation',
@@ -109,13 +109,11 @@ BEGIN
       AND id = NEW.checks_authority_id
     FOR SHARE;
 
-    IF NEW.private_source_authority_id IS NOT NULL THEN
-        SELECT * INTO private_authority
-        FROM github_server_service_authorities
-        WHERE tenant_id = NEW.tenant_id
-          AND id = NEW.private_source_authority_id
-        FOR SHARE;
-    END IF;
+    SELECT * INTO contents_authority
+    FROM github_server_service_authorities
+    WHERE tenant_id = NEW.tenant_id
+      AND id = NEW.repository_contents_authority_id
+    FOR SHARE;
 
     IF inbox.id IS NULL
         OR repository.id IS NULL
@@ -160,42 +158,32 @@ BEGIN
         OR checks_authority.identity_digest <> NEW.checks_authority_identity_digest
         OR checks_authority.state <> 'active'
         OR checks_authority.created_at_ms > inbox.accepted_at_ms
-        OR (
-            NEW.repository_visibility = 'public'
-            AND NEW.private_source_authority_id IS NOT NULL
-        )
-        OR (
-            NEW.repository_visibility = 'private'
-            AND (
-                private_authority.id IS NULL
-                OR private_authority.repository_id <> NEW.repository_id
-                OR private_authority.provider_connection_id <> NEW.provider_connection_id
-                OR private_authority.provider_installation_id <>
-                    NEW.provider_installation_id
-                OR private_authority.github_app_id <> manifest_pin.github_app_id
-                OR private_authority.github_repository_id <> NEW.github_repository_id
-                OR private_authority.github_repository_name <> NEW.github_repository_name
-                OR private_authority.service_scope <>
-                    'private_repository_source_read'
-                OR private_authority.github_app_client_id <>
-                    manifest_pin.github_app_client_id
-                OR private_authority.github_app_jwt_issuer_kind <>
-                    manifest_pin.github_app_jwt_issuer_kind
-                OR private_authority.app_key_spki_sha256 <>
-                    manifest_pin.app_key_spki_sha256
-                OR private_authority.app_configuration_revision <>
-                    NEW.private_source_authority_app_configuration_revision
-                OR private_authority.app_configuration_revision <>
-                    manifest_pin.app_configuration_revision
-                OR private_authority.policy_revision <>
-                    NEW.private_source_authority_policy_revision
-                OR private_authority.policy_revision <> manifest_pin.policy_revision
-                OR private_authority.identity_digest <>
-                    NEW.private_source_authority_identity_digest
-                OR private_authority.state <> 'active'
-                OR private_authority.created_at_ms > inbox.accepted_at_ms
-            )
-        )
+        OR contents_authority.id IS NULL
+        OR contents_authority.repository_id <> NEW.repository_id
+        OR contents_authority.provider_connection_id <> NEW.provider_connection_id
+        OR contents_authority.provider_installation_id <>
+            NEW.provider_installation_id
+        OR contents_authority.github_app_id <> manifest_pin.github_app_id
+        OR contents_authority.github_repository_id <> NEW.github_repository_id
+        OR contents_authority.github_repository_name <> NEW.github_repository_name
+        OR contents_authority.service_scope <> 'repository_contents_read'
+        OR contents_authority.github_app_client_id <>
+            manifest_pin.github_app_client_id
+        OR contents_authority.github_app_jwt_issuer_kind <>
+            manifest_pin.github_app_jwt_issuer_kind
+        OR contents_authority.app_key_spki_sha256 <>
+            manifest_pin.app_key_spki_sha256
+        OR contents_authority.app_configuration_revision <>
+            NEW.repository_contents_authority_app_configuration_revision
+        OR contents_authority.app_configuration_revision <>
+            manifest_pin.app_configuration_revision
+        OR contents_authority.policy_revision <>
+            NEW.repository_contents_authority_policy_revision
+        OR contents_authority.policy_revision <> manifest_pin.policy_revision
+        OR contents_authority.identity_digest <>
+            NEW.repository_contents_authority_identity_digest
+        OR contents_authority.state <> 'active'
+        OR contents_authority.created_at_ms > inbox.accepted_at_ms
     THEN
         RAISE EXCEPTION 'GitHub delivery evidence is not the exact current manifest and service authority'
             USING ERRCODE = 'integrity_constraint_violation',
@@ -528,7 +516,7 @@ CREATE TABLE github_provider_manifest_revisions (
     CONSTRAINT github_provider_manifest_revisions_origins_exact CHECK (((github_web_origin = 'https://github.com/'::text) AND (github_api_origin = 'https://api.github.com/'::text) AND (github_archive_origin = 'https://codeload.github.com/'::text))),
     CONSTRAINT github_provider_manifest_revisions_owner_id_shape CHECK (((github_repository_owner_id IS NULL) OR (github_repository_owner_id > 0))),
     CONSTRAINT github_provider_manifest_revisions_positive CHECK (((manifest_revision > 0) AND (provider_installation_id > 0) AND (github_repository_id > 0) AND (github_app_id > 0) AND (app_configuration_revision > 0) AND (webhook_verifier_revision > 0) AND (policy_revision > 0))),
-    CONSTRAINT github_provider_manifest_revisions_provider_semantics_exact CHECK (((github_rest_api_version = '2026-03-10'::text) AND (github_rest_accept = 'application/vnd.github+json'::text) AND (github_archive_accept = 'application/octet-stream'::text) AND (((repository_visibility = 'public'::text) AND (repository_source_authentication = 'anonymous_public'::text)) OR ((repository_visibility = 'private'::text) AND (repository_source_authentication = 'github_app_installation_token'::text))) AND (repository_source_revision = 'exact_sha'::text) AND (repository_archive_format = 'tar_gzip'::text))),
+    CONSTRAINT github_provider_manifest_revisions_provider_semantics_exact CHECK (((github_rest_api_version = '2026-03-10'::text) AND (github_rest_accept = 'application/vnd.github+json'::text) AND (github_archive_accept = 'application/octet-stream'::text) AND (((repository_visibility = 'public'::text) AND (repository_source_authentication = 'direct_public_archive'::text)) OR ((repository_visibility = 'private'::text) AND (repository_source_authentication = 'github_app_installation_token'::text))) AND (repository_source_revision = 'exact_sha'::text) AND (repository_archive_format = 'tar_gzip'::text))),
     CONSTRAINT github_provider_manifest_revisions_repository_id_canonical CHECK ((repository_id = automata_github_provider_repository_id(tenant_id, github_repository_id))),
     CONSTRAINT github_provider_manifest_revisions_repository_name CHECK (((array_length(string_to_array(github_repository_name, '/'::text), 1) = 2) AND ((octet_length(split_part(github_repository_name, '/'::text, 1)) >= 1) AND (octet_length(split_part(github_repository_name, '/'::text, 1)) <= 39)) AND (split_part(github_repository_name, '/'::text, 1) ~ '^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$'::text) AND (split_part(github_repository_name, '/'::text, 1) !~ '--'::text) AND ((octet_length(split_part(github_repository_name, '/'::text, 2)) >= 1) AND (octet_length(split_part(github_repository_name, '/'::text, 2)) <= 100)) AND (split_part(github_repository_name, '/'::text, 2) ~ '^[A-Za-z0-9._-]+$'::text) AND (split_part(github_repository_name, '/'::text, 2) <> ALL (ARRAY['.'::text, '..'::text])) AND (split_part(github_repository_name, '/'::text, 2) !~* '[.]git$'::text))),
     CONSTRAINT github_provider_manifest_revisions_runner_policy_shape CHECK (((octet_length(runner_policy_digest) = 32) AND ((octet_length(runner_policy_object_key) >= 1) AND (octet_length(runner_policy_object_key) <= 1024)) AND (btrim(runner_policy_object_key) = runner_policy_object_key) AND (runner_policy_object_key !~ '[[:cntrl:]]'::text) AND (runner_policy_object_key = (('github/runner-policy/v1/'::text || encode(runner_policy_digest, 'hex'::text)) || '.json'::text)) AND ((runner_policy_size_bytes >= 1) AND (runner_policy_size_bytes <= 65536)) AND (runner_policy_media_type = 'application/vnd.automata.github-runner-policy+json'::text))),
@@ -710,9 +698,9 @@ BEGIN
         JOIN github_server_service_authorities AS checks
           ON checks.tenant_id = NEW.tenant_id
          AND checks.id = NEW.checks_authority_id
-        LEFT JOIN github_server_service_authorities AS private_source
-          ON private_source.tenant_id = NEW.tenant_id
-         AND private_source.id = NEW.private_source_authority_id
+        JOIN github_server_service_authorities AS repository_source
+          ON repository_source.tenant_id = NEW.tenant_id
+         AND repository_source.id = NEW.repository_contents_authority_id
         WHERE inbox.id = NEW.provider_delivery_id
           AND inbox.tenant_id = NEW.tenant_id
           AND inbox.provider = 'github'
@@ -747,30 +735,25 @@ BEGIN
           AND checks.policy_revision = manifest.policy_revision
           AND checks.state = 'active'
           AND checks.created_at_ms <= inbox.accepted_at_ms
-          AND (
-              manifest.repository_visibility = 'public'
-              AND NEW.private_source_authority_id IS NULL
-              OR manifest.repository_visibility = 'private'
-              AND private_source.id = NEW.private_source_authority_id
-              AND private_source.repository_id = NEW.repository_id
-              AND private_source.provider_connection_id = manifest.provider_connection_id
-              AND private_source.provider_installation_id = manifest.provider_installation_id
-              AND private_source.github_app_id = manifest.github_app_id
-              AND private_source.github_repository_id = manifest.github_repository_id
-              AND private_source.github_repository_name = manifest.github_repository_name
-              AND private_source.service_scope = 'private_repository_source_read'
-              AND private_source.identity_digest =
-                  NEW.private_source_authority_identity_digest
-              AND private_source.app_configuration_revision =
-                  NEW.private_source_authority_app_configuration_revision
-              AND private_source.app_configuration_revision =
-                  manifest.app_configuration_revision
-              AND private_source.policy_revision =
-                  NEW.private_source_authority_policy_revision
-              AND private_source.policy_revision = manifest.policy_revision
-              AND private_source.state = 'active'
-              AND private_source.created_at_ms <= inbox.accepted_at_ms
-          )
+          AND repository_source.id = NEW.repository_contents_authority_id
+          AND repository_source.repository_id = NEW.repository_id
+          AND repository_source.provider_connection_id = manifest.provider_connection_id
+          AND repository_source.provider_installation_id = manifest.provider_installation_id
+          AND repository_source.github_app_id = manifest.github_app_id
+          AND repository_source.github_repository_id = manifest.github_repository_id
+          AND repository_source.github_repository_name = manifest.github_repository_name
+          AND repository_source.service_scope = 'repository_contents_read'
+          AND repository_source.identity_digest =
+              NEW.repository_contents_authority_identity_digest
+          AND repository_source.app_configuration_revision =
+              NEW.repository_contents_authority_app_configuration_revision
+          AND repository_source.app_configuration_revision =
+              manifest.app_configuration_revision
+          AND repository_source.policy_revision =
+              NEW.repository_contents_authority_policy_revision
+          AND repository_source.policy_revision = manifest.policy_revision
+          AND repository_source.state = 'active'
+          AND repository_source.created_at_ms <= inbox.accepted_at_ms
     ) THEN
         RAISE EXCEPTION 'repository dispatch does not match current provider authority'
             USING ERRCODE = 'integrity_constraint_violation',
@@ -1163,24 +1146,24 @@ CREATE FUNCTION automata_github_runtime_authority_has_provenance(authority githu
          AND checks.app_configuration_revision =
              origin.checks_authority_app_configuration_revision
          AND checks.policy_revision = origin.checks_authority_policy_revision
-        LEFT JOIN github_server_service_authorities AS private_authority
-          ON private_authority.tenant_id = origin.tenant_id
-         AND private_authority.id = origin.private_source_authority_id
-         AND private_authority.repository_id = origin.repository_id
-         AND private_authority.provider_connection_id =
+        JOIN github_server_service_authorities AS contents_authority
+          ON contents_authority.tenant_id = origin.tenant_id
+         AND contents_authority.id = origin.repository_contents_authority_id
+         AND contents_authority.repository_id = origin.repository_id
+         AND contents_authority.provider_connection_id =
              origin.provider_connection_id
-         AND private_authority.provider_installation_id =
+         AND contents_authority.provider_installation_id =
              origin.provider_installation_id
-         AND private_authority.github_repository_id = origin.github_repository_id
-         AND private_authority.github_repository_name =
+         AND contents_authority.github_repository_id = origin.github_repository_id
+         AND contents_authority.github_repository_name =
              origin.github_repository_name
-         AND private_authority.service_scope = 'private_repository_source_read'
-         AND private_authority.identity_digest =
-             origin.private_source_authority_identity_digest
-         AND private_authority.app_configuration_revision =
-             origin.private_source_authority_app_configuration_revision
-         AND private_authority.policy_revision =
-             origin.private_source_authority_policy_revision
+         AND contents_authority.service_scope = 'repository_contents_read'
+         AND contents_authority.identity_digest =
+             origin.repository_contents_authority_identity_digest
+         AND contents_authority.app_configuration_revision =
+             origin.repository_contents_authority_app_configuration_revision
+         AND contents_authority.policy_revision =
+             origin.repository_contents_authority_policy_revision
         JOIN workflow_admission_receipts AS admission
           ON admission.tenant_id = origin.tenant_id
          AND admission.idempotency_kind = origin.admission_idempotency_kind
@@ -1251,23 +1234,16 @@ CREATE FUNCTION automata_github_runtime_authority_has_provenance(authority githu
           AND origin.origin_kind IN (
               'provider_delivery', 'scheduled_fire', 'workflow_rerun'
           )
-          AND (
-              origin.repository_visibility = 'public'
-              AND origin.private_source_authority_id IS NULL
-              AND private_authority.id IS NULL
-              OR origin.repository_visibility = 'private'
-              AND private_authority.id IS NOT NULL
-              AND private_authority.github_app_id = manifest.github_app_id
-              AND private_authority.github_app_client_id =
-                  manifest.github_app_client_id
-              AND private_authority.github_app_jwt_issuer_kind =
-                  manifest.github_app_jwt_issuer_kind
-              AND private_authority.app_key_spki_sha256 =
-                  manifest.app_key_spki_sha256
-              AND private_authority.app_configuration_revision =
-                  manifest.app_configuration_revision
-              AND private_authority.policy_revision = manifest.policy_revision
-          )
+          AND contents_authority.github_app_id = manifest.github_app_id
+          AND contents_authority.github_app_client_id =
+              manifest.github_app_client_id
+          AND contents_authority.github_app_jwt_issuer_kind =
+              manifest.github_app_jwt_issuer_kind
+          AND contents_authority.app_key_spki_sha256 =
+              manifest.app_key_spki_sha256
+          AND contents_authority.app_configuration_revision =
+              manifest.app_configuration_revision
+          AND contents_authority.policy_revision = manifest.policy_revision
           AND origin.provider_connection_id = authority.provider_connection_id
           AND origin.provider_installation_id =
               authority.provider_installation_id

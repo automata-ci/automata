@@ -9,11 +9,11 @@ ALTER TABLE github_server_service_authority_handoffs
             'create_check_run'::text,
             'reconcile_check_run'::text,
             'publish_check_run'::text,
-            'fetch_private_repository_revision'::text,
-            'fetch_private_repository_changed_files'::text,
-            'discover_private_repository_schedules'::text,
+            'fetch_repository_revision'::text,
+            'fetch_repository_changed_files'::text,
+            'discover_repository_schedules'::text,
             'observe_workflow_permission_defaults'::text,
-            'fetch_private_pull_request_files'::text,
+            'fetch_pull_request_files'::text,
             'resolve_workflow_dispatch_source'::text
         ])
     );
@@ -34,10 +34,10 @@ CREATE TABLE workflow_dispatch_source_resolutions (
     provider_connection_id uuid NOT NULL,
     provider_manifest_revision bigint NOT NULL,
     provider_manifest_digest bytea NOT NULL,
-    private_source_authority_id uuid,
-    private_source_authority_identity_digest bytea,
-    private_source_authority_app_configuration_revision bigint,
-    private_source_authority_policy_revision bigint,
+    repository_contents_authority_id uuid NOT NULL,
+    repository_contents_authority_identity_digest bytea NOT NULL,
+    repository_contents_authority_app_configuration_revision bigint NOT NULL,
+    repository_contents_authority_policy_revision bigint NOT NULL,
     state text NOT NULL DEFAULT 'claimed' COLLATE pg_catalog."C",
     claim_owner_id uuid,
     claim_fence bigint NOT NULL DEFAULT 1,
@@ -73,16 +73,10 @@ CREATE TABLE workflow_dispatch_source_resolutions (
         AND github_repository_owner_id > 0
     ),
     CONSTRAINT workflow_dispatch_source_resolutions_authority_shape CHECK (
-        (private_source_authority_id IS NULL
-            AND private_source_authority_identity_digest IS NULL
-            AND private_source_authority_app_configuration_revision IS NULL
-            AND private_source_authority_policy_revision IS NULL)
-        OR
-        (private_source_authority_id IS NOT NULL
-            AND private_source_authority_id <> '00000000-0000-0000-0000-000000000000'::uuid
-            AND octet_length(private_source_authority_identity_digest) = 32
-            AND private_source_authority_app_configuration_revision > 0
-            AND private_source_authority_policy_revision > 0)
+        repository_contents_authority_id <> '00000000-0000-0000-0000-000000000000'::uuid
+        AND octet_length(repository_contents_authority_identity_digest) = 32
+        AND repository_contents_authority_app_configuration_revision > 0
+        AND repository_contents_authority_policy_revision > 0
     ),
     CONSTRAINT workflow_dispatch_source_resolutions_state CHECK (
         state = ANY (ARRAY['claimed'::text, 'retryable'::text, 'resolved'::text])
@@ -143,8 +137,8 @@ CREATE TABLE workflow_dispatch_source_resolutions (
             tenant_id, repository_id, provider_connection_id,
             manifest_revision, manifest_digest
         ) ON DELETE RESTRICT,
-    CONSTRAINT workflow_dispatch_source_resolutions_private_authority_fk
-        FOREIGN KEY (tenant_id, private_source_authority_id)
+    CONSTRAINT workflow_dispatch_source_resolutions_contents_authority_fk
+        FOREIGN KEY (tenant_id, repository_contents_authority_id)
         REFERENCES github_server_service_authorities (tenant_id, id) ON DELETE RESTRICT
 );
 

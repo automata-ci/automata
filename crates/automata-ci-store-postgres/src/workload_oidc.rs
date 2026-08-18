@@ -39,7 +39,7 @@ struct CurrentExecutionRow {
     origin_kind: String,
     origin_id: Uuid,
     repository_visibility: String,
-    private_source_authority_id: Option<Uuid>,
+    repository_contents_authority_id: Uuid,
     invocation_id: Uuid,
     logical_job_id: Uuid,
     instance_id: Uuid,
@@ -668,7 +668,7 @@ async fn lock_current_execution(
                origin.subject_evidence_sha256,
                origin.origin_kind, origin.origin_id,
                origin.repository_visibility,
-               origin.private_source_authority_id,
+               origin.repository_contents_authority_id,
                concrete.invocation_id, concrete.logical_job_id, concrete.instance_id,
                attempt.attempt_number, invocation.plan_digest, run.event_digest,
                concrete.runtime_context_digest, origin.workflow_path,
@@ -837,12 +837,7 @@ async fn lock_current_execution(
               AND origin.github_repository_owner_id IS NOT NULL
               AND origin.github_repository_owner_id > 0
           )
-          AND (
-              origin.repository_visibility = 'public'
-              AND origin.private_source_authority_id IS NULL
-              OR origin.repository_visibility = 'private'
-              AND origin.private_source_authority_id IS NOT NULL
-          )
+          AND origin.repository_contents_authority_id IS NOT NULL
           AND marker.orchestration_schema = $21
           AND marker.state IN ('pending', 'active')
           AND automata_logical_workflow_invocation_published(
@@ -925,7 +920,7 @@ async fn lock_current_execution(
     .map_err(oidc_operation_error)?
     .ok_or(WorkloadOidcStoreError::Unauthorized)?;
     let current = decode_current_execution(&row)?;
-    lock_private_source_authority(transaction, &current).await?;
+    lock_repository_contents_authority(transaction, &current).await?;
     Ok(current)
 }
 
@@ -972,7 +967,7 @@ fn decode_current_execution(
         origin_kind,
         origin_id,
         repository_visibility: field!("repository_visibility"),
-        private_source_authority_id: field!("private_source_authority_id"),
+        repository_contents_authority_id: field!("repository_contents_authority_id"),
         invocation_id: field!("invocation_id"),
         logical_job_id: field!("logical_job_id"),
         instance_id: field!("instance_id"),
@@ -994,60 +989,54 @@ fn decode_current_execution(
     })
 }
 
-async fn lock_private_source_authority(
+async fn lock_repository_contents_authority(
     transaction: &mut Transaction<'_, Postgres>,
     current: &CurrentExecutionRow,
 ) -> Result<(), WorkloadOidcStoreError> {
-    match (
-        current.repository_visibility.as_str(),
-        current.private_source_authority_id,
-    ) {
-        ("public", None) => Ok(()),
-        ("private", Some(authority_id)) => {
-            let exact: bool = sqlx::query_scalar(
-                r"
+    if !matches!(current.repository_visibility.as_str(), "public" | "private") {
+        return Err(WorkloadOidcStoreError::CorruptData);
+    }
+    let exact: bool = sqlx::query_scalar(
+        r"
                 SELECT TRUE
                 FROM github_workflow_run_manifest_origins AS origin
                 JOIN github_server_service_authorities AS authority
                   ON authority.tenant_id = origin.tenant_id
-                 AND authority.id = origin.private_source_authority_id
+                 AND authority.id = origin.repository_contents_authority_id
                  AND authority.repository_id = origin.repository_id
                  AND authority.provider_connection_id = origin.provider_connection_id
                  AND authority.provider_installation_id = origin.provider_installation_id
                  AND authority.github_repository_id = origin.github_repository_id
                  AND authority.github_repository_name = origin.github_repository_name
-                 AND authority.service_scope = 'private_repository_source_read'
+                 AND authority.service_scope = 'repository_contents_read'
                  AND authority.identity_digest =
-                     origin.private_source_authority_identity_digest
+                     origin.repository_contents_authority_identity_digest
                  AND authority.app_configuration_revision =
-                     origin.private_source_authority_app_configuration_revision
+                     origin.repository_contents_authority_app_configuration_revision
                  AND authority.policy_revision =
-                     origin.private_source_authority_policy_revision
+                     origin.repository_contents_authority_policy_revision
                  AND authority.state = 'active'
                 WHERE origin.origin_kind = $1
                   AND origin.origin_id = $2
                   AND origin.tenant_id = $3
                   AND origin.repository_id = $4
-                  AND origin.private_source_authority_id = $5
+                  AND origin.repository_contents_authority_id = $5
                 FOR SHARE OF authority
                 ",
-            )
-            .bind(&current.origin_kind)
-            .bind(current.origin_id)
-            .bind(&current.tenant_id)
-            .bind(current.repository_id)
-            .bind(authority_id)
-            .fetch_optional(&mut **transaction)
-            .await
-            .map_err(oidc_operation_error)?
-            .unwrap_or(false);
-            if exact {
-                Ok(())
-            } else {
-                Err(WorkloadOidcStoreError::Unauthorized)
-            }
-        }
-        _ => Err(WorkloadOidcStoreError::CorruptData),
+    )
+    .bind(&current.origin_kind)
+    .bind(current.origin_id)
+    .bind(&current.tenant_id)
+    .bind(current.repository_id)
+    .bind(current.repository_contents_authority_id)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(oidc_operation_error)?
+    .unwrap_or(false);
+    if exact {
+        Ok(())
+    } else {
+        Err(WorkloadOidcStoreError::Unauthorized)
     }
 }
 

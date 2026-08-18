@@ -1,4 +1,4 @@
--- Frozen greenfield baseline. Add a new migration instead of editing this stage.
+-- Canonical greenfield schema stage.
 SET check_function_bodies = false;
 
 CREATE FUNCTION automata_validate_logical_workflow_job_result_instance() RETURNS trigger
@@ -715,7 +715,7 @@ CREATE FUNCTION automata_validate_workflow_rerun_check_evidence() RETURNS trigge
     AS $$
 DECLARE
     exact BOOLEAN;
-    private_exact BOOLEAN := TRUE;
+    contents_exact BOOLEAN;
 BEGIN
     SELECT TRUE INTO exact
     FROM workflow_rerun_attempts AS attempt
@@ -790,57 +790,48 @@ BEGIN
           NEW.checks_authority_app_configuration_revision
       AND manifest.policy_revision =
           NEW.checks_authority_policy_revision
-      AND (
-          origin.repository_visibility = 'public'
-          AND origin.private_source_authority_id IS NULL
-          AND NEW.private_source_authority_id IS NULL
-          AND NEW.private_source_authority_identity_digest IS NULL
-          AND NEW.private_source_authority_app_configuration_revision IS NULL
-          AND NEW.private_source_authority_policy_revision IS NULL
-          OR origin.repository_visibility = 'private'
-          AND NEW.private_source_authority_id =
-              origin.private_source_authority_id
-          AND NEW.private_source_authority_identity_digest =
-              origin.private_source_authority_identity_digest
-          AND NEW.private_source_authority_app_configuration_revision =
-              origin.private_source_authority_app_configuration_revision
-          AND NEW.private_source_authority_policy_revision =
-              origin.private_source_authority_policy_revision
-          AND EXISTS (
+      AND NEW.repository_contents_authority_id =
+          origin.repository_contents_authority_id
+      AND NEW.repository_contents_authority_identity_digest =
+          origin.repository_contents_authority_identity_digest
+      AND NEW.repository_contents_authority_app_configuration_revision =
+          origin.repository_contents_authority_app_configuration_revision
+      AND NEW.repository_contents_authority_policy_revision =
+          origin.repository_contents_authority_policy_revision
+      AND EXISTS (
               SELECT 1
-              FROM github_server_service_authorities AS private_authority
-              WHERE private_authority.tenant_id = origin.tenant_id
-                AND private_authority.id =
-                    origin.private_source_authority_id
-                AND private_authority.repository_id = origin.repository_id
-                AND private_authority.provider_connection_id =
+              FROM github_server_service_authorities AS contents_authority
+              WHERE contents_authority.tenant_id = origin.tenant_id
+                AND contents_authority.id =
+                    origin.repository_contents_authority_id
+                AND contents_authority.repository_id = origin.repository_id
+                AND contents_authority.provider_connection_id =
                     origin.provider_connection_id
-                AND private_authority.provider_installation_id =
+                AND contents_authority.provider_installation_id =
                     origin.provider_installation_id
-                AND private_authority.github_app_id = manifest.github_app_id
-                AND private_authority.github_repository_id =
+                AND contents_authority.github_app_id = manifest.github_app_id
+                AND contents_authority.github_repository_id =
                     origin.github_repository_id
-                AND private_authority.github_repository_name =
+                AND contents_authority.github_repository_name =
                     origin.github_repository_name
-                AND private_authority.service_scope =
-                    'private_repository_source_read'
-                AND private_authority.github_app_client_id =
+                AND contents_authority.service_scope =
+                    'repository_contents_read'
+                AND contents_authority.github_app_client_id =
                     manifest.github_app_client_id
-                AND private_authority.github_app_jwt_issuer_kind =
+                AND contents_authority.github_app_jwt_issuer_kind =
                     manifest.github_app_jwt_issuer_kind
-                AND private_authority.app_key_spki_sha256 =
+                AND contents_authority.app_key_spki_sha256 =
                     manifest.app_key_spki_sha256
-                AND private_authority.identity_digest =
-                    NEW.private_source_authority_identity_digest
-                AND private_authority.app_configuration_revision =
-                    NEW.private_source_authority_app_configuration_revision
-                AND private_authority.policy_revision =
-                    NEW.private_source_authority_policy_revision
-                AND private_authority.state = 'active'
-                AND private_authority.created_at_ms <= NEW.recorded_at_ms
-                AND private_authority.state_updated_at_ms <= NEW.recorded_at_ms
+                AND contents_authority.identity_digest =
+                    NEW.repository_contents_authority_identity_digest
+                AND contents_authority.app_configuration_revision =
+                    NEW.repository_contents_authority_app_configuration_revision
+                AND contents_authority.policy_revision =
+                    NEW.repository_contents_authority_policy_revision
+                AND contents_authority.state = 'active'
+                AND contents_authority.created_at_ms <= NEW.recorded_at_ms
+                AND contents_authority.state_updated_at_ms <= NEW.recorded_at_ms
           )
-      )
       AND source.tenant_id = NEW.tenant_id
       AND source.repository_id = NEW.repository_id
       AND source.provider_connection_id = NEW.provider_connection_id
@@ -883,8 +874,7 @@ BEGIN
     FOR SHARE OF attempt, request, receipt, run, manifest, authority,
                  source, target;
 
-    IF NEW.private_source_authority_id IS NOT NULL THEN
-        SELECT TRUE INTO private_exact
+    SELECT TRUE INTO contents_exact
         FROM workflow_rerun_attempts AS attempt
         JOIN workflow_rerun_requests AS request
           ON request.tenant_id = NEW.tenant_id
@@ -900,50 +890,48 @@ BEGIN
          AND manifest.provider_connection_id = origin.provider_connection_id
          AND manifest.manifest_revision = origin.provider_manifest_revision
          AND manifest.manifest_digest = origin.provider_manifest_digest
-        JOIN github_server_service_authorities AS private_authority
-          ON private_authority.tenant_id = origin.tenant_id
-         AND private_authority.id = NEW.private_source_authority_id
-         AND private_authority.repository_id = origin.repository_id
-         AND private_authority.provider_connection_id =
+        JOIN github_server_service_authorities AS contents_authority
+          ON contents_authority.tenant_id = origin.tenant_id
+         AND contents_authority.id = NEW.repository_contents_authority_id
+         AND contents_authority.repository_id = origin.repository_id
+         AND contents_authority.provider_connection_id =
              origin.provider_connection_id
-         AND private_authority.provider_installation_id =
+         AND contents_authority.provider_installation_id =
              origin.provider_installation_id
-         AND private_authority.github_app_id = manifest.github_app_id
-         AND private_authority.github_repository_id =
+         AND contents_authority.github_app_id = manifest.github_app_id
+         AND contents_authority.github_repository_id =
              origin.github_repository_id
-         AND private_authority.github_repository_name =
+         AND contents_authority.github_repository_name =
              origin.github_repository_name
-         AND private_authority.service_scope =
-             'private_repository_source_read'
-         AND private_authority.github_app_client_id =
+         AND contents_authority.service_scope =
+             'repository_contents_read'
+         AND contents_authority.github_app_client_id =
              manifest.github_app_client_id
-         AND private_authority.github_app_jwt_issuer_kind =
+         AND contents_authority.github_app_jwt_issuer_kind =
              manifest.github_app_jwt_issuer_kind
-         AND private_authority.app_key_spki_sha256 =
+         AND contents_authority.app_key_spki_sha256 =
              manifest.app_key_spki_sha256
-         AND private_authority.identity_digest =
-             NEW.private_source_authority_identity_digest
-         AND private_authority.app_configuration_revision =
-             NEW.private_source_authority_app_configuration_revision
-         AND private_authority.policy_revision =
-             NEW.private_source_authority_policy_revision
-         AND private_authority.state = 'active'
-         AND private_authority.created_at_ms <= NEW.recorded_at_ms
-         AND private_authority.state_updated_at_ms <= NEW.recorded_at_ms
+         AND contents_authority.identity_digest =
+             NEW.repository_contents_authority_identity_digest
+         AND contents_authority.app_configuration_revision =
+             NEW.repository_contents_authority_app_configuration_revision
+         AND contents_authority.policy_revision =
+             NEW.repository_contents_authority_policy_revision
+         AND contents_authority.state = 'active'
+         AND contents_authority.created_at_ms <= NEW.recorded_at_ms
+         AND contents_authority.state_updated_at_ms <= NEW.recorded_at_ms
         WHERE attempt.run_id = NEW.run_id
-          AND origin.repository_visibility = 'private'
-          AND origin.private_source_authority_id =
-              NEW.private_source_authority_id
-          AND origin.private_source_authority_identity_digest =
-              NEW.private_source_authority_identity_digest
-          AND origin.private_source_authority_app_configuration_revision =
-              NEW.private_source_authority_app_configuration_revision
-          AND origin.private_source_authority_policy_revision =
-              NEW.private_source_authority_policy_revision
-        FOR SHARE OF manifest, private_authority;
-    END IF;
+          AND origin.repository_contents_authority_id =
+              NEW.repository_contents_authority_id
+          AND origin.repository_contents_authority_identity_digest =
+              NEW.repository_contents_authority_identity_digest
+          AND origin.repository_contents_authority_app_configuration_revision =
+              NEW.repository_contents_authority_app_configuration_revision
+          AND origin.repository_contents_authority_policy_revision =
+              NEW.repository_contents_authority_policy_revision
+        FOR SHARE OF manifest, contents_authority;
 
-    IF exact IS DISTINCT FROM TRUE OR private_exact IS DISTINCT FROM TRUE THEN
+    IF exact IS DISTINCT FROM TRUE OR contents_exact IS DISTINCT FROM TRUE THEN
         RAISE EXCEPTION 'workflow rerun Check evidence is not exact'
             USING ERRCODE = 'integrity_constraint_violation',
                   CONSTRAINT = 'workflow_rerun_check_evidence_exact';

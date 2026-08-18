@@ -1,4 +1,4 @@
--- Frozen greenfield baseline. Add a new migration instead of editing this stage.
+-- Canonical greenfield schema stage.
 SET check_function_bodies = false;
 
 CREATE FUNCTION automata_guard_github_schedule_discovery_claim_insert() RETURNS trigger
@@ -25,13 +25,11 @@ BEGIN
        AND revision.manifest_revision = NEW.manifest_revision
        AND revision.manifest_digest = NEW.manifest_digest
      FOR SHARE OF revision, current;
-    IF NEW.source_authority_kind = 'private_repository_source_read' THEN
-        SELECT * INTO authority
-          FROM github_server_service_authorities
-         WHERE tenant_id = NEW.tenant_id
-           AND id = NEW.private_source_authority_id
-         FOR SHARE;
-    END IF;
+    SELECT * INTO authority
+      FROM github_server_service_authorities
+     WHERE tenant_id = NEW.tenant_id
+       AND id = NEW.repository_contents_authority_id
+     FOR SHARE;
     IF manifest.provider_connection_id IS NULL
         OR manifest.github_repository_owner_id IS NULL
         OR manifest.github_repository_owner_id <> NEW.github_repository_owner_id
@@ -39,31 +37,26 @@ BEGIN
         OR observed_at_ms - NEW.claimed_at_ms > 60000
         OR NEW.claim_expires_at_ms <= observed_at_ms
         OR (
-            NEW.source_authority_kind = 'public_anonymous'
-            AND manifest.repository_visibility <> 'public'
-        )
-        OR (
-            NEW.source_authority_kind = 'private_repository_source_read'
+            NEW.source_authority_kind = 'repository_contents_read'
             AND (
-                manifest.repository_visibility <> 'private'
-                OR authority.id IS NULL
+                authority.id IS NULL
                 OR authority.repository_id <> NEW.repository_id
                 OR authority.provider_connection_id <> NEW.provider_connection_id
                 OR authority.provider_installation_id <> manifest.provider_installation_id
                 OR authority.github_app_id <> manifest.github_app_id
                 OR authority.github_repository_id <> manifest.github_repository_id
                 OR authority.github_repository_name <> manifest.github_repository_name
-                OR authority.service_scope <> 'private_repository_source_read'
+                OR authority.service_scope <> 'repository_contents_read'
                 OR authority.github_app_client_id <> manifest.github_app_client_id
                 OR authority.github_app_jwt_issuer_kind <>
                     manifest.github_app_jwt_issuer_kind
                 OR authority.app_key_spki_sha256 <> manifest.app_key_spki_sha256
                 OR authority.app_configuration_revision <>
-                    NEW.private_source_authority_app_configuration_revision
+                    NEW.repository_contents_authority_app_configuration_revision
                 OR authority.app_configuration_revision <> manifest.app_configuration_revision
-                OR authority.policy_revision <> NEW.private_source_authority_policy_revision
+                OR authority.policy_revision <> NEW.repository_contents_authority_policy_revision
                 OR authority.policy_revision <> manifest.policy_revision
-                OR authority.identity_digest <> NEW.private_source_authority_identity_digest
+                OR authority.identity_digest <> NEW.repository_contents_authority_identity_digest
                 OR authority.state <> 'active'
                 OR authority.created_at_ms > NEW.claimed_at_ms
             )
@@ -95,13 +88,13 @@ BEGIN
         OR NEW.manifest_digest IS DISTINCT FROM OLD.manifest_digest
         OR NEW.github_repository_owner_id IS DISTINCT FROM OLD.github_repository_owner_id
         OR NEW.source_authority_kind IS DISTINCT FROM OLD.source_authority_kind
-        OR NEW.private_source_authority_id IS DISTINCT FROM OLD.private_source_authority_id
-        OR NEW.private_source_authority_identity_digest IS DISTINCT FROM
-            OLD.private_source_authority_identity_digest
-        OR NEW.private_source_authority_app_configuration_revision IS DISTINCT FROM
-            OLD.private_source_authority_app_configuration_revision
-        OR NEW.private_source_authority_policy_revision IS DISTINCT FROM
-            OLD.private_source_authority_policy_revision
+        OR NEW.repository_contents_authority_id IS DISTINCT FROM OLD.repository_contents_authority_id
+        OR NEW.repository_contents_authority_identity_digest IS DISTINCT FROM
+            OLD.repository_contents_authority_identity_digest
+        OR NEW.repository_contents_authority_app_configuration_revision IS DISTINCT FROM
+            OLD.repository_contents_authority_app_configuration_revision
+        OR NEW.repository_contents_authority_policy_revision IS DISTINCT FROM
+            OLD.repository_contents_authority_policy_revision
         OR NEW.claim_owner_id IS DISTINCT FROM OLD.claim_owner_id
         OR NEW.claim_fence IS DISTINCT FROM OLD.claim_fence
         OR NEW.claimed_at_ms IS DISTINCT FROM OLD.claimed_at_ms
@@ -292,14 +285,14 @@ BEGIN
         OR discovery.manifest_digest <> NEW.manifest_digest
         OR discovery.github_repository_owner_id <> NEW.github_repository_owner_id
         OR discovery.source_authority_kind <> NEW.source_authority_kind
-        OR discovery.private_source_authority_id IS DISTINCT FROM
-            NEW.private_source_authority_id
-        OR discovery.private_source_authority_identity_digest IS DISTINCT FROM
-            NEW.private_source_authority_identity_digest
-        OR discovery.private_source_authority_app_configuration_revision IS DISTINCT FROM
-            NEW.private_source_authority_app_configuration_revision
-        OR discovery.private_source_authority_policy_revision IS DISTINCT FROM
-            NEW.private_source_authority_policy_revision
+        OR discovery.repository_contents_authority_id IS DISTINCT FROM
+            NEW.repository_contents_authority_id
+        OR discovery.repository_contents_authority_identity_digest IS DISTINCT FROM
+            NEW.repository_contents_authority_identity_digest
+        OR discovery.repository_contents_authority_app_configuration_revision IS DISTINCT FROM
+            NEW.repository_contents_authority_app_configuration_revision
+        OR discovery.repository_contents_authority_policy_revision IS DISTINCT FROM
+            NEW.repository_contents_authority_policy_revision
     THEN
         RAISE EXCEPTION 'GitHub schedule registry lacks an exact live discovery claim'
             USING ERRCODE = 'integrity_constraint_violation',
@@ -329,38 +322,32 @@ BEGIN
                   CONSTRAINT = 'github_schedule_registry_source_authority_exact';
     END IF;
 
-    IF NEW.source_authority_kind = 'private_repository_source_read' THEN
-        SELECT * INTO authority
-          FROM github_server_service_authorities
-         WHERE tenant_id = NEW.tenant_id
-           AND id = NEW.private_source_authority_id
-         FOR SHARE;
-    END IF;
+    SELECT * INTO authority
+      FROM github_server_service_authorities
+     WHERE tenant_id = NEW.tenant_id
+       AND id = NEW.repository_contents_authority_id
+     FOR SHARE;
     IF (
-        NEW.source_authority_kind = 'public_anonymous'
-        AND manifest.repository_visibility <> 'public'
-    ) OR (
-        NEW.source_authority_kind = 'private_repository_source_read'
+        NEW.source_authority_kind = 'repository_contents_read'
         AND (
-            manifest.repository_visibility <> 'private'
-            OR authority.id IS NULL
+            authority.id IS NULL
             OR authority.repository_id <> NEW.repository_id
             OR authority.provider_connection_id <> NEW.provider_connection_id
             OR authority.provider_installation_id <> manifest.provider_installation_id
             OR authority.github_app_id <> manifest.github_app_id
             OR authority.github_repository_id <> manifest.github_repository_id
             OR authority.github_repository_name <> manifest.github_repository_name
-            OR authority.service_scope <> 'private_repository_source_read'
+            OR authority.service_scope <> 'repository_contents_read'
             OR authority.github_app_client_id <> manifest.github_app_client_id
             OR authority.github_app_jwt_issuer_kind <>
                 manifest.github_app_jwt_issuer_kind
             OR authority.app_key_spki_sha256 <> manifest.app_key_spki_sha256
             OR authority.app_configuration_revision <>
-                NEW.private_source_authority_app_configuration_revision
+                NEW.repository_contents_authority_app_configuration_revision
             OR authority.app_configuration_revision <> manifest.app_configuration_revision
-            OR authority.policy_revision <> NEW.private_source_authority_policy_revision
+            OR authority.policy_revision <> NEW.repository_contents_authority_policy_revision
             OR authority.policy_revision <> manifest.policy_revision
-            OR authority.identity_digest <> NEW.private_source_authority_identity_digest
+            OR authority.identity_digest <> NEW.repository_contents_authority_identity_digest
             OR authority.state <> 'active'
             OR authority.created_at_ms > NEW.discovered_at_ms
         )

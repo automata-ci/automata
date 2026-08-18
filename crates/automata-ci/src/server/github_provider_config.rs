@@ -1,6 +1,9 @@
 //! Validated runtime projection of database-backed GitHub provider desired state.
 
-use std::{collections::BTreeSet, fmt, str::FromStr as _, sync::Arc};
+use std::{collections::BTreeSet, fmt, sync::Arc};
+
+#[cfg(test)]
+use std::str::FromStr as _;
 
 use automata_ci_core::JobAuthorityProfile;
 use automata_ci_core::WorkspaceId;
@@ -16,19 +19,26 @@ use automata_ci_store::{
     WorkflowRuntimePolicyRevision, github_provider_repository_id,
 };
 use automata_ci_workflow_service::GithubRunnerPolicy;
+#[cfg(test)]
 use serde::Deserialize;
+#[cfg(test)]
 use serde_json::value::RawValue;
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
-use url::{Host, Url};
+#[cfg(test)]
+use url::Host;
+use url::Url;
 use zeroize::Zeroizing;
 
+#[cfg(test)]
 use super::SecretSource;
 
+#[cfg(test)]
 const MAX_GITHUB_PROVIDER_TEST_FIXTURE_BYTES: usize = 512 * 1_024;
 /// Maximum exact repositories served by one shared GitHub webhook authority.
 pub use automata_ci_provisioning::MAX_GITHUB_PROVIDER_REPOSITORIES;
 
+#[cfg(test)]
 const CONFIG_SCHEMA: u16 = 4;
 const DATABASE_CONNECTION_ID_DOMAIN: &[u8] =
     b"automata-ci/github-provider/database-connection/v1\0";
@@ -43,6 +53,7 @@ pub struct GithubProviderConfigError;
 struct ConfiguredUuid([u8; 16]);
 
 impl ConfiguredUuid {
+    #[cfg(test)]
     fn parse(value: &str) -> Result<Self, GithubProviderConfigError> {
         if value.len() != 36 {
             return Err(GithubProviderConfigError);
@@ -97,6 +108,7 @@ macro_rules! configured_uuid {
         pub struct $name(ConfiguredUuid);
 
         impl $name {
+            #[cfg(test)]
             fn parse(value: &str) -> Result<Self, GithubProviderConfigError> {
                 ConfiguredUuid::parse(value).map(Self)
             }
@@ -166,12 +178,10 @@ pub struct GithubProviderConfig {
 }
 
 impl GithubProviderConfig {
-    /// Loads a bounded legacy configuration fixture for protocol-emulator tests.
+    /// Loads a bounded canonical configuration fixture for provider tests.
     ///
     /// Production server composition never calls this function and has no JSON
-    /// provider input. It remains public only because the external GitHub
-    /// emulator matrix constructs historical topology fixtures in a separate
-    /// integration-test crate.
+    /// provider input.
     ///
     /// # Errors
     ///
@@ -179,7 +189,10 @@ impl GithubProviderConfig {
     /// JSON, unknown fields, unsupported schema, invalid typed values, an
     /// incoherent visibility/authority shape, or duplicate identities.
     #[doc(hidden)]
-    pub fn load_test_fixture(source: &SecretSource) -> Result<Self, GithubProviderConfigError> {
+    #[cfg(test)]
+    pub(crate) fn load_test_fixture(
+        source: &SecretSource,
+    ) -> Result<Self, GithubProviderConfigError> {
         let bytes = source
             .load_bytes(MAX_GITHUB_PROVIDER_TEST_FIXTURE_BYTES)
             .map_err(|_| GithubProviderConfigError)?;
@@ -188,6 +201,7 @@ impl GithubProviderConfig {
         Self::from_raw(raw)
     }
 
+    #[cfg(test)]
     fn from_raw(raw: RawConfig) -> Result<Self, GithubProviderConfigError> {
         if raw.schema != CONFIG_SCHEMA
             || raw.repositories.is_empty()
@@ -452,16 +466,6 @@ fn database_repository_config(
     let runtime_policy_revision = WorkflowRuntimePolicyRevision::new(projected_revision)
         .map_err(|_| GithubProviderConfigError)?;
     let visibility = selected.visibility();
-    let private_source_authority = match visibility {
-        ProviderRepositoryVisibility::Public => None,
-        ProviderRepositoryVisibility::Private => Some(authority(b"private-source-read")),
-    };
-    let private_pull_request_files_authority = match visibility {
-        ProviderRepositoryVisibility::Public => None,
-        ProviderRepositoryVisibility::Private => {
-            Some(authority(b"private-pull-request-files-read"))
-        }
-    };
     Ok(GithubProviderRepositoryConfig {
         tenant: tenant.clone(),
         internal_repository_id: GithubProviderInternalRepositoryId::derive(&tenant, repository_id),
@@ -483,11 +487,12 @@ fn database_repository_config(
         check_name: check_name.clone(),
         checks_write_authority: authority(b"checks-write"),
         workflow_permissions_authority: authority(b"workflow-permissions-read"),
-        private_source_authority,
-        private_pull_request_files_authority,
+        repository_contents_authority: authority(b"repository-contents-read"),
+        pull_requests_authority: authority(b"pull-requests-read"),
     })
 }
 
+#[cfg(test)]
 fn validate_dashboard_url(
     value: &str,
     transport: &GithubProviderTransport,
@@ -539,6 +544,7 @@ pub enum GithubProviderTransport {
 }
 
 impl GithubProviderTransport {
+    #[cfg(test)]
     fn validate(raw: RawTransport) -> Result<Self, GithubProviderConfigError> {
         match raw {
             RawTransport::GithubDotCom => Ok(Self::GithubDotCom),
@@ -595,6 +601,7 @@ impl fmt::Debug for GithubProviderTransport {
     }
 }
 
+#[cfg(test)]
 fn valid_loopback_api_base(url: &Url) -> bool {
     let loopback = match url.host() {
         Some(Host::Domain(domain)) => {
@@ -618,6 +625,7 @@ fn valid_loopback_api_base(url: &Url) -> bool {
         && url.fragment().is_none()
 }
 
+#[cfg(test)]
 fn valid_mapped_job_runtime_origin(url: &Url) -> bool {
     url.scheme() == "http"
         && url.host_str().is_some_and(|host| {
@@ -637,6 +645,7 @@ fn valid_mapped_job_runtime_origin(url: &Url) -> bool {
 pub struct GithubProviderScheduleConfig(GithubScheduleServiceConfig);
 
 impl GithubProviderScheduleConfig {
+    #[cfg(test)]
     fn validate(raw: Option<RawSchedule>) -> Result<Self, GithubProviderConfigError> {
         let defaults = GithubScheduleServiceConfig::default();
         let raw = raw.unwrap_or_default();
@@ -689,6 +698,7 @@ pub struct GithubProviderAppConfig {
 }
 
 impl GithubProviderAppConfig {
+    #[cfg(test)]
     fn validate(raw: RawApp) -> Result<Self, GithubProviderConfigError> {
         let RawApp {
             id,
@@ -756,6 +766,7 @@ pub struct GithubProviderWebhookConfig {
 }
 
 impl GithubProviderWebhookConfig {
+    #[cfg(test)]
     fn validate(raw: RawWebhook) -> Result<Self, GithubProviderConfigError> {
         let RawWebhook {
             hmac_secret_source,
@@ -788,7 +799,7 @@ impl fmt::Debug for GithubProviderWebhookConfig {
     }
 }
 
-/// Exact configured repository and its visibility-dependent service authorities.
+/// Exact configured repository and its least-privilege service authorities.
 #[derive(Clone, Eq, PartialEq)]
 pub struct GithubProviderRepositoryConfig {
     tenant: TenantScope,
@@ -811,11 +822,12 @@ pub struct GithubProviderRepositoryConfig {
     check_name: GithubCheckName,
     checks_write_authority: GithubProviderAuthorityConfig,
     workflow_permissions_authority: GithubProviderAuthorityConfig,
-    private_source_authority: Option<GithubProviderAuthorityConfig>,
-    private_pull_request_files_authority: Option<GithubProviderAuthorityConfig>,
+    repository_contents_authority: GithubProviderAuthorityConfig,
+    pull_requests_authority: GithubProviderAuthorityConfig,
 }
 
 impl GithubProviderRepositoryConfig {
+    #[cfg(test)]
     fn validate(raw: RawRepository) -> Result<Self, GithubProviderConfigError> {
         let tenant = TenantScope::from_authenticated_tenant_id(raw.tenant_id)
             .map_err(|_| GithubProviderConfigError)?;
@@ -865,24 +877,19 @@ impl GithubProviderRepositoryConfig {
         let RawAuthorities {
             checks_write,
             workflow_permissions_read,
-            private_repository_source_read,
-            private_pull_request_files_read,
+            repository_contents_read,
+            pull_requests_read,
         } = raw.authorities;
         let checks_write_authority = GithubProviderAuthorityConfig::validate(&checks_write)?;
         let workflow_permissions_authority =
             GithubProviderAuthorityConfig::validate(&workflow_permissions_read)?;
-        let private_source_authority =
-            validate_private_authority(visibility, private_repository_source_read)?;
-        let private_pull_request_files_authority =
-            validate_private_authority(visibility, private_pull_request_files_read)?;
+        let repository_contents_authority =
+            GithubProviderAuthorityConfig::validate(&repository_contents_read)?;
+        let pull_requests_authority = GithubProviderAuthorityConfig::validate(&pull_requests_read)?;
         if checks_write_authority.policy_revision != policy_revision
             || workflow_permissions_authority.policy_revision != policy_revision
-            || private_source_authority
-                .as_ref()
-                .is_some_and(|authority| authority.policy_revision != policy_revision)
-            || private_pull_request_files_authority
-                .as_ref()
-                .is_some_and(|authority| authority.policy_revision != policy_revision)
+            || repository_contents_authority.policy_revision != policy_revision
+            || pull_requests_authority.policy_revision != policy_revision
         {
             return Err(GithubProviderConfigError);
         }
@@ -907,8 +914,8 @@ impl GithubProviderRepositoryConfig {
             check_name,
             checks_write_authority,
             workflow_permissions_authority,
-            private_source_authority,
-            private_pull_request_files_authority,
+            repository_contents_authority,
+            pull_requests_authority,
         })
     }
 
@@ -1032,34 +1039,16 @@ impl GithubProviderRepositoryConfig {
         &self.workflow_permissions_authority
     }
 
-    /// Returns the exact private-source authority only for a Private repository.
+    /// Returns the mandatory exact repository-contents-read authority.
     #[must_use]
-    pub const fn private_source_authority(&self) -> Option<&GithubProviderAuthorityConfig> {
-        self.private_source_authority.as_ref()
+    pub const fn repository_contents_authority(&self) -> &GithubProviderAuthorityConfig {
+        &self.repository_contents_authority
     }
 
-    /// Returns the exact private pull-request-files authority only for a Private repository.
+    /// Returns the mandatory exact pull-requests-read authority.
     #[must_use]
-    pub const fn private_pull_request_files_authority(
-        &self,
-    ) -> Option<&GithubProviderAuthorityConfig> {
-        self.private_pull_request_files_authority.as_ref()
-    }
-}
-
-fn validate_private_authority(
-    visibility: ProviderRepositoryVisibility,
-    raw: RawPrivateAuthority,
-) -> Result<Option<GithubProviderAuthorityConfig>, GithubProviderConfigError> {
-    match (visibility, raw) {
-        (ProviderRepositoryVisibility::Public, RawPrivateAuthority::Null(())) => Ok(None),
-        (ProviderRepositoryVisibility::Private, RawPrivateAuthority::Authority(authority)) => {
-            GithubProviderAuthorityConfig::validate(&authority).map(Some)
-        }
-        (ProviderRepositoryVisibility::Public, RawPrivateAuthority::Authority(_))
-        | (ProviderRepositoryVisibility::Private, RawPrivateAuthority::Null(())) => {
-            Err(GithubProviderConfigError)
-        }
+    pub const fn pull_requests_authority(&self) -> &GithubProviderAuthorityConfig {
+        &self.pull_requests_authority
     }
 }
 
@@ -1092,11 +1081,11 @@ impl fmt::Debug for GithubProviderRepositoryConfig {
                 "workflow_permissions_authority",
                 &self.workflow_permissions_authority,
             )
-            .field("private_source_authority", &self.private_source_authority)
             .field(
-                "private_pull_request_files_authority",
-                &self.private_pull_request_files_authority,
+                "repository_contents_authority",
+                &self.repository_contents_authority,
             )
+            .field("pull_requests_authority", &self.pull_requests_authority)
             .finish_non_exhaustive()
     }
 }
@@ -1109,6 +1098,7 @@ pub struct GithubProviderAuthorityConfig {
 }
 
 impl GithubProviderAuthorityConfig {
+    #[cfg(test)]
     fn validate(raw: &RawAuthority) -> Result<Self, GithubProviderConfigError> {
         Ok(Self {
             authority_id: GithubProviderAuthorityId::parse(&raw.authority_id)?,
@@ -1140,6 +1130,7 @@ impl fmt::Debug for GithubProviderAuthorityConfig {
     }
 }
 
+#[cfg(test)]
 fn parse_secret_source(value: &str) -> Result<SecretSource, GithubProviderConfigError> {
     let source = SecretSource::from_str(value).unwrap_or(SecretSource::Invalid);
     if matches!(source, SecretSource::Environment(_) | SecretSource::File(_)) {
@@ -1166,14 +1157,8 @@ fn validate_unique_repositories(
             || !internal_repository_ids.insert(repository.internal_repository_id)
             || !authority_ids.insert(repository.checks_write_authority.authority_id)
             || !authority_ids.insert(repository.workflow_permissions_authority.authority_id)
-            || repository
-                .private_source_authority
-                .as_ref()
-                .is_some_and(|authority| !authority_ids.insert(authority.authority_id))
-            || repository
-                .private_pull_request_files_authority
-                .as_ref()
-                .is_some_and(|authority| !authority_ids.insert(authority.authority_id))
+            || !authority_ids.insert(repository.repository_contents_authority.authority_id)
+            || !authority_ids.insert(repository.pull_requests_authority.authority_id)
         {
             return Err(GithubProviderConfigError);
         }
@@ -1181,6 +1166,7 @@ fn validate_unique_repositories(
     Ok(())
 }
 
+#[cfg(test)]
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawConfig {
@@ -1194,6 +1180,7 @@ struct RawConfig {
     repositories: Vec<RawRepository>,
 }
 
+#[cfg(test)]
 #[derive(Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
 enum RawTransport {
@@ -1204,6 +1191,7 @@ enum RawTransport {
     },
 }
 
+#[cfg(test)]
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawSchedule {
@@ -1216,6 +1204,7 @@ struct RawSchedule {
     maximum_fires_per_pass: Option<u16>,
 }
 
+#[cfg(test)]
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawApp {
@@ -1226,6 +1215,7 @@ struct RawApp {
     configuration_revision: u64,
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum RawJwtIssuer {
@@ -1233,6 +1223,7 @@ enum RawJwtIssuer {
     AppClientId,
 }
 
+#[cfg(test)]
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawWebhook {
@@ -1240,6 +1231,7 @@ struct RawWebhook {
     verifier_revision: u64,
 }
 
+#[cfg(test)]
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawRepository {
@@ -1262,6 +1254,7 @@ struct RawRepository {
     authorities: RawAuthorities,
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum RawVisibility {
@@ -1269,6 +1262,7 @@ enum RawVisibility {
     Private,
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum RawAuthorityProfile {
@@ -1276,22 +1270,17 @@ enum RawAuthorityProfile {
     CredentialFree,
 }
 
+#[cfg(test)]
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawAuthorities {
     checks_write: RawAuthority,
     workflow_permissions_read: RawAuthority,
-    private_repository_source_read: RawPrivateAuthority,
-    private_pull_request_files_read: RawPrivateAuthority,
+    repository_contents_read: RawAuthority,
+    pull_requests_read: RawAuthority,
 }
 
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum RawPrivateAuthority {
-    Authority(RawAuthority),
-    Null(()),
-}
-
+#[cfg(test)]
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawAuthority {

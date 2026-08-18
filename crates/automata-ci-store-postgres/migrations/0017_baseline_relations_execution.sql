@@ -413,10 +413,10 @@ CREATE TABLE github_provider_delivery_evidence (
     checks_authority_identity_digest bytea CONSTRAINT github_provider_delivery_ev_checks_authority_identity__not_null NOT NULL,
     checks_authority_app_configuration_revision bigint CONSTRAINT github_provider_delivery_ev_checks_authority_app_confi_not_null NOT NULL,
     checks_authority_policy_revision bigint CONSTRAINT github_provider_delivery_ev_checks_authority_policy_re_not_null NOT NULL,
-    private_source_authority_id uuid,
-    private_source_authority_identity_digest bytea,
-    private_source_authority_app_configuration_revision bigint,
-    private_source_authority_policy_revision bigint,
+    repository_contents_authority_id uuid NOT NULL,
+    repository_contents_authority_identity_digest bytea NOT NULL,
+    repository_contents_authority_app_configuration_revision bigint NOT NULL,
+    repository_contents_authority_policy_revision bigint NOT NULL,
     github_check_subject_id uuid CONSTRAINT github_provider_delivery_evide_github_check_subject_id_not_null NOT NULL,
     github_check_head_sha bytea CONSTRAINT github_provider_delivery_evidenc_github_check_head_sha_not_null NOT NULL,
     authenticated_event_envelope_version smallint NOT NULL,
@@ -424,11 +424,11 @@ CREATE TABLE github_provider_delivery_evidence (
     authenticated_event_git_ref text NOT NULL COLLATE pg_catalog."C",
     authenticated_event_source_revision bytea,
     authenticated_event_source_authority text COLLATE pg_catalog."C",
-    CONSTRAINT github_provider_delivery_evidence_authenticated_event CHECK ((((authenticated_event_envelope_version = 1) AND (authenticated_event_name = ANY (ARRAY['push'::text, 'pull_request'::text, 'merge_group'::text])) AND ((octet_length(authenticated_event_git_ref) >= 6) AND (octet_length(authenticated_event_git_ref) <= 1024)) AND (authenticated_event_git_ref ~~ 'refs/%'::text) AND (authenticated_event_git_ref !~ '[[:cntrl:]]'::text) AND (authenticated_event_source_revision IS NULL) AND (authenticated_event_source_authority IS NULL)) OR ((authenticated_event_envelope_version = 1) AND (authenticated_event_name = 'repository_dispatch'::text) AND ((octet_length(authenticated_event_git_ref) >= 12) AND (octet_length(authenticated_event_git_ref) <= 1024)) AND (authenticated_event_git_ref ~~ 'refs/heads/%'::text) AND (authenticated_event_git_ref !~ '[[:cntrl:]]'::text) AND (octet_length(authenticated_event_source_revision) = 20) AND (authenticated_event_source_revision <> decode(repeat('00'::text, 20), 'hex'::text)) AND (((repository_visibility = 'public'::text) AND (authenticated_event_source_authority = 'public_anonymous'::text)) OR ((repository_visibility = 'private'::text) AND (authenticated_event_source_authority = 'private_source_authority'::text)))))),
-    CONSTRAINT github_provider_delivery_evidence_digest_shape CHECK (((octet_length(provider_manifest_digest) = 32) AND (octet_length(authenticated_webhook_verifier_fingerprint_sha256) = 32) AND (authenticated_webhook_verifier_fingerprint_sha256 <> decode(repeat('00'::text, 32), 'hex'::text)) AND (octet_length(checks_authority_identity_digest) = 32) AND ((private_source_authority_identity_digest IS NULL) OR (octet_length(private_source_authority_identity_digest) = 32)) AND (octet_length(github_check_head_sha) = 20) AND (github_check_head_sha <> decode(repeat('00'::text, 20), 'hex'::text)))),
-    CONSTRAINT github_provider_delivery_evidence_non_nil CHECK (((provider_delivery_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (repository_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (provider_connection_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (checks_authority_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (github_check_subject_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND ((private_source_authority_id IS NULL) OR (private_source_authority_id <> '00000000-0000-0000-0000-000000000000'::uuid)))),
-    CONSTRAINT github_provider_delivery_evidence_positive CHECK (((provider_installation_id > 0) AND (github_repository_id > 0) AND (github_repository_owner_id > 0) AND (provider_manifest_revision > 0) AND (authenticated_webhook_verifier_revision > 0) AND (checks_authority_app_configuration_revision > 0) AND (checks_authority_policy_revision > 0) AND ((private_source_authority_id IS NULL) OR ((private_source_authority_app_configuration_revision > 0) AND (private_source_authority_policy_revision > 0))))),
-    CONSTRAINT github_provider_delivery_evidence_private_selector_shape CHECK ((((repository_visibility = 'public'::text) AND (private_source_authority_id IS NULL) AND (private_source_authority_identity_digest IS NULL) AND (private_source_authority_app_configuration_revision IS NULL) AND (private_source_authority_policy_revision IS NULL)) OR ((repository_visibility = 'private'::text) AND (private_source_authority_id IS NOT NULL) AND (private_source_authority_identity_digest IS NOT NULL) AND (private_source_authority_app_configuration_revision IS NOT NULL) AND (private_source_authority_policy_revision IS NOT NULL) AND (private_source_authority_id <> checks_authority_id) AND (private_source_authority_identity_digest <> checks_authority_identity_digest)))),
+    CONSTRAINT github_provider_delivery_evidence_authenticated_event CHECK ((((authenticated_event_envelope_version = 1) AND (authenticated_event_name = ANY (ARRAY['push'::text, 'pull_request'::text, 'merge_group'::text])) AND ((octet_length(authenticated_event_git_ref) >= 6) AND (octet_length(authenticated_event_git_ref) <= 1024)) AND (authenticated_event_git_ref ~~ 'refs/%'::text) AND (authenticated_event_git_ref !~ '[[:cntrl:]]'::text) AND (authenticated_event_source_revision IS NULL) AND (authenticated_event_source_authority IS NULL)) OR ((authenticated_event_envelope_version = 1) AND (authenticated_event_name = 'repository_dispatch'::text) AND ((octet_length(authenticated_event_git_ref) >= 12) AND (octet_length(authenticated_event_git_ref) <= 1024)) AND (authenticated_event_git_ref ~~ 'refs/heads/%'::text) AND (authenticated_event_git_ref !~ '[[:cntrl:]]'::text) AND (octet_length(authenticated_event_source_revision) = 20) AND (authenticated_event_source_revision <> decode(repeat('00'::text, 20), 'hex'::text)) AND (authenticated_event_source_authority = 'repository_contents_read'::text)))),
+    CONSTRAINT github_provider_delivery_evidence_digest_shape CHECK (((octet_length(provider_manifest_digest) = 32) AND (octet_length(authenticated_webhook_verifier_fingerprint_sha256) = 32) AND (authenticated_webhook_verifier_fingerprint_sha256 <> decode(repeat('00'::text, 32), 'hex'::text)) AND (octet_length(checks_authority_identity_digest) = 32) AND (octet_length(repository_contents_authority_identity_digest) = 32) AND (octet_length(github_check_head_sha) = 20) AND (github_check_head_sha <> decode(repeat('00'::text, 20), 'hex'::text)))),
+    CONSTRAINT github_provider_delivery_evidence_non_nil CHECK (((provider_delivery_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (repository_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (provider_connection_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (checks_authority_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (github_check_subject_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (repository_contents_authority_id <> '00000000-0000-0000-0000-000000000000'::uuid))),
+    CONSTRAINT github_provider_delivery_evidence_positive CHECK (((provider_installation_id > 0) AND (github_repository_id > 0) AND (github_repository_owner_id > 0) AND (provider_manifest_revision > 0) AND (authenticated_webhook_verifier_revision > 0) AND (checks_authority_app_configuration_revision > 0) AND (checks_authority_policy_revision > 0) AND (repository_contents_authority_app_configuration_revision > 0) AND (repository_contents_authority_policy_revision > 0))),
+    CONSTRAINT github_provider_delivery_evidence_repository_contents_selector_shape CHECK ((repository_contents_authority_id <> checks_authority_id) AND (repository_contents_authority_identity_digest <> checks_authority_identity_digest)),
     CONSTRAINT github_provider_delivery_evidence_repository_name CHECK (((array_length(string_to_array(github_repository_name, '/'::text), 1) = 2) AND ((octet_length(split_part(github_repository_name, '/'::text, 1)) >= 1) AND (octet_length(split_part(github_repository_name, '/'::text, 1)) <= 39)) AND (split_part(github_repository_name, '/'::text, 1) ~ '^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$'::text) AND (split_part(github_repository_name, '/'::text, 1) !~ '--'::text) AND ((octet_length(split_part(github_repository_name, '/'::text, 2)) >= 1) AND (octet_length(split_part(github_repository_name, '/'::text, 2)) <= 100)) AND (split_part(github_repository_name, '/'::text, 2) ~ '^[A-Za-z0-9._-]+$'::text) AND (split_part(github_repository_name, '/'::text, 2) <> ALL (ARRAY['.'::text, '..'::text])) AND (split_part(github_repository_name, '/'::text, 2) !~* '[.]git$'::text))),
     CONSTRAINT github_provider_delivery_evidence_visibility CHECK ((repository_visibility = ANY (ARRAY['public'::text, 'private'::text])))
 );
@@ -461,11 +461,11 @@ CREATE TABLE github_repository_dispatch_pending_evidence (
     checks_authority_identity_digest bytea CONSTRAINT github_repository_dispatch__checks_authority_identity__not_null NOT NULL,
     checks_authority_app_configuration_revision bigint CONSTRAINT github_repository_dispatch__checks_authority_app_confi_not_null NOT NULL,
     checks_authority_policy_revision bigint CONSTRAINT github_repository_dispatch__checks_authority_policy_re_not_null NOT NULL,
-    private_source_authority_id uuid,
-    private_source_authority_identity_digest bytea,
-    private_source_authority_app_configuration_revision bigint,
-    private_source_authority_policy_revision bigint,
-    CONSTRAINT github_repository_dispatch_pending_shape CHECK (((provider_delivery_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (repository_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (provider_connection_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (github_repository_owner_id > 0) AND (provider_manifest_revision > 0) AND (authenticated_webhook_verifier_revision > 0) AND (octet_length(provider_manifest_digest) = 32) AND (octet_length(authenticated_webhook_verifier_fingerprint_sha256) = 32) AND (authenticated_event_envelope_version = 1) AND (authenticated_event_name = 'repository_dispatch'::text) AND ((octet_length(authenticated_event_git_ref) >= 12) AND (octet_length(authenticated_event_git_ref) <= 1024)) AND (authenticated_event_git_ref ~~ 'refs/heads/%'::text) AND (authenticated_event_git_ref !~ '[[:cntrl:]]'::text) AND (checks_authority_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (octet_length(checks_authority_identity_digest) = 32) AND (checks_authority_app_configuration_revision > 0) AND (checks_authority_policy_revision > 0) AND (((private_source_authority_id IS NULL) AND (private_source_authority_identity_digest IS NULL) AND (private_source_authority_app_configuration_revision IS NULL) AND (private_source_authority_policy_revision IS NULL)) OR ((private_source_authority_id IS NOT NULL) AND (private_source_authority_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (private_source_authority_id <> checks_authority_id) AND (octet_length(private_source_authority_identity_digest) = 32) AND (private_source_authority_identity_digest <> checks_authority_identity_digest) AND (private_source_authority_app_configuration_revision > 0) AND (private_source_authority_policy_revision > 0)))))
+    repository_contents_authority_id uuid NOT NULL,
+    repository_contents_authority_identity_digest bytea NOT NULL,
+    repository_contents_authority_app_configuration_revision bigint NOT NULL,
+    repository_contents_authority_policy_revision bigint NOT NULL,
+    CONSTRAINT github_repository_dispatch_pending_shape CHECK (((provider_delivery_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (repository_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (provider_connection_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (github_repository_owner_id > 0) AND (provider_manifest_revision > 0) AND (authenticated_webhook_verifier_revision > 0) AND (octet_length(provider_manifest_digest) = 32) AND (octet_length(authenticated_webhook_verifier_fingerprint_sha256) = 32) AND (authenticated_event_envelope_version = 1) AND (authenticated_event_name = 'repository_dispatch'::text) AND ((octet_length(authenticated_event_git_ref) >= 12) AND (octet_length(authenticated_event_git_ref) <= 1024)) AND (authenticated_event_git_ref ~~ 'refs/heads/%'::text) AND (authenticated_event_git_ref !~ '[[:cntrl:]]'::text) AND (checks_authority_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (octet_length(checks_authority_identity_digest) = 32) AND (checks_authority_app_configuration_revision > 0) AND (checks_authority_policy_revision > 0) AND (repository_contents_authority_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (repository_contents_authority_id <> checks_authority_id) AND (octet_length(repository_contents_authority_identity_digest) = 32) AND (repository_contents_authority_identity_digest <> checks_authority_identity_digest) AND (repository_contents_authority_app_configuration_revision > 0) AND (repository_contents_authority_policy_revision > 0)))
 );
 
 CREATE TABLE github_role_mappings (
@@ -633,10 +633,10 @@ CREATE TABLE github_schedule_discovery_claims (
     manifest_digest bytea NOT NULL,
     github_repository_owner_id bigint CONSTRAINT github_schedule_discovery_c_github_repository_owner_id_not_null NOT NULL,
     source_authority_kind text NOT NULL COLLATE pg_catalog."C",
-    private_source_authority_id uuid,
-    private_source_authority_identity_digest bytea,
-    private_source_authority_app_configuration_revision bigint,
-    private_source_authority_policy_revision bigint,
+    repository_contents_authority_id uuid NOT NULL,
+    repository_contents_authority_identity_digest bytea NOT NULL,
+    repository_contents_authority_app_configuration_revision bigint NOT NULL,
+    repository_contents_authority_policy_revision bigint NOT NULL,
     claim_owner_id uuid NOT NULL,
     claim_fence bigint NOT NULL,
     state text NOT NULL COLLATE pg_catalog."C",
@@ -647,7 +647,7 @@ CREATE TABLE github_schedule_discovery_claims (
     updated_at_ms bigint NOT NULL,
     CONSTRAINT github_schedule_discovery_claims_non_nil CHECK (((discovery_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (repository_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (provider_connection_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (claim_owner_id <> '00000000-0000-0000-0000-000000000000'::uuid))),
     CONSTRAINT github_schedule_discovery_claims_shape CHECK (((manifest_revision > 0) AND (octet_length(manifest_digest) = 32) AND (github_repository_owner_id > 0) AND (claim_fence > 0) AND (state = ANY (ARRAY['claimed'::text, 'completed'::text, 'expired'::text])) AND (claimed_at_ms >= 0) AND (claim_expires_at_ms > claimed_at_ms) AND ((claim_expires_at_ms - claimed_at_ms) <= 300000) AND (created_at_ms = claimed_at_ms) AND (updated_at_ms >= created_at_ms) AND (((state = 'claimed'::text) AND (completed_registry_id IS NULL)) OR ((state = 'completed'::text) AND (completed_registry_id IS NOT NULL)) OR ((state = 'expired'::text) AND (completed_registry_id IS NULL))))),
-    CONSTRAINT github_schedule_discovery_claims_source_authority_shape CHECK ((((source_authority_kind = 'public_anonymous'::text) AND (private_source_authority_id IS NULL) AND (private_source_authority_identity_digest IS NULL) AND (private_source_authority_app_configuration_revision IS NULL) AND (private_source_authority_policy_revision IS NULL)) OR ((source_authority_kind = 'private_repository_source_read'::text) AND (private_source_authority_id IS NOT NULL) AND (private_source_authority_identity_digest IS NOT NULL) AND (octet_length(private_source_authority_identity_digest) = 32) AND (private_source_authority_app_configuration_revision > 0) AND (private_source_authority_policy_revision > 0))))
+    CONSTRAINT github_schedule_discovery_claims_source_authority_shape CHECK ((source_authority_kind = 'repository_contents_read'::text) AND (octet_length(repository_contents_authority_identity_digest) = 32) AND (repository_contents_authority_app_configuration_revision > 0) AND (repository_contents_authority_policy_revision > 0))
 );
 
 CREATE TABLE github_schedule_fire_attempts (
@@ -720,10 +720,10 @@ CREATE TABLE github_schedule_registry_revisions (
     default_branch_ref text NOT NULL COLLATE pg_catalog."C",
     source_revision text NOT NULL COLLATE pg_catalog."C",
     source_authority_kind text CONSTRAINT github_schedule_registry_revisio_source_authority_kind_not_null NOT NULL COLLATE pg_catalog."C",
-    private_source_authority_id uuid,
-    private_source_authority_identity_digest bytea,
-    private_source_authority_app_configuration_revision bigint,
-    private_source_authority_policy_revision bigint,
+    repository_contents_authority_id uuid NOT NULL,
+    repository_contents_authority_identity_digest bytea NOT NULL,
+    repository_contents_authority_app_configuration_revision bigint NOT NULL,
+    repository_contents_authority_policy_revision bigint NOT NULL,
     archive_digest bytea NOT NULL,
     archive_object_key text NOT NULL COLLATE pg_catalog."C",
     archive_size_bytes bigint NOT NULL,
@@ -733,9 +733,9 @@ CREATE TABLE github_schedule_registry_revisions (
     discovered_at_ms bigint NOT NULL,
     CONSTRAINT github_schedule_registry_revisions_archive_shape CHECK ((((octet_length(archive_object_key) >= 1) AND (octet_length(archive_object_key) <= 1024)) AND (archive_object_key = btrim(archive_object_key)) AND (archive_object_key !~ '[[:cntrl:]]'::text) AND ((archive_size_bytes >= 1) AND (archive_size_bytes <= 268435456)) AND (archive_media_type = 'application/vnd.automata.github-repository-archive+gzip'::text))),
     CONSTRAINT github_schedule_registry_revisions_bounds CHECK (((manifest_revision > 0) AND (github_repository_owner_id > 0) AND ((schedule_count >= 0) AND (schedule_count <= 256)) AND (discovered_at_ms >= 0))),
-    CONSTRAINT github_schedule_registry_revisions_digest_shape CHECK (((octet_length(manifest_digest) = 32) AND (octet_length(archive_digest) = 32) AND (octet_length(inventory_digest) = 32) AND ((private_source_authority_identity_digest IS NULL) OR (octet_length(private_source_authority_identity_digest) = 32)))),
+    CONSTRAINT github_schedule_registry_revisions_digest_shape CHECK (((octet_length(manifest_digest) = 32) AND (octet_length(archive_digest) = 32) AND (octet_length(inventory_digest) = 32) AND (octet_length(repository_contents_authority_identity_digest) = 32))),
     CONSTRAINT github_schedule_registry_revisions_non_nil CHECK (((registry_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (discovery_id = registry_id))),
-    CONSTRAINT github_schedule_registry_revisions_source_authority_shape CHECK ((((source_authority_kind = 'public_anonymous'::text) AND (private_source_authority_id IS NULL) AND (private_source_authority_identity_digest IS NULL) AND (private_source_authority_app_configuration_revision IS NULL) AND (private_source_authority_policy_revision IS NULL)) OR ((source_authority_kind = 'private_repository_source_read'::text) AND (private_source_authority_id IS NOT NULL) AND (private_source_authority_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (private_source_authority_identity_digest IS NOT NULL) AND (private_source_authority_app_configuration_revision > 0) AND (private_source_authority_policy_revision > 0)))),
+    CONSTRAINT github_schedule_registry_revisions_source_authority_shape CHECK ((source_authority_kind = 'repository_contents_read'::text) AND (repository_contents_authority_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (repository_contents_authority_app_configuration_revision > 0) AND (repository_contents_authority_policy_revision > 0)),
     CONSTRAINT github_schedule_registry_revisions_source_shape CHECK (((default_branch_ref ~ '^refs/heads/[^[:cntrl:][:space:]]+$'::text) AND ((octet_length(default_branch_ref) >= 12) AND (octet_length(default_branch_ref) <= 1024)) AND (source_revision ~ '^[0-9a-f]{40}$'::text)))
 );
 
@@ -801,7 +801,7 @@ CREATE TABLE github_server_service_authority_handoffs (
     required_through_ms bigint CONSTRAINT github_server_service_authority_ha_required_through_ms_not_null NOT NULL,
     granted_at_ms bigint NOT NULL,
     released_at_ms bigint,
-    CONSTRAINT github_server_service_handoffs_action CHECK ((consumer_action = ANY (ARRAY['ensure_check_suite'::text, 'create_check_run'::text, 'reconcile_check_run'::text, 'publish_check_run'::text, 'fetch_private_repository_revision'::text, 'fetch_private_repository_changed_files'::text, 'discover_private_repository_schedules'::text]))),
+    CONSTRAINT github_server_service_handoffs_action CHECK ((consumer_action = ANY (ARRAY['ensure_check_suite'::text, 'create_check_run'::text, 'reconcile_check_run'::text, 'publish_check_run'::text, 'fetch_repository_revision'::text, 'fetch_repository_changed_files'::text, 'discover_repository_schedules'::text]))),
     CONSTRAINT github_server_service_handoffs_non_nil CHECK (((id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (consumer_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (consumer_owner_id <> '00000000-0000-0000-0000-000000000000'::uuid))),
     CONSTRAINT github_server_service_handoffs_positive CHECK (((generation > 0) AND (consumer_claim_fence > 0) AND (consumer_revision > 0))),
     CONSTRAINT github_server_service_handoffs_time_shape CHECK (((granted_at_ms >= 0) AND (required_through_ms > granted_at_ms) AND ((required_through_ms - granted_at_ms) <=
@@ -979,10 +979,10 @@ CREATE VIEW github_workflow_run_base_manifest_origins AS
     delivery.checks_authority_identity_digest,
     delivery.checks_authority_app_configuration_revision,
     delivery.checks_authority_policy_revision,
-    delivery.private_source_authority_id,
-    delivery.private_source_authority_identity_digest,
-    delivery.private_source_authority_app_configuration_revision,
-    delivery.private_source_authority_policy_revision
+    delivery.repository_contents_authority_id,
+    delivery.repository_contents_authority_identity_digest,
+    delivery.repository_contents_authority_app_configuration_revision,
+    delivery.repository_contents_authority_policy_revision
    FROM (github_workflow_run_subject_evidence delivery_run
      JOIN github_provider_delivery_evidence delivery ON (((delivery.tenant_id = delivery_run.tenant_id) AND (delivery.repository_id = delivery_run.repository_id) AND (delivery.provider_delivery_id = delivery_run.provider_delivery_id))))
 UNION ALL
@@ -1022,10 +1022,10 @@ UNION ALL
     schedule_check.checks_authority_identity_digest,
     schedule_check.checks_authority_app_configuration_revision,
     schedule_check.checks_authority_policy_revision,
-    registry.private_source_authority_id,
-    registry.private_source_authority_identity_digest,
-    registry.private_source_authority_app_configuration_revision,
-    registry.private_source_authority_policy_revision
+    registry.repository_contents_authority_id,
+    registry.repository_contents_authority_identity_digest,
+    registry.repository_contents_authority_app_configuration_revision,
+    registry.repository_contents_authority_policy_revision
    FROM (((github_schedule_workflow_run_subject_evidence schedule_run
      JOIN github_schedule_check_evidence schedule_check ON (((schedule_check.schedule_fire_id = schedule_run.schedule_fire_id) AND (schedule_check.tenant_id = schedule_run.tenant_id) AND (schedule_check.repository_id = schedule_run.repository_id) AND (schedule_check.github_check_subject_id = schedule_run.github_check_subject_id))))
      JOIN github_schedule_registry_revisions registry ON (((registry.tenant_id = schedule_check.tenant_id) AND (registry.repository_id = schedule_check.repository_id) AND (registry.provider_connection_id = schedule_check.provider_connection_id) AND (registry.registry_id = schedule_check.registry_id) AND (registry.manifest_revision = schedule_check.provider_manifest_revision) AND (registry.manifest_digest = schedule_check.provider_manifest_digest) AND (registry.default_branch_ref = schedule_check.default_branch_ref) AND (registry.source_revision = schedule_check.source_revision))))
@@ -1092,13 +1092,13 @@ CREATE TABLE workflow_rerun_check_evidence (
     checks_authority_identity_digest bytea CONSTRAINT workflow_rerun_check_eviden_checks_authority_identity__not_null NOT NULL,
     checks_authority_app_configuration_revision bigint CONSTRAINT workflow_rerun_check_eviden_checks_authority_app_confi_not_null NOT NULL,
     checks_authority_policy_revision bigint CONSTRAINT workflow_rerun_check_eviden_checks_authority_policy_re_not_null NOT NULL,
-    private_source_authority_id uuid,
-    private_source_authority_identity_digest bytea,
-    private_source_authority_app_configuration_revision bigint,
-    private_source_authority_policy_revision bigint,
+    repository_contents_authority_id uuid NOT NULL,
+    repository_contents_authority_identity_digest bytea NOT NULL,
+    repository_contents_authority_app_configuration_revision bigint NOT NULL,
+    repository_contents_authority_policy_revision bigint NOT NULL,
     recorded_at_ms bigint NOT NULL,
-    CONSTRAINT workflow_rerun_check_evidence_ids_non_nil CHECK (((run_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (source_run_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (operation_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (repository_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (provider_connection_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (source_github_check_subject_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (github_check_subject_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (checks_authority_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND ((private_source_authority_id IS NULL) OR (private_source_authority_id <> '00000000-0000-0000-0000-000000000000'::uuid)))),
-    CONSTRAINT workflow_rerun_check_evidence_shape CHECK (((provider_manifest_revision > 0) AND (octet_length(provider_manifest_digest) = 32) AND (octet_length(github_check_head_sha) = 20) AND (github_check_head_sha <> decode(repeat('00'::text, 20), 'hex'::text)) AND (octet_length(checks_authority_identity_digest) = 32) AND (checks_authority_app_configuration_revision > 0) AND (checks_authority_policy_revision > 0) AND (num_nonnulls(private_source_authority_id, private_source_authority_identity_digest, private_source_authority_app_configuration_revision, private_source_authority_policy_revision) = ANY (ARRAY[0, 4])) AND ((private_source_authority_identity_digest IS NULL) OR ((octet_length(private_source_authority_identity_digest) = 32) AND (private_source_authority_app_configuration_revision > 0) AND (private_source_authority_policy_revision > 0))) AND (recorded_at_ms >= 0)))
+    CONSTRAINT workflow_rerun_check_evidence_ids_non_nil CHECK (((run_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (source_run_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (operation_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (repository_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (provider_connection_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (source_github_check_subject_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (github_check_subject_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (checks_authority_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (repository_contents_authority_id <> '00000000-0000-0000-0000-000000000000'::uuid))),
+    CONSTRAINT workflow_rerun_check_evidence_shape CHECK (((provider_manifest_revision > 0) AND (octet_length(provider_manifest_digest) = 32) AND (octet_length(github_check_head_sha) = 20) AND (github_check_head_sha <> decode(repeat('00'::text, 20), 'hex'::text)) AND (octet_length(checks_authority_identity_digest) = 32) AND (checks_authority_app_configuration_revision > 0) AND (checks_authority_policy_revision > 0) AND (octet_length(repository_contents_authority_identity_digest) = 32) AND (repository_contents_authority_app_configuration_revision > 0) AND (repository_contents_authority_policy_revision > 0) AND (recorded_at_ms >= 0)))
 );
 
 CREATE TABLE workflow_rerun_requests (
@@ -1225,10 +1225,10 @@ CREATE VIEW github_workflow_run_manifest_origins AS
     github_workflow_run_base_manifest_origins.checks_authority_identity_digest,
     github_workflow_run_base_manifest_origins.checks_authority_app_configuration_revision,
     github_workflow_run_base_manifest_origins.checks_authority_policy_revision,
-    github_workflow_run_base_manifest_origins.private_source_authority_id,
-    github_workflow_run_base_manifest_origins.private_source_authority_identity_digest,
-    github_workflow_run_base_manifest_origins.private_source_authority_app_configuration_revision,
-    github_workflow_run_base_manifest_origins.private_source_authority_policy_revision
+    github_workflow_run_base_manifest_origins.repository_contents_authority_id,
+    github_workflow_run_base_manifest_origins.repository_contents_authority_identity_digest,
+    github_workflow_run_base_manifest_origins.repository_contents_authority_app_configuration_revision,
+    github_workflow_run_base_manifest_origins.repository_contents_authority_policy_revision
    FROM github_workflow_run_base_manifest_origins
 UNION ALL
  SELECT origin.tenant_id,
@@ -1267,10 +1267,10 @@ UNION ALL
     check_evidence.checks_authority_identity_digest,
     check_evidence.checks_authority_app_configuration_revision,
     check_evidence.checks_authority_policy_revision,
-    check_evidence.private_source_authority_id,
-    check_evidence.private_source_authority_identity_digest,
-    check_evidence.private_source_authority_app_configuration_revision,
-    check_evidence.private_source_authority_policy_revision
+    check_evidence.repository_contents_authority_id,
+    check_evidence.repository_contents_authority_identity_digest,
+    check_evidence.repository_contents_authority_app_configuration_revision,
+    check_evidence.repository_contents_authority_policy_revision
    FROM ((((((workflow_rerun_attempts attempt
      JOIN workflow_rerun_check_evidence check_evidence ON (((check_evidence.run_id = attempt.run_id) AND (check_evidence.source_run_id = attempt.source_run_id))))
      JOIN workflow_rerun_requests request ON (((request.tenant_id = check_evidence.tenant_id) AND (request.operation_id = check_evidence.operation_id) AND (request.rerun_run_id = attempt.run_id) AND (request.committed_at_ms = attempt.created_at_ms))))

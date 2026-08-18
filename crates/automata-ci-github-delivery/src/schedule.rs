@@ -35,9 +35,8 @@ use automata_ci_store::{
     GithubServerServiceAuthoritySelector, GithubServerServiceClaimFence,
     GithubServerServiceConsumerClaim, GithubServerServiceConsumerId, GithubServerServiceRevision,
     GithubServerServiceWorkerId, MAX_GITHUB_SCHEDULE_CLAIM_MILLIS,
-    MAX_GITHUB_SCHEDULE_RETRY_MILLIS, ObjectKey, ProviderRepositoryVisibility,
-    RegisterGithubScheduleRegistry, RegisterGithubScheduledCheckSubject, RetryGithubScheduleFire,
-    WorkflowAdmissionIdempotency,
+    MAX_GITHUB_SCHEDULE_RETRY_MILLIS, ObjectKey, RegisterGithubScheduleRegistry,
+    RegisterGithubScheduledCheckSubject, RetryGithubScheduleFire, WorkflowAdmissionIdempotency,
 };
 use automata_ci_workflow_actions::{
     CompilationDisposition, CompileWorkflowRequest, GithubEventMetadata, GithubWorkflowCompiler,
@@ -198,7 +197,7 @@ impl Default for GithubScheduleServiceConfig {
 #[error("GitHub schedule service configuration is invalid")]
 pub struct GithubScheduleServiceConfigurationError;
 
-/// Borrowed exact private-source authority for one discovery claim.
+/// Borrowed exact repository-source authority for one discovery claim.
 pub struct GithubScheduleSourceCredentialRequest<'a> {
     claim: GithubScheduleDiscoveryClaim,
     manifest: &'a GithubProviderManifest,
@@ -208,11 +207,11 @@ pub struct GithubScheduleSourceCredentialRequest<'a> {
 }
 
 impl<'a> GithubScheduleSourceCredentialRequest<'a> {
-    /// Creates a private source credential request for a live discovery claim.
+    /// Creates a source credential request for a live discovery claim.
     ///
     /// # Errors
     ///
-    /// Rejects a non-private, stale, cross-tenant, or overflowing request.
+    /// Rejects stale, cross-tenant, or overflowing input.
     pub fn new(
         claim: GithubScheduleDiscoveryClaim,
         manifest: &'a GithubProviderManifest,
@@ -225,8 +224,7 @@ impl<'a> GithubScheduleSourceCredentialRequest<'a> {
             .checked_add(MAX_PROVIDER_REQUEST_MILLIS)
             .map(UnixMillis::new)
             .ok_or(GithubScheduleSourceCredentialValueError)?;
-        if manifest.repository_visibility() != ProviderRepositoryVisibility::Private
-            || manifest.github_repository_owner_id().is_none()
+        if manifest.github_repository_owner_id().is_none()
             || authority_selector.tenant() != manifest.tenant()
             || observed_at < claim.claimed_at()
             || observed_at >= claim.expires_at()
@@ -285,7 +283,7 @@ impl<'a> GithubScheduleSourceCredentialRequest<'a> {
                 .map_err(|_| GithubScheduleSourceCredentialValueError)?,
             GithubServerServiceClaimFence::new(self.claim.fence().get())
                 .map_err(|_| GithubScheduleSourceCredentialValueError)?,
-            GithubServerServiceAction::DiscoverPrivateRepositorySchedules,
+            GithubServerServiceAction::DiscoverRepositorySchedules,
             GithubServerServiceRevision::new(self.manifest.revision().get())
                 .map_err(|_| GithubScheduleSourceCredentialValueError)?,
         ))
@@ -305,7 +303,7 @@ impl fmt::Debug for GithubScheduleSourceCredentialRequest<'_> {
     }
 }
 
-/// Move-only exact private repository source credential for schedule discovery.
+/// Move-only exact repository source credential for schedule discovery.
 #[must_use = "the credential must be released after its one source operation"]
 pub struct GithubScheduleSourceCredential {
     tenant: automata_ci_store::TenantScope,
@@ -338,7 +336,7 @@ impl GithubScheduleSourceCredential {
         if repository.as_str() != manifest.github_repository_name().as_str()
             || authority_selector != *request.authority_selector()
             || consumer != request.consumer_claim()?
-            || consumer.action() != GithubServerServiceAction::DiscoverPrivateRepositorySchedules
+            || consumer.action() != GithubServerServiceAction::DiscoverRepositorySchedules
             || request.required_through() < request.observed_at()
         {
             return Err(GithubScheduleSourceCredentialValueError);
@@ -403,7 +401,7 @@ impl fmt::Debug for GithubScheduleSourceCredential {
 #[error("GitHub schedule source credential binding is invalid")]
 pub struct GithubScheduleSourceCredentialValueError;
 
-/// Sanitized result from product-owned private schedule source authority.
+/// Sanitized result from product-owned schedule source authority.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum GithubScheduleSourceCredentialProviderError {
     /// Current authority is temporarily unavailable.
@@ -417,7 +415,7 @@ pub enum GithubScheduleSourceCredentialProviderError {
     InvariantViolation,
 }
 
-/// Least-authority source credential provider for private schedule discovery.
+/// Least-authority source credential provider for schedule discovery.
 #[async_trait]
 pub trait GithubScheduleSourceCredentialProvider: fmt::Debug + Send + Sync {
     /// Acquires one move-only `contents:read` handoff for the exact discovery claim.
@@ -427,14 +425,14 @@ pub trait GithubScheduleSourceCredentialProvider: fmt::Debug + Send + Sync {
     ) -> Result<GithubScheduleSourceCredential, GithubScheduleSourceCredentialProviderError>;
 }
 
-/// Exact source selectors configured for private current manifests.
+/// Exact source selectors configured for current manifests.
 #[derive(Clone, Debug, Default)]
-pub struct GithubSchedulePrivateSourceAuthorities {
+pub struct GithubScheduleSourceAuthorities {
     selectors: BTreeMap<ProviderConnectionId, GithubServerServiceAuthoritySelector>,
 }
 
-impl GithubSchedulePrivateSourceAuthorities {
-    /// Creates an unambiguous private source selector map.
+impl GithubScheduleSourceAuthorities {
+    /// Creates an unambiguous source selector map.
     ///
     /// # Errors
     ///
@@ -486,61 +484,27 @@ pub struct GithubScheduleService {
     manifests: Arc<dyn GithubProviderManifestRepository>,
     schedules: Arc<dyn GithubScheduleRepository>,
     admission: WorkflowAdmissionService,
-    private_sources: GithubSchedulePrivateSourceAuthorities,
-    credentials: Option<Arc<dyn GithubScheduleSourceCredentialProvider>>,
+    source_authorities: GithubScheduleSourceAuthorities,
+    credentials: Arc<dyn GithubScheduleSourceCredentialProvider>,
     clock: Arc<dyn GithubScheduleClock>,
     worker_id: GithubScheduleWorkerId,
     config: GithubScheduleServiceConfig,
 }
 
 impl GithubScheduleService {
-    /// Creates a scheduler restricted to anonymous public repository discovery.
-    ///
-    /// A private manifest is never fetched by this constructor; it remains
-    /// undiscovered until product composition provides its typed authority.
+    /// Creates a scheduler with explicit `contents:read` discovery authorities.
     ///
     /// # Errors
     ///
     /// Rejects an SCM provider that is not the GitHub provider.
     #[allow(clippy::too_many_arguments)]
-    pub fn new_public_only<R>(
+    pub fn new<R>(
         objects: Arc<dyn ImmutableBlobStore>,
         source: Arc<dyn ScmProvider>,
         repository: Arc<R>,
         admission: WorkflowAdmissionService,
-        clock: Arc<dyn GithubScheduleClock>,
-        worker_id: GithubScheduleWorkerId,
-        config: GithubScheduleServiceConfig,
-    ) -> Result<Self, GithubScheduleServiceConfigurationError>
-    where
-        R: GithubProviderManifestRepository + GithubScheduleRepository + 'static,
-    {
-        Self::new_with_private_source_credentials(
-            objects,
-            source,
-            repository,
-            admission,
-            GithubSchedulePrivateSourceAuthorities::default(),
-            None,
-            clock,
-            worker_id,
-            config,
-        )
-    }
-
-    /// Creates a scheduler with explicit private `contents:read` discovery authority.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an SCM provider that is not the GitHub provider.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new_with_private_source_credentials<R>(
-        objects: Arc<dyn ImmutableBlobStore>,
-        source: Arc<dyn ScmProvider>,
-        repository: Arc<R>,
-        admission: WorkflowAdmissionService,
-        private_sources: GithubSchedulePrivateSourceAuthorities,
-        credentials: Option<Arc<dyn GithubScheduleSourceCredentialProvider>>,
+        source_authorities: GithubScheduleSourceAuthorities,
+        credentials: Arc<dyn GithubScheduleSourceCredentialProvider>,
         clock: Arc<dyn GithubScheduleClock>,
         worker_id: GithubScheduleWorkerId,
         config: GithubScheduleServiceConfig,
@@ -557,7 +521,7 @@ impl GithubScheduleService {
             manifests: repository.clone(),
             schedules: repository,
             admission,
-            private_sources,
+            source_authorities,
             credentials,
             clock,
             worker_id,
@@ -648,18 +612,10 @@ impl GithubScheduleService {
         let Some(owner) = manifest.github_repository_owner_id() else {
             return Ok(false);
         };
-        let source_authority = match manifest.repository_visibility() {
-            ProviderRepositoryVisibility::Public => GithubScheduleSourceAuthority::PublicAnonymous,
-            ProviderRepositoryVisibility::Private => {
-                let Some(selector) = self.private_sources.selector(manifest.connection_id()) else {
-                    return Ok(false);
-                };
-                if self.credentials.is_none() {
-                    return Ok(false);
-                }
-                GithubScheduleSourceAuthority::Private(selector.clone())
-            }
+        let Some(selector) = self.source_authorities.selector(manifest.connection_id()) else {
+            return Ok(false);
         };
+        let source_authority = GithubScheduleSourceAuthority::new(selector.clone());
         let registry_id = GithubScheduleRegistryId::from_uuid(Uuid::new_v4())
             .map_err(|_| GithubScheduleServiceError::Configuration)?;
         let claim = match self
@@ -691,8 +647,8 @@ impl GithubScheduleService {
             Err(
                 GithubScheduleServiceError::SourceUnavailable
                 | GithubScheduleServiceError::SourceRejected
-                | GithubScheduleServiceError::PrivateSourceUnavailable
-                | GithubScheduleServiceError::PrivateSourceRejected,
+                | GithubScheduleServiceError::CredentialUnavailable
+                | GithubScheduleServiceError::CredentialRejected,
             ) => return Ok(false),
             Err(error) => return Err(error),
         };
@@ -743,50 +699,34 @@ impl GithubScheduleService {
             .map_err(|_| GithubScheduleServiceError::InvalidArchive)?;
         let limits = ArchiveLimits::new(manifest.limits().archive_max_compressed_bytes())
             .map_err(|_| GithubScheduleServiceError::InvalidArchive)?;
-        let snapshot = match authority {
-            GithubScheduleSourceAuthority::PublicAnonymous => {
-                self.fetch_snapshot(SnapshotRequest::public(&repository, &revision, limits))
-                    .await?
-            }
-            GithubScheduleSourceAuthority::Private(selector) => {
-                let credentials = self
-                    .credentials
-                    .as_ref()
-                    .ok_or(GithubScheduleServiceError::PrivateSourceRejected)?;
-                let observed_at = self.clock.now()?;
-                let request = GithubScheduleSourceCredentialRequest::new(
-                    claim,
-                    manifest,
-                    selector,
-                    observed_at,
-                )
-                .map_err(|_| GithubScheduleServiceError::PrivateSourceRejected)?;
-                let credential = credentials
-                    .acquire(request)
-                    .await
-                    .map_err(map_private_credential_error)?;
-                let request = GithubScheduleSourceCredentialRequest::new(
-                    claim,
-                    manifest,
-                    selector,
-                    observed_at,
-                )
-                .map_err(|_| GithubScheduleServiceError::PrivateSourceRejected)?;
-                if !credential.matches(&request) {
-                    credential.release().await;
-                    return Err(GithubScheduleServiceError::PrivateSourceRejected);
-                }
-                let result = self
-                    .fetch_snapshot(SnapshotRequest::authenticated(
-                        &repository,
-                        &revision,
-                        credential.token(),
-                        limits,
-                    ))
-                    .await;
+        let snapshot = {
+            let selector = authority.selector();
+            let observed_at = self.clock.now()?;
+            let request =
+                GithubScheduleSourceCredentialRequest::new(claim, manifest, selector, observed_at)
+                    .map_err(|_| GithubScheduleServiceError::CredentialRejected)?;
+            let credential = self
+                .credentials
+                .acquire(request)
+                .await
+                .map_err(map_credential_error)?;
+            let request =
+                GithubScheduleSourceCredentialRequest::new(claim, manifest, selector, observed_at)
+                    .map_err(|_| GithubScheduleServiceError::CredentialRejected)?;
+            if !credential.matches(&request) {
                 credential.release().await;
-                result?
+                return Err(GithubScheduleServiceError::CredentialRejected);
             }
+            let result = self
+                .fetch_snapshot(SnapshotRequest::authenticated(
+                    &repository,
+                    &revision,
+                    credential.token(),
+                    limits,
+                ))
+                .await;
+            credential.release().await;
+            result?
         };
         if snapshot.provider().as_str() != GITHUB_PROVIDER
             || snapshot.repository() != &repository
@@ -1198,13 +1138,10 @@ impl fmt::Debug for GithubScheduleService {
             .field("schedules", &"[schedule repository]")
             .field("admission", &"[workflow admission service]")
             .field(
-                "private_source_count",
-                &self.private_sources.selectors.len(),
+                "source_authority_count",
+                &self.source_authorities.selectors.len(),
             )
-            .field(
-                "private_credentials",
-                &self.credentials.as_ref().map(|_| "[configured]"),
-            )
+            .field("credentials", &"[configured]")
             .field("clock", &"[trusted clock]")
             .field("worker_id", &self.worker_id)
             .field("config", &self.config)
@@ -1252,10 +1189,10 @@ pub enum GithubScheduleServiceError {
     SourceRejected,
     /// Private schedule source authority is temporarily unavailable.
     #[error("GitHub private schedule source authority is unavailable")]
-    PrivateSourceUnavailable,
+    CredentialUnavailable,
     /// Private schedule source authority rejected exact current evidence.
     #[error("GitHub private schedule source authority rejected the request")]
-    PrivateSourceRejected,
+    CredentialRejected,
     /// Immutable blob storage failed.
     #[error(transparent)]
     Blob(#[from] BlobStoreError),
@@ -1270,7 +1207,7 @@ pub enum GithubScheduleServiceError {
 fn retryable_schedule_error(error: &GithubScheduleServiceError) -> bool {
     match error {
         GithubScheduleServiceError::SourceUnavailable
-        | GithubScheduleServiceError::PrivateSourceUnavailable
+        | GithubScheduleServiceError::CredentialUnavailable
         | GithubScheduleServiceError::Manifest(GithubProviderManifestStoreError::Operation(_))
         | GithubScheduleServiceError::Store(GithubScheduleStoreError::Store(_)) => true,
         GithubScheduleServiceError::Blob(error) => error.kind() == BlobStoreErrorKind::Unavailable,
@@ -1279,7 +1216,7 @@ fn retryable_schedule_error(error: &GithubScheduleServiceError) -> bool {
         | GithubScheduleServiceError::InvalidArchive
         | GithubScheduleServiceError::InvalidRegistry
         | GithubScheduleServiceError::SourceRejected
-        | GithubScheduleServiceError::PrivateSourceRejected
+        | GithubScheduleServiceError::CredentialRejected
         | GithubScheduleServiceError::Manifest(_)
         | GithubScheduleServiceError::Store(_) => false,
     }
@@ -1372,16 +1309,16 @@ fn archive_descriptor(archive: &GithubScheduleArchive) -> Result<BlobDescriptor,
     ))
 }
 
-const fn map_private_credential_error(
+const fn map_credential_error(
     error: GithubScheduleSourceCredentialProviderError,
 ) -> GithubScheduleServiceError {
     match error {
         GithubScheduleSourceCredentialProviderError::Unavailable => {
-            GithubScheduleServiceError::PrivateSourceUnavailable
+            GithubScheduleServiceError::CredentialUnavailable
         }
         GithubScheduleSourceCredentialProviderError::Rejected
         | GithubScheduleSourceCredentialProviderError::InvariantViolation => {
-            GithubScheduleServiceError::PrivateSourceRejected
+            GithubScheduleServiceError::CredentialRejected
         }
     }
 }
@@ -1473,7 +1410,7 @@ mod tests {
     fn scheduler_retries_only_explicit_transient_boundaries() {
         let retryable = [
             GithubScheduleServiceError::SourceUnavailable,
-            GithubScheduleServiceError::PrivateSourceUnavailable,
+            GithubScheduleServiceError::CredentialUnavailable,
             GithubScheduleServiceError::Blob(BlobStoreError::new(BlobStoreErrorKind::Unavailable)),
             GithubScheduleServiceError::Manifest(GithubProviderManifestStoreError::operation(
                 std::io::Error::other("temporary manifest backend failure"),
@@ -1499,7 +1436,7 @@ mod tests {
             GithubScheduleServiceError::InvalidArchive,
             GithubScheduleServiceError::InvalidRegistry,
             GithubScheduleServiceError::SourceRejected,
-            GithubScheduleServiceError::PrivateSourceRejected,
+            GithubScheduleServiceError::CredentialRejected,
             GithubScheduleServiceError::Blob(BlobStoreError::new(BlobStoreErrorKind::Unauthorized)),
             GithubScheduleServiceError::Blob(BlobStoreError::new(BlobStoreErrorKind::Integrity)),
             GithubScheduleServiceError::Manifest(GithubProviderManifestStoreError::CorruptData),

@@ -290,38 +290,46 @@ fn fixture_receipt(
         "00000000-0000-0000-0000-000000000301",
         0x61,
     );
-    let private_source =
-        (identity.repository_visibility() == ProviderRepositoryVisibility::Private).then(|| {
+    let repository_contents_authority = authority(
+        identity.tenant(),
+        "00000000-0000-0000-0000-000000000401",
+        0x62,
+    );
+    let pull_requests_authority = (request.authenticated_event().kind()
+        == GithubAuthenticatedEventKind::PullRequest)
+        .then(|| {
             authority(
                 identity.tenant(),
-                "00000000-0000-0000-0000-000000000401",
-                0x62,
+                "00000000-0000-0000-0000-000000000501",
+                0x63,
             )
         });
-    let evidence = ManifestPinnedGithubDeliveryEvidence::from_durable_parts(
-        ProviderDeliveryId::from_uuid(
-            "00000000-0000-0000-0000-000000000101"
-                .parse()
-                .expect("fixture UUID"),
+    let evidence =
+        ManifestPinnedGithubDeliveryEvidence::from_durable_parts_with_pull_requests_authority(
+            ProviderDeliveryId::from_uuid(
+                "00000000-0000-0000-0000-000000000101"
+                    .parse()
+                    .expect("fixture UUID"),
+            )
+            .expect("delivery ID"),
+            request.repository_owner_id(),
+            manifest,
+            request.authenticated_webhook_verifier_fingerprint(),
+            request.authenticated_webhook_verifier_revision(),
+            checks,
+            repository_contents_authority,
+            pull_requests_authority,
+            GithubCheckSubjectId::from_uuid(
+                "00000000-0000-0000-0000-000000000201"
+                    .parse()
+                    .expect("fixture UUID"),
+            )
+            .expect("Check subject"),
+            request.head_sha(),
+            request.authenticated_event().clone(),
+            request.delivery().accepted_at(),
         )
-        .expect("delivery ID"),
-        request.repository_owner_id(),
-        manifest,
-        request.authenticated_webhook_verifier_fingerprint(),
-        request.authenticated_webhook_verifier_revision(),
-        checks,
-        private_source,
-        GithubCheckSubjectId::from_uuid(
-            "00000000-0000-0000-0000-000000000201"
-                .parse()
-                .expect("fixture UUID"),
-        )
-        .expect("Check subject"),
-        request.head_sha(),
-        request.authenticated_event().clone(),
-        request.delivery().accepted_at(),
-    )
-    .expect("fixture manifest evidence");
+        .expect("fixture manifest evidence");
     ManifestPinnedGithubDeliveryReceipt::from_durable_parts(evidence)
 }
 
@@ -658,6 +666,7 @@ async fn product_router_routes_every_supported_event_through_one_canonical_ingre
             ))
             .await
             .expect("routed event response");
+        assert_eq!(response.status(), StatusCode::ACCEPTED, "{event_name}");
         assert_fixed_response(response, StatusCode::ACCEPTED).await;
     }
 

@@ -46,7 +46,7 @@ pub const GITHUB_PROVIDER_REST_ACCEPT: &str = "application/vnd.github+json";
 /// Exact media type accepted from the credential-free archive endpoint.
 pub const GITHUB_PROVIDER_ARCHIVE_ACCEPT: &str = "application/octet-stream";
 /// Public repositories use no credential for exact-SHA source reads.
-pub const GITHUB_PROVIDER_PUBLIC_SOURCE_AUTHENTICATION: &str = "anonymous_public";
+pub const GITHUB_PROVIDER_PUBLIC_SOURCE_AUTHENTICATION: &str = "direct_public_archive";
 /// Private repositories require a repository-scoped GitHub App installation token.
 pub const GITHUB_PROVIDER_PRIVATE_SOURCE_AUTHENTICATION: &str = "github_app_installation_token";
 /// Repository source is always resolved and rechecked as an exact commit SHA.
@@ -263,7 +263,7 @@ impl GithubProviderGitRef {
         Ok(Self(value))
     }
 
-    /// Returns the backward-compatible default branch reference.
+    /// Returns the canonical default branch reference.
     ///
     /// # Panics
     ///

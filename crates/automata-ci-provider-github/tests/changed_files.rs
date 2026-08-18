@@ -2,6 +2,7 @@ use crate::support;
 
 use std::{
     num::NonZeroU64,
+    sync::OnceLock,
     time::{Duration, Instant},
 };
 
@@ -24,6 +25,11 @@ use url::Url;
 const BEFORE: &str = "1111111111111111111111111111111111111111";
 const AFTER: &str = "2222222222222222222222222222222222222222";
 const OTHER: &str = "3333333333333333333333333333333333333333";
+
+fn test_token() -> &'static SecretString {
+    static TOKEN: OnceLock<SecretString> = OnceLock::new();
+    TOKEN.get_or_init(|| SecretString::new("ghs_changed_files_test").expect("fixture token"))
+}
 
 fn revision(value: &str) -> GitObjectId {
     GitObjectId::from_provider_hex(value).expect("exact fixture revision")
@@ -128,7 +134,7 @@ async fn pull_request_diff<'a>(
         repository,
         base,
         head,
-        GithubPullRequestDiffAuthority::PublicAnonymous,
+        GithubPullRequestDiffAuthority::new(test_token()),
     )
     .await
 }
@@ -265,7 +271,7 @@ async fn pull_request_transport_and_authority_failures_have_disjoint_disposition
             &repository,
             &revision(BEFORE),
             &revision(AFTER),
-            GithubPullRequestDiffAuthority::PrivateInstallationPullRequestsRead(&token),
+            GithubPullRequestDiffAuthority::new(&token),
         )
         .await,
         GithubPullRequestDiffOutcome::Invalid(GithubPushDiffIncompleteReason::ProviderRejected)
@@ -538,7 +544,7 @@ async fn pull_request_authority_and_fork_repository_are_exactly_bound() {
         &head_repository,
         &revision(BEFORE),
         &revision(AFTER),
-        GithubPullRequestDiffAuthority::PrivateInstallationPullRequestsRead(&token),
+        GithubPullRequestDiffAuthority::new(&token),
     )
     .await;
     assert!(matches!(outcome, GithubPullRequestDiffOutcome::Complete(_)));
@@ -564,7 +570,7 @@ async fn pull_request_authority_and_fork_repository_are_exactly_bound() {
             &head_repository,
             &revision(BEFORE),
             &revision(AFTER),
-            GithubPullRequestDiffAuthority::PublicAnonymous,
+            GithubPullRequestDiffAuthority::new(test_token()),
         )
         .await,
         GithubPullRequestDiffOutcome::Invalid(GithubPushDiffIncompleteReason::InvalidEvidence)
@@ -638,7 +644,7 @@ async fn pull_request_deletions_and_both_rename_paths_are_complete() {
 }
 
 #[tokio::test]
-async fn public_comparison_is_anonymous_exact_and_canonical() {
+async fn public_comparison_is_installation_authenticated_exact_and_canonical() {
     let fixture = FixtureServer::spawn().await;
     fixture.enqueue(ResponseSpec::json(
         StatusCode::OK,
@@ -665,7 +671,7 @@ async fn public_comparison_is_anonymous_exact_and_canonical() {
         &before,
         &after,
         &commits,
-        GithubPushDiffAuthority::PublicAnonymous,
+        GithubPushDiffAuthority::new(test_token()),
     )
     .await;
     let GithubPushDiffOutcome::Complete(evidence) = outcome else {
@@ -684,7 +690,10 @@ async fn public_comparison_is_anonymous_exact_and_canonical() {
     );
     assert_eq!(requests[0].headers["accept"], "application/vnd.github+json");
     assert_eq!(requests[0].headers["x-github-api-version"], "2026-03-10");
-    assert!(!requests[0].headers.contains_key("authorization"));
+    assert_eq!(
+        requests[0].headers["authorization"],
+        "Bearer ghs_changed_files_test"
+    );
 }
 
 #[tokio::test]
@@ -713,7 +722,7 @@ async fn private_comparison_sends_only_the_exact_bearer_to_the_api_origin() {
         &before,
         &after,
         &commits,
-        GithubPushDiffAuthority::PrivateInstallationContentsRead(&token),
+        GithubPushDiffAuthority::new(&token),
     )
     .await;
     assert!(matches!(outcome, GithubPushDiffOutcome::Complete(_)));
@@ -751,7 +760,7 @@ async fn unsupported_push_shapes_are_typed_incomplete_without_provider_io() {
             .push_changed_files(GithubPushDiffRequest::new(
                 &repository,
                 range,
-                GithubPushDiffAuthority::PublicAnonymous,
+                GithubPushDiffAuthority::new(test_token()),
                 deadline(),
             ))
             .await;
@@ -783,7 +792,7 @@ async fn compare_selection_has_exact_299_300_301_boundaries() {
             &before,
             &after,
             &commits,
-            GithubPushDiffAuthority::PublicAnonymous,
+            GithubPushDiffAuthority::new(test_token()),
         )
         .await;
         if file_count <= MAX_GITHUB_COMPARE_PATH_FILTER_FILES {
@@ -838,7 +847,7 @@ async fn pagination_must_equal_the_complete_signed_commit_set_and_end_at_after()
         &before,
         &after,
         &signed_commits,
-        GithubPushDiffAuthority::PublicAnonymous,
+        GithubPushDiffAuthority::new(test_token()),
     )
     .await;
     assert!(matches!(outcome, GithubPushDiffOutcome::Complete(_)));
@@ -863,7 +872,7 @@ async fn pagination_must_equal_the_complete_signed_commit_set_and_end_at_after()
         &before,
         &after,
         &signed_commits,
-        GithubPushDiffAuthority::PublicAnonymous,
+        GithubPushDiffAuthority::new(test_token()),
     )
     .await;
     assert_eq!(
@@ -890,7 +899,7 @@ async fn divergence_is_invalid_and_push_renames_include_both_paths() {
         &before,
         &after,
         &commits,
-        GithubPushDiffAuthority::PublicAnonymous,
+        GithubPushDiffAuthority::new(test_token()),
     )
     .await;
     assert_eq!(
@@ -919,7 +928,7 @@ async fn divergence_is_invalid_and_push_renames_include_both_paths() {
         &before,
         &after,
         &commits,
-        GithubPushDiffAuthority::PublicAnonymous,
+        GithubPushDiffAuthority::new(test_token()),
     )
     .await;
     let GithubPushDiffOutcome::Complete(evidence) = outcome else {
@@ -972,7 +981,7 @@ async fn duplicate_or_malformed_paths_fail_closed() {
             &before,
             &after,
             &commits,
-            GithubPushDiffAuthority::PublicAnonymous,
+            GithubPushDiffAuthority::new(test_token()),
         )
         .await;
         assert_eq!(
@@ -1002,7 +1011,7 @@ async fn redirects_and_oversized_responses_fail_closed_without_following() {
         &before,
         &after,
         &commits,
-        GithubPushDiffAuthority::PublicAnonymous,
+        GithubPushDiffAuthority::new(test_token()),
     )
     .await;
     assert_eq!(
@@ -1040,7 +1049,7 @@ async fn redirects_and_oversized_responses_fail_closed_without_following() {
         &before,
         &after,
         &commits,
-        GithubPushDiffAuthority::PublicAnonymous,
+        GithubPushDiffAuthority::new(test_token()),
     )
     .await;
     assert_eq!(
@@ -1066,7 +1075,7 @@ async fn only_exact_ok_is_accepted_and_credential_rejection_is_typed() {
         &before,
         &after,
         &commits,
-        GithubPushDiffAuthority::PublicAnonymous,
+        GithubPushDiffAuthority::new(test_token()),
     )
     .await;
     assert_eq!(
@@ -1083,7 +1092,7 @@ async fn only_exact_ok_is_accepted_and_credential_rejection_is_typed() {
         &before,
         &after,
         &commits,
-        GithubPushDiffAuthority::PrivateInstallationContentsRead(&token),
+        GithubPushDiffAuthority::new(&token),
     )
     .await;
     assert_eq!(
@@ -1099,7 +1108,7 @@ async fn only_exact_ok_is_accepted_and_credential_rejection_is_typed() {
         &before,
         &after,
         &commits,
-        GithubPushDiffAuthority::PublicAnonymous,
+        GithubPushDiffAuthority::new(test_token()),
     )
     .await;
     assert_eq!(outcome, GithubPushDiffOutcome::RetryableUnavailable);
@@ -1119,7 +1128,7 @@ async fn rate_limits_and_the_overall_deadline_are_unavailable() {
         &before,
         &after,
         &commits,
-        GithubPushDiffAuthority::PublicAnonymous,
+        GithubPushDiffAuthority::new(test_token()),
     )
     .await;
     assert_eq!(outcome, GithubPushDiffOutcome::RetryableUnavailable);
@@ -1134,7 +1143,7 @@ async fn rate_limits_and_the_overall_deadline_are_unavailable() {
                 after,
                 pushed_commits: commits.to_vec(),
             },
-            GithubPushDiffAuthority::PublicAnonymous,
+            GithubPushDiffAuthority::new(test_token()),
             Instant::now()
                 .checked_sub(Duration::from_millis(1))
                 .unwrap(),
@@ -1150,7 +1159,7 @@ async fn rate_limits_and_the_overall_deadline_are_unavailable() {
         &before,
         &after,
         &commits,
-        GithubPushDiffAuthority::PublicAnonymous,
+        GithubPushDiffAuthority::new(test_token()),
     )
     .await;
     assert_eq!(outcome, GithubPushDiffOutcome::RetryableUnavailable);

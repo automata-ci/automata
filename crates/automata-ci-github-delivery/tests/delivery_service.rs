@@ -14,7 +14,7 @@ use automata_ci_core::GitObjectId;
 use automata_ci_core::{Sha256Digest, UnixMillis};
 use automata_ci_github_delivery::{
     GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE, GithubChangedFileSelection,
-    GithubChangedFilesDisposition, GithubDeliveryClock, GithubDeliveryPrivateRepositoryAction,
+    GithubChangedFilesDisposition, GithubDeliveryClock, GithubDeliveryRepositoryAction,
     GithubDeliveryService, GithubDeliveryServiceConfig, GithubDeliveryServiceConfigurationError,
     GithubDeliveryServiceError, GithubDeliveryServiceOutcome, GithubDeliverySourceCredential,
     GithubDeliverySourceCredentialBinding, GithubDeliverySourceCredentialProvider,
@@ -482,7 +482,7 @@ impl RenewalApplyGate {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct RacingChangedFilesObservation {
     claim: ProviderDeliveryClaimFence,
-    private_authority: bool,
+    installation_authority: bool,
 }
 
 #[derive(Debug)]
@@ -528,9 +528,9 @@ impl GithubPushChangedFilesProvider for RenewalRacingChangedFiles {
             .expect("changed-files observations lock")
             .push(RacingChangedFilesObservation {
                 claim: request.snapshot().claim(),
-                private_authority: matches!(
+                installation_authority: matches!(
                     request.authority(),
-                    GithubPushChangedFilesAuthority::PrivateInstallationContentsRead(_)
+                    GithubPushChangedFilesAuthority::InstallationContentsRead(_)
                 ),
             });
         if call == 0
@@ -583,7 +583,7 @@ struct CredentialObservation {
     repository_id: ProviderRepositoryId,
     claim: ProviderDeliveryClaimFence,
     attempt: u16,
-    action: GithubDeliveryPrivateRepositoryAction,
+    action: GithubDeliveryRepositoryAction,
     authority_selector: GithubServerServiceAuthoritySelector,
     consumer: GithubServerServiceConsumerClaim,
     observed_at: UnixMillis,
@@ -645,7 +645,7 @@ impl RecordingCredentialProvider {
         };
         let coordinates = ProviderRepositoryCoordinates::new(
             repository_id,
-            ProviderRepositoryVisibility::Private,
+            identity.repository_visibility(),
             route.clone(),
         )
         .expect("credential repository coordinates");
@@ -668,8 +668,7 @@ impl RecordingCredentialProvider {
     ) -> ProviderRepositoryOwnerId {
         let wrong_during_predecessor_changed_files = self.behavior
             == CredentialBehavior::WrongOwnerChangedFilesDuringRenewalApply
-            && request.action()
-                == GithubDeliveryPrivateRepositoryAction::FetchPrivateRepositoryChangedFiles
+            && request.action() == GithubDeliveryRepositoryAction::FetchRepositoryChangedFiles
             && request.snapshot().claim().fence() == 7;
         if self.behavior == CredentialBehavior::WrongOwner || wrong_during_predecessor_changed_files
         {
@@ -695,12 +694,12 @@ impl RecordingCredentialProvider {
         };
         let action = if self.behavior == CredentialBehavior::WrongAction {
             match request.action() {
-                GithubDeliveryPrivateRepositoryAction::FetchPrivateRepositoryRevision => {
-                    GithubServerServiceAction::FetchPrivateRepositoryChangedFiles
+                GithubDeliveryRepositoryAction::FetchRepositoryRevision => {
+                    GithubServerServiceAction::FetchRepositoryChangedFiles
                 }
-                GithubDeliveryPrivateRepositoryAction::FetchPrivateRepositoryChangedFiles
-                | GithubDeliveryPrivateRepositoryAction::FetchPrivatePullRequestFiles => {
-                    GithubServerServiceAction::FetchPrivateRepositoryRevision
+                GithubDeliveryRepositoryAction::FetchRepositoryChangedFiles
+                | GithubDeliveryRepositoryAction::FetchPullRequestFiles => {
+                    GithubServerServiceAction::FetchRepositoryRevision
                 }
             }
         } else {
@@ -776,11 +775,11 @@ impl RecordingCredentialProvider {
                 renewal_apply_gate: match (self.behavior, request.action()) {
                     (
                         CredentialBehavior::ReleaseDuringRenewalApply,
-                        GithubDeliveryPrivateRepositoryAction::FetchPrivateRepositoryRevision,
+                        GithubDeliveryRepositoryAction::FetchRepositoryRevision,
                     )
                     | (
                         CredentialBehavior::ReleaseChangedFilesDuringRenewalApply,
-                        GithubDeliveryPrivateRepositoryAction::FetchPrivateRepositoryChangedFiles,
+                        GithubDeliveryRepositoryAction::FetchRepositoryChangedFiles,
                     ) => Some(Arc::clone(&self.renewal_apply_gate)),
                     _ => None,
                 },
@@ -841,8 +840,7 @@ impl GithubDeliverySourceCredentialProvider for RecordingCredentialProvider {
             return Err(GithubDeliverySourceCredentialProviderError::Rejected);
         }
         if self.behavior == CredentialBehavior::WrongOwnerChangedFilesDuringRenewalApply
-            && request.action()
-                == GithubDeliveryPrivateRepositoryAction::FetchPrivateRepositoryChangedFiles
+            && request.action() == GithubDeliveryRepositoryAction::FetchRepositoryChangedFiles
             && request.snapshot().claim().fence() == 7
         {
             self.renewal_apply_gate.wait_committed().await;
@@ -1242,11 +1240,16 @@ fn blocking_clock_harness(
     let worker_id =
         ProviderProcessingWorkerId::from_uuid(Uuid::from_u128(2)).expect("worker identity");
     let objects = Arc::new(VerifiedBlobStore::exact(descriptor, body));
-    let service = GithubDeliveryService::new_public_only(
+    let credentials = Arc::new(RecordingCredentialProvider::new(
+        CredentialBehavior::Exact,
+        Arc::new(RenewalApplyGate::new()),
+    ));
+    let service = GithubDeliveryService::new(
         objects,
         source,
         Arc::new(StaticProcessor),
         repository.clone(),
+        credentials,
         clock,
         worker_id,
         GithubDeliveryWorkerConfig::default(),
@@ -1285,30 +1288,6 @@ fn harness_with_visibility(
     service_config: GithubDeliveryServiceConfig,
     visibility: ProviderRepositoryVisibility,
 ) -> Harness {
-    let private_source_enabled = visibility == ProviderRepositoryVisibility::Private;
-    harness_with_source_policy(
-        credential_behavior,
-        renewal_behavior,
-        terminal_behavior,
-        gate,
-        service_config,
-        visibility,
-        private_source_enabled,
-        false,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn harness_with_source_policy(
-    credential_behavior: CredentialBehavior,
-    renewal_behavior: RenewalBehavior,
-    terminal_behavior: TerminalBehavior,
-    gate: Option<Arc<SourceGate>>,
-    service_config: GithubDeliveryServiceConfig,
-    visibility: ProviderRepositoryVisibility,
-    private_source_enabled: bool,
-    deleted: bool,
-) -> Harness {
     harness_with_stored_visibility(
         credential_behavior,
         renewal_behavior,
@@ -1317,8 +1296,7 @@ fn harness_with_source_policy(
         service_config,
         visibility,
         visibility,
-        private_source_enabled,
-        deleted,
+        false,
     )
 }
 
@@ -1331,7 +1309,6 @@ fn harness_with_stored_visibility(
     service_config: GithubDeliveryServiceConfig,
     identity_visibility: ProviderRepositoryVisibility,
     stored_visibility: ProviderRepositoryVisibility,
-    private_source_enabled: bool,
     deleted: bool,
 ) -> Harness {
     let (template, descriptor, body) =
@@ -1361,30 +1338,17 @@ fn harness_with_stored_visibility(
     let worker_id =
         ProviderProcessingWorkerId::from_uuid(Uuid::from_u128(2)).expect("worker identity");
     let objects = Arc::new(VerifiedBlobStore::exact(descriptor, body));
-    let service = if private_source_enabled {
-        GithubDeliveryService::new_with_private_source_credentials(
-            objects.clone(),
-            source.clone(),
-            Arc::new(StaticProcessor),
-            repository.clone(),
-            credentials.clone(),
-            clock.clone(),
-            worker_id,
-            GithubDeliveryWorkerConfig::default(),
-            service_config,
-        )
-    } else {
-        GithubDeliveryService::new_public_only(
-            objects.clone(),
-            source.clone(),
-            Arc::new(StaticProcessor),
-            repository.clone(),
-            clock.clone(),
-            worker_id,
-            GithubDeliveryWorkerConfig::default(),
-            service_config,
-        )
-    }
+    let service = GithubDeliveryService::new(
+        objects.clone(),
+        source.clone(),
+        Arc::new(StaticProcessor),
+        repository.clone(),
+        credentials.clone(),
+        clock.clone(),
+        worker_id,
+        GithubDeliveryWorkerConfig::default(),
+        service_config,
+    )
     .expect("delivery service");
     Harness {
         service: Arc::new(service),
@@ -1462,7 +1426,7 @@ fn snapshot_processor_harness_with_config(
     let worker_id =
         ProviderProcessingWorkerId::from_uuid(Uuid::from_u128(2)).expect("worker identity");
     let objects = Arc::new(VerifiedBlobStore::exact(descriptor, body));
-    let service = GithubDeliveryService::new_with_private_source_credentials(
+    let service = GithubDeliveryService::new(
         objects.clone(),
         source.clone(),
         processor.clone(),
@@ -1548,30 +1512,17 @@ fn changed_files_renewal_harness(
         GithubDeliveryWorkflowAdmissionProcessor::new(admission)
             .with_changed_files_provider(changed_files.clone()),
     ));
-    let service = if visibility == ProviderRepositoryVisibility::Private {
-        GithubDeliveryService::new_with_private_source_credentials(
-            objects.clone(),
-            source.clone(),
-            processor.clone(),
-            repository.clone(),
-            credentials.clone(),
-            clock.clone(),
-            worker_id,
-            GithubDeliveryWorkerConfig::default(),
-            service_config(),
-        )
-    } else {
-        GithubDeliveryService::new_public_only(
-            objects.clone(),
-            source.clone(),
-            processor.clone(),
-            repository.clone(),
-            clock.clone(),
-            worker_id,
-            GithubDeliveryWorkerConfig::default(),
-            service_config(),
-        )
-    }
+    let service = GithubDeliveryService::new(
+        objects.clone(),
+        source.clone(),
+        processor.clone(),
+        repository.clone(),
+        credentials.clone(),
+        clock.clone(),
+        worker_id,
+        GithubDeliveryWorkerConfig::default(),
+        service_config(),
+    )
     .expect("delivery service");
     (
         Harness {
@@ -1784,19 +1735,17 @@ async fn success_uses_one_stable_worker_and_exact_request_scoped_credential() {
         );
         assert_eq!(
             &observations[0].authority_selector,
-            expected_evidence
-                .private_source_authority()
-                .expect("private delivery pins source authority")
+            expected_evidence.repository_contents_authority()
         );
         assert_eq!(
             observations[0].consumer.action(),
-            GithubServerServiceAction::FetchPrivateRepositoryRevision
+            GithubServerServiceAction::FetchRepositoryRevision
         );
         assert_eq!(observations[0].consumer.fence().get(), 7);
         assert_eq!(observations[0].consumer.revision().get(), 1);
         assert_eq!(
             observations[0].action,
-            GithubDeliveryPrivateRepositoryAction::FetchPrivateRepositoryRevision
+            GithubDeliveryRepositoryAction::FetchRepositoryRevision
         );
         assert_eq!(
             observations[0].required_through,
@@ -1831,82 +1780,33 @@ async fn success_uses_one_stable_worker_and_exact_request_scoped_credential() {
 }
 
 #[tokio::test]
-async fn public_delivery_ignores_retained_private_credentials_and_fetches_anonymously() {
-    for private_source_enabled in [false, true] {
-        let harness = harness_with_source_policy(
-            CredentialBehavior::Error(GithubDeliverySourceCredentialProviderError::Rejected),
-            RenewalBehavior::Succeed,
-            TerminalBehavior::Succeed,
-            None,
-            service_config(),
-            ProviderRepositoryVisibility::Public,
-            private_source_enabled,
-            false,
-        );
-
-        let outcome = run_once(harness.service.clone(), CancellationToken::new())
-            .await
-            .expect("public delivery completion");
-        assert!(matches!(
-            outcome,
-            GithubDeliveryServiceOutcome::Processed(GithubDeliveryWorkerOutcome::Completed(_))
-        ));
-        if private_source_enabled {
-            assert_eq!(harness.credentials.calls.load(Ordering::SeqCst), 0);
-            assert!(
-                harness
-                    .credentials
-                    .observations
-                    .lock()
-                    .expect("credential observations lock")
-                    .is_empty()
-            );
-        }
-        assert_eq!(harness.objects.read_count(), 1);
-        assert_eq!(harness.source.calls.load(Ordering::SeqCst), 1);
-        assert!(!harness.source.credential_present.load(Ordering::SeqCst));
-        assert!(!harness.source.credential_matched.load(Ordering::SeqCst));
-        assert_eq!(harness.repository.transition_count(), 1);
-    }
-}
-
-#[tokio::test]
-async fn public_only_service_terminally_rejects_private_delivery_without_credential_authority() {
-    let harness = harness_with_source_policy(
-        CredentialBehavior::Exact,
+async fn public_delivery_uses_direct_archive_without_acquiring_a_rest_credential() {
+    let harness = harness_with_visibility(
+        CredentialBehavior::Error(GithubDeliverySourceCredentialProviderError::Rejected),
         RenewalBehavior::Succeed,
         TerminalBehavior::Succeed,
         None,
         service_config(),
-        ProviderRepositoryVisibility::Private,
-        false,
-        false,
+        ProviderRepositoryVisibility::Public,
     );
-    let debug = format!("{:?}", harness.service);
-    assert!(debug.contains("source_policy: PublicOnly"));
-    assert!(!debug.contains(TOKEN_MARKER));
 
-    let outcome = run_once(harness.service, CancellationToken::new())
+    let outcome = run_once(harness.service.clone(), CancellationToken::new())
         .await
-        .expect("unsupported private delivery is durably rejected");
+        .expect("public delivery completion");
     assert!(matches!(
         outcome,
-        GithubDeliveryServiceOutcome::Processed(GithubDeliveryWorkerOutcome::Rejected(_))
+        GithubDeliveryServiceOutcome::Processed(GithubDeliveryWorkerOutcome::Completed(_))
     ));
-    assert_eq!(harness.objects.read_count(), 1);
     assert_eq!(harness.credentials.calls.load(Ordering::SeqCst), 0);
-    assert_eq!(harness.source.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(harness.objects.read_count(), 1);
+    assert_eq!(harness.source.calls.load(Ordering::SeqCst), 1);
+    assert!(!harness.source.credential_present.load(Ordering::SeqCst));
+    assert!(!harness.source.credential_matched.load(Ordering::SeqCst));
     assert_eq!(harness.repository.transition_count(), 1);
-    let rejections = harness.repository.ledger.rejections();
-    assert_eq!(rejections.len(), 1);
-    assert_eq!(
-        rejections[0].failure_kind().as_str(),
-        "github.repository_source.private_unsupported"
-    );
 }
 
 #[tokio::test]
-async fn public_only_service_rejects_envelope_visibility_mismatch_before_blob_io() {
+async fn service_rejects_envelope_visibility_mismatch_before_blob_io() {
     let harness = harness_with_stored_visibility(
         CredentialBehavior::Exact,
         RenewalBehavior::Succeed,
@@ -1915,7 +1815,6 @@ async fn public_only_service_rejects_envelope_visibility_mismatch_before_blob_io
         service_config(),
         ProviderRepositoryVisibility::Private,
         ProviderRepositoryVisibility::Public,
-        false,
         false,
     );
 
@@ -1939,7 +1838,7 @@ async fn public_only_service_rejects_envelope_visibility_mismatch_before_blob_io
 }
 
 #[tokio::test]
-async fn public_only_service_rejects_private_envelope_before_anonymous_source() {
+async fn service_rejects_payload_visibility_mismatch_before_source_io() {
     let harness = harness_with_stored_visibility(
         CredentialBehavior::Exact,
         RenewalBehavior::Succeed,
@@ -1948,7 +1847,6 @@ async fn public_only_service_rejects_private_envelope_before_anonymous_source() 
         service_config(),
         ProviderRepositoryVisibility::Public,
         ProviderRepositoryVisibility::Private,
-        false,
         false,
     );
 
@@ -1969,62 +1867,6 @@ async fn public_only_service_rejects_private_envelope_before_anonymous_source() 
         rejections[0].failure_kind().as_str(),
         "github.event_envelope.identity_mismatch"
     );
-}
-
-#[tokio::test]
-async fn public_only_service_rejects_private_deletion_before_empty_completion() {
-    let harness = harness_with_source_policy(
-        CredentialBehavior::Exact,
-        RenewalBehavior::Succeed,
-        TerminalBehavior::Succeed,
-        None,
-        service_config(),
-        ProviderRepositoryVisibility::Private,
-        false,
-        true,
-    );
-
-    let outcome = run_once(harness.service, CancellationToken::new())
-        .await
-        .expect("unsupported private deletion is durably rejected");
-    assert!(matches!(
-        outcome,
-        GithubDeliveryServiceOutcome::Processed(GithubDeliveryWorkerOutcome::Rejected(_))
-    ));
-    assert_eq!(harness.objects.read_count(), 1);
-    assert_eq!(harness.credentials.calls.load(Ordering::SeqCst), 0);
-    assert_eq!(harness.source.calls.load(Ordering::SeqCst), 0);
-    assert_eq!(harness.repository.transition_count(), 1);
-    assert!(harness.repository.ledger.completions().is_empty());
-    let rejections = harness.repository.ledger.rejections();
-    assert_eq!(rejections.len(), 1);
-    assert_eq!(
-        rejections[0].failure_kind().as_str(),
-        "github.repository_source.private_unsupported"
-    );
-}
-
-#[tokio::test]
-async fn public_only_private_rejection_preserves_terminal_fence_loss() {
-    let harness = harness_with_source_policy(
-        CredentialBehavior::Exact,
-        RenewalBehavior::Succeed,
-        TerminalBehavior::ClaimLost,
-        None,
-        service_config(),
-        ProviderRepositoryVisibility::Private,
-        false,
-        false,
-    );
-
-    assert!(matches!(
-        run_once(harness.service, CancellationToken::new()).await,
-        Err(GithubDeliveryServiceError::ClaimLost)
-    ));
-    assert_eq!(harness.credentials.calls.load(Ordering::SeqCst), 0);
-    assert_eq!(harness.source.calls.load(Ordering::SeqCst), 0);
-    assert_eq!(harness.repository.ledger.rejections().len(), 1);
-    assert!(harness.repository.ledger.completions().is_empty());
 }
 
 #[tokio::test]
@@ -2185,8 +2027,8 @@ async fn renewal_during_changed_files_release_reuses_the_completed_provider_resu
             .map(|observation| observation.action)
             .collect::<Vec<_>>(),
         [
-            GithubDeliveryPrivateRepositoryAction::FetchPrivateRepositoryRevision,
-            GithubDeliveryPrivateRepositoryAction::FetchPrivateRepositoryChangedFiles,
+            GithubDeliveryRepositoryAction::FetchRepositoryRevision,
+            GithubDeliveryRepositoryAction::FetchRepositoryChangedFiles,
         ]
     );
     drop(credential_observations);
@@ -2480,7 +2322,7 @@ async fn renewal_during_credential_acquisition_reacquires_for_the_latest_horizon
     assert_eq!(observations[0].claim.fence(), 7);
     assert_eq!(observations[1].claim.fence(), 8);
     assert!(observations.iter().all(|observation| {
-        observation.action == GithubDeliveryPrivateRepositoryAction::FetchPrivateRepositoryRevision
+        observation.action == GithubDeliveryRepositoryAction::FetchRepositoryRevision
             && observation.attempt == 1
     }));
     assert_eq!(harness.source.calls.load(Ordering::SeqCst), 1);
@@ -2589,10 +2431,11 @@ async fn stale_changed_files_failures_wait_for_renewal_and_replay_on_the_success
             assert_eq!(observations.len(), 2);
             assert_eq!(observations[0].claim.fence(), 7);
             assert_eq!(observations[1].claim.fence(), 8);
-            assert!(observations.iter().all(|observation| {
-                observation.private_authority
-                    == (visibility == ProviderRepositoryVisibility::Private)
-            }));
+            assert!(
+                observations
+                    .iter()
+                    .all(|observation| observation.installation_authority)
+            );
             drop(observations);
             assert_single_skipped_completion(&harness, 8);
         }
@@ -2617,7 +2460,7 @@ async fn stale_malformed_changed_files_credential_reacquires_on_the_successor() 
                 .iter()
                 .any(|observation| {
                     observation.action
-                        == GithubDeliveryPrivateRepositoryAction::FetchPrivateRepositoryChangedFiles
+                        == GithubDeliveryRepositoryAction::FetchRepositoryChangedFiles
                 });
             if observed_changed_files {
                 break;
@@ -2664,16 +2507,13 @@ async fn stale_malformed_changed_files_credential_reacquires_on_the_successor() 
             .map(|observation| (observation.action, observation.claim.fence()))
             .collect::<Vec<_>>(),
         [
+            (GithubDeliveryRepositoryAction::FetchRepositoryRevision, 7,),
             (
-                GithubDeliveryPrivateRepositoryAction::FetchPrivateRepositoryRevision,
+                GithubDeliveryRepositoryAction::FetchRepositoryChangedFiles,
                 7,
             ),
             (
-                GithubDeliveryPrivateRepositoryAction::FetchPrivateRepositoryChangedFiles,
-                7,
-            ),
-            (
-                GithubDeliveryPrivateRepositoryAction::FetchPrivateRepositoryChangedFiles,
+                GithubDeliveryRepositoryAction::FetchRepositoryChangedFiles,
                 8,
             ),
         ]
@@ -2685,7 +2525,7 @@ async fn stale_malformed_changed_files_credential_reacquires_on_the_successor() 
         .expect("changed-files observations lock");
     assert_eq!(changed_files_observations.len(), 1);
     assert_eq!(changed_files_observations[0].claim.fence(), 8);
-    assert!(changed_files_observations[0].private_authority);
+    assert!(changed_files_observations[0].installation_authority);
     drop(changed_files_observations);
     assert_single_skipped_completion(&harness, 8);
 }

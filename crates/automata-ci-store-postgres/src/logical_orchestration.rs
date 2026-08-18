@@ -119,9 +119,9 @@ const DISPATCH_SOURCE_RESOLUTION_COLUMNS: &str = r"
     workflow_path, git_ref, scm_provider, provider_repository_id,
     repository_owner, repository_name, github_repository_owner_id,
     provider_connection_id, provider_manifest_revision, provider_manifest_digest,
-    private_source_authority_id, private_source_authority_identity_digest,
-    private_source_authority_app_configuration_revision,
-    private_source_authority_policy_revision, state, claim_owner_id,
+    repository_contents_authority_id, repository_contents_authority_identity_digest,
+    repository_contents_authority_app_configuration_revision,
+    repository_contents_authority_policy_revision, state, claim_owner_id,
     claim_fence, claimed_at_ms, claim_expires_at_ms, commit_sha,
     source_digest, source_object_key, source_size_bytes, source_media_type,
     created_at_ms, resolved_at_ms
@@ -134,10 +134,10 @@ const DISPATCH_SOURCE_RESOLUTION_RETURNING_COLUMNS: &str = r"
     resolution.repository_owner, resolution.repository_name,
     resolution.github_repository_owner_id, resolution.provider_connection_id,
     resolution.provider_manifest_revision, resolution.provider_manifest_digest,
-    resolution.private_source_authority_id,
-    resolution.private_source_authority_identity_digest,
-    resolution.private_source_authority_app_configuration_revision,
-    resolution.private_source_authority_policy_revision, resolution.state,
+    resolution.repository_contents_authority_id,
+    resolution.repository_contents_authority_identity_digest,
+    resolution.repository_contents_authority_app_configuration_revision,
+    resolution.repository_contents_authority_policy_revision, resolution.state,
     resolution.claim_owner_id, resolution.claim_fence, resolution.claimed_at_ms,
     resolution.claim_expires_at_ms, resolution.commit_sha, resolution.source_digest,
     resolution.source_object_key, resolution.source_size_bytes,
@@ -250,11 +250,11 @@ async fn begin_dispatch_source_resolution(
                current_manifest.manifest_digest,
                manifest.github_repository_owner_id,
                manifest.repository_visibility,
-               authority.id AS private_source_authority_id,
-               authority.identity_digest AS private_source_authority_identity_digest,
+               authority.id AS repository_contents_authority_id,
+               authority.identity_digest AS repository_contents_authority_identity_digest,
                authority.app_configuration_revision
-                   AS private_source_authority_app_configuration_revision,
-               authority.policy_revision AS private_source_authority_policy_revision
+                   AS repository_contents_authority_app_configuration_revision,
+               authority.policy_revision AS repository_contents_authority_policy_revision
         FROM repositories AS repository
         JOIN workflow_definitions AS workflow
           ON workflow.repository_id = repository.id
@@ -268,7 +268,7 @@ async fn begin_dispatch_source_resolution(
          AND manifest.provider_connection_id = current_manifest.provider_connection_id
          AND manifest.manifest_revision = current_manifest.manifest_revision
          AND manifest.manifest_digest = current_manifest.manifest_digest
-        LEFT JOIN github_server_service_authorities AS authority
+        JOIN github_server_service_authorities AS authority
           ON authority.tenant_id = manifest.tenant_id
          AND authority.repository_id = manifest.repository_id
          AND authority.provider_connection_id = manifest.provider_connection_id
@@ -278,7 +278,7 @@ async fn begin_dispatch_source_resolution(
          AND authority.github_repository_name = manifest.github_repository_name
          AND authority.app_configuration_revision = manifest.app_configuration_revision
          AND authority.policy_revision = manifest.policy_revision
-         AND authority.service_scope = 'private_repository_source_read'
+         AND authority.service_scope = 'repository_contents_read'
          AND authority.state = 'active'
         WHERE repository.tenant_id = $1
           AND repository.id = $2
@@ -297,12 +297,10 @@ async fn begin_dispatch_source_resolution(
     let visibility = target
         .try_get::<String, _>("repository_visibility")
         .map_err(source_operation_error)?;
-    let private_authority = target
-        .try_get::<Option<Uuid>, _>("private_source_authority_id")
+    let repository_contents_authority = target
+        .try_get::<Uuid, _>("repository_contents_authority_id")
         .map_err(source_operation_error)?;
-    if (visibility == "private") != private_authority.is_some()
-        || !matches!(visibility.as_str(), "public" | "private")
-    {
+    if !matches!(visibility.as_str(), "public" | "private") {
         return Err(WorkflowDispatchSourceResolutionStoreError::NotFound);
     }
     let expires_at = now
@@ -315,9 +313,9 @@ async fn begin_dispatch_source_resolution(
             workflow_path, git_ref, scm_provider, provider_repository_id,\
             repository_owner, repository_name, github_repository_owner_id,\
             provider_connection_id, provider_manifest_revision, provider_manifest_digest,\
-            private_source_authority_id, private_source_authority_identity_digest,\
-            private_source_authority_app_configuration_revision,\
-            private_source_authority_policy_revision, state, claim_owner_id, claim_fence,\
+            repository_contents_authority_id, repository_contents_authority_identity_digest,\
+            repository_contents_authority_app_configuration_revision,\
+            repository_contents_authority_policy_revision, state, claim_owner_id, claim_fence,\
             claimed_at_ms, claim_expires_at_ms, created_at_ms\
          ) VALUES (\
             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,\
@@ -376,20 +374,20 @@ async fn begin_dispatch_source_resolution(
                 .try_get::<Vec<u8>, _>("manifest_digest")
                 .map_err(source_operation_error)?,
         )
-        .bind(private_authority)
+        .bind(repository_contents_authority)
         .bind(
             target
-                .try_get::<Option<Vec<u8>>, _>("private_source_authority_identity_digest")
+                .try_get::<Vec<u8>, _>("repository_contents_authority_identity_digest")
                 .map_err(source_operation_error)?,
         )
         .bind(
             target
-                .try_get::<Option<i64>, _>("private_source_authority_app_configuration_revision")
+                .try_get::<i64, _>("repository_contents_authority_app_configuration_revision")
                 .map_err(source_operation_error)?,
         )
         .bind(
             target
-                .try_get::<Option<i64>, _>("private_source_authority_policy_revision")
+                .try_get::<i64, _>("repository_contents_authority_policy_revision")
                 .map_err(source_operation_error)?,
         )
         .bind(request.worker_id().as_uuid())
@@ -423,11 +421,11 @@ async fn complete_dispatch_source_resolution(
            AND resolution.provider_connection_id = $7 \
            AND resolution.provider_manifest_revision = $8 \
            AND resolution.provider_manifest_digest = $9 \
-           AND resolution.private_source_authority_id IS NOT DISTINCT FROM $10 \
-           AND resolution.private_source_authority_identity_digest IS NOT DISTINCT FROM $11 \
-           AND resolution.private_source_authority_app_configuration_revision \
+           AND resolution.repository_contents_authority_id IS NOT DISTINCT FROM $10 \
+           AND resolution.repository_contents_authority_identity_digest IS NOT DISTINCT FROM $11 \
+           AND resolution.repository_contents_authority_app_configuration_revision \
                IS NOT DISTINCT FROM $12 \
-           AND resolution.private_source_authority_policy_revision IS NOT DISTINCT FROM $13 \
+           AND resolution.repository_contents_authority_policy_revision IS NOT DISTINCT FROM $13 \
            AND resolution.state = 'claimed' AND resolution.claim_owner_id = $14 \
            AND resolution.claim_fence = $15 AND resolution.claimed_at_ms = $16 \
            AND resolution.claim_expires_at_ms = $17 \
@@ -442,7 +440,7 @@ async fn complete_dispatch_source_resolution(
     let commit_sha = request.commit_sha();
     let size = i64::try_from(request.source().encoded_size())
         .map_err(|_| WorkflowDispatchSourceResolutionStoreError::Conflict)?;
-    let private_authority = claim.private_source_authority();
+    let source_authority = claim.repository_contents_authority();
     let row = sqlx::query(AssertSqlSafe(update_query))
         .bind(claim.tenant().as_str())
         .bind(claim.operation_id().as_uuid())
@@ -456,18 +454,14 @@ async fn complete_dispatch_source_resolution(
                 .map_err(|_| WorkflowDispatchSourceResolutionStoreError::Conflict)?,
         )
         .bind(claim.manifest_digest().as_bytes().as_slice())
-        .bind(private_authority.map(|selector| selector.authority_id().as_uuid()))
-        .bind(private_authority.map(|selector| selector.identity_digest().as_bytes().to_vec()))
+        .bind(source_authority.authority_id().as_uuid())
+        .bind(source_authority.identity_digest().as_bytes().to_vec())
         .bind(
-            private_authority
-                .map(|selector| i64::try_from(selector.app_configuration_revision().get()))
-                .transpose()
+            i64::try_from(source_authority.app_configuration_revision().get())
                 .map_err(|_| WorkflowDispatchSourceResolutionStoreError::Conflict)?,
         )
         .bind(
-            private_authority
-                .map(|selector| i64::try_from(selector.policy_revision().get()))
-                .transpose()
+            i64::try_from(source_authority.policy_revision().get())
                 .map_err(|_| WorkflowDispatchSourceResolutionStoreError::Conflict)?,
         )
         .bind(claim.worker_id().as_uuid())
@@ -505,10 +499,10 @@ async fn release_dispatch_source_resolution(
           AND repository_id = $3 AND workflow_id = $4 AND workflow_path = $5
           AND git_ref = $6 AND provider_connection_id = $7
           AND provider_manifest_revision = $8 AND provider_manifest_digest = $9
-          AND private_source_authority_id IS NOT DISTINCT FROM $10
-          AND private_source_authority_identity_digest IS NOT DISTINCT FROM $11
-          AND private_source_authority_app_configuration_revision IS NOT DISTINCT FROM $12
-          AND private_source_authority_policy_revision IS NOT DISTINCT FROM $13
+          AND repository_contents_authority_id IS NOT DISTINCT FROM $10
+          AND repository_contents_authority_identity_digest IS NOT DISTINCT FROM $11
+          AND repository_contents_authority_app_configuration_revision IS NOT DISTINCT FROM $12
+          AND repository_contents_authority_policy_revision IS NOT DISTINCT FROM $13
           AND claim_owner_id = $14 AND claim_fence = $15
           AND claimed_at_ms = $16 AND claim_expires_at_ms = $17
         ",
@@ -527,27 +521,34 @@ async fn release_dispatch_source_resolution(
     .bind(claim.manifest_digest().as_bytes().as_slice())
     .bind(
         claim
-            .private_source_authority()
-            .map(|selector| selector.authority_id().as_uuid()),
+            .repository_contents_authority()
+            .authority_id()
+            .as_uuid(),
     )
     .bind(
         claim
-            .private_source_authority()
-            .map(|selector| selector.identity_digest().as_bytes().to_vec()),
+            .repository_contents_authority()
+            .identity_digest()
+            .as_bytes()
+            .to_vec(),
     )
     .bind(
-        claim
-            .private_source_authority()
-            .map(|selector| i64::try_from(selector.app_configuration_revision().get()))
-            .transpose()
-            .map_err(|_| WorkflowDispatchSourceResolutionStoreError::Conflict)?,
+        i64::try_from(
+            claim
+                .repository_contents_authority()
+                .app_configuration_revision()
+                .get(),
+        )
+        .map_err(|_| WorkflowDispatchSourceResolutionStoreError::Conflict)?,
     )
     .bind(
-        claim
-            .private_source_authority()
-            .map(|selector| i64::try_from(selector.policy_revision().get()))
-            .transpose()
-            .map_err(|_| WorkflowDispatchSourceResolutionStoreError::Conflict)?,
+        i64::try_from(
+            claim
+                .repository_contents_authority()
+                .policy_revision()
+                .get(),
+        )
+        .map_err(|_| WorkflowDispatchSourceResolutionStoreError::Conflict)?,
     )
     .bind(claim.worker_id().as_uuid())
     .bind(
@@ -657,33 +658,32 @@ fn dispatch_source_claim_from_row(
     )
     .map_err(|_| source_corrupt("source-resolution tenant is invalid"))?;
     let authority_id = row
-        .try_get::<Option<Uuid>, _>("private_source_authority_id")
+        .try_get::<Option<Uuid>, _>("repository_contents_authority_id")
         .map_err(source_operation_error)?;
     let authority_digest = row
-        .try_get::<Option<Vec<u8>>, _>("private_source_authority_identity_digest")
+        .try_get::<Option<Vec<u8>>, _>("repository_contents_authority_identity_digest")
         .map_err(source_operation_error)?;
     let authority_app_revision = row
-        .try_get::<Option<i64>, _>("private_source_authority_app_configuration_revision")
+        .try_get::<Option<i64>, _>("repository_contents_authority_app_configuration_revision")
         .map_err(source_operation_error)?;
     let authority_policy_revision = row
-        .try_get::<Option<i64>, _>("private_source_authority_policy_revision")
+        .try_get::<Option<i64>, _>("repository_contents_authority_policy_revision")
         .map_err(source_operation_error)?;
-    let private_source_authority = match (
+    let repository_contents_authority = match (
         authority_id,
         authority_digest,
         authority_app_revision,
         authority_policy_revision,
     ) {
-        (None, None, None, None) => None,
         (Some(id), Some(digest), Some(app_revision), Some(policy_revision)) => {
-            Some(GithubServerServiceAuthoritySelector::from_durable_parts(
+            GithubServerServiceAuthoritySelector::from_durable_parts(
                 tenant.clone(),
                 GithubServerServiceAuthorityId::from_uuid(id)
                     .map_err(|_| source_corrupt("source authority ID is invalid"))?,
                 source_digest(&digest)?,
                 source_revision(app_revision)?,
                 source_revision(policy_revision)?,
-            ))
+            )
         }
         _ => return Err(source_corrupt("source authority selector is incomplete")),
     };
@@ -716,7 +716,7 @@ fn dispatch_source_claim_from_row(
             &row.try_get::<Vec<u8>, _>("provider_manifest_digest")
                 .map_err(source_operation_error)?,
         )?,
-        private_source_authority,
+        repository_contents_authority,
         GithubServerServiceWorkerId::from_uuid(
             row.try_get("claim_owner_id")
                 .map_err(source_operation_error)?,

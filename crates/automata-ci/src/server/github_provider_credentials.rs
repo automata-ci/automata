@@ -24,7 +24,7 @@ use automata_ci_credential_github::{
 use automata_ci_github_delivery::{
     GithubChecksCredentialProvider, GithubChecksCredentialProviderError,
     GithubChecksCredentialRequest, GithubChecksServerServiceCredential,
-    GithubDeliveryPrivateRepositoryAction, GithubDeliverySourceCredential,
+    GithubDeliveryRepositoryAction, GithubDeliverySourceCredential,
     GithubDeliverySourceCredentialBinding, GithubDeliverySourceCredentialProvider,
     GithubDeliverySourceCredentialProviderError, GithubDeliverySourceCredentialRequest,
     GithubScheduleSourceCredential, GithubScheduleSourceCredentialProvider,
@@ -88,7 +88,7 @@ pub enum GithubWorkflowPermissionObservationError {
     Inconsistent,
 }
 
-/// Sanitized private-source credential failure for a manual dispatch.
+/// Sanitized repository-source credential failure for a manual dispatch.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub(crate) enum GithubWorkflowDispatchSourceCredentialError {
     /// Credential or provider infrastructure is temporarily unavailable.
@@ -136,7 +136,7 @@ impl GithubWorkflowDispatchSourceCredential {
         claim: &WorkflowDispatchSourceClaim,
         manifest: &GithubProviderManifest,
     ) -> bool {
-        claim.private_source_authority() == Some(&self.selector)
+        claim.repository_contents_authority() == &self.selector
             && claim.credential_consumer() == self.consumer
             && self.repository.as_str() == manifest.github_repository_name().as_str()
             && self.required_through > claim.expires_at()
@@ -313,7 +313,7 @@ impl GithubProviderCredentialReleaseSupervisor {
 
     /// Waits until every reserved live or release-pending handoff has left the supervisor.
     ///
-    /// Product shutdown must first stop every Checks publisher and private-source
+    /// Product shutdown must first stop every Checks publisher and repository-source
     /// delivery worker, so no new reservation can race this drain. A caller may
     /// impose its own shutdown deadline; abandoning this future cannot erase
     /// the authoritative durable handoff or extend its immutable horizon.
@@ -1085,9 +1085,9 @@ fn map_handoff_error(
 
 /// Exact authority registry plus delivery-provider adapters for one product replica.
 ///
-/// The Checks implementation accepts both public and private repository
-/// subjects. The source implementation is deliberately private-only; public
-/// archive and changed-file reads remain anonymous and never enter this object.
+/// Every REST-backed repository operation uses a scoped GitHub App installation
+/// credential. Exact public archives bypass REST and therefore do not acquire a
+/// token unless workflow evaluation later requests changed-file evidence.
 pub struct GithubProviderCredentialAdapters {
     handoffs: Arc<dyn GithubProviderCredentialHandoffIssuer>,
     workflow_permission_issuer: Option<Arc<GithubServerServiceCredentialIssuer>>,
@@ -1344,16 +1344,16 @@ impl GithubProviderCredentialAdapters {
         }
     }
 
-    async fn acquire_private_source(
+    async fn acquire_source(
         &self,
-        context: PrivateSourceCredentialContext,
+        context: SourceCredentialContext,
     ) -> Result<GithubDeliverySourceCredential, GithubDeliverySourceCredentialProviderError> {
-        let action = private_action(context.action);
+        let action = repository_action(context.action);
         let authority = self
             .authority(&context.selector, action.required_scope())
             .await
             .map_err(source_handoff_error)?;
-        if !private_identity_matches(&authority, &context.identity)
+        if !repository_identity_matches(&authority, &context.identity)
             || context.consumer.action() != action
         {
             return Err(GithubDeliverySourceCredentialProviderError::Rejected);
@@ -1370,7 +1370,7 @@ impl GithubProviderCredentialAdapters {
             .acquire(request)
             .await
             .map_err(source_handoff_error)?;
-        if !private_handoff_matches(&handoff, &context) {
+        if !repository_handoff_matches(&handoff, &context) {
             release_invalid_handoff(handoff).await;
             return Err(GithubDeliverySourceCredentialProviderError::InvariantViolation);
         }
@@ -1408,18 +1408,18 @@ impl GithubProviderCredentialAdapters {
         }
     }
 
-    async fn acquire_private_schedule_source(
+    async fn acquire_schedule_source(
         &self,
         request: GithubScheduleSourceCredentialRequest<'_>,
     ) -> Result<GithubScheduleSourceCredential, GithubScheduleSourceCredentialProviderError> {
         let authority = self
             .authority(
                 request.authority_selector(),
-                GithubServerServiceScope::PrivateRepositorySourceRead,
+                GithubServerServiceScope::RepositoryContentsRead,
             )
             .await
             .map_err(schedule_source_handoff_error)?;
-        if !private_schedule_identity_matches(&authority, request.manifest()) {
+        if !schedule_identity_matches(&authority, request.manifest()) {
             return Err(GithubScheduleSourceCredentialProviderError::Rejected);
         }
         let consumer = request
@@ -1437,7 +1437,7 @@ impl GithubProviderCredentialAdapters {
             .acquire(handoff_request)
             .await
             .map_err(schedule_source_handoff_error)?;
-        if !private_schedule_handoff_matches(&handoff, &request, consumer) {
+        if !schedule_handoff_matches(&handoff, &request, consumer) {
             release_invalid_handoff(handoff).await;
             return Err(GithubScheduleSourceCredentialProviderError::InvariantViolation);
         }
@@ -1464,7 +1464,7 @@ impl GithubProviderCredentialAdapters {
         }
     }
 
-    /// Acquires one exact private-repository handoff for a live manual-dispatch claim.
+    /// Acquires one exact repository handoff for a live manual-dispatch claim.
     pub(crate) async fn acquire_workflow_dispatch_source(
         &self,
         claim: &WorkflowDispatchSourceClaim,
@@ -1472,12 +1472,8 @@ impl GithubProviderCredentialAdapters {
         observed_at: UnixMillis,
     ) -> Result<GithubWorkflowDispatchSourceCredential, GithubWorkflowDispatchSourceCredentialError>
     {
-        let selector = claim
-            .private_source_authority()
-            .ok_or(GithubWorkflowDispatchSourceCredentialError::Rejected)?;
-        if manifest.repository_visibility()
-            != automata_ci_store::ProviderRepositoryVisibility::Private
-            || manifest.tenant() != claim.tenant()
+        let selector = claim.repository_contents_authority();
+        if manifest.tenant() != claim.tenant()
             || manifest.repository_id() != claim.repository_id()
             || manifest.connection_id() != claim.connection_id()
             || manifest.revision() != claim.manifest_revision()
@@ -1486,13 +1482,10 @@ impl GithubProviderCredentialAdapters {
             return Err(GithubWorkflowDispatchSourceCredentialError::Rejected);
         }
         let authority = self
-            .authority(
-                selector,
-                GithubServerServiceScope::PrivateRepositorySourceRead,
-            )
+            .authority(selector, GithubServerServiceScope::RepositoryContentsRead)
             .await
             .map_err(workflow_dispatch_source_handoff_error)?;
-        if !private_schedule_identity_matches(&authority, manifest) {
+        if !schedule_identity_matches(&authority, manifest) {
             return Err(GithubWorkflowDispatchSourceCredentialError::Rejected);
         }
         let consumer = claim.credential_consumer();
@@ -1888,7 +1881,7 @@ impl GithubDeliverySourceCredentialProvider for GithubProviderCredentialAdapters
         let consumer = request
             .consumer_claim()
             .map_err(|_| GithubDeliverySourceCredentialProviderError::InvariantViolation)?;
-        self.acquire_private_source(PrivateSourceCredentialContext {
+        self.acquire_source(SourceCredentialContext {
             identity: request.identity().clone(),
             repository_owner_id: request.repository_owner_id(),
             selector: request.authority_selector().clone(),
@@ -1907,7 +1900,7 @@ impl GithubScheduleSourceCredentialProvider for GithubProviderCredentialAdapters
         &self,
         request: GithubScheduleSourceCredentialRequest<'_>,
     ) -> Result<GithubScheduleSourceCredential, GithubScheduleSourceCredentialProviderError> {
-        self.acquire_private_schedule_source(request).await
+        self.acquire_schedule_source(request).await
     }
 }
 
@@ -1919,11 +1912,11 @@ struct ChecksCredentialContext {
     required_through: UnixMillis,
 }
 
-struct PrivateSourceCredentialContext {
+struct SourceCredentialContext {
     identity: ProviderDeliveryIdentity,
     repository_owner_id: ProviderRepositoryOwnerId,
     selector: GithubServerServiceAuthoritySelector,
-    action: GithubDeliveryPrivateRepositoryAction,
+    action: GithubDeliveryRepositoryAction,
     consumer: GithubServerServiceConsumerClaim,
     observed_at: UnixMillis,
     required_through: UnixMillis,
@@ -1960,13 +1953,11 @@ fn checks_identity_matches(
         && authority.github_app_id().get() == identity.app_id().get()
 }
 
-fn private_identity_matches(
+fn repository_identity_matches(
     authority: &GithubServerServiceAuthorityIdentity,
     identity: &ProviderDeliveryIdentity,
 ) -> bool {
     identity.provider() == "github"
-        && identity.repository_visibility()
-            == automata_ci_store::ProviderRepositoryVisibility::Private
         && authority.tenant() == identity.tenant()
         && authority.connection_id() == identity.connection_id()
         && authority.installation_id() == identity.installation_id()
@@ -1974,12 +1965,11 @@ fn private_identity_matches(
         && authority.github_repository_name().as_str() == identity.repository_identity()
 }
 
-fn private_schedule_identity_matches(
+fn schedule_identity_matches(
     authority: &GithubServerServiceAuthorityIdentity,
     manifest: &GithubProviderManifest,
 ) -> bool {
-    manifest.repository_visibility() == automata_ci_store::ProviderRepositoryVisibility::Private
-        && authority.tenant() == manifest.tenant()
+    authority.tenant() == manifest.tenant()
         && authority.repository_id() == manifest.repository_id()
         && authority.connection_id() == manifest.connection_id()
         && authority.installation_id() == manifest.installation_id()
@@ -2005,9 +1995,9 @@ fn handoff_matches(
         && handoff.usable_until > context.required_through
 }
 
-fn private_handoff_matches(
+fn repository_handoff_matches(
     handoff: &GithubProviderCredentialHandoff,
-    context: &PrivateSourceCredentialContext,
+    context: &SourceCredentialContext,
 ) -> bool {
     handoff.selector == context.selector
         && handoff.consumer == context.consumer
@@ -2017,7 +2007,7 @@ fn private_handoff_matches(
         && handoff.usable_until >= context.required_through
 }
 
-fn private_schedule_handoff_matches(
+fn schedule_handoff_matches(
     handoff: &GithubProviderCredentialHandoff,
     request: &GithubScheduleSourceCredentialRequest<'_>,
     consumer: GithubServerServiceConsumerClaim,
@@ -2041,18 +2031,16 @@ fn arm_drop_release(arm: Option<Arc<AtomicBool>>) {
     }
 }
 
-const fn private_action(
-    action: GithubDeliveryPrivateRepositoryAction,
-) -> GithubServerServiceAction {
+const fn repository_action(action: GithubDeliveryRepositoryAction) -> GithubServerServiceAction {
     match action {
-        GithubDeliveryPrivateRepositoryAction::FetchPrivateRepositoryRevision => {
-            GithubServerServiceAction::FetchPrivateRepositoryRevision
+        GithubDeliveryRepositoryAction::FetchRepositoryRevision => {
+            GithubServerServiceAction::FetchRepositoryRevision
         }
-        GithubDeliveryPrivateRepositoryAction::FetchPrivateRepositoryChangedFiles => {
-            GithubServerServiceAction::FetchPrivateRepositoryChangedFiles
+        GithubDeliveryRepositoryAction::FetchRepositoryChangedFiles => {
+            GithubServerServiceAction::FetchRepositoryChangedFiles
         }
-        GithubDeliveryPrivateRepositoryAction::FetchPrivatePullRequestFiles => {
-            GithubServerServiceAction::FetchPrivatePullRequestFiles
+        GithubDeliveryRepositoryAction::FetchPullRequestFiles => {
+            GithubServerServiceAction::FetchPullRequestFiles
         }
     }
 }

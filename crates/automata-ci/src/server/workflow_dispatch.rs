@@ -17,9 +17,9 @@ use automata_ci_store::{
     AdmissionObject, AuthenticatedWorkflowDispatchSource, BeginWorkflowDispatchSourceResolution,
     CompleteWorkflowDispatchSourceResolution, GithubProviderManifestRepository,
     GithubServerServiceWorkerId, LogicalWorkflowAdmissionStoreError,
-    MAX_WORKFLOW_DISPATCH_SOURCE_CLAIM_MILLIS, ObjectKey, ProviderRepositoryVisibility, StoreError,
-    WorkflowDispatchSourceClaim, WorkflowDispatchSourceResolutionOutcome,
-    WorkflowDispatchSourceResolutionRepository, WorkflowDispatchSourceResolutionStoreError,
+    MAX_WORKFLOW_DISPATCH_SOURCE_CLAIM_MILLIS, ObjectKey, StoreError, WorkflowDispatchSourceClaim,
+    WorkflowDispatchSourceResolutionOutcome, WorkflowDispatchSourceResolutionRepository,
+    WorkflowDispatchSourceResolutionStoreError,
 };
 use automata_ci_workflow_actions::{
     RepositoryWorkflowDiscoveryLimits, discover_github_delivery_workflows,
@@ -48,7 +48,7 @@ pub(crate) struct OperationalWorkflowDispatchBackend {
     manifests: Arc<dyn GithubProviderManifestRepository>,
     source: Arc<dyn ScmProvider>,
     blobs: Arc<dyn ImmutableBlobStore>,
-    private_credentials: Option<Arc<GithubProviderCredentialAdapters>>,
+    credentials: Arc<GithubProviderCredentialAdapters>,
     worker_id: GithubServerServiceWorkerId,
 }
 
@@ -60,7 +60,7 @@ impl OperationalWorkflowDispatchBackend {
         manifests: Arc<dyn GithubProviderManifestRepository>,
         source: Arc<dyn ScmProvider>,
         blobs: Arc<dyn ImmutableBlobStore>,
-        private_credentials: Option<Arc<GithubProviderCredentialAdapters>>,
+        credentials: Arc<GithubProviderCredentialAdapters>,
         worker_id: GithubServerServiceWorkerId,
     ) -> Self {
         Self {
@@ -69,7 +69,7 @@ impl OperationalWorkflowDispatchBackend {
             manifests,
             source,
             blobs,
-            private_credentials,
+            credentials,
             worker_id,
         }
     }
@@ -150,40 +150,27 @@ impl OperationalWorkflowDispatchBackend {
             .map_err(|_| WorkflowDispatchApiBackendError::InvalidRequest)?;
         let limits = ArchiveLimits::new(manifest.limits().archive_max_compressed_bytes())
             .map_err(|_| WorkflowDispatchApiBackendError::Invariant)?;
-        let snapshot = match manifest.repository_visibility() {
-            ProviderRepositoryVisibility::Public => self
-                .source
-                .fetch_snapshot(SnapshotRequest::public(&repository, &revision, limits))
-                .await
-                .map_err(classify_scm_error)?,
-            ProviderRepositoryVisibility::Private => {
-                let credentials = self
-                    .private_credentials
-                    .as_ref()
-                    .ok_or(WorkflowDispatchApiBackendError::Unavailable)?;
-                let observed_at =
-                    system_now().ok_or(WorkflowDispatchApiBackendError::Unavailable)?;
-                let credential = credentials
-                    .acquire_workflow_dispatch_source(&claim, manifest, observed_at)
-                    .await
-                    .map_err(classify_source_credential_error)?;
-                if !credential.matches(&claim, manifest) {
-                    credential.release().await;
-                    return Err(WorkflowDispatchApiBackendError::Invariant);
-                }
-                let result = self
-                    .source
-                    .fetch_snapshot(SnapshotRequest::authenticated(
-                        &repository,
-                        &revision,
-                        credential.token(),
-                        limits,
-                    ))
-                    .await;
-                credential.release().await;
-                result.map_err(classify_scm_error)?
-            }
-        };
+        let observed_at = system_now().ok_or(WorkflowDispatchApiBackendError::Unavailable)?;
+        let credential = self
+            .credentials
+            .acquire_workflow_dispatch_source(&claim, manifest, observed_at)
+            .await
+            .map_err(classify_source_credential_error)?;
+        if !credential.matches(&claim, manifest) {
+            credential.release().await;
+            return Err(WorkflowDispatchApiBackendError::Invariant);
+        }
+        let result = self
+            .source
+            .fetch_snapshot(SnapshotRequest::authenticated(
+                &repository,
+                &revision,
+                credential.token(),
+                limits,
+            ))
+            .await;
+        credential.release().await;
+        let snapshot = result.map_err(classify_scm_error)?;
         if snapshot.provider().as_str() != "github"
             || snapshot.repository() != &repository
             || snapshot.requested_revision() != &revision

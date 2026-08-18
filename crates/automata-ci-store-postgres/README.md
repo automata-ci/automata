@@ -13,13 +13,12 @@ test support.
 
 The crate uses SQLx's embedded migrator; another Rust migration framework would
 duplicate its locking, transaction, checksum, and migration-ledger behavior.
-The files numbered `0001` through `0026` are the frozen greenfield baseline,
+The files numbered `0001` through `0026` form the canonical greenfield baseline,
 split into bounded stages for routines, relations, catalog data, keys, indexes,
-triggers, and foreign keys. Do not edit, renumber, squash, or delete an applied
-migration. SQLx deliberately rejects checksum changes. An ordinary Rust
-contract pins every applied filename and raw SQLx SHA-384 checksum. Each schema
-change must append the next sequential version and its identity to that
-inventory without changing an earlier entry.
+triggers, and foreign keys. The project uses big-bang schema cutovers while it
+remains greenfield: update the canonical lineage directly and recreate local
+databases. A Rust contract pins every filename and raw SQLx SHA-384 checksum so
+intentional schema rewrites cannot leave stale embedded migration metadata.
 
 With `sqlx-cli` installed, create a focused, forward-only migration from the
 repository root with:

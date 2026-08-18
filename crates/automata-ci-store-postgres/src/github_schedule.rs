@@ -166,9 +166,7 @@ async fn verify_discovery_source_authority(
     request: &ClaimGithubScheduleDiscovery,
     now: UnixMillis,
 ) -> Result<(), GithubScheduleStoreError> {
-    let GithubScheduleSourceAuthority::Private(selector) = request.source_authority() else {
-        return Ok(());
-    };
+    let selector = request.source_authority().selector();
     let manifest = request.manifest();
     let exact: bool = sqlx::query_scalar(
         r"
@@ -183,7 +181,7 @@ async fn verify_discovery_source_authority(
                AND authority.github_app_id = $6
                AND authority.github_repository_id = $7
                AND authority.github_repository_name = $8
-               AND authority.service_scope = 'private_repository_source_read'
+               AND authority.service_scope = 'repository_contents_read'
                AND authority.github_app_client_id = $9
                AND authority.github_app_jwt_issuer_kind = $10
                AND authority.app_key_spki_sha256 = $11
@@ -230,10 +228,10 @@ async fn exact_discovery_claim_replay(
         r"
         SELECT tenant_id, repository_id, provider_connection_id,
                manifest_revision, manifest_digest, github_repository_owner_id,
-               source_authority_kind, private_source_authority_id,
-               private_source_authority_identity_digest,
-               private_source_authority_app_configuration_revision,
-               private_source_authority_policy_revision,
+               source_authority_kind, repository_contents_authority_id,
+               repository_contents_authority_identity_digest,
+               repository_contents_authority_app_configuration_revision,
+               repository_contents_authority_policy_revision,
                claim_owner_id, claim_fence, state, claimed_at_ms,
                claim_expires_at_ms, completed_registry_id
           FROM github_schedule_discovery_claims
@@ -299,16 +297,16 @@ async fn insert_schedule_discovery_claim(
     now: UnixMillis,
 ) -> Result<GithubScheduleDiscoveryClaim, GithubScheduleStoreError> {
     let expires_at = UnixMillis::new(checked_add(now.get(), request.lease_millis())?);
-    let private = request.source_authority().private_selector();
+    let selector = request.source_authority().selector();
     let result = sqlx::query(
         r"
         INSERT INTO github_schedule_discovery_claims (
             discovery_id, tenant_id, repository_id, provider_connection_id,
             manifest_revision, manifest_digest, github_repository_owner_id,
-            source_authority_kind, private_source_authority_id,
-            private_source_authority_identity_digest,
-            private_source_authority_app_configuration_revision,
-            private_source_authority_policy_revision,
+            source_authority_kind, repository_contents_authority_id,
+            repository_contents_authority_identity_digest,
+            repository_contents_authority_app_configuration_revision,
+            repository_contents_authority_policy_revision,
             claim_owner_id, claim_fence, state, claimed_at_ms,
             claim_expires_at_ms, created_at_ms, updated_at_ms
         ) VALUES (
@@ -326,18 +324,10 @@ async fn insert_schedule_discovery_claim(
     .bind(request.manifest().digest().as_bytes().as_slice())
     .bind(i64_from_u64(request.repository_owner_id().get())?)
     .bind(request.source_authority().as_durable_str())
-    .bind(private.map(|selector| selector.authority_id().as_uuid()))
-    .bind(private.map(|selector| selector.identity_digest().as_bytes().to_vec()))
-    .bind(
-        private
-            .map(|selector| i64_from_u64(selector.app_configuration_revision().get()))
-            .transpose()?,
-    )
-    .bind(
-        private
-            .map(|selector| i64_from_u64(selector.policy_revision().get()))
-            .transpose()?,
-    )
+    .bind(selector.authority_id().as_uuid())
+    .bind(selector.identity_digest().as_bytes().to_vec())
+    .bind(i64_from_u64(selector.app_configuration_revision().get())?)
+    .bind(i64_from_u64(selector.policy_revision().get())?)
     .bind(request.worker_id().as_uuid())
     .bind(now.get())
     .bind(expires_at.get())
@@ -1462,10 +1452,10 @@ async fn lock_and_verify_registration_discovery(
         r"
         SELECT tenant_id, repository_id, provider_connection_id,
                manifest_revision, manifest_digest, github_repository_owner_id,
-               source_authority_kind, private_source_authority_id,
-               private_source_authority_identity_digest,
-               private_source_authority_app_configuration_revision,
-               private_source_authority_policy_revision,
+               source_authority_kind, repository_contents_authority_id,
+               repository_contents_authority_identity_digest,
+               repository_contents_authority_app_configuration_revision,
+               repository_contents_authority_policy_revision,
                claim_owner_id, claim_fence, state, claimed_at_ms,
                claim_expires_at_ms, completed_registry_id
           FROM github_schedule_discovery_claims
@@ -1651,9 +1641,7 @@ async fn verify_schedule_source_authority(
     request: &RegisterGithubScheduleRegistry,
     registered_at: UnixMillis,
 ) -> Result<(), GithubScheduleStoreError> {
-    let GithubScheduleSourceAuthority::Private(selector) = request.source_authority() else {
-        return Ok(());
-    };
+    let selector = request.source_authority().selector();
     let exact: bool = sqlx::query_scalar(
         r"
         SELECT EXISTS (
@@ -1663,7 +1651,7 @@ async fn verify_schedule_source_authority(
                AND authority.repository_id = $3 AND authority.provider_connection_id = $4
                AND authority.provider_installation_id = $5 AND authority.github_app_id = $6
                AND authority.github_repository_id = $7 AND authority.github_repository_name = $8
-               AND authority.service_scope = 'private_repository_source_read'
+               AND authority.service_scope = 'repository_contents_read'
                AND authority.github_app_client_id = $9
                AND authority.github_app_jwt_issuer_kind = $10
                AND authority.app_key_spki_sha256 = $11
@@ -1720,10 +1708,10 @@ async fn exact_registry_replay(
                registry.schedule_count, registry.discovered_at_ms,
                registry.github_repository_owner_id,
                registry.source_authority_kind,
-               registry.private_source_authority_id,
-               registry.private_source_authority_identity_digest,
-               registry.private_source_authority_app_configuration_revision,
-               registry.private_source_authority_policy_revision,
+               registry.repository_contents_authority_id,
+               registry.repository_contents_authority_identity_digest,
+               registry.repository_contents_authority_app_configuration_revision,
+               registry.repository_contents_authority_policy_revision,
                current.registry_id AS current_registry_id
           FROM github_schedule_registry_revisions AS registry
           LEFT JOIN github_schedule_registry_current AS current
@@ -1799,33 +1787,23 @@ fn registry_source_authority_is_exact(
 ) -> Result<bool, GithubScheduleStoreError> {
     let kind: String = row.try_get("source_authority_kind").map_err(corrupt)?;
     let authority_id: Option<Uuid> = row
-        .try_get("private_source_authority_id")
+        .try_get("repository_contents_authority_id")
         .map_err(corrupt)?;
     let identity_digest: Option<Vec<u8>> = row
-        .try_get("private_source_authority_identity_digest")
+        .try_get("repository_contents_authority_identity_digest")
         .map_err(corrupt)?;
     let app_revision: Option<i64> = row
-        .try_get("private_source_authority_app_configuration_revision")
+        .try_get("repository_contents_authority_app_configuration_revision")
         .map_err(corrupt)?;
     let policy_revision: Option<i64> = row
-        .try_get("private_source_authority_policy_revision")
+        .try_get("repository_contents_authority_policy_revision")
         .map_err(corrupt)?;
-    Ok(match expected {
-        GithubScheduleSourceAuthority::PublicAnonymous => {
-            kind == expected.as_durable_str()
-                && authority_id.is_none()
-                && identity_digest.is_none()
-                && app_revision.is_none()
-                && policy_revision.is_none()
-        }
-        GithubScheduleSourceAuthority::Private(selector) => {
-            kind == expected.as_durable_str()
-                && authority_id == Some(selector.authority_id().as_uuid())
-                && identity_digest.as_deref() == Some(selector.identity_digest().as_bytes())
-                && app_revision == i64::try_from(selector.app_configuration_revision().get()).ok()
-                && policy_revision == i64::try_from(selector.policy_revision().get()).ok()
-        }
-    })
+    let selector = expected.selector();
+    Ok(kind == expected.as_durable_str()
+        && authority_id == Some(selector.authority_id().as_uuid())
+        && identity_digest.as_deref() == Some(selector.identity_digest().as_bytes())
+        && app_revision == i64::try_from(selector.app_configuration_revision().get()).ok()
+        && policy_revision == i64::try_from(selector.policy_revision().get()).ok())
 }
 
 async fn replay_entries_are_exact(
@@ -2061,15 +2039,7 @@ async fn insert_registry_revision(
     request: &RegisterGithubScheduleRegistry,
     now: UnixMillis,
 ) -> Result<(), GithubScheduleStoreError> {
-    let private = request.source_authority().private_selector();
-    let private_identity_digest =
-        private.map(|selector| selector.identity_digest().as_bytes().to_vec());
-    let private_app_revision = private
-        .map(|selector| i64_from_u64(selector.app_configuration_revision().get()))
-        .transpose()?;
-    let private_policy_revision = private
-        .map(|selector| i64_from_u64(selector.policy_revision().get()))
-        .transpose()?;
+    let selector = request.source_authority().selector();
     let result = sqlx::query(
         r"
         INSERT INTO github_schedule_registry_revisions (
@@ -2077,10 +2047,10 @@ async fn insert_registry_revision(
             tenant_id, repository_id, provider_connection_id,
             manifest_revision, manifest_digest, github_repository_owner_id,
             default_branch_ref, source_revision,
-            source_authority_kind, private_source_authority_id,
-            private_source_authority_identity_digest,
-            private_source_authority_app_configuration_revision,
-            private_source_authority_policy_revision,
+            source_authority_kind, repository_contents_authority_id,
+            repository_contents_authority_identity_digest,
+            repository_contents_authority_app_configuration_revision,
+            repository_contents_authority_policy_revision,
             archive_digest, archive_object_key, archive_size_bytes, archive_media_type,
             inventory_digest, schedule_count, discovered_at_ms
         ) VALUES (
@@ -2102,10 +2072,10 @@ async fn insert_registry_revision(
     .bind(request.manifest().git_ref())
     .bind(request.source_revision().as_bytes())
     .bind(request.source_authority().as_durable_str())
-    .bind(private.map(|selector| selector.authority_id().as_uuid()))
-    .bind(private_identity_digest)
-    .bind(private_app_revision)
-    .bind(private_policy_revision)
+    .bind(selector.authority_id().as_uuid())
+    .bind(selector.identity_digest().as_bytes().to_vec())
+    .bind(i64_from_u64(selector.app_configuration_revision().get())?)
+    .bind(i64_from_u64(selector.policy_revision().get())?)
     .bind(request.archive().digest().as_bytes().as_slice())
     .bind(request.archive().object_key().as_str())
     .bind(

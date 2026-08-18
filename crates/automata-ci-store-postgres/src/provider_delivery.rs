@@ -30,8 +30,6 @@ use super::{
 };
 
 const MAX_CALLER_DATABASE_SKEW_MILLIS: u64 = 60_000;
-const LEGACY_UNSEALED_FAILURE_KIND: &str = "provider_delivery.legacy_unsealed";
-const LEGACY_UNSEALED_QUARANTINE_BATCH: i64 = 64;
 
 #[allow(clippy::too_many_lines)]
 #[async_trait]
@@ -154,9 +152,6 @@ impl ProviderDeliveryRepository for PostgresStore {
         if !caller_time_is_admissible(request.observed_at(), admission_time) {
             return Err(ProviderDeliveryStoreError::ClaimRejected);
         }
-        quarantine_legacy_unsealed_deliveries(&mut transaction, request.owner(), admission_time)
-            .await?;
-
         let candidate: Option<(Uuid, i64)> = sqlx::query_as(
             r"
             WITH database_time AS MATERIALIZED (
@@ -165,8 +160,7 @@ impl ProviderDeliveryRepository for PostgresStore {
             SELECT inbox.id, database_time.now_ms
             FROM provider_delivery_inbox AS inbox
             CROSS JOIN database_time
-            WHERE inbox.event_envelope_schema IS NOT NULL
-              AND inbox.state_updated_at_ms <= database_time.now_ms
+            WHERE inbox.state_updated_at_ms <= database_time.now_ms
               AND inbox.claim_fence < 9223372036854775807
               AND (
                 inbox.state = 'pending'
@@ -240,7 +234,6 @@ impl ProviderDeliveryRepository for PostgresStore {
                 rejected_at_ms = NULL,
                 state_updated_at_ms = $3
             WHERE inbox.id = $1
-              AND inbox.event_envelope_schema IS NOT NULL
               AND inbox.state_updated_at_ms <= $3
               AND inbox.claim_fence < 9223372036854775807
               AND (
@@ -731,70 +724,6 @@ fn caller_time_is_admissible(observed_at: UnixMillis, database_time: UnixMillis)
     observed_at.get().abs_diff(database_time.get()) <= MAX_CALLER_DATABASE_SKEW_MILLIS
 }
 
-/// Terminally isolates rows accepted before sealed envelopes became mandatory.
-///
-/// A bounded, lock-skipping pass prevents legacy evidence from blocking newer
-/// work while ensuring it can never be claimed and interpreted from raw JSON.
-async fn quarantine_legacy_unsealed_deliveries(
-    transaction: &mut Transaction<'_, Postgres>,
-    owner: ProviderProcessingWorkerId,
-    observed_at: UnixMillis,
-) -> Result<(), ProviderDeliveryStoreError> {
-    sqlx::query(
-        r"
-        WITH candidates AS MATERIALIZED (
-            SELECT inbox.id
-            FROM provider_delivery_inbox AS inbox
-            WHERE inbox.event_envelope_schema IS NULL
-              AND inbox.state_updated_at_ms <= $2
-              AND inbox.claim_fence < 9223372036854775807
-              AND (
-                inbox.state = 'pending'
-                OR (
-                    inbox.state = 'retry'
-                    AND inbox.next_attempt_at_ms <= $2
-                )
-                OR (
-                    inbox.state = 'claimed'
-                    AND inbox.claim_expires_at_ms <= $2
-                )
-              )
-              AND (inbox.state = 'claimed' OR inbox.attempt_count < 16)
-            ORDER BY inbox.accepted_at_ms, inbox.id
-            FOR UPDATE OF inbox SKIP LOCKED
-            LIMIT $3
-        )
-        UPDATE provider_delivery_inbox AS inbox
-        SET state = 'rejected',
-            attempt_count = GREATEST(inbox.attempt_count, 1),
-            claim_fence = inbox.claim_fence + 1,
-            claim_owner_id = NULL,
-            claimed_at_ms = NULL,
-            claim_expires_at_ms = NULL,
-            renewal_predecessor_expires_at_ms = NULL,
-            next_attempt_at_ms = NULL,
-            last_failure_kind = $4,
-            terminal_claim_owner_id = $1,
-            terminal_claim_fence = inbox.claim_fence + 1,
-            completion_digest = NULL,
-            completion_outcome_count = NULL,
-            completed_at_ms = NULL,
-            rejected_at_ms = $2,
-            state_updated_at_ms = $2
-        FROM candidates
-        WHERE inbox.id = candidates.id
-        ",
-    )
-    .bind(owner.as_uuid())
-    .bind(observed_at.get())
-    .bind(LEGACY_UNSEALED_QUARANTINE_BATCH)
-    .bind(LEGACY_UNSEALED_FAILURE_KIND)
-    .execute(&mut **transaction)
-    .await
-    .map_err(operation_error)?;
-    Ok(())
-}
-
 async fn eligible_exhausted_fence(
     transaction: &mut Transaction<'_, Postgres>,
     database_time: UnixMillis,
@@ -804,8 +733,7 @@ async fn eligible_exhausted_fence(
         SELECT EXISTS (
             SELECT 1
             FROM provider_delivery_inbox
-            WHERE event_envelope_schema IS NOT NULL
-              AND state_updated_at_ms <= $1
+            WHERE state_updated_at_ms <= $1
               AND claim_fence = 9223372036854775807
               AND (
                 state = 'pending'

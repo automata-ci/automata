@@ -64,8 +64,10 @@ fn repository(
     name: &str,
     visibility: &str,
     checks_authority: u128,
-    private_authority: Option<u128>,
+    repository_contents_authority_seed: Option<u128>,
 ) -> Value {
+    let repository_authority =
+        repository_contents_authority_seed.unwrap_or(checks_authority + 0x2000_0000);
     json!({
         "tenant_id": tenant,
         "connection_id": uuid(connection),
@@ -112,10 +114,8 @@ fn repository(
         "authorities": {
             "checks_write": authority(checks_authority),
             "workflow_permissions_read": authority(checks_authority + 0x1000_0000),
-            "private_repository_source_read": private_authority
-                .map_or(Value::Null, authority),
-            "private_pull_request_files_read": private_authority
-                .map_or(Value::Null, |id| authority(id + 0x10_0000))
+            "repository_contents_read": authority(repository_authority),
+            "pull_requests_read": authority(repository_authority + 0x10_0000)
         }
     })
 }
@@ -210,6 +210,8 @@ fn set_repository_revisions(repository: &mut Value, manifest: u64, policy: u64) 
     repository["policy_revision"] = json!(policy);
     repository["authorities"]["checks_write"]["policy_revision"] = json!(policy);
     repository["authorities"]["workflow_permissions_read"]["policy_revision"] = json!(policy);
+    repository["authorities"]["repository_contents_read"]["policy_revision"] = json!(policy);
+    repository["authorities"]["pull_requests_read"]["policy_revision"] = json!(policy);
 }
 
 fn live_test_broker(
@@ -606,62 +608,6 @@ fn non_regressing_clock_clamps_backward_observations() {
     assert_eq!(clock.observe(9).get(), 41);
     assert_eq!(clock.observe(-1).get(), 41);
     assert_eq!(clock.observe(73).get(), 73);
-}
-
-#[test]
-fn public_only_and_mixed_registries_select_closed_source_modes() {
-    let public = load_config(&document(&[repository(
-        "tenant-public",
-        0x201,
-        202,
-        302,
-        402,
-        "octo/public-repository",
-        "public",
-        0x501,
-        None,
-    )]));
-    let public_shape = GithubProviderRuntimeShape::from_config(&public);
-    assert_eq!(public_shape.repository_count(), 1);
-    assert_eq!(public_shape.installation_count(), 1);
-    assert_eq!(public_shape.tenant_count(), 1);
-    assert_eq!(
-        public_shape.source_mode(),
-        GithubProviderSourceMode::PublicOnly
-    );
-
-    let mixed = load_config(&document(&[
-        repository(
-            "tenant-public",
-            0x211,
-            202,
-            312,
-            412,
-            "octo/public-repository",
-            "public",
-            0x511,
-            None,
-        ),
-        repository(
-            "tenant-private",
-            0x212,
-            101,
-            311,
-            411,
-            "octo/private-repository",
-            "private",
-            0x512,
-            Some(0x612),
-        ),
-    ]));
-    let mixed_shape = GithubProviderRuntimeShape::from_config(&mixed);
-    assert_eq!(mixed_shape.repository_count(), 2);
-    assert_eq!(mixed_shape.installation_count(), 2);
-    assert_eq!(mixed_shape.tenant_count(), 2);
-    assert_eq!(
-        mixed_shape.source_mode(),
-        GithubProviderSourceMode::PublicAndPrivate
-    );
 }
 
 #[test]

@@ -1,4 +1,4 @@
--- Frozen greenfield baseline. Add a new migration instead of editing this stage.
+-- Canonical greenfield schema stage.
 SET check_function_bodies = false;
 
 CREATE FUNCTION automata_enforce_logical_workflow_terminal_counter() RETURNS trigger
@@ -1543,26 +1543,26 @@ CREATE FUNCTION automata_github_oidc_authority_is_current(authority github_oidc_
              origin.checks_authority_app_configuration_revision
          AND checks_authority.policy_revision =
              origin.checks_authority_policy_revision
-        LEFT JOIN github_server_service_authorities AS private_authority
-          ON private_authority.tenant_id = origin.tenant_id
-         AND private_authority.id = origin.private_source_authority_id
-         AND private_authority.repository_id = origin.repository_id
-         AND private_authority.provider_connection_id =
+        JOIN github_server_service_authorities AS contents_authority
+          ON contents_authority.tenant_id = origin.tenant_id
+         AND contents_authority.id = origin.repository_contents_authority_id
+         AND contents_authority.repository_id = origin.repository_id
+         AND contents_authority.provider_connection_id =
              origin.provider_connection_id
-         AND private_authority.provider_installation_id =
+         AND contents_authority.provider_installation_id =
              origin.provider_installation_id
-         AND private_authority.github_repository_id =
+         AND contents_authority.github_repository_id =
              origin.github_repository_id
-         AND private_authority.github_repository_name =
+         AND contents_authority.github_repository_name =
              origin.github_repository_name
-         AND private_authority.service_scope =
-             'private_repository_source_read'
-         AND private_authority.identity_digest =
-             origin.private_source_authority_identity_digest
-         AND private_authority.app_configuration_revision =
-             origin.private_source_authority_app_configuration_revision
-         AND private_authority.policy_revision =
-             origin.private_source_authority_policy_revision
+         AND contents_authority.service_scope =
+             'repository_contents_read'
+         AND contents_authority.identity_digest =
+             origin.repository_contents_authority_identity_digest
+         AND contents_authority.app_configuration_revision =
+             origin.repository_contents_authority_app_configuration_revision
+         AND contents_authority.policy_revision =
+             origin.repository_contents_authority_policy_revision
         WHERE attempt.id = authority.attempt_id
           AND attempt.job_id = authority.job_id
           AND attempt.attempt_number = authority.attempt_number
@@ -1700,16 +1700,9 @@ CREATE FUNCTION automata_github_oidc_authority_is_current(authority github_oidc_
           AND checks_authority.state = 'active'
           AND checks_authority.created_at_ms <= observed_at_ms
           AND checks_authority.state_updated_at_ms <= observed_at_ms
-          AND (
-              origin.repository_visibility = 'public'
-              AND origin.private_source_authority_id IS NULL
-              AND private_authority.id IS NULL
-              OR origin.repository_visibility = 'private'
-              AND private_authority.id IS NOT NULL
-              AND private_authority.state = 'active'
-              AND private_authority.created_at_ms <= observed_at_ms
-              AND private_authority.state_updated_at_ms <= observed_at_ms
-          )
+          AND contents_authority.state = 'active'
+          AND contents_authority.created_at_ms <= observed_at_ms
+          AND contents_authority.state_updated_at_ms <= observed_at_ms
           AND origin.admitted_at_ms <= observed_at_ms
           AND authority.request_bearer_iat_seconds * 1000 <= observed_at_ms
           AND authority.request_bearer_exp_seconds * 1000 > observed_at_ms

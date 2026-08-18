@@ -4,7 +4,7 @@
 used by Automata's control plane. It authenticates a request, stores the raw
 event in immutable blob storage, and records a credential-free descriptor in
 the provider inbox. A worker claims that entry, resolves public or explicitly
-authorized private source, and submits the workflow through normal admission.
+installation-authorized repository source, and submits the workflow through normal admission.
 
 One canonical ingress normalizes authenticated `push`, `pull_request`,
 `merge_group`, and `repository_dispatch` evidence, including the selected ref

@@ -216,11 +216,11 @@ pub enum GithubServerServiceScope {
     /// Exactly `{"checks":"write"}` for Check Suite and Check Run I/O.
     ChecksWrite,
     /// Exactly `{"contents":"read"}` for private repository source reads.
-    PrivateRepositorySourceRead,
+    RepositoryContentsRead,
     /// Exactly `{"administration":"read"}` for effective workflow-permission discovery.
     WorkflowPermissionsRead,
-    /// Exactly `{"pull_requests":"read"}` for private pull-request file reads.
-    PrivatePullRequestFilesRead,
+    /// Exactly `{"pull_requests":"read"}` for pull-request file reads.
+    PullRequestsRead,
 }
 
 impl GithubServerServiceScope {
@@ -229,9 +229,9 @@ impl GithubServerServiceScope {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::ChecksWrite => "checks_write",
-            Self::PrivateRepositorySourceRead => "private_repository_source_read",
+            Self::RepositoryContentsRead => "repository_contents_read",
             Self::WorkflowPermissionsRead => "workflow_permissions_read",
-            Self::PrivatePullRequestFilesRead => "private_pull_request_files_read",
+            Self::PullRequestsRead => "pull_requests_read",
         }
     }
 
@@ -240,9 +240,9 @@ impl GithubServerServiceScope {
     pub const fn permissions_json(self) -> &'static str {
         match self {
             Self::ChecksWrite => "{\"checks\":\"write\"}",
-            Self::PrivateRepositorySourceRead => "{\"contents\":\"read\"}",
+            Self::RepositoryContentsRead => "{\"contents\":\"read\"}",
             Self::WorkflowPermissionsRead => "{\"administration\":\"read\"}",
-            Self::PrivatePullRequestFilesRead => "{\"pull_requests\":\"read\"}",
+            Self::PullRequestsRead => "{\"pull_requests\":\"read\"}",
         }
     }
 
@@ -1630,13 +1630,13 @@ pub enum GithubServerServiceAction {
     /// Publish one exact desired Check Run revision.
     PublishCheckRun,
     /// Fetch one exact private repository revision.
-    FetchPrivateRepositoryRevision,
+    FetchRepositoryRevision,
     /// Fetch one exact private repository changed-file set.
-    FetchPrivateRepositoryChangedFiles,
+    FetchRepositoryChangedFiles,
     /// Fetch one exact private pull request's changed-file set.
-    FetchPrivatePullRequestFiles,
+    FetchPullRequestFiles,
     /// Resolve schedules from one exact claimed private default-branch revision.
-    DiscoverPrivateRepositorySchedules,
+    DiscoverRepositorySchedules,
     /// Resolve one manually dispatched workflow from a claimed repository ref.
     ResolveWorkflowDispatchSource,
     /// Observe one repository's effective workflow-permission defaults.
@@ -1652,10 +1652,10 @@ impl GithubServerServiceAction {
             Self::CreateCheckRun => "create_check_run",
             Self::ReconcileCheckRun => "reconcile_check_run",
             Self::PublishCheckRun => "publish_check_run",
-            Self::FetchPrivateRepositoryRevision => "fetch_private_repository_revision",
-            Self::FetchPrivateRepositoryChangedFiles => "fetch_private_repository_changed_files",
-            Self::FetchPrivatePullRequestFiles => "fetch_private_pull_request_files",
-            Self::DiscoverPrivateRepositorySchedules => "discover_private_repository_schedules",
+            Self::FetchRepositoryRevision => "fetch_repository_revision",
+            Self::FetchRepositoryChangedFiles => "fetch_repository_changed_files",
+            Self::FetchPullRequestFiles => "fetch_pull_request_files",
+            Self::DiscoverRepositorySchedules => "discover_repository_schedules",
             Self::ResolveWorkflowDispatchSource => "resolve_workflow_dispatch_source",
             Self::ObserveWorkflowPermissionDefaults => "observe_workflow_permission_defaults",
         }
@@ -1668,18 +1668,16 @@ impl GithubServerServiceAction {
             | Self::CreateCheckRun
             | Self::ReconcileCheckRun
             | Self::PublishCheckRun => GithubServerServiceScope::ChecksWrite,
-            Self::FetchPrivateRepositoryRevision
-            | Self::FetchPrivateRepositoryChangedFiles
-            | Self::DiscoverPrivateRepositorySchedules
+            Self::FetchRepositoryRevision
+            | Self::FetchRepositoryChangedFiles
+            | Self::DiscoverRepositorySchedules
             | Self::ResolveWorkflowDispatchSource => {
-                GithubServerServiceScope::PrivateRepositorySourceRead
+                GithubServerServiceScope::RepositoryContentsRead
             }
             Self::ObserveWorkflowPermissionDefaults => {
                 GithubServerServiceScope::WorkflowPermissionsRead
             }
-            Self::FetchPrivatePullRequestFiles => {
-                GithubServerServiceScope::PrivatePullRequestFilesRead
-            }
+            Self::FetchPullRequestFiles => GithubServerServiceScope::PullRequestsRead,
         }
     }
     /// Returns the largest derivative lease needed by this exact action.
@@ -1698,11 +1696,11 @@ impl GithubServerServiceAction {
             Self::EnsureCheckSuite
             | Self::CreateCheckRun
             | Self::ReconcileCheckRun
-            | Self::FetchPrivateRepositoryRevision
-            | Self::FetchPrivateRepositoryChangedFiles
-            | Self::DiscoverPrivateRepositorySchedules
+            | Self::FetchRepositoryRevision
+            | Self::FetchRepositoryChangedFiles
+            | Self::DiscoverRepositorySchedules
             | Self::ResolveWorkflowDispatchSource
-            | Self::FetchPrivatePullRequestFiles
+            | Self::FetchPullRequestFiles
             | Self::ObserveWorkflowPermissionDefaults => MAX_GITHUB_SERVICE_CONSUMER_REQUEST_MILLIS,
         }
     }

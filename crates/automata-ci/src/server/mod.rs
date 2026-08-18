@@ -88,7 +88,7 @@ use github_provider_runtime::GithubProviderFatalNotification;
 pub use github_provider_runtime::{
     GithubProviderRuntime, GithubProviderRuntimeBuildError, GithubProviderRuntimeBuilder,
     GithubProviderRuntimeError, GithubProviderRuntimePolicy, GithubProviderRuntimePolicyError,
-    GithubProviderRuntimeShape, GithubProviderSourceMode,
+    GithubProviderRuntimeShape,
 };
 pub use github_webhook::{
     GITHUB_WEBHOOK_HTTP_DEADLINE, GITHUB_WEBHOOK_PATH, MAX_GITHUB_WEBHOOK_HTTP_BODY_BYTES,

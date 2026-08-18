@@ -1,4 +1,4 @@
--- Frozen greenfield baseline. Add a new migration instead of editing this stage.
+-- Canonical greenfield schema stage.
 SET check_function_bodies = false;
 
 CREATE FUNCTION automata_github_runtime_authority_hash_bytes(value bytea) RETURNS bytea
@@ -362,24 +362,24 @@ CREATE FUNCTION automata_github_runtime_authority_base_is_current(authority gith
              origin.checks_authority_app_configuration_revision
          AND checks_authority.policy_revision =
              origin.checks_authority_policy_revision
-        LEFT JOIN github_server_service_authorities AS private_authority
-          ON private_authority.tenant_id = origin.tenant_id
-         AND private_authority.id = origin.private_source_authority_id
-         AND private_authority.repository_id = origin.repository_id
-         AND private_authority.provider_connection_id =
+        JOIN github_server_service_authorities AS contents_authority
+          ON contents_authority.tenant_id = origin.tenant_id
+         AND contents_authority.id = origin.repository_contents_authority_id
+         AND contents_authority.repository_id = origin.repository_id
+         AND contents_authority.provider_connection_id =
              origin.provider_connection_id
-         AND private_authority.provider_installation_id =
+         AND contents_authority.provider_installation_id =
              origin.provider_installation_id
-         AND private_authority.github_repository_id = origin.github_repository_id
-         AND private_authority.github_repository_name =
+         AND contents_authority.github_repository_id = origin.github_repository_id
+         AND contents_authority.github_repository_name =
              origin.github_repository_name
-         AND private_authority.service_scope = 'private_repository_source_read'
-         AND private_authority.identity_digest =
-             origin.private_source_authority_identity_digest
-         AND private_authority.app_configuration_revision =
-             origin.private_source_authority_app_configuration_revision
-         AND private_authority.policy_revision =
-             origin.private_source_authority_policy_revision
+         AND contents_authority.service_scope = 'repository_contents_read'
+         AND contents_authority.identity_digest =
+             origin.repository_contents_authority_identity_digest
+         AND contents_authority.app_configuration_revision =
+             origin.repository_contents_authority_app_configuration_revision
+         AND contents_authority.policy_revision =
+             origin.repository_contents_authority_policy_revision
         JOIN runners AS runner
           ON runner.id = attempt.runner_id
          AND runner.id = authority.runner_id
@@ -526,26 +526,19 @@ CREATE FUNCTION automata_github_runtime_authority_base_is_current(authority gith
           AND origin.origin_kind IN (
               'provider_delivery', 'scheduled_fire', 'workflow_rerun'
           )
-          AND (
-              origin.repository_visibility = 'public'
-              AND origin.private_source_authority_id IS NULL
-              AND private_authority.id IS NULL
-              OR origin.repository_visibility = 'private'
-              AND private_authority.id IS NOT NULL
-              AND private_authority.github_app_id = manifest.github_app_id
-              AND private_authority.github_app_client_id =
-                  manifest.github_app_client_id
-              AND private_authority.github_app_jwt_issuer_kind =
-                  manifest.github_app_jwt_issuer_kind
-              AND private_authority.app_key_spki_sha256 =
-                  manifest.app_key_spki_sha256
-              AND private_authority.app_configuration_revision =
-                  manifest.app_configuration_revision
-              AND private_authority.policy_revision = manifest.policy_revision
-              AND private_authority.state = 'active'
-              AND private_authority.created_at_ms <= observed_at
-              AND private_authority.state_updated_at_ms <= observed_at
-          )
+          AND contents_authority.github_app_id = manifest.github_app_id
+          AND contents_authority.github_app_client_id =
+              manifest.github_app_client_id
+          AND contents_authority.github_app_jwt_issuer_kind =
+              manifest.github_app_jwt_issuer_kind
+          AND contents_authority.app_key_spki_sha256 =
+              manifest.app_key_spki_sha256
+          AND contents_authority.app_configuration_revision =
+              manifest.app_configuration_revision
+          AND contents_authority.policy_revision = manifest.policy_revision
+          AND contents_authority.state = 'active'
+          AND contents_authority.created_at_ms <= observed_at
+          AND contents_authority.state_updated_at_ms <= observed_at
           AND origin.admitted_at_ms <= observed_at
           AND runner.status = 'online'
           AND runner.desired_state IN ('active', 'draining')
@@ -1411,8 +1404,8 @@ BEGIN
                 USING ERRCODE = 'integrity_constraint_violation',
                       CONSTRAINT = 'github_server_service_handoffs_checks_claim_exact';
         END IF;
-    ELSIF authority.service_scope = 'private_repository_source_read' THEN
-        IF NEW.consumer_action = 'discover_private_repository_schedules' THEN
+    ELSIF authority.service_scope = 'repository_contents_read' THEN
+        IF NEW.consumer_action = 'discover_repository_schedules' THEN
             SELECT EXISTS (
                 SELECT 1
                   FROM github_schedule_discovery_claims AS discovery
@@ -1449,13 +1442,13 @@ BEGIN
                    AND discovery.repository_id = authority.repository_id
                    AND discovery.provider_connection_id = authority.provider_connection_id
                    AND discovery.source_authority_kind =
-                       'private_repository_source_read'
-                   AND discovery.private_source_authority_id = authority.id
-                   AND discovery.private_source_authority_identity_digest =
+                       'repository_contents_read'
+                   AND discovery.repository_contents_authority_id = authority.id
+                   AND discovery.repository_contents_authority_identity_digest =
                        authority.identity_digest
-                   AND discovery.private_source_authority_app_configuration_revision =
+                   AND discovery.repository_contents_authority_app_configuration_revision =
                        authority.app_configuration_revision
-                   AND discovery.private_source_authority_policy_revision =
+                   AND discovery.repository_contents_authority_policy_revision =
                        authority.policy_revision
                    AND manifest.provider_installation_id =
                        authority.provider_installation_id
@@ -1497,8 +1490,8 @@ BEGIN
                 OR NEW.required_through_ms::NUMERIC
                     > delivery.claim_expires_at_ms::NUMERIC + 300000
                 OR NEW.consumer_action NOT IN (
-                    'fetch_private_repository_revision',
-                    'fetch_private_repository_changed_files'
+                    'fetch_repository_revision',
+                    'fetch_repository_changed_files'
                 )
                 OR delivery.tenant_id IS DISTINCT FROM authority.tenant_id
                 OR delivery.provider IS DISTINCT FROM 'github'

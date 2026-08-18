@@ -15,11 +15,10 @@ use thiserror::Error;
 use crate::{
     AcceptProviderDelivery, AuthenticatedGithubDeliveryClaim, GithubAuthenticatedEvent,
     GithubAuthenticatedEventKind, GithubProviderManifest, GithubProviderWebhookVerifierFingerprint,
-    GithubRepositoryDispatchResolution, GithubRepositoryDispatchResolutionAuthority,
-    GithubServerServiceAuthoritySelector, GithubServerServiceRevision,
-    GithubSubjectEvidenceStoreError, GithubSubjectEvidenceValueError,
+    GithubRepositoryDispatchResolution, GithubServerServiceAuthoritySelector,
+    GithubServerServiceRevision, GithubSubjectEvidenceStoreError, GithubSubjectEvidenceValueError,
     ManifestPinnedGithubDeliveryEvidence, ProviderDeliveryId, ProviderRepositoryOwnerId,
-    ProviderRepositoryVisibility, TenantScope,
+    TenantScope,
 };
 
 /// Manifest and least-authority pins retained before default-branch resolution.
@@ -31,7 +30,7 @@ pub struct PendingGithubRepositoryDispatchEvidence {
     authenticated_webhook_verifier_fingerprint: GithubProviderWebhookVerifierFingerprint,
     authenticated_webhook_verifier_revision: GithubServerServiceRevision,
     checks_authority: GithubServerServiceAuthoritySelector,
-    private_source_authority: Option<GithubServerServiceAuthoritySelector>,
+    repository_contents_authority: GithubServerServiceAuthoritySelector,
     event: GithubAuthenticatedEvent,
     accepted_at: UnixMillis,
 }
@@ -51,7 +50,7 @@ impl PendingGithubRepositoryDispatchEvidence {
         authenticated_webhook_verifier_fingerprint: GithubProviderWebhookVerifierFingerprint,
         authenticated_webhook_verifier_revision: GithubServerServiceRevision,
         checks_authority: GithubServerServiceAuthoritySelector,
-        private_source_authority: Option<GithubServerServiceAuthoritySelector>,
+        repository_contents_authority: GithubServerServiceAuthoritySelector,
         event: GithubAuthenticatedEvent,
         accepted_at: UnixMillis,
     ) -> Result<Self, GithubRepositoryDispatchValueError> {
@@ -63,13 +62,11 @@ impl PendingGithubRepositoryDispatchEvidence {
         {
             return Err(GithubRepositoryDispatchValueError);
         }
-        match (manifest.repository_visibility(), &private_source_authority) {
-            (ProviderRepositoryVisibility::Public, None) => {}
-            (ProviderRepositoryVisibility::Private, Some(selector))
-                if selector_matches_manifest(selector, &manifest)
-                    && selector.authority_id() != checks_authority.authority_id()
-                    && selector.identity_digest() != checks_authority.identity_digest() => {}
-            _ => return Err(GithubRepositoryDispatchValueError),
+        if !selector_matches_manifest(&repository_contents_authority, &manifest)
+            || repository_contents_authority.authority_id() == checks_authority.authority_id()
+            || repository_contents_authority.identity_digest() == checks_authority.identity_digest()
+        {
+            return Err(GithubRepositoryDispatchValueError);
         }
         Ok(Self {
             delivery_id,
@@ -78,7 +75,7 @@ impl PendingGithubRepositoryDispatchEvidence {
             authenticated_webhook_verifier_fingerprint,
             authenticated_webhook_verifier_revision,
             checks_authority,
-            private_source_authority,
+            repository_contents_authority,
             event,
             accepted_at,
         })
@@ -128,10 +125,10 @@ impl PendingGithubRepositoryDispatchEvidence {
         &self.checks_authority
     }
 
-    /// Returns the private exact-repository source authority when required.
+    /// Returns the exact repository-contents authority.
     #[must_use]
-    pub const fn private_source_authority(&self) -> Option<&GithubServerServiceAuthoritySelector> {
-        self.private_source_authority.as_ref()
+    pub const fn repository_contents_authority(&self) -> &GithubServerServiceAuthoritySelector {
+        &self.repository_contents_authority
     }
 
     /// Returns the authenticated event kind and default-branch ref.
@@ -275,31 +272,14 @@ impl ResolveGithubRepositoryDispatch {
     ///
     /// # Errors
     ///
-    /// Rejects a foreign/expired claim or a resolver authority inconsistent
-    /// with the pinned repository visibility.
+    /// Rejects a foreign or expired claim.
     pub fn new(
         pending: PendingGithubRepositoryDispatchEvidence,
         claim: AuthenticatedGithubDeliveryClaim,
         resolution: GithubRepositoryDispatchResolution,
         observed_at: UnixMillis,
     ) -> Result<Self, GithubRepositoryDispatchValueError> {
-        let expected_authority = match pending.manifest().repository_visibility() {
-            ProviderRepositoryVisibility::Public
-                if pending.private_source_authority().is_none() =>
-            {
-                GithubRepositoryDispatchResolutionAuthority::PublicAnonymous
-            }
-            ProviderRepositoryVisibility::Private
-                if pending.private_source_authority().is_some() =>
-            {
-                GithubRepositoryDispatchResolutionAuthority::PrivateSourceAuthority
-            }
-            _ => return Err(GithubRepositoryDispatchValueError),
-        };
-        if claim.claim().delivery_id() != pending.delivery_id()
-            || !claim.authorizes(observed_at)
-            || resolution.authority() != expected_authority
-        {
+        if claim.claim().delivery_id() != pending.delivery_id() || !claim.authorizes(observed_at) {
             return Err(GithubRepositoryDispatchValueError);
         }
         Ok(Self {

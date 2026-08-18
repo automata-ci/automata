@@ -1,49 +1,29 @@
 -- EVT-01: persist the canonical event envelope accepted with each provider delivery.
 --
--- Rows accepted before sealed envelopes became mandatory remain all-null so the
--- bounded legacy quarantine can terminally isolate them without inventing trust
--- evidence from raw provider JSON. New rows must carry one complete, bounded
--- envelope.
+-- Every row carries one complete, bounded envelope. This is a greenfield
+-- canonical schema; unsealed provider deliveries are not representable.
 
 ALTER TABLE provider_delivery_inbox
-    ADD COLUMN event_envelope_schema SMALLINT,
-    ADD COLUMN event_registry_schema SMALLINT,
-    ADD COLUMN event_envelope_digest BYTEA,
-    ADD COLUMN event_envelope_bytes BYTEA,
-    ADD COLUMN event_envelope_media_type TEXT COLLATE "C";
+    ADD COLUMN event_envelope_schema SMALLINT NOT NULL,
+    ADD COLUMN event_registry_schema SMALLINT NOT NULL,
+    ADD COLUMN event_envelope_digest BYTEA NOT NULL,
+    ADD COLUMN event_envelope_bytes BYTEA NOT NULL,
+    ADD COLUMN event_envelope_media_type TEXT COLLATE "C" NOT NULL;
 
 ALTER TABLE provider_delivery_inbox
     ADD CONSTRAINT provider_delivery_inbox_event_envelope_complete CHECK (
-        (
-            event_envelope_schema IS NULL
-            AND event_registry_schema IS NULL
-            AND event_envelope_digest IS NULL
-            AND event_envelope_bytes IS NULL
-            AND event_envelope_media_type IS NULL
-        )
-        OR (
-            event_envelope_schema IS NOT NULL
-            AND event_registry_schema IS NOT NULL
-            AND event_envelope_digest IS NOT NULL
-            AND event_envelope_bytes IS NOT NULL
-            AND event_envelope_media_type IS NOT NULL
-            AND event_envelope_schema > 0
-            AND event_registry_schema > 0
-            AND octet_length(event_envelope_digest) = 32
-            AND octet_length(event_envelope_bytes) BETWEEN 1 AND 32768
-            AND octet_length(event_envelope_media_type) BETWEEN 1 AND 128
-            AND event_envelope_media_type LIKE '%/%'
-            AND event_envelope_media_type ~ '^[!-~]+$'
-            AND event_envelope_media_type !~ '[[:space:][:cntrl:];]'
-        )
-    ) NOT VALID;
+        event_envelope_schema > 0
+        AND event_registry_schema > 0
+        AND octet_length(event_envelope_digest) = 32
+        AND octet_length(event_envelope_bytes) BETWEEN 1 AND 32768
+        AND octet_length(event_envelope_media_type) BETWEEN 1 AND 128
+        AND event_envelope_media_type LIKE '%/%'
+        AND event_envelope_media_type ~ '^[!-~]+$'
+        AND event_envelope_media_type !~ '[[:space:][:cntrl:];]'
+    );
 
-ALTER TABLE provider_delivery_inbox
-    VALIDATE CONSTRAINT provider_delivery_inbox_event_envelope_complete;
-
--- Envelope evidence is immutable after acceptance. The only new lifecycle edge
--- is the bounded quarantine of an eligible all-null legacy row; sealed rows
--- retain the original state machine unchanged.
+-- Envelope evidence is immutable after acceptance; the original state machine
+-- remains closed over canonical sealed deliveries.
 CREATE OR REPLACE FUNCTION automata_enforce_provider_delivery_lifecycle()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -81,28 +61,7 @@ BEGIN
                   CONSTRAINT = 'provider_delivery_inbox_time_regression';
     END IF;
 
-    IF OLD.event_envelope_schema IS NULL
-        AND OLD.state IN ('pending', 'retry', 'claimed')
-        AND NEW.state = 'rejected'
-    THEN
-        IF NEW.claim_fence <> OLD.claim_fence + 1
-            OR NEW.attempt_count <> GREATEST(OLD.attempt_count, 1)
-            OR NEW.last_failure_kind
-                IS DISTINCT FROM 'provider_delivery.legacy_unsealed'
-            OR (
-                OLD.state = 'retry'
-                AND NEW.state_updated_at_ms < OLD.next_attempt_at_ms
-            )
-            OR (
-                OLD.state = 'claimed'
-                AND NEW.state_updated_at_ms < OLD.claim_expires_at_ms
-            )
-        THEN
-            RAISE EXCEPTION 'legacy provider delivery quarantine must close exact eligible state'
-                USING ERRCODE = 'check_violation',
-                      CONSTRAINT = 'provider_delivery_inbox_legacy_unsealed_transition';
-        END IF;
-    ELSIF OLD.state IN ('pending', 'retry') AND NEW.state = 'claimed' THEN
+    IF OLD.state IN ('pending', 'retry') AND NEW.state = 'claimed' THEN
         IF NEW.claim_fence <> OLD.claim_fence + 1
             OR NEW.attempt_count <> OLD.attempt_count + 1
             OR NEW.claimed_at_ms < OLD.state_updated_at_ms

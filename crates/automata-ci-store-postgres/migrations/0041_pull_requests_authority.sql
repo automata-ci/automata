@@ -1,4 +1,4 @@
--- Wave 1 EVT-02 append-only migration 0041. Earlier applied versions remain frozen.
+-- Pull-request changed-files authority for every GitHub repository visibility.
 
 ALTER TABLE github_server_service_authorities
     DROP CONSTRAINT github_server_service_authorities_permission_exact,
@@ -12,10 +12,10 @@ ALTER TABLE github_server_service_authorities
                 '6acf4ef0f49f5935d65a42dacb8ffcd49718dfd847d802d96038d81cea869a9c',
                 'hex'
             ))
-        OR (service_scope = 'private_repository_source_read'
+        OR (service_scope = 'repository_contents_read'
             AND permission_policy = '{"contents": "read"}'::jsonb
             AND policy_digest = decode(
-                '3c2516eac095f5bda3e7d20265497325e91030d1abe5907d4fb7fefcd0aa7f57',
+                '0459c70295d97ec229bdf62d3c3da5ca7750d65f4021dc0cea7d7a98611d97b6',
                 'hex'
             ))
         OR (service_scope = 'workflow_permissions_read'
@@ -24,19 +24,19 @@ ALTER TABLE github_server_service_authorities
                 '8ed2a0af82c45da675ac00d905c42d8da14c97ea67427c43cc00c60a6c330a30',
                 'hex'
             ))
-        OR (service_scope = 'private_pull_request_files_read'
+        OR (service_scope = 'pull_requests_read'
             AND permission_policy = '{"pull_requests": "read"}'::jsonb
             AND policy_digest = decode(
-                '523d0319f40cf91e5eb3e1482a80462088748aa2537ae3c9540e76b7965d0099',
+                '10d74793a5ed7ac4476894f656a11576adf8a55559d0f06a4e5851963b17619c',
                 'hex'
             ))
     ),
     ADD CONSTRAINT github_server_service_authorities_service_scope CHECK (
         service_scope = ANY (ARRAY[
             'checks_write'::text,
-            'private_repository_source_read'::text,
+            'repository_contents_read'::text,
             'workflow_permissions_read'::text,
-            'private_pull_request_files_read'::text
+            'pull_requests_read'::text
         ])
     );
 
@@ -50,51 +50,47 @@ ALTER TABLE github_server_service_authority_handoffs
             'create_check_run'::text,
             'reconcile_check_run'::text,
             'publish_check_run'::text,
-            'fetch_private_repository_revision'::text,
-            'fetch_private_repository_changed_files'::text,
-            'discover_private_repository_schedules'::text,
+            'fetch_repository_revision'::text,
+            'fetch_repository_changed_files'::text,
+            'discover_repository_schedules'::text,
             'observe_workflow_permission_defaults'::text,
-            'fetch_private_pull_request_files'::text
+            'fetch_pull_request_files'::text
         ])
     );
 
 ALTER TABLE github_provider_delivery_evidence
-    ADD COLUMN private_pull_request_files_authority_id UUID,
-    ADD COLUMN private_pull_request_files_authority_identity_digest BYTEA,
-    ADD COLUMN private_pull_request_files_authority_app_configuration_revision BIGINT,
-    ADD COLUMN private_pull_request_files_authority_policy_revision BIGINT;
+    ADD COLUMN pull_requests_authority_id UUID,
+    ADD COLUMN pull_requests_authority_identity_digest BYTEA,
+    ADD COLUMN pull_requests_authority_app_configuration_revision BIGINT,
+    ADD COLUMN pull_requests_authority_policy_revision BIGINT;
 
 ALTER TABLE github_provider_delivery_evidence
-    ADD CONSTRAINT github_provider_delivery_evidence_pr_files_authority
-        FOREIGN KEY (private_pull_request_files_authority_id)
+    ADD CONSTRAINT github_provider_delivery_evidence_pull_requests_authority
+        FOREIGN KEY (pull_requests_authority_id)
         REFERENCES github_server_service_authorities (id)
         ON DELETE RESTRICT,
-    ADD CONSTRAINT github_provider_delivery_evidence_pr_files_selector_shape CHECK (
-        repository_visibility = 'private'
-        AND authenticated_event_name = 'pull_request'
-        AND private_pull_request_files_authority_id IS NOT NULL
-        AND private_pull_request_files_authority_identity_digest IS NOT NULL
-        AND octet_length(private_pull_request_files_authority_identity_digest) = 32
-        AND private_pull_request_files_authority_app_configuration_revision > 0
-        AND private_pull_request_files_authority_policy_revision > 0
-        AND private_pull_request_files_authority_id <> checks_authority_id
-        AND private_pull_request_files_authority_identity_digest <>
+    ADD CONSTRAINT github_provider_delivery_evidence_pull_requests_selector_shape CHECK (
+        authenticated_event_name = 'pull_request'
+        AND pull_requests_authority_id IS NOT NULL
+        AND pull_requests_authority_identity_digest IS NOT NULL
+        AND octet_length(pull_requests_authority_identity_digest) = 32
+        AND pull_requests_authority_app_configuration_revision > 0
+        AND pull_requests_authority_policy_revision > 0
+        AND pull_requests_authority_id <> checks_authority_id
+        AND pull_requests_authority_identity_digest <>
             checks_authority_identity_digest
-        AND private_pull_request_files_authority_id <>
-            private_source_authority_id
-        AND private_pull_request_files_authority_identity_digest <>
-            private_source_authority_identity_digest
-        OR NOT (
-            repository_visibility = 'private'
-            AND authenticated_event_name = 'pull_request'
-        )
-        AND private_pull_request_files_authority_id IS NULL
-        AND private_pull_request_files_authority_identity_digest IS NULL
-        AND private_pull_request_files_authority_app_configuration_revision IS NULL
-        AND private_pull_request_files_authority_policy_revision IS NULL
+        AND pull_requests_authority_id <>
+            repository_contents_authority_id
+        AND pull_requests_authority_identity_digest <>
+            repository_contents_authority_identity_digest
+        OR authenticated_event_name <> 'pull_request'
+        AND pull_requests_authority_id IS NULL
+        AND pull_requests_authority_identity_digest IS NULL
+        AND pull_requests_authority_app_configuration_revision IS NULL
+        AND pull_requests_authority_policy_revision IS NULL
     ) NOT VALID;
 
-CREATE FUNCTION automata_github_provider_delivery_pr_files_authority_guard()
+CREATE FUNCTION automata_github_provider_delivery_pull_requests_authority_guard()
 RETURNS trigger
 LANGUAGE plpgsql
 AS $$
@@ -103,9 +99,7 @@ DECLARE
     manifest_pin RECORD;
     authority github_server_service_authorities%ROWTYPE;
 BEGIN
-    IF NEW.repository_visibility <> 'private'
-        OR NEW.authenticated_event_name <> 'pull_request'
-    THEN
+    IF NEW.authenticated_event_name <> 'pull_request' THEN
         RETURN NEW;
     END IF;
 
@@ -136,13 +130,13 @@ BEGIN
     SELECT * INTO authority
     FROM github_server_service_authorities
     WHERE tenant_id = NEW.tenant_id
-      AND id = NEW.private_pull_request_files_authority_id
+      AND id = NEW.pull_requests_authority_id
     FOR SHARE;
 
     IF inbox.id IS NULL
         OR manifest_pin.provider_connection_id IS NULL
         OR authority.id IS NULL
-        OR inbox.repository_visibility <> 'private'
+        OR inbox.repository_visibility <> NEW.repository_visibility
         OR inbox.accepted_at_ms < manifest_pin.current_activated_at_ms
         OR authority.repository_id <> NEW.repository_id
         OR authority.provider_connection_id <> NEW.provider_connection_id
@@ -150,36 +144,36 @@ BEGIN
         OR authority.github_app_id <> manifest_pin.github_app_id
         OR authority.github_repository_id <> NEW.github_repository_id
         OR authority.github_repository_name <> NEW.github_repository_name
-        OR authority.service_scope <> 'private_pull_request_files_read'
+        OR authority.service_scope <> 'pull_requests_read'
         OR authority.github_app_client_id <> manifest_pin.github_app_client_id
         OR authority.github_app_jwt_issuer_kind <>
             manifest_pin.github_app_jwt_issuer_kind
         OR authority.app_key_spki_sha256 <> manifest_pin.app_key_spki_sha256
         OR authority.app_configuration_revision <>
-            NEW.private_pull_request_files_authority_app_configuration_revision
+            NEW.pull_requests_authority_app_configuration_revision
         OR authority.app_configuration_revision <>
             manifest_pin.app_configuration_revision
         OR authority.policy_revision <>
-            NEW.private_pull_request_files_authority_policy_revision
+            NEW.pull_requests_authority_policy_revision
         OR authority.policy_revision <> manifest_pin.policy_revision
         OR authority.identity_digest <>
-            NEW.private_pull_request_files_authority_identity_digest
+            NEW.pull_requests_authority_identity_digest
         OR authority.state <> 'active'
         OR authority.created_at_ms > inbox.accepted_at_ms
     THEN
-        RAISE EXCEPTION 'private pull-request files authority is not exact'
+        RAISE EXCEPTION 'pull-request files authority is not exact'
             USING ERRCODE = 'integrity_constraint_violation',
                   CONSTRAINT =
-                      'github_provider_delivery_evidence_pr_files_authority_exact';
+                      'github_provider_delivery_evidence_pull_requests_authority_exact';
     END IF;
     RETURN NEW;
 END;
 $$;
 
-CREATE TRIGGER github_provider_delivery_evidence_01_pr_files_guard
+CREATE TRIGGER github_provider_delivery_evidence_01_pull_requests_guard
 BEFORE INSERT ON github_provider_delivery_evidence
 FOR EACH ROW
-EXECUTE FUNCTION automata_github_provider_delivery_pr_files_authority_guard();
+EXECUTE FUNCTION automata_github_provider_delivery_pull_requests_authority_guard();
 
 CREATE OR REPLACE FUNCTION automata_github_server_service_handoff_insert_guard()
 RETURNS trigger
@@ -274,8 +268,8 @@ BEGIN
                       CONSTRAINT =
                           'github_server_service_handoffs_checks_claim_exact';
         END IF;
-    ELSIF authority.service_scope = 'private_repository_source_read' THEN
-        IF NEW.consumer_action = 'discover_private_repository_schedules' THEN
+    ELSIF authority.service_scope = 'repository_contents_read' THEN
+        IF NEW.consumer_action = 'discover_repository_schedules' THEN
             SELECT EXISTS (
                 SELECT 1
                   FROM github_schedule_discovery_claims AS discovery
@@ -315,13 +309,13 @@ BEGIN
                    AND discovery.provider_connection_id =
                        authority.provider_connection_id
                    AND discovery.source_authority_kind =
-                       'private_repository_source_read'
-                   AND discovery.private_source_authority_id = authority.id
-                   AND discovery.private_source_authority_identity_digest =
+                       'repository_contents_read'
+                   AND discovery.repository_contents_authority_id = authority.id
+                   AND discovery.repository_contents_authority_identity_digest =
                        authority.identity_digest
-                   AND discovery.private_source_authority_app_configuration_revision =
+                   AND discovery.repository_contents_authority_app_configuration_revision =
                        authority.app_configuration_revision
-                   AND discovery.private_source_authority_policy_revision =
+                   AND discovery.repository_contents_authority_policy_revision =
                        authority.policy_revision
                    AND manifest.provider_installation_id =
                        authority.provider_installation_id
@@ -364,8 +358,8 @@ BEGIN
                 OR NEW.required_through_ms::NUMERIC >
                     delivery.claim_expires_at_ms::NUMERIC + 300000
                 OR NEW.consumer_action NOT IN (
-                    'fetch_private_repository_revision',
-                    'fetch_private_repository_changed_files'
+                    'fetch_repository_revision',
+                    'fetch_repository_changed_files'
                 )
                 OR delivery.tenant_id IS DISTINCT FROM authority.tenant_id
                 OR delivery.provider IS DISTINCT FROM 'github'
@@ -390,7 +384,7 @@ BEGIN
                               'github_server_service_handoffs_source_claim_exact';
             END IF;
         END IF;
-    ELSIF authority.service_scope = 'private_pull_request_files_read' THEN
+    ELSIF authority.service_scope = 'pull_requests_read' THEN
         SELECT * INTO delivery
         FROM provider_delivery_inbox
         WHERE id = NEW.consumer_id
@@ -408,7 +402,7 @@ BEGIN
         IF delivery.id IS NULL
             OR delivery_evidence.provider_delivery_id IS NULL
             OR repository.id IS NULL
-            OR NEW.consumer_action <> 'fetch_private_pull_request_files'
+            OR NEW.consumer_action <> 'fetch_pull_request_files'
             OR delivery.state IS DISTINCT FROM 'claimed'
             OR delivery.claim_owner_id IS DISTINCT FROM NEW.consumer_owner_id
             OR delivery.claim_fence IS DISTINCT FROM NEW.consumer_claim_fence
@@ -432,13 +426,13 @@ BEGIN
             OR delivery.repository_identity IS DISTINCT FROM
                 authority.github_repository_name
             OR delivery_evidence.authenticated_event_name IS DISTINCT FROM 'pull_request'
-            OR delivery_evidence.private_pull_request_files_authority_id IS DISTINCT FROM
+            OR delivery_evidence.pull_requests_authority_id IS DISTINCT FROM
                 authority.id
-            OR delivery_evidence.private_pull_request_files_authority_identity_digest IS DISTINCT FROM
+            OR delivery_evidence.pull_requests_authority_identity_digest IS DISTINCT FROM
                 authority.identity_digest
-            OR delivery_evidence.private_pull_request_files_authority_app_configuration_revision IS DISTINCT FROM
+            OR delivery_evidence.pull_requests_authority_app_configuration_revision IS DISTINCT FROM
                 authority.app_configuration_revision
-            OR delivery_evidence.private_pull_request_files_authority_policy_revision IS DISTINCT FROM
+            OR delivery_evidence.pull_requests_authority_policy_revision IS DISTINCT FROM
                 authority.policy_revision
             OR repository.scm_provider IS DISTINCT FROM 'github'
             OR repository.provider_repository_id IS DISTINCT FROM
@@ -449,7 +443,7 @@ BEGIN
             RAISE EXCEPTION 'private GitHub pull-request files handoff claim is not exact'
                 USING ERRCODE = 'integrity_constraint_violation',
                       CONSTRAINT =
-                          'github_server_service_handoffs_pr_files_claim_exact';
+                          'github_server_service_handoffs_pull_requests_claim_exact';
         END IF;
     ELSE
         RAISE EXCEPTION 'GitHub server-service handoff scope is unknown'

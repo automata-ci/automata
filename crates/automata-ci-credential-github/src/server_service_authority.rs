@@ -81,15 +81,11 @@ pub fn github_server_service_credential_request(
 ) -> Result<RepositoryCredentialRequest, GithubServerServiceResolutionValueError> {
     let permission = match identity.scope() {
         GithubServerServiceScope::ChecksWrite => ("checks", PermissionLevel::Write),
-        GithubServerServiceScope::PrivateRepositorySourceRead => {
-            ("contents", PermissionLevel::Read)
-        }
+        GithubServerServiceScope::RepositoryContentsRead => ("contents", PermissionLevel::Read),
         GithubServerServiceScope::WorkflowPermissionsRead => {
             ("administration", PermissionLevel::Read)
         }
-        GithubServerServiceScope::PrivatePullRequestFilesRead => {
-            ("pull_requests", PermissionLevel::Read)
-        }
+        GithubServerServiceScope::PullRequestsRead => ("pull_requests", PermissionLevel::Read),
     };
     let permissions = PermissionSet::new([(
         PermissionName::new(permission.0).map_err(|_| GithubServerServiceResolutionValueError)?,
@@ -670,7 +666,7 @@ pub enum GithubServerServiceCoordinationOutcome {
     RevocationCommitPending(Box<PendingGithubServerServiceRevocationCommit>),
 }
 
-/// Generic coordinator for Checks and private-source credentials.
+/// Generic coordinator for repository-scoped GitHub App credentials.
 pub struct GithubServerServiceCredentialCoordinator {
     repository: Arc<dyn GithubServerServiceCredentialRepository>,
     resolver: Arc<dyn GithubServerServiceCredentialRequestResolver>,

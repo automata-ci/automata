@@ -359,16 +359,17 @@ async fn assert_invalid(
 }
 
 #[tokio::test]
-async fn public_request_is_anonymous_at_the_real_http_boundary() {
+async fn public_request_sends_the_exact_token_at_the_real_http_boundary() {
     let delivery = delivery_fixture(ProviderRepositoryVisibility::Public);
     let http = HttpFixture::spawn(comparison_response()).await;
+    let token = SecretString::new("ghs_public_changed_files_adapter").expect("token");
 
     let outcome = http
         .provider
         .changed_files(changed_files_request(
             &delivery,
             delivery.claimed.identity(),
-            GithubPushChangedFilesAuthority::PublicAnonymous,
+            GithubPushChangedFilesAuthority::InstallationContentsRead(&token),
         ))
         .await;
     assert!(matches!(
@@ -381,7 +382,10 @@ async fn public_request_is_anonymous_at_the_real_http_boundary() {
 
     let captured = http.finish().await;
     assert_common_request(&captured);
-    assert!(header_value(&captured, "authorization").is_none());
+    assert_eq!(
+        header_value(&captured, "authorization"),
+        Some("Bearer ghs_public_changed_files_adapter")
+    );
 }
 
 #[tokio::test]
@@ -395,7 +399,7 @@ async fn private_request_sends_only_the_exact_token_at_the_real_http_boundary() 
         .changed_files(changed_files_request(
             &delivery,
             delivery.claimed.identity(),
-            GithubPushChangedFilesAuthority::PrivateInstallationContentsRead(&token),
+            GithubPushChangedFilesAuthority::InstallationContentsRead(&token),
         ))
         .await;
     assert!(matches!(
@@ -423,6 +427,7 @@ async fn binding_mismatches_are_rejected_before_any_http_io() {
         .expect("make no-I/O fixture nonblocking");
     let provider = provider_for(listener.local_addr().expect("no-I/O fixture address"));
 
+    let token = SecretString::new("ghs_must_not_reach_http").expect("token");
     let mismatched_identities = [
         identity_with_provider_and_delivery(
             "gitlab",
@@ -465,13 +470,12 @@ async fn binding_mismatches_are_rejected_before_any_http_io() {
             changed_files_request(
                 &delivery,
                 mismatched,
-                GithubPushChangedFilesAuthority::PublicAnonymous,
+                GithubPushChangedFilesAuthority::InstallationContentsRead(&token),
             ),
         )
         .await;
     }
 
-    let token = SecretString::new("ghs_must_not_reach_http").expect("token");
     let private_identity = identity(
         ProviderRepositoryVisibility::Private,
         REPOSITORY_ID,
@@ -483,24 +487,14 @@ async fn binding_mismatches_are_rejected_before_any_http_io() {
         changed_files_request(
             &delivery,
             &private_identity,
-            GithubPushChangedFilesAuthority::PrivateInstallationContentsRead(&token),
+            GithubPushChangedFilesAuthority::InstallationContentsRead(&token),
         ),
     )
     .await;
-    assert_invalid(
-        &provider,
-        changed_files_request(
-            &delivery,
-            delivery.claimed.identity(),
-            GithubPushChangedFilesAuthority::PrivateInstallationContentsRead(&token),
-        ),
-    )
-    .await;
-
     let mut expired = changed_files_request(
         &delivery,
         delivery.claimed.identity(),
-        GithubPushChangedFilesAuthority::PublicAnonymous,
+        GithubPushChangedFilesAuthority::InstallationContentsRead(&token),
     );
     expired.required_through = expired.observed_at;
     assert_invalid(&provider, expired).await;

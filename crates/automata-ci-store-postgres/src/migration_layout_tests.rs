@@ -4,7 +4,7 @@ use sha2::{Digest as _, Sha384};
 
 use crate::migration::MIGRATOR;
 
-const FROZEN_MIGRATIONS: &[(&str, &str)] = &[
+const CANONICAL_MIGRATIONS: &[(&str, &str)] = &[
     (
         "0001_baseline_routines_01.sql",
         "a88f5c285d9d0286eb5f9d3812c06e254ff22ded8041b014ce666f73c29436d92f2ba0ec3633fdb59d779da6918e7a2a",
@@ -15,27 +15,27 @@ const FROZEN_MIGRATIONS: &[(&str, &str)] = &[
     ),
     (
         "0003_baseline_routines_03.sql",
-        "6094bc86a6b041c70c8cfd3e04d202bf03272e94b39ea7131b61e7c67e30a6bb307a89771a3325e4a15a2b215237381f",
+        "f324de1a77ec95f6b3f0969e668a55b2bceb4818e8be4dac41a3784ceaad9aadbd8845668fc49d3a265fe79b4227a8a4",
     ),
     (
         "0004_baseline_routines_04.sql",
-        "e4161674d25811f9da1e1f6152ad6eb9c1086edb85e3f3791588450c1678105b0a799b3780c8272b4f8ad9eb364017be",
+        "732df18d9d24d28bd8563aa5d7f196a59a52a721316dce6a46f1a0ee527515005907c9e26a099bd66c9024a215f97aff",
     ),
     (
         "0005_baseline_routines_05.sql",
-        "4f796ebcfcf8390bf9b40843fe25e91bb935ac29730959cbee0830d2e96bbb8175253fc32ffbbc25792bb5894a7398f4",
+        "2e57ad16e0b14c80f1aa5e2e9870ad97575c8415f52a8f66917bca2f18b40e064a42c24092871844ac3feb62b11398a4",
     ),
     (
         "0006_baseline_routines_06.sql",
-        "57d00fe6cd4a68825eeea8b964a28801bfba2c4e13b8b8112e1cec5b5ec655fe15b3e236e03fa8add09945ced1534625",
+        "cc8d01639e840602f5561584a1dd3fc34c93aff70e1659ec29d18d5287eaf589e684e810df49c504eba1b4e9309035dc",
     ),
     (
         "0007_baseline_routines_07.sql",
-        "39206936cadbfabef47a775440353367eaa1e9737f3a79c4da360c71511093f0c5e2c4fcb42b67a133d6f93ea4d333b7",
+        "9a5e7c4b3e652fc9117c20e52191d8ab49731d3e9ffb67afbc55b3e8027b165d02155ca6986b86e689285df5a457fa09",
     ),
     (
         "0008_baseline_routines_08.sql",
-        "bd208061cc3d0c296656fd50514fbbf6b2bca8eb6d7b8e07d25c2892923295f4b63348383b1b0fed8656c5d04da51def",
+        "9be95694ab8914a42af6bf01c2865e87db29db00583c5c804325a26221f46acd8e4d80876cff849913f44d20122c9975",
     ),
     (
         "0009_baseline_routines_09.sql",
@@ -63,7 +63,7 @@ const FROZEN_MIGRATIONS: &[(&str, &str)] = &[
     ),
     (
         "0015_baseline_routines_15.sql",
-        "04721f411fc6aa8aaba893b879d7a1ec42ed49d1d95bdfe0966db2584bc502cc55955dca8573ec3f0bb4ce4bd43336d0",
+        "7230a0afb4557f610128b2c8f905f6ceb49766c2ba003eb6062e82a51ea00788094db51b9490319d2cb1c2f7582ae48f",
     ),
     (
         "0016_baseline_routines_16.sql",
@@ -71,7 +71,7 @@ const FROZEN_MIGRATIONS: &[(&str, &str)] = &[
     ),
     (
         "0017_baseline_relations_execution.sql",
-        "9d80766241d5b07160607c4e90fcd30d9ee2ac341e89576f1033fd7072e466c0364a10a4479e8eb919bb39979a1603b9",
+        "01b80cc7889c9dbd901e407b67956da1392a791bb3265574e684aa9df4894d4b09b970c3227495bf8c823e487020448b",
     ),
     (
         "0018_baseline_relations_auth_and_delivery.sql",
@@ -107,7 +107,7 @@ const FROZEN_MIGRATIONS: &[(&str, &str)] = &[
     ),
     (
         "0026_baseline_foreign_keys.sql",
-        "57e7e93dcdc0ee7568393785b30774259dcf5300f9a8df99ac7795d9799c60b97dec36479976ae99e5c4bd320080a977",
+        "4ebc234ebd99cbe18d59d75848e955057d4d92b5daa1412c8e081cf0c51d5546cd1b6133ca676fd165578c5c587ae824",
     ),
     (
         "0027_workspace_usage_feed.sql",
@@ -135,7 +135,7 @@ const FROZEN_MIGRATIONS: &[(&str, &str)] = &[
     ),
     (
         "0033_github_workflow_permission_defaults.sql",
-        "0725af95c311d20f756f738e8828ed178f043c6e4fdf503f01bf3d82530c6d966319811f3a55a4ab8d20d28cf15b9b56",
+        "e2766c2f259a407a31e10e6b2589b65473b6a48c043fd1841b41f43172dc14eb1ec34ffe113769b2b87747d31f7ff336",
     ),
     (
         "0034_event_trust_control_contracts.sql",
@@ -163,11 +163,11 @@ const FROZEN_MIGRATIONS: &[(&str, &str)] = &[
     ),
     (
         "0040_provider_delivery_event_envelope.sql",
-        "939ba465bb389fbe4c3ed2066e4e86cd46102664e35451ea182af3f49d10e142fcdc046c1f957c28d9eb1747309793e0",
+        "7dfdf8c7ce3c931bdd9006990617cb7e5c591cecc248511e63b8c1068bc7ab6e6a67b555417f51bb56782e0d856c88bc",
     ),
     (
-        "0041_private_pull_request_files_authority.sql",
-        "a458499937bd5133caeee8271f961e0d8c96e2db9d58ac0cd538ed1e6f99687aa03cdae3ea111bbe526a18075d56d5ba",
+        "0041_pull_requests_authority.sql",
+        "5b89abcaf3e0703746e7a94f6ba6f783c3c3bceb115605a2cccfce77c39d701c4e4bee85516b2d680ed0bbb9a832f93e",
     ),
     (
         "0042_github_provider_desired_state.sql",
@@ -199,7 +199,7 @@ const FROZEN_MIGRATIONS: &[(&str, &str)] = &[
     ),
     (
         "0049_delegated_workflow_dispatch.sql",
-        "df17f7d6396ca08d57594ca0411301a9ed3ea4d8c8e8d3f9acae5aba2592bff5ba0a7c26a78766bc23106d9a9f3d6f0c",
+        "c8d8e5c6a473f9112f7ebf60224e53a2b1863b3353669f3065d204af031f12eb1a7e13b56261a7afee732351363c79bc",
     ),
     (
         "0050_structured_live_logs.sql",
@@ -211,7 +211,7 @@ const FROZEN_MIGRATIONS: &[(&str, &str)] = &[
     ),
     (
         "0052_canonical_git_object_ids.sql",
-        "c3cfa4f85f13f8385bf6edd2c997018eb6e8542dc01a0821456d1caf33d062d404bc902810429315318c40a305feb0cc",
+        "ddb2ca60bc2dec5b52f11dfc4ea025d2af651d34ccb090e942e1b61de1044fa7d5ca73d407c51a6141d1596ebb1be154",
     ),
     (
         "0053_provider_delivery_foundation.sql",
@@ -219,7 +219,7 @@ const FROZEN_MIGRATIONS: &[(&str, &str)] = &[
     ),
     (
         "0054_provider_neutral_workload_oidc.sql",
-        "6bcb92936a5882ee9d085e8bef4da2c95903d0e75860d08dd52a140c18b94351dccb4263e0f0dd40964b337c3101dc53",
+        "5a63d295c00e984e20647ba8d241b168941bf13effcef30255d8fad452dcd3cb3ed954e22f11a31fc779d778241230d7",
     ),
     (
         "0055_terminal_log_output_v3.sql",
@@ -239,7 +239,7 @@ const BASELINE_MIGRATION_COUNT: u32 = 26;
 const MAX_MIGRATION_LINES: usize = 2_000;
 
 #[test]
-fn applied_migration_lineage_is_frozen() {
+fn canonical_migration_lineage_is_exact() {
     let migrations = migration_paths();
     assert!(
         !MIGRATOR.ignore_missing,
@@ -247,19 +247,19 @@ fn applied_migration_lineage_is_frozen() {
     );
     assert_eq!(
         migrations.len(),
-        FROZEN_MIGRATIONS.len(),
-        "append each new migration to the frozen inventory; never remove an applied migration"
+        CANONICAL_MIGRATIONS.len(),
+        "the canonical greenfield inventory must be updated intentionally"
     );
     assert_eq!(
         MIGRATOR.iter().count(),
-        FROZEN_MIGRATIONS.len(),
-        "the embedded migrator must contain the complete frozen inventory"
+        CANONICAL_MIGRATIONS.len(),
+        "the embedded migrator must contain the complete canonical inventory"
     );
 
     for (index, ((path, embedded), (expected_name, expected_checksum))) in migrations
         .iter()
         .zip(MIGRATOR.iter())
-        .zip(FROZEN_MIGRATIONS)
+        .zip(CANONICAL_MIGRATIONS)
         .enumerate()
     {
         let file_name = path
@@ -267,7 +267,10 @@ fn applied_migration_lineage_is_frozen() {
             .and_then(|name| name.to_str())
             .expect("migration file name is UTF-8");
         let version = u32::try_from(index + 1).expect("migration count fits u32");
-        assert_eq!(file_name, *expected_name, "applied migration was renamed");
+        assert_eq!(
+            file_name, *expected_name,
+            "canonical migration name changed"
+        );
         assert_eq!(migration_version(path), version);
         assert_eq!(embedded.version, i64::from(version));
 
@@ -276,7 +279,7 @@ fn applied_migration_lineage_is_frozen() {
         assert_eq!(
             checksum_hex(&checksum),
             *expected_checksum,
-            "applied migration {file_name} changed; restore its exact bytes and append a new migration"
+            "canonical migration {file_name} fingerprint is stale"
         );
         assert_eq!(
             embedded.checksum.as_ref(),
@@ -436,26 +439,16 @@ fn runtime_authority_delivery_is_post_accept_exact_and_value_free() {
 }
 
 #[test]
-fn provider_delivery_event_envelope_is_complete_bounded_and_legacy_nullable() {
+fn provider_delivery_event_envelope_is_complete_bounded_and_mandatory() {
     let source = include_str!("../migrations/0040_provider_delivery_event_envelope.sql");
 
     for required in [
-        "ADD COLUMN event_envelope_schema SMALLINT",
-        "ADD COLUMN event_registry_schema SMALLINT",
-        "ADD COLUMN event_envelope_digest BYTEA",
-        "ADD COLUMN event_envelope_bytes BYTEA",
-        "ADD COLUMN event_envelope_media_type TEXT COLLATE \"C\"",
+        "ADD COLUMN event_envelope_schema SMALLINT NOT NULL",
+        "ADD COLUMN event_registry_schema SMALLINT NOT NULL",
+        "ADD COLUMN event_envelope_digest BYTEA NOT NULL",
+        "ADD COLUMN event_envelope_bytes BYTEA NOT NULL",
+        "ADD COLUMN event_envelope_media_type TEXT COLLATE \"C\" NOT NULL",
         "CONSTRAINT provider_delivery_inbox_event_envelope_complete CHECK",
-        "event_envelope_schema IS NULL",
-        "event_registry_schema IS NULL",
-        "event_envelope_digest IS NULL",
-        "event_envelope_bytes IS NULL",
-        "event_envelope_media_type IS NULL",
-        "event_envelope_schema IS NOT NULL",
-        "event_registry_schema IS NOT NULL",
-        "event_envelope_digest IS NOT NULL",
-        "event_envelope_bytes IS NOT NULL",
-        "event_envelope_media_type IS NOT NULL",
         "event_envelope_schema > 0",
         "event_registry_schema > 0",
         "octet_length(event_envelope_digest) = 32",
@@ -464,25 +457,23 @@ fn provider_delivery_event_envelope_is_complete_bounded_and_legacy_nullable() {
         "event_envelope_media_type LIKE '%/%'",
         "event_envelope_media_type ~ '^[!-~]+$'",
         "event_envelope_media_type !~ '[[:space:][:cntrl:];]'",
-        ") NOT VALID",
-        "VALIDATE CONSTRAINT provider_delivery_inbox_event_envelope_complete",
         "CREATE OR REPLACE FUNCTION automata_enforce_provider_delivery_lifecycle()",
         "NEW.event_envelope_schema IS DISTINCT FROM OLD.event_envelope_schema",
         "NEW.event_registry_schema IS DISTINCT FROM OLD.event_registry_schema",
         "NEW.event_envelope_digest IS DISTINCT FROM OLD.event_envelope_digest",
         "NEW.event_envelope_bytes IS DISTINCT FROM OLD.event_envelope_bytes",
         "NEW.event_envelope_media_type IS DISTINCT FROM OLD.event_envelope_media_type",
-        "OLD.event_envelope_schema IS NULL",
-        "OLD.state IN ('pending', 'retry', 'claimed')",
-        "NEW.state = 'rejected'",
-        "NEW.claim_fence <> OLD.claim_fence + 1",
-        "NEW.attempt_count <> GREATEST(OLD.attempt_count, 1)",
-        "IS DISTINCT FROM 'provider_delivery.legacy_unsealed'",
-        "CONSTRAINT = 'provider_delivery_inbox_legacy_unsealed_transition'",
     ] {
         assert!(
             source.contains(required),
             "provider-delivery envelope migration lost required contract: {required}"
+        );
+    }
+
+    for forbidden in ["legacy", "event_envelope_schema IS NULL", ") NOT VALID"] {
+        assert!(
+            !source.contains(forbidden),
+            "canonical provider-delivery envelope retained compatibility SQL: {forbidden}"
         );
     }
 

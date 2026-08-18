@@ -10,10 +10,10 @@ ALTER TABLE github_server_service_authorities
                 '6acf4ef0f49f5935d65a42dacb8ffcd49718dfd847d802d96038d81cea869a9c',
                 'hex'
             ))
-        OR (service_scope = 'private_repository_source_read'
+        OR (service_scope = 'repository_contents_read'
             AND permission_policy = '{"contents": "read"}'::jsonb
             AND policy_digest = decode(
-                '3c2516eac095f5bda3e7d20265497325e91030d1abe5907d4fb7fefcd0aa7f57',
+                '0459c70295d97ec229bdf62d3c3da5ca7750d65f4021dc0cea7d7a98611d97b6',
                 'hex'
             ))
         OR (service_scope = 'workflow_permissions_read'
@@ -26,7 +26,7 @@ ALTER TABLE github_server_service_authorities
     ADD CONSTRAINT github_server_service_authorities_service_scope CHECK (
         service_scope = ANY (ARRAY[
             'checks_write'::text,
-            'private_repository_source_read'::text,
+            'repository_contents_read'::text,
             'workflow_permissions_read'::text
         ])
     );
@@ -41,9 +41,9 @@ ALTER TABLE github_server_service_authority_handoffs
             'create_check_run'::text,
             'reconcile_check_run'::text,
             'publish_check_run'::text,
-            'fetch_private_repository_revision'::text,
-            'fetch_private_repository_changed_files'::text,
-            'discover_private_repository_schedules'::text,
+            'fetch_repository_revision'::text,
+            'fetch_repository_changed_files'::text,
+            'discover_repository_schedules'::text,
             'observe_workflow_permission_defaults'::text
         ])
     ),

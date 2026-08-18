@@ -70,7 +70,7 @@ Current implementation boundary:
   immutable workflow-plan provenance and therefore its plan/admission digest;
   a terminal path miss is retained by durable per-workflow delivery progress.
 - Private pull-request delivery evidence pins a distinct
-  `private_pull_request_files_read` selector whose exact policy is only
+  `pull_requests_read` selector whose exact policy is only
   `pull requests: read`. The selector, App/config/policy revisions, delivery
   claim fence, action, and provider-use horizon are revalidated before a
   credential handoff. Acquisition happens only after the compiler demands
@@ -148,7 +148,7 @@ Acceptance:
 Tasks:
 
 - [x] Preserve authenticated private-repository schedule-source groundwork:
-  re-resolve the exact current private-source authority before source access
+  re-resolve the exact current repository-source authority before source access
   and reject provider-manifest or authority drift.
 - [ ] Preserve durable discovery and fire claims.
 - [ ] Populate `github.event.schedule`.

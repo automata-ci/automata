@@ -422,7 +422,7 @@ The GitHub App webhook URL is the public Automata origin plus
 configuration, subscribe only to the supported `push`, `pull_request`, `merge_group`,
 and `repository_dispatch` events selected for the installation. The App's
 registration-wide permissions are Administration read, Checks write, Contents
-read, Pull requests read, and Merge queues read; Automata's private-source
+read, Pull requests read, and Merge queues read; Automata's repository-source
 authority remains scoped separately per repository. Administration read is
 required to authenticate the repository's effective Actions permission defaults.
 A missing permission or provider `403` fails startup, and an expired or invalid
