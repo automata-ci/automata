@@ -5,13 +5,14 @@ use automata_ci_store::{
     MAX_ADMISSION_EVENT_BYTES, MAX_ADMISSION_OBJECT_BYTES, MAX_PROVIDER_DELIVERY_ATTEMPTS,
     MAX_PROVIDER_DELIVERY_CLAIM_MILLIS, MAX_PROVIDER_DELIVERY_EVENT_ENVELOPE_BYTES,
     MAX_PROVIDER_DELIVERY_RETRY_BACKOFF_MILLIS, MAX_PROVIDER_DELIVERY_TOTAL_CLAIM_MILLIS,
-    ObjectKey, ProviderDeliveryClaimFence, ProviderDeliveryClaimOwnerId,
-    ProviderDeliveryEventEnvelope, ProviderDeliveryFailureKind, ProviderDeliveryId,
-    ProviderDeliveryIdentity, ProviderDeliveryReceipt, ProviderDeliveryRenewalTiming,
-    ProviderDeliveryState, ProviderDeliveryValueError, ProviderDeliveryWorkflowConclusion,
-    ProviderDeliveryWorkflowOutcome, ProviderInstallationId, ProviderRepositoryCoordinates,
-    ProviderRepositoryId, ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
-    RenewProviderDeliveryClaim, RenewedProviderDeliveryClaim, TenantScope,
+    ObjectKey, ProviderDeliveryClaimFence, ProviderDeliveryEventEnvelope,
+    ProviderDeliveryFailureKind, ProviderDeliveryId, ProviderDeliveryIdentity,
+    ProviderDeliveryReceipt, ProviderDeliveryRenewalTiming, ProviderDeliveryState,
+    ProviderDeliveryValueError, ProviderDeliveryWorkflowConclusion,
+    ProviderDeliveryWorkflowOutcome, ProviderInstallationId, ProviderProcessingWorkerId,
+    ProviderRepositoryCoordinates, ProviderRepositoryId, ProviderRepositoryOwnerId,
+    ProviderRepositoryVisibility, RenewProviderDeliveryClaim, RenewedProviderDeliveryClaim,
+    TenantScope,
 };
 use std::time::Duration;
 use tokio::time::Instant;
@@ -150,9 +151,9 @@ fn provider_authority_rejects_sentinels_and_unbounded_values() {
         Err(ProviderIdentityError::NilUuid("provider connection ID"))
     ));
     assert!(matches!(
-        ProviderDeliveryClaimOwnerId::from_uuid(Uuid::nil()),
-        Err(ProviderDeliveryValueError::NilUuid(
-            "provider delivery claim owner ID"
+        ProviderProcessingWorkerId::from_uuid(Uuid::nil()),
+        Err(ProviderIdentityError::NilUuid(
+            "provider processing worker ID"
         ))
     ));
     assert!(matches!(
@@ -251,7 +252,7 @@ fn acceptance_retains_only_bounded_immutable_object_evidence() {
 
 #[test]
 fn claims_and_retry_classifications_are_strictly_bounded() {
-    let owner = ProviderDeliveryClaimOwnerId::from_uuid(Uuid::new_v4()).expect("owner");
+    let owner = ProviderProcessingWorkerId::from_uuid(Uuid::new_v4()).expect("owner");
     let claim = ClaimProviderDelivery::new(
         owner,
         UnixMillis::new(1_000),
@@ -288,7 +289,7 @@ fn claims_and_retry_classifications_are_strictly_bounded() {
 fn durable_claim_rehydration_revalidates_receipt_fence_and_time() {
     let delivery_id = ProviderDeliveryId::from_uuid(Uuid::new_v4()).expect("delivery");
     let other_delivery_id = ProviderDeliveryId::from_uuid(Uuid::new_v4()).expect("other delivery");
-    let owner = ProviderDeliveryClaimOwnerId::from_uuid(Uuid::new_v4()).expect("owner");
+    let owner = ProviderProcessingWorkerId::from_uuid(Uuid::new_v4()).expect("owner");
     let receipt = ProviderDeliveryReceipt::from_durable_parts(
         delivery_id,
         ProviderDeliveryState::Claimed,
@@ -370,7 +371,7 @@ fn durable_claim_rehydration_revalidates_receipt_fence_and_time() {
 #[test]
 fn durable_renewal_rehydration_revalidates_rotated_fence_and_bounded_time() {
     let delivery_id = ProviderDeliveryId::from_uuid(Uuid::new_v4()).expect("delivery");
-    let owner = ProviderDeliveryClaimOwnerId::from_uuid(Uuid::new_v4()).expect("owner");
+    let owner = ProviderProcessingWorkerId::from_uuid(Uuid::new_v4()).expect("owner");
     let claim =
         ProviderDeliveryClaimFence::from_durable_parts(delivery_id, owner, 9).expect("claim fence");
     let renewed = RenewedProviderDeliveryClaim::from_durable_parts(
@@ -474,7 +475,7 @@ fn durable_renewal_rehydration_revalidates_rotated_fence_and_bounded_time() {
 #[test]
 fn renewal_request_binds_the_exact_predecessor_to_one_monotonic_deadline() {
     let delivery_id = ProviderDeliveryId::from_uuid(Uuid::new_v4()).expect("delivery");
-    let owner = ProviderDeliveryClaimOwnerId::from_uuid(Uuid::new_v4()).expect("owner");
+    let owner = ProviderProcessingWorkerId::from_uuid(Uuid::new_v4()).expect("owner");
     let claim =
         ProviderDeliveryClaimFence::from_durable_parts(delivery_id, owner, 9).expect("claim");
     let monotonic_observed_at = Instant::now();
@@ -524,7 +525,7 @@ fn renewal_request_binds_the_exact_predecessor_to_one_monotonic_deadline() {
 #[test]
 fn renewal_request_rejects_stale_or_inconsistent_evidence() {
     let delivery_id = ProviderDeliveryId::from_uuid(Uuid::new_v4()).expect("delivery");
-    let owner = ProviderDeliveryClaimOwnerId::from_uuid(Uuid::new_v4()).expect("owner");
+    let owner = ProviderProcessingWorkerId::from_uuid(Uuid::new_v4()).expect("owner");
     let claim =
         ProviderDeliveryClaimFence::from_durable_parts(delivery_id, owner, 9).expect("claim");
     let monotonic_observed_at = Instant::now();

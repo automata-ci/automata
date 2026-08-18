@@ -9,23 +9,23 @@ use std::{
 use automata_ci_core::{GitObjectAlgorithm, GitObjectId, Sha256Digest, UnixMillis, WorkspaceId};
 use automata_ci_key_management::SecretBytes;
 use automata_ci_provider::{
-    AuthenticatedProviderWebhook, CompleteProviderDelivery, DeliveryAdapter,
+    AuthenticatedProviderWebhook, CompleteProviderProcessing, DeliveryAdapter,
     DeliveryAdapterRegistry, ExternalDeliveryId, ExternalDeliveryIdentity, ExternalRepositoryId,
     ExternalRepositoryIdentity, NormalizedTrigger, ProviderArchiveLimits,
     ProviderConfigurationRevision, ProviderConnectionConfiguration, ProviderConnectionId,
     ProviderConnectionManifest, ProviderConnectionPolicyDocument, ProviderConnectionRevision,
-    ProviderDefaultBranch, ProviderDeliveryClaimFence, ProviderDeliveryDraft, ProviderDeliveryId,
-    ProviderDeliveryNormalization, ProviderDeliveryObservations, ProviderDeliveryRejection,
-    ProviderDeliveryWorkerId, ProviderEventName, ProviderGitRef, ProviderGitRefKind,
-    ProviderInstanceId, ProviderLifecycleState, ProviderRepository, ProviderRepositoryPath,
-    ProviderRunnerPolicyBinding, ProviderSchemaVersion, ProviderSecret, ProviderSecretGeneration,
-    ProviderSecretName, ProviderTypeId, ProviderWebhookAuthenticationError,
-    ProviderWebhookAuthenticationRequest, ProviderWebhookEndpointId,
-    ProviderWebhookEndpointManifest, ProviderWebhookEndpointRevision, ProviderWebhookEndpointState,
-    ProviderWebhookHeaderName, ProviderWebhookHeaders, ProviderWebhookMethod,
-    ProviderWebhookRequest, ProviderWebhookSecretCandidates, ProviderWebhookSecretReference,
-    ProviderWebhookSignatureEvidence, ProviderWorkflowSource, PushCommitEvidence, PushTrigger,
-    RenewProviderDelivery, RepositoryVisibility,
+    ProviderDefaultBranch, ProviderDeliveryId, ProviderDeliveryNormalization,
+    ProviderDeliveryObservations, ProviderDeliveryRejection, ProviderEventName, ProviderGitRef,
+    ProviderGitRefKind, ProviderInstanceId, ProviderLifecycleState, ProviderProcessingClaimFence,
+    ProviderProcessingInvocationId, ProviderProcessingWorkerId, ProviderRepository,
+    ProviderRepositoryPath, ProviderRunnerPolicyBinding, ProviderSchemaVersion, ProviderSecret,
+    ProviderSecretGeneration, ProviderSecretName, ProviderTriggerDeliveryDraft, ProviderTypeId,
+    ProviderWebhookAuthenticationError, ProviderWebhookAuthenticationRequest,
+    ProviderWebhookEndpointId, ProviderWebhookEndpointManifest, ProviderWebhookEndpointRevision,
+    ProviderWebhookEndpointState, ProviderWebhookHeaderName, ProviderWebhookHeaders,
+    ProviderWebhookMethod, ProviderWebhookRequest, ProviderWebhookSecretCandidates,
+    ProviderWebhookSecretReference, ProviderWebhookSignatureEvidence, ProviderWorkflowSource,
+    PushCommitEvidence, PushTrigger, RenewProviderProcessing, RepositoryVisibility,
 };
 use sha2::{Digest as _, Sha256};
 
@@ -119,8 +119,8 @@ impl DeliveryAdapter for FakeAdapter {
             None,
         )
         .expect("push");
-        ProviderDeliveryNormalization::Accepted(Box::new(
-            ProviderDeliveryDraft::new(
+        ProviderDeliveryNormalization::Trigger(Box::new(
+            ProviderTriggerDeliveryDraft::new(
                 ProviderDeliveryId::new(),
                 ExternalDeliveryIdentity::new(
                     instance_id,
@@ -387,40 +387,40 @@ fn authenticated_invalid_json_is_recorded_without_admission() {
 
 #[test]
 fn worker_fence_rejects_mutations_before_claim_or_at_expiry() {
-    let fence = ProviderDeliveryClaimFence::new(
-        ProviderDeliveryId::new(),
-        ProviderDeliveryWorkerId::new(),
+    let fence = ProviderProcessingClaimFence::new(
+        ProviderProcessingInvocationId::new(),
+        ProviderProcessingWorkerId::new(),
         1,
         UnixMillis::new(100),
         UnixMillis::new(200),
     )
     .expect("fence");
 
-    assert!(CompleteProviderDelivery::new(fence, UnixMillis::new(99)).is_err());
-    assert!(CompleteProviderDelivery::new(fence, UnixMillis::new(200)).is_err());
-    assert!(CompleteProviderDelivery::new(fence, UnixMillis::new(150)).is_ok());
+    assert!(CompleteProviderProcessing::new(fence, UnixMillis::new(99)).is_err());
+    assert!(CompleteProviderProcessing::new(fence, UnixMillis::new(200)).is_err());
+    assert!(CompleteProviderProcessing::new(fence, UnixMillis::new(150)).is_ok());
 }
 
 #[test]
 fn claim_renewal_must_strictly_extend_a_live_fence() {
-    let fence = ProviderDeliveryClaimFence::new(
-        ProviderDeliveryId::new(),
-        ProviderDeliveryWorkerId::new(),
+    let fence = ProviderProcessingClaimFence::new(
+        ProviderProcessingInvocationId::new(),
+        ProviderProcessingWorkerId::new(),
         1,
         UnixMillis::new(1_000),
         UnixMillis::new(2_000),
     )
     .expect("fence");
-    let renewal =
-        RenewProviderDelivery::new(fence, UnixMillis::new(1_500), 1_000).expect("strict extension");
+    let renewal = RenewProviderProcessing::new(fence, UnixMillis::new(1_500), 1_000)
+        .expect("strict extension");
     assert_eq!(renewal.fence(), fence);
     assert_eq!(renewal.renewed_at(), UnixMillis::new(1_500));
     assert_eq!(renewal.lease_millis(), 1_000);
-    assert!(RenewProviderDelivery::new(fence, UnixMillis::new(1_000), 1_000).is_err());
-    assert!(RenewProviderDelivery::new(fence, UnixMillis::new(2_000), 1_000).is_err());
+    assert!(RenewProviderProcessing::new(fence, UnixMillis::new(1_000), 1_000).is_err());
+    assert!(RenewProviderProcessing::new(fence, UnixMillis::new(2_000), 1_000).is_err());
 
-    let near_total_limit = ProviderDeliveryClaimFence::new(
-        fence.delivery_id(),
+    let near_total_limit = ProviderProcessingClaimFence::new(
+        fence.invocation_id(),
         fence.worker_id(),
         fence.token(),
         UnixMillis::new(1_000),
@@ -428,6 +428,7 @@ fn claim_renewal_must_strictly_extend_a_live_fence() {
     )
     .expect("claim below total lifetime limit");
     assert!(
-        RenewProviderDelivery::new(near_total_limit, UnixMillis::new(3_400_000), 900_000).is_err()
+        RenewProviderProcessing::new(near_total_limit, UnixMillis::new(3_400_000), 900_000)
+            .is_err()
     );
 }

@@ -438,13 +438,13 @@ fn private_body() -> Bytes {
 
 fn public_pull_request_body() -> Bytes {
     Bytes::from(format!(
-        r#"{{"action":"opened","number":7,"pull_request":{{"number":7,"merged":false,"merge_commit_sha":"{AFTER_COMMIT}","head":{{"ref":"feature/topic","sha":"{AFTER_COMMIT}","repo":{{"id":101,"private":false,"visibility":"public","name":"public-repository","full_name":"octo-public/public-repository","owner":{{"id":1001,"login":"octo-public"}}}}}},"base":{{"ref":"main","sha":"{BEFORE_COMMIT}","repo":{{"id":101,"private":false,"visibility":"public","name":"public-repository","full_name":"octo-public/public-repository","owner":{{"id":1001,"login":"octo-public"}}}}}}}},"repository":{{"id":101,"private":false,"visibility":"public","name":"public-repository","full_name":"octo-public/public-repository","owner":{{"id":1001,"login":"octo-public"}}}},"installation":{{"id":11}},"sender":{{"id":301}}}}"#
+        r#"{{"action":"opened","number":7,"pull_request":{{"number":7,"merged":false,"draft":false,"merge_commit_sha":"{AFTER_COMMIT}","user":{{"id":302,"login":"contributor","type":"User"}},"head":{{"ref":"feature/topic","sha":"{AFTER_COMMIT}","repo":{{"id":101,"private":false,"visibility":"public","name":"public-repository","full_name":"octo-public/public-repository","owner":{{"id":1001,"login":"octo-public"}}}}}},"base":{{"ref":"main","sha":"{BEFORE_COMMIT}","repo":{{"id":101,"private":false,"visibility":"public","name":"public-repository","full_name":"octo-public/public-repository","owner":{{"id":1001,"login":"octo-public"}}}}}}}},"repository":{{"id":101,"private":false,"visibility":"public","name":"public-repository","full_name":"octo-public/public-repository","owner":{{"id":1001,"login":"octo-public"}}}},"installation":{{"id":11}},"sender":{{"id":301,"login":"octocat","type":"User"}}}}"#
     ))
 }
 
 fn public_merge_group_body() -> Bytes {
     Bytes::from(format!(
-        r#"{{"action":"checks_requested","merge_group":{{"head_sha":"{AFTER_COMMIT}","head_ref":"refs/heads/merge-queue/main/group-7","base_sha":"{BEFORE_COMMIT}","base_ref":"refs/heads/main","head_commit":{{}}}},"repository":{{"id":101,"private":false,"visibility":"public","name":"public-repository","full_name":"octo-public/public-repository","owner":{{"id":1001,"login":"octo-public"}}}},"installation":{{"id":11}},"sender":{{"id":301}}}}"#
+        r#"{{"action":"checks_requested","merge_group":{{"head_sha":"{AFTER_COMMIT}","head_ref":"refs/heads/merge-queue/main/group-7","base_sha":"{BEFORE_COMMIT}","base_ref":"refs/heads/main","head_commit":{{}}}},"repository":{{"id":101,"private":false,"visibility":"public","name":"public-repository","full_name":"octo-public/public-repository","owner":{{"id":1001,"login":"octo-public"}}}},"installation":{{"id":11}},"sender":{{"id":301,"login":"octocat","type":"User"}}}}"#
     ))
 }
 

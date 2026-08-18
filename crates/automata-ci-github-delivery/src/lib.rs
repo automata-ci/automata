@@ -698,7 +698,7 @@ impl GithubDeliveryIngress {
             VerifiedGithubWebhook::CheckRun(check) => (
                 check.app_id().get(),
                 check.head_revision(),
-                check.sender_id().get(),
+                check.actor().id().get(),
                 GithubCheckRerunTarget::Run {
                     run_id: GithubCheckRunId::new(check.run_id().get())
                         .map_err(|_| GithubDeliveryIngressError::InvariantViolation)?,
@@ -716,7 +716,7 @@ impl GithubDeliveryIngress {
             VerifiedGithubWebhook::CheckSuite(check) => (
                 check.app_id().get(),
                 check.head_revision(),
-                check.sender_id().get(),
+                check.actor().id().get(),
                 GithubCheckRerunTarget::Suite {
                     suite_id: GithubCheckSuiteId::new(check.suite_id().get())
                         .map_err(|_| GithubDeliveryIngressError::InvariantViolation)?,

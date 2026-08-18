@@ -103,6 +103,7 @@ automata-ci-metrics = { path = "crates/automata-ci-metrics", version = "0.1.0" }
 automata-ci-workload-oidc = { path = "crates/automata-ci-workload-oidc", version = "0.1.0" }
 automata-ci-postgres = { path = "crates/automata-ci-postgres", version = "0.1.0" }
 automata-ci-provider = { path = "crates/automata-ci-provider", version = "0.1.0" }
+automata-ci-provider-delivery = { path = "crates/automata-ci-provider-delivery", version = "0.1.0" }
 automata-ci-provider-postgres = { path = "crates/automata-ci-provider-postgres", version = "0.1.0" }
 automata-ci-protocol = { path = "crates/automata-ci-protocol", version = "0.1.0" }
 automata-ci-protocol-protobuf = { path = "crates/automata-ci-protocol-protobuf", version = "0.1.0" }

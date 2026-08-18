@@ -192,9 +192,14 @@ uuid_identity!(
     "provider delivery ID"
 );
 uuid_identity!(
-    /// Durable identity of one provider-delivery worker.
-    ProviderDeliveryWorkerId,
-    "provider delivery worker ID"
+    /// Durable identity of one processing invocation derived from an immutable delivery.
+    ProviderProcessingInvocationId,
+    "provider processing invocation ID"
+);
+uuid_identity!(
+    /// Durable identity of one provider processing worker.
+    ProviderProcessingWorkerId,
+    "provider processing worker ID"
 );
 uuid_identity!(
     /// Durable identity of one provider result subject.

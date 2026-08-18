@@ -7,10 +7,11 @@ use automata_ci_provider::{
     AuthenticatedProviderWebhook, DeliveryAdapter, ExternalChangeId, ExternalDeliveryId,
     ExternalDeliveryIdentity, ExternalMergeQueueId, ExternalRepositoryId,
     ExternalRepositoryIdentity, ExternalSubjectId, ExternalSubjectIdentity, ExternalSubjectKind,
-    MergeQueueActivity, MergeQueueTrigger, NormalizedTrigger, ProviderDeliveryDraft,
-    ProviderDeliveryId, ProviderDeliveryNormalization, ProviderDeliveryObservations,
-    ProviderDeliveryRejection, ProviderDispatchInput, ProviderEventName, ProviderGitRef,
-    ProviderGitRefKind, ProviderRepository, ProviderRepositoryPath,
+    MergeQueueActivity, MergeQueueTrigger, NormalizedTrigger, ProviderControl,
+    ProviderControlDeliveryDraft, ProviderControlKind, ProviderDeliveryId,
+    ProviderDeliveryNormalization, ProviderDeliveryObservations, ProviderDeliveryRejection,
+    ProviderDispatchInput, ProviderEventName, ProviderGitRef, ProviderGitRefKind,
+    ProviderRepository, ProviderRepositoryPath, ProviderTriggerDeliveryDraft,
     ProviderWebhookAuthenticationError, ProviderWebhookAuthenticationRequest,
     ProviderWebhookHeaderName, ProviderWebhookRequest, ProviderWebhookSignatureEvidence,
     PullRequestActivity, PullRequestTrigger, PushCommitEvidence, PushTrigger,
@@ -21,12 +22,12 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde::Serialize;
 
 use crate::{
-    GithubEventActor, GithubEventActorKind, GithubMergeGroupAction, GithubPullRequestAction,
-    GithubRepositoryVisibility, GithubWebhookError, GithubWebhookRef, GithubWebhookRefKind,
-    GithubWebhookRepository, GithubWebhookVerifier, VerifiedGithubMergeGroup,
-    VerifiedGithubPullRequest, VerifiedGithubPush, VerifiedGithubRepositoryDispatch,
-    VerifiedGithubWebhook, X_GITHUB_DELIVERY, X_GITHUB_EVENT, X_HUB_SIGNATURE_256,
-    factory::decode_connection, webhook::AuthenticatedGithubWebhook,
+    GithubCheckRunControl, GithubEventActor, GithubEventActorKind, GithubMergeGroupAction,
+    GithubPullRequestAction, GithubRepositoryVisibility, GithubWebhookError, GithubWebhookRef,
+    GithubWebhookRefKind, GithubWebhookRepository, GithubWebhookVerifier, VerifiedGithubCheckRun,
+    VerifiedGithubMergeGroup, VerifiedGithubPullRequest, VerifiedGithubPush,
+    VerifiedGithubRepositoryDispatch, VerifiedGithubWebhook, X_GITHUB_DELIVERY, X_GITHUB_EVENT,
+    X_HUB_SIGNATURE_256, factory::decode_connection, webhook::AuthenticatedGithubWebhook,
 };
 
 const GITHUB_SIGNATURE_SCHEME: &str = "github-hmac-sha256";
@@ -166,10 +167,33 @@ fn normalize_authenticated(
         }
     };
     let repository = external_repository(instance_id, native.repository());
-    if matches!(
-        native,
-        VerifiedGithubWebhook::CheckRun(_) | VerifiedGithubWebhook::CheckSuite(_)
-    ) {
+    let observations =
+        observations(&native).expect("fixed GitHub delivery observations satisfy the common bound");
+    if matches!(native, VerifiedGithubWebhook::CheckRun(_)) {
+        let control = match normalize_control(request, &native) {
+            Ok(control) => control,
+            Err(reason) => {
+                return rejected(
+                    authenticated,
+                    external_delivery,
+                    event_type,
+                    Some(repository),
+                    reason,
+                );
+            }
+        };
+        let draft = ProviderControlDeliveryDraft::new(
+            ProviderDeliveryId::new(),
+            external_delivery,
+            event_type,
+            authenticated,
+            control,
+            observations,
+        )
+        .expect("GitHub control normalization preserves common endpoint identities");
+        return ProviderDeliveryNormalization::Control(Box::new(draft));
+    }
+    if matches!(native, VerifiedGithubWebhook::CheckSuite(_)) {
         return rejected(
             authenticated,
             external_delivery,
@@ -178,8 +202,6 @@ fn normalize_authenticated(
             ProviderDeliveryRejection::UnsupportedEvent,
         );
     }
-    let observations =
-        observations(&native).expect("fixed GitHub delivery observations satisfy the common bound");
     let trigger = match normalize_trigger(request, &native) {
         Ok(trigger) => trigger,
         Err(reason) => {
@@ -192,7 +214,7 @@ fn normalize_authenticated(
             );
         }
     };
-    let draft = ProviderDeliveryDraft::new(
+    let draft = ProviderTriggerDeliveryDraft::new(
         ProviderDeliveryId::new(),
         external_delivery,
         event_type,
@@ -201,7 +223,64 @@ fn normalize_authenticated(
         observations,
     )
     .expect("GitHub normalization preserves common endpoint identities");
-    ProviderDeliveryNormalization::Accepted(Box::new(draft))
+    ProviderDeliveryNormalization::Trigger(Box::new(draft))
+}
+
+fn normalize_control(
+    request: &ProviderWebhookRequest,
+    event: &VerifiedGithubWebhook,
+) -> Result<ProviderControl, ProviderDeliveryRejection> {
+    let (repository, object, actor_value, native) = match event {
+        VerifiedGithubWebhook::CheckRun(check) => check_run_control(request, check)?,
+        _ => return Err(ProviderDeliveryRejection::UnsupportedEvent),
+    };
+    let document = native
+        .document()
+        .map_err(|_| ProviderDeliveryRejection::InvalidPayload)?;
+    ProviderControl::new(
+        ProviderControlKind::Rerun,
+        repository,
+        object,
+        Some(actor_value),
+        document,
+    )
+    .map_err(|_| ProviderDeliveryRejection::InvalidPayload)
+}
+
+fn check_run_control(
+    request: &ProviderWebhookRequest,
+    event: &VerifiedGithubCheckRun,
+) -> Result<
+    (
+        ExternalRepositoryIdentity,
+        GitObjectId,
+        ExternalSubjectIdentity,
+        GithubCheckRunControl,
+    ),
+    ProviderDeliveryRejection,
+> {
+    if event.action() != crate::GithubCheckRunAction::Rerequested {
+        return Err(ProviderDeliveryRejection::UnsupportedEvent);
+    }
+    let repository = target_repository(request, event.installation_id().get(), event.repository())?
+        .identity()
+        .clone();
+    let actor =
+        actor(request, Some(event.actor()))?.ok_or(ProviderDeliveryRejection::IncompleteEvent)?;
+    Ok((
+        repository,
+        *event.head_revision(),
+        actor,
+        GithubCheckRunControl::new(
+            event.installation_id().get(),
+            event.app_id().get(),
+            event.run_id().get(),
+            event.suite_id().get(),
+            event.external_id(),
+            event.action(),
+        )
+        .map_err(|_| ProviderDeliveryRejection::InvalidPayload)?,
+    ))
 }
 
 fn normalize_trigger(

@@ -11,9 +11,10 @@ use thiserror::Error;
 use crate::{
     ExternalDeliveryIdentity, ExternalRepositoryIdentity, NormalizedTrigger,
     ProviderConfigurationRevision, ProviderConnectionId, ProviderConnectionManifest,
-    ProviderConnectionRevision, ProviderDeliveryId, ProviderEventName, ProviderInstanceId,
-    ProviderLifecycleState, ProviderSecret, ProviderSecretGeneration, ProviderSecretName,
-    ProviderTriggerError, ProviderTypeId, ProviderWebhookEndpointId, SealedNormalizedTrigger,
+    ProviderConnectionRevision, ProviderControl, ProviderDeliveryId, ProviderEventName,
+    ProviderInstanceId, ProviderLifecycleState, ProviderSecret, ProviderSecretGeneration,
+    ProviderSecretName, ProviderTriggerError, ProviderTypeId, ProviderWebhookEndpointId,
+    SealedNormalizedTrigger,
 };
 
 /// Hard upper bound for any provider webhook body.
@@ -841,51 +842,25 @@ impl fmt::Debug for ProviderDeliveryObservations {
     }
 }
 
-/// Authenticated and normalized delivery awaiting immutable raw-body storage.
+/// Authenticated delivery facts shared by every normalization outcome.
 #[derive(Debug)]
-pub struct ProviderDeliveryDraft {
+struct ProviderDeliveryDraftEvidence {
     delivery_id: ProviderDeliveryId,
     external_delivery: ExternalDeliveryIdentity,
     event_type: ProviderEventName,
     authenticated: AuthenticatedProviderWebhook,
-    trigger: SealedNormalizedTrigger,
     observations: ProviderDeliveryObservations,
 }
 
-/// Authenticated non-admission delivery awaiting immutable raw-body storage.
-#[derive(Debug)]
-pub struct RejectedProviderDeliveryDraft {
-    delivery_id: ProviderDeliveryId,
-    external_delivery: ExternalDeliveryIdentity,
-    event_type: ProviderEventName,
-    authenticated: AuthenticatedProviderWebhook,
-    repository: Option<ExternalRepositoryIdentity>,
-    reason: ProviderDeliveryRejection,
-    observations: ProviderDeliveryObservations,
-}
-
-impl RejectedProviderDeliveryDraft {
-    /// Constructs a bounded authenticated rejection record.
-    ///
-    /// # Errors
-    ///
-    /// Rejects delivery or optional repository evidence from another instance.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
+impl ProviderDeliveryDraftEvidence {
+    fn new(
         delivery_id: ProviderDeliveryId,
         external_delivery: ExternalDeliveryIdentity,
         event_type: ProviderEventName,
         authenticated: AuthenticatedProviderWebhook,
-        repository: Option<ExternalRepositoryIdentity>,
-        reason: ProviderDeliveryRejection,
         observations: ProviderDeliveryObservations,
     ) -> Result<Self, ProviderWebhookError> {
-        let instance_id = authenticated.request().endpoint().instance_id();
-        if external_delivery.instance_id() != instance_id
-            || repository
-                .as_ref()
-                .is_some_and(|value| value.instance_id() != instance_id)
-        {
+        if external_delivery.instance_id() != authenticated.request().endpoint().instance_id() {
             return Err(ProviderWebhookError::PayloadIdentityMismatch);
         }
         Ok(Self {
@@ -893,48 +868,47 @@ impl RejectedProviderDeliveryDraft {
             external_delivery,
             event_type,
             authenticated,
-            repository,
-            reason,
             observations,
         })
     }
-}
 
-impl ProviderDeliveryDraft {
-    /// Binds adapter output to exact endpoint, instance, and repository evidence.
-    ///
-    /// # Errors
-    ///
-    /// Rejects cross-instance delivery or normalized repository identities.
-    pub fn new(
-        delivery_id: ProviderDeliveryId,
-        external_delivery: ExternalDeliveryIdentity,
-        event_type: ProviderEventName,
-        authenticated: AuthenticatedProviderWebhook,
-        trigger: &NormalizedTrigger,
-        observations: ProviderDeliveryObservations,
-    ) -> Result<Self, ProviderWebhookError> {
-        let endpoint_instance = authenticated.request().endpoint().instance_id();
-        if external_delivery.instance_id() != endpoint_instance
-            || trigger.target_repository().identity().instance_id() != endpoint_instance
-        {
-            return Err(ProviderWebhookError::PayloadIdentityMismatch);
-        }
-        let trigger = trigger.seal().map_err(ProviderWebhookError::Trigger)?;
-        Ok(Self {
-            delivery_id,
-            external_delivery,
-            event_type,
-            authenticated,
-            trigger,
-            observations,
-        })
+    fn request(&self) -> &ProviderWebhookRequest {
+        self.authenticated.request()
+    }
+
+    fn seal(
+        self,
+        raw_body: BlobDescriptor,
+    ) -> Result<ProviderDeliveryEvidence, ProviderWebhookError> {
+        validate_raw_descriptor(self.authenticated.request(), &raw_body)?;
+        let endpoint = self.authenticated.request().endpoint();
+        let raw_retain_until = retention_deadline(
+            self.authenticated.request().received_at(),
+            endpoint.raw_retention_millis(),
+        )?;
+        ProviderDeliveryEvidence::rehydrate(
+            self.delivery_id,
+            endpoint.endpoint_id(),
+            endpoint.revision(),
+            endpoint.provider_type().clone(),
+            endpoint.instance_id(),
+            endpoint.provider_revision(),
+            endpoint.connection_id(),
+            endpoint.connection_revision(),
+            self.external_delivery,
+            self.event_type,
+            self.authenticated.request().received_at(),
+            raw_body,
+            raw_retain_until,
+            self.authenticated.signature().clone(),
+            self.observations,
+        )
     }
 }
 
-/// Complete verified delivery with immutable raw-body evidence.
+/// Complete immutable authenticated evidence shared by all delivery outcomes.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct VerifiedProviderDelivery {
+pub struct ProviderDeliveryEvidence {
     delivery_id: ProviderDeliveryId,
     endpoint_id: ProviderWebhookEndpointId,
     endpoint_revision: ProviderWebhookEndpointRevision,
@@ -949,17 +923,15 @@ pub struct VerifiedProviderDelivery {
     raw_body: BlobDescriptor,
     raw_retain_until: UnixMillis,
     signature: ProviderWebhookSignatureEvidence,
-    trigger: SealedNormalizedTrigger,
     observations: ProviderDeliveryObservations,
 }
 
-impl VerifiedProviderDelivery {
-    /// Rehydrates complete durable verified-delivery evidence.
+impl ProviderDeliveryEvidence {
+    /// Rehydrates exact durable evidence shared by every delivery disposition.
     ///
     /// # Errors
     ///
-    /// Rejects cross-instance identities, negative receipt time, or a raw object
-    /// descriptor that is not the canonical content-addressed representation.
+    /// Rejects cross-instance identities, invalid times, or noncanonical raw evidence.
     #[allow(clippy::too_many_arguments)]
     pub fn rehydrate(
         delivery_id: ProviderDeliveryId,
@@ -976,7 +948,6 @@ impl VerifiedProviderDelivery {
         raw_body: BlobDescriptor,
         raw_retain_until: UnixMillis,
         signature: ProviderWebhookSignatureEvidence,
-        trigger: SealedNormalizedTrigger,
         observations: ProviderDeliveryObservations,
     ) -> Result<Self, ProviderWebhookError> {
         validate_durable_evidence(
@@ -986,15 +957,6 @@ impl VerifiedProviderDelivery {
             &raw_body,
             raw_retain_until,
         )?;
-        if trigger
-            .trigger()
-            .target_repository()
-            .identity()
-            .instance_id()
-            != instance_id
-        {
-            return Err(ProviderWebhookError::PayloadIdentityMismatch);
-        }
         Ok(Self {
             delivery_id,
             endpoint_id,
@@ -1010,44 +972,7 @@ impl VerifiedProviderDelivery {
             raw_body,
             raw_retain_until,
             signature,
-            trigger,
             observations,
-        })
-    }
-
-    /// Seals normalized output against an immutable content-addressed raw body.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a raw descriptor whose digest, size, media type, or key differs
-    /// from the authenticated request.
-    pub fn seal(
-        draft: ProviderDeliveryDraft,
-        raw_body: BlobDescriptor,
-    ) -> Result<Self, ProviderWebhookError> {
-        validate_raw_descriptor(draft.authenticated.request(), &raw_body)?;
-        let endpoint = draft.authenticated.request().endpoint();
-        let raw_retain_until = retention_deadline(
-            draft.authenticated.request().received_at(),
-            endpoint.raw_retention_millis(),
-        )?;
-        Ok(Self {
-            delivery_id: draft.delivery_id,
-            endpoint_id: endpoint.endpoint_id(),
-            endpoint_revision: endpoint.revision(),
-            provider_type: endpoint.provider_type().clone(),
-            instance_id: endpoint.instance_id(),
-            provider_revision: endpoint.provider_revision(),
-            connection_id: endpoint.connection_id(),
-            connection_revision: endpoint.connection_revision(),
-            external_delivery: draft.external_delivery,
-            event_type: draft.event_type,
-            received_at: draft.authenticated.request().received_at(),
-            raw_body,
-            raw_retain_until,
-            signature: draft.authenticated.signature().clone(),
-            trigger: draft.trigger,
-            observations: draft.observations,
         })
     }
 
@@ -1135,12 +1060,6 @@ impl VerifiedProviderDelivery {
         &self.signature
     }
 
-    /// Returns the strongly typed normalized trigger.
-    #[must_use]
-    pub const fn trigger(&self) -> &SealedNormalizedTrigger {
-        &self.trigger
-    }
-
     /// Returns bounded adapter audit observations.
     #[must_use]
     pub const fn observations(&self) -> &ProviderDeliveryObservations {
@@ -1148,207 +1067,271 @@ impl VerifiedProviderDelivery {
     }
 }
 
-/// Complete authenticated rejection with immutable raw-body evidence.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RejectedProviderDelivery {
-    delivery_id: ProviderDeliveryId,
-    endpoint_id: ProviderWebhookEndpointId,
-    endpoint_revision: ProviderWebhookEndpointRevision,
-    provider_type: ProviderTypeId,
-    instance_id: ProviderInstanceId,
-    provider_revision: ProviderConfigurationRevision,
-    connection_id: ProviderConnectionId,
-    connection_revision: ProviderConnectionRevision,
-    external_delivery: ExternalDeliveryIdentity,
-    event_type: ProviderEventName,
-    received_at: UnixMillis,
-    raw_body: BlobDescriptor,
-    raw_retain_until: UnixMillis,
-    signature: ProviderWebhookSignatureEvidence,
-    repository: Option<ExternalRepositoryIdentity>,
-    reason: ProviderDeliveryRejection,
-    observations: ProviderDeliveryObservations,
+/// Authenticated normalized trigger awaiting immutable raw-body storage.
+#[derive(Debug)]
+pub struct ProviderTriggerDeliveryDraft {
+    evidence: ProviderDeliveryDraftEvidence,
+    trigger: SealedNormalizedTrigger,
 }
 
-impl RejectedProviderDelivery {
-    /// Rehydrates complete durable authenticated rejection evidence.
+impl ProviderTriggerDeliveryDraft {
+    /// Binds adapter output to exact endpoint, instance, and repository evidence.
     ///
     /// # Errors
     ///
-    /// Rejects cross-instance identities, negative receipt time, or a noncanonical
-    /// immutable raw object descriptor.
-    #[allow(clippy::too_many_arguments)]
-    pub fn rehydrate(
+    /// Rejects inconsistent provider identities or an invalid normalized trigger.
+    pub fn new(
         delivery_id: ProviderDeliveryId,
-        endpoint_id: ProviderWebhookEndpointId,
-        endpoint_revision: ProviderWebhookEndpointRevision,
-        provider_type: ProviderTypeId,
-        instance_id: ProviderInstanceId,
-        provider_revision: ProviderConfigurationRevision,
-        connection_id: ProviderConnectionId,
-        connection_revision: ProviderConnectionRevision,
         external_delivery: ExternalDeliveryIdentity,
         event_type: ProviderEventName,
-        received_at: UnixMillis,
-        raw_body: BlobDescriptor,
-        raw_retain_until: UnixMillis,
-        signature: ProviderWebhookSignatureEvidence,
-        repository: Option<ExternalRepositoryIdentity>,
-        reason: ProviderDeliveryRejection,
+        authenticated: AuthenticatedProviderWebhook,
+        trigger: &NormalizedTrigger,
         observations: ProviderDeliveryObservations,
     ) -> Result<Self, ProviderWebhookError> {
-        validate_durable_evidence(
-            instance_id,
-            &external_delivery,
-            received_at,
-            &raw_body,
-            raw_retain_until,
+        let evidence = ProviderDeliveryDraftEvidence::new(
+            delivery_id,
+            external_delivery,
+            event_type,
+            authenticated,
+            observations,
         )?;
-        if repository
-            .as_ref()
-            .is_some_and(|value| value.instance_id() != instance_id)
+        if trigger.target_repository().identity().instance_id()
+            != evidence.request().endpoint().instance_id()
         {
             return Err(ProviderWebhookError::PayloadIdentityMismatch);
         }
         Ok(Self {
-            delivery_id,
-            endpoint_id,
-            endpoint_revision,
-            provider_type,
-            instance_id,
-            provider_revision,
-            connection_id,
-            connection_revision,
-            external_delivery,
-            event_type,
-            received_at,
-            raw_body,
-            raw_retain_until,
-            signature,
-            repository,
-            reason,
-            observations,
+            evidence,
+            trigger: trigger.seal().map_err(ProviderWebhookError::Trigger)?,
         })
     }
+}
 
-    /// Seals an authenticated rejection against immutable raw-body evidence.
+/// Authenticated normalized control awaiting immutable raw-body storage.
+#[derive(Debug)]
+pub struct ProviderControlDeliveryDraft {
+    evidence: ProviderDeliveryDraftEvidence,
+    control: ProviderControl,
+}
+
+impl ProviderControlDeliveryDraft {
+    /// Binds adapter control output to the exact authenticated instance.
     ///
     /// # Errors
     ///
-    /// Rejects a descriptor that disagrees with the exact authenticated body.
-    pub fn seal(
-        draft: RejectedProviderDeliveryDraft,
+    /// Rejects a control targeting another provider instance.
+    pub fn new(
+        delivery_id: ProviderDeliveryId,
+        external_delivery: ExternalDeliveryIdentity,
+        event_type: ProviderEventName,
+        authenticated: AuthenticatedProviderWebhook,
+        control: ProviderControl,
+        observations: ProviderDeliveryObservations,
+    ) -> Result<Self, ProviderWebhookError> {
+        let evidence = ProviderDeliveryDraftEvidence::new(
+            delivery_id,
+            external_delivery,
+            event_type,
+            authenticated,
+            observations,
+        )?;
+        if control.repository().instance_id() != evidence.request().endpoint().instance_id() {
+            return Err(ProviderWebhookError::PayloadIdentityMismatch);
+        }
+        Ok(Self { evidence, control })
+    }
+}
+
+/// Authenticated non-admission delivery awaiting immutable raw-body storage.
+#[derive(Debug)]
+pub struct RejectedProviderDeliveryDraft {
+    evidence: ProviderDeliveryDraftEvidence,
+    repository: Option<ExternalRepositoryIdentity>,
+    reason: ProviderDeliveryRejection,
+}
+
+impl RejectedProviderDeliveryDraft {
+    /// Constructs a bounded authenticated rejection record.
+    ///
+    /// # Errors
+    ///
+    /// Rejects rejection evidence targeting another provider instance.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        delivery_id: ProviderDeliveryId,
+        external_delivery: ExternalDeliveryIdentity,
+        event_type: ProviderEventName,
+        authenticated: AuthenticatedProviderWebhook,
+        repository: Option<ExternalRepositoryIdentity>,
+        reason: ProviderDeliveryRejection,
+        observations: ProviderDeliveryObservations,
+    ) -> Result<Self, ProviderWebhookError> {
+        let evidence = ProviderDeliveryDraftEvidence::new(
+            delivery_id,
+            external_delivery,
+            event_type,
+            authenticated,
+            observations,
+        )?;
+        if repository
+            .as_ref()
+            .is_some_and(|value| value.instance_id() != evidence.request().endpoint().instance_id())
+        {
+            return Err(ProviderWebhookError::PayloadIdentityMismatch);
+        }
+        Ok(Self {
+            evidence,
+            repository,
+            reason,
+        })
+    }
+}
+
+/// Complete normalized trigger with immutable authenticated evidence.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VerifiedProviderTriggerDelivery {
+    evidence: ProviderDeliveryEvidence,
+    trigger: SealedNormalizedTrigger,
+}
+
+impl VerifiedProviderTriggerDelivery {
+    /// Rehydrates a trigger from common evidence and normalized payload.
+    ///
+    /// # Errors
+    ///
+    /// Rejects trigger and delivery evidence from different provider instances.
+    pub fn rehydrate(
+        evidence: ProviderDeliveryEvidence,
+        trigger: SealedNormalizedTrigger,
+    ) -> Result<Self, ProviderWebhookError> {
+        if trigger
+            .trigger()
+            .target_repository()
+            .identity()
+            .instance_id()
+            != evidence.instance_id()
+        {
+            return Err(ProviderWebhookError::PayloadIdentityMismatch);
+        }
+        Ok(Self { evidence, trigger })
+    }
+
+    fn seal(
+        draft: ProviderTriggerDeliveryDraft,
         raw_body: BlobDescriptor,
     ) -> Result<Self, ProviderWebhookError> {
-        validate_raw_descriptor(draft.authenticated.request(), &raw_body)?;
-        let endpoint = draft.authenticated.request().endpoint();
-        let raw_retain_until = retention_deadline(
-            draft.authenticated.request().received_at(),
-            endpoint.raw_retention_millis(),
-        )?;
         Ok(Self {
-            delivery_id: draft.delivery_id,
-            endpoint_id: endpoint.endpoint_id(),
-            endpoint_revision: endpoint.revision(),
-            provider_type: endpoint.provider_type().clone(),
-            instance_id: endpoint.instance_id(),
-            provider_revision: endpoint.provider_revision(),
-            connection_id: endpoint.connection_id(),
-            connection_revision: endpoint.connection_revision(),
-            external_delivery: draft.external_delivery,
-            event_type: draft.event_type,
-            received_at: draft.authenticated.request().received_at(),
-            raw_body,
-            raw_retain_until,
-            signature: draft.authenticated.signature().clone(),
-            repository: draft.repository,
-            reason: draft.reason,
-            observations: draft.observations,
+            evidence: draft.evidence.seal(raw_body)?,
+            trigger: draft.trigger,
         })
     }
 
-    /// Returns the durable server-owned delivery identity.
+    /// Returns the immutable authenticated envelope.
     #[must_use]
-    pub const fn delivery_id(&self) -> ProviderDeliveryId {
-        self.delivery_id
+    pub const fn evidence(&self) -> &ProviderDeliveryEvidence {
+        &self.evidence
     }
 
-    /// Returns the exact public endpoint used for ingress.
+    /// Returns the strongly typed normalized trigger.
     #[must_use]
-    pub const fn endpoint_id(&self) -> ProviderWebhookEndpointId {
-        self.endpoint_id
+    pub const fn trigger(&self) -> &SealedNormalizedTrigger {
+        &self.trigger
+    }
+}
+
+/// Complete normalized control with immutable authenticated evidence.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VerifiedProviderControlDelivery {
+    evidence: ProviderDeliveryEvidence,
+    control: ProviderControl,
+}
+
+impl VerifiedProviderControlDelivery {
+    /// Rehydrates a control from common evidence and adapter-owned target evidence.
+    ///
+    /// # Errors
+    ///
+    /// Rejects control and delivery evidence from different provider instances.
+    pub fn rehydrate(
+        evidence: ProviderDeliveryEvidence,
+        control: ProviderControl,
+    ) -> Result<Self, ProviderWebhookError> {
+        if control.repository().instance_id() != evidence.instance_id() {
+            return Err(ProviderWebhookError::PayloadIdentityMismatch);
+        }
+        Ok(Self { evidence, control })
     }
 
-    /// Returns the endpoint policy revision used for authentication.
-    #[must_use]
-    pub const fn endpoint_revision(&self) -> ProviderWebhookEndpointRevision {
-        self.endpoint_revision
+    fn seal(
+        draft: ProviderControlDeliveryDraft,
+        raw_body: BlobDescriptor,
+    ) -> Result<Self, ProviderWebhookError> {
+        Ok(Self {
+            evidence: draft.evidence.seal(raw_body)?,
+            control: draft.control,
+        })
     }
 
-    /// Returns the exact provider adapter type.
+    /// Returns the immutable authenticated envelope.
     #[must_use]
-    pub const fn provider_type(&self) -> &ProviderTypeId {
-        &self.provider_type
+    pub const fn evidence(&self) -> &ProviderDeliveryEvidence {
+        &self.evidence
     }
 
-    /// Returns the configured provider instance.
+    /// Returns normalized provider-independent control facts.
     #[must_use]
-    pub const fn instance_id(&self) -> ProviderInstanceId {
-        self.instance_id
+    pub const fn control(&self) -> &ProviderControl {
+        &self.control
+    }
+}
+
+/// Complete authenticated rejection with immutable raw-body evidence.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RejectedProviderDelivery {
+    evidence: ProviderDeliveryEvidence,
+    repository: Option<ExternalRepositoryIdentity>,
+    reason: ProviderDeliveryRejection,
+}
+
+impl RejectedProviderDelivery {
+    /// Rehydrates an authenticated rejection from common evidence.
+    ///
+    /// # Errors
+    ///
+    /// Rejects repository and delivery evidence from different provider instances.
+    pub fn rehydrate(
+        evidence: ProviderDeliveryEvidence,
+        repository: Option<ExternalRepositoryIdentity>,
+        reason: ProviderDeliveryRejection,
+    ) -> Result<Self, ProviderWebhookError> {
+        if repository
+            .as_ref()
+            .is_some_and(|value| value.instance_id() != evidence.instance_id())
+        {
+            return Err(ProviderWebhookError::PayloadIdentityMismatch);
+        }
+        Ok(Self {
+            evidence,
+            repository,
+            reason,
+        })
     }
 
-    /// Returns the exact provider configuration revision used for normalization.
-    #[must_use]
-    pub const fn provider_revision(&self) -> ProviderConfigurationRevision {
-        self.provider_revision
+    fn seal(
+        draft: RejectedProviderDeliveryDraft,
+        raw_body: BlobDescriptor,
+    ) -> Result<Self, ProviderWebhookError> {
+        Ok(Self {
+            evidence: draft.evidence.seal(raw_body)?,
+            repository: draft.repository,
+            reason: draft.reason,
+        })
     }
 
-    /// Returns the endpoint-bound connection.
+    /// Returns the immutable authenticated envelope.
     #[must_use]
-    pub const fn connection_id(&self) -> ProviderConnectionId {
-        self.connection_id
-    }
-
-    /// Returns the exact endpoint-bound connection policy revision.
-    #[must_use]
-    pub const fn connection_revision(&self) -> ProviderConnectionRevision {
-        self.connection_revision
-    }
-
-    /// Returns instance-scoped provider replay identity.
-    #[must_use]
-    pub const fn external_delivery(&self) -> &ExternalDeliveryIdentity {
-        &self.external_delivery
-    }
-
-    /// Returns provider-native event-name evidence.
-    #[must_use]
-    pub const fn event_type(&self) -> &ProviderEventName {
-        &self.event_type
-    }
-
-    /// Returns trusted ingress receipt time.
-    #[must_use]
-    pub const fn received_at(&self) -> UnixMillis {
-        self.received_at
-    }
-
-    /// Returns immutable raw request-body evidence.
-    #[must_use]
-    pub const fn raw_body(&self) -> &BlobDescriptor {
-        &self.raw_body
-    }
-
-    /// Returns the inclusive raw-evidence retention deadline.
-    #[must_use]
-    pub const fn raw_retain_until(&self) -> UnixMillis {
-        self.raw_retain_until
-    }
-
-    /// Returns signature scheme and accepted generation evidence.
-    #[must_use]
-    pub const fn signature(&self) -> &ProviderWebhookSignatureEvidence {
-        &self.signature
+    pub const fn evidence(&self) -> &ProviderDeliveryEvidence {
+        &self.evidence
     }
 
     /// Returns repository identity when the authenticated shape contained it.
@@ -1361,12 +1344,6 @@ impl RejectedProviderDelivery {
     #[must_use]
     pub const fn reason(&self) -> ProviderDeliveryRejection {
         self.reason
-    }
-
-    /// Returns bounded adapter audit observations.
-    #[must_use]
-    pub const fn observations(&self) -> &ProviderDeliveryObservations {
-        &self.observations
     }
 }
 
@@ -1394,7 +1371,9 @@ pub enum ProviderDeliveryRejection {
 #[derive(Debug)]
 pub enum ProviderDeliveryNormalization {
     /// A complete trigger ready for raw evidence storage and durable acceptance.
-    Accepted(Box<ProviderDeliveryDraft>),
+    Trigger(Box<ProviderTriggerDeliveryDraft>),
+    /// A complete authenticated control ready for durable processing.
+    Control(Box<ProviderControlDeliveryDraft>),
     /// A sanitized authenticated rejection retained for audit but not admission.
     Rejected(Box<RejectedProviderDeliveryDraft>),
 }
@@ -1404,8 +1383,9 @@ impl ProviderDeliveryNormalization {
     #[must_use]
     pub fn raw_body(&self) -> &[u8] {
         match self {
-            Self::Accepted(value) => value.authenticated.request().body(),
-            Self::Rejected(value) => value.authenticated.request().body(),
+            Self::Trigger(value) => value.evidence.request().body(),
+            Self::Control(value) => value.evidence.request().body(),
+            Self::Rejected(value) => value.evidence.request().body(),
         }
     }
 
@@ -1416,14 +1396,15 @@ impl ProviderDeliveryNormalization {
     /// Fails only if the static provider raw-evidence blob contract is invalid.
     pub fn raw_descriptor(&self) -> Result<BlobDescriptor, ProviderWebhookError> {
         let request = match self {
-            Self::Accepted(value) => value.authenticated.request(),
-            Self::Rejected(value) => value.authenticated.request(),
+            Self::Trigger(value) => value.evidence.request(),
+            Self::Control(value) => value.evidence.request(),
+            Self::Rejected(value) => value.evidence.request(),
         };
         provider_raw_webhook_descriptor(request.body_digest(), request.body().len() as u64)
     }
 
-    /// Seals either normalized trigger or authenticated rejection after the
-    /// caller durably stores exact raw body bytes under `raw_body`.
+    /// Seals normalized trigger, control, or rejection evidence after the caller
+    /// durably stores exact raw body bytes under `raw_body`.
     ///
     /// # Errors
     ///
@@ -1433,9 +1414,12 @@ impl ProviderDeliveryNormalization {
         raw_body: BlobDescriptor,
     ) -> Result<crate::ProviderDelivery, ProviderWebhookError> {
         match self {
-            Self::Accepted(value) => VerifiedProviderDelivery::seal(*value, raw_body)
+            Self::Trigger(value) => VerifiedProviderTriggerDelivery::seal(*value, raw_body)
                 .map(Box::new)
                 .map(crate::ProviderDelivery::Trigger),
+            Self::Control(value) => VerifiedProviderControlDelivery::seal(*value, raw_body)
+                .map(Box::new)
+                .map(crate::ProviderDelivery::Control),
             Self::Rejected(value) => RejectedProviderDelivery::seal(*value, raw_body)
                 .map(Box::new)
                 .map(crate::ProviderDelivery::Rejected),

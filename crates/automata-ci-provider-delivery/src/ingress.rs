@@ -265,8 +265,6 @@ const fn repository_error(error: ProviderDeliveryRepositoryError) -> ProviderDel
         }
         ProviderDeliveryRepositoryError::Unavailable => ProviderDeliveryIngressError::Unavailable,
         ProviderDeliveryRepositoryError::EndpointConflict
-        | ProviderDeliveryRepositoryError::ClaimRejected
-        | ProviderDeliveryRepositoryError::AttemptLimitReached
         | ProviderDeliveryRepositoryError::Corrupt => ProviderDeliveryIngressError::Storage,
     }
 }

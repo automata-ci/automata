@@ -25,7 +25,7 @@ fn check_run_controls_retain_exact_signed_identity() {
     };
     assert_eq!(event.installation_id().get(), 71);
     assert_eq!(event.repository().id().get(), 41);
-    assert_eq!(event.sender_id().get(), 301);
+    assert_eq!(event.actor().id().get(), 301);
     assert_eq!(event.app_id().get(), 17);
     assert_eq!(event.run_id().get(), 41);
     assert_eq!(event.suite_id().get(), 23);
@@ -76,7 +76,7 @@ fn check_suite_rerequest_retains_suite_app_sender_and_revision() {
     let VerifiedGithubWebhook::CheckSuite(event) = event else {
         panic!("expected check-suite evidence");
     };
-    assert_eq!(event.sender_id().get(), 301);
+    assert_eq!(event.actor().id().get(), 301);
     assert_eq!(event.app_id().get(), 17);
     assert_eq!(event.suite_id().get(), 23);
     assert_eq!(event.head_revision().to_string(), HEAD_SHA);

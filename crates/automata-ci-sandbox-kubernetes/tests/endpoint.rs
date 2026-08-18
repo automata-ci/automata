@@ -512,6 +512,50 @@ fn assert_required_policy_checks(server: &FakeExecServer, exchange_count: usize)
     );
 }
 
+fn assert_round_trip_requests(
+    requests: &[GuestRequest],
+    command: &ExecutionCommand,
+    copy_to: &CopyToRequest,
+    copy_from: &CopyFromRequest,
+) {
+    assert_eq!(requests.len(), 3);
+    assert_eq!(
+        requests[0],
+        GuestRequest::Exec {
+            protocol: GUEST_PROTOCOL_VERSION,
+            operation_id: command.operation_id().to_string(),
+            program: "/usr/bin/example".into(),
+            arguments: vec!["literal argument".into(), "$(never-a-shell)".into()],
+            environment: BTreeMap::from([
+                ("PUBLIC_VALUE".into(), "visible".into()),
+                ("SECRET_TOKEN".into(), "sensitive-value".into()),
+            ]),
+            working_directory: "/workspace/subdir".into(),
+            timeout_millis: 1_250,
+            output_limit: 1_024,
+            process_limit: None,
+        }
+    );
+    assert_eq!(
+        requests[1],
+        GuestRequest::WriteFile {
+            protocol: GUEST_PROTOCOL_VERSION,
+            operation_id: copy_to.operation_id().to_string(),
+            path: "/workspace/input.bin".into(),
+            content_base64: BASE64.encode([0, 1, 2, 255]),
+        }
+    );
+    assert_eq!(
+        requests[2],
+        GuestRequest::ReadFile {
+            protocol: GUEST_PROTOCOL_VERSION,
+            operation_id: copy_from.operation_id().to_string(),
+            path: "/workspace/output.bin".into(),
+            byte_limit: 64,
+        }
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn exec_and_copy_round_trips_preserve_exact_guest_requests_and_results() {
     let exec_response = guest_response(json!({
@@ -573,43 +617,7 @@ async fn exec_and_copy_round_trips_preserve_exact_guest_requests_and_results() {
     assert_eq!(output.records()[0].stream(), ExecutionOutputStream::Stdout);
     assert_eq!(output.records()[1].stream(), ExecutionOutputStream::Stderr);
     assert_eq!(copied, b"copied bytes");
-    let requests = server.guest_requests();
-    assert_eq!(requests.len(), 3);
-    assert_eq!(
-        requests[0],
-        GuestRequest::Exec {
-            protocol: GUEST_PROTOCOL_VERSION,
-            operation_id: command.operation_id().to_string(),
-            program: "/usr/bin/example".into(),
-            arguments: vec!["literal argument".into(), "$(never-a-shell)".into()],
-            environment: BTreeMap::from([
-                ("PUBLIC_VALUE".into(), "visible".into()),
-                ("SECRET_TOKEN".into(), "sensitive-value".into()),
-            ]),
-            working_directory: "/workspace/subdir".into(),
-            timeout_millis: 1_250,
-            output_limit: 1_024,
-            process_limit: None,
-        }
-    );
-    assert_eq!(
-        requests[1],
-        GuestRequest::WriteFile {
-            protocol: GUEST_PROTOCOL_VERSION,
-            operation_id: copy_to.operation_id().to_string(),
-            path: "/workspace/input.bin".into(),
-            content_base64: BASE64.encode([0, 1, 2, 255]),
-        }
-    );
-    assert_eq!(
-        requests[2],
-        GuestRequest::ReadFile {
-            protocol: GUEST_PROTOCOL_VERSION,
-            operation_id: copy_from.operation_id().to_string(),
-            path: "/workspace/output.bin".into(),
-            byte_limit: 64,
-        }
-    );
+    assert_round_trip_requests(&server.guest_requests(), &command, &copy_to, &copy_from);
     assert!(server.websocket_uris().iter().all(|uri| {
         uri.starts_with(&format!(
             "/api/v1/namespaces/{NAMESPACE}/pods/{HANDLE}/exec?"

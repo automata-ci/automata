@@ -12,7 +12,7 @@ use automata_ci_core::UnixMillis;
 use automata_ci_store::{
     AdmitLogicalWorkflowRun, AuthenticatedGithubDeliveryClaim, LogicalWorkflowAdmissionReceipt,
     LogicalWorkflowAdmissionRepository, LogicalWorkflowAdmissionStoreError,
-    ProviderDeliveryClaimFence, ProviderDeliveryClaimOwnerId, ProviderDeliveryId,
+    ProviderDeliveryClaimFence, ProviderDeliveryId, ProviderProcessingWorkerId,
 };
 use automata_ci_workflow_service::{
     GithubWorkflowPlanVerifier, WorkflowAdmissionError, WorkflowAdmissionService,
@@ -176,7 +176,7 @@ fn authenticated_claim() -> AuthenticatedGithubDeliveryClaim {
     .expect("current time fits i64");
     let delivery_id =
         ProviderDeliveryId::from_uuid(Uuid::from_u128(42)).expect("provider delivery ID");
-    let owner = ProviderDeliveryClaimOwnerId::from_uuid(Uuid::from_u128(900))
+    let owner = ProviderProcessingWorkerId::from_uuid(Uuid::from_u128(900))
         .expect("provider delivery owner");
     let claim = ProviderDeliveryClaimFence::from_durable_parts(delivery_id, owner, 1)
         .expect("provider delivery fence");

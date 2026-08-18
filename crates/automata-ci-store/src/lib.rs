@@ -67,6 +67,7 @@ pub use admission::{
 };
 pub use assignment::{AttemptAssignment, AttemptAssignmentError};
 pub use automata_ci_core::Sha256Digest;
+pub use automata_ci_provider::{ProviderDeliveryId, ProviderProcessingWorkerId};
 pub use conformance::{
     ConformanceDelivery, ConformanceDeliveryQuery, ConformanceDeliveryState,
     ConformanceReadRepository, ConformanceReadValueError, ConformanceWorkflowOutcome,
@@ -333,9 +334,8 @@ pub use provider_delivery::{
     CompleteProviderDelivery, MAX_PROVIDER_DELIVERY_ATTEMPTS, MAX_PROVIDER_DELIVERY_CLAIM_MILLIS,
     MAX_PROVIDER_DELIVERY_EVENT_ENVELOPE_BYTES, MAX_PROVIDER_DELIVERY_RETRY_BACKOFF_MILLIS,
     MAX_PROVIDER_DELIVERY_TOTAL_CLAIM_MILLIS, MAX_PROVIDER_DELIVERY_WORKFLOW_OUTCOMES,
-    ProviderDeliveryClaimFence, ProviderDeliveryClaimOwnerId,
-    ProviderDeliveryClaimRenewalRepository, ProviderDeliveryEventEnvelope,
-    ProviderDeliveryFailureKind, ProviderDeliveryId, ProviderDeliveryIdentity,
+    ProviderDeliveryClaimFence, ProviderDeliveryClaimRenewalRepository,
+    ProviderDeliveryEventEnvelope, ProviderDeliveryFailureKind, ProviderDeliveryIdentity,
     ProviderDeliveryReceipt, ProviderDeliveryRenewalTiming, ProviderDeliveryRepository,
     ProviderDeliveryState, ProviderDeliveryStoreError, ProviderDeliveryValueError,
     ProviderDeliveryWorkflowConclusion, ProviderDeliveryWorkflowInventory,

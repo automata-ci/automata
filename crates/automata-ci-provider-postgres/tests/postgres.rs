@@ -4,17 +4,21 @@ use automata_ci_core::{GitObjectAlgorithm, Sha256Digest, UnixMillis, WorkspaceId
 use automata_ci_key_management::{KeyId, LocalAes256GcmKeyring, LocalKeyMaterial, SecretBytes};
 use automata_ci_postgres::test_support::{TestResult, run_with_database};
 use automata_ci_provider::{
-    AcceptProviderDelivery, ClaimProviderDelivery, CompleteProviderDelivery, ExternalDeliveryId,
-    ExternalDeliveryIdentity, ExternalRepositoryId, ExternalRepositoryIdentity, NormalizedTrigger,
-    ProviderArchiveLimits, ProviderCapabilities, ProviderCapability, ProviderConfigurationDocument,
-    ProviderConfigurationRevision, ProviderConnectionConfiguration, ProviderConnectionId,
-    ProviderConnectionManifest, ProviderConnectionPolicyDocument, ProviderConnectionRevision,
+    AcceptProviderDelivery, BindProviderProcessingSource, ClaimProviderProcessing,
+    CompleteProviderProcessing, ExternalDeliveryId, ExternalDeliveryIdentity, ExternalRepositoryId,
+    ExternalRepositoryIdentity, ExternalSubjectId, ExternalSubjectIdentity, ExternalSubjectKind,
+    NormalizedTrigger, ProviderArchiveLimits, ProviderCapabilities, ProviderCapability,
+    ProviderConfigurationDocument, ProviderConfigurationRevision, ProviderConnectionConfiguration,
+    ProviderConnectionId, ProviderConnectionManifest, ProviderConnectionPolicyDocument,
+    ProviderConnectionRevision, ProviderControl, ProviderControlDocument, ProviderControlKind,
     ProviderDefaultBranch, ProviderDelivery, ProviderDeliveryAcceptOutcome,
-    ProviderDeliveryFailure, ProviderDeliveryId, ProviderDeliveryObservations,
-    ProviderDeliveryRepository as _, ProviderDeliveryRepositoryError, ProviderDeliveryState,
-    ProviderDeliveryWorkerId, ProviderEventName, ProviderGitRef, ProviderGitRefKind,
-    ProviderInstanceId, ProviderInstanceManifest, ProviderInstanceRecord, ProviderLifecycleState,
-    ProviderManifestRepository as _, ProviderOrigins, ProviderRepository, ProviderRepositoryError,
+    ProviderDeliveryEvidence, ProviderDeliveryId, ProviderDeliveryObservations,
+    ProviderDeliveryRepository as _, ProviderDeliveryRepositoryError, ProviderEventName,
+    ProviderGitRef, ProviderGitRefKind, ProviderInstanceId, ProviderInstanceManifest,
+    ProviderInstanceRecord, ProviderLifecycleState, ProviderManifestRepository as _,
+    ProviderOrigins, ProviderProcessingFailure, ProviderProcessingInput,
+    ProviderProcessingRepository as _, ProviderProcessingRepositoryError, ProviderProcessingState,
+    ProviderProcessingWorkerId, ProviderRepository, ProviderRepositoryError,
     ProviderRepositoryPath, ProviderRunnerPolicyBinding, ProviderSaveOutcome,
     ProviderSchemaVersion, ProviderSecret, ProviderSecretBinding, ProviderSecretBindings,
     ProviderSecretGeneration, ProviderSecretName, ProviderSecretSet, ProviderTypeId,
@@ -22,8 +26,8 @@ use automata_ci_provider::{
     ProviderWebhookEndpointRepository as _, ProviderWebhookEndpointRevision,
     ProviderWebhookEndpointState, ProviderWebhookSecretReference, ProviderWebhookSignatureEvidence,
     ProviderWorkflowSource, PushCommitEvidence, PushTrigger, RepositoryVisibility,
-    RetryProviderDelivery, SourceReadCapability, VerifiedProviderDelivery,
-    provider_capability_digest, provider_raw_webhook_descriptor,
+    RetryProviderProcessing, SourceReadCapability, VerifiedProviderControlDelivery,
+    VerifiedProviderTriggerDelivery, provider_capability_digest, provider_raw_webhook_descriptor,
 };
 use automata_ci_provider_postgres::PostgresProviderManifestRepository;
 use sha2::{Digest as _, Sha256};
@@ -392,7 +396,7 @@ fn verified_delivery(
     endpoint: &ProviderWebhookEndpointManifest,
     delivery_id: ProviderDeliveryId,
     raw_body: &[u8],
-) -> VerifiedProviderDelivery {
+) -> VerifiedProviderTriggerDelivery {
     let digest = secret_digest(raw_body);
     let raw =
         provider_raw_webhook_descriptor(digest, raw_body.len() as u64).expect("raw descriptor");
@@ -422,7 +426,7 @@ fn verified_delivery(
     )
     .seal()
     .expect("sealed trigger");
-    VerifiedProviderDelivery::rehydrate(
+    let evidence = ProviderDeliveryEvidence::rehydrate(
         delivery_id,
         endpoint.endpoint_id(),
         endpoint.revision(),
@@ -448,11 +452,71 @@ fn verified_delivery(
             endpoint.secret_references()[0].clone(),
         )
         .expect("signature evidence"),
-        trigger,
         ProviderDeliveryObservations::new(br#"{"fixture":"postgres"}"#.to_vec())
             .expect("observations"),
     )
-    .expect("verified delivery")
+    .expect("delivery evidence");
+    VerifiedProviderTriggerDelivery::rehydrate(evidence, trigger).expect("verified delivery")
+}
+
+fn verified_control(
+    endpoint: &ProviderWebhookEndpointManifest,
+    delivery_id: ProviderDeliveryId,
+    raw_body: &[u8],
+) -> VerifiedProviderControlDelivery {
+    let raw = provider_raw_webhook_descriptor(secret_digest(raw_body), raw_body.len() as u64)
+        .expect("raw descriptor");
+    let evidence = ProviderDeliveryEvidence::rehydrate(
+        delivery_id,
+        endpoint.endpoint_id(),
+        endpoint.revision(),
+        endpoint.provider_type().clone(),
+        endpoint.instance_id(),
+        endpoint.provider_revision(),
+        endpoint.connection_id(),
+        endpoint.connection_revision(),
+        ExternalDeliveryIdentity::new(
+            endpoint.instance_id(),
+            ExternalDeliveryId::new("control-100").expect("external delivery"),
+        ),
+        ProviderEventName::new("check_run").expect("event type"),
+        UnixMillis::new(8_000),
+        raw,
+        UnixMillis::new(
+            8_000
+                + i64::try_from(endpoint.raw_retention_millis())
+                    .expect("retention is in signed range"),
+        ),
+        ProviderWebhookSignatureEvidence::new(
+            "fake-sha256",
+            endpoint.secret_references()[0].clone(),
+        )
+        .expect("signature evidence"),
+        ProviderDeliveryObservations::new(br#"{"fixture":"control"}"#.to_vec())
+            .expect("observations"),
+    )
+    .expect("delivery evidence");
+    let control = ProviderControl::new(
+        ProviderControlKind::Rerun,
+        ExternalRepositoryIdentity::new(
+            endpoint.instance_id(),
+            ExternalRepositoryId::new("42").expect("repository ID"),
+        ),
+        automata_ci_core::GitObjectId::from_hex(GitObjectAlgorithm::Sha1, &"b".repeat(40))
+            .expect("object"),
+        Some(ExternalSubjectIdentity::new(
+            endpoint.instance_id(),
+            ExternalSubjectKind::User,
+            ExternalSubjectId::new("301").expect("actor"),
+        )),
+        ProviderControlDocument::new(
+            ProviderSchemaVersion::new(1).expect("schema"),
+            br#"{"schema":1,"target":{"kind":"check_run","run_id":601}}"#.to_vec(),
+        )
+        .expect("control document"),
+    )
+    .expect("control");
+    VerifiedProviderControlDelivery::rehydrate(evidence, control).expect("verified control")
 }
 
 #[tokio::test]
@@ -536,10 +600,10 @@ async fn endpoint_secrets_replay_conflicts_and_worker_fences_are_exact() -> Test
             repository.accept_delivery(acceptance).await?,
             ProviderDeliveryAcceptOutcome::Inserted(receipt)
                 if receipt.delivery_id() == first_id
-                    && receipt.state() == ProviderDeliveryState::Pending
+                    && receipt.invocation_id().is_some()
         ));
         let immutable_update = sqlx::query(
-            "UPDATE provider_delivery_records SET event_type = 'tampered' WHERE delivery_id = $1",
+            "UPDATE provider_deliveries SET event_type = 'tampered' WHERE delivery_id = $1",
         )
         .bind(first_id.as_uuid())
         .execute(database.pool())
@@ -577,9 +641,9 @@ async fn endpoint_secrets_replay_conflicts_and_worker_fences_are_exact() -> Test
             Err(ProviderDeliveryRepositoryError::ReplayConflict)
         );
 
-        let worker = ProviderDeliveryWorkerId::from_uuid(Uuid::from_u128(106))?;
+        let worker = ProviderProcessingWorkerId::from_uuid(Uuid::from_u128(106))?;
         let first_claim = repository
-            .claim_delivery(ClaimProviderDelivery::new(
+            .claim_processing(ClaimProviderProcessing::new(
                 worker,
                 UnixMillis::new(5_000),
                 1_000,
@@ -587,17 +651,17 @@ async fn endpoint_secrets_replay_conflicts_and_worker_fences_are_exact() -> Test
             .await?
             .expect("first claim");
         let retry = repository
-            .retry_delivery(RetryProviderDelivery::new(
+            .retry_processing(RetryProviderProcessing::new(
                 first_claim.fence(),
                 UnixMillis::new(5_500),
                 UnixMillis::new(7_000),
-                ProviderDeliveryFailure::DependencyUnavailable,
+                ProviderProcessingFailure::DependencyUnavailable,
             )?)
             .await?;
-        assert_eq!(retry.state(), ProviderDeliveryState::RetryPending);
+        assert_eq!(retry.state(), ProviderProcessingState::RetryPending);
         assert!(
             repository
-                .claim_delivery(ClaimProviderDelivery::new(
+                .claim_processing(ClaimProviderProcessing::new(
                     worker,
                     UnixMillis::new(6_999),
                     1_000,
@@ -606,7 +670,7 @@ async fn endpoint_secrets_replay_conflicts_and_worker_fences_are_exact() -> Test
                 .is_none()
         );
         let second_claim = repository
-            .claim_delivery(ClaimProviderDelivery::new(
+            .claim_processing(ClaimProviderProcessing::new(
                 worker,
                 UnixMillis::new(7_000),
                 1_000,
@@ -615,12 +679,89 @@ async fn endpoint_secrets_replay_conflicts_and_worker_fences_are_exact() -> Test
             .expect("second claim");
         assert!(second_claim.fence().token() > first_claim.fence().token());
         let completed = repository
-            .complete_delivery(CompleteProviderDelivery::new(
+            .complete_processing(CompleteProviderProcessing::new(
                 second_claim.fence(),
                 UnixMillis::new(7_500),
             )?)
             .await?;
-        assert_eq!(completed.state(), ProviderDeliveryState::Completed);
+        assert_eq!(completed.state(), ProviderProcessingState::Completed);
+
+        let control_id = ProviderDeliveryId::from_uuid(Uuid::from_u128(107))?;
+        let control = ProviderDelivery::Control(Box::new(verified_control(
+            &endpoint,
+            control_id,
+            b"control-body",
+        )));
+        let ProviderDeliveryAcceptOutcome::Inserted(control_receipt) = repository
+            .accept_delivery(AcceptProviderDelivery::new(
+                control,
+                UnixMillis::new(8_100),
+            )?)
+            .await?
+        else {
+            panic!("new control was not inserted");
+        };
+        assert_eq!(control_receipt.delivery_id(), control_id);
+        assert!(control_receipt.invocation_id().is_some());
+        let replay = ProviderDelivery::Control(Box::new(verified_control(
+            &endpoint,
+            ProviderDeliveryId::from_uuid(Uuid::from_u128(108))?,
+            b"control-body",
+        )));
+        assert!(matches!(
+            repository
+                .accept_delivery(AcceptProviderDelivery::new(
+                    replay,
+                    UnixMillis::new(8_150),
+                )?)
+                .await?,
+            ProviderDeliveryAcceptOutcome::Duplicate(receipt)
+                if receipt.delivery_id() == control_id
+                    && receipt.invocation_id() == control_receipt.invocation_id()
+        ));
+        let control_claim = repository
+            .claim_processing(ClaimProviderProcessing::new(
+                worker,
+                UnixMillis::new(8_200),
+                1_000,
+            )?)
+            .await?
+            .expect("control claim");
+        assert!(matches!(
+            control_claim.input(),
+            ProviderProcessingInput::Control(delivery)
+                if delivery.evidence().delivery_id() == control_id
+        ));
+        assert!(control_claim.receipt().source_delivery_id().is_none());
+        let bound = repository
+            .bind_processing_source(BindProviderProcessingSource::new(
+                control_claim.fence(),
+                first_id,
+                UnixMillis::new(8_300),
+            )?)
+            .await?;
+        assert_eq!(bound.receipt().source_delivery_id(), Some(first_id));
+        assert_eq!(
+            repository
+                .bind_processing_source(BindProviderProcessingSource::new(
+                    control_claim.fence(),
+                    first_id,
+                    UnixMillis::new(8_400),
+                )?)
+                .await,
+            Err(ProviderProcessingRepositoryError::ClaimRejected),
+            "a control source can only be bound once"
+        );
+        assert_eq!(
+            repository
+                .complete_processing(CompleteProviderProcessing::new(
+                    control_claim.fence(),
+                    UnixMillis::new(8_500),
+                )?)
+                .await?
+                .state(),
+            ProviderProcessingState::Completed
+        );
 
         let disabled_connection = ProviderConnectionManifest::new(
             connection.connection_id(),

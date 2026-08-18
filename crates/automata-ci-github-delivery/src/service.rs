@@ -22,11 +22,11 @@ use automata_ci_store::{
     GithubServerServiceRevision, GithubServerServiceWorkerId, GithubSubjectEvidenceRepository,
     MAX_GITHUB_SERVICE_CONSUMER_REQUEST_MILLIS, MAX_PROVIDER_DELIVERY_ATTEMPTS,
     MAX_PROVIDER_DELIVERY_CLAIM_MILLIS, MAX_PROVIDER_DELIVERY_TOTAL_CLAIM_MILLIS,
-    ProviderDeliveryClaimOwnerId, ProviderDeliveryClaimRenewalRepository, ProviderDeliveryIdentity,
+    ProviderDeliveryClaimRenewalRepository, ProviderDeliveryIdentity,
     ProviderDeliveryRenewalTiming, ProviderDeliveryRepository, ProviderDeliveryStoreError,
-    ProviderInstallationId, ProviderRepositoryId, ProviderRepositoryOwnerId,
-    ProviderRepositoryVisibility, RenewProviderDeliveryClaim, RenewedProviderDeliveryClaim,
-    TenantScope,
+    ProviderInstallationId, ProviderProcessingWorkerId, ProviderRepositoryId,
+    ProviderRepositoryOwnerId, ProviderRepositoryVisibility, RenewProviderDeliveryClaim,
+    RenewedProviderDeliveryClaim, TenantScope,
 };
 use thiserror::Error;
 use tokio::{sync::OwnedMutexGuard, time::Instant};
@@ -635,7 +635,7 @@ pub struct GithubDeliveryService {
     renewals: Arc<dyn ProviderDeliveryClaimRenewalRepository>,
     source_policy: GithubDeliverySourcePolicy,
     clock: Arc<dyn GithubDeliveryClock>,
-    worker_id: ProviderDeliveryClaimOwnerId,
+    worker_id: ProviderProcessingWorkerId,
     config: GithubDeliveryServiceConfig,
 }
 
@@ -684,7 +684,7 @@ impl GithubDeliveryService {
         workflow_processor: Arc<dyn GithubDeliveryWorkflowProcessor>,
         deliveries: Arc<R>,
         clock: Arc<dyn GithubDeliveryClock>,
-        worker_id: ProviderDeliveryClaimOwnerId,
+        worker_id: ProviderProcessingWorkerId,
         worker_config: GithubDeliveryWorkerConfig,
         config: GithubDeliveryServiceConfig,
     ) -> Result<Self, GithubDeliveryWorkerConfigurationError>
@@ -722,7 +722,7 @@ impl GithubDeliveryService {
         deliveries: Arc<R>,
         repository_dispatches: Arc<dyn GithubRepositoryDispatchEvidenceRepository>,
         clock: Arc<dyn GithubDeliveryClock>,
-        worker_id: ProviderDeliveryClaimOwnerId,
+        worker_id: ProviderProcessingWorkerId,
         worker_config: GithubDeliveryWorkerConfig,
         config: GithubDeliveryServiceConfig,
     ) -> Result<Self, GithubDeliveryWorkerConfigurationError>
@@ -763,7 +763,7 @@ impl GithubDeliveryService {
         deliveries: Arc<R>,
         credentials: Arc<dyn GithubDeliverySourceCredentialProvider>,
         clock: Arc<dyn GithubDeliveryClock>,
-        worker_id: ProviderDeliveryClaimOwnerId,
+        worker_id: ProviderProcessingWorkerId,
         worker_config: GithubDeliveryWorkerConfig,
         config: GithubDeliveryServiceConfig,
     ) -> Result<Self, GithubDeliveryWorkerConfigurationError>
@@ -805,7 +805,7 @@ impl GithubDeliveryService {
         repository_dispatches: Arc<dyn GithubRepositoryDispatchEvidenceRepository>,
         credentials: Arc<dyn GithubDeliverySourceCredentialProvider>,
         clock: Arc<dyn GithubDeliveryClock>,
-        worker_id: ProviderDeliveryClaimOwnerId,
+        worker_id: ProviderProcessingWorkerId,
         worker_config: GithubDeliveryWorkerConfig,
         config: GithubDeliveryServiceConfig,
     ) -> Result<Self, GithubDeliveryWorkerConfigurationError>
@@ -841,7 +841,7 @@ impl GithubDeliveryService {
             Arc<dyn ScmProvider>,
         )>,
         clock: Arc<dyn GithubDeliveryClock>,
-        worker_id: ProviderDeliveryClaimOwnerId,
+        worker_id: ProviderProcessingWorkerId,
         worker_config: GithubDeliveryWorkerConfig,
         config: GithubDeliveryServiceConfig,
     ) -> Result<Self, GithubDeliveryWorkerConfigurationError>
@@ -892,7 +892,7 @@ impl GithubDeliveryService {
 
     /// Returns the stable durable identity used by every claim from this service.
     #[must_use]
-    pub const fn worker_id(&self) -> ProviderDeliveryClaimOwnerId {
+    pub const fn worker_id(&self) -> ProviderProcessingWorkerId {
         self.worker_id
     }
 

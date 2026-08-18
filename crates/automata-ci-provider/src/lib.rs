@@ -10,6 +10,7 @@
 mod capability;
 mod configuration;
 mod connection;
+mod control;
 mod credential;
 mod delivery;
 mod factory;
@@ -46,6 +47,10 @@ pub use connection::{
     ProviderRepositoryPath, ProviderRunnerPolicyBinding, ProviderWorkflowSource,
     RepositoryVisibility,
 };
+pub use control::{
+    MAX_PROVIDER_CONTROL_DOCUMENT_BYTES, ProviderControl, ProviderControlDocument,
+    ProviderControlError, ProviderControlKind,
+};
 pub use credential::{
     ControlCredential, ControlCredentialFuture, ControlCredentialProvider,
     ControlCredentialProviderError, ControlCredentialRequest, ControlCredentialRevocation,
@@ -59,14 +64,16 @@ pub use credential::{
     WorkloadCredentialRevocationOutcome,
 };
 pub use delivery::{
-    AcceptProviderDelivery, ClaimProviderDelivery, ClaimedProviderDelivery,
-    CompleteProviderDelivery, FailProviderDelivery, MAX_PROVIDER_DELIVERY_ATTEMPTS,
-    MAX_PROVIDER_DELIVERY_LEASE_MILLIS, MAX_PROVIDER_DELIVERY_RETRY_MILLIS, ProviderDelivery,
-    ProviderDeliveryAcceptOutcome, ProviderDeliveryClaimFence, ProviderDeliveryFailure,
+    AcceptProviderDelivery, BindProviderProcessingSource, ClaimProviderProcessing,
+    ClaimedProviderProcessing, CompleteProviderProcessing, FailProviderProcessing,
+    MAX_PROVIDER_PROCESSING_ATTEMPTS, MAX_PROVIDER_PROCESSING_LEASE_MILLIS,
+    MAX_PROVIDER_PROCESSING_RETRY_MILLIS, ProviderDelivery, ProviderDeliveryAcceptOutcome,
     ProviderDeliveryFuture, ProviderDeliveryModelError, ProviderDeliveryReceipt,
     ProviderDeliveryReplayFingerprint, ProviderDeliveryRepository, ProviderDeliveryRepositoryError,
-    ProviderDeliveryState, ProviderWebhookEndpointRecord, ProviderWebhookEndpointRepository,
-    RenewProviderDelivery, RetryProviderDelivery,
+    ProviderProcessingClaimFence, ProviderProcessingFailure, ProviderProcessingFuture,
+    ProviderProcessingInput, ProviderProcessingReceipt, ProviderProcessingRepository,
+    ProviderProcessingRepositoryError, ProviderProcessingState, ProviderWebhookEndpointRecord,
+    ProviderWebhookEndpointRepository, RenewProviderProcessing, RetryProviderProcessing,
 };
 pub use factory::{
     MAX_PROVIDER_FACTORIES, ProviderConfigurationFactory, ProviderConnectionFactoryRequest,
@@ -89,9 +96,9 @@ pub use identity::{
     ExternalMergeQueueId, ExternalRepositoryId, ExternalRepositoryIdentity, ExternalResultId,
     ExternalSubjectId, ExternalSubjectIdentity, ExternalSubjectKind, MAX_EXTERNAL_ID_BYTES,
     MAX_PROVIDER_TYPE_ID_BYTES, ProviderConnectionId, ProviderControlCredentialId,
-    ProviderDeliveryId, ProviderDeliveryWorkerId, ProviderIdentityError, ProviderInstanceId,
-    ProviderResultSubjectId, ProviderResultWorkerId, ProviderTypeId, ProviderWebhookEndpointId,
-    ProviderWorkloadCredentialId,
+    ProviderDeliveryId, ProviderIdentityError, ProviderInstanceId, ProviderProcessingInvocationId,
+    ProviderProcessingWorkerId, ProviderResultSubjectId, ProviderResultWorkerId, ProviderTypeId,
+    ProviderWebhookEndpointId, ProviderWorkloadCredentialId,
 };
 pub use result::{
     ClaimProviderResult, ClaimedProviderResult, CompleteProviderResult, DesiredProviderResult,
@@ -127,12 +134,14 @@ pub use webhook::{
     MAX_PROVIDER_WEBHOOK_HEADER_BYTES, MAX_PROVIDER_WEBHOOK_HEADER_NAME_BYTES,
     MAX_PROVIDER_WEBHOOK_HEADER_VALUE_BYTES, MAX_PROVIDER_WEBHOOK_HEADERS,
     MAX_PROVIDER_WEBHOOK_SECRET_CANDIDATES, PROVIDER_RAW_WEBHOOK_KEY_PREFIX,
-    PROVIDER_RAW_WEBHOOK_MEDIA_TYPE, ProviderDeliveryDraft, ProviderDeliveryNormalization,
-    ProviderDeliveryObservations, ProviderDeliveryRejection, ProviderWebhookAuthenticationError,
+    PROVIDER_RAW_WEBHOOK_MEDIA_TYPE, ProviderControlDeliveryDraft, ProviderDeliveryEvidence,
+    ProviderDeliveryNormalization, ProviderDeliveryObservations, ProviderDeliveryRejection,
+    ProviderTriggerDeliveryDraft, ProviderWebhookAuthenticationError,
     ProviderWebhookAuthenticationRequest, ProviderWebhookEndpointManifest,
     ProviderWebhookEndpointRevision, ProviderWebhookEndpointState, ProviderWebhookError,
     ProviderWebhookHeaderName, ProviderWebhookHeaders, ProviderWebhookMethod,
     ProviderWebhookRequest, ProviderWebhookSecretCandidate, ProviderWebhookSecretCandidates,
     ProviderWebhookSecretReference, ProviderWebhookSignatureEvidence, RejectedProviderDelivery,
-    RejectedProviderDeliveryDraft, VerifiedProviderDelivery, provider_raw_webhook_descriptor,
+    RejectedProviderDeliveryDraft, VerifiedProviderControlDelivery,
+    VerifiedProviderTriggerDelivery, provider_raw_webhook_descriptor,
 };

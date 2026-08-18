@@ -16,8 +16,8 @@ use automata_ci_store::{
     GithubWorkflowRunSubjectEvidence, LogicalWorkflowInvocationId,
     ManifestPinnedGithubDeliveryEvidence, ManifestPinnedGithubDeliveryReceipt, ObjectKey,
     PendingGithubRepositoryDispatchEvidence, ProviderDeliveryClaimFence,
-    ProviderDeliveryClaimOwnerId, ProviderDeliveryEventEnvelope, ProviderDeliveryId,
-    ProviderDeliveryIdentity, ProviderInstallationId, ProviderRepositoryCoordinates,
+    ProviderDeliveryEventEnvelope, ProviderDeliveryId, ProviderDeliveryIdentity,
+    ProviderInstallationId, ProviderProcessingWorkerId, ProviderRepositoryCoordinates,
     ProviderRepositoryId, ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
     RecordGithubWorkflowRunSubjectEvidence, RepositoryId, ResolveGithubRepositoryDispatch,
     TenantScope, WorkflowSnapshotId,
@@ -506,7 +506,7 @@ fn admission_claim(
     AuthenticatedGithubDeliveryClaim::new(
         ProviderDeliveryClaimFence::from_durable_parts(
             delivery_id,
-            ProviderDeliveryClaimOwnerId::from_uuid(Uuid::from_u128(0x401)).expect("claim owner"),
+            ProviderProcessingWorkerId::from_uuid(Uuid::from_u128(0x401)).expect("claim owner"),
             1,
         )
         .expect("claim fence"),

@@ -6,11 +6,10 @@ use std::{
 
 use async_trait::async_trait;
 use automata_ci_core::{GitObjectId, RunId, UnixMillis};
-use automata_ci_provider::ProviderConnectionId;
+use automata_ci_provider::{ProviderConnectionId, ProviderDeliveryId, ProviderProcessingWorkerId};
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 use tokio::time::Instant;
-use uuid::Uuid;
 
 use crate::{AdmissionObject, RepositoryOperationError, Sha256Digest, TenantScope};
 
@@ -36,38 +35,6 @@ const MAX_WORKFLOW_PATH_BYTES: usize = 1_024;
 const COMPLETION_DIGEST_DOMAIN: &[u8] = b"automata.store.provider-delivery-completion.v1\0";
 const WORKFLOW_INVENTORY_DIGEST_DOMAIN: &[u8] =
     b"automata.store.provider-delivery-workflow-inventory.v1\0";
-
-macro_rules! uuid_identity {
-    ($(#[$meta:meta])* $name:ident, $field:literal) => {
-        $(#[$meta])*
-        #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-        pub struct $name(Uuid);
-
-        impl $name {
-            /// Constructs a non-nil durable UUID identity.
-            ///
-            /// # Errors
-            ///
-            /// Rejects the nil UUID sentinel.
-            pub fn from_uuid(value: Uuid) -> Result<Self, ProviderDeliveryValueError> {
-                if value.is_nil() {
-                    return Err(ProviderDeliveryValueError::NilUuid($field));
-                }
-                Ok(Self(value))
-            }
-
-            #[must_use]
-            pub const fn as_uuid(self) -> Uuid {
-                self.0
-            }
-        }
-    };
-}
-
-uuid_identity!(/// Durable identity of one accepted provider delivery.
-    ProviderDeliveryId, "provider delivery ID");
-uuid_identity!(/// Durable identity of a provider-delivery worker.
-    ProviderDeliveryClaimOwnerId, "provider delivery claim owner ID");
 
 macro_rules! positive_provider_id {
     ($(#[$meta:meta])* $name:ident, $field:literal) => {
@@ -511,7 +478,7 @@ impl ProviderDeliveryReceipt {
 /// across provider, blob, compiler, or admission work.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ClaimProviderDelivery {
-    owner: ProviderDeliveryClaimOwnerId,
+    owner: ProviderProcessingWorkerId,
     observed_at: UnixMillis,
     expires_at: UnixMillis,
 }
@@ -524,7 +491,7 @@ impl ClaimProviderDelivery {
     /// Rejects negative time, an empty interval, or a lease longer than the
     /// fixed provider-delivery claim bound.
     pub fn new(
-        owner: ProviderDeliveryClaimOwnerId,
+        owner: ProviderProcessingWorkerId,
         observed_at: UnixMillis,
         expires_at: UnixMillis,
     ) -> Result<Self, ProviderDeliveryValueError> {
@@ -544,7 +511,7 @@ impl ClaimProviderDelivery {
     }
 
     #[must_use]
-    pub const fn owner(self) -> ProviderDeliveryClaimOwnerId {
+    pub const fn owner(self) -> ProviderProcessingWorkerId {
         self.owner
     }
 
@@ -563,7 +530,7 @@ impl ClaimProviderDelivery {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ProviderDeliveryClaimFence {
     delivery_id: ProviderDeliveryId,
-    owner: ProviderDeliveryClaimOwnerId,
+    owner: ProviderProcessingWorkerId,
     fence: NonZeroU64,
 }
 
@@ -575,7 +542,7 @@ impl ProviderDeliveryClaimFence {
     /// Rejects a zero fence or one outside the signed 64-bit storage boundary.
     pub fn from_durable_parts(
         delivery_id: ProviderDeliveryId,
-        owner: ProviderDeliveryClaimOwnerId,
+        owner: ProviderProcessingWorkerId,
         fence: u64,
     ) -> Result<Self, ProviderDeliveryValueError> {
         let fence = NonZeroU64::new(fence)
@@ -594,7 +561,7 @@ impl ProviderDeliveryClaimFence {
     }
 
     #[must_use]
-    pub const fn owner(self) -> ProviderDeliveryClaimOwnerId {
+    pub const fn owner(self) -> ProviderProcessingWorkerId {
         self.owner
     }
 

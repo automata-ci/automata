@@ -22,8 +22,8 @@ use automata_ci_store::{
     GithubWorkflowRunSubjectEvidence, LogicalWorkflowInvocationId,
     ManifestPinnedGithubDeliveryEvidence, ManifestPinnedGithubDeliveryReceipt, ObjectKey,
     PendingGithubRepositoryDispatchEvidence, PendingGithubRepositoryDispatchReceipt,
-    ProviderDeliveryClaimFence, ProviderDeliveryClaimOwnerId, ProviderDeliveryId,
-    ProviderInstallationId, ProviderRepositoryId, ProviderRepositoryOwnerId,
+    ProviderDeliveryClaimFence, ProviderDeliveryId, ProviderInstallationId,
+    ProviderProcessingWorkerId, ProviderRepositoryId, ProviderRepositoryOwnerId,
     ProviderRepositoryVisibility, RecordGithubWorkflowRunSubjectEvidence, RepositoryId,
     ResolveGithubRepositoryDispatch, TenantScope, ValidateGithubWorkflowRunSubjectEvidenceReplay,
     WorkflowAdmissionIdempotency, WorkflowRuntimePolicyRevision, WorkflowSnapshotId,
@@ -2458,7 +2458,7 @@ fn decode_run_evidence(
     let admission_claim = AuthenticatedGithubDeliveryClaim::new(
         ProviderDeliveryClaimFence::from_durable_parts(
             delivery_id,
-            ProviderDeliveryClaimOwnerId::from_uuid(claim_owner)
+            ProviderProcessingWorkerId::from_uuid(claim_owner)
                 .map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)?,
             positive_u64(claim_fence)?,
         )

@@ -9,10 +9,10 @@ use automata_ci_provider::{
     DeliveryAdapter as _, ExternalRepositoryId, ExternalRepositoryIdentity, NormalizedTrigger,
     ProviderArchiveLimits, ProviderConfigurationRevision, ProviderConnectionConfiguration,
     ProviderConnectionId, ProviderConnectionManifest, ProviderConnectionRevision,
-    ProviderDefaultBranch, ProviderDelivery, ProviderDeliveryRejection, ProviderInstanceId,
-    ProviderLifecycleState, ProviderRepositoryPath, ProviderRunnerPolicyBinding,
-    ProviderSchemaVersion, ProviderSecret, ProviderSecretGeneration, ProviderSecretName,
-    ProviderWebhookAuthenticationError, ProviderWebhookAuthenticationRequest,
+    ProviderControlKind, ProviderDefaultBranch, ProviderDelivery, ProviderDeliveryRejection,
+    ProviderInstanceId, ProviderLifecycleState, ProviderRepositoryPath,
+    ProviderRunnerPolicyBinding, ProviderSchemaVersion, ProviderSecret, ProviderSecretGeneration,
+    ProviderSecretName, ProviderWebhookAuthenticationError, ProviderWebhookAuthenticationRequest,
     ProviderWebhookEndpointId, ProviderWebhookEndpointManifest, ProviderWebhookEndpointRevision,
     ProviderWebhookEndpointState, ProviderWebhookHeaderName, ProviderWebhookHeaders,
     ProviderWebhookMethod, ProviderWebhookRequest, ProviderWebhookSecretCandidates,
@@ -241,7 +241,10 @@ fn all_admission_events_normalize_through_the_common_contract() {
             }
         };
         assert_eq!(actual, expected);
-        assert_eq!(delivery.connection_id(), fixture.connection.connection_id());
+        assert_eq!(
+            delivery.evidence().connection_id(),
+            fixture.connection.connection_id()
+        );
     }
 }
 
@@ -266,6 +269,89 @@ fn endpoint_repository_identity_is_enforced_after_authentication() {
         delivery.reason(),
         ProviderDeliveryRejection::PayloadIdentityMismatch
     );
+}
+
+#[test]
+fn rerequested_check_run_becomes_an_authenticated_control() {
+    let fixture = Fixture::new(ProviderInstanceId::new(), "41");
+    let adapter = GithubDeliveryAdapter::new();
+    let authenticated = adapter
+        .authenticate(fixture.authentication(
+            &check_run_rerequested_payload(),
+            "check_run",
+            "delivery-check-run-rerequested",
+            CURRENT_SECRET,
+        ))
+        .expect("signature");
+    let normalized = adapter.normalize(authenticated);
+    let descriptor = normalized.raw_descriptor().expect("raw descriptor");
+    let ProviderDelivery::Control(delivery) = normalized.seal(descriptor).expect("seal") else {
+        panic!("rerequested Check Run was not admitted as a control");
+    };
+    assert_eq!(delivery.control().kind(), ProviderControlKind::Rerun);
+    assert_eq!(delivery.control().repository().external_id().as_str(), "41");
+    assert_eq!(delivery.control().object().to_string(), HEAD_SHA);
+    assert_eq!(
+        delivery
+            .control()
+            .actor()
+            .expect("authenticated sender")
+            .external_id()
+            .as_str(),
+        "301"
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(delivery.control().document().bytes())
+            .expect("canonical document"),
+        json!({
+            "schema": 1,
+            "installation_id": 71,
+            "target": {
+                "kind": "check_run",
+                "app_id": 501,
+                "run_id": 601,
+                "suite_id": 701,
+                "external_id": "automata-result-subject",
+                "action": "rerequested"
+            }
+        })
+    );
+}
+
+#[test]
+fn multi_target_rerun_events_are_rejected_until_selection_is_common() {
+    let fixture = Fixture::new(ProviderInstanceId::new(), "41");
+    let adapter = GithubDeliveryAdapter::new();
+    let mut requested_action = check_run_rerequested_payload();
+    requested_action["action"] = json!("requested_action");
+    requested_action["requested_action"] = json!({"identifier": "rerun_failed"});
+
+    for (payload, event, delivery_id) in [
+        (
+            requested_action,
+            "check_run",
+            "delivery-check-run-rerun-failed",
+        ),
+        (
+            check_suite_rerequested_payload(),
+            "check_suite",
+            "delivery-check-suite-rerequested",
+        ),
+    ] {
+        let authenticated = adapter
+            .authenticate(fixture.authentication(&payload, event, delivery_id, CURRENT_SECRET))
+            .expect("signature");
+        let normalized = adapter.normalize(authenticated);
+        let descriptor = normalized.raw_descriptor().expect("raw descriptor");
+        let ProviderDelivery::Rejected(delivery) = normalized.seal(descriptor).expect("seal")
+        else {
+            panic!("{event} unexpectedly entered singleton control processing");
+        };
+        assert_eq!(
+            delivery.reason(),
+            ProviderDeliveryRejection::UnsupportedEvent
+        );
+    }
 }
 
 #[test]
@@ -316,6 +402,40 @@ fn push_payload() -> Value {
         "installation": { "id": 71 },
         "sender": { "id": 301, "login": "octocat", "type": "User" },
         "commits": [{"id": HEAD_SHA}, {"id": MERGE_SHA}]
+    })
+}
+
+fn check_run_rerequested_payload() -> Value {
+    json!({
+        "action": "rerequested",
+        "check_run": {
+            "id": 601,
+            "head_sha": HEAD_SHA,
+            "external_id": "automata-result-subject",
+            "status": "completed",
+            "conclusion": "failure",
+            "app": { "id": 501 },
+            "check_suite": { "id": 701, "head_sha": HEAD_SHA }
+        },
+        "repository": base_repository(),
+        "installation": { "id": 71 },
+        "sender": { "id": 301, "login": "octocat", "type": "User" }
+    })
+}
+
+fn check_suite_rerequested_payload() -> Value {
+    json!({
+        "action": "rerequested",
+        "check_suite": {
+            "id": 701,
+            "head_sha": HEAD_SHA,
+            "status": "completed",
+            "conclusion": "failure",
+            "app": { "id": 501 }
+        },
+        "repository": base_repository(),
+        "installation": { "id": 71 },
+        "sender": { "id": 301, "login": "octocat", "type": "User" }
     })
 }
 
