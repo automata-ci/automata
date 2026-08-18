@@ -2,6 +2,7 @@
 
 use std::{
     collections::BTreeSet,
+    fmt::Write as _,
     fs,
     path::{Path, PathBuf},
     sync::atomic::{AtomicUsize, Ordering},
@@ -24,6 +25,7 @@ use ring::{
     signature::{Ed25519KeyPair, KeyPair as _},
 };
 use serde::Serialize;
+use sha2::{Digest as _, Sha256};
 
 static NEXT_EVIDENCE_ROOT: AtomicUsize = AtomicUsize::new(0);
 const BROKER_HOST_ID: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -165,6 +167,126 @@ impl EvidenceFixture {
         write_secure_fixture(&path, &bytes);
         path
     }
+
+    fn rewrite_candidate_evidence(&mut self, production_identities: bool, image_repository: &str) {
+        let base_image = format!(
+            "mcr.microsoft.com/windows/servercore@sha256:{}",
+            sha256(b"production base image")
+        );
+        let image = format!(
+            "{image_repository}@sha256:{}",
+            sha256(b"production Windows runner image")
+        );
+        for (kind, name, statement) in [
+            (
+                "provenance",
+                "provenance.json",
+                "Accepted in-toto SLSA provenance for the exact image identity.",
+            ),
+            (
+                "sbom",
+                "sbom.spdx.json",
+                "Accepted SPDX 2.3 inventory for the exact image recipe and tools.",
+            ),
+            (
+                "patch_report",
+                "patch-report.json",
+                "Accepted Windows Server 2025 build, UBR, and executable inventory.",
+            ),
+            (
+                "revocations",
+                "revocations.json",
+                "Accepted image revocation generation and validity window.",
+            ),
+        ] {
+            let path = self.root.join(name);
+            let mut document: serde_json::Value =
+                serde_json::from_slice(&fs::read(&path).expect("read evidence reference"))
+                    .expect("parse evidence reference");
+            document
+                .as_object_mut()
+                .expect("evidence reference object")
+                .remove("candidate_fixture");
+            if production_identities {
+                document["image"] = serde_json::json!(image.clone());
+                document["subject"]["sha256"] =
+                    serde_json::json!(sha256(format!("{kind} subject").as_bytes()));
+                document["statement"] = serde_json::json!(statement);
+            }
+            let bytes = serde_json::to_vec(&document).expect("serialize production reference");
+            write_secure_fixture(&path, &bytes);
+        }
+
+        let manifest_path = self.root.join("manifest.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&manifest_path).expect("read candidate manifest"))
+                .expect("parse candidate manifest");
+        if production_identities {
+            manifest["base_image"] = serde_json::json!(base_image.clone());
+            manifest["image"] = serde_json::json!(image.clone());
+            let tools = manifest["tools"].as_array_mut().expect("manifest tools");
+            for tool in tools {
+                let kind = tool["kind"].as_str().expect("tool kind").to_owned();
+                tool["sha256"] = serde_json::json!(sha256(format!("{kind} tool").as_bytes()));
+                tool["version"] = serde_json::json!(match kind.as_str() {
+                    "pwsh" => "PowerShell 7.6.5",
+                    "powershell" => "5.1.26100.33296",
+                    "cmd" => "Microsoft Windows [Version 10.0.26100.33296]",
+                    "sha256" => "automata-sha256 1.0.0",
+                    "node24" => "v24.19.0",
+                    _ => panic!("unexpected candidate tool kind: {kind}"),
+                });
+            }
+            self.config["inventory"]["environment_profiles"][0]["image"] =
+                serde_json::json!(image.clone());
+        }
+        for (kind, name) in [
+            ("provenance", "provenance.json"),
+            ("sbom", "sbom.spdx.json"),
+            ("patch_report", "patch-report.json"),
+            ("revocations", "revocations.json"),
+        ] {
+            manifest["evidence"][kind]["sha256"] = serde_json::json!(sha256(
+                &fs::read(self.root.join(name)).expect("read reference")
+            ));
+        }
+        let manifest_bytes = serde_json::to_vec(&manifest).expect("serialize production manifest");
+        write_secure_fixture(&manifest_path, &manifest_bytes);
+        let manifest_sha256 = sha256(&manifest_bytes);
+        self.config["inventory"]["environment_profiles"][0]["manifest_sha256"] =
+            serde_json::json!(manifest_sha256.clone());
+        self.config["windows_hyperv"]["image_contract"]["manifest_sha256"] =
+            serde_json::json!(manifest_sha256.clone());
+
+        let lock_path = self.root.join("image.lock.json");
+        let mut lock: serde_json::Value =
+            serde_json::from_slice(&fs::read(&lock_path).expect("read image lock"))
+                .expect("parse image lock");
+        if production_identities {
+            lock["base_image"] = serde_json::json!(base_image);
+            lock["image"] = serde_json::json!(image);
+        }
+        lock["manifest_sha256"] = serde_json::json!(manifest_sha256);
+        let lock_bytes = serde_json::to_vec(&lock).expect("serialize production image lock");
+        write_secure_fixture(&lock_path, &lock_bytes);
+        self.config["windows_hyperv"]["image_contract"]["lock_sha256"] =
+            serde_json::json!(sha256(&lock_bytes));
+    }
+
+    fn remove_fixture_markers(&mut self) {
+        self.rewrite_candidate_evidence(false, "registry.example/unused");
+    }
+
+    fn make_promotable(&mut self) {
+        self.rewrite_candidate_evidence(
+            true,
+            "ghcr.io/example-corp/localhost-tools-windows-runner",
+        );
+    }
+
+    fn make_reserved_repository_evidence(&mut self) {
+        self.rewrite_candidate_evidence(true, "registry.example/automata/windows-runner");
+    }
 }
 
 impl Drop for EvidenceFixture {
@@ -181,12 +303,12 @@ struct TestPromotionPayload {
     profile_id: &'static str,
     base_image: String,
     image: String,
-    manifest_sha256: &'static str,
-    lock_sha256: &'static str,
-    provenance_sha256: &'static str,
-    sbom_sha256: &'static str,
-    patch_report_sha256: &'static str,
-    revocations_sha256: &'static str,
+    manifest_sha256: String,
+    lock_sha256: String,
+    provenance_sha256: String,
+    sbom_sha256: String,
+    patch_report_sha256: String,
+    revocations_sha256: String,
     revocation_generation: u64,
     provenance_accepted: bool,
     sbom_accepted: bool,
@@ -195,25 +317,45 @@ struct TestPromotionPayload {
 }
 
 fn add_promotion(fixture: &mut EvidenceFixture) {
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &fs::read(fixture.root.join("manifest.json")).expect("read manifest"),
+    )
+    .expect("parse manifest");
+    let revocations: serde_json::Value = serde_json::from_slice(
+        &fs::read(fixture.root.join("revocations.json")).expect("read revocations"),
+    )
+    .expect("parse revocations");
     let payload = TestPromotionPayload {
         schema_version: 1,
         decision: "promote",
         profile_id: "automata.dev/windows-2025-x64-hyperv-v1",
-        base_image: format!(
-            "mcr.microsoft.com/windows/servercore@sha256:{}",
-            "0".repeat(64)
+        base_image: manifest["base_image"]
+            .as_str()
+            .expect("manifest base image")
+            .to_owned(),
+        image: manifest["image"]
+            .as_str()
+            .expect("manifest image")
+            .to_owned(),
+        manifest_sha256: sha256(
+            &fs::read(fixture.root.join("manifest.json")).expect("read manifest"),
         ),
-        image: format!(
-            "registry.example/automata/windows-runner@sha256:{}",
-            "1".repeat(64)
+        lock_sha256: sha256(
+            &fs::read(fixture.root.join("image.lock.json")).expect("read image lock"),
         ),
-        manifest_sha256: "8469373351b458633450cd4f28e24b18fa756832a7917c9d8ae2a82ad6241c23",
-        lock_sha256: "181bc78f2993a8221f0ab4aa6d01f53ef05b02ac1755ffd84c1c0abf0f3c6747",
-        provenance_sha256: "8450f524b6efd5cc9017b805dd8803a1079dbc222c23ad4e890994d662f8bb25",
-        sbom_sha256: "280ba2ce2e4ce8767a7392fbc8176e6d98aebaf6e6e4595e49d88eeab6fcb655",
-        patch_report_sha256: "fd34d37ea605013011baa61331834de11ffd476584a4ba9cc2bc09ed0356d9fb",
-        revocations_sha256: "f08001567b8098fe63060a8eeaf12fb2e9dcb4be383c2480f9d887728ed3c223",
-        revocation_generation: 1,
+        provenance_sha256: sha256(
+            &fs::read(fixture.root.join("provenance.json")).expect("read provenance"),
+        ),
+        sbom_sha256: sha256(&fs::read(fixture.root.join("sbom.spdx.json")).expect("read SBOM")),
+        patch_report_sha256: sha256(
+            &fs::read(fixture.root.join("patch-report.json")).expect("read patch report"),
+        ),
+        revocations_sha256: sha256(
+            &fs::read(fixture.root.join("revocations.json")).expect("read revocations"),
+        ),
+        revocation_generation: revocations["generation"]
+            .as_u64()
+            .expect("revocation generation"),
         provenance_accepted: true,
         sbom_accepted: true,
         patch_accepted: true,
@@ -237,6 +379,14 @@ fn add_promotion(fixture: &mut EvidenceFixture) {
         "key_id": "test.windows-image-promotion.v1",
         "public_key_base64": encoder.encode(key.public_key().as_ref())
     });
+}
+
+fn sha256(bytes: &[u8]) -> String {
+    let mut encoded = String::with_capacity(64);
+    for byte in Sha256::digest(bytes) {
+        write!(&mut encoded, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    encoded
 }
 
 fn baseline() -> serde_json::Value {
@@ -314,7 +464,7 @@ fn internal_windows_fixture_selects_only_hyperv_containers() {
     assert!(config.executor().toolchain().pwsh().is_some());
     assert!(config.executor().toolchain().powershell().is_some());
     assert!(config.executor().toolchain().cmd().is_some());
-    assert!(config.executor().toolchain().tar().is_some());
+    assert!(config.executor().toolchain().tar().is_none());
     assert!(config.executor().toolchain().sha256sum().is_some());
     assert!(config.executor().toolchain().node24().is_some());
     assert_eq!(windows.image_admission(), WindowsImageAdmission::Unverified);
@@ -408,6 +558,7 @@ fn candidate_evidence_is_verified_but_does_not_publish_action_capabilities() {
 #[test]
 fn exact_external_promotion_keeps_actions_unadvertised_without_a_broker_materializer() {
     let mut fixture = EvidenceFixture::new();
+    fixture.make_promotable();
     add_promotion(&mut fixture);
     let config_path = fixture.write_config("promoted-runner.json");
     let config =
@@ -476,7 +627,7 @@ fn exact_external_promotion_keeps_actions_unadvertised_without_a_broker_material
         request.binding().profile(),
         request.environment().attestation()
     );
-    assert_eq!(request.probe_policy().contract_schema_version(), 1);
+    assert_eq!(request.probe_policy().contract_schema_version(), 2);
     assert!(
         request
             .probe_policy()
@@ -496,6 +647,44 @@ fn exact_external_promotion_keeps_actions_unadvertised_without_a_broker_material
     );
     assert_action_features_remain_unadvertised(&request);
     assert_host_input_contract(&request, &config_path);
+}
+
+#[test]
+fn candidate_fixture_cannot_be_promoted_even_with_a_valid_signature() {
+    let mut fixture = EvidenceFixture::new();
+    add_promotion(&mut fixture);
+
+    assert_eq!(
+        RunnerProductConfig::load(&fixture.write_config("signed-candidate-runner.json"))
+            .expect_err("candidate fixture evidence must never become promoted"),
+        RunnerProductConfigError::InvalidWindowsImage
+    );
+}
+
+#[test]
+fn marker_free_placeholder_evidence_cannot_be_promoted() {
+    let mut fixture = EvidenceFixture::new();
+    fixture.remove_fixture_markers();
+    add_promotion(&mut fixture);
+
+    assert_eq!(
+        RunnerProductConfig::load(&fixture.write_config("placeholder-promoted-runner.json"))
+            .expect_err("placeholder evidence must not become promoted"),
+        RunnerProductConfigError::InvalidWindowsImage
+    );
+}
+
+#[test]
+fn reserved_repository_evidence_cannot_be_promoted() {
+    let mut fixture = EvidenceFixture::new();
+    fixture.make_reserved_repository_evidence();
+    add_promotion(&mut fixture);
+
+    assert_eq!(
+        RunnerProductConfig::load(&fixture.write_config("reserved-repository-runner.json"))
+            .expect_err("reserved repository evidence must not become promoted"),
+        RunnerProductConfigError::InvalidWindowsImage
+    );
 }
 
 #[test]
@@ -522,6 +711,7 @@ fn evidence_verification_fails_closed_on_missing_evidence_and_bad_signature() {
     );
 
     let mut fixture = EvidenceFixture::new();
+    fixture.make_promotable();
     add_promotion(&mut fixture);
     let envelope_path = fixture.root.join("promotion.json");
     let mut envelope: serde_json::Value =

@@ -55,7 +55,7 @@ real-host gates pass.
 Image admission now verifies a digest-bound Windows Server 2025 Server Core
 manifest and lock together with provenance, SPDX SBOM, patch, and revocation
 metadata. It binds the exact guest/workspace and configured PowerShell, cmd,
-tar, hash-helper, and Node-generation paths. A canonical external Ed25519
+hash-helper, and Node-generation paths. A canonical external Ed25519
 promotion envelope and fresh-container probes validate image evidence, but do
 not add JavaScript, composite, repository, local-action, or Node-generation
 features. Those capabilities remain absent until a broker-owned materializer
@@ -123,14 +123,16 @@ offline Hyper-V-container gate.
 Tasks:
 
 - [x] Define and probe exact configured `pwsh.exe`, `powershell.exe`,
-  `cmd.exe`, `tar.exe`, Automata SHA-256 helper, and Node 12/16/20/24 paths in
-  a fresh Windows sandbox.
+  `cmd.exe`, Automata SHA-256 helper, and Node 12/16/20/24 paths in a fresh
+  Windows sandbox.
 - [x] Bind exact tool versions, architecture, paths, and digests through the
   candidate manifest and externally signed promotion interface.
 - [x] Withhold all Windows action and Node capabilities until a broker-owned
   production materializer is available.
 - [ ] Add a broker-owned materialization path that retains archive and tree
   identity through verification, extraction, metadata reads, and execution.
+- [ ] Qualify and pin a non-vulnerable Windows GNU tar distribution together
+  with that broker-owned materializer.
 - [ ] Reject traversal, links, special entries, reserved/illegal Windows names,
   case-fold collisions, stale destinations, digest mismatch, and reparse-tree
   escape under retained broker handles.

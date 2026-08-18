@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "profile_id": "automata.dev/windows-2025-x64-hyperv-v1",
-  "manifest_sha256": "8469373351b458633450cd4f28e24b18fa756832a7917c9d8ae2a82ad6241c23",
+  "manifest_sha256": "b9101ed7a45c49597920ae9fd7505cdafe8a924cd9c4e549f183e4564a88fa6f",
   "base_image": "mcr.microsoft.com/windows/servercore@sha256:0000000000000000000000000000000000000000000000000000000000000000",
   "image": "registry.example/automata/windows-runner@sha256:1111111111111111111111111111111111111111111111111111111111111111"
 }

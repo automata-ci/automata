@@ -116,9 +116,10 @@ those release gates:
   optional externally signed Ed25519 promotion
   envelope that binds every evidence digest and the revocation generation;
 - exact manifest-to-configuration bindings for the guest, workspace,
-  `pwsh.exe`, `powershell.exe`, `cmd.exe`, `tar.exe`, the Automata SHA-256
-  helper, and any configured Node 12/16/20/24 runtime;
-- component probe definitions for configured Windows action tools; and
+  `pwsh.exe`, `powershell.exe`, `cmd.exe`, the Automata SHA-256 helper, and any
+  configured Node 12/16/20/24 runtime. GNU tar stays absent while Windows
+  action materialization is unsupported;
+- component probe definitions for configured Windows support tools; and
 - bounded archive-validation helpers for a future broker-owned materializer.
 
 Candidate evidence that is internally consistent but lacks the external
@@ -390,7 +391,7 @@ The provider configuration is closed:
   and
 - a bounded lifecycle timeout.
 
-Current runner product schema v7 selects exactly one provider. The Windows
+Current runner product schema v8 selects exactly one provider. The Windows
 provider requires one or more digest-attested environment profiles with:
 
 - an immutable digest-qualified Windows image reference;
@@ -399,8 +400,9 @@ provider requires one or more digest-attested environment profiles with:
   artifacts;
 - a Windows keepalive executable and literal argument vector;
 - an in-container Windows workspace root;
-- exact `pwsh.exe`, `powershell.exe`, `cmd.exe`, `tar.exe`, Automata SHA-256
-  helper, and configured Node-generation paths located in the image; and
+- exact `pwsh.exe`, `powershell.exe`, `cmd.exe`, Automata SHA-256 helper, and
+  configured Node-generation paths located in the image. GNU tar stays absent
+  while Windows action materialization is unsupported; and
 - network disabled, writable container root, unprivileged execution, zero GPU,
   and zero claimed ephemeral-disk allocation.
 
@@ -801,6 +803,11 @@ and the broker can mutate only exact generation-bound Automata resources.
       SBOM, patch, revocation, and external Ed25519 promotion metadata.
 - [x] Keep checked-in fixtures explicitly candidate-only and withhold action
       and Node capabilities even after evidence promotion.
+- [x] Add a digest-pinned Server Core 2025 recipe, twice-verified tool
+      acquisition, reproducible local helper build, Hyper-V qualification
+      collector, canonical provenance/SBOM/patch/revocation assembler, and
+      external opaque-key-handle signing command. The pipeline publishes
+      nothing and cannot promote its checked-in candidate fixtures.
 - [ ] Define the exact Server Core host/image compatibility matrix.
 - [ ] Build a digest-pinned image containing guest executable and reviewed
       shells/tools without job-time mutable installation.
@@ -821,7 +828,7 @@ for each advertised profile.
 First-PR component scope:
 
 - [x] Add the explicit Windows Hyper-V container launch variant.
-- [x] Keep the current schema-v7 `windows_hyperv` configuration and remove
+- [x] Keep the current schema-v8 `windows_hyperv` configuration and remove
       `windows_native`.
 - [x] Require disabled network, unprivileged workload, writable container root,
       no services, zero GPU, and no ephemeral-disk claim.

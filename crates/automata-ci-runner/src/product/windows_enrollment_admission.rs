@@ -369,7 +369,6 @@ pub struct WindowsEnrollmentProbePolicy {
     powershell: TargetPath,
     cmd: TargetPath,
     python: Option<TargetPath>,
-    tar: TargetPath,
     sha256: TargetPath,
     node12: Option<TargetPath>,
     node16: Option<TargetPath>,
@@ -442,12 +441,6 @@ impl WindowsEnrollmentProbePolicy {
     #[must_use]
     pub const fn python(&self) -> Option<&TargetPath> {
         self.python.as_ref()
-    }
-
-    /// Returns the exact archive executable to probe.
-    #[must_use]
-    pub const fn tar(&self) -> &TargetPath {
-        &self.tar
     }
 
     /// Returns the exact SHA-256 helper executable to probe.
@@ -543,7 +536,6 @@ pub fn probe_windows_enrollment_request(
         probe.powershell.clone(),
         probe.cmd.clone(),
         probe.python.clone(),
-        probe.tar.clone(),
         probe.sha256.clone(),
         probe.node12.clone(),
         probe.node16.clone(),
@@ -772,10 +764,6 @@ fn windows_enrollment_probe_policy(
             .ok_or(WindowsEnrollmentAdmissionError::InvalidRequest)?
             .clone(),
         python: toolchain.python().cloned(),
-        tar: toolchain
-            .tar()
-            .ok_or(WindowsEnrollmentAdmissionError::InvalidRequest)?
-            .clone(),
         sha256: toolchain
             .sha256sum()
             .ok_or(WindowsEnrollmentAdmissionError::InvalidRequest)?
@@ -1209,8 +1197,6 @@ mod tests {
             cmd: automata_ci_execution::TargetPath::windows(r"C:\Windows\System32\cmd.exe")
                 .expect("cmd"),
             python: None,
-            tar: automata_ci_execution::TargetPath::windows(r"C:\Windows\System32\tar.exe")
-                .expect("tar"),
             sha256: automata_ci_execution::TargetPath::windows(
                 r"C:\automata\bin\automata-sha256.exe",
             )

@@ -40,7 +40,7 @@ use super::windows_image::{
 };
 
 /// Current on-disk runner product configuration schema.
-pub const RUNNER_PRODUCT_CONFIG_SCHEMA_VERSION: u16 = 7;
+pub const RUNNER_PRODUCT_CONFIG_SCHEMA_VERSION: u16 = 8;
 /// Hard ceiling applied before parsing a runner configuration document.
 pub const MAX_RUNNER_CONFIG_BYTES: usize = 256 * 1024;
 const PODMAN_RUNTIME_ROOT_NAME: &str = "automata-ci-podman";
@@ -2982,10 +2982,7 @@ impl RawToolchainConfig {
                         .python
                         .as_ref()
                         .is_none_or(|path| exact_windows_executable(path, "python.exe"))
-                    && config
-                        .tar
-                        .as_ref()
-                        .is_some_and(|path| exact_windows_executable(path, "tar.exe"))
+                    && config.tar.is_none()
                     && config
                         .sha256sum
                         .as_ref()

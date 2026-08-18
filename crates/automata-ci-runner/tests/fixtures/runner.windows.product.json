@@ -1,5 +1,5 @@
 {
-  "schema_version": 7,
+  "schema_version": 8,
   "runner_id": "6e561f8b-9098-418d-b573-d82f5c73006e",
   "control_endpoint": "https://127.0.0.1:9090/",
   "state": {
@@ -49,7 +49,7 @@
     "environment_profiles": [
       {
         "id": "automata.dev/windows-2025-x64-hyperv-v1",
-        "manifest_sha256": "8469373351b458633450cd4f28e24b18fa756832a7917c9d8ae2a82ad6241c23",
+        "manifest_sha256": "b9101ed7a45c49597920ae9fd7505cdafe8a924cd9c4e549f183e4564a88fa6f",
         "image": "registry.example/automata/windows-runner@sha256:1111111111111111111111111111111111111111111111111111111111111111",
         "keepalive_program": "C:\\automata\\guest\\automata-ci-sandbox-guest.exe",
         "keepalive_arguments": [
@@ -74,9 +74,9 @@
     "operation_timeout_seconds": 120,
     "image_contract": {
       "manifest_path": "C:\\ProgramData\\Automata\\images\\windows-server-2025-hyperv-v1\\manifest.json",
-          "manifest_sha256": "8469373351b458633450cd4f28e24b18fa756832a7917c9d8ae2a82ad6241c23",
+          "manifest_sha256": "b9101ed7a45c49597920ae9fd7505cdafe8a924cd9c4e549f183e4564a88fa6f",
       "lock_path": "C:\\ProgramData\\Automata\\images\\windows-server-2025-hyperv-v1\\image.lock.json",
-          "lock_sha256": "181bc78f2993a8221f0ab4aa6d01f53ef05b02ac1755ffd84c1c0abf0f3c6747",
+          "lock_sha256": "2592638daf5fd1db37ea712e3ef9822cb9c5f4206214d38033248741bb454e7e",
       "provenance_path": "C:\\ProgramData\\Automata\\images\\windows-server-2025-hyperv-v1\\provenance.json",
       "sbom_path": "C:\\ProgramData\\Automata\\images\\windows-server-2025-hyperv-v1\\sbom.spdx.json",
       "patch_report_path": "C:\\ProgramData\\Automata\\images\\windows-server-2025-hyperv-v1\\patch-report.json",
@@ -97,7 +97,7 @@
     "maximum_output_bytes": 16777216,
     "runner_root": "C:\\automata\\runner",
     "home": "C:\\automata\\home",
-    "path": "C:\\Program Files\\PowerShell\\7;C:\\automata\\tools\\tar;C:\\automata\\tools\\hash;C:\\automata\\externals\\node24;C:\\Windows\\System32;C:\\Windows",
+    "path": "C:\\Program Files\\PowerShell\\7;C:\\automata\\tools\\hash;C:\\automata\\externals\\node24;C:\\Windows\\System32;C:\\Windows",
     "temp": "C:\\automata\\temp",
     "tool_cache": "C:\\automata\\toolcache",
     "toolchain": {
@@ -108,7 +108,7 @@
       "powershell": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
       "cmd": "C:\\Windows\\System32\\cmd.exe",
       "install": null,
-      "tar": "C:\\automata\\tools\\tar\\tar.exe",
+      "tar": null,
       "sha256sum": "C:\\automata\\tools\\hash\\automata-sha256.exe",
       "node12": null,
       "node16": null,

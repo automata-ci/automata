@@ -9,9 +9,12 @@ image was built, signed, scanned, patched, or exercised on physical Windows
 hardware.
 
 Production promotion requires replacing the candidate values with outputs from
-the Windows image pipeline, deploying the exact files at the configured secure
-paths, and supplying an Ed25519 promotion envelope from an external authority.
+the production-shaped pipeline in
+`../windows-server-2025-hyperv/`, deploying the exact files at the configured
+secure paths, and supplying an Ed25519 promotion envelope from an external
+authority.
 The signed payload must accept all four evidence subjects and bind their exact
 digests, the manifest and lock, both image digests, and the revocation
-generation. Without that envelope the runner can verify this candidate for
-internal consistency but cannot compose or advertise action runtimes.
+generation. Even with that envelope, the runner remains shell-only: action
+runtimes and their archive tooling stay absent until a broker-owned
+retained-file-identity materializer is implemented.

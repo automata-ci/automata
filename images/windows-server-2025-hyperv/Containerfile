@@ -1,0 +1,34 @@
+# escape=`
+
+FROM mcr.microsoft.com/windows/servercore@sha256:2cd01bf7793879d5e1756b46045ea5dd61d040837e36d48c340f6e17d3263507
+
+SHELL ["C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command"]
+
+ARG AUTOMATA_SOURCE_COMMIT
+ARG AUTOMATA_SOURCE_LOCK_SHA256
+ARG AUTOMATA_BUILD_INPUTS_SHA256
+ARG SOURCE_DATE_EPOCH
+
+LABEL org.opencontainers.image.source="https://github.com/automata-ci/automata" `
+      org.opencontainers.image.revision="${AUTOMATA_SOURCE_COMMIT}" `
+      io.automata.environment-profile="automata.dev/windows-2025-x64-hyperv-v1" `
+      io.automata.windows-build-inputs.sha256="${AUTOMATA_BUILD_INPUTS_SHA256}" `
+      io.automata.windows-source-lock.sha256="${AUTOMATA_SOURCE_LOCK_SHA256}"
+
+COPY . C:/automata/build/
+
+RUN C:\automata\build\install-image.ps1 `
+        -ExpectedBuildInputsSha256 $env:AUTOMATA_BUILD_INPUTS_SHA256 `
+        -ExpectedSourceCommit $env:AUTOMATA_SOURCE_COMMIT `
+        -ExpectedSourceDateEpoch ([int64]$env:SOURCE_DATE_EPOCH); `
+    Remove-Item -LiteralPath C:\automata\build -Recurse -Force; `
+    $sourceTimestamp = [DateTimeOffset]::FromUnixTimeSeconds([int64]$env:SOURCE_DATE_EPOCH).UtcDateTime; `
+    (Get-Item -LiteralPath C:\automata).CreationTimeUtc = $sourceTimestamp; `
+    (Get-Item -LiteralPath C:\automata).LastAccessTimeUtc = $sourceTimestamp; `
+    (Get-Item -LiteralPath C:\automata).LastWriteTimeUtc = $sourceTimestamp
+
+USER ContainerUser
+WORKDIR C:\__w
+
+ENTRYPOINT ["C:\\automata\\guest\\automata-ci-sandbox-guest.exe"]
+CMD ["keepalive"]

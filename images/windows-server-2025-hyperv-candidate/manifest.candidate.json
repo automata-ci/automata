@@ -33,12 +33,6 @@
       "sha256": "5555555555555555555555555555555555555555555555555555555555555555"
     },
     {
-      "kind": "tar",
-      "path": "C:\\automata\\tools\\tar\\tar.exe",
-      "version": "candidate-gnu-tar",
-      "sha256": "6666666666666666666666666666666666666666666666666666666666666666"
-    },
-    {
       "kind": "sha256",
       "path": "C:\\automata\\tools\\hash\\automata-sha256.exe",
       "version": "candidate-automata-sha256-v1",
