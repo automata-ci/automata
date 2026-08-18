@@ -10,9 +10,6 @@ import {
 } from "../unicode";
 import { RENDER_REQUEST_LIMITS, utf8ByteLength } from "./limits";
 
-const CONTROL_CHARACTER_EXCEPT_TAB = /[\u0000-\u0008\u000a-\u001f\u007f-\u009f]/u;
-const BIDI_FORMATTING_CHARACTER =
-  /[\u061c\u200e-\u200f\u202a-\u202e\u2066-\u2069]/u;
 const GENERATED_CSRF_TOKEN = /^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/u;
 
 export type JsonRecord = Record<string, unknown>;
@@ -107,21 +104,6 @@ export function expectDisplayText(
   const text = expectString(value, path, maximumLength, 1);
   if (!hasVisibleDisplayCharacter(text) || hasForbiddenDisplayCharacter(text)) {
     invalid(path, "non-blank display text without control or bidi formatting characters");
-  }
-  return text;
-}
-
-export function expectLogText(
-  value: unknown,
-  path: string,
-  maximumLength: number,
-): string {
-  const text = expectString(value, path, maximumLength);
-  if (
-    CONTROL_CHARACTER_EXCEPT_TAB.test(text) ||
-    BIDI_FORMATTING_CHARACTER.test(text)
-  ) {
-    invalid(path, "printable log text with tabs but no control or bidi formatting characters");
   }
   return text;
 }

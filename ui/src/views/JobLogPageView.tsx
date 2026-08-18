@@ -76,7 +76,7 @@ export function JobLogPageView({ logs, model, shellUtility }: JobLogPageViewProp
   );
 }
 
-export function LogGroupPanel({ expanded, group, onToggle }: { readonly expanded: boolean; readonly group: LogGroupView; readonly onToggle: () => void }) {
+function LogGroupPanel({ expanded, group, onToggle }: { readonly expanded: boolean; readonly group: LogGroupView; readonly onToggle: () => void }) {
   const panelId = logGroupPanelId(group.id);
   return (
     <article className="log-group" data-state={group.conclusion ?? "running"}>
@@ -88,13 +88,13 @@ export function LogGroupPanel({ expanded, group, onToggle }: { readonly expanded
   );
 }
 
-export function LogLine({ line }: { readonly line: LiveLogLineRecord }) {
+function LogLine({ line }: { readonly line: LiveLogLineRecord }) {
   const number = line.fragment === null ? line.sequence : `${line.sequence}.${line.fragment}`;
   const id = `log-line-${number.replace(".", "-")}`;
   return <div className="log-line" data-channel={line.channel} id={id}><a aria-label={`Link to log line ${number}`} href={`#${id}`}>{number}</a><time dateTime={new Date(line.emittedAtMs).toISOString()}>{logTime(line.emittedAtMs)}</time><code>{line.text}</code></div>;
 }
 
-export function StreamState({ available, state, running }: { readonly available: boolean; readonly state: LogConnectionState; readonly running: boolean }) {
+function StreamState({ available, state, running }: { readonly available: boolean; readonly state: LogConnectionState; readonly running: boolean }) {
   const label = !available && !running ? "Unavailable" : state === "open" ? "Live" : state === "reconnecting" || state === "connecting" ? "Connecting" : state === "complete" ? "Complete" : state === "failed" ? "Failed" : running ? "Waiting" : "Loaded";
   return <span className="log-stream-state" data-state={state}><span aria-hidden="true" />{label}</span>;
 }

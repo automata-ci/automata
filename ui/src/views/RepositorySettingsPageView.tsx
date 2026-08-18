@@ -87,7 +87,7 @@ export function RepositorySettingsPageView({
   );
 }
 
-export function AudienceSummary({ policy }: { readonly policy: RepositoryPublicationPolicyModel }) {
+function AudienceSummary({ policy }: { readonly policy: RepositoryPublicationPolicyModel }) {
   return (
     <ul aria-label="Current access defaults" className="repository-settings__summary">
       {publicationResources.map((resource) => {
@@ -103,7 +103,7 @@ export function AudienceSummary({ policy }: { readonly policy: RepositoryPublica
   );
 }
 
-export function AudienceControls({
+function AudienceControls({
   onChange,
   policy,
 }: {

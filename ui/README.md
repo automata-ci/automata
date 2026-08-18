@@ -117,10 +117,10 @@ Node 24.19.0 baseline:
 
 | Metric | Baseline | Enforced floor | Headroom |
 | --- | ---: | ---: | ---: |
-| Statements | 93.54% | 93% | 0.54 points |
-| Branches | 84.42% | 84% | 0.42 points |
-| Functions | 97.22% | 96% | 1.22 points |
-| Lines | 93.75% | 93% | 0.75 points |
+| Statements | 93.74% | 93% | 0.74 points |
+| Branches | 84.67% | 84% | 0.67 points |
+| Functions | 97.43% | 96% | 1.43 points |
+| Lines | 93.91% | 93% | 0.91 points |
 
 CI runs this threshold check on Node 24.19.0; raise the floors after reviewed
 coverage improvements, and lower them only with a new reproducible baseline and

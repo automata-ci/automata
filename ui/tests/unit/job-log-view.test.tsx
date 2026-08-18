@@ -5,7 +5,7 @@ import { replayLogRecords, type LogGroupView } from "../../src/presenters/jobLog
 import { previewJobLog, previewJobLogRecords } from "../../src/preview/models";
 import { PREVIEW_PRIMARY_RUN_ID } from "../../src/preview/sampleData";
 import type { JobLogsViewState, LogConnectionState } from "../../src/viewModels/jobLogs";
-import { JobLogPageView, LogGroupPanel, LogLine, StreamState } from "../../src/views/JobLogPageView";
+import { JobLogPageView } from "../../src/views/JobLogPageView";
 
 describe("job log presentation states", () => {
   it.each([
@@ -21,7 +21,10 @@ describe("job log presentation states", () => {
     "labels availability=%s state=%s running=%s as %s",
     (available, state, running, label) => {
       expect(renderToStaticMarkup(
-        <StreamState available={available} running={running} state={state} />,
+        <JobLogPageView
+          logs={logs({ connection: state, logToolsAvailable: available, running })}
+          model={jobLogFixture()}
+        />,
       )).toContain(label);
     },
   );
@@ -48,14 +51,20 @@ describe("job log presentation states", () => {
       previewJobLogRecords(PREVIEW_PRIMARY_RUN_ID, null),
     ).ordered[0];
     if (group === undefined) throw new Error("preview job log has no group");
+    const model = jobLogFixture();
     expect(renderToStaticMarkup(
-      <LogGroupPanel expanded={false} group={group} onToggle={vi.fn()} />,
+      <JobLogPageView
+        logs={logs({ visibleGroups: [group] })}
+        model={model}
+      />,
     )).not.toContain("log-group__output");
     expect(renderToStaticMarkup(
-      <LogGroupPanel
-        expanded
-        group={{ ...group, lines: [] }}
-        onToggle={vi.fn()}
+      <JobLogPageView
+        logs={logs({
+          expanded: new Set([group.id]),
+          visibleGroups: [{ ...group, lines: [] }],
+        })}
+        model={model}
       />,
     )).toContain("No output");
 
@@ -69,14 +78,15 @@ describe("job log presentation states", () => {
       text: "fragmented",
       type: "line",
     };
-    expect(renderToStaticMarkup(<LogLine line={line} />)).toContain("7.2");
     expect(renderToStaticMarkup(
-      <LogGroupPanel
-        expanded
-        group={{ ...group, lines: [line] } satisfies LogGroupView}
-        onToggle={vi.fn()}
+      <JobLogPageView
+        logs={logs({
+          expanded: new Set([group.id]),
+          visibleGroups: [{ ...group, lines: [line] } satisfies LogGroupView],
+        })}
+        model={model}
       />,
-    )).toContain("fragmented");
+    )).toContain("7.2");
   });
 });
 

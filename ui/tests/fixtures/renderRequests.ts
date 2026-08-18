@@ -1,10 +1,10 @@
 import type { RenderRequest, ShellModel } from "../../src/models";
 
 export const PRIMARY_RUN_ID = "550e8400-e29b-41d4-a716-446655440000";
-export const SECONDARY_RUN_ID = "550e8400-e29b-41d4-a716-446655440001";
+const SECONDARY_RUN_ID = "550e8400-e29b-41d4-a716-446655440001";
 const CI_WORKFLOW_ID = "11111111-1111-4111-8111-11111111111a";
 const RELEASE_WORKFLOW_ID = "11111111-1111-4111-8111-11111111111b";
-export const PRIMARY_JOB_ID = "33333333-3333-4333-8333-33333333333c";
+const PRIMARY_JOB_ID = "33333333-3333-4333-8333-33333333333c";
 const SECONDARY_JOB_ID = "44444444-4444-4444-8444-44444444444d";
 const SOURCE_REPOSITORY_HREF = "https://github.com/automata-ci/automata";
 const PRIMARY_COMMIT = "26713a895eb6744012da74726e59230a259357c4";
@@ -459,7 +459,7 @@ export const repositorySettingsRequest: RenderRequest = {
 };
 
 export const REPOSITORY_SECRET_ID = "77777777-7777-4777-8777-777777777777";
-export const REPOSITORY_SECRET_CREATE_ID = "88888888-8888-4888-8888-888888888888";
+const REPOSITORY_SECRET_CREATE_ID = "88888888-8888-4888-8888-888888888888";
 const REPOSITORY_SECRET_CREATE_MUTATION_ID =
   "99999999-9999-4999-8999-999999999999";
 const REPOSITORY_SECRET_REPLACE_MUTATION_ID =
@@ -535,9 +535,9 @@ export const repositorySecretsRequest: RenderRequest = {
 };
 
 export const RBAC_USER_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-export const RBAC_SECOND_USER_ID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+const RBAC_SECOND_USER_ID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 export const RBAC_ROLE_ID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
-export const RBAC_BUILT_IN_ROLE_ID = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+const RBAC_BUILT_IN_ROLE_ID = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
 export const RBAC_BINDING_ID = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
 const RBAC_PROVIDER_BINDING_ID = "ffffffff-ffff-4fff-8fff-ffffffffffff";
 

@@ -1,6 +1,6 @@
 import { Icon } from "./Icon";
 
-export interface BreadcrumbItem {
+interface BreadcrumbItem {
   readonly href: string | null;
   readonly label: string;
 }

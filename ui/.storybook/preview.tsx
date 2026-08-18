@@ -1,27 +1,18 @@
-import type { Decorator, Preview } from "@storybook/react-vite";
+import { withThemeByDataAttribute } from "@storybook/addon-themes";
+import type { Preview, Renderer } from "@storybook/react-vite";
 import "../src/styles.css";
 
-const withTheme: Decorator = (Story, context) => {
-  const theme = context.globals.theme === "dark" ? "dark" : "light";
-  document.documentElement.dataset.theme = theme;
-  return <Story />;
-};
-
 const preview: Preview = {
-  decorators: [withTheme],
-  globalTypes: {
-    theme: {
-      description: "Automata color theme",
-      toolbar: {
-        dynamicTitle: true,
-        icon: "paintbrush",
-        items: [
-          { value: "light", title: "Light" },
-          { value: "dark", title: "Dark" },
-        ],
+  decorators: [
+    withThemeByDataAttribute<Renderer>({
+      themes: {
+        light: "light",
+        dark: "dark",
       },
-    },
-  },
+      defaultTheme: "light",
+      attributeName: "data-theme",
+    }),
+  ],
   initialGlobals: {
     theme: "light",
   },

@@ -7,7 +7,7 @@ import { Icon } from "./Icon";
 import { Pagination } from "./Pagination";
 import { StatusBadge } from "./StatusBadge";
 
-export interface RunNavigationJob {
+interface RunNavigationJob {
   readonly id: string;
   readonly href: string | null;
   readonly name: string;
