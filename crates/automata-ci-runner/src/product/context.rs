@@ -6,7 +6,7 @@ use automata_ci_core::{
     TrustPermissionAuthority, TrustResultsAuthority, TrustSecretAuthority, ValueSource,
 };
 use automata_ci_execution::{TargetPath, TargetPlatform};
-use automata_ci_expression_github::{
+use automata_ci_expression_actions::{
     GithubObject, GithubStatus, GithubValue, MapContext, NoExtensionFunctions,
 };
 use automata_ci_github_runtime::StepId as RuntimeStepId;

@@ -73,7 +73,7 @@ jobs:
             -p automata-ci-sandbox-podman \
             -p automata-ci-store-postgres \
             -p automata-ci-ui-renderer \
-            -p automata-ci-workflow-github \
+            -p automata-ci-workflow-actions \
             -p automata-ci-workflow-service
 
   postgres:

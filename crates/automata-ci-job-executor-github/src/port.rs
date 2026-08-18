@@ -1,7 +1,7 @@
 use std::{fmt, sync::Arc, time::SystemTime};
 
 use async_trait::async_trait;
-use automata_ci_action_github::JavascriptRuntime;
+use automata_ci_action_actions::JavascriptRuntime;
 use automata_ci_auth::secret::{SecretString, SharedSensitiveString};
 use automata_ci_core::{
     ActionReference, AttemptId, EnvironmentProfile, JobConclusion, JobContentReference,
@@ -10,7 +10,7 @@ use automata_ci_core::{
 use automata_ci_execution::{
     ExecutionArgv, SandboxEnvironment, ServiceContainerBindings, TargetPath, TargetPlatform,
 };
-use automata_ci_expression_github::{
+use automata_ci_expression_actions::{
     ExtensionFunctionResult, GithubEvaluationContext, GithubExpressionFunctionProvider,
     GithubStatus, GithubValue,
 };

@@ -24,7 +24,7 @@ use automata_ci_store::{
     ProviderDeliveryWorkflowConclusion, ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
     StoreError, WorkflowAdmissionIdempotency,
 };
-use automata_ci_workflow_github::{
+use automata_ci_workflow_actions::{
     CompilationDisposition, CompileWorkflowRequest, GithubChangedFiles, GithubEventMetadata,
     GithubWorkflowCompiler, GithubWorkflowFrontend, GithubWorkflowSourcePlan, ParseWorkflowRequest,
     RepositoryWorkflowDiscoveryLimits, SourceId, SourceOrigin, SourceProvenance,
@@ -769,7 +769,7 @@ impl GithubDeliveryWorkflowAdmissionProcessor {
     async fn finish_authenticated_event_compilation(
         &self,
         request: &GithubDeliveryWorkflowRequest<'_>,
-        report: automata_ci_workflow_github::CompilationReport,
+        report: automata_ci_workflow_actions::CompilationReport,
     ) -> Result<ProviderDeliveryWorkflowConclusion, GithubDeliveryWorkflowProcessorError> {
         match report.disposition() {
             CompilationDisposition::Accepted => {
@@ -1284,7 +1284,7 @@ fn compile(
     source_plan: &GithubWorkflowSourcePlan,
     event: WorkflowEventProvenance,
     metadata: GithubEventMetadata,
-) -> automata_ci_workflow_github::CompilationReport {
+) -> automata_ci_workflow_actions::CompilationReport {
     GithubWorkflowCompiler::new()
         .compile(CompileWorkflowRequest::new(source_plan, event).with_event_metadata(metadata))
 }

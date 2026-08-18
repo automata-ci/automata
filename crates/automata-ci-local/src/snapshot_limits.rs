@@ -1,4 +1,4 @@
-use automata_ci_workflow_github::RepositoryWorkflowDiscoveryLimits;
+use automata_ci_workflow_actions::RepositoryWorkflowDiscoveryLimits;
 
 // Capture retains bounded Git inventories and one expanded file inventory while
 // constructing one compressed archive. These local-only ceilings keep the peak

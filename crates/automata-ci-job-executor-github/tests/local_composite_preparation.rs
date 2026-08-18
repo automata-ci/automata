@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use automata_ci_action_github::{GithubActionMetadataDecoder, JavascriptRuntime};
+use automata_ci_action_actions::{GithubActionMetadataDecoder, JavascriptRuntime};
 use automata_ci_core::ActionReference;
 use automata_ci_execution::TargetPath;
 use automata_ci_job_executor_github::{
@@ -8,7 +8,7 @@ use automata_ci_job_executor_github::{
     PreparedActionExecution, PreparedBoolean, PreparedCompositeStep, PreparedValue,
     PreparedValueSegment,
 };
-use automata_ci_workflow_github::GithubConditionCompiler;
+use automata_ci_workflow_actions::GithubConditionCompiler;
 
 const COMPOSITE: &str = r#"
 name: Synthetic composite
@@ -67,7 +67,7 @@ fn prepared_fixture(source: &str) -> automata_ci_job_executor_github::PreparedLo
 #[allow(clippy::too_many_lines)] // One cross-action fixture table keeps order and scalar assertions adjacent.
 fn checkout_setup_and_artifact_fixtures_preserve_runner_input_contracts() {
     let checkout = prepared_fixture(include_str!(
-        "../../automata-ci-action-github/tests/fixtures/checkout-v6.0.2-de0fac2-action.yml"
+        "../../automata-ci-action-actions/tests/fixtures/checkout-v6.0.2-de0fac2-action.yml"
     ));
     let expected_checkout_inputs = [
         "repository",
@@ -138,7 +138,7 @@ fn checkout_setup_and_artifact_fixtures_preserve_runner_input_contracts() {
     ));
 
     let setup = prepared_fixture(include_str!(
-        "../../automata-ci-action-github/tests/fixtures/setup-node-v6-representative.yml"
+        "../../automata-ci-action-actions/tests/fixtures/setup-node-v6-representative.yml"
     ));
     let deprecated = setup
         .definition()
@@ -153,7 +153,7 @@ fn checkout_setup_and_artifact_fixtures_preserve_runner_input_contracts() {
     ));
 
     let artifact = prepared_fixture(include_str!(
-        "../../automata-ci-action-github/tests/fixtures/upload-artifact-v7-representative.yml"
+        "../../automata-ci-action-actions/tests/fixtures/upload-artifact-v7-representative.yml"
     ));
     let path = artifact
         .definition()

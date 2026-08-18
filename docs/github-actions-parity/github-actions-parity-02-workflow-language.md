@@ -130,7 +130,7 @@ are conformance-gate items, not unrecorded implementation assumptions.
 **Owner:** W. **Size:** L. **Dependencies:** FND-01.
 
 **Primary scope:** workflow expression compiler and
-`automata-ci-expression-github` evaluator.
+`automata-ci-expression-actions` evaluator.
 
 Tasks:
 

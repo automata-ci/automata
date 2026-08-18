@@ -8,7 +8,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use automata_ci_action_github::JavascriptRuntime;
+use automata_ci_action_actions::JavascriptRuntime;
 use automata_ci_blob::{
     BlobDescriptor, BlobKey, BlobPayload, BlobStoreError, BlobStoreErrorKind, ImmutableBlobStore,
     MediaType, MemoryBlobStore, PutBlobOutcome, VerifiedBlob,
@@ -61,7 +61,7 @@ use automata_ci_store::{
     SelectedLogicalJobOrchestration, StoreError, TenantScope, WorkflowRuntimePolicy,
     WorkflowRuntimePolicyPin, WorkflowRuntimePolicyRevision,
 };
-use automata_ci_workflow_github::{
+use automata_ci_workflow_actions::{
     CompileWorkflowRequest, GithubConditionCompiler, GithubConditionPhase, GithubWorkflowCompiler,
     GithubWorkflowFrontend, ParseWorkflowRequest, SourceId, SourceOrigin, SourceProvenance,
     WorkflowFrontend as _,

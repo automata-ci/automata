@@ -12,7 +12,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use automata_ci_action_github::JavascriptRuntime;
+use automata_ci_action_actions::JavascriptRuntime;
 use automata_ci_auth::secret::{SecretString, SharedSensitiveString};
 use automata_ci_core::{
     ActionReference, AttemptId, ContainerSpec, ContextValue, EnvironmentProfile,
@@ -37,7 +37,7 @@ use automata_ci_execution::{
     SandboxRecord, SandboxSpec, SandboxState, ServiceContainerBinding, ServiceContainerBindings,
     ServiceNetwork, ServicePortBinding, SignalRequest, TargetPath, TargetPlatform, WaitRequest,
 };
-use automata_ci_expression_github::{
+use automata_ci_expression_actions::{
     ExtensionFunctionResult, GithubEvaluationContext, GithubExpressionEvaluator,
     GithubExpressionFunctionProvider, GithubObject, GithubValue, MapContext,
 };
@@ -68,7 +68,7 @@ use automata_ci_runner_runtime::{
     ExecutionRequest, LogEvent,
 };
 use automata_ci_runner_spool::ProtectionId;
-use automata_ci_workflow_github::{GithubConditionCompiler, GithubConditionPhase};
+use automata_ci_workflow_actions::{GithubConditionCompiler, GithubConditionPhase};
 use bytes::Bytes;
 use flate2::{Compression, write::GzEncoder};
 use sha2::{Digest as _, Sha256};
@@ -2472,7 +2472,7 @@ impl GithubEvaluationContext for CancellingEvaluationContext {
         self.inner.named_value(name)
     }
 
-    fn status(&self) -> automata_ci_expression_github::GithubStatus {
+    fn status(&self) -> automata_ci_expression_actions::GithubStatus {
         self.inner.status()
     }
 

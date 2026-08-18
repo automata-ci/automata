@@ -14,12 +14,12 @@ ROOT = Path(__file__).resolve().parents[3]
 # rename from silently changing the workspace test topology.
 AGGREGATES = {
     "automata-ci-action": "action",
-    "automata-ci-action-github": "action_github",
+    "automata-ci-action-actions": "action_actions",
     "automata-ci-blob-s3": "blob_s3",
     "automata-ci-control": "control",
     "automata-ci-core": "core",
     "automata-ci-execution": "execution",
-    "automata-ci-expression-github": "expression_github",
+    "automata-ci-expression-actions": "expression_actions",
     "automata-ci-github": "github",
     "automata-ci-github-delivery": "github_delivery",
     "automata-ci-github-runtime": "github_runtime",
@@ -39,7 +39,7 @@ AGGREGATES = {
     "automata-ci-secret": "secret",
     "automata-ci-store": "store_contracts",
     "automata-ci-ui-renderer": "ui_renderer",
-    "automata-ci-workflow-github": "workflow_github",
+    "automata-ci-workflow-actions": "workflow_actions",
     "automata-ci-workflow-service": "workflow_service",
 }
 
@@ -47,7 +47,7 @@ AGGREGATES = {
 # siblings consolidate into the package aggregate named above.
 LIVE_TARGETS = {
     "automata-ci-action": "live_github_rustfs",
-    "automata-ci-action-github": "live_checkout_pipeline",
+    "automata-ci-action-actions": "live_checkout_pipeline",
     "automata-ci-github": "live_repository_snapshot",
     "automata-ci-sandbox-podman": "live_rootless",
     "automata-ci-workflow-service": "live_admission",

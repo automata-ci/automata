@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use automata_ci_core::Sha256Digest;
-use automata_ci_workflow_github::RepositoryWorkflowDiscoveryLimits;
+use automata_ci_workflow_actions::RepositoryWorkflowDiscoveryLimits;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 

@@ -5,7 +5,7 @@ use std::{
     sync::{Arc, atomic::Ordering},
 };
 
-use automata_ci_action_github::GithubActionMetadataDecoder;
+use automata_ci_action_actions::GithubActionMetadataDecoder;
 use automata_ci_core::{
     ActionReference, JobConclusion, MAX_STEP_ATTACHMENT_TEXT_BYTES, RuntimeBoolean, SemanticStep,
     Sha256Digest, StepAnnotationLevel, StepId, StepIr, ValueSource, ValueTemplate,
@@ -16,7 +16,7 @@ use automata_ci_job_executor_github::{
 use automata_ci_runner_runtime::{
     ExecutionCancellation, ExecutionEvents, ExecutorErrorKind, JobExecutor,
 };
-use automata_ci_workflow_github::{GithubConditionCompiler, GithubConditionPhase};
+use automata_ci_workflow_actions::{GithubConditionCompiler, GithubConditionPhase};
 use bytes::Bytes;
 use sha2::{Digest as _, Sha256};
 

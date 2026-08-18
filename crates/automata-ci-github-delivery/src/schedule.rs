@@ -39,7 +39,7 @@ use automata_ci_store::{
     RegisterGithubScheduleRegistry, RegisterGithubScheduledCheckSubject, RetryGithubScheduleFire,
     WorkflowAdmissionIdempotency,
 };
-use automata_ci_workflow_github::{
+use automata_ci_workflow_actions::{
     CompilationDisposition, CompileWorkflowRequest, GithubEventMetadata, GithubWorkflowCompiler,
     GithubWorkflowFrontend, ParseWorkflowRequest, RepositoryWorkflowDiscoveryLimits, SourceId,
     SourceOrigin, SourceProvenance, WorkflowFrontend as _, discover_github_delivery_workflows,

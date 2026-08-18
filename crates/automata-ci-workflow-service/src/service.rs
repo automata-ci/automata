@@ -14,7 +14,7 @@ use automata_ci_core::{
     MAX_LOGICAL_FIELD_BYTES, OutputSensitivity, PermissionLevel, PlanSourceOrigin, Sha256Digest,
     WorkflowJobKey,
 };
-use automata_ci_expression_github::{
+use automata_ci_expression_actions::{
     GithubExpressionEvaluator, GithubObject, GithubStatus, GithubValue, MapContext,
 };
 use automata_ci_protocol::ProtocolLimits;

@@ -109,7 +109,7 @@ all work packages at once.
 
 These files and contracts are merge hotspots. Assign one owner at a time.
 
-- `crates/automata-ci-workflow-github/src/compiler/logical.rs`: lane W.
+- `crates/automata-ci-workflow-actions/src/compiler/logical.rs`: lane W.
 - `crates/automata-ci-workflow-service/src/logical_projection.rs`: lane S,
   except for an interface PR explicitly handed to another lane.
 - `crates/automata-ci-workflow-service/src/orchestration.rs`: lane S while

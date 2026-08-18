@@ -2,13 +2,13 @@ mod support;
 
 use std::sync::Arc;
 
-use automata_ci_action_github::GithubActionMetadataDecoder;
+use automata_ci_action_actions::GithubActionMetadataDecoder;
 use automata_ci_core::{ActionReference, JobConclusion, LogChannel, Sha256Digest};
 use automata_ci_job_executor_github::{
     CheckedOutLocalActionPreparer, LocalActionPreparationRequest, PreparedAction,
 };
 use automata_ci_runner_runtime::{ExecutionCancellation, ExecutionEvents, JobExecutor};
-use automata_ci_workflow_github::GithubConditionCompiler;
+use automata_ci_workflow_actions::GithubConditionCompiler;
 use bytes::Bytes;
 use sha2::{Digest as _, Sha256};
 

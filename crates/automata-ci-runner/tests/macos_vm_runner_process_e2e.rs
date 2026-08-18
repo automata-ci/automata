@@ -45,7 +45,7 @@ use automata_ci_runner_transport::{
     RunnerControlHandler, RunnerControlServer, ServerTlsConfig, TransportLimits,
 };
 #[cfg(target_os = "macos")]
-use automata_ci_workflow_github::{GithubConditionCompiler, GithubConditionPhase};
+use automata_ci_workflow_actions::{GithubConditionCompiler, GithubConditionPhase};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use rcgen::{
     BasicConstraints, CertificateParams, CertifiedIssuer, DnType, ExtendedKeyUsagePurpose, IsCa,

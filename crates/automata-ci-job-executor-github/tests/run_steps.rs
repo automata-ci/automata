@@ -11,7 +11,7 @@ use automata_ci_github_runtime::CommandFileKind;
 use automata_ci_runner_runtime::{
     ExecutionCancellation, ExecutionEvents, ExecutorErrorKind, JobExecutor,
 };
-use automata_ci_workflow_github::{GithubConditionCompiler, GithubConditionPhase};
+use automata_ci_workflow_actions::{GithubConditionCompiler, GithubConditionPhase};
 
 use support::{
     Fixture, PHASE_FILE_ENVIRONMENT_NAMES, PhaseResponse, SECRET, credential_free_envelope,

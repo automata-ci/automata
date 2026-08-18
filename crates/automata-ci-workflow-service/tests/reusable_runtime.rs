@@ -25,7 +25,7 @@ use automata_ci_store::{
     ReusableWorkflowRuntimeStoreError, ReusableWorkflowSecretBindingEvidence, TenantScope,
     WorkflowRuntimePolicy, WorkflowRuntimePolicyPin, WorkflowRuntimePolicyRevision,
 };
-use automata_ci_workflow_github::{
+use automata_ci_workflow_actions::{
     CompileWorkflowRequest, GithubWorkflowCompiler, GithubWorkflowFrontend, ParseWorkflowRequest,
     SourceId, SourceOrigin, SourceProvenance, WorkflowFrontend as _,
 };

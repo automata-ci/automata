@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, fmt};
 
-use automata_ci_action_github::JavascriptRuntime;
+use automata_ci_action_actions::JavascriptRuntime;
 use automata_ci_core::EnvironmentProfile;
 use automata_ci_execution::{ExecutionArgv, SandboxEnvironment, TargetPath, TargetPlatform};
 

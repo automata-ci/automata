@@ -2,7 +2,7 @@
 resolver = "3"
 members = [
     "crates/automata-ci-action",
-    "crates/automata-ci-action-github",
+    "crates/automata-ci-action-actions",
     "crates/automata-ci",
     "crates/automata-ci-auth",
     "crates/automata-ci-auth-postgres",
@@ -13,7 +13,7 @@ members = [
     "crates/automata-ci-core",
     "crates/automata-ci-credential-github",
     "crates/automata-ci-execution",
-    "crates/automata-ci-expression-github",
+    "crates/automata-ci-expression-actions",
     "crates/automata-ci-github",
     "crates/automata-ci-github-permissions",
     "crates/automata-ci-github-delivery",
@@ -52,7 +52,7 @@ members = [
     "crates/automata-ci-store-postgres",
     "crates/automata-ci-tls",
     "crates/automata-ci-ui-renderer",
-    "crates/automata-ci-workflow-github",
+    "crates/automata-ci-workflow-actions",
     "crates/automata-ci-workflow-service",
     "crates/automata-ci-windows-file-security",
 ]
@@ -82,7 +82,7 @@ bollard = { version = "=0.21.0", default-features = false, features = ["pipe"] }
 automata-ci-auth = { path = "crates/automata-ci-auth", version = "0.1.0" }
 automata-ci-auth-postgres = { path = "crates/automata-ci-auth-postgres", version = "0.1.0" }
 automata-ci-action = { path = "crates/automata-ci-action", version = "0.1.0" }
-automata-ci-action-github = { path = "crates/automata-ci-action-github", version = "0.1.0" }
+automata-ci-action-actions = { path = "crates/automata-ci-action-actions", version = "0.1.0" }
 automata-ci-blob = { path = "crates/automata-ci-blob", version = "0.1.0" }
 automata-ci-blob-s3 = { path = "crates/automata-ci-blob-s3", version = "0.1.0" }
 automata-ci-build-support = { path = "crates/automata-ci-build-support", version = "0.1.0" }
@@ -90,7 +90,7 @@ automata-ci-control = { path = "crates/automata-ci-control", version = "0.1.0" }
 automata-ci-core = { path = "crates/automata-ci-core", version = "0.1.0" }
 automata-ci-credential-github = { path = "crates/automata-ci-credential-github", version = "0.1.0" }
 automata-ci-execution = { path = "crates/automata-ci-execution", version = "0.1.0" }
-automata-ci-expression-github = { path = "crates/automata-ci-expression-github", version = "0.1.0" }
+automata-ci-expression-actions = { path = "crates/automata-ci-expression-actions", version = "0.1.0" }
 automata-ci-github = { path = "crates/automata-ci-github", version = "0.1.0" }
 automata-ci-github-permissions = { path = "crates/automata-ci-github-permissions", version = "0.1.0" }
 automata-ci-github-delivery = { path = "crates/automata-ci-github-delivery", version = "0.1.0" }
@@ -127,7 +127,7 @@ automata-ci-store = { path = "crates/automata-ci-store", version = "0.1.0" }
 automata-ci-store-postgres = { path = "crates/automata-ci-store-postgres", version = "0.1.0" }
 automata-ci-tls = { path = "crates/automata-ci-tls", version = "0.1.0" }
 automata-ci-ui-renderer = { path = "crates/automata-ci-ui-renderer", version = "0.1.0" }
-automata-ci-workflow-github = { path = "crates/automata-ci-workflow-github", version = "0.1.0" }
+automata-ci-workflow-actions = { path = "crates/automata-ci-workflow-actions", version = "0.1.0" }
 automata-ci-workflow-service = { path = "crates/automata-ci-workflow-service", version = "0.1.0" }
 automata-ci-windows-file-security = { path = "crates/automata-ci-windows-file-security", version = "0.1.0" }
 axum = { version = "0.8.4", features = ["http1", "json", "tokio"] }

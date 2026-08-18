@@ -454,7 +454,7 @@ pub fn windows_script_arguments(
 mod tests {
     use std::borrow::Cow;
 
-    use automata_ci_action_github::JavascriptRuntime;
+    use automata_ci_action_actions::JavascriptRuntime;
     use automata_ci_core::{ShellTemplate, ValueTemplate};
     use automata_ci_execution::{ExecutionArgv, TargetPath, TargetPlatform};
     use static_assertions::assert_not_impl_any;

@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use automata_ci_action::{
     ActionBundleLimits, ActionResolver, ImmutableActionResolver, ObjectActionReferenceIndex,
 };
-use automata_ci_action_github::{GithubActionMetadataDecoder, GithubActionMetadataLimits};
+use automata_ci_action_actions::{GithubActionMetadataDecoder, GithubActionMetadataLimits};
 use automata_ci_auth::{
     authorization::AuthorizationContext,
     github::GithubEndpoints,
@@ -163,7 +163,7 @@ use crate::app::{
     workflow_dispatch_api::{WorkflowDispatchApiBackend, workflow_dispatch_api_router},
     workflow_rerun_api::{WorkflowRerunApiBackend, workflow_rerun_api_router},
 };
-use automata_ci_workflow_github::GithubConditionCompiler;
+use automata_ci_workflow_actions::GithubConditionCompiler;
 
 use super::human_auth::HumanAuthRuntime;
 use super::installation_setup::InstallationSetupService;

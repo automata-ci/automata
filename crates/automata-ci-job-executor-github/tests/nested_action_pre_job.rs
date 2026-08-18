@@ -5,7 +5,7 @@ use std::{
     sync::Arc,
 };
 
-use automata_ci_action_github::{GithubActionMetadataDecoder, JavascriptRuntime};
+use automata_ci_action_actions::{GithubActionMetadataDecoder, JavascriptRuntime};
 use automata_ci_core::{
     ActionReference, JobConclusion, RuntimeBoolean, SemanticStep, Sha256Digest, StepId, StepIr,
     ValueTemplate,
@@ -16,7 +16,7 @@ use automata_ci_job_executor_github::{
     PreparedActionDefinition, PreparedActionExecution, PreparedJavascriptAction,
 };
 use automata_ci_runner_runtime::{ExecutionCancellation, ExecutionEvents, JobExecutor};
-use automata_ci_workflow_github::{GithubConditionCompiler, GithubConditionPhase};
+use automata_ci_workflow_actions::{GithubConditionCompiler, GithubConditionPhase};
 use bytes::Bytes;
 use sha2::{Digest as _, Sha256};
 

@@ -45,7 +45,7 @@ use automata_ci_store::{
     RegisterProviderDeliveryWorkflowInventory, RejectProviderDelivery,
     RenewedProviderDeliveryClaim, ResolveGithubRepositoryDispatch, RetryProviderDelivery,
 };
-use automata_ci_workflow_github::{
+use automata_ci_workflow_actions::{
     RepositoryWorkflowDiscoveryError, RepositoryWorkflowDiscoveryFailure,
     RepositoryWorkflowDiscoveryLimits, RepositoryWorkflowDiscoveryOutcome,
     discover_github_delivery_workflows,

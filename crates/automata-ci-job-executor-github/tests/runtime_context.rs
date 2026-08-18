@@ -17,7 +17,7 @@ use automata_ci_core::{
     Sha256Digest, ShellTemplate, StepId, StepIr, StrategyContext, ValueTemplate,
     ValueTemplateSegment,
 };
-use automata_ci_expression_github::{GithubObject, GithubValue, MapContext};
+use automata_ci_expression_actions::{GithubObject, GithubValue, MapContext};
 use automata_ci_job_executor_github::{
     GithubContextPort, GithubContextRequest, GithubContextSnapshot, JobContentPort, PortError,
     PortErrorKind, SecretCustodyAcknowledger,
@@ -26,7 +26,7 @@ use automata_ci_protocol::ProtocolLimits;
 use automata_ci_runner_runtime::{
     ExecutionCancellation, ExecutionEvents, ExecutorError, ExecutorErrorKind, JobExecutor,
 };
-use automata_ci_workflow_github::{GithubConditionCompiler, GithubConditionPhase};
+use automata_ci_workflow_actions::{GithubConditionCompiler, GithubConditionPhase};
 use bytes::Bytes;
 use tokio_util::sync::CancellationToken;
 

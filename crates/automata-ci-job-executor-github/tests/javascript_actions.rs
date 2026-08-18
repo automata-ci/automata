@@ -2,7 +2,7 @@ mod support;
 
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
-use automata_ci_action_github::GithubActionMetadataDecoder;
+use automata_ci_action_actions::GithubActionMetadataDecoder;
 use automata_ci_core::{ActionReference, JobConclusion, LogChannel, Sha256Digest, ValueSource};
 use automata_ci_execution::{
     EnvironmentName, EnvironmentValue, EnvironmentVariable, ExecutionEnvironment,
@@ -12,7 +12,7 @@ use automata_ci_job_executor_github::{
     CheckedOutLocalActionPreparer, LocalActionPreparationRequest, PreparedAction,
 };
 use automata_ci_runner_runtime::{ExecutionCancellation, ExecutionEvents, JobExecutor};
-use automata_ci_workflow_github::{GithubConditionCompiler, GithubConditionPhase};
+use automata_ci_workflow_actions::{GithubConditionCompiler, GithubConditionPhase};
 use bytes::Bytes;
 use sha2::{Digest as _, Sha256};
 
