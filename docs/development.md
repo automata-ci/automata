@@ -148,6 +148,19 @@ cargo test -p automata-ci-runner --locked \
   --ignored --test-threads=1
 ```
 
+On Apple Silicon, `./scripts/ci/run-macos-integration-checks.sh` composes the
+six RustFS contracts above with the exact artifact/cache client real-store
+acceptance. In addition to the database and S3 variables, set the three pinned
+action roots and module paths named by
+`exact_client_real_store.rs`: `AUTOMATA_TEST_UPLOAD_ARTIFACT_ACTION_ROOT`,
+`AUTOMATA_TEST_ACTIONS_ARTIFACT_MODULE`,
+`AUTOMATA_TEST_DOWNLOAD_ARTIFACT_ACTION_ROOT`,
+`AUTOMATA_TEST_ACTIONS_DOWNLOAD_ARTIFACT_MODULE`,
+`AUTOMATA_TEST_CACHE_ACTION_ROOT`, and
+`AUTOMATA_TEST_ACTIONS_CACHE_MODULE`. The gate checks the platform and pinned
+Node release, bounds every test to one thread, and always removes its complete
+PostgreSQL namespace. `--plan` prints the credential-free command matrix.
+
 The coverage runner checks the filtered runner probe listing against exact test
 identities in the policy and against every ignored function in its source file,
 so adding an ignored test outside the current module filter fails closed.
