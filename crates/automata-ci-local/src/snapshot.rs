@@ -3445,7 +3445,7 @@ mod tests {
 
     impl Fixture {
         fn new() -> Self {
-            let root = std::env::temp_dir().join(format!("als-{}", Uuid::new_v4().simple()));
+            let root = Self::temporary_root("als-");
             fs::create_dir(&root).expect("create fixture root");
             let fixture = Self { root };
             fixture.git(&["init", "--quiet"]);
@@ -3455,7 +3455,7 @@ mod tests {
         }
 
         fn clone_from(source: &Path) -> Self {
-            let root = std::env::temp_dir().join(format!("als-clone-{}", Uuid::new_v4().simple()));
+            let root = Self::temporary_root("als-clone-");
             let output = Command::new("git")
                 .args(["clone", "--quiet"])
                 .arg(source)
@@ -3464,6 +3464,13 @@ mod tests {
                 .expect("clone fixture");
             assert!(output.status.success(), "git clone failed");
             Self { root }
+        }
+
+        fn temporary_root(prefix: &str) -> PathBuf {
+            let identifier = Uuid::new_v4().simple().to_string();
+            // One fixture creates a pathname Unix socket. Keep its randomized
+            // directory component short enough for Darwin's 103-byte limit.
+            std::env::temp_dir().join(format!("{prefix}{}", &identifier[..16]))
         }
 
         fn path(&self) -> &Path {
