@@ -22,7 +22,7 @@ use crate::{
     template::{VerifiedTemplate, verify_helper},
 };
 
-const HOST_HELPER_PROTOCOL_VERSION: u16 = 1;
+const HOST_HELPER_PROTOCOL_VERSION: u16 = 2;
 const CONTROL_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const TRANSPORT_GRACE: Duration = Duration::from_secs(10);
 const PREPARE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -59,6 +59,7 @@ struct LaunchRequest<'a> {
     handshake_nonce: &'a str,
     boot_timeout_millis: u64,
     stop_timeout_millis: u64,
+    runtime_proxy_socket: Option<&'a Path>,
 }
 
 #[derive(Deserialize)]
@@ -174,6 +175,9 @@ impl VmProcess {
             handshake_nonce: &nonce,
             boot_timeout_millis: duration_millis(options.boot_timeout())?,
             stop_timeout_millis: duration_millis(options.stop_timeout())?,
+            // The transport is present in protocol 2 but remains closed until
+            // the runner supplies an attempt-scoped, route-restricted broker.
+            runtime_proxy_socket: None,
         };
         write_json_frame(&mut input, &request)?;
         let response = read_frame_controlled(
