@@ -273,15 +273,19 @@ Remaining tasks:
 - [x] Implement the `macos_virtualization` provider with an attested macOS 15
   ARM64 template, private guest protocol, APFS clone cleanup, resource
   enforcement, and self-hosted physical-machine acceptance.
-- [ ] Keep action steps, containers, GPUs, Intel hosts, signing jobs,
-  job-scoped Keychains, and broader Xcode profiles out of the initial slice;
-  gate each future addition separately.
+- [x] Gate JavaScript action generations on exact configured Node paths and
+  startup execution probes inside a disposable VM; admit repository/composite
+  materialization only with the macOS `install`, `tar`, and `shasum` tools.
+- [ ] Keep container actions, job/service containers, GPUs, Intel hosts,
+  signing jobs, job-scoped Keychains, and broader Xcode profiles gated as
+  separate future additions.
 
 Acceptance:
 
 - [ ] The shipped VM runner on Apple Silicon macOS 15 reports
   `runner.os=macOS` and `runner.arch=ARM64`, completes zero-resource Bash and
-  `sh` jobs, and rejects actions, services, and containers before launch.
+  `sh` jobs plus pinned Node 20/24 repository actions, and rejects services and
+  containers before launch.
 - [ ] Self-hosted macOS 15 differential fixtures cover stable environment,
   working-directory, command-file, output, timeout, cancellation, and
   conclusion behavior.

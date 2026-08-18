@@ -74,7 +74,7 @@
     "maximum_output_bytes": 16777216,
     "runner_root": "/Users/automata-job/runner",
     "home": "/Users/automata-job",
-    "path": "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+    "path": "/Library/Automata/externals/node24/bin:/Library/Automata/externals/node20/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
     "temp": "/Users/automata-job/tmp",
     "tool_cache": "/Users/automata-job/tool-cache",
     "toolchain": {
@@ -89,8 +89,8 @@
       "sha256sum": "/usr/bin/shasum",
       "node12": null,
       "node16": null,
-      "node20": null,
-      "node24": null
+      "node20": "/Library/Automata/externals/node20/bin/node",
+      "node24": "/Library/Automata/externals/node24/bin/node"
     }
   },
   "object_store": {

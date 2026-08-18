@@ -2,10 +2,22 @@ import Darwin
 import Foundation
 
 private let maximumFrameBytes = 32 * 1024 * 1024
-private let guestProtocol: UInt16 = 2
+private let guestProtocol: UInt16 = 3
 
-private enum BridgeFailure: Error {
-  case rejected
+private enum BridgeFailure: String, Error {
+  case guestClientExit = "guest_client_exit"
+  case guestClientInput = "guest_client_input"
+  case guestClientLaunch = "guest_client_launch"
+  case guestClientResponse = "guest_client_response"
+  case invalidArguments = "invalid_arguments"
+  case requestEnvelope = "request_envelope"
+  case requestFrame = "request_frame"
+  case requestRejected = "request_rejected"
+  case responseWrite = "response_write"
+  case socketBind = "socket_bind"
+  case socketCreate = "socket_create"
+  case socketListen = "socket_listen"
+  case socketAccept = "socket_accept"
 }
 
 private struct RequestEnvelope: Decodable {
@@ -23,9 +35,14 @@ private func portablePort(_ value: String) -> UInt32? {
   return port
 }
 
-private func listen(port: UInt32) -> Int32? {
+private func diagnose(_ failure: BridgeFailure) {
+  let message = Data("automata vsock bridge rejected: \(failure.rawValue)\n".utf8)
+  try? FileHandle.standardError.write(contentsOf: message)
+}
+
+private func listen(port: UInt32) throws -> Int32 {
   let descriptor = socket(AF_VSOCK, SOCK_STREAM, 0)
-  guard descriptor >= 0 else { return nil }
+  guard descriptor >= 0 else { throw BridgeFailure.socketCreate }
   _ = fcntl(descriptor, F_SETFD, FD_CLOEXEC)
   var address = sockaddr_vm()
   address.svm_len = UInt8(MemoryLayout<sockaddr_vm>.size)
@@ -37,9 +54,13 @@ private func listen(port: UInt32) -> Int32? {
       Darwin.bind(descriptor, $0, socklen_t(MemoryLayout<sockaddr_vm>.size))
     }
   }
-  guard bound == 0, Darwin.listen(descriptor, 8) == 0 else {
+  guard bound == 0 else {
     close(descriptor)
-    return nil
+    throw BridgeFailure.socketBind
+  }
+  guard Darwin.listen(descriptor, 8) == 0 else {
+    close(descriptor)
+    throw BridgeFailure.socketListen
   }
   return descriptor
 }
@@ -95,14 +116,27 @@ private func forward(
   client.environment = [:]
   client.standardInput = input
   client.standardOutput = output
-  client.standardError = FileHandle.nullDevice
-  try client.run()
-  try input.fileHandleForWriting.write(contentsOf: frame)
-  try input.fileHandleForWriting.close()
-  let response = try readFrame(output.fileHandleForReading)
+  client.standardError = FileHandle.standardError
+  do {
+    try client.run()
+  } catch {
+    throw BridgeFailure.guestClientLaunch
+  }
+  do {
+    try input.fileHandleForWriting.write(contentsOf: frame)
+    try input.fileHandleForWriting.close()
+  } catch {
+    throw BridgeFailure.guestClientInput
+  }
+  let response: Data
+  do {
+    response = try readFrame(output.fileHandleForReading)
+  } catch {
+    throw BridgeFailure.guestClientResponse
+  }
   client.waitUntilExit()
   guard client.terminationReason == .exit, client.terminationStatus == 0 else {
-    throw CocoaError(.fileReadUnknown)
+    throw BridgeFailure.guestClientExit
   }
   return response
 }
@@ -110,14 +144,28 @@ private func forward(
 private func serve(listener: Int32, guestClient: String, unixSocket: String) -> Never {
   var configureFrame: Data?
   var configuredLimit: UInt32?
+  var diagnosed = Set<BridgeFailure>()
   while true {
     let connection = accept(listener, nil, nil)
-    if connection < 0 { continue }
+    if connection < 0 {
+      if diagnosed.insert(.socketAccept).inserted { diagnose(.socketAccept) }
+      continue
+    }
     _ = fcntl(connection, F_SETFD, FD_CLOEXEC)
     let handle = FileHandle(fileDescriptor: connection, closeOnDealloc: true)
     do {
-      let request = try readFrame(handle)
-      let envelope = try requestEnvelope(request)
+      let request: Data
+      do {
+        request = try readFrame(handle)
+      } catch {
+        throw BridgeFailure.requestFrame
+      }
+      let envelope: RequestEnvelope
+      do {
+        envelope = try requestEnvelope(request)
+      } catch {
+        throw BridgeFailure.requestEnvelope
+      }
       let response: Data
       switch envelope.operation {
       case "hello":
@@ -127,17 +175,17 @@ private func serve(listener: Int32, guestClient: String, unixSocket: String) -> 
           limit > 0,
           configuredLimit == nil || configuredLimit == limit
         else {
-          throw BridgeFailure.rejected
+          throw BridgeFailure.requestRejected
         }
         response = try forward(request, guestClient: guestClient, unixSocket: unixSocket)
         guard configuredResponse(response) else {
-          throw BridgeFailure.rejected
+          throw BridgeFailure.requestRejected
         }
         configureFrame = request
         configuredLimit = limit
       default:
         guard let configureFrame else {
-          throw BridgeFailure.rejected
+          throw BridgeFailure.requestRejected
         }
         let configured = try forward(
           configureFrame,
@@ -145,12 +193,20 @@ private func serve(listener: Int32, guestClient: String, unixSocket: String) -> 
           unixSocket: unixSocket
         )
         guard configuredResponse(configured) else {
-          throw BridgeFailure.rejected
+          throw BridgeFailure.requestRejected
         }
         response = try forward(request, guestClient: guestClient, unixSocket: unixSocket)
       }
-      try handle.write(contentsOf: response)
-    } catch {}
+      do {
+        try handle.write(contentsOf: response)
+      } catch {
+        throw BridgeFailure.responseWrite
+      }
+    } catch let failure as BridgeFailure {
+      if diagnosed.insert(failure).inserted { diagnose(failure) }
+    } catch {
+      if diagnosed.insert(.requestRejected).inserted { diagnose(.requestRejected) }
+    }
     try? handle.close()
   }
 }
@@ -165,12 +221,20 @@ private func main() -> Int32 {
     arguments[4].hasPrefix("/"),
     arguments[6].hasPrefix("/"),
     access(arguments[4], X_OK) == 0,
-    geteuid() == 0,
-    let listener = listen(port: port)
+    geteuid() == 0
   else {
+    diagnose(.invalidArguments)
     return 64
   }
-  serve(listener: listener, guestClient: arguments[4], unixSocket: arguments[6])
+  do {
+    let listener = try listen(port: port)
+    serve(listener: listener, guestClient: arguments[4], unixSocket: arguments[6])
+  } catch let failure as BridgeFailure {
+    diagnose(failure)
+  } catch {
+    diagnose(.requestRejected)
+  }
+  return 70
 }
 
 exit(main())

@@ -907,7 +907,7 @@ fn admit_configured_environment_profiles(
             )
             .map_err(|_| RunnerProductError::ProviderConfiguration)?,
         RunnerProviderConfig::MacosVirtualization(_) => policy
-            .with_virtualized_macos_shells(
+            .with_virtualized_macos_tools(
                 config.executor().runner_root().clone(),
                 toolchain
                     .bash()
@@ -919,6 +919,22 @@ fn admit_configured_environment_profiles(
                     .clone(),
                 toolchain.python().cloned(),
                 toolchain.pwsh().cloned(),
+                toolchain
+                    .install()
+                    .ok_or(RunnerProductError::ProviderConfiguration)?
+                    .clone(),
+                toolchain
+                    .tar()
+                    .ok_or(RunnerProductError::ProviderConfiguration)?
+                    .clone(),
+                toolchain
+                    .sha256sum()
+                    .ok_or(RunnerProductError::ProviderConfiguration)?
+                    .clone(),
+                toolchain.node12().cloned(),
+                toolchain.node16().cloned(),
+                toolchain.node20().cloned(),
+                toolchain.node24().cloned(),
             )
             .map_err(|_| RunnerProductError::ProviderConfiguration)?,
         RunnerProviderConfig::Podman(_)

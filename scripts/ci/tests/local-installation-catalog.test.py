@@ -53,6 +53,18 @@ def rust_string_constant(relative_path: str, name: str) -> str:
     return match.group(1)
 
 
+def swift_integer_constant(relative_path: str, name: str) -> int:
+    source = (REPOSITORY_ROOT / relative_path).read_text(encoding="utf-8")
+    match = re.search(
+        rf"^private let {re.escape(name)}: UInt16 = ([0-9][0-9_]*)$",
+        source,
+        flags=re.MULTILINE,
+    )
+    if match is None:
+        raise AssertionError(f"could not resolve Swift constant {name}")
+    return int(match.group(1).replace("_", ""))
+
+
 class LocalInstallationCatalogContract(unittest.TestCase):
     def setUp(self) -> None:
         self.release = {
@@ -210,6 +222,16 @@ class LocalInstallationCatalogContract(unittest.TestCase):
                 "GUEST_PROTOCOL_VERSION",
             ),
         )
+        for swift_source in (
+            "crates/automata-ci-sandbox-macos/swift/Sources/"
+            "AutomataMacOSTemplateTool/main.swift",
+            "crates/automata-ci-sandbox-macos/swift/Sources/"
+            "AutomataMacOSVsockBridge/main.swift",
+        ):
+            self.assertEqual(
+                source["images"]["sandbox-guest"]["runtime"]["guest_protocol"],
+                swift_integer_constant(swift_source, "guestProtocol"),
+            )
         self.assertEqual(
             runner["maximum_parallel_jobs"],
             rust_integer_constant(

@@ -4,10 +4,25 @@
 use std::{path::PathBuf, time::Duration};
 
 use automata_ci_execution::{ProviderErrorKind, Sha256Digest};
+use automata_ci_sandbox_guest::GUEST_PROTOCOL_VERSION;
 use automata_ci_sandbox_macos::{MacosVirtualizationProvider, MacosVirtualizationProviderOptions};
 use static_assertions::assert_impl_all;
 
 assert_impl_all!(MacosVirtualizationProvider: Send, Sync, Clone);
+
+#[test]
+fn swift_template_and_bridge_track_the_guest_protocol() {
+    let expected = format!("private let guestProtocol: UInt16 = {GUEST_PROTOCOL_VERSION}");
+    for source in [
+        include_str!("../swift/Sources/AutomataMacOSTemplateTool/main.swift"),
+        include_str!("../swift/Sources/AutomataMacOSVsockBridge/main.swift"),
+    ] {
+        assert!(
+            source.lines().any(|line| line == expected),
+            "Swift protocol constant must match the Rust guest"
+        );
+    }
+}
 
 fn options(
     root: impl Into<PathBuf>,

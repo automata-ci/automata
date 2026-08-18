@@ -5,7 +5,7 @@ import Foundation
 import Virtualization
 
 private let gibibyte = UInt64(1024 * 1024 * 1024)
-private let guestProtocol: UInt16 = 2
+private let guestProtocol: UInt16 = 3
 private let guestPort: UInt32 = 10250
 
 private enum ToolFailure: Error, CustomStringConvertible {
@@ -579,7 +579,9 @@ private func sha256(_ url: URL) throws -> String {
   let handle = try FileHandle(forReadingFrom: url)
   defer { try? handle.close() }
   var digest = SHA256()
-  while let data = try handle.read(upToCount: 1024 * 1024), !data.isEmpty {
+  while let data = try autoreleasepool(invoking: {
+    try handle.read(upToCount: 1024 * 1024)
+  }), !data.isEmpty {
     digest.update(data: data)
   }
   return digest.finalize().map { String(format: "%02x", $0) }.joined()

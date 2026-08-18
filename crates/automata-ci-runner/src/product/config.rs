@@ -2887,6 +2887,29 @@ fn exact_windows_executable(path: &TargetPath, basename: &str) -> bool {
             .is_some_and(|value| value.eq_ignore_ascii_case(basename))
 }
 
+fn exact_posix_executable(path: &TargetPath, basename: &str) -> bool {
+    path.platform() == TargetPlatform::Posix
+        && path
+            .as_str()
+            .rsplit('/')
+            .next()
+            .is_some_and(|value| value == basename)
+}
+
+fn exact_posix_python(path: &TargetPath) -> bool {
+    if path.platform() != TargetPlatform::Posix {
+        return false;
+    }
+    let Some(basename) = path.as_str().rsplit('/').next() else {
+        return false;
+    };
+    basename == "python"
+        || basename == "python3"
+        || basename.strip_prefix("python3.").is_some_and(|version| {
+            !version.is_empty() && version.bytes().all(|byte| byte.is_ascii_digit())
+        })
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawToolchainConfig {
@@ -2999,17 +3022,42 @@ impl RawToolchainConfig {
                     && config.install.is_none()
             }
             ProviderKind::MacosVirtualization => {
-                config.bash.is_some()
-                    && config.sh.is_some()
-                    && config.install.is_some()
-                    && config.tar.is_some()
-                    && config.sha256sum.is_some()
+                config
+                    .bash
+                    .as_ref()
+                    .is_some_and(|path| exact_posix_executable(path, "bash"))
+                    && config
+                        .sh
+                        .as_ref()
+                        .is_some_and(|path| exact_posix_executable(path, "sh"))
+                    && config.python.as_ref().is_none_or(exact_posix_python)
+                    && config
+                        .pwsh
+                        .as_ref()
+                        .is_none_or(|path| exact_posix_executable(path, "pwsh"))
+                    && config
+                        .install
+                        .as_ref()
+                        .is_some_and(|path| exact_posix_executable(path, "install"))
+                    && config
+                        .tar
+                        .as_ref()
+                        .is_some_and(|path| exact_posix_executable(path, "tar"))
+                    && config
+                        .sha256sum
+                        .as_ref()
+                        .is_some_and(|path| exact_posix_executable(path, "shasum"))
                     && config.powershell.is_none()
                     && config.cmd.is_none()
-                    && config.node12.is_none()
-                    && config.node16.is_none()
-                    && config.node20.is_none()
-                    && config.node24.is_none()
+                    && [
+                        config.node12.as_ref(),
+                        config.node16.as_ref(),
+                        config.node20.as_ref(),
+                        config.node24.as_ref(),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .all(|path| exact_posix_executable(path, "node"))
             }
         };
         valid
