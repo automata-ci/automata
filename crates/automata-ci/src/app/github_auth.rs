@@ -6,9 +6,7 @@
 //! logged here.
 
 use std::{
-    fmt,
-    future::Future,
-    io,
+    fmt, io,
     sync::{Arc, Mutex, OnceLock},
     time::{Duration, Instant},
 };
@@ -16,14 +14,15 @@ use std::{
 use async_trait::async_trait;
 use automata_ci_auth::{
     github::{
-        GithubBrowserBindingCookie, GithubDeviceLoginPollOutcome, GithubDevicePollCredential,
-        GithubLoginError, GithubLoginService, GithubWebCallback, GithubWebCallbackPurpose,
+        GithubBrowserBindingCookie, GithubDeviceLoginPollOutcome, GithubDeviceLoginStart,
+        GithubDevicePollCredential, GithubLoginError, GithubLoginService, GithubWebCallback,
+        GithubWebCallbackPurpose, GithubWebLoginStart,
     },
     human::TenantId,
     login::LoginReturnPath,
     request_auth::AuthenticatedRequestSnapshot,
     secret::{CsrfToken, SecretString},
-    session::{ActivateCliSessionOutcome, RevokeOwnSessionOutcome, SessionKind},
+    session::{ActivateCliSessionOutcome, DurableSession, RevokeOwnSessionOutcome, SessionKind},
     session_credential::{
         SessionCredential, SessionCredentialService, SessionCredentialServiceError,
     },
@@ -288,6 +287,10 @@ impl OperationalGithubAuthBackend {
             setup,
         }
     }
+
+    fn setup_enabled(&self) -> bool {
+        self.setup.is_some()
+    }
 }
 
 impl fmt::Debug for OperationalGithubAuthBackend {
@@ -301,47 +304,76 @@ impl fmt::Debug for OperationalGithubAuthBackend {
     }
 }
 
-struct WebLoginStart {
-    authorization_url: Url,
-    binding: SecretString,
+struct WebLoginStartRef<'a> {
+    authorization_url: &'a Url,
+    binding_secret: &'a str,
     expires_at: UnixTimestamp,
 }
 
-impl fmt::Debug for WebLoginStart {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("WebLoginStart")
-            .field("authorization_origin", &self.authorization_url.origin())
-            .field("authorization_path", &self.authorization_url.path())
-            .field("authorization_query", &"[REDACTED]")
-            .field("binding", &"[REDACTED]")
-            .field("expires_at", &self.expires_at)
-            .finish()
+trait WebLoginStartView: Send + Sync {
+    fn view(&self) -> WebLoginStartRef<'_>;
+}
+
+impl WebLoginStartView for GithubWebLoginStart {
+    fn view(&self) -> WebLoginStartRef<'_> {
+        WebLoginStartRef {
+            authorization_url: self.authorization_url(),
+            binding_secret: self.binding_cookie().expose_secret(),
+            expires_at: self.expires_at(),
+        }
     }
 }
 
-struct DeviceLoginStart {
-    poll_credential: SecretString,
-    user_code: SecretString,
-    verification_uri: Url,
+struct DeviceLoginStartRef<'a> {
+    poll_credential_secret: &'a str,
+    user_code_secret: &'a str,
+    verification_uri: &'a Url,
     expires_at: UnixTimestamp,
     poll_interval: Duration,
 }
 
-impl fmt::Debug for DeviceLoginStart {
+trait DeviceLoginStartView: Send + Sync {
+    fn view(&self) -> DeviceLoginStartRef<'_>;
+}
+
+impl DeviceLoginStartView for GithubDeviceLoginStart {
+    fn view(&self) -> DeviceLoginStartRef<'_> {
+        DeviceLoginStartRef {
+            poll_credential_secret: self.poll_credential().expose_secret(),
+            user_code_secret: self.user_code(),
+            verification_uri: self.verification_uri(),
+            expires_at: self.expires_at(),
+            poll_interval: self.poll_interval(),
+        }
+    }
+}
+
+struct RedactedDeviceLoginStart<T>(T);
+
+impl<T: DeviceLoginStartView> DeviceLoginStartView for RedactedDeviceLoginStart<T> {
+    fn view(&self) -> DeviceLoginStartRef<'_> {
+        self.0.view()
+    }
+}
+
+impl<T: DeviceLoginStartView> fmt::Debug for RedactedDeviceLoginStart<T> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let start = self.view();
         formatter
             .debug_struct("DeviceLoginStart")
             .field("poll_credential", &"[REDACTED]")
             .field("user_code", &"[REDACTED]")
-            .field("verification_origin", &self.verification_uri.origin())
-            .field("verification_path", &self.verification_uri.path())
+            .field("verification_origin", &start.verification_uri.origin())
+            .field("verification_path", &start.verification_uri.path())
             .field("verification_query", &"[REDACTED]")
-            .field("expires_at", &self.expires_at)
-            .field("poll_interval", &self.poll_interval)
+            .field("expires_at", &start.expires_at)
+            .field("poll_interval", &start.poll_interval)
             .finish()
     }
 }
+
+type BoxedWebLoginStart = Box<dyn WebLoginStartView>;
+type BoxedDeviceLoginStart = Box<dyn DeviceLoginStartView>;
 
 struct WebLoginCompletion {
     credential: SessionCredential,
@@ -446,12 +478,54 @@ enum DevicePollOutcome {
     Complete(DeviceLoginCompletion),
     Denied,
     Expired,
+    InvalidCompletion,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GithubAuthFailure {
+    SignIn(GithubLoginError),
+    InstallationSetup(InstallationSetupError),
+}
+
+type DevicePollResult = Result<DevicePollOutcome, GithubAuthFailure>;
+
 /// Testable application seam around the operational coordinator. Every secret
-/// output remains a non-serializable redacted value until a response is built.
+/// output remains behind a borrowed, non-serializable view until response
+/// construction.
 #[async_trait]
 trait GithubAuthBackend: fmt::Debug + Send + Sync {
+    async fn begin_web(
+        &self,
+        tenant_id: TenantId,
+        return_path: LoginReturnPath,
+    ) -> Result<BoxedWebLoginStart, GithubLoginError>;
+
+    async fn begin_device(
+        &self,
+        tenant_id: TenantId,
+        return_path: Option<LoginReturnPath>,
+    ) -> Result<BoxedDeviceLoginStart, GithubLoginError>;
+
+    async fn poll_device(
+        &self,
+        tenant_id: TenantId,
+        credential: GithubDevicePollCredential,
+    ) -> DevicePollResult;
+
+    async fn begin_setup_web(
+        &self,
+        bootstrap_token: SecretString,
+        return_path: LoginReturnPath,
+    ) -> Result<BoxedWebLoginStart, InstallationSetupError>;
+
+    async fn begin_setup_device(
+        &self,
+        bootstrap_token: SecretString,
+        return_path: Option<LoginReturnPath>,
+    ) -> Result<BoxedDeviceLoginStart, InstallationSetupError>;
+
+    async fn poll_setup_device(&self, credential: GithubDevicePollCredential) -> DevicePollResult;
+
     async fn revoke_browser(
         &self,
         raw_credential: &str,
@@ -467,34 +541,119 @@ trait GithubAuthBackend: fmt::Debug + Send + Sync {
         raw_credential: &str,
     ) -> Result<ActivateCliSessionOutcome, SessionCredentialServiceError>;
 
-    async fn begin_web(
-        &self,
-        tenant_id: TenantId,
-        return_path: LoginReturnPath,
-    ) -> Result<WebLoginStart, GithubLoginError>;
-
     async fn complete_web(
         &self,
         tenant_id: TenantId,
         binding: GithubBrowserBindingCookie,
         callback: GithubWebCallback,
     ) -> Result<WebCallbackCompletion, WebCallbackError>;
+}
+
+#[async_trait]
+impl GithubAuthBackend for OperationalGithubAuthBackend {
+    async fn begin_web(
+        &self,
+        tenant_id: TenantId,
+        return_path: LoginReturnPath,
+    ) -> Result<BoxedWebLoginStart, GithubLoginError> {
+        let started = self.login.begin_web(tenant_id, return_path).await?;
+        Ok(Box::new(started))
+    }
 
     async fn begin_device(
         &self,
         tenant_id: TenantId,
         return_path: Option<LoginReturnPath>,
-    ) -> Result<DeviceLoginStart, GithubLoginError>;
+    ) -> Result<BoxedDeviceLoginStart, GithubLoginError> {
+        let started = self.login.begin_device(tenant_id, return_path).await?;
+        Ok(Box::new(RedactedDeviceLoginStart(started)))
+    }
 
     async fn poll_device(
         &self,
         tenant_id: TenantId,
         credential: GithubDevicePollCredential,
-    ) -> Result<DevicePollOutcome, GithubLoginError>;
-}
+    ) -> DevicePollResult {
+        match self
+            .login
+            .poll_device(tenant_id.clone(), credential)
+            .await
+            .map_err(GithubAuthFailure::SignIn)?
+        {
+            GithubDeviceLoginPollOutcome::Pending { next_poll_at } => {
+                Ok(DevicePollOutcome::Pending { next_poll_at })
+            }
+            GithubDeviceLoginPollOutcome::SlowDown { next_poll_at } => {
+                Ok(DevicePollOutcome::SlowDown { next_poll_at })
+            }
+            GithubDeviceLoginPollOutcome::Complete(completion) => {
+                let (credential, _, session, _, return_path) = completion.into_parts();
+                map_sign_in_device_completion(&tenant_id, credential, &session, return_path)
+            }
+            GithubDeviceLoginPollOutcome::Denied => Ok(DevicePollOutcome::Denied),
+            GithubDeviceLoginPollOutcome::Expired => Ok(DevicePollOutcome::Expired),
+        }
+    }
 
-#[async_trait]
-impl GithubAuthBackend for OperationalGithubAuthBackend {
+    async fn begin_setup_web(
+        &self,
+        bootstrap_token: SecretString,
+        return_path: LoginReturnPath,
+    ) -> Result<BoxedWebLoginStart, InstallationSetupError> {
+        let setup = self
+            .setup
+            .as_ref()
+            .ok_or(InstallationSetupError::AlreadyConfigured)?;
+        let started = setup
+            .begin_web(bootstrap_token.expose_secret(), return_path)
+            .await;
+        drop(bootstrap_token);
+        Ok(Box::new(started?))
+    }
+
+    async fn begin_setup_device(
+        &self,
+        bootstrap_token: SecretString,
+        return_path: Option<LoginReturnPath>,
+    ) -> Result<BoxedDeviceLoginStart, InstallationSetupError> {
+        let setup = self
+            .setup
+            .as_ref()
+            .ok_or(InstallationSetupError::AlreadyConfigured)?;
+        let started = setup
+            .begin_device(bootstrap_token.expose_secret(), return_path)
+            .await;
+        drop(bootstrap_token);
+        Ok(Box::new(RedactedDeviceLoginStart(started?)))
+    }
+
+    async fn poll_setup_device(&self, credential: GithubDevicePollCredential) -> DevicePollResult {
+        let setup = self
+            .setup
+            .as_ref()
+            .ok_or(InstallationSetupError::AlreadyConfigured)
+            .map_err(GithubAuthFailure::InstallationSetup)?;
+        match setup
+            .poll_device(credential)
+            .await
+            .map_err(GithubAuthFailure::InstallationSetup)?
+        {
+            InstallationDevicePollOutcome::Pending { next_poll_at } => {
+                Ok(DevicePollOutcome::Pending { next_poll_at })
+            }
+            InstallationDevicePollOutcome::SlowDown { next_poll_at } => {
+                Ok(DevicePollOutcome::SlowDown { next_poll_at })
+            }
+            InstallationDevicePollOutcome::Complete(completion) => {
+                let (credential, _, session, return_path) = completion.into_parts();
+                let outcome = map_setup_device_completion(credential, &session, return_path);
+                Ok(outcome)
+            }
+            InstallationDevicePollOutcome::Denied => Ok(DevicePollOutcome::Denied),
+            InstallationDevicePollOutcome::Expired => Ok(DevicePollOutcome::Expired),
+        }
+    }
+
     async fn revoke_browser(
         &self,
         raw_credential: &str,
@@ -520,22 +679,6 @@ impl GithubAuthBackend for OperationalGithubAuthBackend {
         self.sessions.activate_cli_raw(raw_credential).await
     }
 
-    async fn begin_web(
-        &self,
-        tenant_id: TenantId,
-        return_path: LoginReturnPath,
-    ) -> Result<WebLoginStart, GithubLoginError> {
-        let started = self.login.begin_web(tenant_id, return_path).await?;
-        let (authorization_url, binding, expires_at) = started.into_parts();
-        let binding = SecretString::new(binding.expose_secret().to_owned())
-            .map_err(|_| GithubLoginError::IntegrityFailure)?;
-        Ok(WebLoginStart {
-            authorization_url,
-            binding,
-            expires_at,
-        })
-    }
-
     async fn complete_web(
         &self,
         tenant_id: TenantId,
@@ -554,8 +697,7 @@ impl GithubAuthBackend for OperationalGithubAuthBackend {
                     .complete_web(tenant_id.clone(), binding, &callback)
                     .await
                     .map_err(WebCallbackError::SignIn)?;
-                if completion.session().identity().kind() != SessionKind::Browser
-                    || completion.session().identity().tenant_id() != &tenant_id
+                if !session_identity_matches(completion.session(), SessionKind::Browser, &tenant_id)
                 {
                     return Err(WebCallbackError::SignIn(GithubLoginError::IntegrityFailure));
                 }
@@ -586,9 +728,7 @@ impl GithubAuthBackend for OperationalGithubAuthBackend {
                     .await
                     .map_err(WebCallbackError::InstallationSetup)?;
                 let (credential, _, session, return_path) = completion.into_parts();
-                if session.identity().kind() != SessionKind::Browser
-                    || session.identity().tenant_id() != &tenant_id
-                {
+                if !session_identity_matches(&session, SessionKind::Browser, &tenant_id) {
                     return Err(WebCallbackError::InstallationSetup(
                         InstallationSetupError::IntegrityFailure,
                     ));
@@ -612,72 +752,98 @@ impl GithubAuthBackend for OperationalGithubAuthBackend {
             }
         }
     }
+}
 
-    async fn begin_device(
-        &self,
-        tenant_id: TenantId,
-        return_path: Option<LoginReturnPath>,
-    ) -> Result<DeviceLoginStart, GithubLoginError> {
-        let started = self.login.begin_device(tenant_id, return_path).await?;
-        let poll_credential =
-            SecretString::new(started.poll_credential().expose_secret().to_owned())
-                .map_err(|_| GithubLoginError::IntegrityFailure)?;
-        let user_code = SecretString::new(started.user_code().to_owned())
-            .map_err(|_| GithubLoginError::IntegrityFailure)?;
-        Ok(DeviceLoginStart {
-            poll_credential,
-            user_code,
-            verification_uri: started.verification_uri().clone(),
-            expires_at: started.expires_at(),
-            poll_interval: started.poll_interval(),
-        })
+fn map_sign_in_device_completion(
+    tenant_id: &TenantId,
+    credential: SessionCredential,
+    session: &DurableSession,
+    return_path: Option<LoginReturnPath>,
+) -> DevicePollResult {
+    if !session_identity_matches(session, SessionKind::Cli, tenant_id) {
+        return Err(GithubAuthFailure::SignIn(
+            GithubLoginError::IntegrityFailure,
+        ));
     }
+    Ok(DevicePollOutcome::Complete(DeviceLoginCompletion {
+        credential,
+        expires_at: session.expires_at(),
+        return_path,
+    }))
+}
 
-    async fn poll_device(
-        &self,
-        tenant_id: TenantId,
-        credential: GithubDevicePollCredential,
-    ) -> Result<DevicePollOutcome, GithubLoginError> {
-        match self
-            .login
-            .poll_device(tenant_id.clone(), credential)
-            .await?
-        {
-            GithubDeviceLoginPollOutcome::Pending { next_poll_at } => {
-                Ok(DevicePollOutcome::Pending { next_poll_at })
-            }
-            GithubDeviceLoginPollOutcome::SlowDown { next_poll_at } => {
-                Ok(DevicePollOutcome::SlowDown { next_poll_at })
-            }
-            GithubDeviceLoginPollOutcome::Complete(completion) => {
-                if completion.session().identity().kind() != SessionKind::Cli
-                    || completion.session().identity().tenant_id() != &tenant_id
-                {
-                    return Err(GithubLoginError::IntegrityFailure);
-                }
-                let (credential, _, session, _, return_path) = completion.into_parts();
-                Ok(DevicePollOutcome::Complete(DeviceLoginCompletion {
-                    credential,
-                    expires_at: session.expires_at(),
-                    return_path,
-                }))
-            }
-            GithubDeviceLoginPollOutcome::Denied => Ok(DevicePollOutcome::Denied),
-            GithubDeviceLoginPollOutcome::Expired => Ok(DevicePollOutcome::Expired),
+fn map_setup_device_completion(
+    credential: SessionCredential,
+    session: &DurableSession,
+    return_path: Option<LoginReturnPath>,
+) -> DevicePollOutcome {
+    if session.identity().kind() != SessionKind::Cli {
+        return DevicePollOutcome::InvalidCompletion;
+    }
+    DevicePollOutcome::Complete(DeviceLoginCompletion {
+        credential,
+        expires_at: session.expires_at(),
+        return_path,
+    })
+}
+
+fn session_identity_matches(
+    session: &DurableSession,
+    expected_kind: SessionKind,
+    expected_tenant: &TenantId,
+) -> bool {
+    session.identity().kind() == expected_kind && session.identity().tenant_id() == expected_tenant
+}
+
+#[derive(Clone)]
+struct GithubAuthTransportState {
+    backend: Arc<dyn GithubAuthBackend>,
+    begin_admission: Arc<GithubBeginAdmission>,
+    application_origin: HumanAuthOrigin,
+    provider_origin: GithubProviderOrigin,
+    default_return_path: LoginReturnPath,
+    clock: Arc<dyn Clock>,
+}
+
+impl GithubAuthTransportState {
+    fn new(
+        backend: Arc<dyn GithubAuthBackend>,
+        begin_admission: Arc<GithubBeginAdmission>,
+        application_origin: HumanAuthOrigin,
+        provider_origin: GithubProviderOrigin,
+        default_return_path: LoginReturnPath,
+        clock: Arc<dyn Clock>,
+    ) -> Self {
+        Self {
+            backend,
+            begin_admission,
+            application_origin,
+            provider_origin,
+            default_return_path,
+            clock,
         }
+    }
+}
+
+impl fmt::Debug for GithubAuthTransportState {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GithubAuthTransportState")
+            .field("backend", &self.backend)
+            .field("begin_admission", &self.begin_admission)
+            .field("application_origin", &self.application_origin)
+            .field("provider_origin", &self.provider_origin)
+            .field("default_return_path", &self.default_return_path)
+            .field("clock", &self.clock)
+            .finish()
     }
 }
 
 /// Cloneable dependencies for one tenant-specific GitHub auth router.
 #[derive(Clone)]
 pub(crate) struct GithubAuthHttpState {
-    backend: Arc<dyn GithubAuthBackend>,
-    begin_admission: Arc<GithubBeginAdmission>,
+    transport: GithubAuthTransportState,
     tenant_id: TenantId,
-    application_origin: HumanAuthOrigin,
-    provider_origin: GithubProviderOrigin,
-    default_return_path: LoginReturnPath,
-    clock: Arc<dyn Clock>,
 }
 
 impl GithubAuthHttpState {
@@ -690,56 +856,16 @@ impl GithubAuthHttpState {
         default_return_path: LoginReturnPath,
         clock: Arc<dyn Clock>,
     ) -> Self {
-        Self::from_backend_and_admission(
-            backend,
-            process_github_begin_admission(),
-            tenant_id,
-            application_origin,
-            provider_origin,
-            default_return_path,
-            clock,
-        )
-    }
-
-    #[cfg(test)]
-    fn from_backend(
-        backend: Arc<dyn GithubAuthBackend>,
-        tenant_id: TenantId,
-        application_origin: HumanAuthOrigin,
-        provider_origin: GithubProviderOrigin,
-        default_return_path: LoginReturnPath,
-        clock: Arc<dyn Clock>,
-    ) -> Self {
-        Self::from_backend_and_admission(
-            backend,
-            Arc::new(GithubBeginAdmission::new(Arc::new(
-                ProcessMonotonicClock::new(),
-            ))),
-            tenant_id,
-            application_origin,
-            provider_origin,
-            default_return_path,
-            clock,
-        )
-    }
-
-    fn from_backend_and_admission(
-        backend: Arc<dyn GithubAuthBackend>,
-        begin_admission: Arc<GithubBeginAdmission>,
-        tenant_id: TenantId,
-        application_origin: HumanAuthOrigin,
-        provider_origin: GithubProviderOrigin,
-        default_return_path: LoginReturnPath,
-        clock: Arc<dyn Clock>,
-    ) -> Self {
         Self {
-            backend,
-            begin_admission,
+            transport: GithubAuthTransportState::new(
+                backend,
+                process_github_begin_admission(),
+                application_origin,
+                provider_origin,
+                default_return_path,
+                clock,
+            ),
             tenant_id,
-            application_origin,
-            provider_origin,
-            default_return_path,
-            clock,
         }
     }
 }
@@ -748,13 +874,8 @@ impl fmt::Debug for GithubAuthHttpState {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("GithubAuthHttpState")
-            .field("backend", &self.backend)
-            .field("begin_admission", &self.begin_admission)
+            .field("transport", &self.transport)
             .field("tenant_id", &self.tenant_id)
-            .field("application_origin", &self.application_origin)
-            .field("provider_origin", &self.provider_origin)
-            .field("default_return_path", &self.default_return_path)
-            .field("clock", &self.clock)
             .finish()
     }
 }
@@ -762,30 +883,30 @@ impl fmt::Debug for GithubAuthHttpState {
 /// Cloneable dependencies for the one-use installation setup routes.
 #[derive(Clone)]
 pub(crate) struct GithubSetupHttpState {
-    service: Arc<InstallationSetupService>,
-    begin_admission: Arc<GithubBeginAdmission>,
-    application_origin: HumanAuthOrigin,
-    provider_origin: GithubProviderOrigin,
-    default_return_path: LoginReturnPath,
-    clock: Arc<dyn Clock>,
+    transport: GithubAuthTransportState,
 }
 
 impl GithubSetupHttpState {
     pub(crate) fn new(
-        service: Arc<InstallationSetupService>,
+        backend: Arc<OperationalGithubAuthBackend>,
         application_origin: HumanAuthOrigin,
         provider_origin: GithubProviderOrigin,
         default_return_path: LoginReturnPath,
         clock: Arc<dyn Clock>,
-    ) -> Self {
-        Self {
-            service,
-            begin_admission: process_github_begin_admission(),
-            application_origin,
-            provider_origin,
-            default_return_path,
-            clock,
+    ) -> Option<Self> {
+        if !backend.setup_enabled() {
+            return None;
         }
+        Some(Self {
+            transport: GithubAuthTransportState::new(
+                backend,
+                process_github_begin_admission(),
+                application_origin,
+                provider_origin,
+                default_return_path,
+                clock,
+            ),
+        })
     }
 }
 
@@ -793,13 +914,23 @@ impl fmt::Debug for GithubSetupHttpState {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("GithubSetupHttpState")
-            .field("service", &self.service)
-            .field("begin_admission", &self.begin_admission)
-            .field("application_origin", &self.application_origin)
-            .field("provider_origin", &self.provider_origin)
-            .field("default_return_path", &self.default_return_path)
-            .field("clock", &self.clock)
+            .field("transport", &self.transport)
+            .field("capability", &"enabled")
             .finish()
+    }
+}
+
+enum GithubAuthFlow<'a> {
+    SignIn(&'a GithubAuthHttpState),
+    InstallationSetup(&'a GithubSetupHttpState),
+}
+
+impl<'a> GithubAuthFlow<'a> {
+    fn transport(&self) -> &'a GithubAuthTransportState {
+        match self {
+            Self::SignIn(state) => &state.transport,
+            Self::InstallationSetup(state) => &state.transport,
+        }
     }
 }
 
@@ -883,13 +1014,15 @@ async fn activate_cli_session(
         return error_response(StatusCode::BAD_REQUEST, "invalid_request");
     }
     let (parts, body) = request.into_parts();
-    let presented =
-        match extract_human_credential(&parts.headers, state.application_origin.cookie_mode()) {
-            Ok(Some(PresentedHumanCredential::Cli(credential))) => credential,
-            Ok(None | Some(PresentedHumanCredential::Browser(_))) | Err(_) => {
-                return cli_unauthorized_response();
-            }
-        };
+    let presented = match extract_human_credential(
+        &parts.headers,
+        state.transport.application_origin.cookie_mode(),
+    ) {
+        Ok(Some(PresentedHumanCredential::Cli(credential))) => credential,
+        Ok(None | Some(PresentedHumanCredential::Browser(_))) | Err(_) => {
+            return cli_unauthorized_response();
+        }
+    };
     // Drop the ordinary HeaderMap bearer copy before the body read or durable
     // activation await. The typed credential is redacted and zeroizing.
     drop(parts);
@@ -898,7 +1031,12 @@ async fn activate_cli_session(
         Ok(_) | Err(_) => return error_response(StatusCode::BAD_REQUEST, "invalid_request"),
     };
     drop(body);
-    match state.backend.activate_cli(presented.expose_secret()).await {
+    match state
+        .transport
+        .backend
+        .activate_cli(presented.expose_secret())
+        .await
+    {
         Ok(
             ActivateCliSessionOutcome::Activated(_) | ActivateCliSessionOutcome::AlreadyActive(_),
         ) => (StatusCode::NO_CONTENT, Body::empty()).into_response(),
@@ -950,7 +1088,12 @@ async fn logout_cli(
     if require_empty_request(request).await.is_err() {
         return error_response(StatusCode::BAD_REQUEST, "invalid_request");
     }
-    match state.backend.revoke_cli(credential.expose_secret()).await {
+    match state
+        .transport
+        .backend
+        .revoke_cli(credential.expose_secret())
+        .await
+    {
         Ok(
             RevokeOwnSessionOutcome::Revoked
             | RevokeOwnSessionOutcome::AlreadyRevoked
@@ -995,6 +1138,7 @@ async fn logout_browser(
         );
     }
     match state
+        .transport
         .backend
         .revoke_browser(credential.expose_secret())
         .await
@@ -1085,134 +1229,74 @@ struct SetupLoginStartDocument {
 }
 
 async fn begin_setup_web(State(state): State<GithubSetupHttpState>, request: Request) -> Response {
-    let service = Arc::clone(&state.service);
-    begin_setup_web_request(
-        SetupWebRequestContext {
-            application_origin: &state.application_origin,
-            provider_origin: &state.provider_origin,
-            default_return_path: &state.default_return_path,
-            clock: state.clock.as_ref(),
-            begin_admission: &state.begin_admission,
-        },
-        request,
-        move |bootstrap_token, return_path| async move {
-            let started = service
-                .begin_web(bootstrap_token.expose_secret(), return_path)
-                .await?;
-            let (authorization_url, binding_cookie, expires_at) = started.into_parts();
-            Ok(SetupWebLoginStart {
-                authorization_url,
-                binding_cookie,
-                expires_at,
-            })
-        },
-    )
-    .await
-}
-
-struct SetupWebRequestContext<'a> {
-    application_origin: &'a HumanAuthOrigin,
-    provider_origin: &'a GithubProviderOrigin,
-    default_return_path: &'a LoginReturnPath,
-    clock: &'a dyn Clock,
-    begin_admission: &'a Arc<GithubBeginAdmission>,
-}
-
-struct SetupWebLoginStart {
-    authorization_url: Url,
-    binding_cookie: GithubBrowserBindingCookie,
-    expires_at: UnixTimestamp,
-}
-
-async fn begin_setup_web_request<Begin, BeginFuture>(
-    context: SetupWebRequestContext<'_>,
-    request: Request,
-    begin: Begin,
-) -> Response
-where
-    Begin: FnOnce(SecretString, LoginReturnPath) -> BeginFuture,
-    BeginFuture: Future<Output = Result<SetupWebLoginStart, InstallationSetupError>>,
-{
-    if !valid_login_initiation(request.headers(), context.application_origin) {
-        return error_response(StatusCode::FORBIDDEN, "browser_security_check_failed");
-    }
-    let document = match parse_setup_login_start_request(request).await {
-        Ok(document) => document,
-        Err(error) => return request_error_response(error),
-    };
-    let SetupLoginStartDocument {
-        bootstrap_token,
-        return_path: requested_return_path,
-    } = document;
-    let Ok(return_path) = parse_return_path(
-        requested_return_path.as_deref(),
-        context.default_return_path,
-        context.application_origin,
-    ) else {
-        return error_response(StatusCode::BAD_REQUEST, "invalid_request");
-    };
-    drop(requested_return_path);
-    let _begin_permit = match context.begin_admission.try_acquire() {
-        Ok(permit) => permit,
-        Err(rejection) => return browser_begin_overload_response(rejection),
-    };
-    match begin(bootstrap_token, return_path).await {
-        Ok(started) => setup_web_start_response(&context, &started),
-        Err(error) => setup_error_response(error, context.clock.now()),
-    }
-}
-
-fn setup_web_start_response(
-    context: &SetupWebRequestContext<'_>,
-    started: &SetupWebLoginStart,
-) -> Response {
-    if !context.provider_origin.trusts(&started.authorization_url) {
-        return error_response(StatusCode::INTERNAL_SERVER_ERROR, "internal_error");
-    }
-    let Some(lifetime) = remaining_lifetime(started.expires_at, context.clock.now()) else {
-        return error_response(StatusCode::INTERNAL_SERVER_ERROR, "internal_error");
-    };
-    let cookie = match login_set_cookie(
-        context.application_origin.cookie_mode(),
-        started.binding_cookie.expose_secret(),
-        lifetime,
-    ) {
-        Ok(cookie) => cookie.into_header_value(),
-        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
-    };
-    redirect_response(
-        StatusCode::SEE_OTHER,
-        started.authorization_url.as_str(),
-        &[cookie],
-    )
+    begin_web_request(GithubAuthFlow::InstallationSetup(&state), request).await
 }
 
 async fn begin_web(State(state): State<GithubAuthHttpState>, request: Request) -> Response {
-    if !valid_login_initiation(request.headers(), &state.application_origin) {
+    begin_web_request(GithubAuthFlow::SignIn(&state), request).await
+}
+
+async fn begin_web_request(flow: GithubAuthFlow<'_>, request: Request) -> Response {
+    let transport = flow.transport();
+    if !valid_login_initiation(request.headers(), &transport.application_origin) {
         return error_response(StatusCode::FORBIDDEN, "browser_security_check_failed");
     }
-    let document = match parse_login_start_request(request).await {
-        Ok(document) => document,
-        Err(error) => return request_error_response(error),
-    };
-    let Ok(return_path) = parse_return_path(
-        document.return_path.as_deref(),
-        &state.default_return_path,
-        &state.application_origin,
-    ) else {
-        return error_response(StatusCode::BAD_REQUEST, "invalid_request");
-    };
-    let _begin_permit = match state.begin_admission.try_acquire() {
-        Ok(permit) => permit,
-        Err(rejection) => return browser_begin_overload_response(rejection),
-    };
-    match state
-        .backend
-        .begin_web(state.tenant_id.clone(), return_path)
-        .await
-    {
-        Ok(start) => web_start_response(&state, &start),
-        Err(error) => login_error_response(error, state.clock.now()),
+    match &flow {
+        GithubAuthFlow::SignIn(state) => {
+            let document = match parse_login_start_request(request).await {
+                Ok(document) => document,
+                Err(error) => return request_error_response(error),
+            };
+            let Ok(return_path) = parse_return_path(
+                document.return_path.as_deref(),
+                &transport.default_return_path,
+                &transport.application_origin,
+            ) else {
+                return error_response(StatusCode::BAD_REQUEST, "invalid_request");
+            };
+            let _begin_permit = match transport.begin_admission.try_acquire() {
+                Ok(permit) => permit,
+                Err(rejection) => return browser_begin_overload_response(rejection),
+            };
+            match transport
+                .backend
+                .begin_web(state.tenant_id.clone(), return_path)
+                .await
+            {
+                Ok(start) => web_start_response(transport, start.as_ref()),
+                Err(error) => login_error_response(error, transport.clock.now()),
+            }
+        }
+        GithubAuthFlow::InstallationSetup(_) => {
+            let document = match parse_setup_login_start_request(request).await {
+                Ok(document) => document,
+                Err(error) => return request_error_response(error),
+            };
+            let SetupLoginStartDocument {
+                bootstrap_token,
+                return_path: requested_return_path,
+            } = document;
+            let Ok(return_path) = parse_return_path(
+                requested_return_path.as_deref(),
+                &transport.default_return_path,
+                &transport.application_origin,
+            ) else {
+                return error_response(StatusCode::BAD_REQUEST, "invalid_request");
+            };
+            drop(requested_return_path);
+            let _begin_permit = match transport.begin_admission.try_acquire() {
+                Ok(permit) => permit,
+                Err(rejection) => return browser_begin_overload_response(rejection),
+            };
+            match transport
+                .backend
+                .begin_setup_web(bootstrap_token, return_path)
+                .await
+            {
+                Ok(start) => web_start_response(transport, start.as_ref()),
+                Err(error) => setup_error_response(error, transport.clock.now()),
+            }
+        }
     }
 }
 
@@ -1360,16 +1444,20 @@ fn decode_form_component(value: &[u8]) -> Result<String, RequestDocumentError> {
     form::decode_text(value, value.len()).map_err(|_| RequestDocumentError::Invalid)
 }
 
-fn web_start_response(state: &GithubAuthHttpState, start: &WebLoginStart) -> Response {
-    if !state.provider_origin.trusts(&start.authorization_url) {
+fn web_start_response(
+    transport: &GithubAuthTransportState,
+    start: &dyn WebLoginStartView,
+) -> Response {
+    let start = start.view();
+    if !transport.provider_origin.trusts(start.authorization_url) {
         return error_response(StatusCode::INTERNAL_SERVER_ERROR, "internal_error");
     }
-    let Some(lifetime) = remaining_lifetime(start.expires_at, state.clock.now()) else {
+    let Some(lifetime) = remaining_lifetime(start.expires_at, transport.clock.now()) else {
         return error_response(StatusCode::INTERNAL_SERVER_ERROR, "internal_error");
     };
     let Ok(cookie) = login_set_cookie(
-        state.application_origin.cookie_mode(),
-        start.binding.expose_secret(),
+        transport.application_origin.cookie_mode(),
+        start.binding_secret,
         lifetime,
     ) else {
         return error_response(StatusCode::INTERNAL_SERVER_ERROR, "internal_error");
@@ -1382,7 +1470,7 @@ fn web_start_response(state: &GithubAuthHttpState, start: &WebLoginStart) -> Res
 }
 
 async fn complete_web(State(state): State<GithubAuthHttpState>, request: Request) -> Response {
-    let clear = match clear_login_cookie(state.application_origin.cookie_mode()) {
+    let clear = match clear_login_cookie(state.transport.application_origin.cookie_mode()) {
         Ok(cookie) => cookie.into_header_value(),
         Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
     };
@@ -1406,7 +1494,7 @@ async fn complete_web_inner(state: &GithubAuthHttpState, request: Request) -> Re
     };
     let binding = match extract_login_binding_cookie(
         request.headers(),
-        state.application_origin.cookie_mode(),
+        state.transport.application_origin.cookie_mode(),
     ) {
         Ok(Some(binding)) => {
             let binding = Zeroizing::new(binding);
@@ -1419,6 +1507,7 @@ async fn complete_web_inner(state: &GithubAuthHttpState, request: Request) -> Re
     };
     drop(request);
     match state
+        .transport
         .backend
         .complete_web(state.tenant_id.clone(), binding, callback)
         .await
@@ -1427,13 +1516,15 @@ async fn complete_web_inner(state: &GithubAuthHttpState, request: Request) -> Re
             WebCallbackCompletion::SignIn(completion)
             | WebCallbackCompletion::InstallationSetup(completion),
         ) => web_completion_response(state, &completion),
-        Err(WebCallbackError::SignIn(error)) => login_error_response(error, state.clock.now()),
+        Err(WebCallbackError::SignIn(error)) => {
+            login_error_response(error, state.transport.clock.now())
+        }
         Err(WebCallbackError::InstallationSetup(error)) => {
             tracing::warn!(
                 error_kind = ?error,
                 "GitHub installation setup callback failed"
             );
-            setup_error_response(error, state.clock.now())
+            setup_error_response(error, state.transport.clock.now())
         }
     }
 }
@@ -1442,11 +1533,12 @@ fn web_completion_response(
     state: &GithubAuthHttpState,
     completion: &WebLoginCompletion,
 ) -> Response {
-    let Some(lifetime) = remaining_lifetime(completion.expires_at, state.clock.now()) else {
+    let Some(lifetime) = remaining_lifetime(completion.expires_at, state.transport.clock.now())
+    else {
         return error_response(StatusCode::INTERNAL_SERVER_ERROR, "internal_error");
     };
     let session = match session_set_cookie(
-        state.application_origin.cookie_mode(),
+        state.transport.application_origin.cookie_mode(),
         &completion.credential,
         lifetime,
     ) {
@@ -1454,7 +1546,7 @@ fn web_completion_response(
         Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
     };
     let csrf = match csrf_set_cookie(
-        state.application_origin.cookie_mode(),
+        state.transport.application_origin.cookie_mode(),
         &completion.csrf,
         lifetime,
     ) {
@@ -1464,131 +1556,89 @@ fn web_completion_response(
     let location = completion
         .return_path
         .as_ref()
-        .unwrap_or(&state.default_return_path)
+        .unwrap_or(&state.transport.default_return_path)
         .as_str();
-    let Some(location) = canonical_local_return_path(&state.application_origin, location) else {
+    let Some(location) = canonical_local_return_path(&state.transport.application_origin, location)
+    else {
         return error_response(StatusCode::INTERNAL_SERVER_ERROR, "internal_error");
     };
     redirect_response(StatusCode::SEE_OTHER, location.as_str(), &[session, csrf])
 }
 
 async fn begin_device(State(state): State<GithubAuthHttpState>, request: Request) -> Response {
-    let document = match parse_json_request::<LoginStartDocument>(request).await {
-        Ok(document) => document,
-        Err(error) => return request_error_response(error),
-    };
-    let return_path = match document.return_path {
-        Some(path) => match canonical_local_return_path(&state.application_origin, &path) {
-            Some(path) => Some(path),
-            None => return error_response(StatusCode::BAD_REQUEST, "invalid_request"),
-        },
-        None => None,
-    };
-    let _begin_permit = match state.begin_admission.try_acquire() {
-        Ok(permit) => permit,
-        Err(rejection) => return device_begin_overload_response(rejection),
-    };
-    match state
-        .backend
-        .begin_device(state.tenant_id.clone(), return_path)
-        .await
-    {
-        Ok(start) => device_start_response(&state, &start),
-        Err(error) => login_error_response(error, state.clock.now()),
-    }
+    begin_device_request(GithubAuthFlow::SignIn(&state), request).await
 }
 
 async fn begin_setup_device(
     State(state): State<GithubSetupHttpState>,
     request: Request,
 ) -> Response {
-    let service = Arc::clone(&state.service);
-    begin_setup_device_request(
-        SetupDeviceRequestContext {
-            application_origin: &state.application_origin,
-            provider_origin: &state.provider_origin,
-            clock: state.clock.as_ref(),
-            begin_admission: &state.begin_admission,
-        },
-        request,
-        move |bootstrap_token, return_path| async move {
-            service
-                .begin_device(bootstrap_token.expose_secret(), return_path)
+    begin_device_request(GithubAuthFlow::InstallationSetup(&state), request).await
+}
+
+async fn begin_device_request(flow: GithubAuthFlow<'_>, request: Request) -> Response {
+    let transport = flow.transport();
+    match &flow {
+        GithubAuthFlow::SignIn(state) => {
+            let document = match parse_json_request::<LoginStartDocument>(request).await {
+                Ok(document) => document,
+                Err(error) => return request_error_response(error),
+            };
+            let Ok(return_path) =
+                parse_optional_return_path(document.return_path, &transport.application_origin)
+            else {
+                return error_response(StatusCode::BAD_REQUEST, "invalid_request");
+            };
+            let _begin_permit = match transport.begin_admission.try_acquire() {
+                Ok(permit) => permit,
+                Err(rejection) => return device_begin_overload_response(rejection),
+            };
+            match transport
+                .backend
+                .begin_device(state.tenant_id.clone(), return_path)
                 .await
-        },
-    )
-    .await
-}
-
-struct SetupDeviceRequestContext<'a> {
-    application_origin: &'a HumanAuthOrigin,
-    provider_origin: &'a GithubProviderOrigin,
-    clock: &'a dyn Clock,
-    begin_admission: &'a Arc<GithubBeginAdmission>,
-}
-
-async fn begin_setup_device_request<Begin, BeginFuture>(
-    context: SetupDeviceRequestContext<'_>,
-    request: Request,
-    begin: Begin,
-) -> Response
-where
-    Begin: FnOnce(SecretString, Option<LoginReturnPath>) -> BeginFuture,
-    BeginFuture: Future<
-        Output = Result<automata_ci_auth::github::GithubDeviceLoginStart, InstallationSetupError>,
-    >,
-{
-    let document = match parse_json_request::<SetupLoginStartDocument>(request).await {
-        Ok(document) => document,
-        Err(error) => return request_error_response(error),
-    };
-    let return_path = match document.return_path {
-        Some(path) => match canonical_local_return_path(context.application_origin, &path) {
-            Some(path) => Some(path),
-            None => return error_response(StatusCode::BAD_REQUEST, "invalid_request"),
-        },
-        None => None,
-    };
-    let _begin_permit = match context.begin_admission.try_acquire() {
-        Ok(permit) => permit,
-        Err(rejection) => return device_begin_overload_response(rejection),
-    };
-    match begin(document.bootstrap_token, return_path).await {
-        Ok(started) => setup_device_start_response(&context, &started),
-        Err(error) => setup_error_response(error, context.clock.now()),
+            {
+                Ok(start) => device_start_response(transport, start.as_ref()),
+                Err(error) => login_error_response(error, transport.clock.now()),
+            }
+        }
+        GithubAuthFlow::InstallationSetup(_) => {
+            let document = match parse_json_request::<SetupLoginStartDocument>(request).await {
+                Ok(document) => document,
+                Err(error) => return request_error_response(error),
+            };
+            let SetupLoginStartDocument {
+                bootstrap_token,
+                return_path,
+            } = document;
+            let Ok(return_path) =
+                parse_optional_return_path(return_path, &transport.application_origin)
+            else {
+                return error_response(StatusCode::BAD_REQUEST, "invalid_request");
+            };
+            let _begin_permit = match transport.begin_admission.try_acquire() {
+                Ok(permit) => permit,
+                Err(rejection) => return device_begin_overload_response(rejection),
+            };
+            match transport
+                .backend
+                .begin_setup_device(bootstrap_token, return_path)
+                .await
+            {
+                Ok(start) => device_start_response(transport, start.as_ref()),
+                Err(error) => setup_error_response(error, transport.clock.now()),
+            }
+        }
     }
 }
 
-fn setup_device_start_response(
-    context: &SetupDeviceRequestContext<'_>,
-    started: &automata_ci_auth::github::GithubDeviceLoginStart,
-) -> Response {
-    if !context.provider_origin.trusts(started.verification_uri())
-        || started.poll_interval().is_zero()
-        || started.poll_interval().subsec_nanos() != 0
-        || started.expires_at() <= context.clock.now()
-    {
-        return error_response(StatusCode::INTERNAL_SERVER_ERROR, "internal_error");
-    }
-    let Some(expires_in_seconds) = started
-        .expires_at()
-        .as_seconds()
-        .checked_sub(context.clock.now().as_seconds())
-        .filter(|seconds| *seconds > 0)
-    else {
-        return error_response(StatusCode::INTERNAL_SERVER_ERROR, "internal_error");
-    };
-    json_response(
-        StatusCode::OK,
-        &DeviceStartDocument {
-            poll_credential: started.poll_credential().expose_secret(),
-            user_code: started.user_code(),
-            verification_uri: started.verification_uri().as_str(),
-            expires_at: started.expires_at().as_seconds(),
-            expires_in_seconds,
-            poll_interval_seconds: started.poll_interval().as_secs(),
-        },
-    )
+fn parse_optional_return_path(
+    requested: Option<String>,
+    origin: &HumanAuthOrigin,
+) -> Result<Option<LoginReturnPath>, ()> {
+    requested
+        .map(|path| canonical_local_return_path(origin, &path).ok_or(()))
+        .transpose()
 }
 
 #[derive(Serialize)]
@@ -1601,18 +1651,22 @@ struct DeviceStartDocument<'a> {
     poll_interval_seconds: u64,
 }
 
-fn device_start_response(state: &GithubAuthHttpState, start: &DeviceLoginStart) -> Response {
-    if !state.provider_origin.trusts(&start.verification_uri)
+fn device_start_response(
+    transport: &GithubAuthTransportState,
+    start: &dyn DeviceLoginStartView,
+) -> Response {
+    let start = start.view();
+    if !transport.provider_origin.trusts(start.verification_uri)
         || start.poll_interval.is_zero()
         || start.poll_interval.subsec_nanos() != 0
-        || start.expires_at <= state.clock.now()
+        || start.expires_at <= transport.clock.now()
     {
         return error_response(StatusCode::INTERNAL_SERVER_ERROR, "internal_error");
     }
     let Some(expires_in_seconds) = start
         .expires_at
         .as_seconds()
-        .checked_sub(state.clock.now().as_seconds())
+        .checked_sub(transport.clock.now().as_seconds())
         .filter(|seconds| *seconds > 0)
     else {
         return error_response(StatusCode::INTERNAL_SERVER_ERROR, "internal_error");
@@ -1620,8 +1674,8 @@ fn device_start_response(state: &GithubAuthHttpState, start: &DeviceLoginStart) 
     json_response(
         StatusCode::OK,
         &DeviceStartDocument {
-            poll_credential: start.poll_credential.expose_secret(),
-            user_code: start.user_code.expose_secret(),
+            poll_credential: start.poll_credential_secret,
+            user_code: start.user_code_secret,
             verification_uri: start.verification_uri.as_str(),
             expires_at: start.expires_at.as_seconds(),
             expires_in_seconds,
@@ -1637,45 +1691,18 @@ struct DevicePollRequest {
 }
 
 async fn poll_device(State(state): State<GithubAuthHttpState>, request: Request) -> Response {
-    let document = match parse_json_request::<DevicePollRequest>(request).await {
-        Ok(document) => document,
-        Err(error) => return request_error_response(error),
-    };
-    let Ok(credential) =
-        GithubDevicePollCredential::from_raw(document.poll_credential.expose_secret())
-    else {
-        return error_response(StatusCode::BAD_REQUEST, "invalid_request");
-    };
-    drop(document);
-    match state
-        .backend
-        .poll_device(state.tenant_id.clone(), credential)
-        .await
-    {
-        Ok(outcome) => device_poll_response(&state, outcome, state.clock.now()),
-        Err(error) => {
-            if matches!(
-                error,
-                GithubLoginError::ProviderUnavailable
-                    | GithubLoginError::StorageUnavailable
-                    | GithubLoginError::RandomnessUnavailable
-                    | GithubLoginError::CollisionLimitExceeded
-                    | GithubLoginError::IntegrityFailure
-            ) {
-                tracing::warn!(
-                    error = ?error,
-                    "GitHub device authorization poll failed"
-                );
-            }
-            login_error_response(error, state.clock.now())
-        }
-    }
+    poll_device_request(GithubAuthFlow::SignIn(&state), request).await
 }
 
 async fn poll_setup_device(
     State(state): State<GithubSetupHttpState>,
     request: Request,
 ) -> Response {
+    poll_device_request(GithubAuthFlow::InstallationSetup(&state), request).await
+}
+
+async fn poll_device_request(flow: GithubAuthFlow<'_>, request: Request) -> Response {
+    let transport = flow.transport();
     let document = match parse_json_request::<DevicePollRequest>(request).await {
         Ok(document) => document,
         Err(error) => return request_error_response(error),
@@ -1686,14 +1713,46 @@ async fn poll_setup_device(
         return error_response(StatusCode::BAD_REQUEST, "invalid_request");
     };
     drop(document);
-    match state.service.poll_device(credential).await {
-        Ok(outcome) => setup_device_poll_response(&state, outcome, state.clock.now()),
+    let result = match &flow {
+        GithubAuthFlow::SignIn(state) => {
+            transport
+                .backend
+                .poll_device(state.tenant_id.clone(), credential)
+                .await
+        }
+        GithubAuthFlow::InstallationSetup(_) => {
+            transport.backend.poll_setup_device(credential).await
+        }
+    };
+    match result {
+        Ok(outcome) => device_poll_response(transport, outcome, transport.clock.now()),
         Err(error) => {
+            log_device_poll_failure(error);
+            github_auth_failure_response(error, transport.clock.now())
+        }
+    }
+}
+
+fn log_device_poll_failure(failure: GithubAuthFailure) {
+    match failure {
+        GithubAuthFailure::SignIn(
+            error @ (GithubLoginError::ProviderUnavailable
+            | GithubLoginError::StorageUnavailable
+            | GithubLoginError::RandomnessUnavailable
+            | GithubLoginError::CollisionLimitExceeded
+            | GithubLoginError::IntegrityFailure),
+        ) => {
+            tracing::warn!(
+                error = ?error,
+                "GitHub device authorization poll failed"
+            );
+        }
+        GithubAuthFailure::SignIn(_) => {}
+        GithubAuthFailure::InstallationSetup(error) => {
             tracing::warn!(
                 error = ?error,
                 "installation setup device authorization poll failed"
             );
-            setup_error_response(error, state.clock.now())
         }
     }
 }
@@ -1708,7 +1767,7 @@ struct DevicePollDocument<'a> {
 }
 
 fn device_poll_response(
-    state: &GithubAuthHttpState,
+    transport: &GithubAuthTransportState,
     outcome: DevicePollOutcome,
     now: UnixTimestamp,
 ) -> Response {
@@ -1744,7 +1803,7 @@ fn device_poll_response(
         DevicePollOutcome::Complete(completion)
             if completion.expires_at > now
                 && completion.return_path.as_ref().is_none_or(|path| {
-                    trusted_local_return_path(&state.application_origin, path.as_str())
+                    trusted_local_return_path(&transport.application_origin, path.as_str())
                 }) =>
         {
             json_response(
@@ -1758,75 +1817,11 @@ fn device_poll_response(
                 },
             )
         }
-        DevicePollOutcome::Complete(_) => {
+        DevicePollOutcome::Complete(_) | DevicePollOutcome::InvalidCompletion => {
             error_response(StatusCode::INTERNAL_SERVER_ERROR, "internal_error")
         }
         DevicePollOutcome::Denied => error_response(StatusCode::FORBIDDEN, "authorization_denied"),
         DevicePollOutcome::Expired => error_response(StatusCode::GONE, "authorization_expired"),
-    }
-}
-
-fn setup_device_poll_response(
-    state: &GithubSetupHttpState,
-    outcome: InstallationDevicePollOutcome,
-    now: UnixTimestamp,
-) -> Response {
-    match outcome {
-        InstallationDevicePollOutcome::Pending { next_poll_at } => {
-            let mut response = json_response(
-                StatusCode::ACCEPTED,
-                &DevicePollDocument {
-                    status: "pending",
-                    next_poll_at: Some(next_poll_at.as_seconds()),
-                    credential: None,
-                    expires_at: None,
-                    return_path: None,
-                },
-            );
-            set_retry_after(&mut response, retry_seconds(next_poll_at, now));
-            response
-        }
-        InstallationDevicePollOutcome::SlowDown { next_poll_at } => {
-            let mut response = json_response(
-                StatusCode::ACCEPTED,
-                &DevicePollDocument {
-                    status: "slow_down",
-                    next_poll_at: Some(next_poll_at.as_seconds()),
-                    credential: None,
-                    expires_at: None,
-                    return_path: None,
-                },
-            );
-            set_retry_after(&mut response, retry_seconds(next_poll_at, now));
-            response
-        }
-        InstallationDevicePollOutcome::Complete(completion) => {
-            let (credential, _, session, return_path) = completion.into_parts();
-            if session.identity().kind() != SessionKind::Cli
-                || session.expires_at() <= now
-                || return_path.as_ref().is_some_and(|path| {
-                    !trusted_local_return_path(&state.application_origin, path.as_str())
-                })
-            {
-                return error_response(StatusCode::INTERNAL_SERVER_ERROR, "internal_error");
-            }
-            json_response(
-                StatusCode::OK,
-                &DevicePollDocument {
-                    status: "complete",
-                    next_poll_at: None,
-                    credential: Some(credential.expose_secret()),
-                    expires_at: Some(session.expires_at().as_seconds()),
-                    return_path: return_path.as_ref().map(LoginReturnPath::as_str),
-                },
-            )
-        }
-        InstallationDevicePollOutcome::Denied => {
-            error_response(StatusCode::FORBIDDEN, "authorization_denied")
-        }
-        InstallationDevicePollOutcome::Expired => {
-            error_response(StatusCode::GONE, "authorization_expired")
-        }
     }
 }
 
@@ -2076,89 +2071,87 @@ fn retry_seconds(next_poll_at: UnixTimestamp, now: UnixTimestamp) -> u64 {
 }
 
 fn login_error_response(error: GithubLoginError, now: UnixTimestamp) -> Response {
-    match error {
-        GithubLoginError::Invalid => error_response(StatusCode::BAD_REQUEST, "invalid_request"),
-        GithubLoginError::Replay => error_response(StatusCode::CONFLICT, "request_replayed"),
-        GithubLoginError::Expired => error_response(StatusCode::GONE, "request_expired"),
-        GithubLoginError::Denied => error_response(StatusCode::FORBIDDEN, "authorization_denied"),
-        GithubLoginError::PollTooEarly { next_poll_at } => {
-            let mut response = error_response(StatusCode::TOO_MANY_REQUESTS, "poll_too_early");
-            set_retry_after(&mut response, retry_seconds(next_poll_at, now));
-            response
-        }
-        GithubLoginError::RateLimited {
-            retry_after_seconds,
-        } => {
-            let mut response = error_response(StatusCode::TOO_MANY_REQUESTS, "rate_limited");
-            if let Some(seconds) = retry_after_seconds {
-                set_retry_after(&mut response, seconds.max(1));
-            }
-            response
-        }
-        GithubLoginError::ProviderUnavailable
-        | GithubLoginError::StorageUnavailable
-        | GithubLoginError::RandomnessUnavailable
-        | GithubLoginError::CollisionLimitExceeded => {
-            let mut response = error_response(StatusCode::SERVICE_UNAVAILABLE, "unavailable");
-            set_retry_after(&mut response, 1);
-            response
-        }
-        GithubLoginError::NotAuthorized => error_response(StatusCode::FORBIDDEN, "not_authorized"),
-        GithubLoginError::IntegrityFailure => {
-            error_response(StatusCode::INTERNAL_SERVER_ERROR, "internal_error")
-        }
-    }
+    github_auth_failure_response(GithubAuthFailure::SignIn(error), now)
 }
 
 fn setup_error_response(error: InstallationSetupError, now: UnixTimestamp) -> Response {
-    match error {
-        InstallationSetupError::InvalidRequest => {
-            error_response(StatusCode::BAD_REQUEST, "invalid_request")
+    github_auth_failure_response(GithubAuthFailure::InstallationSetup(error), now)
+}
+
+fn github_auth_failure_response(error: GithubAuthFailure, now: UnixTimestamp) -> Response {
+    let (status, code, retry_after) = match error {
+        GithubAuthFailure::SignIn(GithubLoginError::Invalid)
+        | GithubAuthFailure::InstallationSetup(InstallationSetupError::InvalidRequest) => {
+            (StatusCode::BAD_REQUEST, "invalid_request", None)
         }
-        InstallationSetupError::InvalidProof => {
-            error_response(StatusCode::FORBIDDEN, "setup_proof_rejected")
+        GithubAuthFailure::InstallationSetup(InstallationSetupError::InvalidProof) => {
+            (StatusCode::FORBIDDEN, "setup_proof_rejected", None)
         }
-        InstallationSetupError::NotArmed => error_response(StatusCode::CONFLICT, "setup_not_armed"),
-        InstallationSetupError::StateConflict => {
-            error_response(StatusCode::CONFLICT, "setup_state_conflict")
+        GithubAuthFailure::InstallationSetup(InstallationSetupError::NotArmed) => {
+            (StatusCode::CONFLICT, "setup_not_armed", None)
         }
-        InstallationSetupError::Replay => error_response(StatusCode::CONFLICT, "request_replayed"),
-        InstallationSetupError::Expired => error_response(StatusCode::GONE, "request_expired"),
-        InstallationSetupError::Denied => {
-            error_response(StatusCode::FORBIDDEN, "authorization_denied")
+        GithubAuthFailure::InstallationSetup(InstallationSetupError::StateConflict) => {
+            (StatusCode::CONFLICT, "setup_state_conflict", None)
         }
-        InstallationSetupError::PollTooEarly { next_poll_at } => {
-            let mut response = error_response(StatusCode::TOO_MANY_REQUESTS, "poll_too_early");
-            set_retry_after(&mut response, retry_seconds(next_poll_at, now));
-            response
+        GithubAuthFailure::SignIn(GithubLoginError::Replay)
+        | GithubAuthFailure::InstallationSetup(InstallationSetupError::Replay) => {
+            (StatusCode::CONFLICT, "request_replayed", None)
         }
-        InstallationSetupError::RateLimited {
+        GithubAuthFailure::SignIn(GithubLoginError::Expired)
+        | GithubAuthFailure::InstallationSetup(InstallationSetupError::Expired) => {
+            (StatusCode::GONE, "request_expired", None)
+        }
+        GithubAuthFailure::SignIn(GithubLoginError::Denied)
+        | GithubAuthFailure::InstallationSetup(InstallationSetupError::Denied) => {
+            (StatusCode::FORBIDDEN, "authorization_denied", None)
+        }
+        GithubAuthFailure::SignIn(GithubLoginError::PollTooEarly { next_poll_at })
+        | GithubAuthFailure::InstallationSetup(InstallationSetupError::PollTooEarly {
+            next_poll_at,
+        }) => (
+            StatusCode::TOO_MANY_REQUESTS,
+            "poll_too_early",
+            Some(retry_seconds(next_poll_at, now)),
+        ),
+        GithubAuthFailure::SignIn(GithubLoginError::RateLimited {
             retry_after_seconds,
-        } => {
-            let mut response = error_response(StatusCode::TOO_MANY_REQUESTS, "rate_limited");
-            if let Some(seconds) = retry_after_seconds {
-                set_retry_after(&mut response, seconds.max(1));
-            }
-            response
+        })
+        | GithubAuthFailure::InstallationSetup(InstallationSetupError::RateLimited {
+            retry_after_seconds,
+        }) => (
+            StatusCode::TOO_MANY_REQUESTS,
+            "rate_limited",
+            retry_after_seconds.map(|seconds| seconds.max(1)),
+        ),
+        GithubAuthFailure::SignIn(
+            GithubLoginError::ProviderUnavailable
+            | GithubLoginError::StorageUnavailable
+            | GithubLoginError::RandomnessUnavailable
+            | GithubLoginError::CollisionLimitExceeded,
+        )
+        | GithubAuthFailure::InstallationSetup(
+            InstallationSetupError::ProviderUnavailable
+            | InstallationSetupError::StorageUnavailable
+            | InstallationSetupError::RandomnessUnavailable
+            | InstallationSetupError::CollisionLimitExceeded,
+        ) => (StatusCode::SERVICE_UNAVAILABLE, "unavailable", Some(1)),
+        GithubAuthFailure::SignIn(GithubLoginError::NotAuthorized)
+        | GithubAuthFailure::InstallationSetup(InstallationSetupError::NotAuthorized) => {
+            (StatusCode::FORBIDDEN, "not_authorized", None)
         }
-        InstallationSetupError::ProviderUnavailable
-        | InstallationSetupError::StorageUnavailable
-        | InstallationSetupError::RandomnessUnavailable
-        | InstallationSetupError::CollisionLimitExceeded => {
-            let mut response = error_response(StatusCode::SERVICE_UNAVAILABLE, "unavailable");
-            set_retry_after(&mut response, 1);
-            response
+        GithubAuthFailure::InstallationSetup(InstallationSetupError::AlreadyConfigured) => {
+            (StatusCode::GONE, "setup_complete", None)
         }
-        InstallationSetupError::NotAuthorized => {
-            error_response(StatusCode::FORBIDDEN, "not_authorized")
+        GithubAuthFailure::SignIn(GithubLoginError::IntegrityFailure)
+        | GithubAuthFailure::InstallationSetup(InstallationSetupError::IntegrityFailure) => {
+            (StatusCode::INTERNAL_SERVER_ERROR, "internal_error", None)
         }
-        InstallationSetupError::AlreadyConfigured => {
-            error_response(StatusCode::GONE, "setup_complete")
-        }
-        InstallationSetupError::IntegrityFailure => {
-            error_response(StatusCode::INTERNAL_SERVER_ERROR, "internal_error")
-        }
+    };
+    let mut response = error_response(status, code);
+    if let Some(seconds) = retry_after {
+        set_retry_after(&mut response, seconds);
     }
+    response
 }
 
 fn browser_begin_overload_response(rejection: GithubBeginRejection) -> Response {
@@ -2285,7 +2278,7 @@ mod tests {
         convert::Infallible,
         sync::{
             Mutex,
-            atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+            atomic::{AtomicU64, AtomicUsize, Ordering},
         },
         task::Poll,
     };
@@ -2317,11 +2310,11 @@ mod tests {
     const BOOTSTRAP_SENTINEL: &str = "setup-bootstrap-sentinel-0123456789abcdef";
 
     #[derive(Debug)]
-    struct FixedClock;
+    struct FixedClock(u64);
 
     impl Clock for FixedClock {
         fn now(&self) -> UnixTimestamp {
-            UnixTimestamp::from_seconds(NOW)
+            UnixTimestamp::from_seconds(self.0)
         }
     }
 
@@ -2381,21 +2374,69 @@ mod tests {
         }
     }
 
+    struct TestWebLoginStart(Url, SecretString, UnixTimestamp);
+
+    impl WebLoginStartView for TestWebLoginStart {
+        fn view(&self) -> WebLoginStartRef<'_> {
+            WebLoginStartRef {
+                authorization_url: &self.0,
+                binding_secret: self.1.expose_secret(),
+                expires_at: self.2,
+            }
+        }
+    }
+
+    struct TestDeviceLoginStart(SecretString, SecretString, Url, UnixTimestamp, Duration);
+
+    impl DeviceLoginStartView for TestDeviceLoginStart {
+        fn view(&self) -> DeviceLoginStartRef<'_> {
+            DeviceLoginStartRef {
+                poll_credential_secret: self.0.expose_secret(),
+                user_code_secret: self.1.expose_secret(),
+                verification_uri: &self.2,
+                expires_at: self.3,
+                poll_interval: self.4,
+            }
+        }
+    }
+
+    /// Non-secret `(matches_sentinel, decoded_len, all_x)` probe evidence.
+    type BootstrapObservation = (bool, usize, bool);
+
+    fn observe_bootstrap(token: &SecretString) -> BootstrapObservation {
+        let exposed = token.expose_secret();
+        let matches_sentinel = token.constant_time_eq(BOOTSTRAP_SENTINEL);
+        let all_x = exposed.bytes().all(|byte| byte == b'x');
+        (matches_sentinel, exposed.len(), all_x)
+    }
+
+    #[derive(Default)]
+    struct TransportProbes {
+        begin_web: Vec<(TenantId, LoginReturnPath)>,
+        begin_setup_web: Vec<(BootstrapObservation, LoginReturnPath)>,
+        begin_device: Vec<(TenantId, Option<LoginReturnPath>)>,
+        begin_setup_device: Vec<(BootstrapObservation, Option<LoginReturnPath>)>,
+        poll_device: Vec<(TenantId, bool)>,
+        poll_setup_device: Vec<bool>,
+    }
+
+    type SignResult<T> = Result<T, GithubLoginError>;
+    type SetupResult<T> = Result<T, InstallationSetupError>;
+    type SessionResult<T> = Result<T, SessionCredentialServiceError>;
+
+    #[derive(Default)]
     struct FakeBackend {
-        browser_revoke:
-            Mutex<Option<Result<RevokeOwnSessionOutcome, SessionCredentialServiceError>>>,
-        cli_revoke: Mutex<Option<Result<RevokeOwnSessionOutcome, SessionCredentialServiceError>>>,
-        cli_activation:
-            Mutex<Option<Result<ActivateCliSessionOutcome, SessionCredentialServiceError>>>,
+        browser_revoke: Mutex<Option<SessionResult<RevokeOwnSessionOutcome>>>,
+        cli_revoke: Mutex<Option<SessionResult<RevokeOwnSessionOutcome>>>,
+        cli_activation: Mutex<Option<SessionResult<ActivateCliSessionOutcome>>>,
         revoked_credentials: Mutex<Vec<String>>,
         activated_credentials: Mutex<Vec<String>>,
-        web_start: Mutex<Option<Result<WebLoginStart, GithubLoginError>>>,
-        web_return_paths: Mutex<Vec<LoginReturnPath>>,
+        web_start: Mutex<Option<TestWebLoginStart>>,
         web_begin_blocker: Mutex<Option<Arc<BeginBlocker>>>,
         web_completion: Mutex<Option<Result<WebCallbackCompletion, WebCallbackError>>>,
-        device_start: Mutex<Option<Result<DeviceLoginStart, GithubLoginError>>>,
-        device_begin_calls: AtomicUsize,
-        device_poll: Mutex<Option<Result<DevicePollOutcome, GithubLoginError>>>,
+        device_start: Mutex<Option<TestDeviceLoginStart>>,
+        device_poll: Mutex<Option<DevicePollOutcome>>,
+        probes: Mutex<TransportProbes>,
     }
 
     impl fmt::Debug for FakeBackend {
@@ -2404,87 +2445,152 @@ mod tests {
         }
     }
 
+    fn take_slot<T>(slot: &Mutex<Option<T>>) -> Option<T> {
+        slot.lock().unwrap().take()
+    }
+
     impl FakeBackend {
         fn empty() -> Self {
-            Self {
-                browser_revoke: Mutex::new(None),
-                cli_revoke: Mutex::new(None),
-                cli_activation: Mutex::new(None),
-                revoked_credentials: Mutex::new(Vec::new()),
-                activated_credentials: Mutex::new(Vec::new()),
-                web_start: Mutex::new(None),
-                web_return_paths: Mutex::new(Vec::new()),
-                web_begin_blocker: Mutex::new(None),
-                web_completion: Mutex::new(None),
-                device_start: Mutex::new(None),
-                device_begin_calls: AtomicUsize::new(0),
-                device_poll: Mutex::new(None),
+            Self::default()
+        }
+
+        async fn wait_for_web_begin(&self) {
+            let blocker = self.web_begin_blocker.lock().unwrap().clone();
+            if let Some(blocker) = blocker {
+                blocker.enter().await;
             }
+        }
+
+        fn probes(&self) -> std::sync::MutexGuard<'_, TransportProbes> {
+            self.probes.lock().unwrap()
+        }
+
+        fn take_web_start(&self) -> Option<BoxedWebLoginStart> {
+            take_slot(&self.web_start).map(|start| Box::new(start) as BoxedWebLoginStart)
+        }
+
+        fn take_device_start(&self) -> Option<BoxedDeviceLoginStart> {
+            take_slot(&self.device_start)
+                .map(|start| Box::new(RedactedDeviceLoginStart(start)) as BoxedDeviceLoginStart)
+        }
+
+        fn transport_call_count(&self) -> usize {
+            let probes = self.probes();
+            probes.begin_web.len()
+                + probes.begin_setup_web.len()
+                + probes.begin_device.len()
+                + probes.begin_setup_device.len()
+                + probes.poll_device.len()
+                + probes.poll_setup_device.len()
         }
     }
 
     #[async_trait]
     impl GithubAuthBackend for FakeBackend {
+        async fn begin_web(
+            &self,
+            tenant_id: TenantId,
+            return_path: LoginReturnPath,
+        ) -> SignResult<BoxedWebLoginStart> {
+            self.probes().begin_web.push((tenant_id, return_path));
+            self.wait_for_web_begin().await;
+            self.take_web_start().ok_or(GithubLoginError::Invalid)
+        }
+
+        async fn begin_device(
+            &self,
+            tenant_id: TenantId,
+            return_path: Option<LoginReturnPath>,
+        ) -> SignResult<BoxedDeviceLoginStart> {
+            self.probes().begin_device.push((tenant_id, return_path));
+            self.take_device_start().ok_or(GithubLoginError::Invalid)
+        }
+
+        async fn poll_device(
+            &self,
+            tenant_id: TenantId,
+            credential: GithubDevicePollCredential,
+        ) -> DevicePollResult {
+            let credential_matches = credential.expose_secret() == POLL;
+            drop(credential);
+            self.probes()
+                .poll_device
+                .push((tenant_id, credential_matches));
+            take_slot(&self.device_poll).ok_or(GithubAuthFailure::SignIn(GithubLoginError::Invalid))
+        }
+
+        async fn begin_setup_web(
+            &self,
+            bootstrap_token: SecretString,
+            return_path: LoginReturnPath,
+        ) -> SetupResult<BoxedWebLoginStart> {
+            let observation = observe_bootstrap(&bootstrap_token);
+            drop(bootstrap_token);
+            self.probes()
+                .begin_setup_web
+                .push((observation, return_path));
+            self.wait_for_web_begin().await;
+            self.take_web_start()
+                .ok_or(InstallationSetupError::InvalidRequest)
+        }
+
+        async fn begin_setup_device(
+            &self,
+            bootstrap_token: SecretString,
+            return_path: Option<LoginReturnPath>,
+        ) -> SetupResult<BoxedDeviceLoginStart> {
+            let observation = observe_bootstrap(&bootstrap_token);
+            drop(bootstrap_token);
+            self.probes()
+                .begin_setup_device
+                .push((observation, return_path));
+            self.take_device_start()
+                .ok_or(InstallationSetupError::InvalidRequest)
+        }
+
+        async fn poll_setup_device(
+            &self,
+            credential: GithubDevicePollCredential,
+        ) -> DevicePollResult {
+            let credential_matches = credential.expose_secret() == POLL;
+            drop(credential);
+            self.probes().poll_setup_device.push(credential_matches);
+            take_slot(&self.device_poll).ok_or(GithubAuthFailure::InstallationSetup(
+                InstallationSetupError::InvalidRequest,
+            ))
+        }
+
         async fn revoke_browser(
             &self,
             raw_credential: &str,
-        ) -> Result<RevokeOwnSessionOutcome, SessionCredentialServiceError> {
+        ) -> SessionResult<RevokeOwnSessionOutcome> {
             self.revoked_credentials
                 .lock()
                 .unwrap()
                 .push(raw_credential.to_owned());
-            self.browser_revoke
-                .lock()
-                .unwrap()
-                .take()
+            take_slot(&self.browser_revoke)
                 .unwrap_or(Err(SessionCredentialServiceError::InternalFailure))
         }
 
-        async fn revoke_cli(
-            &self,
-            raw_credential: &str,
-        ) -> Result<RevokeOwnSessionOutcome, SessionCredentialServiceError> {
+        async fn revoke_cli(&self, raw_credential: &str) -> SessionResult<RevokeOwnSessionOutcome> {
             self.revoked_credentials
                 .lock()
                 .unwrap()
                 .push(raw_credential.to_owned());
-            self.cli_revoke
-                .lock()
-                .unwrap()
-                .take()
+            take_slot(&self.cli_revoke)
                 .unwrap_or(Err(SessionCredentialServiceError::InternalFailure))
         }
 
         async fn activate_cli(
             &self,
             raw_credential: &str,
-        ) -> Result<ActivateCliSessionOutcome, SessionCredentialServiceError> {
+        ) -> SessionResult<ActivateCliSessionOutcome> {
             self.activated_credentials
                 .lock()
                 .unwrap()
                 .push(raw_credential.to_owned());
-            self.cli_activation
-                .lock()
-                .unwrap()
-                .take()
+            take_slot(&self.cli_activation)
                 .unwrap_or(Err(SessionCredentialServiceError::InternalFailure))
-        }
-
-        async fn begin_web(
-            &self,
-            _tenant_id: TenantId,
-            return_path: LoginReturnPath,
-        ) -> Result<WebLoginStart, GithubLoginError> {
-            self.web_return_paths.lock().unwrap().push(return_path);
-            let blocker = self.web_begin_blocker.lock().unwrap().clone();
-            if let Some(blocker) = blocker {
-                blocker.enter().await;
-            }
-            self.web_start
-                .lock()
-                .unwrap()
-                .take()
-                .unwrap_or(Err(GithubLoginError::Invalid))
         }
 
         async fn complete_web(
@@ -2493,82 +2599,61 @@ mod tests {
             _binding: GithubBrowserBindingCookie,
             _callback: GithubWebCallback,
         ) -> Result<WebCallbackCompletion, WebCallbackError> {
-            self.web_completion
-                .lock()
-                .unwrap()
-                .take()
+            take_slot(&self.web_completion)
                 .unwrap_or(Err(WebCallbackError::SignIn(GithubLoginError::Invalid)))
-        }
-
-        async fn begin_device(
-            &self,
-            _tenant_id: TenantId,
-            _return_path: Option<LoginReturnPath>,
-        ) -> Result<DeviceLoginStart, GithubLoginError> {
-            self.device_begin_calls.fetch_add(1, Ordering::SeqCst);
-            self.device_start
-                .lock()
-                .unwrap()
-                .take()
-                .unwrap_or(Err(GithubLoginError::Invalid))
-        }
-
-        async fn poll_device(
-            &self,
-            _tenant_id: TenantId,
-            _credential: GithubDevicePollCredential,
-        ) -> Result<DevicePollOutcome, GithubLoginError> {
-            self.device_poll
-                .lock()
-                .unwrap()
-                .take()
-                .unwrap_or(Err(GithubLoginError::Invalid))
         }
     }
 
-    fn state(backend: Arc<FakeBackend>) -> GithubAuthHttpState {
-        GithubAuthHttpState::from_backend(
+    fn test_transport(
+        backend: Arc<dyn GithubAuthBackend>,
+        begin_admission: Arc<GithubBeginAdmission>,
+    ) -> GithubAuthTransportState {
+        GithubAuthTransportState::new(
             backend,
-            TenantId::new("tenant-a").unwrap(),
+            begin_admission,
             HumanAuthOrigin::new(&Url::parse("https://ci.example/").unwrap()).unwrap(),
             GithubProviderOrigin::new(&Url::parse("https://github.example/login").unwrap())
                 .unwrap(),
             LoginReturnPath::new("/").unwrap(),
-            Arc::new(FixedClock),
+            Arc::new(FixedClock(NOW)),
         )
+    }
+
+    fn begin_admission() -> Arc<GithubBeginAdmission> {
+        Arc::new(GithubBeginAdmission::new(Arc::new(
+            ProcessMonotonicClock::new(),
+        )))
+    }
+
+    fn state(backend: Arc<FakeBackend>) -> GithubAuthHttpState {
+        state_with_admission(backend, begin_admission())
     }
 
     fn state_with_admission(
         backend: Arc<FakeBackend>,
         begin_admission: Arc<GithubBeginAdmission>,
     ) -> GithubAuthHttpState {
-        GithubAuthHttpState::from_backend_and_admission(
-            backend,
-            begin_admission,
-            TenantId::new("tenant-a").unwrap(),
-            HumanAuthOrigin::new(&Url::parse("https://ci.example/").unwrap()).unwrap(),
-            GithubProviderOrigin::new(&Url::parse("https://github.example/login").unwrap())
-                .unwrap(),
-            LoginReturnPath::new("/").unwrap(),
-            Arc::new(FixedClock),
-        )
+        GithubAuthHttpState {
+            transport: test_transport(backend, begin_admission),
+            tenant_id: TenantId::new("tenant-a").unwrap(),
+        }
     }
 
-    fn cli_snapshot() -> AuthenticatedRequestSnapshot {
-        let tenant = TenantId::new("tenant-a").unwrap();
-        let principal = PrincipalId::new("33333333-3333-4333-8333-333333333333").unwrap();
-        let provider = ProviderId::new("github").unwrap();
-        let subject = ProviderSubject::new("1234567").unwrap();
+    fn durable_session(
+        tenant: &TenantId,
+        principal: &PrincipalId,
+        kind: SessionKind,
+    ) -> DurableSession {
         let identity = DurableSessionIdentity::new(
             SessionId::new("44444444-4444-4444-8444-444444444444").unwrap(),
             tenant.clone(),
             principal.clone(),
-            provider.clone(),
-            subject.clone(),
-            SessionKind::Cli,
+            ProviderId::new("github").unwrap(),
+            ProviderSubject::new("1234567").unwrap(),
+            kind,
         )
         .unwrap();
-        let session = DurableSession::new(
+        DurableSession::new(
             identity,
             7,
             UnixTimestamp::from_seconds(NOW - 1_000),
@@ -2577,7 +2662,15 @@ mod tests {
             UnixTimestamp::from_seconds(NOW + 2_000),
             None,
         )
-        .unwrap();
+        .unwrap()
+    }
+
+    fn cli_snapshot() -> AuthenticatedRequestSnapshot {
+        let tenant = TenantId::new("tenant-a").unwrap();
+        let principal = PrincipalId::new("33333333-3333-4333-8333-333333333333").unwrap();
+        let provider = ProviderId::new("github").unwrap();
+        let subject = ProviderSubject::new("1234567").unwrap();
+        let session = durable_session(&tenant, &principal, SessionKind::Cli);
         let human = AuthenticatedHuman::new(
             principal.clone(),
             provider,
@@ -2599,17 +2692,33 @@ mod tests {
         .unwrap()
     }
 
-    fn json_post(path: &str, body: impl Into<Body>) -> Request<Body> {
-        Request::builder()
-            .method("POST")
-            .uri(path)
-            .header(CONTENT_TYPE, "application/json")
-            .body(body.into())
-            .unwrap()
+    fn request(
+        method: &str,
+        path: &str,
+        content_type: Option<&str>,
+        body: impl Into<Body>,
+    ) -> Request<Body> {
+        let mut builder = Request::builder().method(method).uri(path);
+        if let Some(content_type) = content_type {
+            builder = builder.header(CONTENT_TYPE, content_type);
+        }
+        builder.body(body.into()).unwrap()
     }
 
-    fn browser_begin_request() -> Request<Body> {
-        let mut request = json_post(GITHUB_WEB_BEGIN_PATH, r#"{"return_path":null}"#);
+    fn json_post(path: &str, body: impl Into<Body>) -> Request<Body> {
+        request("POST", path, Some("application/json"), body)
+    }
+
+    fn empty_request(method: &str, path: &str) -> Request<Body> {
+        request(method, path, None, Body::empty())
+    }
+
+    async fn send(app: &Router, request: Request<Body>) -> Response {
+        app.clone().oneshot(request).await.unwrap()
+    }
+
+    fn browser_post(path: &str, content_type: &str, body: impl Into<Body>) -> Request<Body> {
+        let mut request = request("POST", path, Some(content_type), body);
         request
             .headers_mut()
             .insert(ORIGIN, HeaderValue::from_static("https://ci.example"));
@@ -2619,131 +2728,207 @@ mod tests {
         request
     }
 
-    #[derive(Default)]
-    struct SetupBeginProbe {
-        calls: AtomicUsize,
-        device_calls: AtomicUsize,
-        received_sentinel: AtomicBool,
-        return_paths: Mutex<Vec<LoginReturnPath>>,
+    fn browser_begin_request() -> Request<Body> {
+        browser_post(
+            GITHUB_WEB_BEGIN_PATH,
+            "application/json",
+            r#"{"return_path":null}"#,
+        )
     }
 
-    #[derive(Clone)]
-    struct SetupBeginHarnessState {
-        application_origin: HumanAuthOrigin,
-        provider_origin: GithubProviderOrigin,
-        default_return_path: LoginReturnPath,
-        clock: Arc<dyn Clock>,
-        begin_admission: Arc<GithubBeginAdmission>,
-        probe: Arc<SetupBeginProbe>,
+    fn browser_form_request(body: impl Into<Body>) -> Request<Body> {
+        browser_post(
+            GITHUB_WEB_BEGIN_PATH,
+            "application/x-www-form-urlencoded",
+            body,
+        )
     }
 
-    async fn setup_begin_harness_handler(
-        State(state): State<SetupBeginHarnessState>,
-        request: Request<Body>,
-    ) -> Response {
-        let probe = Arc::clone(&state.probe);
-        begin_setup_web_request(
-            SetupWebRequestContext {
-                application_origin: &state.application_origin,
-                provider_origin: &state.provider_origin,
-                default_return_path: &state.default_return_path,
-                clock: state.clock.as_ref(),
-                begin_admission: &state.begin_admission,
-            },
-            request,
-            move |bootstrap_token, return_path| async move {
-                probe.calls.fetch_add(1, Ordering::SeqCst);
-                probe.received_sentinel.store(
-                    bootstrap_token.constant_time_eq(BOOTSTRAP_SENTINEL),
-                    Ordering::SeqCst,
-                );
-                probe.return_paths.lock().unwrap().push(return_path);
-                drop(bootstrap_token);
-                Ok(SetupWebLoginStart {
-                    authorization_url: Url::parse(&format!(
-                        "https://github.example/login/oauth?state={STATE}"
-                    ))
-                    .unwrap(),
-                    binding_cookie: GithubBrowserBindingCookie::from_raw(BINDING).unwrap(),
-                    expires_at: UnixTimestamp::from_seconds(NOW + 300),
-                })
-            },
+    async fn setup_form_response(app: &Router, body: impl Into<Body>) -> Response {
+        send(
+            app,
+            browser_post(
+                GITHUB_SETUP_WEB_BEGIN_PATH,
+                "application/x-www-form-urlencoded",
+                body,
+            ),
         )
         .await
     }
 
-    async fn setup_device_begin_harness_handler(
-        State(state): State<SetupBeginHarnessState>,
-        request: Request<Body>,
-    ) -> Response {
-        let probe = Arc::clone(&state.probe);
-        begin_setup_device_request(
-            SetupDeviceRequestContext {
-                application_origin: &state.application_origin,
-                provider_origin: &state.provider_origin,
-                clock: state.clock.as_ref(),
-                begin_admission: &state.begin_admission,
-            },
-            request,
-            move |bootstrap_token, _return_path| async move {
-                probe.device_calls.fetch_add(1, Ordering::SeqCst);
-                drop(bootstrap_token);
-                Err(InstallationSetupError::InvalidRequest)
-            },
-        )
-        .await
+    fn bearer_request(method: &str, path: &str) -> Request<Body> {
+        let mut request = empty_request(method, path);
+        request.headers_mut().insert(
+            axum::http::header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {SESSION}")).unwrap(),
+        );
+        request
     }
 
-    fn setup_begin_harness() -> (Router, Arc<SetupBeginProbe>) {
-        setup_begin_harness_with_admission(Arc::new(GithubBeginAdmission::new(Arc::new(
-            ProcessMonotonicClock::new(),
-        ))))
+    fn setup_state(backend: Arc<FakeBackend>) -> GithubSetupHttpState {
+        setup_state_with_admission(backend, begin_admission())
     }
 
-    fn setup_begin_harness_with_admission(
+    fn setup_state_with_admission(
+        backend: Arc<FakeBackend>,
         begin_admission: Arc<GithubBeginAdmission>,
-    ) -> (Router, Arc<SetupBeginProbe>) {
-        let probe = Arc::new(SetupBeginProbe::default());
-        let state = SetupBeginHarnessState {
-            application_origin: HumanAuthOrigin::new(&Url::parse("https://ci.example/").unwrap())
-                .unwrap(),
-            provider_origin: GithubProviderOrigin::new(
-                &Url::parse("https://github.example/login").unwrap(),
-            )
-            .unwrap(),
-            default_return_path: LoginReturnPath::new("/").unwrap(),
-            clock: Arc::new(FixedClock),
-            begin_admission,
-            probe: Arc::clone(&probe),
-        };
-        (
-            Router::new()
-                .route(
-                    GITHUB_SETUP_WEB_BEGIN_PATH,
-                    post(setup_begin_harness_handler),
-                )
-                .route(
-                    GITHUB_SETUP_DEVICE_BEGIN_PATH,
-                    post(setup_device_begin_harness_handler),
-                )
-                .with_state(state),
-            probe,
+    ) -> GithubSetupHttpState {
+        GithubSetupHttpState {
+            transport: test_transport(backend, begin_admission),
+        }
+    }
+
+    fn renderer_flow_transports() -> [(GithubAuthTransportState, String, u64); 2] {
+        [("sign", NOW), ("setup", NOW + 1_000)].map(|(flow, now)| {
+            let application = format!("https://{flow}.example");
+            let provider = format!("https://github-{flow}.example/login");
+            let mut transport = test_transport(Arc::new(FakeBackend::empty()), begin_admission());
+            transport.application_origin =
+                HumanAuthOrigin::new(&Url::parse(&format!("{application}/")).unwrap()).unwrap();
+            transport.provider_origin =
+                GithubProviderOrigin::new(&Url::parse(&provider).unwrap()).unwrap();
+            transport.clock = Arc::new(FixedClock(now));
+            let selected_provider = Url::parse(&format!("{provider}/selection")).unwrap();
+            assert_eq!(transport.application_origin.as_str(), application);
+            assert!(transport.provider_origin.trusts(&selected_provider));
+            assert_eq!(transport.clock.now().as_seconds(), now);
+            (transport, provider, now)
+        })
+    }
+
+    fn web_start(url: &str, expires_at: u64) -> TestWebLoginStart {
+        TestWebLoginStart(
+            Url::parse(url).unwrap(),
+            SecretString::new(BINDING).unwrap(),
+            UnixTimestamp::from_seconds(expires_at),
         )
     }
 
-    fn setup_begin_request(
-        uri: &str,
-        content_type: &'static str,
-        body: impl Into<Body>,
-    ) -> Request<Body> {
+    fn trusted_web_start() -> TestWebLoginStart {
+        web_start(
+            &format!("https://github.example/login/oauth?state={STATE}"),
+            NOW + 300,
+        )
+    }
+
+    fn device_start(uri: &str, interval: Duration, expires_at: u64) -> TestDeviceLoginStart {
+        TestDeviceLoginStart(
+            SecretString::new(POLL).unwrap(),
+            SecretString::new("ABCD-EFGH").unwrap(),
+            Url::parse(uri).unwrap(),
+            UnixTimestamp::from_seconds(expires_at),
+            interval,
+        )
+    }
+
+    fn trusted_device_start() -> TestDeviceLoginStart {
+        device_start(
+            "https://github.example/login/device",
+            Duration::from_secs(5),
+            NOW + 900,
+        )
+    }
+
+    fn device_completion(path: Option<&str>, expires_at: u64) -> DevicePollOutcome {
+        DevicePollOutcome::Complete(DeviceLoginCompletion {
+            credential: SessionCredential::from_raw(SESSION).unwrap(),
+            expires_at: UnixTimestamp::from_seconds(expires_at),
+            return_path: path.map(|path| LoginReturnPath::new(path).unwrap()),
+        })
+    }
+
+    fn device_start_body(uri: &str, now: u64) -> String {
+        format!(
+            r#"{{"poll_credential":"{POLL}","user_code":"ABCD-EFGH","verification_uri":"{uri}","expires_at":{},"expires_in_seconds":900,"poll_interval_seconds":5}}"#,
+            now + 900
+        )
+    }
+
+    fn device_completion_body(path: Option<&str>, expires_at: u64) -> String {
+        let path = path.map_or_else(|| "null".to_owned(), |path| format!(r#""{path}""#));
+        format!(
+            r#"{{"status":"complete","next_poll_at":null,"credential":"{SESSION}","expires_at":{expires_at},"return_path":{path}}}"#
+        )
+    }
+
+    fn callback_request(method: &str, uri: &str) -> Request<Body> {
         Request::builder()
-            .method("POST")
+            .method(method)
             .uri(uri)
-            .header(CONTENT_TYPE, content_type)
-            .header(ORIGIN, "https://ci.example")
-            .header(SEC_FETCH_SITE, "same-origin")
-            .body(body.into())
+            .header(COOKIE, format!("__Host-automata-login={BINDING}"))
+            .body(Body::empty())
             .unwrap()
+    }
+
+    fn callback_completion(setup: bool, return_path: &str) -> WebCallbackCompletion {
+        let completion = WebLoginCompletion {
+            credential: SessionCredential::from_raw(SESSION).unwrap(),
+            csrf: CsrfToken::from_generated_secret(SecretString::new(CSRF).unwrap()).unwrap(),
+            expires_at: UnixTimestamp::from_seconds(NOW + 3_600),
+            return_path: Some(LoginReturnPath::new(return_path).unwrap()),
+        };
+        if setup {
+            WebCallbackCompletion::InstallationSetup(completion)
+        } else {
+            WebCallbackCompletion::SignIn(completion)
+        }
+    }
+
+    async fn response_text(response: Response) -> String {
+        let body = to_bytes(response.into_body(), 64 * 1_024).await.unwrap();
+        String::from_utf8(body.to_vec()).unwrap()
+    }
+
+    fn assert_auth_security_headers(response: &Response) {
+        assert_eq!(response.headers()[CACHE_CONTROL], "no-store");
+        assert_eq!(response.headers()[REFERRER_POLICY], "no-referrer");
+        assert_eq!(response.headers()[X_CONTENT_TYPE_OPTIONS], "nosniff");
+    }
+
+    async fn assert_exact_json(response: Response, status: u16, retry: Option<&str>, body: &str) {
+        assert_eq!(response.status().as_u16(), status);
+        let headers = response.headers();
+        assert_eq!(headers[CONTENT_TYPE], "application/json; charset=utf-8");
+        assert_auth_security_headers(&response);
+        assert_eq!(
+            headers
+                .get(RETRY_AFTER)
+                .and_then(|value| value.to_str().ok()),
+            retry
+        );
+        assert_eq!(response_text(response).await, body);
+    }
+
+    fn assert_web_start_redirect(response: &Response, expected_location: &str) {
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let location = &response.headers()[LOCATION];
+        assert_eq!(location, expected_location);
+        assert!(location.is_sensitive());
+        let cookie = &response.headers()[SET_COOKIE];
+        assert!(cookie.is_sensitive());
+        let cookie = cookie.to_str().unwrap();
+        assert!(cookie.contains(BINDING));
+        assert!(cookie.contains("Secure; HttpOnly; SameSite=Lax"));
+        assert_auth_security_headers(response);
+    }
+
+    fn assert_callback_cookies(response: &Response) {
+        let cookies = response.headers().get_all(SET_COOKIE);
+        assert_eq!(cookies.iter().count(), 3);
+        assert!(cookies.iter().all(HeaderValue::is_sensitive));
+        for secret in [SESSION, CSRF] {
+            assert_eq!(
+                cookies
+                    .iter()
+                    .filter(|cookie| cookie.to_str().unwrap().contains(secret))
+                    .count(),
+                1
+            );
+        }
+        assert!(cookies.iter().any(|cookie| {
+            let cookie = cookie.to_str().unwrap();
+            cookie.starts_with("__Host-automata-login=;") && cookie.contains("Max-Age=0")
+        }));
     }
 
     fn logout_app(backend: Arc<FakeBackend>) -> Router {
@@ -2755,18 +2940,14 @@ mod tests {
 
     #[test]
     fn native_logout_form_is_exact_and_bounded() {
-        assert!(is_browser_logout_form(
-            &axum::http::Method::POST,
-            GITHUB_WEB_LOGOUT_PATH
-        ));
-        assert!(!is_browser_logout_form(
-            &axum::http::Method::GET,
-            GITHUB_WEB_LOGOUT_PATH
-        ));
-        assert!(!is_browser_logout_form(
-            &axum::http::Method::POST,
-            "/auth/logout/"
-        ));
+        use axum::http::Method;
+        for (method, path, valid) in [
+            (Method::POST, GITHUB_WEB_LOGOUT_PATH, true),
+            (Method::GET, GITHUB_WEB_LOGOUT_PATH, false),
+            (Method::POST, "/auth/logout/", false),
+        ] {
+            assert_eq!(is_browser_logout_form(&method, path), valid);
+        }
 
         let body = format!("csrf_token={CSRF}");
         let parsed = browser_logout_csrf_token(body.as_bytes()).expect("valid CSRF field");
@@ -2789,126 +2970,80 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn browser_logout_revokes_exact_session_and_redirects_idempotently() {
-        for outcome in [
-            RevokeOwnSessionOutcome::Revoked,
-            RevokeOwnSessionOutcome::AlreadyRevoked,
-            RevokeOwnSessionOutcome::NotFound,
-        ] {
-            let backend = Arc::new(FakeBackend::empty());
-            *backend.browser_revoke.lock().unwrap() = Some(Ok(outcome));
-            let response = logout_app(Arc::clone(&backend))
-                .oneshot(
-                    Request::builder()
-                        .method("POST")
-                        .uri(GITHUB_WEB_LOGOUT_PATH)
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
+    async fn browser_logout_outcomes_preserve_exact_authority_and_representation() {
+        use RevokeOwnSessionOutcome as R;
+        use SessionCredentialServiceError as E;
+        use StatusCode as S;
 
-            assert_eq!(response.status(), StatusCode::SEE_OTHER);
-            assert_eq!(response.headers()[LOCATION], "/repositories");
-            assert!(
-                response
-                    .extensions()
-                    .get::<BrowserLogoutCompleted>()
-                    .is_some()
-            );
+        let cases = [
+            (Ok(R::Revoked), S::SEE_OTHER, None),
+            (Ok(R::AlreadyRevoked), S::SEE_OTHER, None),
+            (Ok(R::NotFound), S::SEE_OTHER, None),
+            (
+                Err(E::RepositoryUnavailable),
+                S::SERVICE_UNAVAILABLE,
+                Some("Sign out temporarily unavailable"),
+            ),
+            (
+                Err(E::InternalFailure),
+                S::INTERNAL_SERVER_ERROR,
+                Some("Unable to sign out"),
+            ),
+        ];
+        for (outcome, status, heading) in cases {
+            let backend = Arc::new(FakeBackend::empty());
+            *backend.browser_revoke.lock().unwrap() = Some(outcome);
+            let response = send(
+                &logout_app(Arc::clone(&backend)),
+                empty_request("POST", GITHUB_WEB_LOGOUT_PATH),
+            )
+            .await;
+
+            assert_eq!(response.status(), status);
+            let completed = response
+                .extensions()
+                .get::<BrowserLogoutCompleted>()
+                .is_some();
+            assert_eq!(completed, heading.is_none());
             assert!(!response.headers().contains_key(SET_COOKIE));
             assert_eq!(
                 *backend.revoked_credentials.lock().unwrap(),
                 [SESSION.to_owned()]
             );
-        }
-    }
-
-    #[tokio::test]
-    async fn browser_logout_errors_are_branded_and_do_not_claim_completion() {
-        for (error, expected_status, expected_heading) in [
-            (
-                SessionCredentialServiceError::RepositoryUnavailable,
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Sign out temporarily unavailable",
-            ),
-            (
-                SessionCredentialServiceError::InternalFailure,
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Unable to sign out",
-            ),
-        ] {
-            let backend = Arc::new(FakeBackend::empty());
-            *backend.browser_revoke.lock().unwrap() = Some(Err(error));
-            let response = logout_app(backend)
-                .oneshot(
-                    Request::builder()
-                        .method("POST")
-                        .uri(GITHUB_WEB_LOGOUT_PATH)
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-
-            assert_eq!(response.status(), expected_status);
-            assert!(
-                response
-                    .extensions()
-                    .get::<BrowserLogoutCompleted>()
-                    .is_none()
-            );
-            assert!(!response.headers().contains_key(SET_COOKIE));
-            if expected_status == StatusCode::SERVICE_UNAVAILABLE {
+            if status == S::SEE_OTHER {
+                assert_eq!(response.headers()[LOCATION], "/repositories");
+            } else if status == S::SERVICE_UNAVAILABLE {
                 assert_eq!(response.headers()[RETRY_AFTER], "1");
             }
-            let body = to_bytes(response.into_body(), 32 * 1_024).await.unwrap();
-            assert!(
-                String::from_utf8(body.to_vec())
-                    .unwrap()
-                    .contains(expected_heading)
-            );
+            if let Some(heading) = heading {
+                assert!(response_text(response).await.contains(heading));
+            }
         }
 
-        let backend = Arc::new(FakeBackend::empty());
-        let response = logout_app(Arc::clone(&backend))
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/auth/logout?return_path=%2Fsettings")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        assert!(backend.revoked_credentials.lock().unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn browser_logout_never_revokes_without_middleware_authority_or_post_method() {
-        for method in ["POST", "GET"] {
+        for (authorized, method, path, status) in [
+            (
+                true,
+                "POST",
+                "/auth/logout?return_path=%2Fsettings",
+                S::BAD_REQUEST,
+            ),
+            (
+                false,
+                "POST",
+                GITHUB_WEB_LOGOUT_PATH,
+                S::INTERNAL_SERVER_ERROR,
+            ),
+            (false, "GET", GITHUB_WEB_LOGOUT_PATH, S::METHOD_NOT_ALLOWED),
+        ] {
             let backend = Arc::new(FakeBackend::empty());
-            *backend.browser_revoke.lock().unwrap() = Some(Ok(RevokeOwnSessionOutcome::Revoked));
-            let response = router(state(Arc::clone(&backend)))
-                .oneshot(
-                    Request::builder()
-                        .method(method)
-                        .uri(GITHUB_WEB_LOGOUT_PATH)
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-
-            assert_eq!(
-                response.status(),
-                if method == "POST" {
-                    StatusCode::INTERNAL_SERVER_ERROR
-                } else {
-                    StatusCode::METHOD_NOT_ALLOWED
-                }
-            );
+            *backend.browser_revoke.lock().unwrap() = Some(Ok(R::Revoked));
+            let app = if authorized {
+                logout_app(Arc::clone(&backend))
+            } else {
+                router(state(Arc::clone(&backend)))
+            };
+            let response = send(&app, empty_request(method, path)).await;
+            assert_eq!(response.status(), status);
             assert!(backend.revoked_credentials.lock().unwrap().is_empty());
         }
     }
@@ -2961,37 +3096,24 @@ mod tests {
         let admission = Arc::new(GithubBeginAdmission::new(Arc::new(
             MutableMonotonicClock::new(0),
         )));
-        let app = router(state_with_admission(
+        let sign_app = router(state_with_admission(
             Arc::clone(&backend),
             Arc::clone(&admission),
         ));
 
         let mut starts = Vec::new();
         for _ in 0..MAX_CONCURRENT_GITHUB_BEGINS {
-            let app = app.clone();
+            let app = sign_app.clone();
             starts.push(tokio::spawn(async move {
-                app.oneshot(browser_begin_request()).await.unwrap()
+                send(&app, browser_begin_request()).await
             }));
         }
         blocker.wait_for_entries(MAX_CONCURRENT_GITHUB_BEGINS).await;
 
-        let overloaded = app.clone().oneshot(browser_begin_request()).await.unwrap();
+        let overloaded = send(&sign_app, browser_begin_request()).await;
         assert_eq!(overloaded.status(), StatusCode::TOO_MANY_REQUESTS);
-        assert_eq!(overloaded.headers()[RETRY_AFTER], "1");
-        assert_eq!(overloaded.headers()[CACHE_CONTROL], "no-store");
-        assert!(
-            overloaded.headers()[CONTENT_TYPE]
-                .to_str()
-                .unwrap()
-                .starts_with("text/html")
-        );
-        let body = to_bytes(overloaded.into_body(), 64 * 1_024).await.unwrap();
-        assert!(
-            body.windows(b"Sign-in temporarily busy".len())
-                .any(|window| window == b"Sign-in temporarily busy")
-        );
         assert_eq!(
-            backend.web_return_paths.lock().unwrap().len(),
+            backend.probes.lock().unwrap().begin_web.len(),
             MAX_CONCURRENT_GITHUB_BEGINS
         );
 
@@ -3000,10 +3122,10 @@ mod tests {
             assert_eq!(start.await.unwrap().status(), StatusCode::BAD_REQUEST);
         }
         *backend.web_begin_blocker.lock().unwrap() = None;
-        let recovered = app.oneshot(browser_begin_request()).await.unwrap();
+        let recovered = send(&sign_app, browser_begin_request()).await;
         assert_eq!(recovered.status(), StatusCode::BAD_REQUEST);
         assert_eq!(
-            backend.web_return_paths.lock().unwrap().len(),
+            backend.probes.lock().unwrap().begin_web.len(),
             MAX_CONCURRENT_GITHUB_BEGINS + 1
         );
     }
@@ -3017,174 +3139,151 @@ mod tests {
         for _ in 0..GITHUB_BEGIN_BURST {
             drop(admission.try_acquire().expect("burst token"));
         }
-        let app = router(state_with_admission(
+        let sign_app = router(state_with_admission(
             Arc::clone(&backend),
             Arc::clone(&admission),
         ));
-        let (setup_app, setup_probe) = setup_begin_harness_with_admission(admission);
+        let setup_app = setup_router(setup_state_with_admission(Arc::clone(&backend), admission));
 
         let mut invalid_origin = browser_begin_request();
         invalid_origin.headers_mut().remove(SEC_FETCH_SITE);
         invalid_origin
             .headers_mut()
             .insert(ORIGIN, HeaderValue::from_static("https://attacker.example"));
-        let invalid = app.clone().oneshot(invalid_origin).await.unwrap();
+        let invalid = send(&sign_app, invalid_origin).await;
         assert_eq!(invalid.status(), StatusCode::FORBIDDEN);
-
-        let browser_overload = app.clone().oneshot(browser_begin_request()).await.unwrap();
-        assert_eq!(browser_overload.status(), StatusCode::TOO_MANY_REQUESTS);
-        assert!(
-            browser_overload.headers()[CONTENT_TYPE]
-                .to_str()
-                .unwrap()
-                .starts_with("text/html")
-        );
-
-        let device_overload = app
-            .oneshot(json_post(
-                GITHUB_DEVICE_BEGIN_PATH,
-                r#"{"return_path":null}"#,
-            ))
-            .await
-            .unwrap();
-        assert_eq!(device_overload.status(), StatusCode::TOO_MANY_REQUESTS);
-        assert_eq!(device_overload.headers()[RETRY_AFTER], "1");
-        assert_eq!(
-            device_overload.headers()[CONTENT_TYPE],
-            "application/json; charset=utf-8"
-        );
-        assert_eq!(
-            to_bytes(device_overload.into_body(), 128).await.unwrap(),
-            r#"{"error":"rate_limited"}"#
-        );
-
-        let mut setup_browser_request = json_post(
-            GITHUB_SETUP_WEB_BEGIN_PATH,
-            format!(r#"{{"bootstrap_token":"{BOOTSTRAP_SENTINEL}","return_path":null}}"#),
-        );
-        setup_browser_request
-            .headers_mut()
-            .insert(ORIGIN, HeaderValue::from_static("https://ci.example"));
-        setup_browser_request
-            .headers_mut()
-            .insert(SEC_FETCH_SITE, HeaderValue::from_static("same-origin"));
-        let setup_browser_overload = setup_app
-            .clone()
-            .oneshot(setup_browser_request)
-            .await
-            .unwrap();
-        assert_eq!(
-            setup_browser_overload.status(),
-            StatusCode::TOO_MANY_REQUESTS
-        );
-        assert!(
-            setup_browser_overload.headers()[CONTENT_TYPE]
-                .to_str()
-                .unwrap()
-                .starts_with("text/html")
-        );
-
-        let setup_device_overload = setup_app
-            .oneshot(json_post(
-                GITHUB_SETUP_DEVICE_BEGIN_PATH,
-                format!(r#"{{"bootstrap_token":"{BOOTSTRAP_SENTINEL}","return_path":null}}"#),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(
-            setup_device_overload.status(),
-            StatusCode::TOO_MANY_REQUESTS
-        );
-        assert_eq!(setup_device_overload.headers()[RETRY_AFTER], "1");
-        assert_eq!(
-            to_bytes(setup_device_overload.into_body(), 128)
-                .await
-                .unwrap(),
-            r#"{"error":"rate_limited"}"#
-        );
-        assert!(backend.web_return_paths.lock().unwrap().is_empty());
-        assert_eq!(backend.device_begin_calls.load(Ordering::SeqCst), 0);
-        assert_eq!(setup_probe.calls.load(Ordering::SeqCst), 0);
-        assert_eq!(setup_probe.device_calls.load(Ordering::SeqCst), 0);
+        let setup_document =
+            format!(r#"{{"bootstrap_token":"{BOOTSTRAP_SENTINEL}","return_path":null}}"#);
+        let cases = [
+            (sign_app.clone(), GITHUB_WEB_BEGIN_PATH, true, false),
+            (sign_app, GITHUB_DEVICE_BEGIN_PATH, false, false),
+            (setup_app.clone(), GITHUB_SETUP_WEB_BEGIN_PATH, true, true),
+            (setup_app, GITHUB_SETUP_DEVICE_BEGIN_PATH, false, true),
+        ];
+        for (app, path, browser, setup) in cases {
+            let body = if setup {
+                setup_document.clone()
+            } else {
+                r#"{"return_path":null}"#.to_owned()
+            };
+            let request = if browser {
+                browser_post(path, "application/json", body)
+            } else {
+                json_post(path, body)
+            };
+            let response = send(&app, request).await;
+            if browser {
+                assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+                assert_eq!(response.headers()[RETRY_AFTER], "1");
+                assert!(
+                    response.headers()[CONTENT_TYPE]
+                        .to_str()
+                        .unwrap()
+                        .starts_with("text/html")
+                );
+            } else {
+                assert_exact_json(response, 429, Some("1"), r#"{"error":"rate_limited"}"#).await;
+            }
+        }
+        assert_eq!(backend.transport_call_count(), 0);
     }
 
     #[tokio::test]
-    async fn browser_begin_requires_exact_origin_and_sets_only_bound_trusted_redirect() {
-        let backend = Arc::new(FakeBackend::empty());
-        *backend.web_start.lock().unwrap() = Some(Ok(WebLoginStart {
-            authorization_url: Url::parse(&format!(
-                "https://github.example/login/oauth?state={STATE}"
-            ))
-            .unwrap(),
-            binding: SecretString::new(BINDING).unwrap(),
-            expires_at: UnixTimestamp::from_seconds(NOW + 300),
-        }));
-        let app = router(state(backend));
-        let mut request = json_post(GITHUB_WEB_BEGIN_PATH, r#"{"return_path":"/repositories"}"#);
-        request
-            .headers_mut()
-            .insert(ORIGIN, HeaderValue::from_static("https://ci.example"));
-        request
-            .headers_mut()
-            .insert(SEC_FETCH_SITE, HeaderValue::from_static("same-origin"));
-        let response = app.oneshot(request).await.unwrap();
+    async fn start_renderers_select_each_flow_and_share_one_integrity_matrix() {
+        for (transport, provider, now) in renderer_flow_transports() {
+            let trusted_web = format!("{provider}/oauth?state={STATE}");
+            let trusted_device = format!("{provider}/device");
+            let credentialed = provider.replacen("https://", "https://user@", 1);
+            let device_body = device_start_body(&trusted_device, now);
+            let cases = [
+                (provider.as_str(), "", now + 900, true),
+                ("https://evil.example", "", now + 900, false),
+                (credentialed.as_str(), "", now + 900, false),
+                (provider.as_str(), "#secret", now + 900, false),
+                (provider.as_str(), "", now, false),
+            ];
+            for (authority, fragment, expires_at, valid) in cases {
+                let web_url = format!("{authority}/oauth?state={STATE}{fragment}");
+                let start = web_start(&web_url, expires_at);
+                let response = web_start_response(&transport, &start);
+                if valid {
+                    assert_web_start_redirect(&response, &trusted_web);
+                } else {
+                    assert_exact_json(response, 500, None, r#"{"error":"internal_error"}"#).await;
+                }
 
-        assert_eq!(response.status(), StatusCode::SEE_OTHER);
-        assert_eq!(response.headers()[CACHE_CONTROL], "no-store");
-        assert_eq!(
-            response.headers()[LOCATION],
-            format!("https://github.example/login/oauth?state={STATE}")
-        );
-        assert!(response.headers()[LOCATION].is_sensitive());
-        let cookie = response
-            .headers()
-            .get_all(SET_COOKIE)
-            .iter()
-            .next()
-            .unwrap();
-        assert!(cookie.is_sensitive());
-        let cookie = cookie.to_str().unwrap();
-        assert!(cookie.contains(BINDING));
-        assert!(cookie.contains("Secure; HttpOnly; SameSite=Lax"));
+                let device_url = format!("{authority}/device{fragment}");
+                let start = device_start(&device_url, Duration::from_secs(5), expires_at);
+                let response = device_start_response(&transport, &start);
+                let (status, body) = if valid {
+                    (200, device_body.as_str())
+                } else {
+                    (500, r#"{"error":"internal_error"}"#)
+                };
+                assert_exact_json(response, status, None, body).await;
+            }
+            for interval in [Duration::ZERO, Duration::new(5, 1)] {
+                let start = device_start(&trusted_device, interval, now + 900);
+                let response = device_start_response(&transport, &start);
+                assert_exact_json(response, 500, None, r#"{"error":"internal_error"}"#).await;
+            }
+        }
     }
 
     #[tokio::test]
-    async fn browser_begin_accepts_one_native_return_path_and_binds_it_to_login() {
-        let backend = Arc::new(FakeBackend::empty());
-        *backend.web_start.lock().unwrap() = Some(Ok(WebLoginStart {
-            authorization_url: Url::parse(&format!(
-                "https://github.example/login/oauth?state={STATE}"
-            ))
-            .unwrap(),
-            binding: SecretString::new(BINDING).unwrap(),
-            expires_at: UnixTimestamp::from_seconds(NOW + 300),
-        }));
-        let app = router(state(Arc::clone(&backend)));
-        let request = Request::builder()
-            .method("POST")
-            .uri(GITHUB_WEB_BEGIN_PATH)
-            .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
-            .header(ORIGIN, "https://ci.example")
-            .header(SEC_FETCH_SITE, "same-origin")
-            .body(Body::from(
-                "return_path=%2Facme%2Fcaf%C3%A9%2Factions%3Fstatus%3Dfailed",
-            ))
-            .unwrap();
-        let response = app.oneshot(request).await.unwrap();
+    async fn browser_begin_success_matrix_routes_exact_paths_and_authority() {
+        for setup in [false, true] {
+            let backend = Arc::new(FakeBackend::empty());
+            *backend.web_start.lock().unwrap() = Some(trusted_web_start());
+            let (app, request, expected_path) = if setup {
+                (
+                    setup_router(setup_state(Arc::clone(&backend))),
+                    browser_post(
+                        GITHUB_SETUP_WEB_BEGIN_PATH,
+                        "application/json",
+                        format!(
+                            r#"{{"bootstrap_token":"{BOOTSTRAP_SENTINEL}","return_path":null}}"#
+                        ),
+                    ),
+                    "/",
+                )
+            } else {
+                (
+                    router(state(Arc::clone(&backend))),
+                    browser_form_request(
+                        "return_path=%2Facme%2Fcaf%C3%A9%2Factions%3Fstatus%3Dfailed",
+                    ),
+                    "/acme/caf%C3%A9/actions?status=failed",
+                )
+            };
+            let response = send(&app, request).await;
 
-        assert_eq!(response.status(), StatusCode::SEE_OTHER);
-        assert_eq!(
-            response.headers()[LOCATION],
-            format!("https://github.example/login/oauth?state={STATE}")
-        );
-        assert_eq!(
-            *backend.web_return_paths.lock().unwrap(),
-            vec![LoginReturnPath::new("/acme/caf%C3%A9/actions?status=failed").unwrap()]
-        );
+            assert_web_start_redirect(
+                &response,
+                &format!("https://github.example/login/oauth?state={STATE}"),
+            );
+            assert!(!format!("{response:?}").contains(BOOTSTRAP_SENTINEL));
+            let body = response_text(response).await;
+            let probes = backend.probes();
+            let expected = LoginReturnPath::new(expected_path).unwrap();
+            if setup {
+                assert_eq!(probes.begin_setup_web.len(), 1);
+                assert!(probes.begin_setup_web[0].0.0);
+                assert_eq!(probes.begin_setup_web[0].1, expected);
+            } else {
+                assert_eq!(
+                    probes.begin_web,
+                    [(TenantId::new("tenant-a").unwrap(), expected)]
+                );
+            }
+            assert!(!body.contains(BOOTSTRAP_SENTINEL));
+        }
     }
 
     #[tokio::test]
     async fn browser_begin_rejects_empty_duplicate_unknown_and_untrusted_native_forms() {
+        let backend = Arc::new(FakeBackend::empty());
+        let app = router(state(Arc::clone(&backend)));
         for body in [
             "",
             "return_path=%2Fruns&return_path=%2Fother",
@@ -3193,156 +3292,106 @@ mod tests {
             "return_path=%",
             "return_path=%2F%FF",
         ] {
-            let backend = Arc::new(FakeBackend::empty());
-            let app = router(state(Arc::clone(&backend)));
-            let request = Request::builder()
-                .method("POST")
-                .uri(GITHUB_WEB_BEGIN_PATH)
-                .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
-                .header(ORIGIN, "https://ci.example")
-                .header(SEC_FETCH_SITE, "same-origin")
-                .body(Body::from(body))
-                .unwrap();
-            let response = app.oneshot(request).await.unwrap();
+            let response = send(&app, browser_form_request(body)).await;
 
             assert_eq!(response.status(), StatusCode::BAD_REQUEST, "body {body:?}");
-            assert!(backend.web_return_paths.lock().unwrap().is_empty());
         }
+        assert_eq!(backend.transport_call_count(), 0);
     }
 
     #[tokio::test]
-    async fn browser_begin_rejects_cross_origin_before_state_creation() {
+    async fn browser_origin_rejection_precedes_body_for_both_flows() {
         let backend = Arc::new(FakeBackend::empty());
-        let app = router(state(Arc::clone(&backend)));
-        let mut request = json_post(GITHUB_WEB_BEGIN_PATH, r#"{"return_path":null}"#);
-        request
-            .headers_mut()
-            .insert(ORIGIN, HeaderValue::from_static("https://attacker.example"));
-        let response = app.oneshot(request).await.unwrap();
-
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
-        assert!(backend.web_start.lock().unwrap().is_none());
+        let cases = [
+            (router(state(Arc::clone(&backend))), GITHUB_WEB_BEGIN_PATH),
+            (
+                setup_router(setup_state(Arc::clone(&backend))),
+                GITHUB_SETUP_WEB_BEGIN_PATH,
+            ),
+        ];
+        for (app, path) in cases {
+            let polls = Arc::new(AtomicUsize::new(0));
+            let observed_polls = Arc::clone(&polls);
+            let body = Body::from_stream(futures::stream::poll_fn(move |_| {
+                observed_polls.fetch_add(1, Ordering::SeqCst);
+                Poll::Ready(Some(Ok::<_, Infallible>(Bytes::from_static(
+                    b"body-secret",
+                ))))
+            }));
+            let mut request = browser_post(path, "application/x-www-form-urlencoded", body);
+            request
+                .headers_mut()
+                .insert(ORIGIN, HeaderValue::from_static("https://attacker.example"));
+            request
+                .headers_mut()
+                .insert(SEC_FETCH_SITE, HeaderValue::from_static("cross-site"));
+            let response = send(&app, request).await;
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            assert_eq!(polls.load(Ordering::SeqCst), 0);
+        }
+        assert_eq!(backend.transport_call_count(), 0);
     }
 
     #[test]
     fn browser_login_initiation_accepts_either_browser_same_origin_or_exact_origin() {
         let expected = HumanAuthOrigin::new(&Url::parse("https://ci.example/").unwrap()).unwrap();
-
-        let mut fetch_metadata = HeaderMap::new();
-        fetch_metadata.insert(SEC_FETCH_SITE, HeaderValue::from_static("same-origin"));
-        assert!(valid_login_initiation(&fetch_metadata, &expected));
-
-        let mut origin_fallback = HeaderMap::new();
-        origin_fallback.insert(ORIGIN, HeaderValue::from_static("https://ci.example"));
-        assert!(valid_login_initiation(&origin_fallback, &expected));
-
-        let mut cross_site = origin_fallback.clone();
-        cross_site.insert(SEC_FETCH_SITE, HeaderValue::from_static("cross-site"));
-        assert!(!valid_login_initiation(&cross_site, &expected));
-
-        let mut same_site = HeaderMap::new();
-        same_site.insert(SEC_FETCH_SITE, HeaderValue::from_static("same-site"));
-        same_site.insert(ORIGIN, HeaderValue::from_static("https://other.example"));
-        assert!(!valid_login_initiation(&same_site, &expected));
-
-        assert!(!valid_login_initiation(&HeaderMap::new(), &expected));
-    }
-
-    #[tokio::test]
-    async fn setup_browser_begin_accepts_native_form_and_preserves_json_contract() {
-        for (content_type, body) in [
-            (
-                "application/x-www-form-urlencoded",
-                format!("bootstrap_token={BOOTSTRAP_SENTINEL}&return_path=%2Frepositories"),
-            ),
-            (
-                "application/json",
-                format!(
-                    r#"{{"bootstrap_token":"{BOOTSTRAP_SENTINEL}","return_path":"/repositories"}}"#
-                ),
-            ),
+        for (site, origin, valid) in [
+            (Some("same-origin"), None, true),
+            (None, Some("https://ci.example"), true),
+            (Some("cross-site"), Some("https://ci.example"), false),
+            (Some("same-site"), Some("https://other.example"), false),
+            (None, None, false),
         ] {
-            let (app, probe) = setup_begin_harness();
-            let response = app
-                .oneshot(setup_begin_request(
-                    GITHUB_SETUP_WEB_BEGIN_PATH,
-                    content_type,
-                    body,
-                ))
-                .await
-                .unwrap();
-
-            assert_eq!(response.status(), StatusCode::SEE_OTHER);
-            assert_eq!(
-                response.headers()[LOCATION],
-                format!("https://github.example/login/oauth?state={STATE}")
-            );
-            assert!(response.headers()[LOCATION].is_sensitive());
-            assert_eq!(probe.calls.load(Ordering::SeqCst), 1);
-            assert!(probe.received_sentinel.load(Ordering::SeqCst));
-            assert_eq!(
-                *probe.return_paths.lock().unwrap(),
-                vec![LoginReturnPath::new("/repositories").unwrap()]
-            );
-            let response_debug = format!("{response:?}");
-            assert!(!response_debug.contains(BOOTSTRAP_SENTINEL));
-            for cookie in response.headers().get_all(SET_COOKIE) {
-                assert!(!cookie.to_str().unwrap().contains(BOOTSTRAP_SENTINEL));
+            let mut headers = HeaderMap::new();
+            if let Some(site) = site {
+                headers.insert(SEC_FETCH_SITE, HeaderValue::from_str(site).unwrap());
             }
-            let response_body = to_bytes(response.into_body(), 64).await.unwrap();
-            assert!(!String::from_utf8_lossy(&response_body).contains(BOOTSTRAP_SENTINEL));
+            if let Some(origin) = origin {
+                headers.insert(ORIGIN, HeaderValue::from_str(origin).unwrap());
+            }
+            assert_eq!(valid_login_initiation(&headers, &expected), valid);
         }
     }
 
     #[tokio::test]
     async fn setup_browser_form_rejects_closed_grammar_before_backend_use() {
+        let backend = Arc::new(FakeBackend::empty());
+        let app = setup_router(setup_state(Arc::clone(&backend)));
+        let token = BOOTSTRAP_SENTINEL;
         for body in [
             String::new(),
-            format!("bootstrap_token={BOOTSTRAP_SENTINEL}"),
+            format!("bootstrap_token={token}"),
             "return_path=%2Fruns".to_owned(),
             "bootstrap_token=&return_path=%2Fruns".to_owned(),
-            format!("bootstrap_token={BOOTSTRAP_SENTINEL}&return_path="),
-            format!(
-                "bootstrap_token={BOOTSTRAP_SENTINEL}&bootstrap_token={BOOTSTRAP_SENTINEL}&return_path=%2Fruns"
-            ),
-            format!(
-                "bootstrap_token={BOOTSTRAP_SENTINEL}&return_path=%2Fruns&return_path=%2Fother"
-            ),
-            format!("bootstrap_token={BOOTSTRAP_SENTINEL}&return_path=%2Fruns&unknown=x"),
-            format!("%62ootstrap_token={BOOTSTRAP_SENTINEL}&return_path=%2Fruns"),
+            format!("bootstrap_token={token}&return_path="),
+            format!("bootstrap_token={token}&bootstrap_token={token}&return_path=%2Fruns"),
+            format!("bootstrap_token={token}&return_path=%2Fruns&return_path=%2Fother"),
+            format!("bootstrap_token={token}&return_path=%2Fruns&unknown={token}"),
+            format!("%62ootstrap_token={token}&return_path=%2Fruns"),
             "bootstrap_token=%&return_path=%2Fruns".to_owned(),
             "bootstrap_token=%FF&return_path=%2Fruns".to_owned(),
-            format!("bootstrap_token={BOOTSTRAP_SENTINEL}&return_path=%"),
-            format!("bootstrap_token={BOOTSTRAP_SENTINEL}&return_path=%2F%FF"),
-            format!(
-                "bootstrap_token={BOOTSTRAP_SENTINEL}&return_path=https%3A%2F%2Fevil.example%2F"
-            ),
+            format!("bootstrap_token={token}&return_path=%"),
+            format!("bootstrap_token={token}&return_path=%2F%FF"),
+            format!("bootstrap_token={token}&return_path=https%3A%2F%2Fevil.example%2F"),
         ] {
-            let (app, probe) = setup_begin_harness();
-            let response = app
-                .oneshot(setup_begin_request(
-                    GITHUB_SETUP_WEB_BEGIN_PATH,
-                    "application/x-www-form-urlencoded",
-                    body,
-                ))
-                .await
-                .unwrap();
+            let response = setup_form_response(&app, body).await;
 
             assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-            assert_eq!(probe.calls.load(Ordering::SeqCst), 0);
+            assert!(!format!("{response:?}").contains(BOOTSTRAP_SENTINEL));
+            assert!(!response_text(response).await.contains(BOOTSTRAP_SENTINEL));
         }
 
-        let (app, probe) = setup_begin_harness();
-        let response = app
-            .oneshot(setup_begin_request(
+        let response = send(
+            &app,
+            browser_post(
                 &format!("{GITHUB_SETUP_WEB_BEGIN_PATH}?unexpected=1"),
                 "application/x-www-form-urlencoded",
                 format!("bootstrap_token={BOOTSTRAP_SENTINEL}&return_path=%2Fruns"),
-            ))
-            .await
-            .unwrap();
+            ),
+        )
+        .await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        assert_eq!(probe.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(backend.transport_call_count(), 0);
     }
 
     #[tokio::test]
@@ -3355,418 +3404,202 @@ mod tests {
         let exact = format!("bootstrap_token={token}&return_path={return_path}");
         assert_eq!(exact.len(), MAX_SETUP_FORM_BYTES);
 
-        let (app, probe) = setup_begin_harness();
-        let response = app
-            .oneshot(setup_begin_request(
-                GITHUB_SETUP_WEB_BEGIN_PATH,
-                "application/x-www-form-urlencoded",
-                exact.clone(),
-            ))
-            .await
-            .unwrap();
+        let backend = Arc::new(FakeBackend::empty());
+        *backend.web_start.lock().unwrap() = Some(trusted_web_start());
+        let app = setup_router(setup_state(Arc::clone(&backend)));
+        let response = setup_form_response(&app, exact.clone()).await;
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
-        assert_eq!(probe.calls.load(Ordering::SeqCst), 1);
+        let oversized = setup_form_response(&app, format!("{exact}x")).await;
+        assert_eq!(oversized.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(backend.transport_call_count(), 1);
+        let probes = backend.probes.lock().unwrap();
+        assert_eq!(probes.begin_setup_web.len(), 1);
+        let (matches_sentinel, decoded_len, all_x) = probes.begin_setup_web[0].0;
+        assert!(!matches_sentinel);
+        assert_eq!(decoded_len, MAX_SETUP_BOOTSTRAP_TOKEN_BYTES);
+        assert!(all_x);
         assert_eq!(
-            probe.return_paths.lock().unwrap()[0].as_str().len(),
+            probes.begin_setup_web[0].1.as_str().len(),
             MAX_SETUP_RETURN_PATH_BYTES
         );
-
-        let (app, probe) = setup_begin_harness();
-        let response = app
-            .oneshot(setup_begin_request(
-                GITHUB_SETUP_WEB_BEGIN_PATH,
-                "application/x-www-form-urlencoded",
-                format!("{exact}x"),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
-        assert_eq!(probe.calls.load(Ordering::SeqCst), 0);
-    }
-
-    #[tokio::test]
-    async fn setup_browser_origin_rejection_precedes_body_poll_and_backend() {
-        let (app, probe) = setup_begin_harness();
-        let polls = Arc::new(AtomicUsize::new(0));
-        let observed_polls = Arc::clone(&polls);
-        let mut emitted = false;
-        let body = Body::from_stream(futures::stream::poll_fn(move |_| {
-            observed_polls.fetch_add(1, Ordering::SeqCst);
-            if std::mem::replace(&mut emitted, true) {
-                Poll::Ready(None)
-            } else {
-                Poll::Ready(Some(Ok::<_, Infallible>(Bytes::from_static(
-                    b"bootstrap_token=body-secret&return_path=%2Fruns",
-                ))))
-            }
-        }));
-        let request = Request::builder()
-            .method("POST")
-            .uri(GITHUB_SETUP_WEB_BEGIN_PATH)
-            .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
-            .header(ORIGIN, "https://attacker.example")
-            .header(SEC_FETCH_SITE, "cross-site")
-            .body(body)
-            .unwrap();
-        let response = app.oneshot(request).await.unwrap();
-
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
-        assert_eq!(polls.load(Ordering::SeqCst), 0);
-        assert_eq!(probe.calls.load(Ordering::SeqCst), 0);
-    }
-
-    #[tokio::test]
-    async fn setup_browser_errors_never_reflect_decoded_bootstrap_secret() {
-        let (app, probe) = setup_begin_harness();
-        let response = app
-            .oneshot(setup_begin_request(
-                GITHUB_SETUP_WEB_BEGIN_PATH,
-                "application/x-www-form-urlencoded",
-                format!(
-                    "bootstrap_token={BOOTSTRAP_SENTINEL}&return_path=%2Fruns&unknown={BOOTSTRAP_SENTINEL}"
-                ),
-            ))
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        assert_eq!(probe.calls.load(Ordering::SeqCst), 0);
-        assert!(!format!("{response:?}").contains(BOOTSTRAP_SENTINEL));
-        let body = to_bytes(response.into_body(), 1_024).await.unwrap();
-        assert_eq!(body, r#"{"error":"invalid_request"}"#);
-        assert!(!String::from_utf8_lossy(&body).contains(BOOTSTRAP_SENTINEL));
     }
 
     #[tokio::test]
     async fn callback_head_is_hardened_and_never_consumes_sign_in_or_setup_state() {
-        for (purpose, completion, expected_location) in [
+        let callback_uri = format!("{GITHUB_WEB_CALLBACK_PATH}?code=provider-secret&state={STATE}");
+        for (setup, return_path, expected_location) in [
             (
-                "sign-in",
-                WebCallbackCompletion::SignIn(WebLoginCompletion {
-                    credential: SessionCredential::from_raw(SESSION).unwrap(),
-                    csrf: CsrfToken::from_generated_secret(SecretString::new(CSRF).unwrap())
-                        .unwrap(),
-                    expires_at: UnixTimestamp::from_seconds(NOW + 3_600),
-                    return_path: Some(LoginReturnPath::new("/callback-head-sign-in").unwrap()),
-                }),
-                "/callback-head-sign-in",
+                false,
+                "/café/runs?q=failed build",
+                "/caf%C3%A9/runs?q=failed%20build",
             ),
-            (
-                "installation-setup",
-                WebCallbackCompletion::InstallationSetup(WebLoginCompletion {
-                    credential: SessionCredential::from_raw(SESSION).unwrap(),
-                    csrf: CsrfToken::from_generated_secret(SecretString::new(CSRF).unwrap())
-                        .unwrap(),
-                    expires_at: UnixTimestamp::from_seconds(NOW + 3_600),
-                    return_path: Some(LoginReturnPath::new("/settings/access/users").unwrap()),
-                }),
-                "/settings/access/users",
-            ),
+            (true, "/settings/access/users", "/settings/access/users"),
         ] {
             let backend = Arc::new(FakeBackend::empty());
-            *backend.web_completion.lock().unwrap() = Some(Ok(completion));
+            *backend.web_completion.lock().unwrap() =
+                Some(Ok(callback_completion(setup, return_path)));
             let app = router(state(Arc::clone(&backend)));
-            let callback_uri =
-                format!("{GITHUB_WEB_CALLBACK_PATH}?code=provider-secret&state={STATE}");
-            let response = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .method("HEAD")
-                        .uri(&callback_uri)
-                        .header(COOKIE, format!("__Host-automata-login={BINDING}"))
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
+            let response = send(&app, callback_request("HEAD", &callback_uri)).await;
 
-            assert_eq!(
-                response.status(),
-                StatusCode::METHOD_NOT_ALLOWED,
-                "{purpose} HEAD status"
-            );
+            assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
             assert_eq!(response.headers()[axum::http::header::ALLOW], "GET");
-            assert_eq!(response.headers()[CACHE_CONTROL], "no-store");
-            assert_eq!(response.headers()[REFERRER_POLICY], "no-referrer");
-            assert_eq!(response.headers()[X_CONTENT_TYPE_OPTIONS], "nosniff");
+            assert_auth_security_headers(&response);
             assert!(response.headers().get(SET_COOKIE).is_none());
             assert!(backend.web_completion.lock().unwrap().is_some());
             assert!(!format!("{response:?}").contains("provider-secret"));
             assert!(to_bytes(response.into_body(), 1).await.unwrap().is_empty());
 
-            let response = app
-                .oneshot(
-                    Request::builder()
-                        .uri(callback_uri)
-                        .header(COOKIE, format!("__Host-automata-login={BINDING}"))
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::SEE_OTHER, "{purpose} GET");
+            let response = send(&app, callback_request("GET", &callback_uri)).await;
+            assert_eq!(response.status(), StatusCode::SEE_OTHER);
             assert_eq!(response.headers()[LOCATION], expected_location);
+            assert!(response.headers()[LOCATION].is_sensitive());
+            assert_callback_cookies(&response);
             assert!(backend.web_completion.lock().unwrap().is_none());
         }
     }
 
     #[tokio::test]
-    async fn callback_clears_binding_on_failure_without_reflecting_query_secrets() {
-        let app = router(state(Arc::new(FakeBackend::empty())));
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri(format!(
-                        "{GITHUB_WEB_CALLBACK_PATH}?code=provider-secret&state={STATE}&state={STATE}"
-                    ))
-                    .header(COOKIE, format!("__Host-automata-login={BINDING}"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        let clear = response
-            .headers()
-            .get_all(SET_COOKIE)
-            .iter()
-            .next()
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .to_owned();
-        let body = to_bytes(response.into_body(), 1_024).await.unwrap();
-        let body = String::from_utf8(body.to_vec()).unwrap();
-
-        assert_eq!(body, r#"{"error":"invalid_callback"}"#);
-        assert!(!body.contains("provider-secret"));
-        assert!(clear.starts_with("__Host-automata-login=;"));
-        assert!(clear.contains("Max-Age=0"));
-    }
-
-    #[tokio::test]
-    async fn successful_callback_issues_session_and_csrf_then_redirects_locally() {
-        let backend = Arc::new(FakeBackend::empty());
-        *backend.web_completion.lock().unwrap() =
-            Some(Ok(WebCallbackCompletion::SignIn(WebLoginCompletion {
-                credential: SessionCredential::from_raw(SESSION).unwrap(),
-                csrf: CsrfToken::from_generated_secret(SecretString::new(CSRF).unwrap()).unwrap(),
-                expires_at: UnixTimestamp::from_seconds(NOW + 3_600),
-                return_path: Some(LoginReturnPath::new("/café/runs?q=failed build").unwrap()),
-            })));
-        let app = router(state(backend));
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri(format!(
-                        "{GITHUB_WEB_CALLBACK_PATH}?code=provider-code&state={STATE}"
-                    ))
-                    .header(COOKIE, format!("__Host-automata-login={BINDING}"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::SEE_OTHER);
-        assert_eq!(
-            response.headers()[LOCATION],
-            "/caf%C3%A9/runs?q=failed%20build"
-        );
-        assert!(response.headers()[LOCATION].is_sensitive());
-        assert!(
-            response
-                .headers()
-                .get_all(SET_COOKIE)
-                .iter()
-                .all(HeaderValue::is_sensitive)
-        );
-        let cookies: Vec<_> = response
-            .headers()
-            .get_all(SET_COOKIE)
-            .iter()
-            .map(|value| value.to_str().unwrap())
-            .collect();
-        assert_eq!(cookies.len(), 3);
-        assert_eq!(
-            cookies
-                .iter()
-                .filter(|cookie| cookie.contains(SESSION))
-                .count(),
-            1
-        );
-        assert_eq!(
-            cookies
-                .iter()
-                .filter(|cookie| cookie.contains(CSRF))
-                .count(),
-            1
-        );
-        assert!(cookies.iter().any(|cookie| {
-            cookie.starts_with("__Host-automata-login=;") && cookie.contains("Max-Age=0")
-        }));
-    }
-
-    #[tokio::test]
-    async fn shared_callback_preserves_installation_completion_and_setup_errors() {
-        let backend = Arc::new(FakeBackend::empty());
-        *backend.web_completion.lock().unwrap() = Some(Ok(
-            WebCallbackCompletion::InstallationSetup(WebLoginCompletion {
-                credential: SessionCredential::from_raw(SESSION).unwrap(),
-                csrf: CsrfToken::from_generated_secret(SecretString::new(CSRF).unwrap()).unwrap(),
-                expires_at: UnixTimestamp::from_seconds(NOW + 3_600),
-                return_path: Some(LoginReturnPath::new("/settings/access/users").unwrap()),
-            }),
-        ));
-        let response = router(state(backend))
-            .oneshot(
-                Request::builder()
-                    .uri(format!(
-                        "{GITHUB_WEB_CALLBACK_PATH}?code=provider-code&state={STATE}"
-                    ))
-                    .header(COOKIE, format!("__Host-automata-login={BINDING}"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::SEE_OTHER);
-        assert_eq!(response.headers()[LOCATION], "/settings/access/users");
-        let cookies: Vec<_> = response
-            .headers()
-            .get_all(SET_COOKIE)
-            .iter()
-            .map(|value| value.to_str().unwrap())
-            .collect();
-        assert_eq!(cookies.len(), 3);
-        assert!(cookies.iter().any(|cookie| cookie.contains(SESSION)));
-        assert!(cookies.iter().any(|cookie| cookie.contains(CSRF)));
-        assert!(cookies.iter().any(|cookie| {
-            cookie.starts_with("__Host-automata-login=;") && cookie.contains("Max-Age=0")
-        }));
-
-        let backend = Arc::new(FakeBackend::empty());
-        *backend.web_completion.lock().unwrap() = Some(Err(WebCallbackError::InstallationSetup(
+    async fn callback_failures_clear_binding_and_keep_exact_redacted_codes() {
+        let setup_error = Err(WebCallbackError::InstallationSetup(
             InstallationSetupError::AlreadyConfigured,
-        )));
-        let response = router(state(backend))
-            .oneshot(
-                Request::builder()
-                    .uri(format!(
-                        "{GITHUB_WEB_CALLBACK_PATH}?code=provider-code&state={STATE}"
-                    ))
-                    .header(COOKIE, format!("__Host-automata-login={BINDING}"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::GONE);
-        assert!(response.headers().get_all(SET_COOKIE).iter().any(|value| {
-            let cookie = value.to_str().unwrap();
-            cookie.starts_with("__Host-automata-login=;") && cookie.contains("Max-Age=0")
-        }));
-        assert_eq!(
-            to_bytes(response.into_body(), 1_024).await.unwrap(),
-            r#"{"error":"setup_complete"}"#
-        );
-    }
-
-    #[tokio::test]
-    async fn setup_state_conflict_is_distinct_from_callback_replay() {
-        for (error, expected) in [
+        ));
+        for (completion, query, status, expected_body) in [
             (
-                InstallationSetupError::StateConflict,
-                r#"{"error":"setup_state_conflict"}"#,
+                None,
+                format!("code=provider-secret&state={STATE}&state={STATE}"),
+                400,
+                r#"{"error":"invalid_callback"}"#,
             ),
             (
-                InstallationSetupError::Replay,
-                r#"{"error":"request_replayed"}"#,
+                Some(setup_error),
+                format!("code=provider-secret&state={STATE}"),
+                410,
+                r#"{"error":"setup_complete"}"#,
             ),
         ] {
-            let response = setup_error_response(error, UnixTimestamp::from_seconds(NOW));
-            assert_eq!(response.status(), StatusCode::CONFLICT);
-            assert_eq!(
-                to_bytes(response.into_body(), 1_024).await.unwrap(),
-                expected
-            );
+            let backend = Arc::new(FakeBackend::empty());
+            *backend.web_completion.lock().unwrap() = completion;
+            let uri = format!("{GITHUB_WEB_CALLBACK_PATH}?{query}");
+            let response = send(&router(state(backend)), callback_request("GET", &uri)).await;
+            assert!(response.headers().get_all(SET_COOKIE).iter().any(|value| {
+                let cookie = value.to_str().unwrap();
+                cookie.starts_with("__Host-automata-login=;") && cookie.contains("Max-Age=0")
+            }));
+            assert_exact_json(response, status, None, expected_body).await;
         }
     }
 
     #[tokio::test]
-    async fn device_begin_and_poll_expose_secrets_only_in_success_documents() {
+    async fn device_routes_dispatch_exact_methods_and_setup_poll_completes() {
         let backend = Arc::new(FakeBackend::empty());
-        *backend.device_start.lock().unwrap() = Some(Ok(DeviceLoginStart {
-            poll_credential: SecretString::new(POLL).unwrap(),
-            user_code: SecretString::new("ABCD-EFGH").unwrap(),
-            verification_uri: Url::parse("https://github.example/login/device").unwrap(),
-            expires_at: UnixTimestamp::from_seconds(NOW + 900),
-            poll_interval: Duration::from_secs(5),
-        }));
-        *backend.device_poll.lock().unwrap() =
-            Some(Ok(DevicePollOutcome::Complete(DeviceLoginCompletion {
-                credential: SessionCredential::from_raw(SESSION).unwrap(),
-                expires_at: UnixTimestamp::from_seconds(NOW + 86_400),
-                return_path: None,
-            })));
-        let app = router(state(backend));
+        for setup in [false, true] {
+            *backend.device_start.lock().unwrap() = Some(trusted_device_start());
+            *backend.device_poll.lock().unwrap() = Some(device_completion(
+                setup.then_some("/setup-finished"),
+                NOW + 86_400,
+            ));
+            let (begin_path, poll_path) = if setup {
+                (
+                    GITHUB_SETUP_DEVICE_BEGIN_PATH,
+                    GITHUB_SETUP_DEVICE_POLL_PATH,
+                )
+            } else {
+                (GITHUB_DEVICE_BEGIN_PATH, GITHUB_DEVICE_POLL_PATH)
+            };
+            let begin_body = if setup {
+                format!(
+                    r#"{{"bootstrap_token":"{BOOTSTRAP_SENTINEL}","return_path":"/setup-cli"}}"#
+                )
+            } else {
+                r#"{"return_path":null}"#.to_owned()
+            };
+            let app = if setup {
+                setup_router(setup_state(Arc::clone(&backend)))
+            } else {
+                router(state(Arc::clone(&backend)))
+            };
 
-        let begin = app
-            .clone()
-            .oneshot(json_post(
-                GITHUB_DEVICE_BEGIN_PATH,
-                r#"{"return_path":null}"#,
-            ))
-            .await
-            .unwrap();
-        assert_eq!(begin.status(), StatusCode::OK);
-        assert_eq!(begin.headers()[CACHE_CONTROL], "no-store");
-        let begin_body = to_bytes(begin.into_body(), 4_096).await.unwrap();
-        let begin_body = String::from_utf8(begin_body.to_vec()).unwrap();
-        assert!(begin_body.contains(POLL));
-        assert!(begin_body.contains("ABCD-EFGH"));
+            let begin = send(&app, json_post(begin_path, begin_body)).await;
+            assert_exact_json(
+                begin,
+                200,
+                None,
+                &device_start_body("https://github.example/login/device", NOW),
+            )
+            .await;
 
-        let poll_body = format!(r#"{{"poll_credential":"{POLL}"}}"#);
-        let poll = app
-            .oneshot(json_post(GITHUB_DEVICE_POLL_PATH, poll_body))
-            .await
-            .unwrap();
-        assert_eq!(poll.status(), StatusCode::OK);
-        let poll_body = to_bytes(poll.into_body(), 4_096).await.unwrap();
-        let poll_body = String::from_utf8(poll_body.to_vec()).unwrap();
-        assert_eq!(poll_body.matches(SESSION).count(), 1);
-        assert!(!poll_body.contains(POLL));
+            let poll = send(
+                &app,
+                json_post(poll_path, format!(r#"{{"poll_credential":"{POLL}"}}"#)),
+            )
+            .await;
+            assert_exact_json(
+                poll,
+                200,
+                None,
+                &device_completion_body(setup.then_some("/setup-finished"), NOW + 86_400),
+            )
+            .await;
+        }
+
+        let probes = backend.probes();
+        let tenant = TenantId::new("tenant-a").unwrap();
+        assert_eq!(probes.begin_device, [(tenant.clone(), None)]);
+        assert_eq!(probes.poll_device, [(tenant, true)]);
+        assert_eq!(probes.begin_setup_device.len(), 1);
+        assert!(probes.begin_setup_device[0].0.0);
+        assert_eq!(
+            probes.begin_setup_device[0].1,
+            Some(LoginReturnPath::new("/setup-cli").unwrap())
+        );
+        assert_eq!(probes.poll_setup_device, [true]);
     }
 
     #[tokio::test]
-    async fn device_completions_fail_closed_on_expiry_and_untrusted_return_paths() {
-        let state = state(Arc::new(FakeBackend::empty()));
-        let responses = [
-            device_poll_response(
-                &state,
-                DevicePollOutcome::Complete(DeviceLoginCompletion {
-                    credential: SessionCredential::from_raw(SESSION).unwrap(),
-                    expires_at: UnixTimestamp::from_seconds(NOW),
-                    return_path: None,
-                }),
-                UnixTimestamp::from_seconds(NOW),
-            ),
-            device_poll_response(
-                &state,
-                DevicePollOutcome::Complete(DeviceLoginCompletion {
-                    credential: SessionCredential::from_raw(SESSION).unwrap(),
-                    expires_at: UnixTimestamp::from_seconds(NOW + 60),
-                    return_path: Some(LoginReturnPath::new(r"/\attacker.example").unwrap()),
-                }),
-                UnixTimestamp::from_seconds(NOW),
-            ),
-        ];
-        for response in responses {
-            assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-            let body = to_bytes(response.into_body(), 1_024).await.unwrap();
-            assert!(!String::from_utf8(body.to_vec()).unwrap().contains(SESSION));
+    async fn device_poll_outcomes_have_one_exact_matrix_for_both_flows() {
+        type Case = (DevicePollOutcome, u16, Option<&'static str>, String);
+        fn waiting(slow: bool, next: u64, retry: &'static str) -> Case {
+            let status = if slow { "slow_down" } else { "pending" };
+            let next_poll_at = UnixTimestamp::from_seconds(next);
+            let outcome = if slow {
+                DevicePollOutcome::SlowDown { next_poll_at }
+            } else {
+                DevicePollOutcome::Pending { next_poll_at }
+            };
+            let body = format!(
+                r#"{{"status":"{status}","next_poll_at":{next},"credential":null,"expires_at":null,"return_path":null}}"#
+            );
+            (outcome, 202, Some(retry), body)
+        }
+        fn completed(expires: u64, path: Option<&str>, valid: bool) -> Case {
+            let body = if valid {
+                device_completion_body(path, expires)
+            } else {
+                r#"{"error":"internal_error"}"#.to_owned()
+            };
+            let status = if valid { 200 } else { 500 };
+            (device_completion(path, expires), status, None, body)
+        }
+        fn terminal(outcome: DevicePollOutcome, status: u16, code: &'static str) -> Case {
+            (outcome, status, None, format!(r#"{{"error":"{code}"}}"#))
+        }
+
+        for (transport, _provider, now) in renderer_flow_transports() {
+            let cases = [
+                waiting(false, now + 5, "5"),
+                waiting(true, now + 9, "9"),
+                completed(now + 60, None, true),
+                completed(now + 60, Some("/stored?x=1"), true),
+                terminal(DevicePollOutcome::Denied, 403, "authorization_denied"),
+                terminal(DevicePollOutcome::Expired, 410, "authorization_expired"),
+                completed(now, None, false),
+                completed(now + 60, Some(r"/\attacker.example"), false),
+                terminal(DevicePollOutcome::InvalidCompletion, 500, "internal_error"),
+            ];
+            for (outcome, status, retry, body) in cases {
+                let response = device_poll_response(&transport, outcome, transport.clock.now());
+                assert_exact_json(response, status, retry, &body).await;
+            }
         }
     }
 
@@ -3775,69 +3608,45 @@ mod tests {
         let backend = Arc::new(FakeBackend::empty());
         let app = router(state(Arc::clone(&backend)));
         for suffix in ["?ignored=1", "?"] {
-            let response = app
-                .clone()
-                .oneshot(json_post(
+            let response = send(
+                &app,
+                json_post(
                     &format!("{GITHUB_DEVICE_BEGIN_PATH}{suffix}"),
                     r#"{"return_path":null}"#,
-                ))
-                .await
-                .unwrap();
+                ),
+            )
+            .await;
             assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         }
-        assert!(backend.device_start.lock().unwrap().is_none());
+        assert_eq!(backend.transport_call_count(), 0);
     }
 
     #[tokio::test]
     async fn router_generated_responses_keep_auth_security_headers() {
         let app = router(state(Arc::new(FakeBackend::empty())));
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri(GITHUB_DEVICE_BEGIN_PATH)
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let response = send(&app, empty_request("GET", GITHUB_DEVICE_BEGIN_PATH)).await;
 
         assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
-        assert_eq!(response.headers()[CACHE_CONTROL], "no-store");
-        assert_eq!(response.headers()[REFERRER_POLICY], "no-referrer");
-        assert_eq!(response.headers()[X_CONTENT_TYPE_OPTIONS], "nosniff");
+        assert_auth_security_headers(&response);
     }
 
     #[tokio::test]
     async fn cli_session_status_exposes_only_safe_current_metadata() {
         let app = router(state(Arc::new(FakeBackend::empty()))).layer(Extension(cli_snapshot()));
         for request in [
-            Request::builder()
-                .method("GET")
-                .uri(CLI_SESSION_PATH)
-                .body(Body::from("ignored"))
-                .unwrap(),
-            Request::builder()
-                .method("GET")
-                .uri(CLI_SESSION_PATH)
-                .header(CONTENT_TYPE, "application/json")
-                .body(Body::empty())
-                .unwrap(),
+            request("GET", CLI_SESSION_PATH, None, "ignored"),
+            request(
+                "GET",
+                CLI_SESSION_PATH,
+                Some("application/json"),
+                Body::empty(),
+            ),
         ] {
-            let response = app.clone().oneshot(request).await.unwrap();
+            let response = send(&app, request).await;
             assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         }
 
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri(CLI_SESSION_PATH)
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let response = send(&app, empty_request("GET", CLI_SESSION_PATH)).await;
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.headers()[CACHE_CONTROL], "no-store");
@@ -3859,38 +3668,15 @@ mod tests {
         )));
         let app = router(state(Arc::clone(&backend)));
 
-        let query = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(format!("{CLI_SESSION_PATH}?unexpected=1"))
-                    .header(
-                        axum::http::header::AUTHORIZATION,
-                        format!("Bearer {SESSION}"),
-                    )
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let query = send(
+            &app,
+            bearer_request("POST", &format!("{CLI_SESSION_PATH}?unexpected=1")),
+        )
+        .await;
         assert_eq!(query.status(), StatusCode::BAD_REQUEST);
         assert!(backend.activated_credentials.lock().unwrap().is_empty());
 
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(CLI_SESSION_PATH)
-                    .header(
-                        axum::http::header::AUTHORIZATION,
-                        format!("Bearer {SESSION}"),
-                    )
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let response = send(&app, bearer_request("POST", CLI_SESSION_PATH)).await;
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
         assert_eq!(response.headers()[CACHE_CONTROL], "no-store");
         assert_eq!(
@@ -3909,44 +3695,19 @@ mod tests {
         let app = router(state(Arc::clone(&backend)))
             .layer(Extension(Arc::new(CliSessionCredential::new(credential))));
 
-        let query = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("DELETE")
-                    .uri(format!("{CLI_SESSION_PATH}?unexpected=1"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let query = send(
+            &app,
+            empty_request("DELETE", &format!("{CLI_SESSION_PATH}?unexpected=1")),
+        )
+        .await;
         assert_eq!(query.status(), StatusCode::BAD_REQUEST);
         assert!(backend.revoked_credentials.lock().unwrap().is_empty());
 
-        let payload = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("DELETE")
-                    .uri(CLI_SESSION_PATH)
-                    .body(Body::from("ignored"))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let payload = send(&app, request("DELETE", CLI_SESSION_PATH, None, "ignored")).await;
         assert_eq!(payload.status(), StatusCode::BAD_REQUEST);
         assert!(backend.revoked_credentials.lock().unwrap().is_empty());
 
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("DELETE")
-                    .uri(CLI_SESSION_PATH)
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let response = send(&app, empty_request("DELETE", CLI_SESSION_PATH)).await;
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
         assert_eq!(response.headers()[CACHE_CONTROL], "no-store");
         assert_eq!(
@@ -3992,21 +3753,49 @@ mod tests {
 
     #[test]
     fn device_debug_redacts_secrets_and_verification_query() {
-        let start = DeviceLoginStart {
-            poll_credential: SecretString::new(POLL).unwrap(),
-            user_code: SecretString::new("ABCD-EFGH").unwrap(),
-            verification_uri: Url::parse(
-                "https://github.example/login/device?user_code=query-secret",
-            )
-            .unwrap(),
-            expires_at: UnixTimestamp::from_seconds(NOW + 60),
-            poll_interval: Duration::from_secs(5),
-        };
-        let debug = format!("{start:?}");
+        let start = device_start(
+            "https://github.example/login/device?user_code=query-secret",
+            Duration::from_secs(5),
+            NOW + 60,
+        );
+        let debug = format!("{:?}", RedactedDeviceLoginStart(start));
         assert!(!debug.contains(POLL));
         assert!(!debug.contains("ABCD-EFGH"));
         assert!(!debug.contains("query-secret"));
         assert!(debug.contains("verification_query: \"[REDACTED]\""));
+    }
+
+    #[test]
+    fn completion_mappers_preserve_authority_and_failure_logging_boundary() {
+        let tenant = TenantId::new("tenant-a").unwrap();
+        let other = TenantId::new("tenant-b").unwrap();
+        let principal = PrincipalId::new("33333333-3333-4333-8333-333333333333").unwrap();
+        for (setup, session_tenant, kind, expected) in [
+            (false, &tenant, SessionKind::Cli, "complete"),
+            (false, &other, SessionKind::Cli, "sign_in_integrity"),
+            (false, &tenant, SessionKind::Browser, "sign_in_integrity"),
+            (true, &other, SessionKind::Cli, "complete"),
+            (true, &tenant, SessionKind::Browser, "invalid_completion"),
+        ] {
+            let credential = SessionCredential::from_raw(SESSION).unwrap();
+            let session = Box::new(durable_session(session_tenant, &principal, kind));
+            let result = if setup {
+                Ok(map_setup_device_completion(credential, &session, None))
+            } else {
+                map_sign_in_device_completion(&tenant, credential, &session, None)
+            };
+            let enters_failure_logging = result.is_err();
+            let actual = match result {
+                Ok(DevicePollOutcome::Complete(_)) => "complete",
+                Ok(DevicePollOutcome::InvalidCompletion) => "invalid_completion",
+                Err(GithubAuthFailure::SignIn(GithubLoginError::IntegrityFailure)) => {
+                    "sign_in_integrity"
+                }
+                other => panic!("unexpected completion mapping: {other:?}"),
+            };
+            assert_eq!(actual, expected);
+            assert_eq!(enters_failure_logging, expected == "sign_in_integrity");
+        }
     }
 
     #[test]
@@ -4047,22 +3836,78 @@ mod tests {
         );
     }
 
-    #[test]
-    fn typed_errors_have_sanitized_stable_statuses_and_retry_headers() {
-        let response = login_error_response(
-            GithubLoginError::PollTooEarly {
-                next_poll_at: UnixTimestamp::from_seconds(NOW + 7),
-            },
-            UnixTimestamp::from_seconds(NOW),
-        );
-        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
-        assert_eq!(response.headers()[RETRY_AFTER], "7");
-        assert_eq!(response.headers()[CACHE_CONTROL], "no-store");
+    #[tokio::test]
+    async fn auth_failures_have_one_exact_wire_matrix() {
+        use GithubAuthFailure::{InstallationSetup as Setup, SignIn};
+        use GithubLoginError as G;
+        use InstallationSetupError as I;
 
-        let internal = login_error_response(
-            GithubLoginError::IntegrityFailure,
-            UnixTimestamp::from_seconds(NOW),
-        );
-        assert_eq!(internal.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        macro_rules! poll {
+            ($error:ident, $at:expr) => {
+                $error::PollTooEarly {
+                    next_poll_at: UnixTimestamp::from_seconds($at),
+                }
+            };
+        }
+        macro_rules! rate {
+            ($error:ident, $retry:expr) => {
+                $error::RateLimited {
+                    retry_after_seconds: $retry,
+                }
+            };
+        }
+
+        let sign_in = [
+            (G::Invalid, 400, "invalid_request", None),
+            (G::Replay, 409, "request_replayed", None),
+            (G::Expired, 410, "request_expired", None),
+            (G::Denied, 403, "authorization_denied", None),
+            (poll!(G, NOW - 1), 429, "poll_too_early", Some("1")),
+            (poll!(G, NOW + 7), 429, "poll_too_early", Some("7")),
+            (rate!(G, None), 429, "rate_limited", None),
+            (rate!(G, Some(0)), 429, "rate_limited", Some("1")),
+            (rate!(G, Some(9)), 429, "rate_limited", Some("9")),
+            (G::ProviderUnavailable, 503, "unavailable", Some("1")),
+            (G::StorageUnavailable, 503, "unavailable", Some("1")),
+            (G::RandomnessUnavailable, 503, "unavailable", Some("1")),
+            (G::CollisionLimitExceeded, 503, "unavailable", Some("1")),
+            (G::NotAuthorized, 403, "not_authorized", None),
+            (G::IntegrityFailure, 500, "internal_error", None),
+        ];
+        let setup = [
+            (I::InvalidRequest, 400, "invalid_request", None),
+            (I::InvalidProof, 403, "setup_proof_rejected", None),
+            (I::NotArmed, 409, "setup_not_armed", None),
+            (I::StateConflict, 409, "setup_state_conflict", None),
+            (I::Replay, 409, "request_replayed", None),
+            (I::Expired, 410, "request_expired", None),
+            (I::Denied, 403, "authorization_denied", None),
+            (poll!(I, NOW - 1), 429, "poll_too_early", Some("1")),
+            (poll!(I, NOW + 3), 429, "poll_too_early", Some("3")),
+            (rate!(I, None), 429, "rate_limited", None),
+            (rate!(I, Some(0)), 429, "rate_limited", Some("1")),
+            (rate!(I, Some(9)), 429, "rate_limited", Some("9")),
+            (I::ProviderUnavailable, 503, "unavailable", Some("1")),
+            (I::StorageUnavailable, 503, "unavailable", Some("1")),
+            (I::RandomnessUnavailable, 503, "unavailable", Some("1")),
+            (I::CollisionLimitExceeded, 503, "unavailable", Some("1")),
+            (I::NotAuthorized, 403, "not_authorized", None),
+            (I::AlreadyConfigured, 410, "setup_complete", None),
+            (I::IntegrityFailure, 500, "internal_error", None),
+        ];
+        let cases = sign_in
+            .map(|(error, status, code, retry)| (SignIn(error), status, code, retry))
+            .into_iter()
+            .chain(setup.map(|(error, status, code, retry)| (Setup(error), status, code, retry)));
+        for (failure, status, code, retry) in cases {
+            let body = format!(r#"{{"error":"{code}"}}"#);
+            assert_exact_json(
+                github_auth_failure_response(failure, UnixTimestamp::from_seconds(NOW)),
+                status,
+                retry,
+                &body,
+            )
+            .await;
+        }
     }
 }
