@@ -20,6 +20,9 @@ use automata_ci_store::{
     GithubCheckRerunStoreError, GithubCheckRerunTarget, GithubCheckRunId, GithubCheckSuiteId,
     StoreError, TenantScope,
 };
+use automata_ci_workflow_service::{
+    ProviderWorkflowResultService, ProviderWorkflowResultServiceError,
+};
 
 use crate::GithubTriggerHandler;
 
@@ -28,6 +31,7 @@ pub struct GithubProviderRuntimeAdapter {
     provider_type: ProviderTypeId,
     triggers: Arc<dyn GithubTriggerHandler>,
     reruns: Arc<dyn GithubCheckRerunRepository>,
+    results: ProviderWorkflowResultService,
 }
 
 impl GithubProviderRuntimeAdapter {
@@ -41,12 +45,14 @@ impl GithubProviderRuntimeAdapter {
     pub fn new(
         triggers: Arc<dyn GithubTriggerHandler>,
         reruns: Arc<dyn GithubCheckRerunRepository>,
+        results: ProviderWorkflowResultService,
     ) -> Self {
         Self {
             provider_type: ProviderTypeId::new("github")
                 .expect("the built-in GitHub provider type is canonical"),
             triggers,
             reruns,
+            results,
         }
     }
 }
@@ -58,6 +64,7 @@ impl fmt::Debug for GithubProviderRuntimeAdapter {
             .field("provider_type", &self.provider_type)
             .field("triggers", &self.triggers)
             .field("reruns", &self.reruns)
+            .field("results", &self.results)
             .finish()
     }
 }
@@ -84,6 +91,7 @@ impl ProviderRuntimeAdapter for GithubProviderRuntimeAdapter {
         &self,
         context: &ProviderRuntimeContext,
         control: &VerifiedProviderControlDelivery,
+        invocation: &ClaimedProviderProcessing,
         _lease: &ProviderProcessingLease,
     ) -> Result<Option<ProviderDeliveryId>, ProviderControlHandlingError> {
         let request =
@@ -95,6 +103,16 @@ impl ProviderRuntimeAdapter for GithubProviderRuntimeAdapter {
             .map_err(|error| rerun_error(&error))?;
         if receipts.is_empty() {
             return Err(ProviderControlHandlingError::Conflict);
+        }
+        for receipt in receipts {
+            self.results
+                .project_rerun(
+                    context.connection(),
+                    receipt,
+                    invocation.receipt().created_at(),
+                )
+                .await
+                .map_err(result_error)?;
         }
         Ok(None)
     }
@@ -194,6 +212,22 @@ fn rerun_error(error: &GithubCheckRerunStoreError) -> ProviderControlHandlingErr
         GithubCheckRerunStoreError::Store(_) => ProviderControlHandlingError::InvalidEvidence,
         GithubCheckRerunStoreError::AuthorityRejected => ProviderControlHandlingError::Unauthorized,
         GithubCheckRerunStoreError::Conflict => ProviderControlHandlingError::Conflict,
+    }
+}
+
+const fn result_error(error: ProviderWorkflowResultServiceError) -> ProviderControlHandlingError {
+    match error {
+        ProviderWorkflowResultServiceError::Unavailable => {
+            ProviderControlHandlingError::Unavailable
+        }
+        ProviderWorkflowResultServiceError::SubjectNotReady => {
+            ProviderControlHandlingError::NotFound
+        }
+        ProviderWorkflowResultServiceError::InvalidConfiguration
+        | ProviderWorkflowResultServiceError::InvalidEvidence => {
+            ProviderControlHandlingError::InvalidEvidence
+        }
+        ProviderWorkflowResultServiceError::Inconsistent => ProviderControlHandlingError::Conflict,
     }
 }
 

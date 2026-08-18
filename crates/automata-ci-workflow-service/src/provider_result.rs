@@ -11,6 +11,7 @@ use automata_ci_provider::{
     ProviderResultSubjectKind, ProviderResultSummary, ProviderResultTitle,
     ProviderWorkflowRunState, SaveDesiredProviderResult, VerifiedProviderTriggerDelivery,
 };
+use automata_ci_store::WorkflowRerunReceipt;
 use thiserror::Error;
 use url::Url;
 
@@ -165,6 +166,74 @@ impl ProviderWorkflowResultService {
             .map_err(repository_error)
     }
 
+    /// Creates or exactly replays the queued result for one durable rerun.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed error when source evidence is absent, the current
+    /// connection no longer owns that source, or result storage fails.
+    pub async fn project_rerun(
+        &self,
+        connection: &ProviderConnectionManifest,
+        receipt: WorkflowRerunReceipt,
+        created_at: UnixMillis,
+    ) -> Result<ProviderResultSaveOutcome, ProviderWorkflowResultServiceError> {
+        let source = self
+            .results
+            .load_workflow_subject(receipt.source_run_id())
+            .await
+            .map_err(repository_error)?
+            .ok_or(ProviderWorkflowResultServiceError::SubjectNotReady)?;
+        if source.connection_id() != connection.connection_id()
+            || source.repository() != connection.configuration().repository()
+            || source.subject()
+                != &(ProviderResultSubjectKind::WorkflowRun {
+                    run_id: receipt.source_run_id(),
+                })
+        {
+            return Err(ProviderWorkflowResultServiceError::Inconsistent);
+        }
+        let kind = ProviderResultSubjectKind::WorkflowRun {
+            run_id: receipt.run_id(),
+        };
+        let subject = ProviderResultSubject::new(
+            ProviderResultSubjectId::derive(connection.connection_id(), &kind),
+            connection,
+            source.object(),
+            source.name().clone(),
+            rerun_details_url(
+                source.details_url(),
+                receipt.source_run_id(),
+                receipt.run_id(),
+            )?,
+            kind,
+            receipt.run_attempt(),
+            created_at,
+        )
+        .map_err(model_error)?;
+        if let Some(current) = self
+            .results
+            .load_workflow_subject(receipt.run_id())
+            .await
+            .map_err(repository_error)?
+        {
+            return if current == subject {
+                Ok(ProviderResultSaveOutcome::Unchanged)
+            } else {
+                Err(ProviderWorkflowResultServiceError::Inconsistent)
+            };
+        }
+        let projection = lifecycle_projection(
+            subject.name().as_str(),
+            ProviderWorkflowRunState::Queued,
+            created_at,
+        )?;
+        self.results
+            .save_desired(SaveDesiredProviderResult::new(subject, projection).map_err(model_error)?)
+            .await
+            .map_err(repository_error)
+    }
+
     fn details_url(
         &self,
         repository: &ProviderRepositoryPath,
@@ -247,6 +316,33 @@ fn lifecycle_projection(
     .map_err(model_error)
 }
 
+fn rerun_details_url(
+    source: &ProviderResultDetailsUrl,
+    source_run_id: RunId,
+    run_id: RunId,
+) -> Result<ProviderResultDetailsUrl, ProviderWorkflowResultServiceError> {
+    let mut url = source.as_url().clone();
+    let segments = url
+        .path_segments()
+        .ok_or(ProviderWorkflowResultServiceError::InvalidEvidence)?
+        .collect::<Vec<_>>();
+    let expected_source = source_run_id.to_string();
+    if segments.len() < 3
+        || segments[segments.len() - 3] != "actions"
+        || segments[segments.len() - 2] != "runs"
+        || segments.last().copied() != Some(expected_source.as_str())
+    {
+        return Err(ProviderWorkflowResultServiceError::InvalidEvidence);
+    }
+    let mut path = url
+        .path_segments_mut()
+        .map_err(|()| ProviderWorkflowResultServiceError::InvalidEvidence)?;
+    path.pop();
+    path.push(&run_id.to_string());
+    drop(path);
+    ProviderResultDetailsUrl::new(url).map_err(model_error)
+}
+
 const fn model_error(_: ProviderResultModelError) -> ProviderWorkflowResultServiceError {
     ProviderWorkflowResultServiceError::InvalidEvidence
 }
@@ -289,19 +385,30 @@ pub enum ProviderWorkflowResultServiceError {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
-    use automata_ci_core::{RunId, UnixMillis};
-    use automata_ci_provider::{
-        ProviderRepositoryPath, ProviderResultFuture, ProviderResultRepository,
-        ProviderResultRepositoryError, ProviderResultSubjectKind, SaveDesiredProviderResult,
+    use std::{
+        collections::BTreeMap,
+        sync::{Arc, Mutex},
     };
+
+    use automata_ci_core::{GitObjectId, RunId, Sha256Digest, UnixMillis, WorkspaceId};
+    use automata_ci_provider::{
+        ExternalRepositoryId, ExternalRepositoryIdentity, ProviderArchiveLimits,
+        ProviderConfigurationRevision, ProviderConnectionConfiguration, ProviderConnectionId,
+        ProviderConnectionManifest, ProviderConnectionPolicyDocument, ProviderConnectionRevision,
+        ProviderDefaultBranch, ProviderLifecycleState, ProviderRepositoryPath,
+        ProviderResultDetailsUrl, ProviderResultFuture, ProviderResultName,
+        ProviderResultRepository, ProviderResultRepositoryError, ProviderResultSubject,
+        ProviderResultSubjectId, ProviderResultSubjectKind, ProviderRunnerPolicyBinding,
+        ProviderSchemaVersion, ProviderWorkflowSource, RepositoryVisibility,
+        SaveDesiredProviderResult,
+    };
+    use automata_ci_store::WorkflowRerunReceipt;
     use url::Url;
     use uuid::Uuid;
 
     use super::{
         ProviderWorkflowResultService, ProviderWorkflowResultServiceError, bounded_name,
-        lifecycle_projection,
+        lifecycle_projection, rerun_details_url,
     };
 
     #[derive(Debug)]
@@ -351,10 +458,106 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Default)]
+    struct MemoryResults(Mutex<BTreeMap<RunId, ProviderResultSubject>>);
+
+    impl ProviderResultRepository for MemoryResults {
+        fn load_workflow_subject(
+            &self,
+            run_id: RunId,
+        ) -> ProviderResultFuture<'_, Option<ProviderResultSubject>> {
+            Box::pin(async move { Ok(self.0.lock().unwrap().get(&run_id).cloned()) })
+        }
+
+        fn save_desired(
+            &self,
+            request: SaveDesiredProviderResult,
+        ) -> ProviderResultFuture<'_, automata_ci_provider::ProviderResultSaveOutcome> {
+            Box::pin(async move {
+                let (subject, _projection) = request.into_parts();
+                let ProviderResultSubjectKind::WorkflowRun { run_id } = subject.subject() else {
+                    return Err(ProviderResultRepositoryError::Corrupt);
+                };
+                let outcome = if self.0.lock().unwrap().insert(*run_id, subject).is_none() {
+                    automata_ci_provider::ProviderResultSaveOutcome::Inserted
+                } else {
+                    automata_ci_provider::ProviderResultSaveOutcome::Superseded
+                };
+                Ok(outcome)
+            })
+        }
+
+        fn claim_result(
+            &self,
+            _request: automata_ci_provider::ClaimProviderResult,
+        ) -> ProviderResultFuture<'_, Option<automata_ci_provider::ClaimedProviderResult>> {
+            Box::pin(async { Ok(None) })
+        }
+
+        fn complete_result(
+            &self,
+            _request: automata_ci_provider::CompleteProviderResult,
+        ) -> ProviderResultFuture<'_, ()> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn retry_result(
+            &self,
+            _request: automata_ci_provider::RetryProviderResult,
+        ) -> ProviderResultFuture<'_, ()> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn fail_result(
+            &self,
+            _request: automata_ci_provider::FailProviderResult,
+        ) -> ProviderResultFuture<'_, ()> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
     fn service(
         origin: &str,
     ) -> Result<ProviderWorkflowResultService, ProviderWorkflowResultServiceError> {
         ProviderWorkflowResultService::new(Arc::new(UnusedResults), Url::parse(origin).unwrap())
+    }
+
+    fn connection() -> ProviderConnectionManifest {
+        let configuration = ProviderConnectionConfiguration::new(
+            WorkspaceId::parse("11111111-1111-4111-8111-111111111111").unwrap(),
+            ExternalRepositoryIdentity::new(
+                "22222222-2222-4222-8222-222222222222".parse().unwrap(),
+                ExternalRepositoryId::new("repository-42").unwrap(),
+            ),
+            ProviderConfigurationRevision::new(3).unwrap(),
+            Sha256Digest::from_bytes([3; 32]),
+            Sha256Digest::from_bytes([4; 32]),
+            RepositoryVisibility::Private,
+            ProviderDefaultBranch::new("main").unwrap(),
+            ProviderWorkflowSource::Directory(
+                ProviderRepositoryPath::new(".ci/workflows").unwrap(),
+            ),
+            ProviderRunnerPolicyBinding::new(
+                ProviderSchemaVersion::new(1).unwrap(),
+                Sha256Digest::from_bytes([5; 32]),
+            ),
+            ProviderArchiveLimits::new(1_024, 8_192, 100, 1_024, 10, 1_024).unwrap(),
+            ProviderConnectionPolicyDocument::new(
+                ProviderSchemaVersion::new(1).unwrap(),
+                b"{}".to_vec(),
+            )
+            .unwrap(),
+        );
+        ProviderConnectionManifest::new(
+            ProviderConnectionId::from_uuid(Uuid::from_u128(3)).unwrap(),
+            ProviderConnectionRevision::new(7).unwrap(),
+            ProviderLifecycleState::Active,
+            configuration,
+            UnixMillis::new(1_000),
+            Some(UnixMillis::new(1_001)),
+            None,
+        )
+        .unwrap()
     }
 
     #[test]
@@ -410,6 +613,14 @@ mod tests {
         assert_eq!(
             run.as_url().as_str(),
             format!("https://ci.example/group/subgroup/repository/actions/runs/{run_id}")
+        );
+        let rerun_id = RunId::from_uuid(Uuid::from_u128(43));
+        assert_eq!(
+            rerun_details_url(&run, run_id, rerun_id)
+                .unwrap()
+                .as_url()
+                .as_str(),
+            format!("https://ci.example/group/subgroup/repository/actions/runs/{rerun_id}")
         );
     }
 
@@ -470,6 +681,58 @@ mod tests {
                 )
                 .await,
             Err(ProviderWorkflowResultServiceError::SubjectNotReady)
+        );
+    }
+
+    #[tokio::test]
+    async fn rerun_projection_creates_once_and_exact_replay_never_regresses() {
+        let connection = connection();
+        let source_run = RunId::from_uuid(Uuid::from_u128(42));
+        let rerun = RunId::from_uuid(Uuid::from_u128(43));
+        let source_kind = ProviderResultSubjectKind::WorkflowRun { run_id: source_run };
+        let source = ProviderResultSubject::new(
+            ProviderResultSubjectId::derive(connection.connection_id(), &source_kind),
+            &connection,
+            GitObjectId::from_provider_hex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap(),
+            ProviderResultName::new("Automata CI / build").unwrap(),
+            ProviderResultDetailsUrl::new(
+                format!("https://ci.example/owner/repository/actions/runs/{source_run}")
+                    .parse()
+                    .unwrap(),
+            )
+            .unwrap(),
+            source_kind,
+            1,
+            UnixMillis::new(2_000),
+        )
+        .unwrap();
+        let results = Arc::new(MemoryResults::default());
+        results.0.lock().unwrap().insert(source_run, source);
+        let service = ProviderWorkflowResultService::new(
+            results.clone(),
+            Url::parse("https://ci.example/").unwrap(),
+        )
+        .unwrap();
+        let receipt = WorkflowRerunReceipt::new(source_run, rerun, 7, 5, 2, false).unwrap();
+        assert_eq!(
+            service
+                .project_rerun(&connection, receipt, UnixMillis::new(3_000))
+                .await
+                .unwrap(),
+            automata_ci_provider::ProviderResultSaveOutcome::Inserted
+        );
+        let projected = results.0.lock().unwrap().get(&rerun).cloned().unwrap();
+        assert_eq!(projected.attempt(), 2);
+        assert_eq!(
+            projected.details_url().as_url().as_str(),
+            format!("https://ci.example/owner/repository/actions/runs/{rerun}")
+        );
+        assert_eq!(
+            service
+                .project_rerun(&connection, receipt, UnixMillis::new(3_000))
+                .await
+                .unwrap(),
+            automata_ci_provider::ProviderResultSaveOutcome::Unchanged
         );
     }
 }

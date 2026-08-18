@@ -612,6 +612,7 @@ mod tests {
             &self,
             context: &crate::ProviderRuntimeContext,
             _control: &VerifiedProviderControlDelivery,
+            _invocation: &ClaimedProviderProcessing,
             _lease: &ProviderProcessingLease,
         ) -> Result<Option<ProviderDeliveryId>, crate::ProviderControlHandlingError> {
             assert_eq!(
@@ -651,6 +652,7 @@ mod tests {
             &self,
             context: &crate::ProviderRuntimeContext,
             _control: &VerifiedProviderControlDelivery,
+            _invocation: &ClaimedProviderProcessing,
             lease: &ProviderProcessingLease,
         ) -> Result<Option<ProviderDeliveryId>, crate::ProviderControlHandlingError> {
             assert_eq!(
