@@ -1,6 +1,6 @@
 #![cfg(all(target_os = "macos", target_arch = "aarch64"))]
 
-use automata_ci_core::SandboxFeature;
+use automata_ci_core::{RunnerFeature, SandboxFeature};
 use automata_ci_runner::product::{RunnerProductConfig, RunnerProductConfigError};
 
 fn baseline() -> serde_json::Value {
@@ -87,10 +87,10 @@ fn macos_configuration_rejects_every_weaker_boundary() {
         RunnerProductConfigError::InvalidProvider
     );
 
-    let mut javascript = baseline();
-    javascript["executor"]["toolchain"]["node20"] = serde_json::json!("/usr/local/bin/node");
+    let mut aliased_node = baseline();
+    aliased_node["executor"]["toolchain"]["node20"] = serde_json::json!("/usr/local/bin/not-node");
     assert_eq!(
-        parse(&javascript).expect_err("JavaScript actions are not supported"),
+        parse(&aliased_node).expect_err("a generic executable cannot stand in for Node"),
         RunnerProductConfigError::InvalidExecutor
     );
 
@@ -100,6 +100,35 @@ fn macos_configuration_rejects_every_weaker_boundary() {
         value["inventory"]["resources_per_job"][field] = serde_json::json!(1);
         assert!(parse(&value).is_err(), "nonzero {field} must fail closed");
     }
+}
+
+#[test]
+fn macos_configuration_advertises_only_configured_admitted_action_runtimes() {
+    let config = parse(&baseline()).expect("checked-in macOS runner configuration");
+    let features = config.inventory().features();
+    for feature in [
+        RunnerFeature::JAVASCRIPT_ACTIONS,
+        RunnerFeature::COMPOSITE_ACTIONS,
+        RunnerFeature::REPOSITORY_ACTIONS,
+        RunnerFeature::LOCAL_ACTIONS,
+        RunnerFeature::NODE20_ACTIONS,
+        RunnerFeature::NODE24_ACTIONS,
+    ] {
+        assert!(features.contains(&feature), "missing {feature}");
+    }
+    assert!(!features.contains(&RunnerFeature::NODE12_ACTIONS));
+    assert!(!features.contains(&RunnerFeature::NODE16_ACTIONS));
+
+    let mut shell_only = baseline();
+    shell_only["executor"]["toolchain"]["node20"] = serde_json::Value::Null;
+    shell_only["executor"]["toolchain"]["node24"] = serde_json::Value::Null;
+    let shell_only = parse(&shell_only).expect("Node runtimes remain optional");
+    assert!(
+        !shell_only
+            .inventory()
+            .features()
+            .contains(&RunnerFeature::JAVASCRIPT_ACTIONS)
+    );
 }
 
 #[test]

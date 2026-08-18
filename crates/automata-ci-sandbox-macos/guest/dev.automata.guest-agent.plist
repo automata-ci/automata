@@ -29,6 +29,11 @@
         <key>NumberOfProcesses</key>
         <integer>512</integer>
     </dict>
+    <key>SoftResourceLimits</key>
+    <dict>
+        <key>NumberOfProcesses</key>
+        <integer>512</integer>
+    </dict>
     <key>ThrottleInterval</key>
     <integer>5</integer>
     <key>Umask</key>

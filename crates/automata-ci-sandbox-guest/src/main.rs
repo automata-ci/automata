@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use std::{env, ffi::OsString, future::Future, path::PathBuf, process::ExitCode};
+use std::{env, ffi::OsString, future::Future, io, path::PathBuf, process::ExitCode};
 
 #[cfg(target_os = "macos")]
 use std::fmt::Write as _;
@@ -79,11 +79,15 @@ fn serve_vm(arguments: &mut impl Iterator<Item = OsString>) -> ExitCode {
     let identity = std::fs::read(identity_path)
         .ok()
         .filter(|bytes| !bytes.is_empty() && bytes.len() <= 16 * 1024)
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .filter(valid_vm_identity);
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok());
     let Some(identity) = identity else {
+        eprintln!("automata guest identity rejected: invalid_identity_file");
         return ExitCode::FAILURE;
     };
+    if let Some(reason) = vm_identity_rejection(&identity) {
+        eprintln!("automata guest identity rejected: {reason}");
+        return ExitCode::FAILURE;
+    }
     run_future(automata_ci_sandbox_guest::serve_vm(&socket, identity))
 }
 
@@ -91,7 +95,39 @@ fn client(arguments: &mut impl Iterator<Item = OsString>) -> ExitCode {
     let Some(socket) = path_argument(arguments) else {
         return ExitCode::FAILURE;
     };
-    run_future(automata_ci_sandbox_guest::forward_stdio(&socket))
+    let result = runtime()
+        .map(|runtime| runtime.block_on(automata_ci_sandbox_guest::forward_stdio(&socket)));
+    match result {
+        Some(Ok(())) => ExitCode::SUCCESS,
+        Some(Err(automata_ci_sandbox_guest::GuestProtocolError::InvalidFrame)) => {
+            eprintln!("automata guest client rejected: invalid_frame");
+            ExitCode::FAILURE
+        }
+        Some(Err(automata_ci_sandbox_guest::GuestProtocolError::Io(error))) => {
+            eprintln!(
+                "automata guest client rejected: {}",
+                client_io_rejection(error.kind())
+            );
+            ExitCode::FAILURE
+        }
+        None => {
+            eprintln!("automata guest client rejected: runtime");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+const fn client_io_rejection(kind: io::ErrorKind) -> &'static str {
+    match kind {
+        io::ErrorKind::NotFound => "not_found",
+        io::ErrorKind::PermissionDenied => "permission_denied",
+        io::ErrorKind::ConnectionRefused => "connection_refused",
+        io::ErrorKind::ConnectionReset => "connection_reset",
+        io::ErrorKind::BrokenPipe => "broken_pipe",
+        io::ErrorKind::UnexpectedEof => "unexpected_eof",
+        io::ErrorKind::TimedOut => "timed_out",
+        _ => "io",
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -149,7 +185,9 @@ const fn success(success: bool) -> ExitCode {
 }
 
 #[cfg(target_os = "macos")]
-fn valid_vm_identity(identity: &automata_ci_sandbox_guest::GuestIdentity) -> bool {
+fn vm_identity_rejection(
+    identity: &automata_ci_sandbox_guest::GuestIdentity,
+) -> Option<&'static str> {
     let executable_digest = env::current_exe()
         .ok()
         .and_then(|path| std::fs::read(path).ok())
@@ -163,19 +201,31 @@ fn valid_vm_identity(identity: &automata_ci_sandbox_guest::GuestIdentity) -> boo
         });
     let product_version = command_output("/usr/bin/sw_vers", &["-productVersion"]);
     let build_version = command_output("/usr/bin/sw_vers", &["-buildVersion"]);
-    identity.architecture == "arm64"
-        && std::env::consts::ARCH == "aarch64"
-        && executable_digest.as_deref() == Some(identity.guest_agent_sha256.as_str())
-        && product_version.as_deref() == Some(identity.macos_version.as_str())
-        && build_version.as_deref() == Some(identity.macos_build.as_str())
-        && rustix::process::getuid().as_raw() == identity.job_uid
-        && rustix::process::getgid().as_raw() == identity.job_gid
-        && process_limit() == Some(identity.process_limit)
+    if identity.architecture != "arm64" || std::env::consts::ARCH != "aarch64" {
+        Some("architecture")
+    } else if executable_digest.as_deref() != Some(identity.guest_agent_sha256.as_str()) {
+        Some("executable_digest")
+    } else if product_version.as_deref() != Some(identity.macos_version.as_str()) {
+        Some("product_version")
+    } else if build_version.as_deref() != Some(identity.macos_build.as_str()) {
+        Some("build_version")
+    } else if rustix::process::getuid().as_raw() != identity.job_uid {
+        Some("job_uid")
+    } else if rustix::process::getgid().as_raw() != identity.job_gid {
+        Some("job_gid")
+    } else if process_limit() != Some(identity.process_limit) {
+        Some("process_limit")
+    } else {
+        None
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
-fn valid_vm_identity(_identity: &automata_ci_sandbox_guest::GuestIdentity) -> bool {
-    false
+#[allow(clippy::unnecessary_wraps)]
+fn vm_identity_rejection(
+    _identity: &automata_ci_sandbox_guest::GuestIdentity,
+) -> Option<&'static str> {
+    Some("unsupported_platform")
 }
 
 #[cfg(target_os = "macos")]

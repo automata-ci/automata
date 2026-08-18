@@ -90,6 +90,7 @@ enum ShellKind {
     Install,
     Tar,
     Sha256sum,
+    Shasum,
     Node12,
     Node16,
     Node20,
@@ -112,6 +113,7 @@ impl ShellProbe {
             ShellKind::Install
             | ShellKind::Tar
             | ShellKind::Sha256sum
+            | ShellKind::Shasum
             | ShellKind::Node12
             | ShellKind::Node16
             | ShellKind::Node20
@@ -130,6 +132,7 @@ impl ShellProbe {
             ShellKind::Install => "install",
             ShellKind::Tar => "tar",
             ShellKind::Sha256sum => "sha256sum",
+            ShellKind::Shasum => "shasum",
             ShellKind::Node12 => "node12",
             ShellKind::Node16 => "node16",
             ShellKind::Node20 => "node20",
@@ -158,6 +161,7 @@ impl ShellProbe {
             ShellKind::Install
             | ShellKind::Tar
             | ShellKind::Sha256sum
+            | ShellKind::Shasum
             | ShellKind::Node12
             | ShellKind::Node16
             | ShellKind::Node20
@@ -205,8 +209,18 @@ impl ShellProbe {
                 windows_script_arguments(WindowsScriptShell::Cmd, script.expect("matched script"))
                     .ok_or_else(invalid_catalog)?
             }
-            (ShellKind::Install | ShellKind::Tar | ShellKind::Sha256sum, None) => {
+            (ShellKind::Install, None) => vec![
+                "-d".to_owned(),
+                "-m".to_owned(),
+                "0700".to_owned(),
+                "--".to_owned(),
+                self.marker(operation_id),
+            ],
+            (ShellKind::Tar | ShellKind::Sha256sum, None) => {
                 vec!["--version".to_owned()]
+            }
+            (ShellKind::Shasum, None) => {
+                vec!["-a".to_owned(), "256".to_owned(), "/dev/null".to_owned()]
             }
             (
                 ShellKind::Node12 | ShellKind::Node16 | ShellKind::Node20 | ShellKind::Node24,
@@ -235,12 +249,16 @@ impl ShellProbe {
 
     fn expected_stdout_matches(&self, operation_id: OperationId, stdout: &[u8]) -> bool {
         match self.kind {
-            ShellKind::Install => stdout.starts_with(b"install (GNU coreutils) "),
-            ShellKind::Tar => stdout.starts_with(b"tar (GNU tar) "),
+            ShellKind::Install => stdout.is_empty(),
+            ShellKind::Tar => {
+                stdout.starts_with(b"tar (GNU tar) ") || stdout.starts_with(b"bsdtar ")
+            }
             ShellKind::Sha256sum if self.program.platform() == TargetPlatform::Windows => {
                 stdout.starts_with(b"automata-sha256 ")
             }
             ShellKind::Sha256sum => stdout.starts_with(b"sha256sum (GNU coreutils) "),
+            ShellKind::Shasum => stdout
+                == b"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  /dev/null\n",
             _ => stdout == self.marker(operation_id).as_bytes(),
         }
     }
@@ -391,40 +409,57 @@ impl ProfileAdmissionPolicy {
         Ok(policy)
     }
 
-    pub(super) fn with_virtualized_macos_shells(
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn with_virtualized_macos_tools(
         mut self,
         scratch_root: TargetPath,
         bash: TargetPath,
         sh: TargetPath,
         python: Option<TargetPath>,
         pwsh: Option<TargetPath>,
+        install: TargetPath,
+        tar: TargetPath,
+        shasum: TargetPath,
+        node12: Option<TargetPath>,
+        node16: Option<TargetPath>,
+        node20: Option<TargetPath>,
+        node24: Option<TargetPath>,
     ) -> Result<Self, ProfileAdmissionError> {
-        if self.shell_probes.is_some()
-            || [scratch_root.platform(), bash.platform(), sh.platform()]
-                .into_iter()
-                .any(|platform| platform != TargetPlatform::Posix)
-            || python
-                .as_ref()
-                .is_some_and(|python| python.platform() != TargetPlatform::Posix)
-            || pwsh
-                .as_ref()
-                .is_some_and(|pwsh| pwsh.platform() != TargetPlatform::Posix)
-        {
-            return Err(invalid_catalog());
-        }
-        let mut shell_probes = vec![
+        let mut probes = vec![
             ShellProbe::new(ShellKind::Bash, bash),
             ShellProbe::new(ShellKind::Sh, sh),
         ];
         if let Some(python) = python {
-            shell_probes.push(ShellProbe::new(ShellKind::Python, python));
+            probes.push(ShellProbe::new(ShellKind::Python, python));
         }
         if let Some(pwsh) = pwsh {
-            shell_probes.push(ShellProbe::new(ShellKind::Pwsh, pwsh));
+            probes.push(ShellProbe::new(ShellKind::Pwsh, pwsh));
+        }
+        probes.extend([
+            ShellProbe::new(ShellKind::Install, install),
+            ShellProbe::new(ShellKind::Tar, tar),
+            ShellProbe::new(ShellKind::Shasum, shasum),
+        ]);
+        for (kind, program) in [
+            (ShellKind::Node12, node12),
+            (ShellKind::Node16, node16),
+            (ShellKind::Node20, node20),
+            (ShellKind::Node24, node24),
+        ] {
+            if let Some(program) = program {
+                probes.push(ShellProbe::new(kind, program));
+            }
+        }
+        if self.shell_probes.is_some()
+            || scratch_root.platform() != TargetPlatform::Posix
+            || probes.len() > MAX_SHELL_PROBE_COUNT
+            || probes.iter().any(|probe| !valid_macos_probe(probe))
+        {
+            return Err(invalid_catalog());
         }
         self.shell_probes = Some(ShellProbePolicy {
             scratch_root: Some(scratch_root),
-            probes: shell_probes,
+            probes,
         });
         Ok(self)
     }
@@ -455,7 +490,36 @@ fn valid_linux_probe(probe: &ShellProbe) -> bool {
         ShellKind::Node12 | ShellKind::Node16 | ShellKind::Node20 | ShellKind::Node24 => {
             basename == "node"
         }
-        ShellKind::WindowsPowerShell | ShellKind::Cmd => false,
+        ShellKind::Shasum | ShellKind::WindowsPowerShell | ShellKind::Cmd => false,
+    }
+}
+
+fn valid_macos_probe(probe: &ShellProbe) -> bool {
+    if probe.program.platform() != TargetPlatform::Posix || !probe.program.as_str().starts_with('/')
+    {
+        return false;
+    }
+    let Some(basename) = probe.program.as_str().rsplit('/').next() else {
+        return false;
+    };
+    match probe.kind {
+        ShellKind::Bash => basename == "bash",
+        ShellKind::Sh => basename == "sh",
+        ShellKind::Pwsh => basename == "pwsh",
+        ShellKind::Python => {
+            basename == "python"
+                || basename == "python3"
+                || basename.strip_prefix("python3.").is_some_and(|version| {
+                    !version.is_empty() && version.bytes().all(|byte| byte.is_ascii_digit())
+                })
+        }
+        ShellKind::Install => basename == "install",
+        ShellKind::Tar => basename == "tar",
+        ShellKind::Shasum => basename == "shasum",
+        ShellKind::Node12 | ShellKind::Node16 | ShellKind::Node20 | ShellKind::Node24 => {
+            basename == "node"
+        }
+        ShellKind::WindowsPowerShell | ShellKind::Cmd | ShellKind::Sha256sum => false,
     }
 }
 
@@ -476,7 +540,7 @@ fn valid_windows_probe(probe: &ShellProbe) -> bool {
         ShellKind::Node12 | ShellKind::Node16 | ShellKind::Node20 | ShellKind::Node24 => {
             basename.eq_ignore_ascii_case("node.exe")
         }
-        ShellKind::Bash | ShellKind::Sh | ShellKind::Install => false,
+        ShellKind::Bash | ShellKind::Sh | ShellKind::Install | ShellKind::Shasum => false,
     }
 }
 
@@ -1594,6 +1658,8 @@ mod tests {
             || basename.eq_ignore_ascii_case("automata-sha256.exe")
         {
             Some(ShellKind::Sha256sum)
+        } else if basename == "shasum" {
+            Some(ShellKind::Shasum)
         } else if basename.eq_ignore_ascii_case("node") || basename.eq_ignore_ascii_case("node.exe")
         {
             let evaluation = request.argv().arguments().last()?;
@@ -1648,7 +1714,7 @@ mod tests {
                 b"wrong-shell-probe-output".to_vec()
             } else {
                 match kind {
-                    ShellKind::Install => b"install (GNU coreutils) 9.4\n".to_vec(),
+                    ShellKind::Install => Vec::new(),
                     ShellKind::Tar => b"tar (GNU tar) 1.35\n".to_vec(),
                     ShellKind::Sha256sum
                         if request.argv().program().platform() == TargetPlatform::Windows =>
@@ -1656,19 +1722,28 @@ mod tests {
                         b"automata-sha256 1.0.0\n".to_vec()
                     }
                     ShellKind::Sha256sum => b"sha256sum (GNU coreutils) 9.4\n".to_vec(),
+                    ShellKind::Shasum => b"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  /dev/null\n".to_vec(),
                     _ => ShellProbe::new(kind, request.argv().program().clone())
                         .marker(request.operation_id())
                         .into_bytes(),
                 }
             };
-            let stdout = ExecutionOutputRecord::data(ExecutionOutputStream::Stdout, stdout)
-                .map_err(|_| {
-                    ExecutionError::new(ExecutionErrorKind::LocalStorage, ExecutionStage::Exec)
-                })?;
-            let mut records = vec![
-                stdout,
-                ExecutionOutputRecord::end_of_stream(ExecutionOutputStream::Stdout),
-            ];
+            let mut records = Vec::new();
+            if !stdout.is_empty() {
+                records.push(
+                    ExecutionOutputRecord::data(ExecutionOutputStream::Stdout, stdout).map_err(
+                        |_| {
+                            ExecutionError::new(
+                                ExecutionErrorKind::LocalStorage,
+                                ExecutionStage::Exec,
+                            )
+                        },
+                    )?,
+                );
+            }
+            records.push(ExecutionOutputRecord::end_of_stream(
+                ExecutionOutputStream::Stdout,
+            ));
             if self.behavior == FakeBehavior::ExecStderr {
                 records.push(
                     ExecutionOutputRecord::data(
@@ -1891,6 +1966,89 @@ mod tests {
         .expect("Linux tool admission policy")
     }
 
+    fn macos_tool_policy() -> ProfileAdmissionPolicy {
+        let resources = ResourceLimits::new(8 * 1024 * 1024 * 1024, 4_000, 512).expect("resources");
+        ProfileAdmissionPolicy::new(
+            NetworkPolicy::Disabled,
+            RootFilesystemPolicy::Writable,
+            SandboxPrivilegePolicy::Unprivileged,
+            resources,
+            resource_allocation(resources),
+        )
+        .with_virtualized_macos_tools(
+            TargetPath::posix("/Users/automata-job/runner").expect("scratch root"),
+            TargetPath::posix("/bin/bash").expect("bash path"),
+            TargetPath::posix("/bin/sh").expect("sh path"),
+            None,
+            None,
+            TargetPath::posix("/usr/bin/install").expect("install path"),
+            TargetPath::posix("/usr/bin/tar").expect("tar path"),
+            TargetPath::posix("/usr/bin/shasum").expect("shasum path"),
+            None,
+            None,
+            Some(
+                TargetPath::posix("/Library/Automata/externals/node20/bin/node")
+                    .expect("node20 path"),
+            ),
+            Some(
+                TargetPath::posix("/Library/Automata/externals/node24/bin/node")
+                    .expect("node24 path"),
+            ),
+        )
+        .expect("macOS tool admission policy")
+    }
+
+    #[test]
+    fn macos_profile_admission_proves_action_tools_and_nodes_inside_the_vm() {
+        let signals = ProbeCancellation::default();
+        let provider = FakeProvider::new(FakeBehavior::Happy, signals.clone());
+        let (attestation, environment) = environment("macos-tools", profile_digest(0x36), 0x47);
+        let profiles = BTreeMap::from([(attestation, environment)]);
+
+        assert_eq!(
+            admit_environment_profiles(
+                &provider,
+                runner_id(),
+                &profiles,
+                macos_tool_policy(),
+                &signals,
+            ),
+            Ok(ProfileAdmissionOutcome::Admitted)
+        );
+        let calls = provider.calls();
+        let Call::Create(spec) = &calls[0] else {
+            panic!("macOS tool admission must begin with create")
+        };
+        assert_eq!(spec.network(), NetworkPolicy::Disabled);
+        assert_eq!(spec.root_filesystem(), RootFilesystemPolicy::Writable);
+        assert_eq!(spec.privilege(), SandboxPrivilegePolicy::Unprivileged);
+        assert!(
+            spec.scratch()
+                .is_some_and(|path| path.as_str().starts_with("/Users/automata-job/runner/"))
+        );
+        let programs = calls
+            .iter()
+            .filter_map(|call| match call {
+                Call::Exec(command) => Some(command.argv().program().as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            programs,
+            [
+                "/bin/bash",
+                "/bin/sh",
+                "/usr/bin/install",
+                "/usr/bin/tar",
+                "/usr/bin/shasum",
+                "/Library/Automata/externals/node20/bin/node",
+                "/Library/Automata/externals/node24/bin/node",
+            ]
+        );
+        assert!(matches!(calls.last(), Some(Call::Destroy(_, false))));
+        assert_eq!(provider.resource_count(), 0);
+    }
+
     #[test]
     fn linux_profile_admission_proves_every_configured_tool_in_the_exact_sandbox() {
         let signals = ProbeCancellation::default();
@@ -1961,7 +2119,12 @@ mod tests {
             assert_eq!(command.timeout(), SHELL_PROBE_TIMEOUT);
             assert_eq!(command.output_limit(), SHELL_PROBE_OUTPUT_BYTES);
         }
-        for call in &executions[3..6] {
+        let Call::Exec(install) = &executions[3] else {
+            unreachable!()
+        };
+        assert_eq!(&install.argv().arguments()[..4], ["-d", "-m", "0700", "--"]);
+        assert!(install.argv().arguments()[4].starts_with("automata-profile-install-"));
+        for call in &executions[4..6] {
             let Call::Exec(command) = call else {
                 unreachable!()
             };

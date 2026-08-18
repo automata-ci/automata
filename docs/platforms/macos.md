@@ -223,9 +223,25 @@ copy the provisioning bundle to a guest-local directory and run:
 ```console
 sudo guest/install.sh automata.dev/macos-15-arm64-vm-v1 \
   ./automata-ci-sandbox-guest ./automata-macos-vsock-bridge 502 502 512
+sudo guest/install-node-runtime.sh 20 ./node20 \
+  <lowercase-sha256-of-the-native-arm64-node20-binary>
+sudo guest/install-node-runtime.sh 24 ./node24 \
+  <lowercase-sha256-of-the-native-arm64-node24-binary>
 cp guest/guest-identity.json "/Volumes/My Shared Files/Output/guest-identity.json"
 sudo shutdown -h now
 ```
+
+`node20` and `node24` above are the `bin/node` regular files extracted from
+version-pinned official `darwin-arm64` Node.js distributions on the trusted
+builder. Verify each distribution against its published Node.js release
+`SHASUMS256.txt` before copying the binary into the provisioning directory.
+The installer independently pins the binary digest, rejects non-ARM64 or wrong
+major-version executables, and installs it root-owned and non-writable beneath
+`/Library/Automata/externals`. The checked-in runner example advertises both
+runtimes. Set an unavailable generation to `null`; the runner then withholds
+that exact Node capability. Node 12 and 16 use the same installer when a native
+ARM64 binary is deliberately provided, but are not part of the checked-in
+profile.
 
 The script creates the disabled-password non-admin account, installs the two
 launch daemons, writes the baked guest identity, and copies that identity beside
@@ -310,11 +326,15 @@ cargo build --release --bin automata-runner
 ```
 
 Startup refuses Intel, macOS before 15, fractional CPU allocations, multiple
-slots or profiles, services, containers, actions, GPUs, claimed ephemeral-disk
-capacity, private/host networking, host identity/filesystem policies, mutable or
+slots or profiles, services, containers, GPUs, claimed ephemeral-disk capacity,
+private/host networking, host identity/filesystem policies, mutable or
 wrong-owner artifacts, mismatched hashes/profile, untrusted helper signatures,
 an unbounded/shared/boot-container APFS layout, insufficient clone capacity, or
-overlapping host state roots. Old schema/native configuration is an error.
+overlapping host state roots. It admits Bash, `sh`, action materialization
+utilities, and every configured Node runtime by executing them inside a
+disposable VM before connecting to the control plane. Missing or wrong-major
+Node runtimes therefore cannot be advertised. Old schema/native configuration
+is an error.
 
 ## Validation
 

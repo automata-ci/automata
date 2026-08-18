@@ -95,6 +95,7 @@ for label in dev.automata.guest-agent dev.automata.vsock-bridge; do
     if [ "$label" = dev.automata.guest-agent ]; then
         /usr/libexec/PlistBuddy \
             -c "Set :HardResourceLimits:NumberOfProcesses $process_limit" \
+            -c "Set :SoftResourceLimits:NumberOfProcesses $process_limit" \
             "$destination_plist"
     fi
     chown root:wheel "$destination_plist"
