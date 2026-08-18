@@ -1343,11 +1343,11 @@ fn log_frame(value: &core::LogFrame) -> wire::LogFrame {
             core::LogRecord::GroupStarted { group } => {
                 wire::log_frame::Record::GroupStarted(log_group(group))
             }
-            core::LogRecord::Line {
+            core::LogRecord::Output {
                 group_id,
                 channel,
                 payload,
-            } => wire::log_frame::Record::Line(wire::LogLine {
+            } => wire::log_frame::Record::Output(wire::LogOutput {
                 group_id: group_id.as_str().to_owned(),
                 channel: log_channel(*channel),
                 payload: payload.clone(),

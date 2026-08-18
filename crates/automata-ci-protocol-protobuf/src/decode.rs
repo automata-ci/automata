@@ -2523,7 +2523,7 @@ fn log_batch(
     )?;
     let payload_bytes = value.frames.iter().try_fold(0_usize, |total, frame| {
         let payload = match frame.record.as_ref() {
-            Some(wire::log_frame::Record::Line(line)) => line.payload.len(),
+            Some(wire::log_frame::Record::Output(output)) => output.payload.len(),
             Some(
                 wire::log_frame::Record::GroupStarted(_)
                 | wire::log_frame::Record::GroupFinished(_)
@@ -2571,14 +2571,14 @@ fn log_frame(value: wire::LogFrame) -> Result<core::LogFrame, DecodeError> {
             emitted_at,
             log_group(group)?,
         ),
-        wire::log_frame::Record::Line(line) => core::LogFrame::line(
+        wire::log_frame::Record::Output(output) => core::LogFrame::output(
             stream_id,
             attempt_id,
             sequence,
             emitted_at,
-            log_group_id(line.group_id)?,
-            log_channel(line.channel)?,
-            line.payload,
+            log_group_id(output.group_id)?,
+            log_channel(output.channel)?,
+            output.payload,
         ),
         wire::log_frame::Record::GroupFinished(group) => core::LogFrame::group_finished(
             stream_id,

@@ -379,8 +379,15 @@ function createLogRecords(job: Omit<JobModel, "href">): readonly LiveLogRecord[]
   const base = (sequence: number, offsetMs: number) => ({
     streamId,
     sequence: String(sequence),
-    fragment: null,
     emittedAtMs: startedAtMs + offsetMs,
+  });
+  const output = (sequence: number, offsetMs: number, groupId: string, channel: "stdout" | "stderr" | "system", text: string): LiveLogRecord => ({
+    ...base(sequence, offsetMs),
+    type: "output",
+    groupId,
+    channel,
+    part: 0,
+    data: Uint8Array.from(`${text}\n`, (character) => character.charCodeAt(0)),
   });
   const records: LiveLogRecord[] = [
     {
@@ -394,13 +401,7 @@ function createLogRecords(job: Omit<JobModel, "href">): readonly LiveLogRecord[]
         ordinal: 0,
       },
     },
-    {
-      ...base(1, 150),
-      type: "line",
-      groupId: `${job.id}/diagnostics`,
-      channel: "system",
-      text: "Runner image: ubuntu-24.04",
-    },
+    output(1, 150, `${job.id}/diagnostics`, "system", "Runner image: ubuntu-24.04"),
     {
       ...base(2, 400),
       type: "group_finished",
@@ -418,13 +419,7 @@ function createLogRecords(job: Omit<JobModel, "href">): readonly LiveLogRecord[]
         ordinal: 1,
       },
     },
-    {
-      ...base(4, 900),
-      type: "line",
-      groupId: `${job.id}/checkout`,
-      channel: "stdout",
-      text: "Checking out automata-ci/automata at main",
-    },
+    output(4, 900, `${job.id}/checkout`, "stdout", "Checking out automata-ci/automata at main"),
     {
       ...base(5, 1_400),
       type: "group_finished",
@@ -442,25 +437,18 @@ function createLogRecords(job: Omit<JobModel, "href">): readonly LiveLogRecord[]
         ordinal: 2,
       },
     },
-    {
-      ...base(7, 1_800),
-      type: "line",
-      groupId: `${job.id}/build`,
-      channel: "stdout",
-      text: "Operating System: Ubuntu 24.04.3 LTS",
-    },
-    {
-      ...base(8, 2_100),
-      type: "line",
-      groupId: `${job.id}/build`,
-      channel: job.status.tone === "failure" ? "stderr" : "stdout",
-      text:
+    output(7, 1_800, `${job.id}/build`, "stdout", "Operating System: Ubuntu 24.04.3 LTS"),
+    output(
+      8,
+      2_100,
+      `${job.id}/build`,
+      job.status.tone === "failure" ? "stderr" : "stdout",
         job.status.tone === "failure"
           ? "error: workspace test failed"
           : job.status.tone === "running"
             ? "Compiling automata-ci-job-executor-actions"
             : "Finished release build and workspace tests",
-    },
+    ),
   ];
   if (job.status.tone !== "running") {
     records.push({

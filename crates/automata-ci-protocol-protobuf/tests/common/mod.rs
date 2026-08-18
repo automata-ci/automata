@@ -730,7 +730,7 @@ fn log_frames(attempt: AttemptId) -> Vec<LogFrame> {
                 ),
             )
         } else {
-            LogFrame::line(
+            LogFrame::output(
                 stream,
                 attempt,
                 LogSequence::new(sequence),

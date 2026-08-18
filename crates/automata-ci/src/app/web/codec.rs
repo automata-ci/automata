@@ -371,7 +371,7 @@ mod tests {
                 UnixMillis::new(10),
             )
         } else {
-            LogFrame::line(
+            LogFrame::output(
                 stream,
                 attempt,
                 LogSequence::new(sequence),

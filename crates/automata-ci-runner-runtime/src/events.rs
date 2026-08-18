@@ -78,7 +78,7 @@ struct LogSegmentCandidate {
 #[derive(Clone)]
 enum PendingLogRecord {
     GroupStarted(LogGroup),
-    Line(LogEvent),
+    Output(LogEvent),
     GroupFinished(LogGroupId, JobConclusion),
     StreamFinished,
 }
@@ -95,7 +95,7 @@ impl PendingLogRecord {
             Self::GroupStarted(group) => {
                 LogFrame::group_started(stream_id, attempt_id, sequence, emitted_at, group)
             }
-            Self::Line(event) => LogFrame::line(
+            Self::Output(event) => LogFrame::output(
                 stream_id,
                 attempt_id,
                 sequence,
@@ -563,7 +563,7 @@ impl ExecutionEvents for DurableExecutionEvents {
     }
 
     fn emit_log(&self, event: LogEvent) -> Result<(), ExecutionEventError> {
-        self.emit_record(PendingLogRecord::Line(event))
+        self.emit_record(PendingLogRecord::Output(event))
     }
 
     fn finish_log_group(

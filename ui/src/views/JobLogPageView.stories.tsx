@@ -25,6 +25,7 @@ const logs: JobLogsViewState = {
   query: "",
   running: false,
   streamError: null,
+  subscribeOutput: () => () => undefined,
   visibleGroups: initial.ordered,
 };
 

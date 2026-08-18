@@ -22,6 +22,6 @@ export type {
   LiveLogGroupFinishedRecord,
   LiveLogGroupKind,
   LiveLogGroupStartedRecord,
-  LiveLogLineRecord,
+  LiveLogOutputRecord,
   LiveLogRecord,
 } from "./sse";

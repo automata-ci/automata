@@ -259,7 +259,7 @@ fn log_frame(
             UnixMillis::new(10),
         )
     } else {
-        LogFrame::line(
+        LogFrame::output(
             stream_id,
             attempt_id,
             LogSequence::new(sequence),

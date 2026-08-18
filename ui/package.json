@@ -39,6 +39,7 @@
     "test:unit": "vitest run tests/unit",
     "test:preview": "vitest run tests/unit/preview-routing.test.ts tests/unit/preview-models.test.ts",
     "test:integration": "vitest run tests/integration",
+    "benchmark:logs": "vitest bench --project=unit tests/benchmarks/log-viewer.bench.ts --run",
     "test:watch": "vitest",
     "build:client": "vite build",
     "build:ssr": "vite build --ssr src/entry-server.tsx",

@@ -938,7 +938,7 @@ message LogGroup {
   uint32 ordinal = 5;
 }
 
-message LogLine {
+message LogOutput {
   string group_id = 1;
   LogChannel channel = 2;
   bytes payload = 3;
@@ -960,7 +960,7 @@ message LogFrame {
   reserved 6 to 8;
   oneof record {
     LogGroup group_started = 9;
-    LogLine line = 10;
+    LogOutput output = 10;
     LogGroupFinished group_finished = 11;
     LogStreamFinished stream_finished = 12;
   }

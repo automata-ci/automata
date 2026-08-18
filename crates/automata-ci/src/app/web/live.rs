@@ -35,7 +35,7 @@ use super::{
     data::{
         ArtifactDownload, ArtifactSummary, AuthorizedLiveLog, CollectionVisibility, JobLogPage,
         JobNavigationItem, JobSummary, LiveLogBatch, LiveLogRecord, LogChannel, LogGroup,
-        LogGroupKind, LogLine, LogRecord, Repository, RepositoryDirectoryItem,
+        LogGroupKind, LogOutput, LogRecord, Repository, RepositoryDirectoryItem,
         RepositoryDirectoryPage, RepositoryDirectoryRequest, RepositoryPath,
         RepositorySettingsDestination, RepositorySettingsPage, RequestContext, RunDetailPage,
         RunDetailRequest, RunListPage, RunListRequest, RunSummary, Status, StatusFilter,
@@ -576,7 +576,7 @@ struct DecodedRunCursor {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct DecodedLogCursor {
     sequence: LogSequence,
-    line_ordinal: u32,
+    part: u32,
     direction: HumanLogSegmentPageDirection,
 }
 
@@ -824,7 +824,7 @@ fn encode_log_cursor(
     bytes.extend_from_slice(job_id.as_uuid().as_bytes());
     bytes.extend_from_slice(stream_id.as_uuid().as_bytes());
     bytes.extend_from_slice(&cursor.sequence.get().to_be_bytes());
-    bytes.extend_from_slice(&cursor.line_ordinal.to_be_bytes());
+    bytes.extend_from_slice(&cursor.part.to_be_bytes());
     debug_assert_eq!(bytes.len(), LOG_CURSOR_BYTES);
     URL_SAFE_NO_PAD.encode(bytes)
 }
@@ -849,18 +849,18 @@ fn decode_log_cursor(
         return None;
     }
     let direction = log_direction(bytes[2])?;
-    let line_ordinal = u32::from_be_bytes(bytes[91..95].try_into().ok()?);
+    let part = u32::from_be_bytes(bytes[91..95].try_into().ok()?);
     let sequence = u64::from_be_bytes(bytes[83..91].try_into().ok()?);
     if sequence > i64::MAX.unsigned_abs()
         || (direction == HumanLogSegmentPageDirection::Older
-            && line_ordinal > 0
+            && part > 0
             && sequence == i64::MAX.unsigned_abs())
     {
         return None;
     }
     Some(DecodedLogCursor {
         sequence: LogSequence::new(sequence),
-        line_ordinal,
+        part,
         direction,
     })
 }
@@ -1324,128 +1324,16 @@ fn log_stream_safety_is_valid(stream: &automata_ci_store::HumanLogStream) -> boo
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct RenderedFrameLine {
-    sequence: LogSequence,
-    ordinal: u32,
-    emitted_at: UnixMillis,
-    group_id: String,
-    channel: LogChannel,
-    text: String,
-    fragmented: bool,
-}
-
-fn render_frame_lines(frame: &LogFrame) -> Result<Vec<RenderedFrameLine>, WebDataError> {
-    let CoreLogRecord::Line {
-        group_id,
-        channel,
-        payload,
-    } = frame.record()
-    else {
-        return Ok(Vec::new());
-    };
-    let decoded = String::from_utf8_lossy(payload);
-    let mut chunks = Vec::new();
-    let mut remaining = decoded.as_ref();
-    while !remaining.is_empty() {
-        let (line, rest) = match remaining.find('\n') {
-            Some(index) => (&remaining[..index], &remaining[index + 1..]),
-            None => (remaining, ""),
-        };
-        let line = line.strip_suffix('\r').unwrap_or(line);
-        split_utf8_line(line, &mut chunks);
-        remaining = rest;
-    }
-    if decoded.is_empty() {
-        chunks.push(String::new());
-    }
-    let fragmented = chunks.len() > 1;
-    chunks
-        .into_iter()
-        .enumerate()
-        .map(|(index, text)| {
-            Ok(RenderedFrameLine {
-                sequence: frame.sequence(),
-                ordinal: u32::try_from(index).map_err(|_| WebDataError::Corrupt)?,
-                emitted_at: frame.emitted_at(),
-                group_id: group_id.as_str().to_owned(),
-                channel: match channel {
-                    automata_ci_core::LogChannel::Stdout => LogChannel::Stdout,
-                    automata_ci_core::LogChannel::Stderr => LogChannel::Stderr,
-                    automata_ci_core::LogChannel::System => LogChannel::System,
-                },
-                text,
-                fragmented,
-            })
-        })
-        .collect()
-}
-
-fn split_utf8_line(line: &str, chunks: &mut Vec<String>) {
-    let sanitized = sanitize_log_text(line);
-    if sanitized.is_empty() {
-        chunks.push(String::new());
-        return;
-    }
-    let mut remaining = sanitized.as_str();
-    while !remaining.is_empty() {
-        let mut split = remaining.len().min(super::data::LOG_LINE_BYTES);
-        while !remaining.is_char_boundary(split) {
-            split -= 1;
-        }
-        chunks.push(remaining[..split].to_owned());
-        remaining = &remaining[split..];
-    }
-}
-
-fn sanitize_log_text(value: &str) -> String {
-    let mut sanitized = String::with_capacity(value.len());
-    for character in value.chars() {
-        if character == '\t' || !must_escape_log_character(character) {
-            sanitized.push(character);
-        } else {
-            write!(&mut sanitized, "\\u{{{:04X}}}", u32::from(character))
-                .expect("writing to a string cannot fail");
-        }
-    }
-    sanitized
-}
-
-fn must_escape_log_character(character: char) -> bool {
-    character.is_control()
-        || matches!(
-            character,
-            '\u{061c}'
-                | '\u{200e}'..='\u{200f}'
-                | '\u{202a}'..='\u{202e}'
-                | '\u{2066}'..='\u{2069}'
-        )
-}
-
-fn visible_log_line(line: RenderedFrameLine) -> LogLine {
-    LogLine {
-        sequence: line.sequence.get(),
-        fragment: line.fragmented.then_some(line.ordinal + 1),
-        emitted_at: line.emitted_at,
-        group_id: line.group_id,
-        channel: line.channel,
-        text: line.text,
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
 struct RenderedFrameRecord {
     sequence: LogSequence,
-    ordinal: u32,
+    part: u32,
+    decoded_bytes: usize,
     record: LogRecord,
 }
 
 impl RenderedFrameRecord {
-    fn decoded_bytes(&self) -> usize {
-        match &self.record {
-            LogRecord::Line(line) => line.text.len(),
-            LogRecord::GroupStarted { group, .. } => group.name.len(),
-            LogRecord::GroupFinished { group_id, .. } => group_id.len(),
-        }
+    const fn decoded_bytes(&self) -> usize {
+        self.decoded_bytes
     }
 }
 
@@ -1453,7 +1341,8 @@ fn render_frame_records(frame: &LogFrame) -> Result<Vec<RenderedFrameRecord>, We
     match frame.record() {
         CoreLogRecord::GroupStarted { group } => Ok(vec![RenderedFrameRecord {
             sequence: frame.sequence(),
-            ordinal: 0,
+            part: 0,
+            decoded_bytes: group.name().len(),
             record: LogRecord::GroupStarted {
                 sequence: frame.sequence().get(),
                 emitted_at: frame.emitted_at(),
@@ -1472,22 +1361,41 @@ fn render_frame_records(frame: &LogFrame) -> Result<Vec<RenderedFrameRecord>, We
                 },
             },
         }]),
-        CoreLogRecord::Line { .. } => render_frame_lines(frame).map(|lines| {
-            lines
-                .into_iter()
-                .map(|line| RenderedFrameRecord {
-                    sequence: line.sequence,
-                    ordinal: line.ordinal,
-                    record: LogRecord::Line(visible_log_line(line)),
+        CoreLogRecord::Output {
+            group_id,
+            channel,
+            payload,
+        } => payload
+            .chunks(super::data::LOG_OUTPUT_CHUNK_BYTES)
+            .enumerate()
+            .map(|(part, chunk)| {
+                let part = u32::try_from(part).map_err(|_| WebDataError::Corrupt)?;
+                Ok(RenderedFrameRecord {
+                    sequence: frame.sequence(),
+                    part,
+                    decoded_bytes: chunk.len(),
+                    record: LogRecord::Output(LogOutput {
+                        sequence: frame.sequence().get(),
+                        part,
+                        emitted_at: frame.emitted_at(),
+                        group_id: group_id.as_str().to_owned(),
+                        channel: match channel {
+                            automata_ci_core::LogChannel::Stdout => LogChannel::Stdout,
+                            automata_ci_core::LogChannel::Stderr => LogChannel::Stderr,
+                            automata_ci_core::LogChannel::System => LogChannel::System,
+                        },
+                        data_base64: URL_SAFE_NO_PAD.encode(chunk),
+                    }),
                 })
-                .collect()
-        }),
+            })
+            .collect(),
         CoreLogRecord::GroupFinished {
             group_id,
             conclusion,
         } => Ok(vec![RenderedFrameRecord {
             sequence: frame.sequence(),
-            ordinal: 0,
+            part: 0,
+            decoded_bytes: group_id.as_str().len(),
             record: LogRecord::GroupFinished {
                 sequence: frame.sequence().get(),
                 emitted_at: frame.emitted_at(),
@@ -1505,7 +1413,7 @@ fn rendered_record_cursor(
 ) -> DecodedLogCursor {
     DecodedLogCursor {
         sequence: record.sequence,
-        line_ordinal: record.ordinal,
+        part: record.part,
         direction,
     }
 }
@@ -1522,7 +1430,7 @@ fn cursor_boundary_is_valid(
         return true;
     }
     cursor.direction == HumanLogSegmentPageDirection::Older
-        && cursor.line_ordinal == 0
+        && cursor.part == 0
         && page.newer_cursor.is_some_and(|next| {
             next.direction == HumanLogSegmentPageDirection::Newer
                 && next.sequence == cursor.sequence
@@ -2582,7 +2490,7 @@ impl WebData for LiveWebData {
                 if candidates.is_empty() {
                     checkpoint_cursor = Some(DecodedLogCursor {
                         sequence: frame.sequence(),
-                        line_ordinal: 0,
+                        part: 0,
                         direction: HumanLogSegmentPageDirection::Newer,
                     });
                 }
@@ -2595,19 +2503,19 @@ impl WebData for LiveWebData {
                     }
                     if frame.sequence() == boundary.sequence {
                         saw_boundary = true;
-                        if usize::try_from(boundary.line_ordinal)
+                        if usize::try_from(boundary.part)
                             .ok()
                             .is_none_or(|ordinal| ordinal >= candidates.len())
-                            && !(boundary.line_ordinal == 0 && frame.payload().is_empty())
+                            && !(boundary.part == 0 && frame.payload().is_empty())
                         {
                             return Ok(None);
                         }
                     }
                 }
                 for candidate in candidates {
-                    let candidate_position = (candidate.sequence.get(), candidate.ordinal);
+                    let candidate_position = (candidate.sequence.get(), candidate.part);
                     if let Some(boundary) = decoded_checkpoint {
-                        let boundary_position = (boundary.sequence.get(), boundary.line_ordinal);
+                        let boundary_position = (boundary.sequence.get(), boundary.part);
                         if candidate_position < boundary_position
                             || (!replay_checkpoint && candidate_position == boundary_position)
                         {
@@ -2795,18 +2703,19 @@ mod tests {
         HumanRunPublication, HumanWorkflow, HumanWorkflowReadRepository, JobIrMetadata, ObjectKey,
         RepositoryCoordinate, RepositoryId, StoreError, TenantScope, WorkflowRunStatus,
     };
+    use base64::Engine as _;
 
     use super::{
         CURSOR_VERSION, DecodedJobCursor, DecodedLogCursor, DecodedWorkflowCursor,
         JOB_CURSOR_BYTES, LOG_CURSOR_BYTES, LiveWebData, NavigationPageDirection,
         REPOSITORY_SETTINGS_READ_PERMISSION, REPOSITORY_SETTINGS_UPDATE_PERMISSION,
-        RUN_CURSOR_BYTES, SECRET_METADATA_READ_PERMISSION, WORKFLOW_CURSOR_BYTES,
+        RUN_CURSOR_BYTES, SECRET_METADATA_READ_PERMISSION, URL_SAFE_NO_PAD, WORKFLOW_CURSOR_BYTES,
         conclusion_status, decode_job_cursor, decode_log_cursor, decode_repository_cursor,
         decode_run_cursor, decode_workflow_cursor, encode_job_cursor, encode_log_cursor,
         encode_repository_cursor, encode_run_cursor, encode_workflow_cursor, lifecycle_status,
         log_stream_safety_is_valid, map_job, map_navigation, map_run, map_workflow,
-        must_escape_log_character, navigation_page_start, normalize_git_ref,
-        projected_repository_next_cursor, render_frame_lines, valid_canonical_uuid,
+        navigation_page_start, normalize_git_ref, projected_repository_next_cursor,
+        render_frame_records, valid_canonical_uuid,
     };
     use crate::app::repository_secrets::{
         RepositorySecretBrowserMutationOutcome, RepositorySecretWebData, RepositorySecretWebError,
@@ -3491,7 +3400,7 @@ mod tests {
                 .expect("log group"),
             )
             .expect("group start frame"),
-            LogFrame::line(
+            LogFrame::output(
                 log_stream.id,
                 log_stream.attempt_id,
                 LogSequence::new(1),
@@ -4121,7 +4030,7 @@ mod tests {
     }
 
     #[test]
-    fn log_cursor_binds_every_parent_and_exact_fragment() {
+    fn log_cursor_binds_every_parent_and_exact_output_part() {
         let tenant = tenant();
         let repository_id = RepositoryId::from_uuid(RunId::new().as_uuid());
         let run_id = RunId::new();
@@ -4129,7 +4038,7 @@ mod tests {
         let stream_id = LogStreamId::new();
         let expected = DecodedLogCursor {
             sequence: LogSequence::new(41),
-            line_ordinal: 3,
+            part: 3,
             direction: automata_ci_store::HumanLogSegmentPageDirection::Newer,
         };
         let encoded =
@@ -4195,7 +4104,7 @@ mod tests {
             ),
         );
         assert!(log_stream_safety_is_valid(&stream));
-        for schema in [1, 3] {
+        for schema in [1, 2] {
             stream.schema = DocumentSchema::new(schema).expect("noncurrent log schema");
             assert!(!log_stream_safety_is_valid(&stream));
         }
@@ -4240,7 +4149,8 @@ mod tests {
         ));
         assert!(matches!(
             &first.records[1].record,
-            super::super::data::LogRecord::Line(line) if line.text == "checkout ok"
+            super::super::data::LogRecord::Output(output)
+                if URL_SAFE_NO_PAD.decode(&output.data_base64).expect("output bytes") == b"checkout ok\n"
         ));
         assert!(first.stream_closed);
         assert!(!first.more_available);
@@ -4291,68 +4201,35 @@ mod tests {
     }
 
     #[test]
-    fn log_frames_split_on_lines_and_utf8_boundaries_with_stable_ordinals() {
-        let frame = LogFrame::line(
+    fn log_output_is_lossless_and_split_only_at_transport_bounds() {
+        let mut payload = vec![b'x'; super::super::data::LOG_OUTPUT_CHUNK_BYTES];
+        payload.extend_from_slice("é\u{001b}[31m\u{202e}".as_bytes());
+        let frame = LogFrame::output(
             LogStreamId::new(),
             AttemptId::new(),
             LogSequence::new(7),
             UnixMillis::new(10),
             automata_ci_core::LogGroupId::new("test").expect("group ID"),
             CoreLogChannel::Stdout,
-            b"first\n\nlast\n".to_vec(),
+            payload.clone(),
         )
         .expect("frame");
-        let lines = render_frame_lines(&frame).expect("lines");
+        let records = render_frame_records(&frame).expect("output records");
+        assert_eq!(records.len(), 2);
         assert_eq!(
-            lines
-                .iter()
-                .map(|line| line.text.as_str())
-                .collect::<Vec<_>>(),
-            ["first", "", "last"]
+            records.iter().map(|record| record.part).collect::<Vec<_>>(),
+            [0, 1]
         );
-        assert_eq!(
-            lines.iter().map(|line| line.ordinal).collect::<Vec<_>>(),
-            [0, 1, 2]
-        );
-
-        let oversized = "é".repeat(super::super::data::LOG_LINE_BYTES / 2 + 1);
-        let frame = LogFrame::line(
-            LogStreamId::new(),
-            AttemptId::new(),
-            LogSequence::new(8),
-            UnixMillis::new(11),
-            automata_ci_core::LogGroupId::new("test").expect("group ID"),
-            CoreLogChannel::Stderr,
-            oversized.into_bytes(),
-        )
-        .expect("frame");
-        let lines = render_frame_lines(&frame).expect("split lines");
-        assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0].text.len(), super::super::data::LOG_LINE_BYTES);
-        assert_eq!(lines[1].text, "é");
-    }
-
-    #[test]
-    fn log_rendering_exposes_controls_and_bidi_formatting_as_plain_text() {
-        let frame = LogFrame::line(
-            LogStreamId::new(),
-            AttemptId::new(),
-            LogSequence::new(9),
-            UnixMillis::new(12),
-            automata_ci_core::LogGroupId::new("test").expect("group ID"),
-            CoreLogChannel::Stdout,
-            "safe\t\u{001b}[31m\u{202e}copy\r\n".as_bytes().to_vec(),
-        )
-        .expect("frame");
-        let lines = render_frame_lines(&frame).expect("sanitized lines");
-        assert_eq!(lines.len(), 1);
-        assert_eq!(lines[0].text, "safe\t\\u{001B}[31m\\u{202E}copy");
-        assert!(
-            lines[0]
-                .text
-                .chars()
-                .all(|character| character == '\t' || !must_escape_log_character(character))
-        );
+        let decoded = records
+            .iter()
+            .flat_map(|record| match &record.record {
+                super::super::data::LogRecord::Output(output) => URL_SAFE_NO_PAD
+                    .decode(&output.data_base64)
+                    .expect("canonical output"),
+                _ => panic!("output frame projected as structural record"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(decoded, payload);
     }
 
     #[test]
@@ -4364,7 +4241,7 @@ mod tests {
             UnixMillis::new(12),
         )
         .expect("end frame");
-        assert!(render_frame_lines(&frame).expect("lines").is_empty());
+        assert!(render_frame_records(&frame).expect("records").is_empty());
     }
 
     #[test]

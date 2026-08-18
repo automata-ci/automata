@@ -214,7 +214,7 @@ mod tests {
                     UnixMillis::new(10_000),
                 )
             } else {
-                LogFrame::line(
+                LogFrame::output(
                     self.stream_id,
                     self.attempt_id,
                     LogSequence::new(sequence),

@@ -1,6 +1,6 @@
-export const LIVE_LOG_PROTOCOL_VERSION = 2 as const;
+export const LIVE_LOG_PROTOCOL_VERSION = 3 as const;
 
-const TICKET = /^allt_v2_[A-Za-z0-9_-]{43}$/u;
+const TICKET = /^allt_v3_[A-Za-z0-9_-]{43}$/u;
 const CHECKPOINT = /^[A-Za-z0-9_-]{1,512}$/u;
 const TRANSPORT_KIND = /^[a-z][a-z0-9-]{0,31}$/u;
 const MAX_TICKET_RESPONSE_BYTES = 32 * 1024;

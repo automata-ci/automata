@@ -576,7 +576,6 @@ describe("server rendering", () => {
       (id, index) => ({
         streamId: "00000000-0000-4000-8000-000000000005",
         sequence: String(index + 1),
-        fragment: null,
         emittedAtMs: 1_777_890_010_000 + index,
         type: "group_started",
         group: {

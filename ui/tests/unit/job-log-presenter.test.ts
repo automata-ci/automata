@@ -17,25 +17,23 @@ const started: LiveLogRecord = {
   type: "group_started",
   streamId: "00000000-0000-4000-8000-000000000001",
   sequence: "1",
-  fragment: null,
   emittedAtMs: 1_000,
   group: { id: "build/one", parentId: null, name: "Build", kind: "step", ordinal: 2 },
 };
-const line: LiveLogRecord = {
-  type: "line",
+const output: LiveLogRecord = {
+  type: "output",
   streamId: started.streamId,
   sequence: "2",
-  fragment: null,
   emittedAtMs: 1_250,
   groupId: "build/one",
   channel: "stdout",
-  text: "Compiling automata",
+  part: 0,
+  data: Uint8Array.from("Compiling automata\n", (character) => character.charCodeAt(0)),
 };
 const finished: LiveLogRecord = {
   type: "group_finished",
   streamId: started.streamId,
   sequence: "3",
-  fragment: null,
   emittedAtMs: 2_250,
   groupId: "build/one",
   conclusion: "success",
@@ -43,14 +41,14 @@ const finished: LiveLogRecord = {
 
 describe("job log presentation", () => {
   it("replays, orders, filters, and formats structured groups", () => {
-    const replayed = replayLogRecords([started, line, finished]);
+    const replayed = replayLogRecords([started, output, finished]);
     const group = replayed.ordered[0];
     expect(group).toMatchObject({ id: "build/one", conclusion: "success" });
-    expect(group?.lines).toEqual([line]);
+    expect(group?.lines[0]?.text).toBe("Compiling automata");
     expect(replayed.expanded).toEqual(new Set());
-    expect(projectVisibleLogGroups(replayed.ordered, "COMPIL")[0]?.lines).toEqual([line]);
-    expect(projectVisibleLogGroups(replayed.ordered, "stdout")[0]?.lines).toEqual([line]);
-    expect(projectVisibleLogGroups(replayed.ordered, "2")[0]?.lines).toEqual([line]);
+    expect(projectVisibleLogGroups(replayed.ordered, "COMPIL")[0]?.lines[0]?.text).toBe("Compiling automata");
+    expect(projectVisibleLogGroups(replayed.ordered, "stdout")[0]?.lines).toHaveLength(1);
+    expect(projectVisibleLogGroups(replayed.ordered, "2")[0]?.lines).toHaveLength(1);
     expect(projectVisibleLogGroups(replayed.ordered, "missing")).toEqual([]);
     expect(projectVisibleLogGroups(replayed.ordered, "Build")[0]?.lines).toEqual([]);
     expect(logGroupDuration(group as LogGroupView)).toBe("1.3s");
@@ -72,13 +70,41 @@ describe("job log presentation", () => {
   });
 
   it("rejects invalid stream transitions", () => {
-    const groups = new Map<string, LogGroupView>();
+    const groups = replayLogRecords([]).groups;
     applyLogRecord(groups, started);
     expect(() => applyLogRecord(groups, started)).toThrow("repeated");
-    expect(() => applyLogRecord(new Map(), line)).toThrow("unknown group");
+    expect(() => applyLogRecord(new Map(), output)).toThrow("unknown group");
     applyLogRecord(groups, finished);
-    expect(() => applyLogRecord(groups, line)).toThrow("finished group");
+    expect(() => applyLogRecord(groups, output)).toThrow("finished group");
     expect(() => applyLogRecord(new Map(), { ...started, group: { ...started.group, id: "child", parentId: "missing" } })).toThrow("unknown parent");
+  });
+
+  it("keeps stdout, stderr, and system terminal state independent while interleaving", () => {
+    const groups = replayLogRecords([]).groups;
+    applyLogRecord(groups, started);
+    applyLogRecord(groups, {
+      ...output,
+      data: Uint8Array.from([0x1b, 0x5b, 0x33, 0x31, 0x6d, 0xf0, 0x9f]),
+    });
+    applyLogRecord(groups, {
+      ...output,
+      sequence: "3",
+      channel: "stderr",
+      data: new TextEncoder().encode("error\n"),
+    });
+    applyLogRecord(groups, {
+      ...output,
+      sequence: "4",
+      data: Uint8Array.from([0x98, 0x80, 0x1b, 0x5b, 0x30, 0x6d, 0x0a]),
+    });
+
+    const lines = orderedLogGroups(groups)[0]?.lines;
+    expect(lines?.map((line) => [line.sourceSequence, line.channel, line.text])).toEqual([
+      ["2", "stdout", "😀"],
+      ["3", "stderr", "error"],
+    ]);
+    expect(lines?.[0]?.spans[0]?.style.foreground).toEqual({ kind: "palette", index: 1 });
+    expect(lines?.[1]?.spans[0]?.style.foreground).toBeNull();
   });
 
   it("toggles sets and detects follow distance", () => {

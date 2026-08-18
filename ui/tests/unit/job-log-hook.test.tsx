@@ -164,9 +164,18 @@ describe("useJobLogs", () => {
     expect(current().streamError).toContain("could not be opened");
 
     const records = streamedRecords();
-    for (const record of records) {
+    const firstRecord = records[0];
+    if (firstRecord === undefined) throw new Error("stream fixture is empty");
+    await act(async () => controller.options.onRecord(firstRecord, firstRecord.sequence));
+    const outputSubscriber = vi.fn();
+    const unsubscribeOutput = current().subscribeOutput("successful-step", outputSubscriber);
+    for (const record of records.slice(1)) {
       await act(async () => controller.options.onRecord(record, record.sequence));
     }
+    expect(outputSubscriber).toHaveBeenCalledWith(expect.arrayContaining([
+      expect.objectContaining({ text: "building" }),
+    ]));
+    unsubscribeOutput();
     expect(current().visibleGroups).toHaveLength(2);
     expect(current().expanded.has("successful-step")).toBe(false);
     expect(current().expanded.has("failed-step")).toBe(true);
@@ -218,7 +227,6 @@ async function render(element: React.ReactNode): Promise<HTMLDivElement> {
 function streamedRecords(): readonly LiveLogRecord[] {
   const base = {
     streamId: "12345678-1234-4123-8123-123456789abc",
-    fragment: null,
   } as const;
   return [
     {
@@ -236,12 +244,13 @@ function streamedRecords(): readonly LiveLogRecord[] {
     },
     {
       ...base,
-      type: "line",
+      type: "output",
       sequence: "2",
       emittedAtMs: 1_100,
       groupId: "successful-step",
       channel: "stdout",
-      text: "building",
+      part: 0,
+      data: Uint8Array.from("building\n", (character) => character.charCodeAt(0)),
     },
     {
       ...base,

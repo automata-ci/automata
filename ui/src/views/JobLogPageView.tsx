@@ -1,6 +1,5 @@
 import type { ReactNode } from "react";
 import type { JobLogPageModel } from "../models";
-import type { LiveLogLineRecord } from "../logs/sse";
 import type { JobLogsViewState, LogConnectionState } from "../viewModels/jobLogs";
 import type { LogGroupView } from "../presenters/jobLogs";
 import { ActionsLayout } from "../components/ActionsLayout";
@@ -8,12 +7,12 @@ import { Breadcrumbs } from "../components/Breadcrumbs";
 import { RunNavigation } from "../components/RunNavigation";
 import { Shell } from "../components/Shell";
 import { StatusBadge } from "../components/StatusBadge";
+import { TerminalOutput } from "../components/TerminalOutput";
 import { durationCopy, startTimeCopy } from "../presentation/runPresentation";
 import {
   logGroupDuration,
   logGroupPanelId,
   logGroupStatus,
-  logTime,
 } from "../presenters/jobLogs";
 
 export interface JobLogPageViewProps {
@@ -65,7 +64,7 @@ export function JobLogPageView({ logs, model, shellUtility }: JobLogPageViewProp
                 {logs.visibleGroups.length === 0 ? (
                   <div className="log-empty">{normalizedQuery !== "" ? "No steps match your search." : logs.streamError !== null ? "Log output could not be loaded." : logs.running ? "Waiting for log output…" : "Logs are unavailable for this job."}</div>
                 ) : logs.visibleGroups.map((group) => (
-                  <LogGroupPanel expanded={logs.expanded.has(group.id) || normalizedQuery !== ""} group={group} key={group.id} onToggle={() => logs.onToggleGroup(group.id)} />
+                  <LogGroupPanel expanded={logs.expanded.has(group.id) || normalizedQuery !== ""} group={group} key={group.id} onToggle={() => logs.onToggleGroup(group.id)} subscribeOutput={normalizedQuery === "" ? logs.subscribeOutput : undefined} />
                 ))}
               </div>
             )}
@@ -76,22 +75,16 @@ export function JobLogPageView({ logs, model, shellUtility }: JobLogPageViewProp
   );
 }
 
-function LogGroupPanel({ expanded, group, onToggle }: { readonly expanded: boolean; readonly group: LogGroupView; readonly onToggle: () => void }) {
+function LogGroupPanel({ expanded, group, onToggle, subscribeOutput }: { readonly expanded: boolean; readonly group: LogGroupView; readonly onToggle: () => void; readonly subscribeOutput: JobLogsViewState["subscribeOutput"] | undefined }) {
   const panelId = logGroupPanelId(group.id);
   return (
     <article className="log-group" data-state={group.conclusion ?? "running"}>
       <button aria-controls={panelId} aria-expanded={expanded} className="log-group__summary" onClick={onToggle} type="button">
         <span aria-hidden="true" className="log-group__chevron">›</span><span aria-hidden="true" className="log-group__status" /><span className="sr-only">{logGroupStatus(group)}</span><span className="log-group__name">{group.name}</span><span className="log-group__duration">{logGroupDuration(group)}</span>
       </button>
-      {expanded ? <div aria-label={`${group.name} log output`} className="log-group__output" id={panelId} role="region" tabIndex={0}>{group.lines.length === 0 ? <div className="log-group__empty">No output</div> : group.lines.map((line) => <LogLine key={`${line.sequence}.${line.fragment ?? 0}`} line={line} />)}</div> : null}
+      {expanded ? <TerminalOutput group={group} panelId={panelId} subscribeOutput={subscribeOutput} /> : null}
     </article>
   );
-}
-
-function LogLine({ line }: { readonly line: LiveLogLineRecord }) {
-  const number = line.fragment === null ? line.sequence : `${line.sequence}.${line.fragment}`;
-  const id = `log-line-${number.replace(".", "-")}`;
-  return <div className="log-line" data-channel={line.channel} id={id}><a aria-label={`Link to log line ${number}`} href={`#${id}`}>{number}</a><time dateTime={new Date(line.emittedAtMs).toISOString()}>{logTime(line.emittedAtMs)}</time><code>{line.text}</code></div>;
 }
 
 function StreamState({ available, state, running }: { readonly available: boolean; readonly state: LogConnectionState; readonly running: boolean }) {
