@@ -1,5 +1,6 @@
 use std::fmt;
 
+use automata_ci_core::WorkspaceId;
 use thiserror::Error;
 use url::Url;
 use uuid::Uuid;
@@ -60,7 +61,6 @@ macro_rules! uuid_identifier {
 }
 
 uuid_identifier!(OperationId, InvalidOperationId, "a provisioning operation");
-uuid_identifier!(WorkspaceId, InvalidWorkspaceId, "a workspace");
 uuid_identifier!(
     ExternalAccountSubject,
     InvalidExternalAccountSubject,
@@ -522,9 +522,6 @@ pub enum ProvisioningValueError {
     /// The shard slug is invalid.
     #[error("shard ID is invalid")]
     InvalidShardId,
-    /// The workspace UUID is invalid.
-    #[error("workspace ID is invalid")]
-    InvalidWorkspaceId,
     /// A display label is invalid.
     #[error("display name is invalid")]
     InvalidDisplayName,
@@ -600,22 +597,6 @@ mod tests {
         assert_eq!(
             AuthorizedProvisionWorkspace::authorize(authority(), wrong_issuer),
             Err(ProvisioningAuthorizationError::Forbidden)
-        );
-    }
-
-    #[test]
-    fn uuid_text_is_canonical_and_non_nil() {
-        assert_eq!(
-            WorkspaceId::parse("00000000-0000-0000-0000-000000000000"),
-            Err(ProvisioningValueError::InvalidWorkspaceId)
-        );
-        assert_eq!(
-            WorkspaceId::parse("22222222222242228222222222222222"),
-            Err(ProvisioningValueError::InvalidWorkspaceId)
-        );
-        assert_eq!(
-            WorkspaceId::parse("22222222-2222-4222-8222-22222222222A"),
-            Err(ProvisioningValueError::InvalidWorkspaceId)
         );
     }
 

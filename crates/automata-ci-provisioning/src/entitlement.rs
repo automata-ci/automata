@@ -1,8 +1,9 @@
 use std::fmt;
 
+use automata_ci_core::WorkspaceId;
 use thiserror::Error;
 
-use crate::{OperationId, ProvisioningAuthority, ShardId, WorkspaceId};
+use crate::{OperationId, ProvisioningAuthority, ShardId};
 
 const MILLIS_PER_SECOND: u64 = 1_000;
 const MAX_DURABLE_SECONDS: u64 = (i64::MAX as u64) / MILLIS_PER_SECOND;

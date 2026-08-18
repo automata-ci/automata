@@ -314,7 +314,7 @@ impl StoredOperation {
         self,
         operation_id: automata_ci_provisioning::OperationId,
         shard_id: automata_ci_provisioning::ShardId,
-        workspace_id: automata_ci_provisioning::WorkspaceId,
+        workspace_id: automata_ci_core::WorkspaceId,
     ) -> Result<ProvisionWorkspaceResult, ProvisioningFailure> {
         if self.state != "completed" {
             return Err(failure(ProvisioningFailureKind::Internal));

@@ -44,8 +44,9 @@ pub use model::{
     InitialOwnerPrincipalId, OperationId, ProvisionWorkspaceCommand, ProvisionWorkspaceResult,
     ProvisionedAt, ProvisioningAuthority, ProvisioningAuthorityId, ProvisioningAuthorizationError,
     ProvisioningFailure, ProvisioningFailureKind, ProvisioningRequestId, ProvisioningValueError,
-    ShardId, WorkspaceId,
+    ShardId,
 };
+
 pub use port::{
     EntitlementApplicationFuture, GithubProviderConfigurationApplicationFuture,
     GithubProviderConfigurationApplier, GithubProviderDesiredStateLoadFuture,

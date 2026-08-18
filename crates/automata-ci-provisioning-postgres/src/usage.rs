@@ -1,9 +1,10 @@
 use std::fmt;
 
+use automata_ci_core::WorkspaceId;
 use automata_ci_provisioning::{
     AuthorizedListWorkspaceUsage, ConsumedComputeMilliseconds, EntitlementRevision, ShardId,
     UsageAttemptId, UsageEventId, UsageExportCursor, UsageExportFailure, UsageExportFailureKind,
-    UsageExportFuture, UsageTimestamp, WorkspaceId, WorkspaceUsageEvent, WorkspaceUsageExporter,
+    UsageExportFuture, UsageTimestamp, WorkspaceUsageEvent, WorkspaceUsageExporter,
     WorkspaceUsagePage,
 };
 use sqlx::{FromRow, PgPool, Postgres, Transaction};

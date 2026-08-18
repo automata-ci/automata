@@ -3,7 +3,7 @@
 - Roadmap status: Active
 - Available provider: GitHub only
 - Target provider: Forgejo 16.0.x
-- Current checkpoint: A2 algorithm-bearing Git object identity
+- Current checkpoint: A4 delivery foundation
 - Date: 2026-08-18
 
 This roadmap owns the refactor that separates source-hosting providers from

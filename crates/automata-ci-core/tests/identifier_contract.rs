@@ -1,5 +1,27 @@
-use automata_ci_core::{AttemptNumber, FencingToken, IdentifierError, RunId, RunIdAlias};
+use automata_ci_core::{
+    AttemptNumber, FencingToken, IdentifierError, RunId, RunIdAlias, WorkspaceId, WorkspaceIdError,
+};
 use uuid::Uuid;
+
+#[test]
+fn workspace_ids_are_canonical_and_non_nil() {
+    let value = "22222222-2222-4222-8222-222222222222";
+    let workspace = WorkspaceId::parse(value).expect("workspace ID");
+    assert_eq!(workspace.to_string(), value);
+    assert_eq!(
+        serde_json::from_str::<WorkspaceId>(&format!("\"{value}\"")).expect("deserialize"),
+        workspace
+    );
+
+    for invalid in [
+        "00000000-0000-0000-0000-000000000000",
+        "22222222222242228222222222222222",
+        "22222222-2222-4222-8222-22222222222A",
+    ] {
+        assert_eq!(WorkspaceId::parse(invalid), Err(WorkspaceIdError));
+    }
+    assert_eq!(WorkspaceId::from_uuid(Uuid::nil()), Err(WorkspaceIdError));
+}
 
 #[test]
 fn typed_ids_have_stable_json_string_encoding() {

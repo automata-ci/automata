@@ -1,6 +1,7 @@
 use std::{collections::BTreeMap, fmt, sync::Arc};
 
 use automata_ci_core::JobAuthorityProfile;
+use automata_ci_core::WorkspaceId;
 use automata_ci_key_management::{
     EncryptedEnvelope, EnvelopeCodec, EnvelopeError, KeyEncryptionContext, KeyEncryptionProvider,
     KeyId, KeyPurpose, SecretBytes, WrappedDataKey,
@@ -18,7 +19,7 @@ use automata_ci_provisioning::{
     GithubProviderTimestamp, MAX_GITHUB_PROVIDER_REPOSITORIES, ShardId,
     WorkspaceGithubRepositoriesApplicationFuture, WorkspaceGithubRepositoriesApplier,
     WorkspaceGithubRepositoriesDesiredState, WorkspaceGithubRepositoriesFailure,
-    WorkspaceGithubRepositoriesFailureKind, WorkspaceGithubRepositoriesRevision, WorkspaceId,
+    WorkspaceGithubRepositoriesFailureKind, WorkspaceGithubRepositoriesRevision,
 };
 use automata_ci_store::{
     GithubCheckName, GithubRepositoryName, GithubServerServiceAppClientId,
@@ -1272,7 +1273,7 @@ fn provider_result(
 fn workspace_result(
     operation_id: automata_ci_provisioning::OperationId,
     shard_id: automata_ci_provisioning::ShardId,
-    workspace_id: automata_ci_provisioning::WorkspaceId,
+    workspace_id: WorkspaceId,
     revision: WorkspaceGithubRepositoriesRevision,
     applied_at_ms: i64,
 ) -> Result<ApplyWorkspaceGithubRepositoriesResult, WorkspaceGithubRepositoriesFailure> {

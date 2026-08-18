@@ -114,6 +114,15 @@ run_bounded_tests cargo test \
   --ignored \
   --test-threads=1
 
+printf 'PostgreSQL tests: provider manifests\n' >&2
+run_bounded_tests cargo test \
+  -p automata-ci-provider-postgres \
+  --test postgres \
+  --locked \
+  -- \
+  --ignored \
+  --test-threads=2
+
 printf 'PostgreSQL tests: artifacts and cache\n' >&2
 run_bounded_tests cargo test \
   -p automata-ci-results-github \
