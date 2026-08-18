@@ -2141,6 +2141,88 @@ fn helper_inspect_recovery_rejects_ambient_authority_and_realized_networks() {
     );
 }
 
+#[test]
+fn writable_helper_mount_normalizes_omitted_read_only_as_false() {
+    let expected = Mount {
+        target: Some("/var/lib/automata".to_owned()),
+        source: Some("automata-volume".to_owned()),
+        typ: Some(MountType::VOLUME),
+        read_only: Some(false),
+        volume_options: Some(MountVolumeOptions {
+            no_copy: Some(true),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let mut actual = expected.clone();
+    actual.read_only = None;
+    assert!(helper_mounts_match(
+        std::slice::from_ref(&actual),
+        std::slice::from_ref(&expected)
+    ));
+
+    let mut read_only = expected.clone();
+    read_only.read_only = Some(true);
+    assert!(!helper_mounts_match(
+        std::slice::from_ref(&actual),
+        std::slice::from_ref(&read_only)
+    ));
+    actual.source = Some("ambient-volume".to_owned());
+    assert!(!helper_mounts_match(
+        std::slice::from_ref(&actual),
+        std::slice::from_ref(&expected)
+    ));
+}
+
+#[test]
+fn helper_rejects_every_closed_resource_authority_class() {
+    let installation = installation();
+    let host = helper_body(
+        "registry.example.invalid/automata@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        &volume_names(&installation),
+        &helper_labels(&installation, fingerprint()),
+        HelperMode::Mutating,
+    )
+    .host_config
+    .unwrap();
+    assert!(!helper_has_ambient_authority(&host));
+
+    let cases = [
+        ("CpuShares", serde_json::json!(1)),
+        ("CpuPeriod", serde_json::json!(1)),
+        ("CpuQuota", serde_json::json!(1)),
+        ("CpuRealtimePeriod", serde_json::json!(1)),
+        ("CpuRealtimeRuntime", serde_json::json!(1)),
+        ("CpusetCpus", serde_json::json!("0")),
+        ("CpusetMems", serde_json::json!("0")),
+        ("BlkioWeight", serde_json::json!(1)),
+        ("CpuCount", serde_json::json!(1)),
+        ("CpuPercent", serde_json::json!(1)),
+        ("IOMaximumIOps", serde_json::json!(1)),
+        ("IOMaximumBandwidth", serde_json::json!(1)),
+        ("MemoryReservation", serde_json::json!(1)),
+        ("MemorySwappiness", serde_json::json!(1)),
+        ("OomKillDisable", serde_json::json!(true)),
+        ("OomScoreAdj", serde_json::json!(1)),
+        (
+            "Ulimits",
+            serde_json::json!([{"Name":"nofile","Soft":1,"Hard":1}]),
+        ),
+        ("ConsoleSize", serde_json::json!([1, 0])),
+        ("ShmSize", serde_json::json!(1)),
+        ("Isolation", serde_json::json!("hyperv")),
+    ];
+    for (field, value) in cases {
+        let mut serialized = serde_json::to_value(&host).unwrap();
+        serialized
+            .as_object_mut()
+            .unwrap()
+            .insert(field.to_owned(), value);
+        let drift: HostConfig = serde_json::from_value(serialized).unwrap();
+        assert!(helper_has_ambient_authority(&drift), "accepted {field}");
+    }
+}
+
 #[derive(Default)]
 struct FakeOwnedUnionDriver {
     warnings: bool,

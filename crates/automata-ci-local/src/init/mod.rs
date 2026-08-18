@@ -518,10 +518,9 @@ pub async fn initialize_local(
     let operation = holder_bounded(&holder_lost, async {
         cancellation_checkpoint(&transaction_cancellation)?;
         if existing_identity.is_none() {
-            mutation_fence.authorize().await?;
-            let created = adapter
-                .create_or_adopt_exact_identity(&installation)
-                .await
+            let created = mutation_fence
+                .run(adapter.create_or_adopt_exact_identity(&installation))
+                .await?
                 .map_err(map_engine_error)?;
             exact_installation_identity(Some(&created), &installation)?;
         } else {
@@ -813,11 +812,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn release_catalog_derives_disjoint_desired_networks() {
-        let catalog = catalog::VerifiedCatalog::parse(include_bytes!(
-            "../../../../images/local-installation/catalog-v1.json"
-        ))
-        .unwrap();
+    fn catalog_inputs_derive_disjoint_desired_networks() {
+        let catalog = catalog::desired_test_catalog();
         let installation =
             Installation::verified(InstallationName::default(), crate::InstallationId::new());
         let desired = desired_from_catalog(&catalog, &installation, NonZeroU16::new(1).unwrap())

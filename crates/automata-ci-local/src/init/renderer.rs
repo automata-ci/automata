@@ -1268,11 +1268,6 @@ fn relay_service(spec: &DesiredSpec) -> Value {
         replaceable_labels(spec, "engine-relay"),
     );
     insert(&mut service, "network_mode", json!("none"));
-    // The daemon itself is required to remap untrusted job containers. The
-    // trusted fixed relay must stay in the host user namespace so its root
-    // bootstrap can open the root-owned Docker socket before dropping every
-    // capability and switching to the socket group.
-    insert(&mut service, "userns_mode", json!("host"));
     insert(
         &mut service,
         "cap_add",
@@ -1421,6 +1416,7 @@ fn base_service(
         "ipc": "private",
         "cgroup": "private",
         "runtime": "runc",
+        "userns_mode": "host",
         "shm_size": 67108864_u64,
         "cap_add": [],
         "cap_drop": [],
@@ -1585,7 +1581,7 @@ mod tests {
         );
         assert_eq!(
             relay["security_opt"],
-            serde_json::json!(["no-new-privileges:true"])
+            serde_json::json!(["no-new-privileges:true", "seccomp=builtin"])
         );
         let host_socket = relay["volumes"]
             .as_array()
@@ -1595,6 +1591,25 @@ mod tests {
             .expect("exact host socket bind");
         assert_eq!(host_socket["source"], "/var/run/docker.sock");
         assert_eq!(host_socket["read_only"], true);
+    }
+
+    #[test]
+    fn every_trusted_lifecycle_unit_uses_the_host_user_namespace() {
+        let rendered = render_compose(&spec());
+        let document: Value = serde_json::from_slice(&rendered.compose_bytes)
+            .expect("closed Compose document is JSON");
+        let services = document["services"].as_object().expect("closed services");
+        assert_eq!(services.len(), 8);
+        for (name, service) in services {
+            assert_eq!(
+                service["userns_mode"], "host",
+                "trusted lifecycle service {name} must see sealed host ownership"
+            );
+            assert_eq!(
+                rendered.expected.containers[name].userns_mode.as_deref(),
+                Some("host")
+            );
+        }
     }
 
     #[test]

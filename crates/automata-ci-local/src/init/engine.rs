@@ -12,8 +12,8 @@ use bollard::{
     errors::Error as BollardError,
     models::{
         ContainerCreateBody, ContainerSummary, HostConfig, HostConfigCgroupnsModeEnum,
-        HostConfigLogConfig, Mount, MountType, MountVolumeOptions, Network, RestartPolicy,
-        RestartPolicyNameEnum, Volume, VolumeCreateRequest,
+        HostConfigIsolationEnum, HostConfigLogConfig, Mount, MountType, MountVolumeOptions,
+        Network, RestartPolicy, RestartPolicyNameEnum, Volume, VolumeCreateRequest,
     },
     query_parameters::{
         AttachContainerOptionsBuilder, CreateContainerOptionsBuilder, CreateImageOptionsBuilder,
@@ -54,6 +54,7 @@ const COMPOSE_PROJECT_LABEL: &str = "com.docker.compose.project";
 const HELPER_KIND: &str = "init-materializer";
 const LIFECYCLE_ATTESTER_KIND: &str = "lifecycle-material-attester";
 const HELPER_MEMORY_BYTES: i64 = 128 * 1024 * 1024;
+const HELPER_SHM_BYTES: i64 = 64 * 1024 * 1024;
 const HELPER_PIDS: i64 = 64;
 const HELPER_NANO_CPUS: i64 = 1_000_000_000;
 const MAX_HELPER_LOG_BYTES: usize = 16 * 1024;
@@ -158,10 +159,20 @@ enum ImageQualificationAuthority<'a> {
 }
 
 impl ImageQualificationAuthority<'_> {
-    async fn authorize(self, cancellation: &CancellationToken) -> Result<(), LocalInitError> {
+    async fn run<Mutation, Output>(
+        self,
+        cancellation: &CancellationToken,
+        mutation: Mutation,
+    ) -> Result<Output, LocalInitError>
+    where
+        Mutation: Future<Output = Output>,
+    {
         match self {
-            Self::PreElectionLockBootstrap => cancellation_checkpoint(cancellation),
-            Self::Lifecycle(mutation) => mutation.authorize().await,
+            Self::PreElectionLockBootstrap => {
+                cancellation_checkpoint(cancellation)?;
+                Ok(mutation.await)
+            }
+            Self::Lifecycle(fence) => fence.run(mutation).await,
         }
     }
 }
@@ -475,6 +486,7 @@ impl<'a> InitEngine<'a> {
         Ok(ResetEnginePreflight { helper })
     }
 
+    #[cfg(test)]
     pub(super) async fn cleanup_reset_helper(
         &self,
         installation: &Installation,
@@ -578,6 +590,7 @@ impl<'a> InitEngine<'a> {
         Ok(deleted)
     }
 
+    #[cfg(test)]
     pub(super) async fn remove_reset_volume(
         &self,
         installation: &Installation,
@@ -605,6 +618,7 @@ impl<'a> InitEngine<'a> {
         self.remove_volume_and_prove_absent(&name).await
     }
 
+    #[cfg(test)]
     pub(super) async fn remove_reset_anchor(
         &self,
         installation: &Installation,
@@ -869,16 +883,19 @@ impl<'a> InitEngine<'a> {
                         .platform("linux/amd64")
                         .build();
                     mutation_after_cancellation_checkpoint(cancellation, || async {
-                        authority.authorize(cancellation).await?;
-                        tokio::time::timeout(
-                            IMAGE_TIMEOUT,
-                            self.docker
-                                .create_image(Some(options), None, None)
-                                .try_collect::<Vec<_>>(),
-                        )
-                        .await
-                        .map_err(|_| engine_unavailable())?
-                        .map_err(|_| engine_unavailable())?;
+                        authority
+                            .run(
+                                cancellation,
+                                tokio::time::timeout(
+                                    IMAGE_TIMEOUT,
+                                    self.docker
+                                        .create_image(Some(options), None, None)
+                                        .try_collect::<Vec<_>>(),
+                                ),
+                            )
+                            .await?
+                            .map_err(|_| engine_unavailable())?
+                            .map_err(|_| engine_unavailable())?;
                         Ok(())
                     })
                     .await?;
@@ -1928,8 +1945,9 @@ impl CandidateLoadDriver for FencedCandidateLoadDriver<'_, '_, '_> {
     }
 
     async fn candidate_import_untrusted(&self, archive: &[u8]) -> Result<(), LocalInitError> {
-        self.mutation.authorize().await?;
-        self.engine.candidate_import_untrusted(archive).await
+        self.mutation
+            .run(self.engine.candidate_import_untrusted(archive))
+            .await?
     }
 }
 
@@ -2081,8 +2099,9 @@ impl VolumeGuardDriver for FencedVolumeGuardDriver<'_, '_, '_> {
         name: &str,
         labels: &BTreeMap<String, String>,
     ) -> Result<(), LocalInitError> {
-        self.mutation.authorize().await?;
-        self.engine.guard_create_untrusted(name, labels).await
+        self.mutation
+            .run(self.engine.guard_create_untrusted(name, labels))
+            .await?
     }
 }
 
@@ -2363,8 +2382,9 @@ impl HelperDriver for FencedHelperDriver<'_, '_, '_> {
         name: &str,
         body: ContainerCreateBody,
     ) -> Result<HelperCreateResult, LocalInitError> {
-        self.mutation.authorize().await?;
-        self.engine.driver_create(name, body).await
+        self.mutation
+            .run(self.engine.driver_create(name, body))
+            .await?
     }
 
     async fn driver_inspect(
@@ -2382,13 +2402,11 @@ impl HelperDriver for FencedHelperDriver<'_, '_, '_> {
     }
 
     async fn driver_attach(&self, id: &str) -> Result<HelperInput, LocalInitError> {
-        self.mutation.authorize().await?;
-        self.engine.driver_attach(id).await
+        self.mutation.run(self.engine.driver_attach(id)).await?
     }
 
     async fn driver_start(&self, id: &str) -> Result<(), LocalInitError> {
-        self.mutation.authorize().await?;
-        self.engine.driver_start(id).await
+        self.mutation.run(self.engine.driver_start(id)).await?
     }
 
     async fn driver_send_request(
@@ -2396,8 +2414,9 @@ impl HelperDriver for FencedHelperDriver<'_, '_, '_> {
         input: &mut HelperInput,
         request: &[u8],
     ) -> Result<(), LocalInitError> {
-        self.mutation.authorize().await?;
-        self.engine.driver_send_request(input, request).await
+        self.mutation
+            .run(self.engine.driver_send_request(input, request))
+            .await?
     }
 
     async fn driver_wait(&self, id: &str) -> Result<HelperWaitResult, LocalInitError> {
@@ -2409,8 +2428,9 @@ impl HelperDriver for FencedHelperDriver<'_, '_, '_> {
     }
 
     async fn driver_force_remove(&self, id: &str) -> Result<(), LocalInitError> {
-        self.mutation.authorize().await?;
-        self.engine.driver_force_remove(id).await
+        self.mutation
+            .run(self.engine.driver_force_remove(id))
+            .await?
     }
 
     async fn driver_volume_attachments(&self, name: &str) -> Result<Vec<String>, LocalInitError> {
@@ -2642,6 +2662,7 @@ async fn cleanup_helper<D: HelperDriver>(
     cleanup_failure.map_or(Ok(()), Err)
 }
 
+#[cfg(test)]
 async fn cleanup_reset_helper_with_driver<D: HelperDriver>(
     driver: &D,
     contract: &HelperContract<'_>,
@@ -3003,6 +3024,9 @@ fn helper_body(
             memory_swap: Some(HELPER_MEMORY_BYTES),
             nano_cpus: Some(HELPER_NANO_CPUS),
             pids_limit: Some(HELPER_PIDS),
+            console_size: Some(vec![0, 0]),
+            shm_size: Some(HELPER_SHM_BYTES),
+            isolation: Some(HostConfigIsolationEnum::EMPTY),
             init: Some(false),
             mounts: Some(mounts),
             cap_add: Some(cap_add),
@@ -3021,6 +3045,7 @@ fn helper_body(
             readonly_paths: Some(helper_readonly_paths()),
             log_config: Some(helper_log_config()),
             runtime: Some("runc".to_owned()),
+            userns_mode: Some("host".to_owned()),
             ..Default::default()
         }),
         ..Default::default()
@@ -3042,6 +3067,21 @@ fn helper_mounts(volumes: &BTreeMap<VolumeRole, String>, read_only: bool) -> Vec
             ..Default::default()
         })
         .collect()
+}
+
+fn helper_mounts_match(actual: &[Mount], expected: &[Mount]) -> bool {
+    actual.len() == expected.len()
+        && actual.iter().zip(expected).all(|(actual, expected)| {
+            actual.target == expected.target
+                && actual.source == expected.source
+                && actual.typ == expected.typ
+                && actual.read_only.unwrap_or(false) == expected.read_only.unwrap_or(false)
+                && actual.consistency == expected.consistency
+                && actual.bind_options == expected.bind_options
+                && actual.volume_options == expected.volume_options
+                && actual.image_options == expected.image_options
+                && actual.tmpfs_options == expected.tmpfs_options
+        })
 }
 
 fn helper_security_options() -> Vec<String> {
@@ -3222,7 +3262,10 @@ fn validate_helper_image_ids(
         || host.nano_cpus != Some(HELPER_NANO_CPUS)
         || host.pids_limit != Some(HELPER_PIDS)
         || host.binds.as_ref().is_some_and(|binds| !binds.is_empty())
-        || host.mounts.as_deref() != Some(helper_mounts(volumes, read_only).as_slice())
+        || host
+            .mounts
+            .as_deref()
+            .is_none_or(|actual| !helper_mounts_match(actual, &helper_mounts(volumes, read_only)))
         || host.security_opt.as_deref() != Some(helper_security_options().as_slice())
         || host.masked_paths.as_deref() != Some(helper_masked_paths().as_slice())
         || host.readonly_paths.as_deref() != Some(helper_readonly_paths().as_slice())
@@ -3276,6 +3319,7 @@ fn validate_helper_image_ids(
 }
 
 fn helper_has_ambient_authority(host: &HostConfig) -> bool {
+    let nonzero = |value: Option<i64>| value.is_some_and(|value| value != 0);
     host.cgroup_parent
         .as_ref()
         .is_some_and(|value| !value.is_empty())
@@ -3298,6 +3342,52 @@ fn helper_has_ambient_authority(host: &HostConfig) -> bool {
             .as_ref()
             .is_some_and(|value| !value.is_empty())
         || host.publish_all_ports.unwrap_or(false)
+        || host.oom_kill_disable.unwrap_or(false)
+        || nonzero(host.cpu_shares)
+        || nonzero(host.cpu_period)
+        || nonzero(host.cpu_quota)
+        || nonzero(host.cpu_realtime_period)
+        || nonzero(host.cpu_realtime_runtime)
+        || host
+            .cpuset_cpus
+            .as_ref()
+            .is_some_and(|value| !value.is_empty())
+        || host
+            .cpuset_mems
+            .as_ref()
+            .is_some_and(|value| !value.is_empty())
+        || host.blkio_weight.is_some_and(|value| value != 0)
+        || host
+            .blkio_weight_device
+            .as_ref()
+            .is_some_and(|value| !value.is_empty())
+        || host
+            .blkio_device_read_bps
+            .as_ref()
+            .is_some_and(|value| !value.is_empty())
+        || host
+            .blkio_device_write_bps
+            .as_ref()
+            .is_some_and(|value| !value.is_empty())
+        || host
+            .blkio_device_read_iops
+            .as_ref()
+            .is_some_and(|value| !value.is_empty())
+        || host
+            .blkio_device_write_iops
+            .as_ref()
+            .is_some_and(|value| !value.is_empty())
+        || nonzero(host.cpu_count)
+        || nonzero(host.cpu_percent)
+        || nonzero(host.io_maximum_iops)
+        || nonzero(host.io_maximum_bandwidth)
+        || nonzero(host.memory_reservation)
+        || nonzero(host.memory_swappiness)
+        || nonzero(host.oom_score_adj)
+        || host.ulimits.as_ref().is_some_and(|value| !value.is_empty())
+        || host.console_size.as_deref() != Some([0, 0].as_slice())
+        || host.shm_size != Some(HELPER_SHM_BYTES)
+        || host.isolation != Some(HostConfigIsolationEnum::EMPTY)
         || host
             .volume_driver
             .as_ref()
@@ -3343,10 +3433,7 @@ fn helper_has_ambient_authority(host: &HostConfig) -> bool {
             .uts_mode
             .as_ref()
             .is_some_and(|value| !value.is_empty())
-        || host
-            .userns_mode
-            .as_ref()
-            .is_some_and(|value| !value.is_empty())
+        || host.userns_mode.as_deref() != Some("host")
         || host.sysctls.as_ref().is_some_and(|value| !value.is_empty())
         || host.runtime.as_deref() != Some("runc")
         || host.restart_policy.as_ref().is_none_or(|policy| {

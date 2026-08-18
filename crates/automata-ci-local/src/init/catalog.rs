@@ -2294,4 +2294,68 @@ pub(super) fn candidate_replay_test_catalog(
 }
 
 #[cfg(test)]
+pub(super) fn desired_test_catalog() -> VerifiedCatalog {
+    let digest = |value: u8| format!("sha256:{value:064x}");
+    let mut images = BTreeMap::new();
+    for (index, role) in ALL_ROLES[..ALL_ROLES.len() - 1].iter().enumerate() {
+        let repository = format!("registry.example.invalid/{role}");
+        images.insert(
+            (*role).to_owned(),
+            VerifiedImage {
+                canonical_repository: repository.clone(),
+                config: Value::Null,
+                runtime: Value::Null,
+                source: ImageSource::Registry(RegistryBinding {
+                    reference: format!("{repository}@{}", digest(index as u8 + 1)),
+                    top_level_digest: digest(index as u8 + 1),
+                    platform_manifest_digest: digest(index as u8 + 17),
+                    config_digest: digest(index as u8 + 33),
+                }),
+            },
+        );
+    }
+    images.insert(
+        "service-proxy".to_owned(),
+        VerifiedImage {
+            canonical_repository: "automata.local/automata-ci-service-proxy".to_owned(),
+            config: Value::Null,
+            runtime: Value::Null,
+            source: ImageSource::Candidate(CandidateBinding {
+                reference: "automata.local/automata-ci-service-proxy:fixture".to_owned(),
+                candidate_provenance_sha256: "4".repeat(64),
+                config_digest: digest(65),
+                image_digest: digest(66),
+                image_name: CANDIDATE_IMAGE_NAME.to_owned(),
+                oci_archive_sha256: "5".repeat(64),
+                sha256: "6".repeat(64),
+                source_provenance_sha256: "7".repeat(64),
+            }),
+        },
+    );
+    VerifiedCatalog {
+        bytes_sha256: Sha256Digest::from_bytes([0x81; 32]),
+        source_contract_sha256: current_source_contract_sha256(),
+        release: Release {
+            version: "0.0.0-test".to_owned(),
+            commit: "1".repeat(40),
+            created: "2026-01-01T00:00:00Z".to_owned(),
+            prerelease: true,
+            source_date_epoch: 1_767_225_600,
+            tag: "v0.0.0-test".to_owned(),
+            tag_object: "2".repeat(40),
+        },
+        profile: ProfileBinding {
+            id: "automata.dev/github-hosted-ubuntu-24-04-x64-v1".to_owned(),
+            manifest_sha256: Sha256Digest::from_bytes([0x82; 32]),
+            lock_sha256: Sha256Digest::from_bytes([0x83; 32]),
+        },
+        images,
+        maximum_parallel_jobs: 1,
+        human_port: 8080,
+        results_port: 8081,
+        runner_control_port: 9090,
+    }
+}
+
+#[cfg(test)]
 mod tests;

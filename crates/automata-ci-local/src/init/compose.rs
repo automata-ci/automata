@@ -225,18 +225,19 @@ impl QualifiedDockerCli {
         ];
         let operation_timeout = append_step(&step, &mut arguments);
         let arguments = arguments.iter().map(String::as_str).collect::<Vec<_>>();
-        if let Some(mutation) = mutation {
-            mutation.authorize().await?;
-        }
-        let output = run_held(
+        let operation = run_held(
             &self.compose,
             selection,
             &arguments,
             Some(compose_bytes),
             operation_timeout,
             cancellation,
-        )
-        .await;
+        );
+        let output = if let Some(mutation) = mutation {
+            mutation.run(operation).await?
+        } else {
+            operation.await
+        };
         self.verify_identity()?;
         output
     }

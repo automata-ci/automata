@@ -673,6 +673,7 @@ where
 
     let adapter = connect().await?;
     let engine = InitEngine::connect(&adapter).await?;
+    engine.preflight_lifecycle_daemon().await?;
     let mut active_lifecycle = None;
     let intent = if let Some(intent) = replay_intent {
         if let Some(epoch_bytes) = snapshot.epoch.completed() {
@@ -954,22 +955,26 @@ where
         if holder_lost.is_cancelled() {
             return Err(reset_required());
         }
-        let stopped = engine
-            .stop_lifecycle_lock_for_reset(&intent.installation, &active.epoch, active.holder)
-            .await?;
         engine
-            .remove_reset_anchor_and_lock(&intent.installation, stopped)
+            .remove_reset_anchor_and_release_lock(
+                &intent.installation,
+                &active.epoch,
+                active.holder,
+                &mutation,
+            )
             .await?;
         cancellation_latched |= request.cancellation.is_cancelled();
     } else {
-        cancellation_latched |= drive_engine_reset(
-            &engine,
-            &intent.installation,
-            intent.epoch_fingerprint,
-            intent.helper.as_ref(),
-            &request.cancellation,
-        )
-        .await?;
+        // A replay without the sealed epoch cannot reconstruct the exact
+        // lifecycle lock/image/topology contract. It may finish erasing host
+        // custody only after proving the complete Engine namespace already
+        // absent; it must never fall back to unfenced volume deletion.
+        attest_no_project_compose_processes(&intent.installation)?;
+        engine
+            .attest_reset_union_absent(&intent.installation)
+            .await?;
+        attest_no_project_compose_processes(&intent.installation)?;
+        cancellation_latched |= request.cancellation.is_cancelled();
     }
     drop(engine);
     drop(adapter);
@@ -1074,6 +1079,7 @@ async fn holder_bounded<T>(
     }
 }
 
+#[cfg(test)]
 #[async_trait::async_trait]
 trait ResetMutationDriver: Sync {
     async fn cleanup_helper(
@@ -1099,6 +1105,7 @@ trait ResetMutationDriver: Sync {
     async fn remove_anchor(&self, installation: &Installation) -> Result<(), LocalInitError>;
 }
 
+#[cfg(test)]
 #[async_trait::async_trait]
 impl ResetMutationDriver for InitEngine<'_> {
     async fn cleanup_helper(
@@ -1135,6 +1142,7 @@ impl ResetMutationDriver for InitEngine<'_> {
     }
 }
 
+#[cfg(test)]
 async fn drive_engine_reset<D: ResetMutationDriver>(
     driver: &D,
     installation: &Installation,
