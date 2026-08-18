@@ -32,6 +32,9 @@ export default defineConfig({
       }),
       defineProject({
         extends: true,
+        optimizeDeps: {
+          include: ["storybook/theming"],
+        },
         plugins: [
           storybookTest({
             configDir: ".storybook",

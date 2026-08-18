@@ -48,7 +48,7 @@ export const Complete: Story = {
       onToggleGroup: fn(),
     },
   },
-  play: async ({ args, canvas, userEvent }) => {
+  play: async ({ args, canvas, canvasElement, userEvent }) => {
     await userEvent.click(canvas.getByRole("button", { name: "Collapse all" }));
     await expect(args.logs.onToggleAll).toHaveBeenCalledOnce();
     await userEvent.click(canvas.getByRole("button", { name: "Following" }));
@@ -63,11 +63,11 @@ export const Complete: Story = {
     await userEvent.click(groupName);
     await expect(args.logs.onToggleGroup).toHaveBeenCalledWith(firstGroup.id);
 
-    await userEvent.type(
-      canvas.getByRole("searchbox", { name: "Search job logs" }),
-      "error",
-    );
+    const search = canvas.getByRole("searchbox", { name: "Search job logs" });
+    await userEvent.type(search, "error");
     await expect(args.logs.onQueryChange).toHaveBeenCalled();
+    search.blur();
+    canvasElement.ownerDocument.defaultView?.scrollTo(0, 0);
   },
 };
 export const Waiting: Story = {

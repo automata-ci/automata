@@ -34,15 +34,16 @@ export const Ready: Story = {
     isSubmitting: false,
     onSubmit: fn((event) => event.preventDefault()),
   },
-  play: async ({ args, canvas, userEvent }) => {
-    await userEvent.type(
-      canvas.getByLabelText("Bootstrap token"),
-      "one-time-token",
-    );
+  play: async ({ args, canvas, canvasElement, userEvent }) => {
+    const token = canvas.getByLabelText("Bootstrap token");
+    await userEvent.type(token, "one-time-token");
     await userEvent.click(
       canvas.getByRole("button", { name: "Continue with GitHub" }),
     );
     await expect(args.onSubmit).toHaveBeenCalledOnce();
+    await userEvent.clear(token);
+    token.blur();
+    canvasElement.ownerDocument.defaultView?.scrollTo(0, 0);
   },
 };
 export const Submitting: Story = { args: { isSubmitting: true } };

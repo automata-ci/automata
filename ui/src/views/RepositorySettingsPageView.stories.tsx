@@ -33,13 +33,15 @@ export const Editable: Story = {
     form: { ...form, onChange: fn() },
     model: editableModel,
   },
-  play: async ({ args, canvas, userEvent }) => {
+  play: async ({ args, canvas, canvasElement, userEvent }) => {
     const publicOptions = canvas.getAllByRole("radio", { name: /Public/ });
     const jobLogsPublic = publicOptions[1];
     if (jobLogsPublic === undefined)
       throw new Error("public audience option is missing");
     await userEvent.click(jobLogsPublic);
     await expect(args.form.onChange).toHaveBeenCalledWith("logs", "public");
+    jobLogsPublic.blur();
+    canvasElement.ownerDocument.defaultView?.scrollTo(0, 0);
   },
 };
 export const Saving: Story = {

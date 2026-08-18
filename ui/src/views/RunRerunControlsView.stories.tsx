@@ -29,6 +29,7 @@ export const Ready: Story = {
       canvas.getByRole("button", { name: "Re-run failed jobs" }),
     );
     await expect(args.onRerunFailed).toHaveBeenCalledOnce();
+    canvas.getByRole("button", { name: "Re-run failed jobs" }).blur();
   },
 };
 export const NoFailedJobs: Story = { args: { failedJobsAvailable: false } };
