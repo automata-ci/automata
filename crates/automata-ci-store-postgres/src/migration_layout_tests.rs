@@ -237,6 +237,10 @@ const CANONICAL_MIGRATIONS: &[(&str, &str)] = &[
         "0058_required_check_event_isolation.sql",
         "ea67c5ce5f63d1fedffc66d92d7cf871cb0c0ec363f9312d3aebf12a015cd76a7c24c03c269558db395abbcc94390365",
     ),
+    (
+        "0059_provider_runner_policy_revision.sql",
+        "16f98a4cbb0b60b6145787bc5a38b8f37228b52cb7e6512a6738fcd24b483542adbadbf0fbf59bd0fd4ba7e53c3e6f76",
+    ),
 ];
 
 const BASELINE_MIGRATION_COUNT: u32 = 26;
@@ -397,6 +401,22 @@ fn required_github_check_identity_is_event_isolated_and_never_skipped() {
         assert!(
             source.contains(required),
             "required-Check isolation migration lost contract: {required}"
+        );
+    }
+}
+
+#[test]
+fn provider_runner_policy_revision_is_independent_and_positive() {
+    let source = include_str!("../migrations/0059_provider_runner_policy_revision.sql");
+
+    for required in [
+        "ADD COLUMN runner_policy_revision bigint NOT NULL DEFAULT 1",
+        "ALTER COLUMN runner_policy_revision DROP DEFAULT",
+        "CHECK (runner_policy_revision > 0)",
+    ] {
+        assert!(
+            source.contains(required),
+            "provider runner-policy revision migration lost required contract: {required}"
         );
     }
 }

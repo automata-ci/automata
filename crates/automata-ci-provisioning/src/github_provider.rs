@@ -776,6 +776,7 @@ pub struct GithubProviderDesiredState {
     configuration_revision: GithubProviderConfigurationRevision,
     app_configuration_revision: u64,
     webhook_verifier_revision: u64,
+    runner_policy_revision: u64,
     configuration: GithubProviderConfiguration,
     workspaces: Vec<WorkspaceGithubRepositoriesDesiredState>,
 }
@@ -791,10 +792,14 @@ impl GithubProviderDesiredState {
         configuration_revision: GithubProviderConfigurationRevision,
         app_configuration_revision: u64,
         webhook_verifier_revision: u64,
+        runner_policy_revision: u64,
         configuration: GithubProviderConfiguration,
         mut workspaces: Vec<WorkspaceGithubRepositoriesDesiredState>,
     ) -> Result<Self, GithubProviderValueError> {
-        if app_configuration_revision == 0 || webhook_verifier_revision == 0 {
+        if app_configuration_revision == 0
+            || webhook_verifier_revision == 0
+            || runner_policy_revision == 0
+        {
             return Err(GithubProviderValueError::InvalidProviderRevision);
         }
         workspaces.sort_unstable_by_key(WorkspaceGithubRepositoriesDesiredState::workspace_id);
@@ -809,6 +814,7 @@ impl GithubProviderDesiredState {
             configuration_revision,
             app_configuration_revision,
             webhook_verifier_revision,
+            runner_policy_revision,
             configuration,
             workspaces,
         })
@@ -838,6 +844,12 @@ impl GithubProviderDesiredState {
         self.webhook_verifier_revision
     }
 
+    /// Returns the independently versioned canonical runner-policy revision.
+    #[must_use]
+    pub const fn runner_policy_revision(&self) -> u64 {
+        self.runner_policy_revision
+    }
+
     /// Returns the validated shard-wide provider configuration.
     #[must_use]
     pub const fn configuration(&self) -> &GithubProviderConfiguration {
@@ -859,6 +871,7 @@ impl GithubProviderDesiredState {
         GithubProviderConfigurationRevision,
         u64,
         u64,
+        u64,
         GithubProviderConfiguration,
         Vec<WorkspaceGithubRepositoriesDesiredState>,
     ) {
@@ -867,6 +880,7 @@ impl GithubProviderDesiredState {
             self.configuration_revision,
             self.app_configuration_revision,
             self.webhook_verifier_revision,
+            self.runner_policy_revision,
             self.configuration,
             self.workspaces,
         )
@@ -884,6 +898,7 @@ impl fmt::Debug for GithubProviderDesiredState {
                 &self.app_configuration_revision,
             )
             .field("webhook_verifier_revision", &self.webhook_verifier_revision)
+            .field("runner_policy_revision", &self.runner_policy_revision)
             .field("configuration", &self.configuration)
             .field("workspace_count", &self.workspaces.len())
             .field(

@@ -576,6 +576,7 @@ async fn duplicate_config_and_durable_manifest_selector_drift_fail_closed() {
 fn database_desired_state(
     configuration_revision: u64,
     workspace_revision: u64,
+    runner_policy_revision: u64,
 ) -> automata_ci_provisioning::GithubProviderDesiredState {
     use automata_ci_core::JobAuthorityProfile;
     use automata_ci_core::WorkspaceId;
@@ -623,6 +624,7 @@ fn database_desired_state(
             .expect("configuration revision"),
         3,
         4,
+        runner_policy_revision,
         configuration,
         vec![
             WorkspaceGithubRepositoriesDesiredState::new(
@@ -639,9 +641,9 @@ fn database_desired_state(
 
 #[test]
 fn database_desired_state_derives_stable_runtime_identities_and_revisions() {
-    let first = GithubProviderConfig::from_desired_state(database_desired_state(5, 5))
+    let first = GithubProviderConfig::from_desired_state(database_desired_state(5, 5, 2))
         .expect("database projection");
-    let second = GithubProviderConfig::from_desired_state(database_desired_state(5, 5))
+    let second = GithubProviderConfig::from_desired_state(database_desired_state(5, 5, 2))
         .expect("stable database projection");
     let first_repository = &first.config().repositories()[0];
     let second_repository = &second.config().repositories()[0];
@@ -652,7 +654,7 @@ fn database_desired_state_derives_stable_runtime_identities_and_revisions() {
     );
     assert_eq!(first_repository.manifest_revision().get(), 5);
     assert_eq!(first_repository.policy_revision().get(), 5);
-    assert_eq!(first_repository.runtime_policy_revision().get(), 5);
+    assert_eq!(first_repository.runtime_policy_revision().get(), 2);
     assert_eq!(
         first_repository.connection_id(),
         second_repository.connection_id()
@@ -675,5 +677,5 @@ fn database_desired_state_derives_stable_runtime_identities_and_revisions() {
 
 #[test]
 fn database_desired_state_rejects_mixed_runtime_generations() {
-    assert!(GithubProviderConfig::from_desired_state(database_desired_state(5, 4)).is_err());
+    assert!(GithubProviderConfig::from_desired_state(database_desired_state(5, 4, 2)).is_err());
 }
