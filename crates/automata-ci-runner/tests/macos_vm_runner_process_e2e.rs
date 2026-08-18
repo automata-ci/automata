@@ -87,6 +87,8 @@ const VM_STORAGE_ROOT_ENV: &str = "AUTOMATA_MACOS_VM_STORAGE_ROOT";
 #[cfg(target_os = "macos")]
 const VM_STORAGE_VOLUME_UUID_ENV: &str = "AUTOMATA_MACOS_VM_STORAGE_VOLUME_UUID";
 #[cfg(target_os = "macos")]
+const VM_STORAGE_QUOTA_BYTES_ENV: &str = "AUTOMATA_MACOS_VM_STORAGE_QUOTA_BYTES";
+#[cfg(target_os = "macos")]
 const DIFFERENTIAL_REFERENCE: &str = "differential.bash=ok\nisolation.cpu=4\nisolation.memory=8589934592\nisolation.process_limit=512\nisolation.no_host_helper=true\nisolation.no_ethernet=true\ndifferential.sh=ok\ndifferential.environment=command-file\ndifferential.output=vm-output\ndifferential.workspace=true\ndifferential.conclusion=success\n";
 const TEARDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -1187,6 +1189,7 @@ fn write_runner_config(
     let template_manifest = required_macos_vm_environment(VM_TEMPLATE_MANIFEST_ENV);
     let template_sha256 = process_profile_digest().to_string();
     let storage_volume_uuid = required_macos_vm_environment(VM_STORAGE_VOLUME_UUID_ENV);
+    let storage_quota_bytes = required_macos_storage_quota_bytes();
     let config = json!({
         "schema_version": RUNNER_PRODUCT_CONFIG_SCHEMA_VERSION,
         "runner_id": runner_id.to_string(),
@@ -1230,7 +1233,7 @@ fn write_runner_config(
             "template_manifest": template_manifest,
             "template_manifest_sha256": template_sha256,
             "storage_volume_uuid": storage_volume_uuid,
-            "storage_quota_bytes": 274_877_906_944_u64,
+            "storage_quota_bytes": storage_quota_bytes,
             "boot_timeout_seconds": 300,
             "stop_timeout_seconds": 10,
         },
@@ -1299,6 +1302,31 @@ fn write_runner_config(
 #[cfg(target_os = "macos")]
 fn required_macos_vm_environment(name: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| panic!("{name} is required"))
+}
+
+#[cfg(target_os = "macos")]
+fn required_macos_storage_quota_bytes() -> u64 {
+    parse_macos_storage_quota_bytes(&required_macos_vm_environment(VM_STORAGE_QUOTA_BYTES_ENV))
+        .unwrap_or_else(|| panic!("{VM_STORAGE_QUOTA_BYTES_ENV} must be a decimal byte count"))
+}
+
+#[cfg(target_os = "macos")]
+fn parse_macos_storage_quota_bytes(value: &str) -> Option<u64> {
+    (!value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
+        .then(|| value.parse().ok())
+        .flatten()
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_storage_quota_requires_one_decimal_byte_count() {
+    assert_eq!(
+        parse_macos_storage_quota_bytes("107374182400").unwrap(),
+        107_374_182_400
+    );
+    for invalid in ["", " 107374182400", "+107374182400", "100GiB"] {
+        assert!(parse_macos_storage_quota_bytes(invalid).is_none());
+    }
 }
 
 struct TemporaryRoot {

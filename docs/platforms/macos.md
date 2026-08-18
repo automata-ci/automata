@@ -102,11 +102,14 @@ Back up the host, then use Disk Utility's documented
 [**Partition** operation](https://support.apple.com/guide/disk-utility/partition-a-physical-disk-dskutl14027/mac)
 to create the fixed container. Do not use **Add APFS Volume** on `Macintosh HD`. Provision the
 container with enough capacity for the chosen quota and APFS overhead. Make the
-final volume its sole member and assign a 256 GiB (`274877906944` byte) quota;
-Apple's Disk Utility **Size Options** UI can set the quota. If a bootstrap volume
-was created during partitioning, add the quota-bearing volume and remove the
-bootstrap volume only after resolving the exact device identifiers with
-`diskutil apfs list`.
+final volume its sole member and assign a whole-GiB quota between 64 GiB and
+1 TiB. The quota must exceed the sealed virtual disk length plus auxiliary
+storage plus 32 GiB of provider headroom. For example, the minimum 64 GiB
+template can use a 100 GiB (`107374182400` byte) quota; a 128 GiB template needs
+a larger quota. Apple's Disk Utility **Size Options** UI can set the quota. If a
+bootstrap volume was created during partitioning, add the quota-bearing volume
+and remove the bootstrap volume only after resolving the exact device
+identifiers with `diskutil apfs list`.
 
 Verify the mounted result and record the volume UUID:
 
@@ -257,7 +260,7 @@ and lint the Rust and Swift components, inspect the helper entitlement, and
 exercise protocol/configuration failure paths. Before deployment, that physical
 runner must also execute the ignored
 `macos_vm_runner_process_e2e::shipped_runner_process_executes_a_claimed_isolated_shell_job`
-test with the seven `AUTOMATA_MACOS_VM_*` artifact
+test with the eight `AUTOMATA_MACOS_VM_*` artifact and storage
 variables. That test verifies no Ethernet device, no host helper path,
 memory/vCPU sizing, the sealed process ceiling, shell/output behavior, and
 clone cleanup. Deployment qualification must additionally inject
@@ -275,6 +278,7 @@ AUTOMATA_MACOS_VM_TEMPLATE_MANIFEST=/Volumes/AutomataVM/templates/macos-15-arm64
 AUTOMATA_MACOS_VM_TEMPLATE_SHA256=<manifest-sha256> \
 AUTOMATA_MACOS_VM_STORAGE_ROOT=/Volumes/AutomataVM/e2e-state \
 AUTOMATA_MACOS_VM_STORAGE_VOLUME_UUID=<uppercase-volume-uuid> \
+AUTOMATA_MACOS_VM_STORAGE_QUOTA_BYTES=107374182400 \
 cargo test --locked -p automata-ci-runner --test runner -- \
   macos_vm_runner_process_e2e::shipped_runner_process_executes_a_claimed_isolated_shell_job \
   --ignored --nocapture --test-threads=1
