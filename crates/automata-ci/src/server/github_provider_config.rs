@@ -462,7 +462,7 @@ fn database_repository_config(
     let workflow_git_ref = GithubProviderGitRef::new(cache_repository.default_branch_ref())
         .map_err(|_| GithubProviderConfigError)?;
     let installation_binding_generation =
-        GithubInstallationBindingGeneration::new(projected_revision)
+        GithubInstallationBindingGeneration::new(selected.installation_binding_generation())
             .map_err(|_| GithubProviderConfigError)?;
     let manifest_revision = GithubProviderManifestRevision::new(projected_revision)
         .map_err(|_| GithubProviderConfigError)?;
