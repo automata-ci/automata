@@ -211,7 +211,7 @@ const FROZEN_MIGRATIONS: &[(&str, &str)] = &[
     ),
     (
         "0052_canonical_git_object_ids.sql",
-        "3442ce29a4381d087378cc169475bad1f37fd4d408334524777298be1b16fe10e5b1ab0b81c19d34d834843356016732",
+        "c3cfa4f85f13f8385bf6edd2c997018eb6e8542dc01a0821456d1caf33d062d404bc902810429315318c40a305feb0cc",
     ),
 ];
 
@@ -608,6 +608,11 @@ fn canonical_git_object_ids_are_a_forward_only_exact_transition() {
     for required in [
         "DROP CONSTRAINT github_schedule_check_evidence_registry",
         "DROP CONSTRAINT event_subject_selections_digest_canonical",
+        "DROP CONSTRAINT event_control_subjects_tenant_id_subject_id_selection_dige_fkey",
+        "DROP CONSTRAINT event_subject_progress_tenant_id_subject_id_selection_dige_fkey",
+        "DROP TRIGGER event_subject_selections_immutable ON event_subject_selections",
+        "DROP TRIGGER event_control_subjects_immutable ON event_control_subjects",
+        "DROP TRIGGER event_subject_progress_immutable ON event_subject_progress",
         "DROP VIEW github_workflow_run_manifest_origins",
         "DROP VIEW github_workflow_run_base_manifest_origins",
         "DROP FUNCTION automata_event_subject_selection_digest(",
@@ -617,6 +622,15 @@ fn canonical_git_object_ids_are_a_forward_only_exact_transition() {
         "CREATE OR REPLACE FUNCTION automata_github_schedule_check_evidence_insert_guard()",
         "CREATE OR REPLACE FUNCTION automata_validate_reusable_workflow_expansion()",
         "CREATE OR REPLACE FUNCTION automata_guard_provider_delivery_workflow_inventory()",
+        "UPDATE event_subject_selections",
+        "UPDATE event_control_subjects AS control",
+        "UPDATE event_subject_progress AS progress",
+        "SET selection_digest = selection.selection_digest",
+        "ADD CONSTRAINT event_control_subjects_tenant_id_subject_id_selection_dige_fkey",
+        "ADD CONSTRAINT event_subject_progress_tenant_id_subject_id_selection_dige_fkey",
+        "CREATE TRIGGER event_subject_selections_immutable",
+        "CREATE TRIGGER event_control_subjects_immutable",
+        "CREATE TRIGGER event_subject_progress_immutable",
         "CREATE VIEW github_workflow_run_base_manifest_origins AS",
         "CREATE VIEW github_workflow_run_manifest_origins AS",
     ] {

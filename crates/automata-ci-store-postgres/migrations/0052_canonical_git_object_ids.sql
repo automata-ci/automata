@@ -27,6 +27,14 @@ ALTER TABLE logical_workflow_reusable_workflow_catalog
 ALTER TABLE event_subject_selections
     DROP CONSTRAINT event_subject_selections_shape,
     DROP CONSTRAINT event_subject_selections_digest_canonical;
+ALTER TABLE event_control_subjects
+    DROP CONSTRAINT event_control_subjects_tenant_id_subject_id_selection_dige_fkey;
+ALTER TABLE event_subject_progress
+    DROP CONSTRAINT event_subject_progress_tenant_id_subject_id_selection_dige_fkey;
+
+DROP TRIGGER event_subject_selections_immutable ON event_subject_selections;
+DROP TRIGGER event_control_subjects_immutable ON event_control_subjects;
+DROP TRIGGER event_subject_progress_immutable ON event_subject_progress;
 
 DROP VIEW github_workflow_run_manifest_origins;
 DROP VIEW github_workflow_run_base_manifest_origins;
@@ -808,6 +816,76 @@ SELECT pg_catalog.sha256(
     || pg_catalog.int8send($14)
 )
 $function$;
+
+-- The selection digest commits to source_revision, so changing that field's
+-- representation necessarily changes the durable selection identity. Re-key
+-- the parent and both dependent records as one schema transaction.
+UPDATE event_subject_selections
+SET selection_digest = automata_event_subject_selection_digest(
+    selection_schema,
+    origin_registry_version,
+    origin_registry_digest,
+    subject_id,
+    tenant_id,
+    repository_id,
+    origin_kind_code,
+    origin_id,
+    event_name,
+    workflow_path,
+    source_revision,
+    source_digest,
+    authority_digest,
+    selected_at_ms
+);
+
+UPDATE event_control_subjects AS control
+SET selection_digest = selection.selection_digest,
+    control_digest = automata_event_control_subject_digest(
+        control.control_schema,
+        control.control_id,
+        control.subject_id,
+        selection.selection_digest,
+        control.registered_at_ms
+    )
+FROM event_subject_selections AS selection
+WHERE selection.tenant_id = control.tenant_id
+  AND selection.subject_id = control.subject_id;
+
+UPDATE event_subject_progress AS progress
+SET selection_digest = selection.selection_digest,
+    progress_digest = automata_event_subject_progress_digest(
+        progress.progress_schema,
+        progress.subject_id,
+        selection.selection_digest,
+        progress.outcome_kind,
+        progress.run_id,
+        progress.reason,
+        progress.recorded_at_ms
+    )
+FROM event_subject_selections AS selection
+WHERE selection.tenant_id = progress.tenant_id
+  AND selection.subject_id = progress.subject_id;
+
+ALTER TABLE event_control_subjects
+    ADD CONSTRAINT event_control_subjects_tenant_id_subject_id_selection_dige_fkey
+    FOREIGN KEY (tenant_id, subject_id, selection_digest)
+    REFERENCES event_subject_selections(tenant_id, subject_id, selection_digest)
+    ON DELETE RESTRICT;
+ALTER TABLE event_subject_progress
+    ADD CONSTRAINT event_subject_progress_tenant_id_subject_id_selection_dige_fkey
+    FOREIGN KEY (tenant_id, subject_id, selection_digest)
+    REFERENCES event_subject_selections(tenant_id, subject_id, selection_digest)
+    ON DELETE RESTRICT;
+
+CREATE TRIGGER event_subject_selections_immutable
+    BEFORE DELETE OR UPDATE ON event_subject_selections
+    FOR EACH ROW EXECUTE FUNCTION automata_event_subject_records_immutable();
+CREATE TRIGGER event_control_subjects_immutable
+    BEFORE DELETE OR UPDATE ON event_control_subjects
+    FOR EACH ROW EXECUTE FUNCTION automata_event_subject_records_immutable();
+CREATE TRIGGER event_subject_progress_immutable
+    BEFORE DELETE OR UPDATE ON event_subject_progress
+    FOR EACH ROW EXECUTE FUNCTION automata_event_subject_records_immutable();
 
 CREATE OR REPLACE FUNCTION automata_event_subject_progress_insert_exact()
  RETURNS trigger
