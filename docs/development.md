@@ -14,9 +14,10 @@ tests need rootless Podman, `podman-compose`, PostgreSQL client tools, and
 OpenSSL. Static Linux distribution builds also need musl and ELF tooling.
 
 The native Rust workspace, control plane, and PostgreSQL contract suite are
-supported on Apple Silicon macOS. The database scripts require Bash 4 or newer;
-Apple's `/bin/bash` 3.2 is too old. A headless Homebrew setup can provide the
-required shell, PostgreSQL 18 server, and client:
+supported on Apple Silicon macOS. The complete gate also requires the pinned
+Node.js 24.19.0 release used by compatibility fixtures. The database scripts
+require Bash 4 or newer; Apple's `/bin/bash` 3.2 is too old. A headless Homebrew
+setup can provide the required shell, PostgreSQL 18 server, and client:
 
 ```console
 brew install bash postgresql@18
@@ -24,6 +25,13 @@ brew services start postgresql@18
 export PATH="/opt/homebrew/bin:/opt/homebrew/opt/postgresql@18/bin:$HOME/.cargo/bin:$PATH"
 export AUTOMATA_PSQL_BINARY=/opt/homebrew/opt/postgresql@18/bin/psql
 ```
+
+Run `./scripts/ci/run-macos-checks.sh` from the repository root for the complete
+non-service macOS gate. It rejects an unpinned Node version, keeps all test
+scratch space under a short, trusted `target/` ancestry that also respects
+Darwin Unix-socket limits, formats, lints, tests, and documents every workspace
+target other than the intentionally Linux-only `automata-ci-service-proxy`, then
+builds all three release Swift executables used by the native VM provider.
 
 The secret-safe PostgreSQL launcher discovers that Apple Silicon Homebrew path
 and the Intel Homebrew prefix when no override is set. Keep the explicit

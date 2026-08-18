@@ -3203,14 +3203,17 @@ mod tests {
             LocalSnapshotErrorCode::ResourceLimit
         );
 
-        let aliases = Fixture::new();
-        aliases.write("Directory/one", "one\n");
-        aliases.write("directory/two", "two\n");
-        aliases.commit_all("component aliases");
-        let alias_snapshot = aliases.capture().await.expect("exact alias archive");
-        let alias_files = archive_files(alias_snapshot.archive_bytes());
-        assert_eq!(alias_files.get("Directory/one").unwrap(), b"one\n");
-        assert_eq!(alias_files.get("directory/two").unwrap(), b"two\n");
+        #[cfg(target_os = "linux")]
+        {
+            let aliases = Fixture::new();
+            aliases.write("Directory/one", "one\n");
+            aliases.write("directory/two", "two\n");
+            aliases.commit_all("component aliases");
+            let alias_snapshot = aliases.capture().await.expect("exact alias archive");
+            let alias_files = archive_files(alias_snapshot.archive_bytes());
+            assert_eq!(alias_files.get("Directory/one").unwrap(), b"one\n");
+            assert_eq!(alias_files.get("directory/two").unwrap(), b"two\n");
+        }
 
         let deletion = Fixture::new();
         deletion.write("nested/deleted", "delete me\n");
@@ -3281,20 +3284,22 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn non_unicode_fifo_and_socket_entries_fail_closed() {
-        use std::{
-            ffi::OsString,
-            os::unix::{ffi::OsStringExt as _, net::UnixListener},
-        };
+        use std::os::unix::net::UnixListener;
 
-        let non_unicode = Fixture::new();
-        let invalid = OsString::from_vec(b"invalid-\xff".to_vec());
-        fs::write(non_unicode.path().join(invalid), b"bytes").expect("write non-Unicode path");
-        non_unicode.write("tracked.txt", "tracked\n");
-        non_unicode.commit_all("non-Unicode fixture");
-        assert_eq!(
-            non_unicode.capture().await.unwrap_err().code(),
-            LocalSnapshotErrorCode::NonUnicodePath
-        );
+        #[cfg(target_os = "linux")]
+        {
+            use std::{ffi::OsString, os::unix::ffi::OsStringExt as _};
+
+            let non_unicode = Fixture::new();
+            let invalid = OsString::from_vec(b"invalid-\xff".to_vec());
+            fs::write(non_unicode.path().join(invalid), b"bytes").expect("write non-Unicode path");
+            non_unicode.write("tracked.txt", "tracked\n");
+            non_unicode.commit_all("non-Unicode fixture");
+            assert_eq!(
+                non_unicode.capture().await.unwrap_err().code(),
+                LocalSnapshotErrorCode::NonUnicodePath
+            );
+        }
 
         let fifo = Fixture::new();
         fifo.write("tracked.txt", "tracked\n");
@@ -3326,8 +3331,7 @@ mod tests {
         let socket = Fixture::new();
         socket.write("tracked.txt", "tracked\n");
         socket.commit_all("socket fixture");
-        let _listener =
-            UnixListener::bind(socket.path().join("service.sock")).expect("create Unix socket");
+        let _listener = UnixListener::bind(socket.path().join("s")).expect("create Unix socket");
         assert_eq!(
             socket.capture().await.unwrap_err().code(),
             LocalSnapshotErrorCode::UnsupportedEntry
@@ -3441,10 +3445,7 @@ mod tests {
 
     impl Fixture {
         fn new() -> Self {
-            let root = std::env::temp_dir().join(format!(
-                "automata-local-snapshot-{}",
-                Uuid::new_v4().simple()
-            ));
+            let root = std::env::temp_dir().join(format!("als-{}", Uuid::new_v4().simple()));
             fs::create_dir(&root).expect("create fixture root");
             let fixture = Self { root };
             fixture.git(&["init", "--quiet"]);
@@ -3454,10 +3455,7 @@ mod tests {
         }
 
         fn clone_from(source: &Path) -> Self {
-            let root = std::env::temp_dir().join(format!(
-                "automata-local-snapshot-clone-{}",
-                Uuid::new_v4().simple()
-            ));
+            let root = std::env::temp_dir().join(format!("als-clone-{}", Uuid::new_v4().simple()));
             let output = Command::new("git")
                 .args(["clone", "--quiet"])
                 .arg(source)

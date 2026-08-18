@@ -803,6 +803,27 @@ mod tests {
     };
     use super::{ERROR_BYTES, MAX_IN_FLIGHT_REQUESTS, MAX_RESPONSE_HEADERS, deadline};
 
+    #[cfg(unix)]
+    fn short_socket_path() -> std::path::PathBuf {
+        use std::os::unix::fs::DirBuilderExt as _;
+
+        let root =
+            std::path::Path::new("/tmp").join(format!("adt-{}", uuid::Uuid::new_v4().simple()));
+        let mut builder = std::fs::DirBuilder::new();
+        builder.mode(0o700);
+        builder
+            .create(&root)
+            .expect("create owner-only fake Docker socket directory");
+        root.join("s")
+    }
+
+    #[cfg(unix)]
+    fn remove_socket_fixture(socket: &std::path::Path) {
+        std::fs::remove_file(socket).expect("remove exact fake socket");
+        std::fs::remove_dir(socket.parent().expect("fake socket directory"))
+            .expect("remove fake Docker socket directory");
+    }
+
     #[test]
     fn path_components_are_encoded_without_query_or_path_injection() {
         assert_eq!(
@@ -867,10 +888,7 @@ mod tests {
     ) {
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
-        let socket = std::env::temp_dir().join(format!(
-            "automata-docker-transport-{}.sock",
-            uuid::Uuid::new_v4().simple()
-        ));
+        let socket = short_socket_path();
         let listener = tokio::net::UnixListener::bind(&socket).expect("bind fake Docker socket");
         let response = [
             format!(
@@ -909,7 +927,7 @@ mod tests {
 
     async fn finish_fake_response(socket: &std::path::Path, server: tokio::task::JoinHandle<()>) {
         server.await.expect("fake Docker server");
-        std::fs::remove_file(socket).expect("remove exact fake socket");
+        remove_socket_fixture(socket);
     }
 
     fn transport_with_raw_response(
@@ -921,10 +939,7 @@ mod tests {
     ) {
         use tokio::io::AsyncWriteExt as _;
 
-        let socket = std::env::temp_dir().join(format!(
-            "automata-docker-transport-{}.sock",
-            uuid::Uuid::new_v4().simple()
-        ));
+        let socket = short_socket_path();
         let listener = tokio::net::UnixListener::bind(&socket).expect("bind fake Docker socket");
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.expect("accept fake request");
@@ -1131,10 +1146,7 @@ mod tests {
     async fn assert_stalled_response_is_cancelled(prefix: &'static [u8]) {
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
-        let socket = std::env::temp_dir().join(format!(
-            "automata-docker-transport-stall-{}.sock",
-            uuid::Uuid::new_v4().simple()
-        ));
+        let socket = short_socket_path();
         let listener = tokio::net::UnixListener::bind(&socket).expect("bind stalled Docker socket");
         let (stalled_tx, stalled_rx) = tokio::sync::oneshot::channel();
         let server = tokio::spawn(async move {
@@ -1223,10 +1235,7 @@ mod tests {
     async fn every_request_reconnects_to_the_exact_rebound_unix_socket() {
         use tokio::io::AsyncWriteExt as _;
 
-        let socket = std::env::temp_dir().join(format!(
-            "automata-docker-transport-rebind-{}.sock",
-            uuid::Uuid::new_v4().simple()
-        ));
+        let socket = short_socket_path();
         let transport = fake_transport(&socket);
         for expected in [1_u8, 2] {
             let listener = tokio::net::UnixListener::bind(&socket).expect("bind rebound socket");
@@ -1257,15 +1266,14 @@ mod tests {
             server.await.expect("rebound server");
             std::fs::remove_file(&socket).expect("remove rebound socket name");
         }
+        std::fs::remove_dir(socket.parent().expect("rebound socket directory"))
+            .expect("remove rebound socket directory");
     }
 
     #[cfg(unix)]
     #[tokio::test]
     async fn failed_connection_is_not_implicitly_retried() {
-        let socket = std::env::temp_dir().join(format!(
-            "automata-docker-transport-no-retry-{}.sock",
-            uuid::Uuid::new_v4().simple()
-        ));
+        let socket = short_socket_path();
         let listener = tokio::net::UnixListener::bind(&socket).expect("bind no-retry socket");
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.expect("accept first request");
@@ -1296,10 +1304,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn concurrent_connection_cardinality_is_hard_bounded() {
-        let socket = std::env::temp_dir().join(format!(
-            "automata-docker-transport-cardinality-{}.sock",
-            uuid::Uuid::new_v4().simple()
-        ));
+        let socket = short_socket_path();
         let listener = tokio::net::UnixListener::bind(&socket).expect("bind cardinality socket");
         let (accepted_tx, mut accepted_rx) = tokio::sync::mpsc::channel(MAX_IN_FLIGHT_REQUESTS);
         let (checked_tx, checked_rx) = tokio::sync::oneshot::channel();
