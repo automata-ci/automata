@@ -122,7 +122,7 @@ filled from mutable repository state.
 | Push | full actor/repository/ref/revision tuple, non-fork relationship, and provider-suppressed token recursion |
 | Pull request | full tuple plus the distinct source actor; source and target stay independent |
 | Pull-request target | pull-request evidence plus an explicit privileged-transition marker; source restrictions survive base-context execution |
-| Merge group | full tuple plus complete upstream evidence with depth 1-3 |
+| Merge group | full target-owned tuple and provider-suppressed token recursion; exact constituent evidence with depth 1-3 may further restrict authority |
 | Repository dispatch | full tuple and authenticated external token origin, unless a pinned future policy explicitly permits recursion |
 | Workflow dispatch | full tuple, authenticated caller, stable manifest repository/owner IDs, and non-fork relationship |
 | Schedule | full tuple, scheduler identity, pinned repository evidence, and non-fork relationship |
@@ -144,6 +144,8 @@ Classification occurs only after completeness and consistency checks:
 - `dependabot`: complete same-repository evidence whose source authority is
   Dependabot.
 - `automation`: complete evidence from other restricted provider automation.
+- `merge_queue`: complete provider-authenticated merge-group evidence without
+  exact constituent authority.
 - `incomplete`: one or more event-required dimensions are absent or transitive
   evidence cannot authorize the event.
 
@@ -164,6 +166,7 @@ defaults may be guessed.
 | Fork, explicit future fork-write policy | Requested | Denied | Restore-only | Denied | Denied | Untrusted | Untrusted |
 | Dependabot | Read-only | Denied | Restore-only | Denied | Denied | Untrusted | Untrusted |
 | Other restricted automation | Read-only | Denied | Restore-only | Denied | Denied | Untrusted | Untrusted |
+| Merge queue without constituent evidence | Read-only | Denied | Restore-only | Denied | Denied | Untrusted | Untrusted |
 | Incomplete | Deny all | Denied | Denied | Denied | Denied | Untrusted | Denied |
 
 Fork-write permission, if explicitly enabled by a future pinned policy, changes
@@ -227,8 +230,8 @@ the snapshot's exact authority decision:
 
 Admission or execution fails closed for at least these conditions:
 
-- absent event-required actor, repository, ref, revision, fork, recursion, or
-  upstream evidence;
+- absent event-required actor, repository, ref, revision, fork, or recursion
+  evidence, or absent workflow-run upstream evidence;
 - source/target identity contradicting the fork bit;
 - Dependabot combined with a fork classification;
 - privileged event origin or transition inconsistent with the event kind;
@@ -252,8 +255,8 @@ formatting for actor evidence is intentionally redacted.
 
 The implementation is covered at several boundaries:
 
-- pure truth-table tests for event, fork, Dependabot, automation, incomplete,
-  recursion, privileged-transition, transitive, and policy combinations;
+- pure truth-table tests for event, fork, Dependabot, automation, merge queue,
+  incomplete, recursion, privileged-transition, transitive, and policy combinations;
 - canonical encoding, digest, unsupported-schema, altered-decision, and
   redacted-debug tests;
 - typed GitHub event-envelope tests proving derivation from authenticated

@@ -1438,10 +1438,10 @@ const fn trust_gate_evidence(snapshot: &TrustSnapshot) -> (JobEventTrust, JobSou
         TrustSourceClass::Dependabot | TrustSourceClass::Automation => {
             (JobEventTrust::Untrusted, JobSourceKind::Dependabot)
         }
-        // The legacy gate has no `incomplete` variant. Snapshot authority is
+        // The durable job gate has no `incomplete` variant. Snapshot authority is
         // authoritative and denies environments/secrets; `fork` is retained
         // only as a conservative storage-compatible projection.
-        TrustSourceClass::Fork | TrustSourceClass::Incomplete => {
+        TrustSourceClass::Fork | TrustSourceClass::MergeQueue | TrustSourceClass::Incomplete => {
             (JobEventTrust::Untrusted, JobSourceKind::Fork)
         }
     }
@@ -1479,6 +1479,24 @@ mod source_evidence_tests {
             .expect("valid push trust")
     }
 
+    fn merge_queue() -> TrustSnapshot {
+        TrustPolicy::current()
+            .evaluate(
+                TrustEvidence::new(TrustOriginKind::ProviderWebhook, TrustEventKind::MergeGroup)
+                    .with_original_actor(actor(TrustAutomationKind::None))
+                    .with_repositories(repository("42"), repository("42"))
+                    .with_refs(
+                        "refs/heads/gh-readonly-queue/main/pr-7",
+                        "refs/heads/main",
+                        "refs/heads/gh-readonly-queue/main/pr-7",
+                    )
+                    .with_revisions("group", "target", "group")
+                    .with_fork(false)
+                    .with_token_recursion(TrustTokenRecursion::Suppressed),
+            )
+            .expect("valid merge-queue trust")
+    }
+
     #[test]
     fn exact_github_integer_limit_has_exact_boundaries() {
         assert_eq!(
@@ -1496,7 +1514,7 @@ mod source_evidence_tests {
     }
 
     #[test]
-    fn legacy_job_gate_is_only_a_projection_of_the_exact_snapshot() {
+    fn job_gate_is_only_a_projection_of_the_exact_snapshot() {
         let trusted = same_repository_push(TrustAutomationKind::None);
         assert_eq!(
             trust_gate_evidence(&trusted),
@@ -1508,6 +1526,13 @@ mod source_evidence_tests {
         assert_eq!(
             trust_gate_evidence(&automation),
             (JobEventTrust::Untrusted, JobSourceKind::Dependabot)
+        );
+
+        let merge_queue = merge_queue();
+        assert_eq!(merge_queue.source_class(), TrustSourceClass::MergeQueue);
+        assert_eq!(
+            trust_gate_evidence(&merge_queue),
+            (JobEventTrust::Untrusted, JobSourceKind::Fork)
         );
 
         let incomplete = TrustPolicy::current()

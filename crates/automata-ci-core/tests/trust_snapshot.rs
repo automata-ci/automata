@@ -58,6 +58,18 @@ fn fork_pull_request(automation: TrustAutomationKind) -> TrustEvidence {
     .with_source_actor(actor("101", automation))
 }
 
+fn merge_queue() -> TrustEvidence {
+    complete_evidence(
+        TrustOriginKind::ProviderWebhook,
+        TrustEventKind::MergeGroup,
+        repository("42", "7"),
+        repository("42", "7"),
+        false,
+        actor("100", TrustAutomationKind::None),
+    )
+    .with_token_recursion(TrustTokenRecursion::Suppressed)
+}
+
 #[derive(Clone, Copy)]
 struct ExpectedAuthority {
     permissions: TrustPermissionAuthority,
@@ -134,6 +146,19 @@ fn multidimensional_source_truth_table_reduces_every_consumer_coherently() {
         (
             same_repository_push(TrustAutomationKind::Other),
             TrustSourceClass::Automation,
+            ExpectedAuthority {
+                permissions: TrustPermissionAuthority::ReadOnly,
+                secrets: TrustSecretAuthority::Denied,
+                cache: TrustCacheAuthority::ReadOnly,
+                environment: TrustEnvironmentAuthority::Denied,
+                oidc: TrustOidcAuthority::Denied,
+                outputs: TrustOutputAuthority::Untrusted,
+                results: TrustResultsAuthority::Untrusted,
+            },
+        ),
+        (
+            merge_queue(),
+            TrustSourceClass::MergeQueue,
             ExpectedAuthority {
                 permissions: TrustPermissionAuthority::ReadOnly,
                 secrets: TrustSecretAuthority::Denied,
@@ -271,15 +296,18 @@ fn transitive_source_restrictions_survive_merge_group_and_workflow_run() {
         (TrustOriginKind::ProviderWebhook, TrustEventKind::MergeGroup),
         (TrustOriginKind::WorkflowRun, TrustEventKind::WorkflowRun),
     ] {
-        let evidence = complete_evidence(
+        let mut evidence = complete_evidence(
             origin,
             event,
             repository("42", "7"),
             repository("42", "7"),
             false,
             actor("100", TrustAutomationKind::None),
-        )
-        .with_upstream(
+        );
+        if event == TrustEventKind::MergeGroup {
+            evidence = evidence.with_token_recursion(TrustTokenRecursion::Suppressed);
+        }
+        let evidence = evidence.with_upstream(
             TrustUpstreamEvidence::new(
                 Sha256Digest::from_bytes([7; 32]),
                 2,

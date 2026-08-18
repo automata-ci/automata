@@ -704,7 +704,11 @@ async fn database_now_minus_sixty_cannot_commit_expired_provider_or_membership_a
             candidate,
             caller_now,
         )?;
-        let finalizer = PostgresHumanSignInFinalizer::new(pool.clone(), encryption);
+        // Expired database authority is terminal before token encryption. An
+        // unavailable key provider makes that ordering observable and prevents
+        // a regression from being hidden by a fast local finalization.
+        let finalizer =
+            PostgresHumanSignInFinalizer::new(pool.clone(), Arc::new(UnavailableKeyProvider));
         assert!(matches!(
             finalizer.finalize(request).await?,
             FinalizeSignInOutcome::Expired

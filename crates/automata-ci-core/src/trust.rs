@@ -819,10 +819,10 @@ impl TrustEvidence {
                 base && self.source_actor.is_some() && self.privileged_transition
             }
             TrustEventKind::MergeGroup => {
-                base && self
-                    .upstream
-                    .as_ref()
-                    .is_some_and(|upstream| upstream.evidence_complete && upstream.chain_depth <= 3)
+                base && self.token_recursion == TrustTokenRecursion::Suppressed
+                    && self.upstream.as_ref().is_none_or(|upstream| {
+                        upstream.evidence_complete && upstream.chain_depth <= 3
+                    })
             }
             TrustEventKind::RepositoryDispatch => {
                 base && (self.token_recursion == TrustTokenRecursion::External
@@ -855,6 +855,8 @@ pub enum TrustSourceClass {
     Dependabot,
     /// Complete evidence for another provider automation actor.
     Automation,
+    /// Complete provider-authenticated merge-queue evidence without constituent authority.
+    MergeQueue,
     /// Missing transitive or direct evidence; all authority is denied.
     Incomplete,
 }
@@ -1261,6 +1263,9 @@ fn source_classification(
     if let Some(upstream) = &evidence.upstream {
         return Ok(upstream.source);
     }
+    if evidence.event == TrustEventKind::MergeGroup {
+        return Ok(TrustSourceClass::MergeQueue);
+    }
     let other_automation =
         source_actor.is_some_and(|actor| actor.automation == TrustAutomationKind::Other);
     Ok(if dependabot {
@@ -1313,7 +1318,9 @@ fn authority_decision(
             outputs: TrustOutputAuthority::Untrusted,
             results: TrustResultsAuthority::Untrusted,
         },
-        TrustSourceClass::Dependabot | TrustSourceClass::Automation => TrustAuthorityDecision {
+        TrustSourceClass::Dependabot
+        | TrustSourceClass::Automation
+        | TrustSourceClass::MergeQueue => TrustAuthorityDecision {
             permissions: TrustPermissionAuthority::ReadOnly,
             secrets: TrustSecretAuthority::Denied,
             cache: TrustCacheAuthority::ReadOnly,

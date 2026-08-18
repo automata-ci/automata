@@ -90,7 +90,7 @@ pub enum GithubEventSourceRule {
     EventRepository,
     /// Source is the pull-request head repository and target is the base repository.
     PullRequestHeadRepository,
-    /// The merge group is target-owned; constituent source repositories require later evidence.
+    /// The merge group is target-owned and remains read-only without constituent evidence.
     MergeGroupTargetWithUnresolvedConstituents,
 }
 
