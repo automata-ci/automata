@@ -212,7 +212,7 @@ falls back to the shared manifest and archive. This local tier can keep that
 runner warm during a simultaneous object-store interruption; another runner
 requires the shared store.
 
-Runner product schema 7 requires an explicit object-store trust policy.
+Runner product schema 8 requires an explicit object-store trust policy.
 `web_pki` uses platform roots; `private_ca` loads exactly one bounded CA through
 an existing secure-input descriptor and installs it into an otherwise empty
 root store. The PEM bytes must use canonical RFC 7468 64-column/LF encoding

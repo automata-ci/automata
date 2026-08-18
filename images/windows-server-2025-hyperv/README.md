@@ -6,12 +6,14 @@ image, a signing key, a signed promotion envelope, or physical-host acceptance
 evidence.
 
 The recipe starts from one architecture-specific Server Core 2025 manifest
-digest. `sources.lock.json` pins the official PowerShell 7.6.5, Git for Windows
-GNU tar 1.35, and Node.js 24.19.0 archives by HTTPS URL and SHA-256. The build
-context preparer downloads or accepts those exact archives, verifies them
-before copying, and the in-image installer verifies them again before
-extraction. Mutable base tags, placeholder digests, unreviewed redirects, and
-changed local executables fail closed.
+digest. `sources.lock.json` pins the official PowerShell 7.6.5 and Node.js
+24.19.0 archives by HTTPS URL and SHA-256. The build context preparer downloads
+or accepts those exact archives, verifies them before copying, and the in-image
+installer verifies them again before extraction. Mutable base tags, placeholder
+digests, unreviewed redirects, and changed local executables fail closed. GNU
+tar is deliberately absent while Windows action materialization remains
+unsupported; it must return with the broker-owned retained-file-identity
+implementation and a reviewed, non-vulnerable binary source.
 
 The guest agent and `automata-sha256` are repository-owned binaries. Build them
 twice from an exact commit and require byte-identical outputs:
@@ -49,12 +51,12 @@ images\windows-server-2025-hyperv\collect-qualification.ps1 `
 
 `windows-image-pipeline.py assemble` consumes that qualification, the retained
 build-input lock, an exact source commit, an independently selected promotion
-serial, and a fresh revocation generation/window. It emits canonical in-toto
-provenance, SPDX 2.3 inventory, patch/tool evidence, revocation evidence, the
-runner manifest/lock, and the exact compact schema-v2 promotion payload. The
-command refuses every `candidate_fixture` field, mutable or placeholder image,
-zero serial/generation, stale revocation window, revoked target image, unknown
-field, or mismatched digest.
+serial, issuance instant, and fresh revocation generation/window. It emits
+canonical in-toto provenance, SPDX 2.3 inventory, patch/tool evidence,
+revocation evidence, the runner manifest/lock, and the exact compact schema-v1
+promotion payload. The command refuses every `candidate_fixture` field,
+mutable or placeholder image, zero serial/generation, stale revocation window,
+revoked target image, unknown field, or mismatched digest.
 
 ```powershell
 python scripts\ci\windows-image-pipeline.py assemble `
@@ -66,7 +68,6 @@ python scripts\ci\windows-image-pipeline.py assemble `
   --source-commit <commit> `
   --builder-id https://builders.automata.dev/windows-hyperv/v1 `
   --issued-at-unix-millis <millis> `
-  --expires-at-unix-millis <millis> `
   --promotion-serial <positive-monotonic-serial> `
   --revocation-generation <positive-monotonic-generation> `
   --output target\windows-image-promotion
@@ -86,14 +87,20 @@ python scripts\ci\windows-image-pipeline.py sign `
   --output target\windows-image-promotion\promotion.envelope.json
 ```
 
-The canonical broker independently reads the host files, resolves the key ID
-through its administrator/control-owned versioned trust bundle, verifies the
-signature and exact profile/image/host inputs, and enforces durable
-per-key/profile promotion-serial and revocation-generation high-water marks.
-Runner-local parsing is only a fail-fast check and cannot authorize action or
-Node capabilities. No action capability is registered unless control verifies
-the broker-signed admission receipt and that receipt attests the sealed-action
-graph materialization profile.
+The runner configuration pins the exact Ed25519 key ID and public key, and its
+filesystem verifier binds the signature to the exact profile, image, manifest,
+lock, evidence references, and revocation generation. Promotion is image
+evidence only: the registered and live Windows inventories remain shell-only.
+Action and Node capabilities stay absent until a broker-owned production
+materializer can retain file identity from verification through execution.
+
+The hermetic pipeline contract runs in the unified Linux CI workflow:
+
+```text
+python3 scripts/ci/tests/windows-image-pipeline.test.py
+```
+
+That contract does not build, publish, qualify, or sign an image.
 
 Actual image publication, external signing, registry verification, dedicated
 Hyper-V-host compatibility, broker admission, hostile testing, patch review,

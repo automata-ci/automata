@@ -4,7 +4,7 @@
 - Available slice: read-only `automata local doctor`, source-only
   `automata local check`, x86-64 Linux-only sealed `automata local init`,
   recorded-metadata `status`, exact confirmed `reset`, and explicit
-  runner-schema-7 evaluation through the fixed-relay `LocalDocker` provider;
+  runner-schema-8 evaluation through the fixed-relay `LocalDocker` provider;
   init starts no services and there is no `automata local run`, `up`, or `down`
   yet
 - Current implementation checkpoints: 2B.1 pinned Docker context and immutable
@@ -862,7 +862,7 @@ renderer does not invent a shell client, test helper, compatibility alias, or
 placeholder service-init command.
 The initializer and server share the production S3 connection parser and the
 sole validated-config-to-store AWS SDK construction boundary. Runner product
-schema 7 independently requires the same closed
+schema 8 independently requires the same closed
 trust choice for every runner-side S3 client. Local HTTPS rendering selects
 exact private-CA trust and mounted bounded `SecretSource` file references for
 the CA and credentials on all three surfaces; the private root is never merged
@@ -887,7 +887,7 @@ the desired `N`, profile, render inputs, data, and run history.
 
 Status: evaluation provider and its closed Results gateway foundation are
 implemented behind the existing sandbox/provider interfaces. Runner product
-schema 7 binds the sealed desired-plan digest and the exact classic/config-ID
+schema 8 binds the sealed desired-plan digest and the exact classic/config-ID
 or containerd/manifest-ID representation of the imported proxy. The provider
 requires Docker Engine 28/API 1.48 and consumes one externally provisioned
 plan-labeled transit network, running numeric Results target, and protocol-2

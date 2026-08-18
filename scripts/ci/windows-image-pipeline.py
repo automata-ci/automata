@@ -28,13 +28,9 @@ EVIDENCE_MEDIA_TYPE = (
 )
 MAX_JSON_BYTES = 16 * 1024 * 1024
 MAX_ARTIFACT_BYTES = 256 * 1024 * 1024
-MAX_PROMOTION_LIFETIME_MILLIS = 7 * 24 * 60 * 60 * 1000
 PROMOTION_PAYLOAD_FIELDS = (
     "schema_version",
     "decision",
-    "promotion_serial",
-    "issued_at_unix_millis",
-    "expires_at_unix_millis",
     "profile_id",
     "base_image",
     "image",
@@ -57,7 +53,7 @@ IMMUTABLE_IMAGE = re.compile(
 )
 IDENTIFIER = re.compile(r"[a-z0-9][a-z0-9._-]{2,127}")
 KEY_HANDLE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{2,255}")
-EXPECTED_SOURCES = ("pwsh", "gnu_tar", "node24")
+EXPECTED_SOURCES = ("pwsh", "node24")
 EXPECTED_TOOLS = (
     ("pwsh", r"C:\Program Files\PowerShell\7\pwsh.exe"),
     (
@@ -65,7 +61,6 @@ EXPECTED_TOOLS = (
         r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
     ),
     ("cmd", r"C:\Windows\System32\cmd.exe"),
-    ("tar", r"C:\automata\tools\tar\tar.exe"),
     ("sha256", r"C:\automata\tools\hash\automata-sha256.exe"),
     ("node24", r"C:\automata\externals\node24\node.exe"),
 )
@@ -712,11 +707,9 @@ def load_qualification(path: pathlib.Path, image: str, inputs: dict) -> dict:
             fail("qualified tool version is invalid")
     if not tools[0]["version"].endswith("7.6.5"):
         fail("qualified PowerShell version differs from the source lock")
-    if tools[3]["version"] != "tar (GNU tar) 1.35":
-        fail("qualified GNU tar version differs from the source lock")
-    if tools[4]["version"] != "automata-sha256 1.0.0":
+    if tools[3]["version"] != "automata-sha256 1.0.0":
         fail("qualified hash helper version differs")
-    if tools[5]["version"] != "v24.19.0":
+    if tools[4]["version"] != "v24.19.0":
         fail("qualified Node 24 version differs from the source lock")
     return value
 
@@ -725,7 +718,6 @@ def load_revocations(
     path: pathlib.Path,
     generation: int,
     issued: int,
-    expires: int,
 ) -> dict:
     value = exact_object(
         parse_json(read_regular(path), "revocation input", canonical=True),
@@ -753,7 +745,7 @@ def load_revocations(
         or value["issued_at_unix_millis"] <= 0
         or value["expires_at_unix_millis"] <= value["issued_at_unix_millis"]
         or value["issued_at_unix_millis"] > issued
-        or value["expires_at_unix_millis"] < expires
+        or value["expires_at_unix_millis"] <= issued
     ):
         fail("revocation input generation or validity window differs")
     revoked = value["revoked_images"]
@@ -772,6 +764,30 @@ def timestamp(unix_millis: int) -> str:
     except (OverflowError, OSError, ValueError):
         fail("promotion timestamp is outside the supported range")
     return value.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def parse_timestamp(value: object, description: str) -> int:
+    if not isinstance(value, str) or not re.fullmatch(
+        r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z",
+        value,
+    ):
+        fail(f"{description} timestamp is not canonical")
+    try:
+        parsed = datetime.datetime.strptime(
+            value, "%Y-%m-%dT%H:%M:%S.%fZ"
+        ).replace(tzinfo=datetime.timezone.utc)
+    except ValueError:
+        fail(f"{description} timestamp is invalid")
+    epoch = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
+    delta = parsed - epoch
+    unix_millis = (
+        delta.days * 24 * 60 * 60 * 1000
+        + delta.seconds * 1000
+        + delta.microseconds // 1000
+    )
+    if unix_millis <= 0 or timestamp(unix_millis) != value:
+        fail(f"{description} timestamp is invalid")
+    return unix_millis
 
 
 def make_provenance(
@@ -961,9 +977,7 @@ def reference_document(
     if revocations is not None:
         value.update(
             {
-                "expires_at_unix_millis": revocations["expires_at_unix_millis"],
                 "generation": revocations["generation"],
-                "issued_at_unix_millis": revocations["issued_at_unix_millis"],
                 "revoked_images": revocations["revoked_images"],
             }
         )
@@ -977,21 +991,17 @@ def assemble(arguments: argparse.Namespace) -> None:
         fail("promotion source commit differs from the build input lock")
     image, image_sha = image_digest(arguments.image, "promoted image")
     issued = arguments.issued_at_unix_millis
-    expires = arguments.expires_at_unix_millis
     serial = arguments.promotion_serial
     generation = arguments.revocation_generation
     if (
         type(issued) is not int
-        or type(expires) is not int
         or type(serial) is not int
         or type(generation) is not int
         or issued <= 0
-        or expires <= issued
-        or expires - issued > MAX_PROMOTION_LIFETIME_MILLIS
         or serial <= 0
         or generation <= 0
     ):
-        fail("promotion serial, generation, or validity window is invalid")
+        fail("promotion serial, generation, or issuance is invalid")
     if (
         not isinstance(arguments.builder_id, str)
         or len(arguments.builder_id) > 512
@@ -1000,9 +1010,7 @@ def assemble(arguments: argparse.Namespace) -> None:
     ):
         fail("builder identity must be one bounded HTTPS URI")
     qualification = load_qualification(arguments.qualification, image, inputs)
-    revocations = load_revocations(
-        arguments.revocations, generation, issued, expires
-    )
+    revocations = load_revocations(arguments.revocations, generation, issued)
     if image in revocations["revoked_images"]:
         fail("promoted image is revoked")
 
@@ -1109,11 +1117,8 @@ def assemble(arguments: argparse.Namespace) -> None:
         }
         image_lock_bytes = canonical_json(image_lock)
         payload = {
-            "schema_version": 2,
+            "schema_version": 1,
             "decision": "promote",
-            "promotion_serial": serial,
-            "issued_at_unix_millis": issued,
-            "expires_at_unix_millis": expires,
             "profile_id": PROFILE_ID,
             "base_image": lock["base_image"],
             "image": image,
@@ -1249,10 +1254,8 @@ def verify_bundle(directory: pathlib.Path) -> dict:
                 }
                 if kind != "revocations"
                 else {
-                    "expires_at_unix_millis",
                     "generation",
                     "image",
-                    "issued_at_unix_millis",
                     "kind",
                     "profile_id",
                     "revoked_images",
@@ -1314,9 +1317,6 @@ def verify_bundle(directory: pathlib.Path) -> dict:
             type(payload[name]) is not int
             for name in (
                 "schema_version",
-                "promotion_serial",
-                "issued_at_unix_millis",
-                "expires_at_unix_millis",
                 "revocation_generation",
             )
         )
@@ -1345,14 +1345,9 @@ def verify_bundle(directory: pathlib.Path) -> dict:
     ):
         valid_sha(payload[name], f"promotion payload {name}")
     if (
-        payload["schema_version"] != 2
+        payload["schema_version"] != 1
         or payload["decision"] != "promote"
-        or payload["promotion_serial"] <= 0
         or payload["revocation_generation"] <= 0
-        or payload["issued_at_unix_millis"] <= 0
-        or payload["expires_at_unix_millis"] <= payload["issued_at_unix_millis"]
-        or payload["expires_at_unix_millis"] - payload["issued_at_unix_millis"]
-        > MAX_PROMOTION_LIFETIME_MILLIS
         or payload["profile_id"] != PROFILE_ID
         or payload["base_image"] != lock["base_image"]
         or payload["image"] != image
@@ -1378,24 +1373,10 @@ def verify_bundle(directory: pathlib.Path) -> dict:
 
     revocation_reference = reference_documents["revocations"]
     if (
-        any(
-            type(revocation_reference[name]) is not int
-            for name in (
-                "generation",
-                "issued_at_unix_millis",
-                "expires_at_unix_millis",
-            )
-        )
+        type(revocation_reference["generation"]) is not int
         or revocation_reference["generation"] <= 0
-        or revocation_reference["issued_at_unix_millis"] <= 0
-        or revocation_reference["expires_at_unix_millis"]
-        <= revocation_reference["issued_at_unix_millis"]
-        or revocation_reference["issued_at_unix_millis"]
-        > payload["issued_at_unix_millis"]
-        or revocation_reference["expires_at_unix_millis"]
-        < payload["expires_at_unix_millis"]
     ):
-        fail("revocation evidence is stale or outside the promotion window")
+        fail("revocation evidence generation is invalid")
     revoked_images = revocation_reference["revoked_images"]
     if (
         not isinstance(revoked_images, list)
@@ -1409,6 +1390,65 @@ def verify_bundle(directory: pathlib.Path) -> dict:
         fail("promotion bundle targets a revoked image")
 
     provenance = subject_documents["provenance"]
+    sbom = subject_documents["sbom"]
+    try:
+        started = provenance["predicate"]["runDetails"]["metadata"]["startedOn"]
+        finished = provenance["predicate"]["runDetails"]["metadata"]["finishedOn"]
+        created = sbom["creationInfo"]["created"]
+    except (KeyError, TypeError):
+        fail("evidence issuance timestamp is absent")
+    if started != finished or started != created:
+        fail("evidence issuance timestamps differ")
+    issued = parse_timestamp(started, "evidence issuance")
+
+    revocation_subject = exact_object(
+        subject_documents["revocations"],
+        {
+            "expires_at_unix_millis",
+            "generation",
+            "issued_at_unix_millis",
+            "profile_id",
+            "revoked_images",
+            "schema_version",
+        },
+        "revocation subject",
+    )
+    if (
+        any(
+            type(revocation_subject[name]) is not int
+            for name in (
+                "schema_version",
+                "generation",
+                "issued_at_unix_millis",
+                "expires_at_unix_millis",
+            )
+        )
+        or revocation_subject["schema_version"] != 1
+        or revocation_subject["profile_id"] != PROFILE_ID
+        or revocation_subject["generation"] != revocation_reference["generation"]
+        or revocation_subject["revoked_images"] != revoked_images
+        or revocation_subject["issued_at_unix_millis"] <= 0
+        or revocation_subject["expires_at_unix_millis"]
+        <= revocation_subject["issued_at_unix_millis"]
+        or revocation_subject["issued_at_unix_millis"] > issued
+        or revocation_subject["expires_at_unix_millis"] <= issued
+    ):
+        fail("revocation subject differs or has an invalid validity window")
+
+    _, image_sha = image_digest(image, "promoted image")
+    try:
+        namespace = sbom["documentNamespace"]
+    except (KeyError, TypeError):
+        fail("SBOM document namespace is absent")
+    namespace_prefix = f"https://automata.dev/spdx/windows-2025/{image_sha}/"
+    if not isinstance(namespace, str) or not namespace.startswith(namespace_prefix):
+        fail("SBOM document namespace differs")
+    serial_text = namespace.removeprefix(namespace_prefix)
+    if not serial_text.isascii() or not serial_text.isdecimal():
+        fail("SBOM promotion serial is invalid")
+    serial = int(serial_text)
+    if serial <= 0 or str(serial) != serial_text:
+        fail("SBOM promotion serial is invalid")
     try:
         builder_id = provenance["predicate"]["runDetails"]["builder"]["id"]
     except (KeyError, TypeError):
@@ -1420,7 +1460,6 @@ def verify_bundle(directory: pathlib.Path) -> dict:
         or len(builder_id) > 512
     ):
         fail("provenance builder identity is invalid")
-    _, image_sha = image_digest(image, "promoted image")
     expected_subjects = {
         "provenance": make_provenance(
             image,
@@ -1429,7 +1468,7 @@ def verify_bundle(directory: pathlib.Path) -> dict:
             lock_bytes,
             inputs,
             builder_id,
-            payload["issued_at_unix_millis"],
+            issued,
         ),
         "sbom": make_sbom(
             image,
@@ -1437,8 +1476,8 @@ def verify_bundle(directory: pathlib.Path) -> dict:
             lock,
             inputs,
             qualification,
-            payload["promotion_serial"],
-            payload["issued_at_unix_millis"],
+            serial,
+            issued,
         ),
         "patch_report": {
             "image": image,
@@ -1450,11 +1489,11 @@ def verify_bundle(directory: pathlib.Path) -> dict:
             "schema_version": 1,
         },
         "revocations": {
-            "expires_at_unix_millis": revocation_reference[
+            "expires_at_unix_millis": revocation_subject[
                 "expires_at_unix_millis"
             ],
             "generation": revocation_reference["generation"],
-            "issued_at_unix_millis": revocation_reference[
+            "issued_at_unix_millis": revocation_subject[
                 "issued_at_unix_millis"
             ],
             "profile_id": PROFILE_ID,
@@ -1469,7 +1508,6 @@ def verify_bundle(directory: pathlib.Path) -> dict:
 
 def verify_command(arguments: argparse.Namespace) -> None:
     payload = verify_bundle(arguments.bundle)
-    print(f"promotion_serial={payload['promotion_serial']}")
     print(f"revocation_generation={payload['revocation_generation']}")
     print(
         "promotion_payload_sha256="
@@ -1565,7 +1603,6 @@ def sign(arguments: argparse.Namespace) -> None:
                 }
             )
             write_new_regular(output, envelope_bytes, 0o600, "promotion envelope")
-    print(f"promotion_serial={payload['promotion_serial']}")
     print(f"promotion_envelope_sha256={sha256(envelope_bytes)}")
 
 
@@ -1599,7 +1636,6 @@ def parser() -> argparse.ArgumentParser:
     evidence.add_argument("--source-commit", required=True)
     evidence.add_argument("--builder-id", required=True)
     evidence.add_argument("--issued-at-unix-millis", required=True, type=int)
-    evidence.add_argument("--expires-at-unix-millis", required=True, type=int)
     evidence.add_argument("--promotion-serial", required=True, type=int)
     evidence.add_argument("--revocation-generation", required=True, type=int)
     evidence.add_argument("--output", required=True, type=pathlib.Path)

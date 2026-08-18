@@ -17,11 +17,11 @@ follow the
 [profile publication guide](https://github.com/automata-ci/automata/blob/main/images/github-hosted-ubuntu-24.04-x64/README.md)
 before trusting a protected-main candidate.
 
-Product schema v7 accepts exactly one sandbox provider. Host runners use the
+Product schema v8 accepts exactly one sandbox provider. Host runners use the
 top-level `podman` object and require `state.podman`. Kubernetes and local
 Docker runners omit every provider-specific state root and use a top-level
 `kubernetes` or `local_docker` object. Windows and macOS runners use their
-matching provider name in both locations. All non-v7 schemas,
+matching provider name in both locations. All non-v8 schemas,
 `windows_native`, and the removed macOS native key are rejected, not migrated.
 The Kubernetes runner loads credentials through standard in-cluster or ambient
 kubeconfig discovery; the JSON remains secret-free.
@@ -206,8 +206,9 @@ reference record as an in-toto or SPDX document. The manifest and lock digests
 are pinned in runner configuration. All evidence must bind the configured profile,
 base image, output image, guest path, workspace, and exact x86-64 Hyper-V,
 offline, unprivileged policy. The manifest's tool entries must exactly match
-the configured `pwsh.exe`, `powershell.exe`, `cmd.exe`, `tar.exe`,
-`automata-sha256.exe`, and each configured Node 12/16/20/24 executable. Missing,
+the configured `pwsh.exe`, `powershell.exe`, `cmd.exe`,
+`automata-sha256.exe`, and each configured Node 12/16/20/24 executable. GNU tar
+remains absent while Windows action materialization is unsupported. Missing,
 malformed, revoked, substituted, or digest-mismatched material stops startup.
 
 The resulting inventory advertises

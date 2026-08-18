@@ -207,8 +207,8 @@ fn add_promotion(fixture: &mut EvidenceFixture) {
             "registry.example/automata/windows-runner@sha256:{}",
             "1".repeat(64)
         ),
-        manifest_sha256: "8469373351b458633450cd4f28e24b18fa756832a7917c9d8ae2a82ad6241c23",
-        lock_sha256: "181bc78f2993a8221f0ab4aa6d01f53ef05b02ac1755ffd84c1c0abf0f3c6747",
+        manifest_sha256: "b9101ed7a45c49597920ae9fd7505cdafe8a924cd9c4e549f183e4564a88fa6f",
+        lock_sha256: "2592638daf5fd1db37ea712e3ef9822cb9c5f4206214d38033248741bb454e7e",
         provenance_sha256: "8450f524b6efd5cc9017b805dd8803a1079dbc222c23ad4e890994d662f8bb25",
         sbom_sha256: "280ba2ce2e4ce8767a7392fbc8176e6d98aebaf6e6e4595e49d88eeab6fcb655",
         patch_report_sha256: "fd34d37ea605013011baa61331834de11ffd476584a4ba9cc2bc09ed0356d9fb",
@@ -314,7 +314,7 @@ fn internal_windows_fixture_selects_only_hyperv_containers() {
     assert!(config.executor().toolchain().pwsh().is_some());
     assert!(config.executor().toolchain().powershell().is_some());
     assert!(config.executor().toolchain().cmd().is_some());
-    assert!(config.executor().toolchain().tar().is_some());
+    assert!(config.executor().toolchain().tar().is_none());
     assert!(config.executor().toolchain().sha256sum().is_some());
     assert!(config.executor().toolchain().node24().is_some());
     assert_eq!(windows.image_admission(), WindowsImageAdmission::Unverified);
@@ -476,7 +476,7 @@ fn exact_external_promotion_keeps_actions_unadvertised_without_a_broker_material
         request.binding().profile(),
         request.environment().attestation()
     );
-    assert_eq!(request.probe_policy().contract_schema_version(), 1);
+    assert_eq!(request.probe_policy().contract_schema_version(), 2);
     assert!(
         request
             .probe_policy()

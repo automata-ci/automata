@@ -562,7 +562,6 @@ fn expected_tools(
         (ToolKind::Pwsh, toolchain.pwsh()),
         (ToolKind::Powershell, toolchain.powershell()),
         (ToolKind::Cmd, toolchain.cmd()),
-        (ToolKind::Tar, toolchain.tar()),
         (ToolKind::Sha256, toolchain.sha256sum()),
     ] {
         tools.insert(kind, path.ok_or(WindowsImageVerificationError::Mismatch)?);

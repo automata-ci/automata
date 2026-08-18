@@ -1459,8 +1459,7 @@ pub async fn forward_stdio(_socket: &Path) -> Result<(), GuestProtocolError> {
 #[cfg(any(unix, windows))]
 pub async fn serve_stdio_once() -> Result<(), GuestProtocolError> {
     let mut input = tokio::io::stdin();
-    let frame = read_frame(&mut input).await?;
-    let request: GuestRequest = decode_frame(&frame)?;
+    let request = read_one_shot_request(&mut input).await?;
     let response = match immediate_rejection(&request) {
         Some(response) => response,
         None => handle_request(request, None, false).await,
@@ -1708,6 +1707,15 @@ async fn require_eof<R: AsyncRead + Unpin>(reader: &mut R) -> Result<(), GuestPr
         Ok(_) => Err(GuestProtocolError::InvalidFrame),
         Err(error) => Err(GuestProtocolError::Io(error)),
     }
+}
+
+#[cfg(any(unix, windows))]
+async fn read_one_shot_request<R: AsyncRead + Unpin>(
+    reader: &mut R,
+) -> Result<GuestRequest, GuestProtocolError> {
+    let frame = read_frame(reader).await?;
+    require_eof(reader).await?;
+    decode_frame(&frame)
 }
 
 #[cfg(unix)]
@@ -2538,6 +2546,22 @@ mod tests {
         let mut frame = encode_frame(&response).expect("frame");
         frame.push(0);
         assert!(decode_frame::<GuestResponse>(&frame).is_err());
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn one_shot_stdio_rejects_trailing_input() {
+        let request = GuestRequest::Probe {
+            protocol: GUEST_PROTOCOL_VERSION,
+            operation_id: OPERATION_ONE.into(),
+        };
+        let mut input = encode_frame(&request).expect("request frame");
+        input.push(0);
+
+        assert!(matches!(
+            read_one_shot_request(&mut input.as_slice()).await,
+            Err(GuestProtocolError::InvalidFrame)
+        ));
     }
 
     #[cfg(unix)]

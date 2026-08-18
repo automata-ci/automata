@@ -58,7 +58,7 @@ Assert-Sha256 $sourceLockPath $inputLock.source_lock_sha256
 Assert-Sha256 (Join-Path $buildRoot 'Containerfile') $inputLock.containerfile_sha256
 Assert-Sha256 (Join-Path $buildRoot 'install-image.ps1') $inputLock.install_script_sha256
 
-$expectedKinds = @('pwsh', 'gnu_tar', 'node24')
+$expectedKinds = @('pwsh', 'node24')
 $actualKinds = @($sourceLock.sources | ForEach-Object { $_.kind })
 if (($actualKinds -join "`n") -cne ($expectedKinds -join "`n")) {
     throw 'source lock artifact order differs'
@@ -75,13 +75,12 @@ foreach ($local in @($inputLock.guest_agent, $inputLock.hash_helper)) {
 
 $powerShellRoot = 'C:\Program Files\PowerShell\7'
 $nodeRoot = 'C:\automata\externals\node24'
-$tarRoot = 'C:\automata\tools\tar'
 $hashRoot = 'C:\automata\tools\hash'
 $guestRoot = 'C:\automata\guest'
 $temporaryRoot = 'C:\automata\temp'
 $workspaceRoot = 'C:\__w'
 New-Item -ItemType Directory -Force -Path @(
-    $powerShellRoot, $nodeRoot, $tarRoot, $hashRoot, $guestRoot,
+    $powerShellRoot, $nodeRoot, $hashRoot, $guestRoot,
     $temporaryRoot, $workspaceRoot, 'C:\automata\home', 'C:\automata\toolcache'
 ) | Out-Null
 
@@ -94,15 +93,6 @@ Expand-Archive -LiteralPath (Join-Path $buildRoot 'node-v24.19.0-win-x64.zip') `
 $nodeSource = Join-Path $nodeStage 'node-v24.19.0-win-x64'
 Copy-Item -Path (Join-Path $nodeSource '*') -Destination $nodeRoot -Recurse -Force
 
-$gitStage = Join-Path $buildRoot 'git-stage'
-Expand-Archive -LiteralPath (Join-Path $buildRoot 'MinGit-2.55.0.4-64-bit.zip') `
-    -DestinationPath $gitStage
-$gitBin = Join-Path $gitStage 'usr\bin'
-if (-not (Test-Path -LiteralPath (Join-Path $gitBin 'tar.exe') -PathType Leaf)) {
-    throw 'pinned Git for Windows archive does not contain GNU tar'
-}
-Copy-Item -Path (Join-Path $gitBin '*') -Destination $tarRoot -Recurse -Force
-
 Copy-Item -LiteralPath (Join-Path $buildRoot $inputLock.hash_helper.filename) `
     -Destination (Join-Path $hashRoot 'automata-sha256.exe')
 Copy-Item -LiteralPath (Join-Path $buildRoot $inputLock.guest_agent.filename) `
@@ -111,7 +101,6 @@ Copy-Item -LiteralPath (Join-Path $buildRoot $inputLock.guest_agent.filename) `
 $expectedPrograms = @(
     (Join-Path $powerShellRoot 'pwsh.exe'),
     (Join-Path $nodeRoot 'node.exe'),
-    (Join-Path $tarRoot 'tar.exe'),
     (Join-Path $hashRoot 'automata-sha256.exe'),
     (Join-Path $guestRoot 'automata-ci-sandbox-guest.exe')
 )
@@ -121,12 +110,10 @@ foreach ($program in $expectedPrograms) {
     }
 }
 
-$tarVersion = & (Join-Path $tarRoot 'tar.exe') --version | Select-Object -First 1
 $hashVersion = & (Join-Path $hashRoot 'automata-sha256.exe') --version
 $nodeVersion = & (Join-Path $nodeRoot 'node.exe') --version
 $pwshVersion = & (Join-Path $powerShellRoot 'pwsh.exe') -NoLogo -NoProfile -Command '$PSVersionTable.PSVersion.ToString()'
-if (-not $tarVersion.StartsWith('tar (GNU tar) ') `
-    -or -not $hashVersion.StartsWith('automata-sha256 ') `
+if (-not $hashVersion.StartsWith('automata-sha256 ') `
     -or $nodeVersion -cne 'v24.19.0' `
     -or $pwshVersion -cne '7.6.5') {
     throw 'installed image tool version differs from the source lock'
@@ -137,6 +124,9 @@ foreach ($root in @(
     'C:\automata\tools', $guestRoot
 )) {
     & icacls.exe $root /inheritance:r | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "could not remove inherited image ACL: $root"
+    }
     & icacls.exe $root /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' `
         '*S-1-5-32-545:(OI)(CI)RX' | Out-Null
     if ($LASTEXITCODE -ne 0) {
@@ -147,6 +137,9 @@ foreach ($root in @(
     $workspaceRoot, $temporaryRoot, 'C:\automata\home', 'C:\automata\toolcache'
 )) {
     & icacls.exe $root /inheritance:r | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "could not remove inherited image ACL: $root"
+    }
     & icacls.exe $root /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' `
         '*S-1-5-93-2-1:(OI)(CI)M' | Out-Null
     if ($LASTEXITCODE -ne 0) {

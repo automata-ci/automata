@@ -67,7 +67,7 @@ structure of [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
   retained; missing retained images do not block custody deletion. `local up`
   and `down` remain absent.
 - Evaluation-only fixed-relay Local Docker runner execution on Linux. Runner
-  schema 7 binds the private provider to an exact existing installation anchor,
+  schema 8 binds the private provider to an exact existing installation anchor,
   an already-present digest-pinned guest image, the sealed desired-plan digest,
   the exact classic-Docker/config-ID or containerd/manifest-ID representation
   of the daemon-local imported Results-proxy image, and an exact externally
@@ -103,7 +103,7 @@ structure of [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
   current-only `automata internal object-store ensure-bucket` image command.
   Server, initializer, and runner use closed bounded credential/trust
   configuration and the production AWS SDK client path; runner product schema
-  7 requires the same explicit trust choice. Config and SDK clients are one
+  8 requires the same explicit trust choice. Config and SDK clients are one
   inseparable store, canonical private-CA bytes and signing usage fail closed,
   connected-store diagnostics expose no bound state, validated transport is
   one closed security mode, and bucket creation is region-correct, idempotent,

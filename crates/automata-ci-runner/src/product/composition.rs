@@ -893,10 +893,6 @@ fn admit_configured_environment_profiles(
                     .clone(),
                 toolchain.python().cloned(),
                 toolchain
-                    .tar()
-                    .ok_or(RunnerProductError::ProviderConfiguration)?
-                    .clone(),
-                toolchain
                     .sha256sum()
                     .ok_or(RunnerProductError::ProviderConfiguration)?
                     .clone(),

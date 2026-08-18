@@ -10,6 +10,7 @@ import importlib.util
 import json
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -32,6 +33,24 @@ def digest(contents: bytes) -> str:
     return hashlib.sha256(contents).hexdigest()
 
 
+def rust_struct_fields(source: str, struct_name: str) -> tuple[str, ...]:
+    match = re.search(
+        rf"struct {re.escape(struct_name)} \{{(?P<body>.*?)^\}}",
+        source,
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    if match is None:
+        raise AssertionError(f"could not find Rust struct {struct_name}")
+    return tuple(
+        field.group(1)
+        for field in re.finditer(
+            r"^\s{4}([a-z][a-z0-9_]*):\s",
+            match.group("body"),
+            flags=re.MULTILINE,
+        )
+    )
+
+
 class WindowsImagePipelineTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
@@ -43,12 +62,10 @@ class WindowsImagePipelineTests(unittest.TestCase):
         self.artifacts.mkdir()
         self.source_contents = {
             "pwsh": b"reviewed-pwsh-archive",
-            "gnu_tar": b"reviewed-gnu-tar-archive",
             "node24": b"reviewed-node24-archive",
         }
         self.source_filenames = {
             "pwsh": "PowerShell-7.6.5-win-x64.zip",
-            "gnu_tar": "MinGit-2.55.0.4-64-bit.zip",
             "node24": "node-v24.19.0-win-x64.zip",
         }
         for kind, contents in self.source_contents.items():
@@ -125,7 +142,6 @@ class WindowsImagePipelineTests(unittest.TestCase):
                     + self.source_filenames[kind],
                     "version": {
                         "pwsh": "7.6.5",
-                        "gnu_tar": "1.35-git-for-windows-2.55.0.4",
                         "node24": "24.19.0",
                     }[kind],
                 }
@@ -157,7 +173,6 @@ class WindowsImagePipelineTests(unittest.TestCase):
             "pwsh": "PowerShell 7.6.5",
             "powershell": "5.1.26100.33296",
             "cmd": "Microsoft Windows [Version 10.0.26100.33296]",
-            "tar": "tar (GNU tar) 1.35",
             "sha256": "automata-sha256 1.0.0",
             "node24": "v24.19.0",
         }
@@ -214,7 +229,6 @@ class WindowsImagePipelineTests(unittest.TestCase):
             "source_commit": self.commit,
             "builder_id": "https://builders.automata.dev/windows-hyperv/v1",
             "issued_at_unix_millis": self.issued,
-            "expires_at_unix_millis": self.expires,
             "promotion_serial": 17,
             "revocation_generation": 9,
             "output": output,
@@ -240,6 +254,10 @@ class WindowsImagePipelineTests(unittest.TestCase):
             REPOSITORY_ROOT / "images" / "windows-server-2025-hyperv"
         )
         lock, _ = pipeline.load_source_lock(directory / "sources.lock.json")
+        self.assertEqual(
+            [source["kind"] for source in lock["sources"]],
+            ["pwsh", "node24"],
+        )
         containerfile = (directory / "Containerfile").read_text(encoding="utf-8")
         self.assertIn(lock["base_image"], containerfile)
         self.assertNotIn("sha256:" + "0" * 64, containerfile)
@@ -248,10 +266,62 @@ class WindowsImagePipelineTests(unittest.TestCase):
         qualification = (directory / "collect-qualification.ps1").read_text(
             encoding="utf-8"
         )
+        installer = (directory / "install-image.ps1").read_text(encoding="utf-8")
+        candidate_manifest = json.loads(
+            (
+                REPOSITORY_ROOT
+                / "images"
+                / "windows-server-2025-hyperv-candidate"
+                / "manifest.candidate.json"
+            ).read_bytes()
+        )
+        runner_fixture = json.loads(
+            (
+                REPOSITORY_ROOT
+                / "crates"
+                / "automata-ci-runner"
+                / "tests"
+                / "fixtures"
+                / "runner.windows.product.json"
+            ).read_bytes()
+        )
+        attributes = (REPOSITORY_ROOT / ".gitattributes").read_text(
+            encoding="utf-8"
+        ).splitlines()
         self.assertIn("--pull=false", build)
         self.assertNotIn("docker push", build.lower())
         self.assertIn("--isolation hyperv", qualification)
         self.assertIn("--network none", qualification)
+        self.assertIn(
+            "images/windows-server-2025-hyperv/Containerfile text eol=lf",
+            attributes,
+        )
+        self.assertIn(
+            "images/windows-server-2025-hyperv/*.ps1 text eol=lf",
+            attributes,
+        )
+        cleanup_check = "$removeExitCode = $LASTEXITCODE"
+        output_write = "[IO.File]::WriteAllText($outputPath"
+        self.assertIn(cleanup_check, qualification)
+        self.assertIn("could not remove the qualification container", qualification)
+        self.assertGreater(
+            qualification.index(output_write), qualification.index(cleanup_check)
+        )
+        self.assertNotIn("MinGit", installer)
+        self.assertNotIn(r"C:\automata\tools\tar", installer)
+        inheritance_checks = re.findall(
+            r"& icacls\.exe \$root /inheritance:r \| Out-Null\s+"
+            r"if \(\$LASTEXITCODE -ne 0\) \{\s+"
+            r'throw "could not remove inherited image ACL: \$root"\s+\}',
+            installer,
+        )
+        self.assertEqual(len(inheritance_checks), 2)
+        self.assertNotIn("Tool 'tar'", qualification)
+        self.assertIsNone(runner_fixture["executor"]["toolchain"]["tar"])
+        self.assertEqual(
+            [(tool["kind"], tool["path"]) for tool in candidate_manifest["tools"]],
+            list(pipeline.EXPECTED_TOOLS),
+        )
 
     def test_prepared_context_binds_every_local_and_remote_input(self) -> None:
         inputs = json.loads((self.context / "build-inputs.json").read_bytes())
@@ -277,8 +347,26 @@ class WindowsImagePipelineTests(unittest.TestCase):
     def test_bundle_is_canonical_digest_bound_and_has_no_fixture_escape(self) -> None:
         bundle = self.assemble()
         payload = pipeline.verify_bundle(bundle)
-        self.assertEqual(payload["promotion_serial"], 17)
+        self.assertEqual(payload["schema_version"], 1)
         self.assertEqual(payload["revocation_generation"], 9)
+        for removed in (
+            "promotion_serial",
+            "issued_at_unix_millis",
+            "expires_at_unix_millis",
+        ):
+            self.assertNotIn(removed, payload)
+        revocations = json.loads((bundle / "revocations.json").read_bytes())
+        self.assertNotIn("issued_at_unix_millis", revocations)
+        self.assertNotIn("expires_at_unix_millis", revocations)
+        revocation_subject = json.loads(
+            (bundle / "revocations.subject.json").read_bytes()
+        )
+        self.assertEqual(
+            revocation_subject["issued_at_unix_millis"], self.issued - 1000
+        )
+        self.assertEqual(
+            revocation_subject["expires_at_unix_millis"], self.expires + 1000
+        )
         for path in bundle.iterdir():
             self.assertNotIn(b"candidate_fixture", path.read_bytes())
         pairs = json.loads(
@@ -290,9 +378,6 @@ class WindowsImagePipelineTests(unittest.TestCase):
             [
                 "schema_version",
                 "decision",
-                "promotion_serial",
-                "issued_at_unix_millis",
-                "expires_at_unix_millis",
                 "profile_id",
                 "base_image",
                 "image",
@@ -309,6 +394,24 @@ class WindowsImagePipelineTests(unittest.TestCase):
                 "revocations_accepted",
             ],
         )
+
+    def test_generated_payload_matches_the_runner_verifier_schema(self) -> None:
+        bundle = self.assemble()
+        payload = json.loads((bundle / "promotion.payload.json").read_bytes())
+        verifier = (
+            REPOSITORY_ROOT
+            / "crates"
+            / "automata-ci-runner"
+            / "src"
+            / "product"
+            / "windows_image.rs"
+        ).read_text(encoding="utf-8")
+
+        self.assertEqual(
+            tuple(payload), rust_struct_fields(verifier, "PromotionPayload")
+        )
+        self.assertIn("#[serde(deny_unknown_fields)]", verifier)
+        self.assertEqual(tuple(payload), pipeline.PROMOTION_PAYLOAD_FIELDS)
 
     def test_fixture_marker_is_rejected_even_after_every_digest_is_nonzero(self) -> None:
         bundle = self.assemble()
@@ -375,7 +478,7 @@ class WindowsImagePipelineTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 pipeline.load_source_lock(self.lock_path)
         self.write_lock()
-        self.write_revocations(expires_at_unix_millis=self.expires - 1)
+        self.write_revocations(expires_at_unix_millis=self.issued)
         with self.assertRaisesRegex(SystemExit, "revocation input"):
             self.assemble(output=self.root / "stale")
         self.write_revocations()

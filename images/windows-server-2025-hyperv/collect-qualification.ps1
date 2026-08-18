@@ -22,6 +22,8 @@ New-Item -ItemType Directory -Path $scratch | Out-Null
 $probePath = Join-Path $scratch 'probe.ps1'
 $guestOutput = Join-Path $scratch 'guest.json'
 $container = $null
+$json = $null
+$removeExitCode = 0
 
 $probe = @'
 $ErrorActionPreference = 'Stop'
@@ -86,7 +88,6 @@ $document = [ordered]@{
         $pwsh,
         $windowsPowerShell,
         $cmd,
-        (Tool 'tar' 'C:\automata\tools\tar\tar.exe' @('--version')),
         (Tool 'sha256' 'C:\automata\tools\hash\automata-sha256.exe' @('--version')),
         (Tool 'node24' 'C:\automata\externals\node24\node.exe' @('--version'))
     )
@@ -150,13 +151,21 @@ try {
         workspace = $guest.workspace
     }
     $json = $qualified | ConvertTo-Json -Depth 8
-    [IO.File]::WriteAllText($outputPath, $json + "`n", [Text.UTF8Encoding]::new($false))
 }
 finally {
     if (-not [string]::IsNullOrWhiteSpace($container)) {
         & $Docker rm --force $container | Out-Null
+        $removeExitCode = $LASTEXITCODE
     }
     if (Test-Path -LiteralPath $scratch) {
         Remove-Item -LiteralPath $scratch -Recurse -Force
     }
+    if ($removeExitCode -ne 0) {
+        throw 'could not remove the qualification container'
+    }
 }
+
+if ([string]::IsNullOrWhiteSpace($json)) {
+    throw 'qualification probe produced no output'
+}
+[IO.File]::WriteAllText($outputPath, $json + "`n", [Text.UTF8Encoding]::new($false))
