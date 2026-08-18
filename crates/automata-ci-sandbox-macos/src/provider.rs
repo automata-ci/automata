@@ -14,9 +14,10 @@ use automata_ci_execution::{
     Cancellation, DestroyDisposition, DestroySandbox, EnvironmentProfile, ExecutionEndpoint,
     NetworkPolicy, OperationId, OperationOutcome, ProviderCapabilities, ProviderError,
     ProviderErrorKind, ProviderId, ProviderStage, ResourceLimits, RootFilesystemPolicy,
-    SandboxCapability, SandboxCustody, SandboxGeneration, SandboxHandle, SandboxInspection,
-    SandboxLaunch, SandboxPrivilegePolicy, SandboxProvider, SandboxRecord, SandboxSpec,
-    SandboxState, Sha256Digest, TargetPath, TargetPlatform,
+    RuntimeServiceProtocol, RuntimeServiceRoutes, SandboxCapability, SandboxCustody,
+    SandboxGeneration, SandboxHandle, SandboxInspection, SandboxLaunch, SandboxPrivilegePolicy,
+    SandboxProvider, SandboxRecord, SandboxSpec, SandboxState, Sha256Digest, TargetPath,
+    TargetPlatform,
 };
 use serde::de::DeserializeOwned;
 use sha2::{Digest as _, Sha256};
@@ -29,6 +30,7 @@ use crate::{
         DurableCreate, DurableDestroyRequest, DurableEntry, DurableEntryPhase, DurableEvent,
         DurableSnapshot, DurableTombstone, LifecycleJournal, recovered_generation,
     },
+    runtime_proxy::RuntimeProxy,
     template::{VerifiedTemplate, load_template, plist_to_json, verify_helper},
     vm::VmProcess,
 };
@@ -38,8 +40,10 @@ const QUIESCE_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const GIBIBYTE: u64 = 1024 * 1024 * 1024;
 const MINIMUM_STORAGE_HEADROOM: u64 = 32 * GIBIBYTE;
 const MAX_DISKUTIL_PLIST_BYTES: usize = 4 * 1024 * 1024;
+const MACOS_UNIX_SOCKET_PATH_BYTES: usize = 104;
+const OPAQUE_HANDLE_PATH_SAMPLE: &str = "00000000-0000-0000-0000-000000000000";
 
-const PROVIDER_CAPABILITIES: [SandboxCapability; 11] = [
+const PROVIDER_CAPABILITIES: [SandboxCapability; 12] = [
     SandboxCapability::WholeJob,
     SandboxCapability::Attach,
     SandboxCapability::Inspect,
@@ -51,6 +55,7 @@ const PROVIDER_CAPABILITIES: [SandboxCapability; 11] = [
     SandboxCapability::WritableRootFilesystem,
     SandboxCapability::ResourceLimits,
     SandboxCapability::ProcessLimits,
+    SandboxCapability::RuntimeServiceProxy,
 ];
 
 pub(crate) const ENDPOINT_CAPABILITIES: [SandboxCapability; 4] = [
@@ -131,6 +136,7 @@ impl MacosVirtualizationProviderOptions {
             || !storage_quota_bytes.is_multiple_of(GIBIBYTE)
             || !(Duration::from_secs(30)..=Duration::from_mins(15)).contains(&boot_timeout)
             || !(Duration::from_secs(1)..=Duration::from_secs(30)).contains(&stop_timeout)
+            || !runtime_proxy_path_fits(&provider_root)
         {
             return Err(known(
                 ProviderErrorKind::InvalidConfiguration,
@@ -199,6 +205,17 @@ impl MacosVirtualizationProviderOptions {
     pub(crate) const fn provider_target(&self) -> &TargetPath {
         &self.provider_target
     }
+}
+
+fn runtime_proxy_path_fits(provider_root: &Path) -> bool {
+    provider_root
+        .join("attempts")
+        .join(OPAQUE_HANDLE_PATH_SAMPLE)
+        .join("runtime-proxy.sock")
+        .as_os_str()
+        .as_encoded_bytes()
+        .len()
+        < MACOS_UNIX_SOCKET_PATH_BYTES
 }
 
 /// macOS provider backed by one disposable Virtualization.framework VM per job.
@@ -370,9 +387,25 @@ pub(crate) struct SandboxEntry {
     pub(crate) scratch: TargetPath,
     pub(crate) operation_lock: Mutex<()>,
     pub(crate) endpoint_state: Mutex<crate::endpoint::EndpointState>,
-    pub(crate) vm: Mutex<Option<VmProcess>>,
+    pub(crate) runtime: Mutex<Option<SandboxRuntime>>,
+    pub(crate) runtime_service_routes: RuntimeServiceRoutes,
     resources: ResourceLimits,
     phase: Mutex<DurableEntryPhase>,
+}
+
+pub(crate) struct SandboxRuntime {
+    pub(crate) vm: VmProcess,
+    proxy: Option<RuntimeProxy>,
+}
+
+impl SandboxRuntime {
+    fn stop(&mut self) -> std::io::Result<()> {
+        let vm_result = self.vm.stop();
+        if let Some(proxy) = self.proxy.as_mut() {
+            proxy.stop();
+        }
+        vm_result
+    }
 }
 
 impl SandboxEntry {
@@ -498,7 +531,8 @@ impl ProviderInner {
             scratch: scratch.clone(),
             operation_lock: Mutex::new(()),
             endpoint_state: Mutex::new(crate::endpoint::EndpointState::default()),
-            vm: Mutex::new(None),
+            runtime: Mutex::new(None),
+            runtime_service_routes: spec.runtime_service_routes().clone(),
             resources,
             phase: Mutex::new(DurableEntryPhase::Intent),
         });
@@ -710,13 +744,13 @@ fn complete_destroy(
         return Err(invalid_journal());
     }
     let operation = quiesce(entry, cancellation)?;
-    if let Some(mut vm) = entry
-        .vm
+    if let Some(mut runtime) = entry
+        .runtime
         .lock()
         .map_err(|_| local(ProviderStage::DestroySandbox))?
         .take()
     {
-        vm.stop().map_err(|_| {
+        runtime.stop().map_err(|_| {
             uncertain(
                 ProviderErrorKind::AdapterUnavailable,
                 ProviderStage::DestroySandbox,
@@ -830,11 +864,11 @@ fn resume_create(
         ));
     }
     let attempt = attempt_target(&provider.options, entry.handle.opaque())?;
-    let mut vm = entry
-        .vm
+    let mut runtime = entry
+        .runtime
         .lock()
         .map_err(|_| local(ProviderStage::CreateSandbox))?;
-    if vm.is_none() {
+    if runtime.is_none() {
         provider
             .root
             .remove_owned_tree(&attempt)
@@ -846,11 +880,28 @@ fn resume_create(
                     entry.handle.clone(),
                 )
             })?;
+        let attempt_path = attempt_path(&provider.options, entry.handle.opaque());
+        let proxy = if entry.runtime_service_routes.is_empty() {
+            None
+        } else {
+            Some(
+                RuntimeProxy::start(&attempt_path, entry.runtime_service_routes.clone()).map_err(
+                    |_| {
+                        uncertain(
+                            ProviderErrorKind::AdapterUnavailable,
+                            ProviderStage::CreateSandbox,
+                            entry.handle.clone(),
+                        )
+                    },
+                )?,
+            )
+        };
         let mut launched = VmProcess::launch(
             &provider.options,
             &provider.template,
             entry.handle.opaque(),
-            &attempt_path(&provider.options, entry.handle.opaque()),
+            &attempt_path,
+            proxy.as_ref().map(RuntimeProxy::socket_path),
             entry.resources,
             cancellation,
         )
@@ -872,7 +923,10 @@ fn resume_create(
                 };
                 uncertain(kind, ProviderStage::CreateWorkspace, entry.handle.clone())
             })?;
-        *vm = Some(launched);
+        *runtime = Some(SandboxRuntime {
+            vm: launched,
+            proxy,
+        });
     }
     state
         .journal
@@ -889,7 +943,7 @@ fn resume_create(
     entry
         .set_phase(DurableEntryPhase::Running)
         .map_err(|()| local(ProviderStage::CreateSandbox))?;
-    drop(vm);
+    drop(runtime);
     entry.record()
 }
 
@@ -922,7 +976,6 @@ fn validate_spec(
         && spec.resources().memory_bytes() >= template.minimum_memory_bytes
         && spec.resources().pids() == template.process_limit
         && spec.services().is_empty()
-        && spec.runtime_service_routes().is_empty()
         && spec.has_coherent_resource_contract()
         && !spec
             .profile()
@@ -940,7 +993,7 @@ fn validate_spec(
 
 fn spec_fingerprint(spec: &SandboxSpec) -> Result<[u8; 32], ProviderError> {
     let mut digest = Sha256::new();
-    fingerprint_field(&mut digest, b"automata-macos-virtualization-spec-v2");
+    fingerprint_field(&mut digest, b"automata-macos-virtualization-spec-v3");
     fingerprint_custody(&mut digest, spec.custody());
     fingerprint_field(&mut digest, &spec.generation().get().to_le_bytes());
     fingerprint_field(
@@ -982,6 +1035,17 @@ fn spec_fingerprint(spec: &SandboxSpec) -> Result<[u8; 32], ProviderError> {
         fingerprint_field(&mut digest, variable.name().as_str().as_bytes());
         fingerprint_field(&mut digest, variable.value().expose().as_bytes());
         fingerprint_field(&mut digest, &[u8::from(variable.is_secret())]);
+    }
+    for route in spec.runtime_service_routes().as_slice() {
+        fingerprint_field(
+            &mut digest,
+            match route.protocol() {
+                RuntimeServiceProtocol::Http => b"http",
+                RuntimeServiceProtocol::Https => b"https",
+            },
+        );
+        fingerprint_field(&mut digest, route.host().as_bytes());
+        fingerprint_field(&mut digest, &route.port().get().to_be_bytes());
     }
     Ok(digest.finalize().into())
 }

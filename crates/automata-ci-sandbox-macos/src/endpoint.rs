@@ -270,7 +270,7 @@ impl MacosVirtualizationEndpoint {
                 ExecutionStage::Exec,
             ));
         }
-        let environment = request
+        let mut environment = request
             .environment()
             .values()
             .iter()
@@ -281,6 +281,13 @@ impl MacosVirtualizationEndpoint {
                 )
             })
             .collect::<BTreeMap<_, _>>();
+        if !self.entry.runtime_service_routes.is_empty() {
+            for name in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"] {
+                environment.insert(name.to_owned(), "http://127.0.0.1:18081".to_owned());
+            }
+            environment.insert("NO_PROXY".to_owned(), String::new());
+            environment.insert("no_proxy".to_owned(), String::new());
+        }
         let timeout_millis = u64::try_from(request.timeout().as_millis())
             .map_err(|_| error(ExecutionErrorKind::BackendRejected, ExecutionStage::Exec))?;
         let guest_request = GuestRequest::Exec {
@@ -396,11 +403,12 @@ fn exchange(
     stage: ExecutionStage,
 ) -> Result<GuestResponse, ExecutionError> {
     entry
-        .vm
+        .runtime
         .lock()
         .map_err(|_| error(ExecutionErrorKind::LocalStorage, stage))?
         .as_mut()
         .ok_or_else(|| error(ExecutionErrorKind::InvalidState, stage))?
+        .vm
         .exchange(request, timeout, cancellation, stage)
 }
 
