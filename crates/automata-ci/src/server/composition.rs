@@ -1764,7 +1764,7 @@ async fn build_human_api(
         setup_service.clone(),
     ));
     let github_state = GithubAuthHttpState::new(
-        github_backend,
+        Arc::clone(&github_backend),
         tenant_id.clone(),
         runtime.origin().clone(),
         provider_origin.clone(),
@@ -1780,14 +1780,15 @@ async fn build_human_api(
         availability
     });
 
-    if let Some(service) = setup_service {
+    if setup_service.is_some() {
         let setup_state = GithubSetupHttpState::new(
-            service,
+            github_backend,
             runtime.origin().clone(),
             provider_origin,
             default_return_path,
             Arc::clone(runtime.clock()),
-        );
+        )
+        .ok_or(ServerCompositionError::HumanAuthenticationSetup)?;
         router = router.merge(github_setup_router(setup_state));
     }
 
