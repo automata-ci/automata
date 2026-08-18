@@ -49,7 +49,7 @@ use automata_ci_control::runner_control::{
 use automata_ci_control::scheduling::{DeterministicScheduler, SchedulerPolicy};
 use automata_ci_core::RunId;
 use automata_ci_github::MAX_GITHUB_WEBHOOK_SECRET_BYTES;
-use automata_ci_job_executor_github::{
+use automata_ci_job_executor_actions::{
     ActionPreparationPort, NoRepositoryCredentials, ResolvedBundleActionPreparer,
 };
 use automata_ci_key_management::KeyEncryptionProvider;
@@ -65,15 +65,15 @@ use automata_ci_provisioning_postgres::{
     PostgresWorkspaceEntitlementApplier, PostgresWorkspaceGithubRepositoriesApplier,
     PostgresWorkspaceProvisioner,
 };
-use automata_ci_results_github::{
+use automata_ci_runner_auth_postgres::PostgresRunnerMachineDirectory;
+use automata_ci_runner_results::{
+    ActionsCacheApi, ActionsCacheHttpLimits, ActionsResultsApi, ActionsResultsHttpLimits,
     ArtifactRepository, ArtifactService, CacheLimits, CacheRepository, CacheRepositoryMetadata,
-    CacheService, GithubCacheApi, GithubCacheHttpLimits, GithubResultsApi, GithubResultsHttpLimits,
-    GithubResultsRuntimeAuthorityIssuer, HmacResultsAuthority, HmacResultsAuthorityConfig,
+    CacheService, HmacResultsAuthority, HmacResultsAuthorityConfig,
     ObservedResultsArtifactRepository, ObservedResultsBlobStore, PostgresArtifactRepository,
     PostgresCacheRepository, ResultsClock, ResultsIdGenerator, ResultsLimits, ResultsObserver,
-    SystemResultsClock, SystemResultsIdGenerator,
+    RunnerResultsRuntimeAuthorityIssuer, SystemResultsClock, SystemResultsIdGenerator,
 };
-use automata_ci_runner_auth_postgres::PostgresRunnerMachineDirectory;
 use automata_ci_runner_transport::{
     ConfigurationError as TransportConfigurationError, RunnerControlHandler, RunnerControlServer,
     ServerTlsConfig, TransportLimits,
@@ -118,11 +118,11 @@ use tokio::net::TcpListener;
 
 use super::config::DatabaseTransportLoadError;
 use super::github_job_runtime_authority::unavailable_github_job_runtime_authority_issuer;
-use super::github_oidc::{
-    GithubOidcProductError, build_github_oidc_product, compose_runtime_authority_issuer,
-};
 use super::github_provider_runtime::provider_http_endpoint;
 use super::state_metrics::ControlPlaneStateSampler;
+use super::workload_oidc::{
+    WorkloadOidcProductError, build_workload_oidc_product, compose_runtime_authority_issuer,
+};
 use super::{
     ControlPlaneMaintenanceLoop, ControlPlaneMetrics, DatabaseGithubProviderConfig,
     GithubProviderRuntime, GithubProviderRuntimeBuildError, GithubProviderRuntimeBuilder,
@@ -190,7 +190,7 @@ const READINESS_OBJECT_KEY: &str = "system/readiness/v1";
 const READINESS_MEDIA_TYPE: &str = "application/vnd.automata.readiness+plain";
 const READINESS_BYTES: &[u8] = b"automata-immutable-readiness-v1\n";
 const RESULTS_ISSUER: &str = "automata";
-const RESULTS_AUDIENCE: &str = "github-actions-results";
+const RESULTS_AUDIENCE: &str = "runner-results";
 const RESULTS_RUNTIME_TOKEN_VALIDITY_SECONDS: u64 = 6 * 60 * 60;
 const RESULTS_UPLOAD_CAPABILITY_VALIDITY_SECONDS: u64 = 15 * 60;
 const RESULTS_ALLOWED_CLOCK_SKEW_SECONDS: u64 = 60;
@@ -417,9 +417,10 @@ impl ProductionComponents {
             Arc::clone(&blob_store),
             ProtocolLimits::default(),
         );
-        let github_oidc = build_github_oidc_product(config.github_oidc(), store.as_ref()).await?;
-        let capability_readiness = if github_oidc.operationally_ready() {
-            RunnerCapabilityReadiness::unavailable().with_github_oidc()
+        let workload_oidc =
+            build_workload_oidc_product(config.workload_oidc(), store.as_ref()).await?;
+        let capability_readiness = if workload_oidc.operationally_ready() {
+            RunnerCapabilityReadiness::unavailable().with_workload_oidc()
         } else {
             RunnerCapabilityReadiness::unavailable()
         };
@@ -650,11 +651,11 @@ impl ProductionComponents {
         )?;
         let runtime_authority_issuer = compose_runtime_authority_issuer(
             results_runtime_authority_issuer,
-            github_oidc.authority_issuer,
+            workload_oidc.authority_issuer,
             github_job_runtime_authority_issuer,
         )
         .map_err(|_| ServerCompositionError::InvalidResultsConfiguration)?;
-        let results_api = results_api.merge(github_oidc.router);
+        let results_api = results_api.merge(workload_oidc.router);
 
         let directory = Arc::new(PostgresRunnerMachineDirectory::new(
             store.postgres_pool().clone(),
@@ -1013,7 +1014,7 @@ fn build_results(
     let runtime_authority_issuer: Arc<
         dyn automata_ci_control::runner_control::RuntimeAuthorityIssuer,
     > = Arc::new(
-        GithubResultsRuntimeAuthorityIssuer::new(
+        RunnerResultsRuntimeAuthorityIssuer::new(
             Arc::clone(&authority),
             RESULTS_RUNTIME_TOKEN_VALIDITY_SECONDS,
             cache_repositories,
@@ -1059,21 +1060,21 @@ fn build_results(
     let download_capabilities = authority.clone();
     let cache_runtime_tokens = authority.clone();
     let cache_capabilities = authority;
-    let router = GithubResultsApi::new(
+    let router = ActionsResultsApi::new(
         service,
         runtime_tokens,
         upload_capabilities,
         download_capabilities,
-        GithubResultsHttpLimits::default(),
+        ActionsResultsHttpLimits::default(),
     )
     .with_observer(Arc::clone(&observer))
     .router()
     .merge(
-        GithubCacheApi::new(
+        ActionsCacheApi::new(
             cache_service,
             cache_runtime_tokens,
             cache_capabilities,
-            GithubCacheHttpLimits::default(),
+            ActionsCacheHttpLimits::default(),
         )
         .with_observer(observer)
         .router(),
@@ -2106,9 +2107,9 @@ pub enum ServerCompositionError {
     /// Results endpoint, signing policy, or runtime authority composition was invalid.
     #[error("GitHub Results authority configuration is invalid")]
     InvalidResultsConfiguration,
-    /// Optional GitHub-compatible OIDC composition or durable readiness was invalid.
+    /// Optional Automata workload OIDC composition or durable readiness was invalid.
     #[error(transparent)]
-    GithubOidc(#[from] GithubOidcProductError),
+    WorkloadOidc(#[from] WorkloadOidcProductError),
     /// The optional GitHub provider configuration or its secret encoding was invalid.
     #[error("GitHub provider configuration is invalid")]
     InvalidGithubProviderConfiguration,

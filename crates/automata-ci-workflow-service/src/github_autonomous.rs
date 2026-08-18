@@ -3,7 +3,7 @@
 use std::{fmt, sync::Arc};
 
 use automata_ci_blob::ImmutableBlobStore;
-use automata_ci_job_executor_github::ActionPreparationPort;
+use automata_ci_job_executor_actions::ActionPreparationPort;
 use automata_ci_protocol::ProtocolLimits;
 use automata_ci_store::{
     LogicalActivationPreparationStore, LogicalActivationRepository,

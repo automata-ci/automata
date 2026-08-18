@@ -9,7 +9,6 @@ mod event_subject;
 mod github_check_rerun;
 mod github_checks;
 mod github_job_runtime_authority;
-mod github_oidc;
 mod github_provider_manifest;
 mod github_repository_dispatch;
 mod github_schedule;
@@ -47,6 +46,7 @@ mod web;
 mod workflow_enable_state;
 mod workflow_rerun;
 mod workflow_runtime_policy;
+mod workload_oidc;
 
 /// Unstable construction and inspection hooks for Automata's first-party
 /// durable adapters.
@@ -111,17 +111,6 @@ pub use github_job_runtime_authority::{
     GithubJobRuntimeAuthorityEvidence, GithubJobRuntimeAuthorityExecution,
     GithubJobRuntimeAuthorityRepository, GithubJobRuntimeAuthorityResolution,
     GithubJobRuntimeAuthorityStoreError, GithubJobRuntimeAuthorityValueError,
-};
-pub use github_oidc::{
-    GITHUB_OIDC_REQUEST_BEARER_KEY_FINGERPRINT_DOMAIN,
-    GITHUB_OIDC_RS256_PUBLIC_KEY_FINGERPRINT_DOMAIN, GithubOidcAuthorityProposal,
-    GithubOidcAuthorityRepository, GithubOidcCurrentPolicy, GithubOidcCurrentnessClock,
-    GithubOidcCurrentnessClockError, GithubOidcExecutionIdentity, GithubOidcKeyDeadline,
-    GithubOidcKeyRetentionRepository, GithubOidcKeyUse, GithubOidcLoadedKey, GithubOidcStoreError,
-    GithubOidcSubjectPolicyMode, GithubOidcSubjectPolicyRevision, GithubOidcValueError,
-    MAX_GITHUB_OIDC_ISSUANCE_SLOTS, MAXIMUM_OIDC_KEYS_PER_KEYRING,
-    MAXIMUM_REQUEST_BEARER_CLOCK_SKEW_SECONDS, OIDC_JWKS_CACHE_SECONDS, ReserveGithubOidcAuthority,
-    ReservedGithubOidcAuthority, RetainGithubOidcKey, github_oidc_rs256_public_key_fingerprint,
 };
 pub use github_provider_manifest::{
     BootstrapGithubProviderManifest, BootstrapGithubProviderRepository,
@@ -402,11 +391,11 @@ pub use runtime_authority::{
     GithubRuntimeAuthorityState, GithubRuntimeAuthorityStoreError,
     GithubRuntimeAuthorityTerminalReason, GithubRuntimeAuthorityValueError,
     GithubRuntimeAuthorityWorkerId, InspectGithubRuntimeAuthority, LoadGithubRuntimeAuthority,
-    MAX_GITHUB_AUTHORITY_MINT_ATTEMPTS, MAX_GITHUB_AUTHORITY_MINT_CLAIM_MILLIS,
-    MAX_GITHUB_AUTHORITY_MINT_RETRY_BACKOFF_MILLIS, MAX_GITHUB_AUTHORITY_RECONCILE_BATCH,
-    MAX_GITHUB_AUTHORITY_REQUEST_MILLIS, MAX_GITHUB_AUTHORITY_REVOKE_ATTEMPTS,
-    MAX_GITHUB_AUTHORITY_REVOKE_BACKOFF_MILLIS, MAX_GITHUB_AUTHORITY_REVOKE_CLAIM_MILLIS,
-    MAX_GITHUB_RUNTIME_AUTHORITY_PLAINTEXT_BYTES, MarkGithubRuntimeAuthorityIndeterminate,
+    MAX_ACTIONS_RUNTIME_AUTHORITY_PLAINTEXT_BYTES, MAX_GITHUB_AUTHORITY_MINT_ATTEMPTS,
+    MAX_GITHUB_AUTHORITY_MINT_CLAIM_MILLIS, MAX_GITHUB_AUTHORITY_MINT_RETRY_BACKOFF_MILLIS,
+    MAX_GITHUB_AUTHORITY_RECONCILE_BATCH, MAX_GITHUB_AUTHORITY_REQUEST_MILLIS,
+    MAX_GITHUB_AUTHORITY_REVOKE_ATTEMPTS, MAX_GITHUB_AUTHORITY_REVOKE_BACKOFF_MILLIS,
+    MAX_GITHUB_AUTHORITY_REVOKE_CLAIM_MILLIS, MarkGithubRuntimeAuthorityIndeterminate,
     ProtectedGithubRuntimeAuthority, QuarantineGithubRuntimeAuthority, ReadyGithubRuntimeAuthority,
     ReconcileGithubRuntimeAuthorities, RejectGithubRuntimeAuthorityMint,
     RetryGithubRuntimeAuthorityMint, RetryGithubRuntimeAuthorityRevocation,
@@ -497,4 +486,16 @@ pub use workflow_runtime_policy::{
     WorkflowRuntimePolicy, WorkflowRuntimePolicyMapping, WorkflowRuntimePolicyPin,
     WorkflowRuntimePolicyReceipt, WorkflowRuntimePolicyRepository, WorkflowRuntimePolicyRevision,
     WorkflowRuntimePolicyStoreError, WorkflowRuntimePolicyValueError,
+};
+pub use workload_oidc::{
+    MAX_WORKLOAD_OIDC_ISSUANCE_SLOTS, MAXIMUM_OIDC_KEYS_PER_KEYRING,
+    MAXIMUM_REQUEST_BEARER_CLOCK_SKEW_SECONDS, OIDC_JWKS_CACHE_SECONDS,
+    ReserveWorkloadOidcAuthority, ReservedWorkloadOidcAuthority, RetainWorkloadOidcKey,
+    WORKLOAD_OIDC_REQUEST_BEARER_KEY_FINGERPRINT_DOMAIN,
+    WORKLOAD_OIDC_RS256_PUBLIC_KEY_FINGERPRINT_DOMAIN, WorkloadOidcAuthorityProposal,
+    WorkloadOidcAuthorityRepository, WorkloadOidcCurrentPolicy, WorkloadOidcCurrentnessClock,
+    WorkloadOidcCurrentnessClockError, WorkloadOidcExecutionIdentity, WorkloadOidcKeyDeadline,
+    WorkloadOidcKeyRetentionRepository, WorkloadOidcKeyUse, WorkloadOidcLoadedKey,
+    WorkloadOidcStoreError, WorkloadOidcSubjectPolicyMode, WorkloadOidcSubjectPolicyRevision,
+    WorkloadOidcValueError, workload_oidc_rs256_public_key_fingerprint,
 };

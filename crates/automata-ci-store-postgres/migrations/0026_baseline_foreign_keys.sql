@@ -88,35 +88,35 @@ ALTER TABLE ONLY github_membership_snapshots
 ALTER TABLE ONLY github_membership_snapshots
     ADD CONSTRAINT github_membership_snapshots_membership FOREIGN KEY (tenant_id, principal_id) REFERENCES tenant_human_memberships(tenant_id, principal_id) ON DELETE RESTRICT;
 
-ALTER TABLE ONLY github_oidc_authorities
-    ADD CONSTRAINT github_oidc_authorities_concrete_job FOREIGN KEY (instance_id) REFERENCES logical_workflow_concrete_jobs(instance_id) ON DELETE RESTRICT;
+ALTER TABLE ONLY workload_oidc_authorities
+    ADD CONSTRAINT workload_oidc_authorities_concrete_job FOREIGN KEY (instance_id) REFERENCES logical_workflow_concrete_jobs(instance_id) ON DELETE RESTRICT;
 
-ALTER TABLE ONLY github_oidc_authorities
-    ADD CONSTRAINT github_oidc_authorities_job_attempt FOREIGN KEY (job_id, attempt_id) REFERENCES job_attempts(job_id, id) ON DELETE RESTRICT;
+ALTER TABLE ONLY workload_oidc_authorities
+    ADD CONSTRAINT workload_oidc_authorities_job_attempt FOREIGN KEY (job_id, attempt_id) REFERENCES job_attempts(job_id, id) ON DELETE RESTRICT;
 
-ALTER TABLE ONLY github_oidc_authorities
-    ADD CONSTRAINT github_oidc_authorities_repository_run FOREIGN KEY (repository_id, run_id) REFERENCES workflow_runs(repository_id, id) ON DELETE RESTRICT;
+ALTER TABLE ONLY workload_oidc_authorities
+    ADD CONSTRAINT workload_oidc_authorities_repository_run FOREIGN KEY (repository_id, run_id) REFERENCES workflow_runs(repository_id, id) ON DELETE RESTRICT;
 
-ALTER TABLE ONLY github_oidc_authorities
-    ADD CONSTRAINT github_oidc_authorities_repository_workflow FOREIGN KEY (repository_id, workflow_id) REFERENCES workflow_definitions(repository_id, id) ON DELETE RESTRICT;
+ALTER TABLE ONLY workload_oidc_authorities
+    ADD CONSTRAINT workload_oidc_authorities_repository_workflow FOREIGN KEY (repository_id, workflow_id) REFERENCES workflow_definitions(repository_id, id) ON DELETE RESTRICT;
 
-ALTER TABLE ONLY github_oidc_authorities
-    ADD CONSTRAINT github_oidc_authorities_run_job FOREIGN KEY (run_id, job_id) REFERENCES jobs(run_id, id) ON DELETE RESTRICT;
+ALTER TABLE ONLY workload_oidc_authorities
+    ADD CONSTRAINT workload_oidc_authorities_run_job FOREIGN KEY (run_id, job_id) REFERENCES jobs(run_id, id) ON DELETE RESTRICT;
 
-ALTER TABLE ONLY github_oidc_authorities
-    ADD CONSTRAINT github_oidc_authorities_runner_session FOREIGN KEY (runner_id, runner_session_id, runner_session_epoch, runner_generation) REFERENCES runner_sessions(runner_id, id, session_epoch, runner_generation) ON DELETE RESTRICT;
+ALTER TABLE ONLY workload_oidc_authorities
+    ADD CONSTRAINT workload_oidc_authorities_runner_session FOREIGN KEY (runner_id, runner_session_id, runner_session_epoch, runner_generation) REFERENCES runner_sessions(runner_id, id, session_epoch, runner_generation) ON DELETE RESTRICT;
 
-ALTER TABLE ONLY github_oidc_authorities
-    ADD CONSTRAINT github_oidc_authorities_signed_run_evidence FOREIGN KEY (repository_id, run_id, github_run_subject_evidence_sha256) REFERENCES github_workflow_run_subject_evidence(repository_id, run_id, subject_evidence_sha256) ON DELETE RESTRICT;
+ALTER TABLE ONLY workload_oidc_authorities
+    ADD CONSTRAINT workload_oidc_authorities_signed_run_evidence FOREIGN KEY (repository_id, run_id, github_run_subject_evidence_sha256) REFERENCES github_workflow_run_subject_evidence(repository_id, run_id, subject_evidence_sha256) ON DELETE RESTRICT;
 
-ALTER TABLE ONLY github_oidc_authorities
-    ADD CONSTRAINT github_oidc_authorities_tenant_repository FOREIGN KEY (tenant_id, repository_id) REFERENCES repositories(tenant_id, id) ON DELETE RESTRICT;
+ALTER TABLE ONLY workload_oidc_authorities
+    ADD CONSTRAINT workload_oidc_authorities_tenant_repository FOREIGN KEY (tenant_id, repository_id) REFERENCES repositories(tenant_id, id) ON DELETE RESTRICT;
 
-ALTER TABLE ONLY github_oidc_authorities
-    ADD CONSTRAINT github_oidc_authorities_tenant_runner FOREIGN KEY (tenant_id, runner_id) REFERENCES runners(tenant_id, id) ON DELETE RESTRICT;
+ALTER TABLE ONLY workload_oidc_authorities
+    ADD CONSTRAINT workload_oidc_authorities_tenant_runner FOREIGN KEY (tenant_id, runner_id) REFERENCES runners(tenant_id, id) ON DELETE RESTRICT;
 
-ALTER TABLE ONLY github_oidc_issuance_slots
-    ADD CONSTRAINT github_oidc_issuance_slots_authority_id_fkey FOREIGN KEY (authority_id) REFERENCES github_oidc_authorities(authority_id) ON DELETE RESTRICT;
+ALTER TABLE ONLY workload_oidc_issuance_slots
+    ADD CONSTRAINT workload_oidc_issuance_slots_authority_id_fkey FOREIGN KEY (authority_id) REFERENCES workload_oidc_authorities(authority_id) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY github_organization_membership_observations
     ADD CONSTRAINT github_organization_membership_observations_snapshot FOREIGN KEY (tenant_id, snapshot_id) REFERENCES github_membership_snapshots(tenant_id, id) ON DELETE CASCADE;

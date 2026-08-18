@@ -11,7 +11,6 @@ mod attempt_api;
 #[cfg(feature = "adapter-spi")]
 mod attempt_snapshot_api;
 mod durability_values;
-mod github_oidc_runtime_authority;
 mod lease_poll;
 mod maintenance_api;
 mod observability_api;
@@ -26,3 +25,4 @@ mod runner_control_runtime_authority_composite;
 mod runner_control_store_adapters;
 mod scheduling_domain_contract;
 mod scheduling_policy;
+mod workload_oidc_runtime_authority;

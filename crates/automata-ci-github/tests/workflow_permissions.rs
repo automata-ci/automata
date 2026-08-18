@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use automata_ci_auth::{github::GithubEndpointError, secret::SecretString};
 use automata_ci_github::{
-    GithubDefaultWorkflowPermission, GithubHttpLimits, GithubWorkflowPermissionDefaultsRequest,
+    ActionsDefaultWorkflowPermission, GithubHttpLimits, GithubWorkflowPermissionDefaultsRequest,
 };
 use automata_ci_scm::RepositoryId;
 use axum::http::StatusCode;
@@ -43,7 +43,7 @@ async fn effective_defaults_are_exact_versioned_and_repository_scoped() {
         .expect("read defaults");
     assert_eq!(
         read.default_workflow_permissions(),
-        GithubDefaultWorkflowPermission::Read
+        ActionsDefaultWorkflowPermission::Read
     );
     assert!(!read.can_approve_pull_request_reviews());
 
@@ -57,7 +57,7 @@ async fn effective_defaults_are_exact_versioned_and_repository_scoped() {
         .expect("write defaults");
     assert_eq!(
         write.default_workflow_permissions(),
-        GithubDefaultWorkflowPermission::Write
+        ActionsDefaultWorkflowPermission::Write
     );
     assert!(write.can_approve_pull_request_reviews());
 

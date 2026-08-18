@@ -1,5 +1,6 @@
 use std::{collections::BTreeMap, fmt, sync::Arc};
 
+use automata_ci_actions_runtime::StepId as RuntimeStepId;
 use automata_ci_core::{
     Architecture, ContextValue, JobAuthorityProfile, JobConclusion, NeedContext, OperatingSystem,
     PermissionLevel, RunnerId, RunnerPlatform, SemanticStep, StrategyContext, TrustOidcAuthority,
@@ -9,8 +10,7 @@ use automata_ci_execution::{TargetPath, TargetPlatform};
 use automata_ci_expression_actions::{
     GithubObject, GithubStatus, GithubValue, MapContext, NoExtensionFunctions,
 };
-use automata_ci_github_runtime::StepId as RuntimeStepId;
-use automata_ci_job_executor_github::{
+use automata_ci_job_executor_actions::{
     ContextEnvironmentVariable, GithubContextPort, GithubContextRequest, GithubContextSnapshot,
     PortError, PortErrorKind,
 };
@@ -18,12 +18,12 @@ use automata_ci_protocol::{JobRuntimeAuthority, RuntimeAuthorityEndpointSecurity
 
 use super::{ExecutorProductConfig, GithubProductConfig};
 
-const GITHUB_RESULTS_RUNTIME_AUTHORITY: &str = "github-actions-results";
+const RUNNER_RESULTS_RUNTIME_AUTHORITY: &str = "runner-results";
 const GITHUB_REPOSITORY_RUNTIME_AUTHORITY: &str = "github-repository";
-const GITHUB_OIDC_RUNTIME_AUTHORITY: &str = "github-oidc";
+const WORKLOAD_OIDC_RUNTIME_AUTHORITY: &str = "workload-oidc";
 const GITHUB_ID_TOKEN_PERMISSION: &str = "id-token";
-const GITHUB_OIDC_TOKEN_PATH: &str = "/oidc/token";
-const GITHUB_OIDC_API_VERSION_QUERY: &str = "api-version=2.0";
+const WORKLOAD_OIDC_TOKEN_PATH: &str = "/oidc/token";
+const WORKLOAD_OIDC_API_VERSION_QUERY: &str = "api-version=2.0";
 
 /// Standard platform-aware GitHub context and default-environment authority.
 ///
@@ -235,7 +235,7 @@ impl StandardGithubContext {
     ) -> Result<Option<&JobRuntimeAuthority>, PortError> {
         let Some(authority) = request
             .runtime_authorities()
-            .get(GITHUB_OIDC_RUNTIME_AUTHORITY)
+            .get(WORKLOAD_OIDC_RUNTIME_AUTHORITY)
         else {
             return Ok(None);
         };
@@ -359,8 +359,8 @@ impl StandardGithubContext {
         }
         if let Some(oidc) = oidc {
             let mut request_url = oidc.endpoint().as_url().clone();
-            request_url.set_path(GITHUB_OIDC_TOKEN_PATH);
-            request_url.set_query(Some(GITHUB_OIDC_API_VERSION_QUERY));
+            request_url.set_path(WORKLOAD_OIDC_TOKEN_PATH);
+            request_url.set_query(Some(WORKLOAD_OIDC_API_VERSION_QUERY));
             values.push(plain("ACTIONS_ID_TOKEN_REQUEST_URL", request_url.as_str()));
             values.push(ContextEnvironmentVariable::shared_secret(
                 "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
@@ -397,7 +397,7 @@ impl GithubContextPort for StandardGithubContext {
             JobAuthorityProfile::Standard => {
                 let results = request
                     .runtime_authorities()
-                    .get(GITHUB_RESULTS_RUNTIME_AUTHORITY);
+                    .get(RUNNER_RESULTS_RUNTIME_AUTHORITY);
                 let results = match (trust.authority().results(), results) {
                     (TrustResultsAuthority::Denied, None) => None,
                     (

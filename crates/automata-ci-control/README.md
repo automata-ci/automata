@@ -15,7 +15,7 @@ API.
 
 The public `runner_auth` module binds transport-validated mTLS evidence to
 durable runner registrations without trusting certificate contents or protocol
-fields. The public `github_oidc` module turns explicit GitHub `id-token: write`
+fields. The public `workload_oidc` module turns explicit GitHub `id-token: write`
 permission into a durably reserved, replay-stable runtime authority.
 
 The crate keeps database, object-storage, connection, and product-configuration

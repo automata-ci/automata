@@ -1,7 +1,7 @@
 use std::{collections::BTreeSet, time::Duration};
 
 use automata_ci::{build_info::BuildInfo, server::ControlPlaneMetrics};
-use automata_ci_results_github::{
+use automata_ci_runner_results::{
     ResultsBlobOperation, ResultsBlobOperationOutcome, ResultsHttpMethod, ResultsHttpRoute,
     ResultsHttpStatusClass, ResultsObserver, ResultsOperation, ResultsOperationOutcome,
     ResultsRepositoryOperation, ResultsRepositoryOperationOutcome, ResultsTransferDirection,

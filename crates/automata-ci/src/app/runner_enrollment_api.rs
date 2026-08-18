@@ -790,7 +790,7 @@ fn decide_enrollment_preparation(
             if capabilities
                 .features()
                 .contains(&RunnerFeature::OIDC_TOKENS)
-                && !readiness.github_oidc() =>
+                && !readiness.workload_oidc() =>
         {
             EnrollmentPreparation::NotReady
         }

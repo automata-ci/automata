@@ -182,7 +182,7 @@ fn authority_bundle_emptiness_must_match_the_immutable_job_profile() {
     );
     credential_free.validate().expect("credential-free JobIR");
     let authority = JobRuntimeAuthority::new(
-        RuntimeAuthorityName::new("github-actions-results").expect("authority name"),
+        RuntimeAuthorityName::new("runner-results").expect("authority name"),
         credential_free.job().run_id(),
         credential_free.job().job_id(),
         lease.attempt_id(),

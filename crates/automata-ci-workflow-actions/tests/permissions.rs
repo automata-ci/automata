@@ -1,9 +1,9 @@
 use crate::support;
 
+use automata_ci_actions_permissions::ACTIONS_WORKFLOW_PERMISSIONS;
 use automata_ci_core::{
     PermissionLevel as PlanPermissionLevel, WorkflowEventProvenance, WorkflowPermissions,
 };
-use automata_ci_github_permissions::GITHUB_WORKFLOW_PERMISSIONS;
 use automata_ci_workflow_actions::{PermissionLevel, Permissions};
 
 const JOB: &str = r"
@@ -81,7 +81,7 @@ fn id_token_write_and_none_survive_current_logical_compilation() {
 
 #[test]
 fn every_catalog_permission_accepts_exactly_its_declared_levels() {
-    for permission in GITHUB_WORKFLOW_PERMISSIONS {
+    for permission in ACTIONS_WORKFLOW_PERMISSIONS {
         for (level, allowed) in [
             ("read", permission.allows_read()),
             ("write", permission.allows_write()),

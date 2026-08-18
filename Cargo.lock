@@ -229,11 +229,10 @@ dependencies = [
  "automata-ci-execution",
  "automata-ci-github",
  "automata-ci-github-delivery",
- "automata-ci-job-executor-github",
+ "automata-ci-job-executor-actions",
  "automata-ci-key-management",
  "automata-ci-local",
  "automata-ci-metrics",
- "automata-ci-oidc-github",
  "automata-ci-postgres",
  "automata-ci-protocol",
  "automata-ci-protocol-protobuf",
@@ -241,8 +240,8 @@ dependencies = [
  "automata-ci-provisioning",
  "automata-ci-provisioning-grpc",
  "automata-ci-provisioning-postgres",
- "automata-ci-results-github",
  "automata-ci-runner-auth-postgres",
+ "automata-ci-runner-results",
  "automata-ci-runner-transport",
  "automata-ci-scm",
  "automata-ci-secret",
@@ -253,6 +252,7 @@ dependencies = [
  "automata-ci-windows-file-security",
  "automata-ci-workflow-actions",
  "automata-ci-workflow-service",
+ "automata-ci-workload-oidc",
  "axum",
  "base64 0.23.1",
  "bytes",
@@ -328,6 +328,25 @@ dependencies = [
  "thiserror",
  "tokio",
  "url",
+]
+
+[[package]]
+name = "automata-ci-actions-permissions"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+]
+
+[[package]]
+name = "automata-ci-actions-runtime"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "static_assertions",
+ "thiserror",
 ]
 
 [[package]]
@@ -415,11 +434,11 @@ dependencies = [
  "automata-ci-auth",
  "automata-ci-blob",
  "automata-ci-core",
- "automata-ci-oidc-github",
  "automata-ci-protocol",
  "automata-ci-protocol-protobuf",
  "automata-ci-runner-transport",
  "automata-ci-store",
+ "automata-ci-workload-oidc",
  "flate2",
  "serde",
  "serde_json",
@@ -505,10 +524,10 @@ name = "automata-ci-github"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "automata-ci-actions-permissions",
  "automata-ci-auth",
  "automata-ci-blob",
  "automata-ci-core",
- "automata-ci-github-permissions",
  "automata-ci-scm",
  "axum",
  "bytes",
@@ -555,38 +574,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "automata-ci-github-permissions"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "sha2 0.11.0",
-]
-
-[[package]]
-name = "automata-ci-github-runtime"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "static_assertions",
- "thiserror",
-]
-
-[[package]]
-name = "automata-ci-job-executor-github"
+name = "automata-ci-job-executor-actions"
 version = "0.1.0"
 dependencies = [
  "aho-corasick",
  "async-trait",
  "automata-ci-action",
  "automata-ci-action-actions",
+ "automata-ci-actions-runtime",
  "automata-ci-auth",
  "automata-ci-blob",
  "automata-ci-core",
  "automata-ci-execution",
  "automata-ci-expression-actions",
- "automata-ci-github-runtime",
  "automata-ci-protocol",
  "automata-ci-protocol-protobuf",
  "automata-ci-runner-journal",
@@ -679,26 +679,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "automata-ci-oidc-github"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "axum",
- "base64 0.23.1",
- "http-body-util",
- "pem-rfc7468 1.0.0",
- "ring",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tower",
- "url",
- "uuid",
- "zeroize",
-]
-
-[[package]]
 name = "automata-ci-postgres"
 version = "0.1.0"
 dependencies = [
@@ -709,7 +689,6 @@ dependencies = [
  "automata-ci-control",
  "automata-ci-core",
  "automata-ci-key-management",
- "automata-ci-oidc-github",
  "automata-ci-protocol",
  "automata-ci-provisioning",
  "automata-ci-provisioning-postgres",
@@ -720,6 +699,7 @@ dependencies = [
  "automata-ci-store",
  "automata-ci-store-postgres",
  "automata-ci-workflow-service",
+ "automata-ci-workload-oidc",
  "ring",
  "serde",
  "serde_json",
@@ -855,41 +835,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "automata-ci-results-github"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "automata-ci-blob",
- "automata-ci-blob-s3",
- "automata-ci-control",
- "automata-ci-core",
- "automata-ci-postgres",
- "automata-ci-protocol",
- "automata-ci-protocol-protobuf",
- "automata-ci-store",
- "automata-ci-store-postgres",
- "axum",
- "base64 0.23.1",
- "bytes",
- "futures",
- "http-body-util",
- "prost",
- "ring",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "sqlx",
- "thiserror",
- "time",
- "tokio",
- "tower",
- "url",
- "uuid",
- "xmlparser",
- "zeroize",
-]
-
-[[package]]
 name = "automata-ci-runner"
 version = "0.1.0"
 dependencies = [
@@ -897,6 +842,7 @@ dependencies = [
  "async-trait",
  "automata-ci-action",
  "automata-ci-action-actions",
+ "automata-ci-actions-runtime",
  "automata-ci-auth",
  "automata-ci-blob",
  "automata-ci-blob-s3",
@@ -905,8 +851,7 @@ dependencies = [
  "automata-ci-execution",
  "automata-ci-expression-actions",
  "automata-ci-github",
- "automata-ci-github-runtime",
- "automata-ci-job-executor-github",
+ "automata-ci-job-executor-actions",
  "automata-ci-local",
  "automata-ci-metrics",
  "automata-ci-protocol",
@@ -982,6 +927,41 @@ dependencies = [
  "sha2 0.11.0",
  "static_assertions",
  "thiserror",
+]
+
+[[package]]
+name = "automata-ci-runner-results"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "automata-ci-blob",
+ "automata-ci-blob-s3",
+ "automata-ci-control",
+ "automata-ci-core",
+ "automata-ci-postgres",
+ "automata-ci-protocol",
+ "automata-ci-protocol-protobuf",
+ "automata-ci-store",
+ "automata-ci-store-postgres",
+ "axum",
+ "base64 0.23.1",
+ "bytes",
+ "futures",
+ "http-body-util",
+ "prost",
+ "ring",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "sqlx",
+ "thiserror",
+ "time",
+ "tokio",
+ "tower",
+ "url",
+ "uuid",
+ "xmlparser",
+ "zeroize",
 ]
 
 [[package]]
@@ -1183,14 +1163,14 @@ name = "automata-ci-store"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "automata-ci-actions-permissions",
  "automata-ci-auth",
  "automata-ci-blob",
  "automata-ci-core",
- "automata-ci-github-permissions",
  "automata-ci-key-management",
- "automata-ci-oidc-github",
  "automata-ci-provider",
  "automata-ci-schedule",
+ "automata-ci-workload-oidc",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -1211,11 +1191,11 @@ dependencies = [
  "automata-ci-control",
  "automata-ci-core",
  "automata-ci-key-management",
- "automata-ci-oidc-github",
  "automata-ci-provider",
  "automata-ci-schedule",
  "automata-ci-store",
  "automata-ci-tls",
+ "automata-ci-workload-oidc",
  "percent-encoding",
  "rcgen",
  "serde",
@@ -1269,8 +1249,8 @@ dependencies = [
 name = "automata-ci-workflow-actions"
 version = "0.1.0"
 dependencies = [
+ "automata-ci-actions-permissions",
  "automata-ci-core",
- "automata-ci-github-permissions",
  "automata-ci-schedule",
  "flate2",
  "focaccia",
@@ -1289,13 +1269,13 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "automata-ci-action-actions",
+ "automata-ci-actions-permissions",
  "automata-ci-auth",
  "automata-ci-blob",
  "automata-ci-blob-s3",
  "automata-ci-core",
  "automata-ci-expression-actions",
- "automata-ci-github-permissions",
- "automata-ci-job-executor-github",
+ "automata-ci-job-executor-actions",
  "automata-ci-protocol",
  "automata-ci-protocol-protobuf",
  "automata-ci-schedule",
@@ -1310,6 +1290,26 @@ dependencies = [
  "tokio-util",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "automata-ci-workload-oidc"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "base64 0.23.1",
+ "http-body-util",
+ "pem-rfc7468 1.0.0",
+ "ring",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tower",
+ "url",
+ "uuid",
+ "zeroize",
 ]
 
 [[package]]

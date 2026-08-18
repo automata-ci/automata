@@ -833,7 +833,7 @@ BEGIN
 END;
 $$;
 
-CREATE FUNCTION automata_enforce_github_oidc_issuance_replacement() RETURNS trigger
+CREATE FUNCTION automata_enforce_workload_oidc_issuance_replacement() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -844,15 +844,15 @@ BEGIN
         OR NEW.generation <> OLD.generation + 1
         OR NEW.issued_at_seconds < OLD.expires_at_seconds
     THEN
-        RAISE EXCEPTION 'GitHub-compatible OIDC slot replacement is invalid'
+        RAISE EXCEPTION 'Automata workload OIDC slot replacement is invalid'
             USING ERRCODE = 'integrity_constraint_violation',
-                  CONSTRAINT = 'github_oidc_issuance_slot_replacement';
+                  CONSTRAINT = 'workload_oidc_issuance_slot_replacement';
     END IF;
     RETURN NEW;
 END;
 $$;
 
-CREATE FUNCTION automata_enforce_github_oidc_key_deadline() RETURNS trigger
+CREATE FUNCTION automata_enforce_workload_oidc_key_deadline() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -862,9 +862,9 @@ BEGIN
         OR NEW.max_not_after_seconds < OLD.max_not_after_seconds
         OR NEW.updated_at_seconds < OLD.updated_at_seconds
     THEN
-        RAISE EXCEPTION 'GitHub-compatible OIDC key retention cannot regress'
+        RAISE EXCEPTION 'Automata workload OIDC key retention cannot regress'
             USING ERRCODE = 'integrity_constraint_violation',
-                  CONSTRAINT = 'github_oidc_key_deadline_monotonic';
+                  CONSTRAINT = 'workload_oidc_key_deadline_monotonic';
     END IF;
     RETURN NEW;
 END;

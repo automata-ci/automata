@@ -3,8 +3,8 @@ use crate::{
     PermissionLevel, Permissions, PreservedField, RunDefaults, ScalarResolution, ScalarValue,
     Spanned, ValueMap, ValueMapEntry, YamlNode,
 };
-use automata_ci_github_permissions::{
-    GITHUB_WORKFLOW_PERMISSION_CATALOG_REVISION, github_workflow_permission,
+use automata_ci_actions_permissions::{
+    ACTIONS_WORKFLOW_PERMISSION_CATALOG_REVISION, actions_workflow_permission,
 };
 
 use super::{DecodeContext, field_name};
@@ -128,11 +128,11 @@ pub(super) fn permissions(
         let Some(entry_path) = context.child_path(path, &name.decoded, &entry.key.span) else {
             break;
         };
-        let Some(permission) = github_workflow_permission(&name.decoded) else {
+        let Some(permission) = actions_workflow_permission(&name.decoded) else {
             context.semantic(
                 "github.unknown_permission",
                 format!(
-                    "`{entry_path}` is not present in GitHub workflow permission catalog revision {GITHUB_WORKFLOW_PERMISSION_CATALOG_REVISION}"
+                    "`{entry_path}` is not present in GitHub workflow permission catalog revision {ACTIONS_WORKFLOW_PERMISSION_CATALOG_REVISION}"
                 ),
                 entry.key.span.clone(),
             );

@@ -78,7 +78,7 @@ impl RunnerCapabilityAdmissionRepository for PostgresStore {
                 if capabilities
                     .features()
                     .contains(&RunnerFeature::OIDC_TOKENS)
-                    && !readiness.github_oidc()
+                    && !readiness.workload_oidc()
                 {
                     return Err(RunnerCapabilityAdmissionError::drift(
                         "runner capability admission",

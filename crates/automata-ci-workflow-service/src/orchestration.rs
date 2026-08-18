@@ -12,7 +12,7 @@ use automata_ci_core::{
     WorkflowJobKey, WorkflowPlan,
 };
 use automata_ci_expression_actions::{GithubObject, GithubValue};
-use automata_ci_job_executor_github::ActionPreparationPort;
+use automata_ci_job_executor_actions::ActionPreparationPort;
 use automata_ci_protocol::ProtocolLimits;
 use automata_ci_store::{
     ActivatedLogicalInstanceDescriptor, AdmissionObject, ClaimedLogicalJobActivation,

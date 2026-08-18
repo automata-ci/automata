@@ -1,7 +1,7 @@
 use std::{fmt, time::Instant};
 
+pub use automata_ci_actions_permissions::ActionsDefaultWorkflowPermission;
 use automata_ci_auth::{github::GithubEndpointError, secret::SecretString};
-pub use automata_ci_github_permissions::GithubDefaultWorkflowPermission;
 use automata_ci_scm::RepositoryId;
 use reqwest::header::{ACCEPT, AUTHORIZATION};
 use serde::Deserialize;
@@ -19,14 +19,14 @@ const ACCEPT_API_JSON: &str = "application/vnd.github+json";
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct GithubWorkflowPermissionDefaults {
-    default_workflow_permissions: GithubDefaultWorkflowPermission,
+    default_workflow_permissions: ActionsDefaultWorkflowPermission,
     can_approve_pull_request_reviews: bool,
 }
 
 impl GithubWorkflowPermissionDefaults {
     /// Returns the effective default applied when a workflow omits `permissions`.
     #[must_use]
-    pub const fn default_workflow_permissions(self) -> GithubDefaultWorkflowPermission {
+    pub const fn default_workflow_permissions(self) -> ActionsDefaultWorkflowPermission {
         self.default_workflow_permissions
     }
 

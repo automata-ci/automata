@@ -61,7 +61,7 @@ describe("preview bootstrap routing", () => {
       route: "/preview/?view=job&run=run-a4f69c2e&job=job-1",
       title: "Linux release build logs · Automata",
       heading: "Linux release build",
-      content: "Compiling automata-ci-job-executor-github",
+      content: "Compiling automata-ci-job-executor-actions",
     },
     {
       route: "/preview/?view=settings",

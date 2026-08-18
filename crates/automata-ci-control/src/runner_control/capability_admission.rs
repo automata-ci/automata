@@ -37,27 +37,29 @@ impl RunnerCapabilityAdmissionError {
 /// Server-owned readiness gates for capability-bearing runner inventory.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RunnerCapabilityReadiness {
-    github_oidc: bool,
+    workload_oidc: bool,
 }
 
 impl RunnerCapabilityReadiness {
     /// Returns the fail-closed set used when no optional product is ready.
     #[must_use]
     pub const fn unavailable() -> Self {
-        Self { github_oidc: false }
+        Self {
+            workload_oidc: false,
+        }
     }
 
-    /// Admits GitHub-compatible workload OIDC after composition proves it ready.
+    /// Admits Actions-compatible workload OIDC after composition proves it ready.
     #[must_use]
-    pub const fn with_github_oidc(mut self) -> Self {
-        self.github_oidc = true;
+    pub const fn with_workload_oidc(mut self) -> Self {
+        self.workload_oidc = true;
         self
     }
 
     /// Returns whether OIDC-bearing runner inventory may remain active.
     #[must_use]
-    pub const fn github_oidc(self) -> bool {
-        self.github_oidc
+    pub const fn workload_oidc(self) -> bool {
+        self.workload_oidc
     }
 }
 

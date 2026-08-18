@@ -142,7 +142,7 @@ Acceptance:
 
 **Owner:** R. **Size:** M. **Dependencies:** none.
 
-**Primary scope:** `automata-ci-job-executor-github` only; no behavior change.
+**Primary scope:** `automata-ci-job-executor-actions` only; no behavior change.
 
 Tasks:
 

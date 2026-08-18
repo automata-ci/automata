@@ -790,16 +790,16 @@ pub struct ServerArgs {
     #[arg(long, env = "AUTOMATA_RESULTS_KEY_ID", default_value = "primary")]
     pub results_key_id: String,
 
-    /// Optional strict manifest reference enabling GitHub-compatible workload OIDC.
+    /// Optional strict manifest reference enabling Actions-compatible workload OIDC.
     ///
     /// The manifest contains only bounded public policy plus environment or file
     /// references for private key material; raw keys are never accepted in argv.
     #[arg(
         long,
-        env = "AUTOMATA_GITHUB_OIDC_CONFIG_SOURCE",
+        env = "AUTOMATA_WORKLOAD_OIDC_CONFIG_SOURCE",
         value_name = "env:NAME|file:PATH"
     )]
-    pub github_oidc_config_source: Option<SecretSource>,
+    pub workload_oidc_config_source: Option<SecretSource>,
 
     /// Optional strict trust registry for broker-signed Windows runner admission.
     ///

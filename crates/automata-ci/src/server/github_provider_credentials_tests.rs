@@ -617,7 +617,7 @@ fn test_runtime_policy() -> WorkflowRuntimePolicy {
         "/__w",
         [mapping],
         WorkflowPermissionPolicy::from_github_default(
-            automata_ci_github::GithubDefaultWorkflowPermission::Read,
+            automata_ci_github::ActionsDefaultWorkflowPermission::Read,
         )
         .expect("permission policy"),
         resources,
@@ -990,7 +990,7 @@ fn workflow_permission_observation_is_manifest_and_authority_bound() {
         candidate.clone(),
         &release,
         GithubServerServiceGeneration::new(1).expect("generation"),
-        automata_ci_github::GithubDefaultWorkflowPermission::Read,
+        automata_ci_github::ActionsDefaultWorkflowPermission::Read,
         false,
         UnixMillis::new(OBSERVED_AT + 10),
     )
@@ -1000,7 +1000,7 @@ fn workflow_permission_observation_is_manifest_and_authority_bound() {
         candidate.clone(),
         &release,
         GithubServerServiceGeneration::new(1).expect("generation"),
-        automata_ci_github::GithubDefaultWorkflowPermission::Read,
+        automata_ci_github::ActionsDefaultWorkflowPermission::Read,
         true,
         UnixMillis::new(OBSERVED_AT + 10),
     )

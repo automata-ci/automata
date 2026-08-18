@@ -590,7 +590,7 @@ fn raw_github_webhook_secret_configuration_is_not_exposed() {
 }
 
 #[test]
-fn github_oidc_configuration_is_one_strict_https_results_bound_manifest() {
+fn workload_oidc_configuration_is_one_strict_https_results_bound_manifest() {
     let disabled = Cli::try_parse_from([
         "automata",
         "server",
@@ -604,11 +604,11 @@ fn github_oidc_configuration_is_one_strict_https_results_bound_manifest() {
     assert!(
         ServerConfig::from_args(&disabled)
             .expect("OIDC is optional")
-            .github_oidc()
+            .workload_oidc()
             .is_none()
     );
 
-    let manifest_path = test_file("github-oidc.json");
+    let manifest_path = test_file("workload-oidc.json");
     write_secret_file(&manifest_path, oidc_manifest("stable_owner_evidence"));
     let manifest_source = format!("file:{}", manifest_path.display());
     let cli = Cli::try_parse_from([
@@ -616,7 +616,7 @@ fn github_oidc_configuration_is_one_strict_https_results_bound_manifest() {
         "server",
         "--results-public-url",
         "https://results.example.test/",
-        "--github-oidc-config-source",
+        "--workload-oidc-config-source",
         &manifest_source,
     ])
     .expect("complete OIDC configuration syntax");
@@ -626,7 +626,7 @@ fn github_oidc_configuration_is_one_strict_https_results_bound_manifest() {
     let config = ServerConfig::from_args(&args).expect("complete OIDC manifest");
     assert_eq!(
         config
-            .github_oidc()
+            .workload_oidc()
             .expect("OIDC enabled")
             .issuer()
             .as_str(),
@@ -636,7 +636,7 @@ fn github_oidc_configuration_is_one_strict_https_results_bound_manifest() {
     write_secret_file(&manifest_path, oidc_manifest("repository_evidence"));
     assert!(matches!(
         ServerConfig::from_args(&args),
-        Err(ServerConfigError::InvalidGithubOidcConfiguration)
+        Err(ServerConfigError::InvalidWorkloadOidcConfiguration)
     ));
 
     write_secret_file(&manifest_path, oidc_manifest("stable_owner_evidence"));
@@ -646,7 +646,7 @@ fn github_oidc_configuration_is_one_strict_https_results_bound_manifest() {
         "--results-public-url",
         "http://127.0.0.1:8081/",
         "--results-allow-development-http",
-        "--github-oidc-config-source",
+        "--workload-oidc-config-source",
         &manifest_source,
     ])
     .expect("explicit Results development syntax");
@@ -655,7 +655,7 @@ fn github_oidc_configuration_is_one_strict_https_results_bound_manifest() {
     };
     assert!(matches!(
         ServerConfig::from_args(&development),
-        Err(ServerConfigError::InvalidGithubOidcConfiguration)
+        Err(ServerConfigError::InvalidWorkloadOidcConfiguration)
     ));
 }
 

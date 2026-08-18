@@ -108,14 +108,14 @@ cargo test -p automata-ci-github --test live_repository_snapshot --locked -- --i
 cargo test -p automata-ci-blob-s3 --test blob_s3 --locked -- rustfs_contract:: --ignored --test-threads=1
 cargo test -p automata-ci-action --test live_github_rustfs --locked -- --ignored --test-threads=1
 cargo test -p automata-ci-action-actions --test live_checkout_pipeline --locked -- --ignored --test-threads=1
-cargo test -p automata-ci-results-github --test rustfs_results --locked -- --ignored --test-threads=1
-cargo test -p automata-ci-results-github --test cache_rustfs --locked -- --ignored --test-threads=1
+cargo test -p automata-ci-runner-results --test rustfs_results --locked -- --ignored --test-threads=1
+cargo test -p automata-ci-runner-results --test cache_rustfs --locked -- --ignored --test-threads=1
 cargo test -p automata-ci-workflow-service --test live_admission --locked -- --ignored --test-threads=1
 
 # Official Node client compatibility. Set AUTOMATA_TEST_ACTIONS_ARTIFACT_MODULE
 # and AUTOMATA_TEST_ACTIONS_CACHE_MODULE to the exact modules named by the tests.
-cargo test -p automata-ci-results-github --test http_compatibility --locked -- --ignored --test-threads=1
-cargo test -p automata-ci-results-github --test cache_http --locked -- --ignored --test-threads=1
+cargo test -p automata-ci-runner-results --test http_compatibility --locked -- --ignored --test-threads=1
+cargo test -p automata-ci-runner-results --test cache_http --locked -- --ignored --test-threads=1
 
 # Rootless Podman contracts. Set AUTOMATA_LIVE_ROOTLESS_PODMAN=1 and
 # AUTOMATA_LIVE_ROOTLESS_BUILDX=1. Configure the AUTOMATA_PODMAN_TEST_*

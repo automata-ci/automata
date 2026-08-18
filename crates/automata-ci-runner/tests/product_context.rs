@@ -2,6 +2,10 @@
 
 use std::{collections::BTreeMap, sync::Arc};
 
+use automata_ci_actions_runtime::{
+    CommandFilePlatform, EnvironmentMutationBlockReason, JobCommandState,
+    classify_environment_mutation,
+};
 use automata_ci_core::{
     AttemptId, ContextValue, FencingToken, JobAuthorityProfile, JobConclusion, JobContentReference,
     JobExecutionContext, JobId, JobInstanceIdentity, JobIr, JobIrEnvelope, JobPermissionGrant,
@@ -18,12 +22,8 @@ use automata_ci_execution::{
 use automata_ci_expression_actions::{
     GithubExpressionEvaluator, GithubObject, GithubStatus, GithubValue,
 };
-use automata_ci_github_runtime::{
-    CommandFilePlatform, EnvironmentMutationBlockReason, JobCommandState,
-    classify_environment_mutation,
-};
-use automata_ci_job_executor_github::{
-    GithubContextPort, GithubContextRequest, GithubExecutionIdentity, GithubExecutionPhase,
+use automata_ci_job_executor_actions::{
+    ActionsExecutionIdentity, ActionsExecutionPhase, GithubContextPort, GithubContextRequest,
     PortErrorKind,
 };
 use automata_ci_protocol::{
@@ -686,7 +686,7 @@ fn authority_context_custody_shares_original_secret_allocations() {
 
     let results = fixture
         .runtime_authorities
-        .get("github-actions-results")
+        .get("runner-results")
         .expect("Results authority")
         .credential()
         .shared_secret();
@@ -698,7 +698,7 @@ fn authority_context_custody_shares_original_secret_allocations() {
         .shared_secret();
     let oidc = fixture
         .runtime_authorities
-        .get("github-oidc")
+        .get("workload-oidc")
         .expect("OIDC authority")
         .credential()
         .shared_secret();
@@ -868,7 +868,7 @@ fn missing_or_cross_fence_results_authority_fails_closed() {
     let error = cross_fence
         .context
         .snapshot(GithubContextRequest::new(
-            GithubExecutionIdentity::new(
+            ActionsExecutionIdentity::new(
                 &cross_fence.job,
                 &cross_fence.runtime_context,
                 &stale_lease,
@@ -880,7 +880,7 @@ fn missing_or_cross_fence_results_authority_fails_closed() {
             &[],
             GithubStatus::Success,
             None,
-            GithubExecutionPhase::Job,
+            ActionsExecutionPhase::Job,
         ))
         .expect_err("cross-fence authority");
     assert_eq!(error.kind(), PortErrorKind::InvalidData);
@@ -1012,7 +1012,7 @@ impl ContextFixture {
         )
         .expect("valid fixture lease");
         let authority = JobRuntimeAuthority::new(
-            RuntimeAuthorityName::new("github-actions-results").expect("authority name"),
+            RuntimeAuthorityName::new("runner-results").expect("authority name"),
             job.job().run_id(),
             job.job().job_id(),
             lease.attempt_id(),
@@ -1111,7 +1111,7 @@ impl ContextFixture {
 
     fn add_oidc_authority(&mut self, endpoint: RuntimeAuthorityEndpoint, token: &str) {
         let oidc = JobRuntimeAuthority::new(
-            RuntimeAuthorityName::new("github-oidc").expect("OIDC authority name"),
+            RuntimeAuthorityName::new("workload-oidc").expect("OIDC authority name"),
             self.job.job().run_id(),
             self.job.job().job_id(),
             self.lease.attempt_id(),
@@ -1132,8 +1132,8 @@ impl ContextFixture {
     fn snapshot(
         &self,
     ) -> Result<
-        automata_ci_job_executor_github::GithubContextSnapshot,
-        automata_ci_job_executor_github::PortError,
+        automata_ci_job_executor_actions::GithubContextSnapshot,
+        automata_ci_job_executor_actions::PortError,
     > {
         let event = empty_event();
         self.snapshot_with_event(&event)
@@ -1143,13 +1143,13 @@ impl ContextFixture {
         &self,
         event: &GithubValue,
     ) -> Result<
-        automata_ci_job_executor_github::GithubContextSnapshot,
-        automata_ci_job_executor_github::PortError,
+        automata_ci_job_executor_actions::GithubContextSnapshot,
+        automata_ci_job_executor_actions::PortError,
     > {
         let commands = JobCommandState::new(CommandFilePlatform::Unix);
         let event_path = fixture_event_path();
         self.context.snapshot(GithubContextRequest::new(
-            GithubExecutionIdentity::new(
+            ActionsExecutionIdentity::new(
                 &self.job,
                 &self.runtime_context,
                 &self.lease,
@@ -1161,7 +1161,7 @@ impl ContextFixture {
             &[],
             GithubStatus::Success,
             None,
-            GithubExecutionPhase::Job,
+            ActionsExecutionPhase::Job,
         ))
     }
 
@@ -1169,15 +1169,15 @@ impl ContextFixture {
         &self,
         services: &ServiceContainerBindings,
     ) -> Result<
-        automata_ci_job_executor_github::GithubContextSnapshot,
-        automata_ci_job_executor_github::PortError,
+        automata_ci_job_executor_actions::GithubContextSnapshot,
+        automata_ci_job_executor_actions::PortError,
     > {
         let commands = JobCommandState::new(CommandFilePlatform::Unix);
         let event_path = fixture_event_path();
         let event = empty_event();
         self.context.snapshot(
             GithubContextRequest::new(
-                GithubExecutionIdentity::new(
+                ActionsExecutionIdentity::new(
                     &self.job,
                     &self.runtime_context,
                     &self.lease,
@@ -1189,7 +1189,7 @@ impl ContextFixture {
                 &[],
                 GithubStatus::Success,
                 None,
-                GithubExecutionPhase::Run,
+                ActionsExecutionPhase::Run,
             )
             .with_services(Some(services)),
         )

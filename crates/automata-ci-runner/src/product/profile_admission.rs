@@ -14,7 +14,7 @@ use automata_ci_execution::{
     SandboxGeneration, SandboxHandle, SandboxPrivilegePolicy, SandboxProvider, SandboxSpec,
     SandboxState, TargetPath, TargetPlatform,
 };
-use automata_ci_job_executor_github::{WindowsScriptShell, windows_script_arguments};
+use automata_ci_job_executor_actions::{WindowsScriptShell, windows_script_arguments};
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 

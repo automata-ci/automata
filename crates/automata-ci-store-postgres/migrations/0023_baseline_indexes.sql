@@ -18,7 +18,7 @@ CREATE INDEX github_check_subjects_run ON github_check_subjects USING btree (ten
 
 CREATE INDEX github_membership_snapshots_current ON github_membership_snapshots USING btree (tenant_id, principal_id, provider_id, valid_until_ms DESC, observed_at_ms DESC);
 
-CREATE INDEX github_oidc_key_deadlines_active_lookup ON github_oidc_key_deadlines USING btree (key_use, max_not_after_seconds, key_id);
+CREATE INDEX workload_oidc_key_deadlines_active_lookup ON workload_oidc_key_deadlines USING btree (key_use, max_not_after_seconds, key_id);
 
 CREATE UNIQUE INDEX github_role_mappings_active_organization_repository ON github_role_mappings USING btree (tenant_id, provider_id, organization_id, role_id, repository_id) WHERE ((status = 'active'::text) AND (team_id IS NULL) AND (scope_kind = 'repository'::text));
 

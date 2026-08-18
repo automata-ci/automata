@@ -67,7 +67,7 @@ WHERE version.tenant_id = $3 AND version.id = $5
   AND version.variable_id = $4 AND version.version_number = $6;
 $_$;
 
-CREATE FUNCTION automata_lock_github_oidc_authority_dependencies(authority github_oidc_authorities) RETURNS boolean
+CREATE FUNCTION automata_lock_workload_oidc_authority_dependencies(authority workload_oidc_authorities) RETURNS boolean
     LANGUAGE plpgsql
     AS $$
 DECLARE
@@ -1447,22 +1447,22 @@ BEGIN
 END;
 $$;
 
-CREATE FUNCTION automata_reject_github_oidc_authority_mutation() RETURNS trigger
+CREATE FUNCTION automata_reject_workload_oidc_authority_mutation() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
-    RAISE EXCEPTION 'GitHub-compatible OIDC authority is immutable'
+    RAISE EXCEPTION 'Automata workload OIDC authority is immutable'
         USING ERRCODE = 'integrity_constraint_violation',
-              CONSTRAINT = 'github_oidc_authority_immutable';
+              CONSTRAINT = 'workload_oidc_authority_immutable';
 END;
 $$;
 
-CREATE FUNCTION automata_reject_github_oidc_issuance_delete() RETURNS trigger
+CREATE FUNCTION automata_reject_workload_oidc_issuance_delete() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
-    RAISE EXCEPTION 'GitHub-compatible OIDC issuance slots are retained'
+    RAISE EXCEPTION 'Automata workload OIDC issuance slots are retained'
         USING ERRCODE = 'integrity_constraint_violation',
-              CONSTRAINT = 'github_oidc_issuance_slot_retained';
+              CONSTRAINT = 'workload_oidc_issuance_slot_retained';
 END;
 $$;

@@ -1,0 +1,173 @@
+# automata-ci-job-executor-actions
+
+`automata-ci-job-executor-actions` implements GitHub Actions-compatible step
+sequencing over Automata's provider-neutral whole-job sandbox contracts. Action
+resolution, credentials, expression evaluation, runtime commands, clocks, and
+operation identities cross explicit ports.
+
+`automata-runner` composes this executor with the runtime, durable recovery, and
+an isolation provider such as rootless Podman.
+
+The executor currently carries public job outputs, summaries, annotations,
+command-file effects, and registered masks across the execution boundary.
+Secret-derived outputs and values matching registered credentials are marked
+sensitive instead of being returned as public values. The product compatibility
+limit is tracked separately from this component boundary.
+
+The executor implements the reviewed `GITHUB_ARTIFACTS` environment-file
+delta: every phase receives fresh declaration and read-only list files; file
+subjects resolve relative to the job workspace and are SHA-256 hashed as
+regular files inside the sandbox; OCI subjects are normalized; and successful
+subjects become the deterministic list visible to later phases. Parsing and
+job aggregation are atomic and bounded.
+
+Every run, JavaScript pre/main/post, and composite child phase receives a fresh
+set of seven attempt-scoped paths: `GITHUB_ENV`, `GITHUB_OUTPUT`, `GITHUB_PATH`,
+`GITHUB_STATE`, `GITHUB_STEP_SUMMARY`, `GITHUB_ARTIFACTS`, and the read-only
+`GITHUB_ARTIFACTS_LIST`. The first six start empty and the list starts from the
+current canonical job artifact snapshot. Paths are deterministic within one
+attempt and phase for recovery, while different phases and attempts are
+disjoint. Same-attempt recovery reinitializes every file before the path is
+reused, so stale bytes cannot become phase input.
+
+After an execution endpoint returns a terminal output, the executor makes a
+bounded collection attempt for success, nonzero exit, timeout, and
+provider-reported cancellation. Collection or parsing failure cannot replace
+an already-known failure, timeout, or cancellation outcome, and command state
+plus retained attachments commit atomically. A missing or deleted summary is
+treated as no summary; it does not suppress other valid phase-file effects. An
+independently signaled execution-cancellation token remains dominant under the
+executor's cancellation contract.
+
+## Shell dispatch contract
+
+Shell executables come only from the immutable environment toolchain; workflow
+text is never searched on `PATH` and is never executed through an extra outer
+shell. The POSIX default selects configured `bash`, then configured `sh`, with
+`-e`. The Windows default selects configured PowerShell Core, then configured
+Windows PowerShell. Explicit POSIX `bash` uses
+`--noprofile --norc -e -o pipefail`; the other named-shell argument vectors
+match the pinned runner contract.
+
+The advertised named-shell matrix is:
+
+| Target | Named shells |
+| --- | --- |
+| POSIX | `bash`, `sh`, `python`, `pwsh` |
+| Windows Hyper-V container | `python`, `pwsh`, `powershell`, `cmd` |
+
+Custom command templates use a deliberately closed grammar. A template must
+use single ASCII spaces, contain exactly one `{0}` as its complete final token,
+contain no other braces or control characters, and select one configured
+interpreter. The accepted forms are:
+
+- `bash {0}`, `bash -e {0}`,
+  `bash --noprofile --norc -e -o pipefail {0}`, and
+  `bash --noprofile --norc -eo pipefail {0}`;
+- `sh {0}` and `sh -e {0}`;
+- `python {0}` and `python -u {0}`;
+- `pwsh -File {0}` and `powershell -File {0}` (case-insensitive `-File`).
+
+The platform matrix still applies after parsing. In particular, the current
+Windows Hyper-V profile does not advertise Git Bash or `sh`; those requests
+fail at admission instead of relying on a host installation. Arbitrary
+executables, quoted or embedded placeholders, command modes such as `-c` or
+`-Command`, and custom `cmd` templates fail closed. Literal shell contracts and
+tool availability are checked during admission, before provider work. A shell
+derived from an expression is checked immediately after evaluation and before
+the script is copied or any user command runs. Missing configured tools surface
+as a capability change; malformed or platform-incompatible contracts surface
+as invalid jobs.
+
+Scripts are UTF-8 without a BOM. POSIX scripts retain LF input. Every Windows
+script is normalized to CRLF; PowerShell scripts receive error-stop and
+`$LASTEXITCODE` propagation guards, and `cmd` scripts receive `@echo off`.
+Extensions follow the selected interpreter (`.sh`, `.py`, `.ps1`, or `.cmd`).
+The hardened `cmd` divergence uses `/D /E:ON /V:OFF /C` with the script path as
+a separately bounded argv value, rather than GitHub's nested `/S /C CALL`
+command string. Paths containing `"`, `%`, `&`, `|`, `<`, `>`, `^`, `(`, or
+`)` are rejected for `cmd`; `!` remains literal because delayed expansion is
+disabled.
+
+The executor receives the already-resolved workflow/job working-directory
+default in the job IR. A step-local directory overrides it; otherwise the
+resolved default applies, then the workspace. Every resulting path remains
+confined to the workspace.
+
+## Action metadata and runtime contract
+
+Repository action metadata is recursively prepared and cached after runtime
+secret masks are installed but before secret-custody acknowledgement, provider
+create/attach, action archive extraction, or user code. Repository cycles,
+nested container actions, malformed metadata, and a JavaScript generation that
+has no exact executable in the selected toolchain all produce a terminal,
+sanitized job failure without sandbox work. The metadata decoder has a closed
+`node12`/`node16`/`node20`/`node24` enum; availability is narrower and comes
+only from the immutable profile toolchain. There is no fallback between Node
+generations and no `PATH` probe. The current Ubuntu profile advertises only its
+pinned Node 24 executable. Container-action execution and `runs.plugin` remain
+unsupported.
+
+On an admitted Windows action profile, repository archives are bounded and
+validated before provider mutation. The validator permits only regular files
+and directories under the expected archive root and rejects traversal, links,
+special entries, Windows device names, alternate-stream/illegal characters,
+trailing dots or spaces, non-ASCII names, and case-insensitive collisions. The
+executor refuses a stale destination, creates it inside the job container,
+copies the archive through the sandbox content port, verifies the exact digest
+with the configured hash helper, extracts with the configured `tar.exe`, then
+performs a PowerShell root/reparse-point scan before reading metadata or
+executing an action. Every stage is ordered and fail-closed; archive extraction
+and action hooks never run on the host. JavaScript pre/main/post use only the
+metadata-selected, exact Node-generation path. A missing tar, hash helper,
+Node runtime, digest match, or tree check rejects the job.
+
+Checked-out Windows local actions use the exact configured `pwsh.exe` for their
+JIT metadata probe. The probe receives runner-owned candidate paths through a
+closed internal environment, proves the action directory remains below the job
+workspace, and rejects a reparse point in the workspace path or action tree
+before metadata is copied back. Windows local JavaScript and composite phases
+then use the same exact Node and shell contracts as materialized repository
+actions.
+
+The control-plane activation boundary anonymously resolves exact-commit public
+repository metadata before Job IR publication and carries the complete
+statically knowable runtime feature set in `RunnerRequirements`:
+JavaScript/composite execution, the exact Node generation, literal composite
+shells, repository action handling, command files, and summaries. A `$/...`
+self-repository child compiled from repository-action metadata is rebound to
+the same repository and exact revision, so its definition is prepared
+recursively from that immutable repository snapshot. A `./...` child remains
+rooted in the workflow workspace and currently fails closed before Job IR
+publication or runner lease.
+Top-level literal and activation-resolved run shells are concretized by logical
+projection. Mutable tag/branch references and repository composite shell
+expressions fail closed pending ACT-02 resolution and binding support. Runner
+capability matching therefore happens before lease acquisition. This executor
+deliberately repeats repository preparation and runtime validation before
+secret-custody acknowledgement or provider work as a defense against
+capability drift.
+
+Checked-out local action metadata is different: preceding workflow code may
+create or replace it, so its runtime requirements cannot be soundly known at
+control-plane activation time. Such source references currently fail
+activation before Job IR publication or runner lease. The executor retains its
+bounded in-sandbox metadata compiler and exact runtime/shell checks as defense
+in depth, but that JIT path is not advertised as runnable source support.
+Private repository action resolution is not yet composed; it remains ACT-02
+work rather than silently borrowing workflow credentials.
+
+Prepared inputs retain metadata declaration order and use case-insensitive
+caller lookup. Every declared input is present: an omitted input uses its
+evaluated default or the empty string. Boolean, numeric-looking, and null YAML
+scalars retain the pinned runner's string behavior. The `required` scalar is
+retained for compatibility but deliberately does not invent missing-input
+validation. Static deprecation messages are bounded and control-free, are never
+expression-evaluated, and are emitted only when that input was explicitly
+supplied. Action-phase identity supplies invocation-specific
+`GITHUB_ACTION`, `GITHUB_ACTION_PATH`, `GITHUB_ACTION_REF`, and
+`GITHUB_ACTION_REPOSITORY` values and their corresponding expression context.
+
+- [Compatibility documentation](https://github.com/automata-ci/automata/blob/main/docs/compatibility.md)
+- API documentation: run `cargo doc -p automata-ci-job-executor-actions --open` from a source checkout.
+- [Issues and support](https://github.com/automata-ci/automata/issues)

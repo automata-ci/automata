@@ -493,7 +493,7 @@ fn claimed_runtime_authorities(job: &JobIrEnvelope, lease: &Lease) -> JobRuntime
             .expect("credential-free runtime authorities");
     }
     let authority = JobRuntimeAuthority::new(
-        RuntimeAuthorityName::new("github-actions-results").expect("authority name"),
+        RuntimeAuthorityName::new("runner-results").expect("authority name"),
         job.job().run_id(),
         job.job().job_id(),
         lease.attempt_id(),

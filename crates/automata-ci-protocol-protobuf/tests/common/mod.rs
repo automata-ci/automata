@@ -653,7 +653,7 @@ fn active_lease(attempt: AttemptId, runner: RunnerId) -> Lease {
 
 pub fn runtime_authorities(job: &JobIrEnvelope, lease: &Lease) -> JobRuntimeAuthorities {
     let authority = JobRuntimeAuthority::new(
-        RuntimeAuthorityName::new("github-actions-results").expect("valid authority name"),
+        RuntimeAuthorityName::new("runner-results").expect("valid authority name"),
         job.job().run_id(),
         job.job().job_id(),
         lease.attempt_id(),

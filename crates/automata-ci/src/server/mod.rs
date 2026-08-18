@@ -3,7 +3,6 @@
 mod composition;
 mod config;
 mod github_job_runtime_authority;
-mod github_oidc;
 mod github_provider;
 mod github_provider_config;
 mod github_provider_credentials;
@@ -27,6 +26,7 @@ mod state_metrics;
 mod windows_runner_admission;
 mod workflow_dispatch;
 mod workflow_rerun;
+mod workload_oidc;
 
 use std::{future::Future, net::SocketAddr, pin::Pin, sync::Arc, time::Duration};
 
@@ -67,7 +67,6 @@ pub use config::{
     VersionedSecretSourceParseError,
 };
 pub(crate) use config::{S3ConnectionConfig, S3Transport};
-pub use github_oidc::{GithubOidcConfig, GithubOidcProductError};
 pub use github_provider::{
     GithubProviderBootstrapError, GithubProviderBootstrapPlan, GithubProviderBootstrapReady,
     GithubProviderCredentialRequestResolver,
@@ -108,6 +107,7 @@ pub use windows_runner_admission::{
     MAX_WINDOWS_RUNNER_ADMISSION_CONFIG_BYTES, WindowsRunnerAdmissionConfigError,
     WindowsRunnerAdmissionPolicy,
 };
+pub use workload_oidc::{WorkloadOidcConfig, WorkloadOidcProductError};
 
 const RESULTS_HTTP_REQUEST_TIMEOUT: Duration = Duration::from_mins(5);
 const LOGICAL_RESULT_PROJECTION_IDLE_POLL: Duration = Duration::from_millis(250);

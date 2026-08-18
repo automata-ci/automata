@@ -13,8 +13,6 @@ mod github_authenticated_event;
 mod github_checks_api;
 #[path = "github_job_runtime_authority_api.rs"]
 mod github_job_runtime_authority_api;
-#[path = "github_oidc_api.rs"]
-mod github_oidc_api;
 #[path = "github_provider_manifest_api.rs"]
 mod github_provider_manifest_api;
 #[path = "github_schedule_api.rs"]
@@ -63,3 +61,5 @@ mod tenant_scope;
 mod workflow_admission;
 #[path = "workflow_enable_state_api.rs"]
 mod workflow_enable_state_api;
+#[path = "workload_oidc_api.rs"]
+mod workload_oidc_api;

@@ -115,7 +115,7 @@ These files and contracts are merge hotspots. Assign one owner at a time.
 - `crates/automata-ci-workflow-service/src/orchestration.rs`: lane S while
   scheduling work is active; lane C supplies reviewed contracts instead of
   editing it concurrently.
-- `crates/automata-ci-job-executor-github/src/executor.rs`: lane R until the
+- `crates/automata-ci-job-executor-actions/src/executor.rs`: lane R until the
   executor seam extraction lands.
 - `crates/automata-ci-sandbox-podman/src/provider.rs`: lane P.
 - `crates/automata-ci-sandbox-windows/**` and the Windows Hyper-V-container
@@ -123,7 +123,7 @@ These files and contracts are merge hotspots. Assign one owner at a time.
   privileged boundary.
 - `crates/automata-ci-runner/src/product/context.rs`: lane R. Lanes C and P
   provide input contracts and fixtures.
-- `crates/automata-ci-results-github/**`: lane X.
+- `crates/automata-ci-runner-results/**`: lane X.
 - central GitHub event model and trigger compiler files: lane C until the
   event registry split lands.
 - GitHub Check store and publisher: lane X.
