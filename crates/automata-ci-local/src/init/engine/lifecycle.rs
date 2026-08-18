@@ -1,7 +1,8 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     fs,
-    io::ErrorKind,
+    io::{ErrorKind, IoSliceMut, Read as _, Write as _},
+    mem::MaybeUninit,
     os::unix::net::UnixStream,
     pin::Pin,
     time::Duration,
@@ -9,10 +10,11 @@ use std::{
 
 use automata_ci_core::{OperationId, Sha256Digest};
 use bollard::{
+    Docker,
     container::{AttachContainerResults, LogOutput},
     models::{
-        ContainerCreateBody, ContainerSummary, HostConfig, HostConfigCgroupnsModeEnum,
-        HostConfigIsolationEnum, ImageConfig, Ipam, IpamConfig, Mount,
+        ContainerCreateBody, ContainerSummary, EventMessage, EventMessageTypeEnum, HostConfig,
+        HostConfigCgroupnsModeEnum, HostConfigIsolationEnum, ImageConfig, Ipam, IpamConfig, Mount,
         MountBindOptionsPropagationEnum, MountType, MountVolumeOptions, Network,
         NetworkCreateRequest, NetworkInspect, RestartPolicy, RestartPolicyNameEnum,
     },
@@ -22,9 +24,20 @@ use bollard::{
         RemoveContainerOptionsBuilder, WaitContainerOptionsBuilder,
     },
 };
-use futures::StreamExt as _;
+use bytes::Bytes;
+use futures::{Stream, StreamExt as _};
+use http_body_util::{BodyExt as _, Empty};
+use hyper::{Request, StatusCode, client::conn::http1};
+use hyper_util::rt::TokioIo;
+use rustix::net::{
+    AddressFamily, RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, SocketAddrUnix,
+    SocketFlags, SocketType,
+};
+use serde::Deserialize;
 use tokio::{
     io::{AsyncWrite, AsyncWriteExt as _},
+    net::UnixStream as TokioUnixStream,
+    sync::{mpsc, oneshot},
     task::JoinHandle,
 };
 use tokio_util::sync::CancellationToken;
@@ -33,7 +46,8 @@ use crate::{
     DesiredSpec, Installation, MAX_LOCAL_DESIRED_SPEC_BYTES,
     lifecycle_helper::{CasDigestRequest, CasDigestResponse, CasRequest, CasTarget},
     local_docker::{
-        LifecycleSiblingContainer, LifecycleSiblingNetwork, attest_lifecycle_sibling_union,
+        LifecycleSiblingContainer, LifecycleSiblingNetwork, attest_lifecycle_sibling_custody_union,
+        attest_lifecycle_sibling_union,
     },
     results_transport::{
         RESULTS_TRANSIT_GATEWAY_MODE_KEY, RESULTS_TRANSIT_GATEWAY_MODE_VALUE,
@@ -81,6 +95,39 @@ const CAS_MOUNT: &str = "/run/automata-lifecycle-cas";
 const MAX_ONEOFF_LOG_BYTES: usize = 64 * 1024;
 const RECOVERY_ENGINE_QUIET_PERIOD: Duration = Duration::from_secs(2);
 const RECOVERY_ENGINE_QUIET_DEADLINE: Duration = Duration::from_secs(30);
+const ENGINE_GENERATION_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+const ENGINE_GENERATION_RESPONSE_MAXIMUM_BYTES: usize = 4096;
+const ENGINE_GENERATION_REQUEST: &[u8] =
+    b"GET /_ping HTTP/1.0\r\nHost: docker\r\nConnection: close\r\n\r\n";
+const RECOVERY_EVENT_URI: &str = "/v1.48/events?since=1";
+const RECOVERY_EVENT_MAXIMUM_BYTES: usize = 64 * 1024;
+const RECOVERY_EVENT_CHUNK_MAXIMUM_BYTES: usize = 256 * 1024;
+const ENGINE_INFO_URI: &str = "/v1.48/info";
+const ENGINE_INFO_MAXIMUM_BYTES: usize = 1024 * 1024;
+
+#[derive(Clone, Debug, Deserialize)]
+struct LifecycleDaemonInfo {
+    #[serde(rename = "SecurityOptions", default)]
+    security_options: Vec<String>,
+    #[serde(rename = "MemoryLimit")]
+    memory_limit: bool,
+    #[serde(rename = "SwapLimit")]
+    swap_limit: bool,
+    #[serde(rename = "CpuCfsPeriod")]
+    cpu_cfs_period: bool,
+    #[serde(rename = "CpuCfsQuota")]
+    cpu_cfs_quota: bool,
+    #[serde(rename = "PidsLimit")]
+    pids_limit: bool,
+    #[serde(rename = "CgroupVersion")]
+    cgroup_version: String,
+    #[serde(rename = "LiveRestoreEnabled")]
+    live_restore_enabled: bool,
+    #[serde(rename = "DefaultRuntime")]
+    default_runtime: String,
+    #[serde(rename = "DefaultUlimits", default)]
+    default_ulimits: Option<HashMap<String, serde_json::Value>>,
+}
 
 /// Read-only classification of the deterministic Engine mutation lock.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -109,8 +156,29 @@ pub(in crate::init) struct LifecycleLockHolder {
     daemon_generation: EngineDaemonGeneration,
     input: Option<Pin<Box<dyn AsyncWrite + Send>>>,
     holder_lost: CancellationToken,
-    release_started: CancellationToken,
+    commands: mpsc::Sender<LifecycleLockCommand>,
     monitor: JoinHandle<Result<(), LocalInitError>>,
+}
+
+enum LifecycleLockCommand {
+    AuthorizeMutation(oneshot::Sender<()>),
+    BeginRelease {
+        acknowledged: oneshot::Sender<()>,
+        frame_sent: oneshot::Receiver<()>,
+    },
+}
+
+/// One live holder's mandatory per-request mutation capability.
+///
+/// The attach monitor acknowledges each request boundary only while the
+/// holder stream is still pending. Holder loss dominates caller cancellation;
+/// after either signal no later Engine or Compose mutation can obtain a
+/// permit.
+#[derive(Clone)]
+pub(in crate::init) struct LifecycleMutationFence {
+    commands: mpsc::Sender<LifecycleLockCommand>,
+    holder_lost: CancellationToken,
+    caller: CancellationToken,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -118,6 +186,34 @@ struct EngineDaemonGeneration {
     boot_id: uuid::Uuid,
     pid: u32,
     start_ticks: u64,
+}
+
+enum RecoveryEventSignal {
+    Event(EventMessage),
+    Failed,
+}
+
+/// One fixed-socket event subscription spanning an exceptional stopped-lock
+/// recovery from its first census through the exact destroy/absence proof.
+///
+/// The subscription starts at the daemon's bounded history (`since=1`). Once
+/// the HTTP response headers arrive, Moby's atomic history/live registration
+/// makes every event in the header-to-subscribe interval replayable. The exact
+/// destroy event is the trailing catch-up barrier for all earlier activity.
+struct RecoveryEventFence {
+    events: mpsc::Receiver<RecoveryEventSignal>,
+    parser: JoinHandle<()>,
+    connection: JoinHandle<()>,
+    stopped_generation: EngineDaemonGeneration,
+    replacement_generation: EngineDaemonGeneration,
+    cancellation: Option<CancellationToken>,
+}
+
+impl Drop for RecoveryEventFence {
+    fn drop(&mut self) {
+        self.parser.abort();
+        self.connection.abort();
+    }
 }
 
 /// Exact stopped holder retained across the anchor-last reset boundary.
@@ -138,6 +234,390 @@ impl LifecycleLockHolder {
     pub(in crate::init) fn exact_identity(&self) -> (&str, &str) {
         (&self.name, &self.id)
     }
+
+    pub(in crate::init) fn mutation_fence(
+        &self,
+        caller: &CancellationToken,
+    ) -> LifecycleMutationFence {
+        LifecycleMutationFence {
+            commands: self.commands.clone(),
+            holder_lost: self.holder_lost.clone(),
+            caller: caller.clone(),
+        }
+    }
+}
+
+impl LifecycleMutationFence {
+    pub(in crate::init) fn checkpoint(&self) -> Result<(), LocalInitError> {
+        if self.holder_lost.is_cancelled() {
+            Err(LocalInitError::new(LocalInitErrorCode::ResetRequired))
+        } else if self.caller.is_cancelled() {
+            Err(LocalInitError::new(LocalInitErrorCode::Cancelled))
+        } else {
+            Ok(())
+        }
+    }
+
+    pub(in crate::init) async fn authorize(&self) -> Result<(), LocalInitError> {
+        self.checkpoint()?;
+        let (acknowledge, acknowledged) = oneshot::channel();
+        tokio::select! {
+            biased;
+            () = self.holder_lost.cancelled() => {
+                return Err(LocalInitError::new(LocalInitErrorCode::ResetRequired));
+            }
+            () = self.caller.cancelled() => {
+                return Err(LocalInitError::new(LocalInitErrorCode::Cancelled));
+            }
+            result = self.commands.send(LifecycleLockCommand::AuthorizeMutation(acknowledge)) => {
+                result.map_err(|_| LocalInitError::new(LocalInitErrorCode::ResetRequired))?;
+            }
+        }
+        tokio::select! {
+            biased;
+            () = self.holder_lost.cancelled() => {
+                Err(LocalInitError::new(LocalInitErrorCode::ResetRequired))
+            }
+            () = self.caller.cancelled() => {
+                Err(LocalInitError::new(LocalInitErrorCode::Cancelled))
+            }
+            result = acknowledged => {
+                result.map_err(|_| LocalInitError::new(LocalInitErrorCode::ResetRequired))
+            }
+        }
+    }
+}
+
+async fn monitor_lifecycle_lock_output<Output>(
+    mut output: Output,
+    mut command_requests: mpsc::Receiver<LifecycleLockCommand>,
+    holder_lost: CancellationToken,
+) -> Result<(), LocalInitError>
+where
+    Output: Stream + Unpin,
+{
+    loop {
+        let command = tokio::select! {
+            biased;
+            _unexpected = output.next() => {
+                holder_lost.cancel();
+                return Err(engine_resource_mismatch());
+            }
+            command = command_requests.recv() => {
+                command.ok_or_else(engine_resource_mismatch)?
+            }
+        };
+        match command {
+            LifecycleLockCommand::AuthorizeMutation(acknowledge) => {
+                let _ = acknowledge.send(());
+            }
+            LifecycleLockCommand::BeginRelease {
+                acknowledged,
+                frame_sent,
+            } => {
+                acknowledged
+                    .send(())
+                    .map_err(|()| engine_resource_mismatch())?;
+                tokio::select! {
+                    biased;
+                    _unexpected = output.next() => {
+                        holder_lost.cancel();
+                        return Err(engine_resource_mismatch());
+                    }
+                    frame = frame_sent => {
+                        frame.map_err(|_| engine_resource_mismatch())?;
+                    }
+                }
+                return match output.next().await {
+                    None => Ok(()),
+                    Some(_) => {
+                        holder_lost.cancel();
+                        Err(engine_resource_mismatch())
+                    }
+                };
+            }
+        }
+    }
+}
+
+impl RecoveryEventFence {
+    async fn open(
+        stopped_generation: EngineDaemonGeneration,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<Self, LocalInitError> {
+        if let Some(cancellation) = cancellation {
+            lifecycle_cancellation_checkpoint(cancellation)?;
+        }
+        prove_daemon_generation_absent(&stopped_generation)?;
+        let replacement_generation = current_engine_daemon_generation()?;
+        validate_replacement_daemon_generation(
+            &stopped_generation,
+            &replacement_generation,
+            &replacement_generation,
+        )?;
+
+        let stream = TokioUnixStream::connect("/var/run/docker.sock")
+            .await
+            .map_err(|_| engine_unavailable())?;
+        let (mut sender, connection) = http1::handshake(TokioIo::new(stream))
+            .await
+            .map_err(|_| engine_unavailable())?;
+        let connection = tokio::spawn(async move {
+            let _closed = connection.await;
+        });
+        let request = Request::builder()
+            .method("GET")
+            .uri(RECOVERY_EVENT_URI)
+            .header("host", "docker")
+            .header("connection", "close")
+            .body(Empty::<Bytes>::new())
+            .map_err(|_| engine_unavailable())?;
+        let response = sender
+            .send_request(request)
+            .await
+            .map_err(|_| engine_unavailable())?;
+        if response.status() != StatusCode::OK
+            || response
+                .headers()
+                .get("content-type")
+                .and_then(|value| value.to_str().ok())
+                .is_none_or(|value| !value.starts_with("application/json"))
+        {
+            return Err(engine_unavailable());
+        }
+        drop(sender);
+
+        let (event_sender, events) = mpsc::channel(1);
+        let parser = tokio::spawn(forward_recovery_events(response.into_body(), event_sender));
+        let mut fence = Self {
+            events,
+            parser,
+            connection,
+            stopped_generation,
+            replacement_generation,
+            cancellation: cancellation.cloned(),
+        };
+        fence.await_initial_quiet().await?;
+        fence.verify_generation()?;
+        Ok(fence)
+    }
+
+    async fn await_initial_quiet(&mut self) -> Result<(), LocalInitError> {
+        let started = tokio::time::Instant::now();
+        let mut quiet = Box::pin(tokio::time::sleep(RECOVERY_ENGINE_QUIET_PERIOD));
+        let mut deadline = Box::pin(tokio::time::sleep_until(
+            started + RECOVERY_ENGINE_QUIET_DEADLINE,
+        ));
+        loop {
+            tokio::select! {
+                biased;
+                signal = self.events.recv() => match signal {
+                    Some(RecoveryEventSignal::Event(_)) => quiet.as_mut().reset(
+                        tokio::time::Instant::now() + RECOVERY_ENGINE_QUIET_PERIOD,
+                    ),
+                    Some(RecoveryEventSignal::Failed) | None => return Err(engine_unavailable()),
+                },
+                () = recovery_cancellation(self.cancellation.as_ref()) => {
+                    return Err(LocalInitError::new(LocalInitErrorCode::Cancelled));
+                }
+                () = &mut deadline => {
+                    return Err(LocalInitError::new(LocalInitErrorCode::OperationInProgress));
+                }
+                () = &mut quiet => return Ok(()),
+            }
+        }
+    }
+
+    async fn guard<T>(
+        &mut self,
+        operation: impl std::future::Future<Output = Result<T, LocalInitError>>,
+    ) -> Result<T, LocalInitError> {
+        tokio::pin!(operation);
+        tokio::select! {
+            biased;
+            signal = self.events.recv() => match signal {
+                Some(RecoveryEventSignal::Event(_)) => {
+                    Err(LocalInitError::new(LocalInitErrorCode::OperationInProgress))
+                }
+                Some(RecoveryEventSignal::Failed) | None => Err(engine_unavailable()),
+            },
+            () = recovery_cancellation(self.cancellation.as_ref()) => {
+                Err(LocalInitError::new(LocalInitErrorCode::Cancelled))
+            }
+            result = &mut operation => result,
+        }
+    }
+
+    async fn delete_exact_container(
+        &mut self,
+        docker: &Docker,
+        expected_id: &str,
+    ) -> Result<bool, LocalInitError> {
+        if !exact_container_id_text(expected_id) {
+            return Err(engine_resource_mismatch());
+        }
+        if self
+            .cancellation
+            .as_ref()
+            .is_some_and(CancellationToken::is_cancelled)
+        {
+            return Err(LocalInitError::new(LocalInitErrorCode::Cancelled));
+        }
+        self.verify_generation()?;
+        let options = RemoveContainerOptionsBuilder::default()
+            .force(false)
+            .v(false)
+            .link(false)
+            .build();
+        let removal = tokio::time::timeout(
+            ENGINE_TIMEOUT,
+            docker.remove_container(expected_id, Some(options)),
+        );
+        tokio::pin!(removal);
+        let mut removal_complete = false;
+        let mut deadline = Box::pin(tokio::time::sleep(ENGINE_TIMEOUT));
+        loop {
+            tokio::select! {
+                biased;
+                signal = self.events.recv() => match signal {
+                    Some(RecoveryEventSignal::Event(event))
+                        if exact_destroy_event(&event, expected_id) => break,
+                    Some(RecoveryEventSignal::Event(_)) => {
+                        return Err(LocalInitError::new(LocalInitErrorCode::OperationInProgress));
+                    }
+                    Some(RecoveryEventSignal::Failed) | None => return Err(engine_unavailable()),
+                },
+                _untrusted = &mut removal, if !removal_complete => {
+                    removal_complete = true;
+                }
+                () = &mut deadline => return Err(engine_resource_mismatch()),
+            }
+        }
+        Ok(self
+            .cancellation
+            .as_ref()
+            .is_some_and(CancellationToken::is_cancelled))
+    }
+
+    fn verify_generation(&self) -> Result<(), LocalInitError> {
+        let repeated = current_engine_daemon_generation()?;
+        validate_replacement_daemon_generation(
+            &self.stopped_generation,
+            &self.replacement_generation,
+            &repeated,
+        )?;
+        prove_daemon_generation_absent(&self.stopped_generation)
+    }
+}
+
+async fn recovery_cancellation(cancellation: Option<&CancellationToken>) {
+    match cancellation {
+        Some(cancellation) => cancellation.cancelled().await,
+        None => std::future::pending().await,
+    }
+}
+
+async fn forward_recovery_events(
+    mut body: hyper::body::Incoming,
+    sender: mpsc::Sender<RecoveryEventSignal>,
+) {
+    let mut buffered = Vec::new();
+    while let Some(frame) = body.frame().await {
+        let Ok(frame) = frame else {
+            let _ = sender.send(RecoveryEventSignal::Failed).await;
+            return;
+        };
+        let Ok(data) = frame.into_data() else {
+            let _ = sender.send(RecoveryEventSignal::Failed).await;
+            return;
+        };
+        if data.len() > RECOVERY_EVENT_CHUNK_MAXIMUM_BYTES {
+            let _ = sender.send(RecoveryEventSignal::Failed).await;
+            return;
+        }
+        buffered.extend_from_slice(&data);
+        while let Some(newline) = buffered.iter().position(|byte| *byte == b'\n') {
+            let line = buffered.drain(..=newline).collect::<Vec<_>>();
+            let payload = &line[..line.len().saturating_sub(1)];
+            if payload.is_empty() || payload.len() > RECOVERY_EVENT_MAXIMUM_BYTES {
+                let _ = sender.send(RecoveryEventSignal::Failed).await;
+                return;
+            }
+            let Ok(event) = serde_json::from_slice(payload) else {
+                let _ = sender.send(RecoveryEventSignal::Failed).await;
+                return;
+            };
+            if sender
+                .send(RecoveryEventSignal::Event(event))
+                .await
+                .is_err()
+            {
+                return;
+            }
+        }
+        if buffered.len() > RECOVERY_EVENT_MAXIMUM_BYTES {
+            let _ = sender.send(RecoveryEventSignal::Failed).await;
+            return;
+        }
+    }
+    let _ = sender.send(RecoveryEventSignal::Failed).await;
+}
+
+fn exact_destroy_event(event: &EventMessage, expected_id: &str) -> bool {
+    event.typ == Some(EventMessageTypeEnum::CONTAINER)
+        && event.action.as_deref() == Some("destroy")
+        && event.actor.as_ref().and_then(|actor| actor.id.as_deref()) == Some(expected_id)
+}
+
+async fn load_lifecycle_daemon_info() -> Result<LifecycleDaemonInfo, LocalInitError> {
+    tokio::time::timeout(ENGINE_TIMEOUT, async {
+        let stream = TokioUnixStream::connect("/var/run/docker.sock")
+            .await
+            .map_err(|_| engine_unavailable())?;
+        let (mut sender, connection) = http1::handshake(TokioIo::new(stream))
+            .await
+            .map_err(|_| engine_unavailable())?;
+        let connection = tokio::spawn(async move {
+            let _closed = connection.await;
+        });
+        let request = Request::builder()
+            .method("GET")
+            .uri(ENGINE_INFO_URI)
+            .header("host", "docker")
+            .header("connection", "close")
+            .body(Empty::<Bytes>::new())
+            .map_err(|_| engine_unavailable())?;
+        let response = sender
+            .send_request(request)
+            .await
+            .map_err(|_| engine_unavailable())?;
+        if response.status() != StatusCode::OK
+            || response
+                .headers()
+                .get("content-type")
+                .and_then(|value| value.to_str().ok())
+                .is_none_or(|value| !value.starts_with("application/json"))
+        {
+            return Err(engine_unavailable());
+        }
+        drop(sender);
+        let mut body = response.into_body();
+        let mut bytes = Vec::new();
+        while let Some(frame) = body.frame().await {
+            let data = frame
+                .map_err(|_| engine_unavailable())?
+                .into_data()
+                .map_err(|_| engine_unavailable())?;
+            if data.len() > ENGINE_INFO_MAXIMUM_BYTES.saturating_sub(bytes.len()) {
+                return Err(engine_unavailable());
+            }
+            bytes.extend_from_slice(&data);
+        }
+        connection.abort();
+        serde_json::from_slice(&bytes).map_err(|_| engine_unavailable())
+    })
+    .await
+    .map_err(|_| engine_unavailable())?
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -148,6 +628,15 @@ pub(in crate::init) enum LifecycleTopology {
 }
 
 impl InitEngine<'_> {
+    /// Qualifies daemon-wide defaults that cannot be overridden safely by the
+    /// closed lifecycle topology. This runs before any lifecycle mutation.
+    pub(in crate::init) async fn preflight_lifecycle_daemon(&self) -> Result<(), LocalInitError> {
+        self.verify_selected_engine().await?;
+        let info = load_lifecycle_daemon_info().await?;
+        validate_lifecycle_daemon_info(&info)?;
+        self.verify_selected_engine().await
+    }
+
     async fn inspect_rendered_live_ids(
         &self,
         installation: &Installation,
@@ -234,22 +723,11 @@ impl InitEngine<'_> {
         Ok(())
     }
 
-    /// Proves that the exact daemon process which accepted the stopped
-    /// holder's operation no longer exists, then establishes an event-quiet
-    /// interval on one repeatedly qualified replacement daemon generation.
-    ///
-    /// Elapsed time never authorizes recovery: without the sealed boot ID,
-    /// peer PID, and `/proc` start-time transition this method fails closed.
-    /// The event interval is an additional race detector between the caller's
-    /// complete pre- and post-fence Engine censuses.
-    pub(in crate::init) async fn attest_engine_quiescence(
+    async fn begin_stopped_lock_recovery_event_fence(
         &self,
         stopped_lock_id: &str,
         cancellation: Option<&CancellationToken>,
-    ) -> Result<(), LocalInitError> {
-        if let Some(cancellation) = cancellation {
-            lifecycle_cancellation_checkpoint(cancellation)?;
-        }
+    ) -> Result<RecoveryEventFence, LocalInitError> {
         if !exact_container_id_text(stopped_lock_id) {
             return Err(engine_resource_mismatch());
         }
@@ -258,71 +736,22 @@ impl InitEngine<'_> {
             .inspect_container(stopped_lock_id)
             .await?
             .ok_or_else(engine_resource_mismatch)?;
+        if stopped.state.as_ref().and_then(|state| state.running) != Some(false) {
+            return Err(engine_resource_mismatch());
+        }
         let labels = stopped
             .config
             .as_ref()
             .and_then(|config| config.labels.as_ref())
-            .ok_or_else(engine_resource_mismatch)?
+            .ok_or_else(engine_resource_mismatch)?;
+        let labels = labels
             .iter()
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect::<BTreeMap<_, _>>();
         let stopped_generation = daemon_generation_from_labels(&labels)?;
-        prove_daemon_generation_absent(&stopped_generation)?;
-        let replacement_generation = current_engine_daemon_generation()?;
-        validate_replacement_daemon_generation(
-            &stopped_generation,
-            &replacement_generation,
-            &replacement_generation,
-        )?;
-        self.verify_selected_engine().await?;
-        let quiet = async {
-            let started = tokio::time::Instant::now();
-            let deadline = started + RECOVERY_ENGINE_QUIET_DEADLINE;
-            let mut quiet_until = Box::pin(tokio::time::sleep_until(
-                started + RECOVERY_ENGINE_QUIET_PERIOD,
-            ));
-            let mut deadline_timer = Box::pin(tokio::time::sleep_until(deadline));
-            let mut events = Box::pin(self.docker.events(None));
-            loop {
-                tokio::select! {
-                    biased;
-                    event = events.next() => match event {
-                        Some(Ok(_)) => quiet_until
-                            .as_mut()
-                            .reset(tokio::time::Instant::now() + RECOVERY_ENGINE_QUIET_PERIOD),
-                        Some(Err(_)) | None => return Err(engine_unavailable()),
-                    },
-                    () = &mut deadline_timer => {
-                        return Err(LocalInitError::new(LocalInitErrorCode::OperationInProgress));
-                    }
-                    () = &mut quiet_until => break,
-                }
-            }
-            Ok(())
-        };
-        if let Some(cancellation) = cancellation {
-            tokio::select! {
-                biased;
-                () = cancellation.cancelled() => {
-                    return Err(LocalInitError::new(LocalInitErrorCode::Cancelled));
-                }
-                result = quiet => result?,
-            }
-        } else {
-            quiet.await?;
-        }
-        self.verify_selected_engine().await?;
-        let repeated_generation = current_engine_daemon_generation()?;
-        validate_replacement_daemon_generation(
-            &stopped_generation,
-            &replacement_generation,
-            &repeated_generation,
-        )?;
-        prove_daemon_generation_absent(&stopped_generation)?;
-        if let Some(cancellation) = cancellation {
-            lifecycle_cancellation_checkpoint(cancellation)?;
-        }
-        Ok(())
+        let mut fence = RecoveryEventFence::open(stopped_generation, cancellation).await?;
+        fence.guard(self.verify_selected_engine()).await?;
+        Ok(fence)
     }
 
     /// Non-repairing metadata preflight for the complete sealed volume set.
@@ -697,7 +1126,7 @@ impl InitEngine<'_> {
             .stream(true)
             .logs(false)
             .build();
-        let AttachContainerResults { mut output, input } = tokio::time::timeout(
+        let AttachContainerResults { output, input } = tokio::time::timeout(
             ENGINE_TIMEOUT,
             self.docker.attach_container(&id, Some(attach_options)),
         )
@@ -706,22 +1135,12 @@ impl InitEngine<'_> {
         .map_err(|_| LocalInitError::new(LocalInitErrorCode::ResetRequired))?;
 
         let holder_lost = CancellationToken::new();
-        let release_started = CancellationToken::new();
-        let monitor_lost = holder_lost.clone();
-        let monitor_release = release_started.clone();
-        let monitor = tokio::spawn(async move {
-            match output.next().await {
-                Some(Ok(_)) | Some(Err(_)) => {
-                    monitor_lost.cancel();
-                    Err(engine_resource_mismatch())
-                }
-                None if monitor_release.is_cancelled() => Ok(()),
-                None => {
-                    monitor_lost.cancel();
-                    Err(engine_resource_mismatch())
-                }
-            }
-        });
+        let (commands, command_requests) = mpsc::channel(1);
+        let monitor = tokio::spawn(monitor_lifecycle_lock_output(
+            output,
+            command_requests,
+            holder_lost.clone(),
+        ));
 
         let start =
             tokio::time::timeout(ENGINE_TIMEOUT, self.docker.start_container(&id, None)).await;
@@ -774,7 +1193,7 @@ impl InitEngine<'_> {
             daemon_generation,
             input: Some(input),
             holder_lost,
-            release_started,
+            commands,
             monitor,
         })
     }
@@ -866,23 +1285,46 @@ impl InitEngine<'_> {
         Ok(observation)
     }
 
-    /// Gracefully releases only this manager's retained exact live ID.
-    pub(in crate::init) async fn release_lifecycle_lock(
+    async fn gracefully_stop_lifecycle_lock(
         &self,
         installation: &Installation,
         epoch: &ImmutableEpoch,
-        mut holder: LifecycleLockHolder,
-    ) -> Result<(), LocalInitError> {
-        self.attest_lifecycle_lock(installation, epoch, &holder)
+        holder: &mut LifecycleLockHolder,
+    ) -> Result<LifecycleLockImage, LocalInitError> {
+        self.attest_lifecycle_lock(installation, epoch, holder)
             .await?;
         if holder.holder_lost.is_cancelled() {
             return Err(LocalInitError::new(LocalInitErrorCode::ResetRequired));
         }
-        holder.release_started.cancel();
+        let (acknowledged, acknowledgment) = oneshot::channel();
+        let (frame_sent, frame_confirmation) = oneshot::channel();
+        holder
+            .commands
+            .send(LifecycleLockCommand::BeginRelease {
+                acknowledged,
+                frame_sent: frame_confirmation,
+            })
+            .await
+            .map_err(|_| LocalInitError::new(LocalInitErrorCode::ResetRequired))?;
+        tokio::time::timeout(ENGINE_TIMEOUT, acknowledgment)
+            .await
+            .map_err(|_| LocalInitError::new(LocalInitErrorCode::ResetRequired))?
+            .map_err(|_| LocalInitError::new(LocalInitErrorCode::ResetRequired))?;
+
         let mut input = holder
             .input
             .take()
             .ok_or_else(|| LocalInitError::new(LocalInitErrorCode::ResetRequired))?;
+        tokio::time::timeout(
+            ENGINE_TIMEOUT,
+            input.write_all(&crate::LOCAL_LIFECYCLE_LOCK_RELEASE_FRAME),
+        )
+        .await
+        .map_err(|_| LocalInitError::new(LocalInitErrorCode::ResetRequired))?
+        .map_err(|_| LocalInitError::new(LocalInitErrorCode::ResetRequired))?;
+        frame_sent
+            .send(())
+            .map_err(|()| LocalInitError::new(LocalInitErrorCode::ResetRequired))?;
         tokio::time::timeout(ENGINE_TIMEOUT, input.shutdown())
             .await
             .map_err(|_| LocalInitError::new(LocalInitErrorCode::ResetRequired))?
@@ -893,7 +1335,7 @@ impl InitEngine<'_> {
             .condition("not-running")
             .build();
         let mut wait = self.docker.wait_container(&holder.id, Some(options));
-        let result = tokio::time::timeout(ENGINE_TIMEOUT, async {
+        tokio::time::timeout(ENGINE_TIMEOUT, async {
             let result = wait
                 .next()
                 .await
@@ -905,8 +1347,7 @@ impl InitEngine<'_> {
             Ok(())
         })
         .await
-        .map_err(|_| LocalInitError::new(LocalInitErrorCode::ResetRequired))?;
-        result?;
+        .map_err(|_| LocalInitError::new(LocalInitErrorCode::ResetRequired))??;
 
         let image = lifecycle_lock_image(self, epoch).await?;
         self.attest_lifecycle_lock_exact(
@@ -919,10 +1360,22 @@ impl InitEngine<'_> {
             false,
         )
         .await?;
-        tokio::time::timeout(ENGINE_TIMEOUT, holder.monitor)
+        tokio::time::timeout(ENGINE_TIMEOUT, &mut holder.monitor)
             .await
             .map_err(|_| LocalInitError::new(LocalInitErrorCode::ResetRequired))?
             .map_err(|_| LocalInitError::new(LocalInitErrorCode::ResetRequired))??;
+        Ok(image)
+    }
+
+    /// Gracefully releases only this manager's retained exact live ID.
+    pub(in crate::init) async fn release_lifecycle_lock(
+        &self,
+        installation: &Installation,
+        epoch: &ImmutableEpoch,
+        mut holder: LifecycleLockHolder,
+    ) -> Result<(), LocalInitError> {
+        self.gracefully_stop_lifecycle_lock(installation, epoch, &mut holder)
+            .await?;
 
         let options = RemoveContainerOptionsBuilder::default()
             .force(false)
@@ -1167,6 +1620,7 @@ impl InitEngine<'_> {
         epoch: &ImmutableEpoch,
         holder: &LifecycleLockHolder,
         role: VolumeRole,
+        mutation: &LifecycleMutationFence,
     ) -> Result<(), LocalInitError> {
         let removed = self
             .inspect_lifecycle_reset_volume_progress(installation, epoch, holder)
@@ -1187,6 +1641,7 @@ impl InitEngine<'_> {
         if !self.volume_attachments(&name).await?.is_empty() {
             return Err(engine_resource_mismatch());
         }
+        mutation.authorize().await?;
         self.remove_volume_and_prove_absent(&name).await?;
         self.attest_lifecycle_lock(installation, epoch, holder)
             .await
@@ -1207,57 +1662,9 @@ impl InitEngine<'_> {
         {
             return Err(engine_resource_mismatch());
         }
-        let image = lifecycle_lock_image(self, epoch).await?;
-        self.attest_lifecycle_lock(installation, epoch, &holder)
+        let image = self
+            .gracefully_stop_lifecycle_lock(installation, epoch, &mut holder)
             .await?;
-        if holder.holder_lost.is_cancelled() {
-            return Err(LocalInitError::new(LocalInitErrorCode::ResetRequired));
-        }
-        holder.release_started.cancel();
-        let mut input = holder
-            .input
-            .take()
-            .ok_or_else(|| LocalInitError::new(LocalInitErrorCode::ResetRequired))?;
-        tokio::time::timeout(ENGINE_TIMEOUT, input.shutdown())
-            .await
-            .map_err(|_| LocalInitError::new(LocalInitErrorCode::ResetRequired))?
-            .map_err(|_| LocalInitError::new(LocalInitErrorCode::ResetRequired))?;
-        drop(input);
-        let mut wait = self.docker.wait_container(
-            &holder.id,
-            Some(
-                WaitContainerOptionsBuilder::default()
-                    .condition("not-running")
-                    .build(),
-            ),
-        );
-        tokio::time::timeout(ENGINE_TIMEOUT, async {
-            let result = wait
-                .next()
-                .await
-                .ok_or_else(|| LocalInitError::new(LocalInitErrorCode::ResetRequired))?
-                .map_err(|_| LocalInitError::new(LocalInitErrorCode::ResetRequired))?;
-            if wait.next().await.is_some() || result.error.is_some() || result.status_code != 0 {
-                return Err(LocalInitError::new(LocalInitErrorCode::ResetRequired));
-            }
-            Ok(())
-        })
-        .await
-        .map_err(|_| LocalInitError::new(LocalInitErrorCode::ResetRequired))??;
-        self.attest_lifecycle_lock_exact(
-            installation,
-            &holder.name,
-            &holder.id,
-            holder.operation_id,
-            &image.inspection_reference,
-            &image.image_id,
-            false,
-        )
-        .await?;
-        tokio::time::timeout(ENGINE_TIMEOUT, holder.monitor)
-            .await
-            .map_err(|_| LocalInitError::new(LocalInitErrorCode::ResetRequired))?
-            .map_err(|_| LocalInitError::new(LocalInitErrorCode::ResetRequired))??;
         Ok(StoppedLifecycleLock {
             name: holder.name,
             id: holder.id,
@@ -1359,96 +1766,9 @@ impl InitEngine<'_> {
         self.verify_selected_engine().await
     }
 
-    /// Removes one exact stopped lock after the caller has independently
-    /// established stable positive quiescence and explicit authorization.
-    /// Ordinary acquisition never calls this recovery boundary.
-    pub(in crate::init) async fn remove_stopped_lifecycle_lock_after_quiescence(
-        &self,
-        installation: &Installation,
-        epoch: &ImmutableEpoch,
-        expected_id: &str,
-    ) -> Result<(), LocalInitError> {
-        self.remove_stopped_lifecycle_lock_inner(installation, epoch, expected_id, true)
-            .await
-    }
-
-    pub(in crate::init) async fn remove_stopped_initialization_lock_after_quiescence(
-        &self,
-        installation: &Installation,
-        epoch: &ImmutableEpoch,
-        expected_id: &str,
-    ) -> Result<(), LocalInitError> {
-        self.remove_stopped_lifecycle_lock_inner(installation, epoch, expected_id, false)
-            .await
-    }
-
-    async fn remove_stopped_lifecycle_lock_inner(
-        &self,
-        installation: &Installation,
-        epoch: &ImmutableEpoch,
-        expected_id: &str,
-        require_identity: bool,
-    ) -> Result<(), LocalInitError> {
-        if !exact_container_id_text(expected_id) {
-            return Err(engine_resource_mismatch());
-        }
-        self.verify_selected_engine().await?;
-        if require_identity {
-            self.verify_installation(installation).await?;
-        }
-        let image = lifecycle_lock_image(self, epoch).await?;
-        let name = lifecycle_lock_name(installation);
-        let container = self
-            .inspect_container(expected_id)
-            .await?
-            .ok_or_else(engine_resource_mismatch)?;
-        let operation_id = match classify_lifecycle_lock(
-            &container,
-            &name,
-            &image.inspection_reference,
-            &image.image_id,
-            installation,
-        )? {
-            LifecycleLockObservation::Stopped { id, operation_id } if id == expected_id => {
-                operation_id
-            }
-            LifecycleLockObservation::Absent
-            | LifecycleLockObservation::Live { .. }
-            | LifecycleLockObservation::Stopped { .. } => return Err(engine_resource_mismatch()),
-        };
-        self.attest_lifecycle_lock_exact(
-            installation,
-            &name,
-            expected_id,
-            operation_id,
-            &image.inspection_reference,
-            &image.image_id,
-            false,
-        )
-        .await?;
-        let options = RemoveContainerOptionsBuilder::default()
-            .force(false)
-            .v(false)
-            .build();
-        let _untrusted = tokio::time::timeout(
-            ENGINE_TIMEOUT,
-            self.docker.remove_container(expected_id, Some(options)),
-        )
-        .await;
-        if self.inspect_container(expected_id).await?.is_some()
-            || self.inspect_container(&name).await?.is_some()
-        {
-            return Err(engine_resource_mismatch());
-        }
-        if require_identity {
-            self.verify_installation(installation).await?;
-        }
-        self.verify_selected_engine().await
-    }
-
-    /// Recovers sticky stopped-lock evidence for replay of an already durable
-    /// reset intent after two stable, fully validated Engine censuses.
-    pub(in crate::init) async fn recover_stopped_lifecycle_reset_lock(
+    /// Recovers sticky stopped-lock evidence only after a reset intent is
+    /// already durable, following two stable, fully validated Engine censuses.
+    pub(in crate::init) async fn recover_stopped_lifecycle_reset_lock_after_intent(
         &self,
         installation: &Installation,
         epoch: &ImmutableEpoch,
@@ -1459,6 +1779,73 @@ impl InitEngine<'_> {
     ) -> Result<usize, LocalInitError> {
         self.verify_selected_engine().await?;
         self.verify_installation(installation).await?;
+        let mut recovery = self
+            .begin_stopped_lock_recovery_event_fence(expected_id, None)
+            .await?;
+        let first = recovery
+            .guard(async {
+                crate::init::compose::attest_no_project_compose_processes(installation)?;
+                self.inspect_stopped_lifecycle_reset_recovery_census(
+                    installation,
+                    epoch,
+                    desired,
+                    expected,
+                    expected_runner_id,
+                    expected_id,
+                )
+                .await
+            })
+            .await?;
+        let repeated = recovery
+            .guard(async {
+                let census = self
+                    .inspect_stopped_lifecycle_reset_recovery_census(
+                        installation,
+                        epoch,
+                        desired,
+                        expected,
+                        expected_runner_id,
+                        expected_id,
+                    )
+                    .await?;
+                crate::init::compose::attest_no_project_compose_processes(installation)?;
+                Ok(census)
+            })
+            .await?;
+        if first != repeated {
+            return Err(engine_resource_mismatch());
+        }
+        let cancellation_latched = recovery
+            .delete_exact_container(&self.docker, expected_id)
+            .await?;
+        let name = lifecycle_lock_name(installation);
+        recovery
+            .guard(async {
+                if self.inspect_container(expected_id).await?.is_some()
+                    || self.inspect_container(&name).await?.is_some()
+                {
+                    return Err(engine_resource_mismatch());
+                }
+                self.verify_installation(installation).await?;
+                self.verify_selected_engine().await
+            })
+            .await?;
+        recovery.verify_generation()?;
+        if cancellation_latched {
+            return Err(engine_resource_mismatch());
+        }
+        Ok(first.0)
+    }
+
+    async fn inspect_stopped_lifecycle_reset_recovery_census(
+        &self,
+        installation: &Installation,
+        epoch: &ImmutableEpoch,
+        desired: &DesiredSpec,
+        expected: &ExpectedLifecycleTopology,
+        expected_runner_id: uuid::Uuid,
+        expected_id: &str,
+    ) -> Result<(usize, Option<LifecycleTopology>), LocalInitError> {
         let names = volume_names(installation);
         let all_names = names
             .values()
@@ -1482,7 +1869,7 @@ impl InitEngine<'_> {
         if removed == 0 {
             self.preflight_lifecycle_volumes(installation, epoch)
                 .await?;
-            let first = self
+            let topology = self
                 .inspect_lifecycle_topology(
                     installation,
                     epoch,
@@ -1491,19 +1878,7 @@ impl InitEngine<'_> {
                     expected_runner_id,
                 )
                 .await?;
-            self.attest_engine_quiescence(expected_id, None).await?;
-            let repeated = self
-                .inspect_lifecycle_topology(
-                    installation,
-                    epoch,
-                    desired,
-                    expected,
-                    expected_runner_id,
-                )
-                .await?;
-            if first != repeated {
-                return Err(engine_resource_mismatch());
-            }
+            Ok((removed, Some(topology)))
         } else {
             let expected_remaining = reset_volume_order()[removed..]
                 .iter()
@@ -1520,16 +1895,15 @@ impl InitEngine<'_> {
             if observed != expected_remaining {
                 return Err(engine_resource_mismatch());
             }
-            let name = lifecycle_lock_name(installation);
-            self.attest_reset_quiescent_lock(installation, &name, expected_id, &expected_remaining)
-                .await?;
-            self.attest_engine_quiescence(expected_id, None).await?;
-            self.attest_reset_quiescent_lock(installation, &name, expected_id, &expected_remaining)
-                .await?;
-        }
-        self.remove_stopped_lifecycle_lock_after_quiescence(installation, epoch, expected_id)
+            self.attest_reset_quiescent_lock(
+                installation,
+                &lifecycle_lock_name(installation),
+                expected_id,
+                &expected_remaining,
+            )
             .await?;
-        Ok(removed)
+            Ok((removed, None))
+        }
     }
 
     /// Exceptional, operator-authorized recovery for ordinary up/down replay.
@@ -1564,37 +1938,186 @@ impl InitEngine<'_> {
                 return Err(engine_resource_mismatch());
             }
         };
-        self.preflight_lifecycle_volumes(installation, epoch)
+        let mut recovery = self
+            .begin_stopped_lock_recovery_event_fence(expected_id, Some(cancellation))
             .await?;
-        let first_topology = self
-            .inspect_lifecycle_topology(installation, epoch, desired, expected, expected_runner_id)
+        recovery
+            .guard(async {
+                crate::init::compose::attest_no_project_compose_processes(installation)?;
+                self.preflight_lifecycle_volumes(installation, epoch)
+                    .await?;
+                Ok(())
+            })
             .await?;
-        let first_identity = self
-            .lifecycle_quiescent_identity_census(installation)
+        let (first_topology, first_identity) = recovery
+            .guard(async {
+                let topology = self
+                    .inspect_lifecycle_topology(
+                        installation,
+                        epoch,
+                        desired,
+                        expected,
+                        expected_runner_id,
+                    )
+                    .await?;
+                let identity = self
+                    .lifecycle_quiescent_identity_census(installation)
+                    .await?;
+                crate::init::compose::attest_no_project_compose_processes(installation)?;
+                Ok((topology, identity))
+            })
             .await?;
-        self.attest_engine_quiescence(expected_id, Some(cancellation))
-            .await?;
-        let repeated_topology = self
-            .inspect_lifecycle_topology(installation, epoch, desired, expected, expected_runner_id)
-            .await?;
-        let repeated_identity = self
-            .lifecycle_quiescent_identity_census(installation)
+        let (repeated_topology, repeated_identity) = recovery
+            .guard(async {
+                let topology = self
+                    .inspect_lifecycle_topology(
+                        installation,
+                        epoch,
+                        desired,
+                        expected,
+                        expected_runner_id,
+                    )
+                    .await?;
+                let identity = self
+                    .lifecycle_quiescent_identity_census(installation)
+                    .await?;
+                crate::init::compose::attest_no_project_compose_processes(installation)?;
+                Ok((topology, identity))
+            })
             .await?;
         if first_topology != repeated_topology || first_identity != repeated_identity {
             return Err(engine_resource_mismatch());
         }
-        if self.inspect_lifecycle_lock(installation, epoch).await?
-            != (LifecycleLockObservation::Stopped {
-                id: expected_id.to_owned(),
-                operation_id: expected_operation,
+        recovery
+            .guard(async {
+                if self.inspect_lifecycle_lock(installation, epoch).await?
+                    != (LifecycleLockObservation::Stopped {
+                        id: expected_id.to_owned(),
+                        operation_id: expected_operation,
+                    })
+                {
+                    return Err(engine_resource_mismatch());
+                }
+                Ok(())
             })
+            .await?;
+        let cancellation_latched = recovery
+            .delete_exact_container(&self.docker, expected_id)
+            .await?;
+        recovery
+            .guard(async {
+                if self.inspect_container(expected_id).await?.is_some()
+                    || self
+                        .inspect_container(&lifecycle_lock_name(installation))
+                        .await?
+                        .is_some()
+                {
+                    return Err(engine_resource_mismatch());
+                }
+                self.verify_installation(installation).await?;
+                self.verify_selected_engine().await
+            })
+            .await?;
+        recovery.verify_generation()?;
+        if cancellation_latched {
+            Err(LocalInitError::new(LocalInitErrorCode::Cancelled))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Exceptional stopped-lock recovery for initialization before the
+    /// identity anchor necessarily exists. One event subscription spans both
+    /// complete init-union censuses, the exact-ID destroy, and absence proof.
+    pub(in crate::init) async fn recover_stopped_initialization_lock(
+        &self,
+        catalog: &crate::init::catalog::VerifiedCatalog,
+        installation: &Installation,
+        epoch: &ImmutableEpoch,
+        expected_id: &str,
+        cancellation: &CancellationToken,
+    ) -> Result<(), LocalInitError> {
+        let expected_operation = match self
+            .inspect_lifecycle_lock_before_identity(installation, epoch)
+            .await?
         {
+            LifecycleLockObservation::Stopped { id, operation_id } if id == expected_id => {
+                operation_id
+            }
+            LifecycleLockObservation::Live { .. } => {
+                return Err(LocalInitError::new(LocalInitErrorCode::OperationInProgress));
+            }
+            LifecycleLockObservation::Absent | LifecycleLockObservation::Stopped { .. } => {
+                return Err(engine_resource_mismatch());
+            }
+        };
+        let lock_name = lifecycle_lock_name(installation);
+        let mut recovery = self
+            .begin_stopped_lock_recovery_event_fence(expected_id, Some(cancellation))
+            .await?;
+        let first = recovery
+            .guard(async {
+                crate::init::compose::attest_no_project_compose_processes(installation)?;
+                self.preflight_initialization_recovery_union(
+                    catalog,
+                    installation,
+                    epoch.fingerprint(),
+                    (&lock_name, expected_id),
+                )
+                .await
+            })
+            .await?;
+        let repeated = recovery
+            .guard(async {
+                let census = self
+                    .preflight_initialization_recovery_union(
+                        catalog,
+                        installation,
+                        epoch.fingerprint(),
+                        (&lock_name, expected_id),
+                    )
+                    .await?;
+                crate::init::compose::attest_no_project_compose_processes(installation)?;
+                Ok(census)
+            })
+            .await?;
+        if first != repeated {
             return Err(engine_resource_mismatch());
         }
-        lifecycle_cancellation_checkpoint(cancellation)?;
-        self.remove_stopped_lifecycle_lock_after_quiescence(installation, epoch, expected_id)
+        recovery
+            .guard(async {
+                if self
+                    .inspect_lifecycle_lock_before_identity(installation, epoch)
+                    .await?
+                    != (LifecycleLockObservation::Stopped {
+                        id: expected_id.to_owned(),
+                        operation_id: expected_operation,
+                    })
+                {
+                    return Err(engine_resource_mismatch());
+                }
+                Ok(())
+            })
             .await?;
-        self.attest_lifecycle_lock_absent(installation).await
+        let cancellation_latched = recovery
+            .delete_exact_container(&self.docker, expected_id)
+            .await?;
+        recovery
+            .guard(async {
+                if self.inspect_container(expected_id).await?.is_some()
+                    || self.inspect_container(&lock_name).await?.is_some()
+                {
+                    return Err(engine_resource_mismatch());
+                }
+                self.verify_selected_engine().await
+            })
+            .await?;
+        recovery.verify_generation()?;
+        if cancellation_latched {
+            Err(LocalInitError::new(LocalInitErrorCode::Cancelled))
+        } else {
+            Ok(())
+        }
     }
 
     /// Removes the sole exact stopped reset lock after the identity anchor was
@@ -1633,49 +2156,53 @@ impl InitEngine<'_> {
             LifecycleLockObservation::Absent => return Err(engine_resource_mismatch()),
         };
         let expected_volumes = BTreeSet::new();
-        self.attest_reset_quiescent_lock(installation, &name, &id, &expected_volumes)
+        let mut recovery = self
+            .begin_stopped_lock_recovery_event_fence(&id, None)
             .await?;
-        self.attest_engine_quiescence(&id, None).await?;
-        self.attest_reset_quiescent_lock(installation, &name, &id, &expected_volumes)
+        for _ in 0..2 {
+            recovery
+                .guard(async {
+                    crate::init::compose::attest_no_project_compose_processes(installation)?;
+                    self.attest_reset_quiescent_lock(installation, &name, &id, &expected_volumes)
+                        .await?;
+                    let by_id = self
+                        .inspect_container(&id)
+                        .await?
+                        .ok_or_else(engine_resource_mismatch)?;
+                    if classify_lifecycle_lock(
+                        &by_id,
+                        &name,
+                        &image.inspection_reference,
+                        &image.image_id,
+                        installation,
+                    )? != (LifecycleLockObservation::Stopped {
+                        id: id.clone(),
+                        operation_id,
+                    }) {
+                        return Err(engine_resource_mismatch());
+                    }
+                    Ok(())
+                })
+                .await?;
+        }
+        recovery.delete_exact_container(&self.docker, &id).await?;
+        recovery
+            .guard(async {
+                if self.inspect_container(&id).await?.is_some()
+                    || self.inspect_container(&name).await?.is_some()
+                    || self
+                        .adapter
+                        .inspect_identity(installation.name())
+                        .await
+                        .map_err(|_| engine_resource_mismatch())?
+                        .is_some()
+                {
+                    return Err(LocalInitError::new(LocalInitErrorCode::ResetRequired));
+                }
+                self.verify_selected_engine().await
+            })
             .await?;
-        let by_id = self
-            .inspect_container(&id)
-            .await?
-            .ok_or_else(engine_resource_mismatch)?;
-        if classify_lifecycle_lock(
-            &by_id,
-            &name,
-            &image.inspection_reference,
-            &image.image_id,
-            installation,
-        )? != (LifecycleLockObservation::Stopped {
-            id: id.clone(),
-            operation_id,
-        }) {
-            return Err(engine_resource_mismatch());
-        }
-        let options = RemoveContainerOptionsBuilder::default()
-            .force(false)
-            .v(false)
-            .link(false)
-            .build();
-        let _untrusted = tokio::time::timeout(
-            ENGINE_TIMEOUT,
-            self.docker.remove_container(&id, Some(options)),
-        )
-        .await;
-        if self.inspect_container(&id).await?.is_some()
-            || self.inspect_container(&name).await?.is_some()
-            || self
-                .adapter
-                .inspect_identity(installation.name())
-                .await
-                .map_err(|_| engine_resource_mismatch())?
-                .is_some()
-        {
-            return Err(LocalInitError::new(LocalInitErrorCode::ResetRequired));
-        }
-        self.verify_selected_engine().await?;
+        recovery.verify_generation()?;
         Ok(true)
     }
 
@@ -1757,6 +2284,7 @@ impl InitEngine<'_> {
         &self,
         installation: &Installation,
         epoch: &ImmutableEpoch,
+        mutation: &LifecycleMutationFence,
     ) -> Result<Vec<u8>, LocalInitError> {
         self.verify_selected_engine().await?;
         self.verify_installation(installation).await?;
@@ -1804,8 +2332,14 @@ impl InitEngine<'_> {
             if !baseline.remove(&id) {
                 return Err(engine_resource_mismatch());
             }
-            self.remove_desired_reader_and_prove_absent(&id, &name, desired_name, &baseline)
-                .await?;
+            self.remove_desired_reader_and_prove_absent(
+                &id,
+                &name,
+                desired_name,
+                &baseline,
+                mutation,
+            )
+            .await?;
         }
         baseline = exact_attachment_set(self, desired_name).await?;
         if exact_attachment_set(self, desired_name).await? != baseline {
@@ -1816,6 +2350,7 @@ impl InitEngine<'_> {
             .name(&name)
             .platform("linux/amd64")
             .build();
+        mutation.authorize().await?;
         let created = tokio::time::timeout(
             ENGINE_TIMEOUT,
             self.docker.create_container(
@@ -1846,10 +2381,17 @@ impl InitEngine<'_> {
                 desired_name,
                 &labels,
                 &baseline,
+                mutation,
             )
             .await;
         let cleanup = self
-            .remove_desired_reader_and_prove_absent(&pinned, &name, desired_name, &baseline)
+            .remove_desired_reader_and_prove_absent(
+                &pinned,
+                &name,
+                desired_name,
+                &baseline,
+                mutation,
+            )
             .await;
         match (operation, cleanup) {
             (Ok(bytes), Ok(())) => Ok(bytes),
@@ -1867,6 +2409,7 @@ impl InitEngine<'_> {
         desired_volume: &str,
         labels: &BTreeMap<String, String>,
         baseline: &BTreeSet<String>,
+        mutation: &LifecycleMutationFence,
     ) -> Result<Vec<u8>, LocalInitError> {
         let stopped = self
             .inspect_container(pinned)
@@ -1889,6 +2432,7 @@ impl InitEngine<'_> {
             return Err(engine_resource_mismatch());
         }
         self.verify_selected_engine().await?;
+        mutation.authorize().await?;
         tokio::time::timeout(ENGINE_TIMEOUT, self.docker.start_container(pinned, None))
             .await
             .map_err(|_| engine_resource_mismatch())?
@@ -1976,6 +2520,7 @@ impl InitEngine<'_> {
         name: &str,
         desired_volume: &str,
         baseline: &BTreeSet<String>,
+        mutation: &LifecycleMutationFence,
     ) -> Result<(), LocalInitError> {
         if !exact_container_id_text(id) {
             return Err(engine_resource_mismatch());
@@ -1985,6 +2530,7 @@ impl InitEngine<'_> {
             .v(false)
             .link(false)
             .build();
+        mutation.authorize().await?;
         let _untrusted = tokio::time::timeout(
             ENGINE_TIMEOUT,
             self.docker.remove_container(id, Some(options)),
@@ -2010,6 +2556,7 @@ impl InitEngine<'_> {
         installation: &Installation,
         epoch: &ImmutableEpoch,
         request: &CasRequest,
+        mutation: &LifecycleMutationFence,
     ) -> Result<Sha256Digest, LocalInitError> {
         self.verify_selected_engine().await?;
         self.verify_installation(installation).await?;
@@ -2064,10 +2611,11 @@ impl InitEngine<'_> {
                 &cap_add,
                 &labels,
             )?;
-            self.remove_cas_writer_and_prove_absent(&id, &name, &volume_name)
+            self.remove_cas_writer_and_prove_absent(&id, &name, &volume_name, mutation)
                 .await?;
         }
 
+        mutation.authorize().await?;
         let created = self
             .driver_create(
                 &name,
@@ -2108,6 +2656,7 @@ impl InitEngine<'_> {
                 false,
             )
             .await?;
+            mutation.authorize().await?;
             let mut input = self.driver_attach(pinned).await?;
             self.verify_selected_engine().await?;
             self.attest_cas_writer(
@@ -2122,6 +2671,7 @@ impl InitEngine<'_> {
                 false,
             )
             .await?;
+            mutation.authorize().await?;
             self.driver_start(pinned).await?;
             self.verify_selected_engine().await?;
             self.attest_cas_writer(
@@ -2137,6 +2687,7 @@ impl InitEngine<'_> {
             )
             .await?;
             let request_bytes = zeroize::Zeroizing::new(request.canonical_bytes()?);
+            mutation.authorize().await?;
             self.driver_send_request(&mut input, &request_bytes).await?;
             drop(input);
             let wait = self.driver_wait(pinned).await?;
@@ -2164,7 +2715,7 @@ impl InitEngine<'_> {
         .await;
         let cleanup = match pinned.as_deref() {
             Some(id) => {
-                self.remove_cas_writer_and_prove_absent(id, &name, &volume_name)
+                self.remove_cas_writer_and_prove_absent(id, &name, &volume_name, mutation)
                     .await
             }
             None => match self.inspect_container(&name).await? {
@@ -2185,12 +2736,14 @@ impl InitEngine<'_> {
         installation: &Installation,
         epoch: &ImmutableEpoch,
         target: CasTarget,
+        mutation: &LifecycleMutationFence,
     ) -> Result<Option<Sha256Digest>, LocalInitError> {
         self.read_lifecycle_cas_digest_with_attachments(
             installation,
             epoch,
             target,
             &BTreeSet::new(),
+            mutation,
         )
         .await
     }
@@ -2203,6 +2756,7 @@ impl InitEngine<'_> {
         epoch: &ImmutableEpoch,
         target: CasTarget,
         expected_attachments: &BTreeSet<String>,
+        mutation: &LifecycleMutationFence,
     ) -> Result<Option<Sha256Digest>, LocalInitError> {
         if expected_attachments
             .iter()
@@ -2257,9 +2811,16 @@ impl InitEngine<'_> {
                 &volume_name,
                 &labels,
             )?;
-            self.remove_cas_reader_and_prove_absent(&id, &name, &volume_name, expected_attachments)
-                .await?;
+            self.remove_cas_reader_and_prove_absent(
+                &id,
+                &name,
+                &volume_name,
+                expected_attachments,
+                mutation,
+            )
+            .await?;
         }
+        mutation.authorize().await?;
         let created = self
             .driver_create(
                 &name,
@@ -2293,6 +2854,7 @@ impl InitEngine<'_> {
                 false,
             )
             .await?;
+            mutation.authorize().await?;
             let mut input = self.driver_attach(pinned).await?;
             self.attest_cas_digest_reader(
                 pinned,
@@ -2305,6 +2867,7 @@ impl InitEngine<'_> {
                 false,
             )
             .await?;
+            mutation.authorize().await?;
             self.driver_start(pinned).await?;
             self.attest_cas_digest_reader(
                 pinned,
@@ -2318,6 +2881,7 @@ impl InitEngine<'_> {
             )
             .await?;
             let request_bytes = request.canonical_bytes()?;
+            mutation.authorize().await?;
             self.driver_send_request(&mut input, &request_bytes).await?;
             drop(input);
             let wait = self.driver_wait(pinned).await?;
@@ -2350,6 +2914,7 @@ impl InitEngine<'_> {
                     &name,
                     &volume_name,
                     expected_attachments,
+                    mutation,
                 )
                 .await
             }
@@ -2451,10 +3016,12 @@ impl InitEngine<'_> {
         id: &str,
         name: &str,
         volume_name: &str,
+        mutation: &LifecycleMutationFence,
     ) -> Result<(), LocalInitError> {
         if !exact_container_id_text(id) {
             return Err(engine_resource_mismatch());
         }
+        mutation.authorize().await?;
         let _untrusted = self.driver_force_remove(id).await;
         if self.inspect_container(id).await?.is_some()
             || self.inspect_container(name).await?.is_some()
@@ -2471,10 +3038,12 @@ impl InitEngine<'_> {
         name: &str,
         volume_name: &str,
         expected_attachments: &BTreeSet<String>,
+        mutation: &LifecycleMutationFence,
     ) -> Result<(), LocalInitError> {
         if !exact_container_id_text(id) {
             return Err(engine_resource_mismatch());
         }
+        mutation.authorize().await?;
         let _untrusted = self.driver_force_remove(id).await;
         if self.inspect_container(id).await?.is_some()
             || self.inspect_container(name).await?.is_some()
@@ -2495,6 +3064,7 @@ impl InitEngine<'_> {
         &self,
         installation: &Installation,
         desired: &DesiredSpec,
+        mutation: &LifecycleMutationFence,
     ) -> Result<String, LocalInitError> {
         self.verify_selected_engine().await?;
         self.verify_installation(installation).await?;
@@ -2531,6 +3101,7 @@ impl InitEngine<'_> {
                         .collect(),
                 ),
             };
+            mutation.authorize().await?;
             let _untrusted =
                 tokio::time::timeout(ENGINE_TIMEOUT, self.docker.create_network(request)).await;
         }
@@ -2652,6 +3223,7 @@ impl InitEngine<'_> {
         }
         let live_ids = derive_rendered_live_ids(&listed, &listed_networks, installation, expected)?;
         let mut present_services = BTreeSet::new();
+        let mut all_services_running = true;
         let mut present_oneoffs = BTreeSet::new();
         let mut local_children = 0_usize;
         let mut disposable_helpers = 0_usize;
@@ -2774,8 +3346,11 @@ impl InitEngine<'_> {
                 if !present_oneoffs.insert(service.to_owned()) {
                     return Err(engine_resource_mismatch());
                 }
-            } else if !present_services.insert(service.to_owned()) {
-                return Err(engine_resource_mismatch());
+            } else {
+                all_services_running &= rendered_container_is_running(&container, rendered);
+                if !present_services.insert(service.to_owned()) {
+                    return Err(engine_resource_mismatch());
+                }
             }
         }
         if !attachment_ids.is_subset(&discovered_ids) {
@@ -2883,6 +3458,11 @@ impl InitEngine<'_> {
             && egress
             && disposable_helpers == 0
         {
+            if !all_services_running {
+                self.verify_installation(installation).await?;
+                self.verify_selected_engine().await?;
+                return Ok(LifecycleTopology::Partial);
+            }
             let transit_id = transit
                 .and_then(|network| network.id)
                 .filter(|id| exact_container_id_text(id))
@@ -2927,6 +3507,7 @@ impl InitEngine<'_> {
         &self,
         installation: &Installation,
         desired: &DesiredSpec,
+        mutation: &LifecycleMutationFence,
     ) -> Result<bool, LocalInitError> {
         self.verify_selected_engine().await?;
         self.verify_installation(installation).await?;
@@ -2942,6 +3523,7 @@ impl InitEngine<'_> {
             .as_deref()
             .filter(|id| exact_container_id_text(id))
             .ok_or_else(engine_resource_mismatch)?;
+        mutation.authorize().await?;
         let _untrusted =
             tokio::time::timeout(ENGINE_TIMEOUT, self.docker.remove_network(expected_id)).await;
         if self.inspect_network_exact(expected_id).await?.is_some()
@@ -2968,6 +3550,7 @@ impl InitEngine<'_> {
         expected: &ExpectedLifecycleTopology,
         expected_runner_id: uuid::Uuid,
         holder: &LifecycleLockHolder,
+        mutation: &LifecycleMutationFence,
     ) -> Result<(), LocalInitError> {
         self.attest_lifecycle_lock(installation, epoch, holder)
             .await?;
@@ -3021,6 +3604,7 @@ impl InitEngine<'_> {
                 .v(false)
                 .link(false)
                 .build();
+            mutation.authorize().await?;
             let _untrusted = tokio::time::timeout(
                 ENGINE_TIMEOUT,
                 self.docker.remove_container(&id, Some(options)),
@@ -3044,9 +3628,10 @@ impl InitEngine<'_> {
             expected_runner_id,
             holder,
             &holder_lost,
+            mutation,
         )
         .await?;
-        self.remove_local_docker_children(installation, desired, expected_runner_id)
+        self.remove_local_docker_children(installation, desired, expected_runner_id, mutation)
             .await?;
         self.attest_lifecycle_lock(installation, epoch, holder)
             .await?;
@@ -3095,6 +3680,7 @@ impl InitEngine<'_> {
                     .v(false)
                     .link(false)
                     .build();
+                mutation.authorize().await?;
                 let _untrusted = tokio::time::timeout(
                     ENGINE_TIMEOUT,
                     self.docker.remove_container(&id, Some(options)),
@@ -3134,6 +3720,7 @@ impl InitEngine<'_> {
                 .filter(|id| exact_container_id_text(id))
                 .ok_or_else(engine_resource_mismatch)?
                 .to_owned();
+            mutation.authorize().await?;
             let _untrusted =
                 tokio::time::timeout(ENGINE_TIMEOUT, self.docker.remove_network(&id)).await;
             if self.inspect_network_exact(&id).await?.is_some()
@@ -3142,7 +3729,7 @@ impl InitEngine<'_> {
                 return Err(LocalInitError::new(LocalInitErrorCode::ResetRequired));
             }
         }
-        self.remove_results_transit_if_present(installation, desired)
+        self.remove_results_transit_if_present(installation, desired, mutation)
             .await?;
         if self
             .inspect_lifecycle_topology(installation, epoch, desired, expected, expected_runner_id)
@@ -3157,10 +3744,9 @@ impl InitEngine<'_> {
             .await
     }
 
-    async fn preflight_local_docker_children(
+    async fn discover_local_docker_children(
         &self,
         installation: &Installation,
-        desired: &DesiredSpec,
         expected_runner_id: uuid::Uuid,
     ) -> Result<
         (
@@ -3240,48 +3826,6 @@ impl InitEngine<'_> {
             if runner_ids != BTreeSet::from([expected_runner_id]) {
                 return Err(engine_resource_mismatch());
             }
-            let transit_name = results_transit_name(installation);
-            let transit = self
-                .inspect_network_exact(&transit_name)
-                .await?
-                .ok_or_else(engine_resource_mismatch)?;
-            validate_results_transit(&transit, installation, desired, false)?;
-            let transit_id = transit
-                .id
-                .as_deref()
-                .filter(|id| exact_container_id_text(id))
-                .ok_or_else(engine_resource_mismatch)?;
-            let results_name = format!("{}-automata-1", installation.compose_project());
-            let results_id = self
-                .inspect_container(&results_name)
-                .await?
-                .and_then(|container| container.id)
-                .filter(|id| exact_container_id_text(id))
-                .ok_or_else(engine_resource_mismatch)?;
-            attest_lifecycle_sibling_union(
-                installation,
-                desired,
-                expected_runner_id,
-                transit_id,
-                &results_id,
-                &pinned_containers
-                    .iter()
-                    .map(|item| LifecycleSiblingContainer {
-                        id: item.id.clone(),
-                        name: item.name.clone(),
-                        kind: item.kind.clone(),
-                    })
-                    .collect::<Vec<_>>(),
-                &pinned_networks
-                    .iter()
-                    .map(|item| LifecycleSiblingNetwork {
-                        id: item.id.clone(),
-                        name: item.name.clone(),
-                    })
-                    .collect::<Vec<_>>(),
-            )
-            .await
-            .map_err(|_| engine_resource_mismatch())?;
         }
 
         // Re-list before mutation to close discovery races.
@@ -3330,6 +3874,61 @@ impl InitEngine<'_> {
         Ok((pinned_containers, pinned_networks))
     }
 
+    /// Recovers the sole runner authority from already-present LocalDocker
+    /// custody when non-authority host material is missing during reset. The
+    /// full sibling parser revalidates this value before any deletion.
+    pub(in crate::init) async fn discover_lifecycle_runner_id_for_reset(
+        &self,
+        installation: &Installation,
+    ) -> Result<Option<uuid::Uuid>, LocalInitError> {
+        self.verify_selected_engine().await?;
+        self.verify_installation(installation).await?;
+        let containers = tokio::time::timeout(
+            ENGINE_TIMEOUT,
+            self.docker.list_containers(Some(
+                ListContainersOptionsBuilder::default().all(true).build(),
+            )),
+        )
+        .await
+        .map_err(|_| engine_unavailable())?
+        .map_err(|_| engine_unavailable())?;
+        let networks = tokio::time::timeout(
+            ENGINE_TIMEOUT,
+            self.docker
+                .list_networks(Some(ListNetworksOptionsBuilder::default().build())),
+        )
+        .await
+        .map_err(|_| engine_unavailable())?
+        .map_err(|_| engine_unavailable())?;
+        if containers.len() > MAX_ENGINE_RESOURCES || networks.len() > MAX_ENGINE_RESOURCES {
+            return Err(engine_resource_mismatch());
+        }
+        let prefix = local_docker_name_prefix(installation);
+        let mut known_names = BTreeSet::new();
+        let mut runner_ids = BTreeSet::new();
+        for summary in &containers {
+            if !local_docker_candidate_container(summary, installation, &prefix) {
+                continue;
+            }
+            let pinned = validate_local_docker_container_summary(summary, installation)?;
+            if !known_names.insert(pinned.name) {
+                return Err(engine_resource_mismatch());
+            }
+            runner_ids.insert(pinned.runner_id);
+        }
+        for network in &networks {
+            if !local_docker_candidate_network(network, installation, &prefix) {
+                continue;
+            }
+            runner_ids.insert(
+                validate_local_docker_network(network, installation, &known_names)?.runner_id,
+            );
+        }
+        self.verify_installation(installation).await?;
+        self.verify_selected_engine().await?;
+        sole_local_docker_runner_id(runner_ids)
+    }
+
     /// Performs the production-parser LocalDocker union audit without repair.
     pub(in crate::init) async fn attest_local_docker_children(
         &self,
@@ -3337,9 +3936,41 @@ impl InitEngine<'_> {
         desired: &DesiredSpec,
         expected_runner_id: uuid::Uuid,
     ) -> Result<(), LocalInitError> {
-        self.preflight_local_docker_children(installation, desired, expected_runner_id)
-            .await
-            .map(drop)
+        let (containers, networks) = self
+            .discover_local_docker_children(installation, expected_runner_id)
+            .await?;
+        if containers.is_empty() && networks.is_empty() {
+            return Ok(());
+        }
+        let transit_name = results_transit_name(installation);
+        let transit = self
+            .inspect_network_exact(&transit_name)
+            .await?
+            .ok_or_else(engine_resource_mismatch)?;
+        validate_results_transit(&transit, installation, desired, false)?;
+        let transit_id = transit
+            .id
+            .as_deref()
+            .filter(|id| exact_container_id_text(id))
+            .ok_or_else(engine_resource_mismatch)?;
+        let results_name = format!("{}-automata-1", installation.compose_project());
+        let results_id = self
+            .inspect_container(&results_name)
+            .await?
+            .and_then(|container| container.id)
+            .filter(|id| exact_container_id_text(id))
+            .ok_or_else(engine_resource_mismatch)?;
+        attest_lifecycle_sibling_union(
+            installation,
+            desired,
+            expected_runner_id,
+            transit_id,
+            &results_id,
+            &local_docker_container_candidates(&containers),
+            &local_docker_network_candidates(&networks),
+        )
+        .await
+        .map_err(|_| engine_resource_mismatch())
     }
 
     /// Discovers, validates, and removes every exact LocalDocker sibling for
@@ -3351,10 +3982,20 @@ impl InitEngine<'_> {
         installation: &Installation,
         desired: &DesiredSpec,
         expected_runner_id: uuid::Uuid,
+        mutation: &LifecycleMutationFence,
     ) -> Result<(), LocalInitError> {
         let (mut pinned_containers, pinned_networks) = self
-            .preflight_local_docker_children(installation, desired, expected_runner_id)
+            .discover_local_docker_children(installation, expected_runner_id)
             .await?;
+        attest_lifecycle_sibling_custody_union(
+            installation,
+            desired,
+            expected_runner_id,
+            &local_docker_container_candidates(&pinned_containers),
+            &local_docker_network_candidates(&pinned_networks),
+        )
+        .await
+        .map_err(|_| engine_resource_mismatch())?;
         pinned_containers.sort_by_key(|item| local_docker_delete_rank(&item.kind));
         for pinned in &pinned_containers {
             let options = RemoveContainerOptionsBuilder::default()
@@ -3362,6 +4003,7 @@ impl InitEngine<'_> {
                 .v(false)
                 .link(false)
                 .build();
+            mutation.authorize().await?;
             let _untrusted = tokio::time::timeout(
                 ENGINE_TIMEOUT,
                 self.docker.remove_container(&pinned.id, Some(options)),
@@ -3385,6 +4027,7 @@ impl InitEngine<'_> {
             {
                 return Err(LocalInitError::new(LocalInitErrorCode::ResetRequired));
             }
+            mutation.authorize().await?;
             let _untrusted =
                 tokio::time::timeout(ENGINE_TIMEOUT, self.docker.remove_network(&pinned.id)).await;
             if self.inspect_network_exact(&pinned.id).await?.is_some()
@@ -3410,6 +4053,7 @@ impl InitEngine<'_> {
         expected_runner_id: uuid::Uuid,
         holder: &LifecycleLockHolder,
         cancellation: &CancellationToken,
+        mutation: &LifecycleMutationFence,
     ) -> Result<(), LocalInitError> {
         lifecycle_cancellation_checkpoint(cancellation)?;
         self.attest_lifecycle_lock(installation, epoch, holder)
@@ -3482,6 +4126,7 @@ impl InitEngine<'_> {
                 .v(false)
                 .link(false)
                 .build();
+            mutation.authorize().await?;
             let _untrusted = tokio::time::timeout(
                 ENGINE_TIMEOUT,
                 self.docker.remove_container(&pinned.id, Some(options)),
@@ -3766,24 +4411,17 @@ impl InitEngine<'_> {
         desired: &DesiredSpec,
         expected: &ExpectedLifecycleTopology,
         service: &'static str,
+        mutation: &LifecycleMutationFence,
     ) -> Result<(), LocalInitError> {
         let name = lifecycle_oneoff_name(installation, service)?;
         let Some(container) = self.inspect_container(&name).await? else {
             return Ok(());
         };
         let id = exact_container_id(&container)?.to_owned();
-        self.validate_lifecycle_oneoff(
-            &container,
-            &id,
-            installation,
-            epoch,
-            desired,
-            expected,
-            service,
-        )
-        .await?;
+        self.validate_lifecycle_oneoff(&container, installation, epoch, desired, expected, service)
+            .await?;
         self.wait_lifecycle_oneoff(&id).await?;
-        self.remove_lifecycle_oneoff_and_prove_absent(&name, &id)
+        self.remove_lifecycle_oneoff_and_prove_absent(&name, &id, mutation)
             .await
     }
 
@@ -3797,6 +4435,7 @@ impl InitEngine<'_> {
         desired: &DesiredSpec,
         expected: &ExpectedLifecycleTopology,
         service: &'static str,
+        mutation: &LifecycleMutationFence,
     ) -> Result<Vec<u8>, LocalInitError> {
         self.verify_selected_engine().await?;
         self.verify_installation(installation).await?;
@@ -3806,34 +4445,18 @@ impl InitEngine<'_> {
             .await?
             .ok_or_else(engine_resource_mismatch)?;
         let id = exact_container_id(&container)?.to_owned();
-        self.validate_lifecycle_oneoff(
-            &container,
-            &id,
-            installation,
-            epoch,
-            desired,
-            expected,
-            service,
-        )
-        .await?;
+        self.validate_lifecycle_oneoff(&container, installation, epoch, desired, expected, service)
+            .await?;
         let status = self.wait_lifecycle_oneoff(&id).await?;
         let stopped = self
             .inspect_container(&id)
             .await?
             .ok_or_else(engine_resource_mismatch)?;
-        self.validate_lifecycle_oneoff(
-            &stopped,
-            &id,
-            installation,
-            epoch,
-            desired,
-            expected,
-            service,
-        )
-        .await?;
+        self.validate_lifecycle_oneoff(&stopped, installation, epoch, desired, expected, service)
+            .await?;
         let logs = self.lifecycle_oneoff_logs(&id).await?;
         let cleanup = self
-            .remove_lifecycle_oneoff_and_prove_absent(&name, &id)
+            .remove_lifecycle_oneoff_and_prove_absent(&name, &id, mutation)
             .await;
         cleanup?;
         if status != 0 {
@@ -3849,7 +4472,6 @@ impl InitEngine<'_> {
     async fn validate_lifecycle_oneoff(
         &self,
         container: &bollard::models::ContainerInspectResponse,
-        id: &str,
         installation: &Installation,
         epoch: &ImmutableEpoch,
         desired: &DesiredSpec,
@@ -3888,16 +4510,6 @@ impl InitEngine<'_> {
             &image_config,
             &live_ids,
             false,
-        )?;
-        validate_lifecycle_oneoff_container(
-            container,
-            id,
-            &name,
-            &image.inspection_reference,
-            &image.image_id,
-            installation,
-            desired,
-            contract,
         )
     }
 
@@ -3951,11 +4563,13 @@ impl InitEngine<'_> {
         &self,
         name: &str,
         id: &str,
+        mutation: &LifecycleMutationFence,
     ) -> Result<(), LocalInitError> {
         let options = RemoveContainerOptionsBuilder::default()
             .force(true)
             .v(false)
             .build();
+        mutation.authorize().await?;
         let _untrusted = tokio::time::timeout(
             ENGINE_TIMEOUT,
             self.docker.remove_container(id, Some(options)),
@@ -3980,23 +4594,22 @@ impl InitEngine<'_> {
     ) -> Result<String, LocalInitError> {
         self.verify_selected_engine().await?;
         self.verify_installation(installation).await?;
-        let contract = lifecycle_service_contract(service)?;
         let name = format!("{}-{service}-1", installation.compose_project());
         let container = self
             .inspect_container(&name)
             .await?
             .ok_or_else(engine_resource_mismatch)?;
         let id = exact_container_id(&container)?.to_owned();
-        let image = self
-            .inspect_epoch_images(epoch)
-            .await?
-            .into_iter()
-            .find(|image| image.role == contract.image_role)
-            .ok_or_else(engine_resource_mismatch)?;
         let rendered = expected
             .containers
             .get(service)
             .filter(|container| !container.oneoff())
+            .ok_or_else(engine_resource_mismatch)?;
+        let image = self
+            .inspect_epoch_images(epoch)
+            .await?
+            .into_iter()
+            .find(|image| image.role == rendered.image_role)
             .ok_or_else(engine_resource_mismatch)?;
         let image_config = self
             .inspect_image(&image.image_id)
@@ -4017,16 +4630,6 @@ impl InitEngine<'_> {
             &image_config,
             &live_ids,
             true,
-        )?;
-        validate_lifecycle_service_container(
-            &container,
-            &id,
-            &name,
-            &image.inspection_reference,
-            &image.image_id,
-            installation,
-            desired,
-            contract,
         )?;
         let by_id = self
             .inspect_container(&id)
@@ -4087,6 +4690,45 @@ impl InitEngine<'_> {
     }
 }
 
+fn validate_lifecycle_daemon_info(info: &LifecycleDaemonInfo) -> Result<(), LocalInitError> {
+    let security = info
+        .security_options
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let required = BTreeSet::from([
+        "name=cgroupns",
+        "name=seccomp,profile=builtin",
+        "name=userns",
+    ]);
+    let allowed = BTreeSet::from([
+        "name=cgroupns",
+        "name=no-new-privileges",
+        "name=seccomp,profile=builtin",
+        "name=userns",
+    ]);
+    if security.len() != info.security_options.len()
+        || !required.is_subset(&security)
+        || !security.is_subset(&allowed)
+        || !info.memory_limit
+        || !info.swap_limit
+        || !info.cpu_cfs_period
+        || !info.cpu_cfs_quota
+        || !info.pids_limit
+        || info.cgroup_version != "2"
+        || info.live_restore_enabled
+        || info.default_runtime != "runc"
+        || info
+            .default_ulimits
+            .as_ref()
+            .is_some_and(|limits| !limits.is_empty())
+    {
+        Err(engine_unavailable())
+    } else {
+        Ok(())
+    }
+}
+
 struct PinnedLocalDockerContainer {
     id: String,
     name: String,
@@ -4098,6 +4740,41 @@ struct PinnedLocalDockerNetwork {
     id: String,
     name: String,
     runner_id: uuid::Uuid,
+}
+
+fn local_docker_container_candidates(
+    containers: &[PinnedLocalDockerContainer],
+) -> Vec<LifecycleSiblingContainer> {
+    containers
+        .iter()
+        .map(|item| LifecycleSiblingContainer {
+            id: item.id.clone(),
+            name: item.name.clone(),
+            kind: item.kind.clone(),
+        })
+        .collect()
+}
+
+fn local_docker_network_candidates(
+    networks: &[PinnedLocalDockerNetwork],
+) -> Vec<LifecycleSiblingNetwork> {
+    networks
+        .iter()
+        .map(|item| LifecycleSiblingNetwork {
+            id: item.id.clone(),
+            name: item.name.clone(),
+        })
+        .collect()
+}
+
+fn sole_local_docker_runner_id(
+    runner_ids: BTreeSet<uuid::Uuid>,
+) -> Result<Option<uuid::Uuid>, LocalInitError> {
+    if runner_ids.len() > 1 {
+        Err(engine_resource_mismatch())
+    } else {
+        Ok(runner_ids.into_iter().next())
+    }
 }
 
 struct RenderedLiveIds {
@@ -4431,7 +5108,12 @@ fn validate_rendered_network(
         || network.enable_ipv6 != Some(expected.enable_ipv6)
         || network.ingress != Some(false)
         || network.config_only != Some(false)
-        || network.config_from.is_some()
+        || network.config_from.as_ref().is_some_and(|reference| {
+            reference
+                .network
+                .as_deref()
+                .is_some_and(|network| !network.is_empty())
+        })
         || options != expected.driver_options
         || ipam.driver.as_deref() != Some(expected.ipam_driver.as_str())
         || ipam
@@ -4820,7 +5502,7 @@ fn validate_rendered_container(
         .host_config
         .as_ref()
         .ok_or_else(engine_resource_mismatch)?;
-    let state = container
+    let _state = container
         .state
         .as_ref()
         .ok_or_else(engine_resource_mismatch)?;
@@ -4915,7 +5597,10 @@ fn validate_rendered_container(
         || host.cap_add.as_deref().unwrap_or_default() != expected.cap_add.as_slice()
         || host.cap_drop.as_deref().unwrap_or_default() != expected.cap_drop.as_slice()
         || host.security_opt.as_deref().unwrap_or_default() != expected.security_opt.as_slice()
-        || rendered_host_has_extra_authority(host)
+        || host.init != Some(expected.init)
+        || host.userns_mode.as_deref().unwrap_or_default()
+            != expected.userns_mode.as_deref().unwrap_or_default()
+        || rendered_host_has_extra_authority(host, expected)
         || host.auto_remove != Some(false)
         || host.log_config.as_ref().and_then(|log| log.typ.as_deref())
             != Some(expected.log_driver.as_str())
@@ -4927,23 +5612,13 @@ fn validate_rendered_container(
                 options.iter().collect::<BTreeMap<_, _>>()
                     != expected.log_options.iter().collect::<BTreeMap<_, _>>()
             })
-        || require_running
-            && (state.running != Some(true)
-                || state.paused != Some(false)
-                || state.restarting != Some(false)
-                || state.dead != Some(false)
-                || state.oom_killed != Some(false)
-                || state.pid.is_none_or(|pid| pid <= 0)
-                || state
-                    .error
-                    .as_deref()
-                    .is_some_and(|error| !error.is_empty()))
+        || require_running && !rendered_container_is_running(container, expected)
     {
         return Err(engine_resource_mismatch());
     }
 
     validate_rendered_mounts(container, host, installation, expected)?;
-    validate_rendered_ports(config, host, network, expected)?;
+    validate_rendered_ports(config, host, network, expected, image)?;
     validate_rendered_health(config, expected)?;
     validate_rendered_tmpfs(host, expected)?;
     validate_rendered_restart(host, expected)?;
@@ -4960,7 +5635,25 @@ fn validate_rendered_container(
     )
 }
 
-fn rendered_host_has_extra_authority(host: &HostConfig) -> bool {
+fn rendered_container_is_running(
+    container: &bollard::models::ContainerInspectResponse,
+    expected: &ExpectedContainer,
+) -> bool {
+    container.state.as_ref().is_some_and(|state| {
+        state.running == Some(true)
+            && state.paused == Some(false)
+            && state.restarting == Some(false)
+            && state.dead == Some(false)
+            && state.oom_killed == Some(false)
+            && state.pid.is_some_and(|pid| pid > 0)
+            && state.error.as_deref().is_none_or(|error| error.is_empty())
+            && (expected.healthcheck.is_none()
+                || state.health.as_ref().and_then(|health| health.status)
+                    == Some(bollard::models::HealthStatusEnum::HEALTHY))
+    })
+}
+
+fn rendered_host_has_extra_authority(host: &HostConfig, expected: &ExpectedContainer) -> bool {
     let nonempty = |value: Option<&Vec<String>>| value.is_some_and(|value| !value.is_empty());
     let nonzero = |value: Option<i64>| value.is_some_and(|value| value != 0);
     let nonempty_text = |value: Option<&String>| value.is_some_and(|value| !value.is_empty());
@@ -4973,18 +5666,17 @@ fn rendered_host_has_extra_authority(host: &HostConfig) -> bool {
             .pid_mode
             .as_deref()
             .is_some_and(|mode| !mode.is_empty())
-        || host.ipc_mode.as_deref() != Some("private")
+        || host.ipc_mode.as_deref() != Some(expected.ipc.as_str())
         || host
             .uts_mode
             .as_deref()
             .is_some_and(|mode| !mode.is_empty())
-        || host.userns_mode.as_deref().unwrap_or_default() != ""
         || host.cgroup.as_deref().is_some_and(|mode| !mode.is_empty())
-        || host.runtime.as_deref() != Some("runc")
+        || host.runtime.as_deref() != Some(expected.runtime.as_str())
+        || expected.cgroup != "private"
         || host.cgroupns_mode != Some(HostConfigCgroupnsModeEnum::PRIVATE)
         || host.publish_all_ports == Some(true)
         || host.oom_kill_disable == Some(true)
-        || host.init == Some(true)
         || nonzero(host.cpu_shares)
         || nonzero(host.cpu_period)
         || nonzero(host.cpu_quota)
@@ -5040,7 +5732,7 @@ fn rendered_host_has_extra_authority(host: &HostConfig) -> bool {
         || nonempty(host.group_add.as_ref())
         || nonempty(host.links.as_ref())
         || host.console_size.as_deref() != Some([0, 0].as_slice())
-        || host.shm_size != Some(64 * 1024 * 1024)
+        || host.shm_size != i64::try_from(expected.shm_size).ok()
         || host.isolation != Some(HostConfigIsolationEnum::EMPTY)
         || host
             .storage_opt
@@ -5051,8 +5743,43 @@ fn rendered_host_has_extra_authority(host: &HostConfig) -> bool {
             .annotations
             .as_ref()
             .is_some_and(|value| !value.is_empty())
-        || host.masked_paths.as_deref() != Some(helper_masked_paths().as_slice())
-        || host.readonly_paths.as_deref() != Some(helper_readonly_paths().as_slice())
+        || !valid_rendered_masked_paths(host.masked_paths.as_deref())
+        || host.readonly_paths.as_deref().is_none_or(|paths| {
+            paths.iter().collect::<BTreeSet<_>>()
+                != helper_readonly_paths().iter().collect::<BTreeSet<_>>()
+        })
+}
+
+fn valid_rendered_masked_paths(paths: Option<&[String]>) -> bool {
+    const REQUIRED: [&str; 11] = [
+        "/proc/acpi",
+        "/proc/asound",
+        "/proc/kcore",
+        "/proc/keys",
+        "/proc/latency_stats",
+        "/proc/sched_debug",
+        "/proc/scsi",
+        "/proc/timer_list",
+        "/proc/timer_stats",
+        "/sys/devices/virtual/powercap",
+        "/sys/firmware",
+    ];
+    let Some(paths) = paths else {
+        return false;
+    };
+    let observed = paths.iter().map(String::as_str).collect::<BTreeSet<_>>();
+    if observed.len() != paths.len() || REQUIRED.iter().any(|path| !observed.contains(path)) {
+        return false;
+    }
+    observed.into_iter().all(|path| {
+        REQUIRED.contains(&path)
+            || path == "/proc/interrupts"
+            || path
+                .strip_prefix("/sys/devices/system/cpu/cpu")
+                .and_then(|suffix| suffix.strip_suffix("/thermal_throttle"))
+                .and_then(|cpu| cpu.parse::<u32>().ok().map(|index| (cpu, index)))
+                .is_some_and(|(cpu, index)| cpu == index.to_string())
+    })
 }
 
 fn exact_environment(values: &[String]) -> Result<BTreeMap<String, String>, LocalInitError> {
@@ -5152,7 +5879,9 @@ fn validate_rendered_mounts(
             }
             (
                 ExpectedMountSource::Bind {
-                    create_host_path, ..
+                    create_host_path,
+                    propagation,
+                    ..
                 },
                 "bind",
             ) => {
@@ -5161,9 +5890,10 @@ fn validate_rendered_mounts(
                     .as_ref()
                     .ok_or_else(engine_resource_mismatch)?;
                 if mount.volume_options.is_some()
+                    || propagation != "rprivate"
                     || options.propagation != Some(MountBindOptionsPropagationEnum::RPRIVATE)
                     || options.non_recursive.unwrap_or(false)
-                    || options.create_mountpoint != Some(*create_host_path)
+                    || options.create_mountpoint.unwrap_or(false) != *create_host_path
                     || options.read_only_non_recursive.unwrap_or(false)
                     || options.read_only_force_recursive.unwrap_or(false)
                 {
@@ -5222,6 +5952,7 @@ fn validate_rendered_ports(
     host: &HostConfig,
     network: &bollard::models::NetworkSettings,
     expected: &ExpectedContainer,
+    image: &ImageConfig,
 ) -> Result<(), LocalInitError> {
     let expected_ports = expected
         .ports
@@ -5241,12 +5972,15 @@ fn validate_rendered_ports(
         .iter()
         .cloned()
         .collect::<BTreeSet<_>>();
-    if exposed
-        != expected_ports
-            .iter()
-            .map(|(port, _, _)| port.clone())
-            .collect::<BTreeSet<_>>()
-    {
+    let expected_exposed = image
+        .exposed_ports
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .cloned()
+        .chain(expected_ports.iter().map(|(port, _, _)| port.clone()))
+        .collect::<BTreeSet<_>>();
+    if exposed != expected_exposed {
         return Err(engine_resource_mismatch());
     }
     let mut bindings = BTreeSet::new();
@@ -5559,117 +6293,7 @@ fn rendered_network_name(
 
 #[derive(Clone, Copy)]
 struct LifecycleOneoffContract {
-    service: &'static str,
-    resource_kind: &'static str,
     image_role: &'static str,
-    mounts: &'static [(VolumeRole, &'static str, bool)],
-}
-
-#[derive(Clone, Copy)]
-struct LifecycleServiceContract {
-    service: &'static str,
-    resource_kind: &'static str,
-    image_role: &'static str,
-    user: &'static str,
-    mounts: &'static [(VolumeRole, &'static str, bool)],
-    control_host: Option<u32>,
-    egress_host: Option<u32>,
-    transit: bool,
-    healthy: bool,
-}
-
-fn lifecycle_service_contract(
-    service: &'static str,
-) -> Result<LifecycleServiceContract, LocalInitError> {
-    let contract = match service {
-        "postgres" => LifecycleServiceContract {
-            service,
-            resource_kind: "postgres",
-            image_role: "postgres",
-            user: "999:999",
-            mounts: &[
-                (
-                    VolumeRole::PostgresConfig,
-                    "/run/automata-local/postgres",
-                    true,
-                ),
-                (VolumeRole::PostgresData, "/var/lib/postgresql", false),
-            ],
-            control_host: Some(20),
-            egress_host: None,
-            transit: false,
-            healthy: true,
-        },
-        "rustfs" => LifecycleServiceContract {
-            service,
-            resource_kind: "object-store",
-            image_role: "rustfs",
-            user: "10001:10001",
-            mounts: &[
-                (VolumeRole::ObjectData, "/data", false),
-                (VolumeRole::RustfsConfig, "/run/automata-rustfs", true),
-            ],
-            control_host: Some(30),
-            egress_host: None,
-            transit: false,
-            healthy: true,
-        },
-        "automata" => LifecycleServiceContract {
-            service,
-            resource_kind: "control-plane",
-            image_role: "automata",
-            user: "65532:65532",
-            mounts: &[(VolumeRole::ControlMaterial, "/run/automata-control", true)],
-            control_host: Some(10),
-            egress_host: None,
-            transit: true,
-            healthy: true,
-        },
-        "engine-relay" => LifecycleServiceContract {
-            service,
-            resource_kind: "engine-relay",
-            image_role: "automata",
-            user: "0:0",
-            mounts: &[
-                (VolumeRole::EngineRelay, "/run/automata-engine", false),
-                (
-                    VolumeRole::RelayBinding,
-                    "/run/automata-engine-binding",
-                    true,
-                ),
-            ],
-            control_host: None,
-            egress_host: None,
-            transit: false,
-            healthy: true,
-        },
-        "runner" => LifecycleServiceContract {
-            service,
-            resource_kind: "runner",
-            image_role: "runner",
-            user: "65532:65532",
-            mounts: &[
-                (VolumeRole::EngineRelay, "/run/automata-engine", true),
-                (
-                    VolumeRole::RunnerConfig,
-                    "/run/automata-runner-config",
-                    true,
-                ),
-                (VolumeRole::RunnerData, "/var/lib/automata-runner", false),
-                (
-                    VolumeRole::RunnerSecrets,
-                    "/run/automata-runner-secrets",
-                    true,
-                ),
-            ],
-            control_host: Some(40),
-            egress_host: Some(20),
-            transit: false,
-            healthy: true,
-        },
-        _ => return Err(engine_resource_mismatch()),
-    };
-    Ok(contract)
 }
 
 fn lifecycle_oneoff_contract(
@@ -5677,33 +6301,13 @@ fn lifecycle_oneoff_contract(
 ) -> Result<LifecycleOneoffContract, LocalInitError> {
     let contract = match service {
         "object-store-init" => LifecycleOneoffContract {
-            service,
-            resource_kind: "object-store-init",
             image_role: "automata",
-            mounts: &[(VolumeRole::ControlMaterial, "/run/automata-control", true)],
         },
         "bootstrap-runner" => LifecycleOneoffContract {
-            service,
-            resource_kind: "bootstrap-runner",
             image_role: "automata",
-            mounts: &[
-                (VolumeRole::BootstrapState, "/run/automata-bootstrap", false),
-                (VolumeRole::ControlMaterial, "/run/automata-control", true),
-            ],
         },
         "runner-enroll" => LifecycleOneoffContract {
-            service,
-            resource_kind: "runner-enroll",
             image_role: "runner",
-            mounts: &[
-                (VolumeRole::BootstrapState, "/run/automata-bootstrap", true),
-                (
-                    VolumeRole::RunnerConfig,
-                    "/run/automata-runner-config",
-                    true,
-                ),
-                (VolumeRole::RunnerData, "/var/lib/automata-runner", false),
-            ],
         },
         _ => return Err(engine_resource_mismatch()),
     };
@@ -5716,357 +6320,6 @@ fn lifecycle_oneoff_name(
 ) -> Result<String, LocalInitError> {
     lifecycle_oneoff_contract(service)?;
     Ok(format!("{}-{service}", installation.compose_project()))
-}
-
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-fn validate_lifecycle_oneoff_container(
-    container: &bollard::models::ContainerInspectResponse,
-    id: &str,
-    name: &str,
-    image_reference: &str,
-    image_id: &str,
-    installation: &Installation,
-    desired: &DesiredSpec,
-    contract: LifecycleOneoffContract,
-) -> Result<(), LocalInitError> {
-    let config = container
-        .config
-        .as_ref()
-        .ok_or_else(engine_resource_mismatch)?;
-    let host = container
-        .host_config
-        .as_ref()
-        .ok_or_else(engine_resource_mismatch)?;
-    let labels = config
-        .labels
-        .as_ref()
-        .ok_or_else(engine_resource_mismatch)?;
-    let managed = labels
-        .iter()
-        .filter(|(key, _)| key.starts_with("io.automata.local."))
-        .map(|(key, value)| (key.clone(), value.clone()))
-        .collect::<BTreeMap<_, _>>();
-    let expected_managed = BTreeMap::from([
-        (LABEL_MANAGED.to_owned(), "true".to_owned()),
-        (
-            LABEL_INSTALLATION_ID.to_owned(),
-            installation.id().to_string(),
-        ),
-        (
-            LABEL_INSTALLATION_KEY.to_owned(),
-            installation.selector_key().to_string(),
-        ),
-        (
-            LABEL_COMPOSE_PROJECT.to_owned(),
-            installation.compose_project().to_string(),
-        ),
-        (LABEL_PLAN.to_owned(), desired.plan_digest().to_string()),
-        (
-            LABEL_RESOURCE_KIND.to_owned(),
-            contract.resource_kind.to_owned(),
-        ),
-    ]);
-    if container.id.as_deref() != Some(id)
-        || !exact_container_id_text(id)
-        || container.name.as_deref() != Some(format!("/{name}").as_str())
-        || container.image.as_deref() != Some(image_id)
-        || config.image.as_deref() != Some(image_reference)
-        || config.user.as_deref() != Some("65532:65532")
-        || config.working_dir.as_deref() != Some("/")
-        || config.attach_stdin != Some(false)
-        || config.attach_stdout != Some(false)
-        || config.attach_stderr != Some(false)
-        || config.open_stdin != Some(false)
-        || config.tty != Some(false)
-        || managed != expected_managed
-        || labels.get("com.docker.compose.project")
-            != Some(&installation.compose_project().to_string())
-        || labels.get("com.docker.compose.service").map(String::as_str) != Some(contract.service)
-        || labels.get("com.docker.compose.oneoff").map(String::as_str) != Some("True")
-        || host.readonly_rootfs != Some(true)
-        || host.privileged != Some(false)
-        || host.cap_drop.as_deref() != Some(["ALL".to_owned()].as_slice())
-        || host.cap_add.as_ref().is_some_and(|caps| !caps.is_empty())
-        || host.auto_remove != Some(false)
-        || host
-            .security_opt
-            .as_deref()
-            .is_none_or(|options| options != ["no-new-privileges:true"])
-    {
-        return Err(engine_resource_mismatch());
-    }
-    let volume_names = volume_names(installation);
-    let expected_mounts = contract
-        .mounts
-        .iter()
-        .map(|(role, destination, read_only)| {
-            Ok((
-                volume_names
-                    .get(role)
-                    .ok_or_else(engine_resource_mismatch)?
-                    .clone(),
-                (*destination).to_owned(),
-                !*read_only,
-            ))
-        })
-        .collect::<Result<BTreeSet<_>, LocalInitError>>()?;
-    let realized = container
-        .mounts
-        .as_deref()
-        .ok_or_else(engine_resource_mismatch)?;
-    let mut actual_mounts = BTreeSet::new();
-    for mount in realized {
-        if mount.typ.as_deref() != Some("volume")
-            || mount.driver.as_deref() != Some("local")
-            || !actual_mounts.insert((
-                mount.name.clone().ok_or_else(engine_resource_mismatch)?,
-                mount
-                    .destination
-                    .clone()
-                    .ok_or_else(engine_resource_mismatch)?,
-                mount.rw.ok_or_else(engine_resource_mismatch)?,
-            ))
-        {
-            return Err(engine_resource_mismatch());
-        }
-    }
-    if actual_mounts != expected_mounts {
-        return Err(engine_resource_mismatch());
-    }
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-fn validate_lifecycle_service_container(
-    container: &bollard::models::ContainerInspectResponse,
-    id: &str,
-    name: &str,
-    image_reference: &str,
-    image_id: &str,
-    installation: &Installation,
-    desired: &DesiredSpec,
-    contract: LifecycleServiceContract,
-) -> Result<(), LocalInitError> {
-    let config = container
-        .config
-        .as_ref()
-        .ok_or_else(engine_resource_mismatch)?;
-    let host = container
-        .host_config
-        .as_ref()
-        .ok_or_else(engine_resource_mismatch)?;
-    let state = container
-        .state
-        .as_ref()
-        .ok_or_else(engine_resource_mismatch)?;
-    let network = container
-        .network_settings
-        .as_ref()
-        .ok_or_else(engine_resource_mismatch)?;
-    let labels = config
-        .labels
-        .as_ref()
-        .ok_or_else(engine_resource_mismatch)?;
-    let managed = labels
-        .iter()
-        .filter(|(key, _)| key.starts_with("io.automata.local."))
-        .map(|(key, value)| (key.clone(), value.clone()))
-        .collect::<BTreeMap<_, _>>();
-    let mut expected_managed = BTreeMap::from([
-        (LABEL_MANAGED.to_owned(), "true".to_owned()),
-        (
-            LABEL_INSTALLATION_ID.to_owned(),
-            installation.id().to_string(),
-        ),
-        (
-            LABEL_INSTALLATION_KEY.to_owned(),
-            installation.selector_key().to_string(),
-        ),
-        (
-            LABEL_COMPOSE_PROJECT.to_owned(),
-            installation.compose_project().to_string(),
-        ),
-        (LABEL_PLAN.to_owned(), desired.plan_digest().to_string()),
-        (
-            LABEL_RESOURCE_KIND.to_owned(),
-            contract.resource_kind.to_owned(),
-        ),
-    ]);
-    if contract.service == "runner" {
-        expected_managed.extend([
-            (
-                "io.automata.local.max-parallel-jobs".to_owned(),
-                desired.max_parallel_jobs().to_string(),
-            ),
-            (
-                "io.automata.local.profile-id".to_owned(),
-                desired.profile().attestation().id().to_string(),
-            ),
-            (
-                "io.automata.local.profile-manifest-sha256".to_owned(),
-                desired.profile().attestation().digest().to_string(),
-            ),
-        ]);
-    }
-    let health_exact = if contract.healthy {
-        state.health.as_ref().and_then(|health| health.status)
-            == Some(bollard::models::HealthStatusEnum::HEALTHY)
-    } else {
-        state.health.is_none()
-    };
-    let cap_add_exact = if contract.service == "engine-relay" {
-        host.cap_add.as_deref()
-            == Some(
-                [
-                    "SETGID".to_owned(),
-                    "SETUID".to_owned(),
-                    "SETPCAP".to_owned(),
-                ]
-                .as_slice(),
-            )
-    } else {
-        host.cap_add.as_ref().is_none_or(Vec::is_empty)
-    };
-    if container.id.as_deref() != Some(id)
-        || !exact_container_id_text(id)
-        || container.name.as_deref() != Some(format!("/{name}").as_str())
-        || container.image.as_deref() != Some(image_id)
-        || config.image.as_deref() != Some(image_reference)
-        || config.user.as_deref() != Some(contract.user)
-        || config.working_dir.as_deref() != Some("/")
-        || managed != expected_managed
-        || labels.get("com.docker.compose.project")
-            != Some(&installation.compose_project().to_string())
-        || labels.get("com.docker.compose.service").map(String::as_str) != Some(contract.service)
-        || labels.get("com.docker.compose.oneoff").map(String::as_str) != Some("False")
-        || host.readonly_rootfs != Some(true)
-        || host.privileged != Some(false)
-        || host.cap_drop.as_deref() != Some(["ALL".to_owned()].as_slice())
-        || !cap_add_exact
-        || host.auto_remove != Some(false)
-        || host.restart_policy.as_ref().and_then(|policy| policy.name)
-            != Some(RestartPolicyNameEnum::UNLESS_STOPPED)
-        || host
-            .security_opt
-            .as_deref()
-            .is_none_or(|options| options != ["no-new-privileges:true"])
-        || state.running != Some(true)
-        || !health_exact
-    {
-        return Err(engine_resource_mismatch());
-    }
-    let volume_names = volume_names(installation);
-    let expected_mounts = contract
-        .mounts
-        .iter()
-        .map(|(role, destination, read_only)| {
-            Ok((
-                volume_names
-                    .get(role)
-                    .ok_or_else(engine_resource_mismatch)?
-                    .clone(),
-                (*destination).to_owned(),
-                !*read_only,
-            ))
-        })
-        .collect::<Result<BTreeSet<_>, LocalInitError>>()?;
-    let mut actual_mounts = BTreeSet::new();
-    let mut host_socket = false;
-    for mount in container
-        .mounts
-        .as_deref()
-        .ok_or_else(engine_resource_mismatch)?
-    {
-        if mount.typ.as_deref() == Some("bind")
-            && contract.service == "engine-relay"
-            && mount.source.as_deref() == Some("/var/run/docker.sock")
-            && mount.destination.as_deref() == Some("/run/automata-host-engine/docker.sock")
-            && mount.rw == Some(false)
-            && !host_socket
-        {
-            host_socket = true;
-            continue;
-        }
-        if mount.typ.as_deref() != Some("volume")
-            || mount.driver.as_deref() != Some("local")
-            || !actual_mounts.insert((
-                mount.name.clone().ok_or_else(engine_resource_mismatch)?,
-                mount
-                    .destination
-                    .clone()
-                    .ok_or_else(engine_resource_mismatch)?,
-                mount.rw.ok_or_else(engine_resource_mismatch)?,
-            ))
-        {
-            return Err(engine_resource_mismatch());
-        }
-    }
-    if actual_mounts != expected_mounts || host_socket != (contract.service == "engine-relay") {
-        return Err(engine_resource_mismatch());
-    }
-    let actual_networks = network
-        .networks
-        .as_ref()
-        .ok_or_else(engine_resource_mismatch)?;
-    if let Some(host) = contract.control_host {
-        let control_name = format!("{}-control", installation.compose_project());
-        let endpoint = actual_networks
-            .get(&control_name)
-            .ok_or_else(engine_resource_mismatch)?;
-        if endpoint.ip_address.as_deref()
-            != Some(
-                crate::desired_spec::control_subnet_for_spec(desired)
-                    .address(host)
-                    .to_string()
-                    .as_str(),
-            )
-            || endpoint.gw_priority.unwrap_or_default() != 0
-        {
-            return Err(engine_resource_mismatch());
-        }
-    }
-    if let Some(host) = contract.egress_host {
-        let egress_name = format!("{}-egress", installation.compose_project());
-        let endpoint = actual_networks
-            .get(&egress_name)
-            .ok_or_else(engine_resource_mismatch)?;
-        if endpoint.ip_address.as_deref()
-            != Some(
-                crate::desired_spec::egress_subnet_for_spec(desired)
-                    .address(host)
-                    .to_string()
-                    .as_str(),
-            )
-            || endpoint.gw_priority != Some(100)
-        {
-            return Err(engine_resource_mismatch());
-        }
-    }
-    let expected_network_count = usize::from(contract.control_host.is_some())
-        + usize::from(contract.egress_host.is_some())
-        + usize::from(contract.transit);
-    if contract.transit {
-        let transit_name = results_transit_name(installation);
-        let endpoint = actual_networks
-            .get(&transit_name)
-            .ok_or_else(engine_resource_mismatch)?;
-        if endpoint.ip_address.as_deref()
-            != Some(
-                desired
-                    .results_transit()
-                    .results_address()
-                    .to_string()
-                    .as_str(),
-            )
-            || endpoint.gw_priority.unwrap_or_default() != 0
-        {
-            return Err(engine_resource_mismatch());
-        }
-    }
-    if actual_networks.len() != expected_network_count {
-        return Err(engine_resource_mismatch());
-    }
-    Ok(())
 }
 
 fn validate_egress_network(
@@ -6313,11 +6566,82 @@ fn daemon_generation_from_labels(
 }
 
 fn current_engine_daemon_generation() -> Result<EngineDaemonGeneration, LocalInitError> {
-    let socket = UnixStream::connect("/var/run/docker.sock").map_err(|_| engine_unavailable())?;
-    let credentials =
-        rustix::net::sockopt::socket_peercred(&socket).map_err(|_| engine_unavailable())?;
+    let first = probe_engine_daemon_generation()?;
+    let repeated = probe_engine_daemon_generation()?;
+    if first != repeated {
+        return Err(engine_unavailable());
+    }
+    Ok(first)
+}
+
+/// Identifies the process which actually wrote a qualified Docker API
+/// response. `SO_PEERCRED` is deliberately insufficient here: with systemd
+/// socket activation it identifies PID 1, which owns the listening socket,
+/// rather than the `dockerd` process accepting and serving the request.
+fn probe_engine_daemon_generation() -> Result<EngineDaemonGeneration, LocalInitError> {
+    let socket = rustix::net::socket_with(
+        AddressFamily::UNIX,
+        SocketType::STREAM,
+        SocketFlags::CLOEXEC,
+        None,
+    )
+    .map_err(|_| engine_unavailable())?;
+    rustix::net::sockopt::set_socket_passcred(&socket, true).map_err(|_| engine_unavailable())?;
+    let address = SocketAddrUnix::new("/var/run/docker.sock").map_err(|_| engine_unavailable())?;
+    rustix::net::connect(&socket, &address).map_err(|_| engine_unavailable())?;
+    let mut socket = UnixStream::from(socket);
+    socket
+        .set_read_timeout(Some(ENGINE_GENERATION_PROBE_TIMEOUT))
+        .map_err(|_| engine_unavailable())?;
+    socket
+        .set_write_timeout(Some(ENGINE_GENERATION_PROBE_TIMEOUT))
+        .map_err(|_| engine_unavailable())?;
+    socket
+        .write_all(ENGINE_GENERATION_REQUEST)
+        .map_err(|_| engine_unavailable())?;
+
+    let mut response = [0_u8; ENGINE_GENERATION_RESPONSE_MAXIMUM_BYTES];
+    let (received, credentials) = {
+        let mut iov = [IoSliceMut::new(&mut response)];
+        let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmCredentials(1))];
+        let mut ancillary = RecvAncillaryBuffer::new(&mut space);
+        let received =
+            rustix::net::recvmsg(&socket, &mut iov, &mut ancillary, RecvFlags::CMSG_CLOEXEC)
+                .map_err(|_| engine_unavailable())?;
+        let mut credentials = None;
+        for message in ancillary.drain() {
+            match message {
+                RecvAncillaryMessage::ScmCredentials(value) if credentials.is_none() => {
+                    credentials = Some(value);
+                }
+                _ => return Err(engine_unavailable()),
+            }
+        }
+        (received.bytes, credentials.ok_or_else(engine_unavailable)?)
+    };
+    if received == 0 || received >= response.len() {
+        return Err(engine_unavailable());
+    }
+    let mut response = response[..received].to_vec();
+    let mut remaining = [0_u8; 512];
+    loop {
+        match socket.read(&mut remaining) {
+            Ok(0) => break,
+            Ok(count)
+                if response
+                    .len()
+                    .checked_add(count)
+                    .is_some_and(|length| length <= ENGINE_GENERATION_RESPONSE_MAXIMUM_BYTES) =>
+            {
+                response.extend_from_slice(&remaining[..count]);
+            }
+            Ok(_) | Err(_) => return Err(engine_unavailable()),
+        }
+    }
+    validate_engine_generation_response(&response)?;
+
     let pid = u32::try_from(credentials.pid.as_raw_pid()).map_err(|_| engine_unavailable())?;
-    if credentials.uid.as_raw() != 0 || credentials.gid.as_raw() != 0 {
+    if credentials.uid.as_raw() != 0 || credentials.gid.as_raw() != 0 || pid == 0 {
         return Err(engine_unavailable());
     }
     let boot_id = read_boot_id().map_err(|_| engine_unavailable())?;
@@ -6327,6 +6651,23 @@ fn current_engine_daemon_generation() -> Result<EngineDaemonGeneration, LocalIni
         pid,
         start_ticks,
     })
+}
+
+fn validate_engine_generation_response(response: &[u8]) -> Result<(), LocalInitError> {
+    let (head, body) = response
+        .split(|byte| *byte == b'\r')
+        .next()
+        .and_then(|status| {
+            response
+                .windows(4)
+                .position(|window| window == b"\r\n\r\n")
+                .map(|boundary| (status, &response[boundary + 4..]))
+        })
+        .ok_or_else(engine_unavailable)?;
+    if !matches!(head, b"HTTP/1.0 200 OK" | b"HTTP/1.1 200 OK") || body != b"OK" {
+        return Err(engine_unavailable());
+    }
+    Ok(())
 }
 
 fn read_boot_id() -> Result<uuid::Uuid, ()> {
@@ -6532,10 +6873,8 @@ fn classify_lifecycle_lock(
         || config.stop_signal.as_deref() != Some("SIGKILL")
         || config.stop_timeout != Some(0)
         || config.healthcheck.is_some()
-        || config
-            .exposed_ports
-            .as_ref()
-            .is_some_and(|ports| !ports.is_empty())
+        || config.exposed_ports.as_deref()
+            != Some([super::HELPER_EXPOSED_PORT.to_owned()].as_slice())
         || config
             .volumes
             .as_ref()
@@ -7334,7 +7673,10 @@ fn validate_results_transit(
         attachable: network.attachable == Some(true),
         ingress: network.ingress == Some(true),
         config_only: network.config_only == Some(true),
-        config_from_empty: network.config_from.is_none(),
+        config_from_empty: network
+            .config_from
+            .as_ref()
+            .is_none_or(|reference| reference.network.as_deref().is_none_or(str::is_empty)),
         ipam_driver: ipam.driver.clone().unwrap_or_default(),
         ipam_options: ipam
             .options
@@ -7373,6 +7715,7 @@ fn validate_results_transit(
 #[cfg(test)]
 mod daemon_generation_tests {
     use super::*;
+    use futures::channel::mpsc as futures_mpsc;
 
     fn generation(boot: u128, pid: u32, start_ticks: u64) -> EngineDaemonGeneration {
         EngineDaemonGeneration {
@@ -7380,6 +7723,237 @@ mod daemon_generation_tests {
             pid,
             start_ticks,
         }
+    }
+
+    fn qualified_daemon_info() -> LifecycleDaemonInfo {
+        LifecycleDaemonInfo {
+            security_options: vec![
+                "name=seccomp,profile=builtin".to_owned(),
+                "name=cgroupns".to_owned(),
+                "name=userns".to_owned(),
+            ],
+            memory_limit: true,
+            swap_limit: true,
+            cpu_cfs_period: true,
+            cpu_cfs_quota: true,
+            pids_limit: true,
+            cgroup_version: "2".to_owned(),
+            live_restore_enabled: false,
+            default_runtime: "runc".to_owned(),
+            default_ulimits: None,
+        }
+    }
+
+    #[test]
+    fn lifecycle_daemon_contract_is_closed_and_fail_closed() {
+        let valid = qualified_daemon_info();
+        validate_lifecycle_daemon_info(&valid).unwrap();
+        let mut optional_nnp = valid.clone();
+        optional_nnp
+            .security_options
+            .push("name=no-new-privileges".to_owned());
+        validate_lifecycle_daemon_info(&optional_nnp).unwrap();
+
+        let mut invalid = Vec::new();
+        let mut missing_userns = valid.clone();
+        missing_userns
+            .security_options
+            .retain(|option| option != "name=userns");
+        invalid.push(missing_userns);
+        let mut extra_security = valid.clone();
+        extra_security
+            .security_options
+            .push("name=apparmor".to_owned());
+        invalid.push(extra_security);
+        let mut duplicate_security = valid.clone();
+        duplicate_security
+            .security_options
+            .push("name=cgroupns".to_owned());
+        invalid.push(duplicate_security);
+        for mutate in [
+            |info: &mut LifecycleDaemonInfo| info.memory_limit = false,
+            |info: &mut LifecycleDaemonInfo| info.swap_limit = false,
+            |info: &mut LifecycleDaemonInfo| info.cpu_cfs_period = false,
+            |info: &mut LifecycleDaemonInfo| info.cpu_cfs_quota = false,
+            |info: &mut LifecycleDaemonInfo| info.pids_limit = false,
+            |info: &mut LifecycleDaemonInfo| info.live_restore_enabled = true,
+        ] {
+            let mut changed = valid.clone();
+            mutate(&mut changed);
+            invalid.push(changed);
+        }
+        let mut cgroup_one = valid.clone();
+        cgroup_one.cgroup_version = "1".to_owned();
+        invalid.push(cgroup_one);
+        let mut wrong_runtime = valid.clone();
+        wrong_runtime.default_runtime = "custom".to_owned();
+        invalid.push(wrong_runtime);
+        let mut default_ulimits = valid;
+        default_ulimits.default_ulimits = Some(HashMap::from([(
+            "nofile".to_owned(),
+            serde_json::json!({"Hard": 1024, "Name": "nofile", "Soft": 1024}),
+        )]));
+        invalid.push(default_ulimits);
+
+        for info in invalid {
+            assert_eq!(
+                validate_lifecycle_daemon_info(&info).unwrap_err().code(),
+                LocalInitErrorCode::EngineUnavailable
+            );
+        }
+    }
+
+    #[test]
+    fn rendered_masked_paths_normalize_supported_moby_defaults_only() {
+        let base = [
+            "/proc/acpi",
+            "/proc/asound",
+            "/proc/kcore",
+            "/proc/keys",
+            "/proc/latency_stats",
+            "/proc/sched_debug",
+            "/proc/scsi",
+            "/proc/timer_list",
+            "/proc/timer_stats",
+            "/sys/devices/virtual/powercap",
+            "/sys/firmware",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+        assert!(valid_rendered_masked_paths(Some(&base)));
+
+        let mut current = base.clone();
+        current.extend([
+            "/proc/interrupts".to_owned(),
+            "/sys/devices/system/cpu/cpu0/thermal_throttle".to_owned(),
+            "/sys/devices/system/cpu/cpu12/thermal_throttle".to_owned(),
+        ]);
+        assert!(valid_rendered_masked_paths(Some(&current)));
+
+        let mut missing = base.clone();
+        missing.pop();
+        assert!(!valid_rendered_masked_paths(Some(&missing)));
+        let mut duplicate = base.clone();
+        duplicate.push(base[0].clone());
+        assert!(!valid_rendered_masked_paths(Some(&duplicate)));
+        for extra in [
+            "/proc/unknown",
+            "/sys/devices/system/cpu/cpu01/thermal_throttle",
+            "/sys/devices/system/cpu/cpu0/other",
+        ] {
+            let mut invalid = base.clone();
+            invalid.push(extra.to_owned());
+            assert!(!valid_rendered_masked_paths(Some(&invalid)));
+        }
+    }
+
+    #[test]
+    fn reset_runner_discovery_accepts_zero_or_one_authority_only() {
+        assert_eq!(sole_local_docker_runner_id(BTreeSet::new()).unwrap(), None);
+        let first = uuid::Uuid::from_u128(1);
+        assert_eq!(
+            sole_local_docker_runner_id(BTreeSet::from([first])).unwrap(),
+            Some(first)
+        );
+        assert_eq!(
+            sole_local_docker_runner_id(BTreeSet::from([first, uuid::Uuid::from_u128(2)]))
+                .unwrap_err()
+                .code(),
+            LocalInitErrorCode::EngineResourceMismatch
+        );
+    }
+
+    #[tokio::test]
+    async fn holder_eof_wins_over_a_queued_mutation_permit() {
+        let output = futures::stream::empty::<()>();
+        let lost = CancellationToken::new();
+        let (commands, requests) = mpsc::channel(1);
+        let (permit, permitted) = oneshot::channel();
+        commands
+            .send(LifecycleLockCommand::AuthorizeMutation(permit))
+            .await
+            .unwrap();
+
+        assert!(
+            monitor_lifecycle_lock_output(output, requests, lost.clone())
+                .await
+                .is_err()
+        );
+        assert!(lost.is_cancelled());
+        assert!(permitted.await.is_err());
+    }
+
+    #[tokio::test]
+    async fn graceful_holder_release_linearizes_before_clean_eof() {
+        let (output, output_stream) = futures_mpsc::unbounded::<()>();
+        let lost = CancellationToken::new();
+        let (commands, requests) = mpsc::channel(1);
+        let monitor = tokio::spawn(monitor_lifecycle_lock_output(
+            output_stream,
+            requests,
+            lost.clone(),
+        ));
+        let (acknowledge, acknowledged) = oneshot::channel();
+        let (frame_sent, frame_confirmation) = oneshot::channel();
+        commands
+            .send(LifecycleLockCommand::BeginRelease {
+                acknowledged: acknowledge,
+                frame_sent: frame_confirmation,
+            })
+            .await
+            .unwrap();
+        acknowledged.await.unwrap();
+        frame_sent.send(()).unwrap();
+        drop(output);
+
+        assert!(monitor.await.unwrap().is_ok());
+        assert!(!lost.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn holder_output_wins_over_a_release_frame() {
+        let (output, output_stream) = futures_mpsc::unbounded::<()>();
+        let lost = CancellationToken::new();
+        let (commands, requests) = mpsc::channel(1);
+        let monitor = tokio::spawn(monitor_lifecycle_lock_output(
+            output_stream,
+            requests,
+            lost.clone(),
+        ));
+        let (acknowledge, acknowledged) = oneshot::channel();
+        let (frame_sent, frame_confirmation) = oneshot::channel();
+        commands
+            .send(LifecycleLockCommand::BeginRelease {
+                acknowledged: acknowledge,
+                frame_sent: frame_confirmation,
+            })
+            .await
+            .unwrap();
+        acknowledged.await.unwrap();
+        output.unbounded_send(()).unwrap();
+        frame_sent.send(()).unwrap();
+
+        assert!(monitor.await.unwrap().is_err());
+        assert!(lost.is_cancelled());
+    }
+
+    #[test]
+    fn holder_loss_dominates_caller_cancellation() {
+        let holder_lost = CancellationToken::new();
+        let caller = CancellationToken::new();
+        holder_lost.cancel();
+        caller.cancel();
+        let (commands, _requests) = mpsc::channel(1);
+        let mutation = LifecycleMutationFence {
+            commands,
+            holder_lost,
+            caller,
+        };
+        assert_eq!(
+            mutation.checkpoint().unwrap_err().code(),
+            LocalInitErrorCode::ResetRequired
+        );
     }
 
     #[test]
@@ -7477,5 +8051,33 @@ mod daemon_generation_tests {
                 LocalInitErrorCode::EngineResourceMismatch
             );
         }
+    }
+
+    #[test]
+    fn daemon_generation_ping_response_is_closed() {
+        validate_engine_generation_response(b"HTTP/1.0 200 OK\r\nContent-Length: 2\r\n\r\nOK")
+            .unwrap();
+        for invalid in [
+            b"HTTP/1.0 500 Internal Server Error\r\n\r\nOK".as_slice(),
+            b"HTTP/1.0 200 OK\r\n\r\nNO".as_slice(),
+            b"HTTP/1.0 200 OK\n\nOK".as_slice(),
+            b"HTTP/1.0 200 OK\r\n\r\nOKextra".as_slice(),
+        ] {
+            assert_eq!(
+                validate_engine_generation_response(invalid)
+                    .unwrap_err()
+                    .code(),
+                LocalInitErrorCode::EngineUnavailable
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "requires the fixed local Docker Engine"]
+    fn live_daemon_generation_identifies_the_response_writer() {
+        let generation = current_engine_daemon_generation().unwrap();
+        assert_ne!(generation.pid, 1, "socket owner is not the response writer");
+        let command = fs::read_to_string(format!("/proc/{}/comm", generation.pid)).unwrap();
+        assert_eq!(command.trim_end(), "dockerd");
     }
 }

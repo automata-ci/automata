@@ -374,7 +374,7 @@ pub enum LocalContainerEngine {
     /// Select the portable Docker Engine path.
     #[default]
     Auto,
-    /// Require Docker Engine and Compose plugin version 2.20.0 or newer.
+    /// Require Docker Engine and Compose plugin version 2.33.1 or newer.
     Docker,
 }
 

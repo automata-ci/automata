@@ -16,7 +16,7 @@ use super::{LocalInitError, LocalInitErrorCode};
 
 const CATALOG_SCHEMA: &str = "automata.local/release-catalog/v1";
 const SOURCE_SCHEMA: &str = "automata.local/release-catalog-source/v1";
-const SOURCE_SHA256: &str = "9c490bed48e90a18e7161a31ab7b1f085f7fabc609fe3f04127d5ea5d867d5eb";
+const SOURCE_SHA256: &str = "a6233e0d9be9ecd76754b630737ce4153af22e6dcb369976a6096e8c2811cead";
 const CANDIDATE_BASENAME: &str = "automata-service-proxy-candidate-x86_64-unknown-linux-musl.tar";
 const CANDIDATE_PATH: &str = concat!(
     "target/service-proxy-publication/",
@@ -28,7 +28,7 @@ const CANDIDATE_IMAGE_NAME: &str = "ghcr.io/automata-ci/automata-service-proxy";
 const CANDIDATE_SBOM: &str = "automata-ci-service-proxy.cdx.json";
 const CANDIDATE_SOURCE: &str = "source-provenance.json";
 const MAX_CATALOG_BYTES: usize = 1024 * 1024;
-const MAX_CANDIDATE_BYTES: usize = 128 * 1024 * 1024;
+const MAX_CANDIDATE_BYTES: usize = 160 * 1024 * 1024;
 const MAX_CANDIDATE_MEMBER_BYTES: usize = 128 * 1024 * 1024;
 const MAX_DOCKER_LOAD_ARCHIVE_BYTES: usize = 128 * 1024 * 1024;
 const MAX_OCI_MEMBERS: usize = 64;
@@ -416,7 +416,9 @@ fn validate_lifecycle_runtime(value: &Value) -> Result<(), LocalInitError> {
             != Some(&serde_json::json!(
                 crate::LOCAL_LIFECYCLE_LOCK_HOLDER_COMMAND
             ))
-        || hold_lock.get("release").and_then(Value::as_str) != Some("stdin-eof")
+        || hold_lock.get("release").and_then(Value::as_str) != Some("stdin-fixed-frame-v1")
+        || hold_lock.get("release_frame").and_then(Value::as_str)
+            != std::str::from_utf8(&crate::LOCAL_LIFECYCLE_LOCK_RELEASE_FRAME).ok()
         || read_cas_digest.get("argv")
             != Some(&serde_json::json!(["internal", "local", "read-cas-digest"]))
         || read_cas_digest.get("purpose").and_then(Value::as_str) != Some("expected-old-sha256")

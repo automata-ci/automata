@@ -310,7 +310,8 @@
           "local",
           "hold-lock"
         ],
-        "release": "stdin-eof"
+        "release": "stdin-fixed-frame-v1",
+        "release_frame": "release\n"
       },
       "materialize": {
         "argv": [

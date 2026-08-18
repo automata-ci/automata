@@ -24,7 +24,10 @@ use super::{
     LocalInitError, LocalInitErrorCode, StateInstallationSelection, StateMaterialization,
     certificates::{self, CertificateMaterial},
     compose::{ComposeStep, QualifiedDockerCli},
-    engine::{InitEngine, LifecycleLockHolder, LifecycleLockObservation, LifecycleTopology},
+    engine::{
+        InitEngine, LifecycleLockHolder, LifecycleLockObservation, LifecycleMutationFence,
+        LifecycleTopology,
+    },
     epoch::{ImmutableEpoch, MaterialDeriver},
     materializer::{MaterializeRequest, s3_access_key, s3_secret_key},
     renderer::{RelayEngineFacts, render_compose, render_relay_binding, render_runner_config},
@@ -219,6 +222,7 @@ pub async fn up_local(request: LocalUpRequest) -> Result<LocalUpOutcome, LocalIn
         .await
         .map_err(super::map_engine_error)?;
     let engine = InitEngine::connect(&adapter).await?;
+    engine.preflight_lifecycle_daemon().await?;
 
     // Metadata and image admission is non-repairing. Desired content is read
     // by an exact disposable helper only after the mutation lock is retained.
@@ -228,17 +232,15 @@ pub async fn up_local(request: LocalUpRequest) -> Result<LocalUpOutcome, LocalIn
     let expected_desired = established.epoch.desired_spec()?;
     let rendered = render_compose(&expected_desired);
     let expected_runner_id = derive_bootstrap_artifacts(&established)?.runner_id;
-    cli.execute(
+    cli.validate(
         selection,
         &established.installation,
         &rendered.compose_bytes,
-        ComposeStep::Validate,
         &request.cancellation,
     )
     .await?;
     recover_stopped_lock_if_authorized(
         &engine,
-        &cli,
         &established,
         &expected_desired,
         &rendered.expected,
@@ -256,6 +258,7 @@ pub async fn up_local(request: LocalUpRequest) -> Result<LocalUpOutcome, LocalIn
         )
         .await?;
     let (transaction_cancellation, watcher) = linked_cancellation(&request.cancellation, &holder);
+    let mutation_fence = holder.mutation_fence(&request.cancellation);
 
     let operation = cancellation_bounded(&transaction_cancellation, async {
         engine
@@ -273,13 +276,13 @@ pub async fn up_local(request: LocalUpRequest) -> Result<LocalUpOutcome, LocalIn
                 derive_bootstrap_artifacts(&established)?.runner_id,
                 &holder,
                 &transaction_cancellation,
+                &mutation_fence,
             )
             .await?;
-        cli.execute(
+        cli.validate(
             selection,
             &established.installation,
             &rendered.compose_bytes,
-            ComposeStep::Validate,
             &transaction_cancellation,
         )
         .await?;
@@ -296,11 +299,18 @@ pub async fn up_local(request: LocalUpRequest) -> Result<LocalUpOutcome, LocalIn
                 expected_runner_id,
             )
             .await?;
-        let desired = load_sealed_desired(&engine, &established).await?;
+        let desired = load_sealed_desired(&engine, &established, &mutation_fence).await?;
         if desired != expected_desired {
             return Err(reset_required());
         }
-        attest_sealed_material(&engine, &established, &desired, &transaction_cancellation).await?;
+        attest_sealed_material(
+            &engine,
+            &established,
+            &desired,
+            &transaction_cancellation,
+            &mutation_fence,
+        )
+        .await?;
         if engine
             .inspect_lifecycle_topology(
                 &established.installation,
@@ -374,22 +384,13 @@ pub async fn up_local(request: LocalUpRequest) -> Result<LocalUpOutcome, LocalIn
                 &runner_config,
                 &relay_id,
                 &runner_container_id,
+                &mutation_fence,
             )
             .await?;
-            for service in ["object-store-init", "bootstrap-runner", "runner-enroll"] {
-                run_oneoff(
-                    &cli,
-                    selection,
-                    &engine,
-                    &established,
-                    &desired,
-                    &rendered.compose_bytes,
-                    &rendered.expected,
-                    service,
-                    &transaction_cancellation,
-                )
-                .await?;
-            }
+            // A running runner owns the TLS custody lock for its full
+            // lifetime. Completion replay is therefore a read-only
+            // attestation branch: it must never rerun enrollment or any other
+            // mutating one-off beside the admitted steady services.
             attest_exact_cas_material(
                 &engine,
                 &established,
@@ -398,6 +399,7 @@ pub async fn up_local(request: LocalUpRequest) -> Result<LocalUpOutcome, LocalIn
                 &runner_config,
                 &relay_id,
                 &runner_container_id,
+                &mutation_fence,
             )
             .await?;
             let repeated = engine
@@ -427,6 +429,7 @@ pub async fn up_local(request: LocalUpRequest) -> Result<LocalUpOutcome, LocalIn
                 &rendered.compose_bytes,
                 ComposeStep::StopRunner,
                 &transaction_cancellation,
+                &mutation_fence,
             )
             .await?;
             engine
@@ -434,6 +437,7 @@ pub async fn up_local(request: LocalUpRequest) -> Result<LocalUpOutcome, LocalIn
                     &established.installation,
                     &desired,
                     expected_runner_id,
+                    &mutation_fence,
                 )
                 .await?;
             cli.execute(
@@ -442,10 +446,15 @@ pub async fn up_local(request: LocalUpRequest) -> Result<LocalUpOutcome, LocalIn
                 &rendered.compose_bytes,
                 ComposeStep::Down,
                 &transaction_cancellation,
+                &mutation_fence,
             )
             .await?;
             engine
-                .remove_results_transit_if_present(&established.installation, &desired)
+                .remove_results_transit_if_present(
+                    &established.installation,
+                    &desired,
+                    &mutation_fence,
+                )
                 .await?;
             if engine
                 .inspect_lifecycle_topology(
@@ -470,7 +479,7 @@ pub async fn up_local(request: LocalUpRequest) -> Result<LocalUpOutcome, LocalIn
 
         cancellation_checkpoint(&transaction_cancellation)?;
         let transit_id = engine
-            .ensure_results_transit(&established.installation, &desired)
+            .ensure_results_transit(&established.installation, &desired, &mutation_fence)
             .await?;
         engine
             .attest_lifecycle_lock(&established.installation, &established.epoch, &holder)
@@ -482,6 +491,7 @@ pub async fn up_local(request: LocalUpRequest) -> Result<LocalUpOutcome, LocalIn
             &rendered.compose_bytes,
             ComposeStep::UpDependencies,
             &transaction_cancellation,
+            &mutation_fence,
         )
         .await?;
         for service in ["postgres", "rustfs"] {
@@ -517,7 +527,15 @@ pub async fn up_local(request: LocalUpRequest) -> Result<LocalUpOutcome, LocalIn
             ),
             (CasTarget::RunnerSpoolKey, artifacts.spool_key.as_bytes()),
         ] {
-            publish_cas(&engine, &established, target, contents, None).await?;
+            publish_cas(
+                &engine,
+                &established,
+                target,
+                contents,
+                None,
+                &mutation_fence,
+            )
+            .await?;
         }
         run_oneoff(
             &cli,
@@ -529,6 +547,7 @@ pub async fn up_local(request: LocalUpRequest) -> Result<LocalUpOutcome, LocalIn
             &rendered.expected,
             "object-store-init",
             &transaction_cancellation,
+            &mutation_fence,
         )
         .await?;
         run_oneoff(
@@ -541,6 +560,7 @@ pub async fn up_local(request: LocalUpRequest) -> Result<LocalUpOutcome, LocalIn
             &rendered.expected,
             "bootstrap-runner",
             &transaction_cancellation,
+            &mutation_fence,
         )
         .await?;
         engine
@@ -553,6 +573,7 @@ pub async fn up_local(request: LocalUpRequest) -> Result<LocalUpOutcome, LocalIn
             &rendered.compose_bytes,
             ComposeStep::UpControl,
             &transaction_cancellation,
+            &mutation_fence,
         )
         .await?;
         let control_id = engine
@@ -573,7 +594,14 @@ pub async fn up_local(request: LocalUpRequest) -> Result<LocalUpOutcome, LocalIn
                 architecture: selection.architecture(),
             },
         )?;
-        publish_replaceable_cas(&engine, &established, CasTarget::RelayBinding, &relay).await?;
+        publish_replaceable_cas(
+            &engine,
+            &established,
+            CasTarget::RelayBinding,
+            &relay,
+            &mutation_fence,
+        )
+        .await?;
         let runner_config = render_runner_config(
             &desired,
             &established.installation,
@@ -586,6 +614,7 @@ pub async fn up_local(request: LocalUpRequest) -> Result<LocalUpOutcome, LocalIn
             &established,
             CasTarget::RunnerConfig,
             &runner_config,
+            &mutation_fence,
         )
         .await?;
         engine
@@ -602,6 +631,7 @@ pub async fn up_local(request: LocalUpRequest) -> Result<LocalUpOutcome, LocalIn
             &rendered.expected,
             "runner-enroll",
             &transaction_cancellation,
+            &mutation_fence,
         )
         .await?;
         cli.execute(
@@ -610,6 +640,7 @@ pub async fn up_local(request: LocalUpRequest) -> Result<LocalUpOutcome, LocalIn
             &rendered.compose_bytes,
             ComposeStep::UpRelay,
             &transaction_cancellation,
+            &mutation_fence,
         )
         .await?;
         engine
@@ -627,6 +658,7 @@ pub async fn up_local(request: LocalUpRequest) -> Result<LocalUpOutcome, LocalIn
             &rendered.compose_bytes,
             ComposeStep::UpRunner,
             &transaction_cancellation,
+            &mutation_fence,
         )
         .await?;
         let expected_running = LifecycleTopology::Running {
@@ -735,23 +767,22 @@ pub async fn down_local(request: LocalDownRequest) -> Result<LocalDownOutcome, L
         .await
         .map_err(super::map_engine_error)?;
     let engine = InitEngine::connect(&adapter).await?;
+    engine.preflight_lifecycle_daemon().await?;
     engine
         .preflight_lifecycle_volumes(&established.installation, &established.epoch)
         .await?;
     let expected_desired = established.epoch.desired_spec()?;
     let rendered = render_compose(&expected_desired);
     let expected_runner_id = derive_bootstrap_artifacts(&established)?.runner_id;
-    cli.execute(
+    cli.validate(
         selection,
         &established.installation,
         &rendered.compose_bytes,
-        ComposeStep::Validate,
         &request.cancellation,
     )
     .await?;
     recover_stopped_lock_if_authorized(
         &engine,
-        &cli,
         &established,
         &expected_desired,
         &rendered.expected,
@@ -769,6 +800,7 @@ pub async fn down_local(request: LocalDownRequest) -> Result<LocalDownOutcome, L
         )
         .await?;
     let (transaction_cancellation, watcher) = linked_cancellation(&request.cancellation, &holder);
+    let mutation_fence = holder.mutation_fence(&request.cancellation);
 
     let operation = cancellation_bounded(&transaction_cancellation, async {
         engine
@@ -786,13 +818,13 @@ pub async fn down_local(request: LocalDownRequest) -> Result<LocalDownOutcome, L
                 derive_bootstrap_artifacts(&established)?.runner_id,
                 &holder,
                 &transaction_cancellation,
+                &mutation_fence,
             )
             .await?;
-        cli.execute(
+        cli.validate(
             selection,
             &established.installation,
             &rendered.compose_bytes,
-            ComposeStep::Validate,
             &transaction_cancellation,
         )
         .await?;
@@ -805,11 +837,18 @@ pub async fn down_local(request: LocalDownRequest) -> Result<LocalDownOutcome, L
                 expected_runner_id,
             )
             .await?;
-        let desired = load_sealed_desired(&engine, &established).await?;
+        let desired = load_sealed_desired(&engine, &established, &mutation_fence).await?;
         if desired != expected_desired {
             return Err(reset_required());
         }
-        attest_sealed_material(&engine, &established, &desired, &transaction_cancellation).await?;
+        attest_sealed_material(
+            &engine,
+            &established,
+            &desired,
+            &transaction_cancellation,
+            &mutation_fence,
+        )
+        .await?;
         if engine
             .inspect_lifecycle_topology(
                 &established.installation,
@@ -839,13 +878,19 @@ pub async fn down_local(request: LocalDownRequest) -> Result<LocalDownOutcome, L
             &rendered.compose_bytes,
             ComposeStep::StopRunner,
             &transaction_cancellation,
+            &mutation_fence,
         )
         .await?;
         engine
             .attest_lifecycle_lock(&established.installation, &established.epoch, &holder)
             .await?;
         engine
-            .remove_local_docker_children(&established.installation, &desired, expected_runner_id)
+            .remove_local_docker_children(
+                &established.installation,
+                &desired,
+                expected_runner_id,
+                &mutation_fence,
+            )
             .await?;
         cli.execute(
             selection,
@@ -853,13 +898,14 @@ pub async fn down_local(request: LocalDownRequest) -> Result<LocalDownOutcome, L
             &rendered.compose_bytes,
             ComposeStep::Down,
             &transaction_cancellation,
+            &mutation_fence,
         )
         .await?;
         engine
             .attest_lifecycle_lock(&established.installation, &established.epoch, &holder)
             .await?;
         engine
-            .remove_results_transit_if_present(&established.installation, &desired)
+            .remove_results_transit_if_present(&established.installation, &desired, &mutation_fence)
             .await?;
         let final_empty = engine
             .inspect_lifecycle_topology(
@@ -945,7 +991,6 @@ pub async fn down_local(request: LocalDownRequest) -> Result<LocalDownOutcome, L
 
 async fn recover_stopped_lock_if_authorized(
     engine: &InitEngine<'_>,
-    cli: &QualifiedDockerCli,
     established: &EstablishedLifecycle,
     desired: &DesiredSpec,
     expected: &super::renderer::ExpectedLifecycleTopology,
@@ -964,8 +1009,6 @@ async fn recover_stopped_lock_if_authorized(
         LifecycleLockObservation::Stopped { .. } if !authorized => Err(reset_required()),
         LifecycleLockObservation::Stopped { id, .. } => {
             cancellation_checkpoint(cancellation)?;
-            cli.attest_project_process_quiescent(&established.installation)?;
-            cli.attest_project_process_quiescent(&established.installation)?;
             engine
                 .recover_stopped_lifecycle_lock(
                     &established.installation,
@@ -977,7 +1020,6 @@ async fn recover_stopped_lock_if_authorized(
                     cancellation,
                 )
                 .await?;
-            cli.attest_project_process_quiescent(&established.installation)?;
             Ok(())
         }
     }
@@ -999,9 +1041,10 @@ fn load_established_lifecycle(state: &StateRoot) -> Result<EstablishedLifecycle,
 async fn load_sealed_desired(
     engine: &InitEngine<'_>,
     established: &EstablishedLifecycle,
+    mutation: &LifecycleMutationFence,
 ) -> Result<DesiredSpec, LocalInitError> {
     let desired_bytes = engine
-        .read_sealed_desired(&established.installation, &established.epoch)
+        .read_sealed_desired(&established.installation, &established.epoch, mutation)
         .await?;
     let desired_sha256 = Sha256Digest::from_bytes(Sha256::digest(&desired_bytes).into());
     let desired = DesiredSpec::from_canonical_bytes(&desired_bytes, &established.installation)
@@ -1019,6 +1062,7 @@ async fn attest_sealed_material(
     established: &EstablishedLifecycle,
     desired: &DesiredSpec,
     cancellation: &CancellationToken,
+    mutation: &LifecycleMutationFence,
 ) -> Result<(), LocalInitError> {
     let deriver = MaterialDeriver::new(
         *established.material_root,
@@ -1038,6 +1082,7 @@ async fn attest_sealed_material(
             &established.epoch,
             &request,
             cancellation,
+            mutation,
         )
         .await
 }
@@ -1048,10 +1093,16 @@ async fn publish_cas(
     target: CasTarget,
     contents: &[u8],
     expected: Option<Sha256Digest>,
+    mutation: &LifecycleMutationFence,
 ) -> Result<Sha256Digest, LocalInitError> {
     let request = CasRequest::new(target, expected, contents)?;
     engine
-        .apply_lifecycle_cas(&established.installation, &established.epoch, &request)
+        .apply_lifecycle_cas(
+            &established.installation,
+            &established.epoch,
+            &request,
+            mutation,
+        )
         .await
 }
 
@@ -1060,11 +1111,17 @@ async fn publish_replaceable_cas(
     established: &EstablishedLifecycle,
     target: CasTarget,
     contents: &[u8],
+    mutation: &LifecycleMutationFence,
 ) -> Result<Sha256Digest, LocalInitError> {
     let expected = engine
-        .read_lifecycle_cas_digest(&established.installation, &established.epoch, target)
+        .read_lifecycle_cas_digest(
+            &established.installation,
+            &established.epoch,
+            target,
+            mutation,
+        )
         .await?;
-    publish_cas(engine, established, target, contents, expected).await
+    publish_cas(engine, established, target, contents, expected, mutation).await
 }
 
 async fn attest_exact_cas_material(
@@ -1075,6 +1132,7 @@ async fn attest_exact_cas_material(
     runner_config: &[u8],
     relay_id: &str,
     runner_id: &str,
+    mutation: &LifecycleMutationFence,
 ) -> Result<(), LocalInitError> {
     for (target, contents) in [
         (CasTarget::BootstrapRequest, artifacts.request.as_slice()),
@@ -1111,6 +1169,7 @@ async fn attest_exact_cas_material(
                 &established.epoch,
                 target,
                 &expected_attachments,
+                mutation,
             )
             .await?
             != Some(expected)
@@ -1132,6 +1191,7 @@ async fn run_oneoff(
     expected: &super::renderer::ExpectedLifecycleTopology,
     service: &'static str,
     cancellation: &CancellationToken,
+    mutation: &LifecycleMutationFence,
 ) -> Result<(), LocalInitError> {
     engine
         .reconcile_lifecycle_oneoff(
@@ -1140,6 +1200,7 @@ async fn run_oneoff(
             desired,
             expected,
             service,
+            mutation,
         )
         .await?;
     let name = format!("{}-{service}", established.installation.compose_project());
@@ -1152,6 +1213,7 @@ async fn run_oneoff(
             container_name: &name,
         },
         cancellation,
+        mutation,
     )
     .await?;
     engine
@@ -1161,6 +1223,7 @@ async fn run_oneoff(
             desired,
             expected,
             service,
+            mutation,
         )
         .await?;
     Ok(())

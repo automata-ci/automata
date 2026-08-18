@@ -1,10 +1,11 @@
 # Automata local installation
 
-`automata-ci-local` owns host inspection, source snapshot analysis, and sealed
-local-installation custody for `automata local`. It validates the initial
-x86-64 Linux, Apple Silicon macOS, or x86-64 Windows host tuple; a local Linux
-Docker Engine 28.0.0 or newer with API 1.48 or newer; and Compose plugin version
-2.20.0 or newer. It does not yet start or supervise a local Automata stack.
+`automata-ci-local` owns the cross-platform, disposable local-installation
+boundary used by `automata local`. It validates the initial x86-64 Linux, Apple
+Silicon macOS, or x86-64 Windows host tuple; a local Linux Docker Engine 28.0.0
+or newer with API 1.48 or newer; and Compose plugin version 2.33.1 or newer. It
+supervises the local Compose project without adding container-engine
+behavior to the control-plane crate.
 
 The available commands provide read-only host preflight and snapshot-backed
 workflow checking on the qualified platforms. On x86-64 Linux it also provides

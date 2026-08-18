@@ -40,7 +40,7 @@ use super::{
 
 mod lifecycle;
 pub(in crate::init) use lifecycle::{
-    LifecycleLockHolder, LifecycleLockObservation, LifecycleTopology,
+    LifecycleLockHolder, LifecycleLockObservation, LifecycleMutationFence, LifecycleTopology,
 };
 
 const ENGINE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -149,6 +149,21 @@ trait OwnedVolumeDriver: Sync {
 pub(super) struct QualifiedHelperImage {
     pub(super) reference: String,
     pub(super) id: String,
+}
+
+#[derive(Clone, Copy)]
+enum ImageQualificationAuthority<'a> {
+    PreElectionLockBootstrap,
+    Lifecycle(&'a LifecycleMutationFence),
+}
+
+impl ImageQualificationAuthority<'_> {
+    async fn authorize(self, cancellation: &CancellationToken) -> Result<(), LocalInitError> {
+        match self {
+            Self::PreElectionLockBootstrap => cancellation_checkpoint(cancellation),
+            Self::Lifecycle(mutation) => mutation.authorize().await,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -325,12 +340,17 @@ impl<'a> InitEngine<'a> {
         allow_create: bool,
         excluded_container: Option<(&str, &str)>,
         cancellation: &CancellationToken,
+        mutation: &LifecycleMutationFence,
     ) -> Result<(), LocalInitError> {
         let name = volume_name(installation.compose_project().as_str(), VolumeRole::Desired);
         let labels = volume_labels(installation, epoch_fingerprint, VolumeRole::Desired);
+        let guarded = FencedVolumeGuardDriver {
+            engine: self,
+            mutation,
+        };
         guard_then_recover(
             elect_desired_guard_with_driver(
-                self,
+                &guarded,
                 &name,
                 &labels,
                 pre_identity.helper_id.as_deref(),
@@ -345,6 +365,7 @@ impl<'a> InitEngine<'a> {
                     pre_identity,
                     excluded_container,
                     cancellation,
+                    mutation,
                 )
                 .await
             },
@@ -796,12 +817,14 @@ impl<'a> InitEngine<'a> {
         catalog: &VerifiedCatalog,
         candidate_load_archive: &[u8],
         cancellation: &CancellationToken,
+        mutation: &LifecycleMutationFence,
     ) -> Result<QualifiedHelperImage, LocalInitError> {
         self.qualify_image_roles(
             catalog,
             candidate_load_archive,
             VerifiedCatalog::roles(),
             cancellation,
+            ImageQualificationAuthority::Lifecycle(mutation),
         )
         .await
     }
@@ -817,6 +840,7 @@ impl<'a> InitEngine<'a> {
             candidate_load_archive,
             std::iter::once("automata"),
             cancellation,
+            ImageQualificationAuthority::PreElectionLockBootstrap,
         )
         .await
     }
@@ -827,6 +851,7 @@ impl<'a> InitEngine<'a> {
         candidate_load_archive: &[u8],
         roles: Roles,
         cancellation: &CancellationToken,
+        authority: ImageQualificationAuthority<'_>,
     ) -> Result<QualifiedHelperImage, LocalInitError>
     where
         Roles: IntoIterator<Item = &'static str>,
@@ -844,6 +869,7 @@ impl<'a> InitEngine<'a> {
                         .platform("linux/amd64")
                         .build();
                     mutation_after_cancellation_checkpoint(cancellation, || async {
+                        authority.authorize(cancellation).await?;
                         tokio::time::timeout(
                             IMAGE_TIMEOUT,
                             self.docker
@@ -857,15 +883,34 @@ impl<'a> InitEngine<'a> {
                     })
                     .await?;
                 } else {
-                    replay_candidate_load(
-                        self,
-                        catalog,
-                        role,
-                        image_binding,
-                        candidate_load_archive,
-                        cancellation,
-                    )
-                    .await?;
+                    match authority {
+                        ImageQualificationAuthority::PreElectionLockBootstrap => {
+                            replay_candidate_load(
+                                self,
+                                catalog,
+                                role,
+                                image_binding,
+                                candidate_load_archive,
+                                cancellation,
+                            )
+                            .await?;
+                        }
+                        ImageQualificationAuthority::Lifecycle(mutation) => {
+                            let fenced = FencedCandidateLoadDriver {
+                                engine: self,
+                                mutation,
+                            };
+                            replay_candidate_load(
+                                &fenced,
+                                catalog,
+                                role,
+                                image_binding,
+                                candidate_load_archive,
+                                cancellation,
+                            )
+                            .await?;
+                        }
+                    }
                 }
                 self.verify_selected_engine().await?;
             }
@@ -919,21 +964,25 @@ impl<'a> InitEngine<'a> {
         helper_image_id: &str,
         allow_create: bool,
         cancellation: &CancellationToken,
+        mutation: &LifecycleMutationFence,
     ) -> Result<BTreeMap<VolumeRole, String>, LocalInitError> {
         cancellation_checkpoint(cancellation)?;
         self.verify_selected_engine().await?;
         cancellation_checkpoint(cancellation)?;
         let names = volume_names(installation);
-        self.recover_helper(&HelperContract {
-            name: helper_name(installation),
-            image: helper_image,
-            image_id: helper_image_id,
-            volumes: &names,
-            labels: helper_labels(installation, epoch_fingerprint),
-            volume_labels: expected_volume_labels(installation, epoch_fingerprint),
-            baseline_attachments: BTreeMap::new(),
-            mode: HelperMode::Mutating,
-        })
+        self.recover_helper(
+            &HelperContract {
+                name: helper_name(installation),
+                image: helper_image,
+                image_id: helper_image_id,
+                volumes: &names,
+                labels: helper_labels(installation, epoch_fingerprint),
+                volume_labels: expected_volume_labels(installation, epoch_fingerprint),
+                baseline_attachments: BTreeMap::new(),
+                mode: HelperMode::Mutating,
+            },
+            mutation,
+        )
         .await?;
         cancellation_checkpoint(cancellation)?;
         let guard_name = names
@@ -958,6 +1007,10 @@ impl<'a> InitEngine<'a> {
                 (role, name.clone())
             })
             .collect::<Vec<_>>();
+        let guarded = FencedVolumeGuardDriver {
+            engine: self,
+            mutation,
+        };
         cancellation_checkpointed(cancellation, remaining, |(role, name)| async move {
             let labels = volume_labels(installation, epoch_fingerprint, role);
             if let Some(volume) = self.inspect_volume(&name).await? {
@@ -966,7 +1019,7 @@ impl<'a> InitEngine<'a> {
                 if !allow_create {
                     return Err(engine_resource_mismatch());
                 }
-                create_volume_after_preflight(self, &name, &labels, cancellation).await?;
+                create_volume_after_preflight(&guarded, &name, &labels, cancellation).await?;
                 self.verify_selected_engine().await?;
                 let volume = self
                     .inspect_volume(&name)
@@ -994,6 +1047,7 @@ impl<'a> InitEngine<'a> {
         volumes: &BTreeMap<VolumeRole, String>,
         request: &MaterializeRequest,
         cancellation: &CancellationToken,
+        mutation: &LifecycleMutationFence,
     ) -> Result<(), LocalInitError> {
         self.verify_selected_engine().await?;
         let contract = HelperContract {
@@ -1006,8 +1060,12 @@ impl<'a> InitEngine<'a> {
             baseline_attachments: BTreeMap::new(),
             mode: HelperMode::Mutating,
         };
-        self.recover_helper(&contract).await?;
-        run_materializer_with_driver(self, &contract, request, epoch_fingerprint, cancellation)
+        self.recover_helper(&contract, mutation).await?;
+        let fenced = FencedHelperDriver {
+            engine: self,
+            mutation,
+        };
+        run_materializer_with_driver(&fenced, &contract, request, epoch_fingerprint, cancellation)
             .await
     }
 
@@ -1019,6 +1077,7 @@ impl<'a> InitEngine<'a> {
         epoch: &super::epoch::ImmutableEpoch,
         request: &MaterializeRequest,
         cancellation: &CancellationToken,
+        mutation: &LifecycleMutationFence,
     ) -> Result<(), LocalInitError> {
         cancellation_checkpoint(cancellation)?;
         let custody = self
@@ -1050,7 +1109,7 @@ impl<'a> InitEngine<'a> {
                     .await?,
                 mode: HelperMode::ReadOnly,
             };
-            self.recover_helper(&contract).await?;
+            self.recover_helper(&contract, mutation).await?;
         }
 
         let baseline = self.materializer_attachment_baseline(&names, None).await?;
@@ -1068,8 +1127,18 @@ impl<'a> InitEngine<'a> {
             baseline_attachments: baseline,
             mode: HelperMode::ReadOnly,
         };
-        run_materializer_with_driver(self, &contract, request, epoch.fingerprint(), cancellation)
-            .await?;
+        let fenced = FencedHelperDriver {
+            engine: self,
+            mutation,
+        };
+        run_materializer_with_driver(
+            &fenced,
+            &contract,
+            request,
+            epoch.fingerprint(),
+            cancellation,
+        )
+        .await?;
         self.preflight_lifecycle_volumes(installation, epoch)
             .await?;
         cancellation_checkpoint(cancellation)
@@ -1269,6 +1338,7 @@ impl<'a> InitEngine<'a> {
         pre_identity: &InitOwnedUnion,
         excluded_container: Option<(&str, &str)>,
         cancellation: &CancellationToken,
+        mutation: &LifecycleMutationFence,
     ) -> Result<(), LocalInitError> {
         cancellation_checkpoint(cancellation)?;
         self.verify_selected_engine().await?;
@@ -1298,7 +1368,11 @@ impl<'a> InitEngine<'a> {
         {
             cancellation_checkpoint(cancellation)?;
             let contract = stale.contract();
-            cleanup_helper(self, &contract, Some(&stale.id)).await?;
+            let fenced = FencedHelperDriver {
+                engine: self,
+                mutation,
+            };
+            cleanup_helper(&fenced, &contract, Some(&stale.id)).await?;
             self.verify_selected_engine().await?;
         }
         let clean = inspect_init_owned_union_with_driver_excluding(
@@ -1320,7 +1394,11 @@ impl<'a> InitEngine<'a> {
         cancellation_checkpoint(cancellation)
     }
 
-    async fn recover_helper(&self, contract: &HelperContract<'_>) -> Result<(), LocalInitError> {
+    async fn recover_helper(
+        &self,
+        contract: &HelperContract<'_>,
+        mutation: &LifecycleMutationFence,
+    ) -> Result<(), LocalInitError> {
         let Some(container) = self.inspect_container(&contract.name).await? else {
             return Ok(());
         };
@@ -1334,7 +1412,11 @@ impl<'a> InitEngine<'a> {
             contract.volumes,
             &contract.labels,
         )?;
-        cleanup_helper(self, contract, Some(&id)).await
+        let fenced = FencedHelperDriver {
+            engine: self,
+            mutation,
+        };
+        cleanup_helper(&fenced, contract, Some(&id)).await
     }
 
     async fn helper_logs(&self, name: &str) -> Result<(Vec<u8>, Vec<u8>), LocalInitError> {
@@ -1797,7 +1879,7 @@ trait CandidateLoadDriver: Sync {
         &self,
         reference: &str,
     ) -> Result<Option<bollard::models::ImageInspect>, LocalInitError>;
-    async fn candidate_import_untrusted(&self, archive: &[u8]);
+    async fn candidate_import_untrusted(&self, archive: &[u8]) -> Result<(), LocalInitError>;
 }
 
 #[async_trait::async_trait]
@@ -1813,7 +1895,7 @@ impl CandidateLoadDriver for InitEngine<'_> {
         self.inspect_image(reference).await
     }
 
-    async fn candidate_import_untrusted(&self, archive: &[u8]) {
+    async fn candidate_import_untrusted(&self, archive: &[u8]) -> Result<(), LocalInitError> {
         let options = ImportImageOptionsBuilder::default().build();
         let _untrusted = tokio::time::timeout(
             IMAGE_TIMEOUT,
@@ -1822,6 +1904,32 @@ impl CandidateLoadDriver for InitEngine<'_> {
                 .try_collect::<Vec<_>>(),
         )
         .await;
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy)]
+struct FencedCandidateLoadDriver<'engine, 'adapter, 'fence> {
+    engine: &'engine InitEngine<'adapter>,
+    mutation: &'fence LifecycleMutationFence,
+}
+
+#[async_trait::async_trait]
+impl CandidateLoadDriver for FencedCandidateLoadDriver<'_, '_, '_> {
+    async fn candidate_verify(&self) -> Result<(), LocalInitError> {
+        self.engine.candidate_verify().await
+    }
+
+    async fn candidate_inspect(
+        &self,
+        reference: &str,
+    ) -> Result<Option<bollard::models::ImageInspect>, LocalInitError> {
+        self.engine.candidate_inspect(reference).await
+    }
+
+    async fn candidate_import_untrusted(&self, archive: &[u8]) -> Result<(), LocalInitError> {
+        self.mutation.authorize().await?;
+        self.engine.candidate_import_untrusted(archive).await
     }
 }
 
@@ -1863,8 +1971,7 @@ async fn replay_candidate_load<D: CandidateLoadDriver>(
     }
     driver.candidate_verify().await?;
     mutation_after_cancellation_checkpoint(cancellation, || async {
-        driver.candidate_import_untrusted(archive).await;
-        Ok(())
+        driver.candidate_import_untrusted(archive).await
     })
     .await?;
     driver.candidate_verify().await?;
@@ -1904,7 +2011,11 @@ trait VolumeGuardDriver: Sync {
         name: &str,
     ) -> Result<Option<bollard::models::Volume>, LocalInitError>;
     async fn guard_attachments(&self, name: &str) -> Result<Vec<String>, LocalInitError>;
-    async fn guard_create_untrusted(&self, name: &str, labels: &BTreeMap<String, String>);
+    async fn guard_create_untrusted(
+        &self,
+        name: &str,
+        labels: &BTreeMap<String, String>,
+    ) -> Result<(), LocalInitError>;
 }
 
 #[async_trait::async_trait]
@@ -1924,7 +2035,11 @@ impl VolumeGuardDriver for InitEngine<'_> {
         self.volume_attachments(name).await
     }
 
-    async fn guard_create_untrusted(&self, name: &str, labels: &BTreeMap<String, String>) {
+    async fn guard_create_untrusted(
+        &self,
+        name: &str,
+        labels: &BTreeMap<String, String>,
+    ) -> Result<(), LocalInitError> {
         let request = VolumeCreateRequest {
             name: Some(name.to_owned()),
             driver: Some("local".to_owned()),
@@ -1934,6 +2049,40 @@ impl VolumeGuardDriver for InitEngine<'_> {
         };
         let _untrusted =
             tokio::time::timeout(ENGINE_TIMEOUT, self.docker.create_volume(request)).await;
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy)]
+struct FencedVolumeGuardDriver<'engine, 'adapter, 'fence> {
+    engine: &'engine InitEngine<'adapter>,
+    mutation: &'fence LifecycleMutationFence,
+}
+
+#[async_trait::async_trait]
+impl VolumeGuardDriver for FencedVolumeGuardDriver<'_, '_, '_> {
+    async fn guard_verify(&self) -> Result<(), LocalInitError> {
+        self.engine.guard_verify().await
+    }
+
+    async fn guard_inspect(
+        &self,
+        name: &str,
+    ) -> Result<Option<bollard::models::Volume>, LocalInitError> {
+        self.engine.guard_inspect(name).await
+    }
+
+    async fn guard_attachments(&self, name: &str) -> Result<Vec<String>, LocalInitError> {
+        self.engine.guard_attachments(name).await
+    }
+
+    async fn guard_create_untrusted(
+        &self,
+        name: &str,
+        labels: &BTreeMap<String, String>,
+    ) -> Result<(), LocalInitError> {
+        self.mutation.authorize().await?;
+        self.engine.guard_create_untrusted(name, labels).await
     }
 }
 
@@ -1993,8 +2142,7 @@ async fn create_volume_after_preflight<D: VolumeGuardDriver>(
 ) -> Result<(), LocalInitError> {
     driver.guard_verify().await?;
     mutation_after_cancellation_checkpoint(cancellation, || async {
-        driver.guard_create_untrusted(name, labels).await;
-        Ok(())
+        driver.guard_create_untrusted(name, labels).await
     })
     .await
 }
@@ -2195,6 +2343,78 @@ impl HelperDriver for InitEngine<'_> {
 
     async fn driver_volume_attachments(&self, name: &str) -> Result<Vec<String>, LocalInitError> {
         self.volume_attachments(name).await
+    }
+}
+
+#[derive(Clone, Copy)]
+struct FencedHelperDriver<'engine, 'adapter, 'fence> {
+    engine: &'engine InitEngine<'adapter>,
+    mutation: &'fence LifecycleMutationFence,
+}
+
+#[async_trait::async_trait]
+impl HelperDriver for FencedHelperDriver<'_, '_, '_> {
+    async fn driver_verify(&self) -> Result<(), LocalInitError> {
+        self.engine.driver_verify().await
+    }
+
+    async fn driver_create(
+        &self,
+        name: &str,
+        body: ContainerCreateBody,
+    ) -> Result<HelperCreateResult, LocalInitError> {
+        self.mutation.authorize().await?;
+        self.engine.driver_create(name, body).await
+    }
+
+    async fn driver_inspect(
+        &self,
+        target: &str,
+    ) -> Result<Option<bollard::models::ContainerInspectResponse>, LocalInitError> {
+        self.engine.driver_inspect(target).await
+    }
+
+    async fn driver_inspect_volume(
+        &self,
+        name: &str,
+    ) -> Result<Option<bollard::models::Volume>, LocalInitError> {
+        self.engine.driver_inspect_volume(name).await
+    }
+
+    async fn driver_attach(&self, id: &str) -> Result<HelperInput, LocalInitError> {
+        self.mutation.authorize().await?;
+        self.engine.driver_attach(id).await
+    }
+
+    async fn driver_start(&self, id: &str) -> Result<(), LocalInitError> {
+        self.mutation.authorize().await?;
+        self.engine.driver_start(id).await
+    }
+
+    async fn driver_send_request(
+        &self,
+        input: &mut HelperInput,
+        request: &[u8],
+    ) -> Result<(), LocalInitError> {
+        self.mutation.authorize().await?;
+        self.engine.driver_send_request(input, request).await
+    }
+
+    async fn driver_wait(&self, id: &str) -> Result<HelperWaitResult, LocalInitError> {
+        self.engine.driver_wait(id).await
+    }
+
+    async fn driver_logs(&self, id: &str) -> Result<(Vec<u8>, Vec<u8>), LocalInitError> {
+        self.engine.driver_logs(id).await
+    }
+
+    async fn driver_force_remove(&self, id: &str) -> Result<(), LocalInitError> {
+        self.mutation.authorize().await?;
+        self.engine.driver_force_remove(id).await
+    }
+
+    async fn driver_volume_attachments(&self, name: &str) -> Result<Vec<String>, LocalInitError> {
+        self.engine.driver_volume_attachments(name).await
     }
 }
 

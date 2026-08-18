@@ -2,7 +2,7 @@
 
 use std::{
     fs::File,
-    io::{Read as _, Write as _},
+    io::{Read, Write as _},
     net::{SocketAddr, TcpStream},
     os::fd::OwnedFd,
     time::Duration,
@@ -32,17 +32,23 @@ pub(crate) const MAX_CAS_REQUEST_BYTES: usize = 512 * 1024;
 pub(crate) const MAX_CAS_DIGEST_REQUEST_BYTES: usize = 4 * 1024;
 pub(crate) const MAX_CAS_CONTENT_BYTES: usize = 256 * 1024;
 
-/// Holds the exact Engine mutation lock until the manager closes stdin.
+/// Holds the exact Engine mutation lock until the manager writes the complete
+/// fixed release frame.
 ///
-/// The lock protocol has no heartbeat or elapsed-time lease. Any input byte is
-/// a contract violation; an orderly EOF is the sole successful release signal.
+/// The lock protocol has no heartbeat or elapsed-time lease. EOF before the
+/// frame, a partial frame, and every other byte sequence fail, leaving the
+/// stopped container as sticky recovery evidence.
 pub fn hold_lock() -> Result<(), LocalInitError> {
-    let mut byte = [0_u8; 1];
-    loop {
-        match std::io::stdin().lock().read(&mut byte) {
-            Ok(0) => return Ok(()),
-            Ok(_) | Err(_) => return Err(helper_failed()),
-        }
+    hold_lock_from(std::io::stdin().lock())
+}
+
+fn hold_lock_from(mut input: impl Read) -> Result<(), LocalInitError> {
+    let mut frame = [0_u8; crate::LOCAL_LIFECYCLE_LOCK_RELEASE_FRAME.len()];
+    input.read_exact(&mut frame).map_err(|_| helper_failed())?;
+    if frame == crate::LOCAL_LIFECYCLE_LOCK_RELEASE_FRAME {
+        Ok(())
+    } else {
+        Err(helper_failed())
     }
 }
 
@@ -832,6 +838,22 @@ mod tests {
         Chmod,
         Rename,
         AppliedResponseLost,
+    }
+
+    #[test]
+    fn lock_holder_requires_the_complete_release_frame() {
+        assert!(hold_lock_from(crate::LOCAL_LIFECYCLE_LOCK_RELEASE_FRAME.as_slice()).is_ok());
+        for invalid in [
+            b"".as_slice(),
+            b"release".as_slice(),
+            b"release\r".as_slice(),
+            b"release!".as_slice(),
+        ] {
+            assert_eq!(
+                hold_lock_from(invalid).unwrap_err().code(),
+                LocalInitErrorCode::MaterializationFailed
+            );
+        }
     }
 
     #[test]

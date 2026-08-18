@@ -19,7 +19,7 @@ use super::{
     },
     epoch::{ImmutableEpoch, MaterialDeriver},
     renderer::{ExpectedLifecycleTopology, render_compose},
-    state::{ResetStateSnapshot, StateRecord, StateRoot, StateSnapshot},
+    state::{ResetRecordObservation, ResetStateSnapshot, StateRecord, StateRoot, StateSnapshot},
 };
 
 const STATUS_SCHEMA: &str = "automata.local/status/v1";
@@ -143,15 +143,15 @@ impl From<bool> for RecordPresence {
     }
 }
 
-impl From<&StateSnapshot> for StatusRecords {
-    fn from(snapshot: &StateSnapshot) -> Self {
+impl From<&ResetStateSnapshot> for StatusRecords {
+    fn from(snapshot: &ResetStateSnapshot) -> Self {
         Self {
-            installation_selection: snapshot.installation_selection.is_some().into(),
-            material_root: snapshot.material_root.is_some().into(),
-            epoch: snapshot.epoch.is_some().into(),
-            certificates: snapshot.certificates.is_some().into(),
-            materialization: snapshot.materialization.is_some().into(),
-            reset_intent: snapshot.reset_intent.is_some().into(),
+            installation_selection: snapshot.installation_selection.present().into(),
+            material_root: snapshot.material_root.present().into(),
+            epoch: snapshot.epoch.present().into(),
+            certificates: snapshot.certificates.present().into(),
+            materialization: snapshot.materialization.present().into(),
+            reset_intent: snapshot.reset_intent.present().into(),
         }
     }
 }
@@ -318,12 +318,32 @@ pub async fn inspect_local_status(
 ) -> Result<LocalStatusReport, LocalInitError> {
     cancellation_checkpoint(&request.cancellation)?;
     let state = StateRoot::observe_existing(&request.state_directory)?;
-    let snapshot = state.snapshot_read_only()?;
-    let records = StatusRecords::from(&snapshot);
-    if let Some(bytes) = snapshot.reset_intent.as_deref() {
+    let observed = state.snapshot_for_status()?;
+    let reset_candidate = reset_intent_candidate(&observed.reset_intent)?;
+    if reset_candidate.is_none() {
+        state.validate_replay_layout()?;
+    }
+    let snapshot = status_snapshot_from_observation(&observed, reset_candidate)?;
+    let records = StatusRecords::from(&observed);
+    if let Some(bytes) = reset_candidate {
         let intent = ResetIntent::from_canonical_bytes(bytes, state.authority_sha256())?;
-        intent.validate_intent_bytes(snapshot.reset_intent.as_deref())?;
-        intent.validate_status_snapshot(&snapshot)?;
+        intent.validate_intent_bytes(Some(bytes))?;
+        intent.validate_reset_candidate_snapshot(&observed)?;
+        if observed.reset_intent.staged_present() {
+            cancellation_checkpoint(&request.cancellation)?;
+            return Ok(LocalStatusReport {
+                schema: STATUS_SCHEMA,
+                status: LocalInstallationStatus::ResetInProgress,
+                installation: Some(intent.installation.name().as_str().to_owned()),
+                installation_id: Some(intent.installation.id().to_string()),
+                workers: None,
+                epoch_fingerprint: Some(intent.epoch_fingerprint),
+                records,
+                engine: None,
+                volume_contents: "not_inspected",
+                reset: None,
+            });
+        }
         cancellation_checkpoint(&request.cancellation)?;
         let adapter = connect_adapter().await?;
         let engine = InitEngine::connect(&adapter).await?;
@@ -455,7 +475,23 @@ pub async fn inspect_local_status(
         });
     }
 
-    match validate_host_state(&state, &snapshot)? {
+    let staged_init = [
+        &observed.installation_selection,
+        &observed.material_root,
+        &observed.epoch,
+        &observed.certificates,
+        &observed.materialization,
+    ]
+    .into_iter()
+    .any(ResetRecordObservation::staged_present);
+    let host = match (validate_host_state(&state, &snapshot)?, staged_init) {
+        (ValidatedHostState::Established(established), true) => ValidatedHostState::Incomplete {
+            installation: Some(established.installation.name().clone()),
+            epoch: Some(established.epoch),
+        },
+        (host, _) => host,
+    };
+    match host {
         ValidatedHostState::Incomplete {
             installation,
             epoch,
@@ -508,6 +544,7 @@ pub async fn inspect_local_status(
                 }
                 LifecycleLockObservation::Absent => {}
             }
+            engine.preflight_lifecycle_daemon().await?;
             let custody = engine
                 .preflight_lifecycle_volumes(&established.installation, &established.epoch)
                 .await?;
@@ -654,15 +691,20 @@ where
             if identity.as_ref() == Some(&intent.installation) {
                 let desired = epoch.desired_spec()?;
                 let rendered = render_compose(&desired);
-                let material_root = <[u8; 32]>::try_from(
-                    snapshot
-                        .material_root
-                        .completed()
-                        .ok_or_else(reset_required)?,
-                )
-                .map_err(|_| reset_required())?;
-                let runner_id = MaterialDeriver::new(material_root, &intent.installation, &epoch)
-                    .uuid(b"lifecycle/runner-id");
+                let material_root = snapshot
+                    .material_root
+                    .completed()
+                    .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok())
+                    .filter(|root| {
+                        ImmutableEpoch::from_sealed_bytes(
+                            epoch_bytes,
+                            state.authority_sha256(),
+                            root,
+                        )
+                        .is_ok()
+                    });
+                let runner_id =
+                    reset_runner_id(&engine, material_root, &intent.installation, &epoch).await?;
                 let recovered_removed = match engine
                     .inspect_lifecycle_lock(&intent.installation, &epoch)
                     .await?
@@ -673,7 +715,7 @@ where
                     LifecycleLockObservation::Stopped { id, .. } => Some({
                         attest_no_project_compose_processes(&intent.installation)?;
                         let recovered = engine
-                            .recover_stopped_lifecycle_reset_lock(
+                            .recover_stopped_lifecycle_reset_lock_after_intent(
                                 &intent.installation,
                                 &epoch,
                                 &desired,
@@ -749,12 +791,13 @@ where
         cancellation_checkpoint(&request.cancellation)?;
         let desired = established.epoch.desired_spec()?;
         let rendered = render_compose(&desired);
-        let runner_id = MaterialDeriver::new(
-            established.material_root.ok_or_else(reset_required)?,
+        let runner_id = reset_runner_id(
+            &engine,
+            established.material_root,
             &established.installation,
             &established.epoch,
         )
-        .uuid(b"lifecycle/runner-id");
+        .await?;
         engine
             .preflight_lifecycle_volumes(&established.installation, &established.epoch)
             .await?;
@@ -767,6 +810,9 @@ where
                 runner_id,
             )
             .await?;
+        let proposed = ResetIntent::new(state.authority_sha256(), &established, None);
+        let proposed_bytes = proposed.canonical_bytes()?;
+        let mut intent_is_durable = false;
         match engine
             .inspect_lifecycle_lock(&established.installation, &established.epoch)
             .await?
@@ -776,9 +822,25 @@ where
                 return Err(LocalInitError::new(LocalInitErrorCode::OperationInProgress));
             }
             LifecycleLockObservation::Stopped { id, .. } => {
+                // Deleting sticky interrupted-operation evidence is itself a
+                // mutation. Publish reset authority first so every later
+                // cancellation/error can replay safely without an unlatched
+                // gap between the old stopped holder and the new holder.
+                cancellation_checkpoint(&request.cancellation)?;
+                state.store_reset_intent(&proposed_bytes)?;
+                snapshot = state.snapshot_for_reset()?;
+                let durable = ResetIntent::from_canonical_bytes(
+                    snapshot
+                        .reset_intent
+                        .completed()
+                        .ok_or_else(reset_required)?,
+                    state.authority_sha256(),
+                )?;
+                durable.validate_reset_snapshot(&snapshot)?;
+                intent_is_durable = true;
                 attest_no_project_compose_processes(&established.installation)?;
                 engine
-                    .recover_stopped_lifecycle_reset_lock(
+                    .recover_stopped_lifecycle_reset_lock_after_intent(
                         &established.installation,
                         &established.epoch,
                         &desired,
@@ -790,7 +852,9 @@ where
                 attest_no_project_compose_processes(&established.installation)?;
             }
         }
-        cancellation_checkpoint(&request.cancellation)?;
+        if !intent_is_durable {
+            cancellation_checkpoint(&request.cancellation)?;
+        }
         let holder = engine
             .acquire_lifecycle_lock(
                 &established.installation,
@@ -810,16 +874,19 @@ where
                 runner_id,
             )
             .await?;
-        cancellation_checkpoint(&request.cancellation)?;
+        if !intent_is_durable {
+            cancellation_checkpoint(&request.cancellation)?;
+        }
         if holder.holder_lost().is_cancelled() {
             return Err(reset_required());
         }
         engine
             .attest_lifecycle_lock(&established.installation, &established.epoch, &holder)
             .await?;
-        cancellation_checkpoint(&request.cancellation)?;
-        let proposed = ResetIntent::new(state.authority_sha256(), &established, None);
-        state.store_reset_intent(&proposed.canonical_bytes()?)?;
+        if !intent_is_durable {
+            cancellation_checkpoint(&request.cancellation)?;
+            state.store_reset_intent(&proposed_bytes)?;
+        }
         snapshot = state.snapshot_for_reset()?;
         let intent = ResetIntent::from_canonical_bytes(
             snapshot
@@ -846,6 +913,8 @@ where
     delete_empty_os_credential_selectors(&intent.installation)?;
     if let Some(active) = active_lifecycle {
         let holder_lost = active.holder.holder_lost();
+        let shielded_cancellation = CancellationToken::new();
+        let mutation = active.holder.mutation_fence(&shielded_cancellation);
         holder_bounded(&holder_lost, async {
             if !active.topology_removed {
                 engine
@@ -856,6 +925,7 @@ where
                         &active.expected,
                         active.runner_id,
                         &active.holder,
+                        &mutation,
                     )
                     .await?;
             }
@@ -873,6 +943,7 @@ where
                         &active.epoch,
                         &active.holder,
                         role,
+                        &mutation,
                     )
                     .await?;
             }
@@ -1138,6 +1209,55 @@ fn validate_reset_host_state(
     })
 }
 
+fn status_snapshot_from_observation(
+    snapshot: &ResetStateSnapshot,
+    reset_intent: Option<&[u8]>,
+) -> Result<StateSnapshot, LocalInitError> {
+    Ok(StateSnapshot {
+        material_root: status_completed_record(&snapshot.material_root)?,
+        epoch: status_completed_record(&snapshot.epoch)?,
+        certificates: status_completed_record(&snapshot.certificates)?,
+        installation_selection: status_completed_record(&snapshot.installation_selection)?,
+        materialization: status_completed_record(&snapshot.materialization)?,
+        reset_intent: reset_intent.map(<[u8]>::to_vec),
+    })
+}
+
+fn status_completed_record(
+    observation: &ResetRecordObservation,
+) -> Result<Option<Vec<u8>>, LocalInitError> {
+    if observation.completed_present() != observation.completed().is_some() {
+        return Err(reset_required());
+    }
+    if let (Some(completed), Some(staged)) = (observation.completed(), observation.staged())
+        && completed != staged
+    {
+        return Err(reset_required());
+    }
+    Ok(observation.completed().map(<[u8]>::to_vec))
+}
+
+async fn reset_runner_id(
+    engine: &InitEngine<'_>,
+    material_root: Option<[u8; 32]>,
+    installation: &Installation,
+    epoch: &ImmutableEpoch,
+) -> Result<uuid::Uuid, LocalInitError> {
+    if let Some(material_root) = material_root {
+        return Ok(
+            MaterialDeriver::new(material_root, installation, epoch).uuid(b"lifecycle/runner-id")
+        );
+    }
+    // The authority-bound epoch deliberately remains sufficient reset
+    // authority after loss of non-authoritative host records. If LocalDocker
+    // custody remains, its closed labels recover the sole runner identity;
+    // with no children the value is unobserved by the later exact census.
+    Ok(engine
+        .discover_lifecycle_runner_id_for_reset(installation)
+        .await?
+        .unwrap_or_else(uuid::Uuid::nil))
+}
+
 fn reset_intent_candidate(
     observation: &super::state::ResetRecordObservation,
 ) -> Result<Option<&[u8]>, LocalInitError> {
@@ -1202,35 +1322,6 @@ fn validate_reset_candidate_conflicts(
         {
             return Err(reset_required());
         }
-    }
-    Ok(())
-}
-
-fn validate_status_candidate_conflicts(
-    snapshot: &StateSnapshot,
-    state_authority_sha256: Sha256Digest,
-    installation: &Installation,
-    epoch_fingerprint: Sha256Digest,
-) -> Result<(), LocalInitError> {
-    if let Some(bytes) = snapshot.epoch.as_deref()
-        && let Ok(candidate) =
-            ImmutableEpoch::from_authority_bound_bytes(bytes, state_authority_sha256)
-        && (candidate.installation()? != *installation
-            || candidate.fingerprint() != epoch_fingerprint)
-    {
-        return Err(reset_required());
-    }
-    if let Some(bytes) = snapshot.installation_selection.as_deref()
-        && let Ok(selection) = StateInstallationSelection::from_canonical_bytes(bytes)
-        && selection != *installation.name()
-    {
-        return Err(reset_required());
-    }
-    if let Some(bytes) = snapshot.materialization.as_deref()
-        && let Ok(fingerprint) = StateMaterialization::from_canonical_bytes(bytes)
-        && fingerprint != epoch_fingerprint
-    {
-        return Err(reset_required());
     }
     Ok(())
 }
@@ -1468,15 +1559,6 @@ impl ValidatedResetIntent {
         snapshot: &ResetStateSnapshot,
     ) -> Result<(), LocalInitError> {
         validate_reset_candidate_conflicts(
-            snapshot,
-            self.state_authority_sha256,
-            &self.installation,
-            self.epoch_fingerprint,
-        )
-    }
-
-    fn validate_status_snapshot(&self, snapshot: &StateSnapshot) -> Result<(), LocalInitError> {
-        validate_status_candidate_conflicts(
             snapshot,
             self.state_authority_sha256,
             &self.installation,

@@ -198,7 +198,7 @@ impl CandidateLoadDriver for FakeCandidateDriver {
         }
     }
 
-    async fn candidate_import_untrusted(&self, _archive: &[u8]) {
+    async fn candidate_import_untrusted(&self, _archive: &[u8]) -> Result<(), LocalInitError> {
         let mut state = self.state.lock().unwrap();
         state.imports += 1;
         if state.imports == 1 {
@@ -214,6 +214,7 @@ impl CandidateLoadDriver for FakeCandidateDriver {
         if let Some(cancellation) = state.cancel_on_import.take() {
             cancellation.cancel();
         }
+        Ok(())
     }
 }
 
@@ -426,7 +427,11 @@ impl VolumeGuardDriver for FakeGuardDriver {
         Ok(self.state.lock().unwrap().attachments.clone())
     }
 
-    async fn guard_create_untrusted(&self, name: &str, labels: &BTreeMap<String, String>) {
+    async fn guard_create_untrusted(
+        &self,
+        name: &str,
+        labels: &BTreeMap<String, String>,
+    ) -> Result<(), LocalInitError> {
         let mut state = self.state.lock().unwrap();
         state.creates.push(name.to_owned());
         if state.guard.is_none() {
@@ -435,6 +440,7 @@ impl VolumeGuardDriver for FakeGuardDriver {
         if let Some(cancellation) = state.cancel_on_create.take() {
             cancellation.cancel();
         }
+        Ok(())
     }
 }
 

@@ -29,7 +29,7 @@ jobs:
   rust:
     name: Rust
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 20
     resources:
       limits:
         cpu: "4"
@@ -63,23 +63,36 @@ jobs:
           python3 scripts/ci/tests/release-native.test.py
           python3 scripts/ci/tests/verify-release-authority.test.py
           python3 scripts/ci/tests/windows-image-pipeline.test.py
-          cargo clippy --workspace --lib --bins --all-features --locked -- -D warnings
+          python3 scripts/ci/tests/local-installation-catalog.test.py
+          python3 scripts/ci/tests/release-handoff.test.py
+          cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
           cargo test \
             --locked \
             --all-features \
             --lib \
             --no-fail-fast \
+            -p automata-ci \
             -p automata-ci-control \
             -p automata-ci-core \
             -p automata-ci-github-delivery \
             -p automata-ci-job-executor-actions \
+            -p automata-ci-local \
             -p automata-ci-runner-results \
+            -p automata-ci-runner \
             -p automata-ci-runner-runtime \
             -p automata-ci-sandbox-podman \
             -p automata-ci-store-postgres \
             -p automata-ci-ui-renderer \
             -p automata-ci-workflow-actions \
             -p automata-ci-workflow-service
+          cargo test \
+            --locked \
+            --all-features \
+            -p automata-ci \
+            --test cli \
+            --test internal_object_store_process \
+            --test local_check_process \
+            --test local_doctor_process
 
   postgres:
     name: PostgreSQL

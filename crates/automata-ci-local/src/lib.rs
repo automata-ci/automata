@@ -143,7 +143,7 @@ pub fn run_local_lifecycle_cas_digest_reader() -> Result<(), LocalInitError> {
     lifecycle_helper::read_cas_digest()
 }
 
-/// Holds the fixed Engine mutation lock until the supervising manager closes stdin.
+/// Holds the fixed Engine mutation lock until the manager writes its release frame.
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[doc(hidden)]
 pub fn run_local_lifecycle_lock_holder() -> Result<(), LocalInitError> {
@@ -257,6 +257,10 @@ pub const LOCAL_CONTROL_READY_RESPONSE_SUFFIX: &str = "\r\n\r\nready\n";
 #[doc(hidden)]
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub const LOCAL_LIFECYCLE_LOCK_HOLDER_COMMAND: [&str; 3] = ["internal", "local", "hold-lock"];
+/// Sole byte sequence which gracefully releases the fixed Engine mutation lock.
+#[doc(hidden)]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub const LOCAL_LIFECYCLE_LOCK_RELEASE_FRAME: [u8; 8] = *b"release\n";
 
 /// Hidden command token for the fixed local runner readiness check.
 #[doc(hidden)]

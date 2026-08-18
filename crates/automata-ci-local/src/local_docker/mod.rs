@@ -253,6 +253,14 @@ struct LifecycleSiblingGroup {
     front: Option<InspectedNetwork>,
 }
 
+#[derive(Default)]
+struct LifecycleSiblingCustodyGroup {
+    names: Option<ResourceNames>,
+    identity: Option<BaseIdentity>,
+    containers: BTreeMap<String, String>,
+    front: Option<InspectedNetwork>,
+}
+
 /// Read-only, field-for-field attestation of the LocalDocker sibling union
 /// before lifecycle teardown. This deliberately reuses the production HTTP
 /// normalizer and provider definitions instead of trusting discovery labels.
@@ -529,6 +537,166 @@ pub(crate) async fn attest_lifecycle_sibling_union(
     verify_installation_identity(engine.as_ref(), installation).await
 }
 
+/// Read-only ownership-stage attestation for lifecycle teardown.
+///
+/// Unlike runtime admission, this deliberately does not resolve image tags or
+/// require the shared Results transit. Destroy must remain possible after
+/// those replaceable dependencies are damaged, while every sibling is still
+/// bound to its immutable ID, deterministic name, realized custody labels,
+/// profile, and exact private-front membership.
+pub(crate) async fn attest_lifecycle_sibling_custody_union(
+    installation: &Installation,
+    desired: &crate::DesiredSpec,
+    runner_id: uuid::Uuid,
+    containers: &[LifecycleSiblingContainer],
+    networks: &[LifecycleSiblingNetwork],
+) -> Result<(), LocalDockerError> {
+    if containers.is_empty() && networks.is_empty() {
+        return Ok(());
+    }
+    let runner_id = RunnerId::from_str(&runner_id.hyphenated().to_string())
+        .map_err(|_| results_transport_mismatch())?;
+    let (pinned, engine) = connect_host_sandbox_engine(desired.profile().architecture()).await?;
+    verify_installation_identity(engine.as_ref(), installation).await?;
+
+    let mut groups = BTreeMap::<String, LifecycleSiblingCustodyGroup>::new();
+    let mut seen_container_ids = BTreeSet::new();
+    for candidate in containers {
+        if !canonical_object_id(&candidate.id) || !seen_container_ids.insert(candidate.id.clone()) {
+            return Err(results_transport_mismatch());
+        }
+        let container = engine
+            .inspect_container_custody(&candidate.id)
+            .await
+            .map_err(map_engine_call)?
+            .ok_or_else(results_transport_mismatch)?;
+        let by_name = engine
+            .inspect_container_custody(&candidate.name)
+            .await
+            .map_err(map_engine_call)?
+            .ok_or_else(results_transport_mismatch)?;
+        if container != by_name || container.id != candidate.id || container.name != candidate.name
+        {
+            return Err(results_transport_mismatch());
+        }
+        let (names, identity) = lifecycle_sibling_identity(
+            &container.labels,
+            installation,
+            runner_id,
+            &candidate.kind,
+        )?;
+        let expected_name = match candidate.kind.as_str() {
+            KIND_JOB => &names.job,
+            KIND_GUEST_SOURCE => &names.helper,
+            KIND_RESULTS_PROXY => &names.results_proxy,
+            _ => return Err(results_transport_mismatch()),
+        };
+        let expected_image = (candidate.kind == KIND_RESULTS_PROXY)
+            .then(|| desired.images().service_proxy().reference());
+        let verified = verify_container_custody(
+            &container,
+            &names,
+            installation,
+            runner_id,
+            &candidate.kind,
+            expected_image,
+            ProviderStage::VerifyOwnership,
+        )
+        .map_err(|_| results_transport_mismatch())?;
+        if &candidate.name != expected_name
+            || verified != identity
+            || identity.profile != *desired.profile().attestation()
+        {
+            return Err(results_transport_mismatch());
+        }
+        let group = groups.entry(names.results_front.clone()).or_default();
+        merge_lifecycle_custody_identity(group, &names, &identity)?;
+        if group
+            .containers
+            .insert(candidate.kind.clone(), candidate.id.clone())
+            .is_some()
+        {
+            return Err(results_transport_mismatch());
+        }
+    }
+
+    let mut seen_network_ids = BTreeSet::new();
+    for candidate in networks {
+        if !canonical_object_id(&candidate.id) || !seen_network_ids.insert(candidate.id.clone()) {
+            return Err(results_transport_mismatch());
+        }
+        let network = engine
+            .inspect_network(&candidate.id)
+            .await
+            .map_err(map_engine_call)?
+            .ok_or_else(results_transport_mismatch)?;
+        let by_name = engine
+            .inspect_network(&candidate.name)
+            .await
+            .map_err(map_engine_call)?
+            .ok_or_else(results_transport_mismatch)?;
+        if network != by_name || network.id != candidate.id || network.name != candidate.name {
+            return Err(results_transport_mismatch());
+        }
+        let (names, identity) = lifecycle_sibling_identity(
+            &network.labels,
+            installation,
+            runner_id,
+            KIND_RESULTS_FRONT,
+        )?;
+        if candidate.name != names.results_front
+            || identity.profile != *desired.profile().attestation()
+        {
+            return Err(results_transport_mismatch());
+        }
+        let group = groups.entry(names.results_front.clone()).or_default();
+        merge_lifecycle_custody_identity(group, &names, &identity)?;
+        if group.front.replace(network).is_some() {
+            return Err(results_transport_mismatch());
+        }
+    }
+
+    let mut seen_custody = BTreeSet::new();
+    for group in groups.values() {
+        let names = group
+            .names
+            .as_ref()
+            .ok_or_else(results_transport_mismatch)?;
+        let identity = group
+            .identity
+            .as_ref()
+            .ok_or_else(results_transport_mismatch)?;
+        let front = group
+            .front
+            .as_ref()
+            .ok_or_else(results_transport_mismatch)?;
+        let custody_key = match identity.custody {
+            SandboxCustody::ProfileAdmission { .. } => "admission".to_owned(),
+            SandboxCustody::Job { slot_ordinal, .. }
+                if slot_ordinal.get() <= desired.max_parallel_jobs().get() =>
+            {
+                format!("job:{}", slot_ordinal.get())
+            }
+            SandboxCustody::Job { .. } => return Err(results_transport_mismatch()),
+        };
+        if !seen_custody.insert(custody_key) {
+            return Err(results_transport_mismatch());
+        }
+        let expected_front =
+            front_network_definition(names, &identity.base_labels, installation, identity.custody)
+                .map_err(|_| results_transport_mismatch())?;
+        if front.ipv4_network != expected_front.ipv4_network
+            || front.ipv4_gateway != expected_front.ipv4_gateway
+            || !exact_closed_network(front, &names.results_front, &expected_front.labels)
+        {
+            return Err(results_transport_mismatch());
+        }
+        attest_lifecycle_custody_front_members(group, front)?;
+    }
+    pinned.verify().await?;
+    verify_installation_identity(engine.as_ref(), installation).await
+}
+
 fn lifecycle_sibling_identity(
     labels: &BTreeMap<String, String>,
     installation: &Installation,
@@ -577,6 +745,66 @@ fn merge_lifecycle_sibling_identity(
     }
     group.names.get_or_insert_with(|| names.clone());
     group.identity.get_or_insert_with(|| identity.clone());
+    Ok(())
+}
+
+fn merge_lifecycle_custody_identity(
+    group: &mut LifecycleSiblingCustodyGroup,
+    names: &ResourceNames,
+    identity: &BaseIdentity,
+) -> Result<(), LocalDockerError> {
+    if group.names.as_ref().is_some_and(|current| current != names)
+        || group
+            .identity
+            .as_ref()
+            .is_some_and(|current| current != identity)
+    {
+        return Err(results_transport_mismatch());
+    }
+    group.names.get_or_insert_with(|| names.clone());
+    group.identity.get_or_insert_with(|| identity.clone());
+    Ok(())
+}
+
+fn attest_lifecycle_custody_front_members(
+    group: &LifecycleSiblingCustodyGroup,
+    front: &InspectedNetwork,
+) -> Result<(), LocalDockerError> {
+    let names = group
+        .names
+        .as_ref()
+        .ok_or_else(results_transport_mismatch)?;
+    let mut expected = BTreeMap::new();
+    if let Some(proxy) = group.containers.get(KIND_RESULTS_PROXY) {
+        expected.insert(
+            proxy.as_str(),
+            (
+                names.results_proxy.as_str(),
+                front_proxy_address(front).map_err(|_| results_transport_mismatch())?,
+            ),
+        );
+    }
+    if let Some(job) = group.containers.get(KIND_JOB) {
+        expected.insert(
+            job.as_str(),
+            (
+                names.job.as_str(),
+                front_job_address(front).map_err(|_| results_transport_mismatch())?,
+            ),
+        );
+    }
+    if front.containers.len() != expected.len() {
+        return Err(results_transport_mismatch());
+    }
+    for (id, (name, address)) in expected {
+        if !front.containers.get(id).is_some_and(|endpoint| {
+            endpoint.name == name
+                && endpoint.ipv4_address == address
+                && endpoint.ipv4_prefix == front.ipv4_network.prefix
+        }) {
+            return Err(results_transport_mismatch());
+        }
+    }
     Ok(())
 }
 

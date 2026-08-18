@@ -97,6 +97,7 @@ pub(super) struct ExpectedContainer {
     pub(super) mounts: Vec<ExpectedMount>,
     pub(super) networks: BTreeMap<String, ExpectedEndpoint>,
     pub(super) network_mode: Option<String>,
+    pub(super) userns_mode: Option<String>,
     pub(super) ports: Vec<ExpectedPort>,
     pub(super) healthcheck: Option<ExpectedHealthcheck>,
     pub(super) tmpfs: Vec<String>,
@@ -106,6 +107,11 @@ pub(super) struct ExpectedContainer {
     pub(super) cap_add: Vec<String>,
     pub(super) cap_drop: Vec<String>,
     pub(super) security_opt: Vec<String>,
+    pub(super) init: bool,
+    pub(super) ipc: String,
+    pub(super) cgroup: String,
+    pub(super) runtime: String,
+    pub(super) shm_size: u64,
     pub(super) privileged: bool,
     pub(super) stdin_open: bool,
     pub(super) tty: bool,
@@ -125,6 +131,7 @@ pub(super) enum ExpectedMountSource {
     Bind {
         source: String,
         create_host_path: bool,
+        propagation: String,
     },
 }
 
@@ -506,11 +513,14 @@ fn expected_container(service: &str, image_role: &'static str, value: &Value) ->
     let expected_keys = [
         "cap_add",
         "cap_drop",
+        "cgroup",
         "command",
         "entrypoint",
         "environment",
         "healthcheck",
         "image",
+        "init",
+        "ipc",
         "labels",
         "logging",
         "network_mode",
@@ -522,11 +532,14 @@ fn expected_container(service: &str, image_role: &'static str, value: &Value) ->
         "pull_policy",
         "read_only",
         "restart",
+        "runtime",
         "security_opt",
+        "shm_size",
         "stdin_open",
         "tmpfs",
         "tty",
         "user",
+        "userns_mode",
         "volumes",
     ]
     .into_iter()
@@ -682,8 +695,16 @@ fn expected_container(service: &str, image_role: &'static str, value: &Value) ->
             .and_then(Value::as_str)
             .expect("closed platform")
             .to_owned(),
-        command: strings("command"),
-        entrypoint: object.get("entrypoint").map(|_| strings("entrypoint")),
+        command: strings("command")
+            .into_iter()
+            .map(|value| value.replace("$$", "$"))
+            .collect(),
+        entrypoint: object.get("entrypoint").map(|_| {
+            strings("entrypoint")
+                .into_iter()
+                .map(|value| value.replace("$$", "$"))
+                .collect()
+        }),
         environment: string_map("environment"),
         labels: string_map("labels"),
         user: object
@@ -696,6 +717,11 @@ fn expected_container(service: &str, image_role: &'static str, value: &Value) ->
         network_mode: object
             .get("network_mode")
             .map(|mode| mode.as_str().expect("closed network mode").to_owned()),
+        userns_mode: object.get("userns_mode").map(|mode| {
+            mode.as_str()
+                .expect("closed user namespace mode")
+                .to_owned()
+        }),
         ports,
         healthcheck,
         tmpfs: object
@@ -714,6 +740,29 @@ fn expected_container(service: &str, image_role: &'static str, value: &Value) ->
         cap_add: strings("cap_add"),
         cap_drop: strings("cap_drop"),
         security_opt: strings("security_opt"),
+        init: object
+            .get("init")
+            .and_then(Value::as_bool)
+            .expect("closed init flag"),
+        ipc: object
+            .get("ipc")
+            .and_then(Value::as_str)
+            .expect("closed IPC mode")
+            .to_owned(),
+        cgroup: object
+            .get("cgroup")
+            .and_then(Value::as_str)
+            .expect("closed cgroup namespace mode")
+            .to_owned(),
+        runtime: object
+            .get("runtime")
+            .and_then(Value::as_str)
+            .expect("closed runtime")
+            .to_owned(),
+        shm_size: object
+            .get("shm_size")
+            .and_then(Value::as_u64)
+            .expect("closed shared-memory size"),
         privileged: object
             .get("privileged")
             .and_then(Value::as_bool)
@@ -781,6 +830,11 @@ fn expected_mount(value: &Value) -> ExpectedMount {
                         .get("create_host_path")
                         .and_then(Value::as_bool)
                         .expect("closed create-host-path flag"),
+                    propagation: bind
+                        .get("propagation")
+                        .and_then(Value::as_str)
+                        .expect("closed bind propagation")
+                        .to_owned(),
                 },
                 false,
             )
@@ -1202,7 +1256,10 @@ fn relay_service(spec: &DesiredSpec) -> Value {
                 "source": "/var/run/docker.sock",
                 "target": "/run/automata-host-engine/docker.sock",
                 "read_only": true,
-                "bind": {"create_host_path": false},
+                "bind": {
+                    "create_host_path": false,
+                    "propagation": "rprivate",
+                },
             }),
             mount(VolumeRole::EngineRelay, RELAY_ROOT, false),
             mount(VolumeRole::RelayBinding, RELAY_BINDING_ROOT, true),
@@ -1211,6 +1268,11 @@ fn relay_service(spec: &DesiredSpec) -> Value {
         replaceable_labels(spec, "engine-relay"),
     );
     insert(&mut service, "network_mode", json!("none"));
+    // The daemon itself is required to remap untrusted job containers. The
+    // trusted fixed relay must stay in the host user namespace so its root
+    // bootstrap can open the root-owned Docker socket before dropping every
+    // capability and switching to the socket group.
+    insert(&mut service, "userns_mode", json!("host"));
     insert(
         &mut service,
         "cap_add",
@@ -1334,7 +1396,7 @@ fn hardened_service(
     insert(
         &mut value,
         "security_opt",
-        json!(["no-new-privileges:true"]),
+        json!(["no-new-privileges:true", "seccomp=builtin"]),
     );
     value
 }
@@ -1355,9 +1417,14 @@ fn base_service(
         "networks": networks,
         "volumes": volumes,
         "read_only": false,
+        "init": false,
+        "ipc": "private",
+        "cgroup": "private",
+        "runtime": "runc",
+        "shm_size": 67108864_u64,
         "cap_add": [],
         "cap_drop": [],
-        "security_opt": [],
+        "security_opt": ["no-new-privileges:true", "seccomp=builtin"],
         "privileged": false,
         "stdin_open": false,
         "tty": false,

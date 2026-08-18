@@ -60,7 +60,7 @@ fn failed_local_doctor_is_typed_actionable_json_and_is_read_only() {
         issues,
         "docker_compose",
         "docker_compose_unavailable",
-        "install Docker Compose CLI plugin version 2.20.0 or newer",
+        "install Docker Compose CLI plugin version 2.33.1 or newer",
     );
 
     let stdout = String::from_utf8(output.stdout).expect("doctor JSON must be UTF-8");

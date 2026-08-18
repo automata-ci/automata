@@ -357,6 +357,7 @@ pub async fn initialize_local(
         .map_err(map_engine_error)?;
     let expected = Installation::expected(&request.installation);
     let init_engine = engine::InitEngine::connect(&adapter).await?;
+    init_engine.preflight_lifecycle_daemon().await?;
     if material_root.is_some() && existing_selection.is_none()
         || material_root.is_none()
             && (existing_identity.is_some()
@@ -449,29 +450,14 @@ pub async fn initialize_local(
             if !request.recover_stopped_lock {
                 return Err(LocalInitError::new(LocalInitErrorCode::ResetRequired));
             }
-            let lock_name = format!("{}-lifecycle-lock", installation.compose_project());
             init_engine
-                .preflight_initialization_recovery_union(
+                .recover_stopped_initialization_lock(
                     &catalog,
                     &installation,
-                    epoch.fingerprint(),
-                    (&lock_name, &id),
+                    &epoch,
+                    &id,
+                    &request.cancellation,
                 )
-                .await?;
-            init_engine
-                .attest_engine_quiescence(&id, Some(&request.cancellation))
-                .await?;
-            init_engine
-                .preflight_initialization_recovery_union(
-                    &catalog,
-                    &installation,
-                    epoch.fingerprint(),
-                    (&lock_name, &id),
-                )
-                .await?;
-            cancellation_checkpoint(&request.cancellation)?;
-            init_engine
-                .remove_stopped_initialization_lock_after_quiescence(&installation, &epoch, &id)
                 .await?;
             if init_engine
                 .inspect_lifecycle_lock_before_identity(&installation, &epoch)
@@ -527,10 +513,12 @@ pub async fn initialize_local(
     };
     let (transaction_cancellation, watcher) =
         lifecycle::linked_cancellation(&request.cancellation, &holder);
+    let mutation_fence = holder.mutation_fence(&transaction_cancellation);
     let holder_lost = holder.holder_lost();
     let operation = holder_bounded(&holder_lost, async {
         cancellation_checkpoint(&transaction_cancellation)?;
         if existing_identity.is_none() {
+            mutation_fence.authorize().await?;
             let created = adapter
                 .create_or_adopt_exact_identity(&installation)
                 .await
@@ -548,6 +536,7 @@ pub async fn initialize_local(
                 &catalog,
                 &candidate_load_archive,
                 &transaction_cancellation,
+                &mutation_fence,
             ),
         )
         .await?;
@@ -587,6 +576,7 @@ pub async fn initialize_local(
                 allow_volume_creation,
                 lock_identity,
                 &transaction_cancellation,
+                &mutation_fence,
             ),
         )
         .await?;
@@ -599,6 +589,7 @@ pub async fn initialize_local(
                 &helper.id,
                 allow_volume_creation,
                 &transaction_cancellation,
+                &mutation_fence,
             ),
         )
         .await?;
@@ -619,6 +610,7 @@ pub async fn initialize_local(
                 &volumes,
                 &materialize,
                 &transaction_cancellation,
+                &mutation_fence,
             ),
         ))
         .await?;
@@ -757,12 +749,13 @@ fn desired_from_catalog(
         catalog.imported_service_proxy(),
     );
     let digest = installation.selector_key().digest();
+    let second_octet = 24 + (digest.as_bytes()[3] & 0x07);
     let third_octet = digest.as_bytes()[4] & 0xfe;
-    let subnet = format!("192.168.{third_octet}.0/23");
+    let subnet = format!("172.{second_octet}.{third_octet}.0/23");
     let results = ResultsTransit::new(
         subnet,
-        Ipv4Addr::new(192, 168, third_octet, 1),
-        Ipv4Addr::new(192, 168, third_octet, 2),
+        Ipv4Addr::new(172, second_octet, third_octet, 1),
+        Ipv4Addr::new(172, second_octet, third_octet, 2),
     )
     .map_err(|_| LocalInitError::new(LocalInitErrorCode::InvalidCatalog))?;
     let input = DesiredSpecInput::new(
@@ -818,6 +811,29 @@ fn volume_creation_allowed(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn release_catalog_derives_disjoint_desired_networks() {
+        let catalog = catalog::VerifiedCatalog::parse(include_bytes!(
+            "../../../../images/local-installation/catalog-v1.json"
+        ))
+        .unwrap();
+        let installation =
+            Installation::verified(InstallationName::default(), crate::InstallationId::new());
+        let desired = desired_from_catalog(&catalog, &installation, NonZeroU16::new(1).unwrap())
+            .expect("the released catalog always constructs one valid Desired plan");
+        assert!(desired.results_transit().subnet().starts_with("172."));
+        assert!(
+            crate::desired_spec::control_subnet_for_spec(&desired)
+                .to_string()
+                .starts_with("172.")
+        );
+        assert!(
+            crate::desired_spec::egress_subnet_for_spec(&desired)
+                .to_string()
+                .starts_with("192.168.")
+        );
+    }
 
     #[test]
     fn v1_init_authority_is_the_exact_rendered_relay_socket() {

@@ -25,9 +25,10 @@ use tokio::process::Command as ProcessCommand;
 
 use crate::{DoctorReport, EngineSelection, Installation, MAX_COMMAND_STREAM_BYTES};
 
-use super::{LocalInitError, LocalInitErrorCode};
+use super::{LocalInitError, LocalInitErrorCode, engine::LifecycleMutationFence};
 
 const FIXED_DOCKER_HOST: &str = "unix:///var/run/docker.sock";
+const FIXED_DOCKER_API_VERSION: &str = "1.48";
 const ABSENT_CONFIG_ROOT: &str = "/nonexistent/automata-local-docker-config";
 pub(super) const COMPOSE_PROJECT_DIRECTORY: &str = "/";
 const MAX_COMPOSE_OUTPUT: usize = 64 * 1024;
@@ -149,6 +150,24 @@ impl QualifiedDockerCli {
         Ok(qualified)
     }
 
+    pub(super) async fn validate(
+        &self,
+        selection: &EngineSelection,
+        installation: &Installation,
+        compose_bytes: &[u8],
+        cancellation: &CancellationToken,
+    ) -> Result<Vec<u8>, LocalInitError> {
+        self.execute_inner(
+            selection,
+            installation,
+            compose_bytes,
+            ComposeStep::Validate,
+            cancellation,
+            None,
+        )
+        .await
+    }
+
     pub(super) async fn execute(
         &self,
         selection: &EngineSelection,
@@ -156,6 +175,30 @@ impl QualifiedDockerCli {
         compose_bytes: &[u8],
         step: ComposeStep<'_>,
         cancellation: &CancellationToken,
+        mutation: &LifecycleMutationFence,
+    ) -> Result<Vec<u8>, LocalInitError> {
+        if step == ComposeStep::Validate {
+            return Err(reset_required());
+        }
+        self.execute_inner(
+            selection,
+            installation,
+            compose_bytes,
+            step,
+            cancellation,
+            Some(mutation),
+        )
+        .await
+    }
+
+    async fn execute_inner(
+        &self,
+        selection: &EngineSelection,
+        installation: &Installation,
+        compose_bytes: &[u8],
+        step: ComposeStep<'_>,
+        cancellation: &CancellationToken,
+        mutation: Option<&LifecycleMutationFence>,
     ) -> Result<Vec<u8>, LocalInitError> {
         if compose_bytes.is_empty() || !compose_bytes.ends_with(b"\n") {
             return Err(reset_required());
@@ -182,6 +225,9 @@ impl QualifiedDockerCli {
         ];
         let operation_timeout = append_step(&step, &mut arguments);
         let arguments = arguments.iter().map(String::as_str).collect::<Vec<_>>();
+        if let Some(mutation) = mutation {
+            mutation.authorize().await?;
+        }
         let output = run_held(
             &self.compose,
             selection,
@@ -199,18 +245,6 @@ impl QualifiedDockerCli {
         self.docker.verify_identity()?;
         self.compose.verify_identity()
     }
-
-    /// Proves that no same-identity retained Compose executable is still
-    /// operating on this exact project. This is the process-side fence used by
-    /// exceptional stopped-lock recovery before Engine evidence is removed.
-    pub(super) fn attest_project_process_quiescent(
-        &self,
-        installation: &Installation,
-    ) -> Result<(), LocalInitError> {
-        self.verify_identity()?;
-        attest_project_process_quiescent(installation, Some(self.compose.identity))?;
-        self.verify_identity()
-    }
 }
 
 /// Conservative process fence for reset, which does not otherwise need a
@@ -219,13 +253,10 @@ impl QualifiedDockerCli {
 pub(super) fn attest_no_project_compose_processes(
     installation: &Installation,
 ) -> Result<(), LocalInitError> {
-    attest_project_process_quiescent(installation, None)
+    attest_project_process_quiescent(installation)
 }
 
-fn attest_project_process_quiescent(
-    installation: &Installation,
-    executable_identity: Option<ExecutableIdentity>,
-) -> Result<(), LocalInitError> {
+fn attest_project_process_quiescent(installation: &Installation) -> Result<(), LocalInitError> {
     let project = installation.compose_project().as_str();
     let euid = rustix::process::geteuid().as_raw();
     let current_pid = std::process::id();
@@ -250,16 +281,6 @@ fn attest_project_process_quiescent(
         };
         if process_metadata.uid() != euid {
             continue;
-        }
-        if let Some(identity) = executable_identity {
-            let executable = match fs::metadata(entry.path().join("exe")) {
-                Ok(metadata) => metadata,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(_) => return Err(engine_unavailable()),
-            };
-            if executable.dev() != identity.device || executable.ino() != identity.inode {
-                continue;
-            }
         }
         let mut cmdline = Vec::new();
         File::open(entry.path().join("cmdline"))
@@ -387,6 +408,7 @@ async fn run_held(
         .env_clear()
         .env("DOCKER_CONFIG", ABSENT_CONFIG_ROOT)
         .env("DOCKER_HOST", FIXED_DOCKER_HOST)
+        .env("DOCKER_API_VERSION", FIXED_DOCKER_API_VERSION)
         .env("HOME", "/nonexistent")
         .env("LANG", "C")
         .env("LC_ALL", "C")
@@ -516,6 +538,9 @@ fn append_step(step: &ComposeStep<'_>, arguments: &mut Vec<String>) -> Duration 
                     "automata-lifecycle",
                     "run",
                     "--detach",
+                    "--interactive=false",
+                    "--no-tty",
+                    "--use-aliases",
                     "--pull",
                     "never",
                     "--no-build",

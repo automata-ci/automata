@@ -478,7 +478,7 @@ fn control_subnet_from_key(key: InstallationSelectorKey) -> Ipv4Subnet {
     let digest = key.digest();
     let bytes = digest.as_bytes();
     Ipv4Subnet {
-        network: u32::from_be_bytes([172, 16 + (bytes[2] & 0x0f), bytes[3], 0]),
+        network: u32::from_be_bytes([172, 16 + (bytes[2] & 0x07), bytes[3], 0]),
         prefix: 24,
     }
 }

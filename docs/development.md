@@ -329,7 +329,7 @@ adding a page kind.
 The cross-platform local-installation preflight is a read-only host check for
 x86-64 Linux, Apple Silicon macOS, and x86-64 Windows. It requires a local Linux
 Docker Engine 28.0.0 or newer with API 1.48 or newer and matching architecture,
-Docker Compose plugin version 2.20.0 or newer, and rejects a Unix root process:
+Docker Compose plugin version 2.33.1 or newer, and rejects a Unix root process:
 
 ```console
 cargo run --locked -p automata-ci -- local doctor

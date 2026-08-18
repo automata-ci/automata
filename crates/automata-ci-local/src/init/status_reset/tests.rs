@@ -1063,6 +1063,123 @@ async fn valid_staged_reset_intent_is_published_and_bypasses_entry_cancellation(
 }
 
 #[tokio::test]
+async fn status_reports_init_frontier_stage_as_incomplete_without_repair() {
+    let directory = TestDirectory::new();
+    let state = StateRoot::acquire(&directory.state_path()).unwrap();
+    drop(state);
+    let staged = b"partially-written-selection";
+    directory.private_file(".installation-selection.json.automata-write", staged);
+
+    let report = inspect_local_status(LocalStatusRequest::new(
+        directory.state_path(),
+        CancellationToken::new(),
+    ))
+    .await
+    .unwrap();
+
+    assert_eq!(report.status(), LocalInstallationStatus::Incomplete);
+    assert_eq!(report.installation(), None);
+    assert!(report.records.installation_selection.0);
+    assert_eq!(
+        fs::read(
+            directory
+                .state_path()
+                .join(".installation-selection.json.automata-write")
+        )
+        .unwrap(),
+        staged
+    );
+}
+
+#[tokio::test]
+async fn status_accepts_empty_exact_stage_but_rejects_mode_drift() {
+    let empty = TestDirectory::new();
+    drop(StateRoot::acquire(&empty.state_path()).unwrap());
+    empty.private_file(".installation-selection.json.automata-write", b"");
+    let report = inspect_local_status(LocalStatusRequest::new(
+        empty.state_path(),
+        CancellationToken::new(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(report.status(), LocalInstallationStatus::Incomplete);
+
+    let unreadable = TestDirectory::new();
+    drop(StateRoot::acquire(&unreadable.state_path()).unwrap());
+    unreadable.private_file_mode(
+        ".installation-selection.json.automata-write",
+        b"partial",
+        0o000,
+    );
+    let error = inspect_local_status(LocalStatusRequest::new(
+        unreadable.state_path(),
+        CancellationToken::new(),
+    ))
+    .await
+    .unwrap_err();
+    assert_eq!(error.code(), LocalInitErrorCode::ResetRequired);
+
+    let empty_final = TestDirectory::new();
+    drop(StateRoot::acquire(&empty_final.state_path()).unwrap());
+    empty_final.private_file("installation-selection.json", b"");
+    let error = inspect_local_status(LocalStatusRequest::new(
+        empty_final.state_path(),
+        CancellationToken::new(),
+    ))
+    .await
+    .unwrap_err();
+    assert_eq!(error.code(), LocalInitErrorCode::ResetRequired);
+}
+
+#[tokio::test]
+async fn status_reports_valid_staged_reset_intent_without_publishing_it() {
+    let directory = TestDirectory::new();
+    let state = StateRoot::acquire(&directory.state_path()).unwrap();
+    let installation = installation();
+    let epoch = super::super::epoch::authority_test_epoch(
+        &installation,
+        &[0x8b; 32],
+        state.authority_sha256(),
+    );
+    let bytes = ResetIntent::new(
+        state.authority_sha256(),
+        &EstablishedState {
+            installation: installation.clone(),
+            epoch: epoch.clone(),
+            material_root: Some([0x8b; 32]),
+        },
+        None,
+    )
+    .canonical_bytes()
+    .unwrap();
+    directory.private_file("epoch.json", &epoch.canonical_bytes());
+    directory.private_file(".reset-intent.json.automata-write", &bytes);
+    drop(state);
+
+    let report = inspect_local_status(LocalStatusRequest::new(
+        directory.state_path(),
+        CancellationToken::new(),
+    ))
+    .await
+    .unwrap();
+
+    assert_eq!(report.status(), LocalInstallationStatus::ResetInProgress);
+    assert_eq!(report.installation(), Some(installation.name().as_str()));
+    assert!(report.records.reset_intent.0);
+    assert!(report.reset.is_none());
+    assert!(!directory.state_path().join("reset-intent.json").exists());
+    assert_eq!(
+        fs::read(
+            directory
+                .state_path()
+                .join(".reset-intent.json.automata-write")
+        )
+        .unwrap(),
+        bytes
+    );
+}
+
+#[tokio::test]
 async fn pre_cancelled_fresh_reset_precedes_unrelated_corrupt_state() {
     let directory = TestDirectory::new();
     let state = StateRoot::acquire(&directory.state_path()).unwrap();

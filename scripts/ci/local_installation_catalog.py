@@ -24,7 +24,7 @@ CATALOG_SCHEMA = "automata.local/release-catalog/v1"
 SOURCE_SCHEMA = "automata.local/release-catalog-source/v1"
 SOURCE_PATH = "images/local-installation/catalog-v1.json"
 PACKAGED_SOURCE_PATH = "crates/automata-ci-local/src/init/catalog-v1.source.json"
-SOURCE_SHA256 = "9c490bed48e90a18e7161a31ab7b1f085f7fabc609fe3f04127d5ea5d867d5eb"
+SOURCE_SHA256 = "a6233e0d9be9ecd76754b630737ce4153af22e6dcb369976a6096e8c2811cead"
 CATALOG_PATH = "target/distribution/automata-local-installation-catalog.json"
 PROFILE_MANIFEST_PATH = (
     "images/github-hosted-ubuntu-24.04-x64/profile-manifest.json"
@@ -302,7 +302,8 @@ def require_lifecycle_runtime(value: object) -> dict:
             },
             "hold_lock": {
                 "argv": ["internal", "local", "hold-lock"],
-                "release": "stdin-eof",
+                "release": "stdin-fixed-frame-v1",
+                "release_frame": "release\n",
             },
             "materialize": {
                 "argv": ["internal", "local", "materialize"],
