@@ -1,8 +1,16 @@
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 import { createElement } from "react";
@@ -111,6 +119,8 @@ try {
     throw new Error(`npm package contains unexpected files: ${unexpected.join(", ")}`);
   }
 
+  await verifyTypeScriptConsumer(join(firstDirectory, first.filename));
+
   process.stdout.write(
     `Verified composable UI package (${files.length} files, sha256:${firstDigest}).\n`,
   );
@@ -132,6 +142,85 @@ async function pack(directory, destination) {
     throw new Error("npm pack did not report exactly one archive");
   }
   return result[0];
+}
+
+async function verifyTypeScriptConsumer(archive) {
+  const consumerDirectory = await mkdtemp(
+    join(tmpdir(), "automata-ui-consumer-"),
+  );
+  try {
+    const nodeModules = join(consumerDirectory, "node_modules");
+    const installedPackage = join(nodeModules, "@automata", "ui");
+    await mkdir(installedPackage, { recursive: true });
+    await execute(
+      "tar",
+      ["-xzf", archive, "--strip-components=1", "-C", installedPackage],
+    );
+
+    for (const dependency of ["react", "react-dom", "@types"]) {
+      const destination = join(nodeModules, dependency);
+      await mkdir(dirname(destination), { recursive: true });
+      await symlink(
+        fileURLToPath(new URL(`node_modules/${dependency}`, root)),
+        destination,
+      );
+    }
+
+    await writeFile(
+      join(consumerDirectory, "consumer.mts"),
+      `import {
+  App,
+  validateLiveLogAccess,
+  type AppProps,
+  type JobLogPageModel,
+  type LiveLogAccess,
+  type LiveLogAccessProvider,
+  type LiveLogRecord,
+} from "@automata/ui";
+
+declare const access: LiveLogAccess;
+declare const accessProvider: LiveLogAccessProvider;
+declare const page: JobLogPageModel;
+declare const record: LiveLogRecord;
+
+const props: AppProps = { page, jobLogAccess: accessProvider };
+void App;
+void props;
+void record;
+validateLiveLogAccess(access);
+`,
+    );
+    await writeFile(
+      join(consumerDirectory, "tsconfig.json"),
+      `${JSON.stringify(
+        {
+          compilerOptions: {
+            exactOptionalPropertyTypes: true,
+            module: "NodeNext",
+            moduleResolution: "NodeNext",
+            noEmit: true,
+            skipLibCheck: true,
+            strict: true,
+            target: "ES2022",
+          },
+          include: ["consumer.mts"],
+        },
+        null,
+        2,
+      )}\n`,
+    );
+    await execute(
+      process.execPath,
+      [
+        fileURLToPath(new URL("node_modules/typescript/bin/tsc", root)),
+        "--project",
+        join(consumerDirectory, "tsconfig.json"),
+      ],
+      { cwd: consumerDirectory },
+    );
+  } finally {
+    await rm(consumerDirectory, { recursive: true, force: true });
+  }
 }
 
 function digest(value) {

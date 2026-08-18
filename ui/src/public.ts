@@ -1,16 +1,16 @@
-export { App, type AppProps } from "./App";
-export { Shell, type ShellProps } from "./components/Shell";
+export { App, type AppProps } from "./App.js";
+export { Shell, type ShellProps } from "./components/Shell.js";
 export {
   ProviderConnectionPanel,
   type ProviderConnectionLifecycle,
   type ProviderConnectionPanelProps,
-} from "./components/ProviderConnectionPanel";
+} from "./components/ProviderConnectionPanel.js";
 export {
   RepositorySelectionList,
   type RepositorySelectionListProps,
   type SelectableProviderRepository,
-} from "./components/RepositorySelectionList";
-export { ThemeToggle } from "./components/ThemeToggle";
-export { THEME_BOOTSTRAP_SCRIPT } from "./hooks/useThemePreference";
-export * from "./logs";
-export type * from "./models";
+} from "./components/RepositorySelectionList.js";
+export { ThemeToggle } from "./components/ThemeToggle.js";
+export { THEME_BOOTSTRAP_SCRIPT } from "./hooks/useThemePreference.js";
+export * from "./logs/index.js";
+export type * from "./models.js";

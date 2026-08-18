@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import type { PageModel } from "./models";
 import type { LiveLogRecord } from "./logs/sse";
+import type { LiveLogAccessProvider } from "./logs/protocol";
 import { ThemeToggle } from "./components/ThemeToggle";
 import { JobLogPage } from "./pages/JobLogPage";
 import { DeepLinkSignInPage } from "./pages/DeepLinkSignInPage";
@@ -20,9 +21,11 @@ import { SetupPage } from "./pages/SetupPage";
 export interface AppProps {
   readonly page: PageModel;
   readonly shellUtility?: ReactNode;
+  /** Host-supplied direct log authority for composed deployments such as Cloud. */
+  readonly jobLogAccess?: LiveLogAccessProvider;
 }
 
-export function App({ page, shellUtility }: AppProps) {
+export function App({ jobLogAccess, page, shellUtility }: AppProps) {
   const utility = shellUtility === undefined ? <ThemeToggle /> : shellUtility;
 
   switch (page.kind) {
@@ -37,7 +40,13 @@ export function App({ page, shellUtility }: AppProps) {
     case "run-detail":
       return <RunDetailPage model={page} shellUtility={utility} />;
     case "job-log":
-      return <JobLogPage model={page} shellUtility={utility} />;
+      return (
+        <JobLogPage
+          {...(jobLogAccess === undefined ? {} : { access: jobLogAccess })}
+          model={page}
+          shellUtility={utility}
+        />
+      );
     case "deep-link-sign-in":
       return <DeepLinkSignInPage model={page} shellUtility={utility} />;
     case "repository-settings":
