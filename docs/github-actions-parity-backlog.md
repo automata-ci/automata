@@ -750,7 +750,7 @@ all cancellation-time post behavior remain gaps.
 - [x] Decide whether absolute working directories outside the workspace are
   supported: they remain rejected by workspace confinement.
 - [ ] Match container shell defaults once job containers exist.
-- [ ] Add macOS shell behavior.
+- [x] Add macOS Bash/`sh` behavior through the disposable VM provider.
 - [x] Add advertised Python runtime acceptance.
 - [x] Add shell-not-found diagnostics matching the correct lifecycle phase.
 
@@ -1208,13 +1208,14 @@ current baseline.
   trusted-native Bash/sh first, then repository-scoped self-hosted validation,
   followed by Virtualization.framework isolation.
 
-- [ ] Add a macOS provider.
-- [ ] Report `runner.os=macOS`, not Linux.
-- [ ] Add macOS shell behavior.
-- [ ] Add the initial Apple Silicon/ARM64 provider and acceptance path.
+- [x] Add the disposable Virtualization.framework macOS provider.
+- [x] Report `runner.os=macOS`, not Linux.
+- [x] Add macOS Bash/`sh` shell behavior.
+- [x] Add the initial Apple Silicon/ARM64 provider and physical acceptance path.
 - [ ] Decide whether Intel/x64 is a later supported profile.
-- [ ] Add process-tree containment.
-- [ ] Add keychain and signing support.
+- [x] Contain the whole process tree inside the disposable VM and enforce the
+  sealed guest process ceiling.
+- [x] Add macOS Keychain custody and strict Developer ID helper verification.
 - [ ] Add Xcode and toolchain profiles.
 - [ ] Add macOS acceptance jobs.
 - [ ] Add cleanup and recovery tests.
@@ -1329,7 +1330,8 @@ stating that a behavior is unsupported.
 - [ ] Decide whether general Docker socket semantics are supported.
 - [ ] Decide whether GitHub-hosted image parity is a goal or labels merely map
   to Automata profiles.
-- [ ] Decide whether macOS is part of the compatibility promise.
+- [x] Include isolated Apple Silicon macOS 15+ jobs in the compatibility
+  promise; native and Intel macOS execution remain unsupported.
 - [x] Require hostile Windows workflows to wait for the Hyper-V-container
   acceptance gate; no weaker Windows fallback is permitted.
 - [ ] Decide which GitHub UI, administration, and billing surfaces Automata
