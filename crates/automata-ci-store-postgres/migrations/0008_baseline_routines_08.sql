@@ -1084,7 +1084,9 @@ SELECT pg_catalog.sha256(
     )
     || pg_catalog.decode('00', 'hex')
     || inventory.manifest_digest
-    || automata_digest_part(inventory.source_revision)
+    || automata_digest_part(
+        pg_catalog.convert_to(inventory.source_revision, 'UTF8')
+    )
     || inventory.repository_source_digest
     || pg_catalog.int8send(inventory.workflow_count::BIGINT)
     || coalesce((
