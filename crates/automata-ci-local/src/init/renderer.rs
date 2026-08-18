@@ -396,7 +396,7 @@ pub(super) fn render_runner_config(
         ));
     }
     canonical_json(&json!({
-        "schema_version": 7,
+        "schema_version": 8,
         "runner_id": runner_id.to_string(),
         "control_endpoint": "https://runner.automata.invalid:9090/",
         "state": {

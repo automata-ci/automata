@@ -17,8 +17,8 @@ use super::{LocalInitError, LocalInitErrorCode};
 const CATALOG_SCHEMA: &str = "automata.local/release-catalog/v1";
 const SOURCE_SCHEMA: &str = "automata.local/release-catalog-source/v1";
 const LIFECYCLE_RUNTIME_SCHEMA: &str = "automata.local/lifecycle-runtime/v1";
-const DATABASE_MIGRATION_CEILING: u64 = 57;
-const SOURCE_SHA256: &str = "a0a0076c2c0e7a81487ab8121906a7033c0e2fa66636e26f0c58165d1c32e0eb";
+const DATABASE_MIGRATION_CEILING: u64 = 58;
+const SOURCE_SHA256: &str = "88c79a69a874a01c9682947289a3b0fe1b78fa3b6507d6fc1f6cbd05effd423f";
 const CANDIDATE_BASENAME: &str = "automata-service-proxy-candidate-x86_64-unknown-linux-musl.tar";
 const CANDIDATE_PATH: &str = concat!(
     "target/service-proxy-publication/",
@@ -395,7 +395,7 @@ fn validate_lifecycle_runtime(value: &Value) -> Result<(), LocalInitError> {
             .get("database_migration_ceiling")
             .and_then(Value::as_u64)
             != Some(DATABASE_MIGRATION_CEILING)
-        || runtime.get("runner_config_schema").and_then(Value::as_u64) != Some(7)
+        || runtime.get("runner_config_schema").and_then(Value::as_u64) != Some(8)
     {
         return Err(invalid_catalog());
     }
@@ -587,7 +587,7 @@ fn validate_lifecycle_runtime(value: &Value) -> Result<(), LocalInitError> {
         || runner_enroll
             .get("configuration_schema")
             .and_then(Value::as_u64)
-            != Some(7)
+            != Some(8)
         || runner_enroll.get("existing_custody")
             != Some(&serde_json::json!({
                 "current": "success-before-token-network-or-writer-lock",

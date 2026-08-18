@@ -415,7 +415,7 @@
         "log_options": {}
       }
     },
-    "database_migration_ceiling": 57,
+    "database_migration_ceiling": 58,
     "engine_relay": {
       "architecture": "amd64",
       "binding_directory": "/run/automata-engine-binding",
@@ -467,7 +467,7 @@
       "upstream_socket_uid": 0
     },
     "renderer_contract": {
-      "fixture_sha256": "fc65872459cb7a012f78b10ac74ffd8489f591bd0cb14286d2e121304682c430",
+      "fixture_sha256": "c700fdcc5b94f2450be767e2f7b8ca8fad4b724c65b2d5add4cb33058fc6d774",
       "schema": "automata.local/renderer-contract-fixture/v1"
     },
     "results_transit": {
@@ -479,7 +479,7 @@
         "argv": [
           "enroll"
         ],
-        "configuration_schema": 7,
+        "configuration_schema": 8,
         "existing_custody": {
           "current": "success-before-token-network-or-writer-lock",
           "invalid": "fail-closed",
@@ -525,10 +525,10 @@
         "argv": [
           "run"
         ],
-        "configuration_schema": 7
+        "configuration_schema": 8
       }
     },
-    "runner_config_schema": 7,
+    "runner_config_schema": 8,
     "schema": "automata.local/lifecycle-runtime/v1"
   },
   "platform": {

@@ -24,10 +24,10 @@ CATALOG_SCHEMA = "automata.local/release-catalog/v1"
 SOURCE_SCHEMA = "automata.local/release-catalog-source/v1"
 SOURCE_PATH = "images/local-installation/catalog-v1.json"
 PACKAGED_SOURCE_PATH = "crates/automata-ci-local/src/init/catalog-v1.source.json"
-SOURCE_SHA256 = "a0a0076c2c0e7a81487ab8121906a7033c0e2fa66636e26f0c58165d1c32e0eb"
+SOURCE_SHA256 = "88c79a69a874a01c9682947289a3b0fe1b78fa3b6507d6fc1f6cbd05effd423f"
 RENDERER_CONTRACT_FIXTURE_SCHEMA = "automata.local/renderer-contract-fixture/v1"
 RENDERER_CONTRACT_FIXTURE_SHA256 = (
-    "fc65872459cb7a012f78b10ac74ffd8489f591bd0cb14286d2e121304682c430"
+    "c700fdcc5b94f2450be767e2f7b8ca8fad4b724c65b2d5add4cb33058fc6d774"
 )
 CATALOG_PATH = "target/distribution/automata-local-installation-catalog.json"
 PROFILE_MANIFEST_PATH = (
@@ -393,7 +393,7 @@ def require_lifecycle_runtime(value: object) -> dict:
                 "log_options": {},
             },
         },
-        "database_migration_ceiling": 57,
+        "database_migration_ceiling": 58,
         "engine_relay": {
             "architecture": "amd64",
             "binding_directory": "/run/automata-engine-binding",
@@ -451,7 +451,7 @@ def require_lifecycle_runtime(value: object) -> dict:
         "runner_commands": {
             "enroll": {
                 "argv": ["enroll"],
-                "configuration_schema": 7,
+                "configuration_schema": 8,
                 "existing_custody": {
                     "current": "success-before-token-network-or-writer-lock",
                     "invalid": "fail-closed",
@@ -495,10 +495,10 @@ def require_lifecycle_runtime(value: object) -> dict:
             },
             "run": {
                 "argv": ["run"],
-                "configuration_schema": 7,
+                "configuration_schema": 8,
             },
         },
-        "runner_config_schema": 7,
+        "runner_config_schema": 8,
         "schema": "automata.local/lifecycle-runtime/v1",
     }:
         fail("catalog lifecycle runtime contract differs")
