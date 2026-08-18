@@ -606,28 +606,58 @@ impl GithubLogicalJobOrchestrationService {
         lease.before_io(shutdown)?;
         let plan_bytes = match load_object(self.blobs.as_ref(), prepared.plan()).await {
             Ok(bytes) => bytes,
-            Err(error) => return Ok(classify_activation_failure(&error)),
+            Err(error) => {
+                return Ok(report_activation_failure(
+                    "plan_object_load",
+                    prepared.target(),
+                    &error,
+                ));
+            }
         };
         lease.before_io(shutdown)?;
         let event_bytes = match load_object(self.blobs.as_ref(), prepared.event()).await {
             Ok(bytes) => bytes,
-            Err(error) => return Ok(classify_activation_failure(&error)),
+            Err(error) => {
+                return Ok(report_activation_failure(
+                    "event_object_load",
+                    prepared.target(),
+                    &error,
+                ));
+            }
         };
         lease.before_io(shutdown)?;
         let base_bytes = match load_object(self.blobs.as_ref(), prepared.base_context()).await {
             Ok(bytes) => bytes,
-            Err(error) => return Ok(classify_activation_failure(&error)),
+            Err(error) => {
+                return Ok(report_activation_failure(
+                    "base_context_object_load",
+                    prepared.target(),
+                    &error,
+                ));
+            }
         };
         lease.before_io(shutdown)?;
         let prerequisite_bytes =
             match load_object(self.blobs.as_ref(), prepared.prerequisite_context()).await {
                 Ok(bytes) => bytes,
-                Err(error) => return Ok(classify_activation_failure(&error)),
+                Err(error) => {
+                    return Ok(report_activation_failure(
+                        "prerequisite_context_object_load",
+                        prepared.target(),
+                        &error,
+                    ));
+                }
             };
 
         let plan = match decode_plan(&plan_bytes) {
             Ok(plan) => plan,
-            Err(error) => return Ok(classify_activation_failure(&error)),
+            Err(error) => {
+                return Ok(report_activation_failure(
+                    "plan_decode",
+                    prepared.target(),
+                    &error,
+                ));
+            }
         };
         lease.before_io(shutdown)?;
         let permission_ceiling = match self
@@ -646,28 +676,56 @@ impl GithubLogicalJobOrchestrationService {
             return Ok(activation_relational_failure());
         }
         let Ok(validated_plan) = ValidatedLogicalPlan::new(&plan) else {
-            return Ok(activation_payload_failure());
+            return Ok(report_activation_payload_failure(
+                "plan_validation",
+                prepared.target(),
+            ));
         };
         let Ok(logical_job) = validated_plan.job(prepared.logical_key()) else {
-            return Ok(activation_payload_failure());
+            return Ok(report_activation_payload_failure(
+                "logical_job_selection",
+                prepared.target(),
+            ));
         };
         if u16::try_from(logical_job.source_order()).ok() != Some(prepared.source_order()) {
             return Ok(activation_relational_failure());
         }
         let base = match decode_context(&base_bytes, &self.limits) {
             Ok(context) => context,
-            Err(error) => return Ok(classify_activation_failure(&error)),
+            Err(error) => {
+                return Ok(report_activation_failure(
+                    "base_context_decode",
+                    prepared.target(),
+                    &error,
+                ));
+            }
         };
         let prerequisites = match decode_context(&prerequisite_bytes, &self.limits) {
             Ok(context) => context,
-            Err(error) => return Ok(classify_activation_failure(&error)),
+            Err(error) => {
+                return Ok(report_activation_failure(
+                    "prerequisite_context_decode",
+                    prepared.target(),
+                    &error,
+                ));
+            }
         };
         if let Err(error) = validate_split_contexts(&base, &prerequisites) {
-            return Ok(classify_activation_failure(&error));
+            return Ok(report_activation_failure(
+                "context_role_validation",
+                prepared.target(),
+                &error,
+            ));
         }
         let github = match github_activation_context(&plan, prepared.execution(), &event_bytes) {
             Ok(context) => context,
-            Err(error) => return Ok(classify_activation_failure(&error)),
+            Err(error) => {
+                return Ok(report_activation_failure(
+                    "github_context",
+                    prepared.target(),
+                    &error,
+                ));
+            }
         };
         let activation_evaluator = GithubLogicalActivationEvaluator::new(github);
         let activator = LogicalJobActivator::new(activation_evaluator.clone());
@@ -679,7 +737,10 @@ impl GithubLogicalJobOrchestrationService {
             base.secrets(),
             prepared.status(),
         )) else {
-            return Ok(activation_payload_failure());
+            return Ok(report_activation_payload_failure(
+                "logical_job_activation",
+                prepared.target(),
+            ));
         };
         let Ok(profiles) = runtime_profile_catalog(prepared.runtime_policy()) else {
             return Ok(activation_relational_failure());
@@ -691,7 +752,9 @@ impl GithubLogicalJobOrchestrationService {
             {
                 Ok(references) => references,
                 Err(error) => {
-                    return Ok(classify_activation_failure(
+                    return Ok(report_activation_failure(
+                        "action_reference_projection",
+                        prepared.target(),
                         &GithubLogicalJobOrchestrationError::Projection(error),
                     ));
                 }
@@ -717,7 +780,10 @@ impl GithubLogicalJobOrchestrationService {
                     | RuntimeRequirementDiscoveryError::Retryable,
                 ) => return Ok(AutonomousWorkflowExecutionOutcome::Retryable),
                 Err(RuntimeRequirementDiscoveryError::Invalid) => {
-                    return Ok(activation_payload_failure());
+                    return Ok(report_activation_payload_failure(
+                        "runtime_requirement_discovery",
+                        prepared.target(),
+                    ));
                 }
             }
         };
@@ -727,7 +793,10 @@ impl GithubLogicalJobOrchestrationService {
                 &logical_job,
             )
         else {
-            return Ok(activation_payload_failure());
+            return Ok(report_activation_payload_failure(
+                "credential_requirement_discovery",
+                prepared.target(),
+            ));
         };
         let job_references_secret = !credential_requirements.secret_names().is_empty();
         let (event_trust, source_kind) = trust_gate_evidence(prepared.execution().trust_snapshot());
@@ -768,7 +837,11 @@ impl GithubLogicalJobOrchestrationService {
                 Ok(descriptor) => descriptor,
                 Err(SelectedActivationFailure::Lease(error)) => return Err(error),
                 Err(SelectedActivationFailure::Operation(error)) => {
-                    return Ok(classify_activation_failure(&error));
+                    return Ok(report_activation_failure(
+                        "instance_projection",
+                        prepared.target(),
+                        &error,
+                    ));
                 }
             };
             descriptors.push(descriptor);
@@ -1124,6 +1197,34 @@ fn classify_activation_failure(
         | GithubLogicalJobOrchestrationError::PersistenceValue(_)
         | GithubLogicalJobOrchestrationError::Internal => activation_relational_failure(),
     }
+}
+
+fn report_activation_failure(
+    stage: &'static str,
+    target: &LogicalJobOrchestrationTarget,
+    error: &GithubLogicalJobOrchestrationError,
+) -> AutonomousWorkflowExecutionOutcome {
+    tracing::warn!(
+        stage,
+        run_id = %target.run_id(),
+        logical_job_id = ?target.logical_job_id(),
+        %error,
+        "logical workflow activation rejected evidence"
+    );
+    classify_activation_failure(error)
+}
+
+fn report_activation_payload_failure(
+    stage: &'static str,
+    target: &LogicalJobOrchestrationTarget,
+) -> AutonomousWorkflowExecutionOutcome {
+    tracing::warn!(
+        stage,
+        run_id = %target.run_id(),
+        logical_job_id = ?target.logical_job_id(),
+        "logical workflow activation rejected payload evidence"
+    );
+    activation_payload_failure()
 }
 
 fn classify_activation_store_failure(
