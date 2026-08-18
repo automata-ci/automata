@@ -1234,6 +1234,8 @@ fn bootstrap_runner_service(spec: &DesiredSpec) -> Value {
             "file:/run/automata-bootstrap/request.json",
             "--runner-enrollment-token-source",
             "file:/run/automata-bootstrap/runner-enrollment-token",
+            "--runner-enrollment-token-target",
+            "file:/run/automata-bootstrap/active-runner-enrollment-token",
             "--receipt-target",
             "file:/run/automata-bootstrap/receipt.json",
         ]
@@ -1314,7 +1316,7 @@ fn runner_enroll_service(spec: &DesiredSpec) -> Value {
             "--name",
             "local-runner",
             "--token-source",
-            "file:/run/automata-bootstrap/runner-enrollment-token",
+            "file:/run/automata-bootstrap/active-runner-enrollment-token",
         ]
         .into_iter()
         .map(ToOwned::to_owned)
@@ -1378,7 +1380,13 @@ fn runner_service(spec: &DesiredSpec) -> Value {
         &mut service,
         "healthcheck",
         json!({
-            "test": ["CMD", RUNNER_BINARY, crate::LOCAL_RUNNER_READY_COMMAND],
+            "test": [
+                "CMD",
+                RUNNER_BINARY,
+                crate::LOCAL_RUNNER_READY_COMMAND,
+                "--config",
+                "/run/automata-runner-config/runner.json"
+            ],
             "interval": "2s",
             "timeout": "5s",
             "retries": 30,
@@ -1798,7 +1806,9 @@ mod tests {
             serde_json::json!([
                 "CMD",
                 "/usr/local/bin/automata-runner",
-                "__local-check-ready"
+                "__local-check-ready",
+                "--config",
+                "/run/automata-runner-config/runner.json"
             ])
         );
     }

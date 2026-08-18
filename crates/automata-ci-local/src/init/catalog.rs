@@ -16,7 +16,7 @@ use super::{LocalInitError, LocalInitErrorCode};
 
 const CATALOG_SCHEMA: &str = "automata.local/release-catalog/v1";
 const SOURCE_SCHEMA: &str = "automata.local/release-catalog-source/v1";
-const SOURCE_SHA256: &str = "a6233e0d9be9ecd76754b630737ce4153af22e6dcb369976a6096e8c2811cead";
+const SOURCE_SHA256: &str = "bfb18e708b75259b05ef6a7e1f3cec79d8acec357c3f5f467a7a1e2a21ba14be";
 const CANDIDATE_BASENAME: &str = "automata-service-proxy-candidate-x86_64-unknown-linux-musl.tar";
 const CANDIDATE_PATH: &str = concat!(
     "target/service-proxy-publication/",
@@ -427,11 +427,18 @@ fn validate_lifecycle_runtime(value: &Value) -> Result<(), LocalInitError> {
         || compose.get("named_volume_nocopy").and_then(Value::as_bool) != Some(true)
         || compose.get("project_directory").and_then(Value::as_str)
             != Some(super::compose::COMPOSE_PROJECT_DIRECTORY)
-        || runner_ready.get("argv") != Some(&serde_json::json!([crate::LOCAL_RUNNER_READY_COMMAND]))
+        || runner_ready.get("argv")
+            != Some(&serde_json::json!([
+                crate::LOCAL_RUNNER_READY_COMMAND,
+                "--config",
+                "/run/automata-runner-config/runner.json"
+            ]))
         || runner_ready.get("healthcheck_argv")
             != Some(&serde_json::json!([
                 super::renderer::RUNNER_BINARY,
-                crate::LOCAL_RUNNER_READY_COMMAND
+                crate::LOCAL_RUNNER_READY_COMMAND,
+                "--config",
+                "/run/automata-runner-config/runner.json"
             ]))
         || runner_ready.get("listen").and_then(Value::as_str)
             != Some(crate::LOCAL_RUNNER_READY_LISTEN)

@@ -334,7 +334,9 @@ class LocalInstallationCatalogContract(unittest.TestCase):
             [
                 rust_string_constant(
                     "crates/automata-ci-local/src/lib.rs", "LOCAL_RUNNER_READY_COMMAND"
-                )
+                ),
+                "--config",
+                "/run/automata-runner-config/runner.json",
             ],
         )
         self.assertEqual(
@@ -346,6 +348,8 @@ class LocalInstallationCatalogContract(unittest.TestCase):
                 rust_string_constant(
                     "crates/automata-ci-local/src/lib.rs", "LOCAL_RUNNER_READY_COMMAND",
                 ),
+                "--config",
+                "/run/automata-runner-config/runner.json",
             ],
         )
         self.assertEqual(

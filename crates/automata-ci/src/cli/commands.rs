@@ -141,9 +141,12 @@ pub struct InternalBootstrapRunnerArgs {
     /// Owner-only file containing one canonical current request document.
     #[arg(long, value_name = "file:/ABSOLUTE/PATH")]
     pub request_source: InternalBootstrapFileSource,
-    /// Owner-only file containing one canonical runner-enrollment token scalar.
+    /// Owner-only immutable seed that is also the generation-zero token.
     #[arg(long, value_name = "file:/ABSOLUTE/PATH")]
     pub runner_enrollment_token_source: InternalBootstrapFileSource,
+    /// Owner-only active one-use token file reconciled by this operation.
+    #[arg(long, value_name = "file:/ABSOLUTE/PATH")]
+    pub runner_enrollment_token_target: InternalBootstrapFileSource,
     /// Owner-only canonical receipt file replaced durably by this operation.
     #[arg(long, value_name = "file:/ABSOLUTE/PATH")]
     pub receipt_target: InternalBootstrapFileSource,

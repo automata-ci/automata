@@ -427,11 +427,15 @@
       },
       "local_check_ready": {
         "argv": [
-          "__local-check-ready"
+          "__local-check-ready",
+          "--config",
+          "/run/automata-runner-config/runner.json"
         ],
         "healthcheck_argv": [
           "/usr/local/bin/automata-runner",
-          "__local-check-ready"
+          "__local-check-ready",
+          "--config",
+          "/run/automata-runner-config/runner.json"
         ],
         "listen": "127.0.0.1:9464",
         "maximum_response_bytes": 262144,

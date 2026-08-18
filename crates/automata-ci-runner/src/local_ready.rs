@@ -16,7 +16,9 @@ use automata_ci_local::{
 
 const TIMEOUT: Duration = Duration::from_secs(TIMEOUT_SECONDS);
 
-pub(crate) fn check() -> Result<()> {
+pub(crate) fn check(config_path: &std::path::Path) -> Result<()> {
+    let config = crate::product::RunnerProductConfig::load(config_path)?;
+    crate::enrollment::observe_current_custody(&config)?;
     let address = LISTEN.parse()?;
     let mut stream = TcpStream::connect_timeout(&address, TIMEOUT)?;
     stream.set_read_timeout(Some(TIMEOUT))?;

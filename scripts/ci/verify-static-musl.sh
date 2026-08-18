@@ -117,7 +117,7 @@ verify_lifecycle_commands() {
   verify_command_help "$automata" internal local bootstrap-runner
   verify_command_help "$automata" internal object-store ensure-bucket
   verify_command_help "$runner" enroll
-  verify_command_help "$runner" __local-check-ready
+  verify_command_help "$runner" __local-check-ready --config /run/automata-runner-config/runner.json
   verify_command_help "$runner" run
   if "$automata" internal local engine-relay --help >/dev/null 2>&1; then
     die "automata still accepts the retired internal local engine-relay command"
@@ -207,7 +207,7 @@ container_command_help /automata internal local check-ready
 container_command_help /automata internal local bootstrap-runner
 container_command_help /automata internal object-store ensure-bucket
 container_command_help /automata-runner enroll
-container_command_help /automata-runner __local-check-ready
+container_command_help /automata-runner __local-check-ready --config /run/automata-runner-config/runner.json
 container_command_help /automata-runner run
 if "$runtime" run --rm --entrypoint /automata "$image_tag" \
   internal local engine-relay --help >/dev/null 2>&1; then

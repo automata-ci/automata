@@ -388,6 +388,12 @@ CREATE TRIGGER installation_state_lifecycle_guard
 ALTER TABLE runner_enrollment_tokens
     ADD COLUMN issuer_kind text COLLATE pg_catalog."C",
     ADD COLUMN installation_authority_sha256 bytea,
+    ADD COLUMN installation_runner_id uuid,
+    ADD COLUMN installation_generation bigint,
+    ADD COLUMN installation_predecessor_enrollment_id uuid,
+    ADD COLUMN redeem_certificate_leaf_sha256 bytea,
+    ADD COLUMN redeem_predecessor_certificate_leaf_sha256 bytea,
+    ADD COLUMN redeem_predecessor_certificate_expires_at_seconds bigint,
     ADD COLUMN last_refreshed_at_ms bigint,
     DROP CONSTRAINT runner_enrollment_tokens_lifetime,
     DROP CONSTRAINT runner_enrollment_tokens_consumption_shape,
@@ -418,6 +424,9 @@ ALTER TABLE runner_enrollment_tokens
             AND issued_by_session_id IS NOT NULL
             AND issued_authorization_revision IS NOT NULL
             AND installation_authority_sha256 IS NULL
+            AND installation_runner_id IS NULL
+            AND installation_generation IS NULL
+            AND installation_predecessor_enrollment_id IS NULL
             AND last_refreshed_at_ms IS NULL
         )
         OR
@@ -427,6 +436,23 @@ ALTER TABLE runner_enrollment_tokens
             AND issued_by_session_id IS NULL
             AND issued_authorization_revision IS NULL
             AND installation_authority_sha256 IS NOT NULL
+            AND installation_runner_id IS NOT NULL
+            AND installation_runner_id <>
+                '00000000-0000-0000-0000-000000000000'::uuid
+            AND installation_generation >= 0
+            AND (
+                (
+                    installation_generation = 0
+                    AND installation_predecessor_enrollment_id IS NULL
+                )
+                OR
+                (
+                    installation_generation > 0
+                    AND installation_predecessor_enrollment_id IS NOT NULL
+                    AND installation_predecessor_enrollment_id <>
+                        '00000000-0000-0000-0000-000000000000'::uuid
+                )
+            )
         )
     ) IS TRUE),
     ADD CONSTRAINT runner_enrollment_tokens_active_lifetime CHECK ((
@@ -457,6 +483,9 @@ ALTER TABLE runner_enrollment_tokens
             AND redeem_operation_id IS NULL
             AND redeem_request_sha256 IS NULL
             AND redeem_response IS NULL
+            AND redeem_certificate_leaf_sha256 IS NULL
+            AND redeem_predecessor_certificate_leaf_sha256 IS NULL
+            AND redeem_predecessor_certificate_expires_at_seconds IS NULL
             AND redeem_certificate_expires_at_seconds IS NULL
         )
         OR
@@ -465,9 +494,48 @@ ALTER TABLE runner_enrollment_tokens
                 COALESCE(last_refreshed_at_ms, issued_at_ms)
             AND consumed_at_ms < expires_at_ms
             AND consumed_runner_id IS NOT NULL
+            AND (
+                issuer_kind = 'human'
+                OR consumed_runner_id = installation_runner_id
+            )
             AND redeem_operation_id IS NOT NULL
             AND octet_length(redeem_request_sha256) = 32
             AND octet_length(redeem_response) BETWEEN 1 AND 524288
+            AND (
+                (
+                    issuer_kind = 'human'
+                    AND redeem_certificate_leaf_sha256 IS NULL
+                )
+                OR (
+                    issuer_kind = 'installation_bootstrap'
+                    AND octet_length(redeem_certificate_leaf_sha256) = 32
+                    AND redeem_certificate_leaf_sha256 <>
+                        decode(repeat('00', 32), 'hex')
+                )
+            )
+            AND (
+                (
+                    issuer_kind = 'installation_bootstrap'
+                    AND installation_generation > 0
+                    AND octet_length(
+                        redeem_predecessor_certificate_leaf_sha256
+                    ) = 32
+                    AND redeem_predecessor_certificate_leaf_sha256 <>
+                        decode(repeat('00', 32), 'hex')
+                    AND redeem_predecessor_certificate_expires_at_seconds > 0
+                    AND redeem_predecessor_certificate_expires_at_seconds <=
+                        consumed_at_ms / 1000
+                )
+                OR
+                (
+                    (
+                        issuer_kind = 'human'
+                        OR installation_generation = 0
+                    )
+                    AND redeem_predecessor_certificate_leaf_sha256 IS NULL
+                    AND redeem_predecessor_certificate_expires_at_seconds IS NULL
+                )
+            )
             AND (
                 redeem_certificate_expires_at_seconds
                 - consumed_at_ms / 1000
@@ -479,7 +547,56 @@ ALTER TABLE runner_enrollment_tokens
         REFERENCES installation_state(
             configured_tenant_id,
             deployment_authority_sha256
-        ) ON DELETE RESTRICT;
+        ) ON DELETE RESTRICT,
+    ADD CONSTRAINT runner_enrollment_tokens_installation_predecessor_fkey
+        FOREIGN KEY (installation_predecessor_enrollment_id)
+        REFERENCES runner_enrollment_tokens(id) ON DELETE RESTRICT,
+    ADD CONSTRAINT runner_enrollment_tokens_installation_generation_unique
+        UNIQUE (
+            tenant_id,
+            installation_authority_sha256,
+            installation_runner_id,
+            installation_generation
+        );
+
+CREATE FUNCTION automata_runner_enrollment_installation_generation_exact()
+    RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF NEW.issuer_kind = 'installation_bootstrap'
+       AND NEW.installation_generation > 0
+       AND NOT EXISTS (
+            SELECT 1
+            FROM runner_enrollment_tokens AS predecessor
+            WHERE predecessor.id =
+                    NEW.installation_predecessor_enrollment_id
+              AND predecessor.tenant_id = NEW.tenant_id
+              AND predecessor.issuer_kind = 'installation_bootstrap'
+              AND predecessor.installation_authority_sha256 =
+                    NEW.installation_authority_sha256
+              AND predecessor.installation_runner_id =
+                    NEW.installation_runner_id
+              AND predecessor.installation_generation =
+                    NEW.installation_generation - 1
+              AND predecessor.consumed_at_ms IS NOT NULL
+              AND predecessor.consumed_runner_id =
+                    NEW.installation_runner_id
+       )
+    THEN
+        RAISE EXCEPTION 'installation runner enrollment generation lacks its exact consumed predecessor'
+            USING ERRCODE = 'integrity_constraint_violation',
+                  CONSTRAINT =
+                    'runner_enrollment_tokens_installation_generation_exact';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER runner_enrollment_tokens_installation_generation_exact
+    BEFORE INSERT ON runner_enrollment_tokens
+    FOR EACH ROW EXECUTE FUNCTION
+        automata_runner_enrollment_installation_generation_exact();
 
 CREATE OR REPLACE FUNCTION automata_runner_enrollment_token_consume_once()
     RETURNS trigger
@@ -500,6 +617,9 @@ BEGIN
        OR NEW.issued_by_session_id IS DISTINCT FROM OLD.issued_by_session_id
        OR NEW.issued_authorization_revision IS DISTINCT FROM OLD.issued_authorization_revision
        OR NEW.installation_authority_sha256 IS DISTINCT FROM OLD.installation_authority_sha256
+       OR NEW.installation_runner_id IS DISTINCT FROM OLD.installation_runner_id
+       OR NEW.installation_generation IS DISTINCT FROM OLD.installation_generation
+       OR NEW.installation_predecessor_enrollment_id IS DISTINCT FROM OLD.installation_predecessor_enrollment_id
        OR NEW.issued_at_ms IS DISTINCT FROM OLD.issued_at_ms
        OR (
            refreshing
@@ -511,6 +631,9 @@ BEGIN
                AND NEW.redeem_operation_id IS NULL
                AND NEW.redeem_request_sha256 IS NULL
                AND NEW.redeem_response IS NULL
+               AND NEW.redeem_certificate_leaf_sha256 IS NULL
+               AND NEW.redeem_predecessor_certificate_leaf_sha256 IS NULL
+               AND NEW.redeem_predecessor_certificate_expires_at_seconds IS NULL
                AND NEW.redeem_certificate_expires_at_seconds IS NULL
                AND OLD.expires_at_ms <=
                    floor(
@@ -533,6 +656,9 @@ BEGIN
            OR NEW.redeem_operation_id IS DISTINCT FROM OLD.redeem_operation_id
            OR NEW.redeem_request_sha256 IS DISTINCT FROM OLD.redeem_request_sha256
            OR NEW.redeem_response IS DISTINCT FROM OLD.redeem_response
+           OR NEW.redeem_certificate_leaf_sha256 IS DISTINCT FROM OLD.redeem_certificate_leaf_sha256
+           OR NEW.redeem_predecessor_certificate_leaf_sha256 IS DISTINCT FROM OLD.redeem_predecessor_certificate_leaf_sha256
+           OR NEW.redeem_predecessor_certificate_expires_at_seconds IS DISTINCT FROM OLD.redeem_predecessor_certificate_expires_at_seconds
            OR NEW.redeem_certificate_expires_at_seconds IS DISTINCT FROM OLD.redeem_certificate_expires_at_seconds
        )) THEN
         RAISE EXCEPTION 'runner enrollment token authority is immutable and consumption is write-once'

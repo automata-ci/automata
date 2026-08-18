@@ -13,8 +13,9 @@ use automata_ci_auth_postgres::{
     PostgresInstallationAuthorityRepository, PostgresRunnerEnrollmentRepository,
     management::{
         EnsureInstallationBootstrapRunnerEnrollmentToken,
-        INSTALLATION_BOOTSTRAP_ENROLLMENT_TOKEN_LIFETIME_MS,
-        InstallationBootstrapRunnerEnrollmentTokenOutcome, RunnerEnrollmentTokenRecord,
+        INSTALLATION_BOOTSTRAP_ENROLLMENT_TOKEN_LIFETIME_MS, InstallationBootstrapRecoveryToken,
+        InstallationBootstrapRequestError, InstallationBootstrapRunnerEnrollmentTokenOutcome,
+        InstallationBootstrapRunnerEnrollmentTokenRecord,
     },
 };
 use automata_ci_core::{RunnerGroup, Sha256Digest};
@@ -22,7 +23,9 @@ use automata_ci_store_postgres::{
     MAX_POSTGRES_PRIVATE_CA_PEM_BYTES, PostgresConnectionConfig, PostgresStore,
     PostgresTransportSecurity,
 };
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -41,6 +44,8 @@ const CONNECT_DEADLINE: Duration = Duration::from_secs(30);
 const MIGRATION_DEADLINE: Duration = Duration::from_mins(2);
 const TRANSACTION_DEADLINE: Duration = Duration::from_secs(30);
 const TOKEN_LIFETIME_SECONDS: u64 = 60 * 60;
+const RECOVERY_TOKEN_DOMAIN: &[u8] = b"automata.local/runner-recovery-token/v1\0";
+const RECOVERY_ENROLLMENT_ID_DOMAIN: &[u8] = b"automata.local/runner-recovery-enrollment-id/v1\0";
 
 pub(super) async fn execute(args: &InternalBootstrapRunnerArgs) -> Result<()> {
     let prepared = PreparedBootstrapRunner::load(args)?;
@@ -63,7 +68,11 @@ pub(super) async fn execute(args: &InternalBootstrapRunnerArgs) -> Result<()> {
         .map_err(|_| BootstrapRunnerError::DatabaseMigration)?;
 
     let result = bootstrap_runner(&store, prepared.operation, TRANSACTION_DEADLINE).await;
-    finalize_bootstrap(&args.receipt_target, result)?;
+    finalize_bootstrap(
+        &args.runner_enrollment_token_target,
+        &args.receipt_target,
+        result,
+    )?;
     Ok(())
 }
 
@@ -74,6 +83,7 @@ struct BootstrapRunnerRequest {
     bootstrap_operation_id: Uuid,
     tenant: InstallationTenant,
     installation_authority_source_sha256: Sha256Digest,
+    runner_id: Uuid,
     enrollment_id: Uuid,
     runner_group: RunnerGroup,
     token_lifetime_seconds: u64,
@@ -87,6 +97,7 @@ impl fmt::Debug for BootstrapRunnerRequest {
             .field("bootstrap_operation_id", &self.bootstrap_operation_id)
             .field("tenant", &self.tenant)
             .field("installation_authority_source_sha256", &"[redacted]")
+            .field("runner_id", &self.runner_id)
             .field("enrollment_id", &self.enrollment_id)
             .field("runner_group", &self.runner_group)
             .field("token_lifetime_seconds", &self.token_lifetime_seconds)
@@ -106,7 +117,12 @@ impl PreparedBootstrapRunner {
             || !args.database_private_ca_source.is_valid()
             || !args.request_source.is_valid()
             || !args.runner_enrollment_token_source.is_valid()
+            || !args.runner_enrollment_token_target.is_valid()
             || !args.receipt_target.is_valid()
+            || args.runner_enrollment_token_source.path()
+                == args.runner_enrollment_token_target.path()
+            || args.runner_enrollment_token_source.path() == args.receipt_target.path()
+            || args.runner_enrollment_token_target.path() == args.receipt_target.path()
         {
             return Err(BootstrapRunnerError::InvalidInput);
         }
@@ -125,14 +141,12 @@ impl PreparedBootstrapRunner {
             .map_err(|_| BootstrapRunnerError::InvalidInput)?;
         let token = RunnerEnrollmentToken::from_secret(secret)
             .map_err(|_| BootstrapRunnerError::InvalidInput)?;
-        let token_sha256 = token.digest();
-        drop(token);
         Ok(Self {
             database_url,
             database_private_ca,
             operation: BootstrapRunnerOperation {
                 request,
-                token_sha256,
+                token_seed: token,
             },
         })
     }
@@ -151,7 +165,7 @@ impl fmt::Debug for PreparedBootstrapRunner {
 
 struct BootstrapRunnerOperation {
     request: BootstrapRunnerRequest,
-    token_sha256: [u8; 32],
+    token_seed: RunnerEnrollmentToken,
 }
 
 impl fmt::Debug for BootstrapRunnerOperation {
@@ -159,31 +173,65 @@ impl fmt::Debug for BootstrapRunnerOperation {
         formatter
             .debug_struct("BootstrapRunnerOperation")
             .field("request", &self.request)
-            .field("token_sha256", &"[redacted]")
+            .field("token_seed", &"[redacted]")
             .finish()
     }
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Eq, PartialEq)]
 enum BootstrapResult {
     Ready {
         bootstrap_operation_id: Uuid,
-        record: RunnerEnrollmentTokenRecord,
+        runner_id: Uuid,
+        record: InstallationBootstrapRunnerEnrollmentTokenRecord,
+        active_token: Zeroizing<String>,
+        predecessor_token: Option<Zeroizing<String>>,
         receipt_update: ReceiptUpdate,
     },
+}
+
+impl fmt::Debug for BootstrapResult {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Ready {
+                bootstrap_operation_id,
+                runner_id,
+                record,
+                active_token: _,
+                predecessor_token: _,
+                receipt_update,
+            } => formatter
+                .debug_struct("BootstrapResult::Ready")
+                .field("bootstrap_operation_id", bootstrap_operation_id)
+                .field("runner_id", runner_id)
+                .field("record", record)
+                .field("active_token", &"[redacted]")
+                .field("predecessor_token", &"[redacted]")
+                .field("receipt_update", receipt_update)
+                .finish(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ReceiptUpdate {
     EnsureExact,
-    RefreshExpiration,
+    Reconcile {
+        predecessor: Option<InstallationBootstrapRecoveryToken>,
+    },
+    AdvanceGeneration {
+        predecessor: InstallationBootstrapRecoveryToken,
+    },
 }
 
 #[derive(Debug, Eq, PartialEq, Serialize)]
 struct BootstrapReceipt<'a> {
     schema: &'static str,
     bootstrap_operation_id: Uuid,
+    runner_id: Uuid,
     enrollment_id: Uuid,
+    generation: u64,
+    token_sha256: Sha256Digest,
     runner_group: &'a str,
     status: &'static str,
     expires_at_ms: i64,
@@ -194,7 +242,10 @@ struct BootstrapReceipt<'a> {
 struct StoredBootstrapReceipt {
     schema: String,
     bootstrap_operation_id: Uuid,
+    runner_id: Uuid,
     enrollment_id: Uuid,
+    generation: u64,
+    token_sha256: Sha256Digest,
     runner_group: String,
     status: String,
     expires_at_ms: i64,
@@ -236,6 +287,7 @@ fn decode_canonical_request(
     if request.schema != REQUEST_SCHEMA
         || request.bootstrap_operation_id.is_nil()
         || request.installation_authority_source_sha256.as_bytes() == &[0; 32]
+        || request.runner_id.is_nil()
         || request.enrollment_id.is_nil()
         || request.token_lifetime_seconds != TOKEN_LIFETIME_SECONDS
         || request.tenant.display_name() != "Local Automata"
@@ -258,14 +310,18 @@ async fn bootstrap_runner(
     operation: BootstrapRunnerOperation,
     transaction_deadline: Duration,
 ) -> Result<BootstrapResult, BootstrapRunnerError> {
-    let bootstrap_operation_id = operation.request.bootstrap_operation_id;
+    let BootstrapRunnerOperation {
+        request,
+        token_seed,
+    } = operation;
+    let bootstrap_operation_id = request.bootstrap_operation_id;
+    let expected_runner_id = request.runner_id;
+    let expected_enrollment_id = request.enrollment_id;
+    let expected_runner_group = request.runner_group.as_str().to_owned();
     let installation_request = ConfigureDeploymentInstallation::new(
-        operation
-            .request
-            .installation_authority_source_sha256
-            .into_bytes(),
+        request.installation_authority_source_sha256.into_bytes(),
         bootstrap_operation_id,
-        operation.request.tenant,
+        request.tenant,
     )
     .map_err(|_| BootstrapRunnerError::InvalidInput)?;
     let installation = tokio::time::timeout(
@@ -284,43 +340,132 @@ async fn bootstrap_runner(
         }
     };
 
-    let expected_enrollment_id = operation.request.enrollment_id;
-    let expected_runner_group = operation.request.runner_group.as_str().to_owned();
     let enrollment_request = EnsureInstallationBootstrapRunnerEnrollmentToken::new(
         proof,
+        expected_runner_id,
         expected_enrollment_id,
-        operation.token_sha256,
-        operation.request.runner_group,
+        token_seed.digest(),
+        request.runner_group,
         INSTALLATION_BOOTSTRAP_ENROLLMENT_TOKEN_LIFETIME_MS,
     )
     .map_err(|_| BootstrapRunnerError::InvalidInput)?;
     let enrollment = tokio::time::timeout(
         transaction_deadline,
         PostgresRunnerEnrollmentRepository::new(store.postgres_pool().clone())
-            .ensure_installation_bootstrap_runner_enrollment_token(enrollment_request),
+            .ensure_installation_bootstrap_runner_enrollment_token(
+                enrollment_request,
+                |generation| {
+                    derive_recovery_token(&token_seed, generation)
+                        .map(|derived| derived.identity)
+                        .map_err(|_| InstallationBootstrapRequestError)
+                },
+            ),
     )
     .await
     .map_err(|_| BootstrapRunnerError::TransactionOutcomeUncertain)?
     .map_err(map_management_repository_error)?;
-    let (record, receipt_update) = match enrollment {
-        InstallationBootstrapRunnerEnrollmentTokenOutcome::Applied(record) => {
-            (record, ReceiptUpdate::EnsureExact)
-        }
+    let (record, applied) = match enrollment {
+        InstallationBootstrapRunnerEnrollmentTokenOutcome::Applied(record) => (record, true),
         InstallationBootstrapRunnerEnrollmentTokenOutcome::Replayed(record)
-        | InstallationBootstrapRunnerEnrollmentTokenOutcome::Refreshed(record)
-        | InstallationBootstrapRunnerEnrollmentTokenOutcome::Consumed(record) => {
-            (record, ReceiptUpdate::RefreshExpiration)
+        | InstallationBootstrapRunnerEnrollmentTokenOutcome::Refreshed(record) => {
+            // A database replay can be the generation inserted immediately
+            // before a crash that left the local receipt on its predecessor.
+            (record, false)
         }
         InstallationBootstrapRunnerEnrollmentTokenOutcome::Conflict => {
             return Err(BootstrapRunnerError::EnrollmentConflict);
         }
     };
-    validate_record(&record, expected_enrollment_id, &expected_runner_group)?;
+    validate_record(
+        &record,
+        expected_enrollment_id,
+        &expected_runner_group,
+        &token_seed,
+    )?;
+    let predecessor = record
+        .generation
+        .checked_sub(1)
+        .map(|generation| {
+            installation_token_identity(&token_seed, expected_enrollment_id, generation)
+        })
+        .transpose()?;
+    let receipt_update = match (applied, predecessor) {
+        (true, None) => ReceiptUpdate::EnsureExact,
+        (true, Some(predecessor)) => ReceiptUpdate::AdvanceGeneration { predecessor },
+        (false, predecessor) => ReceiptUpdate::Reconcile { predecessor },
+    };
+    let active_token = if record.generation == 0 {
+        Zeroizing::new(token_seed.expose_secret().to_owned())
+    } else {
+        derive_recovery_token(&token_seed, record.generation)?.token
+    };
+    let predecessor_token = match record.generation {
+        0 => None,
+        1 => Some(Zeroizing::new(token_seed.expose_secret().to_owned())),
+        generation => Some(derive_recovery_token(&token_seed, generation - 1)?.token),
+    };
     Ok(BootstrapResult::Ready {
         bootstrap_operation_id,
+        runner_id: expected_runner_id,
         record,
+        active_token,
+        predecessor_token,
         receipt_update,
     })
+}
+
+struct DerivedRecoveryToken {
+    identity: InstallationBootstrapRecoveryToken,
+    token: Zeroizing<String>,
+}
+
+fn derive_recovery_token(
+    seed: &RunnerEnrollmentToken,
+    generation: u64,
+) -> Result<DerivedRecoveryToken, BootstrapRunnerError> {
+    if generation == 0 {
+        return Err(BootstrapRunnerError::InvalidInput);
+    }
+    let mut token_hasher = Sha256::new();
+    token_hasher.update(RECOVERY_TOKEN_DOMAIN);
+    token_hasher.update(seed.expose_secret().as_bytes());
+    token_hasher.update(generation.to_be_bytes());
+    let entropy: [u8; 32] = token_hasher.finalize().into();
+    let mut token_text = Zeroizing::new(String::from("atm_re_"));
+    URL_SAFE_NO_PAD.encode_string(entropy, &mut token_text);
+    let token = RunnerEnrollmentToken::from_secret(
+        SecretString::new(token_text.as_str().to_owned())
+            .map_err(|_| BootstrapRunnerError::InvalidInput)?,
+    )
+    .map_err(|_| BootstrapRunnerError::InvalidInput)?;
+
+    let mut id_hasher = Sha256::new();
+    id_hasher.update(RECOVERY_ENROLLMENT_ID_DOMAIN);
+    id_hasher.update(seed.expose_secret().as_bytes());
+    id_hasher.update(generation.to_be_bytes());
+    let id_material: [u8; 32] = id_hasher.finalize().into();
+    let mut id =
+        <[u8; 16]>::try_from(&id_material[..16]).map_err(|_| BootstrapRunnerError::InvalidInput)?;
+    id[6] = (id[6] & 0x0f) | 0x40;
+    id[8] = (id[8] & 0x3f) | 0x80;
+    let identity = InstallationBootstrapRecoveryToken::new(Uuid::from_bytes(id), token.digest())
+        .map_err(|_| BootstrapRunnerError::InvalidInput)?;
+    Ok(DerivedRecoveryToken {
+        identity,
+        token: token_text,
+    })
+}
+
+fn installation_token_identity(
+    seed: &RunnerEnrollmentToken,
+    seed_enrollment_id: Uuid,
+    generation: u64,
+) -> Result<InstallationBootstrapRecoveryToken, BootstrapRunnerError> {
+    if generation == 0 {
+        return InstallationBootstrapRecoveryToken::new(seed_enrollment_id, seed.digest())
+            .map_err(|_| BootstrapRunnerError::InvalidInput);
+    }
+    Ok(derive_recovery_token(seed, generation)?.identity)
 }
 
 fn map_installation_repository_error(error: InstallationRepositoryError) -> BootstrapRunnerError {
@@ -351,11 +496,15 @@ fn map_management_repository_error(error: ManagementRepositoryError) -> Bootstra
 }
 
 fn validate_record(
-    record: &RunnerEnrollmentTokenRecord,
+    record: &InstallationBootstrapRunnerEnrollmentTokenRecord,
     expected_enrollment_id: Uuid,
     expected_runner_group: &str,
+    token_seed: &RunnerEnrollmentToken,
 ) -> Result<(), BootstrapRunnerError> {
-    if record.enrollment_id != expected_enrollment_id
+    let expected_id =
+        installation_token_identity(token_seed, expected_enrollment_id, record.generation)?
+            .enrollment_id();
+    if record.enrollment_id != expected_id
         || record.runner_group_id.is_nil()
         || record.runner_group != expected_runner_group
         || record.expires_at_ms <= 0
@@ -366,26 +515,45 @@ fn validate_record(
 }
 
 fn finalize_bootstrap(
-    target: &InternalBootstrapFileSource,
+    token_target: &InternalBootstrapFileSource,
+    receipt_target: &InternalBootstrapFileSource,
     result: Result<BootstrapResult, BootstrapRunnerError>,
 ) -> Result<(), BootstrapRunnerError> {
     match result? {
         BootstrapResult::Ready {
             bootstrap_operation_id,
+            runner_id,
             record,
+            active_token,
+            predecessor_token,
             receipt_update,
-        } => persist_receipt(
-            target,
-            &BootstrapReceipt {
-                schema: RECEIPT_SCHEMA,
-                bootstrap_operation_id,
-                enrollment_id: record.enrollment_id,
-                runner_group: &record.runner_group,
-                status: "ready",
-                expires_at_ms: record.expires_at_ms,
-            },
-            receipt_update,
-        ),
+        } => {
+            let active = RunnerEnrollmentToken::from_secret(
+                SecretString::new(active_token.as_str().to_owned())
+                    .map_err(|_| BootstrapRunnerError::Output)?,
+            )
+            .map_err(|_| BootstrapRunnerError::Output)?;
+            persist_active_token(
+                token_target,
+                active_token.as_bytes(),
+                predecessor_token.as_ref().map(|value| value.as_bytes()),
+            )?;
+            persist_receipt(
+                receipt_target,
+                &BootstrapReceipt {
+                    schema: RECEIPT_SCHEMA,
+                    bootstrap_operation_id,
+                    runner_id,
+                    enrollment_id: record.enrollment_id,
+                    generation: record.generation,
+                    token_sha256: Sha256Digest::from_bytes(active.digest()),
+                    runner_group: &record.runner_group,
+                    status: "ready",
+                    expires_at_ms: record.expires_at_ms,
+                },
+                receipt_update,
+            )
+        }
     }
 }
 
@@ -403,6 +571,137 @@ fn persist_receipt(
     )
 }
 
+#[cfg(unix)]
+fn persist_active_token(
+    target: &InternalBootstrapFileSource,
+    bytes: &[u8],
+    predecessor: Option<&[u8]>,
+) -> Result<(), BootstrapRunnerError> {
+    use rustix::fs::{
+        FlockOperation, Mode, OFlags, RenameFlags, fchmod, flock, fsync, openat, renameat,
+        renameat_with,
+    };
+    use std::{
+        fs::File,
+        io::{Read as _, Seek as _, SeekFrom, Write as _},
+    };
+
+    let token_text = std::str::from_utf8(bytes).map_err(|_| BootstrapRunnerError::Output)?;
+    let _token = RunnerEnrollmentToken::from_secret(
+        SecretString::new(token_text.to_owned()).map_err(|_| BootstrapRunnerError::Output)?,
+    )
+    .map_err(|_| BootstrapRunnerError::Output)?;
+    if let Some(predecessor) = predecessor {
+        let predecessor_text =
+            std::str::from_utf8(predecessor).map_err(|_| BootstrapRunnerError::Output)?;
+        let _predecessor = RunnerEnrollmentToken::from_secret(
+            SecretString::new(predecessor_text.to_owned())
+                .map_err(|_| BootstrapRunnerError::Output)?,
+        )
+        .map_err(|_| BootstrapRunnerError::Output)?;
+        if predecessor == bytes {
+            return Err(BootstrapRunnerError::Output);
+        }
+    }
+    let path = target.path().ok_or(BootstrapRunnerError::InvalidInput)?;
+    let (parent, target_name) = open_private_parent(path)?;
+    let target_text = target_name.to_str().ok_or(BootstrapRunnerError::Output)?;
+    let temporary = format!(".{target_text}.automata-write");
+    let mut replace_existing = false;
+    let target_lock = match openat(
+        &parent,
+        &target_name,
+        OFlags::RDWR | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+        Mode::empty(),
+    ) {
+        Ok(existing) => {
+            verify_private_regular(&existing)?;
+            flock(&existing, FlockOperation::NonBlockingLockExclusive)
+                .map_err(|_| BootstrapRunnerError::Output)?;
+            let mut file = File::from(existing);
+            let mut current = Vec::with_capacity(RunnerEnrollmentToken::BYTE_LENGTH + 1);
+            (&mut file)
+                .take(
+                    u64::try_from(RunnerEnrollmentToken::BYTE_LENGTH + 1)
+                        .map_err(|_| BootstrapRunnerError::Output)?,
+                )
+                .read_to_end(&mut current)
+                .map_err(|_| BootstrapRunnerError::Output)?;
+            if current == bytes {
+                return fsync(&parent).map_err(|_| BootstrapRunnerError::Output);
+            }
+            if predecessor != Some(current.as_slice()) {
+                return Err(BootstrapRunnerError::Output);
+            }
+            replace_existing = true;
+            Some(file)
+        }
+        Err(rustix::io::Errno::NOENT) if predecessor.is_none() => None,
+        Err(_) => return Err(BootstrapRunnerError::Output),
+    };
+    let (staging, created) = match openat(
+        &parent,
+        temporary.as_str(),
+        OFlags::RDWR
+            | OFlags::CREATE
+            | OFlags::EXCL
+            | OFlags::CLOEXEC
+            | OFlags::NOFOLLOW
+            | OFlags::NONBLOCK,
+        Mode::from_raw_mode(0o600),
+    ) {
+        Ok(staging) => (staging, true),
+        Err(rustix::io::Errno::EXIST) => (
+            openat(
+                &parent,
+                temporary.as_str(),
+                OFlags::RDWR | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+                Mode::empty(),
+            )
+            .map_err(|_| BootstrapRunnerError::Output)?,
+            false,
+        ),
+        Err(_) => return Err(BootstrapRunnerError::Output),
+    };
+    if created {
+        fchmod(&staging, Mode::from_raw_mode(0o600)).map_err(|_| BootstrapRunnerError::Output)?;
+    }
+    verify_private_regular(&staging)?;
+    flock(&staging, FlockOperation::NonBlockingLockExclusive)
+        .map_err(|_| BootstrapRunnerError::Output)?;
+    let mut staging = File::from(staging);
+    staging
+        .set_len(0)
+        .and_then(|()| staging.seek(SeekFrom::Start(0)).map(|_| ()))
+        .and_then(|()| staging.write_all(bytes))
+        .and_then(|()| staging.sync_all())
+        .map_err(|_| BootstrapRunnerError::Output)?;
+    if replace_existing {
+        renameat(&parent, temporary.as_str(), &parent, &target_name)
+            .map_err(|_| BootstrapRunnerError::Output)?;
+        drop(target_lock);
+    } else {
+        renameat_with(
+            &parent,
+            temporary.as_str(),
+            &parent,
+            &target_name,
+            RenameFlags::NOREPLACE,
+        )
+        .map_err(|_| BootstrapRunnerError::Output)?;
+    }
+    fsync(&parent).map_err(|_| BootstrapRunnerError::Output)
+}
+
+#[cfg(not(unix))]
+fn persist_active_token(
+    _target: &InternalBootstrapFileSource,
+    _bytes: &[u8],
+    _predecessor: Option<&[u8]>,
+) -> Result<(), BootstrapRunnerError> {
+    Err(BootstrapRunnerError::Output)
+}
+
 fn decode_stored_receipt(bytes: &[u8]) -> Result<StoredBootstrapReceipt, BootstrapRunnerError> {
     let receipt: StoredBootstrapReceipt =
         serde_json::from_slice(bytes).map_err(|_| BootstrapRunnerError::Output)?;
@@ -411,7 +710,9 @@ fn decode_stored_receipt(bytes: &[u8]) -> Result<StoredBootstrapReceipt, Bootstr
     if bytes != canonical
         || receipt.schema != RECEIPT_SCHEMA
         || receipt.bootstrap_operation_id.is_nil()
+        || receipt.runner_id.is_nil()
         || receipt.enrollment_id.is_nil()
+        || receipt.token_sha256.as_bytes() == &[0; 32]
         || receipt.runner_group != "default"
         || receipt.status != "ready"
         || receipt.expires_at_ms <= 0
@@ -430,10 +731,52 @@ fn receipt_refresh_is_exact_predecessor(current: &[u8], replacement: &[u8]) -> b
     };
     current.schema == replacement.schema
         && current.bootstrap_operation_id == replacement.bootstrap_operation_id
+        && current.runner_id == replacement.runner_id
         && current.enrollment_id == replacement.enrollment_id
+        && current.generation == replacement.generation
+        && current.token_sha256 == replacement.token_sha256
         && current.runner_group == replacement.runner_group
         && current.status == replacement.status
         && replacement.expires_at_ms > current.expires_at_ms
+}
+
+fn receipt_advance_is_exact_successor(
+    current: &[u8],
+    replacement: &[u8],
+    predecessor: InstallationBootstrapRecoveryToken,
+) -> bool {
+    let Ok(current) = decode_stored_receipt(current) else {
+        return false;
+    };
+    let Ok(replacement) = decode_stored_receipt(replacement) else {
+        return false;
+    };
+    current.schema == replacement.schema
+        && current.bootstrap_operation_id == replacement.bootstrap_operation_id
+        && current.runner_id == replacement.runner_id
+        && current.enrollment_id == predecessor.enrollment_id()
+        && current.token_sha256 == Sha256Digest::from_bytes(predecessor.token_sha256())
+        && current.generation.checked_add(1) == Some(replacement.generation)
+        && current.enrollment_id != replacement.enrollment_id
+        && current.token_sha256 != replacement.token_sha256
+        && current.runner_group == replacement.runner_group
+        && current.status == replacement.status
+        && replacement.expires_at_ms > 0
+}
+
+fn receipt_update_is_allowed(current: &[u8], replacement: &[u8], update: ReceiptUpdate) -> bool {
+    match update {
+        ReceiptUpdate::EnsureExact => false,
+        ReceiptUpdate::Reconcile { predecessor } => {
+            receipt_refresh_is_exact_predecessor(current, replacement)
+                || predecessor.is_some_and(|predecessor| {
+                    receipt_advance_is_exact_successor(current, replacement, predecessor)
+                })
+        }
+        ReceiptUpdate::AdvanceGeneration { predecessor } => {
+            receipt_advance_is_exact_successor(current, replacement, predecessor)
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -482,9 +825,7 @@ fn persist_receipt_bytes(
             if current == bytes {
                 return fsync(&parent).map_err(|_| BootstrapRunnerError::Output);
             }
-            if update != ReceiptUpdate::RefreshExpiration
-                || !receipt_refresh_is_exact_predecessor(&current, bytes)
-            {
+            if !receipt_update_is_allowed(&current, bytes, update) {
                 return Err(BootstrapRunnerError::Output);
             }
             replace_existing = true;
@@ -541,9 +882,7 @@ fn persist_receipt_bytes(
             .read_to_end(&mut current)
             .map_err(|_| BootstrapRunnerError::Output)?;
         if current != bytes {
-            if update != ReceiptUpdate::RefreshExpiration
-                || !receipt_refresh_is_exact_predecessor(&current, bytes)
-            {
+            if !receipt_update_is_allowed(&current, bytes, update) {
                 return Err(BootstrapRunnerError::Output);
             }
             file.set_len(0).map_err(|_| BootstrapRunnerError::Output)?;
@@ -605,6 +944,9 @@ fn open_private_parent(
     use rustix::fd::OwnedFd;
     use rustix::fs::{FileType, Mode, OFlags, fstat, open, openat};
 
+    if !path.is_absolute() {
+        return Err(BootstrapRunnerError::Output);
+    }
     let mut components = Vec::<std::ffi::OsString>::new();
     for component in path.components() {
         match component {
@@ -619,18 +961,37 @@ fn open_private_parent(
     let directory_flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW;
     let mut parent: OwnedFd =
         open("/", directory_flags, Mode::empty()).map_err(|_| BootstrapRunnerError::Output)?;
+    verify_trusted_directory(&parent)?;
     for component in parents {
         parent = openat(&parent, component, directory_flags, Mode::empty())
             .map_err(|_| BootstrapRunnerError::Output)?;
+        verify_trusted_directory(&parent)?;
     }
     let metadata = fstat(&parent).map_err(|_| BootstrapRunnerError::Output)?;
     if FileType::from_raw_mode(metadata.st_mode) != FileType::Directory
         || metadata.st_uid != rustix::process::geteuid().as_raw()
-        || metadata.st_mode & 0o077 != 0
+        || metadata.st_mode & 0o7777 != 0o700
     {
         return Err(BootstrapRunnerError::Output);
     }
     Ok((parent, target_name.clone()))
+}
+
+#[cfg(unix)]
+fn verify_trusted_directory(
+    descriptor: &impl std::os::fd::AsFd,
+) -> Result<(), BootstrapRunnerError> {
+    use rustix::fs::{FileType, fstat};
+
+    let metadata = fstat(descriptor).map_err(|_| BootstrapRunnerError::Output)?;
+    let effective_user = rustix::process::geteuid().as_raw();
+    if FileType::from_raw_mode(metadata.st_mode) != FileType::Directory
+        || (!matches!(metadata.st_uid, 0) && metadata.st_uid != effective_user)
+        || metadata.st_mode & 0o022 != 0
+    {
+        return Err(BootstrapRunnerError::Output);
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -699,6 +1060,7 @@ mod tests {
             )
             .expect("installation tenant"),
             installation_authority_source_sha256: Sha256Digest::from_bytes([31; 32]),
+            runner_id: Uuid::parse_str("33333333-3333-4333-8333-333333333333").expect("runner ID"),
             enrollment_id: Uuid::parse_str("22222222-2222-4222-8222-222222222222")
                 .expect("enrollment ID"),
             runner_group: RunnerGroup::new("default").expect("runner group"),
@@ -710,6 +1072,14 @@ mod tests {
         let mut bytes = serde_json::to_vec(request).expect("request JSON");
         bytes.push(b'\n');
         bytes
+    }
+
+    fn token_seed() -> RunnerEnrollmentToken {
+        RunnerEnrollmentToken::from_secret(
+            SecretString::new("atm_re_BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc".to_owned())
+                .expect("bounded seed"),
+        )
+        .expect("canonical seed")
     }
 
     #[test]
@@ -738,7 +1108,10 @@ mod tests {
         let receipt = BootstrapReceipt {
             schema: RECEIPT_SCHEMA,
             bootstrap_operation_id: request().bootstrap_operation_id,
+            runner_id: request().runner_id,
             enrollment_id: request().enrollment_id,
+            generation: 0,
+            token_sha256: Sha256Digest::from_bytes([7; 32]),
             runner_group: "default",
             status: "ready",
             expires_at_ms: 123_456,
@@ -750,6 +1123,175 @@ mod tests {
             serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["status"],
             "ready"
         );
+    }
+
+    #[test]
+    fn recovery_token_derivation_is_deterministic_and_generation_separated() {
+        let seed = token_seed();
+        let first = derive_recovery_token(&seed, 1).expect("first recovery token");
+        let replay = derive_recovery_token(&seed, 1).expect("replayed recovery token");
+        let next = derive_recovery_token(&seed, 2).expect("next recovery token");
+        assert_eq!(first.identity, replay.identity);
+        assert_eq!(first.token, replay.token);
+        assert_ne!(first.identity, next.identity);
+        assert_ne!(first.token, next.token);
+        assert_ne!(first.token.as_str(), seed.expose_secret());
+        assert_eq!(first.token.len(), RunnerEnrollmentToken::BYTE_LENGTH);
+        assert!(matches!(
+            derive_recovery_token(&seed, 0),
+            Err(BootstrapRunnerError::InvalidInput)
+        ));
+    }
+
+    #[test]
+    fn bootstrap_result_debug_redacts_active_and_predecessor_tokens() {
+        let seed = token_seed();
+        let recovery = derive_recovery_token(&seed, 1).expect("recovery token");
+        let result = BootstrapResult::Ready {
+            bootstrap_operation_id: request().bootstrap_operation_id,
+            runner_id: request().runner_id,
+            record: InstallationBootstrapRunnerEnrollmentTokenRecord {
+                enrollment_id: recovery.identity.enrollment_id(),
+                runner_group_id: Uuid::new_v4(),
+                runner_group: "default".to_owned(),
+                expires_at_ms: 123_456,
+                generation: 1,
+            },
+            active_token: Zeroizing::new(recovery.token.as_str().to_owned()),
+            predecessor_token: Some(Zeroizing::new(seed.expose_secret().to_owned())),
+            receipt_update: ReceiptUpdate::Reconcile { predecessor: None },
+        };
+        let rendered = format!("{result:?}");
+        assert!(!rendered.contains(recovery.token.as_str()));
+        assert!(!rendered.contains(seed.expose_secret()));
+        assert_eq!(rendered.matches("[redacted]").count(), 2);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn active_token_advances_only_from_its_exact_predecessor() {
+        use std::{fs, os::unix::fs::PermissionsExt as _};
+
+        let root = std::env::current_dir()
+            .expect("current directory")
+            .join(format!(".automata-active-token-test-{}", Uuid::new_v4()));
+        fs::create_dir(&root).expect("active token test root");
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700))
+            .expect("private active token root");
+        let path = root.join("active-token");
+        let target: InternalBootstrapFileSource = format!("file:{}", path.display())
+            .parse()
+            .expect("file source");
+        let seed = token_seed();
+        let first = derive_recovery_token(&seed, 1).expect("first recovery token");
+        let next = derive_recovery_token(&seed, 2).expect("next recovery token");
+        persist_active_token(&target, seed.expose_secret().as_bytes(), None)
+            .expect("generation zero publication");
+        persist_active_token(
+            &target,
+            first.token.as_bytes(),
+            Some(seed.expose_secret().as_bytes()),
+        )
+        .expect("one-generation advance");
+        persist_active_token(
+            &target,
+            first.token.as_bytes(),
+            Some(seed.expose_secret().as_bytes()),
+        )
+        .expect("exact replay");
+        assert_eq!(
+            persist_active_token(
+                &target,
+                next.token.as_bytes(),
+                Some(seed.expose_secret().as_bytes()),
+            ),
+            Err(BootstrapRunnerError::Output)
+        );
+        assert_eq!(
+            fs::read(&path).expect("active token"),
+            first.token.as_bytes()
+        );
+        fs::remove_dir_all(&root).expect("remove active token test root");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn active_token_refuses_a_world_writable_ancestor() {
+        use std::{fs, os::unix::fs::PermissionsExt as _};
+
+        let temporary_root = std::env::temp_dir();
+        let metadata = fs::metadata(&temporary_root).expect("temporary root metadata");
+        if metadata.permissions().mode() & 0o022 == 0 {
+            return;
+        }
+        let root = temporary_root.join(format!(
+            "automata-active-token-untrusted-test-{}",
+            Uuid::new_v4()
+        ));
+        fs::create_dir(&root).expect("untrusted-parent test root");
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700))
+            .expect("private child under untrusted parent");
+        let path = root.join("active-token");
+        let target: InternalBootstrapFileSource = format!("file:{}", path.display())
+            .parse()
+            .expect("file source");
+        assert_eq!(
+            persist_active_token(&target, token_seed().expose_secret().as_bytes(), None),
+            Err(BootstrapRunnerError::Output)
+        );
+        assert!(!path.exists());
+        fs::remove_dir(root).expect("remove untrusted-parent test root");
+    }
+
+    #[test]
+    fn replay_reconciliation_accepts_only_one_exact_receipt_generation() {
+        let request = request();
+        let receipt = |generation, enrollment_id, token_byte| BootstrapReceipt {
+            schema: RECEIPT_SCHEMA,
+            bootstrap_operation_id: request.bootstrap_operation_id,
+            runner_id: request.runner_id,
+            enrollment_id,
+            generation,
+            token_sha256: Sha256Digest::from_bytes([token_byte; 32]),
+            runner_group: request.runner_group.as_str(),
+            status: "ready",
+            expires_at_ms: 100,
+        };
+        let current = receipt(0, request.enrollment_id, 7)
+            .canonical_bytes()
+            .expect("current receipt");
+        let successor = receipt(1, Uuid::new_v4(), 8)
+            .canonical_bytes()
+            .expect("successor receipt");
+        let skipped = receipt(2, Uuid::new_v4(), 9)
+            .canonical_bytes()
+            .expect("skipped receipt");
+        let predecessor = InstallationBootstrapRecoveryToken::new(request.enrollment_id, [7; 32])
+            .expect("predecessor identity");
+        assert!(receipt_update_is_allowed(
+            &current,
+            &successor,
+            ReceiptUpdate::Reconcile {
+                predecessor: Some(predecessor),
+            }
+        ));
+        assert!(!receipt_update_is_allowed(
+            &current,
+            &skipped,
+            ReceiptUpdate::Reconcile {
+                predecessor: Some(predecessor),
+            }
+        ));
+        let drifted_predecessor = receipt(0, Uuid::new_v4(), 7)
+            .canonical_bytes()
+            .expect("drifted predecessor receipt");
+        assert!(!receipt_update_is_allowed(
+            &drifted_predecessor,
+            &successor,
+            ReceiptUpdate::Reconcile {
+                predecessor: Some(predecessor),
+            }
+        ));
     }
 
     #[test]
@@ -771,7 +1313,10 @@ mod tests {
         let exact = BootstrapReceipt {
             schema: RECEIPT_SCHEMA,
             bootstrap_operation_id: request.bootstrap_operation_id,
+            runner_id: request.runner_id,
             enrollment_id: request.enrollment_id,
+            generation: 0,
+            token_sha256: Sha256Digest::from_bytes([7; 32]),
             runner_group: request.runner_group.as_str(),
             status: "ready",
             expires_at_ms: 100,
@@ -797,7 +1342,10 @@ mod tests {
         let drifted = BootstrapReceipt {
             schema: RECEIPT_SCHEMA,
             bootstrap_operation_id: Uuid::new_v4(),
+            runner_id: request.runner_id,
             enrollment_id: request.enrollment_id,
+            generation: 0,
+            token_sha256: Sha256Digest::from_bytes([7; 32]),
             runner_group: request.runner_group.as_str(),
             status: "ready",
             expires_at_ms: 100,
@@ -841,7 +1389,10 @@ mod tests {
         let receipt = |expires_at_ms| BootstrapReceipt {
             schema: RECEIPT_SCHEMA,
             bootstrap_operation_id: request.bootstrap_operation_id,
+            runner_id: request.runner_id,
             enrollment_id: request.enrollment_id,
+            generation: 0,
+            token_sha256: Sha256Digest::from_bytes([7; 32]),
             runner_group: request.runner_group.as_str(),
             status: "ready",
             expires_at_ms,
@@ -859,7 +1410,7 @@ mod tests {
             &path,
             &refreshed,
             request.enrollment_id,
-            ReceiptUpdate::RefreshExpiration,
+            ReceiptUpdate::Reconcile { predecessor: None },
         )
         .expect("authorized expiration refresh");
         assert_eq!(fs::read(&path).expect("refreshed receipt"), refreshed);
@@ -876,7 +1427,7 @@ mod tests {
                 &path,
                 &drifted,
                 request.enrollment_id,
-                ReceiptUpdate::RefreshExpiration,
+                ReceiptUpdate::Reconcile { predecessor: None },
             ),
             Err(BootstrapRunnerError::Output)
         );

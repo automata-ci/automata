@@ -88,6 +88,7 @@ fn bootstrap_identity_uses_the_installation_uuid_and_material_root_identifier() 
         request["installation_authority_source_sha256"],
         established.epoch.material_root_sha256().to_string()
     );
+    assert_eq!(request["runner_id"], artifacts.runner_id.to_string());
 }
 
 #[test]

@@ -24,7 +24,7 @@ CATALOG_SCHEMA = "automata.local/release-catalog/v1"
 SOURCE_SCHEMA = "automata.local/release-catalog-source/v1"
 SOURCE_PATH = "images/local-installation/catalog-v1.json"
 PACKAGED_SOURCE_PATH = "crates/automata-ci-local/src/init/catalog-v1.source.json"
-SOURCE_SHA256 = "a6233e0d9be9ecd76754b630737ce4153af22e6dcb369976a6096e8c2811cead"
+SOURCE_SHA256 = "bfb18e708b75259b05ef6a7e1f3cec79d8acec357c3f5f467a7a1e2a21ba14be"
 CATALOG_PATH = "target/distribution/automata-local-installation-catalog.json"
 PROFILE_MANIFEST_PATH = (
     "images/github-hosted-ubuntu-24.04-x64/profile-manifest.json"
@@ -392,10 +392,16 @@ def require_lifecycle_runtime(value: object) -> dict:
                 "configuration_schema": 7,
             },
             "local_check_ready": {
-                "argv": ["__local-check-ready"],
+                "argv": [
+                    "__local-check-ready",
+                    "--config",
+                    "/run/automata-runner-config/runner.json",
+                ],
                 "healthcheck_argv": [
                     "/usr/local/bin/automata-runner",
                     "__local-check-ready",
+                    "--config",
+                    "/run/automata-runner-config/runner.json",
                 ],
                 "listen": "127.0.0.1:9464",
                 "maximum_response_bytes": 262144,

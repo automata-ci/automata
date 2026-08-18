@@ -108,9 +108,10 @@ lifecycle journal or detached lifecycle work exists.
 
 The lifecycle requires rootful Docker with daemon-default user-namespace
 remapping, cgroup v2, the built-in seccomp profile, private cgroup namespaces,
-the required memory/CPU/PID controllers, `runc`, and live restore disabled. The
-trusted fixed Engine-relay service alone sets `userns_mode: host` so its root
-bootstrap can open the root-owned socket before dropping authority; untrusted
+the required memory/CPU/PID controllers, `runc`, and live restore disabled. All
+eight trusted fixed lifecycle units set `userns_mode: host` so they observe the
+sealed host-owned volume custody; the Engine relay additionally needs that
+namespace to open the root-owned socket before dropping authority. Untrusted
 `LocalDocker` job containers do not override the user namespace and therefore
 inherit the required daemon remap. Docker `/info` does not expose daemon-wide
 `log-opts` or the bridge entry in `default-network-opts`, and may omit
@@ -118,6 +119,16 @@ inherit the required daemon remap. Docker `/info` does not expose daemon-wide
 prerequisites. Exact post-create container and network inspection rejects any
 injected log option, bridge option, or ulimit. Such drift fails the lifecycle
 operation while its exact lock becomes sticky recovery evidence.
+
+Runner bootstrap retains its material-derived token as immutable generation
+zero and publishes a separate active token file. Each consumed generation
+authorizes exactly one deterministic successor under the sealed installation
+authority; unconsumed generations are refreshed in place. This lets an exact
+offline Linux runner recover only after its 30-day leaf is also expired by the
+database clock, without making the seed reusable, changing normal mTLS renewal,
+or admitting a different runner.
+The runner healthcheck also proves current on-volume config/CA/chain/key and
+completion-receipt custody read-only while the steady runner owns the TLS flock.
 
 A stopped exact-ID holder remains sticky interruption evidence and ordinary
 acquisition refuses it. `--recover-stopped-lock` is explicit operator

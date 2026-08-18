@@ -6,8 +6,10 @@ use automata_ci_auth_postgres::{
     PostgresInstallationAuthorityRepository, PostgresRunnerEnrollmentRepository,
     management::{
         ConsumeRunnerEnrollment, EnsureInstallationBootstrapRunnerEnrollmentToken,
-        INSTALLATION_BOOTSTRAP_ENROLLMENT_TOKEN_LIFETIME_MS,
-        InstallationBootstrapRunnerEnrollmentTokenOutcome, MAX_RUNNER_CERTIFICATE_LIFETIME_SECONDS,
+        INSTALLATION_BOOTSTRAP_ENROLLMENT_TOKEN_LIFETIME_MS, InstallationBootstrapRecoveryToken,
+        InstallationBootstrapRequestError, InstallationBootstrapRunnerEnrollmentTokenOutcome,
+        InstallationRunnerRecoveryConsumeOutcome, InstallationRunnerRecoveryPredecessor,
+        InstallationRunnerRecoveryPrepareOutcome, MAX_RUNNER_CERTIFICATE_LIFETIME_SECONDS,
         PrepareRunnerEnrollment, RunnerEnrollmentConsumeOutcome, RunnerEnrollmentPrepareOutcome,
         WindowsRunnerAdmissionRecord,
     },
@@ -291,6 +293,9 @@ struct StoredInstallationBootstrapToken {
     issued_by_session_id: Option<Uuid>,
     issued_authorization_revision: Option<i64>,
     installation_authority_sha256: Option<Vec<u8>>,
+    installation_runner_id: Option<Uuid>,
+    installation_generation: Option<i64>,
+    installation_predecessor_enrollment_id: Option<Uuid>,
     issued_at_ms: i64,
     last_refreshed_at_ms: Option<i64>,
     expires_at_ms: i64,
@@ -313,6 +318,32 @@ fn digest(byte: u8) -> Sha256Digest {
 
 fn sha256(bytes: &[u8]) -> Sha256Digest {
     Sha256Digest::from_bytes(Sha256::digest(bytes).into())
+}
+
+fn installation_recovery_identity(
+    generation: u64,
+) -> Result<InstallationBootstrapRecoveryToken, InstallationBootstrapRequestError> {
+    installation_recovery_identity_for(0x41, generation)
+}
+
+fn installation_recovery_identity_for(
+    chain: u8,
+    generation: u64,
+) -> Result<InstallationBootstrapRecoveryToken, InstallationBootstrapRequestError> {
+    let mut id_hasher = Sha256::new();
+    id_hasher.update(b"automata.test/installation-recovery-id/v1\0");
+    id_hasher.update([chain]);
+    id_hasher.update(generation.to_be_bytes());
+    let material: [u8; 32] = id_hasher.finalize().into();
+    let mut id = <[u8; 16]>::try_from(&material[..16]).expect("16-byte recovery UUID");
+    id[6] = (id[6] & 0x0f) | 0x40;
+    id[8] = (id[8] & 0x3f) | 0x80;
+    let mut token_hasher = Sha256::new();
+    token_hasher.update(b"automata.test/installation-recovery-token/v1\0");
+    token_hasher.update([chain]);
+    token_hasher.update(generation.to_be_bytes());
+    let digest: [u8; 32] = token_hasher.finalize().into();
+    InstallationBootstrapRecoveryToken::new(Uuid::from_bytes(id), digest)
 }
 
 #[allow(
@@ -631,11 +662,13 @@ async fn migration_0052_fresh_database_supports_exact_deployment_bootstrap() -> 
 
         let enrollment_repository =
             PostgresRunnerEnrollmentRepository::new(database.pool().clone());
+        let runner_id = RunnerId::new();
         let enrollment_id = Uuid::new_v4();
-        let token_sha256 = [0x41; 32];
+        let token_sha256 = [0x41_u8; 32];
         let group = RunnerGroup::new("default")?;
         let ensure = EnsureInstallationBootstrapRunnerEnrollmentToken::new(
             installation.clone(),
+            runner_id.as_uuid(),
             enrollment_id,
             token_sha256,
             group.clone(),
@@ -643,10 +676,12 @@ async fn migration_0052_fresh_database_supports_exact_deployment_bootstrap() -> 
         )?;
         let (left, right) = tokio::join!(
             enrollment_repository.ensure_installation_bootstrap_runner_enrollment_token(
-                ensure.clone()
+                ensure.clone(),
+                installation_recovery_identity,
             ),
             enrollment_repository.ensure_installation_bootstrap_runner_enrollment_token(
-                ensure.clone()
+                ensure.clone(),
+                installation_recovery_identity,
             ),
         );
         let enrollment_outcomes = [left?, right?];
@@ -670,13 +705,15 @@ async fn migration_0052_fresh_database_supports_exact_deployment_bootstrap() -> 
                 InstallationBootstrapRunnerEnrollmentTokenOutcome::Applied(record) => Some(record),
                 InstallationBootstrapRunnerEnrollmentTokenOutcome::Replayed(_)
                 | InstallationBootstrapRunnerEnrollmentTokenOutcome::Refreshed(_)
-                | InstallationBootstrapRunnerEnrollmentTokenOutcome::Consumed(_)
                 | InstallationBootstrapRunnerEnrollmentTokenOutcome::Conflict => None,
             })
             .ok_or_else(|| message_error("installation enrollment token was not applied"))?;
         assert_eq!(
             enrollment_repository
-                .ensure_installation_bootstrap_runner_enrollment_token(ensure.clone())
+                .ensure_installation_bootstrap_runner_enrollment_token(
+                    ensure.clone(),
+                    installation_recovery_identity,
+                )
                 .await?,
             InstallationBootstrapRunnerEnrollmentTokenOutcome::Replayed(issued.clone())
         );
@@ -684,6 +721,8 @@ async fn migration_0052_fresh_database_supports_exact_deployment_bootstrap() -> 
             r"
             SELECT issuer_kind,issued_by_principal_id,issued_by_session_id,
                    issued_authorization_revision,installation_authority_sha256,
+                   installation_runner_id,installation_generation,
+                   installation_predecessor_enrollment_id,
                    issued_at_ms,last_refreshed_at_ms,expires_at_ms
             FROM runner_enrollment_tokens WHERE id=$1
             ",
@@ -705,10 +744,14 @@ async fn migration_0052_fresh_database_supports_exact_deployment_bootstrap() -> 
             Some(vec![0x31; 32])
         );
         assert_eq!(stored_initial.last_refreshed_at_ms, None);
+        assert_eq!(stored_initial.installation_runner_id, Some(runner_id.as_uuid()));
+        assert_eq!(stored_initial.installation_generation, Some(0));
+        assert_eq!(stored_initial.installation_predecessor_enrollment_id, None);
         assert_eq!(stored_initial.expires_at_ms, issued.expires_at_ms);
 
         let conflicting = EnsureInstallationBootstrapRunnerEnrollmentToken::new(
             installation.clone(),
+            runner_id.as_uuid(),
             enrollment_id,
             [0x42; 32],
             group.clone(),
@@ -716,14 +759,20 @@ async fn migration_0052_fresh_database_supports_exact_deployment_bootstrap() -> 
         )?;
         assert_eq!(
             enrollment_repository
-                .ensure_installation_bootstrap_runner_enrollment_token(conflicting)
+                .ensure_installation_bootstrap_runner_enrollment_token(
+                    conflicting,
+                    installation_recovery_identity,
+                )
                 .await?,
             InstallationBootstrapRunnerEnrollmentTokenOutcome::Conflict
         );
         clock.set(issued.expires_at_ms - 1).await?;
         assert_eq!(
             enrollment_repository
-                .ensure_installation_bootstrap_runner_enrollment_token(ensure.clone())
+                .ensure_installation_bootstrap_runner_enrollment_token(
+                    ensure.clone(),
+                    installation_recovery_identity,
+                )
                 .await?,
             InstallationBootstrapRunnerEnrollmentTokenOutcome::Replayed(issued.clone())
         );
@@ -750,7 +799,10 @@ async fn migration_0052_fresh_database_supports_exact_deployment_bootstrap() -> 
             }
         }
         let refreshed = match enrollment_repository
-            .ensure_installation_bootstrap_runner_enrollment_token(ensure.clone())
+            .ensure_installation_bootstrap_runner_enrollment_token(
+                ensure.clone(),
+                installation_recovery_identity,
+            )
             .await?
         {
             InstallationBootstrapRunnerEnrollmentTokenOutcome::Refreshed(record) => record,
@@ -779,15 +831,17 @@ async fn migration_0052_fresh_database_supports_exact_deployment_bootstrap() -> 
             PostgresRunnerEnrollmentRepository::new(restart_pool.clone());
         assert_eq!(
             restarted_enrollment_repository
-                .ensure_installation_bootstrap_runner_enrollment_token(ensure.clone())
+                .ensure_installation_bootstrap_runner_enrollment_token(
+                    ensure.clone(),
+                    installation_recovery_identity,
+                )
                 .await?,
             InstallationBootstrapRunnerEnrollmentTokenOutcome::Replayed(refreshed.clone())
         );
         restart_pool.close().await;
 
-        let runner_id = RunnerId::new();
         let operation_id = Uuid::new_v4();
-        let request_sha256 = [0x51; 32];
+        let request_sha256 = [0x51_u8; 32];
         let runner_name = "local-windows-runner";
         let response = br#"{"runner":"local-windows-runner"}"#.to_vec();
         let database_time_ms = clock.now().await?;
@@ -857,18 +911,440 @@ async fn migration_0052_fresh_database_supports_exact_deployment_bootstrap() -> 
         .fetch_one(database.pool())
         .await?;
         assert_eq!(windows_counts, (1, 1, 1, 1));
+        let recovery = match enrollment_repository
+            .ensure_installation_bootstrap_runner_enrollment_token(
+                ensure.clone(),
+                installation_recovery_identity,
+            )
+            .await?
+        {
+            InstallationBootstrapRunnerEnrollmentTokenOutcome::Applied(record) => record,
+            outcome => {
+                return Err(message_error(format!(
+                    "consumed generation zero did not advance exactly once: {outcome:?}"
+                )));
+            }
+        };
+        assert_eq!(recovery.generation, 1);
         assert_eq!(
-            enrollment_repository
-                .ensure_installation_bootstrap_runner_enrollment_token(ensure.clone())
-                .await?,
-            InstallationBootstrapRunnerEnrollmentTokenOutcome::Consumed(refreshed.clone())
+            recovery.enrollment_id,
+            installation_recovery_identity(1)?.enrollment_id()
         );
-        clock.set(refreshed.expires_at_ms).await?;
+        clock.set(recovery.expires_at_ms).await?;
+        let recovery_refreshed = match enrollment_repository
+            .ensure_installation_bootstrap_runner_enrollment_token(
+                ensure,
+                installation_recovery_identity,
+            )
+            .await?
+        {
+            InstallationBootstrapRunnerEnrollmentTokenOutcome::Refreshed(record) => record,
+            outcome => {
+                return Err(message_error(format!(
+                    "expired unconsumed recovery generation was not refreshed: {outcome:?}"
+                )));
+            }
+        };
+        assert_eq!(recovery_refreshed.generation, 1);
+        assert_eq!(recovery_refreshed.enrollment_id, recovery.enrollment_id);
+
+        // A distinct Linux installation runner exercises the positive-
+        // generation recovery path itself. The earlier Windows runner proves
+        // that generation issuance does not broaden broker-owned admission;
+        // recovery consumption remains deliberately unavailable to Windows.
+        let linux_runner_id = RunnerId::new();
+        let linux_enrollment_id = Uuid::new_v4();
+        let linux_token_sha256 = [0x81_u8; 32];
+        let linux_group = RunnerGroup::new("default")?;
+        let linux_ensure = EnsureInstallationBootstrapRunnerEnrollmentToken::new(
+            installation.clone(),
+            linux_runner_id.as_uuid(),
+            linux_enrollment_id,
+            linux_token_sha256,
+            linux_group.clone(),
+            INSTALLATION_BOOTSTRAP_ENROLLMENT_TOKEN_LIFETIME_MS,
+        )?;
+        let linux_initial = match enrollment_repository
+            .ensure_installation_bootstrap_runner_enrollment_token(
+                linux_ensure.clone(),
+                |generation| installation_recovery_identity_for(0x81, generation),
+            )
+            .await?
+        {
+            InstallationBootstrapRunnerEnrollmentTokenOutcome::Applied(record) => record,
+            outcome => {
+                return Err(message_error(format!(
+                    "Linux generation zero was not issued: {outcome:?}"
+                )));
+            }
+        };
+        assert_eq!(linux_initial.generation, 0);
+        let linux_capabilities = RunnerCapabilities::new(
+            linux_runner_id,
+            RunnerPlatform::new(OperatingSystem::Linux, Architecture::X86_64),
+        )
+        .with_groups([linux_group]);
+        let linux_now_ms = clock.now().await?;
+        let linux_now_seconds = linux_now_ms.div_euclid(1_000);
+        let linux_name = "local-linux-runner";
+        let initial_leaf = [0x82_u8; 32];
+        let initial_expires_at_seconds =
+            linux_now_seconds + MAX_RUNNER_CERTIFICATE_LIFETIME_SECONDS;
+        let initial_response = br#"{"runner":"local-linux-runner","generation":0}"#.to_vec();
+        let initial_operation_id = Uuid::new_v4();
+        let initial_request_sha256 = [0x83_u8; 32];
+        let initial_consume = ConsumeRunnerEnrollment {
+            token_sha256: linux_token_sha256,
+            operation_id: initial_operation_id,
+            request_sha256: initial_request_sha256,
+            runner_id: linux_runner_id.as_uuid(),
+            runner_name: linux_name.to_owned(),
+            capabilities: linux_capabilities.clone(),
+            certificate_leaf_sha256: initial_leaf,
+            certificate_issued_at_seconds: linux_now_seconds,
+            certificate_expires_at_seconds: initial_expires_at_seconds,
+            response: initial_response,
+            windows_admission: None,
+        };
+        assert!(matches!(
+            enrollment_repository
+                .consume_runner_enrollment(initial_consume)
+                .await?,
+            RunnerEnrollmentConsumeOutcome::Applied(_)
+        ));
+        let linux_recovery = match enrollment_repository
+            .ensure_installation_bootstrap_runner_enrollment_token(
+                linux_ensure.clone(),
+                |generation| installation_recovery_identity_for(0x81, generation),
+            )
+            .await?
+        {
+            InstallationBootstrapRunnerEnrollmentTokenOutcome::Applied(record) => record,
+            outcome => {
+                return Err(message_error(format!(
+                    "Linux recovery generation was not issued: {outcome:?}"
+                )));
+            }
+        };
+        let recovery_identity = installation_recovery_identity_for(0x81, 1)?;
+        assert_eq!(linux_recovery.generation, 1);
+        assert_eq!(linux_recovery.enrollment_id, recovery_identity.enrollment_id());
+        let drifted_linux_genesis = EnsureInstallationBootstrapRunnerEnrollmentToken::new(
+            installation.clone(),
+            linux_runner_id.as_uuid(),
+            Uuid::new_v4(),
+            [0x91; 32],
+            RunnerGroup::new("default")?,
+            INSTALLATION_BOOTSTRAP_ENROLLMENT_TOKEN_LIFETIME_MS,
+        )?;
         assert_eq!(
             enrollment_repository
-                .ensure_installation_bootstrap_runner_enrollment_token(ensure)
+                .ensure_installation_bootstrap_runner_enrollment_token(
+                    drifted_linux_genesis,
+                    |generation| installation_recovery_identity_for(0x81, generation),
+                )
                 .await?,
-            InstallationBootstrapRunnerEnrollmentTokenOutcome::Consumed(refreshed)
+            InstallationBootstrapRunnerEnrollmentTokenOutcome::Conflict,
+            "a positive-generation tail must remain bound to its exact generation-zero identity"
+        );
+        assert_eq!(
+            enrollment_repository
+                .consume_installation_runner_recovery(
+                    ConsumeRunnerEnrollment {
+                        token_sha256: recovery_identity.token_sha256(),
+                        operation_id: Uuid::new_v4(),
+                        request_sha256: [0x87; 32],
+                        runner_id: linux_runner_id.as_uuid(),
+                        runner_name: linux_name.to_owned(),
+                        capabilities: linux_capabilities.clone(),
+                        certificate_leaf_sha256: [0x88; 32],
+                        certificate_issued_at_seconds: linux_now_seconds,
+                        certificate_expires_at_seconds: initial_expires_at_seconds,
+                        response: br#"{"premature":true}"#.to_vec(),
+                        windows_admission: None,
+                    },
+                    InstallationRunnerRecoveryPredecessor {
+                        certificate_leaf_sha256: initial_leaf,
+                        certificate_expires_at_seconds: initial_expires_at_seconds,
+                    },
+                )
+                .await?,
+            InstallationRunnerRecoveryConsumeOutcome::Rejected,
+            "the installation token must not rotate a still-current local predecessor"
+        );
+        clock
+            .set(initial_expires_at_seconds.saturating_mul(1_000))
+            .await?;
+        let linux_recovery = match enrollment_repository
+            .ensure_installation_bootstrap_runner_enrollment_token(
+                linux_ensure.clone(),
+                |generation| installation_recovery_identity_for(0x81, generation),
+            )
+            .await?
+        {
+            InstallationBootstrapRunnerEnrollmentTokenOutcome::Refreshed(record) => record,
+            outcome => {
+                return Err(message_error(format!(
+                    "expired Linux recovery token was not refreshed: {outcome:?}"
+                )));
+            }
+        };
+        assert_eq!(linux_recovery.generation, 1);
+        let recovery_now_seconds = clock.now().await?.div_euclid(1_000);
+        let ambiguous_live_leaf = [0x86_u8; 32];
+        sqlx::query(
+            "INSERT INTO runner_machine_certificates (leaf_sha256,runner_id,expires_at_seconds) VALUES ($1,$2,$3)",
+        )
+        .bind(ambiguous_live_leaf.as_slice())
+        .bind(linux_runner_id.as_uuid())
+        .bind(recovery_now_seconds + MAX_RUNNER_CERTIFICATE_LIFETIME_SECONDS)
+        .execute(database.pool())
+        .await?;
+        let recovery_operation_id = Uuid::new_v4();
+        let recovery_request_sha256 = [0x84_u8; 32];
+        let recovery_prepare = PrepareRunnerEnrollment {
+            token_sha256: recovery_identity.token_sha256(),
+            operation_id: recovery_operation_id,
+            request_sha256: recovery_request_sha256,
+        };
+        match enrollment_repository
+            .prepare_installation_runner_recovery(recovery_prepare)
+            .await?
+        {
+            InstallationRunnerRecoveryPrepareOutcome::Prepared(prepared) => {
+                assert_eq!(prepared.runner_id, linux_runner_id.as_uuid());
+                assert_eq!(prepared.generation, 1);
+                assert_eq!(prepared.runner_group, "default");
+            }
+            outcome => {
+                return Err(message_error(format!(
+                    "Linux recovery generation was not prepared: {outcome:?}"
+                )));
+            }
+        }
+        let recovered_leaf = [0x85_u8; 32];
+        let recovered_expires_at_seconds =
+            recovery_now_seconds + MAX_RUNNER_CERTIFICATE_LIFETIME_SECONDS;
+        let recovered_response =
+            br#"{"runner":"local-linux-runner","generation":1}"#.to_vec();
+        let recovery_consume = || ConsumeRunnerEnrollment {
+            token_sha256: recovery_identity.token_sha256(),
+            operation_id: recovery_operation_id,
+            request_sha256: recovery_request_sha256,
+            runner_id: linux_runner_id.as_uuid(),
+            runner_name: linux_name.to_owned(),
+            capabilities: linux_capabilities.clone(),
+            certificate_leaf_sha256: recovered_leaf,
+            certificate_issued_at_seconds: recovery_now_seconds,
+            certificate_expires_at_seconds: recovered_expires_at_seconds,
+            response: recovered_response.clone(),
+            windows_admission: None,
+        };
+        let revoked_historical_leaf = [0x89_u8; 32];
+        let revoked_historical_expiry = recovery_now_seconds - 1;
+        sqlx::query(
+            "INSERT INTO runner_machine_certificates (leaf_sha256,runner_id,expires_at_seconds,revoked_at_seconds) VALUES ($1,$2,$3,$4)",
+        )
+        .bind(revoked_historical_leaf.as_slice())
+        .bind(linux_runner_id.as_uuid())
+        .bind(revoked_historical_expiry)
+        .bind(revoked_historical_expiry - 1)
+        .execute(database.pool())
+        .await?;
+        assert_eq!(
+            enrollment_repository
+                .consume_installation_runner_recovery(
+                    recovery_consume(),
+                    InstallationRunnerRecoveryPredecessor {
+                        certificate_leaf_sha256: revoked_historical_leaf,
+                        certificate_expires_at_seconds: revoked_historical_expiry,
+                    },
+                )
+                .await?,
+            InstallationRunnerRecoveryConsumeOutcome::Rejected,
+            "a revoked historical leaf must not authorize installation recovery"
+        );
+        assert_eq!(
+            enrollment_repository
+                .consume_installation_runner_recovery(
+                    recovery_consume(),
+                    InstallationRunnerRecoveryPredecessor {
+                        certificate_leaf_sha256: initial_leaf,
+                        certificate_expires_at_seconds: initial_expires_at_seconds,
+                    },
+                )
+                .await?,
+            InstallationRunnerRecoveryConsumeOutcome::Applied(recovered_response.clone())
+        );
+        let recovered_runner_fence: (i64, i64) = sqlx::query_as(
+            "SELECT generation,updated_at_ms FROM runners WHERE id=$1",
+        )
+        .bind(linux_runner_id.as_uuid())
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(
+            recovered_runner_fence,
+            (2, clock.now().await?),
+            "recovery must advance the durable runner generation before an old-leaf handshake can open a session"
+        );
+        let stored_recovery_predecessor: (Vec<u8>, i64) = sqlx::query_as(
+            r"
+            SELECT redeem_predecessor_certificate_leaf_sha256,
+                   redeem_predecessor_certificate_expires_at_seconds
+            FROM runner_enrollment_tokens
+            WHERE id=$1
+            ",
+        )
+        .bind(linux_recovery.enrollment_id)
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(
+            stored_recovery_predecessor.0.as_slice(),
+            initial_leaf.as_slice()
+        );
+        assert_eq!(
+            stored_recovery_predecessor.1,
+            initial_expires_at_seconds
+        );
+        assert_eq!(
+            enrollment_repository
+                .consume_installation_runner_recovery(
+                    recovery_consume(),
+                    InstallationRunnerRecoveryPredecessor {
+                        certificate_leaf_sha256: initial_leaf,
+                        certificate_expires_at_seconds: initial_expires_at_seconds,
+                    },
+                )
+                .await?,
+            InstallationRunnerRecoveryConsumeOutcome::Replayed(recovered_response.clone())
+        );
+        let certificate_state: (Option<i64>, Option<i64>, Option<i64>) = sqlx::query_as(
+            r"
+            SELECT
+                (SELECT revoked_at_seconds FROM runner_machine_certificates
+                 WHERE leaf_sha256=$1),
+                (SELECT revoked_at_seconds FROM runner_machine_certificates
+                 WHERE leaf_sha256=$2),
+                (SELECT revoked_at_seconds FROM runner_machine_certificates
+                 WHERE leaf_sha256=$3)
+            ",
+        )
+        .bind(initial_leaf.as_slice())
+        .bind(ambiguous_live_leaf.as_slice())
+        .bind(recovered_leaf.as_slice())
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(certificate_state, (None, Some(recovery_now_seconds), None));
+        let mut certificate_lock = database.pool().begin().await?;
+        sqlx::query(
+            "SELECT leaf_sha256 FROM runner_machine_certificates WHERE leaf_sha256=$1 FOR UPDATE",
+        )
+        .bind(recovered_leaf.as_slice())
+        .fetch_one(&mut *certificate_lock)
+        .await?;
+        let replay_repository = enrollment_repository.clone();
+        let blocked_replay = tokio::spawn(async move {
+            replay_repository
+                .prepare_installation_runner_recovery(PrepareRunnerEnrollment {
+                    token_sha256: recovery_identity.token_sha256(),
+                    operation_id: recovery_operation_id,
+                    request_sha256: recovery_request_sha256,
+                })
+                .await
+        });
+        let mut replay_waits_for_certificate = false;
+        for _ in 0..200 {
+            replay_waits_for_certificate = sqlx::query_scalar(
+                r"
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM pg_catalog.pg_stat_activity
+                    WHERE datname=pg_catalog.current_database()
+                      AND pid <> pg_catalog.pg_backend_pid()
+                      AND wait_event_type='Lock'
+                      AND query LIKE '%FROM runner_machine_certificates%'
+                      AND query LIKE '%FOR SHARE%'
+                )
+                ",
+            )
+            .fetch_one(database.pool())
+            .await?;
+            if replay_waits_for_certificate {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            replay_waits_for_certificate,
+            "exact replay did not reach the certificate currentness lock"
+        );
+        clock
+            .set(recovered_expires_at_seconds.saturating_mul(1_000))
+            .await?;
+        certificate_lock.commit().await?;
+        assert_eq!(
+            blocked_replay.await??,
+            InstallationRunnerRecoveryPrepareOutcome::Rejected,
+            "replay blocked across leaf expiry must use a fresh post-lock database time"
+        );
+        // The blocked replay was read-only. Restore its pre-boundary test time
+        // so the independent revoked-current-leaf gate remains isolated.
+        clock.set(recovery_now_seconds.saturating_mul(1_000)).await?;
+        let recovery_audits: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM security_audit_events WHERE action='runner.certificate.installation_recover' AND outcome='succeeded'",
+        )
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(recovery_audits, 1);
+        let linux_next = match enrollment_repository
+            .ensure_installation_bootstrap_runner_enrollment_token(
+                linux_ensure,
+                |generation| installation_recovery_identity_for(0x81, generation),
+            )
+            .await?
+        {
+            InstallationBootstrapRunnerEnrollmentTokenOutcome::Applied(record) => record,
+            outcome => {
+                return Err(message_error(format!(
+                    "consumed Linux recovery did not advance once: {outcome:?}"
+                )));
+            }
+        };
+        assert_eq!(linux_next.generation, 2);
+        assert_eq!(
+            linux_next.enrollment_id,
+            installation_recovery_identity_for(0x81, 2)?.enrollment_id()
+        );
+        sqlx::query(
+            "UPDATE runner_machine_certificates SET revoked_at_seconds=$2 WHERE leaf_sha256=$1",
+        )
+        .bind(recovered_leaf.as_slice())
+        .bind(recovery_now_seconds)
+        .execute(database.pool())
+        .await?;
+        assert_eq!(
+            enrollment_repository
+                .prepare_installation_runner_recovery(PrepareRunnerEnrollment {
+                    token_sha256: recovery_identity.token_sha256(),
+                    operation_id: recovery_operation_id,
+                    request_sha256: recovery_request_sha256,
+                })
+                .await?,
+            InstallationRunnerRecoveryPrepareOutcome::Rejected,
+            "exact replay must not return credentials after their response leaf is revoked"
+        );
+        assert_eq!(
+            enrollment_repository
+                .consume_installation_runner_recovery(
+                    recovery_consume(),
+                    InstallationRunnerRecoveryPredecessor {
+                        certificate_leaf_sha256: initial_leaf,
+                        certificate_expires_at_seconds: initial_expires_at_seconds,
+                    },
+                )
+                .await?,
+            InstallationRunnerRecoveryConsumeOutcome::Rejected,
+            "consume replay must not reinstall a revoked response leaf"
         );
 
         let mutation_error = sqlx::query(
@@ -904,15 +1380,17 @@ async fn migration_0052_fresh_database_supports_exact_deployment_bootstrap() -> 
             r"
             INSERT INTO runner_enrollment_tokens (
                 id,tenant_id,runner_group_id,token_sha256,issuer_kind,
-                installation_authority_sha256,issued_at_ms,expires_at_ms
+                installation_authority_sha256,installation_runner_id,
+                installation_generation,issued_at_ms,expires_at_ms
             ) VALUES ($1,'local-deployment-bootstrap',$2,$3,
-                      'installation_bootstrap',$4,$5,$6)
+                      'installation_bootstrap',$4,$5,0,$6,$7)
             ",
         )
         .bind(Uuid::new_v4())
         .bind(runner_group_id)
         .bind([0x71_u8; 32].as_slice())
         .bind([0x72_u8; 32].as_slice())
+        .bind(Uuid::new_v4())
         .bind(clock.now().await?)
         .bind(clock.now().await? + INSTALLATION_BOOTSTRAP_ENROLLMENT_TOKEN_LIFETIME_MS)
         .execute(database.pool())
@@ -933,7 +1411,7 @@ async fn migration_0052_fresh_database_supports_exact_deployment_bootstrap() -> 
         )
         .fetch_one(database.pool())
         .await?;
-        assert_eq!(bootstrap_audits, (2, 1));
+        assert_eq!(bootstrap_audits, (8, 2));
         Ok(())
     })
     .await
@@ -1146,6 +1624,8 @@ async fn migration_0052_upgrades_0051_human_installation_and_token_exactly() -> 
             r"
             SELECT issuer_kind,issued_by_principal_id,issued_by_session_id,
                    issued_authorization_revision,installation_authority_sha256,
+                   installation_runner_id,installation_generation,
+                   installation_predecessor_enrollment_id,
                    issued_at_ms,last_refreshed_at_ms,expires_at_ms
             FROM runner_enrollment_tokens WHERE id=$1
             ",
@@ -1161,6 +1641,9 @@ async fn migration_0052_upgrades_0051_human_installation_and_token_exactly() -> 
             Some(authorization_revision)
         );
         assert_eq!(upgraded_token.installation_authority_sha256, None);
+        assert_eq!(upgraded_token.installation_runner_id, None);
+        assert_eq!(upgraded_token.installation_generation, None);
+        assert_eq!(upgraded_token.installation_predecessor_enrollment_id, None);
         assert_eq!(upgraded_token.last_refreshed_at_ms, None);
         assert_eq!(upgraded_token.issued_at_ms, now_ms);
         assert_eq!(upgraded_token.expires_at_ms, now_ms + 600_000);

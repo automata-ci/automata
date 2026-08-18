@@ -26,6 +26,18 @@ files while retaining Keychain custody for stable secrets. Windows has no
 deployment configuration until native atomic TLS custody and physical-host
 qualification exist; there is no manual or static-identity fallback.
 
+The sealed local installation additionally keeps an installation-authority-
+bound chain of one-use recovery tokens. If that single Linux runner remains
+down beyond its current leaf lifetime, `enroll` accepts only the exact expired
+config/CA/chain/key/completion-receipt tuple and the control plane replaces the
+certificate only after that exact leaf is expired in durable state and while
+the same runner is offline with no live session. A distinct still-live leaf
+left by an ambiguous renewal is revoked atomically. This does not broaden
+ordinary enrollment or mTLS renewal, and it is unavailable to Windows broker
+enrollment. The hidden local readiness probe observes the same completed tuple
+through two stable no-follow snapshots without taking the runner-held TLS
+writer flock.
+
 `automata-runner run` selects exactly one host-compatible provider from its
 configuration: rootless Podman, Kubernetes, or the evaluation-only fixed-relay
 Docker provider on Linux; fresh Hyper-V-isolated Windows containers on Windows;

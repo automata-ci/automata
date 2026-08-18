@@ -16,7 +16,7 @@ use zeroize::Zeroizing;
 pub(crate) mod custody;
 mod transport;
 
-use custody::CredentialDestinations;
+use custody::{CompletedEnrollmentState, CredentialDestinations};
 use transport::read_bounded_response;
 
 use crate::{
@@ -25,6 +25,7 @@ use crate::{
 };
 
 const REDEEM_PATH: &str = "/api/v1/runner-enrollments/redeem";
+const RECOVER_PATH: &str = "/api/v1/runner-enrollments/recover";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -32,31 +33,105 @@ pub(super) async fn enroll(args: &EnrollArgs) -> Result<()> {
     validate_name(&args.name)?;
     let config = RunnerProductConfig::load(&args.config)
         .context("runner enrollment could not load the product configuration")?;
-    let destinations = CredentialDestinations::from_config(&config)?;
     let origin = enrollment_origin(&args.server)?;
+    if CredentialDestinations::observe_completed(&config, current_unix_time_seconds()?)?
+        == Some(CompletedEnrollmentState::Current)
+    {
+        println!("runner {} is already enrolled", config.runner_id());
+        return Ok(());
+    }
+    let destinations = CredentialDestinations::from_config(&config)?;
     let stage = if let Some(stage) = destinations.load_stage(&config, &origin, &args.name)? {
+        if stage.is_recovery() {
+            if let Some(response) = destinations.load_recovery_response()? {
+                destinations.finish_recovery(
+                    &config,
+                    &stage,
+                    &response,
+                    current_unix_time_seconds()?,
+                )?;
+                destinations.complete_recovery()?;
+                let receipt = destinations
+                    .load_response()?
+                    .context("runner enrollment completion receipt is missing")?;
+                let enrolled: RedeemResponse = serde_json::from_slice(&receipt)
+                    .context("runner enrollment receipt is invalid")?;
+                destinations.attest_completed(
+                    &config,
+                    &enrolled,
+                    &receipt,
+                    current_unix_time_seconds()?,
+                )?;
+                println!("runner {} recovery is already complete", config.runner_id());
+                return Ok(());
+            }
+        }
         stage
     } else {
-        if let Some(receipt) = destinations.load_response()? {
+        let receipt = destinations.load_response()?;
+        if let Some(recovery_response) = destinations.load_recovery_response()? {
+            let completion_receipt = receipt
+                .as_deref()
+                .context("runner enrollment recovery response lacks its completion receipt")?;
+            validate_staged_response(&recovery_response, completion_receipt)?;
+            destinations.remove_recovery_response()?;
+        }
+        if let Some(receipt) = receipt {
             let validation_time_seconds = current_unix_time_seconds()?;
             let enrolled: RedeemResponse =
                 serde_json::from_slice(&receipt).context("runner enrollment receipt is invalid")?;
-            destinations.attest_completed(&config, &enrolled, &receipt, validation_time_seconds)?;
-            println!("runner {} is already enrolled", config.runner_id());
-            return Ok(());
+            if destinations
+                .attest_completed(&config, &enrolled, &receipt, validation_time_seconds)
+                .is_ok()
+            {
+                println!("runner {} is already enrolled", config.runner_id());
+                return Ok(());
+            }
+            let predecessor = destinations.attest_expired_completed(
+                &config,
+                &enrolled,
+                &receipt,
+                validation_time_seconds,
+            )?;
+            destinations.create_recovery_stage(
+                &config,
+                &origin,
+                &args.name,
+                load_token(args)?,
+                predecessor,
+            )?
+        } else {
+            destinations.create_stage(&config, &origin, &args.name, load_token(args)?)?
         }
-        destinations.create_stage(&config, &origin, &args.name, load_token(args)?)?
     };
-    let staged_response = destinations.load_response()?;
+    let staged_response = if stage.is_recovery() {
+        destinations.load_recovery_response()?
+    } else {
+        destinations.load_response()?
+    };
+    if stage.is_recovery() && staged_response.is_none() {
+        destinations.attest_recovery_request(&config, &stage, current_unix_time_seconds()?)?;
+    }
     let endpoint = origin
-        .join(REDEEM_PATH)
+        .join(if stage.is_recovery() {
+            RECOVER_PATH
+        } else {
+            REDEEM_PATH
+        })
         .context("runner enrollment endpoint is invalid")?;
+    let recovery_predecessor = stage.recovery_predecessor().map(
+        |(certificate_leaf_sha256, certificate_expires_at_seconds)| RecoveryPredecessorRequest {
+            certificate_leaf_sha256,
+            certificate_expires_at_seconds,
+        },
+    );
     let body = RedeemRequest {
         operation_id: stage.operation_id,
         token: stage.token.expose_secret(),
         runner_name: &stage.runner_name,
         capabilities: &stage.capabilities,
         csr_pem: &stage.csr_pem,
+        recovery_predecessor,
     };
     let client = Client::builder()
         .https_only(origin.scheme() == "https")
@@ -90,6 +165,8 @@ pub(super) async fn enroll(args: &EnrollArgs) -> Result<()> {
     let bytes = read_bounded_response(response).await?;
     if let Some(staged_response) = staged_response {
         validate_staged_response(&staged_response, &bytes)?;
+    } else if stage.is_recovery() {
+        destinations.persist_recovery_response(&bytes)?;
     } else {
         destinations.persist_response(&bytes)?;
     }
@@ -98,17 +175,34 @@ pub(super) async fn enroll(args: &EnrollArgs) -> Result<()> {
         serde_json::from_slice(&bytes).context("runner enrollment returned an invalid response")?;
     validate_response(&config, &enrolled, response_validation_time_seconds)?;
     stage.validate_certificate(&config, &enrolled, response_validation_time_seconds)?;
-    destinations.persist_exact(
-        enrolled.server_ca_pem.as_bytes(),
-        enrolled.certificate_chain_pem.as_bytes(),
-        stage.private_key_pem.as_bytes(),
-    )?;
-    destinations.complete()?;
+    if stage.is_recovery() {
+        destinations.finish_recovery(&config, &stage, &bytes, response_validation_time_seconds)?;
+        destinations.complete_recovery()?;
+    } else {
+        destinations.persist_exact(
+            enrolled.server_ca_pem.as_bytes(),
+            enrolled.certificate_chain_pem.as_bytes(),
+            stage.private_key_pem.as_bytes(),
+        )?;
+        destinations.complete()?;
+    }
     println!(
         "enrolled runner {} in group {} (certificate expires at {})",
         enrolled.runner_id, enrolled.runner_group, enrolled.certificate_expires_at_seconds
     );
     Ok(())
+}
+
+/// Proves the current config-bound completed TLS custody without acquiring the
+/// writer flock or mutating any local state.
+pub(crate) fn observe_current_custody(config: &RunnerProductConfig) -> Result<()> {
+    match CredentialDestinations::observe_completed(config, current_unix_time_seconds()?)? {
+        Some(CompletedEnrollmentState::Current) => Ok(()),
+        Some(CompletedEnrollmentState::Expired) => {
+            bail!("runner enrollment identity is expired")
+        }
+        None => bail!("runner enrollment identity is incomplete"),
+    }
 }
 
 fn validate_staged_response(staged: &[u8], replayed: &[u8]) -> Result<()> {
@@ -236,6 +330,14 @@ struct RedeemRequest<'a> {
     runner_name: &'a str,
     capabilities: &'a automata_ci_core::RunnerCapabilities,
     csr_pem: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recovery_predecessor: Option<RecoveryPredecessorRequest>,
+}
+
+#[derive(Clone, Copy, Serialize)]
+struct RecoveryPredecessorRequest {
+    certificate_leaf_sha256: [u8; 32],
+    certificate_expires_at_seconds: i64,
 }
 
 #[derive(Deserialize, Serialize)]

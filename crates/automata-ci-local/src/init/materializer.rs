@@ -535,6 +535,8 @@ fn verify_dynamic_root_shape(directory: &OwnedFd, role: VolumeRole) -> Result<()
                         | ".request.json.automata-write"
                         | "runner-enrollment-token"
                         | ".runner-enrollment-token.automata-write"
+                        | "active-runner-enrollment-token"
+                        | ".active-runner-enrollment-token.automata-write"
                         | "receipt.json"
                 ) || name
                     .strip_prefix(".automata-bootstrap-receipt-")

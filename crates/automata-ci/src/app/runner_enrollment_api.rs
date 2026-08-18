@@ -12,10 +12,12 @@ use automata_ci_auth::{
     time::Clock,
 };
 use automata_ci_auth_postgres::management::{
-    ConsumeRunnerEnrollment, CreateRunnerEnrollmentToken, IssuedRunnerCertificateRenewal,
-    MAX_RUNNER_CERTIFICATE_LIFETIME_SECONDS, MIN_RUNNER_CERTIFICATE_REMAINING_LIFETIME_SECONDS,
-    PostgresRunnerEnrollmentRepository, PrepareRunnerEnrollment, PreparedRunnerEnrollment,
-    RenewRunnerCertificate, RunnerCertificateRenewalOutcome, RunnerCertificateRenewalSigningError,
+    ConsumeRunnerEnrollment, CreateRunnerEnrollmentToken, InstallationRunnerRecoveryConsumeOutcome,
+    InstallationRunnerRecoveryPredecessor, InstallationRunnerRecoveryPrepareOutcome,
+    IssuedRunnerCertificateRenewal, MAX_RUNNER_CERTIFICATE_LIFETIME_SECONDS,
+    MIN_RUNNER_CERTIFICATE_REMAINING_LIFETIME_SECONDS, PostgresRunnerEnrollmentRepository,
+    PrepareRunnerEnrollment, PreparedRunnerEnrollment, RenewRunnerCertificate,
+    RunnerCertificateRenewalOutcome, RunnerCertificateRenewalSigningError,
     RunnerEnrollmentConsumeOutcome, RunnerEnrollmentPrepareOutcome, WindowsRunnerAdmissionRecord,
 };
 use automata_ci_control::runner_control::capability_admission::RunnerCapabilityReadiness;
@@ -58,8 +60,10 @@ use zeroize::Zeroizing;
 
 pub(crate) const RUNNER_ENROLLMENTS_PATH: &str = "/api/v1/runner-enrollments";
 pub(crate) const RUNNER_ENROLLMENT_REDEEM_PATH: &str = "/api/v1/runner-enrollments/redeem";
+pub(crate) const RUNNER_ENROLLMENT_RECOVER_PATH: &str = "/api/v1/runner-enrollments/recover";
 
 const REDEEM_REQUEST_DOMAIN: &[u8] = b"automata.runner-enrollment-request.v1\0";
+const RECOVERY_REQUEST_DOMAIN: &[u8] = b"automata.runner-enrollment-recovery-request.v1\0";
 const RENEWAL_REQUEST_DOMAIN: &[u8] = b"automata.runner-certificate-renewal-request.v1\0";
 const MAX_REQUEST_BYTES: usize = 384 * 1_024;
 const INITIAL_REQUEST_CAPACITY_BYTES: usize = 8 * 1_024;
@@ -501,6 +505,7 @@ pub(crate) fn runner_enrollment_redeem_router(
 ) -> Router {
     Router::new()
         .route(RUNNER_ENROLLMENT_REDEEM_PATH, post(redeem_enrollment))
+        .route(RUNNER_ENROLLMENT_RECOVER_PATH, post(recover_enrollment))
         .with_state(RunnerEnrollmentRedeemApiState {
             repository,
             issuer,
@@ -580,10 +585,10 @@ async fn redeem_enrollment(
         Ok(document) => document,
         Err(error) => return error.into_response(),
     };
-    if !valid_redeem_document(&document) {
+    if !valid_redeem_document(&document) || document.recovery_predecessor.is_some() {
         return ApiError::InvalidRequest.into_response();
     }
-    let request_sha256 = match redeem_request_digest(&document) {
+    let request_sha256 = match redeem_request_digest(&document, REDEEM_REQUEST_DOMAIN) {
         Ok(digest) => digest,
         Err(error) => return error.into_response(),
     };
@@ -624,6 +629,7 @@ async fn redeem_enrollment(
         capabilities: &document.capabilities,
         csr_pem: &document.csr_pem,
         windows_admission: document.windows_admission.as_ref(),
+        recovery_predecessor: None,
     };
     let windows_admission = match windows_runner_admission(
         &state,
@@ -634,11 +640,16 @@ async fn redeem_enrollment(
         Ok(admission) => admission,
         Err(error) => return error.into_response(),
     };
-    let (issued, response) =
-        match issue_redeem_response(&state, runner_id, &prepared, &document.csr_pem) {
-            Ok(result) => result,
-            Err(error) => return error.into_response(),
-        };
+    let (issued, response) = match issue_redeem_response(
+        &state,
+        runner_id,
+        &prepared.runner_group,
+        prepared.database_time_ms,
+        &document.csr_pem,
+    ) {
+        Ok(result) => result,
+        Err(error) => return error.into_response(),
+    };
     let consume = ConsumeRunnerEnrollment {
         token_sha256: token.digest(),
         operation_id: document.operation_id,
@@ -668,19 +679,132 @@ async fn redeem_enrollment(
     }
 }
 
+async fn recover_enrollment(
+    State(state): State<RunnerEnrollmentRedeemApiState>,
+    request: Request,
+) -> Response {
+    let Ok(_permit) = state.redemptions.try_acquire() else {
+        return ApiError::RateLimited.into_response();
+    };
+    let document: RedeemEnrollmentDocument = match json_document(request).await {
+        Ok(document) => document,
+        Err(error) => return error.into_response(),
+    };
+    let Some(recovery_predecessor) = document.recovery_predecessor else {
+        return ApiError::InvalidRequest.into_response();
+    };
+    if !valid_redeem_document(&document)
+        || document.windows_admission.is_some()
+        || document.capabilities.platform().operating_system() == &OperatingSystem::Windows
+        || recovery_predecessor.certificate_leaf_sha256 == [0; 32]
+        || recovery_predecessor.certificate_expires_at_seconds <= 0
+    {
+        return ApiError::InvalidRequest.into_response();
+    }
+    let request_sha256 = match redeem_request_digest(&document, RECOVERY_REQUEST_DOMAIN) {
+        Ok(digest) => digest,
+        Err(error) => return error.into_response(),
+    };
+    let Ok(token) = RunnerEnrollmentToken::from_secret(document.token) else {
+        return ApiError::EnrollmentRejected.into_response();
+    };
+    let outcome = match state
+        .repository
+        .prepare_installation_runner_recovery(PrepareRunnerEnrollment {
+            token_sha256: token.digest(),
+            operation_id: document.operation_id,
+            request_sha256,
+        })
+        .await
+    {
+        Ok(outcome) => outcome,
+        Err(error) => return repository_error(error).into_response(),
+    };
+    let prepared = match outcome {
+        InstallationRunnerRecoveryPrepareOutcome::Prepared(prepared) => prepared,
+        InstallationRunnerRecoveryPrepareOutcome::Replayed(response) => {
+            return exact_json_response(StatusCode::CREATED, response);
+        }
+        InstallationRunnerRecoveryPrepareOutcome::Rejected => {
+            return ApiError::EnrollmentRejected.into_response();
+        }
+    };
+    if document
+        .capabilities
+        .features()
+        .contains(&RunnerFeature::OIDC_TOKENS)
+        && !state.capability_readiness.github_oidc()
+    {
+        return ApiError::InvalidRequest.into_response();
+    }
+    let expected_group = match RunnerGroup::new(&prepared.runner_group) {
+        Ok(group) => group,
+        Err(_) => return ApiError::Internal.into_response(),
+    };
+    if document.capabilities.runner_id().as_uuid() != prepared.runner_id
+        || document.capabilities.groups() != &std::collections::BTreeSet::from([expected_group])
+    {
+        return ApiError::EnrollmentRejected.into_response();
+    }
+    let (issued, response) = match issue_redeem_response(
+        &state,
+        prepared.runner_id,
+        &prepared.runner_group,
+        prepared.database_time_ms,
+        &document.csr_pem,
+    ) {
+        Ok(result) => result,
+        Err(error) => return error.into_response(),
+    };
+    let consume = ConsumeRunnerEnrollment {
+        token_sha256: token.digest(),
+        operation_id: document.operation_id,
+        request_sha256,
+        runner_id: prepared.runner_id,
+        runner_name: document.runner_name,
+        capabilities: document.capabilities,
+        certificate_leaf_sha256: issued.leaf_sha256,
+        certificate_issued_at_seconds: issued.issued_at_seconds,
+        certificate_expires_at_seconds: issued.expires_at_seconds,
+        response,
+        windows_admission: None,
+    };
+    match state
+        .repository
+        .consume_installation_runner_recovery(
+            consume,
+            InstallationRunnerRecoveryPredecessor {
+                certificate_leaf_sha256: recovery_predecessor.certificate_leaf_sha256,
+                certificate_expires_at_seconds: recovery_predecessor.certificate_expires_at_seconds,
+            },
+        )
+        .await
+    {
+        Ok(
+            InstallationRunnerRecoveryConsumeOutcome::Applied(response)
+            | InstallationRunnerRecoveryConsumeOutcome::Replayed(response),
+        ) => exact_json_response(StatusCode::CREATED, response),
+        Ok(InstallationRunnerRecoveryConsumeOutcome::Rejected) => {
+            ApiError::EnrollmentRejected.into_response()
+        }
+        Err(error) => repository_error(error).into_response(),
+    }
+}
+
 fn issue_redeem_response(
     state: &RunnerEnrollmentRedeemApiState,
     runner_id: Uuid,
-    prepared: &PreparedRunnerEnrollment,
+    runner_group: &str,
+    database_time_ms: i64,
     csr_pem: &str,
 ) -> Result<(IssuedRunnerCertificate, Vec<u8>), ApiError> {
     let issued = state
         .issuer
-        .issue(runner_id, csr_pem, prepared.database_time_ms)
+        .issue(runner_id, csr_pem, database_time_ms)
         .map_err(|_| ApiError::InvalidRequest)?;
     let response = RedeemEnrollmentResponse {
         runner_id,
-        runner_group: prepared.runner_group.clone(),
+        runner_group: runner_group.to_owned(),
         control_endpoint: issued.control_endpoint.clone(),
         certificate_chain_pem: issued.certificate_chain_pem.clone(),
         server_ca_pem: issued.server_ca_pem.clone(),
@@ -870,17 +994,21 @@ fn is_json_content_type(headers: &HeaderMap) -> bool {
         })
 }
 
-fn redeem_request_digest(document: &RedeemEnrollmentDocument) -> Result<[u8; 32], ApiError> {
+fn redeem_request_digest(
+    document: &RedeemEnrollmentDocument,
+    domain: &[u8],
+) -> Result<[u8; 32], ApiError> {
     let receipt = RedeemRequestReceipt {
         operation_id: document.operation_id,
         runner_name: &document.runner_name,
         capabilities: &document.capabilities,
         csr_pem: &document.csr_pem,
         windows_admission: document.windows_admission.as_ref(),
+        recovery_predecessor: document.recovery_predecessor.as_ref(),
     };
     let encoded = serde_json::to_vec(&receipt).map_err(|_| ApiError::InvalidRequest)?;
     let mut digest = Sha256::new();
-    digest.update(REDEEM_REQUEST_DOMAIN);
+    digest.update(domain);
     digest.update(encoded);
     Ok(digest.finalize().into())
 }
@@ -929,6 +1057,15 @@ struct RedeemEnrollmentDocument {
     csr_pem: String,
     #[serde(default)]
     windows_admission: Option<WindowsRunnerAdmissionEnvelope>,
+    #[serde(default)]
+    recovery_predecessor: Option<RecoveryPredecessorDocument>,
+}
+
+#[derive(Clone, Copy, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RecoveryPredecessorDocument {
+    certificate_leaf_sha256: [u8; 32],
+    certificate_expires_at_seconds: i64,
 }
 
 #[derive(Serialize)]
@@ -938,6 +1075,8 @@ struct RedeemRequestReceipt<'a> {
     capabilities: &'a RunnerCapabilities,
     csr_pem: &'a str,
     windows_admission: Option<&'a WindowsRunnerAdmissionEnvelope>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recovery_predecessor: Option<&'a RecoveryPredecessorDocument>,
 }
 
 #[derive(Serialize)]
@@ -1104,17 +1243,41 @@ mod tests {
             capabilities,
             csr_pem: "csr".to_owned(),
             windows_admission: None,
+            recovery_predecessor: None,
         };
-        let first = redeem_request_digest(&document).expect("request digest");
+        let first =
+            redeem_request_digest(&document, REDEEM_REQUEST_DOMAIN).expect("request digest");
+        assert_ne!(
+            redeem_request_digest(&document, RECOVERY_REQUEST_DOMAIN).expect("recovery digest"),
+            first,
+            "recovery replay receipts must be domain-separated from initial enrollment"
+        );
         document.token = SecretString::new("different-secret").expect("bounded secret");
         assert_eq!(
-            redeem_request_digest(&document).expect("request digest"),
+            redeem_request_digest(&document, REDEEM_REQUEST_DOMAIN).expect("request digest"),
             first
         );
         document.operation_id = Uuid::new_v4();
         assert_ne!(
-            redeem_request_digest(&document).expect("request digest"),
+            redeem_request_digest(&document, REDEEM_REQUEST_DOMAIN).expect("request digest"),
             first
+        );
+        document.recovery_predecessor = Some(RecoveryPredecessorDocument {
+            certificate_leaf_sha256: [7; 32],
+            certificate_expires_at_seconds: 1_900_000_000,
+        });
+        let recovery =
+            redeem_request_digest(&document, RECOVERY_REQUEST_DOMAIN).expect("recovery digest");
+        document
+            .recovery_predecessor
+            .as_mut()
+            .expect("recovery predecessor")
+            .certificate_expires_at_seconds += 1;
+        assert_ne!(
+            redeem_request_digest(&document, RECOVERY_REQUEST_DOMAIN)
+                .expect("changed recovery digest"),
+            recovery,
+            "recovery replay receipts must bind the exact expired predecessor"
         );
     }
 

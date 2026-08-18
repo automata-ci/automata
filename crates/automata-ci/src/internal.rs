@@ -147,6 +147,8 @@ mod tests {
             "file:/run/automata/bootstrap-request",
             "--runner-enrollment-token-source",
             "file:/run/secrets/runner-enrollment-token",
+            "--runner-enrollment-token-target",
+            "file:/run/automata/active-runner-enrollment-token",
             "--receipt-target",
             "file:/run/automata/bootstrap-receipt",
         ])

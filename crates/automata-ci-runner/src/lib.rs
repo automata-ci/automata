@@ -90,7 +90,7 @@ async fn execute(cli: Cli) -> Result<()> {
         }
         Command::InternalProbeHttp(args) => probe_http::serve(args).await,
         #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-        Command::InternalLocalCheckReady => local_ready::check(),
+        Command::InternalLocalCheckReady(args) => local_ready::check(&args.config),
     }
 }
 
