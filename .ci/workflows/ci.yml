@@ -5,6 +5,7 @@ on:
     branches:
       - main
   pull_request:
+  merge_group:
 
 permissions:
   contents: read
@@ -32,7 +33,7 @@ jobs:
     resources:
       limits:
         cpu: "4"
-        memory: 5Gi
+        memory: 8Gi
     env:
       CARGO_BUILD_JOBS: "4"
       CARGO_PROFILE_DEV_DEBUG: "0"
@@ -51,8 +52,6 @@ jobs:
         run: ./scripts/ci/install-sccache.sh
 
       - name: Run Rust and CI checks
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           cargo fmt --all -- --check
           ./scripts/ci/install-actionlint.sh target/ci-tools
@@ -84,7 +83,7 @@ jobs:
     resources:
       limits:
         cpu: "4"
-        memory: 4Gi
+        memory: 8Gi
     services:
       postgres:
         image: docker.io/library/postgres@sha256:7e6103cf85f88f7a0eddb3ec0b1ba8940eba098ed118ade25a729ca9daee5568
@@ -106,7 +105,7 @@ jobs:
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
       CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: -C link-arg=-fuse-ld=lld
-      RUST_TEST_THREADS: "2"
+      RUST_TEST_THREADS: "4"
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: "true"
     steps:

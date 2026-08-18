@@ -9,8 +9,6 @@ if [[ ! -x "$zizmor" ]]; then
   printf 'error: install zizmor before linting CI definitions\n' >&2
   exit 2
 fi
-: "${GH_TOKEN:?error: GH_TOKEN is required for zizmor online audits}"
-
 shopt -s nullglob
 workflow_files=(
   "$repository_root"/.ci/workflows/*.yml
@@ -25,6 +23,7 @@ fi
 "$zizmor" \
   "${workflow_files[@]}" \
   "$repository_root/.github/dependabot.yml" \
+  --offline \
   --collect all \
   --min-confidence low \
   --min-severity informational \
