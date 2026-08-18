@@ -60,6 +60,8 @@ jobs:
           ./scripts/ci/lint-ci-security.sh
           python3 scripts/ci/tests/macos-integration-checks.test.py
           python3 scripts/ci/tests/macos-physical-checks.test.py
+          python3 scripts/ci/tests/release-native.test.py
+          python3 scripts/ci/tests/verify-release-authority.test.py
           python3 scripts/ci/tests/windows-image-pipeline.test.py
           cargo clippy --workspace --lib --bins --all-features --locked -- -D warnings
           cargo test \

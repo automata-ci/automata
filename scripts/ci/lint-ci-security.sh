@@ -23,6 +23,7 @@ fi
 "$zizmor" \
   "${workflow_files[@]}" \
   "$repository_root/.github/dependabot.yml" \
+  --config "$repository_root/.ci/zizmor.yml" \
   --offline \
   --collect all \
   --min-confidence low \

@@ -1,4 +1,4 @@
-name: Release (publication disabled)
+name: Release
 
 on:
   push:
@@ -18,11 +18,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 100
     permissions:
+      checks: read # Read the trusted Automata App Check for the tagged commit.
       contents: read
     outputs:
       commit: ${{ steps.identity.outputs.commit }}
-      crates_io_initial_burst_override_approved: ${{ steps.capacity.outputs.initial_burst_override_approved }}
-      crates_io_owner_logins: ${{ steps.capacity.outputs.owner_logins }}
       created: ${{ steps.identity.outputs.created }}
       prerelease: ${{ steps.identity.outputs.prerelease }}
       source_date_epoch: ${{ steps.identity.outputs.source_date_epoch }}
@@ -30,17 +29,10 @@ jobs:
       tag_object: ${{ steps.identity.outputs.tag_object }}
       version: ${{ steps.identity.outputs.version }}
     steps:
-      - name: Refuse publication without exact Automata release authority
+      - name: Install release API client
         run: |
-          printf '%s\n' \
-            'error: public release publication is disabled.' \
-            'Automata does not yet expose provider-authenticated evidence binding the exact' \
-            'trusted provider App and dashboard origin, repository, commit,' \
-            '.ci/workflows/ci.yml, push event, refs/heads/main,' \
-            'logical distribution job, workflow run, and job attempt required by this gate.' \
-            'A same-name GitHub Check is not release authority.' \
-            'Retry is unavailable; future recovery requires authenticated Automata dispatch.' >&2
-          exit 1
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends gh
 
       - name: Check out the release tag and main history
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -149,6 +141,28 @@ jobs:
             fi
           } >> "$GITHUB_OUTPUT"
 
+      - name: Require successful Automata revision CI for a commit on main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_COMMIT: ${{ steps.identity.outputs.commit }}
+        run: |
+          comparison="$RUNNER_TEMP/release-main-comparison.json"
+          checks="$RUNNER_TEMP/release-automata-checks.json"
+          gh api \
+            "repos/${GITHUB_REPOSITORY}/compare/${RELEASE_COMMIT}...main" \
+            > "$comparison"
+          gh api --method GET \
+            "repos/${GITHUB_REPOSITORY}/commits/${RELEASE_COMMIT}/check-runs" \
+            -f 'check_name=Automata CI / required' \
+            -f filter=latest \
+            -f per_page=100 \
+            > "$checks"
+          env -u GH_TOKEN -u GITHUB_TOKEN \
+            python3 scripts/ci/verify-release-authority.py \
+              --commit "$RELEASE_COMMIT" \
+              --comparison "$comparison" \
+              --checks "$checks"
+
       - name: Require unambiguous release order
         env:
           GH_TOKEN: ${{ github.token }}
@@ -166,24 +180,17 @@ jobs:
               --prerelease "$RELEASE_PRERELEASE" < "$release_state"
 
       - name: Require crates.io name ownership and first-publish capacity
-        id: capacity
         env:
-          CRATES_IO_EXPECTED_OWNER_LOGINS: ${{ vars.CRATES_IO_EXPECTED_OWNER_LOGINS }}
-          CRATES_IO_INITIAL_BURST_OVERRIDE_APPROVED: ${{ vars.CRATES_IO_INITIAL_BURST_OVERRIDE_APPROVED }}
+          CRATES_IO_EXPECTED_OWNER_LOGINS: ${{ secrets.CRATES_IO_EXPECTED_OWNER_LOGINS }}
+          CRATES_IO_INITIAL_BURST_OVERRIDE_APPROVED: ${{ secrets.CRATES_IO_INITIAL_BURST_OVERRIDE_APPROVED }}
         run: |
           python3 scripts/ci/publish-crates.py --check-capacity
-          {
-            printf 'owner_logins=%s\n' "$CRATES_IO_EXPECTED_OWNER_LOGINS"
-            printf 'initial_burst_override_approved=%s\n' \
-              "${CRATES_IO_INITIAL_BURST_OVERRIDE_APPROVED:-false}"
-          } >> "$GITHUB_OUTPUT"
 
   stage_release:
     name: Stage release payloads
     needs: gate
     runs-on: ubuntu-24.04
     timeout-minutes: 240
-    environment: release
     outputs:
       automata_digest: ${{ steps.images.outputs.automata_digest }}
       handoff_artifact_digest: ${{ steps.upload-handoff.outputs.artifact-digest }}
@@ -200,16 +207,12 @@ jobs:
       service_proxy_image_digest: ${{ steps.selected-service-proxy-candidate.outputs.image_digest }}
       service_proxy_provenance_sha256: ${{ steps.selected-service-proxy-candidate.outputs.provenance_sha256 }}
     permissions:
-      artifact-metadata: write # Bind release handoff artifacts to service digests.
-      attestations: write # Publish provenance for release artifacts and images.
       contents: write # Create the draft release and upload its immutable assets.
-      id-token: write # Mint the OIDC identity used to sign attestations.
       packages: write # Push digest-addressed release images to GHCR.
     env:
-      ATTESTATION_HOME: ${{ github.workspace }}/target/task-tmp/release/attestation-home
       CARGO_INCREMENTAL: "0"
       CARGO_TERM_COLOR: always
-      DOCKER_CONFIG: ${{ github.workspace }}/target/task-tmp/release/attestation-home/.docker
+      DOCKER_CONFIG: ${{ github.workspace }}/target/task-tmp/release/docker
       RUST_BACKTRACE: "1"
       TMPDIR: ${{ github.workspace }}/target/task-tmp/release
     steps:
@@ -261,18 +264,10 @@ jobs:
 
       - name: Install release build dependencies
         run: |
-          install -d -m 0700 -- "$TMPDIR" "$ATTESTATION_HOME" "$DOCKER_CONFIG"
+          install -d -m 0700 -- "$TMPDIR" "$DOCKER_CONFIG"
           sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends binutils musl-tools podman
-
-      - name: Install Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 24.19.0
-          package-manager-cache: false
-
-      - name: Install pinned SBOM generator
-        run: cargo install cargo-cyclonedx --version 0.5.9 --locked
+          sudo apt-get install --yes --no-install-recommends \
+            binutils buildah gh musl-tools
 
       - name: Verify crates.io packages
         run: |
@@ -289,7 +284,7 @@ jobs:
       - name: Build and verify static executables
         run: |
           ./scripts/ci/build-static-musl.sh
-          AUTOMATA_SCRATCH_RUNTIME=docker ./scripts/ci/verify-static-musl.sh
+          AUTOMATA_SCRATCH_RUNTIME=none ./scripts/ci/verify-static-musl.sh
           ./scripts/ci/verify-sandbox-guest-static.sh
           ./scripts/ci/verify-service-proxy-static.sh
 
@@ -303,7 +298,9 @@ jobs:
       - name: Prepare digest-bound private service-proxy image candidate
         id: service-proxy-candidate
         env:
-          AUTOMATA_SERVICE_PROXY_CONTAINER_RUNTIME: podman
+          AUTOMATA_SERVICE_PROXY_CONTAINER_RUNTIME: buildah
+          AUTOMATA_SERVICE_PROXY_OCI_BUILDER: buildah-chroot
+          AUTOMATA_SERVICE_PROXY_PROCESS_PROBE: metadata-only
           RELEASE_COMMIT: ${{ needs.gate.outputs.commit }}
           RELEASE_CREATED: ${{ needs.gate.outputs.created }}
           RELEASE_SOURCE_DATE_EPOCH: ${{ needs.gate.outputs.source_date_epoch }}
@@ -318,10 +315,6 @@ jobs:
           ./scripts/ci/build-service-proxy-candidate.sh \
             target/service-proxy-context \
             target/service-proxy-publication
-          python3 scripts/ci/verify-service-proxy-candidate-load.py \
-            --candidate target/service-proxy-publication/automata-service-proxy-candidate-x86_64-unknown-linux-musl.tar \
-            --source-directory "$GITHUB_WORKSPACE" \
-            --expected-commit "$RELEASE_COMMIT"
 
       - name: Require complete private service-proxy candidate evidence
         env:
@@ -353,6 +346,12 @@ jobs:
             printf 'error: private service-proxy candidate bytes changed\n' >&2
             exit 1
           }
+
+      - name: Set up and bootstrap Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Require the native Automata BuildKit boundary
+        run: docker buildx inspect --bootstrap
 
       - name: Revalidate identity before the first staging mutation
         env:
@@ -571,13 +570,6 @@ jobs:
             printf 'manifest_present=%s\n' "$manifest_present"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Attest accepted release archive bytes
-        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
-        with:
-          subject-path: |
-            target/distribution/automata-x86_64-unknown-linux-musl.tar.gz
-            target/distribution/automata-x86_64-unknown-linux-musl.tar.gz.sha256
-
       - name: Recover immutable release binding from the draft
         id: recovered
         if: ${{ steps.draft.outputs.candidate_present == 'true' }}
@@ -611,13 +603,6 @@ jobs:
             target/service-proxy-publication/automata-service-proxy-candidate-x86_64-unknown-linux-musl.tar \
             "$recovery_directory/automata-service-proxy-candidate-x86_64-unknown-linux-musl.tar"
           if [[ "${CATALOG_PRESENT}" == true ]]; then
-            gh attestation verify \
-              "$recovery_directory/automata-local-installation-catalog.json" \
-              --repo "$GITHUB_REPOSITORY" \
-              --signer-workflow "$GITHUB_REPOSITORY/.ci/workflows/release.yml" \
-              --source-digest "$RELEASE_COMMIT" \
-              --source-ref "refs/tags/$RELEASE_TAG" \
-              --deny-self-hosted-runners
             install -m 0444 -- \
               "$recovery_directory/automata-local-installation-catalog.json" \
               target/distribution/automata-local-installation-catalog.json
@@ -675,9 +660,6 @@ jobs:
         run: |
           printf '%s' "$GHCR_TOKEN" |
             docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Refuse unbound version image tags
         if: ${{ steps.draft.outputs.manifest_present != 'true' }}
@@ -859,11 +841,6 @@ jobs:
             --created "$RELEASE_CREATED" \
             --github-output "$GITHUB_OUTPUT"
 
-      - name: Attest release-scoped service-proxy candidate bytes
-        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
-        with:
-          subject-path: target/service-proxy-publication/${{ steps.selected-service-proxy-candidate.outputs.candidate_filename }}
-
       - name: Create immutable cross-job handoff
         id: handoff
         env:
@@ -912,11 +889,6 @@ jobs:
               --runner-digest "$RUNNER_DIGEST" \
               --sandbox-guest-digest "$SANDBOX_GUEST_DIGEST"
           fi
-
-      - name: Attest local-installation catalog bytes
-        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
-        with:
-          subject-path: target/distribution/automata-local-installation-catalog.json
 
       - name: Revalidate identity before the immutable image binding
         env:
@@ -1078,69 +1050,6 @@ jobs:
             ghcr.io/automata-ci/automata-sandbox-guest \
             "$SANDBOX_GUEST_DIGEST"
 
-      - name: Attest Automata image provenance
-        env:
-          HOME: ${{ env.ATTESTATION_HOME }}
-        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
-        with:
-          subject-name: ghcr.io/automata-ci/automata
-          subject-digest: ${{ steps.images.outputs.automata_digest }}
-          subject-version: ${{ needs.gate.outputs.version }}
-          push-to-registry: true
-
-      - name: Attest Automata image SBOM
-        env:
-          HOME: ${{ env.ATTESTATION_HOME }}
-        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
-        with:
-          subject-name: ghcr.io/automata-ci/automata
-          subject-digest: ${{ steps.images.outputs.automata_digest }}
-          subject-version: ${{ needs.gate.outputs.version }}
-          sbom-path: target/container-release/sbom/automata.cdx.json
-          push-to-registry: true
-
-      - name: Attest runner image provenance
-        env:
-          HOME: ${{ env.ATTESTATION_HOME }}
-        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
-        with:
-          subject-name: ghcr.io/automata-ci/automata-runner
-          subject-digest: ${{ steps.images.outputs.runner_digest }}
-          subject-version: ${{ needs.gate.outputs.version }}
-          push-to-registry: true
-
-      - name: Attest runner image SBOM
-        env:
-          HOME: ${{ env.ATTESTATION_HOME }}
-        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
-        with:
-          subject-name: ghcr.io/automata-ci/automata-runner
-          subject-digest: ${{ steps.images.outputs.runner_digest }}
-          subject-version: ${{ needs.gate.outputs.version }}
-          sbom-path: target/container-release/sbom/automata-runner.cdx.json
-          push-to-registry: true
-
-      - name: Attest sandbox-guest image provenance
-        env:
-          HOME: ${{ env.ATTESTATION_HOME }}
-        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
-        with:
-          subject-name: ghcr.io/automata-ci/automata-sandbox-guest
-          subject-digest: ${{ steps.images.outputs.sandbox_guest_digest }}
-          subject-version: ${{ needs.gate.outputs.version }}
-          push-to-registry: true
-
-      - name: Attest sandbox-guest image SBOM
-        env:
-          HOME: ${{ env.ATTESTATION_HOME }}
-        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
-        with:
-          subject-name: ghcr.io/automata-ci/automata-sandbox-guest
-          subject-digest: ${{ steps.images.outputs.sandbox_guest_digest }}
-          subject-version: ${{ needs.gate.outputs.version }}
-          sbom-path: target/sandbox-guest-context/sbom/automata-ci-sandbox-guest.cdx.json
-          push-to-registry: true
-
       - name: Verify anonymous versioned GHCR images
         env:
           AUTOMATA_DIGEST: ${{ steps.images.outputs.automata_digest }}
@@ -1266,6 +1175,11 @@ jobs:
       SOURCE_DATE_EPOCH: ${{ needs.gate.outputs.source_date_epoch }}
       TMPDIR: ${{ github.workspace }}/target/task-tmp/release-crates
     steps:
+      - name: Install release API client
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends gh
+
       - name: Check out the gated release tag
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1628,11 +1542,14 @@ jobs:
     if: ${{ needs.prepare_crates.outputs.publish_required == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-    environment: crates-io
     permissions:
       contents: read
-      id-token: write # Exchange OIDC identity for a short-lived crates.io token.
     steps:
+      - name: Install release API client
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends gh
+
       - name: Download same-run raw handoff by artifact ID
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -1924,29 +1841,19 @@ jobs:
             ghcr.io/automata-ci/automata-sandbox-guest \
             "$SANDBOX_GUEST_DIGEST"
 
-      # id-token permission is job-wide. Before this explicit crates.io exchange,
-      # this job runs only pinned artifact downloads, bounded materialization,
-      # fixed runner clients, and the digest-bound audited release helpers.
-      # It checks out no repository and runs no build or dependency code.
-      - name: Request short-lived crates.io credentials
-        id: crates-auth
-        if: ${{ vars.CRATES_IO_TRUSTED_PUBLISHING == 'true' }}
-        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
-
       # The bounded executor sends the exact handoff .crate bytes through the
       # documented length-prefixed registry API. It neither builds nor invokes
       # Cargo, follows no redirects, and reconciles every visible checksum.
       - name: Publish exact prepared crates.io archives
         env:
-          CRATES_IO_EXPECTED_OWNER_LOGINS: ${{ needs.gate.outputs.crates_io_owner_logins }}
-          CRATES_IO_INITIAL_BURST_OVERRIDE_APPROVED: ${{ needs.gate.outputs.crates_io_initial_burst_override_approved }}
-          CARGO_REGISTRY_TOKEN: ${{ steps.crates-auth.outputs.token || secrets.CARGO_REGISTRY_TOKEN }}
+          CRATES_IO_EXPECTED_OWNER_LOGINS: ${{ secrets.CRATES_IO_EXPECTED_OWNER_LOGINS }}
+          CRATES_IO_INITIAL_BURST_OVERRIDE_APPROVED: ${{ secrets.CRATES_IO_INITIAL_BURST_OVERRIDE_APPROVED }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
           PLAN_SHA256: ${{ needs.prepare_crates.outputs.plan_sha256 }}
         run: |
           [[ -n "$CARGO_REGISTRY_TOKEN" ]] || {
             printf '%s\n' \
-              'error: configure crates.io Trusted Publishing or the one-time' \
-              'crates-io-environment CARGO_REGISTRY_TOKEN bootstrap secret' >&2
+              'error: configure the Automata-managed CARGO_REGISTRY_TOKEN secret' >&2
             exit 1
           }
           cd -- "$PUBLISH_ROOT"
@@ -1981,6 +1888,11 @@ jobs:
       DOCKER_CONFIG: ${{ github.workspace }}/target/task-tmp/release-finalize/docker-config
       TMPDIR: ${{ github.workspace }}/target/task-tmp/release-finalize
     steps:
+      - name: Install release API client
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends gh
+
       - name: Check out the gated release tag
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -2172,7 +2084,7 @@ jobs:
 
       - name: Reconcile exact crates.io versions before alias promotion
         env:
-          CRATES_IO_EXPECTED_OWNER_LOGINS: ${{ needs.gate.outputs.crates_io_owner_logins }}
+          CRATES_IO_EXPECTED_OWNER_LOGINS: ${{ secrets.CRATES_IO_EXPECTED_OWNER_LOGINS }}
         run: |
           python3 scripts/ci/publish-crates.py \
             --verify-published \

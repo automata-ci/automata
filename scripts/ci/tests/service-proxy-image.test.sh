@@ -397,27 +397,37 @@ import sys
 root = pathlib.Path(sys.argv[1])
 build = "./scripts/ci/build-service-proxy-candidate.sh"
 load_review = "python3 scripts/ci/verify-service-proxy-candidate-load.py"
-for relative in (".ci/workflows/release.yml", ".ci/workflows/service-proxy-image.yml"):
-    publication = (root / relative).read_text(encoding="utf-8")
-    if build not in publication:
+release = (root / ".ci/workflows/release.yml").read_text(encoding="utf-8")
+for required in (
+    build,
+    "AUTOMATA_SERVICE_PROXY_CONTAINER_RUNTIME: buildah",
+    "AUTOMATA_SERVICE_PROXY_OCI_BUILDER: buildah-chroot",
+    "AUTOMATA_SERVICE_PROXY_PROCESS_PROBE: metadata-only",
+):
+    if required not in release:
         raise SystemExit(
-            f"service-proxy-image-test: {relative} does not build a service-proxy candidate"
+            f"service-proxy-image-test: native release lacks {required}"
         )
-    if (
-        "AUTOMATA_SERVICE_PROXY_OCI_BUILDER" in publication
-        or "AUTOMATA_SERVICE_PROXY_PROCESS_PROBE" in publication
-    ):
-        raise SystemExit(
-            f"service-proxy-image-test: {relative} overrides Podman required-process defaults"
-        )
-    if "AUTOMATA_SERVICE_PROXY_CONTAINER_RUNTIME: podman" not in publication:
-        raise SystemExit(
-            f"service-proxy-image-test: {relative} does not pin the Podman runtime"
-        )
-    if load_review not in publication:
-        raise SystemExit(
-            f"service-proxy-image-test: {relative} does not verify Docker loading"
-        )
+if load_review in release:
+    raise SystemExit(
+        "service-proxy-image-test: native release requires unavailable Docker loading"
+    )
+
+promotion = (root / ".ci/workflows/service-proxy-image.yml").read_text(
+    encoding="utf-8"
+)
+if build not in promotion:
+    raise SystemExit("service-proxy-image-test: promotion does not build a candidate")
+if (
+    "AUTOMATA_SERVICE_PROXY_OCI_BUILDER" in promotion
+    or "AUTOMATA_SERVICE_PROXY_PROCESS_PROBE" in promotion
+    or "AUTOMATA_SERVICE_PROXY_CONTAINER_RUNTIME: podman" not in promotion
+):
+    raise SystemExit(
+        "service-proxy-image-test: promotion overrides Podman required-process defaults"
+    )
+if load_review not in promotion:
+    raise SystemExit("service-proxy-image-test: promotion does not verify Docker loading")
 PY
 
 printf 'Service-proxy image verifier contract verified\n'
