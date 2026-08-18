@@ -172,6 +172,31 @@ fn loopback_transport_builds_one_exact_emulator_origin() {
     );
 }
 
+#[test]
+fn merge_queue_capability_policy_requires_exact_app_event_and_read_permission() {
+    use automata_ci_credential_github::GithubAppInstallationPermission;
+
+    assert!(merge_queue_capabilities_match(
+        42,
+        42,
+        true,
+        Some(GithubAppInstallationPermission::Read),
+    ));
+    for (observed_app_id, has_event, permission) in [
+        (43, true, Some(GithubAppInstallationPermission::Read)),
+        (42, false, Some(GithubAppInstallationPermission::Read)),
+        (42, true, None),
+        (42, true, Some(GithubAppInstallationPermission::Write)),
+    ] {
+        assert!(!merge_queue_capabilities_match(
+            observed_app_id,
+            42,
+            has_event,
+            permission,
+        ));
+    }
+}
+
 fn config_file() -> PathBuf {
     let sequence = CONFIG_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let temporary_directory =

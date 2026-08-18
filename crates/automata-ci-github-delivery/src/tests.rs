@@ -26,8 +26,8 @@ use automata_ci_store::{
     GITHUB_PROVIDER_WEBHOOK_VERIFIER_FINGERPRINT_DOMAIN, GithubAuthenticatedEventKind,
     GithubCheckName, GithubCheckRerunRepository, GithubCheckRerunRequest,
     GithubCheckRerunStoreError, GithubCheckRerunTarget, GithubCheckSubjectId,
-    GithubProviderManifest, GithubProviderManifestLimits, GithubProviderManifestRevision,
-    GithubProviderOrigins, GithubProviderRunnerPolicyObject,
+    GithubDeliveryCheckKind, GithubProviderManifest, GithubProviderManifestLimits,
+    GithubProviderManifestRevision, GithubProviderOrigins, GithubProviderRunnerPolicyObject,
     GithubRepositoryDispatchEvidenceRepository, GithubRepositoryName,
     GithubServerServiceAppClientId, GithubServerServiceAppId, GithubServerServiceAuthorityId,
     GithubServerServiceAuthoritySelector, GithubServerServiceJwtIssuer,
@@ -280,6 +280,7 @@ fn fixture_manifest_receipt(
             check_subject_id,
             request.head_sha(),
             request.authenticated_event().clone(),
+            request.check_kind(),
             delivery.accepted_at(),
         )
         .expect("manifest evidence");
@@ -792,7 +793,9 @@ fn ingress(
                 "octo-private",
                 "private-repository",
             )
-            .expect("fixture connection is valid"),
+            .expect("fixture connection is valid")
+            .with_default_branch_ref("refs/heads/main")
+            .expect("fixture default branch is valid"),
         ],
         objects,
         deliveries,
@@ -1936,13 +1939,26 @@ async fn object_and_request_digest_are_byte_deterministic() {
 
 #[tokio::test]
 async fn generic_ingress_persists_typed_event_coordinates_without_event_kind_aliasing() {
-    for (body, event_name, delivery_id, expected_kind, expected_ref) in [
+    for (body, event_name, delivery_id, expected_kind, expected_ref, expected_check_kind) in [
         (
             fixture_body(),
             "push",
             "delivery-push-v1",
             GithubAuthenticatedEventKind::Push,
             "refs/heads/main",
+            GithubDeliveryCheckKind::Required,
+        ),
+        (
+            Bytes::from(
+                String::from_utf8(fixture_body().to_vec())
+                    .expect("fixture is UTF-8")
+                    .replace("refs/heads/main", "refs/heads/feature/topic"),
+            ),
+            "push",
+            "delivery-feature-push-v1",
+            GithubAuthenticatedEventKind::Push,
+            "refs/heads/feature/topic",
+            GithubDeliveryCheckKind::Auxiliary,
         ),
         (
             pull_request_body("opened", false),
@@ -1950,13 +1966,15 @@ async fn generic_ingress_persists_typed_event_coordinates_without_event_kind_ali
             "delivery-pr-v1",
             GithubAuthenticatedEventKind::PullRequest,
             "refs/pull/7/merge",
+            GithubDeliveryCheckKind::Required,
         ),
         (
-            pull_request_body("closed", true),
+            pull_request_body("auto_merge_enabled", false),
             "pull_request",
-            "delivery-merged-pr-v1",
+            "delivery-pr-metadata-v1",
             GithubAuthenticatedEventKind::PullRequest,
-            "refs/heads/main",
+            "refs/pull/7/merge",
+            GithubDeliveryCheckKind::Auxiliary,
         ),
         (
             merge_group_body(),
@@ -1964,6 +1982,7 @@ async fn generic_ingress_persists_typed_event_coordinates_without_event_kind_ali
             "delivery-group-v1",
             GithubAuthenticatedEventKind::MergeGroup,
             "refs/heads/merge-queue/main/group-7",
+            GithubDeliveryCheckKind::Required,
         ),
     ] {
         let objects = Arc::new(RecordingBlobStore::default());
@@ -2000,6 +2019,7 @@ async fn generic_ingress_persists_typed_event_coordinates_without_event_kind_ali
         assert_eq!(event.kind(), expected_kind);
         assert_eq!(event.git_ref(), expected_ref);
         assert_eq!(requests[0].head_sha().as_bytes(), AFTER_COMMIT_BYTES);
+        assert_eq!(requests[0].check_kind(), expected_check_kind);
         assert_eq!(requests[0].delivery().identity().delivery_id(), delivery_id);
     }
 }

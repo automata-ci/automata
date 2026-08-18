@@ -28,6 +28,37 @@ use automata_ci_provider::ProviderConnectionId;
 
 const MAX_EVIDENCE_TEXT_BYTES: usize = 1_024;
 
+/// Whether one webhook delivery may own the repository's configured required
+/// Check name.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GithubDeliveryCheckKind {
+    /// A revision-testing event whose aggregate is eligible to gate merging.
+    Required,
+    /// Any other supported event, projected under a distinct Check name.
+    Auxiliary,
+}
+
+impl GithubDeliveryCheckKind {
+    /// Returns the stable durable spelling.
+    #[must_use]
+    pub const fn as_durable_str(self) -> &'static str {
+        match self {
+            Self::Required => "required",
+            Self::Auxiliary => "auxiliary",
+        }
+    }
+
+    /// Rehydrates the closed durable representation.
+    #[must_use]
+    pub fn from_durable_str(value: &str) -> Option<Self> {
+        match value {
+            "required" => Some(Self::Required),
+            "auxiliary" => Some(Self::Auxiliary),
+            _ => None,
+        }
+    }
+}
+
 /// Closed event kind carried by a authenticated GitHub envelope.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GithubAuthenticatedEventKind {
@@ -136,6 +167,7 @@ pub struct AcceptManifestPinnedGithubDelivery {
     repository_owner_id: ProviderRepositoryOwnerId,
     head_sha: GitObjectId,
     authenticated_event: GithubAuthenticatedEvent,
+    check_kind: GithubDeliveryCheckKind,
     authenticated_webhook_verifier_fingerprint: GithubProviderWebhookVerifierFingerprint,
     authenticated_webhook_verifier_revision: GithubServerServiceRevision,
 }
@@ -151,11 +183,13 @@ impl AcceptManifestPinnedGithubDelivery {
     /// # Errors
     ///
     /// Rejects a non-GitHub identity or mismatched signed/configured owners.
+    #[allow(clippy::too_many_arguments)] // Every signed Check-authority coordinate is explicit.
     pub fn new(
         delivery: AcceptProviderDelivery,
         signed_repository_owner_id: ProviderRepositoryOwnerId,
         configured_repository_owner_id: ProviderRepositoryOwnerId,
         authenticated_event: GithubAuthenticatedEvent,
+        check_kind: GithubDeliveryCheckKind,
         head_sha: GitObjectId,
         authenticated_webhook_verifier_fingerprint: GithubProviderWebhookVerifierFingerprint,
         authenticated_webhook_verifier_revision: GithubServerServiceRevision,
@@ -171,6 +205,7 @@ impl AcceptManifestPinnedGithubDelivery {
             repository_owner_id: signed_repository_owner_id,
             head_sha,
             authenticated_event,
+            check_kind,
             authenticated_webhook_verifier_fingerprint,
             authenticated_webhook_verifier_revision,
         })
@@ -198,6 +233,12 @@ impl AcceptManifestPinnedGithubDelivery {
     #[must_use]
     pub const fn authenticated_event(&self) -> &GithubAuthenticatedEvent {
         &self.authenticated_event
+    }
+
+    /// Returns whether this delivery may own the configured required Check.
+    #[must_use]
+    pub const fn check_kind(&self) -> GithubDeliveryCheckKind {
+        self.check_kind
     }
 
     /// Returns the public fingerprint of the exact HMAC key that authenticated
@@ -237,6 +278,7 @@ pub struct ManifestPinnedGithubDeliveryEvidence {
     check_subject_id: GithubCheckSubjectId,
     check_head_sha: GitObjectId,
     authenticated_event: GithubAuthenticatedEvent,
+    check_kind: GithubDeliveryCheckKind,
     repository_dispatch_resolution: Option<GithubRepositoryDispatchResolution>,
     accepted_at: UnixMillis,
 }
@@ -264,6 +306,7 @@ impl ManifestPinnedGithubDeliveryEvidence {
         check_subject_id: GithubCheckSubjectId,
         check_head_sha: GitObjectId,
         authenticated_event: GithubAuthenticatedEvent,
+        check_kind: GithubDeliveryCheckKind,
         accepted_at: UnixMillis,
     ) -> Result<Self, GithubSubjectEvidenceValueError> {
         Self::from_durable_parts_with_pull_requests_authority(
@@ -278,6 +321,7 @@ impl ManifestPinnedGithubDeliveryEvidence {
             check_subject_id,
             check_head_sha,
             authenticated_event,
+            check_kind,
             accepted_at,
         )
     }
@@ -302,6 +346,7 @@ impl ManifestPinnedGithubDeliveryEvidence {
         check_subject_id: GithubCheckSubjectId,
         check_head_sha: GitObjectId,
         authenticated_event: GithubAuthenticatedEvent,
+        check_kind: GithubDeliveryCheckKind,
         accepted_at: UnixMillis,
     ) -> Result<Self, GithubSubjectEvidenceValueError> {
         validate_timestamp(accepted_at)?;
@@ -347,6 +392,7 @@ impl ManifestPinnedGithubDeliveryEvidence {
             check_subject_id,
             check_head_sha,
             authenticated_event,
+            check_kind,
             repository_dispatch_resolution: None,
             accepted_at,
         })
@@ -388,6 +434,7 @@ impl ManifestPinnedGithubDeliveryEvidence {
             check_subject_id,
             check_head_sha,
             authenticated_event,
+            GithubDeliveryCheckKind::Auxiliary,
             accepted_at,
         )?;
         evidence.repository_dispatch_resolution = Some(resolution);
@@ -515,6 +562,12 @@ impl ManifestPinnedGithubDeliveryEvidence {
     #[must_use]
     pub const fn authenticated_event(&self) -> &GithubAuthenticatedEvent {
         &self.authenticated_event
+    }
+
+    /// Returns whether this delivery owns the fresh required aggregate name.
+    #[must_use]
+    pub const fn check_kind(&self) -> GithubDeliveryCheckKind {
+        self.check_kind
     }
 
     /// Returns immutable default-branch resolution evidence for repository dispatches.

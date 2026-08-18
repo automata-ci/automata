@@ -7,11 +7,18 @@ and the rerun service owns admission. Only Check Runs project results: no produc
 
 ## User-visible lifecycle
 
-- The configured Check name belongs only to the delivery-wide aggregate. In
+- The configured Check name is a base namespace. Its `/ required` projection
+  belongs only to the delivery-wide required aggregate. In
   `all_direct` mode it remains nonterminal while any admitted workflow is
   running and derives its terminal conclusion from every admitted workflow;
   per-workflow Checks use distinct path-qualified names. Each concrete job
   attempt has a child Check, and a physical rerun gets fresh Checks.
+- Required-name ownership is event-isolated. Only the configured default-branch
+  push, `pull_request` `opened`/`reopened`/`synchronize`, and `merge_group`
+  `checks_requested` deliveries may publish it. Other deliveries use the
+  distinct `/ auxiliary event` aggregate name. No delivery publishes the bare
+  configured base. A required aggregate never
+  concludes `skipped`; zero selected workflows or an all-skipped result fails.
 - Delivery, schedule, and rerun origins share the same fenced projection contract.
 - Identity is immutable: tenant, repository, connection, installation, App, head SHA,
   Check name, `automata-check:<UUID>` external ID, and exact Details target.
@@ -38,6 +45,9 @@ Commit Statuses are a separate, smaller result surface and are intentionally unu
 Deployments and deployment statuses are a different product boundary and are unused.
 The limits cited below are GitHub's; local byte and retention bounds are identified here.
 GitHub guidance requires unique required-check job names; use its troubleshooting guide for stale checks or an unexpected source.
+Runtime startup attests every effective installation before enabling ingress:
+the configured App and installation IDs must match GitHub, `merge_group` must
+be subscribed, and `merge_queues: read` must be effective.
 
 - [Check Run endpoints](https://docs.github.com/en/rest/checks/runs)
 - [Check Suite endpoints](https://docs.github.com/en/rest/checks/suites)

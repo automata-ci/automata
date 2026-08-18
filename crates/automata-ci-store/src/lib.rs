@@ -185,7 +185,7 @@ pub use github_service_authority::{
 };
 pub use github_subject_evidence::{
     AcceptManifestPinnedGithubDelivery, AuthenticatedGithubDeliveryClaim, GithubAuthenticatedEvent,
-    GithubAuthenticatedEventKind, GithubRepositoryDispatchResolution,
+    GithubAuthenticatedEventKind, GithubDeliveryCheckKind, GithubRepositoryDispatchResolution,
     GithubSubjectEvidenceRepository, GithubSubjectEvidenceStoreError,
     GithubSubjectEvidenceValueError, GithubWorkflowRunSubjectEvidence,
     ManifestPinnedGithubDeliveryEvidence, ManifestPinnedGithubDeliveryReceipt,

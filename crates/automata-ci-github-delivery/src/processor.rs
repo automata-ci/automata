@@ -2170,6 +2170,7 @@ mod renewal_tests {
                 push.git_ref().full(),
             )
             .expect("authenticated event"),
+            automata_ci_store::GithubDeliveryCheckKind::Required,
             claimed.receipt().accepted_at(),
         )
         .expect("manifest-pinned evidence")

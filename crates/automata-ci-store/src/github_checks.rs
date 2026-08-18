@@ -180,6 +180,42 @@ impl GithubCheckName {
         Self::new(format!("{prefix}{suffix}"))
     }
 
+    /// Derives the required aggregate name for revision-testing events.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error only if an already-validated configured base cannot be
+    /// projected within GitHub's Check-name byte ceiling.
+    pub fn for_required_delivery(configured_base: &Self) -> Result<Self, GithubCheckValueError> {
+        Self::with_suffix(configured_base, " / required")
+    }
+
+    /// Derives the fixed name used by delivery aggregates that must never
+    /// satisfy the repository's required status context.
+    ///
+    /// Delivery activities outside the revision-testing set retain a visible
+    /// aggregate under this distinct bounded name.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error only if an already-validated configured name cannot be
+    /// projected within GitHub's Check-name byte ceiling.
+    pub fn for_auxiliary_delivery(configured_base: &Self) -> Result<Self, GithubCheckValueError> {
+        Self::with_suffix(configured_base, " / auxiliary event")
+    }
+
+    fn with_suffix(configured_base: &Self, suffix: &str) -> Result<Self, GithubCheckValueError> {
+        let mut prefix_end = configured_base
+            .as_str()
+            .len()
+            .min(MAX_CHECK_NAME_BYTES - suffix.len());
+        while !configured_base.as_str().is_char_boundary(prefix_end) {
+            prefix_end -= 1;
+        }
+        let prefix = configured_base.as_str()[..prefix_end].trim_end();
+        Self::new(format!("{prefix}{suffix}"))
+    }
+
     /// Returns the validated provider-facing name.
     #[must_use]
     pub fn as_str(&self) -> &str {

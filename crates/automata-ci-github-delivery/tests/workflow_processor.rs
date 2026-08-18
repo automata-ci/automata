@@ -310,6 +310,7 @@ impl FixtureSubjectEvidence {
                 base.check_subject_id(),
                 base.check_head_sha(),
                 event,
+                base.check_kind(),
                 base.accepted_at(),
             )
             .expect("authenticated event evidence"),

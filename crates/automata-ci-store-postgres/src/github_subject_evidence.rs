@@ -10,7 +10,7 @@ use automata_ci_store::{
     AcceptManifestPinnedGithubDelivery, AcceptManifestPinnedGithubRepositoryDispatch,
     AdmissionObject, AuthenticatedGithubDeliveryClaim, EventControlSubjectId, EventSubjectId,
     EventSubjectOrigin, GithubAuthenticatedEvent, GithubAuthenticatedEventKind, GithubCheckName,
-    GithubCheckSubjectId, GithubCheckSubjectKey, GithubProviderManifest,
+    GithubCheckSubjectId, GithubCheckSubjectKey, GithubDeliveryCheckKind, GithubProviderManifest,
     GithubProviderManifestLimits, GithubProviderManifestRevision, GithubProviderOrigins,
     GithubProviderRunnerPolicyObject, GithubProviderWebhookVerifierFingerprint,
     GithubProviderWorkflowSelection, GithubRepositoryDispatchEvidenceRepository,
@@ -1515,11 +1515,12 @@ async fn insert_resolved_repository_dispatch_evidence(
             repository_contents_authority_identity_digest,
             repository_contents_authority_app_configuration_revision,
             repository_contents_authority_policy_revision,
+            aggregate_check_kind,
             github_check_subject_id, github_check_head_sha
         ) VALUES (
             $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$26,
             'repository_dispatch',$14,$15,$16,$17,$18,$19,$20,$21,$22,
-            $23,$24,$25,$15
+            $23,$24,'auxiliary',$25,$15
         )
         ",
     )
@@ -1573,6 +1574,8 @@ async fn insert_resolved_repository_dispatch_check(
 ) -> Result<(), GithubSubjectEvidenceStoreError> {
     let pending = request.pending();
     let manifest = pending.manifest();
+    let check_name = GithubCheckName::for_auxiliary_delivery(manifest.check_name())
+        .map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)?;
     let external_id = format!("automata-check:{subject_id}");
     let result = sqlx::query(
         r"
@@ -1596,7 +1599,7 @@ async fn insert_resolved_repository_dispatch_check(
     .bind(pg_bigint(manifest.github_repository_id().get()))
     .bind(pg_bigint(manifest.github_app_id().get()))
     .bind(request.resolution().source_revision().as_bytes())
-    .bind(manifest.check_name().as_str())
+    .bind(check_name.as_str())
     .bind(external_id)
     .bind(pending.accepted_at().get())
     .execute(&mut **transaction)
@@ -1673,10 +1676,11 @@ async fn insert_delivery_evidence(
             pull_requests_authority_identity_digest,
             pull_requests_authority_app_configuration_revision,
             pull_requests_authority_policy_revision,
+            aggregate_check_kind,
             github_check_subject_id, github_check_head_sha
         ) VALUES (
             $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,
-            $16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30
+            $16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31
         )
         ",
     )
@@ -1722,6 +1726,7 @@ async fn insert_delivery_evidence(
     .bind(pull_requests_authority_digest)
     .bind(pull_requests_authority_app_revision)
     .bind(pull_requests_authority_policy_revision)
+    .bind(request.check_kind().as_durable_str())
     .bind(subject_id)
     .bind(request.head_sha().as_bytes())
     .execute(&mut **transaction)
@@ -1756,6 +1761,16 @@ async fn insert_queued_check(
     let identity = request.delivery().identity();
     let external_id = format!("automata-check:{subject_id}");
     let manifest = &pin.manifest;
+    let check_name = match request.check_kind() {
+        automata_ci_store::GithubDeliveryCheckKind::Required => {
+            GithubCheckName::for_required_delivery(manifest.check_name())
+                .map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)?
+        }
+        automata_ci_store::GithubDeliveryCheckKind::Auxiliary => {
+            GithubCheckName::for_auxiliary_delivery(manifest.check_name())
+                .map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)?
+        }
+    };
     let result = sqlx::query(
         r"
         INSERT INTO github_check_subjects (
@@ -1778,7 +1793,7 @@ async fn insert_queued_check(
     .bind(pg_bigint(identity.repository_id().get()))
     .bind(pg_bigint(manifest.github_app_id().get()))
     .bind(request.head_sha().as_bytes())
-    .bind(manifest.check_name().as_str())
+    .bind(check_name.as_str())
     .bind(external_id)
     .bind(request.delivery().accepted_at().get())
     .execute(&mut **transaction)
@@ -1813,6 +1828,7 @@ fn evidence_from_request(
             subject_id,
             request.head_sha(),
             request.authenticated_event().clone(),
+            request.check_kind(),
             request.delivery().accepted_at(),
         );
     result.map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)
@@ -2156,6 +2172,7 @@ fn acceptance_matches(
         && durable.receipt.repository_owner_id() == request.repository_owner_id()
         && durable.receipt.evidence().check_head_sha() == request.head_sha()
         && durable.receipt.evidence().authenticated_event() == request.authenticated_event()
+        && durable.receipt.evidence().check_kind() == request.check_kind()
         && durable
             .receipt
             .evidence()
@@ -2224,6 +2241,11 @@ fn decode_delivery_evidence(
     )
     .map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)?;
     let accepted_at: i64 = row.try_get("accepted_at_ms").map_err(operation_error)?;
+    let check_kind = GithubDeliveryCheckKind::from_durable_str(
+        &row.try_get::<String, _>("aggregate_check_kind")
+            .map_err(operation_error)?,
+    )
+    .ok_or(GithubSubjectEvidenceStoreError::CorruptData)?;
     let delivery_id = ProviderDeliveryId::from_uuid(delivery_id)
         .map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)?;
     let owner_id = ProviderRepositoryOwnerId::new(positive_u64(owner_id)?)
@@ -2241,6 +2263,7 @@ fn decode_delivery_evidence(
             checks_authority,
             repository_contents_authority,
             pull_requests_authority,
+            check_kind,
             subject_id,
             head_sha,
             accepted_at: UnixMillis::new(accepted_at),
@@ -2257,6 +2280,7 @@ struct DecodedDeliveryEvidenceParts {
     checks_authority: GithubServerServiceAuthoritySelector,
     repository_contents_authority: GithubServerServiceAuthoritySelector,
     pull_requests_authority: Option<GithubServerServiceAuthoritySelector>,
+    check_kind: GithubDeliveryCheckKind,
     subject_id: GithubCheckSubjectId,
     head_sha: GitObjectId,
     accepted_at: UnixMillis,
@@ -2300,6 +2324,7 @@ fn decode_delivery_event_evidence(
         checks_authority,
         repository_contents_authority,
         pull_requests_authority,
+        check_kind,
         subject_id,
         head_sha,
         accepted_at,
@@ -2335,6 +2360,7 @@ fn decode_delivery_event_evidence(
                 subject_id,
                 head_sha,
                 event,
+                check_kind,
                 accepted_at,
             )
         }
@@ -2345,6 +2371,9 @@ fn decode_delivery_event_evidence(
             Some(source_revision),
             Some(source_authority),
         ) if authenticated_event_envelope_schema_is_current(version) => {
+            if check_kind != GithubDeliveryCheckKind::Auxiliary {
+                return Err(GithubSubjectEvidenceStoreError::CorruptData);
+            }
             let kind = decode_github_authenticated_event_kind(&event_name)
                 .filter(|kind| *kind == GithubAuthenticatedEventKind::RepositoryDispatch)
                 .ok_or(GithubSubjectEvidenceStoreError::CorruptData)?;
@@ -3073,6 +3102,7 @@ const EVIDENCE_SELECT: &str = r"
         evidence.pull_requests_authority_identity_digest,
         evidence.pull_requests_authority_app_configuration_revision,
         evidence.pull_requests_authority_policy_revision,
+        evidence.aggregate_check_kind,
         evidence.github_check_subject_id, evidence.github_check_head_sha,
         manifest.tenant_id, manifest.repository_id,
         manifest.provider_connection_id, manifest.manifest_revision,

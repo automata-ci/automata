@@ -5,11 +5,12 @@ use automata_ci_provider::ProviderConnectionId;
 use automata_ci_store::{
     AcceptManifestPinnedGithubDelivery, AcceptProviderDelivery, AdmissionObject,
     AuthenticatedGithubDeliveryClaim, GithubAuthenticatedEvent, GithubAuthenticatedEventKind,
-    GithubCheckName, GithubCheckSubjectId, GithubCheckSubjectKey, GithubProviderManifest,
-    GithubProviderManifestLimits, GithubProviderManifestRevision, GithubProviderOrigins,
-    GithubProviderWebhookVerifierFingerprint, GithubRepositoryDispatchEvidenceRepository,
-    GithubRepositoryDispatchResolution, GithubRepositoryName, GithubServerServiceAppClientId,
-    GithubServerServiceAppId, GithubServerServiceAuthorityId, GithubServerServiceAuthoritySelector,
+    GithubCheckName, GithubCheckSubjectId, GithubCheckSubjectKey, GithubDeliveryCheckKind,
+    GithubProviderManifest, GithubProviderManifestLimits, GithubProviderManifestRevision,
+    GithubProviderOrigins, GithubProviderWebhookVerifierFingerprint,
+    GithubRepositoryDispatchEvidenceRepository, GithubRepositoryDispatchResolution,
+    GithubRepositoryName, GithubServerServiceAppClientId, GithubServerServiceAppId,
+    GithubServerServiceAuthorityId, GithubServerServiceAuthoritySelector,
     GithubServerServiceJwtIssuer, GithubServerServiceRevision, GithubSubjectEvidenceRepository,
     GithubSubjectEvidenceStoreError, GithubSubjectEvidenceValueError,
     GithubWorkflowRunSubjectEvidence, LogicalWorkflowInvocationId,
@@ -88,6 +89,7 @@ fn github_acceptance_compares_signed_and_configured_owner_outside_generic_identi
         owner,
         owner,
         push_event(),
+        GithubDeliveryCheckKind::Required,
         head,
         verifier,
         verifier_revision,
@@ -115,6 +117,7 @@ fn github_acceptance_compares_signed_and_configured_owner_outside_generic_identi
             owner,
             other_owner,
             push_event(),
+            GithubDeliveryCheckKind::Required,
             head,
             verifier,
             verifier_revision
@@ -127,6 +130,7 @@ fn github_acceptance_compares_signed_and_configured_owner_outside_generic_identi
             owner,
             owner,
             push_event(),
+            GithubDeliveryCheckKind::Required,
             head,
             verifier,
             verifier_revision
@@ -293,6 +297,7 @@ fn public_checked_rehydration_retains_manifest_authorities_check_and_run_evidenc
         subject_id,
         GitObjectId::from_durable_bytes(&[9; 20]).expect("head"),
         push_event(),
+        GithubDeliveryCheckKind::Required,
         UnixMillis::new(100),
     )
     .expect("delivery evidence");
@@ -300,6 +305,7 @@ fn public_checked_rehydration_retains_manifest_authorities_check_and_run_evidenc
     assert_eq!(evidence.checks_authority(), &checks);
     assert_eq!(evidence.repository_contents_authority(), &private);
     assert_eq!(evidence.check_subject_id(), subject_id);
+    assert_eq!(evidence.check_kind(), GithubDeliveryCheckKind::Required);
     let receipt = ManifestPinnedGithubDeliveryReceipt::from_durable_parts(evidence.clone());
     assert_eq!(receipt.evidence(), &evidence);
     assert_eq!(receipt.check_subject_id(), subject_id);
@@ -333,6 +339,7 @@ fn public_checked_rehydration_retains_manifest_authorities_check_and_run_evidenc
             subject_id,
             GitObjectId::from_durable_bytes(&[9; 20]).expect("head"),
             push_event(),
+            GithubDeliveryCheckKind::Required,
             UnixMillis::new(100),
         ),
         Err(GithubSubjectEvidenceValueError::WebhookVerifierPinMismatch)
@@ -350,6 +357,7 @@ fn public_checked_rehydration_retains_manifest_authorities_check_and_run_evidenc
             subject_id,
             GitObjectId::from_durable_bytes(&[9; 20]).expect("head"),
             push_event(),
+            GithubDeliveryCheckKind::Required,
             UnixMillis::new(100),
         ),
         Err(GithubSubjectEvidenceValueError::AuthorityPinMismatch)
@@ -382,6 +390,7 @@ fn pull_request_evidence_requires_a_distinct_exact_pull_requests_selector() {
                 subject_id,
                 GitObjectId::from_durable_bytes(&[9; 20]).expect("head"),
                 pull_request_event(),
+                GithubDeliveryCheckKind::Required,
                 UnixMillis::new(100),
             )
             .expect("pull-request evidence");
@@ -402,6 +411,7 @@ fn pull_request_evidence_requires_a_distinct_exact_pull_requests_selector() {
                 subject_id,
                 GitObjectId::from_durable_bytes(&[9; 20]).expect("head"),
                 pull_request_event(),
+                GithubDeliveryCheckKind::Required,
                 UnixMillis::new(100),
             ),
             Err(GithubSubjectEvidenceValueError::AuthorityPinMismatch)
@@ -419,6 +429,7 @@ fn pull_request_evidence_requires_a_distinct_exact_pull_requests_selector() {
                 subject_id,
                 GitObjectId::from_durable_bytes(&[9; 20]).expect("head"),
                 pull_request_event(),
+                GithubDeliveryCheckKind::Required,
                 UnixMillis::new(100),
             ),
             Err(GithubSubjectEvidenceValueError::AuthorityPinMismatch)

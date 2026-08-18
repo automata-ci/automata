@@ -327,6 +327,7 @@ fn fixture_receipt(
             .expect("Check subject"),
             request.head_sha(),
             request.authenticated_event().clone(),
+            request.check_kind(),
             request.delivery().accepted_at(),
         )
         .expect("fixture manifest evidence");

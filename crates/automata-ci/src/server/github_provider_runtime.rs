@@ -570,6 +570,20 @@ impl GithubProviderRuntimeBuilder {
             );
             brokers.push((installation_id, broker));
         }
+        for (_, broker) in &brokers {
+            let capabilities = broker
+                .observe_installation_capabilities()
+                .await
+                .map_err(GithubProviderRuntimeBuildError::InstallationCapabilities)?;
+            if !merge_queue_capabilities_match(
+                capabilities.app_id(),
+                config.app().app_id().get(),
+                capabilities.has_event("merge_group"),
+                capabilities.permission("merge_queues"),
+            ) {
+                return Err(GithubProviderRuntimeBuildError::InvalidMergeQueueCapabilities);
+            }
+        }
         drop(app_private_key);
         let bootstrap_broker = brokers
             .first()
@@ -1018,6 +1032,18 @@ impl GithubProviderRuntimeBuilder {
     }
 }
 
+fn merge_queue_capabilities_match(
+    observed_app_id: u64,
+    configured_app_id: u64,
+    has_merge_group_event: bool,
+    merge_queues_permission: Option<automata_ci_credential_github::GithubAppInstallationPermission>,
+) -> bool {
+    observed_app_id == configured_app_id
+        && has_merge_group_event
+        && merge_queues_permission
+            == Some(automata_ci_credential_github::GithubAppInstallationPermission::Read)
+}
+
 fn provider_credential_config(
     transport: &GithubProviderTransport,
     issuer: GithubAppIssuer,
@@ -1311,6 +1337,12 @@ pub enum GithubProviderRuntimeBuildError {
     /// The loaded App private key could not construct an exact broker.
     #[error("the GitHub provider App key is invalid")]
     InvalidAppKey,
+    /// The effective App installation capabilities could not be observed.
+    #[error(transparent)]
+    InstallationCapabilities(automata_ci_credential_github::GithubAppInstallationObservationError),
+    /// The effective App installation cannot receive merge-queue work safely.
+    #[error("the GitHub App installation cannot receive merge-queue work")]
+    InvalidMergeQueueCapabilities,
     /// The hardened GitHub client could not be constructed.
     #[error("the GitHub provider client configuration is invalid")]
     InvalidProviderClient,

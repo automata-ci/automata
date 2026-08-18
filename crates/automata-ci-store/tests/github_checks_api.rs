@@ -116,6 +116,37 @@ fn discovered_workflow_check_names_cannot_collide_with_the_aggregate() {
 }
 
 #[test]
+fn auxiliary_event_check_names_cannot_satisfy_the_required_aggregate() {
+    let configured = GithubCheckName::new("Automata CI").expect("configured base");
+    let required =
+        GithubCheckName::for_required_delivery(&configured).expect("required event name");
+    let auxiliary =
+        GithubCheckName::for_auxiliary_delivery(&configured).expect("auxiliary event name");
+
+    assert_eq!(required.as_str(), "Automata CI / required");
+    assert_eq!(auxiliary.as_str(), "Automata CI / auxiliary event");
+    assert_ne!(required, configured);
+    assert_ne!(auxiliary, configured);
+    assert_ne!(auxiliary, required);
+
+    let maximum = GithubCheckName::new("x".repeat(255)).expect("maximum configured base");
+    for (bounded, suffix) in [
+        (
+            GithubCheckName::for_required_delivery(&maximum).expect("bounded required name"),
+            " / required",
+        ),
+        (
+            GithubCheckName::for_auxiliary_delivery(&maximum).expect("bounded auxiliary name"),
+            " / auxiliary event",
+        ),
+    ] {
+        assert_eq!(bounded.as_str().len(), 255);
+        assert!(bounded.as_str().ends_with(suffix));
+        assert_ne!(bounded, maximum);
+    }
+}
+
+#[test]
 fn rerun_subject_identity_has_one_closed_physical_origin() {
     let rerun_run_id = RunId::from_uuid(Uuid::new_v4());
     let identity = GithubCheckSubjectIdentity::new_rerun(

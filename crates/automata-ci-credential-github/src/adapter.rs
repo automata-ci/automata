@@ -25,6 +25,10 @@ use crate::{
         GITHUB_API_VERSION, GithubAppConfigurationError, GithubAppCredentialConfig,
         TransportSecurity, whole_milliseconds,
     },
+    installation_contract::{
+        GithubAppInstallationCapabilities, GithubAppInstallationObservationError,
+        observe_installation_response,
+    },
     response::{
         CreatedBodyCompletion, RecoveredInstallationToken, decode_token_response,
         definitive_mint_rejection, is_rate_limited, read_created_response, recover_expiration,
@@ -240,6 +244,58 @@ impl GithubAppCredentialBroker {
             return Err(CredentialError::new(CredentialErrorKind::InvalidRequest));
         }
         Ok(endpoint)
+    }
+
+    fn installation_url(&self) -> Result<Url, GithubAppInstallationObservationError> {
+        let mut endpoint = self.config.api_base.clone();
+        let mut segments = endpoint
+            .path_segments_mut()
+            .map_err(|()| GithubAppInstallationObservationError::InvalidResponse)?;
+        segments.pop_if_empty();
+        segments.push("app");
+        segments.push("installations");
+        segments.push(&self.config.installation_id.get().to_string());
+        drop(segments);
+        if !self.config.trusts_api_url(&endpoint) {
+            return Err(GithubAppInstallationObservationError::InvalidResponse);
+        }
+        Ok(endpoint)
+    }
+
+    /// Observes the effective GitHub App installation capabilities.
+    ///
+    /// GitHub exposes effective webhook subscriptions and repository
+    /// permissions on the App installation resource. The observation is
+    /// bounded and must echo this broker's exact installation identity. Product
+    /// policy remains the caller's responsibility.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized error when GitHub cannot be reached, rejects the App
+    /// assertion, or returns malformed or mismatched installation metadata.
+    pub async fn observe_installation_capabilities(
+        &self,
+    ) -> Result<GithubAppInstallationCapabilities, GithubAppInstallationObservationError> {
+        let assertion = self
+            .signer
+            .sign(self.clock.now())
+            .map_err(|_| GithubAppInstallationObservationError::Authentication)?;
+        let authorization = bearer_header(assertion.expose_secret())
+            .map_err(|_| GithubAppInstallationObservationError::Authentication)?;
+        let response = self
+            .client
+            .get(self.installation_url()?)
+            .header(ACCEPT, ACCEPT_API_JSON)
+            .header(AUTHORIZATION, authorization)
+            .send()
+            .await
+            .map_err(|_| GithubAppInstallationObservationError::Transport)?;
+        observe_installation_response(
+            response,
+            self.config.limits.max_response_bytes,
+            self.config.installation_id.get(),
+        )
+        .await
     }
 
     fn validate_request(

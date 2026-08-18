@@ -2,7 +2,10 @@
 
 `automata-ci-credential-github` implements Automata's workload credential
 broker for GitHub Apps. It exchanges a short-lived App assertion for an
-installation token scoped to one repository and an exact permission set.
+installation token scoped to one repository and an exact permission set. The
+same authenticated App boundary can observe one installation's bounded,
+effective event subscriptions and repository permissions; product-specific
+capability requirements are enforced by the composing runtime.
 
 The adapter implements the provider-neutral contracts in
 `automata_ci_scm::credential`; it does not provide human login or expose the App
