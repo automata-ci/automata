@@ -9,12 +9,13 @@ behavior to the control-plane crate.
 
 The available commands provide read-only host preflight and snapshot-backed
 workflow checking on the qualified platforms. On x86-64 Linux it also provides
-sealed `init`, read-only metadata `status`, and exact confirmed `reset` for a
-Docker Engine at exactly `unix:///var/run/docker.sock`. During `local doctor`, context
+sealed `init`, synchronous `up`/`down`, read-only live `status`, and exact
+confirmed `reset` for a Docker Engine at exactly
+`unix:///var/run/docker.sock`. During `local doctor`, context
 discovery is completed first, subsequent daemon probes are pinned to that exact
 local Unix-socket or Windows-named-pipe endpoint, and JSON schema 3 reports the
 bounded context name. Init accepts only the fixed Unix socket so the verified
-daemon, imported images, sealed topology, and future relay all name the same
+daemon, imported images, sealed topology, and fixed relay all name the same
 authority.
 
 The private local-snapshot foundation uses live bytes for staged additions
@@ -105,11 +106,30 @@ state custody. Both operations converge from sealed Desired bytes plus fresh
 Compose and Engine inspection under the retained exact-ID lock; no host
 lifecycle journal or detached lifecycle work exists.
 
+The lifecycle requires rootful Docker with daemon-default user-namespace
+remapping, cgroup v2, the built-in seccomp profile, private cgroup namespaces,
+the required memory/CPU/PID controllers, `runc`, and live restore disabled. The
+trusted fixed Engine-relay service alone sets `userns_mode: host` so its root
+bootstrap can open the root-owned socket before dropping authority; untrusted
+`LocalDocker` job containers do not override the user namespace and therefore
+inherit the required daemon remap. Docker `/info` does not expose daemon-wide
+`log-opts` or the bridge entry in `default-network-opts`, and may omit
+`DefaultUlimits`, so all three must be configured empty as explicit trusted
+prerequisites. Exact post-create container and network inspection rejects any
+injected log option, bridge option, or ulimit. Such drift fails the lifecycle
+operation while its exact lock becomes sticky recovery evidence.
+
 A stopped exact-ID holder remains sticky interruption evidence and ordinary
 acquisition refuses it. `--recover-stopped-lock` is explicit operator
-authorization to verify positive Engine/process quiescence, remove only the
-reattested exact stopped ID after a Docker Engine restart, and continue the
-requested convergence. Live,
+authorization to verify positive Engine/process quiescence under one continuous
+Docker event fence, remove only the reattested exact stopped ID after a Docker
+Engine restart, and continue the requested convergence. The holder exits
+successfully only after reading the complete fixed `release\n` frame; EOF, a
+partial frame, or any other frame leaves stopped sticky evidence. The accepted
+daemon generation binds host boot ID and `/proc` start time to the twice-sampled
+root `SCM_CREDENTIALS` PID that actually sent a qualified HTTP response;
+`SO_PEERCRED` is not accepted because socket activation can identify the socket
+owner rather than the response-serving daemon. Live,
 drifting, unknown, or indeterminate evidence still fails closed. The same
 authorization is available to init because a pre-seal interruption cannot
 necessarily advance to up.
@@ -125,6 +145,10 @@ unexpectedly managed, or
 foreign-attached state before mutation. Missing or safe malformed material,
 certificate, selector, and commit records are not deletion authority and do not
 strand cleanup; a canonically valid conflicting selector or commit blocks.
+The current lifecycle creates no OS credential-store entries: its exact
+credential-selector set is closed and empty until the public onboarding slice,
+and reset preflights and requeries that empty set without claiming to remove
+host-keyring entries.
 Status and reset use Bollard directly at the fixed Docker socket with pinned API
 1.48; Docker CLI availability, current context, `DOCKER_API_VERSION`, and
 Compose readiness affect neither status nor reset. Init and doctor retain the
@@ -166,6 +190,10 @@ architecture and must not declare volumes, exposed ports, or a healthcheck. The
 proxy additionally has an exact credential-free runtime shape and must carry
 `io.automata.service-proxy.protocol-version=2`.
 
+The trusted fixed relay service runs in the host user namespace only for its
+bounded socket bootstrap. Untrusted job containers inherit daemon-default
+remapping and separately prove the resulting nonzero UID/GID map.
+
 The proxy representation is exact and storage-mode coupled. Classic Docker
 must expose the config ID, the sole canonical local tag, and no repository
 digest. Docker's containerd image store must expose the manifest ID, the same
@@ -174,12 +202,13 @@ digests, alternate or additional tags, and additional repository digests fail
 closed. Connect and every shared-transport operation recheck this live
 representation; cleanup-only destroy deliberately remains image-independent.
 
-The bounded Engine facts do not expose the daemon's `default-ulimits`
-configuration. An empty `default-ulimits` policy is therefore a trusted
-fixed-relay prerequisite, not a preflight attestation. The provider still
-requires the realized container ulimit list to be empty; a violation fails
-closed after create, and custody-only destroy can still remove the container
-when its immutable custody and exact front network remain valid.
+The bounded Engine facts do not fully expose daemon-wide `log-opts`, bridge
+`default-network-opts`, or `default-ulimits`. Empty settings are therefore
+trusted fixed-relay prerequisites rather than complete preflight attestations.
+The provider still requires the realized container ulimit list and exact
+network options; a violation fails closed after create, and custody-only destroy
+can still remove the container when its immutable custody and exact front
+network remain valid.
 
 A job receives no host bind, host engine socket, or per-job volume. It joins one
 deterministic internal `/29` front network shared only with a credential-free

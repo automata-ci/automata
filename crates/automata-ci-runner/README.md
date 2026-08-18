@@ -168,11 +168,14 @@ and peer proxies on every operation that consumes the shared route.
 The rootful relay daemon must attest daemon-default user-namespace remapping
 plus built-in seccomp and private cgroup namespaces, expose every required
 memory/CPU/PID controller, have AppArmor and SELinux disabled, and exactly match
-the architecture already advertised by the runner inventory. Its trusted
-relay must run Docker Engine 28 or newer with API 1.48 or newer. Its trusted
-configuration must leave `default-ulimits` empty because the bounded Engine
-facts do not expose that daemon setting. Rootless Docker is not qualified, and
-each sandbox separately proves one
+the architecture already advertised by the runner inventory. The trusted fixed
+relay service uses `userns_mode: host` only for bounded root-owned-socket
+bootstrap; untrusted job containers omit that override and inherit daemon
+remapping. Its trusted relay must run Docker Engine 28 or newer with API 1.48 or
+newer. Its trusted configuration must leave daemon-wide `log-opts`, bridge
+`default-network-opts`, and `default-ulimits` empty because the bounded Engine
+facts do not fully expose those settings. Realized drift fails closed after
+create. Rootless Docker is not qualified, and each sandbox separately proves one
 nonzero host UID/GID mapping that covers its fixed identities. The guest's
 protected client lives in tmpfs. Its administrator contract is an attenuated
 UID 0 inside that remapped namespace with every Linux capability set empty; it

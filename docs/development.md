@@ -369,8 +369,8 @@ materializer, and seals the immutable epoch plus canonical desired intent.
 Replay reattests the same custody and fails closed on missing or conflicting
 records/resources.
 
-Init stops after sealing material and desired intent. It has no renderer,
-generates no Compose document, invokes no Compose operation, and starts no
+Init stops after sealing material and desired intent. It does not render or
+generate a Compose document, invoke a Compose operation, or start a
 control plane, relay, bootstrap, database, object store, or runner. `local up`
 reattests the sealed epoch and exact Docker/Compose authority, renders the
 canonical topology, and synchronously converges dependencies, bootstrap,
@@ -378,6 +378,15 @@ control, relay, and runner services. `local down` synchronously removes that
 replaceable topology while preserving sealed custody, persistent data, and
 images. Repeating either command re-inspects and reconciles current Engine and
 Compose truth.
+
+Lifecycle convergence requires empty daemon-wide `log-opts`, empty bridge
+`default-network-opts`, and empty `default-ulimits` as trusted host
+prerequisites because `/info` does not completely attest them. The post-create
+inspection catches any injected container log option, bridge option, or ulimit;
+the operation then fails closed and leaves its stopped exact-ID lock as sticky
+recovery evidence. The fixed Engine relay explicitly uses `userns_mode: host`
+for bounded root-owned-socket bootstrap, while untrusted `LocalDocker` jobs
+inherit the required daemon-default user-namespace remap.
 
 A stopped exact-ID lifecycle lock is sticky interruption evidence, so ordinary
 `init`, `up`, and `down` refuse it. Restart Docker Engine so the accepting daemon
@@ -448,11 +457,13 @@ already-present digest-pinned Linux job and sandbox-guest images, the exact
 daemon-local imported service-proxy identity, and the desired-plan-bound,
 externally provisioned Results transit and target. The
 relay must front rootful Docker with daemon-default user-namespace remapping
-enabled; the
+enabled. The trusted relay service uses the host user namespace for its socket
+bootstrap, while the untrusted test jobs inherit that daemon remap. The
 built-in seccomp and private-cgroup-namespace security options must be reported,
 AppArmor and SELinux must be disabled, every required resource controller must
-be available, and daemon `default-ulimits` must be empty. The fixture verifies
-the realized empty-ulimit contract and custody-only rollback. Its network gate
+be available, and daemon-wide `log-opts`, bridge `default-network-opts`, and
+`default-ulimits` must be empty. The fixture verifies the realized exact
+log/network/ulimit contracts and custody-only rollback. Its network gate
 also requires `results.automata.invalid:8081` to reach only the configured
 numeric Results target while external DNS and public-IP egress fail. Rootless
 Docker and multi-range UID/GID maps are intentionally rejected. The

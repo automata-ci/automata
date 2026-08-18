@@ -176,9 +176,8 @@ recovery, and repeated use; their existence must not turn the quickstart into a
 manual assembly guide. `up` never prompts for a workflow, secret, browser, or
 GitHub connection.
 
-The future converged lifecycle commands that select an installation accept the
-same `--installation NAME` selector. Current sealed init accepts that selector;
-current status and reset instead derive the immutable name and ID from the
+Current sealed init accepts the `--installation NAME` selector. Current `up`,
+`down`, `status`, and `reset` instead derive the immutable name and ID from
 explicit `--state-directory` custody and deliberately accept no separate
 selector. Host-only `doctor` and source-only `check` do not invent or select an
 installation. Any native cache location is an internal platform choice, not
@@ -364,7 +363,7 @@ PostgreSQL, object, runner, or desired-spec data look foreign.
 
 #### Replaceable topology and `down`
 
-Future convergence renders the canonical desired spec into a product-owned
+Current convergence renders the canonical desired spec into a product-owned
 Compose configuration. Its
 containers, networks, initialization helpers, and generated-config volumes are
 replaceable and carry the exact plan digest plus their role in the managed
@@ -373,6 +372,19 @@ replaces only resources whose ownership was proven, and inspects the result.
 Mutable parallelism, profile selection, image identity, and render inputs are
 therefore bound both to the durable desired document and to every replaceable
 resource that realizes that plan.
+
+The selected rootful daemon must report cgroup v2, the required controllers,
+`runc`, live restore disabled, daemon-default user-namespace remapping, the
+built-in seccomp profile, and private cgroup namespaces. The trusted fixed
+Engine relay explicitly uses `userns_mode: host` only so its root bootstrap can
+open the fixed root-owned socket before dropping authority; untrusted
+`LocalDocker` jobs omit that override and inherit the required daemon remap.
+Docker `/info` does not expose daemon-wide `log-opts` or the bridge entry in
+`default-network-opts`, and may omit `DefaultUlimits`. Empty values for all
+three are therefore explicit trusted prerequisites. Exact post-create
+inspection rejects injected log options, bridge options, and ulimits; drift
+fails the operation and leaves its exact stopped lock as sticky recovery
+evidence.
 
 `down` holds the engine lock, validates the identity, desired document, and
 discovered resource union, then runs exact-project Compose teardown without
@@ -402,21 +414,29 @@ non-root user, read-only root, `network=none`, all capabilities dropped,
 no-new-privileges, `restart=no`, auto-remove disabled, and no mount, device,
 port, secret, credential, or user-supplied environment. Before starting it, the
 manager attaches the helper's sole stdin stream. The fixed helper command reads
-until EOF and then exits; it has no wall-clock or heartbeat lease that could
-expire while an old Compose request is still mutating the daemon. A paused or
-hung manager therefore retains a live lock and reports busy rather than
-creating a second writer. Its managed labels contain only the lock role,
+one complete exact `release\n` frame and exits successfully only when it
+matches; EOF before the frame, a partial frame, and every other frame fail. It
+has no wall-clock or heartbeat lease that could expire while an old Compose
+request is still mutating the daemon. A paused or hung manager therefore
+retains a live lock and reports busy rather than creating a second writer. Its
+managed labels contain only the lock role,
 installation key, installation UUID, Compose project, core operation ID, and
 the fixed-socket Docker daemon generation needed for exceptional recovery:
-host boot ID, root peer PID, and that PID's `/proc` start time. Those three
-canonical values are attested on every holder inspection and are not a second
-operation identity. The retained immutable container ID is the holder token;
-there is no second local operation-identity type.
+host boot ID, authenticated root HTTP response-sender PID, and that PID's
+`/proc` start time. The PID comes from `SCM_CREDENTIALS` attached to the
+qualified response bytes and is sampled with the generation twice;
+`SO_PEERCRED` is deliberately insufficient because socket activation can
+identify the listening-socket owner rather than the daemon process that served
+the response. Those three canonical values are attested on every holder
+inspection and are not a second operation identity. The retained immutable
+container ID is the holder token; there is no second local operation-identity
+type.
 
 Successful creation is followed by exact inspection and retention of the
 returned container ID. On graceful release, the manager first waits for every
-mutation and child process to settle, closes stdin, waits for the helper to
-stop, re-inspects the same ID, and removes it by ID, never by name. Unexpected
+mutation and child process to settle, writes the exact release frame, closes
+stdin, waits for the helper to stop, re-inspects the same ID, and removes it by
+ID, never by name. Unexpected
 holder-stream loss makes the manager cancel its child process and stop issuing
 requests, but it does not assert that an already accepted daemon operation was
 retracted. The stopped exact-ID container remains as sticky
@@ -424,8 +444,11 @@ interrupted-operation evidence and automatic acquisition never deletes it. A
 colliding live holder reports busy; a stopped holder reports recovery required.
 The exceptional lock-recovery path requires a Docker Engine restart and must
 prove the sealed accepting daemon generation absent, repeatedly qualify one
-replacement fixed-socket root-peer generation, establish event/process and
-complete-census quiescence, and receive explicit operator authorization before
+replacement fixed-socket response-sender generation, and establish process and
+complete-census quiescence. One continuous fixed-socket Docker event
+subscription spans the first census, exact-ID deletion, and final absence proof;
+the exact destroy event is its trailing catch-up barrier. Any other event or a
+broken stream fails closed. Explicit operator authorization is required before
 removing that exact ID. PID reuse is accepted only when the host boot ID is
 unchanged and the `/proc` start time differs. Unreadable or changing evidence
 fails closed. The public authorization is `--recover-stopped-lock` on the
@@ -435,11 +458,11 @@ authorizes lock deletion.
 
 #### Exact reset
 
-This subsection specifies the future converged lifecycle reset after checkpoint
-2C. It includes repositories, service topology, OS credentials, and the
-Engine-held lifecycle lock; it does not describe checkpoint 2B.3's noninteractive
-sealed-custody reset, whose narrower implemented contract is recorded below.
-The converged reset runs under that lock and uses this ordered transaction:
+This subsection specifies the future onboarding-expanded reset beyond the
+implemented 2C lifecycle reset. It includes repositories, service topology, OS
+credentials, and the Engine-held lifecycle lock; the currently implemented
+topology/custody reset has the narrower contract recorded below. The expanded
+reset runs under that lock and uses this ordered transaction:
 
 The current lifecycle creates no OS credential-store entries: its exact OS
 credential-selector set is closed and empty until the later public
@@ -813,15 +836,17 @@ qualified Automata image, no network, a read-only root, UID 0,
 mounts. It receives one bounded canonical request over attached stdin; no
 secret request is stored in a writable image layer or temporary request mount.
 Static role manifests publish last after content, metadata, link, certificate,
-and key validation; dynamic owner roots remain empty until future convergence.
+and key validation; dynamic owner roots remain empty until subsequent lifecycle
+convergence.
 Missing or conflicting established custody is reset required, while
 uncommitted fixed crash temporaries are safely rebuilt.
 
-The slice persists canonical credential-free desired intent, including the
+At checkpoint 2B.2, the slice persisted canonical credential-free desired
+intent, including the
 imported service-proxy tag plus both acceptable OCI IDs for later reattestation.
-It has no renderer, produces no Compose document, and then stops. Init invokes
-no Compose operation and starts no control plane, relay, bootstrap, database,
-object store, or runner. `local status` is existing-only and nonrepairing: it
+Init still produces no Compose document and stops without invoking Compose or
+starting a control plane, relay, bootstrap, database, object store, or runner.
+At that checkpoint `local status` was existing-only and nonrepairing: it
 reports `recorded_sealed` only after canonical host custody and exact bounded
 Engine metadata agree, while explicitly leaving volume contents uninspected.
 `local reset` requires an absolute state directory and `--yes`, authorizes an
@@ -829,8 +854,8 @@ authority-bound canonical epoch only after exact complete post-Desired Engine
 custody agrees, completes a durable reconciling deletion transaction, and
 retains images plus the custody root and operation lock. Safe missing or
 malformed non-authority host records do not strand cleanup. Retained image
-absence or retagging does not block custody deletion. `up` and `down` remain
-absent. Stateful
+absence or retagging does not block custody deletion. `up` and `down` were
+absent at 2B.2 and are implemented by the subsequent 2C checkpoint. Stateful
 recovery, adversarial parser and filesystem tests, strict helper-inspection
 tests, and live Docker portable-load qualification cover the sealed boundary.
 This completes checkpoint 2B's material/desired-intent handoff without claiming
@@ -875,19 +900,19 @@ directory, and the original verified operation lock remain.
 
 ### 2C. Convergent Compose lifecycle
 
-Build on the completed 2B.2 sealed desired-intent/material handoff. Introduce
-the renderer and its complete executable command surface together, then add
-convergence, digest-labeled replaceable topology, the inert ID-held engine lock,
-union discovery, `up`, converged live status, and `down`. The command layer
-remains private until these operations are convergent and their destructive
-boundary is proven.
+Status: implemented on top of the completed 2B.2 sealed
+desired-intent/material handoff. The canonical renderer, fixed executable
+command surface, digest-labeled replaceable topology, inert ID-held Engine lock,
+closed union discovery, public `up`/`down`, and converged live `status` form one
+synchronous lifecycle boundary. `up` runs the exact dependency initialization,
+runner-bootstrap, runner-enrollment, readiness, control, relay, and runner
+surface; `down` removes only the replaceable topology.
 
-The renderer may reuse the current hidden image boundary
-`automata internal object-store ensure-bucket`, but it must not emit references
-to absent readiness, bootstrap, or relay commands. Those fixed hidden
-operations and the renderer that invokes them land and qualify together; the
-renderer does not invent a shell client, test helper, compatibility alias, or
-placeholder service-init command.
+The renderer uses the existing hidden image boundary
+`automata internal object-store ensure-bucket` and references only the fixed
+readiness, bootstrap, relay, Desired-read, CAS, and lock-holder operations that
+ship in the same image contract. It does not invent a shell client, test helper,
+compatibility alias, or placeholder service-init command.
 The initializer and server share the production S3 connection parser and the
 sole validated-config-to-store AWS SDK construction boundary. Runner product
 schema 8 independently requires the same closed
@@ -900,12 +925,13 @@ final `HeadBucket` under the same total deadline.
 Every non-`us-east-1` bucket creation carries the exact validated region as its
 S3 `LocationConstraint`; `us-east-1` alone omits it.
 
-Gate: persistent volumes never carry a mutable plan digest; every replaceable
-resource carries the current digest; unknown managed keys, unexpected roles,
-and mixed digests fail closed. Concurrent mutation tests prove graceful
-ID-based release only after child quiescence, busy-live behavior,
-manager-crash/EOF retention as a stopped recovery-required record, cancellation
-on holder-stream loss, and no automatic or age-based stale deletion. Reset tests
+Implemented gate: persistent volumes never carry a mutable plan digest; every
+replaceable resource carries the current digest; unknown managed keys,
+unexpected roles, and mixed digests fail closed. Concurrent mutation tests
+prove graceful ID-based release only after child quiescence, busy-live behavior,
+manager-crash, EOF-before-release-frame, and invalid-frame retention as a
+stopped recovery-required record, cancellation on holder-stream loss, and no
+automatic or age-based stale deletion. Reset tests
 prove all-before-any validation, ordered topology and the current empty
 OS-credential-selector preflight/requery,
 anchor-last, lock-last, and immediate reinspection. Deleting an optional host
@@ -939,9 +965,9 @@ Gate: shell and JavaScript-action sandboxes execute; restart attach and exact
 cancellation work; realized configuration is inspected; foreign collisions
 fail without mutation; prohibited privilege, namespace, bind, device, socket,
 and network requests fail closed; output/copy bounds hold; and destroy leaves no
-owned job resources. The future lifecycle-created, Compose-external
-transit/listener, local repository authority, Results/cache URL and token
-injection, and `automata local run` composition remain separate gates.
+owned job resources. The current lifecycle-created, Compose-external
+transit/listener is implemented; local repository authority, Results/cache URL
+and token injection, and `automata local run` composition remain separate gates.
 
 ### 3B. `LocalSnapshot` source adapter
 
