@@ -5,8 +5,10 @@ use std::{collections::BTreeMap, fmt, sync::Arc};
 use thiserror::Error;
 
 use crate::{
-    ProviderCapabilities, ProviderConnectionManifest, ProviderInstanceManifest, ProviderSecretSet,
-    ProviderTypeId, provider_capability_digest,
+    ProviderCapabilities, ProviderConfigurationDocument, ProviderConnectionDraft,
+    ProviderConnectionManifest, ProviderInstanceDraft, ProviderInstanceManifest,
+    ProviderInstanceRecord, ProviderLifecycleState, ProviderOrigins, ProviderSecretBindings,
+    ProviderSecretSet, ProviderTypeId, provider_capability_digest,
 };
 
 /// Maximum statically linked provider adapter types in one process.
@@ -15,24 +17,59 @@ pub const MAX_PROVIDER_FACTORIES: usize = 32;
 /// Exact configuration and secret evidence presented to one adapter factory.
 #[derive(Clone, Copy)]
 pub struct ProviderFactoryRequest<'a> {
-    manifest: &'a ProviderInstanceManifest,
+    provider_type: &'a ProviderTypeId,
+    origins: &'a ProviderOrigins,
+    configuration: &'a ProviderConfigurationDocument,
+    secret_bindings: &'a ProviderSecretBindings,
     secrets: &'a ProviderSecretSet,
 }
 
 impl<'a> ProviderFactoryRequest<'a> {
-    /// Binds one immutable manifest to its already verified plaintext secret set.
-    #[must_use]
-    pub const fn new(
+    const fn for_manifest(
         manifest: &'a ProviderInstanceManifest,
         secrets: &'a ProviderSecretSet,
     ) -> Self {
-        Self { manifest, secrets }
+        Self {
+            provider_type: manifest.provider_type(),
+            origins: manifest.origins(),
+            configuration: manifest.configuration(),
+            secret_bindings: manifest.secrets(),
+            secrets,
+        }
     }
 
-    /// Returns the immutable provider manifest.
+    const fn for_draft(draft: &'a ProviderInstanceDraft) -> Self {
+        Self {
+            provider_type: draft.provider_type(),
+            origins: draft.origins(),
+            configuration: draft.configuration(),
+            secret_bindings: draft.secret_bindings(),
+            secrets: draft.secrets(),
+        }
+    }
+
+    /// Returns the exact registered provider type.
     #[must_use]
-    pub const fn manifest(self) -> &'a ProviderInstanceManifest {
-        self.manifest
+    pub const fn provider_type(self) -> &'a ProviderTypeId {
+        self.provider_type
+    }
+
+    /// Returns canonical provider network origins.
+    #[must_use]
+    pub const fn origins(self) -> &'a ProviderOrigins {
+        self.origins
+    }
+
+    /// Returns the canonical adapter-owned configuration document.
+    #[must_use]
+    pub const fn configuration(self) -> &'a ProviderConfigurationDocument {
+        self.configuration
+    }
+
+    /// Returns bindings derived from the exact supplied secret values.
+    #[must_use]
+    pub const fn secret_bindings(self) -> &'a ProviderSecretBindings {
+        self.secret_bindings
     }
 
     /// Returns exact named plaintext values at the adapter boundary.
@@ -46,9 +83,10 @@ impl fmt::Debug for ProviderFactoryRequest<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ProviderFactoryRequest")
-            .field("instance_id", &self.manifest.instance_id())
-            .field("provider_type", self.manifest.provider_type())
-            .field("revision", &self.manifest.revision())
+            .field("provider_type", self.provider_type)
+            .field("origins", self.origins)
+            .field("configuration", self.configuration)
+            .field("secret_bindings", self.secret_bindings)
             .field("secret_names", &self.secrets.names().collect::<Vec<_>>())
             .finish()
     }
@@ -206,7 +244,7 @@ impl ProviderFactoryRegistry {
             return Err(ProviderFactoryRegistryError::FactoryIdentityMismatch);
         }
         let capabilities = factory
-            .validate_instance(ProviderFactoryRequest::new(&manifest, secrets))
+            .validate_instance(ProviderFactoryRequest::for_manifest(&manifest, secrets))
             .map_err(ProviderFactoryRegistryError::Validation)?;
         let digest = provider_capability_digest(&capabilities)
             .map_err(|_| ProviderFactoryRegistryError::CapabilityDigest)?;
@@ -217,6 +255,39 @@ impl ProviderFactoryRegistry {
             manifest,
             capabilities,
         })
+    }
+
+    /// Validates a complete draft and materializes its capability-bound durable record.
+    ///
+    /// The caller cannot provide a capability digest. The exact registered
+    /// adapter validates the configuration and secrets, and the registry
+    /// derives the digest from the returned typed capability set.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an unregistered type, adapter validation failure, capability
+    /// encoding failure, or inconsistent common instance evidence.
+    pub fn materialize_instance(
+        &self,
+        draft: ProviderInstanceDraft,
+    ) -> Result<ProviderInstanceRecord, ProviderFactoryRegistryError> {
+        let factory = self
+            .factories
+            .get(draft.provider_type())
+            .ok_or(ProviderFactoryRegistryError::UnknownProviderType)?;
+        if factory.provider_type() != draft.provider_type() {
+            return Err(ProviderFactoryRegistryError::FactoryIdentityMismatch);
+        }
+        let capabilities = factory
+            .validate_instance(ProviderFactoryRequest::for_draft(&draft))
+            .map_err(ProviderFactoryRegistryError::Validation)?;
+        let capability_digest = provider_capability_digest(&capabilities)
+            .map_err(|_| ProviderFactoryRegistryError::CapabilityDigest)?;
+        let (manifest, secrets) = draft
+            .into_manifest(capability_digest)
+            .map_err(|_| ProviderFactoryRegistryError::InstanceEvidence)?;
+        ProviderInstanceRecord::new(manifest, secrets)
+            .map_err(|_| ProviderFactoryRegistryError::SecretEvidence)
     }
 
     /// Validates exact provider evidence and adapter-owned connection policy.
@@ -247,6 +318,31 @@ impl ProviderFactoryRegistry {
         factory
             .validate_connection(ProviderConnectionFactoryRequest::new(provider, connection))
             .map_err(ProviderFactoryRegistryError::Validation)
+    }
+
+    /// Binds a connection draft to validated provider evidence and adapter policy.
+    ///
+    /// The provider configuration and capability digests are copied from the
+    /// descriptor. They are never accepted from the management caller.
+    ///
+    /// # Errors
+    ///
+    /// Rejects inconsistent common connection evidence or adapter-owned policy.
+    pub fn materialize_connection(
+        &self,
+        provider: &ProviderDescriptor,
+        draft: ProviderConnectionDraft,
+    ) -> Result<ProviderConnectionManifest, ProviderFactoryRegistryError> {
+        let connection = draft
+            .into_manifest(provider.manifest())
+            .map_err(|_| ProviderFactoryRegistryError::ConnectionEvidence)?;
+        if connection.state() == ProviderLifecycleState::Active
+            && provider.manifest().state() != ProviderLifecycleState::Active
+        {
+            return Err(ProviderFactoryRegistryError::ConnectionEvidence);
+        }
+        self.validate_connection(provider, &connection)?;
+        Ok(connection)
     }
 
     /// Iterates registered provider type IDs in canonical order.
@@ -314,4 +410,7 @@ pub enum ProviderFactoryRegistryError {
     /// A connection was pinned to different provider evidence.
     #[error("provider connection evidence is inconsistent")]
     ConnectionEvidence,
+    /// Common instance lifecycle or manifest evidence was inconsistent.
+    #[error("provider instance evidence is inconsistent")]
+    InstanceEvidence,
 }

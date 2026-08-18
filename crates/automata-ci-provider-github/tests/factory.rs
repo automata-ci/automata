@@ -7,18 +7,17 @@ use automata_ci_provider::{
     ProviderCapabilityKind, ProviderConfigurationDocument, ProviderConfigurationFactory,
     ProviderConfigurationRevision, ProviderConnectionConfiguration, ProviderConnectionId,
     ProviderConnectionManifest, ProviderConnectionRevision, ProviderDefaultBranch,
-    ProviderFactoryRegistry, ProviderFactoryRegistryError, ProviderInstanceId,
-    ProviderInstanceManifest, ProviderLifecycleState, ProviderOrigins, ProviderRepositoryPath,
-    ProviderRunnerPolicyBinding, ProviderSchemaVersion, ProviderSecret, ProviderSecretBinding,
-    ProviderSecretBindings, ProviderSecretGeneration, ProviderSecretName, ProviderSecretSet,
-    ProviderTypeId, ProviderWorkflowSource, RepositoryVisibility, provider_capability_digest,
+    ProviderFactoryRegistry, ProviderFactoryRegistryError, ProviderInstanceDraft,
+    ProviderInstanceId, ProviderInstanceManifest, ProviderLifecycleState, ProviderOrigins,
+    ProviderRepositoryPath, ProviderRunnerPolicyBinding, ProviderSchemaVersion, ProviderSecret,
+    ProviderSecretGeneration, ProviderSecretName, ProviderSecretSet, ProviderTypeId,
+    ProviderWorkflowSource, RepositoryVisibility,
 };
 use automata_ci_provider_github::{
     GITHUB_APP_PRIVATE_KEY_SECRET_NAME, GITHUB_WEBHOOK_SECRET_NAME, GithubConnectionPolicy,
     GithubHttpLimits, GithubInstanceConfiguration, GithubJwtIssuer, GithubProviderFactory,
 };
 use automata_ci_scm::RepositoryId;
-use sha2::{Digest as _, Sha256};
 
 const APP_PRIVATE_KEY: &[u8] = b"-----BEGIN PRIVATE KEY-----\ntest\n-----END PRIVATE KEY-----";
 const WEBHOOK_SECRET: &[u8] = b"provider webhook secret";
@@ -37,8 +36,7 @@ fn capabilities_declare_native_rerun_without_requested_actions() {
 }
 
 fn instance(instance_id: &str, web: &str, api: &str, archive: &str) -> ProviderInstanceManifest {
-    let capabilities = GithubProviderFactory::capabilities().expect("GitHub capabilities");
-    ProviderInstanceManifest::new(
+    let draft = ProviderInstanceDraft::new(
         instance_id
             .parse::<ProviderInstanceId>()
             .expect("instance ID"),
@@ -55,29 +53,27 @@ fn instance(instance_id: &str, web: &str, api: &str, archive: &str) -> ProviderI
         .expect("instance configuration")
         .document()
         .expect("configuration document"),
-        secret_bindings(),
-        provider_capability_digest(&capabilities).expect("capability digest"),
+        [
+            ProviderSecret::new(
+                ProviderSecretName::new(GITHUB_APP_PRIVATE_KEY_SECRET_NAME).expect("app key name"),
+                ProviderSecretGeneration::new(1).expect("app key generation"),
+                SecretBytes::new(APP_PRIVATE_KEY.to_vec()).expect("app private key"),
+            ),
+            ProviderSecret::new(
+                ProviderSecretName::new(GITHUB_WEBHOOK_SECRET_NAME).expect("webhook name"),
+                ProviderSecretGeneration::new(1).expect("webhook generation"),
+                SecretBytes::new(WEBHOOK_SECRET.to_vec()).expect("webhook secret"),
+            ),
+        ],
         UnixMillis::new(1_000),
         Some(UnixMillis::new(1_000)),
         None,
     )
-    .expect("instance manifest")
-}
-
-fn secret_bindings() -> ProviderSecretBindings {
-    ProviderSecretBindings::new([
-        ProviderSecretBinding::new(
-            ProviderSecretName::new(GITHUB_APP_PRIVATE_KEY_SECRET_NAME).expect("app key name"),
-            ProviderSecretGeneration::new(1).expect("app key generation"),
-            Sha256Digest::from_bytes(Sha256::digest(APP_PRIVATE_KEY).into()),
-        ),
-        ProviderSecretBinding::new(
-            ProviderSecretName::new(GITHUB_WEBHOOK_SECRET_NAME).expect("webhook name"),
-            ProviderSecretGeneration::new(1).expect("webhook generation"),
-            Sha256Digest::from_bytes(Sha256::digest(WEBHOOK_SECRET).into()),
-        ),
-    ])
-    .expect("secret bindings")
+    .expect("instance draft");
+    let record = registry()
+        .materialize_instance(draft)
+        .expect("instance manifest");
+    record.into_parts().0
 }
 
 fn secret_set(manifest: &ProviderInstanceManifest) -> ProviderSecretSet {

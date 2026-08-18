@@ -347,12 +347,15 @@ impl ProviderConfigurationFactory for GithubProviderFactory {
         request: ProviderFactoryRequest<'_>,
     ) -> Result<ProviderCapabilities, ProviderFactoryValidationError> {
         validate_instance_secrets(request).map_err(map_instance_validation_error)?;
-        let web = Url::parse(request.manifest().origins().web())
+        if request.provider_type() != &self.provider_type {
+            return Err(ProviderFactoryValidationError::InvalidConfiguration);
+        }
+        let web = Url::parse(request.origins().web())
             .map_err(|_| ProviderFactoryValidationError::InvalidOrigins)?;
-        let api = Url::parse(request.manifest().origins().api())
+        let api = Url::parse(request.origins().api())
             .map_err(|_| ProviderFactoryValidationError::InvalidOrigins)?;
-        let configuration = decode_instance(request.manifest().configuration())
-            .map_err(map_instance_validation_error)?;
+        let configuration =
+            decode_instance(request.configuration()).map_err(map_instance_validation_error)?;
         let trusted = GithubTrustedOrigins::new(
             web,
             api,
@@ -426,7 +429,7 @@ fn validate_instance_secrets(
             .map_err(|_| GithubFactoryError::InvalidSecrets)?;
     let webhook_name = automata_ci_provider::ProviderSecretName::new(GITHUB_WEBHOOK_SECRET_NAME)
         .map_err(|_| GithubFactoryError::InvalidSecrets)?;
-    let bindings = request.manifest().secrets();
+    let bindings = request.secret_bindings();
     if bindings.len() != 2
         || bindings.get(&app_key_name).is_none()
         || bindings.get(&webhook_name).is_none()
