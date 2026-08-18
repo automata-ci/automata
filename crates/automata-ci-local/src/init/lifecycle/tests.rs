@@ -191,6 +191,51 @@ async fn acquired_up_and_down_operations_preserve_holder_loss() {
     }
 }
 
+#[test]
+fn public_up_and_down_use_the_acquired_holder_boundary() {
+    let source = include_str!("../lifecycle.rs");
+    let (_, up_and_later) = source
+        .split_once("pub async fn up_local(")
+        .expect("public up entry point exists");
+    let (up, down_and_later) = up_and_later
+        .split_once("pub async fn down_local(")
+        .expect("public down entry point exists");
+    let (down, _) = down_and_later
+        .split_once("async fn recover_stopped_lock_if_authorized(")
+        .expect("down entry point has a trailing helper boundary");
+
+    for (operation, result_type) in [
+        (up, "UpLifecycleOperationResult"),
+        (down, "DownLifecycleOperationResult"),
+    ] {
+        assert_eq!(
+            operation
+                .matches("let holder_lost = holder.holder_lost();")
+                .count(),
+            1
+        );
+        assert_eq!(
+            operation
+                .matches(
+                    "run_acquired_lifecycle_operation(&holder_lost, &transaction_cancellation, operation)",
+                )
+                .count(),
+            1
+        );
+        assert!(operation.contains(&format!(
+            "let {result_type} {{ desired, resumed }} = match operation"
+        )));
+
+        let (_, completion) = operation
+            .split_once("watcher.abort();")
+            .expect("the acquired operation is joined before lock release");
+        let (completion, _) = completion
+            .split_once(".release_lifecycle_lock(")
+            .expect("the operation result precedes graceful lock release");
+        assert_eq!(completion.matches("return Err(error);").count(), 1);
+    }
+}
+
 #[tokio::test]
 async fn running_replay_attests_each_exact_cas_target_once() {
     let (_directory, established) = fixture();
