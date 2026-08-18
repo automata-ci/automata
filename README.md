@@ -1,5 +1,7 @@
 # Automata
 
+<!-- Production live-log verification; this documentation-only change is not intended to merge. -->
+
 Automata runs GitHub Actions workflows on infrastructure you control. It
 accepts repository events, compiles workflow YAML into an immutable execution
 plan, schedules jobs, runs them in isolated sandboxes, streams logs, stores
