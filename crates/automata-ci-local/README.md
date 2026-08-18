@@ -1,13 +1,12 @@
 # Automata local installation
 
-`automata-ci-local` owns the cross-platform, disposable local-installation
-boundary used by `automata local`. It validates the initial x86-64 Linux, Apple
-Silicon macOS, or x86-64 Windows host tuple; a local Linux Docker Engine 28.0.0
-or newer with API 1.48 or newer; and Compose plugin version 2.20.0 or newer. It
-will supervise the local Compose project without adding container-engine
-behavior to the control-plane crate.
+`automata-ci-local` owns host inspection, source snapshot analysis, and sealed
+local-installation custody for `automata local`. It validates the initial
+x86-64 Linux, Apple Silicon macOS, or x86-64 Windows host tuple; a local Linux
+Docker Engine 28.0.0 or newer with API 1.48 or newer; and Compose plugin version
+2.20.0 or newer. It does not yet start or supervise a local Automata stack.
 
-The user-visible slice provides read-only host preflight and snapshot-backed
+The available commands provide read-only host preflight and snapshot-backed
 workflow checking on the qualified platforms. On x86-64 Linux it also provides
 sealed `init`, read-only metadata `status`, and exact confirmed `reset` for a
 Docker Engine at exactly `unix:///var/run/docker.sock`. During `local doctor`, context
@@ -112,8 +111,8 @@ The self-contained topology-bound intent durably reconciles helper, eleven
 roles, Desired, anchor, and whatever safe fixed host records remain. It retains
 images, the state directory, and the verified held operation lock. Missing or
 retagged images do not block deletion because reset derives any stale-helper
-contract from the sealed epoch and never owns image removal. No public `up`,
-`down`, relay, or bootstrap lifecycle command exists.
+contract from the sealed epoch and never owns image removal. No public `run`,
+`up`, `down`, relay, or bootstrap lifecycle command exists.
 The adapter exposes no generic delete, prune, or arbitrary helper API.
 
 On Linux, the runner also consumes one evaluation-only sandbox-provider

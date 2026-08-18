@@ -13,8 +13,12 @@ autonomous worker. That worker discovers durable admitted work and supervises
 logical preparation, activation, and materialization. Separate database-time
 result-projection and logical-run-finalization workers project terminal attempt
 evidence and close runs with complete job-result graphs. Admission remains
-asynchronous: its durable receipt is not a job-completion signal, and the full
-runner, provider, and service-image acceptance gate remains separate.
+asynchronous: its durable receipt is not a job-completion signal. The
+repository's [public CI
+Checks](https://github.com/automata-ci/automata/commit/280cd4f9e685ac022c65a920ba24f4f019b0fd25/checks)
+prove the GitHub, scheduler, rootless Podman, shell-step, service-container,
+result, and Check path. Other providers and optional execution features keep
+their own acceptance gates.
 
 The authenticated CLI control-plane API composes typed `workflow_dispatch`
 inputs with the base runtime context and durable admission. It requires an
@@ -34,7 +38,7 @@ A first-party CLI command, browser form, mutable branch/tag resolution, and
 complete repository variable and secret-reference hydration remain product
 work. Scheduled workflows are discovered and admitted by the separate
 product-supervised GitHub schedule service. The [compatibility matrix](https://github.com/automata-ci/automata/blob/main/docs/compatibility.md#v01-implementation-status)
-records their experimental status and remaining acceptance gates.
+records their exact status and remaining acceptance gates.
 
 - [Architecture documentation](https://github.com/automata-ci/automata/blob/main/docs/architecture.md)
 - API documentation: run `cargo doc -p automata-ci-workflow-service --open` from a source checkout.

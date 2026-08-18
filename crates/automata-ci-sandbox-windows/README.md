@@ -5,6 +5,10 @@ provider: one fresh Hyper-V-isolated Windows container per job. It contains no
 native-host runner, process-isolated fallback, full-VM backend, AppContainer
 backend, or Windows Sandbox backend.
 
+Status: **Component complete**. There is no supported Windows runner deployment
+until the least-privilege broker, watchdog, signed image, credential custody,
+and physical-host acceptance gates pass.
+
 ## Fixed isolation contract
 
 The provider accepts only `SandboxLaunch::WindowsHyperVContainer` and requires:

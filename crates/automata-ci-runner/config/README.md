@@ -12,6 +12,18 @@ selects the Virtualization.framework provider on Apple Silicon macOS 15+.
 Exactly one of the `podman`, `local_docker`, `kubernetes`, `windows_hyperv`,
 and `macos_virtualization` provider objects may be configured.
 
+| Provider | Operator status |
+| --- | --- |
+| `podman` | Available on qualified dedicated Linux hosts; this is the primary deployment path |
+| `kubernetes` | Experimental; requires installation-specific CNI, node, and workload-isolation acceptance |
+| `local_docker` | Experimental local-installation foundation; not a standalone deployment path |
+| `macos_virtualization` | Component complete; requires a sealed VM template and physical Apple Silicon qualification |
+| `windows_hyperv` | Component complete; not deployable until its broker, image, credential, and physical-host gates pass |
+
+Start with [Check the host](#1-check-the-host) for Linux Podman. Provider-specific
+sections below define the additional trust boundary; configuration acceptance
+does not promote an experimental provider.
+
 The Linux examples' local bootstrap digest is not an official promoted profile;
 follow the
 [profile publication guide](https://github.com/automata-ci/automata/blob/main/images/github-hosted-ubuntu-24.04-x64/README.md)

@@ -2,7 +2,8 @@
 
 Automata accepts focused bug fixes, compatibility fixtures, tests,
 documentation, and design feedback. For larger work, agree on the scope before
-implementation; the project is still working toward its first end-to-end gate.
+implementation so the design and acceptance evidence are clear before code is
+written.
 
 Participation in project spaces is governed by the
 [code of conduct](CODE_OF_CONDUCT.md). Report suspected vulnerabilities through

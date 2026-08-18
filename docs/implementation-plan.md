@@ -9,7 +9,7 @@ The [compatibility page](compatibility.md) owns current support claims. The
 
 ## Current foundation
 
-As of 2026-08-14, the source tree contains:
+As of 2026-08-18, the source tree contains:
 
 - workflow parsing, expression evaluation, logical planning, bounded matrix
   expansion, and JobIR projection;
@@ -28,10 +28,14 @@ As of 2026-08-14, the source tree contains:
   the management CLI, and the server-rendered UI; and
 - reproducible distribution, SBOM, notice, image, and release automation.
 
-Focused component and boundary tests cover these paths. The production
-composition has not yet run this repository's unchanged CI workflow from
-admission through differential result comparison. No release artifact is
-public.
+The running Automata installation executes this repository's `.ci/workflows/ci.yml`.
+[Main commit `280cd4f9`](https://github.com/automata-ci/automata/commit/280cd4f9e685ac022c65a920ba24f4f019b0fd25/checks)
+has successful aggregate, Rust, PostgreSQL, and frontend Checks proving push
+admission, exact-commit checkout, rootless Linux execution, per-job
+resources, PostgreSQL service containers, result publication, and GitHub Checks
+for three successful jobs. It does not close the broader differential,
+artifact, log-retention, secret, OIDC, alternate-provider, or release gates
+below. No public release artifact exists.
 
 ## Active work order
 
@@ -54,8 +58,10 @@ does not by itself close the end-to-end gate.
 - [x] Implement ordered `concurrency.queue: max` coordination with PostgreSQL
   FIFO-promotion and stale-running-slot recovery tests. Keep it explicitly
   outside GitHub compatibility as an Automata extension.
-- [ ] Pass the unchanged public bootstrap workflow through admission,
-  orchestration, runner execution, Results, and Check Runs.
+- [x] Pass the current public CI workflow through push admission,
+  orchestration, runner execution, result publication, and Check Runs. Main
+  commit `280cd4f9` records the public Check evidence; the wider G1 surface
+  remains open.
 - [ ] Pass differential fixtures for actions, command files, matrices,
   reusable workflows, artifacts, caches, services, and cancellation.
 - [ ] Pass control-plane fixtures for permissions, protected environments,
@@ -85,10 +91,12 @@ published.
 
 ### G1: durable single-node execution
 
-Run this repository's unchanged `.ci/workflows/ci.yml` through the durable
-control plane and one Linux runner. The run must exercise source admission,
-planning, `run` and required JavaScript actions, local actions, command files,
-services, artifacts, logs, results, cancellation, and cleanup.
+The current `.ci/workflows/ci.yml` passes through the durable control plane and
+Linux runner fleet. It exercises source admission, planning, `run` steps, an
+exact-commit JavaScript checkout action, service containers, results, and Check
+Runs. G1 remains open until the public workflow or a same-revision acceptance
+workflow also proves local actions, command files, artifacts, retained logs,
+cancellation, and cleanup evidence.
 
 Gate: generation zero builds and tests generation one. Promotion happens only
 after the run and differential comparison finish. A special Automata-only
@@ -166,10 +174,12 @@ gates have completed their agreed soak periods.
 
 ## Provider scope
 
-Rootless Podman on Linux and disposable macOS Virtualization.framework VMs are
-current execution paths. The Hyper-V-isolated Windows container code is a
-component foundation only. Planned or unaccepted profiles below must not appear
-in runner capability inventory before their gates pass.
+Rootless Podman on Linux is the available execution path used by this
+repository. Disposable macOS Virtualization.framework VMs have an implemented
+product path and an opt-in physical-host process test; production qualification
+remains open. The Hyper-V-isolated Windows container code is a component
+foundation only. Planned or unaccepted profiles below must not appear in runner
+capability inventory before their gates pass.
 
 | Provider | Planned use | Isolation boundary |
 | --- | --- | --- |

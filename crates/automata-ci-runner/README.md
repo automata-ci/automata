@@ -1,13 +1,21 @@
 # `automata-runner`
 
-The provisioned `automata-runner` command targets Linux and macOS execution
-hosts. Its only Windows execution provider uses Hyper-V-isolated containers;
-the component is implemented, but it
-remains a source-build path without a production-qualified broker deployment,
-promoted runner image, or physical-host release gate. On supported hosts the command
-validates the host and opens an mTLS session to
+`automata-runner` executes Automata jobs on isolated worker hosts. The available
+deployment path is a dedicated Linux host with rootless Podman; Automata's own
+[public CI Checks](https://github.com/automata-ci/automata/commit/280cd4f9e685ac022c65a920ba24f4f019b0fd25/checks)
+run on that path. The command validates the host, opens an mTLS session to
 the control plane, accepts fenced leases, runs jobs through the configured
 sandbox provider, streams logs, and removes interrupted work.
+
+Other provider implementations have narrower status:
+
+| Provider | Status |
+| --- | --- |
+| Rootless Podman on Linux | Available |
+| Kubernetes on Linux | Experimental; cluster isolation must be attested by the operator |
+| Fixed-relay Docker on Linux | Experimental local-installation foundation; no public stack lifecycle |
+| Virtualization.framework on Apple Silicon | Component complete; physical-host production qualification remains |
+| Hyper-V containers on Windows Server 2025 | Component complete; broker, image publication, and physical-host qualification remain |
 
 For Unix file-backed TLS custody, the long-lived command also renews its runner
 certificate before expiry through the dedicated mTLS authority. It recovers
@@ -32,8 +40,8 @@ one slot. The [configuration guide](config/README.md) documents Kubernetes,
 the unprovisioned Windows Hyper-V component boundary, and the macOS VM trust
 boundary.
 
-No crates.io package or public runner archive has been published. Install a
-reviewed source build for configuration work and diagnostics:
+No public runner archive is published. Install a reviewed source build for
+configuration inspection and host diagnostics:
 
 ```console
 cargo install --path crates/automata-ci-runner --locked

@@ -1,9 +1,18 @@
 # GitHub Checks
 
-Status: **Experimental**. This living reference documents Automata's current GitHub
-Checks contract and records behavior rather than delivery scheduling or future promises.
-The GitHub integration owns provider projection; the web app owns Details/snapshots,
-and the rerun service owns admission. Only Check Runs project results: no production Commit Status, Deployment, or badge.
+GitHub Check Runs are available for Automata's push and pull-request workflow
+path. For example, [main commit
+`280cd4f9`](https://github.com/automata-ci/automata/commit/280cd4f9e685ac022c65a920ba24f4f019b0fd25/checks)
+has one successful aggregate Check and three successful job Checks—Rust,
+PostgreSQL, and Frontend—published through the `automata-ci` GitHub App. Their
+Details URLs point to the [corresponding Automata dashboard run](https://ci.automata-ci.com/automata-ci/automata/actions/runs/99ab4504-ef90-8aa1-ad24-34d1811b1c00);
+dashboard access follows repository publication policy. Schedule, rerun,
+requested-action, annotation, and ambiguous-write recovery behavior has focused
+contract coverage but narrower live acceptance.
+
+The GitHub integration owns provider projection; the web app owns Details and
+snapshots, and the rerun service owns admission. Only Check Runs project
+results: Automata does not publish Commit Statuses, Deployments, or badges.
 
 ## User-visible lifecycle
 

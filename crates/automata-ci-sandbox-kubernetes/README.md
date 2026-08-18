@@ -7,6 +7,10 @@ sandbox guest to become ready, supports attach/inspect/exact deletion, and
 implements exec and bounded file transfer without placing job arguments,
 environment values, or file contents in Pod specs or Kubernetes request URLs.
 
+Status: **Experimental**. The runner product path and lifecycle admission are
+implemented, but an operator must still prove the cluster's CNI, node, and
+workload-isolation assertions before using it for untrusted jobs.
+
 `automata-runner` can select this adapter with the mutually exclusive
 top-level `kubernetes` product configuration. It discovers an authenticated
 client through the standard ambient kubeconfig/in-cluster chain and runs the

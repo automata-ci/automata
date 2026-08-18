@@ -1,87 +1,42 @@
 # Getting started
 
-This guide builds both Automata commands from a reviewed source checkout,
-starts the local web preview, and describes the Linux runner boundary and the
-documented experimental Windows boundary.
+This guide installs Automata from source, verifies both commands, checks a
+workflow without running it, and points to the complete deployment path.
 
-> [!IMPORTANT]
-> No public release has been published. Install from a reviewed source checkout
-> and do not guess a version from a planned package or image name.
+To inspect execution evidence first, open the
+[Checks for main commit `280cd4f9`](https://github.com/automata-ci/automata/commit/280cd4f9e685ac022c65a920ba24f4f019b0fd25/checks).
+The aggregate and job Checks point to the
+[current Automata CI dashboard run](https://ci.automata-ci.com/automata-ci/automata/actions/runs/99ab4504-ef90-8aa1-ad24-34d1811b1c00);
+dashboard access follows the repository's current publication and sign-in
+policy.
 
 ## Prerequisites
 
-Install [Git](https://git-scm.com/), [rustup](https://rustup.rs/), and a native
-C/C++ build toolchain. `rust-toolchain.toml` selects the Rust version and
-components used by the repository.
+Install:
 
+- [Git](https://git-scm.com/);
+- [rustup](https://rustup.rs/); and
+- a native C/C++ build toolchain.
+
+The repository's `rust-toolchain.toml` selects the Rust version and components.
 On Windows, use rustup's 64-bit MSVC host and install the Visual Studio Build
-Tools **Desktop development with C++** workload. Run Cargo commands from
-PowerShell; the same checkout builds native `automata.exe` and
-`automata-runner.exe` binaries.
+Tools **Desktop development with C++** workload.
 
-## Run the local preview
+This guide uses a source installation. Build from a revision you have reviewed;
+package and image names found in release automation are not installation
+channels until the matching version exists publicly.
+
+## Install the commands
 
 ```console
 git clone https://github.com/automata-ci/automata.git
 cd automata
-cargo run --locked --bin automata -- preview
-```
-
-Open <http://127.0.0.1:8080>. The root redirects to `/repositories`, where the
-preview shows an empty repository directory.
-
-Check the server from another terminal:
-
-```console
-curl --fail http://127.0.0.1:8080/healthz
-curl --fail http://127.0.0.1:8080/readyz
-```
-
-`/healthz` returns process and build information as JSON. `/readyz` returns
-`ready` because preview mode has no external dependencies. Stop the process
-with `Ctrl-C`.
-
-Preview mode serves the web interface and health endpoints. It does not connect
-to PostgreSQL or object storage, accept webhooks, schedule jobs, listen for
-runners, or expose the Results API. `automata server` never falls back to this
-mode when a production dependency is missing.
-
-## View the hosted demo
-
-<https://automata-ci.github.io/automata/> hosts a static copy of the interface
-with sample repositories and runs. It is useful for exploring the screens
-without compiling the project. It cannot execute workflows, authenticate
-users, or connect to a repository.
-
-## Install both commands
-
-From the reviewed checkout:
-
-```console
 cargo install --path crates/automata-ci --locked
 cargo install --path crates/automata-ci-runner --locked
 ```
 
-Cargo installs the commands in `~/.cargo/bin` by default. The first build
-downloads and compiles Rust dependencies, then embeds the
-checked-in server-side renderer and browser assets, so it may take a few
-minutes.
-
-### Windows Hyper-V-container component boundary
-
-Windows has no current deployment configuration or supported
-`automata-runner run` path. The Hyper-V provider remains an internal component
-fixture until native atomic TLS renewal custody, a promoted immutable image,
-authenticated placement evidence, and the dedicated physical-host acceptance
-gate land together. Do not reconstruct a configuration from tests or pass
-private material through environment variables; no static-certificate or
-environment-backed fallback is supported. Follow the
-[Windows isolation plan](platforms/windows.md) for the remaining qualification
-work.
-
-## Verify the installation
-
-On Linux or macOS:
+Cargo installs executables in `~/.cargo/bin` by default. Verify that both
+commands came from the same checkout:
 
 ```console
 command -v automata
@@ -90,63 +45,123 @@ automata --version
 automata-runner --version
 ```
 
-On Windows PowerShell:
+On Windows PowerShell, replace `command -v` with `Get-Command`.
 
-```powershell
-Get-Command automata
-Get-Command automata-runner
-automata --version
-automata-runner --version
+## Check the host
+
+`automata local doctor` checks the supported host tuple, Docker Engine, and
+Compose plugin without creating containers or local state:
+
+```console
+automata local doctor
+automata local doctor --json
 ```
 
-If the commands resolve from different installation directories, remove the
-older copies before continuing. Mixing binaries from different source
-checkouts can create an accidental version mismatch.
+Use the JSON form in scripts. A successful report means the local-installation
+prerequisites passed; it does not install services or execute a workflow.
 
-Installing the command does not provision an execution host or prove that it
-can execute a job. Linux execution uses rootless Podman; the Windows
-Hyper-V-container provider remains an offline component foundation. Inspect a
-host without starting a runner:
+To inspect a runner host and optional server endpoint:
 
 ```console
 automata-runner doctor --server http://127.0.0.1:8080 --json
 ```
 
-The report separates host capability problems from server reachability. Add
-`--active` only on a Linux host where it is safe for the diagnostic to create
-and remove temporary rootless Podman resources. This ambient doctor check is
-useful preparation, but the Linux `automata-runner run` path performs its own
-mandatory probe with the configured Podman binary and clean provider
-environment before it opens a control-plane session. On Windows, `--active`
-returns an error instead of attempting Linux isolation, and there is no
-supported `automata-runner run` path.
+Plain HTTP is accepted only for a literal loopback address. Add `--active` only
+on a Linux host where the diagnostic may safely create and remove temporary
+rootless Podman resources. The normal `automata-runner run` startup repeats its
+mandatory checks against the configured provider.
 
-## Configure the complete server
+## Check a workflow
 
-The preview is deliberately small. To use PostgreSQL, object storage,
-scheduling, provider ingress, and runner sessions, provide the required
-external services and follow the [`automata` configuration
-reference](../crates/automata-ci/README.md). Configure an execution host with
-the [runner bootstrap guide](../crates/automata-ci-runner/config/README.md).
+`automata local check` validates one exact Git snapshot without network access,
+a GitHub token, server admission, or job execution. The workflow must be a
+direct `.github/workflows/*.yml` or `.yaml` file with a `workflow_dispatch`
+trigger.
 
-Read [Compatibility](compatibility.md) before evaluating a workflow. Successful
-parsing does not mean that every action or workflow feature is supported.
+From the root of your Git worktree:
 
-## Future release channels
+```console
+automata local check .github/workflows/ci.yml
+```
 
-The release pipeline is prepared for checksum-verified x86-64 Linux archives,
-the crates.io packages `automata-ci` and `automata-ci-runner`, and the GHCR
-images `ghcr.io/automata-ci/automata` and
-`ghcr.io/automata-ci/automata-runner`.
+For a workflow with manual inputs:
 
-Use one of those channels only after its registry and
-[GitHub Releases](https://github.com/automata-ci/automata/releases) show the
-same exact version. The current documentation of a name or publication process
-does not make the artifact available.
+```console
+automata local check .github/workflows/release.yml \
+  --input environment=staging \
+  --input publish=false
+```
+
+The command validates the selected workflow and reachable local reusable
+workflows, reports required credentials without exposing their values, and
+returns a nonzero status for unsupported or invalid behavior. It does not run
+steps or prove that actions, credentials, and provider services will succeed at
+runtime. See the [local command boundary](../crates/automata-ci-local/README.md)
+for snapshot rules and limits.
+
+Repositories connected to the Automata server keep executable workflows under
+`.ci/workflows`. The `.github/workflows` path above is the deliberate local
+inspection boundary; Automata does not use it as a server-side fallback.
+
+## Smoke-test the web process
+
+The dependency-free preview is useful for verifying a source build and the
+embedded server-side renderer:
+
+```console
+automata preview
+```
+
+Open <http://127.0.0.1:8080>, then verify the process from another terminal:
+
+```console
+curl --fail http://127.0.0.1:8080/healthz
+curl --fail http://127.0.0.1:8080/readyz
+```
+
+Preview mode has no repositories because it does not connect to PostgreSQL,
+object storage, GitHub, Results, or runners. Stop it with `Ctrl-C`. The complete
+server never falls back to preview behavior when a production dependency is
+missing.
+
+## Deploy Automata
+
+The complete path requires:
+
+- PostgreSQL for mutable state and coordination;
+- S3-compatible storage for immutable payloads;
+- TLS and signing keys for runner control and Results;
+- a configured GitHub App; and
+- at least one enrolled execution host.
+
+The source tree does not yet provide a standalone GitHub-provider onboarding
+command or turnkey deployment bundle. The running composition receives GitHub
+App and repository desired state through its private, mutually-authenticated
+shard-management API. Do not populate its PostgreSQL tables by hand. Until a
+self-hosted provisioning client is available, the supported first-user paths in
+this repository are source installation, preview, host inspection, and local
+workflow checking; complete deployment requires the external provisioning
+authority described in the control-plane reference.
+
+Follow the [`automata` deployment and configuration
+reference](../crates/automata-ci/README.md), then the [runner bootstrap
+guide](../crates/automata-ci-runner/config/README.md). Read
+[Compatibility](compatibility.md) before moving an existing workflow; parsing
+alone does not prove that an action or runtime feature is supported.
+
+After the server starts, verify process health and dependency readiness:
+
+```console
+curl --fail https://ci.example.com/healthz
+curl --fail https://ci.example.com/readyz
+```
+
+The runner bootstrap guide continues with one-time enrollment, capability
+inspection, provider admission, and `automata-runner run`.
 
 ## Update or remove a source installation
 
-Review the new source revision, then update both commands together:
+Review the new revision, then update both commands from the same checkout:
 
 ```console
 cargo install --path crates/automata-ci --locked --force
@@ -162,7 +177,7 @@ cargo uninstall automata-ci-runner
 
 ## Troubleshooting
 
-### A command is not found after installation
+### The command is not found
 
 Add Cargo's binary directory to your shell startup file:
 
@@ -170,32 +185,29 @@ Add Cargo's binary directory to your shell startup file:
 export PATH="$HOME/.cargo/bin:$PATH"
 ```
 
-Open a new terminal and repeat the four verification commands.
+Open a new terminal and repeat the version checks.
 
 ### The Rust toolchain will not install
-
-Update rustup and inspect the toolchain selected for the checkout:
 
 ```console
 rustup self update
 rustup show
 ```
 
+`rustup show` should list the toolchain selected by `rust-toolchain.toml` while
+you are inside the repository.
+
 ### Port 8080 is in use
 
-Choose another loopback port and pass the same URL to CLI commands:
+Choose another loopback port:
 
 ```console
 automata preview --listen 127.0.0.1:8180
-automata admin --server-url http://127.0.0.1:8180 status
 ```
 
-### Runner diagnostics report missing Podman capabilities
+### Runner diagnostics report missing capabilities
 
-On Linux, review the host requirements in the [runner bootstrap
-guide](../crates/automata-ci-runner/config/README.md) and rerun the active probe
-only after its kernel, cgroup, and rootless-networking prerequisites are in
-place. That Podman diagnostic does not apply to Windows. Windows startup
-instead performs create, inspect, guest-probe, shell-probe, and destroy
-admission through the Hyper-V-container provider. Do not deploy it until the
-physical Windows end-to-end gate is accepted.
+Review the provider prerequisites and admission checks in the [runner bootstrap
+guide](../crates/automata-ci-runner/config/README.md). Do not bypass a failed
+probe: the runner withholds unsupported capabilities and refuses unsafe host or
+sandbox state.

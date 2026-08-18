@@ -5,6 +5,15 @@ virtual machine on an Apple Silicon macOS 15+ host. The former native provider
 has been deleted. Current runner product schema v8 has no `macos_native` key,
 no migration from a noncurrent schema, and no host-shared resource mode.
 
+| Field | Value |
+| --- | --- |
+| Status | Component complete; physical-host production qualification remains |
+| Execution boundary | One cold-booted disposable VM per job |
+| Network | Disabled |
+| Available steps | Bash and `sh`; optional configured Python and PowerShell Core |
+| Unavailable | Actions, containers, services, GPUs, and ephemeral-disk claims |
+| Required acceptance | Sealed template, signed helper, dedicated APFS storage, and the opt-in physical-host suite |
+
 ## Why Virtualization.framework
 
 macOS has no public, cgroup-equivalent whole-job security boundary for hostile

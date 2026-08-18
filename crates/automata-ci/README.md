@@ -1,8 +1,9 @@
 # `automata` control plane
 
-The `automata-ci` workspace package builds the `automata` command. It is both
-the control-plane service and the administration CLI. No crates.io release is
-published yet; build the reviewed source checkout with:
+The `automata` command runs the Automata control plane and its administration
+CLI. It admits GitHub workflow deliveries, schedules jobs, coordinates runners,
+stores results, publishes GitHub Checks, and serves the authenticated web UI.
+The current installation channel is a reviewed source checkout:
 
 ```console
 cargo run --locked -p automata-ci -- --version
@@ -10,7 +11,7 @@ cargo run --locked -p automata-ci -- --version
 
 For source builds and other installation options, use the repository
 [getting-started guide](https://github.com/automata-ci/automata/blob/main/docs/getting-started.md).
-The bootstrap build exposes two service modes:
+The command exposes two service modes:
 
 - `automata preview` serves health endpoints and the embedded SSR interface
   without external dependencies.
@@ -19,6 +20,20 @@ The bootstrap build exposes two service modes:
   identity are valid.
 
 This page is the configuration reference for the complete server.
+
+## Deployment boundary
+
+The server can run as a standalone process, but the repository does not yet
+ship a standalone client that installs the GitHub App and per-workspace
+repository desired state. That state enters through the private,
+mutually-authenticated shard-management API described below. Do not seed or
+edit the provider tables directly: their revisions, authorization evidence,
+credential envelopes, and operation receipts are part of the contract.
+
+The Automata-operated installation uses this complete path. A new self-hosted
+operator can build and inspect the source, configure server dependencies, and
+prepare runners, but needs an external provisioning authority until the
+standalone onboarding surface is implemented.
 
 ## Server listeners
 
@@ -297,8 +312,12 @@ extensions, and unauthenticated revisions are rejected.
 Admission validates and persists immutable workflow evidence asynchronously.
 Its durable receipt does not mean a job has finished: the mandatory autonomous
 worker subsequently supervises logical preparation, activation, and
-materialization. End-to-end runner, provider, and service-image acceptance
-remains a separate gate.
+materialization. The repository's
+[public Checks](https://github.com/automata-ci/automata/commit/280cd4f9e685ac022c65a920ba24f4f019b0fd25/checks)
+exercise this path with rootless Podman runners, shell steps, and a PostgreSQL
+service container. Optional providers and execution features retain the
+separate gates recorded in the
+[compatibility matrix](../../docs/compatibility.md).
 
 ## Runner enrollment
 
