@@ -4045,7 +4045,7 @@ mod tests {
                     .expect("RBAC page kind")
                     .to_owned();
                 let expected_copy = match kind.as_str() {
-                    "user-list" => "Users",
+                    "user-list" => "Members",
                     "user-detail" => "Ada Lovelace",
                     "role-list" => "Roles",
                     "role-detail" => "Release reviewer",

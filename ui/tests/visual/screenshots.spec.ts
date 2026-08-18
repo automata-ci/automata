@@ -58,7 +58,7 @@ const previewPages = [
   {
     name: "access-users",
     url: "./?view=users",
-    heading: "Users",
+    heading: "Members",
   },
   {
     name: "access-user-detail",
@@ -342,7 +342,7 @@ test("access management preview is read-only, cohesive, and query-local", async 
   context,
 }) => {
   const routes = [
-    ["./?view=users", "Users"],
+    ["./?view=users", "Members"],
     ["./?view=user&user=ada-lovelace", "Ada Lovelace"],
     ["./?view=roles", "Roles"],
     ["./?view=role&role=release-reviewer", "Release reviewer"],
@@ -583,7 +583,7 @@ test("access management skip navigation bypasses management tabs", async ({
 }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("./?view=users");
-  await waitForStableRender(page, "Users");
+  await waitForStableRender(page, "Members");
   const skipLink = page.getByRole("link", { name: "Skip to content" });
   await page.keyboard.press("Tab");
   await expect(skipLink).toBeFocused();
@@ -597,13 +597,13 @@ test("access management skip navigation bypasses management tabs", async ({
   await expect(
     page
       .getByRole("navigation", { name: "Access management" })
-      .getByRole("link", { name: "Users" }),
+      .getByRole("link", { name: "Members" }),
   ).not.toBeFocused();
 
   await page.setViewportSize({ width: 768, height: 1_024 });
   await page.goto("./?view=users");
-  await waitForStableRender(page, "Users");
-  const overflowingRegion = page.getByRole("region", { name: "Users" });
+  await waitForStableRender(page, "Members");
+  const overflowingRegion = page.getByRole("region", { name: "Members" });
   await overflowingRegion.locator("table").evaluate((table) => {
     table.style.minWidth = "1200px";
   });

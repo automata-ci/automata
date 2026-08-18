@@ -28,33 +28,33 @@ export function UserListPage({ model, shellUtility }: UserListPageProps) {
         className="panel rbac-panel"
       >
         <div className="panel__heading">
-          <h2 id="users-heading">Tenant users</h2>
+          <h2 id="users-heading">Tenant members</h2>
           <span>{model.pagination.label}</span>
         </div>
         {model.users.length === 0 ? (
-          <p className="rbac-empty">No users are available with your current access.</p>
+          <p className="rbac-empty">No members are available with your current access.</p>
         ) : (
           <RbacTableRegion labelledBy="users-heading">
             <table className="rbac-table">
               <caption className="sr-only">
-                Authenticated tenant users and their current status
+                Human and delegated tenant identities and their current status
               </caption>
               <thead>
                 <tr>
-                  <th scope="col">User</th>
-                  <th scope="col">Provider identity</th>
+                  <th scope="col">Member</th>
+                  <th scope="col">Identity</th>
                   <th scope="col">Status</th>
                 </tr>
               </thead>
               <tbody>
                 {model.users.map((user) => (
                   <tr key={user.id}>
-                    <th data-label="User" scope="row">
+                    <th data-label="Member" scope="row">
                       <a className="rbac-primary-link" href={user.href}>
                         {user.displayName ?? user.providerLogin}
                       </a>
                     </th>
-                    <td data-label="Provider identity">
+                    <td data-label="Identity">
                       <span className="rbac-cell-stack">
                         <span>{user.providerLogin}</span>
                         <small>{rbacProviderLabel(user.providerId)}</small>
@@ -70,7 +70,7 @@ export function UserListPage({ model, shellUtility }: UserListPageProps) {
           </RbacTableRegion>
         )}
       </section>
-      <Pagination label="Users pagination" pagination={model.pagination} />
+      <Pagination label="Members pagination" pagination={model.pagination} />
     </RbacManagement>
   );
 }

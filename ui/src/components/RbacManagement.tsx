@@ -24,7 +24,7 @@ export interface RbacTableRegionProps extends PropsWithChildren {
 }
 
 const managementLinks = [
-  { area: "users", hrefKey: "usersHref", label: "Users" },
+  { area: "users", hrefKey: "usersHref", label: "Members" },
   { area: "roles", hrefKey: "rolesHref", label: "Roles" },
   {
     area: "direct-bindings",

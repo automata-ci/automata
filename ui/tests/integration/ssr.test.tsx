@@ -1459,7 +1459,7 @@ describe("hydration", () => {
         pagination: {
           previousHref: null,
           nextHref: null,
-          label: "0 users",
+          label: "0 members",
         },
       },
     };
@@ -1473,7 +1473,7 @@ describe("hydration", () => {
       rendered.querySelector(
         'section[aria-labelledby="users-heading"] .rbac-empty',
       )?.textContent,
-    ).toContain("No users");
+    ).toContain("No members");
   });
 
   it("renders a concise user identity and read-only role assignments", () => {
