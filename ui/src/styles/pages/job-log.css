@@ -203,8 +203,6 @@
 
 .log-line {
   display: grid;
-  content-visibility: auto;
-  contain-intrinsic-block-size: auto 26px;
   grid-column: 1 / -1;
   grid-template-columns: subgrid;
   min-height: 26px;
@@ -238,6 +236,8 @@
 }
 
 .log-line > code {
+  content-visibility: auto;
+  contain-intrinsic-block-size: auto 26px;
   padding: 4px 16px 3px 0;
   color: inherit;
   background: transparent;

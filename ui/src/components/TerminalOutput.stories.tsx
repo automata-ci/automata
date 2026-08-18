@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
+import { expect } from "storybook/test";
 import { TerminalTranscript } from "../logs/terminal";
 import type { LogGroupView } from "../presenters/jobLogs";
 import { TerminalOutput } from "./TerminalOutput";
@@ -45,4 +46,14 @@ export const StyledUnicodeOutput: Story = {
     subscribeOutput: undefined,
   },
   render: (args) => <div className="log-viewer"><div className="log-groups"><TerminalOutput {...args} /></div></div>,
+  play: ({ canvasElement }) => {
+    const rows = [...canvasElement.querySelectorAll<HTMLElement>(".log-line")];
+    expect(rows).toHaveLength(2);
+    for (const row of rows) {
+      const cells = [...row.children].map((cell) => cell.getBoundingClientRect());
+      expect(cells).toHaveLength(3);
+      expect(new Set(cells.map((cell) => cell.top)).size).toBe(1);
+      expect(row.getBoundingClientRect().height).toBeLessThanOrEqual(32);
+    }
+  },
 };
