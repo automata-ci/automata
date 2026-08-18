@@ -605,269 +605,114 @@ async fn lock_exact_selection_lineage(
     lock_exact_materialization_selection_lineage(transaction, selector, current).await
 }
 
-async fn lock_exact_preparation_selection_lineage(
-    transaction: &mut Transaction<'_, Postgres>,
-    selector: &ExactExecutionSelector,
-    current: &ExactExecutionRow,
-) -> Result<(), GithubJobRuntimeAuthorityStoreError> {
-    let tail = current.preparation_selection_tail;
-    let generation = positive_i64(tail.generation().get())?;
-    let base_exact: Option<bool> = sqlx::query_scalar(
-        r"
-        SELECT selection.generation = $8
-           AND selection.claimed_at_ms = $9
-           AND selection.expires_at_ms = $10
-        FROM logical_workflow_activation_work_selections AS selection
-        WHERE selection.selection_id = $1
-          AND selection.outcome = 'claimed'
-          AND selection.authority_kind = 'preparation'
-          AND selection.tenant_id = $2
-          AND selection.run_id = $3
-          AND selection.invocation_id = $4
-          AND selection.logical_job_id = $5
-          AND selection.owner_id = $6
-          AND selection.authority_digest = $7
-        FOR SHARE OF selection
-        ",
-    )
-    .bind(tail.selection_id().as_uuid())
-    .bind(&current.tenant_id)
-    .bind(selector.run_id.as_uuid())
-    .bind(current.invocation_id)
-    .bind(current.logical_job_id)
-    .bind(tail.owner().as_uuid())
-    .bind(tail.descriptor_digest().as_bytes().as_slice())
-    .bind(generation)
-    .bind(tail.claimed_at().get())
-    .bind(tail.expires_at().get())
-    .fetch_optional(&mut **transaction)
-    .await
-    .map_err(GithubJobRuntimeAuthorityStoreError::operation)?;
-    match base_exact {
-        Some(true) => return Ok(()),
-        Some(false) => {}
-        None => return Err(GithubJobRuntimeAuthorityStoreError::CorruptData),
-    }
-    let renewal_exact = sqlx::query_scalar::<_, bool>(
-        r"
-        SELECT TRUE
-        FROM logical_workflow_activation_renewal_receipts AS renewal
-        WHERE renewal.selection_id = $1
-          AND renewal.authority_kind = 'preparation'
-          AND renewal.tenant_id = $2
-          AND renewal.run_id = $3
-          AND renewal.invocation_id = $4
-          AND renewal.logical_job_id = $5
-          AND renewal.owner_id = $6
-          AND renewal.runtime_policy_revision = $7
-          AND renewal.runtime_policy_digest = $8
-          AND renewal.authority_digest = $9
-          AND renewal.successor_generation = $10
-          AND renewal.successor_claimed_at_ms = $11
-          AND renewal.successor_expires_at_ms = $12
-        FOR SHARE OF renewal
-        ",
-    )
-    .bind(tail.selection_id().as_uuid())
-    .bind(&current.tenant_id)
-    .bind(selector.run_id.as_uuid())
-    .bind(current.invocation_id)
-    .bind(current.logical_job_id)
-    .bind(tail.owner().as_uuid())
-    .bind(current.runtime_policy_revision)
-    .bind(&current.runtime_policy_digest)
-    .bind(tail.descriptor_digest().as_bytes().as_slice())
-    .bind(generation)
-    .bind(tail.claimed_at().get())
-    .bind(tail.expires_at().get())
-    .fetch_optional(&mut **transaction)
-    .await
-    .map_err(GithubJobRuntimeAuthorityStoreError::operation)?
-    .unwrap_or(false);
-    if renewal_exact {
-        Ok(())
-    } else {
-        Err(GithubJobRuntimeAuthorityStoreError::CorruptData)
-    }
+// Only these six public arms exist: each phase keeps a compile-time SQL shape.
+#[rustfmt::skip]
+macro_rules! selection_lineage_sql {
+    (preparation_base) => { selection_lineage_sql!(@orchestration_base "preparation") };
+    (preparation_renewal) => { selection_lineage_sql!(@orchestration_renewal "preparation") };
+    (activation_base) => { selection_lineage_sql!(@orchestration_base "activation") };
+    (activation_renewal) => { selection_lineage_sql!(@orchestration_renewal "activation") };
+    (materialization_base) => { concat!(
+        "\n        SELECT selection.generation = $9\n           AND selection.claimed_at_ms = $10\n           AND selection.expires_at_ms = $11\n",
+        "        FROM logical_workflow_materialization_work_selections AS selection\n        WHERE selection.selection_id = $1\n          AND selection.outcome = 'claimed'\n",
+        "          AND selection.tenant_id = $2\n          AND selection.run_id = $3\n          AND selection.invocation_id = $4\n          AND selection.logical_job_id = $5\n",
+        "          AND selection.instance_id = $6\n          AND selection.owner_id = $7\n          AND selection.authority_digest = $8\n        FOR SHARE OF selection\n        ") };
+    (materialization_renewal) => { concat!(
+        "\n        SELECT TRUE\n        FROM logical_workflow_materialization_renewal_receipts AS renewal\n        WHERE renewal.selection_id = $1\n",
+        "          AND renewal.tenant_id = $2\n          AND renewal.run_id = $3\n          AND renewal.invocation_id = $4\n          AND renewal.logical_job_id = $5\n",
+        "          AND renewal.instance_id = $6\n          AND renewal.owner_id = $7\n          AND renewal.runtime_policy_revision = $8\n          AND renewal.runtime_policy_digest = $9\n",
+        "          AND renewal.authority_digest = $10\n          AND renewal.expected_job_id = $11\n          AND renewal.expected_attempt_id = $12\n",
+        "          AND renewal.successor_generation = $13\n          AND renewal.successor_claimed_at_ms = $14\n          AND renewal.successor_expires_at_ms = $15\n        FOR SHARE OF renewal\n        ") };
+    (@orchestration_base $kind:literal) => { concat!(
+        "\n        SELECT selection.generation = $8\n           AND selection.claimed_at_ms = $9\n           AND selection.expires_at_ms = $10\n",
+        "        FROM logical_workflow_activation_work_selections AS selection\n        WHERE selection.selection_id = $1\n          AND selection.outcome = 'claimed'\n          AND selection.authority_kind = '", $kind, "'\n",
+        "          AND selection.tenant_id = $2\n          AND selection.run_id = $3\n          AND selection.invocation_id = $4\n          AND selection.logical_job_id = $5\n",
+        "          AND selection.owner_id = $6\n          AND selection.authority_digest = $7\n        FOR SHARE OF selection\n        ") };
+    (@orchestration_renewal $kind:literal) => { concat!(
+        "\n        SELECT TRUE\n        FROM logical_workflow_activation_renewal_receipts AS renewal\n        WHERE renewal.selection_id = $1\n          AND renewal.authority_kind = '", $kind, "'\n",
+        "          AND renewal.tenant_id = $2\n          AND renewal.run_id = $3\n          AND renewal.invocation_id = $4\n          AND renewal.logical_job_id = $5\n",
+        "          AND renewal.owner_id = $6\n          AND renewal.runtime_policy_revision = $7\n          AND renewal.runtime_policy_digest = $8\n          AND renewal.authority_digest = $9\n",
+        "          AND renewal.successor_generation = $10\n          AND renewal.successor_claimed_at_ms = $11\n          AND renewal.successor_expires_at_ms = $12\n        FOR SHARE OF renewal\n        ") };
 }
 
-async fn lock_exact_activation_selection_lineage(
-    transaction: &mut Transaction<'_, Postgres>,
-    selector: &ExactExecutionSelector,
-    current: &ExactExecutionRow,
-) -> Result<(), GithubJobRuntimeAuthorityStoreError> {
-    let tail = current.activation_selection_tail;
-    let generation = positive_i64(tail.generation().get())?;
-    let base_exact: Option<bool> = sqlx::query_scalar(
-        r"
-        SELECT selection.generation = $8
-           AND selection.claimed_at_ms = $9
-           AND selection.expires_at_ms = $10
-        FROM logical_workflow_activation_work_selections AS selection
-        WHERE selection.selection_id = $1
-          AND selection.outcome = 'claimed'
-          AND selection.authority_kind = 'activation'
-          AND selection.tenant_id = $2
-          AND selection.run_id = $3
-          AND selection.invocation_id = $4
-          AND selection.logical_job_id = $5
-          AND selection.owner_id = $6
-          AND selection.authority_digest = $7
-        FOR SHARE OF selection
-        ",
-    )
-    .bind(tail.selection_id().as_uuid())
-    .bind(&current.tenant_id)
-    .bind(selector.run_id.as_uuid())
-    .bind(current.invocation_id)
-    .bind(current.logical_job_id)
-    .bind(tail.owner().as_uuid())
-    .bind(tail.activation_input_digest().as_bytes().as_slice())
-    .bind(generation)
-    .bind(tail.claimed_at().get())
-    .bind(tail.expires_at().get())
-    .fetch_optional(&mut **transaction)
-    .await
-    .map_err(GithubJobRuntimeAuthorityStoreError::operation)?;
-    match base_exact {
-        Some(true) => return Ok(()),
-        Some(false) => {}
-        None => return Err(GithubJobRuntimeAuthorityStoreError::CorruptData),
-    }
-    let renewal_exact = sqlx::query_scalar::<_, bool>(
-        r"
-        SELECT TRUE
-        FROM logical_workflow_activation_renewal_receipts AS renewal
-        WHERE renewal.selection_id = $1
-          AND renewal.authority_kind = 'activation'
-          AND renewal.tenant_id = $2
-          AND renewal.run_id = $3
-          AND renewal.invocation_id = $4
-          AND renewal.logical_job_id = $5
-          AND renewal.owner_id = $6
-          AND renewal.runtime_policy_revision = $7
-          AND renewal.runtime_policy_digest = $8
-          AND renewal.authority_digest = $9
-          AND renewal.successor_generation = $10
-          AND renewal.successor_claimed_at_ms = $11
-          AND renewal.successor_expires_at_ms = $12
-        FOR SHARE OF renewal
-        ",
-    )
-    .bind(tail.selection_id().as_uuid())
-    .bind(&current.tenant_id)
-    .bind(selector.run_id.as_uuid())
-    .bind(current.invocation_id)
-    .bind(current.logical_job_id)
-    .bind(tail.owner().as_uuid())
-    .bind(current.runtime_policy_revision)
-    .bind(&current.runtime_policy_digest)
-    .bind(tail.activation_input_digest().as_bytes().as_slice())
-    .bind(generation)
-    .bind(tail.claimed_at().get())
-    .bind(tail.expires_at().get())
-    .fetch_optional(&mut **transaction)
-    .await
-    .map_err(GithubJobRuntimeAuthorityStoreError::operation)?
-    .unwrap_or(false);
-    if renewal_exact {
-        Ok(())
-    } else {
-        Err(GithubJobRuntimeAuthorityStoreError::CorruptData)
-    }
+const PREPARATION_SELECTION_BASE_SQL: &str = selection_lineage_sql!(preparation_base);
+const PREPARATION_SELECTION_RENEWAL_SQL: &str = selection_lineage_sql!(preparation_renewal);
+const ACTIVATION_SELECTION_BASE_SQL: &str = selection_lineage_sql!(activation_base);
+const ACTIVATION_SELECTION_RENEWAL_SQL: &str = selection_lineage_sql!(activation_renewal);
+const MATERIALIZATION_SELECTION_BASE_SQL: &str = selection_lineage_sql!(materialization_base);
+const MATERIALIZATION_SELECTION_RENEWAL_SQL: &str = selection_lineage_sql!(materialization_renewal);
+
+// Public phase arms are closed; internal arms own every bind and its position.
+#[rustfmt::skip]
+macro_rules! selection_lineage_query {
+    (preparation_base, $transaction:ident, $selector:ident, $current:ident, $tail:ident, $generation:ident) => {
+        selection_lineage_query!(@orchestration_base PREPARATION_SELECTION_BASE_SQL, descriptor_digest, $transaction, $selector, $current, $tail, $generation) };
+    (preparation_renewal, $transaction:ident, $selector:ident, $current:ident, $tail:ident, $generation:ident) => {
+        selection_lineage_query!(@orchestration_renewal PREPARATION_SELECTION_RENEWAL_SQL, descriptor_digest, $transaction, $selector, $current, $tail, $generation) };
+    (activation_base, $transaction:ident, $selector:ident, $current:ident, $tail:ident, $generation:ident) => {
+        selection_lineage_query!(@orchestration_base ACTIVATION_SELECTION_BASE_SQL, activation_input_digest, $transaction, $selector, $current, $tail, $generation) };
+    (activation_renewal, $transaction:ident, $selector:ident, $current:ident, $tail:ident, $generation:ident) => {
+        selection_lineage_query!(@orchestration_renewal ACTIVATION_SELECTION_RENEWAL_SQL, activation_input_digest, $transaction, $selector, $current, $tail, $generation) };
+    (materialization_base, $transaction:ident, $selector:ident, $current:ident, $tail:ident, $generation:ident) => { sqlx::query_scalar(MATERIALIZATION_SELECTION_BASE_SQL)
+        .bind($tail.selection_id().as_uuid()).bind(&$current.tenant_id).bind($selector.run_id.as_uuid())
+        .bind($current.invocation_id).bind($current.logical_job_id).bind($current.instance_id).bind($tail.owner().as_uuid())
+        .bind($tail.descriptor_digest().as_bytes().as_slice()).bind($generation).bind($tail.claimed_at().get()).bind($tail.expires_at().get()) };
+    (materialization_renewal, $transaction:ident, $selector:ident, $current:ident, $tail:ident, $generation:ident) => { sqlx::query_scalar::<_, bool>(MATERIALIZATION_SELECTION_RENEWAL_SQL)
+        .bind($tail.selection_id().as_uuid()).bind(&$current.tenant_id).bind($selector.run_id.as_uuid())
+        .bind($current.invocation_id).bind($current.logical_job_id).bind($current.instance_id).bind($tail.owner().as_uuid())
+        .bind($current.runtime_policy_revision).bind(&$current.runtime_policy_digest).bind($tail.descriptor_digest().as_bytes().as_slice())
+        .bind($selector.job_id.as_uuid()).bind($selector.attempt_id).bind($generation).bind($tail.claimed_at().get()).bind($tail.expires_at().get()) };
+    (@orchestration_base $sql:ident, $digest:ident, $transaction:ident, $selector:ident, $current:ident, $tail:ident, $generation:ident) => { sqlx::query_scalar($sql)
+        .bind($tail.selection_id().as_uuid()).bind(&$current.tenant_id).bind($selector.run_id.as_uuid())
+        .bind($current.invocation_id).bind($current.logical_job_id).bind($tail.owner().as_uuid())
+        .bind($tail.$digest().as_bytes().as_slice()).bind($generation).bind($tail.claimed_at().get()).bind($tail.expires_at().get()) };
+    (@orchestration_renewal $sql:ident, $digest:ident, $transaction:ident, $selector:ident, $current:ident, $tail:ident, $generation:ident) => { sqlx::query_scalar::<_, bool>($sql)
+        .bind($tail.selection_id().as_uuid()).bind(&$current.tenant_id).bind($selector.run_id.as_uuid())
+        .bind($current.invocation_id).bind($current.logical_job_id).bind($tail.owner().as_uuid())
+        .bind($current.runtime_policy_revision).bind(&$current.runtime_policy_digest).bind($tail.$digest().as_bytes().as_slice())
+        .bind($generation).bind($tail.claimed_at().get()).bind($tail.expires_at().get()) };
 }
 
-async fn lock_exact_materialization_selection_lineage(
-    transaction: &mut Transaction<'_, Postgres>,
-    selector: &ExactExecutionSelector,
-    current: &ExactExecutionRow,
-) -> Result<(), GithubJobRuntimeAuthorityStoreError> {
-    let tail = current.materialization_selection_tail;
-    let generation = positive_i64(tail.generation().get())?;
-    let base_exact: Option<bool> = sqlx::query_scalar(
-        r"
-        SELECT selection.generation = $9
-           AND selection.claimed_at_ms = $10
-           AND selection.expires_at_ms = $11
-        FROM logical_workflow_materialization_work_selections AS selection
-        WHERE selection.selection_id = $1
-          AND selection.outcome = 'claimed'
-          AND selection.tenant_id = $2
-          AND selection.run_id = $3
-          AND selection.invocation_id = $4
-          AND selection.logical_job_id = $5
-          AND selection.instance_id = $6
-          AND selection.owner_id = $7
-          AND selection.authority_digest = $8
-        FOR SHARE OF selection
-        ",
-    )
-    .bind(tail.selection_id().as_uuid())
-    .bind(&current.tenant_id)
-    .bind(selector.run_id.as_uuid())
-    .bind(current.invocation_id)
-    .bind(current.logical_job_id)
-    .bind(current.instance_id)
-    .bind(tail.owner().as_uuid())
-    .bind(tail.descriptor_digest().as_bytes().as_slice())
-    .bind(generation)
-    .bind(tail.claimed_at().get())
-    .bind(tail.expires_at().get())
-    .fetch_optional(&mut **transaction)
-    .await
-    .map_err(GithubJobRuntimeAuthorityStoreError::operation)?;
-    match base_exact {
-        Some(true) => return Ok(()),
-        Some(false) => {}
-        None => return Err(GithubJobRuntimeAuthorityStoreError::CorruptData),
-    }
-    let renewal_exact = sqlx::query_scalar::<_, bool>(
-        r"
-        SELECT TRUE
-        FROM logical_workflow_materialization_renewal_receipts AS renewal
-        WHERE renewal.selection_id = $1
-          AND renewal.tenant_id = $2
-          AND renewal.run_id = $3
-          AND renewal.invocation_id = $4
-          AND renewal.logical_job_id = $5
-          AND renewal.instance_id = $6
-          AND renewal.owner_id = $7
-          AND renewal.runtime_policy_revision = $8
-          AND renewal.runtime_policy_digest = $9
-          AND renewal.authority_digest = $10
-          AND renewal.expected_job_id = $11
-          AND renewal.expected_attempt_id = $12
-          AND renewal.successor_generation = $13
-          AND renewal.successor_claimed_at_ms = $14
-          AND renewal.successor_expires_at_ms = $15
-        FOR SHARE OF renewal
-        ",
-    )
-    .bind(tail.selection_id().as_uuid())
-    .bind(&current.tenant_id)
-    .bind(selector.run_id.as_uuid())
-    .bind(current.invocation_id)
-    .bind(current.logical_job_id)
-    .bind(current.instance_id)
-    .bind(tail.owner().as_uuid())
-    .bind(current.runtime_policy_revision)
-    .bind(&current.runtime_policy_digest)
-    .bind(tail.descriptor_digest().as_bytes().as_slice())
-    .bind(selector.job_id.as_uuid())
-    .bind(selector.attempt_id)
-    .bind(generation)
-    .bind(tail.claimed_at().get())
-    .bind(tail.expires_at().get())
-    .fetch_optional(&mut **transaction)
-    .await
-    .map_err(GithubJobRuntimeAuthorityStoreError::operation)?
-    .unwrap_or(false);
-    if renewal_exact {
-        Ok(())
-    } else {
-        Err(GithubJobRuntimeAuthorityStoreError::CorruptData)
-    }
+macro_rules! define_selection_lineage_lock {
+    (preparation) => { define_selection_lineage_lock!(@one lock_exact_preparation_selection_lineage, preparation_selection_tail, preparation_base, preparation_renewal); };
+    (activation) => { define_selection_lineage_lock!(@one lock_exact_activation_selection_lineage, activation_selection_tail, activation_base, activation_renewal); };
+    (materialization) => { define_selection_lineage_lock!(@one lock_exact_materialization_selection_lineage, materialization_selection_tail, materialization_base, materialization_renewal); };
+    (@one $name:ident, $tail_field:ident, $base:ident, $renewal:ident) => {
+        async fn $name(
+            transaction: &mut Transaction<'_, Postgres>,
+            selector: &ExactExecutionSelector,
+            current: &ExactExecutionRow,
+        ) -> Result<(), GithubJobRuntimeAuthorityStoreError> {
+            let tail = current.$tail_field;
+            let generation = positive_i64(tail.generation().get())?;
+            let base_exact: Option<bool> = selection_lineage_query!(
+                $base, transaction, selector, current, tail, generation
+            )
+            .fetch_optional(&mut **transaction)
+            .await
+            .map_err(GithubJobRuntimeAuthorityStoreError::operation)?;
+            match base_exact {
+                Some(true) => return Ok(()),
+                Some(false) => {}
+                None => return Err(GithubJobRuntimeAuthorityStoreError::CorruptData),
+            }
+            let renewal_exact = selection_lineage_query!(
+                $renewal, transaction, selector, current, tail, generation
+            )
+            .fetch_optional(&mut **transaction)
+            .await
+            .map_err(GithubJobRuntimeAuthorityStoreError::operation)?
+            .unwrap_or(false);
+            renewal_exact
+                .then_some(())
+                .ok_or(GithubJobRuntimeAuthorityStoreError::CorruptData)
+        }
+    };
 }
+
+define_selection_lineage_lock!(preparation);
+define_selection_lineage_lock!(activation);
+define_selection_lineage_lock!(materialization);
 
 async fn lock_exact_private_source_authority(
     transaction: &mut Transaction<'_, Postgres>,
@@ -955,111 +800,64 @@ async fn ensure_database_live_lease(
     Ok(())
 }
 
-fn decode_preparation_selection_tail(
-    row: &sqlx::postgres::PgRow,
-) -> Result<GithubRuntimeAuthorityPreparationSelectionTail, GithubJobRuntimeAuthorityStoreError> {
-    let selection_id: Uuid = row
-        .try_get("preparation_selection_id")
-        .map_err(|_| GithubJobRuntimeAuthorityStoreError::CorruptData)?;
-    let owner_id: Uuid = row
-        .try_get("preparation_owner_id")
-        .map_err(|_| GithubJobRuntimeAuthorityStoreError::CorruptData)?;
-    let generation: i64 = row
-        .try_get("preparation_generation")
-        .map_err(|_| GithubJobRuntimeAuthorityStoreError::CorruptData)?;
-    let descriptor_digest: Vec<u8> = row
-        .try_get("preparation_descriptor_digest")
-        .map_err(|_| GithubJobRuntimeAuthorityStoreError::CorruptData)?;
-    let claimed_at_ms: i64 = row
-        .try_get("preparation_claimed_at_ms")
-        .map_err(|_| GithubJobRuntimeAuthorityStoreError::CorruptData)?;
-    let expires_at_ms: i64 = row
-        .try_get("preparation_expires_at_ms")
-        .map_err(|_| GithubJobRuntimeAuthorityStoreError::CorruptData)?;
-    GithubRuntimeAuthorityPreparationSelectionTail::new(
-        LogicalWorkSelectionId::from_uuid(selection_id)
-            .map_err(|_| GithubJobRuntimeAuthorityStoreError::CorruptData)?,
-        LogicalActivationWorkerId::from_uuid(owner_id)
-            .map_err(|_| GithubJobRuntimeAuthorityStoreError::CorruptData)?,
-        LogicalActivationPreparationGeneration::new(positive_u64(generation)?)
-            .map_err(|_| GithubJobRuntimeAuthorityStoreError::CorruptData)?,
-        digest(&descriptor_digest)?,
-        UnixMillis::new(claimed_at_ms),
-        UnixMillis::new(expires_at_ms),
-    )
-    .map_err(|_| GithubJobRuntimeAuthorityStoreError::CorruptData)
+#[rustfmt::skip]
+macro_rules! define_selection_tail_decoder {
+    ($name:ident, $tail:ty, $owner:ty, $generation:ty, $digest:ident, $mapping:ident,
+     $selection_column:literal, $owner_column:literal, $generation_column:literal,
+     $digest_column:literal, $claimed_column:literal, $expires_column:literal) => {
+        #[cfg(test)]
+        const $mapping: (&str, [(&str, &str); 6]) = (
+            stringify!($name),
+            [
+                ("selection_id", $selection_column), ("owner_id", $owner_column),
+                ("generation", $generation_column), ("digest", $digest_column),
+                ("claimed_at_ms", $claimed_column), ("expires_at_ms", $expires_column),
+            ],
+        );
+        fn $name(
+            row: &sqlx::postgres::PgRow,
+        ) -> Result<$tail, GithubJobRuntimeAuthorityStoreError> {
+            let selection_id: Uuid = row.try_get($selection_column)
+                .map_err(|_| GithubJobRuntimeAuthorityStoreError::CorruptData)?;
+            let owner_id: Uuid = row.try_get($owner_column)
+                .map_err(|_| GithubJobRuntimeAuthorityStoreError::CorruptData)?;
+            let generation: i64 = row.try_get($generation_column)
+                .map_err(|_| GithubJobRuntimeAuthorityStoreError::CorruptData)?;
+            let $digest: Vec<u8> = row.try_get($digest_column)
+                .map_err(|_| GithubJobRuntimeAuthorityStoreError::CorruptData)?;
+            let claimed_at_ms: i64 = row.try_get($claimed_column)
+                .map_err(|_| GithubJobRuntimeAuthorityStoreError::CorruptData)?;
+            let expires_at_ms: i64 = row.try_get($expires_column)
+                .map_err(|_| GithubJobRuntimeAuthorityStoreError::CorruptData)?;
+            <$tail>::new(
+                LogicalWorkSelectionId::from_uuid(selection_id)
+                    .map_err(|_| GithubJobRuntimeAuthorityStoreError::CorruptData)?,
+                <$owner>::from_uuid(owner_id)
+                    .map_err(|_| GithubJobRuntimeAuthorityStoreError::CorruptData)?,
+                <$generation>::new(positive_u64(generation)?)
+                    .map_err(|_| GithubJobRuntimeAuthorityStoreError::CorruptData)?,
+                digest(&$digest)?, UnixMillis::new(claimed_at_ms), UnixMillis::new(expires_at_ms),
+            )
+            .map_err(|_| GithubJobRuntimeAuthorityStoreError::CorruptData)
+        }
+    };
 }
 
-fn decode_activation_selection_tail(
-    row: &sqlx::postgres::PgRow,
-) -> Result<GithubRuntimeAuthorityActivationSelectionTail, GithubJobRuntimeAuthorityStoreError> {
-    let selection_id: Uuid = row
-        .try_get("activation_selection_id")
-        .map_err(|_| GithubJobRuntimeAuthorityStoreError::CorruptData)?;
-    let owner_id: Uuid = row
-        .try_get("activation_owner_id")
-        .map_err(|_| GithubJobRuntimeAuthorityStoreError::CorruptData)?;
-    let generation: i64 = row
-        .try_get("activation_generation")
-        .map_err(|_| GithubJobRuntimeAuthorityStoreError::CorruptData)?;
-    let activation_input_digest: Vec<u8> = row
-        .try_get("activation_input_digest")
-        .map_err(|_| GithubJobRuntimeAuthorityStoreError::CorruptData)?;
-    let claimed_at_ms: i64 = row
-        .try_get("activation_claimed_at_ms")
-        .map_err(|_| GithubJobRuntimeAuthorityStoreError::CorruptData)?;
-    let expires_at_ms: i64 = row
-        .try_get("activation_expires_at_ms")
-        .map_err(|_| GithubJobRuntimeAuthorityStoreError::CorruptData)?;
-    GithubRuntimeAuthorityActivationSelectionTail::new(
-        LogicalWorkSelectionId::from_uuid(selection_id)
-            .map_err(|_| GithubJobRuntimeAuthorityStoreError::CorruptData)?,
-        LogicalActivationWorkerId::from_uuid(owner_id)
-            .map_err(|_| GithubJobRuntimeAuthorityStoreError::CorruptData)?,
-        LogicalActivationGeneration::new(positive_u64(generation)?)
-            .map_err(|_| GithubJobRuntimeAuthorityStoreError::CorruptData)?,
-        digest(&activation_input_digest)?,
-        UnixMillis::new(claimed_at_ms),
-        UnixMillis::new(expires_at_ms),
-    )
-    .map_err(|_| GithubJobRuntimeAuthorityStoreError::CorruptData)
-}
-
-fn decode_materialization_selection_tail(
-    row: &sqlx::postgres::PgRow,
-) -> Result<GithubRuntimeAuthorityMaterializationSelectionTail, GithubJobRuntimeAuthorityStoreError>
-{
-    let selection_id: Uuid = row
-        .try_get("materialization_selection_id")
-        .map_err(|_| GithubJobRuntimeAuthorityStoreError::CorruptData)?;
-    let owner_id: Uuid = row
-        .try_get("materialization_owner_id")
-        .map_err(|_| GithubJobRuntimeAuthorityStoreError::CorruptData)?;
-    let generation: i64 = row
-        .try_get("materialization_generation")
-        .map_err(|_| GithubJobRuntimeAuthorityStoreError::CorruptData)?;
-    let descriptor_digest: Vec<u8> = row
-        .try_get("materialization_descriptor_digest")
-        .map_err(|_| GithubJobRuntimeAuthorityStoreError::CorruptData)?;
-    let claimed_at_ms: i64 = row
-        .try_get("materialization_claimed_at_ms")
-        .map_err(|_| GithubJobRuntimeAuthorityStoreError::CorruptData)?;
-    let expires_at_ms: i64 = row
-        .try_get("materialization_expires_at_ms")
-        .map_err(|_| GithubJobRuntimeAuthorityStoreError::CorruptData)?;
-    GithubRuntimeAuthorityMaterializationSelectionTail::new(
-        LogicalWorkSelectionId::from_uuid(selection_id)
-            .map_err(|_| GithubJobRuntimeAuthorityStoreError::CorruptData)?,
-        LogicalMaterializationWorkerId::from_uuid(owner_id)
-            .map_err(|_| GithubJobRuntimeAuthorityStoreError::CorruptData)?,
-        LogicalMaterializationGeneration::new(positive_u64(generation)?)
-            .map_err(|_| GithubJobRuntimeAuthorityStoreError::CorruptData)?,
-        digest(&descriptor_digest)?,
-        UnixMillis::new(claimed_at_ms),
-        UnixMillis::new(expires_at_ms),
-    )
-    .map_err(|_| GithubJobRuntimeAuthorityStoreError::CorruptData)
-}
+#[rustfmt::skip]
+define_selection_tail_decoder!(decode_preparation_selection_tail, GithubRuntimeAuthorityPreparationSelectionTail,
+    LogicalActivationWorkerId, LogicalActivationPreparationGeneration, descriptor_digest,
+    PREPARATION_DECODER_MAPPING, "preparation_selection_id", "preparation_owner_id", "preparation_generation",
+    "preparation_descriptor_digest", "preparation_claimed_at_ms", "preparation_expires_at_ms");
+#[rustfmt::skip]
+define_selection_tail_decoder!(decode_activation_selection_tail, GithubRuntimeAuthorityActivationSelectionTail,
+    LogicalActivationWorkerId, LogicalActivationGeneration, activation_input_digest,
+    ACTIVATION_DECODER_MAPPING, "activation_selection_id", "activation_owner_id", "activation_generation",
+    "activation_input_digest", "activation_claimed_at_ms", "activation_expires_at_ms");
+#[rustfmt::skip]
+define_selection_tail_decoder!(decode_materialization_selection_tail, GithubRuntimeAuthorityMaterializationSelectionTail,
+    LogicalMaterializationWorkerId, LogicalMaterializationGeneration, descriptor_digest,
+    MATERIALIZATION_DECODER_MAPPING, "materialization_selection_id", "materialization_owner_id", "materialization_generation",
+    "materialization_descriptor_digest", "materialization_claimed_at_ms", "materialization_expires_at_ms");
 
 fn decode_exact_execution_row(
     row: &sqlx::postgres::PgRow,
@@ -1255,4 +1053,111 @@ fn positive_u64(value: i64) -> Result<u64, GithubJobRuntimeAuthorityStoreError> 
         .ok()
         .filter(|value| *value > 0)
         .ok_or(GithubJobRuntimeAuthorityStoreError::CorruptData)
+}
+
+#[cfg(test)]
+#[rustfmt::skip] // Contract matrices stay compact enough to compare all six shapes at once.
+mod tests {
+    use sha2::{Digest as _, Sha256};
+
+    use super::*;
+
+    #[rustfmt::skip]
+    const LINEAGE_SQL: [&str; 6] = [
+        PREPARATION_SELECTION_BASE_SQL, PREPARATION_SELECTION_RENEWAL_SQL,
+        ACTIVATION_SELECTION_BASE_SQL, ACTIVATION_SELECTION_RENEWAL_SQL,
+        MATERIALIZATION_SELECTION_BASE_SQL, MATERIALIZATION_SELECTION_RENEWAL_SQL,
+    ];
+    #[rustfmt::skip]
+    const FINGERPRINTS: [(usize, &str, usize, &str); 6] = [
+        (627, "2923f6d7c4352dd06c66b824490522c45cdb3c1cffd95aac56cc42173ba2406c", 483, "b85f2c5b85a4d82c08b3a53bb075ffe398ad7e71173ce8e8675295cb7b16a35d"),
+        (707, "ae5b47603441c6e1f3fe8e40a4472cea585dd1affc717207f6e11609dfa7a6e1", 545, "4f94ddfb86f4054d8d08708711c98682b2384684107c0f70a2435f709679ddef"),
+        (626, "c4d7991ce5c9d95925daf7c4655f96d81b2d8e7a4a1bf57a4fbb7c64d94097d5", 482, "7c54b608aa3541ad590816d8ffa0e74d894dd3428bdad3a5bce94a74710ec571"),
+        (706, "34191bd0a7b8e1c46416e8b8960d8f0981b007ced5420a9463b4403ede32336a", 544, "d21cc8c6f0f54291ce8796208516c726744657eb049d5d06d8b0ca38ef68a513"),
+        (619, "616910a4eea26286e67d8120f8a1082134bb3d368f0ab2fa316cd3117309cea3", 475, "eeda1985e5ac1143c498005c67014dbf7d7fb482a99804fa155a28bbe1258526"),
+        (791, "f4287f6bcc5b81ae76136e00fc77af9d4edf1e06b312a8a80ecfe8b13b859200", 609, "c91c910c8ea94423f905d5d3ce8b6ce7bedd8f0ddd7cb7a36fcd1bfbbb92d700"),
+    ];
+
+    #[test]
+    fn selection_lineage_sql_fingerprints_and_placeholders_are_stable() {
+        #[rustfmt::skip]
+        let placeholders: [&[u8]; 6] = [
+            &[8, 9, 10, 1, 2, 3, 4, 5, 6, 7], &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+            &[8, 9, 10, 1, 2, 3, 4, 5, 6, 7], &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+            &[9, 10, 11, 1, 2, 3, 4, 5, 6, 7, 8], &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+        ];
+        for ((sql, fingerprint), placeholders) in LINEAGE_SQL
+            .into_iter().zip(FINGERPRINTS).zip(placeholders)
+        {
+            let canonical = canonical_sql(sql);
+            assert_eq!((sql.len(), sha256(sql)), (fingerprint.0, fingerprint.1.to_owned()));
+            assert_eq!((canonical.len(), sha256(&canonical)), (fingerprint.2, fingerprint.3.to_owned()));
+            assert_eq!(placeholder_sequence(sql), placeholders);
+        }
+    }
+
+    #[test]
+    fn selection_lineage_queries_keep_their_closed_relational_shapes() {
+        #[rustfmt::skip]
+        let shapes = [
+            (LINEAGE_SQL[0], "logical_workflow_activation_work_selections", "selection", Some("preparation"), false, false, false),
+            (LINEAGE_SQL[1], "logical_workflow_activation_renewal_receipts", "renewal", Some("preparation"), false, false, true),
+            (LINEAGE_SQL[2], "logical_workflow_activation_work_selections", "selection", Some("activation"), false, false, false),
+            (LINEAGE_SQL[3], "logical_workflow_activation_renewal_receipts", "renewal", Some("activation"), false, false, true),
+            (LINEAGE_SQL[4], "logical_workflow_materialization_work_selections", "selection", None, true, false, false),
+            (LINEAGE_SQL[5], "logical_workflow_materialization_renewal_receipts", "renewal", None, true, true, true),
+        ];
+        for (sql, table, alias, kind, instance, job_attempt, renewal) in shapes {
+            assert!(sql.contains(&format!("FROM {table} AS {alias}")));
+            for column in ["tenant_id", "run_id", "invocation_id", "logical_job_id", "owner_id", "authority_digest"] {
+                assert!(sql.contains(&format!("{alias}.{column} =")), "{table}.{column}");
+            }
+            assert_eq!(sql.contains(&format!("{alias}.instance_id =")), instance);
+            assert_eq!(sql.contains("expected_job_id =") && sql.contains("expected_attempt_id ="), job_attempt);
+            assert_eq!(sql.contains("runtime_policy_revision =") && sql.contains("runtime_policy_digest ="), renewal);
+            assert!(sql.contains(&format!("FOR SHARE OF {alias}")));
+            assert_eq!(sql.contains("authority_kind ="), kind.is_some());
+            if let Some(kind) = kind {
+                assert!(sql.contains(&format!("{alias}.authority_kind = '{kind}'")));
+            }
+        }
+    }
+
+    #[test]
+    fn selection_tail_decoder_aliases_are_closed() {
+        #[rustfmt::skip]
+        let expected = [
+            ("decode_preparation_selection_tail", [("selection_id", "preparation_selection_id"), ("owner_id", "preparation_owner_id"), ("generation", "preparation_generation"), ("digest", "preparation_descriptor_digest"), ("claimed_at_ms", "preparation_claimed_at_ms"), ("expires_at_ms", "preparation_expires_at_ms")]),
+            ("decode_activation_selection_tail", [("selection_id", "activation_selection_id"), ("owner_id", "activation_owner_id"), ("generation", "activation_generation"), ("digest", "activation_input_digest"), ("claimed_at_ms", "activation_claimed_at_ms"), ("expires_at_ms", "activation_expires_at_ms")]),
+            ("decode_materialization_selection_tail", [("selection_id", "materialization_selection_id"), ("owner_id", "materialization_owner_id"), ("generation", "materialization_generation"), ("digest", "materialization_descriptor_digest"), ("claimed_at_ms", "materialization_claimed_at_ms"), ("expires_at_ms", "materialization_expires_at_ms")]),
+        ];
+        assert_eq!([PREPARATION_DECODER_MAPPING, ACTIVATION_DECODER_MAPPING, MATERIALIZATION_DECODER_MAPPING], expected);
+    }
+
+    fn sha256(value: &str) -> String {
+        Sha256Digest::from_bytes(Sha256::digest(value.as_bytes()).into()).to_string()
+    }
+
+    fn canonical_sql(sql: &str) -> String {
+        sql.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    fn placeholder_sequence(sql: &str) -> Vec<u8> {
+        let bytes = sql.as_bytes();
+        let mut sequence = Vec::new();
+        let mut index = 0;
+        while index < bytes.len() {
+            if bytes[index] == b'$' {
+                let start = index + 1;
+                index = start;
+                while index < bytes.len() && bytes[index].is_ascii_digit() { index += 1; }
+                if start != index {
+                    sequence.push(std::str::from_utf8(&bytes[start..index]).expect("placeholder digits").parse().expect("placeholder number"));
+                    continue;
+                }
+            }
+            index += 1;
+        }
+        sequence
+    }
 }
