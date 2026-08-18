@@ -22,9 +22,17 @@
 /// Provider-neutral workload credential request, result, and failure contracts.
 pub mod credential;
 
+mod changed_files;
 mod model;
 mod port;
 
+pub use changed_files::{
+    ChangedFile, ChangedFileEvidence, ChangedFileIncompleteReason, ChangedFileLimits,
+    ChangedFileLimitsError, ChangedFileNotApplicableReason, ChangedFilePageAccumulator,
+    ChangedFilePageEvidence, ChangedFileRead, ChangedFileReadError, ChangedFileReader,
+    ChangedFileRequest, ChangedFileRequestError, MAX_CHANGED_FILE_COUNT, MAX_CHANGED_FILE_PAGES,
+    MAX_CHANGED_FILE_RESPONSE_BYTES,
+};
 pub use model::{
     ArchiveFormat, ArchiveLimits, ArchiveLimitsError, RepositoryId, RepositoryIdError,
     RepositorySnapshot, RepositorySource, RepositorySourceRequest, RevisionError, RevisionSpec,

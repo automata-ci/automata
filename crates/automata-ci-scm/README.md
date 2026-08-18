@@ -9,6 +9,11 @@ for least-privilege, short-lived repository credentials. Requests bind the
 workload, repository, permissions, and minimum validity without exposing a
 provider's root credential.
 
+The changed-file boundary binds each read to an active provider connection and
+sealed normalized trigger. It distinguishes complete, inapplicable, and
+incomplete comparisons, incrementally bounds and hashes every provider page,
+and never exposes partial paths through the complete-result API.
+
 GitHub HTTP adapters implement the snapshot ports, and `automata-ci-action`
 consumes the snapshot contracts to build verified action bundles.
 `automata-ci-credential-github` composes the credential values with
