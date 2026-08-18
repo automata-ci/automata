@@ -149,6 +149,35 @@ impl PostgresProviderManifestRepository {
         }
     }
 
+    pub(crate) async fn current_endpoint_manifest_inner(
+        &self,
+        endpoint_id: ProviderWebhookEndpointId,
+    ) -> Result<Option<ProviderWebhookEndpointManifest>, ProviderDeliveryRepositoryError> {
+        let row = sqlx::query_as::<_, EndpointRow>(
+            r"
+            SELECT revisions.*
+            FROM provider_webhook_endpoint_current AS current
+            JOIN provider_webhook_endpoint_revisions AS revisions
+              ON revisions.endpoint_id = current.endpoint_id
+             AND revisions.revision = current.revision
+            WHERE current.endpoint_id = $1
+            ",
+        )
+        .bind(endpoint_id.as_uuid())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(unavailable)?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let revision = endpoint_revision(row.revision)?;
+        let references = load_references_pool(self, endpoint_id, revision).await?;
+        if usize::try_from(row.candidate_count).ok() != Some(references.len()) {
+            return Err(ProviderDeliveryRepositoryError::Corrupt);
+        }
+        decode_endpoint(row, references).map(Some)
+    }
+
     pub(crate) async fn load_endpoint_inner(
         &self,
         endpoint_id: ProviderWebhookEndpointId,
@@ -208,16 +237,21 @@ async fn ensure_endpoint_references(
             WHERE instance.instance_id = $1
               AND instance.revision = $2
               AND instance.provider_type = $3
-              AND instance.lifecycle_state = 'active'
-              AND EXISTS (
-                  SELECT 1
-                  FROM provider_connection_current AS current
-                  JOIN provider_connection_revisions AS connection
-                    ON connection.connection_id = current.connection_id
-                   AND connection.revision = current.revision
-                  WHERE connection.provider_instance_id = instance.instance_id
-                    AND connection.provider_revision = instance.revision
-                    AND connection.lifecycle_state = 'active'
+              AND (
+                  NOT $4
+                  OR (
+                      instance.lifecycle_state = 'active'
+                      AND EXISTS (
+                          SELECT 1
+                          FROM provider_connection_current AS current
+                          JOIN provider_connection_revisions AS connection
+                            ON connection.connection_id = current.connection_id
+                           AND connection.revision = current.revision
+                          WHERE connection.provider_instance_id = instance.instance_id
+                            AND connection.provider_revision = instance.revision
+                            AND connection.lifecycle_state = 'active'
+                      )
+                  )
               )
         )
         ",
@@ -225,6 +259,7 @@ async fn ensure_endpoint_references(
     .bind(endpoint.instance_id().as_uuid())
     .bind(durable_u64(endpoint.provider_revision().get())?)
     .bind(endpoint.provider_type().as_str())
+    .bind(endpoint.state() == ProviderWebhookEndpointState::Active)
     .fetch_one(&mut **transaction)
     .await
     .map_err(unavailable)?;

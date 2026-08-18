@@ -804,12 +804,13 @@ impl ProviderInstanceManifest {
         self.digest
     }
 
-    /// Validates a strictly contiguous, changed successor revision.
+    /// Validates a strictly contiguous successor revision.
     ///
     /// # Errors
     ///
     /// Rejects identity changes, reactivation after retirement, continuing
-    /// secret generation drift, noncontiguous revisions, or no-op revisions.
+    /// secret generation drift, or noncontiguous revisions. A revision-only
+    /// successor is a valid generation fence for a complete desired set.
     pub fn validate_successor(&self, prior: &Self) -> Result<(), ProviderConfigurationError> {
         let next = prior
             .revision
@@ -826,21 +827,10 @@ impl ProviderInstanceManifest {
                 && self.state != ProviderLifecycleState::Active
                 && self.activated_at.is_some())
             || !self.secrets.valid_successor_of(&prior.secrets)
-            || !self.has_substantive_change_from(prior)
         {
             return Err(ProviderConfigurationError::InvalidSuccessor);
         }
         Ok(())
-    }
-
-    fn has_substantive_change_from(&self, prior: &Self) -> bool {
-        self.state != prior.state
-            || self.origins != prior.origins
-            || self.configuration != prior.configuration
-            || self.secrets != prior.secrets
-            || self.capability_digest != prior.capability_digest
-            || self.activated_at != prior.activated_at
-            || self.retired_at != prior.retired_at
     }
 
     fn compute_digest(&self) -> Sha256Digest {

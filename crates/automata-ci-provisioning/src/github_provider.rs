@@ -733,6 +733,7 @@ impl AuthorizedApplyWorkspaceGithubRepositories {
 pub struct WorkspaceGithubRepositoriesDesiredState {
     workspace_id: WorkspaceId,
     revision: WorkspaceGithubRepositoriesRevision,
+    applied_at: GithubProviderTimestamp,
     repositories: Vec<GithubProviderRepositorySelection>,
 }
 
@@ -745,11 +746,13 @@ impl WorkspaceGithubRepositoriesDesiredState {
     pub fn new(
         workspace_id: WorkspaceId,
         revision: WorkspaceGithubRepositoriesRevision,
+        applied_at: GithubProviderTimestamp,
         repositories: Vec<GithubProviderRepositorySelection>,
     ) -> Result<Self, GithubProviderValueError> {
         Ok(Self {
             workspace_id,
             revision,
+            applied_at,
             repositories: normalize_repositories(repositories)?,
         })
     }
@@ -764,6 +767,12 @@ impl WorkspaceGithubRepositoriesDesiredState {
     #[must_use]
     pub const fn revision(&self) -> WorkspaceGithubRepositoriesRevision {
         self.revision
+    }
+
+    /// Returns the stable database commit time for this desired set.
+    #[must_use]
+    pub const fn applied_at(&self) -> GithubProviderTimestamp {
+        self.applied_at
     }
 
     /// Returns repositories in stable installation/repository order.
@@ -794,13 +803,49 @@ fn normalize_repositories(
     Ok(repositories)
 }
 
-/// Current database-backed GitHub provider desired state for one shard.
-pub struct GithubProviderDesiredState {
-    shard_id: ShardId,
+/// Durable version evidence for one complete GitHub provider desired set.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GithubProviderDesiredStateVersion {
     configuration_revision: GithubProviderConfigurationRevision,
+    applied_at: GithubProviderTimestamp,
     app_configuration_revision: u64,
     webhook_verifier_revision: u64,
     runner_policy_revision: u64,
+}
+
+impl GithubProviderDesiredStateVersion {
+    /// Creates one coherent set of provider and secret-policy revisions.
+    ///
+    /// # Errors
+    ///
+    /// Rejects zero App, webhook, or runner-policy revisions.
+    pub const fn new(
+        configuration_revision: GithubProviderConfigurationRevision,
+        applied_at: GithubProviderTimestamp,
+        app_configuration_revision: u64,
+        webhook_verifier_revision: u64,
+        runner_policy_revision: u64,
+    ) -> Result<Self, GithubProviderValueError> {
+        if app_configuration_revision == 0
+            || webhook_verifier_revision == 0
+            || runner_policy_revision == 0
+        {
+            return Err(GithubProviderValueError::InvalidProviderRevision);
+        }
+        Ok(Self {
+            configuration_revision,
+            applied_at,
+            app_configuration_revision,
+            webhook_verifier_revision,
+            runner_policy_revision,
+        })
+    }
+}
+
+/// Current database-backed GitHub provider desired state for one shard.
+pub struct GithubProviderDesiredState {
+    shard_id: ShardId,
+    version: GithubProviderDesiredStateVersion,
     configuration: GithubProviderConfiguration,
     workspaces: Vec<WorkspaceGithubRepositoriesDesiredState>,
 }
@@ -813,19 +858,10 @@ impl GithubProviderDesiredState {
     /// Rejects zero runtime revisions or duplicate workspace identities.
     pub fn new(
         shard_id: ShardId,
-        configuration_revision: GithubProviderConfigurationRevision,
-        app_configuration_revision: u64,
-        webhook_verifier_revision: u64,
-        runner_policy_revision: u64,
+        version: GithubProviderDesiredStateVersion,
         configuration: GithubProviderConfiguration,
         mut workspaces: Vec<WorkspaceGithubRepositoriesDesiredState>,
     ) -> Result<Self, GithubProviderValueError> {
-        if app_configuration_revision == 0
-            || webhook_verifier_revision == 0
-            || runner_policy_revision == 0
-        {
-            return Err(GithubProviderValueError::InvalidProviderRevision);
-        }
         workspaces.sort_unstable_by_key(WorkspaceGithubRepositoriesDesiredState::workspace_id);
         if workspaces
             .windows(2)
@@ -835,10 +871,7 @@ impl GithubProviderDesiredState {
         }
         Ok(Self {
             shard_id,
-            configuration_revision,
-            app_configuration_revision,
-            webhook_verifier_revision,
-            runner_policy_revision,
+            version,
             configuration,
             workspaces,
         })
@@ -853,25 +886,31 @@ impl GithubProviderDesiredState {
     /// Returns the persisted shard-wide configuration revision.
     #[must_use]
     pub const fn configuration_revision(&self) -> GithubProviderConfigurationRevision {
-        self.configuration_revision
+        self.version.configuration_revision
+    }
+
+    /// Returns the stable database commit time of the provider configuration.
+    #[must_use]
+    pub const fn applied_at(&self) -> GithubProviderTimestamp {
+        self.version.applied_at
     }
 
     /// Returns the App identity/key revision derived during persistence.
     #[must_use]
     pub const fn app_configuration_revision(&self) -> u64 {
-        self.app_configuration_revision
+        self.version.app_configuration_revision
     }
 
     /// Returns the webhook verifier revision derived during persistence.
     #[must_use]
     pub const fn webhook_verifier_revision(&self) -> u64 {
-        self.webhook_verifier_revision
+        self.version.webhook_verifier_revision
     }
 
     /// Returns the independently versioned canonical runner-policy revision.
     #[must_use]
     pub const fn runner_policy_revision(&self) -> u64 {
-        self.runner_policy_revision
+        self.version.runner_policy_revision
     }
 
     /// Returns the validated shard-wide provider configuration.
@@ -893,6 +932,7 @@ impl GithubProviderDesiredState {
     ) -> (
         ShardId,
         GithubProviderConfigurationRevision,
+        GithubProviderTimestamp,
         u64,
         u64,
         u64,
@@ -901,10 +941,11 @@ impl GithubProviderDesiredState {
     ) {
         (
             self.shard_id,
-            self.configuration_revision,
-            self.app_configuration_revision,
-            self.webhook_verifier_revision,
-            self.runner_policy_revision,
+            self.version.configuration_revision,
+            self.version.applied_at,
+            self.version.app_configuration_revision,
+            self.version.webhook_verifier_revision,
+            self.version.runner_policy_revision,
             self.configuration,
             self.workspaces,
         )
@@ -916,13 +957,23 @@ impl fmt::Debug for GithubProviderDesiredState {
         formatter
             .debug_struct("GithubProviderDesiredState")
             .field("shard_id", &self.shard_id)
-            .field("configuration_revision", &self.configuration_revision)
+            .field(
+                "configuration_revision",
+                &self.version.configuration_revision,
+            )
+            .field("applied_at", &self.version.applied_at)
             .field(
                 "app_configuration_revision",
-                &self.app_configuration_revision,
+                &self.version.app_configuration_revision,
             )
-            .field("webhook_verifier_revision", &self.webhook_verifier_revision)
-            .field("runner_policy_revision", &self.runner_policy_revision)
+            .field(
+                "webhook_verifier_revision",
+                &self.version.webhook_verifier_revision,
+            )
+            .field(
+                "runner_policy_revision",
+                &self.version.runner_policy_revision,
+            )
             .field("configuration", &self.configuration)
             .field("workspace_count", &self.workspaces.len())
             .field(

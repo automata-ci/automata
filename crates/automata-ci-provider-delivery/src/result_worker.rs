@@ -846,6 +846,15 @@ mod tests {
             })
         }
 
+        fn latest_secret_generation(
+            &self,
+            _instance_id: ProviderInstanceId,
+            _name: automata_ci_provider::ProviderSecretName,
+        ) -> ProviderRepositoryFuture<'_, Option<automata_ci_provider::ProviderSecretGeneration>>
+        {
+            Box::pin(async { Ok(None) })
+        }
+
         fn save_connection(
             &self,
             _manifest: ProviderConnectionManifest,
@@ -872,6 +881,20 @@ mod tests {
             Box::pin(async move {
                 Ok((self.connection.connection_id() == connection_id)
                     .then(|| self.connection.clone()))
+            })
+        }
+
+        fn current_connections(
+            &self,
+            instance_id: ProviderInstanceId,
+        ) -> ProviderRepositoryFuture<'_, Vec<ProviderConnectionManifest>> {
+            Box::pin(async move {
+                Ok(
+                    (self.connection.configuration().repository().instance_id() == instance_id)
+                        .then(|| self.connection.clone())
+                        .into_iter()
+                        .collect(),
+                )
             })
         }
     }

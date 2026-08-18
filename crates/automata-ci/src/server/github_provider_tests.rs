@@ -5,6 +5,7 @@ use automata_ci_store::ProviderRepositoryVisibility;
 use serde_json::{Value, json};
 
 use super::*;
+use crate::server::github_provider_reconciliation::github_common_desired_state;
 
 fn uuid(value: u128) -> String {
     let encoded = format!("{value:032x}");
@@ -620,17 +621,24 @@ fn database_desired_state(
     .expect("repository selection");
     automata_ci_provisioning::GithubProviderDesiredState::new(
         ShardId::new("prod-us-east-1-001").expect("shard ID"),
-        GithubProviderConfigurationRevision::new(configuration_revision)
-            .expect("configuration revision"),
-        3,
-        4,
-        runner_policy_revision,
+        automata_ci_provisioning::GithubProviderDesiredStateVersion::new(
+            GithubProviderConfigurationRevision::new(configuration_revision)
+                .expect("configuration revision"),
+            automata_ci_provisioning::GithubProviderTimestamp::new(1_000, 0)
+                .expect("provider applied time"),
+            3,
+            4,
+            runner_policy_revision,
+        )
+        .expect("desired-state version"),
         configuration,
         vec![
             WorkspaceGithubRepositoriesDesiredState::new(
                 workspace_id,
                 WorkspaceGithubRepositoriesRevision::new(workspace_revision)
                     .expect("workspace revision"),
+                automata_ci_provisioning::GithubProviderTimestamp::new(2_000, 0)
+                    .expect("workspace applied time"),
                 vec![repository],
             )
             .expect("workspace desired state"),
@@ -648,10 +656,15 @@ fn database_desired_state_derives_stable_runtime_identities_and_revisions() {
     let first_repository = &first.config().repositories()[0];
     let second_repository = &second.config().repositories()[0];
 
+    assert_eq!(first.config().instance_id(), second.config().instance_id());
+    assert_eq!(first.config().endpoint_id(), second.config().endpoint_id());
+    assert_eq!(first.config().configuration_revision().get(), 5);
+    assert_eq!(first.config().applied_at(), UnixMillis::new(1_000_000));
     assert_eq!(
         first_repository.tenant().as_str(),
         "11111111-1111-4111-8111-111111111111"
     );
+    assert_eq!(first_repository.applied_at(), UnixMillis::new(2_000_000));
     assert_eq!(first_repository.manifest_revision().get(), 5);
     assert_eq!(first_repository.policy_revision().get(), 5);
     assert_eq!(first_repository.runtime_policy_revision().get(), 2);
@@ -679,4 +692,26 @@ fn database_desired_state_derives_stable_runtime_identities_and_revisions() {
 #[test]
 fn database_desired_state_rejects_mixed_runtime_generations() {
     assert!(GithubProviderConfig::from_desired_state(database_desired_state(5, 4, 2)).is_err());
+}
+
+#[test]
+fn database_desired_state_projects_one_complete_common_provider_generation() {
+    let database = GithubProviderConfig::from_desired_state(database_desired_state(1, 1, 2))
+        .expect("database projection");
+    let (config, app_private_key, webhook_secret) = database.into_parts();
+    let common = github_common_desired_state(&config, &app_private_key, &webhook_secret)
+        .expect("common provider desired state");
+
+    assert_eq!(common.instance().instance_id(), config.instance_id());
+    assert_eq!(common.instance().provider_type().as_str(), "github");
+    assert_eq!(common.instance().revision().get(), 1);
+    assert_eq!(common.connections().len(), 1);
+    assert_eq!(
+        common.connections()[0].connection_id().as_uuid().as_bytes(),
+        &config.repositories()[0].connection_id().as_bytes()
+    );
+    assert_eq!(common.endpoint().endpoint_id(), config.endpoint_id());
+    let debug = format!("{common:?}");
+    assert!(!debug.contains("database-app-key"));
+    assert!(!debug.contains("database-webhook-secret"));
 }

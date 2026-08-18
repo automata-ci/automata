@@ -15,11 +15,12 @@ use automata_ci_provisioning::{
     GithubProviderConfigurationRevision, GithubProviderDesiredState,
     GithubProviderDesiredStateFailure, GithubProviderDesiredStateFailureKind,
     GithubProviderDesiredStateLoadFuture, GithubProviderDesiredStateReader,
-    GithubProviderRepositorySelection, GithubProviderSchedulePolicy, GithubProviderSecret,
-    GithubProviderTimestamp, MAX_GITHUB_PROVIDER_REPOSITORIES, ShardId,
-    WorkspaceGithubRepositoriesApplicationFuture, WorkspaceGithubRepositoriesApplier,
-    WorkspaceGithubRepositoriesDesiredState, WorkspaceGithubRepositoriesFailure,
-    WorkspaceGithubRepositoriesFailureKind, WorkspaceGithubRepositoriesRevision,
+    GithubProviderDesiredStateVersion, GithubProviderRepositorySelection,
+    GithubProviderSchedulePolicy, GithubProviderSecret, GithubProviderTimestamp,
+    MAX_GITHUB_PROVIDER_REPOSITORIES, ShardId, WorkspaceGithubRepositoriesApplicationFuture,
+    WorkspaceGithubRepositoriesApplier, WorkspaceGithubRepositoriesDesiredState,
+    WorkspaceGithubRepositoriesFailure, WorkspaceGithubRepositoriesFailureKind,
+    WorkspaceGithubRepositoriesRevision,
 };
 use automata_ci_store::{
     GithubCheckName, GithubRepositoryName, GithubServerServiceAppClientId,
@@ -531,7 +532,7 @@ impl PostgresGithubProviderDesiredStateReader {
         };
         let workspace_states = sqlx::query_as::<_, WorkspaceCurrentRow>(
             r"
-            SELECT current.workspace_id, current.revision
+            SELECT current.workspace_id, current.revision, current.applied_at_ms
             FROM workspace_github_repository_current AS current
             WHERE current.shard_id=$1
             ORDER BY current.workspace_id
@@ -646,8 +647,13 @@ impl PostgresGithubProviderDesiredStateReader {
                 .remove(&(state.workspace_id, state.revision))
                 .unwrap_or_default();
             workspaces.push(
-                WorkspaceGithubRepositoriesDesiredState::new(workspace_id, revision, selected)
-                    .map_err(|_| desired_corrupt())?,
+                WorkspaceGithubRepositoriesDesiredState::new(
+                    workspace_id,
+                    revision,
+                    timestamp(state.applied_at_ms).map_err(|()| desired_corrupt())?,
+                    selected,
+                )
+                .map_err(|_| desired_corrupt())?,
             );
         }
         if !repositories.is_empty() {
@@ -656,10 +662,15 @@ impl PostgresGithubProviderDesiredStateReader {
 
         GithubProviderDesiredState::new(
             ShardId::new(provider.shard_id).map_err(|_| desired_corrupt())?,
-            GithubProviderConfigurationRevision::new(revision).map_err(|_| desired_corrupt())?,
-            positive_u64(provider.app_configuration_revision)?,
-            positive_u64(provider.webhook_verifier_revision)?,
-            positive_u64(provider.runner_policy_revision)?,
+            GithubProviderDesiredStateVersion::new(
+                GithubProviderConfigurationRevision::new(revision)
+                    .map_err(|_| desired_corrupt())?,
+                timestamp(provider.applied_at_ms).map_err(|()| desired_corrupt())?,
+                positive_u64(provider.app_configuration_revision)?,
+                positive_u64(provider.webhook_verifier_revision)?,
+                positive_u64(provider.runner_policy_revision)?,
+            )
+            .map_err(|_| desired_corrupt())?,
             configuration,
             workspaces,
         )
@@ -714,6 +725,7 @@ struct ProviderDesiredStateRow {
     schedule_staleness_millis: i64,
     schedule_maximum_manifests: i32,
     schedule_maximum_fires_per_pass: i32,
+    applied_at_ms: i64,
 }
 
 impl ProviderDesiredStateRow {
@@ -742,6 +754,7 @@ impl ProviderDesiredStateRow {
 struct WorkspaceCurrentRow {
     workspace_id: String,
     revision: i64,
+    applied_at_ms: i64,
 }
 
 #[derive(FromRow)]

@@ -5,8 +5,8 @@
 
 mod background;
 mod clock;
-mod configuration;
 mod ingress;
+mod reconciliation;
 mod result_worker;
 mod runtime;
 mod trust;
@@ -14,8 +14,12 @@ mod worker;
 
 pub use background::{ProviderBackgroundRuntime, ProviderBackgroundRuntimeError};
 pub use clock::{ProviderDeliveryClock, ProviderDeliveryClockError, SystemProviderDeliveryClock};
-pub use configuration::{ProviderConfigurationService, ProviderConfigurationServiceError};
 pub use ingress::{PreparedProviderWebhook, ProviderDeliveryIngress, ProviderDeliveryIngressError};
+pub use reconciliation::{
+    ProviderConnectionDesiredState, ProviderDesiredState, ProviderDesiredStateError,
+    ProviderInstanceDesiredState, ProviderReconciliationError, ProviderReconciliationReport,
+    ProviderReconciliationService, ProviderWebhookEndpointDesiredState,
+};
 pub use result_worker::{
     ProviderResultAdapter, ProviderResultAdapterOutcome, ProviderResultAdapterRegistry,
     ProviderResultAdapterRegistryError, ProviderResultLease, ProviderResultObservation,

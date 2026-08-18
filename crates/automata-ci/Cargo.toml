@@ -39,6 +39,7 @@ automata-ci-metrics.workspace = true
 automata-ci-workload-oidc.workspace = true
 automata-ci-provider.workspace = true
 automata-ci-provider-delivery.workspace = true
+automata-ci-provider-postgres.workspace = true
 automata-ci-protocol.workspace = true
 automata-ci-protocol-protobuf.workspace = true
 automata-ci-provisioning.workspace = true

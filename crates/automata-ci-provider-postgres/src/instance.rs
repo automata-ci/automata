@@ -53,6 +53,31 @@ struct SealedSecret {
 }
 
 impl PostgresProviderManifestRepository {
+    pub(crate) async fn latest_secret_generation_inner(
+        &self,
+        instance_id: ProviderInstanceId,
+        name: ProviderSecretName,
+    ) -> Result<Option<ProviderSecretGeneration>, ProviderRepositoryError> {
+        let generation = sqlx::query_scalar::<_, Option<i64>>(
+            r"
+            SELECT max(secret_generation)
+            FROM provider_instance_secret_bindings
+            WHERE instance_id = $1 AND secret_name = $2
+            ",
+        )
+        .bind(instance_id.as_uuid())
+        .bind(name.as_str())
+        .fetch_one(&self.pool)
+        .await
+        .map_err(unavailable)?;
+        generation
+            .map(|value| {
+                ProviderSecretGeneration::new(positive_u64(value)?)
+                    .map_err(|_| ProviderRepositoryError::Corrupt)
+            })
+            .transpose()
+    }
+
     pub(crate) async fn load_secret_inner(
         &self,
         instance_id: ProviderInstanceId,
