@@ -4,7 +4,8 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::Write as _,
-    fs, io,
+    fs,
+    io::{self, Cursor},
     net::{Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
     process::Stdio,
@@ -20,9 +21,9 @@ use automata_ci_auth::{
     time::UnixTimestamp,
 };
 use automata_ci_core::{
-    AttemptId, ContextValue, EnvironmentProfile, EnvironmentProfileId, FencingToken,
-    JobAuthorityProfile, JobConclusion, JobContentReference, JobExecutionContext, JobId,
-    JobInstanceIdentity, JobIr, JobIrEnvelope, JobPermissionRequest, JobResourceAllocation,
+    ActionReference, AttemptId, ContextValue, EnvironmentProfile, EnvironmentProfileId,
+    FencingToken, JobAuthorityProfile, JobConclusion, JobContentReference, JobExecutionContext,
+    JobId, JobInstanceIdentity, JobIr, JobIrEnvelope, JobPermissionRequest, JobResourceAllocation,
     JobRuntimeContext, JobSource, Lease, LeaseId, LogAck, OperatingSystem, OperationId,
     ResourceCapacity, RunId, RunValueTemplates, RunnerFeature, RunnerId, RunnerRequirements,
     RunnerSessionId, RuntimeBoolean, SemanticStep, Sha256Digest, ShellTemplate, StepId, StepIr,
@@ -47,6 +48,7 @@ use automata_ci_runner_transport::{
 #[cfg(target_os = "macos")]
 use automata_ci_workflow_actions::{GithubConditionCompiler, GithubConditionPhase};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use flate2::{Compression, write::GzEncoder};
 use rcgen::{
     BasicConstraints, CertificateParams, CertifiedIssuer, DnType, ExtendedKeyUsagePurpose, IsCa,
     KeyPair, KeyUsagePurpose,
@@ -55,6 +57,7 @@ use rustls::RootCertStore;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use serde_json::json;
 use sha2::{Digest as _, Sha256};
+use tar::{Builder as TarBuilder, EntryType, Header as TarHeader};
 use tokio::{
     io::{AsyncRead, AsyncReadExt as _},
     net::{TcpListener, TcpStream},
@@ -72,6 +75,8 @@ const PROFILE_ID: &str = "automata.dev/macos-15-arm64-vm-v1";
 const S3_BUCKET: &str = "automata-process-e2e";
 const S3_PREFIX: &str = "process-e2e";
 const SENTINEL: &str = "AUTOMATA_MACOS_RUNNER_PROCESS_E2E";
+const ACTION_REPOSITORY: &str = "automata-ci/macos-process-e2e-action";
+const ACTION_REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
 #[cfg(target_os = "macos")]
 const VM_HELPER_ENV: &str = "AUTOMATA_MACOS_VM_HELPER";
 #[cfg(target_os = "macos")]
@@ -89,7 +94,7 @@ const VM_STORAGE_VOLUME_UUID_ENV: &str = "AUTOMATA_MACOS_VM_STORAGE_VOLUME_UUID"
 #[cfg(target_os = "macos")]
 const VM_STORAGE_QUOTA_BYTES_ENV: &str = "AUTOMATA_MACOS_VM_STORAGE_QUOTA_BYTES";
 #[cfg(target_os = "macos")]
-const DIFFERENTIAL_REFERENCE: &str = "differential.bash=ok\nisolation.cpu=4\nisolation.memory=8589934592\nisolation.process_limit=512\nisolation.no_host_helper=true\nisolation.no_ethernet=true\nactions.node20=ok\nactions.node24=ok\ndifferential.sh=ok\ndifferential.environment=command-file\ndifferential.output=vm-output\ndifferential.workspace=true\ndifferential.conclusion=success\n";
+const DIFFERENTIAL_REFERENCE: &str = "differential.bash=ok\nisolation.cpu=4\nisolation.memory=8589934592\nisolation.process_limit=512\nisolation.no_host_helper=true\nisolation.no_ethernet=true\nactions.node20=ok\nactions.node24=ok\nactions.repository=ok\nactions.repository.environment=repository-action-env\nactions.repository.output=repository-action-output\ndifferential.sh=ok\ndifferential.environment=command-file\ndifferential.output=vm-output\ndifferential.workspace=true\ndifferential.conclusion=success\n";
 const TEARDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -104,10 +109,13 @@ async fn shipped_runner_process_executes_a_claimed_isolated_job_with_action_runt
     let session_id = RunnerSessionId::new();
     let pki = TestPki::new(runner_id);
     let (job, event, runtime_context) = process_job();
+    let repository_action = repository_action_fixture();
     let expected_s3_paths = [
         event.fixture_path(),
         runtime_context.fixture_path(),
         runtime_context.fixture_path(),
+        repository_action.reference.fixture_path(),
+        repository_action.archive.fixture_path(),
     ];
     let lease = Lease::new(
         LeaseId::new(),
@@ -128,7 +136,13 @@ async fn shipped_runner_process_executes_a_claimed_isolated_job_with_action_runt
         authorities,
     ));
 
-    let s3 = S3Fixture::spawn([event, runtime_context]).await;
+    let s3 = S3Fixture::spawn([
+        event,
+        runtime_context,
+        repository_action.reference,
+        repository_action.archive,
+    ])
+    .await;
     let control = RunningControlServer::spawn(&pki, handler.clone()).await;
     let config_path =
         write_runner_config(root.path(), runner_id, &pki, control.address, s3.address);
@@ -386,25 +400,49 @@ fn macos_steps() -> Vec<StepIr> {
             ShellTemplate::named(ValueTemplate::literal("bash").expect("Bash shell")),
         )),
     );
+    let repository_action = StepIr::new(
+        StepId::new("macos-repository-action").expect("repository action step ID"),
+        ValueTemplate::literal("Run immutable repository action").expect("action step name"),
+        RuntimeBoolean::literal(false),
+        SemanticStep::action(
+            ActionReference::Repository {
+                repository: ACTION_REPOSITORY.to_owned(),
+                selector: ACTION_REVISION.to_owned(),
+                subpath: None,
+            },
+            BTreeMap::from([(
+                "fixture".to_owned(),
+                ValueSource::Literal("repository-action-input".to_owned()),
+            )]),
+        ),
+    );
     let consumer = StepIr::new(
         StepId::new("macos-sh-reference").expect("consumer step ID"),
         ValueTemplate::literal("Run sh differential fixture").expect("consumer step name"),
         RuntimeBoolean::literal(false),
         SemanticStep::run(RunValueTemplates::new(
             ValueTemplate::literal(format!(
-                "set -eu\ntest \"$AUTOMATA_DIFFERENTIAL_ENV\" = command-file\ntest \"$FROM_OUTPUT\" = vm-output\ntest \"$PWD\" = \"$GITHUB_WORKSPACE\"\ntest \"$(cat differential-artifact.txt)\" = vm-workspace\nprintf 'differential.sh=ok\\ndifferential.environment=%s\\ndifferential.output=%s\\ndifferential.workspace=true\\ndifferential.conclusion=success\\n%s\\n' \"$AUTOMATA_DIFFERENTIAL_ENV\" \"$FROM_OUTPUT\" '{SENTINEL}'"
+                "set -eu\ntest \"$AUTOMATA_DIFFERENTIAL_ENV\" = command-file\ntest \"$AUTOMATA_ACTION_ENV\" = repository-action-env\ntest \"$FROM_OUTPUT\" = vm-output\ntest \"$FROM_ACTION_OUTPUT\" = repository-action-output\ntest \"$PWD\" = \"$GITHUB_WORKSPACE\"\ntest \"$(cat differential-artifact.txt)\" = vm-workspace\nprintf 'actions.repository.environment=%s\\nactions.repository.output=%s\\ndifferential.sh=ok\\ndifferential.environment=%s\\ndifferential.output=%s\\ndifferential.workspace=true\\ndifferential.conclusion=success\\n%s\\n' \"$AUTOMATA_ACTION_ENV\" \"$FROM_ACTION_OUTPUT\" \"$AUTOMATA_DIFFERENTIAL_ENV\" \"$FROM_OUTPUT\" '{SENTINEL}'"
             ))
             .expect("consumer command"),
             ShellTemplate::named(ValueTemplate::literal("sh").expect("sh shell")),
         )),
     )
-    .with_environment(BTreeMap::from([(
-        "FROM_OUTPUT".to_owned(),
-        ValueSource::Expression(output_expression(
-            "${{ steps.macos-bash-reference.outputs.fixture }}",
-        )),
-    )]));
-    vec![producer, consumer]
+    .with_environment(BTreeMap::from([
+        (
+            "FROM_OUTPUT".to_owned(),
+            ValueSource::Expression(output_expression(
+                "${{ steps.macos-bash-reference.outputs.fixture }}",
+            )),
+        ),
+        (
+            "FROM_ACTION_OUTPUT".to_owned(),
+            ValueSource::Expression(output_expression(
+                "${{ steps.macos-repository-action.outputs.fixture }}",
+            )),
+        ),
+    ]));
+    vec![producer, repository_action, consumer]
 }
 
 #[cfg(target_os = "macos")]
@@ -454,6 +492,106 @@ impl S3Object {
     fn fixture_path(&self) -> String {
         format!("/{S3_BUCKET}/{S3_PREFIX}/{}", self.key)
     }
+
+    fn immutable(key: String, media_type: &str, bytes: Vec<u8>) -> Self {
+        Self {
+            key,
+            media_type: media_type.to_owned(),
+            digest: Sha256Digest::from_bytes(Sha256::digest(&bytes).into()),
+            bytes,
+        }
+    }
+}
+
+struct RepositoryActionFixture {
+    reference: S3Object,
+    archive: S3Object,
+}
+
+fn repository_action_fixture() -> RepositoryActionFixture {
+    let archive_bytes = repository_action_archive();
+    let archive_digest = Sha256Digest::from_bytes(Sha256::digest(&archive_bytes).into());
+    let archive_key = format!("actions/v1/sha256/{archive_digest}.tar.gz");
+    let reference_key = repository_action_reference_key();
+    let reference_bytes = serde_json::to_vec(&json!({
+        "schema_version": 1,
+        "provider": "github",
+        "repository": ACTION_REPOSITORY,
+        "revision": ACTION_REVISION,
+        "subpath": "",
+        "archive": {
+            "key": archive_key.clone(),
+            "digest": archive_digest.to_string(),
+            "size": archive_bytes.len(),
+            "media_type": "application/gzip",
+        },
+    }))
+    .expect("encode immutable action reference");
+    RepositoryActionFixture {
+        reference: S3Object::immutable(
+            reference_key,
+            "application/vnd.automata.action-reference.v1+json",
+            reference_bytes,
+        ),
+        archive: S3Object::immutable(archive_key, "application/gzip", archive_bytes),
+    }
+}
+
+fn repository_action_reference_key() -> String {
+    let revision = automata_ci_core::GitObjectId::from_provider_hex(ACTION_REVISION)
+        .expect("exact action revision");
+    let mut hasher = Sha256::new();
+    hasher.update(b"automata.action-reference.v1\0");
+    for component in [
+        b"github".as_slice(),
+        ACTION_REPOSITORY.as_bytes(),
+        revision.as_bytes(),
+        b"".as_slice(),
+    ] {
+        hasher.update(
+            u64::try_from(component.len())
+                .expect("reference component length")
+                .to_be_bytes(),
+        );
+        hasher.update(component);
+    }
+    let digest = Sha256Digest::from_bytes(hasher.finalize().into());
+    format!("actions/references/v1/sha256/{digest}.json")
+}
+
+fn repository_action_archive() -> Vec<u8> {
+    let metadata = b"name: macOS process acceptance\ninputs:\n  fixture:\n    required: true\nruns:\n  using: node24\n  main: dist/index.js\n";
+    let javascript = br#"const fs = require('fs');
+if (process.env.INPUT_FIXTURE !== 'repository-action-input') process.exit(1);
+fs.appendFileSync(process.env.GITHUB_ENV, 'AUTOMATA_ACTION_ENV=repository-action-env\n');
+fs.appendFileSync(process.env.GITHUB_OUTPUT, 'fixture=repository-action-output\n');
+console.log('actions.repository=ok');
+"#;
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    {
+        let mut archive = TarBuilder::new(&mut encoder);
+        append_action_archive_file(&mut archive, "root/action.yml", metadata);
+        append_action_archive_file(&mut archive, "root/dist/index.js", javascript);
+        archive.finish().expect("finish repository action archive");
+    }
+    encoder
+        .finish()
+        .expect("compress repository action archive")
+}
+
+fn append_action_archive_file(
+    archive: &mut TarBuilder<&mut GzEncoder<Vec<u8>>>,
+    path: &str,
+    contents: &[u8],
+) {
+    let mut header = TarHeader::new_gnu();
+    header.set_mode(0o644);
+    header.set_size(u64::try_from(contents.len()).expect("action file length"));
+    header.set_entry_type(EntryType::Regular);
+    header.set_cksum();
+    archive
+        .append_data(&mut header, path, Cursor::new(contents))
+        .expect("append repository action file");
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
