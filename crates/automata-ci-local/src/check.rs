@@ -793,7 +793,7 @@ jobs:
     }
 
     #[tokio::test]
-    async fn github_token_is_builtin_and_never_promptable() {
+    async fn workflow_repository_token_is_builtin_and_never_promptable() {
         let fixture = Fixture::new();
         fixture.write(
             ".github/workflows/root.yml",
@@ -837,7 +837,7 @@ jobs:
         assert!(report.required_root_secrets().is_empty());
         assert_eq!(
             report.required_built_in_credentials(),
-            &[BuiltInCredentialRequirement::GithubToken]
+            &[BuiltInCredentialRequirement::WorkflowRepositoryToken]
         );
     }
 

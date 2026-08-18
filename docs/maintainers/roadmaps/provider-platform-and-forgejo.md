@@ -3,7 +3,7 @@
 - Roadmap status: Active
 - Available provider: GitHub only
 - Target provider: Forgejo 16.0.x
-- Current checkpoint: A6 result projection foundation
+- Current checkpoint: A7 credential and identity foundation
 - Date: 2026-08-18
 
 This roadmap owns the refactor that separates source-hosting providers from
@@ -702,7 +702,7 @@ consistent and passes fresh-database tests after every merge.
 | A4 Delivery foundation | Add opaque webhook endpoints, verified-delivery envelope, normalized trigger events, raw evidence, and generic delivery repository/worker ports | 6,500-8,500 | Fake adapters prove signature-before-parse, replay, conflict, rotation, and instance isolation |
 | A5 Changed-file foundation | Extend SCM with connection- and trigger-scoped completeness-bearing changed-file evidence | 1,000-2,500 | Canonical paths, streaming page bounds, pagination, and incomplete-evidence tests |
 | A6 Result projection foundation | Add desired projection, generic outbox, publication lease, capability descriptor, and publisher port | 1,500-3,000 | Fake mutable and append-history publishers pass response-loss and supersession tests |
-| A7 Credential and identity foundation | Add control/workload credential strategies, generic runtime requirement, auth-code/device/identity/membership ports | 6,500-8,500 | Secret-safety, capability absence, lease binding, PKCE, and namespace tests |
+| A7 Credential and identity foundation | Add control/workload credential strategies, generic runtime requirement, auth-code/device/identity/membership ports | 2,500-4,500 | Secret-safety, capability absence, lease binding, PKCE, and namespace tests |
 
 Stage A adds no Forgejo implementation and changes no provider behavior beyond
 the deliberate SHA-256-capable object/protocol break. Its interfaces are

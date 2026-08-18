@@ -10,8 +10,10 @@
 mod capability;
 mod configuration;
 mod connection;
+mod credential;
 mod delivery;
 mod factory;
+mod human;
 mod identity;
 mod result;
 mod storage;
@@ -44,6 +46,18 @@ pub use connection::{
     ProviderRepositoryPath, ProviderRunnerPolicyBinding, ProviderWorkflowSource,
     RepositoryVisibility,
 };
+pub use credential::{
+    ControlCredential, ControlCredentialFuture, ControlCredentialProvider,
+    ControlCredentialProviderError, ControlCredentialRequest, ControlCredentialRevocation,
+    ControlCredentialStrategy, IssuedWorkloadCredential, MAX_CONTROL_CREDENTIAL_VALIDITY_MILLIS,
+    MAX_PROVIDER_CONTROL_OPERATIONS, MAX_WORKLOAD_CREDENTIAL_VALIDITY_MILLIS,
+    MAX_WORKLOAD_PERMISSION_NAME_BYTES, MAX_WORKLOAD_PERMISSIONS, ProviderControlOperation,
+    ProviderControlOperationSet, ProviderCredentialGeneration, ProviderCredentialModelError,
+    RevokeWorkloadCredential, WorkloadCredentialFuture, WorkloadCredentialIssuer,
+    WorkloadCredentialMarker, WorkloadCredentialPermission, WorkloadCredentialPermissionSet,
+    WorkloadCredentialProviderError, WorkloadCredentialRequest,
+    WorkloadCredentialRevocationOutcome,
+};
 pub use delivery::{
     AcceptProviderDelivery, ClaimProviderDelivery, ClaimedProviderDelivery,
     CompleteProviderDelivery, FailProviderDelivery, MAX_PROVIDER_DELIVERY_ATTEMPTS,
@@ -59,13 +73,25 @@ pub use factory::{
     ProviderDescriptor, ProviderFactoryRegistry, ProviderFactoryRegistryError,
     ProviderFactoryRequest, ProviderFactoryValidationError,
 };
+pub use human::{
+    AuthorizationCodeExchange, AuthorizationCodeFuture, AuthorizationCodeProvider,
+    AuthorizationCodeRequest, DeviceAuthorization, DeviceAuthorizationFuture,
+    DeviceAuthorizationPoll, DeviceAuthorizationProvider, IdentityReader, IdentityReaderFuture,
+    MAX_PROVIDER_DEVICE_POLL_MILLIS, MAX_PROVIDER_DISPLAY_NAME_BYTES, MAX_PROVIDER_LOGIN_BYTES,
+    MAX_PROVIDER_MEMBERSHIP_ROLE_BYTES, MAX_PROVIDER_MEMBERSHIPS, MembershipReader,
+    MembershipReaderFuture, ProviderAuthorizationUrl, ProviderCallbackUri, ProviderHumanCredential,
+    ProviderHumanCredentialAuthority, ProviderHumanIdentity, ProviderHumanModelError,
+    ProviderHumanProviderError, ProviderMembership, ProviderMembershipRole,
+    ProviderMembershipSnapshot, ProviderPkceVerifier,
+};
 pub use identity::{
-    ExternalChangeId, ExternalDeliveryId, ExternalDeliveryIdentity, ExternalMergeQueueId,
-    ExternalRepositoryId, ExternalRepositoryIdentity, ExternalResultId, ExternalSubjectId,
-    ExternalSubjectIdentity, ExternalSubjectKind, MAX_EXTERNAL_ID_BYTES,
-    MAX_PROVIDER_TYPE_ID_BYTES, ProviderConnectionId, ProviderDeliveryId, ProviderDeliveryWorkerId,
-    ProviderIdentityError, ProviderInstanceId, ProviderResultSubjectId, ProviderResultWorkerId,
-    ProviderTypeId, ProviderWebhookEndpointId,
+    ExternalChangeId, ExternalCredentialId, ExternalDeliveryId, ExternalDeliveryIdentity,
+    ExternalMergeQueueId, ExternalRepositoryId, ExternalRepositoryIdentity, ExternalResultId,
+    ExternalSubjectId, ExternalSubjectIdentity, ExternalSubjectKind, MAX_EXTERNAL_ID_BYTES,
+    MAX_PROVIDER_TYPE_ID_BYTES, ProviderConnectionId, ProviderControlCredentialId,
+    ProviderDeliveryId, ProviderDeliveryWorkerId, ProviderIdentityError, ProviderInstanceId,
+    ProviderResultSubjectId, ProviderResultWorkerId, ProviderTypeId, ProviderWebhookEndpointId,
+    ProviderWorkloadCredentialId,
 };
 pub use result::{
     ClaimProviderResult, ClaimedProviderResult, CompleteProviderResult, DesiredProviderResult,

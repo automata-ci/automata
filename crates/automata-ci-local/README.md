@@ -48,7 +48,7 @@ workflows, rejects remote or dynamic calls, and validates typed call contracts,
 cycles, propagation, and bounds through the shared traversal. Reports retain
 only discovered source metadata and value-free external secret/variable names
 plus closed built-in requirements. `github.token` and `secrets.GITHUB_TOKEN`
-are reported as the non-promptable `github_token` built-in; this checkpoint
+are reported as the non-promptable `workflow_repository_token` built-in; this checkpoint
 does not supply it for execution. Local source and event provenance is distinct
 from GitHub delivery evidence. The command is independent of `local doctor`,
 Docker, network access, and GitHub tokens, and performs no admission, scheduling,

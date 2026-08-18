@@ -206,6 +206,16 @@ uuid_identity!(
     ProviderResultWorkerId,
     "provider result worker ID"
 );
+uuid_identity!(
+    /// Durable identity of one control-credential acquisition.
+    ProviderControlCredentialId,
+    "provider control credential ID"
+);
+uuid_identity!(
+    /// Durable identity of one workload credential authority.
+    ProviderWorkloadCredentialId,
+    "provider workload credential ID"
+);
 
 macro_rules! external_identity {
     ($(#[$meta:meta])* $name:ident, $field:literal) => {
@@ -298,6 +308,11 @@ external_identity!(
     /// Provider-native result object identity.
     ExternalResultId,
     "external result ID"
+);
+external_identity!(
+    /// Provider-native credential identity used for reconciliation and revocation.
+    ExternalCredentialId,
+    "external credential ID"
 );
 
 /// Instance-scoped provider-native repository identity.
