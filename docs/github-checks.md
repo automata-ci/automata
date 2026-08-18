@@ -7,8 +7,11 @@ and the rerun service owns admission. Only Check Runs project results: no produc
 
 ## User-visible lifecycle
 
-- An aggregate pre-admission Check reports compilation or admission before jobs exist;
-  each concrete job attempt has a child Check, and a physical rerun gets fresh Checks.
+- The configured Check name belongs only to the delivery-wide aggregate. In
+  `all_direct` mode it remains nonterminal while any admitted workflow is
+  running and derives its terminal conclusion from every admitted workflow;
+  per-workflow Checks use distinct path-qualified names. Each concrete job
+  attempt has a child Check, and a physical rerun gets fresh Checks.
 - Delivery, schedule, and rerun origins share the same fenced projection contract.
 - Identity is immutable: tenant, repository, connection, installation, App, head SHA,
   Check name, `automata-check:<UUID>` external ID, and exact Details target.

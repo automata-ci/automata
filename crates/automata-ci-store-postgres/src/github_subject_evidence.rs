@@ -354,7 +354,9 @@ pub(crate) async fn validate_github_workflow_selection_in_transaction(
            AND subject.github_repository_name = evidence.github_repository_name
            AND subject.github_app_id = manifest.github_app_id
            AND subject.head_sha = evidence.github_check_head_sha
-           AND subject.check_name = manifest.check_name
+           AND subject.check_name = automata_github_workflow_check_name(
+                   manifest.check_name, entry.workflow_path
+               )
            AND subject.created_at_ms = inbox.accepted_at_ms
            AND subject.workflow_run_id IS NULL
            AND subject.linked_at_ms IS NULL
@@ -874,7 +876,9 @@ async fn insert_all_direct_workflow_check_subject(
                evidence.provider_connection_id, evidence.provider_installation_id,
                evidence.github_repository_id, evidence.github_repository_name,
                manifest.github_app_id, evidence.github_check_head_sha,
-               manifest.check_name, $2, inbox.accepted_at_ms,
+               automata_github_workflow_check_name(
+                   manifest.check_name, entry.workflow_path
+               ), $2, inbox.accepted_at_ms,
                inbox.accepted_at_ms
         FROM github_provider_delivery_evidence AS evidence
         JOIN provider_delivery_inbox AS inbox
@@ -964,7 +968,9 @@ async fn load_queued_workflow_check_subject(
           AND subject.github_app_id = manifest.github_app_id
           AND subject.head_sha = $5
           AND subject.head_sha = evidence.github_check_head_sha
-          AND subject.check_name = manifest.check_name
+          AND subject.check_name = automata_github_workflow_check_name(
+                  manifest.check_name, subject.subject_key
+              )
           AND subject.created_at_ms = inbox.accepted_at_ms
           AND subject.workflow_run_id IS NULL
           AND subject.linked_at_ms IS NULL

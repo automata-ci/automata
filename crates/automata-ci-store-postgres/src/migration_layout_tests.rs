@@ -229,6 +229,10 @@ const FROZEN_MIGRATIONS: &[(&str, &str)] = &[
         "0056_provider_processing_invocations.sql",
         "47302f91ed241062d1d9366a326d48d804bd6bbf7daba589501f6c2b92dbf6ef23707fea7999f27398bc1ef7b54203f5",
     ),
+    (
+        "0057_merge_queue_check_aggregation.sql",
+        "447aeb41ee79fe0e96431183dbb850b19769cadcaa7f43bab1efea07dd3b84290cfe034e4682b337abeb06d577d9f639",
+    ),
 ];
 
 const BASELINE_MIGRATION_COUNT: u32 = 26;

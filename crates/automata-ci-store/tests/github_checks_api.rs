@@ -95,6 +95,27 @@ fn static_and_evaluated_job_names_project_without_mutating_durable_text() {
 }
 
 #[test]
+fn discovered_workflow_check_names_cannot_collide_with_the_aggregate() {
+    let aggregate = GithubCheckName::new("Automata CI").expect("aggregate name");
+    let rust = GithubCheckName::from_workflow_path(&aggregate, ".ci/workflows/rust.yml")
+        .expect("workflow name");
+    let frontend = GithubCheckName::from_workflow_path(&aggregate, ".ci/workflows/frontend.yml")
+        .expect("workflow name");
+
+    assert_eq!(rust.as_str(), "Automata CI / .ci/workflows/rust.yml");
+    assert_ne!(rust, aggregate);
+    assert_ne!(rust, frontend);
+
+    let maximum = GithubCheckName::new("x".repeat(255)).expect("maximum aggregate name");
+    let long_path = format!(".ci/workflows/{}.yml", "workflow".repeat(128));
+    let bounded =
+        GithubCheckName::from_workflow_path(&maximum, &long_path).expect("bounded workflow name");
+    assert_eq!(bounded.as_str().len(), 255);
+    assert!(bounded.as_str().contains(" / workflow-"));
+    assert_ne!(bounded, maximum);
+}
+
+#[test]
 fn rerun_subject_identity_has_one_closed_physical_origin() {
     let rerun_run_id = RunId::from_uuid(Uuid::new_v4());
     let identity = GithubCheckSubjectIdentity::new_rerun(

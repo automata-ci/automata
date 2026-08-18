@@ -5,6 +5,9 @@ use automata_ci_core::{
 };
 use sqlx::{PgPool, Postgres, Row as _, Transaction, postgres::PgRow};
 
+use super::github_check_aggregation::{
+    GithubCheckAggregationError, lock_all_direct_check_for_run, reconcile_all_direct_check,
+};
 use super::{PostgresStore, durable_schema::current_durable_schemas, pg_bigint};
 use automata_ci_store::{
     ClaimLogicalRunFinalization, ClaimedLogicalRunFinalization, CommitLogicalRunFinalization,
@@ -266,7 +269,18 @@ impl LogicalRunFinalizationRepository for PostgresStore {
         transition_invocation(&mut transaction, &request).await?;
         transition_marker(&mut transaction, &request).await?;
         transition_workflow_run(&mut transaction, &request).await?;
+        let all_direct_delivery = lock_all_direct_check_for_run(
+            &mut transaction,
+            request.claim().target().run_id().as_uuid(),
+        )
+        .await
+        .map_err(logical_finalization_aggregation_error)?;
         transition_linked_github_check(&mut transaction, &request).await?;
+        if let Some(delivery_id) = all_direct_delivery {
+            reconcile_all_direct_check(&mut transaction, delivery_id, request.finalized_at().get())
+                .await
+                .map_err(logical_finalization_aggregation_error)?;
+        }
         super::admission::reconcile_terminal_concurrency(
             &mut transaction,
             repository_id,
@@ -1233,4 +1247,16 @@ fn corrupt_value(error: impl std::fmt::Display) -> LogicalRunFinalizationStoreEr
 
 fn operation_error(error: sqlx::Error) -> LogicalRunFinalizationStoreError {
     StoreError::operation(error).into()
+}
+
+fn logical_finalization_aggregation_error(
+    error: GithubCheckAggregationError,
+) -> LogicalRunFinalizationStoreError {
+    match error {
+        GithubCheckAggregationError::Operation(error) => operation_error(error),
+        GithubCheckAggregationError::CorruptData => StoreError::corrupt_data(
+            "all-direct GitHub Check aggregate contradicts its workflow outcomes",
+        )
+        .into(),
+    }
 }
