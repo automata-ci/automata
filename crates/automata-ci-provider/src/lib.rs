@@ -13,6 +13,7 @@ mod connection;
 mod delivery;
 mod factory;
 mod identity;
+mod result;
 mod storage;
 mod trigger;
 mod webhook;
@@ -60,10 +61,27 @@ pub use factory::{
 };
 pub use identity::{
     ExternalChangeId, ExternalDeliveryId, ExternalDeliveryIdentity, ExternalMergeQueueId,
-    ExternalRepositoryId, ExternalRepositoryIdentity, ExternalSubjectId, ExternalSubjectIdentity,
-    ExternalSubjectKind, MAX_EXTERNAL_ID_BYTES, MAX_PROVIDER_TYPE_ID_BYTES, ProviderConnectionId,
-    ProviderDeliveryId, ProviderDeliveryWorkerId, ProviderIdentityError, ProviderInstanceId,
+    ExternalRepositoryId, ExternalRepositoryIdentity, ExternalResultId, ExternalSubjectId,
+    ExternalSubjectIdentity, ExternalSubjectKind, MAX_EXTERNAL_ID_BYTES,
+    MAX_PROVIDER_TYPE_ID_BYTES, ProviderConnectionId, ProviderDeliveryId, ProviderDeliveryWorkerId,
+    ProviderIdentityError, ProviderInstanceId, ProviderResultSubjectId, ProviderResultWorkerId,
     ProviderTypeId, ProviderWebhookEndpointId,
+};
+pub use result::{
+    ClaimProviderResult, ClaimedProviderResult, CompleteProviderResult, DesiredProviderResult,
+    FailProviderResult, MAX_PROVIDER_RESULT_ANNOTATION_MESSAGE_BYTES,
+    MAX_PROVIDER_RESULT_ANNOTATION_TITLE_BYTES, MAX_PROVIDER_RESULT_ANNOTATIONS,
+    MAX_PROVIDER_RESULT_DETAILS_URL_BYTES, MAX_PROVIDER_RESULT_LEASE_MILLIS,
+    MAX_PROVIDER_RESULT_PUBLICATION_ATTEMPTS, MAX_PROVIDER_RESULT_RETRY_MILLIS,
+    MAX_PROVIDER_RESULT_SUMMARY_BYTES, MAX_PROVIDER_RESULT_TITLE_BYTES, ProviderResultAnnotation,
+    ProviderResultAnnotationLevel, ProviderResultAnnotationMessage, ProviderResultAnnotationTitle,
+    ProviderResultClaimFence, ProviderResultConclusion, ProviderResultDetailsUrl,
+    ProviderResultFailureKind, ProviderResultFuture, ProviderResultMarker,
+    ProviderResultModelError, ProviderResultPhase, ProviderResultPublicationEvidence,
+    ProviderResultPublicationModel, ProviderResultRepository, ProviderResultRepositoryError,
+    ProviderResultRetryAfter, ProviderResultSaveOutcome, ProviderResultSubject,
+    ProviderResultSubjectKind, ProviderResultSummary, ProviderResultTitle, ResultPublisher,
+    ResultPublisherError, ResultPublisherFuture, RetryProviderResult, SaveDesiredProviderResult,
 };
 pub use storage::{
     ProviderInstanceRecord, ProviderManifestRepository, ProviderRepositoryError,
