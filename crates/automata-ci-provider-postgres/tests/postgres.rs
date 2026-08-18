@@ -25,10 +25,11 @@ use automata_ci_provider::{
     ProviderProcessingRepository as _, ProviderProcessingRepositoryError, ProviderProcessingState,
     ProviderProcessingWorkerId, ProviderRepository, ProviderRepositoryError,
     ProviderRepositoryPath, ProviderResultContinuation, ProviderResultDetailsUrl,
-    ProviderResultName, ProviderResultPhase, ProviderResultPublicationEvidence,
-    ProviderResultPublicationModel, ProviderResultRepository as _, ProviderResultRepositoryError,
-    ProviderResultSaveOutcome, ProviderResultSubject, ProviderResultSubjectId,
-    ProviderResultSubjectKind, ProviderResultSummary, ProviderResultTitle, ProviderResultWorkerId,
+    ProviderResultName, ProviderResultPhase, ProviderResultProjection,
+    ProviderResultPublicationEvidence, ProviderResultPublicationModel,
+    ProviderResultRepository as _, ProviderResultRepositoryError, ProviderResultSaveOutcome,
+    ProviderResultSubject, ProviderResultSubjectId, ProviderResultSubjectKind,
+    ProviderResultSummary, ProviderResultTitle, ProviderResultWorkerId,
     ProviderRunnerPolicyBinding, ProviderSaveOutcome, ProviderSchemaVersion, ProviderSecret,
     ProviderSecretBinding, ProviderSecretBindings, ProviderSecretGeneration, ProviderSecretName,
     ProviderSecretSet, ProviderTypeId, ProviderWebhookEndpointId, ProviderWebhookEndpointManifest,
@@ -523,12 +524,14 @@ async fn provider_results_are_contiguous_fenced_and_rehydratable() -> TestResult
         let desired = |generation, updated_at, summary| {
             DesiredProviderResult::new(
                 generation,
-                ProviderResultPhase::Running,
-                None,
-                ProviderResultTitle::new("Automata CI")?,
-                ProviderResultSummary::new(summary)?,
-                Vec::new(),
-                UnixMillis::new(updated_at),
+                ProviderResultProjection::new(
+                    ProviderResultPhase::Running,
+                    None,
+                    ProviderResultTitle::new("Automata CI")?,
+                    ProviderResultSummary::new(summary)?,
+                    Vec::new(),
+                    UnixMillis::new(updated_at),
+                )?,
             )
         };
         let first_desired = desired(1, 3_001, "queued")?;

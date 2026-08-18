@@ -519,10 +519,9 @@ pub enum ProviderResultConclusion {
     ActionRequired,
 }
 
-/// One immutable desired provider projection generation.
+/// Provider-independent state to reconcile at a native provider.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DesiredProviderResult {
-    generation: NonZeroU64,
+pub struct ProviderResultProjection {
     phase: ProviderResultPhase,
     conclusion: Option<ProviderResultConclusion>,
     title: ProviderResultTitle,
@@ -532,15 +531,14 @@ pub struct DesiredProviderResult {
     digest: Sha256Digest,
 }
 
-impl DesiredProviderResult {
-    /// Creates a complete desired generation with strict phase/conclusion binding.
+impl ProviderResultProjection {
+    /// Creates a complete provider-independent projection.
     ///
     /// # Errors
     ///
-    /// Rejects zero generations, invalid timestamps, excessive annotations, or
-    /// a conclusion outside the completed phase.
+    /// Rejects invalid timestamps, excessive annotations, or a conclusion
+    /// outside the completed phase.
     pub fn new(
-        generation: u64,
         phase: ProviderResultPhase,
         conclusion: Option<ProviderResultConclusion>,
         title: ProviderResultTitle,
@@ -548,7 +546,6 @@ impl DesiredProviderResult {
         mut annotations: Vec<ProviderResultAnnotation>,
         updated_at: UnixMillis,
     ) -> Result<Self, ProviderResultModelError> {
-        let generation = result_generation(generation)?;
         if updated_at.get() < 0 {
             return Err(ProviderResultModelError::InvalidTimestamp);
         }
@@ -580,7 +577,6 @@ impl DesiredProviderResult {
             return Err(ProviderResultModelError::DuplicateAnnotation);
         }
         let mut value = Self {
-            generation,
             phase,
             conclusion,
             title,
@@ -596,7 +592,6 @@ impl DesiredProviderResult {
     fn calculate_digest(&self) -> Sha256Digest {
         let mut hash = Sha256::new();
         hash.update(RESULT_PROJECTION_DOMAIN);
-        hash.update(self.generation.get().to_be_bytes());
         hash.update([
             phase_code(self.phase),
             self.conclusion.map_or(0, conclusion_code),
@@ -618,11 +613,6 @@ impl DesiredProviderResult {
         }
         hash.update(self.updated_at.get().to_be_bytes());
         Sha256Digest::from_bytes(hash.finalize().into())
-    }
-    /// Returns the positive projection generation.
-    #[must_use]
-    pub const fn generation(&self) -> u64 {
-        self.generation.get()
     }
     /// Returns the lifecycle phase.
     #[must_use]
@@ -654,6 +644,91 @@ impl DesiredProviderResult {
     pub const fn updated_at(&self) -> UnixMillis {
         self.updated_at
     }
+    /// Returns the canonical desired-generation digest.
+    #[must_use]
+    pub const fn digest(&self) -> Sha256Digest {
+        self.digest
+    }
+}
+
+/// One store-assigned immutable desired provider projection generation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DesiredProviderResult {
+    generation: NonZeroU64,
+    projection: ProviderResultProjection,
+    digest: Sha256Digest,
+}
+
+impl DesiredProviderResult {
+    /// Assigns a positive durable generation to one validated projection.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a zero or non-durable generation.
+    pub fn new(
+        generation: u64,
+        projection: ProviderResultProjection,
+    ) -> Result<Self, ProviderResultModelError> {
+        let generation = result_generation(generation)?;
+        let mut hash = Sha256::new();
+        hash.update(RESULT_PROJECTION_DOMAIN);
+        hash.update(generation.get().to_be_bytes());
+        hash.update(projection.digest().as_bytes());
+        Ok(Self {
+            generation,
+            projection,
+            digest: Sha256Digest::from_bytes(hash.finalize().into()),
+        })
+    }
+
+    /// Returns the positive projection generation.
+    #[must_use]
+    pub const fn generation(&self) -> u64 {
+        self.generation.get()
+    }
+
+    /// Returns the generation-independent desired state.
+    #[must_use]
+    pub const fn projection(&self) -> &ProviderResultProjection {
+        &self.projection
+    }
+
+    /// Returns the lifecycle phase.
+    #[must_use]
+    pub const fn phase(&self) -> ProviderResultPhase {
+        self.projection.phase()
+    }
+
+    /// Returns the terminal conclusion, if completed.
+    #[must_use]
+    pub const fn conclusion(&self) -> Option<ProviderResultConclusion> {
+        self.projection.conclusion()
+    }
+
+    /// Returns the title.
+    #[must_use]
+    pub const fn title(&self) -> &ProviderResultTitle {
+        self.projection.title()
+    }
+
+    /// Returns the summary.
+    #[must_use]
+    pub const fn summary(&self) -> &ProviderResultSummary {
+        self.projection.summary()
+    }
+
+    /// Returns canonical annotations retained regardless of adapter support.
+    #[must_use]
+    pub fn annotations(&self) -> &[ProviderResultAnnotation] {
+        self.projection.annotations()
+    }
+
+    /// Returns the desired update time.
+    #[must_use]
+    pub const fn updated_at(&self) -> UnixMillis {
+        self.projection.updated_at()
+    }
+
     /// Returns the canonical desired-generation digest.
     #[must_use]
     pub const fn digest(&self) -> Sha256Digest {
@@ -891,7 +966,7 @@ impl ClaimedProviderResult {
             .ok_or(ProviderResultModelError::InvalidPublicationAttempt)?;
         if claim.subject_id != subject.subject_id
             || claim.generation.get() != desired.generation.get()
-            || desired.updated_at < subject.created_at
+            || desired.updated_at() < subject.created_at
         {
             return Err(ProviderResultModelError::InvalidClaimBinding);
         }
@@ -1094,7 +1169,7 @@ impl SaveDesiredProviderResult {
         subject: ProviderResultSubject,
         desired: DesiredProviderResult,
     ) -> Result<Self, ProviderResultModelError> {
-        if desired.updated_at < subject.created_at {
+        if desired.updated_at() < subject.created_at {
             return Err(ProviderResultModelError::InvalidTimestamp);
         }
         Ok(Self { subject, desired })

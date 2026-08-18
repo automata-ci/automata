@@ -13,12 +13,13 @@ use automata_ci_provider::{
     ProviderResultAnnotationMessage, ProviderResultAnnotationTitle, ProviderResultClaimFence,
     ProviderResultConclusion, ProviderResultContinuation, ProviderResultDetailsUrl,
     ProviderResultFailureKind, ProviderResultFuture, ProviderResultModelError, ProviderResultName,
-    ProviderResultPhase, ProviderResultPublicationEvidence, ProviderResultPublicationModel,
-    ProviderResultRepository, ProviderResultRepositoryError, ProviderResultRetryAfter,
-    ProviderResultSaveOutcome, ProviderResultSubject, ProviderResultSubjectId,
-    ProviderResultSubjectKind, ProviderResultSummary, ProviderResultTitle, ProviderResultWorkerId,
-    ProviderRunnerPolicyBinding, ProviderSchemaVersion, ProviderWorkflowSource,
-    RenewProviderResult, RepositoryVisibility, RetryProviderResult, RichCheckCapability,
+    ProviderResultPhase, ProviderResultProjection, ProviderResultPublicationEvidence,
+    ProviderResultPublicationModel, ProviderResultRepository, ProviderResultRepositoryError,
+    ProviderResultRetryAfter, ProviderResultSaveOutcome, ProviderResultSubject,
+    ProviderResultSubjectId, ProviderResultSubjectKind, ProviderResultSummary, ProviderResultTitle,
+    ProviderResultWorkerId, ProviderRunnerPolicyBinding, ProviderSchemaVersion,
+    ProviderWorkflowSource, RenewProviderResult, RepositoryVisibility, RetryProviderResult,
+    RichCheckCapability,
     SaveDesiredProviderResult, StatusHistoryModel,
 };
 use url::Url;
@@ -79,12 +80,15 @@ fn subject() -> ProviderResultSubject {
 fn desired(generation: u64, updated_at: i64) -> DesiredProviderResult {
     DesiredProviderResult::new(
         generation,
-        ProviderResultPhase::Running,
-        None,
-        ProviderResultTitle::new("build").unwrap(),
-        ProviderResultSummary::new("running").unwrap(),
-        Vec::new(),
-        UnixMillis::new(updated_at),
+        ProviderResultProjection::new(
+            ProviderResultPhase::Running,
+            None,
+            ProviderResultTitle::new("build").unwrap(),
+            ProviderResultSummary::new("running").unwrap(),
+            Vec::new(),
+            UnixMillis::new(updated_at),
+        )
+        .unwrap(),
     )
     .unwrap()
 }
@@ -558,12 +562,15 @@ fn presentation_is_canonical_bounded_and_independent_of_provider_features() {
     .unwrap();
     let completed = DesiredProviderResult::new(
         1,
-        ProviderResultPhase::Completed,
-        Some(ProviderResultConclusion::Success),
-        ProviderResultTitle::new("build").unwrap(),
-        ProviderResultSummary::new("complete").unwrap(),
-        vec![annotation.clone()],
-        UnixMillis::new(2_001),
+        ProviderResultProjection::new(
+            ProviderResultPhase::Completed,
+            Some(ProviderResultConclusion::Success),
+            ProviderResultTitle::new("build").unwrap(),
+            ProviderResultSummary::new("complete").unwrap(),
+            vec![annotation.clone()],
+            UnixMillis::new(2_001),
+        )
+        .unwrap(),
     )
     .unwrap();
     assert_eq!(completed.annotations(), std::slice::from_ref(&annotation));
@@ -572,8 +579,7 @@ fn presentation_is_canonical_bounded_and_independent_of_provider_features() {
         Some(ProviderResultConclusion::Success)
     );
     assert!(
-        DesiredProviderResult::new(
-            1,
+        ProviderResultProjection::new(
             ProviderResultPhase::Running,
             Some(ProviderResultConclusion::Success),
             ProviderResultTitle::new("build").unwrap(),
@@ -584,8 +590,7 @@ fn presentation_is_canonical_bounded_and_independent_of_provider_features() {
         .is_err()
     );
     assert!(
-        DesiredProviderResult::new(
-            1,
+        ProviderResultProjection::new(
             ProviderResultPhase::Completed,
             Some(ProviderResultConclusion::Failure),
             ProviderResultTitle::new("build").unwrap(),
@@ -626,12 +631,15 @@ fn presentation_is_canonical_bounded_and_independent_of_provider_features() {
     let projection = |annotations| {
         DesiredProviderResult::new(
             1,
-            ProviderResultPhase::Running,
-            None,
-            ProviderResultTitle::new("build").unwrap(),
-            ProviderResultSummary::new("running").unwrap(),
-            annotations,
-            UnixMillis::new(2_001),
+            ProviderResultProjection::new(
+                ProviderResultPhase::Running,
+                None,
+                ProviderResultTitle::new("build").unwrap(),
+                ProviderResultSummary::new("running").unwrap(),
+                annotations,
+                UnixMillis::new(2_001),
+            )
+            .unwrap(),
         )
         .unwrap()
     };

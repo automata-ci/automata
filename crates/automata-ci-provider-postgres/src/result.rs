@@ -6,7 +6,7 @@ use automata_ci_provider::{
     ProviderResultAnnotationLevel, ProviderResultAnnotationMessage, ProviderResultAnnotationTitle,
     ProviderResultBinding, ProviderResultClaimFence, ProviderResultConclusion,
     ProviderResultContinuation, ProviderResultDetailsUrl, ProviderResultFailureKind,
-    ProviderResultModelError, ProviderResultName, ProviderResultPhase,
+    ProviderResultModelError, ProviderResultName, ProviderResultPhase, ProviderResultProjection,
     ProviderResultPublicationModel, ProviderResultRepositoryError, ProviderResultSaveOutcome,
     ProviderResultSubject, ProviderResultSubjectId, ProviderResultSubjectKind,
     ProviderResultSummary, ProviderResultTitle, ProviderResultWorkerId, ProviderSchemaVersion,
@@ -437,15 +437,18 @@ impl PostgresProviderManifestRepository {
         }
         let desired = DesiredProviderResult::new(
             positive_u64(row.generation)?,
-            phase(&row.phase)?,
-            conclusion(row.conclusion.as_deref())?,
-            ProviderResultTitle::new(row.title).map_err(model_corrupt)?,
-            ProviderResultSummary::new(row.summary).map_err(model_corrupt)?,
-            annotations
-                .into_iter()
-                .map(decode_annotation)
-                .collect::<Result<Vec<_>, _>>()?,
-            UnixMillis::new(row.updated_at_ms),
+            ProviderResultProjection::new(
+                phase(&row.phase)?,
+                conclusion(row.conclusion.as_deref())?,
+                ProviderResultTitle::new(row.title).map_err(model_corrupt)?,
+                ProviderResultSummary::new(row.summary).map_err(model_corrupt)?,
+                annotations
+                    .into_iter()
+                    .map(decode_annotation)
+                    .collect::<Result<Vec<_>, _>>()?,
+                UnixMillis::new(row.updated_at_ms),
+            )
+            .map_err(model_corrupt)?,
         )
         .map_err(model_corrupt)?;
         if digest(&row.desired_digest)? != desired.digest() {

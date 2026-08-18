@@ -114,10 +114,11 @@ pub use result::{
     ProviderResultBinding, ProviderResultClaimFence, ProviderResultConclusion,
     ProviderResultContinuation, ProviderResultDetailsUrl, ProviderResultFailureKind,
     ProviderResultFuture, ProviderResultMarker, ProviderResultModelError, ProviderResultName,
-    ProviderResultPhase, ProviderResultPublicationEvidence, ProviderResultPublicationModel,
-    ProviderResultRepository, ProviderResultRepositoryError, ProviderResultRetryAfter,
-    ProviderResultSaveOutcome, ProviderResultSubject, ProviderResultSubjectKind,
-    ProviderResultSummary, ProviderResultTitle, RenewProviderResult, ResultPublisherError,
+    ProviderResultPhase, ProviderResultProjection, ProviderResultPublicationEvidence,
+    ProviderResultPublicationModel, ProviderResultRepository, ProviderResultRepositoryError,
+    ProviderResultRetryAfter, ProviderResultSaveOutcome, ProviderResultSubject,
+    ProviderResultSubjectKind, ProviderResultSummary, ProviderResultTitle, RenewProviderResult,
+    ResultPublisherError,
     RetryProviderResult, SaveDesiredProviderResult,
 };
 pub use storage::{
