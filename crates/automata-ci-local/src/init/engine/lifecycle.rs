@@ -5751,7 +5751,7 @@ fn validate_rendered_container(
     }
 
     validate_rendered_mounts(container, host, installation, expected)?;
-    validate_rendered_ports(config, host, network, expected, image)?;
+    validate_rendered_ports(config, host, network, expected, image, realized_running)?;
     validate_rendered_health(config, expected)?;
     validate_rendered_tmpfs(host, expected)?;
     validate_rendered_restart(host, expected)?;
@@ -6101,6 +6101,7 @@ fn validate_rendered_ports(
     network: &bollard::models::NetworkSettings,
     expected: &ExpectedContainer,
     image: &ImageConfig,
+    realized_running: bool,
 ) -> Result<(), LocalInitError> {
     let expected_ports = expected
         .ports
@@ -6147,6 +6148,20 @@ fn validate_rendered_ports(
         return Err(engine_resource_mismatch());
     }
     let mut realized = BTreeSet::new();
+    let realized_keys = network
+        .ports
+        .as_ref()
+        .into_iter()
+        .flatten()
+        .map(|(port, _)| port.clone())
+        .collect::<BTreeSet<_>>();
+    if if realized_running {
+        realized_keys != expected_exposed
+    } else {
+        !realized_keys.is_empty()
+    } {
+        return Err(engine_resource_mismatch());
+    }
     for (port, values) in network.ports.as_ref().into_iter().flatten() {
         for value in values.as_deref().unwrap_or_default() {
             realized.insert((
@@ -8252,6 +8267,43 @@ mod daemon_generation_tests {
             bollard::models::EndpointSettings::default(),
         );
         assert!(!exact_stopped_none_network(&network, &network_id));
+    }
+
+    #[test]
+    fn realized_port_keys_are_exact_while_stopped_oneoffs_release_them() {
+        let rendered = crate::init::renderer::render_compose(&crate::desired_spec::tests::spec());
+        let expected = &rendered.expected.containers["engine-relay"];
+        let config = bollard::models::ContainerConfig {
+            exposed_ports: Some(vec!["8080/tcp".to_owned()]),
+            ..Default::default()
+        };
+        let image = ImageConfig {
+            exposed_ports: Some(vec!["8080/tcp".to_owned()]),
+            ..Default::default()
+        };
+        let host = HostConfig {
+            port_bindings: Some(HashMap::new()),
+            ..Default::default()
+        };
+        let mut network = bollard::models::NetworkSettings {
+            ports: Some(HashMap::from([("8080/tcp".to_owned(), None)])),
+            ..Default::default()
+        };
+        assert!(validate_rendered_ports(&config, &host, &network, expected, &image, true).is_ok());
+
+        network
+            .ports
+            .as_mut()
+            .unwrap()
+            .insert("9000/tcp".to_owned(), None);
+        assert!(validate_rendered_ports(&config, &host, &network, expected, &image, true).is_err());
+
+        network.ports = Some(HashMap::new());
+        assert!(validate_rendered_ports(&config, &host, &network, expected, &image, false).is_ok());
+        network.ports = Some(HashMap::from([("8080/tcp".to_owned(), None)]));
+        assert!(
+            validate_rendered_ports(&config, &host, &network, expected, &image, false).is_err()
+        );
     }
 
     #[test]
