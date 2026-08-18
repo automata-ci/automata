@@ -1,5 +1,6 @@
 import AppKit
 import CryptoKit
+import Darwin
 import Foundation
 import Virtualization
 
@@ -7,11 +8,35 @@ private let gibibyte = UInt64(1024 * 1024 * 1024)
 private let guestProtocol: UInt16 = 2
 private let guestPort: UInt32 = 10250
 
-private enum ToolFailure: Error {
+private enum ToolFailure: Error, CustomStringConvertible {
   case invalidArguments
   case invalidArtifact
   case unsupportedRestoreImage
   case installationFailed
+
+  var description: String {
+    switch self {
+    case .invalidArguments:
+      return "invalid arguments"
+    case .invalidArtifact:
+      return "invalid or incomplete template artifact"
+    case .unsupportedRestoreImage:
+      return "restore image is not supported by this host or the requested VM resources"
+    case .installationFailed:
+      return "macOS installation did not return a result"
+    }
+  }
+}
+
+private func report(_ error: Error) {
+  let message: String
+  if let failure = error as? ToolFailure {
+    message = failure.description
+  } else {
+    let failure = error as NSError
+    message = "\(failure.localizedDescription) (\(failure.domain) error \(failure.code))"
+  }
+  FileHandle.standardError.write(Data("automata-macos-template-tool: \(message)\n".utf8))
 }
 
 private final class ResultBox<Value> {
@@ -188,6 +213,28 @@ private func createDisk(at url: URL, bytes: UInt64) throws {
   try handle.close()
 }
 
+private func prepareInstallDirectory(_ url: URL) throws {
+  let manager = FileManager.default
+  var isDirectory = ObjCBool(false)
+  if manager.fileExists(atPath: url.path, isDirectory: &isDirectory) {
+    let attributes = try manager.attributesOfItem(atPath: url.path)
+    guard isDirectory.boolValue,
+      attributes[.type] as? FileAttributeType == .typeDirectory,
+      (attributes[.ownerAccountID] as? NSNumber)?.uint32Value == geteuid(),
+      (attributes[.posixPermissions] as? NSNumber)?.uint16Value == 0o700,
+      try manager.contentsOfDirectory(atPath: url.path).isEmpty
+    else {
+      throw ToolFailure.invalidArtifact
+    }
+    return
+  }
+  try manager.createDirectory(
+    at: url,
+    withIntermediateDirectories: false,
+    attributes: [.posixPermissions: 0o700]
+  )
+}
+
 private func virtualMachineConfiguration(
   disk: URL,
   auxiliary: VZMacAuxiliaryStorage,
@@ -253,7 +300,6 @@ private func install(arguments: ArraySlice<String>) throws {
     let cpuCount = Int(arguments[arguments.index(arguments.startIndex, offsetBy: 3)]),
     let memoryGiB = UInt64(arguments[arguments.index(arguments.startIndex, offsetBy: 4)]),
     FileManager.default.fileExists(atPath: restoreURL.path),
-    !FileManager.default.fileExists(atPath: outputURL.path),
     (64...1024).contains(diskGiB),
     (1...1024).contains(memoryGiB),
     cpuCount > 0
@@ -263,11 +309,7 @@ private func install(arguments: ArraySlice<String>) throws {
   let (diskBytes, diskOverflow) = diskGiB.multipliedReportingOverflow(by: gibibyte)
   let (memoryBytes, memoryOverflow) = memoryGiB.multipliedReportingOverflow(by: gibibyte)
   guard !diskOverflow, !memoryOverflow else { throw ToolFailure.invalidArguments }
-  try FileManager.default.createDirectory(
-    at: outputURL,
-    withIntermediateDirectories: false,
-    attributes: [.posixPermissions: 0o700]
-  )
+  try prepareInstallDirectory(outputURL)
   let restore = try loadRestoreImage(restoreURL)
   guard let requirements = restore.mostFeaturefulSupportedConfiguration,
     requirements.hardwareModel.isSupported,
@@ -477,6 +519,7 @@ private func main() -> Int32 {
     }
     return 0
   } catch {
+    report(error)
     return 70
   }
 }
