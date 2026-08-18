@@ -242,6 +242,13 @@ mod tests {
     struct UnusedResults;
 
     impl ProviderResultRepository for UnusedResults {
+        fn load_workflow_subject(
+            &self,
+            _run_id: RunId,
+        ) -> ProviderResultFuture<'_, Option<automata_ci_provider::ProviderResultSubject>> {
+            Box::pin(async { Ok(None) })
+        }
+
         fn save_desired(
             &self,
             _request: SaveDesiredProviderResult,

@@ -1520,8 +1520,18 @@ pub type ProviderResultFuture<'a, T> =
 
 /// Durable current-only desired result and fenced publication outbox.
 pub trait ProviderResultRepository: fmt::Debug + Send + Sync {
+    /// Loads the immutable provider result subject for one workflow run.
+    ///
+    /// A workflow run has at most one provider-visible aggregate result even
+    /// when its desired projection has advanced through multiple generations.
+    fn load_workflow_subject(
+        &self,
+        run_id: RunId,
+    ) -> ProviderResultFuture<'_, Option<ProviderResultSubject>>;
     /// Reconciles desired state, assigning its next generation atomically and
-    /// invalidating older claims only when the projection changed.
+    /// invalidating older claims only when the projection changed. A changed
+    /// projection must advance durable update time; stale or contradictory
+    /// equal-time observations are rejected.
     fn save_desired(
         &self,
         request: SaveDesiredProviderResult,

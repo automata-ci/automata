@@ -132,6 +132,24 @@ impl Default for MemoryOutbox {
 }
 
 impl ProviderResultRepository for MemoryOutbox {
+    fn load_workflow_subject(
+        &self,
+        run_id: RunId,
+    ) -> ProviderResultFuture<'_, Option<ProviderResultSubject>> {
+        Box::pin(async move {
+            Ok(self
+                .0
+                .lock()
+                .unwrap()
+                .value
+                .as_ref()
+                .filter(|value| {
+                    value.subject.subject() == &ProviderResultSubjectKind::WorkflowRun { run_id }
+                })
+                .map(|value| value.subject.clone()))
+        })
+    }
+
     fn save_desired(
         &self,
         request: SaveDesiredProviderResult,
@@ -146,6 +164,9 @@ impl ProviderResultRepository for MemoryOutbox {
                 }
                 Some(current) if current.desired.projection() == &projection => {
                     return Ok(ProviderResultSaveOutcome::Unchanged);
+                }
+                Some(current) if current.desired.updated_at() >= projection.updated_at() => {
+                    return Err(ProviderResultRepositoryError::Conflict);
                 }
                 Some(_) => ProviderResultSaveOutcome::Superseded,
             };
@@ -412,6 +433,20 @@ async fn newer_generation_supersedes_and_fences_old_claim_without_a_bridge() {
             .unwrap(),
         ProviderResultSaveOutcome::Inserted
     );
+    assert_eq!(
+        outbox
+            .load_workflow_subject(RunId::from_uuid(Uuid::from_u128(5)))
+            .await
+            .unwrap(),
+        Some(subject())
+    );
+    assert!(
+        outbox
+            .load_workflow_subject(RunId::from_uuid(Uuid::from_u128(6)))
+            .await
+            .unwrap()
+            .is_none()
+    );
     let first = outbox
         .claim_result(
             ClaimProviderResult::new(
@@ -461,6 +496,36 @@ async fn newer_generation_supersedes_and_fences_old_claim_without_a_bridge() {
         .unwrap();
     assert_eq!(second.desired().generation(), 2);
     assert_eq!(second.marker(), first.marker());
+}
+
+#[tokio::test]
+async fn changed_projections_must_advance_durable_time() {
+    let outbox = MemoryOutbox::default();
+    outbox
+        .save_desired(SaveDesiredProviderResult::new(subject(), projection(2_001)).unwrap())
+        .await
+        .unwrap();
+    let changed_at_same_time = ProviderResultProjection::new(
+        ProviderResultPhase::Running,
+        None,
+        ProviderResultTitle::new("build").unwrap(),
+        ProviderResultSummary::new("different").unwrap(),
+        Vec::new(),
+        UnixMillis::new(2_001),
+    )
+    .unwrap();
+    assert_eq!(
+        outbox
+            .save_desired(SaveDesiredProviderResult::new(subject(), changed_at_same_time).unwrap())
+            .await,
+        Err(ProviderResultRepositoryError::Conflict)
+    );
+    assert_eq!(
+        outbox
+            .save_desired(SaveDesiredProviderResult::new(subject(), projection(2_000)).unwrap())
+            .await,
+        Err(ProviderResultRepositoryError::Conflict)
+    );
 }
 
 #[tokio::test]

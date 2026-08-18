@@ -269,6 +269,10 @@ const CANONICAL_MIGRATIONS: &[(&str, &str)] = &[
         "0064_provider_result_projection_digest.sql",
         "596e92a05f58bae5827595da316fc4664a0ba1863386ee5fad19d42df816e222d0cbc9cb29b864314c2e8f14aa8ccf2a",
     ),
+    (
+        "0065_provider_workflow_result_identity.sql",
+        "ba5857f778d00011c25d93402772430a99a05a0724081e3bfe1906883e707726e5694b8d942bf6c732f6a966d7733814",
+    ),
 ];
 
 const BASELINE_MIGRATION_COUNT: u32 = 26;
@@ -968,6 +972,34 @@ fn provider_result_projection_digest_is_exact_and_provider_neutral() {
         assert!(
             !source.contains(forbidden),
             "projection digest retained provider-specific or transitional surface: {forbidden}",
+        );
+    }
+}
+
+#[test]
+fn provider_workflow_result_identity_is_unique_and_provider_neutral() {
+    let source = include_str!("../migrations/0065_provider_workflow_result_identity.sql");
+    for required in [
+        "CREATE UNIQUE INDEX provider_result_subjects_workflow_run",
+        "ON provider_result_subjects (run_id)",
+        "WHERE subject_kind = 'workflow-run'",
+    ] {
+        assert!(
+            source.contains(required),
+            "workflow-result identity lost: {required}"
+        );
+    }
+    for forbidden in [
+        "github_",
+        "forgejo_",
+        "gitlab_",
+        "IF EXISTS",
+        "IF NOT EXISTS",
+        " CASCADE",
+    ] {
+        assert!(
+            !source.contains(forbidden),
+            "workflow-result identity retained provider-specific or transitional surface: {forbidden}",
         );
     }
 }

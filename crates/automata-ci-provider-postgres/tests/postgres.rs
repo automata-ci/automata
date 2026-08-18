@@ -549,6 +549,36 @@ async fn provider_results_are_contiguous_fenced_and_rehydratable() -> TestResult
                 .await?,
             ProviderResultSaveOutcome::Unchanged
         );
+        assert_eq!(
+            repository
+                .load_workflow_subject(RunId::from_uuid(Uuid::from_u128(0x5903)))
+                .await?,
+            Some(subject.clone())
+        );
+        assert!(
+            repository
+                .load_workflow_subject(RunId::from_uuid(Uuid::from_u128(0x59ff)))
+                .await?
+                .is_none()
+        );
+        assert_eq!(
+            repository
+                .save_desired(SaveDesiredProviderResult::new(
+                    subject.clone(),
+                    projection(3_001, "contradictory equal-time state")?,
+                )?)
+                .await,
+            Err(ProviderResultRepositoryError::Conflict)
+        );
+        assert_eq!(
+            repository
+                .save_desired(SaveDesiredProviderResult::new(
+                    subject.clone(),
+                    projection(3_000, "stale state")?,
+                )?)
+                .await,
+            Err(ProviderResultRepositoryError::Conflict)
+        );
 
         let worker = ProviderResultWorkerId::from_uuid(Uuid::from_u128(0x5904))?;
         let first_claim = repository

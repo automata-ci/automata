@@ -201,6 +201,13 @@ impl ProviderProcessingRepository for PostgresProviderManifestRepository {
 }
 
 impl ProviderResultRepository for PostgresProviderManifestRepository {
+    fn load_workflow_subject(
+        &self,
+        run_id: automata_ci_core::RunId,
+    ) -> ProviderResultFuture<'_, Option<automata_ci_provider::ProviderResultSubject>> {
+        Box::pin(self.load_workflow_subject_inner(run_id))
+    }
+
     fn save_desired(
         &self,
         request: automata_ci_provider::SaveDesiredProviderResult,

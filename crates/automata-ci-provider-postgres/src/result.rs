@@ -64,6 +64,32 @@ struct AnnotationRow {
 }
 
 impl PostgresProviderManifestRepository {
+    pub(crate) async fn load_workflow_subject_inner(
+        &self,
+        run_id: RunId,
+    ) -> Result<Option<ProviderResultSubject>, ProviderResultRepositoryError> {
+        let mut transaction = self.pool().begin().await.map_err(unavailable)?;
+        let subject_id = sqlx::query_scalar::<_, uuid::Uuid>(
+            r"
+            SELECT subject_id
+            FROM provider_result_subjects
+            WHERE subject_kind = 'workflow-run' AND run_id = $1
+            FOR SHARE
+            ",
+        )
+        .bind(run_id.as_uuid())
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(unavailable)?;
+        let Some(subject_id) = subject_id else {
+            transaction.commit().await.map_err(unavailable)?;
+            return Ok(None);
+        };
+        let row = load_result_row(&mut transaction, subject_id).await?;
+        transaction.commit().await.map_err(unavailable)?;
+        self.decode_subject(&row).await.map(Some)
+    }
+
     pub(crate) async fn save_desired_result_inner(
         &self,
         request: SaveDesiredProviderResult,
@@ -74,7 +100,7 @@ impl PostgresProviderManifestRepository {
         let current = sqlx::query_as::<_, CurrentResultRow>(
             r"
             SELECT subject.subject_digest, outbox.generation,
-                   outbox.projection_digest
+                   outbox.projection_digest, outbox.updated_at_ms
             FROM provider_result_subjects AS subject
             JOIN provider_result_outbox AS outbox ON outbox.subject_id = subject.subject_id
             WHERE subject.subject_id = $1
@@ -102,6 +128,9 @@ impl PostgresProviderManifestRepository {
                 if current.projection_digest == projection.digest().as_bytes() {
                     transaction.commit().await.map_err(unavailable)?;
                     return Ok(ProviderResultSaveOutcome::Unchanged);
+                }
+                if current.updated_at_ms >= projection.updated_at().get() {
+                    return Err(ProviderResultRepositoryError::Conflict);
                 }
                 let next = generation
                     .checked_add(1)
@@ -391,6 +420,7 @@ impl PostgresProviderManifestRepository {
         row: ResultRow,
         annotations: Vec<AnnotationRow>,
     ) -> Result<ClaimedProviderResult, ProviderResultRepositoryError> {
+        let subject = self.decode_subject(&row).await?;
         let binding = row
             .binding_external_result_id
             .as_deref()
@@ -399,43 +429,8 @@ impl PostgresProviderManifestRepository {
             .map_err(|_| ProviderResultRepositoryError::Corrupt)?
             .map(ProviderResultBinding::new);
         let continuation = continuation(&row)?;
-        let result_name =
-            ProviderResultName::new(row.result_name.clone()).map_err(model_corrupt)?;
-        let result_details_url = ProviderResultDetailsUrl::new(
-            row.result_details_url
-                .parse()
-                .map_err(|_| ProviderResultRepositoryError::Corrupt)?,
-        )
-        .map_err(model_corrupt)?;
-        let connection_id = ProviderConnectionId::from_uuid(row.connection_id)
-            .map_err(|_| ProviderResultRepositoryError::Corrupt)?;
-        let connection_revision =
-            ProviderConnectionRevision::new(positive_u64(row.connection_revision)?)
-                .map_err(|_| ProviderResultRepositoryError::Corrupt)?;
-        let connection = self
-            .load_connection_inner(connection_id, connection_revision)
-            .await
-            .map_err(map_manifest_error)?
-            .ok_or(ProviderResultRepositoryError::Corrupt)?;
-        if digest(&row.connection_digest)? != connection.digest() {
-            return Err(ProviderResultRepositoryError::Corrupt);
-        }
         let subject_id = ProviderResultSubjectId::from_uuid(row.subject_id)
             .map_err(|_| ProviderResultRepositoryError::Corrupt)?;
-        let subject = ProviderResultSubject::new(
-            subject_id,
-            &connection,
-            git_object(&row.object_algorithm, &row.object_bytes)?,
-            result_name,
-            result_details_url,
-            subject_kind(&row)?,
-            u32::try_from(row.attempt).map_err(|_| ProviderResultRepositoryError::Corrupt)?,
-            UnixMillis::new(row.created_at_ms),
-        )
-        .map_err(model_corrupt)?;
-        if digest(&row.subject_digest)? != subject.digest() {
-            return Err(ProviderResultRepositoryError::Corrupt);
-        }
         let desired = DesiredProviderResult::new(
             positive_u64(row.generation)?,
             ProviderResultProjection::new(
@@ -490,6 +485,46 @@ impl PostgresProviderManifestRepository {
         )
         .map_err(model_corrupt)
     }
+
+    async fn decode_subject(
+        &self,
+        row: &ResultRow,
+    ) -> Result<ProviderResultSubject, ProviderResultRepositoryError> {
+        let connection_id = ProviderConnectionId::from_uuid(row.connection_id)
+            .map_err(|_| ProviderResultRepositoryError::Corrupt)?;
+        let connection_revision =
+            ProviderConnectionRevision::new(positive_u64(row.connection_revision)?)
+                .map_err(|_| ProviderResultRepositoryError::Corrupt)?;
+        let connection = self
+            .load_connection_inner(connection_id, connection_revision)
+            .await
+            .map_err(map_manifest_error)?
+            .ok_or(ProviderResultRepositoryError::Corrupt)?;
+        if digest(&row.connection_digest)? != connection.digest() {
+            return Err(ProviderResultRepositoryError::Corrupt);
+        }
+        let subject = ProviderResultSubject::new(
+            ProviderResultSubjectId::from_uuid(row.subject_id)
+                .map_err(|_| ProviderResultRepositoryError::Corrupt)?,
+            &connection,
+            git_object(&row.object_algorithm, &row.object_bytes)?,
+            ProviderResultName::new(row.result_name.clone()).map_err(model_corrupt)?,
+            ProviderResultDetailsUrl::new(
+                row.result_details_url
+                    .parse()
+                    .map_err(|_| ProviderResultRepositoryError::Corrupt)?,
+            )
+            .map_err(model_corrupt)?,
+            subject_kind(row)?,
+            u32::try_from(row.attempt).map_err(|_| ProviderResultRepositoryError::Corrupt)?,
+            UnixMillis::new(row.created_at_ms),
+        )
+        .map_err(model_corrupt)?;
+        if digest(&row.subject_digest)? != subject.digest() {
+            return Err(ProviderResultRepositoryError::Corrupt);
+        }
+        Ok(subject)
+    }
 }
 
 #[derive(FromRow)]
@@ -497,6 +532,7 @@ struct CurrentResultRow {
     subject_digest: Vec<u8>,
     generation: i64,
     projection_digest: Vec<u8>,
+    updated_at_ms: i64,
 }
 
 async fn result_lock(
@@ -731,7 +767,7 @@ async fn load_result_row(
                outbox.continuation_digest
         FROM provider_result_subjects AS subject
         JOIN provider_result_outbox AS outbox ON outbox.subject_id = subject.subject_id
-        WHERE subject.subject_id = $1 AND outbox.state = 'claimed'
+        WHERE subject.subject_id = $1
         ",
     )
     .bind(subject_id)
