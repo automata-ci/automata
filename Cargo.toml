@@ -226,3 +226,9 @@ codegen-units = 1
 lto = "thin"
 panic = "abort"
 strip = "symbols"
+
+# The generated S3 client is substantially larger than any workspace crate.
+# Splitting only this dependency's code generation bounds peak compiler memory
+# while preserving the single-unit, thin-LTO profile for Automata binaries.
+[profile.release.package.aws-sdk-s3]
+codegen-units = 16
