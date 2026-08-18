@@ -33,6 +33,7 @@ const KIND_RESULTS_TRANSIT: &str = "results-transit-network";
 /// shared network. Keeping one closed predicate prevents either consumer from
 /// silently weakening the other one's custody contract.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[allow(clippy::struct_excessive_bools)]
 pub(crate) struct ResultsTransitNetworkShape {
     pub(crate) name: String,
     pub(crate) driver: String,

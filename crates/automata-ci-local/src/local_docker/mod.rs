@@ -261,7 +261,7 @@ struct LifecycleSiblingCustodyGroup {
     front: Option<InspectedNetwork>,
 }
 
-/// Read-only, field-for-field attestation of the LocalDocker sibling union
+/// Read-only, field-for-field attestation of the `LocalDocker` sibling union
 /// before lifecycle teardown. This deliberately reuses the production HTTP
 /// normalizer and provider definitions instead of trusting discovery labels.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]

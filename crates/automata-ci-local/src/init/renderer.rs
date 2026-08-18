@@ -84,6 +84,7 @@ pub(super) struct ExpectedLifecycleTopology {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[allow(clippy::struct_excessive_bools)]
 pub(super) struct ExpectedContainer {
     pub(super) service: String,
     pub(super) image_role: &'static str,
@@ -283,32 +284,7 @@ pub(super) fn render_runner_config(
             "key_hex": {"kind": "file", "path": RUNNER_SPOOL_KEY},
             "decrypt_only": [],
         },
-        "inventory": {
-            "labels": ["self-hosted", "linux", "x64", "ubuntu-24.04"],
-            "groups": ["default"],
-            "max_parallel_jobs": spec.max_parallel_jobs().get(),
-            "resources_per_job": {
-                "cpu_millis": 1000,
-                "memory_bytes": 268435456_u64,
-                "ephemeral_disk_bytes": 0,
-                "gpu_count": 0,
-                "pids": 4096,
-            },
-            "environment_profiles": [{
-                "id": spec.profile().attestation().id().as_str(),
-                "manifest_sha256": spec.profile().attestation().digest().to_string(),
-                "image": spec.profile().image().reference(),
-                "keepalive_program": "/bin/sleep",
-                "keepalive_arguments": ["infinity"],
-                "workspace": "/__w",
-                "default_environment": {
-                    "AUTOMATA_ENVIRONMENT_PROFILE_ID": spec.profile().attestation().id().as_str(),
-                    "CARGO_HOME": "/opt/cargo",
-                    "RUNNER_TOOL_CACHE": "/opt/hostedtoolcache",
-                    "RUSTUP_HOME": "/opt/rustup",
-                },
-            }],
-        },
+        "inventory": runner_inventory(spec),
         "local_docker": {
             "installation_name": installation.name().as_str(),
             "installation_id": spec.installation_id().to_string(),
@@ -325,51 +301,8 @@ pub(super) fn render_runner_config(
                 "results_address": spec.results_transit().results_address().to_string(),
             },
         },
-        "executor": {
-            "resources": {
-                "cpu_millis": 1000,
-                "memory_bytes": 268435456_u64,
-                "ephemeral_disk_bytes": 0,
-                "gpu_count": 0,
-                "pids": 4096,
-            },
-            "network": "private_egress",
-            "root_filesystem": "writable",
-            "privilege": "administrator",
-            "default_step_timeout_seconds": 3600,
-            "maximum_output_bytes": 16777216,
-            "runner_root": "/__automata",
-            "home": "/root",
-            "path": "/opt/automata/externals/node24/bin:/opt/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-            "temp": "/var/lib/automata-transient",
-            "tool_cache": "/opt/hostedtoolcache",
-            "toolchain": {
-                "bash": "/usr/bin/bash",
-                "sh": "/usr/bin/sh",
-                "python": "/usr/bin/python3",
-                "pwsh": null,
-                "install": "/usr/bin/install",
-                "tar": "/usr/bin/tar",
-                "sha256sum": "/usr/bin/sha256sum",
-                "node24": "/opt/automata/externals/node24/bin/node",
-            },
-        },
-        "object_store": {
-            "endpoint": "https://objects.automata.invalid:9000/",
-            "region": "us-east-1",
-            "bucket": "automata",
-            "prefix": "objects/v1",
-            "force_path_style": true,
-            "loopback_development": false,
-            "tls_trust": {
-                "mode": "private_ca",
-                "certificate_source": {"kind": "file", "path": RUNNER_S3_CA},
-            },
-            "operation_timeout_seconds": 30,
-            "access_key_id": {"kind": "file", "path": RUNNER_S3_ACCESS_KEY},
-            "secret_access_key": {"kind": "file", "path": RUNNER_S3_SECRET_KEY},
-            "session_token": null,
-        },
+        "executor": runner_executor(),
+        "object_store": runner_object_store(),
         "github": {
             "user_agent": "automata-local-runner/1",
             "server_url": "https://github.com/",
@@ -379,6 +312,86 @@ pub(super) fn render_runner_config(
         },
         "metrics": {"listen": crate::LOCAL_RUNNER_READY_LISTEN},
     }))
+}
+
+fn runner_inventory(spec: &DesiredSpec) -> Value {
+    json!({
+        "labels": ["self-hosted", "linux", "x64", "ubuntu-24.04"],
+        "groups": ["default"],
+        "max_parallel_jobs": spec.max_parallel_jobs().get(),
+        "resources_per_job": {
+            "cpu_millis": 1000,
+            "memory_bytes": 268_435_456_u64,
+            "ephemeral_disk_bytes": 0,
+            "gpu_count": 0,
+            "pids": 4096,
+        },
+        "environment_profiles": [{
+            "id": spec.profile().attestation().id().as_str(),
+            "manifest_sha256": spec.profile().attestation().digest().to_string(),
+            "image": spec.profile().image().reference(),
+            "keepalive_program": "/bin/sleep",
+            "keepalive_arguments": ["infinity"],
+            "workspace": "/__w",
+            "default_environment": {
+                "AUTOMATA_ENVIRONMENT_PROFILE_ID": spec.profile().attestation().id().as_str(),
+                "CARGO_HOME": "/opt/cargo",
+                "RUNNER_TOOL_CACHE": "/opt/hostedtoolcache",
+                "RUSTUP_HOME": "/opt/rustup",
+            },
+        }],
+    })
+}
+
+fn runner_executor() -> Value {
+    json!({
+        "resources": {
+            "cpu_millis": 1000,
+            "memory_bytes": 268_435_456_u64,
+            "ephemeral_disk_bytes": 0,
+            "gpu_count": 0,
+            "pids": 4096,
+        },
+        "network": "private_egress",
+        "root_filesystem": "writable",
+        "privilege": "administrator",
+        "default_step_timeout_seconds": 3600,
+        "maximum_output_bytes": 16_777_216,
+        "runner_root": "/__automata",
+        "home": "/root",
+        "path": "/opt/automata/externals/node24/bin:/opt/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "temp": "/var/lib/automata-transient",
+        "tool_cache": "/opt/hostedtoolcache",
+        "toolchain": {
+            "bash": "/usr/bin/bash",
+            "sh": "/usr/bin/sh",
+            "python": "/usr/bin/python3",
+            "pwsh": null,
+            "install": "/usr/bin/install",
+            "tar": "/usr/bin/tar",
+            "sha256sum": "/usr/bin/sha256sum",
+            "node24": "/opt/automata/externals/node24/bin/node",
+        },
+    })
+}
+
+fn runner_object_store() -> Value {
+    json!({
+        "endpoint": "https://objects.automata.invalid:9000/",
+        "region": "us-east-1",
+        "bucket": "automata",
+        "prefix": "objects/v1",
+        "force_path_style": true,
+        "loopback_development": false,
+        "tls_trust": {
+            "mode": "private_ca",
+            "certificate_source": {"kind": "file", "path": RUNNER_S3_CA},
+        },
+        "operation_timeout_seconds": 30,
+        "access_key_id": {"kind": "file", "path": RUNNER_S3_ACCESS_KEY},
+        "secret_access_key": {"kind": "file", "path": RUNNER_S3_SECRET_KEY},
+        "session_token": null,
+    })
 }
 
 /// Renders the sole current Compose document from the canonical Desired plan.
@@ -1403,6 +1416,15 @@ fn base_service(
     networks: BTreeMap<String, Value>,
     labels: BTreeMap<String, String>,
 ) -> Value {
+    let command = Value::Array(command.into_iter().map(Value::String).collect());
+    let volumes = Value::Array(volumes);
+    let networks = Value::Object(networks.into_iter().collect());
+    let labels = Value::Object(
+        labels
+            .into_iter()
+            .map(|(key, value)| (key, Value::String(value)))
+            .collect(),
+    );
     json!({
         "image": image,
         "platform": PLATFORM,

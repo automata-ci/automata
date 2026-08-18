@@ -342,6 +342,7 @@ impl<'a> InitEngine<'a> {
         Ok(observed.roles)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn elect_desired_and_recover_owned_union(
         &self,
         catalog: &VerifiedCatalog,

@@ -598,7 +598,7 @@ pub(crate) async fn connect_relay_sandbox_engine(
 /// Connects to the lifecycle-qualified host Engine for a read-only exact
 /// sibling audit. The caller has already pinned the same daemon through the
 /// installation adapter; this boundary independently normalizes the complete
-/// LocalDocker container/network bodies with the provider's production parser.
+/// `LocalDocker` container/network bodies with the provider's production parser.
 pub(crate) async fn connect_host_sandbox_engine(
     expected_architecture: crate::EngineArchitecture,
 ) -> Result<(PinnedDockerEngine, Arc<dyn SandboxEngineApi>), LocalDockerError> {
