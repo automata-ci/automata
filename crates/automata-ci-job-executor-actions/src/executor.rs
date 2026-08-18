@@ -4881,6 +4881,7 @@ impl ActionsJobExecutor {
                 workspace,
                 scratch,
                 service_specs,
+                self.ports.provider.capabilities(),
             )?;
             let record = match self.ports.provider.create(&spec, &cancellation) {
                 Ok(record) => record,

@@ -5,6 +5,12 @@ sandboxes, command execution, and service-container discovery. Runner and
 executor logic target `SandboxProvider` and `ExecutionEndpoint` without
 embedding a provider-specific protocol in durable control messages.
 
+`RuntimeServiceRoutes` carries a bounded, credential-free set of exact
+HTTP(S) origins into providers which advertise `RuntimeServiceProxy`. This is
+a separate side channel from general sandbox networking: a provider must
+enforce the supplied scheme, host, and port set and must not infer broader
+egress authority from it.
+
 The Podman, Kubernetes, macOS Virtualization.framework, and Windows Hyper-V
 sandbox adapters implement `SandboxProvider` directly. Providers that
 advertise service-container support return the complete healthy discovery view

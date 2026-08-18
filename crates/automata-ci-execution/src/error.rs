@@ -52,6 +52,9 @@ pub enum ValueError {
     /// A service request or discovered service view violated its invariants.
     #[error("service container request or discovery data is invalid")]
     InvalidServiceContainer,
+    /// A runtime-service route was malformed or exceeded its hard bound.
+    #[error("sandbox runtime-service route is invalid")]
+    InvalidRuntimeServiceRoute,
 }
 
 /// Whether a failed mutating provider operation is proven not to have changed

@@ -7,7 +7,9 @@ use automata_ci_core::{
     ExpressionProgram, JobConclusion, JobOutputDefinition, OutputSensitivity, ValueSource,
     ValueTemplate,
 };
-use automata_ci_execution::{NetworkPolicy, RootFilesystemPolicy, SandboxPrivilegePolicy};
+use automata_ci_execution::{
+    NetworkPolicy, RootFilesystemPolicy, RuntimeServiceProtocol, SandboxPrivilegePolicy,
+};
 use automata_ci_runner_runtime::{
     AdmissionRejection, ExecutionCancellation, ExecutionEvents, JobExecutor,
 };
@@ -175,6 +177,11 @@ async fn windows_default_shell_maps_paths_and_applies_crlf_command_files() {
     assert_eq!(specs[0].network(), NetworkPolicy::Disabled);
     assert_eq!(specs[0].root_filesystem(), RootFilesystemPolicy::Writable);
     assert_eq!(specs[0].privilege(), SandboxPrivilegePolicy::Unprivileged);
+    let routes = specs[0].runtime_service_routes().as_slice();
+    assert_eq!(routes.len(), 1);
+    assert_eq!(routes[0].protocol(), RuntimeServiceProtocol::Https);
+    assert_eq!(routes[0].host(), "results.example.test");
+    assert_eq!(routes[0].port().get(), 443);
     assert!(
         specs[0].scratch().is_none(),
         "a Hyper-V container must not expose host scratch storage"

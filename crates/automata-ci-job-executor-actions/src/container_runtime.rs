@@ -3,10 +3,10 @@ use std::{collections::BTreeSet, time::Duration};
 use automata_ci_core::JobIrEnvelope;
 use automata_ci_execution::{
     ExecutionEnvironment, ImmutableImage, NetworkPolicy, ProviderCapabilities, ResourceLimits,
-    RootFilesystemPolicy, SandboxCapability, SandboxGeneration, SandboxLaunch,
-    SandboxPrivilegePolicy, SandboxSpec, ServiceContainerBindings, ServiceContainerSpec,
-    ServiceContainerSpecs, ServiceHealthOverrides, ServiceHealthPolicy, ServicePort,
-    ServiceTransportProtocol, TargetPath,
+    RootFilesystemPolicy, RuntimeServiceRoute, RuntimeServiceRoutes, SandboxCapability,
+    SandboxGeneration, SandboxLaunch, SandboxPrivilegePolicy, SandboxSpec,
+    ServiceContainerBindings, ServiceContainerSpec, ServiceContainerSpecs, ServiceHealthOverrides,
+    ServiceHealthPolicy, ServicePort, ServiceTransportProtocol, TargetPath,
 };
 use automata_ci_runner_runtime::{AdmissionRejection, ExecutionRequest};
 
@@ -132,6 +132,7 @@ pub(super) fn sandbox_spec(
     workspace: &TargetPath,
     scratch: &TargetPath,
     service_specs: &ServiceContainerSpecs,
+    capabilities: &ProviderCapabilities,
 ) -> Result<SandboxSpec, ExecutorAdapterError> {
     if matches!(
         request.environment().launch(),
@@ -161,6 +162,9 @@ pub(super) fn sandbox_spec(
             .resource_allocation()
             .ok_or_else(invalid_job)?,
     );
+    if capabilities.supports(SandboxCapability::RuntimeServiceProxy) {
+        spec = spec.with_runtime_service_routes(runtime_service_routes(request)?);
+    }
     if matches!(
         request.environment().launch(),
         SandboxLaunch::VirtualMachine { .. }
@@ -168,6 +172,19 @@ pub(super) fn sandbox_spec(
         spec = spec.with_scratch(scratch.clone());
     }
     Ok(spec)
+}
+
+fn runtime_service_routes(
+    request: &ExecutionRequest,
+) -> Result<RuntimeServiceRoutes, ExecutorAdapterError> {
+    let routes = request
+        .runtime_authorities()
+        .as_slice()
+        .iter()
+        .map(|authority| RuntimeServiceRoute::from_url(authority.endpoint().as_url()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| invalid_job())?;
+    RuntimeServiceRoutes::new(routes).map_err(|_| invalid_job())
 }
 
 fn valid_windows_hyperv_contract(

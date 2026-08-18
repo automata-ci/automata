@@ -23,6 +23,7 @@ workspace = true
 automata-ci-core.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+url.workspace = true
 
 [dev-dependencies]
 static_assertions.workspace = true

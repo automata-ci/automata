@@ -94,6 +94,12 @@ default in the job IR. A step-local directory overrides it; otherwise the
 resolved default applies, then the workspace. Every resulting path remains
 confined to the workspace.
 
+When a provider advertises `RuntimeServiceProxy`, the executor reduces the
+already validated, job-bound runtime-authority endpoints to a canonical set of
+scheme/host/port routes on `SandboxSpec`. Credentials remain in the execution
+context and never enter the provider route contract. Providers without that
+capability receive no routes.
+
 ## Action metadata and runtime contract
 
 Repository action metadata is recursively prepared and cached after runtime

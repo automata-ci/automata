@@ -505,6 +505,7 @@ dependencies = [
  "serde",
  "static_assertions",
  "thiserror",
+ "url",
 ]
 
 [[package]]
