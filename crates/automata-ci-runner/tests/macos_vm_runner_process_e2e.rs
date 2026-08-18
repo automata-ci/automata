@@ -519,11 +519,13 @@ fn repository_action_fixture() -> RepositoryActionFixture {
     let archive_digest = Sha256Digest::from_bytes(Sha256::digest(&archive_bytes).into());
     let archive_key = format!("actions/v1/sha256/{archive_digest}.tar.gz");
     let reference_key = repository_action_reference_key();
+    let revision = automata_ci_core::GitObjectId::from_provider_hex(ACTION_REVISION)
+        .expect("exact action revision");
     let reference_bytes = serde_json::to_vec(&json!({
         "schema_version": 1,
         "provider": "github",
         "repository": ACTION_REPOSITORY,
-        "revision": ACTION_REVISION,
+        "revision": revision,
         "subpath": "",
         "archive": {
             "key": archive_key.clone(),
