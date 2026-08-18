@@ -5,7 +5,8 @@ use automata_ci_auth::authorization::{
 };
 use automata_ci_auth::human::{PrincipalId, TenantId};
 use automata_ci_core::{
-    AttemptId, JobId, LogSequence, LogStreamId, RunId, RunnerRequirements, WorkflowId,
+    AttemptId, JobId, LOG_SCHEMA_VERSION, LogSequence, LogStreamId, RunId, RunnerRequirements,
+    WorkflowId,
 };
 use automata_ci_store::{
     HUMAN_OUTPUT_PUBLICATION_SAFETY_SCHEMA, HumanArtifactId, HumanArtifactScope,
@@ -1431,8 +1432,8 @@ async fn seed_public_completed_run(
             requested_visibility, effective_visibility,
             output_safety_reason, output_safety_schema
         ) VALUES (
-            $1, $2, $3, $4, $5, $6, $7, 1, $8, 1, 2, 15, 21,
-            'secretless', 'persist', 'public', 'public', 'repository_policy', $9
+            $1, $2, $3, $4, $5, $6, $7, 1, $8, 1, $9, 15, 21,
+            'secretless', 'persist', 'public', 'public', 'repository_policy', $10
         )
         ",
     )
@@ -1444,6 +1445,7 @@ async fn seed_public_completed_run(
     .bind(i64::try_from(fence.session_epoch().get())?)
     .bind(i64::try_from(fence.runner_generation().get())?)
     .bind(lease_id)
+    .bind(i16::try_from(LOG_SCHEMA_VERSION)?)
     .bind(HUMAN_OUTPUT_PUBLICATION_SAFETY_SCHEMA)
     .execute(database.pool())
     .await?;
@@ -1656,8 +1658,8 @@ async fn insert_duplicate_stream(
             requested_visibility, effective_visibility,
             output_safety_reason, output_safety_schema
         ) VALUES (
-            $1, $2, $3, $4, $5, $6, $7, 1, $8, 1, 2, 22,
-            'secretless', 'persist', 'public', 'public', 'repository_policy', $9
+            $1, $2, $3, $4, $5, $6, $7, 1, $8, 1, $9, 22,
+            'secretless', 'persist', 'public', 'public', 'repository_policy', $10
         )
         ",
     )
@@ -1669,6 +1671,7 @@ async fn insert_duplicate_stream(
     .bind(i64::try_from(fence.session_epoch().get())?)
     .bind(i64::try_from(fence.runner_generation().get())?)
     .bind(Uuid::new_v4())
+    .bind(i16::try_from(LOG_SCHEMA_VERSION)?)
     .bind(HUMAN_OUTPUT_PUBLICATION_SAFETY_SCHEMA)
     .execute(database.pool())
     .await?;
@@ -1698,9 +1701,9 @@ async fn insert_duplicate_authoritative_stream(
         SELECT $1, terminal.attempt_id, terminal.runner_session_id, $2,
                terminal.runner_id, terminal.runner_session_epoch,
                terminal.runner_generation, terminal.runner_slot,
-               terminal.lease_id, terminal.fencing_token, 2, 22,
+               terminal.lease_id, terminal.fencing_token, $4, 22,
                'secretless', 'persist', 'public', 'public',
-               'repository_policy', $4
+               'repository_policy', $5
         FROM attempt_terminal_results AS terminal
         WHERE terminal.attempt_id = $3
         ",
@@ -1708,6 +1711,7 @@ async fn insert_duplicate_authoritative_stream(
     .bind(Uuid::new_v4())
     .bind(Uuid::new_v4())
     .bind(attempt_id)
+    .bind(i16::try_from(LOG_SCHEMA_VERSION)?)
     .bind(HUMAN_OUTPUT_PUBLICATION_SAFETY_SCHEMA)
     .execute(database.pool())
     .await?;
