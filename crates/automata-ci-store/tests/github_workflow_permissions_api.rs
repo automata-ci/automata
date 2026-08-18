@@ -1,7 +1,7 @@
 use crate::{github_manifest_fixture, github_provider_manifest_api};
 
+use automata_ci_actions_permissions::ActionsDefaultWorkflowPermission;
 use automata_ci_core::{Sha256Digest, UnixMillis};
-use automata_ci_github_permissions::GithubDefaultWorkflowPermission;
 use automata_ci_store::{
     FinalizeGithubWorkflowPermissionObservation, GithubProviderManifest,
     GithubServerServiceAppClientId, GithubServerServiceAuthorityId,
@@ -36,7 +36,7 @@ fn candidate_is_fresh_exact_and_rejects_every_authority_identity_disagreement() 
     assert_eq!(first.consumer().consumer_id(), first.observation_id());
     assert_eq!(
         first.expected_default(),
-        GithubDefaultWorkflowPermission::Read
+        ActionsDefaultWorkflowPermission::Read
     );
     assert_eq!(first.expires_at(), UnixMillis::new(370_000));
 
@@ -82,7 +82,7 @@ fn observation_and_finalization_bind_release_generation_time_outcome_and_bootstr
         observation_candidate.clone(),
         &exact_release,
         generation,
-        GithubDefaultWorkflowPermission::Read,
+        ActionsDefaultWorkflowPermission::Read,
         false,
         UnixMillis::new(20_100),
     )
@@ -92,7 +92,7 @@ fn observation_and_finalization_bind_release_generation_time_outcome_and_bootstr
         observation_candidate.clone(),
         &exact_release,
         generation,
-        GithubDefaultWorkflowPermission::Read,
+        ActionsDefaultWorkflowPermission::Read,
         true,
         UnixMillis::new(20_100),
     )
@@ -102,7 +102,7 @@ fn observation_and_finalization_bind_release_generation_time_outcome_and_bootstr
         observation_candidate.clone(),
         &exact_release,
         generation,
-        GithubDefaultWorkflowPermission::Write,
+        ActionsDefaultWorkflowPermission::Write,
         false,
         UnixMillis::new(20_100),
     )
@@ -112,7 +112,7 @@ fn observation_and_finalization_bind_release_generation_time_outcome_and_bootstr
         observation_candidate.clone(),
         &exact_release,
         generation,
-        GithubDefaultWorkflowPermission::Read,
+        ActionsDefaultWorkflowPermission::Read,
         false,
         UnixMillis::new(20_101),
     )
@@ -122,7 +122,7 @@ fn observation_and_finalization_bind_release_generation_time_outcome_and_bootstr
         observation_candidate.clone(),
         &exact_release,
         GithubServerServiceGeneration::new(4).expect("generation"),
-        GithubDefaultWorkflowPermission::Read,
+        ActionsDefaultWorkflowPermission::Read,
         false,
         UnixMillis::new(20_100),
     )
@@ -133,7 +133,7 @@ fn observation_and_finalization_bind_release_generation_time_outcome_and_bootstr
         observation_candidate.clone(),
         &later_release,
         generation,
-        GithubDefaultWorkflowPermission::Read,
+        ActionsDefaultWorkflowPermission::Read,
         false,
         UnixMillis::new(20_100),
     )
@@ -176,7 +176,7 @@ fn observation_and_finalization_bind_release_generation_time_outcome_and_bootstr
             observation_candidate.clone(),
             &early_release,
             generation,
-            GithubDefaultWorkflowPermission::Read,
+            ActionsDefaultWorkflowPermission::Read,
             false,
             UnixMillis::new(20_100),
         ),
@@ -202,7 +202,7 @@ fn observation_and_finalization_bind_release_generation_time_outcome_and_bootstr
             observation_candidate,
             &foreign_release,
             generation,
-            GithubDefaultWorkflowPermission::Read,
+            ActionsDefaultWorkflowPermission::Read,
             false,
             UnixMillis::new(20_100),
         ),

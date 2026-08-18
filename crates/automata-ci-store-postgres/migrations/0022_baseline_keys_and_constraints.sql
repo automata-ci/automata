@@ -97,20 +97,20 @@ ALTER TABLE ONLY github_check_subjects
 ALTER TABLE ONLY github_membership_snapshots
     ADD CONSTRAINT github_membership_snapshots_primary_key PRIMARY KEY (tenant_id, id);
 
-ALTER TABLE ONLY github_oidc_authorities
-    ADD CONSTRAINT github_oidc_authorities_authority_id_key UNIQUE (authority_id);
+ALTER TABLE ONLY workload_oidc_authorities
+    ADD CONSTRAINT workload_oidc_authorities_authority_id_key UNIQUE (authority_id);
 
-ALTER TABLE ONLY github_oidc_authorities
-    ADD CONSTRAINT github_oidc_authorities_primary_key PRIMARY KEY (attempt_id, fencing_token);
+ALTER TABLE ONLY workload_oidc_authorities
+    ADD CONSTRAINT workload_oidc_authorities_primary_key PRIMARY KEY (attempt_id, fencing_token);
 
-ALTER TABLE ONLY github_oidc_issuance_slots
-    ADD CONSTRAINT github_oidc_issuance_slots_primary_key PRIMARY KEY (authority_id, audience_key_sha256);
+ALTER TABLE ONLY workload_oidc_issuance_slots
+    ADD CONSTRAINT workload_oidc_issuance_slots_primary_key PRIMARY KEY (authority_id, audience_key_sha256);
 
-ALTER TABLE ONLY github_oidc_issuance_slots
-    ADD CONSTRAINT github_oidc_issuance_slots_token_id_key UNIQUE (token_id);
+ALTER TABLE ONLY workload_oidc_issuance_slots
+    ADD CONSTRAINT workload_oidc_issuance_slots_token_id_key UNIQUE (token_id);
 
-ALTER TABLE ONLY github_oidc_key_deadlines
-    ADD CONSTRAINT github_oidc_key_deadlines_primary_key PRIMARY KEY (key_use, key_id);
+ALTER TABLE ONLY workload_oidc_key_deadlines
+    ADD CONSTRAINT workload_oidc_key_deadlines_primary_key PRIMARY KEY (key_use, key_id);
 
 ALTER TABLE ONLY github_organization_membership_observations
     ADD CONSTRAINT github_organization_membership_observations_primary_key PRIMARY KEY (tenant_id, snapshot_id, organization_id);

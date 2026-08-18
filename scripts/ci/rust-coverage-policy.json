@@ -39,8 +39,8 @@
         "crates/automata-ci-auth-postgres/src/",
         "crates/automata-ci-postgres/src/",
         "crates/automata-ci-provisioning-postgres/src/",
-        "crates/automata-ci-results-github/src/cache_postgres.rs",
-        "crates/automata-ci-results-github/src/postgres.rs",
+        "crates/automata-ci-runner-results/src/cache_postgres.rs",
+        "crates/automata-ci-runner-results/src/postgres.rs",
         "crates/automata-ci-runner-auth-postgres/src/",
         "crates/automata-ci-secret-postgres/src/",
         "crates/automata-ci-store-postgres/src/"

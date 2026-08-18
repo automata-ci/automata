@@ -262,7 +262,7 @@ a 10 GiB LRU quota. Artifact deletion, cache management, and physical object
 collection are not implemented. The bounded Buildx/BuildKit session and
 provenance surface is implemented, but cache interoperability is not yet
 production-proven and live CacheService v2 acceptance remains open. See the
-[`automata-ci-results-github` reference](../automata-ci-results-github/README.md)
+[`automata-ci-runner-results` reference](../automata-ci-runner-results/README.md)
 for the tested protocol slices.
 
 ## Results development mode

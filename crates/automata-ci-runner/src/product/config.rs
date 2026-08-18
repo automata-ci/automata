@@ -2837,7 +2837,7 @@ impl RawExecutorProductConfig {
             return Err(RunnerProductConfigError::InvalidExecutor);
         }
         let toolchain = self.toolchain.validate(provider_kind)?;
-        let executor_contract = automata_ci_job_executor_github::GithubJobExecutorConfig::new(
+        let executor_contract = automata_ci_job_executor_actions::ActionsJobExecutorConfig::new(
             resources,
             network,
             root_filesystem,

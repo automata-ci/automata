@@ -1,8 +1,8 @@
 //! Durable provenance for GitHub's effective repository workflow-permission defaults.
 
 use async_trait::async_trait;
+use automata_ci_actions_permissions::ActionsDefaultWorkflowPermission;
 use automata_ci_core::{Sha256Digest, UnixMillis};
-use automata_ci_github_permissions::GithubDefaultWorkflowPermission;
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
@@ -60,7 +60,7 @@ pub struct GithubWorkflowPermissionObservationCandidate {
     policy_revision: GithubServerServiceRevision,
     authority_selector: GithubServerServiceAuthoritySelector,
     authority_identity_digest: Sha256Digest,
-    expected_default: GithubDefaultWorkflowPermission,
+    expected_default: ActionsDefaultWorkflowPermission,
     expected_can_approve_pull_request_reviews: bool,
     consumer: GithubServerServiceConsumerClaim,
     claimed_at: UnixMillis,
@@ -218,7 +218,7 @@ impl GithubWorkflowPermissionObservationCandidate {
         self.authority_identity_digest
     }
     #[must_use]
-    pub const fn expected_default(&self) -> GithubDefaultWorkflowPermission {
+    pub const fn expected_default(&self) -> ActionsDefaultWorkflowPermission {
         self.expected_default
     }
     /// Returns the least-authority repository PR-approval setting required by
@@ -304,7 +304,7 @@ pub struct GithubWorkflowPermissionDefaultsObservation {
     candidate: GithubWorkflowPermissionObservationCandidate,
     handoff_id: GithubServerServiceHandoffId,
     handoff_generation: GithubServerServiceGeneration,
-    default_workflow_permissions: GithubDefaultWorkflowPermission,
+    default_workflow_permissions: ActionsDefaultWorkflowPermission,
     can_approve_pull_request_reviews: bool,
     provider_observed_at: UnixMillis,
     released_at: UnixMillis,
@@ -323,7 +323,7 @@ impl GithubWorkflowPermissionDefaultsObservation {
         candidate: GithubWorkflowPermissionObservationCandidate,
         release: &ReleaseGithubServerServiceHandoff,
         handoff_generation: GithubServerServiceGeneration,
-        default_workflow_permissions: GithubDefaultWorkflowPermission,
+        default_workflow_permissions: ActionsDefaultWorkflowPermission,
         can_approve_pull_request_reviews: bool,
         provider_observed_at: UnixMillis,
     ) -> Result<Self, GithubWorkflowPermissionDefaultsObservationError> {
@@ -364,7 +364,7 @@ impl GithubWorkflowPermissionDefaultsObservation {
         self.handoff_generation
     }
     #[must_use]
-    pub const fn default_workflow_permissions(&self) -> GithubDefaultWorkflowPermission {
+    pub const fn default_workflow_permissions(&self) -> ActionsDefaultWorkflowPermission {
         self.default_workflow_permissions
     }
     #[must_use]

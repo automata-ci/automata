@@ -37,7 +37,7 @@ const INSTALLATION_TOKEN_FRAME_DOMAIN: &[u8] = b"automata-ci/github-installation
 const DEFAULT_REVOKE_RETRY_MILLIS: i64 = 1_000;
 const MAX_PENDING_LIFECYCLE_COMMITS: usize = 1_024;
 const MAX_PENDING_RETRY_DELAY: Duration = Duration::from_mins(1);
-const MAX_GITHUB_RUNTIME_AUTHORITY_LIFECYCLE_BROKERS: usize = 256;
+const MAX_ACTIONS_RUNTIME_AUTHORITY_LIFECYCLE_BROKERS: usize = 256;
 
 /// Exact provider boundary for protected job-authority revocation.
 ///
@@ -125,7 +125,7 @@ impl GithubRuntimeAuthorityLifecycleBrokerRouter {
             configuration_fingerprint,
         ) in entries
         {
-            if routes.len() >= MAX_GITHUB_RUNTIME_AUTHORITY_LIFECYCLE_BROKERS {
+            if routes.len() >= MAX_ACTIONS_RUNTIME_AUTHORITY_LIFECYCLE_BROKERS {
                 return Err(GithubRuntimeAuthorityLifecycleBrokerRouterError::TooMany);
             }
             let expected_issuer = match github_app_jwt_issuer_kind {

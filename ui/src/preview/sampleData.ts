@@ -458,7 +458,7 @@ function createLogRecords(job: Omit<JobModel, "href">): readonly LiveLogRecord[]
         job.status.tone === "failure"
           ? "error: workspace test failed"
           : job.status.tone === "running"
-            ? "Compiling automata-ci-job-executor-github"
+            ? "Compiling automata-ci-job-executor-actions"
             : "Finished release build and workspace tests",
     },
   ];

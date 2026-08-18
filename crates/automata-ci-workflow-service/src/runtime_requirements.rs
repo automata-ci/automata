@@ -4,7 +4,7 @@ use std::{collections::BTreeMap, future::Future, pin::Pin, sync::Arc};
 
 use automata_ci_action_actions::JavascriptRuntime;
 use automata_ci_core::{ActionReference, RunnerFeature};
-use automata_ci_job_executor_github::{
+use automata_ci_job_executor_actions::{
     ActionPreparationErrorKind, ActionPreparationPort, ActionPreparationRequest, PreparedAction,
     PreparedActionExecution, PreparedCompositeStep, PreparedValue, static_shell_requirement,
 };
@@ -174,7 +174,7 @@ fn discover_repository_action<'a>(
 }
 
 fn classify_preparation_error(
-    error: automata_ci_job_executor_github::ActionPreparationError,
+    error: automata_ci_job_executor_actions::ActionPreparationError,
 ) -> RuntimeRequirementDiscoveryError {
     match error.kind() {
         ActionPreparationErrorKind::Resolution
@@ -218,7 +218,7 @@ mod tests {
     use async_trait::async_trait;
     use automata_ci_action_actions::{GithubActionMetadataDecoder, JavascriptRuntime};
     use automata_ci_core::Sha256Digest;
-    use automata_ci_job_executor_github::{
+    use automata_ci_job_executor_actions::{
         CheckedOutLocalActionPreparer, LocalActionPreparationRequest, PreparedActionDefinition,
         PreparedJavascriptAction,
     };
@@ -242,12 +242,12 @@ mod tests {
         async fn prepare(
             &self,
             request: ActionPreparationRequest<'_>,
-        ) -> Result<PreparedAction, automata_ci_job_executor_github::ActionPreparationError>
+        ) -> Result<PreparedAction, automata_ci_job_executor_actions::ActionPreparationError>
         {
             let key = action_reference_key(request.reference());
             self.calls.lock().expect("calls").push(key.clone());
             self.prepared.get(&key).cloned().ok_or_else(|| {
-                automata_ci_job_executor_github::ActionPreparationError::new(
+                automata_ci_job_executor_actions::ActionPreparationError::new(
                     ActionPreparationErrorKind::Resolution,
                 )
             })

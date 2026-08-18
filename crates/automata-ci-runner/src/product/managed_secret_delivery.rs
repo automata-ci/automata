@@ -5,8 +5,8 @@ use automata_ci_auth::secret::{SecretString, SecureRandom};
 use std::collections::BTreeMap;
 
 use automata_ci_core::{RunnerId, SecretBinding};
-use automata_ci_job_executor_github::{
-    EphemeralJobSecret, EphemeralJobSecrets, GithubJobExecutor, SecretCustodyAcknowledger,
+use automata_ci_job_executor_actions::{
+    ActionsJobExecutor, EphemeralJobSecret, EphemeralJobSecrets, SecretCustodyAcknowledger,
 };
 use automata_ci_protocol::ManagedSecretBindingOverlay;
 use automata_ci_runner_runtime::{
@@ -29,7 +29,7 @@ const MAX_EXCHANGE_ATTEMPTS: usize = 3;
 /// Execution-scoped managed-secret delivery in front of the secretless base executor.
 pub(super) struct ManagedSecretJobExecutor {
     runner_id: RunnerId,
-    base: Arc<GithubJobExecutor>,
+    base: Arc<ActionsJobExecutor>,
     client: Arc<dyn RunnerEphemeralClient>,
     random: Arc<dyn SecureRandom>,
 }
@@ -37,7 +37,7 @@ pub(super) struct ManagedSecretJobExecutor {
 impl ManagedSecretJobExecutor {
     pub(super) fn new(
         runner_id: RunnerId,
-        base: Arc<GithubJobExecutor>,
+        base: Arc<ActionsJobExecutor>,
         client: Arc<dyn RunnerEphemeralClient>,
         random: Arc<dyn SecureRandom>,
     ) -> Self {
@@ -362,7 +362,7 @@ mod tests {
     use automata_ci_core::{
         AttemptId, FencingToken, Lease, LeaseId, RunnerId, SecretBinding, UnixMillis,
     };
-    use automata_ci_job_executor_github::SecretPort as _;
+    use automata_ci_job_executor_actions::SecretPort as _;
     use automata_ci_runner_transport::{
         EphemeralClientFuture, ManagedSecretDeliveryValue, RunnerEphemeralResponse,
     };

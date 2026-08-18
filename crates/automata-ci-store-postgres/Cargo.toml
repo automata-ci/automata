@@ -22,7 +22,7 @@ automata-ci-blob.workspace = true
 automata-ci-control = { workspace = true, features = ["adapter-spi"] }
 automata-ci-core.workspace = true
 automata-ci-key-management.workspace = true
-automata-ci-oidc-github.workspace = true
+automata-ci-workload-oidc.workspace = true
 automata-ci-provider.workspace = true
 automata-ci-schedule.workspace = true
 automata-ci-store = { workspace = true, features = ["adapter-spi"] }

@@ -42,7 +42,6 @@ mod event_subject;
 mod g1;
 mod github_checks;
 mod github_job_runtime_authority;
-mod github_oidc;
 mod github_provider_manifest;
 mod github_schedule;
 mod github_service_authority;
@@ -77,18 +76,19 @@ mod workflow_enable_state;
 mod workflow_rerun;
 mod workflow_run_trust_snapshot;
 mod workflow_runtime_policy;
+mod workload_oidc;
 
 pub use connection::{
     MAX_POSTGRES_PRIVATE_CA_PEM_BYTES, PostgresConnectionConfig, PostgresConnectionConfigError,
     PostgresTransportSecurity,
 };
-pub use github_oidc::{
-    PostgresGithubOidcAuthorityRepository, PostgresGithubOidcIssuanceRepository,
-};
 pub use live_log_ticket::PostgresLiveLogTicketRepository;
 pub use log_notifications::PostgresLogCommitListener;
 pub use secret_custody::PostgresSecretCustodyRepository;
 pub use secret_management::PostgresSecretManagementRepository;
+pub use workload_oidc::{
+    PostgresWorkloadOidcAuthorityRepository, PostgresWorkloadOidcIssuanceRepository,
+};
 
 /// Failures specific to configuring or migrating the `PostgreSQL` adapter.
 ///

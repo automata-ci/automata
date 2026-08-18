@@ -13,10 +13,10 @@ use automata_ci_blob_s3::{
 };
 use automata_ci_core::{ContainerCapabilities, ContainerFeature, RunnerCapabilities};
 use automata_ci_execution::{ProviderCapabilities, SandboxCapability};
-use automata_ci_job_executor_github::{
-    ActionPreparationPort, DeterministicOperationIds, GithubJobExecutor, GithubJobExecutorConfig,
-    GithubJobExecutorPorts, ImmutableJobContent, ImmutableSandboxEnvironmentCatalog,
-    NoRepositoryCredentials, NoSecrets, ResolvedBundleActionPreparer, StaticGithubToolchain,
+use automata_ci_job_executor_actions::{
+    ActionPreparationPort, ActionsJobExecutor, ActionsJobExecutorConfig, ActionsJobExecutorPorts,
+    DeterministicOperationIds, ImmutableJobContent, ImmutableSandboxEnvironmentCatalog,
+    NoRepositoryCredentials, NoSecrets, ResolvedBundleActionPreparer, StaticActionsToolchain,
     SystemExecutionClock,
 };
 use automata_ci_protocol::ProtocolLimits;
@@ -1264,7 +1264,7 @@ fn build_executor(
         config.executor(),
         config.github().clone(),
     )?);
-    let executor_config = GithubJobExecutorConfig::new(
+    let executor_config = ActionsJobExecutorConfig::new(
         config.executor().resources(),
         config.executor().network(),
         config.executor().root_filesystem(),
@@ -1273,9 +1273,9 @@ fn build_executor(
         config.executor().maximum_output_bytes(),
         config.executor().runner_root().clone(),
     )?;
-    let executor = Arc::new(GithubJobExecutor::new(
+    let executor = Arc::new(ActionsJobExecutor::new(
         executor_config,
-        GithubJobExecutorPorts::new(
+        ActionsJobExecutorPorts::new(
             provider,
             environments,
             action_preparer,
@@ -1379,12 +1379,12 @@ fn load_s3_private_ca(certificate_source: &SecretSource) -> Result<S3TlsTrust, R
 #[allow(clippy::too_many_lines)]
 fn build_toolchain(
     config: &RunnerProductConfig,
-) -> Result<StaticGithubToolchain, RunnerProductError> {
+) -> Result<StaticActionsToolchain, RunnerProductError> {
     let configured = config.executor().toolchain();
     let mut toolchain = match config.provider() {
         RunnerProviderConfig::Podman(_)
         | RunnerProviderConfig::LocalDocker(_)
-        | RunnerProviderConfig::Kubernetes(_) => StaticGithubToolchain::new(
+        | RunnerProviderConfig::Kubernetes(_) => StaticActionsToolchain::new(
             configured
                 .bash()
                 .ok_or(RunnerProductError::ProviderConfiguration)?
@@ -1406,7 +1406,7 @@ fn build_toolchain(
                 .ok_or(RunnerProductError::ProviderConfiguration)?
                 .clone(),
         )?,
-        RunnerProviderConfig::WindowsHyperV(_) => StaticGithubToolchain::windows(
+        RunnerProviderConfig::WindowsHyperV(_) => StaticActionsToolchain::windows(
             configured
                 .pwsh()
                 .ok_or(RunnerProductError::ProviderConfiguration)?
@@ -1420,7 +1420,7 @@ fn build_toolchain(
                 .ok_or(RunnerProductError::ProviderConfiguration)?
                 .clone(),
         )?,
-        RunnerProviderConfig::MacosVirtualization(_) => StaticGithubToolchain::macos(
+        RunnerProviderConfig::MacosVirtualization(_) => StaticActionsToolchain::macos(
             configured
                 .bash()
                 .ok_or(RunnerProductError::ProviderConfiguration)?
@@ -1668,13 +1668,13 @@ pub enum RunnerProductError {
     Github(#[from] automata_ci_github::GithubHttpConfigurationError),
     /// GitHub action preparation composition failed.
     #[error("runner action preparation configuration failed")]
-    ActionPreparation(#[from] automata_ci_job_executor_github::ActionPreparationError),
+    ActionPreparation(#[from] automata_ci_job_executor_actions::ActionPreparationError),
     /// GitHub executor port configuration failed.
     #[error("runner executor port configuration failed")]
-    ExecutorPort(#[from] automata_ci_job_executor_github::PortError),
+    ExecutorPort(#[from] automata_ci_job_executor_actions::PortError),
     /// GitHub executor policy failed validation.
     #[error("runner executor policy configuration failed")]
-    ExecutorConfiguration(#[from] automata_ci_job_executor_github::GithubJobExecutorConfigError),
+    ExecutorConfiguration(#[from] automata_ci_job_executor_actions::ActionsJobExecutorConfigError),
     /// Runner session runtime policy failed validation.
     #[error("runner session runtime configuration failed")]
     RuntimeConfiguration(#[from] automata_ci_runner_runtime::RunnerRuntimeConfigError),
@@ -1718,7 +1718,7 @@ mod tests {
     use std::{fs, os::unix::fs::PermissionsExt as _, path::PathBuf};
 
     #[cfg(target_os = "windows")]
-    use automata_ci_job_executor_github::GithubToolchain as _;
+    use automata_ci_job_executor_actions::ActionsToolchain as _;
     use automata_ci_metrics::OPENMETRICS_CONTENT_TYPE;
 
     #[cfg(unix)]

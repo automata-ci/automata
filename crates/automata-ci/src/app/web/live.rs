@@ -11,7 +11,7 @@ use automata_ci_core::{
     LogGroupKind as CoreLogGroupKind, LogRecord as CoreLogRecord, LogSequence, LogStreamId, RunId,
     Sha256Digest, UnixMillis, WorkflowId,
 };
-use automata_ci_results_github::{
+use automata_ci_runner_results::{
     ARTIFACT_MANIFEST_MEDIA_TYPE, ArtifactManifest, MAXIMUM_ARTIFACT_MANIFEST_BYTES,
 };
 use automata_ci_store::{
@@ -4461,7 +4461,7 @@ mod tests {
             BlobKey, BlobPayload, ImmutableBlobStore, MediaType, MemoryBlobStore,
         };
         use automata_ci_core::{AttemptId, JobId, RunId, Sha256Digest};
-        use automata_ci_results_github::{
+        use automata_ci_runner_results::{
             ARTIFACT_MANIFEST_MEDIA_TYPE, ARTIFACT_MANIFEST_SCHEMA_VERSION, ArtifactManifest,
         };
         use automata_ci_store::{

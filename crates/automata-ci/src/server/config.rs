@@ -32,13 +32,13 @@ use automata_ci_key_management::{
 use automata_ci_provisioning::{
     DelegatedActorIssuer, ProvisioningAuthority, ProvisioningAuthorityId, ShardId,
 };
-use automata_ci_results_github::ResultsPublicEndpoint;
+use automata_ci_runner_results::ResultsPublicEndpoint;
 use automata_ci_store_postgres::{MAX_POSTGRES_PRIVATE_CA_PEM_BYTES, PostgresTransportSecurity};
 
 use crate::cli::{DatabaseTransport, S3ConnectionArgs, S3TlsTrustMode, ServerArgs};
 
 use super::{
-    github_oidc::GithubOidcConfig, windows_runner_admission::WindowsRunnerAdmissionPolicy,
+    windows_runner_admission::WindowsRunnerAdmissionPolicy, workload_oidc::WorkloadOidcConfig,
 };
 
 const MAX_SOURCE_REFERENCE_BYTES: usize = 4_096;
@@ -331,7 +331,7 @@ pub struct ServerConfig {
     pub(crate) results_public_endpoint: ResultsPublicEndpoint,
     pub(crate) results_signing_key: SecretSource,
     pub(crate) results_key_id: String,
-    pub(crate) github_oidc: Option<GithubOidcConfig>,
+    pub(crate) workload_oidc: Option<WorkloadOidcConfig>,
     pub(crate) windows_runner_admission: Option<WindowsRunnerAdmissionPolicy>,
     pub(crate) database_url: SecretSource,
     pub(crate) database_max_connections: u32,
@@ -791,12 +791,12 @@ impl ServerConfig {
             return Err(ServerConfigError::InvalidMaintenancePolicy);
         }
         let (results_public_endpoint, results_key_id) = results_configuration(args)?;
-        let github_oidc = args
-            .github_oidc_config_source
+        let workload_oidc = args
+            .workload_oidc_config_source
             .as_ref()
-            .map(|source| GithubOidcConfig::load(source, &results_public_endpoint))
+            .map(|source| WorkloadOidcConfig::load(source, &results_public_endpoint))
             .transpose()
-            .map_err(|_| ServerConfigError::InvalidGithubOidcConfiguration)?;
+            .map_err(|_| ServerConfigError::InvalidWorkloadOidcConfiguration)?;
         let windows_runner_admission = windows_runner_admission_configuration(args)?;
         let human_auth = human_auth_configuration(args)?;
         let conformance_export_token = conformance_export_configuration(args, human_auth.as_ref())?;
@@ -826,7 +826,7 @@ impl ServerConfig {
             results_public_endpoint,
             results_signing_key: args.results_signing_key_source.clone(),
             results_key_id,
-            github_oidc,
+            workload_oidc,
             windows_runner_admission,
             database_url: args.database_url_source.clone(),
             database_max_connections: args.database_max_connections,
@@ -891,8 +891,8 @@ impl ServerConfig {
     }
 
     /// Returns the complete OIDC configuration only when its strict manifest is enabled.
-    pub const fn github_oidc(&self) -> Option<&GithubOidcConfig> {
-        self.github_oidc.as_ref()
+    pub const fn workload_oidc(&self) -> Option<&WorkloadOidcConfig> {
+        self.workload_oidc.as_ref()
     }
 
     /// Returns the independently configured Windows admission trust registry.
@@ -1372,7 +1372,7 @@ fn validate_server_secret_sources(args: &ServerArgs) -> Result<(), ServerConfigE
         &args.runner_server_key_source,
     ];
     let optional = [
-        args.github_oidc_config_source.as_ref(),
+        args.workload_oidc_config_source.as_ref(),
         args.database_private_ca_source.as_ref(),
         args.windows_runner_admission_config_source.as_ref(),
         args.conformance_export_token_source.as_ref(),
@@ -1495,27 +1495,27 @@ fn results_configuration(
 fn development_results_endpoint(
     args: &ServerArgs,
     results_url: Url,
-) -> Result<ResultsPublicEndpoint, automata_ci_results_github::TokenError> {
+) -> Result<ResultsPublicEndpoint, automata_ci_runner_results::TokenError> {
     if args.results_listen.ip().is_loopback() {
         if args.results_trusted_private_host.is_some() {
-            return Err(automata_ci_results_github::TokenError::Policy);
+            return Err(automata_ci_runner_results::TokenError::Policy);
         }
         return ResultsPublicEndpoint::loopback_development(results_url, args.results_listen);
     }
     let trusted_host = args
         .results_trusted_private_host
         .as_deref()
-        .ok_or(automata_ci_results_github::TokenError::Policy)?;
+        .ok_or(automata_ci_runner_results::TokenError::Policy)?;
     let listener = match args.results_listen {
         SocketAddr::V4(listener) => listener,
-        SocketAddr::V6(_) => return Err(automata_ci_results_github::TokenError::Policy),
+        SocketAddr::V6(_) => return Err(automata_ci_runner_results::TokenError::Policy),
     };
-    automata_ci_results_github::PrivateNetworkResultsEndpoint::new(
+    automata_ci_runner_results::PrivateNetworkResultsEndpoint::new(
         results_url,
         listener,
         trusted_host,
     )
-    .map(automata_ci_results_github::PrivateNetworkResultsEndpoint::into_public_endpoint)
+    .map(automata_ci_runner_results::PrivateNetworkResultsEndpoint::into_public_endpoint)
 }
 
 /// Invalid server deployment configuration.
@@ -1604,8 +1604,8 @@ pub enum ServerConfigError {
     #[error("Results key identity is invalid")]
     InvalidResultsKeyId,
     /// The optional OIDC manifest is incomplete, malformed, excessive, or requires plaintext.
-    #[error("GitHub-compatible OIDC configuration is invalid")]
-    InvalidGithubOidcConfiguration,
+    #[error("Automata workload OIDC configuration is invalid")]
+    InvalidWorkloadOidcConfiguration,
     /// The optional Windows runner admission trust registry is malformed or incoherent.
     #[error("Windows runner admission trust configuration is invalid")]
     InvalidWindowsRunnerAdmissionConfiguration,

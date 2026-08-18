@@ -7,7 +7,7 @@ use crate::migration::MIGRATOR;
 const FROZEN_MIGRATIONS: &[(&str, &str)] = &[
     (
         "0001_baseline_routines_01.sql",
-        "a88f5c285d9d0286eb5f9d3812c06e254ff22ded8041b014ce666f73c29436d92f2ba0ec3633fdb59d779da6918e7a2a",
+        "a87ca5a60542475aedc7efea800900e9d01b0a62115cc5540bb8fe7e61059052fdc046574298eae6cd5c07d06af9c9d9",
     ),
     (
         "0002_baseline_routines_02.sql",
@@ -15,7 +15,7 @@ const FROZEN_MIGRATIONS: &[(&str, &str)] = &[
     ),
     (
         "0003_baseline_routines_03.sql",
-        "6094bc86a6b041c70c8cfd3e04d202bf03272e94b39ea7131b61e7c67e30a6bb307a89771a3325e4a15a2b215237381f",
+        "bef084a13e1c66864b5c8e9a650aa049f3c89629937912c23c8849e68e4f3b300138915e2a042759cae1a298e55e70aa",
     ),
     (
         "0004_baseline_routines_04.sql",
@@ -35,7 +35,7 @@ const FROZEN_MIGRATIONS: &[(&str, &str)] = &[
     ),
     (
         "0008_baseline_routines_08.sql",
-        "bd208061cc3d0c296656fd50514fbbf6b2bca8eb6d7b8e07d25c2892923295f4b63348383b1b0fed8656c5d04da51def",
+        "82386623c855924c858ceb37aa1d8211201d6dffb227b704ff2e162e505113d8d57eda9292f47d281007e57e0b727f10",
     ),
     (
         "0009_baseline_routines_09.sql",
@@ -43,7 +43,7 @@ const FROZEN_MIGRATIONS: &[(&str, &str)] = &[
     ),
     (
         "0010_baseline_routines_10.sql",
-        "5e1c67bd3d713fc9521d147a31fd0965c18f2f86ee27f4ac899c0db239e33f3d11e212ee6004877aa2c7c59b23229a86",
+        "d953914f0abe887f7654461afea8f7a3256309e6cf91bd1dd9a9f9fcfabfe14009623f1ac8e68ad0cffe87b3eaa170b6",
     ),
     (
         "0011_baseline_routines_11.sql",
@@ -51,7 +51,7 @@ const FROZEN_MIGRATIONS: &[(&str, &str)] = &[
     ),
     (
         "0012_baseline_routines_12.sql",
-        "22fe7a4a46350513482df3c314e700c0bc677087edbcb6510cbf45e9ed6020fb7ed6f30da0fb9a5bc8755e83a04f5042",
+        "99d8d42d04536b63d859eeb45e9242c5e08cca6f58b84fca3561b0c54db1205ad04618fd37bdce4b202615a29fba8b6f",
     ),
     (
         "0013_baseline_routines_13.sql",
@@ -71,7 +71,7 @@ const FROZEN_MIGRATIONS: &[(&str, &str)] = &[
     ),
     (
         "0017_baseline_relations_execution.sql",
-        "9d80766241d5b07160607c4e90fcd30d9ee2ac341e89576f1033fd7072e466c0364a10a4479e8eb919bb39979a1603b9",
+        "8be21af9791391f24af6cdeb4eb15d015e2b6a6dbe636c37c6ac32e14993421daf868e9e62e181c2d3e25fafc21e8d35",
     ),
     (
         "0018_baseline_relations_auth_and_delivery.sql",
@@ -91,15 +91,15 @@ const FROZEN_MIGRATIONS: &[(&str, &str)] = &[
     ),
     (
         "0022_baseline_keys_and_constraints.sql",
-        "811561232385a17a9630e8534d98e0538af044ce0ec09f3abddb33a992301245264ceaf16831a92056c2bd82843340d7",
+        "ec02472313cf642e0ef9d7cdce21e2a81c0d402b8136c20cf3a6530a60330412a901e1e6f283bd25355e2afce5a37a5d",
     ),
     (
         "0023_baseline_indexes.sql",
-        "9b45a8ae13c283e0b42848782e912df82b0712b9cfdccf7656260cd23151ad27520e2c6e9ed9b65d70a98ca4ab338b59",
+        "110c483fdd8ef2a06b3550188bc96c2e559221cdb6ef00c14b5c6a72f98029d1519c0c0da15ba33ef1e4182728f64739",
     ),
     (
         "0024_baseline_triggers_control_plane.sql",
-        "b297b80748236be8b1bb1c1793de1d24be4b24bddb1ae628a93cca616457027658fc582c0560500e7331ce02e0a6a7ef",
+        "973e2681a8c3c19c08a5d4946b4ba47d5fb320eada4a702d4199a1b1a24cca2b349b5c6cdd33a9c4da919389d7b4e94d",
     ),
     (
         "0025_baseline_triggers_orchestration.sql",
@@ -107,7 +107,7 @@ const FROZEN_MIGRATIONS: &[(&str, &str)] = &[
     ),
     (
         "0026_baseline_foreign_keys.sql",
-        "57e7e93dcdc0ee7568393785b30774259dcf5300f9a8df99ac7795d9799c60b97dec36479976ae99e5c4bd320080a977",
+        "e13d7290bcc04f62ab507d1c53c40e69d2fd9f6b322d5bccf9d0afb1c10026ed2e057e1c0500b1e737ec5bb6c26a7252",
     ),
     (
         "0027_workspace_usage_feed.sql",

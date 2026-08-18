@@ -248,7 +248,7 @@ fn runtime_authority_bundle_rejects_forward_schema() {
         panic!("fixture produced a different server message")
     };
     let authority = JobRuntimeAuthority::new(
-        RuntimeAuthorityName::new("github-actions-results").expect("authority name"),
+        RuntimeAuthorityName::new("runner-results").expect("authority name"),
         offer.job().job().run_id(),
         offer.job().job().job_id(),
         offer.lease().attempt_id(),

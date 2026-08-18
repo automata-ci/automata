@@ -5,13 +5,13 @@
 
 pub mod attempt;
 pub mod cancellation;
-pub mod github_oidc;
 pub mod lease;
 pub mod maintenance;
 pub mod observability;
 pub mod runner_auth;
 pub mod runner_control;
 pub mod scheduling;
+pub mod workload_oidc;
 
 /// Unstable construction and inspection hooks for Automata's first-party
 /// durable adapters.

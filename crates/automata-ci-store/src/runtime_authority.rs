@@ -55,7 +55,7 @@ pub const MAX_GITHUB_AUTHORITY_MINT_ATTEMPTS: u16 = 32;
 /// Maximum number of provider revocation attempts before conservative expiry.
 pub const MAX_GITHUB_AUTHORITY_REVOKE_ATTEMPTS: u16 = 64;
 /// Maximum protected runtime-authority plaintext size.
-pub const MAX_GITHUB_RUNTIME_AUTHORITY_PLAINTEXT_BYTES: u64 = 64 * 1024;
+pub const MAX_ACTIONS_RUNTIME_AUTHORITY_PLAINTEXT_BYTES: u64 = 64 * 1024;
 /// Maximum records changed by one reconciliation transaction.
 pub const MAX_GITHUB_AUTHORITY_RECONCILE_BATCH: u16 = 512;
 
@@ -899,7 +899,7 @@ impl GithubRuntimeAuthorityEnvelopeMetadata {
             }
         }
         if plaintext_size_bytes == 0
-            || plaintext_size_bytes > MAX_GITHUB_RUNTIME_AUTHORITY_PLAINTEXT_BYTES
+            || plaintext_size_bytes > MAX_ACTIONS_RUNTIME_AUTHORITY_PLAINTEXT_BYTES
         {
             return Err(GithubRuntimeAuthorityValueError::InvalidProtectedPayloadSize);
         }

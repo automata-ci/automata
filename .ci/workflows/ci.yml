@@ -67,8 +67,8 @@ jobs:
             -p automata-ci-control \
             -p automata-ci-core \
             -p automata-ci-github-delivery \
-            -p automata-ci-job-executor-github \
-            -p automata-ci-results-github \
+            -p automata-ci-job-executor-actions \
+            -p automata-ci-runner-results \
             -p automata-ci-runner-runtime \
             -p automata-ci-sandbox-podman \
             -p automata-ci-store-postgres \

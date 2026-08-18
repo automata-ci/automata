@@ -21,7 +21,7 @@ use automata_ci_core::{
     UnixMillis, WorkflowEventProvenance, WorkflowId, WorkflowJobKey, WorkflowOutputKey,
     WorkflowPlan,
 };
-use automata_ci_job_executor_github::{
+use automata_ci_job_executor_actions::{
     ActionPreparationError, ActionPreparationErrorKind, ActionPreparationPort,
     ActionPreparationRequest, PreparedAction, PreparedActionDefinition, PreparedActionExecution,
     PreparedBoolean, PreparedCompositeAction, PreparedCompositeStep, PreparedCompositeStepMetadata,

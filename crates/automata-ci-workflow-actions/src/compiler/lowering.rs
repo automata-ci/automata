@@ -1,9 +1,9 @@
 //! Shared semantic lowering helpers for the current logical workflow plan.
 
-use automata_ci_core::{Located, PermissionGrant, WorkflowJobKey, WorkflowPermissions};
-use automata_ci_github_permissions::{
-    GITHUB_WORKFLOW_PERMISSION_CATALOG_REVISION, github_workflow_permission,
+use automata_ci_actions_permissions::{
+    ACTIONS_WORKFLOW_PERMISSION_CATALOG_REVISION, actions_workflow_permission,
 };
+use automata_ci_core::{Located, PermissionGrant, WorkflowJobKey, WorkflowPermissions};
 
 use crate::{Needs, PermissionLevel, Permissions, Spanned};
 
@@ -45,11 +45,11 @@ pub(super) fn compile_permissions(
             let grants = entries
                 .iter()
                 .filter_map(|entry| {
-                    let Some(permission) = github_workflow_permission(entry.name().value()) else {
+                    let Some(permission) = actions_workflow_permission(entry.name().value()) else {
                         context.semantic(
                             "github.compile.unknown_permission",
                             format!(
-                                "permission `{}` is not present in GitHub workflow permission catalog revision {GITHUB_WORKFLOW_PERMISSION_CATALOG_REVISION}",
+                                "permission `{}` is not present in GitHub workflow permission catalog revision {ACTIONS_WORKFLOW_PERMISSION_CATALOG_REVISION}",
                                 entry.name().value()
                             ),
                             entry.name().span().clone(),
@@ -65,7 +65,7 @@ pub(super) fn compile_permissions(
                         context.semantic(
                             "github.compile.invalid_permission_level",
                             format!(
-                                "permission `{}` uses a level unavailable in GitHub workflow permission catalog revision {GITHUB_WORKFLOW_PERMISSION_CATALOG_REVISION}",
+                                "permission `{}` uses a level unavailable in GitHub workflow permission catalog revision {ACTIONS_WORKFLOW_PERMISSION_CATALOG_REVISION}",
                                 entry.name().value()
                             ),
                             entry.level().span().clone(),

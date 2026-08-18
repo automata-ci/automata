@@ -5,8 +5,8 @@ use automata_ci_control::runner_control::capability_admission::{
 #[test]
 fn readiness_is_fail_closed_until_each_optional_product_is_proved_ready() {
     let unavailable = RunnerCapabilityReadiness::unavailable();
-    assert!(!unavailable.github_oidc());
-    assert!(unavailable.with_github_oidc().github_oidc());
+    assert!(!unavailable.workload_oidc());
+    assert!(unavailable.with_workload_oidc().workload_oidc());
 }
 
 #[test]

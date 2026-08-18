@@ -15,14 +15,14 @@ members = [
     "crates/automata-ci-execution",
     "crates/automata-ci-expression-actions",
     "crates/automata-ci-github",
-    "crates/automata-ci-github-permissions",
+    "crates/automata-ci-actions-permissions",
     "crates/automata-ci-github-delivery",
-    "crates/automata-ci-github-runtime",
-    "crates/automata-ci-job-executor-github",
+    "crates/automata-ci-actions-runtime",
+    "crates/automata-ci-job-executor-actions",
     "crates/automata-ci-key-management",
     "crates/automata-ci-local",
     "crates/automata-ci-metrics",
-    "crates/automata-ci-oidc-github",
+    "crates/automata-ci-workload-oidc",
     "crates/automata-ci-postgres",
     "crates/automata-ci-provider",
     "crates/automata-ci-provider-postgres",
@@ -31,7 +31,7 @@ members = [
     "crates/automata-ci-provisioning",
     "crates/automata-ci-provisioning-grpc",
     "crates/automata-ci-provisioning-postgres",
-    "crates/automata-ci-results-github",
+    "crates/automata-ci-runner-results",
     "crates/automata-ci-runner",
     "crates/automata-ci-runner-auth-postgres",
     "crates/automata-ci-runner-journal",
@@ -92,14 +92,14 @@ automata-ci-credential-github = { path = "crates/automata-ci-credential-github",
 automata-ci-execution = { path = "crates/automata-ci-execution", version = "0.1.0" }
 automata-ci-expression-actions = { path = "crates/automata-ci-expression-actions", version = "0.1.0" }
 automata-ci-github = { path = "crates/automata-ci-github", version = "0.1.0" }
-automata-ci-github-permissions = { path = "crates/automata-ci-github-permissions", version = "0.1.0" }
+automata-ci-actions-permissions = { path = "crates/automata-ci-actions-permissions", version = "0.1.0" }
 automata-ci-github-delivery = { path = "crates/automata-ci-github-delivery", version = "0.1.0" }
-automata-ci-github-runtime = { path = "crates/automata-ci-github-runtime", version = "0.1.0" }
-automata-ci-job-executor-github = { path = "crates/automata-ci-job-executor-github", version = "0.1.0" }
+automata-ci-actions-runtime = { path = "crates/automata-ci-actions-runtime", version = "0.1.0" }
+automata-ci-job-executor-actions = { path = "crates/automata-ci-job-executor-actions", version = "0.1.0" }
 automata-ci-key-management = { path = "crates/automata-ci-key-management", version = "0.1.0" }
 automata-ci-local = { path = "crates/automata-ci-local", version = "0.1.0" }
 automata-ci-metrics = { path = "crates/automata-ci-metrics", version = "0.1.0" }
-automata-ci-oidc-github = { path = "crates/automata-ci-oidc-github", version = "0.1.0" }
+automata-ci-workload-oidc = { path = "crates/automata-ci-workload-oidc", version = "0.1.0" }
 automata-ci-postgres = { path = "crates/automata-ci-postgres", version = "0.1.0" }
 automata-ci-provider = { path = "crates/automata-ci-provider", version = "0.1.0" }
 automata-ci-provider-postgres = { path = "crates/automata-ci-provider-postgres", version = "0.1.0" }
@@ -108,7 +108,7 @@ automata-ci-protocol-protobuf = { path = "crates/automata-ci-protocol-protobuf",
 automata-ci-provisioning = { path = "crates/automata-ci-provisioning", version = "0.1.0" }
 automata-ci-provisioning-grpc = { path = "crates/automata-ci-provisioning-grpc", version = "0.1.0" }
 automata-ci-provisioning-postgres = { path = "crates/automata-ci-provisioning-postgres", version = "0.1.0" }
-automata-ci-results-github = { path = "crates/automata-ci-results-github", version = "0.1.0" }
+automata-ci-runner-results = { path = "crates/automata-ci-runner-results", version = "0.1.0" }
 automata-ci-runner-auth-postgres = { path = "crates/automata-ci-runner-auth-postgres", version = "0.1.0" }
 automata-ci-runner-journal = { path = "crates/automata-ci-runner-journal", version = "0.1.0" }
 automata-ci-runner-runtime = { path = "crates/automata-ci-runner-runtime", version = "0.1.0" }

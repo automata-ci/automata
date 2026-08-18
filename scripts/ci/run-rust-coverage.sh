@@ -156,10 +156,10 @@ run_s3() {
   run_ignored_command cargo test -p automata-ci-action-actions --test live_checkout_pipeline \
     --all-features --locked -- \
     --ignored --test-threads=1
-  run_ignored_command cargo test -p automata-ci-results-github --test rustfs_results \
+  run_ignored_command cargo test -p automata-ci-runner-results --test rustfs_results \
     --all-features --locked -- \
     --ignored --test-threads=1
-  run_ignored_command cargo test -p automata-ci-results-github --test cache_rustfs \
+  run_ignored_command cargo test -p automata-ci-runner-results --test cache_rustfs \
     --all-features --locked -- \
     --ignored --test-threads=1
   run_ignored_command cargo test -p automata-ci-workflow-service --test live_admission \
@@ -183,10 +183,10 @@ run_github_live() {
 }
 
 run_node_live() {
-  run_ignored_command cargo test -p automata-ci-results-github --test http_compatibility \
+  run_ignored_command cargo test -p automata-ci-runner-results --test http_compatibility \
     --all-features --locked -- \
     --ignored --test-threads=1
-  run_ignored_command cargo test -p automata-ci-results-github --test cache_http \
+  run_ignored_command cargo test -p automata-ci-runner-results --test cache_http \
     --all-features --locked -- \
     --ignored --test-threads=1
 }

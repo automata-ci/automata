@@ -23,7 +23,7 @@ use crate::{
     GithubRuntimeAuthorityMintCoordinator,
 };
 
-/// Stable repository credential namespace consumed by the GitHub job executor.
+/// Stable repository credential namespace consumed by the Actions-compatible job executor.
 pub const GITHUB_REPOSITORY_RUNTIME_AUTHORITY: &str = "github-repository";
 /// Durable namespace required on a GitHub repository-token issuance.
 pub const GITHUB_REPOSITORY_AUTHORITY_NAMESPACE: &str = "github.repository";

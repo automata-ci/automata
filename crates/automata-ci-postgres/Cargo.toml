@@ -46,7 +46,7 @@ automata-ci-blob.workspace = true
 automata-ci-control = { workspace = true, features = ["adapter-spi"] }
 automata-ci-core.workspace = true
 automata-ci-key-management.workspace = true
-automata-ci-oidc-github.workspace = true
+automata-ci-workload-oidc.workspace = true
 automata-ci-protocol.workspace = true
 automata-ci-provisioning.workspace = true
 automata-ci-provisioning-postgres.workspace = true

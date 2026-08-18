@@ -1350,31 +1350,38 @@ exit 99
             capture_output=True,
         )
         commands = planned.stdout.splitlines()
-        assert len(commands) == 15, planned.stdout
+        assert len(commands) == 14, planned.stdout
         expected_inventory = [
-            "cargo test --workspace",
-            "-p automata-ci-postgres --test postgres",
-            "-p automata-ci-postgres --lib",
-            "-p automata-ci-results-github --test postgres_artifacts --test postgres_cache",
-            "--test blob_s3",
-            "--test live_github_rustfs",
-            "--test live_checkout_pipeline",
-            "--test rustfs_results",
-            "--test cache_rustfs",
-            "--test live_admission",
-            "--test live_rootless",
-            "podman_probe::tests::",
-            "--test live_repository_snapshot",
-            "--test http_compatibility",
-            "--test cache_http",
+            ("cargo test --workspace",),
+            (
+                "-p automata-ci-postgres",
+                "-p automata-ci-provider-postgres",
+                "-p automata-ci-runner-results",
+                "--test postgres",
+                "--test postgres_artifacts",
+                "--test postgres_cache",
+            ),
+            ("-p automata-ci-postgres --lib",),
+            ("--test blob_s3",),
+            ("--test live_github_rustfs",),
+            ("--test live_checkout_pipeline",),
+            ("--test rustfs_results",),
+            ("--test cache_rustfs",),
+            ("--test live_admission",),
+            ("--test live_rootless",),
+            ("podman_probe::tests::",),
+            ("--test live_repository_snapshot",),
+            ("--test http_compatibility",),
+            ("--test cache_http",),
         ]
-        for expected, command in zip(expected_inventory, commands, strict=True):
-            assert expected in command, command
+        for expected_fragments, command in zip(expected_inventory, commands, strict=True):
+            for expected in expected_fragments:
+                assert expected in command, command
         assert all("--ignored" in command for command in commands[1:])
-        assert "--test-threads=2" in commands[1]
+        assert "--test-threads=4" in commands[1]
         assert "--test-threads=1" in commands[2]
         assert "test_support::tests::" in commands[2]
-        assert "--test-threads=2" in commands[3]
+        assert "--test-threads=1" in commands[3]
         assert "--tests" not in commands[1]
         assert sum(
             command.count("-p automata-ci-postgres-test-support")

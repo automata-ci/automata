@@ -7,14 +7,14 @@ use std::{
 };
 
 use async_trait::async_trait;
+use automata_ci_actions_permissions::{
+    ACTIONS_WORKFLOW_PERMISSIONS, ActionsDefaultWorkflowPermission, actions_workflow_permission,
+};
 use automata_ci_core::{
     Architecture, ContainerFeature, EnvironmentProfile, EnvironmentProfileId, JobPermissionGrant,
     JobPermissionRequest, JobResourcePolicy, MAX_JOB_PERMISSION_GRANTS,
     MAX_JOB_PERMISSION_NAME_BYTES, OperatingSystem, PermissionLevel, RunId, RunnerFeature,
     RunnerLabel, Sha256Digest, UnixMillis,
-};
-use automata_ci_github_permissions::{
-    GITHUB_WORKFLOW_PERMISSIONS, GithubDefaultWorkflowPermission, github_workflow_permission,
 };
 use serde::{
     Deserialize, Deserializer, Serialize,
@@ -117,19 +117,19 @@ impl WorkflowPermissionPolicy {
     /// Returns an error only if the closed catalog can no longer represent
     /// GitHub's restricted or permissive default.
     pub fn from_github_default(
-        provider_default: GithubDefaultWorkflowPermission,
+        provider_default: ActionsDefaultWorkflowPermission,
     ) -> Result<Self, WorkflowRuntimePolicyValueError> {
         Self::from_provider_default(provider_default_permissions(provider_default))
     }
 
     /// Returns which closed GitHub default this policy represents.
     #[must_use]
-    pub fn github_default(&self) -> GithubDefaultWorkflowPermission {
+    pub fn github_default(&self) -> ActionsDefaultWorkflowPermission {
         if self.provider_default == restricted_provider_default() {
-            GithubDefaultWorkflowPermission::Read
+            ActionsDefaultWorkflowPermission::Read
         } else {
             debug_assert_eq!(self.provider_default, catalog_write_all());
-            GithubDefaultWorkflowPermission::Write
+            ActionsDefaultWorkflowPermission::Write
         }
     }
 
@@ -984,7 +984,7 @@ fn validate_permission_map(
 }
 
 fn catalog_read_all() -> BTreeMap<String, PermissionLevel> {
-    GITHUB_WORKFLOW_PERMISSIONS
+    ACTIONS_WORKFLOW_PERMISSIONS
         .iter()
         .copied()
         .filter(|permission| permission.allows_read())
@@ -993,7 +993,7 @@ fn catalog_read_all() -> BTreeMap<String, PermissionLevel> {
 }
 
 fn catalog_write_all() -> BTreeMap<String, PermissionLevel> {
-    GITHUB_WORKFLOW_PERMISSIONS
+    ACTIONS_WORKFLOW_PERMISSIONS
         .iter()
         .copied()
         .filter_map(|permission| {
@@ -1017,11 +1017,11 @@ fn restricted_provider_default() -> BTreeMap<String, PermissionLevel> {
 }
 
 fn provider_default_permissions(
-    provider_default: GithubDefaultWorkflowPermission,
+    provider_default: ActionsDefaultWorkflowPermission,
 ) -> BTreeMap<String, PermissionLevel> {
     match provider_default {
-        GithubDefaultWorkflowPermission::Read => restricted_provider_default(),
-        GithubDefaultWorkflowPermission::Write => catalog_write_all(),
+        ActionsDefaultWorkflowPermission::Read => restricted_provider_default(),
+        ActionsDefaultWorkflowPermission::Write => catalog_write_all(),
     }
 }
 
@@ -1030,7 +1030,7 @@ fn matches_provider_default(provider_default: &BTreeMap<String, PermissionLevel>
 }
 
 fn catalog_allows(name: &str, level: PermissionLevel) -> bool {
-    github_workflow_permission(name).is_some_and(|permission| match level {
+    actions_workflow_permission(name).is_some_and(|permission| match level {
         PermissionLevel::Read => permission.allows_read(),
         PermissionLevel::Write => permission.allows_write(),
         PermissionLevel::None => true,
@@ -1826,7 +1826,7 @@ mod tests {
     #[test]
     fn github_provider_defaults_are_closed_and_round_trip() {
         let restricted =
-            WorkflowPermissionPolicy::from_github_default(GithubDefaultWorkflowPermission::Read)
+            WorkflowPermissionPolicy::from_github_default(ActionsDefaultWorkflowPermission::Read)
                 .expect("restricted GitHub default");
         assert_eq!(
             restricted.provider_default(),
@@ -1837,16 +1837,16 @@ mod tests {
         );
         assert_eq!(
             restricted.github_default(),
-            GithubDefaultWorkflowPermission::Read
+            ActionsDefaultWorkflowPermission::Read
         );
 
         let permissive =
-            WorkflowPermissionPolicy::from_github_default(GithubDefaultWorkflowPermission::Write)
+            WorkflowPermissionPolicy::from_github_default(ActionsDefaultWorkflowPermission::Write)
                 .expect("permissive GitHub default");
         assert_eq!(permissive.provider_default(), permissive.write_all());
         assert_eq!(
             permissive.github_default(),
-            GithubDefaultWorkflowPermission::Write
+            ActionsDefaultWorkflowPermission::Write
         );
 
         for arbitrary_subset in [
@@ -2066,7 +2066,7 @@ mod tests {
     }
 
     fn permission_policy() -> WorkflowPermissionPolicy {
-        WorkflowPermissionPolicy::from_github_default(GithubDefaultWorkflowPermission::Read)
+        WorkflowPermissionPolicy::from_github_default(ActionsDefaultWorkflowPermission::Read)
             .expect("permission policy")
     }
 

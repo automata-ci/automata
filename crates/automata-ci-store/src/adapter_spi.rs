@@ -10,7 +10,7 @@ use automata_ci_core::{
     OutputSensitivity, RunId, Sha256Digest, UnixMillis, WorkflowOutputKey,
 };
 use automata_ci_key_management::KeyId;
-use automata_ci_oidc_github::{
+use automata_ci_workload_oidc::{
     OidcAudience, OidcAuthorityId, OidcClaimSet, OidcKeyId, OidcSubject,
 };
 
@@ -77,14 +77,14 @@ pub fn conformance_delivery(
 /// Rehydrates durable request-bearer coordinates already proven to belong to
 /// the locked authority row.
 #[must_use]
-pub const fn reserved_github_oidc_authority(
+pub const fn reserved_workload_oidc_authority(
     authority_id: OidcAuthorityId,
     request_bearer_key_id: OidcKeyId,
     issued_at_seconds: u64,
     expires_at_seconds: u64,
     request_bearer_sha256: Sha256Digest,
-) -> crate::ReservedGithubOidcAuthority {
-    crate::ReservedGithubOidcAuthority::new(
+) -> crate::ReservedWorkloadOidcAuthority {
+    crate::ReservedWorkloadOidcAuthority::new(
         authority_id,
         request_bearer_key_id,
         issued_at_seconds,
@@ -97,15 +97,15 @@ pub const fn reserved_github_oidc_authority(
 ///
 /// `key_sha256` may be absent only for legacy retained rows written before key
 /// fingerprints became mandatory. New retention requests must continue to use
-/// [`crate::GithubOidcKeyDeadline::from_retention`].
+/// [`crate::WorkloadOidcKeyDeadline::from_retention`].
 #[must_use]
-pub const fn github_oidc_key_deadline(
-    key_use: crate::GithubOidcKeyUse,
+pub const fn workload_oidc_key_deadline(
+    key_use: crate::WorkloadOidcKeyUse,
     key_id: OidcKeyId,
     key_sha256: Option<Sha256Digest>,
     not_after_seconds: u64,
-) -> crate::GithubOidcKeyDeadline {
-    crate::GithubOidcKeyDeadline::new(key_use, key_id, key_sha256, not_after_seconds)
+) -> crate::WorkloadOidcKeyDeadline {
+    crate::WorkloadOidcKeyDeadline::new(key_use, key_id, key_sha256, not_after_seconds)
 }
 
 /// Rechecks the durable repository and digest roots of a decoded manifest.
@@ -508,10 +508,10 @@ pub fn secret_custody_key_set_contains(
 /// Re-derives the canonical OIDC claim-evidence root.
 #[allow(clippy::too_many_arguments)]
 #[must_use]
-pub fn github_oidc_claim_evidence_digest(
+pub fn workload_oidc_claim_evidence_digest(
     permission_evidence_sha256: Sha256Digest,
-    subject_policy_mode: crate::GithubOidcSubjectPolicyMode,
-    subject_policy_revision: crate::GithubOidcSubjectPolicyRevision,
+    subject_policy_mode: crate::WorkloadOidcSubjectPolicyMode,
+    subject_policy_revision: crate::WorkloadOidcSubjectPolicyRevision,
     subject_policy_sha256: Sha256Digest,
     github_run_subject_evidence_sha256: Sha256Digest,
     github_owner_id: u64,
@@ -522,7 +522,7 @@ pub fn github_oidc_claim_evidence_digest(
     request_bearer_verification_skew_seconds: u64,
     id_token_verifier_skew_seconds: u64,
 ) -> Sha256Digest {
-    crate::github_oidc::github_oidc_claim_evidence_digest(
+    crate::workload_oidc::workload_oidc_claim_evidence_digest(
         permission_evidence_sha256,
         subject_policy_mode,
         subject_policy_revision,

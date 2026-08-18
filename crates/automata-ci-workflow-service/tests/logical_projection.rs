@@ -3,6 +3,9 @@ use std::{
     sync::Arc,
 };
 
+use automata_ci_actions_permissions::{
+    ACTIONS_WORKFLOW_PERMISSIONS, ActionsDefaultWorkflowPermission,
+};
 use automata_ci_core::{
     Architecture, ContainerFeature, ContextValue, EnvironmentProfile, EnvironmentProfileId,
     IsolationLevel, JobAuthorityProfile, JobContentReference, JobExecutionContext, JobId,
@@ -15,9 +18,6 @@ use automata_ci_core::{
     WorkflowEventProvenance, WorkflowId, WorkflowJobKey, WorkflowPlan,
 };
 use automata_ci_expression_actions::{GithubObject, GithubValue};
-use automata_ci_github_permissions::{
-    GITHUB_WORKFLOW_PERMISSIONS, GithubDefaultWorkflowPermission,
-};
 use automata_ci_protocol::ProtocolLimits;
 use automata_ci_store::WorkflowPermissionPolicy;
 use automata_ci_workflow_actions::{
@@ -54,7 +54,7 @@ fn resource_policy() -> JobResourcePolicy {
 }
 
 fn permission_policy() -> WorkflowPermissionPolicy {
-    WorkflowPermissionPolicy::from_github_default(GithubDefaultWorkflowPermission::Read)
+    WorkflowPermissionPolicy::from_github_default(ActionsDefaultWorkflowPermission::Read)
         .expect("permission policy")
 }
 
@@ -1528,7 +1528,7 @@ fn assert_projected_permissions(source: &str, expected: &JobPermissionRequest) -
 
 fn catalog_read_all_request() -> JobPermissionRequest {
     JobPermissionRequest::mapping(
-        GITHUB_WORKFLOW_PERMISSIONS
+        ACTIONS_WORKFLOW_PERMISSIONS
             .iter()
             .copied()
             .filter(|permission| permission.allows_read())
@@ -1537,7 +1537,7 @@ fn catalog_read_all_request() -> JobPermissionRequest {
 }
 
 fn catalog_write_all_request() -> JobPermissionRequest {
-    JobPermissionRequest::mapping(GITHUB_WORKFLOW_PERMISSIONS.iter().copied().filter_map(
+    JobPermissionRequest::mapping(ACTIONS_WORKFLOW_PERMISSIONS.iter().copied().filter_map(
         |permission| {
             let level = if permission.allows_write() {
                 PermissionLevel::Write

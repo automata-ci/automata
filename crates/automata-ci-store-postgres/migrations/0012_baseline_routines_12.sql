@@ -1386,72 +1386,72 @@ BEGIN
 END;
 $$;
 
-CREATE FUNCTION automata_validate_github_oidc_authority_insert() RETURNS trigger
+CREATE FUNCTION automata_validate_workload_oidc_authority_insert() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
-    IF NOT automata_lock_github_oidc_authority_dependencies(NEW)
-        OR NOT automata_github_oidc_authority_is_current(
+    IF NOT automata_lock_workload_oidc_authority_dependencies(NEW)
+        OR NOT automata_workload_oidc_authority_is_current(
             NEW, NEW.reserved_at_ms, NEW.reserved_at_ms + 1
         )
     THEN
-        RAISE EXCEPTION 'GitHub-compatible OIDC authority is not current'
+        RAISE EXCEPTION 'Automata workload OIDC authority is not current'
             USING ERRCODE = 'integrity_constraint_violation',
-                  CONSTRAINT = 'github_oidc_authority_current_execution';
+                  CONSTRAINT = 'workload_oidc_authority_current_execution';
     END IF;
     RETURN NEW;
 END;
 $$;
 
-CREATE FUNCTION automata_validate_github_oidc_issuance_slot() RETURNS trigger
+CREATE FUNCTION automata_validate_workload_oidc_issuance_slot() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 DECLARE
-    authority github_oidc_authorities%ROWTYPE;
+    authority workload_oidc_authorities%ROWTYPE;
     slot_count BIGINT;
 BEGIN
     IF NEW.issued_at_seconds > 9223372036854774 THEN
-        RAISE EXCEPTION 'GitHub-compatible OIDC issuance time is out of range'
+        RAISE EXCEPTION 'Automata workload OIDC issuance time is out of range'
             USING ERRCODE = 'integrity_constraint_violation',
-                  CONSTRAINT = 'github_oidc_issuance_current_authority';
+                  CONSTRAINT = 'workload_oidc_issuance_current_authority';
     END IF;
     SELECT * INTO authority
-    FROM github_oidc_authorities
+    FROM workload_oidc_authorities
     WHERE authority_id = NEW.authority_id
     FOR UPDATE;
     IF authority.authority_id IS NULL
-        OR NOT automata_lock_github_oidc_authority_dependencies(authority)
+        OR NOT automata_lock_workload_oidc_authority_dependencies(authority)
         OR NEW.resolved_audience IS DISTINCT FROM coalesce(
             NEW.requested_audience, authority.default_audience
         )
         OR NEW.issued_at_seconds < authority.request_bearer_iat_seconds
         OR NEW.not_before_seconds < authority.request_bearer_iat_seconds
         OR NEW.expires_at_seconds > authority.request_bearer_exp_seconds
-        OR NOT automata_github_oidc_authority_is_current(
+        OR NOT automata_workload_oidc_authority_is_current(
             authority,
             NEW.issued_at_seconds * 1000,
             (NEW.issued_at_seconds + 1) * 1000
         )
     THEN
-        RAISE EXCEPTION 'GitHub-compatible OIDC issuance lacks current authority'
+        RAISE EXCEPTION 'Automata workload OIDC issuance lacks current authority'
             USING ERRCODE = 'integrity_constraint_violation',
-                  CONSTRAINT = 'github_oidc_issuance_current_authority';
+                  CONSTRAINT = 'workload_oidc_issuance_current_authority';
     END IF;
     IF TG_OP = 'INSERT' THEN
         IF NEW.generation <> 1
             OR NEW.created_at_seconds <> NEW.issued_at_seconds
         THEN
-            RAISE EXCEPTION 'GitHub-compatible OIDC initial issuance is invalid'
+            RAISE EXCEPTION 'Automata workload OIDC initial issuance is invalid'
                 USING ERRCODE = 'integrity_constraint_violation',
-                      CONSTRAINT = 'github_oidc_issuance_slot_initial';
+                      CONSTRAINT = 'workload_oidc_issuance_slot_initial';
         END IF;
         SELECT count(*) INTO slot_count
-        FROM github_oidc_issuance_slots
+        FROM workload_oidc_issuance_slots
         WHERE authority_id = NEW.authority_id;
         IF slot_count >= 64 THEN
-            RAISE EXCEPTION 'GitHub-compatible OIDC audience slot bound exceeded'
+            RAISE EXCEPTION 'Automata workload OIDC audience slot bound exceeded'
                 USING ERRCODE = 'program_limit_exceeded',
-                      CONSTRAINT = 'github_oidc_issuance_slot_bound';
+                      CONSTRAINT = 'workload_oidc_issuance_slot_bound';
         END IF;
     END IF;
     RETURN NEW;

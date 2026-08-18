@@ -5,6 +5,7 @@ use std::{
     fmt,
 };
 
+use automata_ci_actions_permissions::actions_workflow_permission;
 use automata_ci_core::{
     ActionReference, Architecture, CompiledBooleanTemplate, CompiledExpressionTemplate,
     CompiledPositiveIntegerTemplate, CompiledValueTemplate, ContainerFeature, ContainerSpec,
@@ -22,8 +23,7 @@ use automata_ci_core::{
     TrustSnapshot, ValueSource, ValueTemplate, ValueTemplateError, ValueTemplateSegment,
     WorkflowId, WorkflowJobKey, WorkflowPermissions,
 };
-use automata_ci_github_permissions::github_workflow_permission;
-use automata_ci_job_executor_github::static_shell_requirement;
+use automata_ci_job_executor_actions::static_shell_requirement;
 use automata_ci_protocol::ProtocolLimits;
 use automata_ci_store::{ReusableWorkflowPermissionSnapshot, WorkflowPermissionPolicy};
 use automata_ci_workflow_actions::{
@@ -45,7 +45,7 @@ use crate::{
 pub use automata_ci_core::JOB_RUNTIME_CONTEXT_MEDIA_TYPE;
 
 const MAX_JOB_CONTENT_BYTES: usize = 16_777_216;
-const DEFAULT_GITHUB_JOB_TIMEOUT_SECONDS: u32 = 360 * 60;
+const DEFAULT_ACTIONS_JOB_TIMEOUT_SECONDS: u32 = 360 * 60;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum LogicalJobProjectionLimitRejection {
@@ -328,7 +328,7 @@ fn project_github_logical_job(
         request
             .instance
             .timeout_seconds()
-            .unwrap_or(DEFAULT_GITHUB_JOB_TIMEOUT_SECONDS),
+            .unwrap_or(DEFAULT_ACTIONS_JOB_TIMEOUT_SECONDS),
     );
     if let Some(directory) = default_directory {
         job = job.with_working_directory(value_template(directory.value())?);
@@ -429,7 +429,7 @@ fn reduce_permission_request_for_trust(
             };
             Ok(JobPermissionRequest::mapping(
                 grants.into_iter().filter_map(|grant| {
-                    let permission = github_workflow_permission(grant.name())?;
+                    let permission = actions_workflow_permission(grant.name())?;
                     match grant.level() {
                         PermissionLevel::Read => Some(grant),
                         PermissionLevel::Write if permission.allows_read() => Some(
@@ -450,7 +450,7 @@ fn validate_resolved_permission_request(
         return Err(LogicalJobProjectionError::InvalidPermissionRequest);
     };
     for grant in grants {
-        let Some(permission) = github_workflow_permission(grant.name()) else {
+        let Some(permission) = actions_workflow_permission(grant.name()) else {
             return Err(LogicalJobProjectionError::InvalidPermissionRequest);
         };
         let allowed = match grant.level() {
@@ -1485,7 +1485,7 @@ mod permission_ceiling_tests {
     #[test]
     fn repository_policy_resolves_all_permission_shorthands_to_exact_mappings() {
         let policy = WorkflowPermissionPolicy::from_github_default(
-            automata_ci_github_permissions::GithubDefaultWorkflowPermission::Read,
+            automata_ci_actions_permissions::ActionsDefaultWorkflowPermission::Read,
         )
         .expect("permission policy");
         assert_eq!(

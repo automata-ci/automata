@@ -66,6 +66,6 @@ pub use webhook_event::{
     VerifiedGithubWebhook,
 };
 pub use workflow_permissions::{
-    GithubDefaultWorkflowPermission, GithubWorkflowPermissionDefaults,
+    ActionsDefaultWorkflowPermission, GithubWorkflowPermissionDefaults,
     GithubWorkflowPermissionDefaultsRequest,
 };

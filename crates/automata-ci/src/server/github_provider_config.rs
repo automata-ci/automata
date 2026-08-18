@@ -6,7 +6,7 @@ use automata_ci_core::JobAuthorityProfile;
 use automata_ci_core::WorkspaceId;
 use automata_ci_github_delivery::GithubScheduleServiceConfig;
 use automata_ci_provisioning::{GithubProviderDesiredState, GithubProviderRepositorySelection};
-use automata_ci_results_github::CacheRepositoryMetadata;
+use automata_ci_runner_results::CacheRepositoryMetadata;
 use automata_ci_store::{
     GithubCheckName, GithubInstallationBindingGeneration, GithubProviderGitRef,
     GithubProviderManifestRevision, GithubProviderWorkflowSelection, GithubRepositoryName,
