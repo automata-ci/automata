@@ -1,5 +1,6 @@
 [CmdletBinding()]
 param(
+    [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{64}$')][string] $ExpectedBuildInputsSha256,
     [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')][string] $ExpectedSourceCommit,
     [Parameter(Mandatory = $true)][ValidateRange(1, 8589934591)][int64] $ExpectedSourceDateEpoch
 )
@@ -54,6 +55,7 @@ if ($inputLock.source_commit -cne $ExpectedSourceCommit `
     -or [int64]$inputLock.source_date_epoch -ne $ExpectedSourceDateEpoch) {
     throw 'source identity differs from the immutable build arguments'
 }
+Assert-Sha256 $inputLockPath $ExpectedBuildInputsSha256
 Assert-Sha256 $sourceLockPath $inputLock.source_lock_sha256
 Assert-Sha256 (Join-Path $buildRoot 'Containerfile') $inputLock.containerfile_sha256
 Assert-Sha256 (Join-Path $buildRoot 'install-image.ps1') $inputLock.install_script_sha256
@@ -141,7 +143,7 @@ foreach ($root in @(
         throw "could not remove inherited image ACL: $root"
     }
     & icacls.exe $root /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' `
-        '*S-1-5-93-2-1:(OI)(CI)M' | Out-Null
+        '*S-1-5-93-2-2:(OI)(CI)M' | Out-Null
     if ($LASTEXITCODE -ne 0) {
         throw "could not configure writable image root: $root"
     }

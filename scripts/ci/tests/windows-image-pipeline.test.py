@@ -169,6 +169,8 @@ class WindowsImagePipelineTests(unittest.TestCase):
         )
 
     def write_qualification(self) -> None:
+        build_inputs_bytes = (self.context / "build-inputs.json").read_bytes()
+        build_inputs = json.loads(build_inputs_bytes)
         versions = {
             "pwsh": "PowerShell 7.6.5",
             "powershell": "5.1.26100.33296",
@@ -178,6 +180,7 @@ class WindowsImagePipelineTests(unittest.TestCase):
         }
         qualification = {
             "architecture": "amd64",
+            "build_inputs_sha256": digest(build_inputs_bytes),
             "container_user": r"User Manager\ContainerUser",
             "guest_agent_sha256": digest(self.guest.read_bytes()),
             "hash_helper_sha256": digest(self.helper.read_bytes()),
@@ -192,7 +195,9 @@ class WindowsImagePipelineTests(unittest.TestCase):
                 "ubr": 33296,
             },
             "profile_id": pipeline.PROFILE_ID,
-            "schema_version": 1,
+            "schema_version": 2,
+            "source_commit": self.commit,
+            "source_lock_sha256": build_inputs["source_lock_sha256"],
             "tools": [
                 {
                     "kind": kind,
@@ -289,9 +294,18 @@ class WindowsImagePipelineTests(unittest.TestCase):
             encoding="utf-8"
         ).splitlines()
         self.assertIn("--pull=false", build)
+        self.assertIn("AUTOMATA_BUILD_INPUTS_SHA256", containerfile)
+        self.assertIn("io.automata.windows-build-inputs.sha256", containerfile)
+        self.assertIn("AUTOMATA_BUILD_INPUTS_SHA256=$buildInputsSha256", build)
+        self.assertIn(
+            "io.automata.windows-build-inputs.sha256' -cne $buildInputsSha256",
+            build,
+        )
         self.assertNotIn("docker push", build.lower())
         self.assertIn("--isolation hyperv", qualification)
         self.assertIn("--network none", qualification)
+        self.assertIn("$inspection[0].Config.Labels", qualification)
+        self.assertIn("build_inputs_sha256 = $buildInputsSha256", qualification)
         self.assertIn(
             "images/windows-server-2025-hyperv/Containerfile text eol=lf",
             attributes,
@@ -309,6 +323,12 @@ class WindowsImagePipelineTests(unittest.TestCase):
         )
         self.assertNotIn("MinGit", installer)
         self.assertNotIn(r"C:\automata\tools\tar", installer)
+        self.assertIn(
+            "Assert-Sha256 $inputLockPath $ExpectedBuildInputsSha256",
+            installer,
+        )
+        self.assertIn("*S-1-5-93-2-2:(OI)(CI)M", installer)
+        self.assertNotIn("*S-1-5-93-2-1:(OI)(CI)M", installer)
         inheritance_checks = re.findall(
             r"& icacls\.exe \$root /inheritance:r \| Out-Null\s+"
             r"if \(\$LASTEXITCODE -ne 0\) \{\s+"
@@ -369,6 +389,42 @@ class WindowsImagePipelineTests(unittest.TestCase):
         )
         for path in bundle.iterdir():
             self.assertNotIn(b"candidate_fixture", path.read_bytes())
+        inputs_bytes = (bundle / "build-inputs.json").read_bytes()
+        qualification = json.loads((bundle / "qualification.json").read_bytes())
+        provenance = json.loads((bundle / "provenance.intoto.json").read_bytes())
+        self.assertEqual(qualification["schema_version"], 2)
+        self.assertEqual(qualification["build_inputs_sha256"], digest(inputs_bytes))
+        self.assertEqual(
+            provenance["predicate"]["buildDefinition"]["externalParameters"][
+                "build_inputs_sha256"
+            ],
+            digest(inputs_bytes),
+        )
+        self.assertTrue((bundle / "sbom.subject.spdx.json").is_file())
+        self.assertTrue((bundle / "sbom.spdx.json").is_file())
+        sbom = json.loads((bundle / "sbom.subject.spdx.json").read_bytes())
+        self.assertRegex(
+            sbom["creationInfo"]["created"],
+            r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
+        )
+        base_package = next(
+            package for package in sbom["packages"] if package["SPDXID"] == "SPDXRef-BaseImage"
+        )
+        self.assertNotIn("externalRefs", base_package)
+        self.assertEqual(
+            base_package["checksums"],
+            [
+                {
+                    "algorithm": "SHA256",
+                    "checksumValue": self.base_image.rsplit(":", 1)[1],
+                }
+            ],
+        )
+        manifest = json.loads((bundle / "manifest.json").read_bytes())
+        self.assertEqual(
+            digest((bundle / "sbom.spdx.json").read_bytes()),
+            manifest["evidence"]["sbom"]["sha256"],
+        )
         pairs = json.loads(
             (bundle / "promotion.payload.json").read_bytes(),
             object_pairs_hook=lambda value: value,
@@ -412,6 +468,31 @@ class WindowsImagePipelineTests(unittest.TestCase):
         )
         self.assertIn("#[serde(deny_unknown_fields)]", verifier)
         self.assertEqual(tuple(payload), pipeline.PROMOTION_PAYLOAD_FIELDS)
+
+    def test_qualification_rejects_mixed_build_input_identity(self) -> None:
+        inputs_path = self.context / "build-inputs.json"
+        inputs = json.loads(inputs_path.read_bytes())
+        replacement_commit = "f" * 40
+        self.assertNotEqual(inputs["source_commit"], replacement_commit)
+        inputs["source_commit"] = replacement_commit
+        inputs_path.write_bytes(pipeline.canonical_json(inputs))
+
+        with self.assertRaisesRegex(
+            SystemExit, "qualification boundary or local artifact identity differs"
+        ):
+            self.assemble(
+                output=self.root / "mixed-build-inputs",
+                source_commit=replacement_commit,
+            )
+
+    def test_spdx_creation_time_rejects_fractional_seconds(self) -> None:
+        with self.assertRaisesRegex(
+            SystemExit, "evidence issuance timestamp must use whole seconds"
+        ):
+            self.assemble(
+                output=self.root / "fractional-spdx-time",
+                issued_at_unix_millis=self.issued + 1,
+            )
 
     def test_fixture_marker_is_rejected_even_after_every_digest_is_nonzero(self) -> None:
         bundle = self.assemble()

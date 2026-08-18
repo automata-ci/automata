@@ -66,7 +66,9 @@ try {
     else {
         Copy-Item -LiteralPath (Join-Path $context 'build-inputs.json') -Destination $retainedBuildInputs
     }
-    $buildInputs = Get-Content -Raw -LiteralPath (Join-Path $context 'build-inputs.json') | ConvertFrom-Json
+    $buildInputsPath = Join-Path $context 'build-inputs.json'
+    $buildInputsSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $buildInputsPath).Hash.ToLowerInvariant()
+    $buildInputs = Get-Content -Raw -LiteralPath $buildInputsPath | ConvertFrom-Json
     if ($buildInputs.source_commit -cne $SourceCommit `
         -or [int64]$buildInputs.source_date_epoch -le 0) {
         throw 'prepared build inputs differ from the requested source identity'
@@ -77,6 +79,7 @@ try {
         --isolation hyperv `
         --no-cache `
         --pull=false `
+        --build-arg "AUTOMATA_BUILD_INPUTS_SHA256=$buildInputsSha256" `
         --build-arg "AUTOMATA_SOURCE_COMMIT=$SourceCommit" `
         --build-arg "AUTOMATA_SOURCE_LOCK_SHA256=$sourceLockSha256" `
         --build-arg "SOURCE_DATE_EPOCH=$($buildInputs.source_date_epoch)" `
@@ -90,6 +93,7 @@ try {
     if ($inspection.Count -ne 1 `
         -or $inspection[0].Config.User -cne 'ContainerUser' `
         -or $inspection[0].Config.WorkingDir -cne 'C:\__w' `
+        -or $inspection[0].Config.Labels.'io.automata.windows-build-inputs.sha256' -cne $buildInputsSha256 `
         -or $inspection[0].Config.Labels.'org.opencontainers.image.revision' -cne $SourceCommit `
         -or $inspection[0].Config.Labels.'io.automata.windows-source-lock.sha256' -cne $sourceLockSha256) {
         throw 'built image configuration differs from the reviewed recipe'
@@ -97,6 +101,7 @@ try {
 
     Write-Output "local_candidate=$LocalTag"
     Write-Output "build_inputs=$retainedBuildInputs"
+    Write-Output "build_inputs_sha256=$buildInputsSha256"
     Write-Output "source_lock_sha256=$sourceLockSha256"
     Write-Output 'The local image ID is not a registry identity. Publication and promotion require a separately authorized push, an exact registry @sha256 reference, Hyper-V qualification, and broker/control acceptance.'
 }

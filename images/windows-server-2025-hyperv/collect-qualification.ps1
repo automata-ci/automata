@@ -106,6 +106,15 @@ try {
     if ($inspection.Count -ne 1 -or -not ($inspection[0].RepoDigests -contains $Image)) {
         throw 'local image does not retain the exact registry identity'
     }
+    $labels = $inspection[0].Config.Labels
+    $buildInputsSha256 = [string]$labels.'io.automata.windows-build-inputs.sha256'
+    $sourceCommit = [string]$labels.'org.opencontainers.image.revision'
+    $sourceLockSha256 = [string]$labels.'io.automata.windows-source-lock.sha256'
+    if ($buildInputsSha256 -cnotmatch '^[0-9a-f]{64}$' `
+        -or $sourceCommit -cnotmatch '^[0-9a-f]{40}$' `
+        -or $sourceLockSha256 -cnotmatch '^[0-9a-f]{64}$') {
+        throw 'pulled image build-input labels are absent or invalid'
+    }
 
     $container = (& $Docker create `
         --isolation hyperv `
@@ -138,6 +147,7 @@ try {
     $guest = Get-Content -Raw -LiteralPath $guestOutput | ConvertFrom-Json
     $qualified = [ordered]@{
         architecture = $guest.architecture
+        build_inputs_sha256 = $buildInputsSha256
         container_user = $guest.container_user
         guest_agent_sha256 = $guest.guest_agent_sha256
         hash_helper_sha256 = $guest.hash_helper_sha256
@@ -146,7 +156,9 @@ try {
         network_disabled = [bool]$guest.network_disabled
         os = $guest.os
         profile_id = $guest.profile_id
-        schema_version = 1
+        schema_version = 2
+        source_commit = $sourceCommit
+        source_lock_sha256 = $sourceLockSha256
         tools = $guest.tools
         workspace = $guest.workspace
     }

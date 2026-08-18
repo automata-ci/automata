@@ -72,7 +72,7 @@ SUBJECT_MEDIA_TYPES = {
 }
 SUBJECT_FILENAMES = {
     "provenance": "provenance.intoto.json",
-    "sbom": "sbom.spdx.json",
+    "sbom": "sbom.subject.spdx.json",
     "patch_report": "patch-report.subject.json",
     "revocations": "revocations.subject.json",
 }
@@ -84,7 +84,7 @@ REFERENCE_STATEMENTS = {
 }
 REFERENCE_FILENAMES = {
     "provenance": "provenance.json",
-    "sbom": "sbom.json",
+    "sbom": "sbom.spdx.json",
     "patch_report": "patch-report.json",
     "revocations": "revocations.json",
 }
@@ -642,6 +642,7 @@ def load_qualification(path: pathlib.Path, image: str, inputs: dict) -> dict:
         parse_json(read_regular(path), "qualification"),
         {
             "architecture",
+            "build_inputs_sha256",
             "container_user",
             "guest_agent_sha256",
             "hash_helper_sha256",
@@ -651,13 +652,15 @@ def load_qualification(path: pathlib.Path, image: str, inputs: dict) -> dict:
             "os",
             "profile_id",
             "schema_version",
+            "source_commit",
+            "source_lock_sha256",
             "tools",
             "workspace",
         },
         "qualification",
     )
     if (
-        value["schema_version"] != 1
+        value["schema_version"] != 2
         or type(value["schema_version"]) is not int
         or value["profile_id"] != PROFILE_ID
         or value["image"] != image
@@ -669,6 +672,9 @@ def load_qualification(path: pathlib.Path, image: str, inputs: dict) -> dict:
         or value["workspace"].lower() != r"c:\__w".lower()
         or value["guest_agent_sha256"] != inputs["guest_agent"]["sha256"]
         or value["hash_helper_sha256"] != inputs["hash_helper"]["sha256"]
+        or value["build_inputs_sha256"] != sha256(canonical_json(inputs))
+        or value["source_commit"] != inputs["source_commit"]
+        or value["source_lock_sha256"] != inputs["source_lock_sha256"]
     ):
         fail("qualification boundary or local artifact identity differs")
     os_value = exact_object(
@@ -757,25 +763,27 @@ def load_revocations(
 
 
 def timestamp(unix_millis: int) -> str:
+    if unix_millis % 1000 != 0:
+        fail("evidence issuance timestamp must use whole seconds")
     try:
         value = datetime.datetime.fromtimestamp(
-            unix_millis / 1000, datetime.timezone.utc
+            unix_millis // 1000, datetime.timezone.utc
         )
     except (OverflowError, OSError, ValueError):
         fail("promotion timestamp is outside the supported range")
-    return value.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    return value.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def parse_timestamp(value: object, description: str) -> int:
     if not isinstance(value, str) or not re.fullmatch(
-        r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z",
+        r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z",
         value,
     ):
         fail(f"{description} timestamp is not canonical")
     try:
-        parsed = datetime.datetime.strptime(
-            value, "%Y-%m-%dT%H:%M:%S.%fZ"
-        ).replace(tzinfo=datetime.timezone.utc)
+        parsed = datetime.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=datetime.timezone.utc
+        )
     except ValueError:
         fail(f"{description} timestamp is invalid")
     epoch = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
@@ -783,7 +791,6 @@ def parse_timestamp(value: object, description: str) -> int:
     unix_millis = (
         delta.days * 24 * 60 * 60 * 1000
         + delta.seconds * 1000
-        + delta.microseconds // 1000
     )
     if unix_millis <= 0 or timestamp(unix_millis) != value:
         fail(f"{description} timestamp is invalid")
@@ -846,6 +853,7 @@ def make_provenance(
                 "buildType": "https://automata.dev/build/windows-server-2025-hyperv/v1",
                 "externalParameters": {
                     "base_image": lock["base_image"],
+                    "build_inputs_sha256": sha256(canonical_json(inputs)),
                     "profile_id": PROFILE_ID,
                     "source_commit": inputs["source_commit"],
                 },
@@ -875,17 +883,14 @@ def make_sbom(
     serial: int,
     issued: int,
 ) -> dict:
+    _, base_image_sha = image_digest(lock["base_image"], "SBOM base image")
     packages = [
         {
             "SPDXID": "SPDXRef-BaseImage",
-            "downloadLocation": "NOASSERTION",
-            "externalRefs": [
-                {
-                    "referenceCategory": "PACKAGE-MANAGER",
-                    "referenceLocator": lock["base_image"],
-                    "referenceType": "purl",
-                }
+            "checksums": [
+                {"algorithm": "SHA256", "checksumValue": base_image_sha}
             ],
+            "downloadLocation": "NOASSERTION",
             "filesAnalyzed": False,
             "name": "Microsoft Windows Server Core 2025 base image",
             "supplier": "Organization: Microsoft",
@@ -1169,8 +1174,8 @@ def verify_bundle(directory: pathlib.Path) -> dict:
         "qualification.json",
         "revocations.json",
         "revocations.subject.json",
-        "sbom.json",
         "sbom.spdx.json",
+        "sbom.subject.spdx.json",
         "sources.lock.json",
     }
     entries = list(directory.iterdir())

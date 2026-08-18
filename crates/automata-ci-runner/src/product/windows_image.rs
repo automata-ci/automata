@@ -398,6 +398,8 @@ impl WindowsImageEvidenceVerifier for FilesystemWindowsImageEvidenceVerifier {
         ];
         let mut evidence_digests = BTreeMap::new();
         let mut revocation_generation = None;
+        let mut candidate_fixture = false;
+        let mut production_subjects = true;
         for (expected_kind, path, reference) in evidence {
             let bytes = read_evidence(path, MAX_EVIDENCE_BYTES)?;
             let actual_digest = digest(&bytes);
@@ -407,6 +409,8 @@ impl WindowsImageEvidenceVerifier for FilesystemWindowsImageEvidenceVerifier {
                 return Err(WindowsImageVerificationError::Mismatch);
             }
             let document: EvidenceReferenceDocument = parse(&bytes)?;
+            candidate_fixture |= document.candidate_fixture == Some(true);
+            production_subjects &= non_placeholder_digest(&document.subject.sha256);
             if let Some(generation) = validate_evidence_reference_document(
                 &document,
                 expected_kind,
@@ -426,6 +430,9 @@ impl WindowsImageEvidenceVerifier for FilesystemWindowsImageEvidenceVerifier {
                 evidence_digests[&EvidenceKind::Revocations],
             ));
         };
+        if candidate_fixture || !production_subjects || !promotable_manifest(&manifest) {
+            return Err(WindowsImageVerificationError::InvalidEvidence);
+        }
         let promotion_verification = verify_promotion(
             promotion,
             request,
@@ -649,6 +656,33 @@ fn parse<'a, T: Deserialize<'a>>(bytes: &'a [u8]) -> Result<T, WindowsImageVerif
 
 fn parse_digest(value: &str) -> Result<Sha256Digest, WindowsImageVerificationError> {
     Sha256Digest::from_str(value).map_err(|_| WindowsImageVerificationError::InvalidEvidence)
+}
+
+fn non_placeholder_digest(value: &str) -> bool {
+    parse_digest(value).is_ok()
+        && value
+            .as_bytes()
+            .first()
+            .is_some_and(|first| value.as_bytes().iter().any(|byte| byte != first))
+}
+
+fn non_placeholder_image(value: &str) -> bool {
+    value
+        .rsplit_once("@sha256:")
+        .is_some_and(|(repository, digest)| {
+            !repository.contains("example")
+                && !repository.contains("localhost")
+                && non_placeholder_digest(digest)
+        })
+}
+
+fn promotable_manifest(manifest: &ImageManifest) -> bool {
+    non_placeholder_image(&manifest.base_image)
+        && non_placeholder_image(&manifest.image)
+        && manifest
+            .tools
+            .iter()
+            .all(|tool| non_placeholder_digest(&tool.sha256))
 }
 
 fn digest(bytes: &[u8]) -> Sha256Digest {

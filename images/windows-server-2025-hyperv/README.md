@@ -25,7 +25,9 @@ images\windows-server-2025-hyperv\build-local-artifacts.ps1 `
 ```
 
 Then build an unpublished local candidate. Every local binary digest is an
-explicit argument; the command never pushes or logs in to a registry.
+explicit argument; the command never pushes or logs in to a registry. The
+installer re-hashes the canonical build-input lock, and the image retains that
+digest as an OCI label.
 
 ```powershell
 images\windows-server-2025-hyperv\build-candidate.ps1 `
@@ -48,6 +50,10 @@ images\windows-server-2025-hyperv\collect-qualification.ps1 `
   -Image ghcr.io/automata-ci/windows-runner@sha256:<digest> `
   -Output target\windows-image-qualification.json
 ```
+
+The collector reads the build-input digest and source identity from the exact
+pulled image into qualification schema v2. Assembly rejects qualification from
+any other build-input lock before it creates provenance.
 
 `windows-image-pipeline.py assemble` consumes that qualification, the retained
 build-input lock, an exact source commit, an independently selected promotion
