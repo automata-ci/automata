@@ -2,7 +2,10 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import type { JobLogPageModel } from "../models";
 import type { LiveLogRecord } from "../logs/sse";
 import { LiveLogController } from "../logs/controller";
-import { createSameOriginLiveLogAccessProvider } from "../logs/protocol";
+import {
+  createSameOriginLiveLogAccessProvider,
+  type LiveLogAccessProvider,
+} from "../logs/protocol";
 import {
   applyLogRecord,
   isNearLogBottom,
@@ -15,9 +18,11 @@ import {
 import type { JobLogsViewState, LogConnectionState } from "../viewModels/jobLogs";
 
 export function useJobLogs({
+  access,
   initialRecords,
   model,
 }: {
+  readonly access?: LiveLogAccessProvider;
   readonly initialRecords: readonly LiveLogRecord[];
   readonly model: JobLogPageModel;
 }): JobLogsViewState {
@@ -37,7 +42,9 @@ export function useJobLogs({
   useEffect(() => {
     if (model.live === null || model.logVisibility !== "full") return undefined;
     const controller = new LiveLogController({
-      access: createSameOriginLiveLogAccessProvider({ endpoint: model.live.ticketHref }),
+      access:
+        access ??
+        createSameOriginLiveLogAccessProvider({ endpoint: model.live.ticketHref }),
       onRecord: (record) => {
         shouldScrollRef.current = followingRef.current && isNearLogBottom(viewerRef.current);
         applyLogRecord(groupsRef.current, record);
@@ -69,7 +76,7 @@ export function useJobLogs({
       document.removeEventListener("visibilitychange", visibilityChanged);
       controller.dispose();
     };
-  }, [model.live, model.logVisibility]);
+  }, [access, model.live, model.logVisibility]);
 
   useLayoutEffect(() => {
     if (!shouldScrollRef.current) return;
