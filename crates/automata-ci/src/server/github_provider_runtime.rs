@@ -48,10 +48,9 @@ use automata_ci_github_delivery::{
     GithubDeliveryServiceError, GithubDeliverySourceCredentialProvider, GithubDeliveryWorkerConfig,
     GithubDeliveryWorkerConfigurationError, GithubDeliveryWorkflowAdmissionProcessor,
     GithubDeliveryWorkflowProcessor, GithubPushChangedFilesProvider,
-    GithubRestPushChangedFilesProvider, GithubScheduleClock,
-    GithubSchedulePrivateSourceAuthorities, GithubScheduleService,
+    GithubRestPushChangedFilesProvider, GithubScheduleClock, GithubScheduleService,
     GithubScheduleServiceConfigurationError, GithubScheduleServiceError,
-    GithubScheduleSourceCredentialProvider,
+    GithubScheduleSourceAuthorities, GithubScheduleSourceCredentialProvider,
 };
 use automata_ci_key_management::{EnvelopeCodec, KeyEncryptionProvider};
 use automata_ci_protocol::RuntimeAuthorityEndpoint;
@@ -70,7 +69,7 @@ use automata_ci_store::{
     GithubWorkflowPermissionDefaultsObservation,
     GithubWorkflowPermissionDefaultsObservationRepository, LogicalWorkflowAdmissionRepository,
     MAX_GITHUB_SERVICE_CONSUMER_REQUEST_MILLIS, ProviderProcessingWorkerId,
-    ProviderRepositoryVisibility, RetireGithubServerServiceAuthority, TenantScope,
+    RetireGithubServerServiceAuthority, TenantScope,
 };
 use automata_ci_store_postgres::PostgresStore;
 use automata_ci_workflow_service::{
@@ -160,22 +159,12 @@ fn job_authority_broker_pins(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct GithubProviderFatalNotification;
 
-/// Whether delivery needs only anonymous Public source access or exact Private access too.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum GithubProviderSourceMode {
-    /// Every configured source repository is Public and fetched anonymously.
-    PublicOnly,
-    /// At least one source repository is Private; Public fetches remain anonymous.
-    PublicAndPrivate,
-}
-
 /// Non-secret topology of one built GitHub provider runtime.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GithubProviderRuntimeShape {
     repositories: usize,
     installations: usize,
     tenants: usize,
-    source_mode: GithubProviderSourceMode,
 }
 
 impl GithubProviderRuntimeShape {
@@ -192,20 +181,10 @@ impl GithubProviderRuntimeShape {
             .map(|repository| repository.tenant().clone())
             .collect::<BTreeSet<_>>()
             .len();
-        let source_mode = if config
-            .repositories()
-            .iter()
-            .any(|repository| repository.visibility() == ProviderRepositoryVisibility::Private)
-        {
-            GithubProviderSourceMode::PublicAndPrivate
-        } else {
-            GithubProviderSourceMode::PublicOnly
-        };
         Self {
             repositories: config.repositories().len(),
             installations,
             tenants,
-            source_mode,
         }
     }
 
@@ -225,12 +204,6 @@ impl GithubProviderRuntimeShape {
     #[must_use]
     pub const fn tenant_count(self) -> usize {
         self.tenants
-    }
-
-    /// Returns the closed source-authority mode selected at construction.
-    #[must_use]
-    pub const fn source_mode(self) -> GithubProviderSourceMode {
-        self.source_mode
     }
 }
 
@@ -874,11 +847,11 @@ impl GithubProviderRuntimeBuilder {
             credential_adapter_routes,
             credential_clock.clone(),
         )?);
-        let schedule_private_authorities = GithubSchedulePrivateSourceAuthorities::new(
+        let schedule_source_authorities = GithubScheduleSourceAuthorities::new(
             plan.authorities()
                 .iter()
                 .filter(|authority| {
-                    authority.scope() == GithubServerServiceScope::PrivateRepositorySourceRead
+                    authority.scope() == GithubServerServiceScope::RepositoryContentsRead
                 })
                 .map(|authority| {
                     (
@@ -893,10 +866,7 @@ impl GithubProviderRuntimeBuilder {
 
         let endpoint = provider_http_endpoint(config.transport())?;
         let workflow_dispatch_source: Arc<dyn ScmProvider> = Arc::new(endpoint.clone());
-        let workflow_dispatch_credentials = match shape.source_mode() {
-            GithubProviderSourceMode::PublicOnly => None,
-            GithubProviderSourceMode::PublicAndPrivate => Some(adapters.clone()),
-        };
+        let workflow_dispatch_credentials = adapters.clone();
         let workflow_dispatch_worker = GithubServerServiceWorkerId::from_uuid(Uuid::new_v4())
             .map_err(|_| GithubProviderRuntimeBuildError::InvalidWorkerIdentity)?;
         let observation_owner = GithubServerServiceWorkerId::from_uuid(Uuid::new_v4())
@@ -942,31 +912,18 @@ impl GithubProviderRuntimeBuilder {
         let schedule_worker = GithubScheduleWorkerId::from_uuid(Uuid::new_v4())
             .map_err(|_| GithubProviderRuntimeBuildError::InvalidWorkerIdentity)?;
         let schedule_source = Arc::new(endpoint.clone());
-        let schedule = match shape.source_mode() {
-            GithubProviderSourceMode::PublicOnly => GithubScheduleService::new_public_only(
-                blobs.clone(),
-                schedule_source,
-                store.clone(),
-                schedule_admission,
-                schedule_clock,
-                schedule_worker,
-                config.schedule().service_config(),
-            ),
-            GithubProviderSourceMode::PublicAndPrivate => {
-                let credentials: Arc<dyn GithubScheduleSourceCredentialProvider> = adapters.clone();
-                GithubScheduleService::new_with_private_source_credentials(
-                    blobs.clone(),
-                    schedule_source,
-                    store.clone(),
-                    schedule_admission,
-                    schedule_private_authorities,
-                    Some(credentials),
-                    schedule_clock,
-                    schedule_worker,
-                    config.schedule().service_config(),
-                )
-            }
-        }
+        let credentials: Arc<dyn GithubScheduleSourceCredentialProvider> = adapters.clone();
+        let schedule = GithubScheduleService::new(
+            blobs.clone(),
+            schedule_source,
+            store.clone(),
+            schedule_admission,
+            schedule_source_authorities,
+            credentials,
+            schedule_clock,
+            schedule_worker,
+            config.schedule().service_config(),
+        )
         .map_err(GithubProviderRuntimeBuildError::ScheduleWorker)?;
         let changed_files: Arc<dyn GithubPushChangedFilesProvider> =
             Arc::new(GithubRestPushChangedFilesProvider::new(endpoint.clone()));
@@ -980,39 +937,20 @@ impl GithubProviderRuntimeBuilder {
             store.clone();
         let delivery_worker = ProviderProcessingWorkerId::from_uuid(Uuid::new_v4())
             .map_err(|_| GithubProviderRuntimeBuildError::InvalidWorkerIdentity)?;
-        let delivery = match shape.source_mode() {
-            GithubProviderSourceMode::PublicOnly => {
-                GithubDeliveryService::new_public_only_with_repository_dispatch(
-                    blobs.clone(),
-                    repository_source,
-                    repository_dispatch_resolver,
-                    workflow_processor,
-                    store.clone(),
-                    repository_dispatch_evidence,
-                    delivery_clock.clone(),
-                    delivery_worker,
-                    GithubDeliveryWorkerConfig::default(),
-                    GithubDeliveryServiceConfig::default(),
-                )
-            }
-            GithubProviderSourceMode::PublicAndPrivate => {
-                let source_credentials: Arc<dyn GithubDeliverySourceCredentialProvider> =
-                    adapters.clone();
-                GithubDeliveryService::new_with_private_source_credentials_and_repository_dispatch(
-                    blobs.clone(),
-                    repository_source,
-                    repository_dispatch_resolver,
-                    workflow_processor,
-                    store.clone(),
-                    repository_dispatch_evidence,
-                    source_credentials,
-                    delivery_clock.clone(),
-                    delivery_worker,
-                    GithubDeliveryWorkerConfig::default(),
-                    GithubDeliveryServiceConfig::default(),
-                )
-            }
-        }
+        let source_credentials: Arc<dyn GithubDeliverySourceCredentialProvider> = adapters.clone();
+        let delivery = GithubDeliveryService::new_with_repository_dispatch(
+            blobs.clone(),
+            repository_source,
+            repository_dispatch_resolver,
+            workflow_processor,
+            store.clone(),
+            repository_dispatch_evidence,
+            source_credentials,
+            delivery_clock.clone(),
+            delivery_worker,
+            GithubDeliveryWorkerConfig::default(),
+            GithubDeliveryServiceConfig::default(),
+        )
         .map_err(GithubProviderRuntimeBuildError::DeliveryWorker)?;
 
         let checks_credentials: Arc<dyn GithubChecksCredentialProvider> = adapters.clone();
@@ -1168,7 +1106,7 @@ pub struct GithubProviderRuntime {
     job_authority_drain: Arc<dyn JobRuntimeAuthorityDrainPort>,
     job_runtime_authority_issuer: Arc<dyn OptionalRuntimeAuthorityIssuer>,
     workflow_dispatch_source: Arc<dyn ScmProvider>,
-    workflow_dispatch_credentials: Option<Arc<GithubProviderCredentialAdapters>>,
+    workflow_dispatch_credentials: Arc<GithubProviderCredentialAdapters>,
     workflow_dispatch_worker: GithubServerServiceWorkerId,
     release_drain: Arc<dyn ReleaseDrainPort>,
     connection_ids: Arc<[ProviderConnectionId]>,
@@ -1206,9 +1144,7 @@ impl GithubProviderRuntime {
         self.workflow_dispatch_source.clone()
     }
 
-    pub(super) fn workflow_dispatch_credentials(
-        &self,
-    ) -> Option<Arc<GithubProviderCredentialAdapters>> {
+    pub(super) fn workflow_dispatch_credentials(&self) -> Arc<GithubProviderCredentialAdapters> {
         self.workflow_dispatch_credentials.clone()
     }
 

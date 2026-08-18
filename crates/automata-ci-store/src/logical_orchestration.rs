@@ -629,7 +629,7 @@ pub struct WorkflowDispatchSourceClaim {
     connection_id: ProviderConnectionId,
     manifest_revision: GithubProviderManifestRevision,
     manifest_digest: Sha256Digest,
-    private_source_authority: Option<GithubServerServiceAuthoritySelector>,
+    repository_contents_authority: GithubServerServiceAuthoritySelector,
     worker_id: GithubServerServiceWorkerId,
     fence: GithubServerServiceClaimFence,
     claimed_at: UnixMillis,
@@ -653,7 +653,7 @@ impl WorkflowDispatchSourceClaim {
         connection_id: ProviderConnectionId,
         manifest_revision: GithubProviderManifestRevision,
         manifest_digest: Sha256Digest,
-        private_source_authority: Option<GithubServerServiceAuthoritySelector>,
+        repository_contents_authority: GithubServerServiceAuthoritySelector,
         worker_id: GithubServerServiceWorkerId,
         fence: GithubServerServiceClaimFence,
         claimed_at: UnixMillis,
@@ -671,9 +671,7 @@ impl WorkflowDispatchSourceClaim {
             || expires_at <= claimed_at
             || expires_at.get().saturating_sub(claimed_at.get())
                 > MAX_WORKFLOW_DISPATCH_SOURCE_CLAIM_MILLIS
-            || private_source_authority
-                .as_ref()
-                .is_some_and(|selector| selector.tenant() != &tenant)
+            || repository_contents_authority.tenant() != &tenant
         {
             return Err(LogicalWorkflowAdmissionValueError::InvalidSourceResolutionClaim);
         }
@@ -687,7 +685,7 @@ impl WorkflowDispatchSourceClaim {
             connection_id,
             manifest_revision,
             manifest_digest,
-            private_source_authority,
+            repository_contents_authority,
             worker_id,
             fence,
             claimed_at,
@@ -740,10 +738,10 @@ impl WorkflowDispatchSourceClaim {
     pub const fn manifest_digest(&self) -> Sha256Digest {
         self.manifest_digest
     }
-    /// Returns private source authority, when the repository is private.
+    /// Returns the exact repository-contents authority.
     #[must_use]
-    pub const fn private_source_authority(&self) -> Option<&GithubServerServiceAuthoritySelector> {
-        self.private_source_authority.as_ref()
+    pub const fn repository_contents_authority(&self) -> &GithubServerServiceAuthoritySelector {
+        &self.repository_contents_authority
     }
     /// Returns the claiming worker.
     #[must_use]

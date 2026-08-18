@@ -1102,10 +1102,10 @@ async fn revalidate_handoff_consumer(
                 GithubServerServiceAction::CreateCheckRun => "prepare_run_create",
                 GithubServerServiceAction::ReconcileCheckRun => "reconcile_run_create",
                 GithubServerServiceAction::PublishCheckRun => "publish",
-                GithubServerServiceAction::FetchPrivateRepositoryRevision
-                | GithubServerServiceAction::FetchPrivateRepositoryChangedFiles
-                | GithubServerServiceAction::FetchPrivatePullRequestFiles
-                | GithubServerServiceAction::DiscoverPrivateRepositorySchedules
+                GithubServerServiceAction::FetchRepositoryRevision
+                | GithubServerServiceAction::FetchRepositoryChangedFiles
+                | GithubServerServiceAction::FetchPullRequestFiles
+                | GithubServerServiceAction::DiscoverRepositorySchedules
                 | GithubServerServiceAction::ResolveWorkflowDispatchSource
                 | GithubServerServiceAction::ObserveWorkflowPermissionDefaults => {
                     return Err(GithubServerServiceStoreError::HandoffRejected);
@@ -1154,7 +1154,7 @@ async fn revalidate_handoff_consumer(
             .map_err(operation_error)?
             .map(UnixMillis::new)
         }
-        GithubServerServiceScope::PrivateRepositorySourceRead => {
+        GithubServerServiceScope::RepositoryContentsRead => {
             if consumer.action() == GithubServerServiceAction::ResolveWorkflowDispatchSource {
                 return revalidate_workflow_dispatch_source_consumer(
                     connection,
@@ -1164,7 +1164,7 @@ async fn revalidate_handoff_consumer(
                 )
                 .await;
             }
-            if consumer.action() == GithubServerServiceAction::DiscoverPrivateRepositorySchedules {
+            if consumer.action() == GithubServerServiceAction::DiscoverRepositorySchedules {
                 return revalidate_schedule_discovery_consumer(
                     connection,
                     identity,
@@ -1175,15 +1175,15 @@ async fn revalidate_handoff_consumer(
             }
             if !matches!(
                 consumer.action(),
-                GithubServerServiceAction::FetchPrivateRepositoryRevision
-                    | GithubServerServiceAction::FetchPrivateRepositoryChangedFiles
+                GithubServerServiceAction::FetchRepositoryRevision
+                    | GithubServerServiceAction::FetchRepositoryChangedFiles
             ) {
                 return Err(GithubServerServiceStoreError::HandoffRejected);
             }
             revalidate_delivery_consumer(connection, identity, consumer, observed_at, false).await?
         }
-        GithubServerServiceScope::PrivatePullRequestFilesRead => {
-            if consumer.action() != GithubServerServiceAction::FetchPrivatePullRequestFiles {
+        GithubServerServiceScope::PullRequestsRead => {
+            if consumer.action() != GithubServerServiceAction::FetchPullRequestFiles {
                 return Err(GithubServerServiceStoreError::HandoffRejected);
             }
             revalidate_delivery_consumer(connection, identity, consumer, observed_at, true).await?
@@ -1288,10 +1288,10 @@ async fn revalidate_delivery_consumer(
                   WHERE evidence.provider_delivery_id = delivery.id
                     AND evidence.tenant_id = delivery.tenant_id
                     AND evidence.authenticated_event_name = 'pull_request'
-                    AND evidence.private_pull_request_files_authority_id = $13
-                    AND evidence.private_pull_request_files_authority_identity_digest = $14
-                    AND evidence.private_pull_request_files_authority_app_configuration_revision = $15
-                    AND evidence.private_pull_request_files_authority_policy_revision = $16
+                    AND evidence.pull_requests_authority_id = $13
+                    AND evidence.pull_requests_authority_identity_digest = $14
+                    AND evidence.pull_requests_authority_app_configuration_revision = $15
+                    AND evidence.pull_requests_authority_policy_revision = $16
               )
           )
         FOR SHARE OF delivery, repository
@@ -1352,10 +1352,10 @@ async fn revalidate_workflow_dispatch_source_consumer(
           AND resolution.claim_fence = $5
           AND resolution.claimed_at_ms <= $6
           AND resolution.claim_expires_at_ms > $6
-          AND resolution.private_source_authority_id = $7
-          AND resolution.private_source_authority_identity_digest = $8
-          AND resolution.private_source_authority_app_configuration_revision = $9
-          AND resolution.private_source_authority_policy_revision = $10
+          AND resolution.repository_contents_authority_id = $7
+          AND resolution.repository_contents_authority_identity_digest = $8
+          AND resolution.repository_contents_authority_app_configuration_revision = $9
+          AND resolution.repository_contents_authority_policy_revision = $10
           AND manifest.repository_visibility = 'private'
           AND manifest.provider_installation_id = $11
           AND manifest.github_app_id = $12
@@ -1427,11 +1427,11 @@ async fn revalidate_schedule_discovery_consumer(
            AND discovery.tenant_id = $5
            AND discovery.repository_id = $6
            AND discovery.provider_connection_id = $7
-           AND discovery.source_authority_kind = 'private_repository_source_read'
-           AND discovery.private_source_authority_id = $8
-           AND discovery.private_source_authority_identity_digest = $9
-           AND discovery.private_source_authority_app_configuration_revision = $10
-           AND discovery.private_source_authority_policy_revision = $11
+           AND discovery.source_authority_kind = 'repository_contents_read'
+           AND discovery.repository_contents_authority_id = $8
+           AND discovery.repository_contents_authority_identity_digest = $9
+           AND discovery.repository_contents_authority_app_configuration_revision = $10
+           AND discovery.repository_contents_authority_policy_revision = $11
            AND manifest.provider_installation_id = $12
            AND manifest.github_app_id = $13
            AND manifest.github_repository_id = $14
@@ -3345,13 +3345,9 @@ fn decode_github_server_service_jwt_issuer(value: &str) -> Option<GithubServerSe
 fn decode_github_server_service_scope(value: &str) -> Option<GithubServerServiceScope> {
     match value {
         "checks_write" => Some(GithubServerServiceScope::ChecksWrite),
-        "private_repository_source_read" => {
-            Some(GithubServerServiceScope::PrivateRepositorySourceRead)
-        }
+        "repository_contents_read" => Some(GithubServerServiceScope::RepositoryContentsRead),
         "workflow_permissions_read" => Some(GithubServerServiceScope::WorkflowPermissionsRead),
-        "private_pull_request_files_read" => {
-            Some(GithubServerServiceScope::PrivatePullRequestFilesRead)
-        }
+        "pull_requests_read" => Some(GithubServerServiceScope::PullRequestsRead),
         _ => None,
     }
 }
@@ -3373,17 +3369,13 @@ fn decode_github_server_service_action(value: &str) -> Option<GithubServerServic
         "create_check_run" => Some(GithubServerServiceAction::CreateCheckRun),
         "reconcile_check_run" => Some(GithubServerServiceAction::ReconcileCheckRun),
         "publish_check_run" => Some(GithubServerServiceAction::PublishCheckRun),
-        "fetch_private_repository_revision" => {
-            Some(GithubServerServiceAction::FetchPrivateRepositoryRevision)
+        "fetch_repository_revision" => Some(GithubServerServiceAction::FetchRepositoryRevision),
+        "fetch_repository_changed_files" => {
+            Some(GithubServerServiceAction::FetchRepositoryChangedFiles)
         }
-        "fetch_private_repository_changed_files" => {
-            Some(GithubServerServiceAction::FetchPrivateRepositoryChangedFiles)
-        }
-        "fetch_private_pull_request_files" => {
-            Some(GithubServerServiceAction::FetchPrivatePullRequestFiles)
-        }
-        "discover_private_repository_schedules" => {
-            Some(GithubServerServiceAction::DiscoverPrivateRepositorySchedules)
+        "fetch_pull_request_files" => Some(GithubServerServiceAction::FetchPullRequestFiles),
+        "discover_repository_schedules" => {
+            Some(GithubServerServiceAction::DiscoverRepositorySchedules)
         }
         "observe_workflow_permission_defaults" => {
             Some(GithubServerServiceAction::ObserveWorkflowPermissionDefaults)

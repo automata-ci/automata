@@ -33,7 +33,7 @@ use automata_ci_store::{
     GithubServerServiceAuthorityRepository, GithubServerServiceAuthorityState,
     GithubServerServiceScope, GithubServerServiceStoreError,
     GithubWorkflowPermissionDefaultsObservationError,
-    GithubWorkflowPermissionDefaultsObservationRepository, ObjectKey, ProviderRepositoryVisibility,
+    GithubWorkflowPermissionDefaultsObservationRepository, ObjectKey,
     RegisterWorkflowRuntimePolicy, RepositoryId, Sha256Digest as StoreSha256Digest, TenantScope,
     WorkflowRuntimePolicy, WorkflowRuntimePolicyRevision, github_provider_repository_id,
 };
@@ -221,47 +221,33 @@ impl GithubProviderBootstrapPlan {
             }
             authorities.push(workflow_permissions);
 
-            match (
-                repository.visibility(),
-                repository.private_source_authority(),
-                repository.private_pull_request_files_authority(),
-            ) {
-                (ProviderRepositoryVisibility::Public, None, None) => {}
-                (
-                    ProviderRepositoryVisibility::Private,
-                    Some(source_authority),
-                    Some(pull_request_files_authority),
-                ) => {
-                    let private_source = authority_identity(
-                        config,
-                        repository,
-                        source_authority,
-                        connection_id,
-                        GithubServerServiceScope::PrivateRepositorySourceRead,
-                        app_key_spki_sha256,
-                        broker_policy_fingerprint,
-                    )?;
-                    if !authority_ids.insert(private_source.authority_id()) {
-                        return Err(GithubProviderBootstrapError::DuplicateSelector);
-                    }
-                    authorities.push(private_source);
-
-                    let private_pull_request_files = authority_identity(
-                        config,
-                        repository,
-                        pull_request_files_authority,
-                        connection_id,
-                        GithubServerServiceScope::PrivatePullRequestFilesRead,
-                        app_key_spki_sha256,
-                        broker_policy_fingerprint,
-                    )?;
-                    if !authority_ids.insert(private_pull_request_files.authority_id()) {
-                        return Err(GithubProviderBootstrapError::DuplicateSelector);
-                    }
-                    authorities.push(private_pull_request_files);
-                }
-                _ => return Err(GithubProviderBootstrapError::InvalidConfiguration),
+            let repository_contents = authority_identity(
+                config,
+                repository,
+                repository.repository_contents_authority(),
+                connection_id,
+                GithubServerServiceScope::RepositoryContentsRead,
+                app_key_spki_sha256,
+                broker_policy_fingerprint,
+            )?;
+            if !authority_ids.insert(repository_contents.authority_id()) {
+                return Err(GithubProviderBootstrapError::DuplicateSelector);
             }
+            authorities.push(repository_contents);
+
+            let pull_requests = authority_identity(
+                config,
+                repository,
+                repository.pull_requests_authority(),
+                connection_id,
+                GithubServerServiceScope::PullRequestsRead,
+                app_key_spki_sha256,
+                broker_policy_fingerprint,
+            )?;
+            if !authority_ids.insert(pull_requests.authority_id()) {
+                return Err(GithubProviderBootstrapError::DuplicateSelector);
+            }
+            authorities.push(pull_requests);
 
             let (owner, name) = repository
                 .repository_name()

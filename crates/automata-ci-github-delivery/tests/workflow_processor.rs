@@ -15,7 +15,7 @@ use automata_ci_core::GitObjectId;
 use automata_ci_core::{Sha256Digest, UnixMillis, WorkflowPlan};
 use automata_ci_github_delivery::{
     GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE, GithubChangedFileSelection,
-    GithubChangedFilesDisposition, GithubDeliveryClock, GithubDeliveryPrivateRepositoryAction,
+    GithubChangedFilesDisposition, GithubDeliveryClock, GithubDeliveryRepositoryAction,
     GithubDeliverySourceAuthority, GithubDeliverySourceCredential,
     GithubDeliverySourceCredentialBinding, GithubDeliverySourceCredentialProvider,
     GithubDeliverySourceCredentialProviderError, GithubDeliverySourceCredentialRequest,
@@ -286,29 +286,27 @@ impl FixtureSubjectEvidence {
     ) -> Self {
         let base = Self::from_claimed(claimed).0;
         let event = GithubAuthenticatedEvent::new(kind, git_ref).expect("event coordinates");
-        let private_pull_request_files_authority = (base.repository_visibility()
-            == ProviderRepositoryVisibility::Private
-            && kind == GithubAuthenticatedEventKind::PullRequest)
-            .then(|| {
+        let pull_requests_authority =
+            (kind == GithubAuthenticatedEventKind::PullRequest).then(|| {
                 GithubServerServiceAuthoritySelector::from_durable_parts(
                     base.tenant().clone(),
                     GithubServerServiceAuthorityId::from_uuid(Uuid::from_u128(0x71ff))
-                        .expect("private pull-request-files authority ID"),
+                        .expect("pull-requests authority ID"),
                     Sha256Digest::from_bytes([0x53; 32]),
                     base.checks_authority().app_configuration_revision(),
                     base.checks_authority().policy_revision(),
                 )
             });
         Self(
-            ManifestPinnedGithubDeliveryEvidence::from_durable_parts_with_pull_request_files_authority(
+            ManifestPinnedGithubDeliveryEvidence::from_durable_parts_with_pull_requests_authority(
                 base.delivery_id(),
                 base.repository_owner_id(),
                 base.manifest().clone(),
                 base.authenticated_webhook_verifier_fingerprint(),
                 base.authenticated_webhook_verifier_revision(),
                 base.checks_authority().clone(),
-                base.private_source_authority().cloned(),
-                private_pull_request_files_authority,
+                base.repository_contents_authority().clone(),
+                pull_requests_authority,
                 base.check_subject_id(),
                 base.check_head_sha(),
                 event,
@@ -354,7 +352,7 @@ struct CredentialObservation {
     repository_owner_id: ProviderRepositoryOwnerId,
     claim: ProviderDeliveryClaimFence,
     attempt: u16,
-    action: GithubDeliveryPrivateRepositoryAction,
+    action: GithubDeliveryRepositoryAction,
     authority_selector: GithubServerServiceAuthoritySelector,
     consumer: GithubServerServiceConsumerClaim,
     observed_at: UnixMillis,
@@ -434,7 +432,7 @@ impl GithubDeliverySourceCredentialProvider for DiffCredentials {
             requested_consumer.owner(),
             requested_consumer.fence(),
             if behavior == DiffCredentialBehavior::WrongAction {
-                GithubServerServiceAction::FetchPrivateRepositoryRevision
+                GithubServerServiceAction::FetchRepositoryRevision
             } else {
                 requested_consumer.action()
             },
@@ -472,7 +470,7 @@ struct ChangedFilesObservation {
     attempt: u16,
     observed_at: UnixMillis,
     required_through: UnixMillis,
-    private_action: Option<GithubDeliveryPrivateRepositoryAction>,
+    repository_action: Option<GithubDeliveryRepositoryAction>,
     credential_present: bool,
     credential_matches: bool,
 }
@@ -502,8 +500,7 @@ impl GithubPushChangedFilesProvider for ChangedFiles {
     ) -> GithubChangedFilesDisposition {
         self.calls.fetch_add(1, Ordering::SeqCst);
         let (credential_present, credential_matches) = match request.authority() {
-            GithubPushChangedFilesAuthority::PublicAnonymous => (false, false),
-            GithubPushChangedFilesAuthority::PrivateInstallationContentsRead(credential) => {
+            GithubPushChangedFilesAuthority::InstallationContentsRead(credential) => {
                 (true, credential.expose_secret() == DIFF_CREDENTIAL)
             }
         };
@@ -519,7 +516,7 @@ impl GithubPushChangedFilesProvider for ChangedFiles {
                 attempt: request.snapshot().attempt(),
                 observed_at: request.observed_at(),
                 required_through: request.required_through(),
-                private_action: request.private_action(),
+                repository_action: Some(request.repository_action()),
                 credential_present,
                 credential_matches,
             });
@@ -534,10 +531,9 @@ impl GithubPushChangedFilesProvider for ChangedFiles {
         assert_eq!(request.pull_request().base_revision().to_string(), BEFORE);
         assert_eq!(request.pull_request().head_revision().to_string(), AFTER);
         let (credential_present, credential_matches) = match request.authority() {
-            GithubPullRequestChangedFilesAuthority::PublicAnonymous => (false, false),
-            GithubPullRequestChangedFilesAuthority::PrivateInstallationPullRequestsRead(
-                credential,
-            ) => (true, credential.expose_secret() == DIFF_CREDENTIAL),
+            GithubPullRequestChangedFilesAuthority::InstallationPullRequestsRead(credential) => {
+                (true, credential.expose_secret() == DIFF_CREDENTIAL)
+            }
         };
         self.observations
             .lock()
@@ -551,7 +547,7 @@ impl GithubPushChangedFilesProvider for ChangedFiles {
                 attempt: request.snapshot().attempt(),
                 observed_at: request.observed_at(),
                 required_through: request.required_through(),
-                private_action: request.private_action(),
+                repository_action: Some(request.repository_action()),
                 credential_present,
                 credential_matches,
             });
@@ -814,9 +810,13 @@ async fn process(
 ) -> Result<GithubDeliveryWorkerOutcome, GithubDeliveryWorkerError> {
     let archive_credential = SecretString::new(CREDENTIAL).expect("credential");
     let authority = match harness.claimed.identity().repository_visibility() {
-        ProviderRepositoryVisibility::Public => GithubDeliverySourceAuthority::PublicAnonymous,
+        ProviderRepositoryVisibility::Public => {
+            GithubDeliverySourceAuthority::DirectPublicArchive {
+                changed_files_credentials: harness.credentials.as_ref(),
+            }
+        }
         ProviderRepositoryVisibility::Private => {
-            GithubDeliverySourceAuthority::PrivateInstallationContentsRead {
+            GithubDeliverySourceAuthority::InstallationContentsRead {
                 credential: &archive_credential,
                 changed_files_credentials: Some(harness.credentials.as_ref()),
             }
@@ -1002,8 +1002,17 @@ async fn public_pull_request_path_filters_admit_with_durable_selection_evidence(
         GithubDeliveryWorkerOutcome::Completed(_)
     ));
     assert_eq!(changed.calls.load(Ordering::SeqCst), 1);
-    assert_eq!(harness.credentials.calls.load(Ordering::SeqCst), 0);
-    assert_eq!(harness.credentials.releases.load(Ordering::SeqCst), 0);
+    assert_eq!(harness.credentials.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(harness.credentials.releases.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        harness
+            .credentials
+            .observations
+            .lock()
+            .expect("credential observations lock")[0]
+            .action,
+        GithubDeliveryRepositoryAction::FetchPullRequestFiles
+    );
     let commands = harness.logical.commands();
     assert_eq!(commands.len(), 1);
     let encoded_plan = read_admission_object(&harness.blobs, commands[0].plan()).await;
@@ -1057,7 +1066,7 @@ async fn private_pull_request_path_filters_use_only_the_pinned_pr_read_authority
     assert!(matches!(
         process(&harness)
             .await
-            .expect("private pull-request path processing"),
+            .expect("pull-request path processing"),
         GithubDeliveryWorkerOutcome::Completed(_)
     ));
     assert_eq!(changed.calls.load(Ordering::SeqCst), 1);
@@ -1066,8 +1075,8 @@ async fn private_pull_request_path_filters_use_only_the_pinned_pr_read_authority
     let changed_observations = changed.observations.lock().expect("observations lock");
     assert_eq!(changed_observations.len(), 1);
     assert_eq!(
-        changed_observations[0].private_action,
-        Some(GithubDeliveryPrivateRepositoryAction::FetchPrivatePullRequestFiles)
+        changed_observations[0].repository_action,
+        Some(GithubDeliveryRepositoryAction::FetchPullRequestFiles)
     );
     assert!(changed_observations[0].credential_present);
     assert!(changed_observations[0].credential_matches);
@@ -1080,11 +1089,11 @@ async fn private_pull_request_path_filters_use_only_the_pinned_pr_read_authority
     assert_eq!(credentials.len(), 1);
     assert_eq!(
         credentials[0].action,
-        GithubDeliveryPrivateRepositoryAction::FetchPrivatePullRequestFiles
+        GithubDeliveryRepositoryAction::FetchPullRequestFiles
     );
     assert_eq!(
         credentials[0].consumer.action(),
-        GithubServerServiceAction::FetchPrivatePullRequestFiles
+        GithubServerServiceAction::FetchPullRequestFiles
     );
     let pinned = FixtureSubjectEvidence::authenticated_event(
         &harness.claimed,
@@ -1095,8 +1104,8 @@ async fn private_pull_request_path_filters_use_only_the_pinned_pr_read_authority
         &credentials[0].authority_selector,
         pinned
             .0
-            .private_pull_request_files_authority()
-            .expect("private PR evidence pins PR-files authority")
+            .pull_requests_authority()
+            .expect("pull-request evidence pins pull-requests authority")
     );
     drop(credentials);
     assert_eq!(harness.logical.commands().len(), 1);
@@ -1143,9 +1152,7 @@ async fn changed_files_are_requested_only_after_typed_compiler_demand() {
             attempt: 1,
             observed_at: UnixMillis::new(500),
             required_through: UnixMillis::new(10_000 + MAX_GITHUB_SERVICE_CONSUMER_REQUEST_MILLIS),
-            private_action: Some(
-                GithubDeliveryPrivateRepositoryAction::FetchPrivateRepositoryChangedFiles
-            ),
+            repository_action: Some(GithubDeliveryRepositoryAction::FetchRepositoryChangedFiles),
             credential_present: true,
             credential_matches: true,
         }]
@@ -1172,23 +1179,21 @@ async fn changed_files_are_requested_only_after_typed_compiler_demand() {
     );
     assert_eq!(
         &credential_observations[0].authority_selector,
-        pinned_evidence
-            .private_source_authority()
-            .expect("private delivery pins source authority")
+        pinned_evidence.repository_contents_authority()
     );
     assert_eq!(
         credential_observations[0].consumer.action(),
-        GithubServerServiceAction::FetchPrivateRepositoryChangedFiles
+        GithubServerServiceAction::FetchRepositoryChangedFiles
     );
     assert_eq!(credential_observations[0].consumer.fence().get(), 7);
     assert_eq!(credential_observations[0].consumer.revision().get(), 1);
     assert_eq!(
         credential_observations[0].action,
-        GithubDeliveryPrivateRepositoryAction::FetchPrivateRepositoryChangedFiles
+        GithubDeliveryRepositoryAction::FetchRepositoryChangedFiles
     );
     assert_ne!(
         credential_observations[0].action,
-        GithubDeliveryPrivateRepositoryAction::FetchPrivateRepositoryRevision
+        GithubDeliveryRepositoryAction::FetchRepositoryRevision
     );
     let completions = harness.deliveries.completions();
     let outcomes = completions[0].outcomes();
@@ -1197,7 +1202,7 @@ async fn changed_files_are_requested_only_after_typed_compiler_demand() {
 }
 
 #[tokio::test]
-async fn public_changed_files_are_anonymous_and_never_request_private_authority() {
+async fn public_changed_files_use_installation_authority() {
     let changed = Arc::new(ChangedFiles::new(complete_changed_files(["src/lib.rs"])));
     let harness = harness_with_visibility(
         BTreeMap::from([(WORKFLOW_PATH, PATH_WORKFLOW)]),
@@ -1209,22 +1214,29 @@ async fn public_changed_files_are_anonymous_and_never_request_private_authority(
 
     process(&harness).await.expect("public diff processing");
     assert_eq!(changed.calls.load(Ordering::SeqCst), 1);
-    assert_eq!(harness.credentials.calls.load(Ordering::SeqCst), 0);
-    assert!(
-        harness
-            .credentials
-            .observations
-            .lock()
-            .expect("credential observations lock")
-            .is_empty()
+    assert_eq!(harness.credentials.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(harness.credentials.releases.load(Ordering::SeqCst), 1);
+    let credential_observations = harness
+        .credentials
+        .observations
+        .lock()
+        .expect("credential observations lock");
+    assert_eq!(credential_observations.len(), 1);
+    assert_eq!(
+        credential_observations[0].action,
+        GithubDeliveryRepositoryAction::FetchRepositoryChangedFiles
     );
+    drop(credential_observations);
     let observations = changed.observations.lock().expect("observations lock");
     assert_eq!(observations.len(), 1);
     assert_eq!(observations[0].claim, harness.claimed.claim());
     assert_eq!(observations[0].attempt, 1);
-    assert_eq!(observations[0].private_action, None);
-    assert!(!observations[0].credential_present);
-    assert!(!observations[0].credential_matches);
+    assert_eq!(
+        observations[0].repository_action,
+        Some(GithubDeliveryRepositoryAction::FetchRepositoryChangedFiles)
+    );
+    assert!(observations[0].credential_present);
+    assert!(observations[0].credential_matches);
 }
 
 #[tokio::test]
@@ -1280,7 +1292,7 @@ async fn selection_digest_binds_event_provider_evidence_workflow_path_and_source
 }
 
 #[tokio::test]
-async fn private_changed_files_reject_wrong_selector_or_action_before_provider_io() {
+async fn changed_files_reject_wrong_selector_or_action_before_provider_io() {
     for behavior in [
         DiffCredentialBehavior::WrongSelector,
         DiffCredentialBehavior::WrongAction,

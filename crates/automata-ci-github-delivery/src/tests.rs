@@ -247,7 +247,7 @@ fn fixture_manifest_receipt(
 ) -> ManifestPinnedGithubDeliveryReceipt {
     let delivery = request.delivery();
     let identity = delivery.identity();
-    let (manifest, checks_authority, private_source_authority) = fixture_manifest_authorities(
+    let (manifest, checks_authority, repository_contents_authority) = fixture_manifest_authorities(
         identity,
         request.authenticated_webhook_verifier_fingerprint(),
         request.authenticated_webhook_verifier_revision(),
@@ -255,29 +255,28 @@ fn fixture_manifest_receipt(
     );
     let check_subject_id =
         GithubCheckSubjectId::from_uuid(Uuid::from_u128(200 + ordinal)).expect("check subject");
-    let private_pull_request_files_authority = (identity.repository_visibility()
-        == ProviderRepositoryVisibility::Private
-        && request.authenticated_event().kind() == GithubAuthenticatedEventKind::PullRequest)
+    let pull_requests_authority = (request.authenticated_event().kind()
+        == GithubAuthenticatedEventKind::PullRequest)
         .then(|| {
             GithubServerServiceAuthoritySelector::from_durable_parts(
                 identity.tenant().clone(),
                 GithubServerServiceAuthorityId::from_uuid(Uuid::from_u128(500 + ordinal))
-                    .expect("private pull-request-files authority"),
+                    .expect("pull-requests authority"),
                 Sha256Digest::from_bytes([0x63; 32]),
                 checks_authority.app_configuration_revision(),
                 checks_authority.policy_revision(),
             )
         });
     let evidence =
-        ManifestPinnedGithubDeliveryEvidence::from_durable_parts_with_pull_request_files_authority(
+        ManifestPinnedGithubDeliveryEvidence::from_durable_parts_with_pull_requests_authority(
             delivery_id,
             request.repository_owner_id(),
             manifest,
             request.authenticated_webhook_verifier_fingerprint(),
             request.authenticated_webhook_verifier_revision(),
             checks_authority,
-            private_source_authority,
-            private_pull_request_files_authority,
+            repository_contents_authority,
+            pull_requests_authority,
             check_subject_id,
             request.head_sha(),
             request.authenticated_event().clone(),
@@ -295,7 +294,7 @@ fn fixture_manifest_authorities(
 ) -> (
     GithubProviderManifest,
     GithubServerServiceAuthoritySelector,
-    Option<GithubServerServiceAuthoritySelector>,
+    GithubServerServiceAuthoritySelector,
 ) {
     let app_revision = GithubServerServiceRevision::new(1).expect("App revision");
     let policy_revision = GithubServerServiceRevision::new(1).expect("policy revision");
@@ -332,17 +331,14 @@ fn fixture_manifest_authorities(
         app_revision,
         policy_revision,
     );
-    let private_source_authority =
-        (identity.repository_visibility() == ProviderRepositoryVisibility::Private).then(|| {
-            fixture_authority_selector(
-                identity.tenant(),
-                Uuid::from_u128(400 + ordinal),
-                [0x62; 32],
-                app_revision,
-                policy_revision,
-            )
-        });
-    (manifest, checks_authority, private_source_authority)
+    let repository_contents_authority = fixture_authority_selector(
+        identity.tenant(),
+        Uuid::from_u128(400 + ordinal),
+        [0x62; 32],
+        app_revision,
+        policy_revision,
+    );
+    (manifest, checks_authority, repository_contents_authority)
 }
 
 fn fixture_authority_selector(
@@ -519,7 +515,7 @@ fn fixture_repository_dispatch_receipt(
     ordinal: u128,
 ) -> PendingGithubRepositoryDispatchReceipt {
     let delivery = request.delivery();
-    let (manifest, checks_authority, private_source_authority) = fixture_manifest_authorities(
+    let (manifest, checks_authority, repository_contents_authority) = fixture_manifest_authorities(
         delivery.identity(),
         request.authenticated_webhook_verifier_fingerprint(),
         request.authenticated_webhook_verifier_revision(),
@@ -532,7 +528,7 @@ fn fixture_repository_dispatch_receipt(
         request.authenticated_webhook_verifier_fingerprint(),
         request.authenticated_webhook_verifier_revision(),
         checks_authority,
-        private_source_authority,
+        repository_contents_authority,
         request.event().clone(),
         delivery.accepted_at(),
     )
@@ -1198,12 +1194,13 @@ async fn repository_dispatch_ingress_pins_raw_event_authority_and_exact_replay()
         accepted.receipt().evidence().event().git_ref(),
         "refs/heads/main"
     );
-    assert!(
+    assert_eq!(
         accepted
             .receipt()
             .evidence()
-            .private_source_authority()
-            .is_some()
+            .repository_contents_authority()
+            .tenant(),
+        accepted.receipt().evidence().tenant()
     );
     assert_eq!(
         accepted.raw_event().media_type(),

@@ -52,7 +52,7 @@ pub use processor::{
 };
 
 pub use service::{
-    GithubDeliveryPrivateRepositoryAction, GithubDeliveryService, GithubDeliveryServiceConfig,
+    GithubDeliveryRepositoryAction, GithubDeliveryService, GithubDeliveryServiceConfig,
     GithubDeliveryServiceConfigurationError, GithubDeliveryServiceError,
     GithubDeliveryServiceOutcome, GithubDeliverySourceCredential,
     GithubDeliverySourceCredentialBinding, GithubDeliverySourceCredentialProvider,
@@ -61,9 +61,9 @@ pub use service::{
 };
 
 pub use schedule::{
-    GithubScheduleClock, GithubSchedulePrivateSourceAuthorities, GithubScheduleService,
-    GithubScheduleServiceConfig, GithubScheduleServiceConfigurationError,
-    GithubScheduleServiceError, GithubScheduleServicePass, GithubScheduleSourceCredential,
+    GithubScheduleClock, GithubScheduleService, GithubScheduleServiceConfig,
+    GithubScheduleServiceConfigurationError, GithubScheduleServiceError, GithubScheduleServicePass,
+    GithubScheduleSourceAuthorities, GithubScheduleSourceCredential,
     GithubScheduleSourceCredentialProvider, GithubScheduleSourceCredentialProviderError,
     GithubScheduleSourceCredentialRequest, GithubScheduleSourceCredentialValueError,
 };

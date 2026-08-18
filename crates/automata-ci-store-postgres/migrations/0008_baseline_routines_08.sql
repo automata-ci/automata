@@ -1,4 +1,4 @@
--- Frozen greenfield baseline. Add a new migration instead of editing this stage.
+-- Canonical greenfield schema stage.
 SET check_function_bodies = false;
 
 CREATE FUNCTION automata_job_secret_binding_digest(target_attempt_id uuid, target_name text, target_tenant_id text, target_grant_id uuid, target_lease_id uuid, target_fencing_token bigint) RETURNS bytea
@@ -71,12 +71,10 @@ CREATE FUNCTION automata_lock_github_oidc_authority_dependencies(authority githu
     LANGUAGE plpgsql
     AS $$
 DECLARE
-    origin_visibility TEXT;
-    private_authority_id UUID;
+    contents_authority_id UUID;
 BEGIN
-    SELECT origin.repository_visibility,
-           origin.private_source_authority_id
-      INTO origin_visibility, private_authority_id
+    SELECT origin.repository_contents_authority_id
+      INTO contents_authority_id
     FROM job_attempts AS attempt
     JOIN jobs AS job
       ON job.id = attempt.job_id
@@ -227,43 +225,40 @@ BEGIN
         RETURN FALSE;
     END IF;
 
-    IF origin_visibility = 'public' THEN
-        RETURN private_authority_id IS NULL;
-    END IF;
-    IF origin_visibility <> 'private' OR private_authority_id IS NULL THEN
+    IF contents_authority_id IS NULL THEN
         RETURN FALSE;
     END IF;
 
     PERFORM 1
     FROM github_workflow_run_manifest_origins AS origin
-    JOIN github_server_service_authorities AS private_authority
-      ON private_authority.tenant_id = origin.tenant_id
-     AND private_authority.id = origin.private_source_authority_id
-     AND private_authority.repository_id = origin.repository_id
-     AND private_authority.provider_connection_id =
+    JOIN github_server_service_authorities AS contents_authority
+      ON contents_authority.tenant_id = origin.tenant_id
+     AND contents_authority.id = origin.repository_contents_authority_id
+     AND contents_authority.repository_id = origin.repository_id
+     AND contents_authority.provider_connection_id =
          origin.provider_connection_id
-     AND private_authority.provider_installation_id =
+     AND contents_authority.provider_installation_id =
          origin.provider_installation_id
-     AND private_authority.github_repository_id =
+     AND contents_authority.github_repository_id =
          origin.github_repository_id
-     AND private_authority.github_repository_name =
+     AND contents_authority.github_repository_name =
          origin.github_repository_name
-     AND private_authority.service_scope = 'private_repository_source_read'
-     AND private_authority.identity_digest =
-         origin.private_source_authority_identity_digest
-     AND private_authority.app_configuration_revision =
-         origin.private_source_authority_app_configuration_revision
-     AND private_authority.policy_revision =
-         origin.private_source_authority_policy_revision
+     AND contents_authority.service_scope = 'repository_contents_read'
+     AND contents_authority.identity_digest =
+         origin.repository_contents_authority_identity_digest
+     AND contents_authority.app_configuration_revision =
+         origin.repository_contents_authority_app_configuration_revision
+     AND contents_authority.policy_revision =
+         origin.repository_contents_authority_policy_revision
     WHERE origin.tenant_id = authority.tenant_id
       AND origin.repository_id = authority.repository_id
       AND origin.workflow_id = authority.workflow_id
       AND origin.run_id = authority.run_id
       AND origin.subject_evidence_sha256 =
           authority.github_run_subject_evidence_sha256
-      AND origin.private_source_authority_id = private_authority_id
-      AND private_authority.state = 'active'
-    FOR SHARE OF private_authority;
+      AND origin.repository_contents_authority_id = contents_authority_id
+      AND contents_authority.state = 'active'
+    FOR SHARE OF contents_authority;
     RETURN FOUND;
 END;
 $$;

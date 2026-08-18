@@ -81,11 +81,8 @@ impl GithubRestPushChangedFilesProvider {
             return GithubChangedFilesDisposition::Invalid;
         };
         let authority = match request.authority() {
-            GithubPullRequestChangedFilesAuthority::PublicAnonymous => {
-                GithubPullRequestDiffAuthority::PublicAnonymous
-            }
-            GithubPullRequestChangedFilesAuthority::PrivateInstallationPullRequestsRead(token) => {
-                GithubPullRequestDiffAuthority::PrivateInstallationPullRequestsRead(token)
+            GithubPullRequestChangedFilesAuthority::InstallationPullRequestsRead(token) => {
+                GithubPullRequestDiffAuthority::new(token)
             }
         };
         let Some(deadline) =
@@ -145,16 +142,13 @@ fn validate_delivery_binding(request: &GithubPushChangedFilesRequest<'_>) -> boo
         (
             identity.repository_visibility(),
             push.repository().visibility(),
-            request.authority(),
         ),
         (
             ProviderRepositoryVisibility::Public,
             GithubRepositoryVisibility::Public,
-            GithubPushChangedFilesAuthority::PublicAnonymous,
         ) | (
             ProviderRepositoryVisibility::Private,
             GithubRepositoryVisibility::Private,
-            GithubPushChangedFilesAuthority::PrivateInstallationContentsRead(_),
         )
     );
     if !visibility_matches
@@ -175,7 +169,6 @@ fn validate_pull_request_delivery_binding(
     validate_common_delivery_binding(
         request.identity(),
         pull_request,
-        request.authority(),
         request.observed_at(),
         request.required_through(),
     )
@@ -184,7 +177,6 @@ fn validate_pull_request_delivery_binding(
 fn validate_common_delivery_binding(
     identity: &automata_ci_store::ProviderDeliveryIdentity,
     pull_request: &VerifiedGithubPullRequest,
-    authority: &GithubPullRequestChangedFilesAuthority<'_>,
     observed_at: automata_ci_core::UnixMillis,
     required_through: automata_ci_core::UnixMillis,
 ) -> bool {
@@ -195,16 +187,13 @@ fn validate_common_delivery_binding(
         (
             identity.repository_visibility(),
             pull_request.repository().visibility(),
-            authority,
         ),
         (
             ProviderRepositoryVisibility::Public,
             GithubRepositoryVisibility::Public,
-            GithubPullRequestChangedFilesAuthority::PublicAnonymous,
         ) | (
             ProviderRepositoryVisibility::Private,
             GithubRepositoryVisibility::Private,
-            GithubPullRequestChangedFilesAuthority::PrivateInstallationPullRequestsRead(_),
         )
     );
     if !visibility_matches
@@ -245,11 +234,8 @@ fn push_authority<'credential>(
     authority: &'credential GithubPushChangedFilesAuthority<'_>,
 ) -> GithubPushDiffAuthority<'credential> {
     match authority {
-        GithubPushChangedFilesAuthority::PublicAnonymous => {
-            GithubPushDiffAuthority::PublicAnonymous
-        }
-        GithubPushChangedFilesAuthority::PrivateInstallationContentsRead(token) => {
-            GithubPushDiffAuthority::PrivateInstallationContentsRead(token)
+        GithubPushChangedFilesAuthority::InstallationContentsRead(token) => {
+            GithubPushDiffAuthority::new(token)
         }
     }
 }
@@ -366,20 +352,11 @@ mod tests {
 
     #[test]
     fn authority_mapping_is_disjoint_and_debug_redacted() {
-        let public = GithubPushChangedFilesAuthority::PublicAnonymous;
-        assert!(matches!(
-            push_authority(&public),
-            GithubPushDiffAuthority::PublicAnonymous
-        ));
-
-        let token = SecretString::new("private-adapter-token").unwrap();
-        let private = GithubPushChangedFilesAuthority::PrivateInstallationContentsRead(&token);
-        let mapped = push_authority(&private);
-        assert!(matches!(
-            mapped,
-            GithubPushDiffAuthority::PrivateInstallationContentsRead(_)
-        ));
-        assert!(!format!("{private:?}").contains("private-adapter-token"));
+        let token = SecretString::new("adapter-token").unwrap();
+        let authority = GithubPushChangedFilesAuthority::InstallationContentsRead(&token);
+        let mapped = push_authority(&authority);
+        assert_eq!(format!("{mapped:?}"), "GithubPushDiffAuthority([redacted])");
+        assert!(!format!("{authority:?}").contains("adapter-token"));
     }
 
     #[test]

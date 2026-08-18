@@ -134,7 +134,7 @@ ALTER TABLE ONLY github_provider_delivery_evidence
     ADD CONSTRAINT github_provider_delivery_evidence_manifest FOREIGN KEY (tenant_id, repository_id, provider_connection_id, provider_manifest_revision, provider_manifest_digest) REFERENCES github_provider_manifest_revisions(tenant_id, repository_id, provider_connection_id, manifest_revision, manifest_digest) MATCH FULL ON DELETE RESTRICT;
 
 ALTER TABLE ONLY github_provider_delivery_evidence
-    ADD CONSTRAINT github_provider_delivery_evidence_private_source_authority FOREIGN KEY (private_source_authority_id) REFERENCES github_server_service_authorities(id) ON DELETE RESTRICT;
+    ADD CONSTRAINT github_provider_delivery_evidence_repository_contents_authority FOREIGN KEY (repository_contents_authority_id) REFERENCES github_server_service_authorities(id) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY github_provider_manifest_current
     ADD CONSTRAINT github_provider_manifest_current_exact_revision FOREIGN KEY (tenant_id, repository_id, provider_connection_id, manifest_revision, manifest_digest) REFERENCES github_provider_manifest_revisions(tenant_id, repository_id, provider_connection_id, manifest_revision, manifest_digest) ON DELETE RESTRICT;
@@ -155,7 +155,7 @@ ALTER TABLE ONLY github_repository_dispatch_pending_evidence
     ADD CONSTRAINT github_repository_dispatch_pending_manifest FOREIGN KEY (tenant_id, repository_id, provider_connection_id, provider_manifest_revision, provider_manifest_digest) REFERENCES github_provider_manifest_revisions(tenant_id, repository_id, provider_connection_id, manifest_revision, manifest_digest) MATCH FULL ON DELETE RESTRICT;
 
 ALTER TABLE ONLY github_repository_dispatch_pending_evidence
-    ADD CONSTRAINT github_repository_dispatch_pending_private_authority FOREIGN KEY (private_source_authority_id) REFERENCES github_server_service_authorities(id) ON DELETE RESTRICT;
+    ADD CONSTRAINT github_repository_dispatch_pending_contents_authority FOREIGN KEY (repository_contents_authority_id) REFERENCES github_server_service_authorities(id) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY github_role_mappings
     ADD CONSTRAINT github_role_mappings_creator_membership FOREIGN KEY (tenant_id, created_by_principal_id) REFERENCES tenant_human_memberships(tenant_id, principal_id) ON DELETE RESTRICT;
@@ -266,7 +266,7 @@ ALTER TABLE ONLY github_schedule_discovery_claims
     ADD CONSTRAINT github_schedule_discovery_claims_manifest_owner FOREIGN KEY (tenant_id, repository_id, provider_connection_id, manifest_revision, manifest_digest, github_repository_owner_id) REFERENCES github_provider_manifest_revisions(tenant_id, repository_id, provider_connection_id, manifest_revision, manifest_digest, github_repository_owner_id) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY github_schedule_discovery_claims
-    ADD CONSTRAINT github_schedule_discovery_claims_private_source_authority FOREIGN KEY (private_source_authority_id) REFERENCES github_server_service_authorities(id) ON DELETE RESTRICT;
+    ADD CONSTRAINT github_schedule_discovery_claims_repository_contents_authority FOREIGN KEY (repository_contents_authority_id) REFERENCES github_server_service_authorities(id) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY github_schedule_fire_attempts
     ADD CONSTRAINT github_schedule_fire_attempts_fire FOREIGN KEY (fire_id) REFERENCES github_schedule_fires(fire_id) ON DELETE RESTRICT;
@@ -299,7 +299,7 @@ ALTER TABLE ONLY github_schedule_registry_revisions
     ADD CONSTRAINT github_schedule_registry_revisions_manifest_owner FOREIGN KEY (tenant_id, repository_id, provider_connection_id, manifest_revision, manifest_digest, github_repository_owner_id) REFERENCES github_provider_manifest_revisions(tenant_id, repository_id, provider_connection_id, manifest_revision, manifest_digest, github_repository_owner_id) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY github_schedule_registry_revisions
-    ADD CONSTRAINT github_schedule_registry_revisions_private_source_authority FOREIGN KEY (private_source_authority_id) REFERENCES github_server_service_authorities(id) ON DELETE RESTRICT;
+    ADD CONSTRAINT github_schedule_registry_revisions_repository_contents_authority FOREIGN KEY (repository_contents_authority_id) REFERENCES github_server_service_authorities(id) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY github_schedule_registry_seals
     ADD CONSTRAINT github_schedule_registry_seals_revision FOREIGN KEY (registry_id) REFERENCES github_schedule_registry_revisions(registry_id) ON DELETE RESTRICT;
@@ -1241,7 +1241,7 @@ ALTER TABLE ONLY workflow_rerun_check_evidence
     ADD CONSTRAINT workflow_rerun_check_evidence_manifest FOREIGN KEY (tenant_id, repository_id, provider_connection_id, provider_manifest_revision, provider_manifest_digest) REFERENCES github_provider_manifest_revisions(tenant_id, repository_id, provider_connection_id, manifest_revision, manifest_digest) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY workflow_rerun_check_evidence
-    ADD CONSTRAINT workflow_rerun_check_evidence_private_authority FOREIGN KEY (tenant_id, private_source_authority_id) REFERENCES github_server_service_authorities(tenant_id, id) ON DELETE RESTRICT;
+    ADD CONSTRAINT workflow_rerun_check_evidence_contents_authority FOREIGN KEY (tenant_id, repository_contents_authority_id) REFERENCES github_server_service_authorities(tenant_id, id) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY workflow_rerun_check_evidence
     ADD CONSTRAINT workflow_rerun_check_evidence_request FOREIGN KEY (tenant_id, operation_id, run_id) REFERENCES workflow_rerun_requests(tenant_id, operation_id, rerun_run_id) ON DELETE RESTRICT;

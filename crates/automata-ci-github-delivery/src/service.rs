@@ -43,36 +43,36 @@ use crate::{
 const DEFAULT_CLAIM_MILLIS: i64 = 5 * 60 * 1_000;
 const DEFAULT_POLL_MILLIS: i64 = 1_000;
 const DEFAULT_RENEW_AFTER_MILLIS: i64 = 2 * 60 * 1_000;
-const PRIVATE_SOURCE_HANDOFF_MILLIS: i64 =
+const SOURCE_HANDOFF_MILLIS: i64 =
     MAX_PROVIDER_DELIVERY_CLAIM_MILLIS + MAX_GITHUB_SERVICE_CONSUMER_REQUEST_MILLIS;
 
-/// Closed private-repository action bound into one server-service handoff.
+/// Closed repository action bound into one server-service handoff.
 ///
 /// The actions deliberately share no replay identity. Revision archives,
 /// push comparisons, and pull-request file pages each require their exact
 /// provider permission and cannot substitute for one another.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub enum GithubDeliveryPrivateRepositoryAction {
-    /// Fetch the exact private repository revision archive.
-    FetchPrivateRepositoryRevision,
-    /// Fetch the exact private repository changed-file set.
-    FetchPrivateRepositoryChangedFiles,
-    /// Fetch the exact private pull request's changed-file set.
-    FetchPrivatePullRequestFiles,
+pub enum GithubDeliveryRepositoryAction {
+    /// Fetch an exact repository revision archive.
+    FetchRepositoryRevision,
+    /// Fetch an exact repository changed-file set.
+    FetchRepositoryChangedFiles,
+    /// Fetch an exact pull request's changed-file set.
+    FetchPullRequestFiles,
 }
 
 const fn server_service_action(
-    action: GithubDeliveryPrivateRepositoryAction,
+    action: GithubDeliveryRepositoryAction,
 ) -> GithubServerServiceAction {
     match action {
-        GithubDeliveryPrivateRepositoryAction::FetchPrivateRepositoryRevision => {
-            GithubServerServiceAction::FetchPrivateRepositoryRevision
+        GithubDeliveryRepositoryAction::FetchRepositoryRevision => {
+            GithubServerServiceAction::FetchRepositoryRevision
         }
-        GithubDeliveryPrivateRepositoryAction::FetchPrivateRepositoryChangedFiles => {
-            GithubServerServiceAction::FetchPrivateRepositoryChangedFiles
+        GithubDeliveryRepositoryAction::FetchRepositoryChangedFiles => {
+            GithubServerServiceAction::FetchRepositoryChangedFiles
         }
-        GithubDeliveryPrivateRepositoryAction::FetchPrivatePullRequestFiles => {
-            GithubServerServiceAction::FetchPrivatePullRequestFiles
+        GithubDeliveryRepositoryAction::FetchPullRequestFiles => {
+            GithubServerServiceAction::FetchPullRequestFiles
         }
     }
 }
@@ -178,14 +178,14 @@ pub enum GithubDeliveryServiceConfigurationError {
     InvalidRenewalDuration,
 }
 
-/// Borrowed exact private-repository authority requested for one claimed delivery.
+/// Borrowed exact repository authority requested for one claimed delivery.
 #[derive(Clone, Copy)]
 pub struct GithubDeliverySourceCredentialRequest<'a> {
     identity: &'a ProviderDeliveryIdentity,
     repository_owner_id: ProviderRepositoryOwnerId,
     authority_selector: &'a GithubServerServiceAuthoritySelector,
     snapshot: GithubDeliveryClaimSnapshot,
-    action: GithubDeliveryPrivateRepositoryAction,
+    action: GithubDeliveryRepositoryAction,
     observed_at: UnixMillis,
     required_through: UnixMillis,
 }
@@ -196,14 +196,13 @@ impl GithubDeliverySourceCredentialRequest<'_> {
         repository_owner_id: ProviderRepositoryOwnerId,
         authority_selector: &'a GithubServerServiceAuthoritySelector,
         snapshot: GithubDeliveryClaimSnapshot,
-        action: GithubDeliveryPrivateRepositoryAction,
+        action: GithubDeliveryRepositoryAction,
         observed_at: UnixMillis,
     ) -> Result<GithubDeliverySourceCredentialRequest<'a>, GithubDeliverySourceCredentialValueError>
     {
         let observed_at = observed_at.max(snapshot.renewed_at());
         let required_through = provider_required_through(snapshot, observed_at)?;
         if identity.provider() != "github"
-            || identity.repository_visibility() != ProviderRepositoryVisibility::Private
             || authority_selector.tenant() != identity.tenant()
             || snapshot.attempt() == 0
             || snapshot.attempt() > MAX_PROVIDER_DELIVERY_ATTEMPTS
@@ -234,7 +233,7 @@ impl GithubDeliverySourceCredentialRequest<'_> {
         self.repository_owner_id
     }
 
-    /// Returns the immutable private-source authority pinned at acceptance.
+    /// Returns the immutable repository-source authority pinned at acceptance.
     #[must_use]
     pub const fn authority_selector(&self) -> &GithubServerServiceAuthoritySelector {
         self.authority_selector
@@ -249,7 +248,7 @@ impl GithubDeliverySourceCredentialRequest<'_> {
 
     /// Returns the disjoint private-repository action requested from authority.
     #[must_use]
-    pub const fn action(&self) -> GithubDeliveryPrivateRepositoryAction {
+    pub const fn action(&self) -> GithubDeliveryRepositoryAction {
         self.action
     }
 
@@ -303,7 +302,7 @@ pub(crate) fn provider_required_through(
     let handoff_millis = required_through
         .get()
         .checked_sub(observed_at.get())
-        .filter(|duration| *duration > 0 && *duration <= PRIVATE_SOURCE_HANDOFF_MILLIS);
+        .filter(|duration| *duration > 0 && *duration <= SOURCE_HANDOFF_MILLIS);
     if snapshot.attempt() == 0
         || snapshot.attempt() > MAX_PROVIDER_DELIVERY_ATTEMPTS
         || snapshot.claimed_at() > snapshot.renewed_at()
@@ -331,7 +330,7 @@ impl fmt::Debug for GithubDeliverySourceCredentialRequest<'_> {
     }
 }
 
-/// Immutable non-secret authority bound into one private source credential.
+/// Immutable non-secret authority bound into one repository source credential.
 pub struct GithubDeliverySourceCredentialBinding {
     identity: ProviderDeliveryIdentity,
     repository_owner_id: ProviderRepositoryOwnerId,
@@ -347,7 +346,7 @@ impl GithubDeliverySourceCredentialBinding {
     ///
     /// # Errors
     ///
-    /// Rejects a non-GitHub or non-private identity, a mismatched repository
+    /// Rejects a non-GitHub identity, a mismatched repository
     /// route, or an invalid durable attempt or horizon.
     pub fn new(
         identity: ProviderDeliveryIdentity,
@@ -359,14 +358,13 @@ impl GithubDeliverySourceCredentialBinding {
         required_through: UnixMillis,
     ) -> Result<Self, GithubDeliverySourceCredentialValueError> {
         if identity.provider() != "github"
-            || identity.repository_visibility() != ProviderRepositoryVisibility::Private
             || repository.as_str() != identity.repository_identity()
             || authority_selector.tenant() != identity.tenant()
             || !matches!(
                 consumer.action(),
-                GithubServerServiceAction::FetchPrivateRepositoryRevision
-                    | GithubServerServiceAction::FetchPrivateRepositoryChangedFiles
-                    | GithubServerServiceAction::FetchPrivatePullRequestFiles
+                GithubServerServiceAction::FetchRepositoryRevision
+                    | GithubServerServiceAction::FetchRepositoryChangedFiles
+                    | GithubServerServiceAction::FetchPullRequestFiles
             )
             || consumer.revision().get() > u64::from(MAX_PROVIDER_DELIVERY_ATTEMPTS)
             || required_through.get() < 0
@@ -400,7 +398,7 @@ impl fmt::Debug for GithubDeliverySourceCredentialBinding {
     }
 }
 
-/// Move-only private source credential bound to one exact GitHub repository authority.
+/// Move-only source credential bound to one exact GitHub repository authority.
 ///
 /// The product-owned issuer must mint this credential for only the bound
 /// repository with exactly `contents: read`; no union with Checks, job, or
@@ -432,7 +430,7 @@ impl GithubDeliverySourceCredential {
             .required_through
             .get()
             .checked_sub(acquired_at.get())
-            .filter(|duration| *duration > 0 && *duration <= PRIVATE_SOURCE_HANDOFF_MILLIS);
+            .filter(|duration| *duration > 0 && *duration <= SOURCE_HANDOFF_MILLIS);
         if acquired_at.get() < 0 || handoff_millis.is_none() {
             return Err(GithubDeliverySourceCredentialValueError::InvalidBinding);
         }
@@ -575,7 +573,7 @@ pub enum GithubDeliverySourceCredentialProviderError {
     InvariantViolation,
 }
 
-/// Least-authority provider for one request-scoped private repository credential.
+/// Least-authority provider for one request-scoped repository credential.
 ///
 /// Implementations resolve existing product authority. They must not delegate
 /// installation-token minting, caching, or persistence to this service.
@@ -633,24 +631,19 @@ pub struct GithubDeliveryService {
     worker: Arc<GithubDeliveryWorker>,
     deliveries: Arc<dyn ProviderDeliveryRepository>,
     renewals: Arc<dyn ProviderDeliveryClaimRenewalRepository>,
-    source_policy: GithubDeliverySourcePolicy,
+    credentials: Arc<dyn GithubDeliverySourceCredentialProvider>,
     clock: Arc<dyn GithubDeliveryClock>,
     worker_id: ProviderProcessingWorkerId,
     config: GithubDeliveryServiceConfig,
 }
 
-enum GithubDeliverySourcePolicy {
-    PublicOnly,
-    PrivateEnabled(Arc<dyn GithubDeliverySourceCredentialProvider>),
-}
-
-enum PrivateCredentialAcquisition {
+enum CredentialAcquisition {
     Credential(Box<GithubDeliverySourceCredential>),
     SnapshotRotated,
     Finished(GithubDeliveryWorkerOutcome),
 }
 
-enum PrivateRevisionFetch {
+enum RevisionFetch {
     SnapshotRotated,
     Classified {
         source: Result<RepositorySourceArchive, ProcessingFailure>,
@@ -658,105 +651,14 @@ enum PrivateRevisionFetch {
     },
 }
 
-impl fmt::Debug for GithubDeliverySourcePolicy {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::PublicOnly => formatter.write_str("PublicOnly"),
-            Self::PrivateEnabled(_) => formatter.write_str("PrivateEnabled([redacted])"),
-        }
-    }
-}
-
 impl GithubDeliveryService {
-    /// Constructs a service that can fetch only authenticated public deliveries.
-    ///
-    /// This mode stores no private-source credential-provider handle. A
-    /// durable private delivery is terminally rejected without source or
-    /// private-source credential I/O.
+    /// Constructs a delivery service with request-scoped repository credentials.
     ///
     /// # Errors
     ///
     /// Rejects a worker configuration incompatible with GitHub delivery.
     #[allow(clippy::too_many_arguments)]
-    pub fn new_public_only<R>(
-        objects: Arc<dyn ImmutableBlobStore>,
-        repository_source: Arc<dyn RepositorySource>,
-        workflow_processor: Arc<dyn GithubDeliveryWorkflowProcessor>,
-        deliveries: Arc<R>,
-        clock: Arc<dyn GithubDeliveryClock>,
-        worker_id: ProviderProcessingWorkerId,
-        worker_config: GithubDeliveryWorkerConfig,
-        config: GithubDeliveryServiceConfig,
-    ) -> Result<Self, GithubDeliveryWorkerConfigurationError>
-    where
-        R: ProviderDeliveryRepository
-            + ProviderDeliveryClaimRenewalRepository
-            + GithubSubjectEvidenceRepository
-            + 'static,
-    {
-        Self::new_with_source_policy(
-            objects,
-            repository_source,
-            workflow_processor,
-            deliveries,
-            GithubDeliverySourcePolicy::PublicOnly,
-            None,
-            clock,
-            worker_id,
-            worker_config,
-            config,
-        )
-    }
-
-    /// Constructs a public-only service with custom-dispatch branch resolution.
-    ///
-    /// # Errors
-    ///
-    /// Rejects either source adapter when it does not identify as GitHub.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new_public_only_with_repository_dispatch<R>(
-        objects: Arc<dyn ImmutableBlobStore>,
-        repository_source: Arc<dyn RepositorySource>,
-        repository_dispatch_resolver: Arc<dyn ScmProvider>,
-        workflow_processor: Arc<dyn GithubDeliveryWorkflowProcessor>,
-        deliveries: Arc<R>,
-        repository_dispatches: Arc<dyn GithubRepositoryDispatchEvidenceRepository>,
-        clock: Arc<dyn GithubDeliveryClock>,
-        worker_id: ProviderProcessingWorkerId,
-        worker_config: GithubDeliveryWorkerConfig,
-        config: GithubDeliveryServiceConfig,
-    ) -> Result<Self, GithubDeliveryWorkerConfigurationError>
-    where
-        R: ProviderDeliveryRepository
-            + ProviderDeliveryClaimRenewalRepository
-            + GithubSubjectEvidenceRepository
-            + 'static,
-    {
-        Self::new_with_source_policy(
-            objects,
-            repository_source,
-            workflow_processor,
-            deliveries,
-            GithubDeliverySourcePolicy::PublicOnly,
-            Some((repository_dispatches, repository_dispatch_resolver)),
-            clock,
-            worker_id,
-            worker_config,
-            config,
-        )
-    }
-
-    /// Constructs a service that can fetch both public and exact-authority private deliveries.
-    ///
-    /// Public fetches remain anonymous. The provider is consulted only for a
-    /// signed private delivery and must return an exact-repository
-    /// `contents: read` handoff covering the latest claim horizon.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a worker configuration incompatible with GitHub delivery.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new_with_private_source_credentials<R>(
+    pub fn new<R>(
         objects: Arc<dyn ImmutableBlobStore>,
         repository_source: Arc<dyn RepositorySource>,
         workflow_processor: Arc<dyn GithubDeliveryWorkflowProcessor>,
@@ -773,12 +675,12 @@ impl GithubDeliveryService {
             + GithubSubjectEvidenceRepository
             + 'static,
     {
-        Self::new_with_source_policy(
+        Self::new_with_optional_repository_dispatch(
             objects,
             repository_source,
             workflow_processor,
             deliveries,
-            GithubDeliverySourcePolicy::PrivateEnabled(credentials),
+            credentials,
             None,
             clock,
             worker_id,
@@ -787,16 +689,13 @@ impl GithubDeliveryService {
         )
     }
 
-    /// Constructs a private-capable service with custom-dispatch resolution.
-    ///
-    /// Public branches resolve anonymously. Private branches reuse only the
-    /// existing exact-repository `contents: read` credential handoff.
+    /// Constructs a delivery service with custom-dispatch resolution.
     ///
     /// # Errors
     ///
     /// Rejects either source adapter when it does not identify as GitHub.
     #[allow(clippy::too_many_arguments)]
-    pub fn new_with_private_source_credentials_and_repository_dispatch<R>(
+    pub fn new_with_repository_dispatch<R>(
         objects: Arc<dyn ImmutableBlobStore>,
         repository_source: Arc<dyn RepositorySource>,
         repository_dispatch_resolver: Arc<dyn ScmProvider>,
@@ -815,12 +714,12 @@ impl GithubDeliveryService {
             + GithubSubjectEvidenceRepository
             + 'static,
     {
-        Self::new_with_source_policy(
+        Self::new_with_optional_repository_dispatch(
             objects,
             repository_source,
             workflow_processor,
             deliveries,
-            GithubDeliverySourcePolicy::PrivateEnabled(credentials),
+            credentials,
             Some((repository_dispatches, repository_dispatch_resolver)),
             clock,
             worker_id,
@@ -830,12 +729,12 @@ impl GithubDeliveryService {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn new_with_source_policy<R>(
+    fn new_with_optional_repository_dispatch<R>(
         objects: Arc<dyn ImmutableBlobStore>,
         repository_source: Arc<dyn RepositorySource>,
         workflow_processor: Arc<dyn GithubDeliveryWorkflowProcessor>,
         deliveries: Arc<R>,
-        source_policy: GithubDeliverySourcePolicy,
+        credentials: Arc<dyn GithubDeliverySourceCredentialProvider>,
         repository_dispatch: Option<(
             Arc<dyn GithubRepositoryDispatchEvidenceRepository>,
             Arc<dyn ScmProvider>,
@@ -883,7 +782,7 @@ impl GithubDeliveryService {
             worker,
             deliveries: delivery_repository,
             renewals: renewal_repository,
-            source_policy,
+            credentials,
             clock,
             worker_id,
             config,
@@ -1017,27 +916,19 @@ impl GithubDeliveryService {
             return Ok(outcome);
         };
 
-        if lease.initial().identity().repository_visibility()
-            == ProviderRepositoryVisibility::Private
-            && matches!(&self.source_policy, GithubDeliverySourcePolicy::PublicOnly)
-        {
-            return self
-                .worker
-                .finish_private_source_unsupported(lease)
-                .await
-                .map_err(Into::into);
-        }
-
         if prepared.deleted() {
             return self.worker.finish_deleted(lease).await.map_err(Into::into);
         }
 
         match lease.initial().identity().repository_visibility() {
-            ProviderRepositoryVisibility::Public => {
+            ProviderRepositoryVisibility::Public
+                if prepared.pending_repository_dispatch().is_none() =>
+            {
                 self.process_public_claim(lease, prepared.as_ref()).await
             }
-            ProviderRepositoryVisibility::Private => {
-                self.process_private_claim(lease, prepared.as_ref()).await
+            ProviderRepositoryVisibility::Public | ProviderRepositoryVisibility::Private => {
+                self.process_authenticated_claim(lease, prepared.as_ref())
+                    .await
             }
         }
     }
@@ -1052,7 +943,9 @@ impl GithubDeliveryService {
         let source = self.worker.fetch_source(
             lease.initial(),
             prepared,
-            GithubDeliverySourceAuthority::PublicAnonymous,
+            GithubDeliverySourceAuthority::DirectPublicArchive {
+                changed_files_credentials: self.credentials.as_ref(),
+            },
         );
         tokio::pin!(source);
         let ready = poll_provider_once(lease, source.as_mut())
@@ -1074,33 +967,23 @@ impl GithubDeliveryService {
             }
         };
         self.worker
-            .process_fetched_source_leased(lease, prepared, &source, None)
+            .process_fetched_source_leased(
+                lease,
+                prepared,
+                &source,
+                Some(self.credentials.as_ref()),
+            )
             .await
             .map_err(Into::into)
     }
 
-    async fn process_private_claim(
+    async fn process_authenticated_claim(
         &self,
         lease: &GithubDeliveryClaimLease,
         prepared: &crate::worker::PreparedGithubDelivery,
     ) -> Result<GithubDeliveryWorkerOutcome, GithubDeliveryServiceError> {
-        let credentials = match &self.source_policy {
-            GithubDeliverySourcePolicy::PublicOnly => {
-                return self
-                    .worker
-                    .finish_private_source_unsupported(lease)
-                    .await
-                    .map_err(Into::into);
-            }
-            GithubDeliverySourcePolicy::PrivateEnabled(credentials) => Arc::clone(credentials),
-        };
-        let Some(authority_selector) = prepared.private_source_authority() else {
-            return self
-                .worker
-                .finish_private_source_unsupported(lease)
-                .await
-                .map_err(Into::into);
-        };
+        let credentials = Arc::clone(&self.credentials);
+        let authority_selector = prepared.repository_contents_authority();
         loop {
             let (requested_snapshot, observed_at) = lease
                 .require_live_observation(self.now()?)
@@ -1117,25 +1000,20 @@ impl GithubDeliveryService {
                 repository_owner_id,
                 authority_selector,
                 requested_snapshot,
-                GithubDeliveryPrivateRepositoryAction::FetchPrivateRepositoryRevision,
+                GithubDeliveryRepositoryAction::FetchRepositoryRevision,
                 observed_at,
             )
             .map_err(|_| GithubDeliveryServiceError::InvalidTrustedTime)?;
             let credential = match self
-                .acquire_private_credential(
-                    lease,
-                    credentials.as_ref(),
-                    request,
-                    requested_snapshot,
-                )
+                .acquire_credential(lease, credentials.as_ref(), request, requested_snapshot)
                 .await?
             {
-                PrivateCredentialAcquisition::Credential(credential) => credential,
-                PrivateCredentialAcquisition::SnapshotRotated => continue,
-                PrivateCredentialAcquisition::Finished(outcome) => return Ok(outcome),
+                CredentialAcquisition::Credential(credential) => credential,
+                CredentialAcquisition::SnapshotRotated => continue,
+                CredentialAcquisition::Finished(outcome) => return Ok(outcome),
             };
-            let PrivateRevisionFetch::Classified { source, operation } = self
-                .fetch_private_revision(
+            let RevisionFetch::Classified { source, operation } = self
+                .fetch_revision(
                     lease,
                     prepared,
                     credentials.as_ref(),
@@ -1165,14 +1043,14 @@ impl GithubDeliveryService {
         }
     }
 
-    async fn fetch_private_revision(
+    async fn fetch_revision(
         &self,
         lease: &GithubDeliveryClaimLease,
         prepared: &crate::worker::PreparedGithubDelivery,
         credentials: &dyn GithubDeliverySourceCredentialProvider,
         requested_snapshot: GithubDeliveryClaimSnapshot,
         credential: Box<GithubDeliverySourceCredential>,
-    ) -> Result<PrivateRevisionFetch, GithubDeliveryServiceError> {
+    ) -> Result<RevisionFetch, GithubDeliveryServiceError> {
         let operation = lease.lock_operation().await;
         let provider_observed_at = match self.now() {
             Ok(observed_at) => observed_at,
@@ -1194,7 +1072,7 @@ impl GithubDeliveryService {
         if latest != requested_snapshot {
             drop(operation);
             (*credential).release().await;
-            return Ok(PrivateRevisionFetch::SnapshotRotated);
+            return Ok(RevisionFetch::SnapshotRotated);
         }
         if credential.acquired_at() > provider_observed_at {
             drop(operation);
@@ -1205,7 +1083,7 @@ impl GithubDeliveryService {
             let source = self.worker.fetch_source(
                 lease.initial(),
                 prepared,
-                GithubDeliverySourceAuthority::PrivateInstallationContentsRead {
+                GithubDeliverySourceAuthority::InstallationContentsRead {
                     credential: credential.token(),
                     changed_files_credentials: Some(credentials),
                 },
@@ -1247,7 +1125,7 @@ impl GithubDeliveryService {
         if post_provider_snapshot != requested_snapshot {
             drop(operation);
             (*credential).release().await;
-            return Ok(PrivateRevisionFetch::SnapshotRotated);
+            return Ok(RevisionFetch::SnapshotRotated);
         }
         drop(operation);
         (*credential).release().await;
@@ -1258,21 +1136,21 @@ impl GithubDeliveryService {
             drop(operation);
             return Err(GithubDeliveryServiceError::ClaimLost);
         }
-        Ok(PrivateRevisionFetch::Classified { source, operation })
+        Ok(RevisionFetch::Classified { source, operation })
     }
 
-    async fn acquire_private_credential(
+    async fn acquire_credential(
         &self,
         lease: &GithubDeliveryClaimLease,
         credentials: &dyn GithubDeliverySourceCredentialProvider,
         request: GithubDeliverySourceCredentialRequest<'_>,
         requested_snapshot: GithubDeliveryClaimSnapshot,
-    ) -> Result<PrivateCredentialAcquisition, GithubDeliveryServiceError> {
+    ) -> Result<CredentialAcquisition, GithubDeliveryServiceError> {
         let operation = lease.lock_operation().await;
         let current = lease.require_live_at(self.now()?).map_err(claim_error)?;
         if current != requested_snapshot {
             drop(operation);
-            return Ok(PrivateCredentialAcquisition::SnapshotRotated);
+            return Ok(CredentialAcquisition::SnapshotRotated);
         }
         let credential = credentials.acquire(request);
         tokio::pin!(credential);
@@ -1285,9 +1163,7 @@ impl GithubDeliveryService {
             None => credential.await,
         } {
             Ok(credential) if credential_matches_request(&credential, request) => {
-                return Ok(PrivateCredentialAcquisition::Credential(Box::new(
-                    credential,
-                )));
+                return Ok(CredentialAcquisition::Credential(Box::new(credential)));
             }
             Ok(credential) => {
                 credential.release().await;
@@ -1298,7 +1174,7 @@ impl GithubDeliveryService {
         let operation = lease.lock_operation().await;
         if lease.latest()? != requested_snapshot {
             drop(operation);
-            return Ok(PrivateCredentialAcquisition::SnapshotRotated);
+            return Ok(CredentialAcquisition::SnapshotRotated);
         }
         let outcome = match failure {
             GithubDeliverySourceCredentialProviderError::Unavailable => {
@@ -1317,7 +1193,7 @@ impl GithubDeliveryService {
                     .await?
             }
         };
-        Ok(PrivateCredentialAcquisition::Finished(outcome))
+        Ok(CredentialAcquisition::Finished(outcome))
     }
 
     async fn renew_claim(
@@ -1575,7 +1451,7 @@ impl fmt::Debug for GithubDeliveryService {
             .field("worker", &self.worker)
             .field("deliveries", &"[provider delivery repository]")
             .field("renewals", &"[provider delivery renewal repository]")
-            .field("source_policy", &self.source_policy)
+            .field("credentials", &"[configured]")
             .field("clock", &self.clock)
             .field("worker_id", &self.worker_id)
             .field("config", &self.config)

@@ -12,7 +12,7 @@ use uuid::Uuid;
 use crate::{
     GithubCheckSubjectKey, GithubCheckSubjectReceipt, GithubProviderManifest,
     GithubProviderManifestRevision, GithubServerServiceAuthoritySelector, ObjectKey,
-    ProviderRepositoryOwnerId, ProviderRepositoryVisibility, RepositoryId, StoreError, TenantScope,
+    ProviderRepositoryOwnerId, RepositoryId, StoreError, TenantScope,
 };
 use automata_ci_provider::ProviderConnectionId;
 
@@ -244,47 +244,35 @@ impl GithubScheduleDiscoveryClaim {
 
 /// Closed source-read authority retained with one discovered repository archive.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum GithubScheduleSourceAuthority {
-    /// A public repository archive fetched without a provider credential.
-    PublicAnonymous,
-    /// An exact least-authority `contents:read` descriptor for a private repository.
-    Private(GithubServerServiceAuthoritySelector),
-}
+pub struct GithubScheduleSourceAuthority(GithubServerServiceAuthoritySelector);
 
 impl GithubScheduleSourceAuthority {
-    /// Returns the private source-authority selector when one is required.
+    /// Creates an exact least-authority `contents:read` descriptor.
     #[must_use]
-    pub const fn private_selector(&self) -> Option<&GithubServerServiceAuthoritySelector> {
-        match self {
-            Self::PublicAnonymous => None,
-            Self::Private(selector) => Some(selector),
-        }
+    pub const fn new(selector: GithubServerServiceAuthoritySelector) -> Self {
+        Self(selector)
+    }
+
+    /// Returns the exact source-authority selector.
+    #[must_use]
+    pub const fn selector(&self) -> &GithubServerServiceAuthoritySelector {
+        &self.0
     }
 
     /// Returns the durable closed discriminator.
     #[must_use]
     pub const fn as_durable_str(&self) -> &'static str {
-        match self {
-            Self::PublicAnonymous => "public_anonymous",
-            Self::Private(_) => "private_repository_source_read",
-        }
+        "repository_contents_read"
     }
 
-    // This is only the compatibility check possible from a value-free
-    // selector. The repository resolves the selector and verifies its exact
+    // This is the structural check possible from a value-free selector. The
+    // repository resolves the selector and verifies its exact
     // repository, connection, installation, App, source-read scope, identity
     // digest, and lifecycle before admitting either discovery or registration.
     fn is_structurally_compatible_with(&self, manifest: &GithubProviderManifest) -> bool {
-        match (manifest.repository_visibility(), self) {
-            (ProviderRepositoryVisibility::Public, Self::PublicAnonymous) => true,
-            (ProviderRepositoryVisibility::Private, Self::Private(selector)) => {
-                selector.tenant() == manifest.tenant()
-                    && selector.app_configuration_revision()
-                        == manifest.app_configuration_revision()
-                    && selector.policy_revision() == manifest.policy_revision()
-            }
-            _ => false,
-        }
+        self.0.tenant() == manifest.tenant()
+            && self.0.app_configuration_revision() == manifest.app_configuration_revision()
+            && self.0.policy_revision() == manifest.policy_revision()
     }
 }
 
@@ -306,7 +294,7 @@ impl ClaimGithubScheduleDiscovery {
     ///
     /// Rejects an authority mode, tenant, or revision incompatible with the
     /// manifest, or an invalid lease. The repository additionally resolves a
-    /// private selector and verifies its complete identity and source-read
+    /// selector and verifies its complete identity and source-read
     /// scope before issuing a claim.
     pub fn new(
         registry_id: GithubScheduleRegistryId,
@@ -353,7 +341,7 @@ impl ClaimGithubScheduleDiscovery {
         self.repository_owner_id
     }
 
-    /// Returns the closed public/private source authority.
+    /// Returns the exact source authority.
     #[must_use]
     pub const fn source_authority(&self) -> &GithubScheduleSourceAuthority {
         &self.source_authority
@@ -490,7 +478,7 @@ impl RegisterGithubScheduleRegistry {
     /// non-contiguous ordinals, inconsistent source digests for one workflow,
     /// non-canonical ordering and duplicates, or any first-fire cursor that is
     /// not the exact first cron occurrence strictly after discovery. The
-    /// repository resolves and fully verifies a private source-authority
+    /// repository resolves and fully verifies its source authority
     /// selector before persistence.
     pub fn new(
         discovery_claim: GithubScheduleDiscoveryClaim,
@@ -549,7 +537,7 @@ impl RegisterGithubScheduleRegistry {
         self.repository_owner_id
     }
 
-    /// Returns the exact public/private source-read authority used for discovery.
+    /// Returns the exact repository source-read authority used for discovery.
     #[must_use]
     pub const fn source_authority(&self) -> &GithubScheduleSourceAuthority {
         &self.source_authority

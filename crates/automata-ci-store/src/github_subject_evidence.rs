@@ -108,56 +108,23 @@ impl fmt::Debug for GithubAuthenticatedEvent {
     }
 }
 
-/// Least-authority mode that resolved a repository dispatch's default branch.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum GithubRepositoryDispatchResolutionAuthority {
-    /// The configured public repository was resolved without credentials.
-    PublicAnonymous,
-    /// The pinned exact-repository private-source authority performed resolution.
-    PrivateSourceAuthority,
-}
-
-impl GithubRepositoryDispatchResolutionAuthority {
-    /// Returns the closed durable spelling.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::PublicAnonymous => "public_anonymous",
-            Self::PrivateSourceAuthority => "private_source_authority",
-        }
-    }
-}
-
 /// Immutable source-resolution evidence for one custom repository dispatch.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GithubRepositoryDispatchResolution {
     source_revision: GitObjectId,
-    authority: GithubRepositoryDispatchResolutionAuthority,
 }
 
 impl GithubRepositoryDispatchResolution {
-    /// Binds the exact default-branch commit to its least-authority mode.
+    /// Binds the exact default-branch commit resolved with the pinned contents authority.
     #[must_use]
-    pub const fn new(
-        source_revision: GitObjectId,
-        authority: GithubRepositoryDispatchResolutionAuthority,
-    ) -> Self {
-        Self {
-            source_revision,
-            authority,
-        }
+    pub const fn new(source_revision: GitObjectId) -> Self {
+        Self { source_revision }
     }
 
     /// Returns the exact immutable default-branch commit.
     #[must_use]
     pub const fn source_revision(self) -> GitObjectId {
         self.source_revision
-    }
-
-    /// Returns the exact resolver authority mode.
-    #[must_use]
-    pub const fn authority(self) -> GithubRepositoryDispatchResolutionAuthority {
-        self.authority
     }
 }
 
@@ -265,8 +232,8 @@ pub struct ManifestPinnedGithubDeliveryEvidence {
     authenticated_webhook_verifier_fingerprint: GithubProviderWebhookVerifierFingerprint,
     authenticated_webhook_verifier_revision: GithubServerServiceRevision,
     checks_authority: GithubServerServiceAuthoritySelector,
-    private_source_authority: Option<GithubServerServiceAuthoritySelector>,
-    private_pull_request_files_authority: Option<GithubServerServiceAuthoritySelector>,
+    repository_contents_authority: GithubServerServiceAuthoritySelector,
+    pull_requests_authority: Option<GithubServerServiceAuthoritySelector>,
     check_subject_id: GithubCheckSubjectId,
     check_head_sha: GitObjectId,
     authenticated_event: GithubAuthenticatedEvent,
@@ -278,14 +245,13 @@ impl ManifestPinnedGithubDeliveryEvidence {
     /// Rehydrates one complete immutable GitHub delivery-evidence record.
     ///
     /// The manifest is the complete accepted policy, not merely a
-    /// revision number. The mandatory `checks_write` selector and visibility-
-    /// dependent private-source selector are retained exactly as accepted.
-    /// Public evidence must prove that no private-source selector was pinned.
+    /// revision number. The mandatory `checks_write` and `contents:read`
+    /// selectors are retained exactly as accepted.
     ///
     /// # Errors
     ///
-    /// Rejects selector/manifest drift, an invalid visibility-dependent private
-    /// pin, reused authority IDs, or a pre-epoch acceptance time.
+    /// Rejects selector/manifest drift, reused authority IDs, or a pre-epoch
+    /// acceptance time.
     #[allow(clippy::too_many_arguments)] // Every immutable delivery pin is explicit.
     pub fn from_durable_parts(
         delivery_id: ProviderDeliveryId,
@@ -294,20 +260,20 @@ impl ManifestPinnedGithubDeliveryEvidence {
         authenticated_webhook_verifier_fingerprint: GithubProviderWebhookVerifierFingerprint,
         authenticated_webhook_verifier_revision: GithubServerServiceRevision,
         checks_authority: GithubServerServiceAuthoritySelector,
-        private_source_authority: Option<GithubServerServiceAuthoritySelector>,
+        repository_contents_authority: GithubServerServiceAuthoritySelector,
         check_subject_id: GithubCheckSubjectId,
         check_head_sha: GitObjectId,
         authenticated_event: GithubAuthenticatedEvent,
         accepted_at: UnixMillis,
     ) -> Result<Self, GithubSubjectEvidenceValueError> {
-        Self::from_durable_parts_with_pull_request_files_authority(
+        Self::from_durable_parts_with_pull_requests_authority(
             delivery_id,
             repository_owner_id,
             manifest,
             authenticated_webhook_verifier_fingerprint,
             authenticated_webhook_verifier_revision,
             checks_authority,
-            private_source_authority,
+            repository_contents_authority,
             None,
             check_subject_id,
             check_head_sha,
@@ -316,23 +282,23 @@ impl ManifestPinnedGithubDeliveryEvidence {
         )
     }
 
-    /// Rehydrates evidence with an exact private pull-request-files authority pin.
+    /// Rehydrates evidence with an exact pull-requests authority pin.
     ///
     /// # Errors
     ///
     /// Rejects the same mismatches as [`Self::from_durable_parts`], plus a
-    /// pull-request-files selector outside a private pull-request event or any
+    /// pull-requests selector outside a pull-request event or any
     /// selector identity reused by another authority.
     #[allow(clippy::too_many_arguments)]
-    pub fn from_durable_parts_with_pull_request_files_authority(
+    pub fn from_durable_parts_with_pull_requests_authority(
         delivery_id: ProviderDeliveryId,
         repository_owner_id: ProviderRepositoryOwnerId,
         manifest: GithubProviderManifest,
         authenticated_webhook_verifier_fingerprint: GithubProviderWebhookVerifierFingerprint,
         authenticated_webhook_verifier_revision: GithubServerServiceRevision,
         checks_authority: GithubServerServiceAuthoritySelector,
-        private_source_authority: Option<GithubServerServiceAuthoritySelector>,
-        private_pull_request_files_authority: Option<GithubServerServiceAuthoritySelector>,
+        repository_contents_authority: GithubServerServiceAuthoritySelector,
+        pull_requests_authority: Option<GithubServerServiceAuthoritySelector>,
         check_subject_id: GithubCheckSubjectId,
         check_head_sha: GitObjectId,
         authenticated_event: GithubAuthenticatedEvent,
@@ -347,38 +313,26 @@ impl ManifestPinnedGithubDeliveryEvidence {
         if !selector_matches_manifest(&checks_authority, &manifest) {
             return Err(GithubSubjectEvidenceValueError::AuthorityPinMismatch);
         }
-        match (manifest.repository_visibility(), &private_source_authority) {
-            (ProviderRepositoryVisibility::Public, None) => {}
-            (ProviderRepositoryVisibility::Private, Some(selector))
-                if selector_matches_manifest(selector, &manifest)
-                    && selector.authority_id() != checks_authority.authority_id()
-                    && selector.identity_digest() != checks_authority.identity_digest() => {}
-            _ => return Err(GithubSubjectEvidenceValueError::AuthorityPinMismatch),
+        if !selector_matches_manifest(&repository_contents_authority, &manifest)
+            || repository_contents_authority.authority_id() == checks_authority.authority_id()
+            || repository_contents_authority.identity_digest() == checks_authority.identity_digest()
+        {
+            return Err(GithubSubjectEvidenceValueError::AuthorityPinMismatch);
         }
-        match (
-            manifest.repository_visibility(),
-            authenticated_event.kind(),
-            &private_pull_request_files_authority,
-        ) {
-            (ProviderRepositoryVisibility::Public, _, None)
-            | (
-                ProviderRepositoryVisibility::Private,
+        match (authenticated_event.kind(), &pull_requests_authority) {
+            (
                 GithubAuthenticatedEventKind::Push
                 | GithubAuthenticatedEventKind::MergeGroup
                 | GithubAuthenticatedEventKind::RepositoryDispatch,
                 None,
             ) => {}
-            (
-                ProviderRepositoryVisibility::Private,
-                GithubAuthenticatedEventKind::PullRequest,
-                Some(selector),
-            ) if selector_matches_manifest(selector, &manifest)
-                && selector.authority_id() != checks_authority.authority_id()
-                && selector.identity_digest() != checks_authority.identity_digest()
-                && private_source_authority.as_ref().is_some_and(|source| {
-                    selector.authority_id() != source.authority_id()
-                        && selector.identity_digest() != source.identity_digest()
-                }) => {}
+            (GithubAuthenticatedEventKind::PullRequest, Some(selector))
+                if selector_matches_manifest(selector, &manifest)
+                    && selector.authority_id() != checks_authority.authority_id()
+                    && selector.identity_digest() != checks_authority.identity_digest()
+                    && selector.authority_id() != repository_contents_authority.authority_id()
+                    && selector.identity_digest()
+                        != repository_contents_authority.identity_digest() => {}
             _ => return Err(GithubSubjectEvidenceValueError::AuthorityPinMismatch),
         }
         Ok(Self {
@@ -388,8 +342,8 @@ impl ManifestPinnedGithubDeliveryEvidence {
             authenticated_webhook_verifier_fingerprint,
             authenticated_webhook_verifier_revision,
             checks_authority,
-            private_source_authority,
-            private_pull_request_files_authority,
+            repository_contents_authority,
+            pull_requests_authority,
             check_subject_id,
             check_head_sha,
             authenticated_event,
@@ -402,8 +356,7 @@ impl ManifestPinnedGithubDeliveryEvidence {
     ///
     /// # Errors
     ///
-    /// Rejects a non-dispatch envelope, a source/Check mismatch, or a resolver
-    /// authority mode inconsistent with the immutable repository visibility.
+    /// Rejects a non-dispatch envelope or a source/Check mismatch.
     #[allow(clippy::too_many_arguments)]
     pub fn from_durable_parts_resolved_repository_dispatch(
         delivery_id: ProviderDeliveryId,
@@ -412,7 +365,7 @@ impl ManifestPinnedGithubDeliveryEvidence {
         authenticated_webhook_verifier_fingerprint: GithubProviderWebhookVerifierFingerprint,
         authenticated_webhook_verifier_revision: GithubServerServiceRevision,
         checks_authority: GithubServerServiceAuthoritySelector,
-        private_source_authority: Option<GithubServerServiceAuthoritySelector>,
+        repository_contents_authority: GithubServerServiceAuthoritySelector,
         check_subject_id: GithubCheckSubjectId,
         check_head_sha: GitObjectId,
         authenticated_event: GithubAuthenticatedEvent,
@@ -424,18 +377,6 @@ impl ManifestPinnedGithubDeliveryEvidence {
         {
             return Err(GithubSubjectEvidenceValueError::InvalidAuthenticatedEvent);
         }
-        let expected_authority = match manifest.repository_visibility() {
-            ProviderRepositoryVisibility::Public if private_source_authority.is_none() => {
-                GithubRepositoryDispatchResolutionAuthority::PublicAnonymous
-            }
-            ProviderRepositoryVisibility::Private if private_source_authority.is_some() => {
-                GithubRepositoryDispatchResolutionAuthority::PrivateSourceAuthority
-            }
-            _ => return Err(GithubSubjectEvidenceValueError::AuthorityPinMismatch),
-        };
-        if resolution.authority() != expected_authority {
-            return Err(GithubSubjectEvidenceValueError::AuthorityPinMismatch);
-        }
         let mut evidence = Self::from_durable_parts(
             delivery_id,
             repository_owner_id,
@@ -443,7 +384,7 @@ impl ManifestPinnedGithubDeliveryEvidence {
             authenticated_webhook_verifier_fingerprint,
             authenticated_webhook_verifier_revision,
             checks_authority,
-            private_source_authority,
+            repository_contents_authority,
             check_subject_id,
             check_head_sha,
             authenticated_event,
@@ -546,18 +487,16 @@ impl ManifestPinnedGithubDeliveryEvidence {
         &self.checks_authority
     }
 
-    /// Returns the exact private-source selector; public evidence returns none.
+    /// Returns the exact pinned `contents:read` selector.
     #[must_use]
-    pub const fn private_source_authority(&self) -> Option<&GithubServerServiceAuthoritySelector> {
-        self.private_source_authority.as_ref()
+    pub const fn repository_contents_authority(&self) -> &GithubServerServiceAuthoritySelector {
+        &self.repository_contents_authority
     }
 
-    /// Returns the exact private pull-request-files selector when pinned.
+    /// Returns the exact pull-requests selector for pull-request events.
     #[must_use]
-    pub const fn private_pull_request_files_authority(
-        &self,
-    ) -> Option<&GithubServerServiceAuthoritySelector> {
-        self.private_pull_request_files_authority.as_ref()
+    pub const fn pull_requests_authority(&self) -> Option<&GithubServerServiceAuthoritySelector> {
+        self.pull_requests_authority.as_ref()
     }
 
     /// Returns the queued Check subject created at the same commit boundary.

@@ -186,11 +186,10 @@ pub use github_service_authority::{
 pub use github_subject_evidence::{
     AcceptManifestPinnedGithubDelivery, AuthenticatedGithubDeliveryClaim, GithubAuthenticatedEvent,
     GithubAuthenticatedEventKind, GithubRepositoryDispatchResolution,
-    GithubRepositoryDispatchResolutionAuthority, GithubSubjectEvidenceRepository,
-    GithubSubjectEvidenceStoreError, GithubSubjectEvidenceValueError,
-    GithubWorkflowRunSubjectEvidence, ManifestPinnedGithubDeliveryEvidence,
-    ManifestPinnedGithubDeliveryReceipt, RecordGithubWorkflowRunSubjectEvidence,
-    ValidateGithubWorkflowRunSubjectEvidenceReplay,
+    GithubSubjectEvidenceRepository, GithubSubjectEvidenceStoreError,
+    GithubSubjectEvidenceValueError, GithubWorkflowRunSubjectEvidence,
+    ManifestPinnedGithubDeliveryEvidence, ManifestPinnedGithubDeliveryReceipt,
+    RecordGithubWorkflowRunSubjectEvidence, ValidateGithubWorkflowRunSubjectEvidenceReplay,
 };
 pub use github_workflow_permissions::{
     FinalizeGithubWorkflowPermissionObservation,

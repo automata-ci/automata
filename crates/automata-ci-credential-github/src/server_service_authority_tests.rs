@@ -213,9 +213,9 @@ impl GithubServerServiceCredentialBroker for FakeBroker {
 struct FakeRepository {
     begin_mode: AtomicU8,
     checks_identity: GithubServerServiceAuthorityIdentity,
-    private_identity: GithubServerServiceAuthorityIdentity,
+    repository_contents_identity: GithubServerServiceAuthorityIdentity,
     workflow_permissions_identity: GithubServerServiceAuthorityIdentity,
-    private_pull_request_files_identity: GithubServerServiceAuthorityIdentity,
+    pull_requests_identity: GithubServerServiceAuthorityIdentity,
     codec: Arc<EnvelopeCodec>,
     corrupt_handoff: AtomicBool,
     begin_calls: AtomicUsize,
@@ -233,18 +233,15 @@ impl FakeRepository {
         Self {
             begin_mode: AtomicU8::new(BeginMode::Started as u8),
             checks_identity: identity(GithubServerServiceScope::ChecksWrite, 0x101),
-            private_identity: identity(
-                GithubServerServiceScope::PrivateRepositorySourceRead,
+            repository_contents_identity: identity(
+                GithubServerServiceScope::RepositoryContentsRead,
                 0x102,
             ),
             workflow_permissions_identity: identity(
                 GithubServerServiceScope::WorkflowPermissionsRead,
                 0x103,
             ),
-            private_pull_request_files_identity: identity(
-                GithubServerServiceScope::PrivatePullRequestFilesRead,
-                0x104,
-            ),
+            pull_requests_identity: identity(GithubServerServiceScope::PullRequestsRead, 0x104),
             codec,
             corrupt_handoff: AtomicBool::new(false),
             begin_calls: AtomicUsize::new(0),
@@ -264,13 +261,11 @@ impl FakeRepository {
     ) -> &GithubServerServiceAuthorityIdentity {
         match action.required_scope() {
             GithubServerServiceScope::ChecksWrite => &self.checks_identity,
-            GithubServerServiceScope::PrivateRepositorySourceRead => &self.private_identity,
+            GithubServerServiceScope::RepositoryContentsRead => &self.repository_contents_identity,
             GithubServerServiceScope::WorkflowPermissionsRead => {
                 &self.workflow_permissions_identity
             }
-            GithubServerServiceScope::PrivatePullRequestFilesRead => {
-                &self.private_pull_request_files_identity
-            }
+            GithubServerServiceScope::PullRequestsRead => &self.pull_requests_identity,
         }
     }
 }
@@ -575,7 +570,7 @@ async fn fractional_broker_duration_never_reaches_revocation_provider() {
         codec.clone(),
         Arc::new(ScriptedClock::new([1_030_000])),
     );
-    let claimed = claimed_revocation(&codec, repository.private_identity.clone()).await;
+    let claimed = claimed_revocation(&codec, repository.repository_contents_identity.clone()).await;
 
     let outcome = coordinator
         .coordinate_maintenance(GithubServerServiceMaintenanceOutcome::Revocation(Box::new(
@@ -730,15 +725,12 @@ async fn protected_handoffs_round_trip_and_replay_the_natural_key_winner() {
         codec,
         Arc::new(ScriptedClock::new([1_030_000])),
     );
-    let consumer = consumer(
-        GithubServerServiceAction::FetchPrivateRepositoryRevision,
-        0x501,
-    );
+    let consumer = consumer(GithubServerServiceAction::FetchRepositoryRevision, 0x501);
     let first_proposed = handoff_id(0x601);
     let second_proposed = handoff_id(0x602);
     let first = issuer
         .acquire(acquire_request(
-            &repository.private_identity,
+            &repository.repository_contents_identity,
             first_proposed,
             consumer,
         ))
@@ -746,7 +738,7 @@ async fn protected_handoffs_round_trip_and_replay_the_natural_key_winner() {
         .expect("first handoff");
     let second = issuer
         .acquire(acquire_request(
-            &repository.private_identity,
+            &repository.repository_contents_identity,
             second_proposed,
             consumer,
         ))
@@ -797,12 +789,9 @@ async fn prepared_handoff_release_replays_one_frozen_timestamp_after_clock_advan
     let issuer = GithubServerServiceCredentialIssuer::new(repository.clone(), codec, clock.clone());
     let credential = issuer
         .acquire(acquire_request(
-            &repository.private_identity,
+            &repository.repository_contents_identity,
             handoff_id(0x603),
-            consumer(
-                GithubServerServiceAction::FetchPrivateRepositoryRevision,
-                0x503,
-            ),
+            consumer(GithubServerServiceAction::FetchRepositoryRevision, 0x503),
         ))
         .await
         .expect("exact handoff");
@@ -837,21 +826,18 @@ async fn private_actions_have_distinct_exact_handoffs() {
     );
     let revision = issuer
         .acquire(acquire_request(
-            &repository.private_identity,
+            &repository.repository_contents_identity,
             handoff_id(0x610),
-            consumer(
-                GithubServerServiceAction::FetchPrivateRepositoryRevision,
-                0x510,
-            ),
+            consumer(GithubServerServiceAction::FetchRepositoryRevision, 0x510),
         ))
         .await
         .expect("revision handoff");
     let changed = issuer
         .acquire(acquire_request(
-            &repository.private_identity,
+            &repository.repository_contents_identity,
             handoff_id(0x611),
             consumer(
-                GithubServerServiceAction::FetchPrivateRepositoryChangedFiles,
+                GithubServerServiceAction::FetchRepositoryChangedFiles,
                 0x511,
             ),
         ))
@@ -859,12 +845,9 @@ async fn private_actions_have_distinct_exact_handoffs() {
         .expect("changed-files handoff");
     let pull_request_files = issuer
         .acquire(acquire_request(
-            &repository.private_pull_request_files_identity,
+            &repository.pull_requests_identity,
             handoff_id(0x612),
-            consumer(
-                GithubServerServiceAction::FetchPrivatePullRequestFiles,
-                0x512,
-            ),
+            consumer(GithubServerServiceAction::FetchPullRequestFiles, 0x512),
         ))
         .await
         .expect("pull-request-files handoff");
@@ -874,15 +857,15 @@ async fn private_actions_have_distinct_exact_handoffs() {
     );
     assert_eq!(
         revision.binding().consumer().action(),
-        GithubServerServiceAction::FetchPrivateRepositoryRevision
+        GithubServerServiceAction::FetchRepositoryRevision
     );
     assert_eq!(
         changed.binding().consumer().action(),
-        GithubServerServiceAction::FetchPrivateRepositoryChangedFiles
+        GithubServerServiceAction::FetchRepositoryChangedFiles
     );
     assert_eq!(
         pull_request_files.binding().consumer().action(),
-        GithubServerServiceAction::FetchPrivatePullRequestFiles
+        GithubServerServiceAction::FetchPullRequestFiles
     );
     assert_ne!(
         changed.binding().selector().authority_id(),
@@ -902,12 +885,9 @@ async fn corrupt_current_custody_is_quarantined_and_released() {
     );
     let result = issuer
         .acquire(acquire_request(
-            &repository.private_identity,
+            &repository.repository_contents_identity,
             handoff_id(0x620),
-            consumer(
-                GithubServerServiceAction::FetchPrivateRepositoryRevision,
-                0x520,
-            ),
+            consumer(GithubServerServiceAction::FetchRepositoryRevision, 0x520),
         ))
         .await;
     assert_eq!(
@@ -955,12 +935,9 @@ async fn pending_corrupt_cleanup(
     );
     let error = issuer
         .acquire(acquire_request(
-            &repository.private_identity,
+            &repository.repository_contents_identity,
             handoff_id(0x621),
-            consumer(
-                GithubServerServiceAction::FetchPrivateRepositoryRevision,
-                0x521,
-            ),
+            consumer(GithubServerServiceAction::FetchRepositoryRevision, 0x521),
         ))
         .await
         .expect_err("uncertain corruption cleanup");
@@ -1033,7 +1010,7 @@ async fn unconfirmed_revocation_is_retained_as_a_bounded_retry() {
         codec.clone(),
         Arc::new(ScriptedClock::new([1_030_000, 1_031_000])),
     );
-    let claimed = claimed_revocation(&codec, repository.private_identity.clone()).await;
+    let claimed = claimed_revocation(&codec, repository.repository_contents_identity.clone()).await;
     let outcome = coordinator
         .coordinate_maintenance(GithubServerServiceMaintenanceOutcome::Revocation(Box::new(
             claimed,
@@ -1074,7 +1051,7 @@ fn service_core_has_only_closed_authenticated_repository_scopes() {
     ))
     .expect("checks request");
     let private = github_server_service_credential_request(&identity(
-        GithubServerServiceScope::PrivateRepositorySourceRead,
+        GithubServerServiceScope::RepositoryContentsRead,
         0x202,
     ))
     .expect("private request");
@@ -1084,7 +1061,7 @@ fn service_core_has_only_closed_authenticated_repository_scopes() {
     ))
     .expect("workflow-permissions request");
     let pull_request_files = github_server_service_credential_request(&identity(
-        GithubServerServiceScope::PrivatePullRequestFilesRead,
+        GithubServerServiceScope::PullRequestsRead,
         0x204,
     ))
     .expect("private pull-request-files request");
@@ -1123,9 +1100,9 @@ fn service_core_has_only_closed_authenticated_repository_scopes() {
     assert!(
         [
             GithubServerServiceScope::ChecksWrite,
-            GithubServerServiceScope::PrivateRepositorySourceRead,
+            GithubServerServiceScope::RepositoryContentsRead,
             GithubServerServiceScope::WorkflowPermissionsRead,
-            GithubServerServiceScope::PrivatePullRequestFilesRead,
+            GithubServerServiceScope::PullRequestsRead,
         ]
         .into_iter()
         .all(|scope| !scope.as_str().contains("public"))
@@ -1413,11 +1390,11 @@ fn action_handoff_id(action: GithubServerServiceAction) -> GithubServerServiceHa
         GithubServerServiceAction::CreateCheckRun => 0x702,
         GithubServerServiceAction::ReconcileCheckRun => 0x703,
         GithubServerServiceAction::PublishCheckRun => 0x704,
-        GithubServerServiceAction::FetchPrivateRepositoryRevision => 0x705,
-        GithubServerServiceAction::FetchPrivateRepositoryChangedFiles => 0x706,
-        GithubServerServiceAction::DiscoverPrivateRepositorySchedules => 0x707,
+        GithubServerServiceAction::FetchRepositoryRevision => 0x705,
+        GithubServerServiceAction::FetchRepositoryChangedFiles => 0x706,
+        GithubServerServiceAction::DiscoverRepositorySchedules => 0x707,
         GithubServerServiceAction::ObserveWorkflowPermissionDefaults => 0x708,
-        GithubServerServiceAction::FetchPrivatePullRequestFiles => 0x709,
+        GithubServerServiceAction::FetchPullRequestFiles => 0x709,
         GithubServerServiceAction::ResolveWorkflowDispatchSource => 0x70a,
     };
     handoff_id(value)

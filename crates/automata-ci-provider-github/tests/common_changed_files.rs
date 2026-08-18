@@ -1,5 +1,6 @@
 use crate::support::{FixtureServer, ResponseSpec};
 
+use automata_ci_auth::secret::SecretString;
 use automata_ci_core::{GitObjectId, Sha256Digest, UnixMillis, WorkspaceId};
 use automata_ci_provider::{
     ExternalRepositoryId, ExternalRepositoryIdentity, NormalizedTrigger, ProviderArchiveLimits,
@@ -142,9 +143,15 @@ async fn common_reader_uses_the_complete_multi_commit_observation() {
             .expect("commit evidence"),
         false,
     );
-    let request =
-        ChangedFileRequest::public(&connection, &trigger, limits(), UnixMillis::new(2_000))
-            .expect("request");
+    let token = SecretString::new("ghs_changed_files_test").expect("fixture token");
+    let request = ChangedFileRequest::authenticated(
+        &connection,
+        &trigger,
+        &token,
+        limits(),
+        UnixMillis::new(2_000),
+    )
+    .expect("request");
 
     assert!(matches!(
         fixture
@@ -166,9 +173,15 @@ async fn provider_commit_limit_short_circuits_without_partial_comparison() {
         automata_ci_provider::PushCommitEvidence::ProviderLimitExceeded,
         false,
     );
-    let request =
-        ChangedFileRequest::public(&connection, &trigger, limits(), UnixMillis::new(2_000))
-            .expect("request");
+    let token = SecretString::new("ghs_changed_files_test").expect("fixture token");
+    let request = ChangedFileRequest::authenticated(
+        &connection,
+        &trigger,
+        &token,
+        limits(),
+        UnixMillis::new(2_000),
+    )
+    .expect("request");
 
     let ChangedFileRead::Incomplete { reason, .. } = fixture
         .endpoint()
@@ -204,9 +217,15 @@ async fn common_reader_seals_raw_compare_page_and_canonical_renames() {
     ));
     let connection = connection();
     let trigger = push(Some(revision(BEFORE)), Some(revision(AFTER)), false);
-    let request =
-        ChangedFileRequest::public(&connection, &trigger, limits(), UnixMillis::new(2_000))
-            .expect("request");
+    let token = SecretString::new("ghs_changed_files_test").expect("fixture token");
+    let request = ChangedFileRequest::authenticated(
+        &connection,
+        &trigger,
+        &token,
+        limits(),
+        UnixMillis::new(2_000),
+    )
+    .expect("request");
 
     let result = fixture
         .endpoint()
@@ -243,9 +262,15 @@ async fn common_reader_reports_created_and_forced_pushes_without_provider_io() {
     ] {
         let fixture = FixtureServer::spawn().await;
         let connection = connection();
-        let request =
-            ChangedFileRequest::public(&connection, &trigger, limits(), UnixMillis::new(2_000))
-                .expect("request");
+        let token = SecretString::new("ghs_changed_files_test").expect("fixture token");
+        let request = ChangedFileRequest::authenticated(
+            &connection,
+            &trigger,
+            &token,
+            limits(),
+            UnixMillis::new(2_000),
+        )
+        .expect("request");
         let result = fixture
             .endpoint()
             .read_changed_files(request)
@@ -276,9 +301,15 @@ async fn common_reader_preserves_rejection_and_invalid_response_failures() {
         fixture.enqueue(response);
         let connection = connection();
         let trigger = push(Some(revision(BEFORE)), Some(revision(AFTER)), false);
-        let request =
-            ChangedFileRequest::public(&connection, &trigger, limits(), UnixMillis::new(2_000))
-                .expect("request");
+        let token = SecretString::new("ghs_changed_files_test").expect("fixture token");
+        let request = ChangedFileRequest::authenticated(
+            &connection,
+            &trigger,
+            &token,
+            limits(),
+            UnixMillis::new(2_000),
+        )
+        .expect("request");
 
         let error = fixture
             .endpoint()

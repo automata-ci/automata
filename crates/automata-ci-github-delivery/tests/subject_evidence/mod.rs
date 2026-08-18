@@ -177,18 +177,14 @@ fn fixture_subject_evidence_with_selection_and_head(
         app_revision,
         policy_revision,
     );
-    let private_source_authority = (identity.repository_visibility()
-        == automata_ci_store::ProviderRepositoryVisibility::Private)
-        .then(|| {
-            GithubServerServiceAuthoritySelector::from_durable_parts(
-                identity.tenant().clone(),
-                GithubServerServiceAuthorityId::from_uuid(Uuid::from_u128(seed + 1))
-                    .expect("private-source authority ID"),
-                Sha256Digest::from_bytes([0x52; 32]),
-                app_revision,
-                policy_revision,
-            )
-        });
+    let repository_contents_authority = GithubServerServiceAuthoritySelector::from_durable_parts(
+        identity.tenant().clone(),
+        GithubServerServiceAuthorityId::from_uuid(Uuid::from_u128(seed + 1))
+            .expect("repository source authority ID"),
+        Sha256Digest::from_bytes([0x52; 32]),
+        app_revision,
+        policy_revision,
+    );
     ManifestPinnedGithubDeliveryEvidence::from_durable_parts(
         delivery_id,
         repository_owner_id,
@@ -196,7 +192,7 @@ fn fixture_subject_evidence_with_selection_and_head(
         webhook_fingerprint,
         webhook_revision,
         checks_authority,
-        private_source_authority,
+        repository_contents_authority,
         GithubCheckSubjectId::from_uuid(Uuid::from_u128(seed + 2)).expect("Check subject ID"),
         check_head_sha,
         GithubAuthenticatedEvent::new(GithubAuthenticatedEventKind::Push, authenticated_git_ref)

@@ -33,14 +33,14 @@ use automata_ci_store::{
     GITHUB_PROVIDER_PRIVATE_SOURCE_AUTHENTICATION, GITHUB_PROVIDER_PUBLIC_SOURCE_AUTHENTICATION,
     GITHUB_PROVIDER_REST_ACCEPT, GITHUB_PROVIDER_REST_API_VERSION, GITHUB_PROVIDER_SOURCE_REVISION,
     GITHUB_PROVIDER_WEB_ORIGIN, GithubProviderManifest, GithubRepositoryDispatchEvidenceRepository,
-    GithubRepositoryDispatchResolution, GithubRepositoryDispatchResolutionAuthority,
-    GithubSubjectEvidenceRepository, GithubSubjectEvidenceStoreError,
-    MAX_GITHUB_SERVICE_CONSUMER_REQUEST_MILLIS, MAX_PROVIDER_DELIVERY_ATTEMPTS,
-    MAX_PROVIDER_DELIVERY_RETRY_BACKOFF_MILLIS, MAX_PROVIDER_DELIVERY_WORKFLOW_OUTCOMES,
-    ManifestPinnedGithubDeliveryEvidence, PendingGithubRepositoryDispatchEvidence,
-    ProviderDeliveryClaimFence, ProviderDeliveryFailureKind, ProviderDeliveryId,
-    ProviderDeliveryIdentity, ProviderDeliveryReceipt, ProviderDeliveryRepository,
-    ProviderDeliveryState, ProviderDeliveryStoreError, ProviderDeliveryWorkflowConclusion,
+    GithubRepositoryDispatchResolution, GithubSubjectEvidenceRepository,
+    GithubSubjectEvidenceStoreError, MAX_GITHUB_SERVICE_CONSUMER_REQUEST_MILLIS,
+    MAX_PROVIDER_DELIVERY_ATTEMPTS, MAX_PROVIDER_DELIVERY_RETRY_BACKOFF_MILLIS,
+    MAX_PROVIDER_DELIVERY_WORKFLOW_OUTCOMES, ManifestPinnedGithubDeliveryEvidence,
+    PendingGithubRepositoryDispatchEvidence, ProviderDeliveryClaimFence,
+    ProviderDeliveryFailureKind, ProviderDeliveryId, ProviderDeliveryIdentity,
+    ProviderDeliveryReceipt, ProviderDeliveryRepository, ProviderDeliveryState,
+    ProviderDeliveryStoreError, ProviderDeliveryWorkflowConclusion,
     ProviderDeliveryWorkflowInventory, ProviderDeliveryWorkflowInventoryEntry,
     ProviderDeliveryWorkflowOutcome, ProviderDeliveryWorkflowSourceState,
     ProviderRepositoryVisibility, RecordProviderDeliveryWorkflowProgress,
@@ -140,25 +140,29 @@ pub enum GithubDeliveryWorkerPrerequisite {
     /// Exact provider changed-file evidence is required for path filtering.
     ProviderChangedFiles,
     /// Private pull-request files require a separately pinned `pull requests: read` authority.
-    PrivatePullRequestFilesAuthority,
+    PullRequestsAuthority,
     /// The product has not supplied durable workflow admission.
     WorkflowAdmission,
 }
 
-/// Exact source authority selected from immutable authenticated visibility.
+/// Exact source transport selected from immutable authenticated visibility.
 ///
-/// The private variant borrows a caller-owned installation token whose mint
+/// Direct public archives do not consume GitHub REST quota. REST-backed reads
+/// and private archives borrow a caller-owned installation token whose mint
 /// policy is exactly one repository and `contents: read`. The token is never
 /// retained by the worker. An optional reference to the same least-authority
 /// broker permits the workflow processor to request a separate changed-files
 /// handoff only if typed compilation demands it.
 #[derive(Clone, Copy)]
 pub enum GithubDeliverySourceAuthority<'credential> {
-    /// Fetch the exact public repository revision anonymously.
-    PublicAnonymous,
-    /// Fetch the exact private repository revision using installation
-    /// authority restricted to `contents: read`.
-    PrivateInstallationContentsRead {
+    /// Fetch an exact public revision directly from the archive endpoint.
+    DirectPublicArchive {
+        /// Broker for an installation-authenticated changed-files handoff.
+        changed_files_credentials: &'credential dyn GithubDeliverySourceCredentialProvider,
+    },
+    /// Fetch an exact repository revision using installation authority
+    /// restricted to `contents: read`.
+    InstallationContentsRead {
         /// Request-scoped credential for the exact revision archive.
         credential: &'credential SecretString,
         /// Broker for a distinct changed-files handoff, when configured.
@@ -169,8 +173,10 @@ pub enum GithubDeliverySourceAuthority<'credential> {
 impl GithubDeliverySourceAuthority<'_> {
     fn changed_files_credentials(&self) -> Option<&dyn GithubDeliverySourceCredentialProvider> {
         match self {
-            Self::PublicAnonymous => None,
-            Self::PrivateInstallationContentsRead {
+            Self::DirectPublicArchive {
+                changed_files_credentials,
+            } => Some(*changed_files_credentials),
+            Self::InstallationContentsRead {
                 changed_files_credentials,
                 ..
             } => *changed_files_credentials,
@@ -181,9 +187,9 @@ impl GithubDeliverySourceAuthority<'_> {
 impl fmt::Debug for GithubDeliverySourceAuthority<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::PublicAnonymous => formatter.write_str("PublicAnonymous"),
-            Self::PrivateInstallationContentsRead { .. } => {
-                formatter.write_str("PrivateInstallationContentsRead([redacted])")
+            Self::DirectPublicArchive { .. } => formatter.write_str("DirectPublicArchive"),
+            Self::InstallationContentsRead { .. } => {
+                formatter.write_str("InstallationContentsRead([redacted])")
             }
         }
     }
@@ -224,7 +230,7 @@ pub struct GithubDeliveryWorkflowRequest<'a> {
     snapshot: GithubDeliveryClaimSnapshot,
     lease: &'a GithubDeliveryClaimLease,
     clock: &'a dyn GithubDeliveryClock,
-    private_credentials: Option<&'a dyn GithubDeliverySourceCredentialProvider>,
+    credentials: Option<&'a dyn GithubDeliverySourceCredentialProvider>,
 }
 
 impl GithubDeliveryWorkflowRequest<'_> {
@@ -309,10 +315,8 @@ impl GithubDeliveryWorkflowRequest<'_> {
         self.clock
     }
 
-    pub(crate) const fn private_credentials(
-        &self,
-    ) -> Option<&dyn GithubDeliverySourceCredentialProvider> {
-        self.private_credentials
+    pub(crate) const fn credentials(&self) -> Option<&dyn GithubDeliverySourceCredentialProvider> {
+        self.credentials
     }
 
     /// Transfers one completed processor result together with the exact live
@@ -365,8 +369,8 @@ impl fmt::Debug for GithubDeliveryWorkflowRequest<'_> {
             .field("manifest_pinned_evidence", &"[redacted]")
             .field("snapshot", &self.snapshot)
             .field(
-                "private_credentials",
-                &self.private_credentials.map(|_| "[credential broker]"),
+                "credentials",
+                &self.credentials.map(|_| "[credential broker]"),
             )
             .finish()
     }
@@ -867,15 +871,15 @@ impl PreparedGithubDelivery {
         }
     }
 
-    pub(crate) const fn private_source_authority(
+    pub(crate) const fn repository_contents_authority(
         &self,
-    ) -> Option<&automata_ci_store::GithubServerServiceAuthoritySelector> {
+    ) -> &automata_ci_store::GithubServerServiceAuthoritySelector {
         match &self.evidence {
             PreparedGithubDeliveryEvidence::Resolved(evidence) => {
-                evidence.private_source_authority()
+                evidence.repository_contents_authority()
             }
             PreparedGithubDeliveryEvidence::PendingRepositoryDispatch(evidence) => {
-                evidence.private_source_authority()
+                evidence.repository_contents_authority()
             }
         }
     }
@@ -1071,12 +1075,12 @@ impl GithubDeliveryWorker {
     ) -> Result<GithubDeliveryWorkerOutcome, GithubDeliveryWorkerError> {
         self.require_live(lease)?;
         let claimed = lease.initial();
-        let private_credentials = source_authority.changed_files_credentials();
+        let credentials = source_authority.changed_files_credentials();
         let source = match self.fetch_source(claimed, prepared, source_authority).await {
             Ok(source) => source,
             Err(failure) => return self.finish_failure(lease, failure).await,
         };
-        self.process_fetched_source_leased(lease, prepared, &source, private_credentials)
+        self.process_fetched_source_leased(lease, prepared, &source, credentials)
             .await
     }
 
@@ -1085,7 +1089,7 @@ impl GithubDeliveryWorker {
         lease: &GithubDeliveryClaimLease,
         prepared: &PreparedGithubDelivery,
         source: &RepositorySourceArchive,
-        private_credentials: Option<&dyn GithubDeliverySourceCredentialProvider>,
+        credentials: Option<&dyn GithubDeliverySourceCredentialProvider>,
     ) -> Result<GithubDeliveryWorkerOutcome, GithubDeliveryWorkerError> {
         self.require_live(lease)?;
         let claimed = lease.initial();
@@ -1099,7 +1103,7 @@ impl GithubDeliveryWorker {
             prepared
         };
         match self
-            .workflow_outcomes(lease, claimed, prepared, source, private_credentials)
+            .workflow_outcomes(lease, claimed, prepared, source, credentials)
             .await
         {
             Ok(outcome) => Ok(outcome),
@@ -1121,18 +1125,6 @@ impl GithubDeliveryWorker {
             .pending_repository_dispatch()
             .ok_or(GithubDeliveryWorkerError::InvariantViolation)?;
         let source_revision = *source.revision();
-        let authority = match (
-            pending.manifest().repository_visibility(),
-            pending.private_source_authority(),
-        ) {
-            (ProviderRepositoryVisibility::Public, None) => {
-                GithubRepositoryDispatchResolutionAuthority::PublicAnonymous
-            }
-            (ProviderRepositoryVisibility::Private, Some(_)) => {
-                GithubRepositoryDispatchResolutionAuthority::PrivateSourceAuthority
-            }
-            _ => return Err(GithubDeliveryWorkerError::InvariantViolation),
-        };
         let operation = lease.lock_operation().await;
         let observed_at = self.clock.now();
         let snapshot = lease.require_live_at(observed_at)?;
@@ -1146,7 +1138,7 @@ impl GithubDeliveryWorker {
         let request = ResolveGithubRepositoryDispatch::new(
             pending.clone(),
             claim,
-            GithubRepositoryDispatchResolution::new(source_revision, authority),
+            GithubRepositoryDispatchResolution::new(source_revision),
             observed_at,
         )
         .map_err(|_| GithubDeliveryWorkerError::InvariantViolation)?;
@@ -1159,10 +1151,7 @@ impl GithubDeliveryWorker {
             || evidence.manifest() != pending.manifest()
             || evidence.authenticated_event() != pending.event()
             || evidence.repository_dispatch_resolution()
-                != Some(GithubRepositoryDispatchResolution::new(
-                    source_revision,
-                    authority,
-                ))
+                != Some(GithubRepositoryDispatchResolution::new(source_revision))
             || evidence.check_head_sha() != source_revision
         {
             return Err(GithubDeliveryWorkerError::InvariantViolation);
@@ -1214,14 +1203,6 @@ impl GithubDeliveryWorker {
         .await
     }
 
-    pub(crate) async fn finish_private_source_unsupported(
-        &self,
-        lease: &GithubDeliveryClaimLease,
-    ) -> Result<GithubDeliveryWorkerOutcome, GithubDeliveryWorkerError> {
-        self.reject(lease, "github.repository_source.private_unsupported")
-            .await
-    }
-
     pub(crate) async fn fetch_source(
         &self,
         claimed: &ClaimedProviderDelivery,
@@ -1255,8 +1236,8 @@ impl GithubDeliveryWorker {
         let request = match (claimed.identity().repository_visibility(), authority) {
             (
                 ProviderRepositoryVisibility::Public,
-                GithubDeliverySourceAuthority::PublicAnonymous,
-            ) if prepared.private_source_authority().is_none() => RepositorySourceRequest::public(
+                GithubDeliverySourceAuthority::DirectPublicArchive { .. },
+            ) => RepositorySourceRequest::public(
                 &connection,
                 &revision,
                 archive_limits(manifest)?,
@@ -1264,18 +1245,14 @@ impl GithubDeliveryWorker {
             ),
             (
                 ProviderRepositoryVisibility::Private,
-                GithubDeliverySourceAuthority::PrivateInstallationContentsRead {
-                    credential, ..
-                },
-            ) if prepared.private_source_authority().is_some() => {
-                RepositorySourceRequest::authenticated(
-                    &connection,
-                    &revision,
-                    credential,
-                    archive_limits(manifest)?,
-                    RepositorySourceRedirectPolicy::ConfiguredArchiveOrigin,
-                )
-            }
+                GithubDeliverySourceAuthority::InstallationContentsRead { credential, .. },
+            ) => RepositorySourceRequest::authenticated(
+                &connection,
+                &revision,
+                credential,
+                archive_limits(manifest)?,
+                RepositorySourceRedirectPolicy::ConfiguredArchiveOrigin,
+            ),
             _ => {
                 return Err(ProcessingFailure::reject(
                     "github.repository_source.authority_mismatch",
@@ -1334,22 +1311,11 @@ impl GithubDeliveryWorker {
         let revision = RevisionSpec::new(dispatch.git_ref())
             .map_err(|_| ProcessingFailure::reject("github.repository_dispatch.invalid_branch"))?;
         let limits = archive_limits(pending.manifest())?;
-        let request = match (claimed.identity().repository_visibility(), authority) {
-            (
-                ProviderRepositoryVisibility::Public,
-                GithubDeliverySourceAuthority::PublicAnonymous,
-            ) if pending.private_source_authority().is_none() => {
-                SnapshotRequest::public(&repository, &revision, limits)
-            }
-            (
-                ProviderRepositoryVisibility::Private,
-                GithubDeliverySourceAuthority::PrivateInstallationContentsRead {
-                    credential, ..
-                },
-            ) if pending.private_source_authority().is_some() => {
+        let request = match authority {
+            GithubDeliverySourceAuthority::InstallationContentsRead { credential, .. } => {
                 SnapshotRequest::authenticated(&repository, &revision, credential, limits)
             }
-            _ => {
+            GithubDeliverySourceAuthority::DirectPublicArchive { .. } => {
                 return Err(ProcessingFailure::reject(
                     "github.repository_source.authority_mismatch",
                 ));
@@ -1403,7 +1369,7 @@ impl GithubDeliveryWorker {
         claimed: &ClaimedProviderDelivery,
         prepared: &PreparedGithubDelivery,
         source: &RepositorySourceArchive,
-        private_credentials: Option<&dyn GithubDeliverySourceCredentialProvider>,
+        credentials: Option<&dyn GithubDeliverySourceCredentialProvider>,
     ) -> Result<GithubDeliveryWorkerOutcome, WorkerInterruption> {
         let evidence = prepared.resolved_evidence().ok_or_else(|| {
             ProcessingFailure::reject("github.repository_dispatch.unresolved_source")
@@ -1413,15 +1379,8 @@ impl GithubDeliveryWorker {
             manifest_discovery_limits(evidence.manifest())?,
         )
         .map_err(|error| ProcessingFailure::reject(discovery_failure_kind(error)))?;
-        self.all_direct_workflow_outcomes(
-            lease,
-            claimed,
-            prepared,
-            source,
-            private_credentials,
-            workflows,
-        )
-        .await
+        self.all_direct_workflow_outcomes(lease, claimed, prepared, source, credentials, workflows)
+            .await
     }
 
     async fn all_direct_workflow_outcomes(
@@ -1430,7 +1389,7 @@ impl GithubDeliveryWorker {
         claimed: &ClaimedProviderDelivery,
         prepared: &PreparedGithubDelivery,
         source: &RepositorySourceArchive,
-        private_credentials: Option<&dyn GithubDeliverySourceCredentialProvider>,
+        credentials: Option<&dyn GithubDeliverySourceCredentialProvider>,
         workflows: Vec<RepositoryWorkflowDiscoveryOutcome>,
     ) -> Result<GithubDeliveryWorkerOutcome, WorkerInterruption> {
         let evidence = prepared.resolved_evidence().ok_or_else(|| {
@@ -1461,7 +1420,7 @@ impl GithubDeliveryWorker {
                             prepared,
                             source,
                             (&path, &workflow_source),
-                            private_credentials,
+                            credentials,
                         )
                         .await?;
                     let (result, operation) = match completion.into_parts() {
@@ -1597,7 +1556,7 @@ impl GithubDeliveryWorker {
         prepared: &PreparedGithubDelivery,
         source: &RepositorySourceArchive,
         workflow: (&str, &[u8]),
-        private_credentials: Option<&dyn GithubDeliverySourceCredentialProvider>,
+        credentials: Option<&dyn GithubDeliverySourceCredentialProvider>,
     ) -> Result<GithubDeliveryWorkflowProcessorCompletion, WorkerInterruption> {
         let snapshot = lease
             .require_live_at(self.clock.now())
@@ -1626,7 +1585,7 @@ impl GithubDeliveryWorker {
                     snapshot,
                     lease,
                     clock: self.clock.as_ref(),
-                    private_credentials,
+                    credentials,
                 })
                 .await),
             _ => Err(
@@ -2244,7 +2203,7 @@ fn validate_rehydration_evidence(
             .manifest()
             .matches_delivery_identity(claimed.identity())
         || evidence.accepted_at() != claimed.receipt().accepted_at()
-        || !valid_manifest_source_policy(evidence.manifest())
+        || !valid_manifest_source_contract(evidence.manifest())
         || !discovery_limits_fit_within(pinned_limits, configured_limits)
         || !valid_visibility_authority(evidence)
     {
@@ -2261,14 +2220,6 @@ fn validate_pending_repository_dispatch_evidence(
     configured_limits: RepositoryWorkflowDiscoveryLimits,
 ) -> Result<(), ProcessingFailure> {
     let pinned_limits = manifest_discovery_limits(evidence.manifest())?;
-    let visibility_authority_matches = matches!(
-        (
-            evidence.manifest().repository_visibility(),
-            evidence.private_source_authority()
-        ),
-        (ProviderRepositoryVisibility::Public, None)
-            | (ProviderRepositoryVisibility::Private, Some(_))
-    );
     if evidence.tenant() != claimed.identity().tenant()
         || evidence.delivery_id() != claimed.receipt().id()
         || !evidence
@@ -2278,9 +2229,8 @@ fn validate_pending_repository_dispatch_evidence(
         || evidence.event().kind()
             != automata_ci_store::GithubAuthenticatedEventKind::RepositoryDispatch
         || evidence.event().git_ref() != evidence.manifest().git_ref()
-        || !valid_manifest_source_policy(evidence.manifest())
+        || !valid_manifest_source_contract(evidence.manifest())
         || !discovery_limits_fit_within(pinned_limits, configured_limits)
-        || !visibility_authority_matches
     {
         return Err(ProcessingFailure::reject(
             "github.subject_evidence.mismatch",
@@ -2289,7 +2239,7 @@ fn validate_pending_repository_dispatch_evidence(
     Ok(())
 }
 
-fn valid_manifest_source_policy(manifest: &GithubProviderManifest) -> bool {
+fn valid_manifest_source_contract(manifest: &GithubProviderManifest) -> bool {
     let origins = manifest.origins();
     let expected_authentication = match manifest.repository_visibility() {
         ProviderRepositoryVisibility::Public => GITHUB_PROVIDER_PUBLIC_SOURCE_AUTHENTICATION,
@@ -2307,14 +2257,7 @@ fn valid_manifest_source_policy(manifest: &GithubProviderManifest) -> bool {
 }
 
 fn valid_visibility_authority(evidence: &ManifestPinnedGithubDeliveryEvidence) -> bool {
-    matches!(
-        (
-            evidence.repository_visibility(),
-            evidence.private_source_authority()
-        ),
-        (ProviderRepositoryVisibility::Public, None)
-            | (ProviderRepositoryVisibility::Private, Some(_))
-    )
+    evidence.repository_contents_authority().tenant() == evidence.tenant()
 }
 
 fn valid_path_filter_commit_evidence(

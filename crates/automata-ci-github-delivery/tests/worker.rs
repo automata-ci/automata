@@ -10,6 +10,8 @@ use automata_ci_core::GitObjectId;
 use automata_ci_core::{Sha256Digest, UnixMillis};
 use automata_ci_github_delivery::{
     GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE, GithubDeliveryClock, GithubDeliverySourceAuthority,
+    GithubDeliverySourceCredential, GithubDeliverySourceCredentialProvider,
+    GithubDeliverySourceCredentialProviderError, GithubDeliverySourceCredentialRequest,
     GithubDeliveryWorker, GithubDeliveryWorkerConfig, GithubDeliveryWorkerConfigurationError,
     GithubDeliveryWorkerError, GithubDeliveryWorkerOutcome, GithubDeliveryWorkerPrerequisite,
     GithubDeliveryWorkflowProcessor, GithubDeliveryWorkflowProcessorCompletion,
@@ -29,9 +31,8 @@ use automata_ci_store::{
     GithubProviderGitRef, GithubProviderManifest, GithubProviderManifestLimits,
     GithubProviderManifestRevision, GithubProviderOrigins,
     GithubProviderWebhookVerifierFingerprint, GithubRepositoryDispatchEvidenceRepository,
-    GithubRepositoryDispatchResolution, GithubRepositoryDispatchResolutionAuthority,
-    GithubRepositoryName, GithubServerServiceAppClientId, GithubServerServiceAppId,
-    GithubServerServiceAuthorityId, GithubServerServiceAuthoritySelector,
+    GithubRepositoryDispatchResolution, GithubRepositoryName, GithubServerServiceAppClientId,
+    GithubServerServiceAppId, GithubServerServiceAuthorityId, GithubServerServiceAuthoritySelector,
     GithubServerServiceJwtIssuer, GithubServerServiceRevision, GithubSubjectEvidenceRepository,
     GithubSubjectEvidenceStoreError, GithubWorkflowRunSubjectEvidence,
     ManifestPinnedGithubDeliveryEvidence, ManifestPinnedGithubDeliveryReceipt, ObjectKey,
@@ -67,6 +68,19 @@ const CREDENTIAL_MARKER: &str = "installation-token-private-marker";
 
 #[derive(Debug)]
 struct FixedClock(UnixMillis);
+
+#[derive(Debug)]
+struct UnusedCredentials;
+
+#[async_trait]
+impl GithubDeliverySourceCredentialProvider for UnusedCredentials {
+    async fn acquire(
+        &self,
+        _request: GithubDeliverySourceCredentialRequest<'_>,
+    ) -> Result<GithubDeliverySourceCredential, GithubDeliverySourceCredentialProviderError> {
+        panic!("this fixture does not request changed-file credentials")
+    }
+}
 
 impl GithubDeliveryClock for FixedClock {
     fn now(&self) -> UnixMillis {
@@ -227,7 +241,7 @@ struct WorkflowObservation {
     revision: String,
     source_bytes: usize,
     manifest_revision: u64,
-    private_source_authority_present: bool,
+    repository_contents_authority_present: bool,
     debug: String,
 }
 
@@ -321,10 +335,7 @@ impl GithubDeliveryWorkflowProcessor for RecordingProcessor {
                     revision: request.repository_source().revision().to_string(),
                     source_bytes: request.workflow_source().len(),
                     manifest_revision: request.manifest_pinned_evidence().manifest_revision().get(),
-                    private_source_authority_present: request
-                        .manifest_pinned_evidence()
-                        .private_source_authority()
-                        .is_some(),
+                    repository_contents_authority_present: true,
                     debug: format!("{request:?}"),
                 });
         }
@@ -534,14 +545,15 @@ impl FixtureSubjectEvidence {
             app_revision,
             policy_revision,
         );
-        let private_source_authority = GithubServerServiceAuthoritySelector::from_durable_parts(
-            identity.tenant().clone(),
-            GithubServerServiceAuthorityId::from_uuid(Uuid::from_u128(seed + 1))
-                .expect("historical source selector"),
-            Sha256Digest::from_bytes([0x63; 32]),
-            app_revision,
-            policy_revision,
-        );
+        let repository_contents_authority =
+            GithubServerServiceAuthoritySelector::from_durable_parts(
+                identity.tenant().clone(),
+                GithubServerServiceAuthorityId::from_uuid(Uuid::from_u128(seed + 1))
+                    .expect("historical source selector"),
+                Sha256Digest::from_bytes([0x63; 32]),
+                app_revision,
+                policy_revision,
+            );
         let evidence = ManifestPinnedGithubDeliveryEvidence::from_durable_parts(
             claimed.receipt().id(),
             ProviderRepositoryOwnerId::new(REPOSITORY_OWNER_ID).expect("owner ID"),
@@ -549,7 +561,7 @@ impl FixtureSubjectEvidence {
             webhook_fingerprint,
             webhook_revision,
             checks_authority,
-            Some(private_source_authority),
+            repository_contents_authority,
             GithubCheckSubjectId::from_uuid(Uuid::from_u128(seed + 2))
                 .expect("historical Check subject"),
             check_head_sha,
@@ -581,34 +593,33 @@ impl FixtureSubjectEvidence {
     ) -> Self {
         let base = Self::from_claimed(claimed, check_head_sha).0;
         let event = GithubAuthenticatedEvent::new(kind, git_ref).expect("event coordinates");
-        let private_pull_request_files_authority = (base.repository_visibility()
-            == ProviderRepositoryVisibility::Private
-            && kind == GithubAuthenticatedEventKind::PullRequest)
-            .then(|| {
+        let pull_requests_authority =
+            (kind == GithubAuthenticatedEventKind::PullRequest).then(|| {
                 GithubServerServiceAuthoritySelector::from_durable_parts(
                     base.tenant().clone(),
                     GithubServerServiceAuthorityId::from_uuid(Uuid::from_u128(0x7_5ff))
-                        .expect("private pull-request-files selector"),
+                        .expect("pull-request-files selector"),
                     Sha256Digest::from_bytes([0x64; 32]),
                     base.checks_authority().app_configuration_revision(),
                     base.checks_authority().policy_revision(),
                 )
             });
-        let evidence = ManifestPinnedGithubDeliveryEvidence::from_durable_parts_with_pull_request_files_authority(
-            base.delivery_id(),
-            base.repository_owner_id(),
-            base.manifest().clone(),
-            base.authenticated_webhook_verifier_fingerprint(),
-            base.authenticated_webhook_verifier_revision(),
-            base.checks_authority().clone(),
-            base.private_source_authority().cloned(),
-            private_pull_request_files_authority,
-            base.check_subject_id(),
-            base.check_head_sha(),
-            event,
-            base.accepted_at(),
-        )
-        .expect("authenticated event evidence");
+        let evidence =
+            ManifestPinnedGithubDeliveryEvidence::from_durable_parts_with_pull_requests_authority(
+                base.delivery_id(),
+                base.repository_owner_id(),
+                base.manifest().clone(),
+                base.authenticated_webhook_verifier_fingerprint(),
+                base.authenticated_webhook_verifier_revision(),
+                base.checks_authority().clone(),
+                base.repository_contents_authority().clone(),
+                pull_requests_authority,
+                base.check_subject_id(),
+                base.check_head_sha(),
+                event,
+                base.accepted_at(),
+            )
+            .expect("authenticated event evidence");
         Self(evidence)
     }
 }
@@ -751,7 +762,7 @@ impl GithubRepositoryDispatchEvidenceRepository for RecordingRepositoryDispatchE
                 self.pending.authenticated_webhook_verifier_fingerprint(),
                 self.pending.authenticated_webhook_verifier_revision(),
                 self.pending.checks_authority().clone(),
-                self.pending.private_source_authority().cloned(),
+                self.pending.repository_contents_authority().clone(),
                 GithubCheckSubjectId::from_uuid(Uuid::from_u128(0x9_100))
                     .expect("dispatch Check subject"),
                 resolution.source_revision(),
@@ -1025,7 +1036,7 @@ fn pending_repository_dispatch_evidence(
         base.authenticated_webhook_verifier_fingerprint(),
         base.authenticated_webhook_verifier_revision(),
         base.checks_authority().clone(),
-        base.private_source_authority().cloned(),
+        base.repository_contents_authority().clone(),
         GithubAuthenticatedEvent::new(
             GithubAuthenticatedEventKind::RepositoryDispatch,
             "refs/heads/main",
@@ -1169,7 +1180,7 @@ async fn exact_source_and_all_direct_workflows_complete_deterministically() {
     let first = worker
         .process_claimed(
             fixture.claimed.clone(),
-            GithubDeliverySourceAuthority::PrivateInstallationContentsRead {
+            GithubDeliverySourceAuthority::InstallationContentsRead {
                 credential: &credential,
                 changed_files_credentials: None,
             },
@@ -1179,7 +1190,7 @@ async fn exact_source_and_all_direct_workflows_complete_deterministically() {
     let second = worker
         .process_claimed(
             fixture.claimed,
-            GithubDeliverySourceAuthority::PrivateInstallationContentsRead {
+            GithubDeliverySourceAuthority::InstallationContentsRead {
                 credential: &credential,
                 changed_files_credentials: None,
             },
@@ -1217,7 +1228,7 @@ async fn exact_source_and_all_direct_workflows_complete_deterministically() {
         observation.ref_kind == GithubWebhookRefKind::Branch
             && observation.revision == AFTER
             && observation.manifest_revision == 1
-            && observation.private_source_authority_present
+            && observation.repository_contents_authority_present
             && !observation.debug.contains("private-workflow-marker")
             && !observation.debug.contains(OWNER)
     }));
@@ -1273,7 +1284,7 @@ async fn all_direct_retry_resumes_after_durable_per_workflow_progress() {
     let first = worker
         .process_claimed(
             fixture.claimed.clone(),
-            GithubDeliverySourceAuthority::PrivateInstallationContentsRead {
+            GithubDeliverySourceAuthority::InstallationContentsRead {
                 credential: &credential,
                 changed_files_credentials: None,
             },
@@ -1290,7 +1301,7 @@ async fn all_direct_retry_resumes_after_durable_per_workflow_progress() {
     let second = worker
         .process_claimed(
             fixture.claimed,
-            GithubDeliverySourceAuthority::PrivateInstallationContentsRead {
+            GithubDeliverySourceAuthority::InstallationContentsRead {
                 credential: &credential,
                 changed_files_credentials: None,
             },
@@ -1361,7 +1372,7 @@ async fn pull_request_uses_checked_head_when_webhook_merge_revision_is_stale() {
     let outcome = worker
         .process_claimed(
             fixture.claimed,
-            GithubDeliverySourceAuthority::PrivateInstallationContentsRead {
+            GithubDeliverySourceAuthority::InstallationContentsRead {
                 credential: &credential,
                 changed_files_credentials: None,
             },
@@ -1423,7 +1434,7 @@ async fn private_repository_dispatch_resolves_once_then_retries_the_pinned_sha()
             worker
                 .process_claimed(
                     claimed,
-                    GithubDeliverySourceAuthority::PrivateInstallationContentsRead {
+                    GithubDeliverySourceAuthority::InstallationContentsRead {
                         credential: &credential,
                         changed_files_credentials: None,
                     },
@@ -1439,10 +1450,7 @@ async fn private_repository_dispatch_resolves_once_then_retries_the_pinned_sha()
     assert!(evidence.has_resolved_evidence());
     assert_eq!(
         evidence.resolutions.lock().expect("resolutions lock")[0],
-        GithubRepositoryDispatchResolution::new(
-            fixture_check_head_sha(AFTER),
-            GithubRepositoryDispatchResolutionAuthority::PrivateSourceAuthority,
-        )
+        GithubRepositoryDispatchResolution::new(fixture_check_head_sha(AFTER))
     );
     let resolver_observations = resolver.observations();
     assert_eq!(resolver_observations.len(), 1);
@@ -1470,7 +1478,7 @@ async fn private_repository_dispatch_resolves_once_then_retries_the_pinned_sha()
 }
 
 #[tokio::test]
-async fn public_repository_dispatch_resolution_is_credential_free() {
+async fn public_repository_dispatch_resolution_uses_installation_credentials() {
     let fixture = repository_dispatch_claimed_fixture(ProviderRepositoryVisibility::Public);
     let source_archive = archive(BTreeMap::from([(
         ".ci/workflows/ci.yml",
@@ -1497,11 +1505,15 @@ async fn public_repository_dispatch_resolution_is_credential_free() {
         evidence.clone(),
     );
 
+    let credential = SecretString::new(CREDENTIAL_MARKER).expect("credential");
     assert!(matches!(
         worker
             .process_claimed(
                 fixture.claimed,
-                GithubDeliverySourceAuthority::PublicAnonymous,
+                GithubDeliverySourceAuthority::InstallationContentsRead {
+                    credential: &credential,
+                    changed_files_credentials: None,
+                },
             )
             .await
             .expect("public dispatch completion"),
@@ -1511,15 +1523,12 @@ async fn public_repository_dispatch_resolution_is_credential_free() {
     assert_eq!(evidence.resolution_count(), 1);
     assert_eq!(
         evidence.resolutions.lock().expect("resolutions lock")[0],
-        GithubRepositoryDispatchResolution::new(
-            fixture_check_head_sha(AFTER),
-            GithubRepositoryDispatchResolutionAuthority::PublicAnonymous,
-        )
+        GithubRepositoryDispatchResolution::new(fixture_check_head_sha(AFTER))
     );
     let observations = resolver.observations();
     assert_eq!(observations.len(), 1);
-    assert!(!observations[0].credential_present);
-    assert!(!observations[0].credential_matches);
+    assert!(observations[0].credential_present);
+    assert!(observations[0].credential_matches);
     assert!(source.observations().is_empty());
     assert_eq!(processor.event_observations().len(), 1);
 }
@@ -1550,7 +1559,7 @@ async fn repository_dispatch_resolution_failure_creates_no_check_or_workflow() {
     let outcome = worker
         .process_claimed(
             fixture.claimed,
-            GithubDeliverySourceAuthority::PrivateInstallationContentsRead {
+            GithubDeliverySourceAuthority::InstallationContentsRead {
                 credential: &SecretString::new(CREDENTIAL_MARKER).expect("credential"),
                 changed_files_credentials: None,
             },
@@ -1590,7 +1599,7 @@ async fn no_direct_workflows_completes_with_an_empty_outcome_set() {
     let outcome = worker
         .process_claimed(
             fixture.claimed,
-            GithubDeliverySourceAuthority::PrivateInstallationContentsRead {
+            GithubDeliverySourceAuthority::InstallationContentsRead {
                 credential: &SecretString::new(CREDENTIAL_MARKER).expect("credential"),
                 changed_files_credentials: None,
             },
@@ -1618,8 +1627,8 @@ async fn historical_manifest_evidence_survives_a_later_manifest_rotation() {
         rotated_current.0.manifest_digest()
     );
     assert_ne!(
-        historical.0.private_source_authority(),
-        rotated_current.0.private_source_authority()
+        historical.0.repository_contents_authority(),
+        rotated_current.0.repository_contents_authority()
     );
     let objects = Arc::new(VerifiedBlobStore::exact(
         fixture.descriptor.clone(),
@@ -1647,7 +1656,7 @@ async fn historical_manifest_evidence_survives_a_later_manifest_rotation() {
             worker
                 .process_claimed(
                     claimed,
-                    GithubDeliverySourceAuthority::PrivateInstallationContentsRead {
+                    GithubDeliverySourceAuthority::InstallationContentsRead {
                         credential: &credential,
                         changed_files_credentials: None,
                     },
@@ -1661,12 +1670,12 @@ async fn historical_manifest_evidence_survives_a_later_manifest_rotation() {
     let observations = processor.observations();
     assert_eq!(observations.len(), 1);
     assert!(observations.iter().all(|observation| {
-        observation.manifest_revision == 2 && observation.private_source_authority_present
+        observation.manifest_revision == 2 && observation.repository_contents_authority_present
     }));
 }
 
 #[tokio::test]
-async fn public_live_ref_uses_anonymous_source_request_without_a_credential() {
+async fn public_live_ref_uses_direct_archive_without_a_credential() {
     let fixture = claimed_fixture_with_visibility(
         "refs/heads/main",
         false,
@@ -1689,10 +1698,12 @@ async fn public_live_ref_uses_anonymous_source_request_without_a_credential() {
     let outcome = worker
         .process_claimed(
             fixture.claimed,
-            GithubDeliverySourceAuthority::PublicAnonymous,
+            GithubDeliverySourceAuthority::DirectPublicArchive {
+                changed_files_credentials: &UnusedCredentials,
+            },
         )
         .await
-        .expect("public source completes anonymously");
+        .expect("public direct archive completes");
     assert!(matches!(outcome, GithubDeliveryWorkerOutcome::Completed(_)));
     let observations = source.observations();
     assert_eq!(observations.len(), 1);
@@ -1701,7 +1712,7 @@ async fn public_live_ref_uses_anonymous_source_request_without_a_credential() {
     assert_eq!(observations[0].maximum_bytes, 256 * 1_024 * 1_024);
     let workflow_observations = processor.observations();
     assert_eq!(workflow_observations.len(), 1);
-    assert!(!workflow_observations[0].private_source_authority_present);
+    assert!(workflow_observations[0].repository_contents_authority_present);
 }
 
 #[tokio::test]
@@ -1733,7 +1744,7 @@ async fn historical_manifest_uses_pinned_limits_below_a_wider_local_ceiling() {
     let outcome = worker
         .process_claimed(
             fixture.claimed,
-            GithubDeliverySourceAuthority::PrivateInstallationContentsRead {
+            GithubDeliverySourceAuthority::InstallationContentsRead {
                 credential: &SecretString::new(CREDENTIAL_MARKER).expect("credential"),
                 changed_files_credentials: None,
             },
@@ -1780,7 +1791,7 @@ async fn pinned_manifest_exceeding_a_local_ceiling_rejects_before_source_io() {
     let outcome = worker
         .process_claimed(
             fixture.claimed,
-            GithubDeliverySourceAuthority::PrivateInstallationContentsRead {
+            GithubDeliverySourceAuthority::InstallationContentsRead {
                 credential: &SecretString::new(CREDENTIAL_MARKER).expect("credential"),
                 changed_files_credentials: None,
             },
@@ -1817,7 +1828,7 @@ async fn deleted_pinned_branch_completes_without_source_authority_or_processing(
     let outcome = worker
         .process_claimed(
             fixture.claimed,
-            GithubDeliverySourceAuthority::PrivateInstallationContentsRead {
+            GithubDeliverySourceAuthority::InstallationContentsRead {
                 credential: &SecretString::new(CREDENTIAL_MARKER).expect("credential"),
                 changed_files_credentials: None,
             },
@@ -1855,7 +1866,7 @@ async fn non_pinned_git_ref_rejects_before_source_or_workflow_processing() {
         worker
             .process_claimed(
                 fixture.claimed,
-                GithubDeliverySourceAuthority::PrivateInstallationContentsRead {
+                GithubDeliverySourceAuthority::InstallationContentsRead {
                     credential: &credential,
                     changed_files_credentials: None,
                 },
@@ -1887,7 +1898,9 @@ async fn private_live_ref_rejects_public_authority_before_provider_io() {
     let outcome = worker
         .process_claimed(
             fixture.claimed,
-            GithubDeliverySourceAuthority::PublicAnonymous,
+            GithubDeliverySourceAuthority::DirectPublicArchive {
+                changed_files_credentials: &UnusedCredentials,
+            },
         )
         .await
         .expect("authority mismatch is durably rejected");
@@ -1928,7 +1941,7 @@ async fn rehydrated_push_head_must_match_the_pinned_check_before_source_io() {
     let outcome = worker
         .process_claimed(
             fixture.claimed,
-            GithubDeliverySourceAuthority::PrivateInstallationContentsRead {
+            GithubDeliverySourceAuthority::InstallationContentsRead {
                 credential: &credential,
                 changed_files_credentials: None,
             },
@@ -2022,7 +2035,7 @@ async fn invalid_or_rebound_event_envelopes_reject_before_blob_or_source_io() {
         let outcome = worker
             .process_claimed(
                 fixture.claimed,
-                GithubDeliverySourceAuthority::PrivateInstallationContentsRead {
+                GithubDeliverySourceAuthority::InstallationContentsRead {
                     credential: &SecretString::new(CREDENTIAL_MARKER).expect("credential"),
                     changed_files_credentials: None,
                 },
@@ -2092,7 +2105,7 @@ async fn immutable_object_failures_are_durably_classified_before_source_io() {
         let outcome = worker
             .process_claimed(
                 fixture.claimed,
-                GithubDeliverySourceAuthority::PrivateInstallationContentsRead {
+                GithubDeliverySourceAuthority::InstallationContentsRead {
                     credential: &SecretString::new(CREDENTIAL_MARKER).expect("credential"),
                     changed_files_credentials: None,
                 },
@@ -2132,7 +2145,7 @@ async fn source_rate_limit_and_processor_prerequisite_never_commit_partial_paths
         rate_limited_worker
             .process_claimed(
                 fixture.claimed,
-                GithubDeliverySourceAuthority::PrivateInstallationContentsRead {
+                GithubDeliverySourceAuthority::InstallationContentsRead {
                     credential: &credential,
                     changed_files_credentials: None,
                 },
@@ -2169,7 +2182,7 @@ async fn source_rate_limit_and_processor_prerequisite_never_commit_partial_paths
         worker
             .process_claimed(
                 fixture.claimed,
-                GithubDeliverySourceAuthority::PrivateInstallationContentsRead {
+                GithubDeliverySourceAuthority::InstallationContentsRead {
                     credential: &credential,
                     changed_files_credentials: None,
                 },
@@ -2207,7 +2220,7 @@ async fn rejected_admitted_run_reuses_the_owned_terminal_operation() {
         std::time::Duration::from_secs(1),
         worker.process_claimed(
             fixture.claimed,
-            GithubDeliverySourceAuthority::PrivateInstallationContentsRead {
+            GithubDeliverySourceAuthority::InstallationContentsRead {
                 credential: &credential,
                 changed_files_credentials: None,
             },

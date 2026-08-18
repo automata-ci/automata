@@ -1,4 +1,4 @@
--- Frozen greenfield baseline. Add a new migration instead of editing this stage.
+-- Canonical greenfield schema stage.
 SET check_function_bodies = false;
 
 CREATE FUNCTION automata_github_server_service_handoff_update_guard() RETURNS trigger
@@ -64,10 +64,10 @@ CREATE TABLE github_server_service_authorities (
     CONSTRAINT github_server_service_authorities_jwt_issuer_kind CHECK ((github_app_jwt_issuer_kind = ANY (ARRAY['app_client_id'::text, 'app_id'::text]))),
     CONSTRAINT github_server_service_authorities_non_nil CHECK (((id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (provider_connection_id <> '00000000-0000-0000-0000-000000000000'::uuid))),
     CONSTRAINT github_server_service_authorities_numeric_positive CHECK (((provider_installation_id > 0) AND (github_app_id > 0) AND (github_repository_id > 0) AND (policy_revision > 0) AND (app_configuration_revision > 0))),
-    CONSTRAINT github_server_service_authorities_permission_exact CHECK ((((service_scope = 'checks_write'::text) AND (permission_policy = '{"checks": "write"}'::jsonb) AND (policy_digest = decode('6acf4ef0f49f5935d65a42dacb8ffcd49718dfd847d802d96038d81cea869a9c'::text, 'hex'::text))) OR ((service_scope = 'private_repository_source_read'::text) AND (permission_policy = '{"contents": "read"}'::jsonb) AND (policy_digest = decode('3c2516eac095f5bda3e7d20265497325e91030d1abe5907d4fb7fefcd0aa7f57'::text, 'hex'::text))))),
+    CONSTRAINT github_server_service_authorities_permission_exact CHECK ((((service_scope = 'checks_write'::text) AND (permission_policy = '{"checks": "write"}'::jsonb) AND (policy_digest = decode('6acf4ef0f49f5935d65a42dacb8ffcd49718dfd847d802d96038d81cea869a9c'::text, 'hex'::text))) OR ((service_scope = 'repository_contents_read'::text) AND (permission_policy = '{"contents": "read"}'::jsonb) AND (policy_digest = decode('0459c70295d97ec229bdf62d3c3da5ca7750d65f4021dc0cea7d7a98611d97b6'::text, 'hex'::text))))),
     CONSTRAINT github_server_service_authorities_refresh_shape CHECK (((refresh_issuance_generation IS NULL) OR ((refresh_issuance_generation > 0) AND (refresh_issuance_generation < next_issuance_generation) AND (refresh_issuance_generation IS DISTINCT FROM current_issuance_generation)))),
     CONSTRAINT github_server_service_authorities_repository_name_shape CHECK ((((octet_length(github_repository_name) >= 3) AND (octet_length(github_repository_name) <= 140)) AND (github_repository_name ~ '^[^/]+/[^/]+$'::text) AND ((octet_length(split_part(github_repository_name, '/'::text, 1)) >= 1) AND (octet_length(split_part(github_repository_name, '/'::text, 1)) <= 39)) AND ((octet_length(split_part(github_repository_name, '/'::text, 2)) >= 1) AND (octet_length(split_part(github_repository_name, '/'::text, 2)) <= 100)) AND ((split_part(github_repository_name, '/'::text, 1) ~ '^[A-Za-z0-9]$'::text) OR (split_part(github_repository_name, '/'::text, 1) ~ '^[A-Za-z0-9][A-Za-z0-9-]*[A-Za-z0-9]$'::text)) AND (split_part(github_repository_name, '/'::text, 1) !~ '--'::text) AND (split_part(github_repository_name, '/'::text, 2) ~ '^[A-Za-z0-9._-]+$'::text) AND (split_part(github_repository_name, '/'::text, 2) <> ALL (ARRAY['.'::text, '..'::text])) AND (split_part(github_repository_name, '/'::text, 2) !~* '[.]git$'::text))),
-    CONSTRAINT github_server_service_authorities_service_scope CHECK ((service_scope = ANY (ARRAY['checks_write'::text, 'private_repository_source_read'::text]))),
+    CONSTRAINT github_server_service_authorities_service_scope CHECK ((service_scope = ANY (ARRAY['checks_write'::text, 'repository_contents_read'::text]))),
     CONSTRAINT github_server_service_authorities_state CHECK ((state = ANY (ARRAY['active'::text, 'retiring'::text, 'retired'::text]))),
     CONSTRAINT github_server_service_authorities_time_shape CHECK (((created_at_ms >= 0) AND (state_updated_at_ms >= created_at_ms) AND (((state = 'active'::text) AND (retired_at_ms IS NULL)) OR ((state = 'retiring'::text) AND (retired_at_ms IS NULL) AND (current_issuance_generation IS NULL) AND (refresh_issuance_generation IS NULL)) OR ((state = 'retired'::text) AND (current_issuance_generation IS NULL) AND (refresh_issuance_generation IS NULL) AND (retired_at_ms IS NOT NULL) AND (retired_at_ms = state_updated_at_ms)))))
 );
@@ -717,7 +717,7 @@ SELECT pg_catalog.sha256(
 )
 $$;
 
-CREATE FUNCTION automata_github_workflow_run_subject_evidence_digest(tenant_id text, repository_id uuid, workflow_id uuid, snapshot_id uuid, run_id uuid, root_invocation_id uuid, provider_delivery_id uuid, provider_delivery_idempotency_key text, admission_claim_owner_id uuid, admission_claim_attempt smallint, admission_claim_fence bigint, admission_claimed_at_ms bigint, admission_claim_expires_at_ms bigint, github_check_subject_id uuid, github_check_head_sha bytea, provider_connection_id uuid, provider_installation_id bigint, github_repository_id bigint, github_repository_owner_id bigint, github_repository_name text, repository_visibility text, provider_manifest_revision bigint, provider_manifest_digest bytea, authenticated_webhook_verifier_fingerprint_sha256 bytea, authenticated_webhook_verifier_revision bigint, checks_authority_id uuid, checks_authority_identity_digest bytea, checks_authority_app_configuration_revision bigint, checks_authority_policy_revision bigint, private_source_authority_id uuid, private_source_authority_identity_digest bytea, private_source_authority_app_configuration_revision bigint, private_source_authority_policy_revision bigint, request_digest bytea, raw_event_digest bytea, accepted_at_ms bigint, workflow_path text, source_digest bytea, event_name text, event_digest bytea, git_ref text, workflow_plan_schema smallint, plan_digest bytea, logical_admission_digest bytea, admitted_at_ms bigint) RETURNS bytea
+CREATE FUNCTION automata_github_workflow_run_subject_evidence_digest(tenant_id text, repository_id uuid, workflow_id uuid, snapshot_id uuid, run_id uuid, root_invocation_id uuid, provider_delivery_id uuid, provider_delivery_idempotency_key text, admission_claim_owner_id uuid, admission_claim_attempt smallint, admission_claim_fence bigint, admission_claimed_at_ms bigint, admission_claim_expires_at_ms bigint, github_check_subject_id uuid, github_check_head_sha bytea, provider_connection_id uuid, provider_installation_id bigint, github_repository_id bigint, github_repository_owner_id bigint, github_repository_name text, repository_visibility text, provider_manifest_revision bigint, provider_manifest_digest bytea, authenticated_webhook_verifier_fingerprint_sha256 bytea, authenticated_webhook_verifier_revision bigint, checks_authority_id uuid, checks_authority_identity_digest bytea, checks_authority_app_configuration_revision bigint, checks_authority_policy_revision bigint, repository_contents_authority_id uuid, repository_contents_authority_identity_digest bytea, repository_contents_authority_app_configuration_revision bigint, repository_contents_authority_policy_revision bigint, request_digest bytea, raw_event_digest bytea, accepted_at_ms bigint, workflow_path text, source_digest bytea, event_name text, event_digest bytea, git_ref text, workflow_plan_schema smallint, plan_digest bytea, logical_admission_digest bytea, admitted_at_ms bigint) RETURNS bytea
     LANGUAGE sql IMMUTABLE PARALLEL SAFE
     AS $$
 SELECT pg_catalog.sha256(
@@ -787,25 +787,18 @@ SELECT pg_catalog.sha256(
         pg_catalog.int8send(checks_authority_policy_revision)
     )
     || automata_digest_part(
-        CASE WHEN private_source_authority_id IS NULL
-            THEN pg_catalog.decode('00', 'hex')
-            ELSE pg_catalog.decode('01', 'hex')
-        END
+        pg_catalog.decode('01', 'hex')
     )
-    || CASE WHEN private_source_authority_id IS NULL THEN ''::BYTEA ELSE
-        automata_digest_part(
-            pg_catalog.uuid_send(private_source_authority_id)
-        )
-        || automata_digest_part(
-            private_source_authority_identity_digest
-        )
-        || automata_digest_part(
-            pg_catalog.int8send(private_source_authority_app_configuration_revision)
-        )
-        || automata_digest_part(
-            pg_catalog.int8send(private_source_authority_policy_revision)
-        )
-       END
+    || automata_digest_part(
+        pg_catalog.uuid_send(repository_contents_authority_id)
+    )
+    || automata_digest_part(repository_contents_authority_identity_digest)
+    || automata_digest_part(
+        pg_catalog.int8send(repository_contents_authority_app_configuration_revision)
+    )
+    || automata_digest_part(
+        pg_catalog.int8send(repository_contents_authority_policy_revision)
+    )
     || automata_digest_part(request_digest)
     || automata_digest_part(raw_event_digest)
     || automata_digest_part(pg_catalog.int8send(accepted_at_ms))
@@ -1074,10 +1067,10 @@ BEGIN
         source_evidence.checks_authority_identity_digest,
         source_evidence.checks_authority_app_configuration_revision,
         source_evidence.checks_authority_policy_revision,
-        source_evidence.private_source_authority_id,
-        source_evidence.private_source_authority_identity_digest,
-        source_evidence.private_source_authority_app_configuration_revision,
-        source_evidence.private_source_authority_policy_revision,
+        source_evidence.repository_contents_authority_id,
+        source_evidence.repository_contents_authority_identity_digest,
+        source_evidence.repository_contents_authority_app_configuration_revision,
+        source_evidence.repository_contents_authority_policy_revision,
         source_evidence.request_digest,
         source_evidence.raw_event_digest,
         source_evidence.accepted_at_ms,

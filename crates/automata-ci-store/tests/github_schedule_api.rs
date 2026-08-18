@@ -242,11 +242,12 @@ fn registry_entry_rejects_invalid_bounds_and_schedule_fields() {
 }
 
 #[test]
-fn discovery_request_preserves_private_and_public_authority_evidence() {
+fn discovery_request_preserves_repository_authority_evidence() {
     let private_manifest = manifest("schedule-private", ProviderRepositoryVisibility::Private, 1);
     let public_manifest = manifest("schedule-public", ProviderRepositoryVisibility::Public, 1);
     let private_selector = source_selector(&private_manifest, 30);
-    let private_authority = GithubScheduleSourceAuthority::Private(private_selector.clone());
+    let private_authority = GithubScheduleSourceAuthority::new(private_selector.clone());
+    let public_selector = source_selector(&public_manifest, 31);
     let owner = ProviderRepositoryOwnerId::new(404).expect("owner ID");
 
     let request = ClaimGithubScheduleDiscovery::new(
@@ -265,30 +266,24 @@ fn discovery_request_preserves_private_and_public_authority_evidence() {
     assert_eq!(request.lease_millis(), MAX_GITHUB_SCHEDULE_CLAIM_MILLIS);
     assert_eq!(
         request.source_authority().as_durable_str(),
-        "private_repository_source_read"
+        "repository_contents_read"
     );
-    assert_eq!(
-        request
-            .source_authority()
-            .private_selector()
-            .expect("private selector"),
-        &private_selector
-    );
+    assert_eq!(request.source_authority().selector(), &private_selector);
 
     let public = ClaimGithubScheduleDiscovery::new(
         registry_id(33),
         public_manifest.clone(),
         owner,
-        GithubScheduleSourceAuthority::PublicAnonymous,
+        GithubScheduleSourceAuthority::new(public_selector.clone()),
         worker_id(34),
         1,
     )
-    .expect("public anonymous discovery request");
+    .expect("public installation discovery request");
     assert_eq!(
         public.source_authority().as_durable_str(),
-        "public_anonymous"
+        "repository_contents_read"
     );
-    assert_eq!(public.source_authority().private_selector(), None);
+    assert_eq!(public.source_authority().selector(), &public_selector);
 }
 
 #[test]
@@ -296,7 +291,7 @@ fn discovery_request_rejects_owner_and_source_authority_mismatches() {
     let private_manifest = manifest("schedule-private", ProviderRepositoryVisibility::Private, 1);
     let public_manifest = manifest("schedule-public", ProviderRepositoryVisibility::Public, 1);
     let private_authority =
-        GithubScheduleSourceAuthority::Private(source_selector(&private_manifest, 30));
+        GithubScheduleSourceAuthority::new(source_selector(&private_manifest, 30));
     let owner = ProviderRepositoryOwnerId::new(404).expect("owner ID");
     assert!(matches!(
         ClaimGithubScheduleDiscovery::new(
@@ -309,16 +304,18 @@ fn discovery_request_rejects_owner_and_source_authority_mismatches() {
         ),
         Err(GithubScheduleValueError::RepositoryOwnerMismatch)
     ));
+    let unbound = unbound_manifest(
+        "schedule-owner-unbound",
+        ProviderRepositoryVisibility::Public,
+        1,
+    );
+    let unbound_authority = GithubScheduleSourceAuthority::new(source_selector(&unbound, 38));
     assert!(matches!(
         ClaimGithubScheduleDiscovery::new(
             registry_id(37),
-            unbound_manifest(
-                "schedule-owner-unbound",
-                ProviderRepositoryVisibility::Public,
-                1,
-            ),
+            unbound,
             owner,
-            GithubScheduleSourceAuthority::PublicAnonymous,
+            unbound_authority,
             worker_id(38),
             1,
         ),
@@ -328,19 +325,18 @@ fn discovery_request_rejects_owner_and_source_authority_mismatches() {
     for (candidate_manifest, authority) in [
         (
             private_manifest.clone(),
-            GithubScheduleSourceAuthority::PublicAnonymous,
-        ),
-        (public_manifest.clone(), private_authority.clone()),
-        (
-            private_manifest.clone(),
-            GithubScheduleSourceAuthority::Private(source_selector(
+            GithubScheduleSourceAuthority::new(source_selector(
                 &manifest("another-tenant", ProviderRepositoryVisibility::Private, 1),
                 35,
             )),
         ),
         (
+            public_manifest,
+            GithubScheduleSourceAuthority::new(source_selector(&private_manifest, 37)),
+        ),
+        (
             private_manifest.clone(),
-            GithubScheduleSourceAuthority::Private(
+            GithubScheduleSourceAuthority::new(
                 GithubServerServiceAuthoritySelector::from_durable_parts(
                     private_manifest.tenant().clone(),
                     GithubServerServiceAuthorityId::from_uuid(Uuid::from_u128(36))
@@ -370,7 +366,7 @@ fn discovery_request_rejects_owner_and_source_authority_mismatches() {
 fn discovery_request_rejects_invalid_lease_bounds() {
     let private_manifest = manifest("schedule-private", ProviderRepositoryVisibility::Private, 1);
     let private_authority =
-        GithubScheduleSourceAuthority::Private(source_selector(&private_manifest, 30));
+        GithubScheduleSourceAuthority::new(source_selector(&private_manifest, 30));
     let owner = ProviderRepositoryOwnerId::new(404).expect("owner ID");
     for lease in [0, -1, MAX_GITHUB_SCHEDULE_CLAIM_MILLIS + 1] {
         assert!(matches!(
@@ -394,7 +390,7 @@ fn registry_preserves_canonical_inventory_evidence() {
         ProviderRepositoryVisibility::Private,
         1,
     );
-    let authority = GithubScheduleSourceAuthority::Private(source_selector(&provider_manifest, 50));
+    let authority = GithubScheduleSourceAuthority::new(source_selector(&provider_manifest, 50));
     let claim = discovery_claim(51, 52, 1_000, 2_000);
     let entries = canonical_registry_entries(claim);
     let registry = RegisterGithubScheduleRegistry::new(
@@ -423,7 +419,7 @@ fn registry_rejects_noncanonical_inventory_shapes() {
         ProviderRepositoryVisibility::Private,
         1,
     );
-    let authority = GithubScheduleSourceAuthority::Private(source_selector(&provider_manifest, 50));
+    let authority = GithubScheduleSourceAuthority::new(source_selector(&provider_manifest, 50));
     let claim = discovery_claim(51, 52, 1_000, 2_000);
     let invalid_inventories = [
         vec![discovered_entry(
@@ -519,11 +515,15 @@ fn registry_rejects_authority_incompatible_with_the_manifest() {
         1,
     );
     let claim = discovery_claim(51, 52, 1_000, 2_000);
+    let wrong_authority = GithubScheduleSourceAuthority::new(source_selector(
+        &manifest("registry-other", ProviderRepositoryVisibility::Private, 1),
+        53,
+    ));
     assert!(matches!(
         RegisterGithubScheduleRegistry::new(
             claim,
             provider_manifest,
-            GithubScheduleSourceAuthority::PublicAnonymous,
+            wrong_authority,
             source_revision(),
             archive(3, "github/schedules/three.tar.gz", 300),
             canonical_registry_entries(claim),
@@ -539,7 +539,7 @@ fn registry_rejects_only_a_tampered_first_fire_cursor() {
         ProviderRepositoryVisibility::Private,
         1,
     );
-    let authority = GithubScheduleSourceAuthority::Private(source_selector(&provider_manifest, 50));
+    let authority = GithubScheduleSourceAuthority::new(source_selector(&provider_manifest, 50));
     let claim = discovery_claim(51, 52, 1_000, 2_000);
     let tampered_occurrence = vec![entry(
         0,
@@ -578,10 +578,13 @@ fn registry_accepts_an_exact_maximum_inventory() {
             "UTC",
         ));
     }
+    let maximum_manifest = manifest("registry-maximum", ProviderRepositoryVisibility::Public, 1);
+    let maximum_authority =
+        GithubScheduleSourceAuthority::new(source_selector(&maximum_manifest, 54));
     RegisterGithubScheduleRegistry::new(
         maximum_claim,
-        manifest("registry-maximum", ProviderRepositoryVisibility::Public, 1),
-        GithubScheduleSourceAuthority::PublicAnonymous,
+        maximum_manifest,
+        maximum_authority,
         source_revision(),
         archive(4, "github/schedules/maximum.tar.gz", 400),
         maximum.clone(),
@@ -594,10 +597,12 @@ fn inventory_digest_excludes_separately_bound_registry_evidence() {
     let provider_manifest = manifest("inventory-digest", ProviderRepositoryVisibility::Public, 1);
     let baseline_claim = discovery_claim(60, 61, 1_000, 2_000);
     let baseline_entries = baseline_inventory_entries(baseline_claim);
+    let baseline_authority =
+        GithubScheduleSourceAuthority::new(source_selector(&provider_manifest, 60));
     let baseline = RegisterGithubScheduleRegistry::new(
         baseline_claim,
         provider_manifest.clone(),
-        GithubScheduleSourceAuthority::PublicAnonymous,
+        baseline_authority,
         source_revision(),
         archive(6, "github/schedules/baseline.tar.gz", 600),
         baseline_entries.clone(),
@@ -610,14 +615,16 @@ fn inventory_digest_excludes_separately_bound_registry_evidence() {
 
     let same_definitions_claim = discovery_claim(62, 63, 3_000, 4_000);
     let same_definitions = baseline_inventory_entries(same_definitions_claim);
+    let other_manifest = manifest(
+        "inventory-other-manifest",
+        ProviderRepositoryVisibility::Public,
+        2,
+    );
+    let other_authority = GithubScheduleSourceAuthority::new(source_selector(&other_manifest, 62));
     let separately_bound_registry = RegisterGithubScheduleRegistry::new(
         same_definitions_claim,
-        manifest(
-            "inventory-other-manifest",
-            ProviderRepositoryVisibility::Public,
-            2,
-        ),
-        GithubScheduleSourceAuthority::PublicAnonymous,
+        other_manifest,
+        other_authority,
         GitObjectId::from_bytes(GitObjectAlgorithm::Sha1, &[0x22; 20])
             .expect("separate source revision"),
         archive(7, "github/schedules/other.tar.gz", 700),
@@ -636,10 +643,12 @@ fn inventory_digest_changes_for_each_source_definition_mutation() {
     let provider_manifest = manifest("inventory-digest", ProviderRepositoryVisibility::Public, 1);
     let baseline_claim = discovery_claim(60, 61, 1_000, 2_000);
     let baseline_entries = baseline_inventory_entries(baseline_claim);
+    let baseline_authority =
+        GithubScheduleSourceAuthority::new(source_selector(&provider_manifest, 63));
     let baseline_digest = RegisterGithubScheduleRegistry::new(
         baseline_claim,
         provider_manifest.clone(),
-        GithubScheduleSourceAuthority::PublicAnonymous,
+        baseline_authority,
         source_revision(),
         archive(6, "github/schedules/baseline.tar.gz", 600),
         baseline_entries.clone(),
@@ -710,7 +719,7 @@ fn inventory_digest_changes_for_each_source_definition_mutation() {
         let registry = RegisterGithubScheduleRegistry::new(
             discovery_claim(70 + index, 80 + index, 1_000, 2_000),
             provider_manifest.clone(),
-            GithubScheduleSourceAuthority::PublicAnonymous,
+            GithubScheduleSourceAuthority::new(source_selector(&provider_manifest, 70 + index)),
             source_revision(),
             archive(6, "github/schedules/baseline.tar.gz", 600),
             entries,
@@ -1076,7 +1085,7 @@ fn source_selector(
         manifest.github_app_id(),
         manifest.github_repository_id(),
         manifest.github_repository_name().clone(),
-        GithubServerServiceScope::PrivateRepositorySourceRead,
+        GithubServerServiceScope::RepositoryContentsRead,
         manifest.app_client_id().clone(),
         manifest.jwt_issuer(),
         manifest.app_key_spki_sha256(),

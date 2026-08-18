@@ -8,9 +8,8 @@ use automata_ci_store::{
     GithubCheckName, GithubCheckSubjectId, GithubCheckSubjectKey, GithubProviderManifest,
     GithubProviderManifestLimits, GithubProviderManifestRevision, GithubProviderOrigins,
     GithubProviderWebhookVerifierFingerprint, GithubRepositoryDispatchEvidenceRepository,
-    GithubRepositoryDispatchResolution, GithubRepositoryDispatchResolutionAuthority,
-    GithubRepositoryName, GithubServerServiceAppClientId, GithubServerServiceAppId,
-    GithubServerServiceAuthorityId, GithubServerServiceAuthoritySelector,
+    GithubRepositoryDispatchResolution, GithubRepositoryName, GithubServerServiceAppClientId,
+    GithubServerServiceAppId, GithubServerServiceAuthorityId, GithubServerServiceAuthoritySelector,
     GithubServerServiceJwtIssuer, GithubServerServiceRevision, GithubSubjectEvidenceRepository,
     GithubSubjectEvidenceStoreError, GithubSubjectEvidenceValueError,
     GithubWorkflowRunSubjectEvidence, LogicalWorkflowInvocationId,
@@ -210,7 +209,7 @@ fn accepts_repository(_: &dyn GithubSubjectEvidenceRepository) {}
 fn accepts_repository_dispatch(_: &dyn GithubRepositoryDispatchEvidenceRepository) {}
 
 #[test]
-fn repository_is_object_safe_has_no_public_backfill_and_errors_are_value_free() {
+fn repository_ports_are_object_safe_and_errors_are_value_free() {
     let _ = accepts_repository;
     let _ = accepts_repository_dispatch;
     for error in [
@@ -227,7 +226,7 @@ fn repository_is_object_safe_has_no_public_backfill_and_errors_are_value_free() 
 }
 
 #[test]
-fn repository_dispatch_resolution_is_visibility_bound_and_redacted() {
+fn repository_dispatch_resolution_is_claim_bound_and_redacted() {
     let manifest = manifest(ProviderRepositoryVisibility::Private);
     let checks = selector(&manifest, 0x401, [7; 32]);
     let private = selector(&manifest, 0x402, [8; 32]);
@@ -239,7 +238,7 @@ fn repository_dispatch_resolution_is_visibility_bound_and_redacted() {
         manifest.webhook_verifier_fingerprint(),
         manifest.webhook_verifier_revision(),
         checks,
-        Some(private),
+        private,
         GithubAuthenticatedEvent::new(
             GithubAuthenticatedEventKind::RepositoryDispatch,
             "refs/heads/main",
@@ -249,10 +248,7 @@ fn repository_dispatch_resolution_is_visibility_bound_and_redacted() {
     )
     .expect("pending dispatch");
     let head = GitObjectId::from_durable_bytes(&[9; 20]).expect("head");
-    let resolution = GithubRepositoryDispatchResolution::new(
-        head,
-        GithubRepositoryDispatchResolutionAuthority::PrivateSourceAuthority,
-    );
+    let resolution = GithubRepositoryDispatchResolution::new(head);
     let request = ResolveGithubRepositoryDispatch::new(
         pending.clone(),
         admission_claim(delivery_id, 100, 300),
@@ -272,11 +268,8 @@ fn repository_dispatch_resolution_is_visibility_bound_and_redacted() {
         ResolveGithubRepositoryDispatch::new(
             pending,
             admission_claim(delivery_id, 100, 300),
-            GithubRepositoryDispatchResolution::new(
-                head,
-                GithubRepositoryDispatchResolutionAuthority::PublicAnonymous,
-            ),
-            UnixMillis::new(200),
+            GithubRepositoryDispatchResolution::new(head),
+            UnixMillis::new(301),
         )
         .is_err()
     );
@@ -296,7 +289,7 @@ fn public_checked_rehydration_retains_manifest_authorities_check_and_run_evidenc
         manifest.webhook_verifier_fingerprint(),
         manifest.webhook_verifier_revision(),
         checks.clone(),
-        Some(private.clone()),
+        private.clone(),
         subject_id,
         GitObjectId::from_durable_bytes(&[9; 20]).expect("head"),
         push_event(),
@@ -305,7 +298,7 @@ fn public_checked_rehydration_retains_manifest_authorities_check_and_run_evidenc
     .expect("delivery evidence");
     assert_eq!(evidence.manifest(), &manifest);
     assert_eq!(evidence.checks_authority(), &checks);
-    assert_eq!(evidence.private_source_authority(), Some(&private));
+    assert_eq!(evidence.repository_contents_authority(), &private);
     assert_eq!(evidence.check_subject_id(), subject_id);
     let receipt = ManifestPinnedGithubDeliveryReceipt::from_durable_parts(evidence.clone());
     assert_eq!(receipt.evidence(), &evidence);
@@ -336,7 +329,7 @@ fn public_checked_rehydration_retains_manifest_authorities_check_and_run_evidenc
             .expect("different verifier"),
             manifest.webhook_verifier_revision(),
             checks.clone(),
-            Some(private),
+            private.clone(),
             subject_id,
             GitObjectId::from_durable_bytes(&[9; 20]).expect("head"),
             push_event(),
@@ -352,8 +345,8 @@ fn public_checked_rehydration_retains_manifest_authorities_check_and_run_evidenc
             manifest.clone(),
             manifest.webhook_verifier_fingerprint(),
             manifest.webhook_verifier_revision(),
-            checks,
-            None,
+            checks.clone(),
+            checks.clone(),
             subject_id,
             GitObjectId::from_durable_bytes(&[9; 20]).expect("head"),
             push_event(),
@@ -364,68 +357,73 @@ fn public_checked_rehydration_retains_manifest_authorities_check_and_run_evidenc
 }
 
 #[test]
-fn private_pull_request_evidence_requires_a_distinct_exact_pr_files_selector() {
-    let manifest = manifest(ProviderRepositoryVisibility::Private);
-    let checks = selector(&manifest, 0x401, [0x41; 32]);
-    let source = selector(&manifest, 0x402, [0x42; 32]);
-    let pull_request_files = selector(&manifest, 0x403, [0x43; 32]);
-    let delivery_id = ProviderDeliveryId::from_uuid(Uuid::from_u128(0x404)).expect("delivery");
-    let subject_id = GithubCheckSubjectId::from_uuid(Uuid::from_u128(0x405)).expect("subject");
+fn pull_request_evidence_requires_a_distinct_exact_pull_requests_selector() {
+    for visibility in [
+        ProviderRepositoryVisibility::Public,
+        ProviderRepositoryVisibility::Private,
+    ] {
+        let manifest = manifest(visibility);
+        let checks = selector(&manifest, 0x401, [0x41; 32]);
+        let source = selector(&manifest, 0x402, [0x42; 32]);
+        let pull_request_files = selector(&manifest, 0x403, [0x43; 32]);
+        let delivery_id = ProviderDeliveryId::from_uuid(Uuid::from_u128(0x404)).expect("delivery");
+        let subject_id = GithubCheckSubjectId::from_uuid(Uuid::from_u128(0x405)).expect("subject");
 
-    let evidence =
-        ManifestPinnedGithubDeliveryEvidence::from_durable_parts_with_pull_request_files_authority(
-            delivery_id,
-            ProviderRepositoryOwnerId::new(404).expect("owner"),
-            manifest.clone(),
-            manifest.webhook_verifier_fingerprint(),
-            manifest.webhook_verifier_revision(),
-            checks.clone(),
-            Some(source.clone()),
-            Some(pull_request_files.clone()),
-            subject_id,
-            GitObjectId::from_durable_bytes(&[9; 20]).expect("head"),
-            pull_request_event(),
-            UnixMillis::new(100),
-        )
-        .expect("private PR evidence");
-    assert_eq!(
-        evidence.private_pull_request_files_authority(),
-        Some(&pull_request_files)
-    );
+        let evidence =
+            ManifestPinnedGithubDeliveryEvidence::from_durable_parts_with_pull_requests_authority(
+                delivery_id,
+                ProviderRepositoryOwnerId::new(404).expect("owner"),
+                manifest.clone(),
+                manifest.webhook_verifier_fingerprint(),
+                manifest.webhook_verifier_revision(),
+                checks.clone(),
+                source.clone(),
+                Some(pull_request_files.clone()),
+                subject_id,
+                GitObjectId::from_durable_bytes(&[9; 20]).expect("head"),
+                pull_request_event(),
+                UnixMillis::new(100),
+            )
+            .expect("pull-request evidence");
+        assert_eq!(
+            evidence.pull_requests_authority(),
+            Some(&pull_request_files)
+        );
 
-    assert!(matches!(
-        ManifestPinnedGithubDeliveryEvidence::from_durable_parts(
-            delivery_id,
-            ProviderRepositoryOwnerId::new(404).expect("owner"),
-            manifest.clone(),
-            manifest.webhook_verifier_fingerprint(),
-            manifest.webhook_verifier_revision(),
-            checks.clone(),
-            Some(source.clone()),
-            subject_id,
-            GitObjectId::from_durable_bytes(&[9; 20]).expect("head"),
-            pull_request_event(),
-            UnixMillis::new(100),
-        ),
-        Err(GithubSubjectEvidenceValueError::AuthorityPinMismatch)
-    ));
-    assert!(matches!(
-        ManifestPinnedGithubDeliveryEvidence::from_durable_parts_with_pull_request_files_authority(
-            delivery_id,
-            ProviderRepositoryOwnerId::new(404).expect("owner"),
-            manifest,
-            evidence.authenticated_webhook_verifier_fingerprint(),
-            evidence.authenticated_webhook_verifier_revision(),
-            checks,
-            Some(source.clone()),
-            Some(source),
-            subject_id,
-            GitObjectId::from_durable_bytes(&[9; 20]).expect("head"),
-            pull_request_event(),
-            UnixMillis::new(100),
-        ),
-        Err(GithubSubjectEvidenceValueError::AuthorityPinMismatch)
-    ));
+        assert!(matches!(
+            ManifestPinnedGithubDeliveryEvidence::from_durable_parts(
+                delivery_id,
+                ProviderRepositoryOwnerId::new(404).expect("owner"),
+                manifest.clone(),
+                manifest.webhook_verifier_fingerprint(),
+                manifest.webhook_verifier_revision(),
+                checks.clone(),
+                source.clone(),
+                subject_id,
+                GitObjectId::from_durable_bytes(&[9; 20]).expect("head"),
+                pull_request_event(),
+                UnixMillis::new(100),
+            ),
+            Err(GithubSubjectEvidenceValueError::AuthorityPinMismatch)
+        ));
+        assert!(matches!(
+            ManifestPinnedGithubDeliveryEvidence::from_durable_parts_with_pull_requests_authority(
+                delivery_id,
+                ProviderRepositoryOwnerId::new(404).expect("owner"),
+                manifest,
+                evidence.authenticated_webhook_verifier_fingerprint(),
+                evidence.authenticated_webhook_verifier_revision(),
+                checks,
+                source.clone(),
+                Some(source),
+                subject_id,
+                GitObjectId::from_durable_bytes(&[9; 20]).expect("head"),
+                pull_request_event(),
+                UnixMillis::new(100),
+            ),
+            Err(GithubSubjectEvidenceValueError::AuthorityPinMismatch)
+        ));
+    }
 }
 
 fn manifest(visibility: ProviderRepositoryVisibility) -> GithubProviderManifest {

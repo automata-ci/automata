@@ -73,7 +73,7 @@ struct ExactExecutionRow {
     repository_visibility: String,
     origin_kind: String,
     origin_id: Uuid,
-    private_source_authority_id: Option<Uuid>,
+    repository_contents_authority_id: Uuid,
     github_app_id: i64,
     github_app_client_id: String,
     github_app_jwt_issuer_kind: String,
@@ -180,9 +180,9 @@ impl GithubJobRuntimeAuthorityRepository for PostgresStore {
         lock_exact_selection_lineage(&mut transaction, &selector, &row)
             .await
             .inspect_err(|error| observe_resolution_failure("selection_lineage", error))?;
-        lock_exact_private_source_authority(&mut transaction, &row)
+        lock_exact_repository_contents_authority(&mut transaction, &row)
             .await
-            .inspect_err(|error| observe_resolution_failure("private_source", error))?;
+            .inspect_err(|error| observe_resolution_failure("repository_source", error))?;
         ensure_database_live_lease(&mut transaction, &selector)
             .await
             .inspect_err(|error| observe_resolution_failure("live_lease", error))?;
@@ -214,7 +214,7 @@ impl GithubJobRuntimeAuthorityRepository for PostgresStore {
             .map_err(GithubJobRuntimeAuthorityStoreError::operation)?;
         let row = lock_exact_execution(&mut transaction, &selector).await?;
         lock_exact_selection_lineage(&mut transaction, &selector, &row).await?;
-        lock_exact_private_source_authority(&mut transaction, &row).await?;
+        lock_exact_repository_contents_authority(&mut transaction, &row).await?;
         ensure_database_live_lease(&mut transaction, &selector).await?;
         let evidence = decode_evidence(&selector, &row)?;
         if evidence.identity() != identity {
@@ -263,7 +263,7 @@ async fn lock_exact_execution(
                origin.repository_visibility,
                origin.origin_kind,
                origin.origin_id,
-               origin.private_source_authority_id,
+               origin.repository_contents_authority_id,
                manifest.github_app_id,
                manifest.github_app_client_id,
                manifest.github_app_jwt_issuer_kind,
@@ -466,12 +466,7 @@ async fn lock_exact_execution(
           AND manifest.github_web_origin = $20
           AND manifest.github_api_origin = $21
           AND manifest.github_rest_api_version = $22
-          AND (
-              origin.repository_visibility = 'public'
-              AND origin.private_source_authority_id IS NULL
-              OR origin.repository_visibility = 'private'
-              AND origin.private_source_authority_id IS NOT NULL
-          )
+          AND origin.repository_contents_authority_id IS NOT NULL
           AND manifest.authority_profile = $23
           AND logical_job.authority_profile = $23
           AND preparation_claim.authority_profile = $23
@@ -714,18 +709,15 @@ define_selection_lineage_lock!(preparation);
 define_selection_lineage_lock!(activation);
 define_selection_lineage_lock!(materialization);
 
-async fn lock_exact_private_source_authority(
+async fn lock_exact_repository_contents_authority(
     transaction: &mut Transaction<'_, Postgres>,
     current: &ExactExecutionRow,
 ) -> Result<(), GithubJobRuntimeAuthorityStoreError> {
-    match (
-        current.repository_visibility.as_str(),
-        current.private_source_authority_id,
-    ) {
-        ("public", None) => Ok(()),
-        ("private", Some(authority_id)) => {
-            let exact: bool = sqlx::query_scalar(
-                r"
+    if !matches!(current.repository_visibility.as_str(), "public" | "private") {
+        return Err(GithubJobRuntimeAuthorityStoreError::CorruptData);
+    }
+    let exact: bool = sqlx::query_scalar(
+        r"
                 SELECT TRUE
                 FROM github_workflow_run_manifest_origins AS evidence
                 JOIN github_provider_manifest_revisions AS manifest
@@ -736,52 +728,49 @@ async fn lock_exact_private_source_authority(
                  AND manifest.manifest_digest = evidence.provider_manifest_digest
                 JOIN github_server_service_authorities AS authority
                   ON authority.tenant_id = evidence.tenant_id
-                 AND authority.id = evidence.private_source_authority_id
+                 AND authority.id = evidence.repository_contents_authority_id
                  AND authority.repository_id = evidence.repository_id
                  AND authority.provider_connection_id = evidence.provider_connection_id
                  AND authority.provider_installation_id = evidence.provider_installation_id
                  AND authority.github_repository_id = evidence.github_repository_id
                  AND authority.github_repository_name = evidence.github_repository_name
-                 AND authority.service_scope = 'private_repository_source_read'
+                 AND authority.service_scope = 'repository_contents_read'
                  AND authority.github_app_id = manifest.github_app_id
                  AND authority.github_app_client_id = manifest.github_app_client_id
                  AND authority.github_app_jwt_issuer_kind =
                      manifest.github_app_jwt_issuer_kind
                  AND authority.app_key_spki_sha256 = manifest.app_key_spki_sha256
                  AND authority.app_configuration_revision =
-                     evidence.private_source_authority_app_configuration_revision
+                     evidence.repository_contents_authority_app_configuration_revision
                  AND authority.app_configuration_revision =
                      manifest.app_configuration_revision
                  AND authority.policy_revision =
-                     evidence.private_source_authority_policy_revision
+                     evidence.repository_contents_authority_policy_revision
                  AND authority.policy_revision = manifest.policy_revision
                  AND authority.identity_digest =
-                     evidence.private_source_authority_identity_digest
+                     evidence.repository_contents_authority_identity_digest
                  AND authority.state = 'active'
                 WHERE evidence.origin_kind = $1
                   AND evidence.origin_id = $2
                   AND evidence.tenant_id = $3
                   AND evidence.repository_id = $4
-                  AND evidence.private_source_authority_id = $5
+                  AND evidence.repository_contents_authority_id = $5
                 FOR SHARE OF authority, manifest
                 ",
-            )
-            .bind(&current.origin_kind)
-            .bind(current.origin_id)
-            .bind(&current.tenant_id)
-            .bind(current.repository_id)
-            .bind(authority_id)
-            .fetch_optional(&mut **transaction)
-            .await
-            .map_err(GithubJobRuntimeAuthorityStoreError::operation)?
-            .unwrap_or(false);
-            if exact {
-                Ok(())
-            } else {
-                Err(GithubJobRuntimeAuthorityStoreError::Unauthorized)
-            }
-        }
-        _ => Err(GithubJobRuntimeAuthorityStoreError::CorruptData),
+    )
+    .bind(&current.origin_kind)
+    .bind(current.origin_id)
+    .bind(&current.tenant_id)
+    .bind(current.repository_id)
+    .bind(current.repository_contents_authority_id)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(GithubJobRuntimeAuthorityStoreError::operation)?
+    .unwrap_or(false);
+    if exact {
+        Ok(())
+    } else {
+        Err(GithubJobRuntimeAuthorityStoreError::Unauthorized)
     }
 }
 
@@ -889,7 +878,7 @@ fn decode_exact_execution_row(
         repository_visibility: field!("repository_visibility"),
         origin_kind,
         origin_id,
-        private_source_authority_id: field!("private_source_authority_id"),
+        repository_contents_authority_id: field!("repository_contents_authority_id"),
         github_app_id: field!("github_app_id"),
         github_app_client_id: field!("github_app_client_id"),
         github_app_jwt_issuer_kind: field!("github_app_jwt_issuer_kind"),

@@ -143,7 +143,7 @@ struct SourceJob {
 }
 
 #[derive(Debug)]
-struct PrivateSourceAuthorityEvidence {
+struct RepositoryContentsAuthorityEvidence {
     id: Uuid,
     identity_digest: Vec<u8>,
     app_configuration_revision: i64,
@@ -154,7 +154,7 @@ struct RerunWrite<'a> {
     request: &'a RerunWorkflow,
     actor: &'a AuthorizedHumanRepositoryAction,
     source: &'a SourceRun,
-    private_source_authority: Option<&'a PrivateSourceAuthorityEvidence>,
+    repository_contents_authority: &'a RepositoryContentsAuthorityEvidence,
     request_digest: [u8; 32],
     idempotency_key: &'a str,
     admitted_at_ms: i64,
@@ -635,8 +635,9 @@ async fn admit_authorized_rerun(
     {
         return Err(WorkflowRerunStoreError::SourceExpired);
     }
-    let private_source_authority =
-        lock_private_source_authority(&mut transaction, &request, &source, database_now).await?;
+    let repository_contents_authority =
+        lock_repository_contents_authority(&mut transaction, &request, &source, database_now)
+            .await?;
     ensure_root_attempt(&mut transaction, &source).await?;
     let next_attempt = next_attempt(&mut transaction, &source).await?;
     let triggering_actor = load_triggering_actor(&mut transaction, &actor).await?;
@@ -659,7 +660,7 @@ async fn admit_authorized_rerun(
         request: &request,
         actor: &actor,
         source: &source,
-        private_source_authority: private_source_authority.as_ref(),
+        repository_contents_authority: &repository_contents_authority,
         request_digest,
         idempotency_key: &idempotency_key,
         admitted_at_ms: database_now,
@@ -1200,37 +1201,12 @@ async fn lock_source_run(
     })
 }
 
-async fn lock_private_source_authority(
+async fn lock_repository_contents_authority(
     transaction: &mut Transaction<'_, Postgres>,
     request: &RerunWorkflow,
     source: &SourceRun,
     admitted_at_ms: i64,
-) -> Result<Option<PrivateSourceAuthorityEvidence>, WorkflowRerunStoreError> {
-    let visibility = sqlx::query_scalar::<_, String>(
-        r"
-        SELECT origin.repository_visibility
-        FROM github_workflow_run_base_manifest_origins AS origin
-        WHERE origin.tenant_id = $1
-          AND origin.repository_id = $2
-          AND origin.run_id = $3
-        ",
-    )
-    .bind(request.actor().tenant_id().as_str())
-    .bind(request.repository_id().as_uuid())
-    .bind(source.root_run_id)
-    .fetch_optional(&mut **transaction)
-    .await
-    .map_err(operation_error)?
-    .ok_or(WorkflowRerunStoreError::UnsupportedSelection)?;
-    if visibility == "public" {
-        return Ok(None);
-    }
-    if visibility != "private" {
-        return Err(
-            StoreError::corrupt_data("workflow rerun repository visibility is invalid").into(),
-        );
-    }
-
+) -> Result<RepositoryContentsAuthorityEvidence, WorkflowRerunStoreError> {
     let rows = sqlx::query(
         r"
         SELECT authority.id, authority.identity_digest,
@@ -1244,31 +1220,30 @@ async fn lock_private_source_authority(
          AND manifest.manifest_digest = origin.provider_manifest_digest
         JOIN github_server_service_authorities AS authority
           ON authority.tenant_id = origin.tenant_id
-         AND authority.id = origin.private_source_authority_id
+         AND authority.id = origin.repository_contents_authority_id
          AND authority.repository_id = origin.repository_id
          AND authority.provider_connection_id = origin.provider_connection_id
          AND authority.provider_installation_id = origin.provider_installation_id
          AND authority.github_app_id = manifest.github_app_id
          AND authority.github_repository_id = origin.github_repository_id
          AND authority.github_repository_name = origin.github_repository_name
-         AND authority.service_scope = 'private_repository_source_read'
+         AND authority.service_scope = 'repository_contents_read'
          AND authority.github_app_client_id = manifest.github_app_client_id
          AND authority.github_app_jwt_issuer_kind =
              manifest.github_app_jwt_issuer_kind
          AND authority.app_key_spki_sha256 = manifest.app_key_spki_sha256
          AND authority.app_configuration_revision =
-             origin.private_source_authority_app_configuration_revision
+             origin.repository_contents_authority_app_configuration_revision
          AND authority.policy_revision =
-             origin.private_source_authority_policy_revision
+             origin.repository_contents_authority_policy_revision
          AND authority.identity_digest =
-             origin.private_source_authority_identity_digest
+             origin.repository_contents_authority_identity_digest
          AND authority.state = 'active'
          AND authority.created_at_ms <= $4
          AND authority.state_updated_at_ms <= $4
         WHERE origin.tenant_id = $1
           AND origin.repository_id = $2
           AND origin.run_id = $3
-          AND origin.repository_visibility = 'private'
         FOR SHARE OF manifest, authority
         ",
     )
@@ -1280,18 +1255,19 @@ async fn lock_private_source_authority(
     .await
     .map_err(operation_error)?;
     match rows.as_slice() {
-        [row] => Ok(Some(PrivateSourceAuthorityEvidence {
+        [row] => Ok(RepositoryContentsAuthorityEvidence {
             id: row.try_get("id").map_err(operation_error)?,
             identity_digest: row.try_get("identity_digest").map_err(operation_error)?,
             app_configuration_revision: row
                 .try_get("app_configuration_revision")
                 .map_err(operation_error)?,
             policy_revision: row.try_get("policy_revision").map_err(operation_error)?,
-        })),
+        }),
         [] => Err(WorkflowRerunStoreError::UnsupportedSelection),
-        _ => Err(
-            StoreError::corrupt_data("workflow rerun private source authority is ambiguous").into(),
-        ),
+        _ => Err(StoreError::corrupt_data(
+            "workflow rerun repository contents authority is ambiguous",
+        )
+        .into()),
     }
 }
 
@@ -2072,10 +2048,10 @@ async fn insert_rerun_check_evidence(
             checks_authority_identity_digest,
             checks_authority_app_configuration_revision,
             checks_authority_policy_revision,
-            private_source_authority_id,
-            private_source_authority_identity_digest,
-            private_source_authority_app_configuration_revision,
-            private_source_authority_policy_revision, recorded_at_ms
+            repository_contents_authority_id,
+            repository_contents_authority_identity_digest,
+            repository_contents_authority_app_configuration_revision,
+            repository_contents_authority_policy_revision, recorded_at_ms
         )
         SELECT $1, $2, origin.tenant_id, request.operation_id,
                origin.repository_id, origin.provider_connection_id,
@@ -2130,22 +2106,19 @@ async fn insert_rerun_check_evidence(
     .bind(write.admitted_at_ms)
     .bind(write.request.actor().tenant_id().as_str())
     .bind(write.request.operation_id().as_uuid())
-    .bind(write.private_source_authority.map(|evidence| evidence.id))
+    .bind(write.repository_contents_authority.id)
     .bind(
         write
-            .private_source_authority
-            .map(|evidence| evidence.identity_digest.as_slice()),
+            .repository_contents_authority
+            .identity_digest
+            .as_slice(),
     )
     .bind(
         write
-            .private_source_authority
-            .map(|evidence| evidence.app_configuration_revision),
+            .repository_contents_authority
+            .app_configuration_revision,
     )
-    .bind(
-        write
-            .private_source_authority
-            .map(|evidence| evidence.policy_revision),
-    )
+    .bind(write.repository_contents_authority.policy_revision)
     .execute(&mut **transaction)
     .await
     .map_err(operation_error)?

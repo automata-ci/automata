@@ -1,6 +1,7 @@
 use std::{collections::BTreeMap, fs, path::PathBuf, sync::Mutex};
 
 use automata_ci_provider::ProviderConnectionId;
+use automata_ci_store::ProviderRepositoryVisibility;
 use serde_json::{Value, json};
 
 use super::*;
@@ -70,8 +71,10 @@ fn repository(
     default_branch: &str,
     visibility: &str,
     checks_authority: u128,
-    private_authority: Option<u128>,
+    repository_contents_authority_seed: Option<u128>,
 ) -> Value {
+    let repository_authority =
+        repository_contents_authority_seed.unwrap_or(checks_authority + 0x2000_0000);
     json!({
         "tenant_id": tenant,
         "connection_id": uuid(connection),
@@ -91,10 +94,8 @@ fn repository(
         "authorities": {
             "checks_write": authority(checks_authority, 7),
             "workflow_permissions_read": authority(checks_authority + 0x1000_0000, 7),
-            "private_repository_source_read": private_authority
-                .map_or(Value::Null, |id| authority(id, 7)),
-            "private_pull_request_files_read": private_authority
-                .map_or(Value::Null, |id| authority(id + 0x10_0000, 7))
+            "repository_contents_read": authority(repository_authority, 7),
+            "pull_requests_read": authority(repository_authority + 0x10_0000, 7)
         }
     })
 }
@@ -293,12 +294,12 @@ impl GithubProviderBootstrapTarget for MemoryBootstrapTarget {
 }
 
 #[test]
-fn mixed_public_private_projection_has_exact_visibility_dependent_shape() {
+fn mixed_public_private_projection_has_one_canonical_authority_shape() {
     let config = load_config("mixed-shape.json", &mixed_document()).expect("mixed config");
     let plan = fixed_evidence_plan(&config, 0x70);
 
     assert_eq!(plan.manifests().len(), 2);
-    assert_eq!(plan.authorities().len(), 6);
+    assert_eq!(plan.authorities().len(), 8);
     assert_eq!(plan.connections().len(), 2);
     assert!(
         plan.manifests()
@@ -337,10 +338,12 @@ fn mixed_public_private_projection_has_exact_visibility_dependent_shape() {
         [
             (101, GithubServerServiceScope::ChecksWrite),
             (101, GithubServerServiceScope::WorkflowPermissionsRead),
-            (101, GithubServerServiceScope::PrivateRepositorySourceRead),
-            (101, GithubServerServiceScope::PrivatePullRequestFilesRead),
+            (101, GithubServerServiceScope::RepositoryContentsRead),
+            (101, GithubServerServiceScope::PullRequestsRead),
             (202, GithubServerServiceScope::ChecksWrite),
             (202, GithubServerServiceScope::WorkflowPermissionsRead),
+            (202, GithubServerServiceScope::RepositoryContentsRead),
+            (202, GithubServerServiceScope::PullRequestsRead),
         ]
     );
 
@@ -350,23 +353,29 @@ fn mixed_public_private_projection_has_exact_visibility_dependent_shape() {
         .iter()
         .filter(|identity| identity.connection_id() == public_connection)
         .collect::<Vec<_>>();
-    assert_eq!(public_authorities.len(), 2);
+    assert_eq!(public_authorities.len(), 4);
     assert_eq!(
-        public_authorities[0].scope(),
-        GithubServerServiceScope::ChecksWrite
+        public_authorities
+            .iter()
+            .map(|identity| identity.scope())
+            .collect::<Vec<_>>(),
+        [
+            GithubServerServiceScope::ChecksWrite,
+            GithubServerServiceScope::WorkflowPermissionsRead,
+            GithubServerServiceScope::RepositoryContentsRead,
+            GithubServerServiceScope::PullRequestsRead,
+        ]
     );
-    assert_eq!(
-        public_authorities[1].scope(),
-        GithubServerServiceScope::WorkflowPermissionsRead
-    );
-    assert!(plan.authorities().iter().any(|identity| {
-        identity.scope() == GithubServerServiceScope::PrivateRepositorySourceRead
-            && identity.connection_id() == plan.manifests()[0].connection_id()
-    }));
-    assert!(plan.authorities().iter().any(|identity| {
-        identity.scope() == GithubServerServiceScope::PrivatePullRequestFilesRead
-            && identity.connection_id() == plan.manifests()[0].connection_id()
-    }));
+    for manifest in plan.manifests() {
+        for scope in [
+            GithubServerServiceScope::RepositoryContentsRead,
+            GithubServerServiceScope::PullRequestsRead,
+        ] {
+            assert!(plan.authorities().iter().any(|identity| {
+                identity.scope() == scope && identity.connection_id() == manifest.connection_id()
+            }));
+        }
+    }
 
     let checks_fingerprints = plan
         .authorities()
@@ -375,20 +384,20 @@ fn mixed_public_private_projection_has_exact_visibility_dependent_shape() {
         .map(GithubServerServiceAuthorityIdentity::configuration_fingerprint)
         .collect::<Vec<_>>();
     assert_eq!(checks_fingerprints[0], checks_fingerprints[1]);
-    let private_fingerprint = plan
+    let contents_fingerprint = plan
         .authorities()
         .iter()
-        .find(|identity| identity.scope() == GithubServerServiceScope::PrivateRepositorySourceRead)
-        .expect("private authority")
+        .find(|identity| identity.scope() == GithubServerServiceScope::RepositoryContentsRead)
+        .expect("repository-contents authority")
         .configuration_fingerprint();
-    assert_ne!(checks_fingerprints[0], private_fingerprint);
+    assert_ne!(checks_fingerprints[0], contents_fingerprint);
     let pull_request_files_fingerprint = plan
         .authorities()
         .iter()
-        .find(|identity| identity.scope() == GithubServerServiceScope::PrivatePullRequestFilesRead)
-        .expect("private pull-request-files authority")
+        .find(|identity| identity.scope() == GithubServerServiceScope::PullRequestsRead)
+        .expect("pull-requests authority")
         .configuration_fingerprint();
-    assert_ne!(private_fingerprint, pull_request_files_fingerprint);
+    assert_ne!(contents_fingerprint, pull_request_files_fingerprint);
 }
 
 #[test]
@@ -426,7 +435,7 @@ async fn exact_bootstrap_replays_and_only_then_exposes_the_resolver() {
     assert_eq!(first.manifest_replay_count(), 0);
     assert_eq!(first.runtime_policy_count(), 2);
     assert_eq!(first.runtime_policy_replay_count(), 0);
-    assert_eq!(first.authority_count(), 6);
+    assert_eq!(first.authority_count(), 8);
     assert_eq!(first.authority_replay_count(), 0);
 
     let replay = plan
@@ -436,9 +445,9 @@ async fn exact_bootstrap_replays_and_only_then_exposes_the_resolver() {
     assert_eq!(replay.manifest_replay_count(), 2);
     assert_eq!(replay.runtime_policy_count(), 2);
     assert_eq!(replay.runtime_policy_replay_count(), 2);
-    assert_eq!(replay.authority_replay_count(), 6);
+    assert_eq!(replay.authority_replay_count(), 8);
     let resolver = replay.credential_request_resolver();
-    assert_eq!(resolver.len(), 6);
+    assert_eq!(resolver.len(), 8);
     for identity in plan.authorities() {
         let resolution = resolver
             .resolve_github_server_service_credential_request(identity)

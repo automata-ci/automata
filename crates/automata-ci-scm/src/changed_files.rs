@@ -84,27 +84,12 @@ impl ChangedFileLimits {
 pub struct ChangedFileRequest<'request> {
     connection: &'request ProviderConnectionManifest,
     trigger: &'request SealedNormalizedTrigger,
-    credential: Option<&'request SecretString>,
+    credential: &'request SecretString,
     limits: ChangedFileLimits,
     observed_at: UnixMillis,
 }
 
 impl<'request> ChangedFileRequest<'request> {
-    /// Creates a credential-free changed-file request.
-    ///
-    /// # Errors
-    ///
-    /// Rejects inactive connections, pre-epoch observation times, and triggers
-    /// for another repository.
-    pub fn public(
-        connection: &'request ProviderConnectionManifest,
-        trigger: &'request SealedNormalizedTrigger,
-        limits: ChangedFileLimits,
-        observed_at: UnixMillis,
-    ) -> Result<Self, ChangedFileRequestError> {
-        Self::build(connection, trigger, None, limits, observed_at)
-    }
-
     /// Creates a changed-file request with one explicitly borrowed credential.
     ///
     /// # Errors
@@ -115,16 +100,6 @@ impl<'request> ChangedFileRequest<'request> {
         connection: &'request ProviderConnectionManifest,
         trigger: &'request SealedNormalizedTrigger,
         credential: &'request SecretString,
-        limits: ChangedFileLimits,
-        observed_at: UnixMillis,
-    ) -> Result<Self, ChangedFileRequestError> {
-        Self::build(connection, trigger, Some(credential), limits, observed_at)
-    }
-
-    fn build(
-        connection: &'request ProviderConnectionManifest,
-        trigger: &'request SealedNormalizedTrigger,
-        credential: Option<&'request SecretString>,
         limits: ChangedFileLimits,
         observed_at: UnixMillis,
     ) -> Result<Self, ChangedFileRequestError> {
@@ -166,9 +141,9 @@ impl<'request> ChangedFileRequest<'request> {
         self.connection.configuration().repository()
     }
 
-    /// Returns the explicitly borrowed credential, when present.
+    /// Returns the explicitly borrowed credential.
     #[must_use]
-    pub const fn credential(&self) -> Option<&SecretString> {
+    pub const fn credential(&self) -> &SecretString {
         self.credential
     }
 
@@ -193,7 +168,7 @@ impl fmt::Debug for ChangedFileRequest<'_> {
             .field("connection_revision", &self.connection.revision())
             .field("trigger_digest", &self.trigger.digest())
             .field("repository", &self.repository())
-            .field("credential", &self.credential.map(|_| "[redacted]"))
+            .field("credential", &"[redacted]")
             .field("limits", &self.limits)
             .field("observed_at", &self.observed_at)
             .finish()

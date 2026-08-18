@@ -3279,7 +3279,7 @@ async fn lock_exact_authority_graph(
     let historical = sqlx::query(
         r"
         SELECT origin.origin_kind, origin.origin_id, origin.repository_visibility,
-               origin.private_source_authority_id
+               origin.repository_contents_authority_id
         FROM github_workflow_run_manifest_origins AS origin
         JOIN workflow_admission_receipts AS admission
           ON admission.tenant_id = origin.tenant_id
@@ -3433,7 +3433,7 @@ async fn lock_exact_authority_graph(
     .fetch_all(&mut **transaction)
     .await
     .map_err(operation_error)?;
-    let (origin_kind, origin_id, visibility, private_authority_id): (
+    let (origin_kind, origin_id, visibility, contents_authority_id): (
         String,
         Uuid,
         String,
@@ -3444,7 +3444,7 @@ async fn lock_exact_authority_graph(
             row.try_get("origin_id").map_err(operation_error)?,
             row.try_get("repository_visibility")
                 .map_err(operation_error)?,
-            row.try_get("private_source_authority_id")
+            row.try_get("repository_contents_authority_id")
                 .map_err(operation_error)?,
         ),
         [] => return Ok(false),
@@ -3459,7 +3459,7 @@ async fn lock_exact_authority_graph(
         &origin_kind,
         origin_id,
         &visibility,
-        private_authority_id,
+        contents_authority_id,
     )
     .await?
     {
@@ -3794,16 +3794,16 @@ async fn lock_exact_private_runtime_authority(
     origin_kind: &str,
     origin_id: Uuid,
     visibility: &str,
-    private_authority_id: Option<Uuid>,
+    contents_authority_id: Option<Uuid>,
 ) -> Result<bool, GithubRuntimeAuthorityStoreError> {
     if visibility == "public"
-        && private_authority_id.is_none()
+        && contents_authority_id.is_none()
         && github_manifest_origin_is_closed(origin_kind)
         && !origin_id.is_nil()
     {
         return Ok(true);
     }
-    let Some(private_authority_id) = private_authority_id.filter(|_| {
+    let Some(contents_authority_id) = contents_authority_id.filter(|_| {
         visibility == "private"
             && github_manifest_origin_is_closed(origin_kind)
             && !origin_id.is_nil()
@@ -3822,29 +3822,29 @@ async fn lock_exact_private_runtime_authority(
          AND manifest.manifest_digest = evidence.provider_manifest_digest
         JOIN github_server_service_authorities AS authority
           ON authority.tenant_id = evidence.tenant_id
-         AND authority.id = evidence.private_source_authority_id
+         AND authority.id = evidence.repository_contents_authority_id
          AND authority.repository_id = evidence.repository_id
          AND authority.provider_connection_id = evidence.provider_connection_id
          AND authority.provider_installation_id = evidence.provider_installation_id
          AND authority.github_repository_id = evidence.github_repository_id
          AND authority.github_repository_name = evidence.github_repository_name
-         AND authority.service_scope = 'private_repository_source_read'
+         AND authority.service_scope = 'repository_contents_read'
          AND authority.github_app_id = manifest.github_app_id
          AND authority.github_app_client_id = manifest.github_app_client_id
          AND authority.github_app_jwt_issuer_kind = manifest.github_app_jwt_issuer_kind
          AND authority.app_key_spki_sha256 = manifest.app_key_spki_sha256
          AND authority.app_configuration_revision =
-             evidence.private_source_authority_app_configuration_revision
+             evidence.repository_contents_authority_app_configuration_revision
          AND authority.app_configuration_revision = manifest.app_configuration_revision
-         AND authority.policy_revision = evidence.private_source_authority_policy_revision
+         AND authority.policy_revision = evidence.repository_contents_authority_policy_revision
          AND authority.policy_revision = manifest.policy_revision
-         AND authority.identity_digest = evidence.private_source_authority_identity_digest
+         AND authority.identity_digest = evidence.repository_contents_authority_identity_digest
          AND authority.state = 'active'
         WHERE evidence.origin_kind = $1
           AND evidence.origin_id = $2
           AND evidence.tenant_id = $3
           AND evidence.repository_id = $4
-          AND evidence.private_source_authority_id = $5
+          AND evidence.repository_contents_authority_id = $5
           AND evidence.provider_connection_id = $6
           AND evidence.provider_installation_id = $7
           AND evidence.github_repository_id = $8
@@ -3860,7 +3860,7 @@ async fn lock_exact_private_runtime_authority(
     .bind(origin_id)
     .bind(identity.tenant().as_str())
     .bind(identity.repository_id().as_uuid())
-    .bind(private_authority_id)
+    .bind(contents_authority_id)
     .bind(identity.provider_connection_id().as_uuid())
     .bind(pg_bigint(identity.provider_installation_id().get()))
     .bind(pg_bigint(identity.github_repository_id().get()))

@@ -1,5 +1,6 @@
 mod support;
 
+use automata_ci_auth::secret::SecretString;
 use automata_ci_core::{GitObjectId, UnixMillis};
 use automata_ci_provider::{
     ExternalRepositoryId, ExternalRepositoryIdentity, NormalizedTrigger, ProviderGitRef,
@@ -17,6 +18,10 @@ use static_assertions::assert_obj_safe;
 use support::{active_connection, connection_with_state};
 
 assert_obj_safe!(ChangedFileReader);
+
+fn credential() -> SecretString {
+    SecretString::new("provider-installation-token").expect("fixture credential")
+}
 
 fn page_evidence(
     request: &ChangedFileRequest<'_>,
@@ -70,9 +75,11 @@ fn push(repository: ExternalRepositoryIdentity) -> automata_ci_provider::SealedN
 fn request_is_connection_repository_and_trigger_bound() {
     let connection = active_connection("repository-42");
     let trigger = push(connection.configuration().repository().clone());
-    let request = ChangedFileRequest::public(
+    let token = credential();
+    let request = ChangedFileRequest::authenticated(
         &connection,
         &trigger,
+        &token,
         ChangedFileLimits::new(10, 2, 4_096).unwrap(),
         UnixMillis::new(2_000),
     )
@@ -87,9 +94,10 @@ fn request_is_connection_repository_and_trigger_bound() {
     let disabled = connection_with_state("repository-42", ProviderLifecycleState::Disabled);
     let disabled_trigger = push(disabled.configuration().repository().clone());
     assert_eq!(
-        ChangedFileRequest::public(
+        ChangedFileRequest::authenticated(
             &disabled,
             &disabled_trigger,
+            &token,
             ChangedFileLimits::new(10, 2, 4_096).unwrap(),
             UnixMillis::new(2_000),
         )
@@ -98,9 +106,10 @@ fn request_is_connection_repository_and_trigger_bound() {
     );
 
     assert_eq!(
-        ChangedFileRequest::public(
+        ChangedFileRequest::authenticated(
             &connection,
             &trigger,
+            &token,
             ChangedFileLimits::new(10, 2, 4_096).unwrap(),
             UnixMillis::new(-1),
         )
@@ -115,9 +124,10 @@ fn request_is_connection_repository_and_trigger_bound() {
         ExternalRepositoryId::new("repository-42").unwrap(),
     ));
     assert_eq!(
-        ChangedFileRequest::public(
+        ChangedFileRequest::authenticated(
             &connection,
             &foreign,
+            &token,
             ChangedFileLimits::new(10, 2, 4_096).unwrap(),
             UnixMillis::new(2_000),
         )
@@ -130,9 +140,11 @@ fn request_is_connection_repository_and_trigger_bound() {
 fn complete_files_are_canonical_unique_and_evidence_bound() {
     let connection = active_connection("repository-42");
     let trigger = push(connection.configuration().repository().clone());
-    let request = ChangedFileRequest::public(
+    let token = credential();
+    let request = ChangedFileRequest::authenticated(
         &connection,
         &trigger,
+        &token,
         ChangedFileLimits::new(10, 2, 4_096).unwrap(),
         UnixMillis::new(2_000),
     )
@@ -165,9 +177,10 @@ fn complete_files_are_canonical_unique_and_evidence_bound() {
     assert_eq!(evidence.page_count(), 1);
     assert_eq!(evidence.response_bytes(), 8);
 
-    let later_request = ChangedFileRequest::public(
+    let later_request = ChangedFileRequest::authenticated(
         &connection,
         &trigger,
+        &token,
         ChangedFileLimits::new(10, 2, 4_096).unwrap(),
         UnixMillis::new(2_001),
     )
@@ -204,9 +217,11 @@ fn complete_files_are_canonical_unique_and_evidence_bound() {
 fn incompleteness_is_durable_and_never_exposes_partial_paths_as_complete() {
     let connection = active_connection("repository-42");
     let trigger = push(connection.configuration().repository().clone());
-    let request = ChangedFileRequest::public(
+    let token = credential();
+    let request = ChangedFileRequest::authenticated(
         &connection,
         &trigger,
+        &token,
         ChangedFileLimits::new(10, 1, 4_096).unwrap(),
         UnixMillis::new(2_000),
     )
@@ -262,9 +277,11 @@ fn limits_and_renames_fail_at_exact_boundaries() {
 fn zero_changed_files_can_be_proven_complete() {
     let connection = active_connection("repository-42");
     let trigger = push(connection.configuration().repository().clone());
-    let request = ChangedFileRequest::public(
+    let token = credential();
+    let request = ChangedFileRequest::authenticated(
         &connection,
         &trigger,
+        &token,
         ChangedFileLimits::new(10, 1, 4_096).unwrap(),
         UnixMillis::new(2_000),
     )
@@ -283,9 +300,11 @@ fn zero_changed_files_can_be_proven_complete() {
 fn page_streaming_fails_closed_at_state_and_byte_boundaries() {
     let connection = active_connection("repository-42");
     let trigger = push(connection.configuration().repository().clone());
-    let request = ChangedFileRequest::public(
+    let token = credential();
+    let request = ChangedFileRequest::authenticated(
         &connection,
         &trigger,
+        &token,
         ChangedFileLimits::new(10, 2, 5).unwrap(),
         UnixMillis::new(2_000),
     )
