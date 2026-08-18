@@ -83,7 +83,11 @@ impl SecureRoot {
 
     pub(crate) fn remove_owned_tree(&self, target: &TargetPath) -> io::Result<()> {
         let components = self.relative_components(target)?;
-        let (parent, name) = self.open_parent(&components)?;
+        let (parent, name) = match self.open_parent(&components) {
+            Ok(parent) => parent,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        };
         let directory = match openat(&parent, &name, DIRECTORY_FLAGS, Mode::empty()) {
             Ok(directory) => directory,
             Err(Errno::NOENT) => return Ok(()),
@@ -208,4 +212,40 @@ fn component_name(component: Component<'_>) -> io::Result<OsString> {
 
 fn is_dot(name: &CStr) -> bool {
     matches!(name.to_bytes(), b"." | b"..")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, time::SystemTime};
+
+    use automata_ci_execution::TargetPath;
+
+    use super::SecureRoot;
+
+    #[test]
+    fn removing_an_absent_tree_with_an_absent_parent_is_idempotent() {
+        let parent = fs::canonicalize(std::env::temp_dir()).expect("canonical temporary root");
+        let unique = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("system clock after Unix epoch")
+            .as_nanos();
+        let path = parent.join(format!(
+            "automata-macos-secure-root-{}-{unique}",
+            std::process::id()
+        ));
+        let root_target = TargetPath::posix(path.to_string_lossy().into_owned()).expect("root");
+        let attempt_path = path.join("attempts/first");
+        let attempt =
+            TargetPath::posix(attempt_path.to_string_lossy().into_owned()).expect("attempt");
+        let root = SecureRoot::open_or_create(&path, root_target).expect("secure root");
+
+        root.remove_owned_tree(&attempt)
+            .expect("an absent parent means the tree is already absent");
+        root.ensure_owned_directory(&attempt)
+            .expect("the following create makes the missing parent hierarchy");
+        assert!(attempt_path.is_dir());
+
+        drop(root);
+        fs::remove_dir_all(path).expect("remove test root");
+    }
 }
