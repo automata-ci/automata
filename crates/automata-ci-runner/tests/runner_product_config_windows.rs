@@ -278,7 +278,10 @@ impl EvidenceFixture {
     }
 
     fn make_promotable(&mut self) {
-        self.rewrite_candidate_evidence(true, "ghcr.io/automata-ci/windows-runner");
+        self.rewrite_candidate_evidence(
+            true,
+            "ghcr.io/example-corp/localhost-tools-windows-runner",
+        );
     }
 
     fn make_reserved_repository_evidence(&mut self) {

@@ -666,13 +666,32 @@ fn non_placeholder_digest(value: &str) -> bool {
             .is_some_and(|first| value.as_bytes().iter().any(|byte| byte != first))
 }
 
+fn production_repository(repository: &str) -> bool {
+    let authority = repository
+        .split_once('/')
+        .map_or(repository, |(authority, _)| authority);
+    let host = authority
+        .rsplit_once(':')
+        .map_or(authority, |(host, port)| {
+            if !port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit()) {
+                host
+            } else {
+                authority
+            }
+        });
+    let top_level_domain = host.rsplit('.').next().unwrap_or(host);
+    !matches!(host, "example.com" | "example.net" | "example.org")
+        && !matches!(
+            top_level_domain,
+            "example" | "invalid" | "localhost" | "test"
+        )
+}
+
 fn non_placeholder_image(value: &str) -> bool {
     value
         .rsplit_once("@sha256:")
         .is_some_and(|(repository, digest)| {
-            !repository.contains("example")
-                && !repository.contains("localhost")
-                && non_placeholder_digest(digest)
+            production_repository(repository) && non_placeholder_digest(digest)
         })
 }
 
@@ -961,5 +980,27 @@ mod tests {
             ),
             Ok(None)
         );
+    }
+
+    #[test]
+    fn production_repository_policy_classifies_only_the_registry_host() {
+        let digest = "12".repeat(32);
+        for repository in [
+            "ghcr.io/example-corp/windows-runner",
+            "ghcr.io/automata/localhost-tools",
+        ] {
+            assert!(non_placeholder_image(&format!(
+                "{repository}@sha256:{digest}"
+            )));
+        }
+        for repository in [
+            "registry.example/automata/windows-runner",
+            "registry.example.test/automata/windows-runner",
+            "localhost:5000/automata/windows-runner",
+        ] {
+            assert!(!non_placeholder_image(&format!(
+                "{repository}@sha256:{digest}"
+            )));
+        }
     }
 }

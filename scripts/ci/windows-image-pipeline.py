@@ -51,6 +51,8 @@ GIT_COMMIT = re.compile(r"[0-9a-f]{40}")
 IMMUTABLE_IMAGE = re.compile(
     r"[a-z0-9](?:[a-z0-9._:/-]*[a-z0-9])?@sha256:([0-9a-f]{64})"
 )
+RESERVED_REGISTRY_HOSTS = frozenset({"example.com", "example.net", "example.org"})
+RESERVED_REGISTRY_TLDS = frozenset({"example", "invalid", "localhost", "test"})
 IDENTIFIER = re.compile(r"[a-z0-9][a-z0-9._-]{2,127}")
 KEY_HANDLE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{2,255}")
 EXPECTED_SOURCES = ("pwsh", "node24")
@@ -340,6 +342,18 @@ def valid_commit(value: object, label: str) -> str:
     return value
 
 
+def production_repository(repository: str) -> bool:
+    authority = repository.split("/", 1)[0]
+    host, separator, port = authority.rpartition(":")
+    if not separator or not port.isdecimal():
+        host = authority
+    top_level_domain = host.rsplit(".", 1)[-1]
+    return (
+        host not in RESERVED_REGISTRY_HOSTS
+        and top_level_domain not in RESERVED_REGISTRY_TLDS
+    )
+
+
 def image_digest(value: object, label: str) -> tuple[str, str]:
     if not isinstance(value, str):
         fail(f"{label} is not an immutable image reference")
@@ -348,7 +362,7 @@ def image_digest(value: object, label: str) -> tuple[str, str]:
         fail(f"{label} is not an immutable image reference")
     digest = valid_sha(match.group(1), f"{label} digest")
     repository = value.split("@", 1)[0]
-    if "example" in repository or "localhost" in repository:
+    if not production_repository(repository):
         fail(f"{label} uses a non-production repository")
     return value, digest
 

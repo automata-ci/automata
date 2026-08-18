@@ -566,6 +566,29 @@ class WindowsImagePipelineTests(unittest.TestCase):
         with self.assertRaisesRegex(SystemExit, "serial"):
             self.assemble(output=self.root / "rollback", promotion_serial=0)
 
+    def test_repository_policy_classifies_only_the_registry_host(self) -> None:
+        digest_reference = "@sha256:" + digest(b"production-image")
+        for repository in (
+            "ghcr.io/example-corp/windows-runner",
+            "ghcr.io/automata/localhost-tools",
+        ):
+            with self.subTest(repository=repository):
+                reference = repository + digest_reference
+                self.assertEqual(
+                    pipeline.image_digest(reference, "promoted image"),
+                    (reference, digest(b"production-image")),
+                )
+        for repository in (
+            "registry.example/automata/windows-runner",
+            "registry.example.test/automata/windows-runner",
+            "localhost:5000/automata/windows-runner",
+        ):
+            with self.subTest(repository=repository):
+                with self.assertRaisesRegex(SystemExit, "non-production repository"):
+                    pipeline.image_digest(
+                        repository + digest_reference, "promoted image"
+                    )
+
     def test_external_signer_receives_only_opaque_handle_and_exact_payload(
         self,
     ) -> None:
