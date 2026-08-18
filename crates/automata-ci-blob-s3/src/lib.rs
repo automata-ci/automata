@@ -1,10 +1,11 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
-//! S3-compatible adapter for Automata's immutable blob port.
+//! S3-compatible adapter for Automata's immutable blob and record ports.
 //!
 //! The adapter uses conditional creation and then reads content back through
-//! the same size/SHA-256 verification path. It does not list objects or use S3
-//! as a coordination primitive.
+//! the same size/SHA-256 verification path. Record reads use one exact
+//! caller-derived key. It does not list objects or use S3 as a coordination
+//! primitive.
 
 mod adapter;
 mod config;

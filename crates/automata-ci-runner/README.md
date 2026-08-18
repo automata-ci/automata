@@ -204,15 +204,22 @@ Additional provider work remains listed in the
 
 ## Repository action cache
 
-Linux runners resolve credential-free repository actions pinned to one
-canonical lowercase 40-character Git commit without consuming the GitHub REST
-API quota. The first resolution downloads the immutable GitHub archive,
-performs the normal bounded archive inspection, and publishes the verified
-content-addressed bytes to the configured shared object store. Each runner also
-retains a verified local copy through its built-in product action cache under
-the private journal state root. A warm job
-therefore reads local disk first and falls back to the shared object store; it
-does not contact GitHub again.
+Credential-free repository actions pinned to one canonical lowercase
+40-character Git commit are cached without consuming the GitHub REST API quota.
+The first resolution downloads the immutable GitHub archive, performs the
+normal bounded archive inspection, and publishes two write-once records to the
+configured shared object store: the content-addressed archive and a small
+reference manifest keyed by provider, repository, commit, and action subpath.
+Both control-plane activation and every runner consult that installation-wide
+manifest before GitHub. Once both records exist, any replica and any runner can
+prepare and execute the action while GitHub's API, web, and codeload origins are
+unavailable.
+
+Unix runners additionally retain a verified local copy and reference index
+under the private journal state root. A warm runner reads local disk first and
+falls back to the shared manifest and archive. This local tier can keep that
+runner warm during a simultaneous object-store interruption; another runner
+requires the shared store.
 
 Runner product schema 6 requires an explicit object-store trust policy.
 `web_pki` uses platform roots; `private_ca` loads exactly one bounded CA through
@@ -223,12 +230,22 @@ with one terminal LF and no surrounding data; a present KeyUsage must include
 runner, server, and image initializer must select the same endpoint trust,
 bucket, and prefix for one installation.
 
-The local archive cache is bounded to 256 entries, 512 MiB total, and 16 MiB per
-compressed archive. Its sibling reference index is crash-durable and retains at
-most 4,096 exact references. Both are recreated automatically and require no
-separate operator configuration or migration. Removing either cache directory
+The shared reference manifests and action archives are persistent installation
+state and are not subject to the runner-local eviction policy. The local archive
+cache is bounded to 256 entries, 512 MiB total, and 16 MiB per compressed
+archive. Its sibling reference index is crash-durable and retains at most 4,096
+exact references. Both local directories are recreated automatically and
+require no separate operator configuration. Removing either local directory
 only discards acceleration data; the next exact public resolution repopulates
-it from shared storage or GitHub.
+it from shared storage without GitHub when the shared manifest is warm.
+
+An archive object left by a release older than the shared-manifest schema is not
+by itself a warm entry because its reference cannot be discovered from a
+content digest. During rollout, run the pinned action set successfully once on
+the new version before relying on GitHub-outage operation. A warm-entry check
+must preserve both `actions/references/v1/sha256/*.json` and the referenced
+`actions/v1/sha256/*.tar.gz` objects. Uncached actions fail closed during an
+outage; Automata never substitutes a stale tag or branch.
 
 This fast path is deliberately narrower than general repository action
 resolution. Tags, branches, noncanonical commit spellings, and every request

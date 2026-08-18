@@ -2,16 +2,17 @@ use crate::support;
 
 use std::sync::{
     Arc,
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 use async_trait::async_trait;
 use automata_ci_action::{
     ActionBundleLimits, ActionResolver, ActionSubpath, ImmutableActionResolver,
-    MemoryActionReferenceIndex, RepositoryActionRequest,
+    MemoryActionReferenceIndex, ObjectActionReferenceIndex, ReadThroughActionReferenceIndex,
+    RepositoryActionRequest,
 };
 use automata_ci_auth::secret::SecretString;
-use automata_ci_blob::MemoryBlobStore;
+use automata_ci_blob::{ImmutableBlobStore, ImmutableRecordStore, MemoryBlobStore};
 use automata_ci_scm::{
     ArchiveFormat, RepositoryId, RepositorySnapshot, ResolvedRevision, RevisionSpec, ScmError,
     ScmProvider, ScmProviderId, SnapshotRequest,
@@ -24,6 +25,7 @@ struct CountingScm {
     provider: ScmProviderId,
     archive: Bytes,
     calls: AtomicUsize,
+    available: AtomicBool,
 }
 
 #[async_trait]
@@ -37,6 +39,9 @@ impl ScmProvider for CountingScm {
         request: SnapshotRequest<'_>,
     ) -> Result<RepositorySnapshot, ScmError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        if !self.available.load(Ordering::SeqCst) {
+            return Err(ScmError::new(automata_ci_scm::ScmErrorKind::Unavailable));
+        }
         Ok(RepositorySnapshot::from_bytes(
             self.provider.clone(),
             request.repository().clone(),
@@ -48,6 +53,51 @@ impl ScmProvider for CountingScm {
             self.archive.clone(),
         ))
     }
+}
+
+#[tokio::test]
+async fn shared_manifest_runs_warm_action_on_another_node_during_scm_outage() {
+    let archive = build_archive(&[
+        TestEntry::File(
+            "root/action.yml",
+            b"name: shared\nruns:\n  using: node24\n  main: dist/index.js\n",
+        ),
+        TestEntry::File("root/dist/index.js", b"console.log('shared')"),
+    ]);
+    let scm = Arc::new(CountingScm {
+        provider: ScmProviderId::new("github").unwrap(),
+        archive,
+        calls: AtomicUsize::new(0),
+        available: AtomicBool::new(true),
+    });
+    let shared_store = Arc::new(MemoryBlobStore::default());
+    let repository = RepositoryId::new("actions/example").unwrap();
+    let revision = RevisionSpec::new(SHA).unwrap();
+    let subpath = ActionSubpath::root();
+
+    let first = resolver_node(scm.clone(), shared_store.clone());
+    first
+        .resolve(RepositoryActionRequest::public(
+            &repository,
+            &revision,
+            &subpath,
+            ActionBundleLimits::default(),
+        ))
+        .await
+        .unwrap();
+    scm.available.store(false, Ordering::SeqCst);
+
+    let second = resolver_node(scm.clone(), shared_store);
+    second
+        .resolve(RepositoryActionRequest::public(
+            &repository,
+            &revision,
+            &subpath,
+            ActionBundleLimits::default(),
+        ))
+        .await
+        .expect("another node must resolve the warm action without SCM");
+    assert_eq!(scm.calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
@@ -129,6 +179,7 @@ fn fixture(
             TestEntry::File("root/dist/index.js", b"console.log('cached')"),
         ]),
         calls: AtomicUsize::new(0),
+        available: AtomicBool::new(true),
     });
     let resolver = ImmutableActionResolver::new(scm.clone(), Arc::new(MemoryBlobStore::default()))
         .with_reference_index(Arc::new(MemoryActionReferenceIndex::new(8).unwrap()));
@@ -139,4 +190,17 @@ fn fixture(
         RevisionSpec::new(revision).unwrap(),
         ActionSubpath::root(),
     )
+}
+
+fn resolver_node(
+    scm: Arc<CountingScm>,
+    shared_store: Arc<MemoryBlobStore>,
+) -> ImmutableActionResolver {
+    let blobs: Arc<dyn ImmutableBlobStore> = shared_store.clone();
+    let records: Arc<dyn ImmutableRecordStore> = shared_store;
+    let shared = Arc::new(ObjectActionReferenceIndex::new(records));
+    let local = Arc::new(MemoryActionReferenceIndex::new(8).unwrap());
+    ImmutableActionResolver::new(scm, blobs).with_reference_index(Arc::new(
+        ReadThroughActionReferenceIndex::new(local, shared),
+    ))
 }

@@ -119,7 +119,12 @@ publication settings, and result metadata. Server replicas coordinate with
 transactions and fencing rather than process-local locks.
 
 S3-compatible storage owns immutable workflow and action bundles, log segments,
-artifacts, cache objects, and final manifests. It is not used for coordination.
+artifacts, cache objects, and final manifests. Exact public action bundles have
+a write-once reference manifest derived from their provider, repository,
+commit, and subpath, so both activation replicas and runners can discover a
+previously verified content descriptor without GitHub. These immutable
+identity records do not provide mutable coordination; PostgreSQL remains the
+authority for transitions and publication.
 Cache quota and retention eviction first records unreachable object descriptors
 in a PostgreSQL outbox in the same transaction that removes their readable
 metadata. Either control-plane replica may then perform idempotent deletion and

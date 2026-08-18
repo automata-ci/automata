@@ -9,7 +9,8 @@ use std::{
 };
 
 use automata_ci_blob::{
-    BlobDescriptor, BlobKey, BlobPayload, BlobStoreErrorKind, ImmutableBlobStore, MediaType,
+    BlobDescriptor, BlobKey, BlobPayload, BlobStoreErrorKind, ImmutableBlobStore,
+    ImmutableRecordStore, MediaType,
 };
 use automata_ci_blob_s3::{S3BlobStore, S3BlobStoreConfig, StaticS3Credentials};
 use bytes::Bytes;
@@ -21,6 +22,24 @@ use tokio::{
 use url::Url;
 
 const TOTAL_ATTEMPTS: usize = 3;
+
+#[tokio::test]
+async fn discovers_and_verifies_an_immutable_record_by_key() {
+    let body = fixture_body();
+    let descriptor = descriptor(&body);
+    let fixture =
+        S3Fixture::spawn(descriptor.clone(), body.clone(), [ResponseSpec::Complete]).await;
+    let store = fixture.store(Duration::from_secs(1));
+
+    let loaded = store
+        .get_record(descriptor.key(), descriptor.media_type(), descriptor.size())
+        .await
+        .expect("record metadata and bytes must be verified after key discovery");
+
+    assert_eq!(loaded.descriptor(), &descriptor);
+    assert_eq!(loaded.bytes(), &body);
+    assert_eq!(fixture.request_count(), 1);
+}
 
 #[tokio::test]
 async fn retries_a_fresh_get_after_a_mid_body_fin() {

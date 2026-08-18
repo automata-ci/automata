@@ -6,8 +6,8 @@ use std::{
 use async_trait::async_trait;
 
 use crate::{
-    BlobDescriptor, BlobPayload, BlobStoreError, BlobStoreErrorKind, ImmutableBlobStore,
-    PutBlobOutcome, ReclaimableBlobStore, VerifiedBlob,
+    BlobDescriptor, BlobKey, BlobPayload, BlobStoreError, BlobStoreErrorKind, ImmutableBlobStore,
+    ImmutableRecordStore, MediaType, PutBlobOutcome, ReclaimableBlobStore, VerifiedBlob,
 };
 
 /// Deterministic in-memory adapter for application and contract tests.
@@ -70,6 +70,31 @@ impl ImmutableBlobStore for MemoryBlobStore {
             .get(descriptor.key().as_str())
             .ok_or_else(|| BlobStoreError::new(BlobStoreErrorKind::NotFound))?;
         if payload.descriptor() != descriptor {
+            return Err(BlobStoreError::new(BlobStoreErrorKind::Integrity));
+        }
+        Ok(VerifiedBlob::from_payload(payload.clone()))
+    }
+}
+
+#[async_trait]
+impl ImmutableRecordStore for MemoryBlobStore {
+    async fn get_record(
+        &self,
+        key: &BlobKey,
+        media_type: &MediaType,
+        maximum_bytes: u64,
+    ) -> Result<VerifiedBlob, BlobStoreError> {
+        let objects = self
+            .objects
+            .read()
+            .map_err(|_| BlobStoreError::new(BlobStoreErrorKind::Unavailable))?;
+        let payload = objects
+            .get(key.as_str())
+            .ok_or_else(|| BlobStoreError::new(BlobStoreErrorKind::NotFound))?;
+        if payload.descriptor().size() > maximum_bytes {
+            return Err(BlobStoreError::new(BlobStoreErrorKind::TooLarge));
+        }
+        if payload.descriptor().media_type() != media_type {
             return Err(BlobStoreError::new(BlobStoreErrorKind::Integrity));
         }
         Ok(VerifiedBlob::from_payload(payload.clone()))

@@ -1,9 +1,10 @@
 # automata-ci-blob-s3
 
-`automata-ci-blob-s3` implements Automata's immutable blob-storage port for
-S3-compatible services. It conditionally creates objects and verifies stored
-bytes by size and SHA-256; it does not use object listing or mutable object
-state for coordination.
+`automata-ci-blob-s3` implements Automata's immutable blob and deterministic
+record-storage ports for S3-compatible services. It conditionally creates
+objects and verifies stored bytes by size and SHA-256. Record discovery is one
+exact bounded `GetObject` by a caller-derived key; the adapter does not use
+object listing or mutable object state for coordination.
 
 The control plane and runner compose this adapter behind `automata-ci-blob`.
 PostgreSQL remains the coordination authority for the product.

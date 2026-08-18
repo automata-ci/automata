@@ -1,7 +1,9 @@
 use std::{collections::BTreeSet, fmt, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
-use automata_ci_action::{ActionBundleLimits, ActionResolver, ImmutableActionResolver};
+use automata_ci_action::{
+    ActionBundleLimits, ActionResolver, ImmutableActionResolver, ObjectActionReferenceIndex,
+};
 use automata_ci_action_github::{GithubActionMetadataDecoder, GithubActionMetadataLimits};
 use automata_ci_auth::{
     authorization::AuthorizationContext,
@@ -18,7 +20,9 @@ use automata_ci_auth_postgres::{
     PostgresDelegatedActorResolver, PostgresHumanRbacManagementRepository,
     PostgresRunnerEnrollmentRepository,
 };
-use automata_ci_blob::{BlobKey, BlobPayload, ImmutableBlobStore, MediaType, ReclaimableBlobStore};
+use automata_ci_blob::{
+    BlobKey, BlobPayload, ImmutableBlobStore, ImmutableRecordStore, MediaType, ReclaimableBlobStore,
+};
 use automata_ci_blob_s3::{S3BlobStore, S3BlobStoreConfigError};
 use automata_ci_control::lease::{
     LeaseClock, LeaseIdGenerator, RandomLeaseIdGenerator, RunnableScanLimit, SystemLeaseClock,
@@ -351,8 +355,11 @@ impl ProductionComponents {
             if let Some(github) = github_provider_config.as_ref() {
                 let endpoint = provider_http_endpoint(github.config().transport())?;
                 let scm: Arc<dyn ScmProvider> = Arc::new(endpoint);
-                let resolver: Arc<dyn ActionResolver> =
-                    Arc::new(ImmutableActionResolver::new(scm, Arc::clone(&blob_store)));
+                let records: Arc<dyn ImmutableRecordStore> = reclaimable_blob_store.clone();
+                let resolver: Arc<dyn ActionResolver> = Arc::new(
+                    ImmutableActionResolver::new(scm, Arc::clone(&blob_store))
+                        .with_reference_index(Arc::new(ObjectActionReferenceIndex::new(records))),
+                );
                 let actions: Arc<dyn ActionPreparationPort> = Arc::new(
                     ResolvedBundleActionPreparer::new(
                         resolver,

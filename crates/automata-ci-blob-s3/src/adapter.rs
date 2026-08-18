@@ -1,10 +1,11 @@
-use std::{fmt, time::Duration};
+use std::{fmt, str::FromStr as _, time::Duration};
 
 use async_trait::async_trait;
 use automata_ci_blob::{
-    BlobDescriptor, BlobPayload, BlobStoreError, BlobStoreErrorKind, ImmutableBlobStore,
-    PutBlobOutcome, ReclaimableBlobStore, VerifiedBlob,
+    BlobDescriptor, BlobKey, BlobPayload, BlobStoreError, BlobStoreErrorKind, ImmutableBlobStore,
+    ImmutableRecordStore, MediaType, PutBlobOutcome, ReclaimableBlobStore, VerifiedBlob,
 };
+use automata_ci_core::Sha256Digest;
 use aws_sdk_s3::{
     Client,
     error::{ProvideErrorMetadata, SdkError},
@@ -136,9 +137,13 @@ impl S3BlobStore {
     }
 
     fn object_key(&self, descriptor: &BlobDescriptor) -> String {
+        self.object_key_for(descriptor.key())
+    }
+
+    fn object_key_for(&self, key: &BlobKey) -> String {
         self.prefix.as_ref().map_or_else(
-            || descriptor.key().as_str().to_owned(),
-            |prefix| format!("{prefix}/{}", descriptor.key().as_str()),
+            || key.as_str().to_owned(),
+            |prefix| format!("{prefix}/{}", key.as_str()),
         )
     }
 
@@ -259,6 +264,115 @@ impl S3BlobStore {
             .map_err(|_| BlobStoreError::new(BlobStoreErrorKind::Integrity))?;
         Ok(VerifiedBlob::from_payload(payload))
     }
+
+    async fn get_record_before(
+        &self,
+        key: &BlobKey,
+        media_type: &MediaType,
+        maximum_bytes: u64,
+        deadline: Instant,
+    ) -> Result<VerifiedBlob, BlobStoreError> {
+        let mut attempts_remaining = MAX_GET_ATTEMPTS;
+        loop {
+            let now = Instant::now();
+            let remaining = deadline
+                .checked_duration_since(now)
+                .ok_or_else(unavailable)?;
+            let attempt_budget = remaining
+                .checked_div(attempts_remaining)
+                .filter(|budget| !budget.is_zero())
+                .ok_or_else(unavailable)?;
+            let attempt_deadline = now + attempt_budget;
+            match self
+                .get_record_attempt(key, media_type, maximum_bytes, attempt_deadline)
+                .await
+            {
+                Ok(record) => return Ok(record),
+                Err(error)
+                    if error.kind() == BlobStoreErrorKind::Unavailable
+                        && attempts_remaining > 1 =>
+                {
+                    attempts_remaining -= 1;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    async fn get_record_attempt(
+        &self,
+        key: &BlobKey,
+        media_type: &MediaType,
+        maximum_bytes: u64,
+        deadline: Instant,
+    ) -> Result<VerifiedBlob, BlobStoreError> {
+        let request = self
+            .client
+            .get_object()
+            .bucket(&self.bucket)
+            .key(self.object_key_for(key));
+        let mut response = match timeout_at(deadline, request.send()).await {
+            Ok(Ok(response)) => response,
+            Ok(Err(error)) => return Err(map_get_error(&error)),
+            Err(_) => return Err(unavailable()),
+        };
+        let content_length = response
+            .content_length()
+            .and_then(|value| u64::try_from(value).ok())
+            .ok_or_else(|| BlobStoreError::new(BlobStoreErrorKind::InvalidResponse))?;
+        if content_length > maximum_bytes {
+            return Err(BlobStoreError::new(BlobStoreErrorKind::TooLarge));
+        }
+        if response.content_type() != Some(media_type.as_str())
+            || !self
+                .at_rest_encryption
+                .verifies(response.server_side_encryption(), response.ssekms_key_id())
+        {
+            return Err(BlobStoreError::new(BlobStoreErrorKind::Integrity));
+        }
+        let metadata = response
+            .metadata()
+            .ok_or_else(|| BlobStoreError::new(BlobStoreErrorKind::Integrity))?;
+        let size_text = metadata
+            .get(SIZE_METADATA_KEY)
+            .ok_or_else(|| BlobStoreError::new(BlobStoreErrorKind::Integrity))?;
+        let stored_size = size_text
+            .parse::<u64>()
+            .map_err(|_| BlobStoreError::new(BlobStoreErrorKind::Integrity))?;
+        if stored_size.to_string() != *size_text || stored_size != content_length {
+            return Err(BlobStoreError::new(BlobStoreErrorKind::Integrity));
+        }
+        let digest_text = metadata
+            .get(DIGEST_METADATA_KEY)
+            .ok_or_else(|| BlobStoreError::new(BlobStoreErrorKind::Integrity))?;
+        let digest = Sha256Digest::from_str(digest_text)
+            .map_err(|_| BlobStoreError::new(BlobStoreErrorKind::Integrity))?;
+        if digest.to_string() != *digest_text {
+            return Err(BlobStoreError::new(BlobStoreErrorKind::Integrity));
+        }
+        let capacity = usize::try_from(stored_size)
+            .map_err(|_| BlobStoreError::new(BlobStoreErrorKind::TooLarge))?;
+        let mut bytes = BytesMut::with_capacity(capacity);
+        loop {
+            let next = timeout_at(deadline, response.body.try_next())
+                .await
+                .map_err(|_| unavailable())?
+                .map_err(|_| unavailable())?;
+            let Some(chunk) = next else { break };
+            let next_size = bytes
+                .len()
+                .checked_add(chunk.len())
+                .ok_or_else(|| BlobStoreError::new(BlobStoreErrorKind::TooLarge))?;
+            if next_size > capacity {
+                return Err(BlobStoreError::new(BlobStoreErrorKind::TooLarge));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        let descriptor = BlobDescriptor::new(key.clone(), digest, stored_size, media_type.clone());
+        let payload = BlobPayload::verify(descriptor, Bytes::from(bytes))
+            .map_err(|_| BlobStoreError::new(BlobStoreErrorKind::Integrity))?;
+        Ok(VerifiedBlob::from_payload(payload))
+    }
 }
 
 const fn unavailable() -> BlobStoreError {
@@ -314,6 +428,24 @@ impl ImmutableBlobStore for S3BlobStore {
     ) -> Result<VerifiedBlob, BlobStoreError> {
         self.get_verified_before(
             descriptor,
+            maximum_bytes,
+            Instant::now() + self.operation_timeout,
+        )
+        .await
+    }
+}
+
+#[async_trait]
+impl ImmutableRecordStore for S3BlobStore {
+    async fn get_record(
+        &self,
+        key: &BlobKey,
+        media_type: &MediaType,
+        maximum_bytes: u64,
+    ) -> Result<VerifiedBlob, BlobStoreError> {
+        self.get_record_before(
+            key,
+            media_type,
             maximum_bytes,
             Instant::now() + self.operation_timeout,
         )
