@@ -1,0 +1,653 @@
+use std::sync::Mutex;
+
+use automata_ci_core::{GitObjectId, RunId, Sha256Digest, UnixMillis, WorkspaceId};
+use automata_ci_provider::{
+    ClaimProviderResult, ClaimedProviderResult, CommitStatusCapability, CommitStatusState,
+    CompleteProviderResult, DesiredProviderResult, ExternalRepositoryId,
+    ExternalRepositoryIdentity, ExternalResultId, FailProviderResult,
+    MAX_PROVIDER_RESULT_PUBLICATION_ATTEMPTS, ProviderArchiveLimits, ProviderCapabilities,
+    ProviderCapability, ProviderConfigurationRevision, ProviderConnectionConfiguration,
+    ProviderConnectionId, ProviderConnectionManifest, ProviderConnectionPolicyDocument,
+    ProviderConnectionRevision, ProviderDefaultBranch, ProviderLifecycleState,
+    ProviderRepositoryPath, ProviderResultAnnotation, ProviderResultAnnotationLevel,
+    ProviderResultAnnotationMessage, ProviderResultAnnotationTitle, ProviderResultClaimFence,
+    ProviderResultConclusion, ProviderResultDetailsUrl, ProviderResultFailureKind,
+    ProviderResultFuture, ProviderResultPhase, ProviderResultPublicationEvidence,
+    ProviderResultPublicationModel, ProviderResultRepository, ProviderResultRepositoryError,
+    ProviderResultRetryAfter, ProviderResultSaveOutcome, ProviderResultSubject,
+    ProviderResultSubjectId, ProviderResultSubjectKind, ProviderResultSummary, ProviderResultTitle,
+    ProviderResultWorkerId, ProviderRunnerPolicyBinding, ProviderSchemaVersion,
+    ProviderWorkflowSource, RepositoryVisibility, ResultPublisher, ResultPublisherError,
+    ResultPublisherFuture, RetryProviderResult, RichCheckCapability, SaveDesiredProviderResult,
+    StatusHistoryModel,
+};
+use url::Url;
+use uuid::Uuid;
+
+fn connection() -> ProviderConnectionManifest {
+    let configuration = ProviderConnectionConfiguration::new(
+        WorkspaceId::parse("11111111-1111-4111-8111-111111111111").unwrap(),
+        ExternalRepositoryIdentity::new(
+            "22222222-2222-4222-8222-222222222222".parse().unwrap(),
+            ExternalRepositoryId::new("repository-42").unwrap(),
+        ),
+        ProviderConfigurationRevision::new(3).unwrap(),
+        Sha256Digest::from_bytes([3; 32]),
+        Sha256Digest::from_bytes([4; 32]),
+        RepositoryVisibility::Private,
+        ProviderDefaultBranch::new("main").unwrap(),
+        ProviderWorkflowSource::Directory(ProviderRepositoryPath::new(".ci/workflows").unwrap()),
+        ProviderRunnerPolicyBinding::new(
+            ProviderSchemaVersion::new(1).unwrap(),
+            Sha256Digest::from_bytes([5; 32]),
+        ),
+        ProviderArchiveLimits::new(1_024, 8_192, 100, 1_024, 10, 1_024).unwrap(),
+        ProviderConnectionPolicyDocument::new(
+            ProviderSchemaVersion::new(1).unwrap(),
+            b"{}".to_vec(),
+        )
+        .unwrap(),
+    );
+    ProviderConnectionManifest::new(
+        ProviderConnectionId::from_uuid(Uuid::from_u128(3)).unwrap(),
+        ProviderConnectionRevision::new(7).unwrap(),
+        ProviderLifecycleState::Active,
+        configuration,
+        UnixMillis::new(1_000),
+        Some(UnixMillis::new(1_001)),
+        None,
+    )
+    .unwrap()
+}
+
+fn subject() -> ProviderResultSubject {
+    ProviderResultSubject::new(
+        ProviderResultSubjectId::from_uuid(Uuid::from_u128(4)).unwrap(),
+        &connection(),
+        GitObjectId::from_provider_hex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap(),
+        ProviderResultSubjectKind::WorkflowRun {
+            run_id: RunId::from_uuid(Uuid::from_u128(5)),
+        },
+        1,
+        UnixMillis::new(2_000),
+    )
+    .unwrap()
+}
+
+fn desired(generation: u64, updated_at: i64) -> DesiredProviderResult {
+    DesiredProviderResult::new(
+        generation,
+        ProviderResultPhase::Running,
+        None,
+        ProviderResultTitle::new("build").unwrap(),
+        ProviderResultSummary::new("running").unwrap(),
+        ProviderResultDetailsUrl::new(Url::parse("https://ci.example/runs/5").unwrap()).unwrap(),
+        Vec::new(),
+        UnixMillis::new(updated_at),
+    )
+    .unwrap()
+}
+
+#[derive(Debug)]
+struct MemoryOutbox(Mutex<MemoryState>);
+
+#[derive(Debug, Default)]
+struct MemoryState {
+    value: Option<MemoryValue>,
+    fence: u64,
+}
+
+#[derive(Debug)]
+struct MemoryValue {
+    subject: ProviderResultSubject,
+    desired: DesiredProviderResult,
+    attempts: u16,
+    available_at: UnixMillis,
+    claim: Option<ProviderResultClaimFence>,
+    completed: bool,
+    failed: bool,
+}
+
+impl Default for MemoryOutbox {
+    fn default() -> Self {
+        Self(Mutex::new(MemoryState::default()))
+    }
+}
+
+impl ProviderResultRepository for MemoryOutbox {
+    fn save_desired(
+        &self,
+        request: SaveDesiredProviderResult,
+    ) -> ProviderResultFuture<'_, ProviderResultSaveOutcome> {
+        Box::pin(async move {
+            let (subject, desired) = request.into_parts();
+            let mut state = self.0.lock().unwrap();
+            let outcome = match &state.value {
+                None if desired.generation() == 1 => ProviderResultSaveOutcome::Inserted,
+                None => return Err(ProviderResultRepositoryError::Conflict),
+                Some(current)
+                    if current.subject != subject
+                        || desired.generation() < current.desired.generation()
+                        || desired.generation() > current.desired.generation() + 1 =>
+                {
+                    return Err(ProviderResultRepositoryError::Conflict);
+                }
+                Some(current) if desired.generation() == current.desired.generation() => {
+                    if current.desired == desired {
+                        return Ok(ProviderResultSaveOutcome::Unchanged);
+                    }
+                    return Err(ProviderResultRepositoryError::Conflict);
+                }
+                Some(_) => ProviderResultSaveOutcome::Superseded,
+            };
+            let available_at = desired.updated_at();
+            state.value = Some(MemoryValue {
+                subject,
+                desired,
+                attempts: 0,
+                available_at,
+                claim: None,
+                completed: false,
+                failed: false,
+            });
+            Ok(outcome)
+        })
+    }
+
+    fn claim_result(
+        &self,
+        request: ClaimProviderResult,
+    ) -> ProviderResultFuture<'_, Option<ClaimedProviderResult>> {
+        Box::pin(async move {
+            let mut state = self.0.lock().unwrap();
+            let eligible = state.value.as_ref().is_some_and(|value| {
+                value.subject.connection_id() == request.connection_id()
+                    && !value.completed
+                    && !value.failed
+                    && value.attempts < MAX_PROVIDER_RESULT_PUBLICATION_ATTEMPTS
+                    && value.available_at <= request.claimed_at()
+                    && value
+                        .claim
+                        .is_none_or(|claim| claim.expires_at() <= request.claimed_at())
+            });
+            if !eligible {
+                return Ok(None);
+            }
+            state.fence += 1;
+            let fence = state.fence;
+            let value = state.value.as_mut().unwrap();
+            value.attempts += 1;
+            let expires_at = UnixMillis::new(
+                request.claimed_at().get() + i64::try_from(request.lease_millis()).unwrap(),
+            );
+            let claim = ProviderResultClaimFence::new(
+                value.subject.subject_id(),
+                value.desired.generation(),
+                request.worker_id(),
+                fence,
+                request.claimed_at(),
+                expires_at,
+            )
+            .unwrap();
+            value.claim = Some(claim);
+            ClaimedProviderResult::new(
+                value.subject.clone(),
+                value.desired.clone(),
+                claim,
+                value.attempts,
+            )
+            .map(Some)
+            .map_err(|_| ProviderResultRepositoryError::Corrupt)
+        })
+    }
+
+    fn complete_result(&self, request: CompleteProviderResult) -> ProviderResultFuture<'_, ()> {
+        Box::pin(async move {
+            let mut state = self.0.lock().unwrap();
+            let value = state
+                .value
+                .as_mut()
+                .ok_or(ProviderResultRepositoryError::NotFound)?;
+            if value.claim != Some(request.claim())
+                || request.evidence().generation() != value.desired.generation()
+            {
+                return Err(ProviderResultRepositoryError::StaleClaim);
+            }
+            value.completed = true;
+            value.claim = None;
+            Ok(())
+        })
+    }
+
+    fn retry_result(&self, request: RetryProviderResult) -> ProviderResultFuture<'_, ()> {
+        Box::pin(async move {
+            let mut state = self.0.lock().unwrap();
+            let value = state
+                .value
+                .as_mut()
+                .ok_or(ProviderResultRepositoryError::NotFound)?;
+            if value.claim != Some(request.claim()) {
+                return Err(ProviderResultRepositoryError::StaleClaim);
+            }
+            value.available_at = request.retry_at();
+            value.claim = None;
+            Ok(())
+        })
+    }
+
+    fn fail_result(&self, request: FailProviderResult) -> ProviderResultFuture<'_, ()> {
+        Box::pin(async move {
+            let mut state = self.0.lock().unwrap();
+            let value = state
+                .value
+                .as_mut()
+                .ok_or(ProviderResultRepositoryError::NotFound)?;
+            if value.claim != Some(request.claim()) {
+                return Err(ProviderResultRepositoryError::StaleClaim);
+            }
+            value.failed = true;
+            value.claim = None;
+            Ok(())
+        })
+    }
+}
+
+#[derive(Debug)]
+struct LossyPublisher {
+    model: ProviderResultPublicationModel,
+    state: Mutex<Vec<(String, Sha256Digest)>>,
+    lose_next_response: Mutex<bool>,
+}
+
+impl LossyPublisher {
+    fn new(model: ProviderResultPublicationModel) -> Self {
+        Self {
+            model,
+            state: Mutex::new(Vec::new()),
+            lose_next_response: Mutex::new(true),
+        }
+    }
+
+    fn objects(&self) -> usize {
+        self.state.lock().unwrap().len()
+    }
+}
+
+impl ResultPublisher for LossyPublisher {
+    fn model(&self) -> ProviderResultPublicationModel {
+        self.model
+    }
+
+    fn publish<'a>(&'a self, claimed: &'a ClaimedProviderResult) -> ResultPublisherFuture<'a> {
+        Box::pin(async move {
+            let marker = claimed.marker().as_str().to_owned();
+            let mut state = self.state.lock().unwrap();
+            let existing = state.iter().find(|(candidate, _)| candidate == &marker);
+            if existing.is_none() {
+                match self.model {
+                    ProviderResultPublicationModel::MutableRichCheck => {
+                        state.clear();
+                        state.push((marker.clone(), claimed.desired().digest()));
+                    }
+                    ProviderResultPublicationModel::AppendOnlyCommitStatus => {
+                        state.push((marker.clone(), claimed.desired().digest()));
+                    }
+                }
+                if std::mem::take(&mut *self.lose_next_response.lock().unwrap()) {
+                    return Err(ResultPublisherError::Unavailable);
+                }
+            }
+            ProviderResultPublicationEvidence::new(
+                claimed,
+                self.model,
+                Some(ExternalResultId::new(marker).unwrap()),
+                claimed.desired().digest(),
+                claimed.claimed_at(),
+            )
+            .map_err(|_| ResultPublisherError::InvalidResponse)
+        })
+    }
+}
+
+#[tokio::test]
+async fn mutable_and_append_publishers_reconcile_response_loss_without_duplicates() {
+    for model in [
+        ProviderResultPublicationModel::MutableRichCheck,
+        ProviderResultPublicationModel::AppendOnlyCommitStatus,
+    ] {
+        let outbox = MemoryOutbox::default();
+        outbox
+            .save_desired(SaveDesiredProviderResult::new(subject(), desired(1, 2_001)).unwrap())
+            .await
+            .unwrap();
+        let claimed = outbox
+            .claim_result(
+                ClaimProviderResult::new(
+                    subject().connection_id(),
+                    ProviderResultWorkerId::from_uuid(Uuid::from_u128(9)).unwrap(),
+                    UnixMillis::new(2_002),
+                    1_000,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let publisher = LossyPublisher::new(model);
+        assert_eq!(
+            publisher.publish(&claimed).await,
+            Err(ResultPublisherError::Unavailable)
+        );
+        let evidence = publisher.publish(&claimed).await.unwrap();
+        assert_eq!(publisher.objects(), 1);
+        outbox
+            .complete_result(CompleteProviderResult::new(claimed.claim(), evidence).unwrap())
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn newer_generation_supersedes_and_fences_old_claim_without_a_bridge() {
+    let outbox = MemoryOutbox::default();
+    assert_eq!(
+        outbox
+            .save_desired(SaveDesiredProviderResult::new(subject(), desired(1, 2_001)).unwrap())
+            .await
+            .unwrap(),
+        ProviderResultSaveOutcome::Inserted
+    );
+    let first = outbox
+        .claim_result(
+            ClaimProviderResult::new(
+                subject().connection_id(),
+                ProviderResultWorkerId::from_uuid(Uuid::from_u128(9)).unwrap(),
+                UnixMillis::new(2_002),
+                1_000,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        outbox
+            .save_desired(SaveDesiredProviderResult::new(subject(), desired(2, 2_003)).unwrap())
+            .await
+            .unwrap(),
+        ProviderResultSaveOutcome::Superseded
+    );
+    let stale_evidence = ProviderResultPublicationEvidence::new(
+        &first,
+        ProviderResultPublicationModel::MutableRichCheck,
+        None,
+        first.desired().digest(),
+        first.claimed_at(),
+    )
+    .unwrap();
+    assert_eq!(
+        outbox
+            .complete_result(CompleteProviderResult::new(first.claim(), stale_evidence).unwrap())
+            .await,
+        Err(ProviderResultRepositoryError::StaleClaim)
+    );
+    let second = outbox
+        .claim_result(
+            ClaimProviderResult::new(
+                subject().connection_id(),
+                ProviderResultWorkerId::from_uuid(Uuid::from_u128(9)).unwrap(),
+                UnixMillis::new(2_004),
+                1_000,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(second.desired().generation(), 2);
+    assert_ne!(second.marker(), first.marker());
+}
+
+#[tokio::test]
+async fn retries_and_terminal_failures_consume_only_the_exact_fence() {
+    let outbox = MemoryOutbox::default();
+    outbox
+        .save_desired(SaveDesiredProviderResult::new(subject(), desired(1, 2_001)).unwrap())
+        .await
+        .unwrap();
+    let worker = ProviderResultWorkerId::from_uuid(Uuid::from_u128(9)).unwrap();
+    let first = outbox
+        .claim_result(
+            ClaimProviderResult::new(
+                subject().connection_id(),
+                worker,
+                UnixMillis::new(2_002),
+                1_000,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let retry = RetryProviderResult::new(
+        first.claim(),
+        UnixMillis::new(2_003),
+        UnixMillis::new(2_100),
+    )
+    .unwrap();
+    outbox.retry_result(retry).await.unwrap();
+    assert!(
+        outbox
+            .claim_result(
+                ClaimProviderResult::new(
+                    subject().connection_id(),
+                    worker,
+                    UnixMillis::new(2_099),
+                    1_000,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let second = outbox
+        .claim_result(
+            ClaimProviderResult::new(
+                subject().connection_id(),
+                worker,
+                UnixMillis::new(2_100),
+                1_000,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(second.claim().fence(), first.claim().fence());
+    assert!(
+        outbox
+            .fail_result(
+                FailProviderResult::new(
+                    first.claim(),
+                    UnixMillis::new(2_101),
+                    ProviderResultFailureKind::Conflict,
+                )
+                .unwrap(),
+            )
+            .await
+            .is_err()
+    );
+    outbox
+        .fail_result(
+            FailProviderResult::new(
+                second.claim(),
+                UnixMillis::new(2_101),
+                ProviderResultFailureKind::Conflict,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+}
+
+#[test]
+fn presentation_is_canonical_bounded_and_independent_of_provider_features() {
+    let annotation = ProviderResultAnnotation::new(
+        ProviderRepositoryPath::new("src/main.rs").unwrap(),
+        7,
+        9,
+        ProviderResultAnnotationLevel::Warning,
+        ProviderResultAnnotationTitle::new("lint").unwrap(),
+        ProviderResultAnnotationMessage::new("first line\nsecond line").unwrap(),
+    )
+    .unwrap();
+    let completed = DesiredProviderResult::new(
+        1,
+        ProviderResultPhase::Completed,
+        Some(ProviderResultConclusion::Success),
+        ProviderResultTitle::new("build").unwrap(),
+        ProviderResultSummary::new("complete").unwrap(),
+        ProviderResultDetailsUrl::new(Url::parse("https://ci.example/runs/5").unwrap()).unwrap(),
+        vec![annotation.clone()],
+        UnixMillis::new(2_001),
+    )
+    .unwrap();
+    assert_eq!(completed.annotations(), std::slice::from_ref(&annotation));
+    assert_eq!(
+        completed.conclusion(),
+        Some(ProviderResultConclusion::Success)
+    );
+    assert!(
+        DesiredProviderResult::new(
+            1,
+            ProviderResultPhase::Running,
+            Some(ProviderResultConclusion::Success),
+            ProviderResultTitle::new("build").unwrap(),
+            ProviderResultSummary::new("running").unwrap(),
+            ProviderResultDetailsUrl::new(Url::parse("https://ci.example/runs/5").unwrap())
+                .unwrap(),
+            Vec::new(),
+            UnixMillis::new(2_001),
+        )
+        .is_err()
+    );
+    assert!(
+        DesiredProviderResult::new(
+            1,
+            ProviderResultPhase::Completed,
+            Some(ProviderResultConclusion::Failure),
+            ProviderResultTitle::new("build").unwrap(),
+            ProviderResultSummary::new("failed").unwrap(),
+            ProviderResultDetailsUrl::new(Url::parse("https://ci.example/runs/5").unwrap())
+                .unwrap(),
+            vec![annotation.clone(), annotation],
+            UnixMillis::new(2_001),
+        )
+        .is_err()
+    );
+    assert!(
+        ProviderResultDetailsUrl::new(
+            Url::parse("https://ci.example/runs/5?credential=secret").unwrap()
+        )
+        .is_err()
+    );
+    assert!(ProviderResultRetryAfter::new(0).is_err());
+    assert!(ProviderResultRetryAfter::new(24 * 60 * 60 * 1_000).is_ok());
+    assert!(ProviderResultRetryAfter::new(24 * 60 * 60 * 1_000 + 1).is_err());
+
+    let first = ProviderResultAnnotation::new(
+        ProviderRepositoryPath::new("src/main.rs").unwrap(),
+        1,
+        1,
+        ProviderResultAnnotationLevel::Notice,
+        ProviderResultAnnotationTitle::new("a").unwrap(),
+        ProviderResultAnnotationMessage::new("first").unwrap(),
+    )
+    .unwrap();
+    let second = ProviderResultAnnotation::new(
+        ProviderRepositoryPath::new("src/main.rs").unwrap(),
+        1,
+        1,
+        ProviderResultAnnotationLevel::Notice,
+        ProviderResultAnnotationTitle::new("b").unwrap(),
+        ProviderResultAnnotationMessage::new("second").unwrap(),
+    )
+    .unwrap();
+    let projection = |annotations| {
+        DesiredProviderResult::new(
+            1,
+            ProviderResultPhase::Running,
+            None,
+            ProviderResultTitle::new("build").unwrap(),
+            ProviderResultSummary::new("running").unwrap(),
+            ProviderResultDetailsUrl::new(Url::parse("https://ci.example/runs/5").unwrap())
+                .unwrap(),
+            annotations,
+            UnixMillis::new(2_001),
+        )
+        .unwrap()
+    };
+    assert_eq!(
+        projection(vec![first.clone(), second.clone()]).digest(),
+        projection(vec![second, first]).digest()
+    );
+}
+
+#[test]
+fn evidence_is_bound_to_the_exact_claim_fence() {
+    let claimed = ClaimedProviderResult::new(
+        subject(),
+        desired(1, 2_001),
+        ProviderResultClaimFence::new(
+            subject().subject_id(),
+            1,
+            ProviderResultWorkerId::from_uuid(Uuid::from_u128(9)).unwrap(),
+            1,
+            UnixMillis::new(2_002),
+            UnixMillis::new(3_002),
+        )
+        .unwrap(),
+        1,
+    )
+    .unwrap();
+    let evidence = ProviderResultPublicationEvidence::new(
+        &claimed,
+        ProviderResultPublicationModel::MutableRichCheck,
+        None,
+        claimed.desired().digest(),
+        UnixMillis::new(2_003),
+    )
+    .unwrap();
+    let later_claim = ProviderResultClaimFence::new(
+        claimed.subject().subject_id(),
+        1,
+        ProviderResultWorkerId::from_uuid(Uuid::from_u128(9)).unwrap(),
+        2,
+        UnixMillis::new(3_003),
+        UnixMillis::new(4_003),
+    )
+    .unwrap();
+    assert!(CompleteProviderResult::new(later_claim, evidence).is_err());
+}
+
+#[test]
+fn publication_models_require_their_exact_declared_capability() {
+    let statuses = ProviderCapabilities::new([ProviderCapability::CommitStatus(
+        CommitStatusCapability::new(
+            [CommitStatusState::Pending, CommitStatusState::Success],
+            StatusHistoryModel::AppendOnly,
+        )
+        .unwrap(),
+    )])
+    .unwrap();
+    assert!(ProviderResultPublicationModel::AppendOnlyCommitStatus.is_declared_by(&statuses));
+    assert!(!ProviderResultPublicationModel::MutableRichCheck.is_declared_by(&statuses));
+
+    let rich = ProviderCapabilities::new([ProviderCapability::RichChecks(
+        RichCheckCapability::new(true, false, false).unwrap(),
+    )])
+    .unwrap();
+    assert!(ProviderResultPublicationModel::MutableRichCheck.is_declared_by(&rich));
+    assert!(!ProviderResultPublicationModel::AppendOnlyCommitStatus.is_declared_by(&rich));
+}

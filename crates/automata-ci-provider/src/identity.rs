@@ -196,6 +196,16 @@ uuid_identity!(
     ProviderDeliveryWorkerId,
     "provider delivery worker ID"
 );
+uuid_identity!(
+    /// Durable identity of one provider result subject.
+    ProviderResultSubjectId,
+    "provider result subject ID"
+);
+uuid_identity!(
+    /// Durable identity of one provider result publication worker.
+    ProviderResultWorkerId,
+    "provider result worker ID"
+);
 
 macro_rules! external_identity {
     ($(#[$meta:meta])* $name:ident, $field:literal) => {
@@ -283,6 +293,11 @@ external_identity!(
     /// Provider-native merge-queue entry or candidate identity.
     ExternalMergeQueueId,
     "external merge-queue ID"
+);
+external_identity!(
+    /// Provider-native result object identity.
+    ExternalResultId,
+    "external result ID"
 );
 
 /// Instance-scoped provider-native repository identity.
