@@ -43,12 +43,18 @@ private final class ResultBox<Value> {
   var value: Result<Value, Error>?
 }
 
-private final class BootController: NSObject, NSWindowDelegate {
+private final class BootController: NSObject, NSWindowDelegate, VZVirtualMachineDelegate {
   private let machine: VZVirtualMachine
+  private let screenshotURL: URL?
+  private let view: VZVirtualMachineView
   private let window: NSWindow
+  private var inputBuffer = Data()
+  private var inputSource: DispatchSourceRead?
+  private var stopping = false
 
-  init(machine: VZVirtualMachine) {
+  init(machine: VZVirtualMachine, screenshotURL: URL?) {
     self.machine = machine
+    self.screenshotURL = screenshotURL
     let frame = NSRect(x: 0, y: 0, width: 1280, height: 800)
     window = NSWindow(
       contentRect: frame,
@@ -56,7 +62,7 @@ private final class BootController: NSObject, NSWindowDelegate {
       backing: .buffered,
       defer: false
     )
-    let view = VZVirtualMachineView(frame: frame)
+    view = VZVirtualMachineView(frame: frame)
     view.autoresizingMask = [.width, .height]
     view.virtualMachine = machine
     view.capturesSystemKeys = true
@@ -64,26 +70,238 @@ private final class BootController: NSObject, NSWindowDelegate {
     window.title = "Automata macOS template provisioning"
     super.init()
     window.delegate = self
+    machine.delegate = self
   }
 
   func start() {
     window.center()
     window.makeKeyAndOrderFront(nil)
+    window.makeFirstResponder(view)
     NSApplication.shared.activate(ignoringOtherApps: true)
     machine.start { result in
       if case .failure = result {
         NSApplication.shared.terminate(nil)
       }
     }
+    if screenshotURL != nil {
+      startInput()
+      respond("ready")
+    }
   }
 
   func windowWillClose(_ notification: Notification) {
+    stop()
+  }
+
+  func guestDidStop(_ virtualMachine: VZVirtualMachine) {
+    inputSource?.cancel()
+    NSApplication.shared.terminate(nil)
+  }
+
+  func virtualMachine(_ virtualMachine: VZVirtualMachine, didStopWithError error: any Error) {
+    report(error)
+    inputSource?.cancel()
+    NSApplication.shared.terminate(nil)
+  }
+
+  private func stop() {
+    guard !stopping else { return }
+    stopping = true
+    inputSource?.cancel()
     guard machine.canStop else {
       NSApplication.shared.terminate(nil)
       return
     }
     machine.stop { _ in NSApplication.shared.terminate(nil) }
   }
+
+  private func startInput() {
+    let source = DispatchSource.makeReadSource(fileDescriptor: STDIN_FILENO, queue: .main)
+    source.setEventHandler { [weak self] in self?.readInput() }
+    inputSource = source
+    source.resume()
+  }
+
+  private func readInput() {
+    var bytes = [UInt8](repeating: 0, count: 4096)
+    let count = Darwin.read(STDIN_FILENO, &bytes, bytes.count)
+    guard count > 0 else {
+      stop()
+      return
+    }
+    inputBuffer.append(contentsOf: bytes.prefix(count))
+    guard inputBuffer.count <= 64 * 1024 else {
+      respond("error input-too-large")
+      stop()
+      return
+    }
+    while let newline = inputBuffer.firstIndex(of: 0x0a) {
+      let line = inputBuffer.prefix(upTo: newline)
+      inputBuffer.removeSubrange(...newline)
+      guard let command = String(data: line, encoding: .utf8) else {
+        respond("error invalid-utf8")
+        continue
+      }
+      handle(command)
+    }
+  }
+
+  private func handle(_ command: String) {
+    let fields = command.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: true)
+    guard let operation = fields.first else {
+      respond("error empty-command")
+      return
+    }
+    do {
+      switch operation {
+      case "capture" where fields.count == 1:
+        try capture()
+      case "click" where fields.count == 3:
+        guard let x = Double(fields[1]), let y = Double(fields[2]) else {
+          throw ToolFailure.invalidArguments
+        }
+        try click(x: x, y: y)
+      case "key" where fields.count == 2:
+        guard let keyCode = UInt16(fields[1]) else {
+          throw ToolFailure.invalidArguments
+        }
+        sendKey(keyCode, characters: "")
+      case "type" where fields.count == 2:
+        guard let data = Data(base64Encoded: String(fields[1])),
+          let text = String(data: data, encoding: .utf8)
+        else {
+          throw ToolFailure.invalidArguments
+        }
+        try type(text)
+      case "stop" where fields.count == 1:
+        respond("ok stop")
+        stop()
+        return
+      case "shutdown" where fields.count == 1:
+        try machine.requestStop()
+      default:
+        throw ToolFailure.invalidArguments
+      }
+      respond("ok \(operation)")
+    } catch {
+      respond("error \(error)")
+    }
+  }
+
+  private func capture() throws {
+    guard let screenshotURL,
+      let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds)
+    else {
+      throw ToolFailure.invalidArtifact
+    }
+    view.cacheDisplay(in: view.bounds, to: bitmap)
+    guard let png = bitmap.representation(using: .png, properties: [:]) else {
+      throw ToolFailure.invalidArtifact
+    }
+    try png.write(to: screenshotURL, options: .atomic)
+  }
+
+  private func click(x: Double, y: Double) throws {
+    guard x >= 0, y >= 0, x < view.bounds.width, y < view.bounds.height else {
+      throw ToolFailure.invalidArguments
+    }
+    let location = NSPoint(x: x, y: view.bounds.height - y)
+    guard
+      let move = NSEvent.mouseEvent(
+        with: .mouseMoved,
+        location: location,
+        modifierFlags: [],
+        timestamp: ProcessInfo.processInfo.systemUptime,
+        windowNumber: window.windowNumber,
+        context: nil,
+        eventNumber: 0,
+        clickCount: 0,
+        pressure: 0
+      )
+    else {
+      throw ToolFailure.invalidArguments
+    }
+    view.mouseMoved(with: move)
+    usleep(50_000)
+    for type: NSEvent.EventType in [.leftMouseDown, .leftMouseUp] {
+      guard
+        let event = NSEvent.mouseEvent(
+          with: type,
+          location: location,
+          modifierFlags: [],
+          timestamp: ProcessInfo.processInfo.systemUptime,
+          windowNumber: window.windowNumber,
+          context: nil,
+          eventNumber: 0,
+          clickCount: 1,
+          pressure: type == .leftMouseDown ? 1 : 0
+        )
+      else {
+        throw ToolFailure.invalidArguments
+      }
+      if type == .leftMouseDown {
+        view.mouseDown(with: event)
+        usleep(50_000)
+      } else {
+        view.mouseUp(with: event)
+      }
+    }
+  }
+
+  private func type(_ text: String) throws {
+    guard text.utf8.count <= 16 * 1024 else { throw ToolFailure.invalidArguments }
+    let keyCodes = try text.map { character in
+      guard let keyCode = keyCode(for: character) else { throw ToolFailure.invalidArguments }
+      return (keyCode, String(character))
+    }
+    for (keyCode, character) in keyCodes {
+      sendKey(keyCode, characters: character)
+      usleep(1_000)
+    }
+  }
+
+  private func sendKey(_ keyCode: UInt16, characters: String) {
+    for type: NSEvent.EventType in [.keyDown, .keyUp] {
+      guard
+        let event = NSEvent.keyEvent(
+          with: type,
+          location: .zero,
+          modifierFlags: [],
+          timestamp: ProcessInfo.processInfo.systemUptime,
+          windowNumber: window.windowNumber,
+          context: nil,
+          characters: characters,
+          charactersIgnoringModifiers: characters,
+          isARepeat: false,
+          keyCode: keyCode
+        )
+      else { continue }
+      if type == .keyDown {
+        view.keyDown(with: event)
+      } else {
+        view.keyUp(with: event)
+      }
+      usleep(1_000)
+    }
+  }
+
+  private func respond(_ response: String) {
+    FileHandle.standardOutput.write(Data("\(response)\n".utf8))
+  }
+}
+
+private let unmodifiedKeyCodes: [Character: UInt16] = [
+  "a": 0, "s": 1, "d": 2, "f": 3, "h": 4, "g": 5, "z": 6, "x": 7,
+  "c": 8, "v": 9, "b": 11, "q": 12, "w": 13, "e": 14, "r": 15,
+  "y": 16, "t": 17, "1": 18, "2": 19, "3": 20, "4": 21, "6": 22,
+  "5": 23, "=": 24, "9": 25, "7": 26, "-": 27, "8": 28, "0": 29,
+  "]": 30, "o": 31, "u": 32, "[": 33, "i": 34, "p": 35, "\n": 36,
+  "l": 37, "j": 38, "'": 39, "k": 40, ";": 41, "\\": 42, ",": 43,
+  "/": 44, "n": 45, "m": 46, ".": 47, "\t": 48, " ": 49, "`": 50,
+]
+
+private func keyCode(for character: Character) -> UInt16? {
+  unmodifiedKeyCodes[character]
 }
 
 private struct GuestIdentity: Decodable {
@@ -435,7 +653,7 @@ private func seal(arguments: ArraySlice<String>) throws {
 }
 
 private func boot(arguments: ArraySlice<String>) throws {
-  guard arguments.count == 3 || arguments.count == 7,
+  guard [3, 5, 7, 9].contains(arguments.count),
     let templateURL = normalizedAbsolute(arguments[arguments.startIndex]),
     let cpuCount = Int(arguments[arguments.index(arguments.startIndex, offsetBy: 1)]),
     let memoryGiB = UInt64(arguments[arguments.index(arguments.startIndex, offsetBy: 2)]),
@@ -446,7 +664,7 @@ private func boot(arguments: ArraySlice<String>) throws {
   }
   let provisioningDirectory: URL?
   let outputDirectory: URL?
-  if arguments.count == 7 {
+  if arguments.count == 7 || arguments.count == 9 {
     guard
       arguments[arguments.index(arguments.startIndex, offsetBy: 3)] == "--provisioning-directory",
       let provisioning = normalizedAbsolute(
@@ -466,6 +684,24 @@ private func boot(arguments: ArraySlice<String>) throws {
   } else {
     provisioningDirectory = nil
     outputDirectory = nil
+  }
+  let screenshotURL: URL?
+  if arguments.count == 5 || arguments.count == 9 {
+    let optionOffset = arguments.count == 5 ? 3 : 7
+    guard
+      arguments[arguments.index(arguments.startIndex, offsetBy: optionOffset)]
+        == "--control-screenshot",
+      let screenshot = normalizedAbsolute(
+        arguments[arguments.index(arguments.startIndex, offsetBy: optionOffset + 1)]),
+      !FileManager.default.fileExists(atPath: screenshot.path),
+      (try? screenshot.deletingLastPathComponent().resourceValues(forKeys: [.isDirectoryKey]))?
+        .isDirectory == true
+    else {
+      throw ToolFailure.invalidArguments
+    }
+    screenshotURL = screenshot
+  } else {
+    screenshotURL = nil
   }
   let (memoryBytes, overflow) = memoryGiB.multipliedReportingOverflow(by: gibibyte)
   guard !overflow,
@@ -499,7 +735,7 @@ private func boot(arguments: ArraySlice<String>) throws {
   let application = NSApplication.shared
   application.setActivationPolicy(.regular)
   let machine = VZVirtualMachine(configuration: configuration, queue: .main)
-  let controller = BootController(machine: machine)
+  let controller = BootController(machine: machine, screenshotURL: screenshotURL)
   controller.start()
   withExtendedLifetime(controller) { application.run() }
 }
