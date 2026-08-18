@@ -217,7 +217,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "automata-ci-action",
- "automata-ci-action-github",
+ "automata-ci-action-actions",
  "automata-ci-auth",
  "automata-ci-auth-postgres",
  "automata-ci-blob",
@@ -251,7 +251,7 @@ dependencies = [
  "automata-ci-store-postgres",
  "automata-ci-ui-renderer",
  "automata-ci-windows-file-security",
- "automata-ci-workflow-github",
+ "automata-ci-workflow-actions",
  "automata-ci-workflow-service",
  "axum",
  "base64 0.23.1",
@@ -311,7 +311,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "automata-ci-action-github"
+name = "automata-ci-action-actions"
 version = "0.1.0"
 dependencies = [
  "automata-ci-action",
@@ -488,11 +488,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "automata-ci-expression-github"
+name = "automata-ci-expression-actions"
 version = "0.1.0"
 dependencies = [
  "automata-ci-core",
- "automata-ci-workflow-github",
+ "automata-ci-workflow-actions",
  "serde",
  "serde_json",
  "static_assertions",
@@ -536,7 +536,7 @@ dependencies = [
  "automata-ci-schedule",
  "automata-ci-scm",
  "automata-ci-store",
- "automata-ci-workflow-github",
+ "automata-ci-workflow-actions",
  "automata-ci-workflow-service",
  "bytes",
  "flate2",
@@ -579,12 +579,12 @@ dependencies = [
  "aho-corasick",
  "async-trait",
  "automata-ci-action",
- "automata-ci-action-github",
+ "automata-ci-action-actions",
  "automata-ci-auth",
  "automata-ci-blob",
  "automata-ci-core",
  "automata-ci-execution",
- "automata-ci-expression-github",
+ "automata-ci-expression-actions",
  "automata-ci-github-runtime",
  "automata-ci-protocol",
  "automata-ci-protocol-protobuf",
@@ -592,7 +592,7 @@ dependencies = [
  "automata-ci-runner-runtime",
  "automata-ci-runner-spool",
  "automata-ci-scm",
- "automata-ci-workflow-github",
+ "automata-ci-workflow-actions",
  "bytes",
  "flate2",
  "serde_json",
@@ -630,7 +630,7 @@ dependencies = [
  "automata-ci-execution",
  "automata-ci-runner-journal",
  "automata-ci-sandbox-guest",
- "automata-ci-workflow-github",
+ "automata-ci-workflow-actions",
  "automata-ci-workflow-service",
  "base64 0.23.1",
  "bollard",
@@ -895,14 +895,14 @@ dependencies = [
  "anyhow",
  "async-trait",
  "automata-ci-action",
- "automata-ci-action-github",
+ "automata-ci-action-actions",
  "automata-ci-auth",
  "automata-ci-blob",
  "automata-ci-blob-s3",
  "automata-ci-build-support",
  "automata-ci-core",
  "automata-ci-execution",
- "automata-ci-expression-github",
+ "automata-ci-expression-actions",
  "automata-ci-github",
  "automata-ci-github-runtime",
  "automata-ci-job-executor-github",
@@ -920,7 +920,7 @@ dependencies = [
  "automata-ci-sandbox-windows",
  "automata-ci-scm",
  "automata-ci-windows-file-security",
- "automata-ci-workflow-github",
+ "automata-ci-workflow-actions",
  "axum",
  "base64 0.23.1",
  "bytes",
@@ -1265,7 +1265,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "automata-ci-workflow-github"
+name = "automata-ci-workflow-actions"
 version = "0.1.0"
 dependencies = [
  "automata-ci-core",
@@ -1287,19 +1287,19 @@ name = "automata-ci-workflow-service"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "automata-ci-action-github",
+ "automata-ci-action-actions",
  "automata-ci-auth",
  "automata-ci-blob",
  "automata-ci-blob-s3",
  "automata-ci-core",
- "automata-ci-expression-github",
+ "automata-ci-expression-actions",
  "automata-ci-github-permissions",
  "automata-ci-job-executor-github",
  "automata-ci-protocol",
  "automata-ci-protocol-protobuf",
  "automata-ci-schedule",
  "automata-ci-store",
- "automata-ci-workflow-github",
+ "automata-ci-workflow-actions",
  "bytes",
  "serde",
  "serde_json",

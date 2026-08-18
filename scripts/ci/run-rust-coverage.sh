@@ -153,7 +153,7 @@ run_s3() {
   run_ignored_command cargo test -p automata-ci-action --test live_github_rustfs \
     --all-features --locked -- \
     --ignored --test-threads=1
-  run_ignored_command cargo test -p automata-ci-action-github --test live_checkout_pipeline \
+  run_ignored_command cargo test -p automata-ci-action-actions --test live_checkout_pipeline \
     --all-features --locked -- \
     --ignored --test-threads=1
   run_ignored_command cargo test -p automata-ci-results-github --test rustfs_results \

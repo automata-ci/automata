@@ -7,7 +7,7 @@ use automata_ci_core::{
     WorkflowEventProvenance,
 };
 use automata_ci_store::{TenantScope, WorkflowAdmissionIdempotency};
-use automata_ci_workflow_github::{
+use automata_ci_workflow_actions::{
     CompilationReport, CompileWorkflowRequest, GithubEventMetadata, GithubWorkflowCompiler,
     GithubWorkflowFrontend, ParseWorkflowRequest, SourceId, SourceOrigin, SourceProvenance,
     WorkflowFrontend as _,

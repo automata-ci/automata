@@ -107,7 +107,7 @@ cargo test -p automata-ci-github --test live_repository_snapshot --locked -- --i
 # AUTOMATA_TEST_DATABASE_URL.
 cargo test -p automata-ci-blob-s3 --test blob_s3 --locked -- rustfs_contract:: --ignored --test-threads=1
 cargo test -p automata-ci-action --test live_github_rustfs --locked -- --ignored --test-threads=1
-cargo test -p automata-ci-action-github --test live_checkout_pipeline --locked -- --ignored --test-threads=1
+cargo test -p automata-ci-action-actions --test live_checkout_pipeline --locked -- --ignored --test-threads=1
 cargo test -p automata-ci-results-github --test rustfs_results --locked -- --ignored --test-threads=1
 cargo test -p automata-ci-results-github --test cache_rustfs --locked -- --ignored --test-threads=1
 cargo test -p automata-ci-workflow-service --test live_admission --locked -- --ignored --test-threads=1

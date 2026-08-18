@@ -3,7 +3,7 @@ use automata_ci_local::{
     ComposeFrontend, DoctorReport, DoctorRequest, Engine, EngineArchitecture, EngineEndpoint,
     EngineRequest, LocalCheckReport, LocalCheckRequest, check_workflow, inspect,
 };
-use automata_ci_workflow_github::GithubWorkflowDispatchInputs;
+use automata_ci_workflow_actions::GithubWorkflowDispatchInputs;
 use automata_ci_workflow_service::BuiltInCredentialRequirement;
 use tokio_util::sync::CancellationToken;
 

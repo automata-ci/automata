@@ -22,7 +22,7 @@ use automata_ci_core::{
     WorkflowPermissions, WorkflowPlan,
 };
 use automata_ci_store::{LogicalWorkflowInvocationId, LogicalWorkflowJobId};
-use automata_ci_workflow_github::{
+use automata_ci_workflow_actions::{
     CompileWorkflowRequest, Diagnostic, GithubWorkflowCompiler, GithubWorkflowDispatchInputs,
     GithubWorkflowFrontend, LocalGithubArchiveCompilation,
     LocalGithubArchiveCompilationFailureKind, ParseWorkflowRequest,
@@ -853,7 +853,7 @@ fn analyze_local_workflow(
 }
 
 fn local_compilation_failure(
-    failure: &automata_ci_workflow_github::LocalGithubArchiveCompilationFailure,
+    failure: &automata_ci_workflow_actions::LocalGithubArchiveCompilationFailure,
 ) -> LocalGithubArchiveAnalysisFailure {
     let kind = match failure.kind() {
         LocalGithubArchiveCompilationFailureKind::Cancelled => {

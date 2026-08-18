@@ -8,7 +8,7 @@ use std::{
 };
 
 use automata_ci_core::Sha256Digest;
-use automata_ci_workflow_github::{
+use automata_ci_workflow_actions::{
     RepositoryPathValidationError, RepositoryPathValidator, RepositoryWorkflowDiscoveryLimits,
 };
 use cap_fs_ext::{DirExt as _, FollowSymlinks, OpenOptionsFollowExt as _, ambient_authority};
@@ -2029,11 +2029,11 @@ fn capture_symlink_placeholder(
             LocalSnapshotErrorCode::ConcurrentMutation,
         ));
     }
-    let maximum = u64::try_from(automata_ci_workflow_github::USTAR_LINK_NAME_BYTES)
+    let maximum = u64::try_from(automata_ci_workflow_actions::USTAR_LINK_NAME_BYTES)
         .map_err(|_| LocalSnapshotError::new(LocalSnapshotErrorCode::ResourceLimit))?;
     let mut bytes = Vec::new();
     read_file_cancellable(&mut file, maximum + 1, &mut bytes, cancellation)?;
-    if bytes.len() > automata_ci_workflow_github::USTAR_LINK_NAME_BYTES {
+    if bytes.len() > automata_ci_workflow_actions::USTAR_LINK_NAME_BYTES {
         return Err(LocalSnapshotError::new(
             LocalSnapshotErrorCode::ResourceLimit,
         ));
@@ -2506,7 +2506,7 @@ mod tests {
     };
 
     use automata_ci_core::Sha256Digest;
-    use automata_ci_workflow_github::{
+    use automata_ci_workflow_actions::{
         GithubWorkflowDispatchInputs, RepositoryWorkflowDiscoveryLimits,
     };
     use automata_ci_workflow_service::{

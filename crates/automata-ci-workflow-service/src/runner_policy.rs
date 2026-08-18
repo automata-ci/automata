@@ -7,7 +7,7 @@ use automata_ci_store::{
     MAX_WORKFLOW_RUNTIME_POLICY_RUNNER_FEATURES, WORKFLOW_RUNTIME_POLICY_MEDIA_TYPE,
     WorkflowRuntimePolicy,
 };
-use automata_ci_workflow_github::{GithubRunnerProfileCatalog, GithubRunnerProfileMapping};
+use automata_ci_workflow_actions::{GithubRunnerProfileCatalog, GithubRunnerProfileMapping};
 use thiserror::Error;
 
 /// Exact immutable media type for a canonical runner-policy blob.

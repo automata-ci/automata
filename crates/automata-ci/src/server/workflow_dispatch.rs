@@ -21,7 +21,7 @@ use automata_ci_store::{
     WorkflowDispatchSourceClaim, WorkflowDispatchSourceResolutionOutcome,
     WorkflowDispatchSourceResolutionRepository, WorkflowDispatchSourceResolutionStoreError,
 };
-use automata_ci_workflow_github::{
+use automata_ci_workflow_actions::{
     RepositoryWorkflowDiscoveryLimits, discover_github_delivery_workflows,
 };
 use automata_ci_workflow_service::{

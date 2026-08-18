@@ -11,8 +11,8 @@ use automata_ci_core::{
     WorkflowEventProvenance, WorkflowJobKey, WorkflowPlan, WorkflowSourceProvenance,
     WorkflowStepKey, WorkflowStrategyTemplate,
 };
-use automata_ci_expression_github::{GithubObject, GithubValue};
-use automata_ci_workflow_github::{GithubConditionCompiler, GithubConditionPhase};
+use automata_ci_expression_actions::{GithubObject, GithubValue};
+use automata_ci_workflow_actions::{GithubConditionCompiler, GithubConditionPhase};
 use automata_ci_workflow_service::{
     ActivateLogicalJobRequest, ActivationStatus, GithubActivationContext,
     GithubActivationEvaluationError, GithubLogicalActivationEvaluator, LogicalActivationError,

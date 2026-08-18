@@ -1,6 +1,6 @@
 use std::fmt;
 
-use automata_ci_action_github::JavascriptRuntime;
+use automata_ci_action_actions::JavascriptRuntime;
 use automata_ci_core::{ActionReference, ExpressionProgram, Sha256Digest, StepId};
 use bytes::Bytes;
 use sha2::{Digest as _, Sha256};

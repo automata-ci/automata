@@ -22,7 +22,9 @@ use automata_ci_store::{
     LogicalWorkflowAdmissionRepository, LogicalWorkflowAdmissionStoreError, ObjectKey,
     ResolveAuthenticatedWorkflowDispatchSource, TenantScope, WorkflowAdmissionIdempotency,
 };
-use automata_ci_workflow_github::{GithubWorkflowDispatchInputValue, GithubWorkflowDispatchInputs};
+use automata_ci_workflow_actions::{
+    GithubWorkflowDispatchInputValue, GithubWorkflowDispatchInputs,
+};
 use automata_ci_workflow_service::{
     AUTOMATA_WORKFLOW_DISPATCH_EVIDENCE_V1_MEDIA_TYPE, AdmissionIdGenerator,
     AdmissionRepositoryCoordinates, DurableGithubWorkflowDispatchRequest,

@@ -11,7 +11,7 @@ use automata_ci_core::{
     PlanSourceOrigin, RunId, Sha256Digest, TrustSnapshot, TrustSourceClass, UnixMillis,
     WorkflowJobKey, WorkflowPlan,
 };
-use automata_ci_expression_github::{GithubObject, GithubValue};
+use automata_ci_expression_actions::{GithubObject, GithubValue};
 use automata_ci_job_executor_github::ActionPreparationPort;
 use automata_ci_protocol::ProtocolLimits;
 use automata_ci_store::{
@@ -24,7 +24,7 @@ use automata_ci_store::{
     LogicalWorkflowJobKind, ObjectKey, PinnedWorkflowRuntimePolicy, PublishLogicalJobActivation,
     ResolvedLogicalJobSchedulingPolicy, ReusableSecretPermission, StoreError, TenantScope,
 };
-use automata_ci_workflow_github::{GithubRunnerProfileCatalog, GithubRunnerProfileMapping};
+use automata_ci_workflow_actions::{GithubRunnerProfileCatalog, GithubRunnerProfileMapping};
 use bytes::Bytes;
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;

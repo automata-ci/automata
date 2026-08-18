@@ -11,7 +11,7 @@ use automata_ci_store::{
     AuthenticatedWorkflowDispatchSource, ResolveAuthenticatedWorkflowDispatchSource,
 };
 use automata_ci_store::{RepositoryId, TenantScope, WorkflowAdmissionIdempotency};
-use automata_ci_workflow_github::{
+use automata_ci_workflow_actions::{
     CompilationDisposition, CompileWorkflowRequest, Diagnostic, GithubEventMetadata,
     GithubWorkflowCompiler, GithubWorkflowDispatchInputValue, GithubWorkflowDispatchInputs,
     GithubWorkflowDispatchInputsError, GithubWorkflowFrontend, ParseWorkflowRequest, SourceId,

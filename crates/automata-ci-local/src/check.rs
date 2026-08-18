@@ -1,7 +1,7 @@
 use std::{fmt, path::PathBuf};
 
 use automata_ci_core::Sha256Digest;
-use automata_ci_workflow_github::{
+use automata_ci_workflow_actions::{
     Diagnostic, GithubWorkflowDispatchInputs, RepositoryWorkflowDiscoveryLimits,
 };
 use automata_ci_workflow_service::{
@@ -551,7 +551,7 @@ mod tests {
         process::Command,
     };
 
-    use automata_ci_workflow_github::{
+    use automata_ci_workflow_actions::{
         GithubWorkflowDispatchInputs, RepositoryWorkflowDiscoveryLimits,
     };
     use automata_ci_workflow_service::BuiltInCredentialRequirement;

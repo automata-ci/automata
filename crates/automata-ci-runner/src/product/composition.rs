@@ -4,7 +4,7 @@ use automata_ci_action::{
     ActionBundleLimits, ActionReferenceIndex, ActionResolver, ImmutableActionResolver,
     ObjectActionReferenceIndex, ReadThroughActionReferenceIndex,
 };
-use automata_ci_action_github::{
+use automata_ci_action_actions::{
     GithubActionMetadataDecoder, GithubActionMetadataLimits, JavascriptRuntime,
 };
 use automata_ci_blob::{ImmutableBlobStore, ImmutableRecordStore};
@@ -44,7 +44,7 @@ use automata_ci_sandbox_windows::{
     WindowsHyperVContainerProvider, WindowsHyperVContainerProviderOptions,
 };
 use automata_ci_scm::ScmProvider;
-use automata_ci_workflow_github::GithubConditionCompiler;
+use automata_ci_workflow_actions::GithubConditionCompiler;
 use thiserror::Error;
 use tokio::{net::TcpListener, task::JoinError};
 use tokio_util::sync::CancellationToken;

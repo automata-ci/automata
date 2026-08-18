@@ -15,7 +15,7 @@ use automata_ci_execution::{
     ContainerHandle, ServiceContainerBinding, ServiceContainerBindings, ServiceNetwork,
     ServicePort, ServicePortBinding, ServiceTransportProtocol, TargetPath,
 };
-use automata_ci_expression_github::{
+use automata_ci_expression_actions::{
     GithubExpressionEvaluator, GithubObject, GithubStatus, GithubValue,
 };
 use automata_ci_github_runtime::{
@@ -31,7 +31,7 @@ use automata_ci_protocol::{
     RuntimeAuthorityEndpoint, RuntimeAuthorityName,
 };
 use automata_ci_runner::product::{RunnerProductConfig, StandardGithubContext};
-use automata_ci_workflow_github::{GithubConditionCompiler, GithubConditionPhase};
+use automata_ci_workflow_actions::{GithubConditionCompiler, GithubConditionPhase};
 
 const REPOSITORY_TOKEN: &str = "ghs_exact_job_repository_token";
 const OIDC_REQUEST_TOKEN: &str = "oidc_exact_job_request_token";

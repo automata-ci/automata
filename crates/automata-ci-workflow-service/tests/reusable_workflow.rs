@@ -5,7 +5,7 @@ use automata_ci_core::{
     PlanSourceOrigin, RunId, WorkflowEventProvenance,
 };
 use automata_ci_store::LogicalWorkflowInvocationId;
-use automata_ci_workflow_github::{
+use automata_ci_workflow_actions::{
     CompileWorkflowRequest, GithubWorkflowCompiler, GithubWorkflowFrontend, ParseWorkflowRequest,
     SourceId, SourceOrigin, SourceProvenance, WorkflowFrontend as _,
 };

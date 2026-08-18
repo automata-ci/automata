@@ -9,7 +9,7 @@ use automata_ci_action::{
     ActionBundleLimits, ActionResolveError, ActionResolveErrorKind, ActionResolver,
     ImmutableActionResolver, RepositoryActionRequest, ResolvedActionBundle,
 };
-use automata_ci_action_github::GithubActionMetadataDecoder;
+use automata_ci_action_actions::GithubActionMetadataDecoder;
 use automata_ci_blob::{ImmutableBlobStore, MemoryBlobStore};
 use automata_ci_core::{ActionReference, GitObjectId};
 use automata_ci_job_executor_github::{
@@ -20,7 +20,7 @@ use automata_ci_scm::{
     ArchiveFormat, ArchiveLimits, RepositoryId, RepositorySnapshot, RevisionSpec, ScmError,
     ScmErrorKind, ScmProvider, ScmProviderId, SnapshotRequest,
 };
-use automata_ci_workflow_github::GithubConditionCompiler;
+use automata_ci_workflow_actions::GithubConditionCompiler;
 use bytes::Bytes;
 use flate2::{Compression, write::GzEncoder};
 use tar::{Builder, EntryType, Header};

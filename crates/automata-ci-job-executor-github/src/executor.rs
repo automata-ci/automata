@@ -12,7 +12,7 @@ use std::{
 };
 
 use automata_ci_action::{ActionBundleLimits, validate_windows_materialization_archive};
-use automata_ci_action_github::{GithubActionMetadataDecoder, JavascriptRuntime};
+use automata_ci_action_actions::{GithubActionMetadataDecoder, JavascriptRuntime};
 use automata_ci_core::{
     ActionReference, AttemptId, JOB_RUNTIME_CONTEXT_MEDIA_TYPE, JobAuthorityProfile, JobConclusion,
     JobIrEnvelope, JobLifecycle, JobResult, JobResultOutput, JobResultValidationError,
@@ -31,7 +31,7 @@ use automata_ci_execution::{
     SandboxLaunch, SandboxProvider, SandboxState, ServiceContainerBindings, ServiceContainerSpecs,
     TargetPath, TargetPlatform,
 };
-use automata_ci_expression_github::{
+use automata_ci_expression_actions::{
     ExtensionFunctionResult, GithubEvaluationContext, GithubExpressionEvaluator,
     GithubExpressionFunctionProvider, GithubObject, GithubStatus, GithubValue,
 };
@@ -80,7 +80,7 @@ use crate::{
         shell_argv,
     },
 };
-use automata_ci_workflow_github::GithubConditionCompiler;
+use automata_ci_workflow_actions::GithubConditionCompiler;
 
 const DIRECTORY_MODE: &str = "0700";
 const MAX_ACTION_NESTING_DEPTH: usize = 10;
@@ -8230,7 +8230,7 @@ mod tests {
         Cancellation, CancellationDisposition, ExecutionOutputRecord, ExecutionOutputStream,
         TargetPath,
     };
-    use automata_ci_expression_github::GithubValue;
+    use automata_ci_expression_actions::GithubValue;
     use automata_ci_github_runtime::{
         CommandFileDecoder, CommandFileKind, CommandFilePlatform, GithubCommandFileDecoder,
         ParsedCommandFile, WorkflowCommandLimits, WorkflowCommandPolicy,

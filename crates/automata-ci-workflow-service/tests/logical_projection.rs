@@ -14,13 +14,13 @@ use automata_ci_core::{
     TrustPolicy, TrustRepositoryEvidence, TrustSnapshot, ValueSource, ValueTemplateSegment,
     WorkflowEventProvenance, WorkflowId, WorkflowJobKey, WorkflowPlan,
 };
-use automata_ci_expression_github::{GithubObject, GithubValue};
+use automata_ci_expression_actions::{GithubObject, GithubValue};
 use automata_ci_github_permissions::{
     GITHUB_WORKFLOW_PERMISSIONS, GithubDefaultWorkflowPermission,
 };
 use automata_ci_protocol::ProtocolLimits;
 use automata_ci_store::WorkflowPermissionPolicy;
-use automata_ci_workflow_github::{
+use automata_ci_workflow_actions::{
     CompileWorkflowRequest, GithubRunnerProfileCatalog, GithubRunnerProfileMapping,
     GithubWorkflowCompiler, GithubWorkflowFrontend, ParseWorkflowRequest, SourceId, SourceOrigin,
     SourceProvenance, WorkflowFrontend as _,
@@ -151,7 +151,7 @@ jobs:
           label: artifact-${{ matrix.target }}
 ";
 
-fn compile(source: &str) -> automata_ci_workflow_github::CompilationReport {
+fn compile(source: &str) -> automata_ci_workflow_actions::CompilationReport {
     let provenance = SourceProvenance::new(
         SourceId::new(WORKFLOW_PATH),
         SourceOrigin::Repository {

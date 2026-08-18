@@ -12,7 +12,7 @@ use automata_ci_auth::{
 };
 use automata_ci_core::{OperationId, RunId, WorkflowId, WorkflowInputKey, canonical_git_ref};
 use automata_ci_store::RepositoryId;
-use automata_ci_workflow_github::{
+use automata_ci_workflow_actions::{
     MAX_GITHUB_WORKFLOW_DISPATCH_INPUT_CHARACTERS, MAX_GITHUB_WORKFLOW_DISPATCH_INPUTS,
 };
 use axum::{

@@ -1,0 +1,36 @@
+[package]
+name = "automata-ci-workflow-actions"
+autotests = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+description = "Loss-aware GitHub Actions workflow frontend for Automata"
+publish.workspace = true
+
+[[test]]
+name = "workflow_actions"
+path = "tests/workflow_actions.rs"
+
+[dependencies]
+automata-ci-core.workspace = true
+automata-ci-github-permissions.workspace = true
+automata-ci-schedule.workspace = true
+flate2.workspace = true
+focaccia.workspace = true
+jiff.workspace = true
+saphyr-parser.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tar.workspace = true
+thiserror.workspace = true
+unicode-normalization.workspace = true
+
+[dev-dependencies]
+
+[lints]
+workspace = true

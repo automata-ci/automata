@@ -5,7 +5,7 @@ use automata_ci_action::{
     ActionBundleLimits, ActionDefinitionDocument, ActionResolveErrorKind, ActionResolver,
     ActionSubpath, RepositoryActionRequest,
 };
-use automata_ci_action_github::{
+use automata_ci_action_actions::{
     ActionMetadataDecoder, CompositeRunStep, CompositeStep, CompositeUsesStep,
     GithubActionMetadata, MetadataDecodeErrorKind, MetadataKeyValue, MetadataScalar,
     MetadataScalarKind,
@@ -13,7 +13,7 @@ use automata_ci_action_github::{
 use automata_ci_core::{ActionReference, StepId};
 use automata_ci_execution::{TargetPath, TargetPlatform};
 use automata_ci_scm::{RepositoryId, RevisionSpec};
-use automata_ci_workflow_github::{GithubConditionCompiler, GithubConditionPhase};
+use automata_ci_workflow_actions::{GithubConditionCompiler, GithubConditionPhase};
 use bytes::Bytes;
 
 use crate::{
@@ -459,7 +459,7 @@ fn prepare_definition(
 }
 
 fn prepare_javascript(
-    javascript: &automata_ci_action_github::JavascriptAction,
+    javascript: &automata_ci_action_actions::JavascriptAction,
     conditions: &GithubConditionCompiler,
 ) -> Result<PreparedJavascriptAction, ActionPreparationError> {
     let pre_condition = conditions
@@ -798,7 +798,7 @@ fn valid_action_revision(value: &str) -> bool {
 }
 
 fn map_metadata_error(
-    error: &automata_ci_action_github::MetadataDecodeError,
+    error: &automata_ci_action_actions::MetadataDecodeError,
 ) -> ActionPreparationError {
     let kind = if error.kind() == MetadataDecodeErrorKind::ResourceLimit {
         ActionPreparationErrorKind::ResourceExhausted
@@ -818,7 +818,7 @@ const fn internal() -> ActionPreparationError {
 
 #[cfg(test)]
 mod tests {
-    use automata_ci_action_github::GithubActionMetadataDecoder;
+    use automata_ci_action_actions::GithubActionMetadataDecoder;
 
     use super::*;
 

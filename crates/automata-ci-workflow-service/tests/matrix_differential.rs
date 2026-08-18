@@ -4,8 +4,8 @@ use automata_ci_core::{
     CompiledValueTemplate, ContextValue, ExpressionContext, LogicalJobKind,
     WorkflowEventProvenance, WorkflowJobKey, WorkflowPlan,
 };
-use automata_ci_expression_github::{GithubObject, GithubValue};
-use automata_ci_workflow_github::{
+use automata_ci_expression_actions::{GithubObject, GithubValue};
+use automata_ci_workflow_actions::{
     CompilationReport, CompileWorkflowRequest, GithubEventMetadata, GithubFrontendReport,
     GithubWorkflowCompiler, GithubWorkflowDispatchInputs, GithubWorkflowFrontend,
     ParseWorkflowRequest, SourceId, SourceOrigin, SourceProvenance, WorkflowFrontend as _,

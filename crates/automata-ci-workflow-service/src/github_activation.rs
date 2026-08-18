@@ -6,7 +6,7 @@ use automata_ci_core::{
     CompiledExpressionTemplate, ContextValue, ExpressionInstruction, ExpressionSegment,
     JobConclusion, MAX_LOGICAL_FIELD_BYTES, NeedContext, StrategyContext,
 };
-use automata_ci_expression_github::{
+use automata_ci_expression_actions::{
     GithubExpressionEvaluationError, GithubExpressionEvaluator, GithubExpressionLimits,
     GithubObject, GithubStatus, GithubValue, GithubValueError, MapContext, MapContextError,
 };

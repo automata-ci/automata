@@ -47,7 +47,7 @@ use automata_ci_store::{
     RejectProviderDelivery, RepositoryId as StoreRepositoryId, ResolveGithubRepositoryDispatch,
     RetryProviderDelivery, TenantScope,
 };
-use automata_ci_workflow_github::RepositoryWorkflowDiscoveryLimits;
+use automata_ci_workflow_actions::RepositoryWorkflowDiscoveryLimits;
 use bytes::Bytes;
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;

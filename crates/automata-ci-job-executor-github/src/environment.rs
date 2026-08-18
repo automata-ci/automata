@@ -5,7 +5,7 @@ use automata_ci_core::{ExpressionProgram, ValueSource, ValueTemplate, ValueTempl
 use automata_ci_execution::{
     EnvironmentName, EnvironmentValue, EnvironmentVariable, ExecutionEnvironment,
 };
-use automata_ci_expression_github::{
+use automata_ci_expression_actions::{
     GithubEvaluationContext, GithubExpressionEvaluator, GithubExpressionFunctionProvider,
     GithubObject, GithubStatus, GithubValue,
 };
@@ -723,15 +723,15 @@ fn into_execution_environment(
 mod tests {
     use std::{collections::BTreeMap, sync::Arc};
 
-    use automata_ci_action_github::JavascriptRuntime;
+    use automata_ci_action_actions::JavascriptRuntime;
     use automata_ci_auth::secret::{SecretString, SharedSensitiveString};
     use automata_ci_core::{
         ExpressionDialect, ExpressionInstruction, ExpressionLiteral, ValueTemplate,
     };
     use automata_ci_execution::{EnvironmentName, EnvironmentValue, EnvironmentVariable};
-    use automata_ci_expression_github::{GithubObject, GithubStatus, GithubValue, MapContext};
+    use automata_ci_expression_actions::{GithubObject, GithubStatus, GithubValue, MapContext};
     use automata_ci_github_runtime::{CommandFilePlatform, JobCommandState};
-    use automata_ci_workflow_github::{GithubConditionCompiler, GithubConditionPhase};
+    use automata_ci_workflow_actions::{GithubConditionCompiler, GithubConditionPhase};
     use static_assertions::assert_not_impl_any;
 
     use super::*;

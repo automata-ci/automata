@@ -41,7 +41,7 @@ pub use activation::{
     MAX_ACTIVATION_OUTPUT_BYTES, MAX_MATRIX_CANDIDATE_COMBINATIONS, MAX_MATRIX_EXPANSION_WORK,
     ValidatedLogicalJob, ValidatedLogicalPlan,
 };
-pub use automata_ci_workflow_github::{
+pub use automata_ci_workflow_actions::{
     GithubWorkflowDispatchInputValue, GithubWorkflowDispatchInputs,
 };
 pub use autonomous_workflow::{

@@ -26,7 +26,7 @@ use automata_ci_github_permissions::github_workflow_permission;
 use automata_ci_job_executor_github::static_shell_requirement;
 use automata_ci_protocol::ProtocolLimits;
 use automata_ci_store::{ReusableWorkflowPermissionSnapshot, WorkflowPermissionPolicy};
-use automata_ci_workflow_github::{
+use automata_ci_workflow_actions::{
     GithubConditionCompiler, GithubConditionPhase, GithubRunnerProfileCatalog,
     GithubRunnerProfileMapping,
 };

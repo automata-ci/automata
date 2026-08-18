@@ -22,7 +22,7 @@ use automata_ci_store::{
     ProviderDeliveryClaimFence, ProviderDeliveryClaimOwnerId, ProviderDeliveryId,
     WorkflowAdmissionIdempotency, WorkflowAdmissionValueError,
 };
-use automata_ci_workflow_github::{
+use automata_ci_workflow_actions::{
     CompileWorkflowRequest, GithubEventMetadata, GithubWorkflowCompiler, GithubWorkflowFrontend,
     ParseWorkflowRequest, SourceId, SourceOrigin, SourceProvenance, WorkflowFrontend as _,
 };

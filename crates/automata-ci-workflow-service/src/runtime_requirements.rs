@@ -2,7 +2,7 @@
 
 use std::{collections::BTreeMap, future::Future, pin::Pin, sync::Arc};
 
-use automata_ci_action_github::JavascriptRuntime;
+use automata_ci_action_actions::JavascriptRuntime;
 use automata_ci_core::{ActionReference, RunnerFeature};
 use automata_ci_job_executor_github::{
     ActionPreparationErrorKind, ActionPreparationPort, ActionPreparationRequest, PreparedAction,
@@ -216,13 +216,13 @@ mod tests {
     use std::sync::Mutex;
 
     use async_trait::async_trait;
-    use automata_ci_action_github::{GithubActionMetadataDecoder, JavascriptRuntime};
+    use automata_ci_action_actions::{GithubActionMetadataDecoder, JavascriptRuntime};
     use automata_ci_core::Sha256Digest;
     use automata_ci_job_executor_github::{
         CheckedOutLocalActionPreparer, LocalActionPreparationRequest, PreparedActionDefinition,
         PreparedJavascriptAction,
     };
-    use automata_ci_workflow_github::{GithubConditionCompiler, GithubConditionPhase};
+    use automata_ci_workflow_actions::{GithubConditionCompiler, GithubConditionPhase};
     use bytes::Bytes;
     use sha2::{Digest as _, Sha256};
 
