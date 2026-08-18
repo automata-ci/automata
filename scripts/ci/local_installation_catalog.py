@@ -24,7 +24,7 @@ CATALOG_SCHEMA = "automata.local/release-catalog/v1"
 SOURCE_SCHEMA = "automata.local/release-catalog-source/v1"
 SOURCE_PATH = "images/local-installation/catalog-v1.json"
 PACKAGED_SOURCE_PATH = "crates/automata-ci-local/src/init/catalog-v1.source.json"
-SOURCE_SHA256 = "88c79a69a874a01c9682947289a3b0fe1b78fa3b6507d6fc1f6cbd05effd423f"
+SOURCE_SHA256 = "092336db1d4dad5651d44496c5c1c9e0434aefe03fafbbfa772b827937afa934"
 RENDERER_CONTRACT_FIXTURE_SCHEMA = "automata.local/renderer-contract-fixture/v1"
 RENDERER_CONTRACT_FIXTURE_SHA256 = (
     "c700fdcc5b94f2450be767e2f7b8ca8fad4b724c65b2d5add4cb33058fc6d774"
@@ -393,7 +393,7 @@ def require_lifecycle_runtime(value: object) -> dict:
                 "log_options": {},
             },
         },
-        "database_migration_ceiling": 58,
+        "database_migration_ceiling": 61,
         "engine_relay": {
             "architecture": "amd64",
             "binding_directory": "/run/automata-engine-binding",

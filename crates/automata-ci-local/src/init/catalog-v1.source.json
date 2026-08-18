@@ -415,7 +415,7 @@
         "log_options": {}
       }
     },
-    "database_migration_ceiling": 58,
+    "database_migration_ceiling": 61,
     "engine_relay": {
       "architecture": "amd64",
       "binding_directory": "/run/automata-engine-binding",
