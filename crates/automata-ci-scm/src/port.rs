@@ -2,7 +2,8 @@ use async_trait::async_trait;
 use thiserror::Error;
 
 use crate::{
-    RepositorySnapshot, RepositorySource, RepositorySourceRequest, ScmProviderId, SnapshotRequest,
+    RepositorySnapshot, RepositorySourceArchive, RepositorySourceRequest, ScmProviderId,
+    SnapshotRequest,
 };
 
 /// Stable failure class at an SCM trust boundary.
@@ -115,10 +116,7 @@ pub trait ScmProvider: std::fmt::Debug + Send + Sync {
 /// enforce the request byte limit incrementally, disable ambient credentials
 /// and automatic redirects, and never retain or report credential material.
 #[async_trait]
-pub trait RepositorySourcePort: std::fmt::Debug + Send + Sync {
-    /// Returns the stable identifier used to select and record this adapter.
-    fn provider_id(&self) -> &ScmProviderId;
-
+pub trait RepositorySource: std::fmt::Debug + Send + Sync {
     /// Returns one bounded archive proven to represent the requested revision.
     ///
     /// This operation must fail closed when provider revision evidence is
@@ -134,5 +132,5 @@ pub trait RepositorySourcePort: std::fmt::Debug + Send + Sync {
     async fn fetch_repository_source(
         &self,
         request: RepositorySourceRequest<'_>,
-    ) -> Result<RepositorySource, ScmError>;
+    ) -> Result<RepositorySourceArchive, ScmError>;
 }

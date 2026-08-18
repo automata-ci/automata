@@ -3,7 +3,7 @@ use crate::support::{
     signed_webhook_headers, webhook_body_digest,
 };
 
-use automata_ci_github::{
+use automata_ci_provider_github::{
     GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE, GithubCheckRunAction, GithubMergeGroupAction,
     GithubPullRequestAction, GithubPushRefKind, GithubRepositoryVisibility,
     GithubStoredWebhookError, GithubWebhookError, GithubWebhookVerifier,

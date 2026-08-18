@@ -98,7 +98,7 @@ lane. The remaining ignored integration targets are explicit operator lanes:
 
 ```console
 # Public GitHub compatibility.
-cargo test -p automata-ci-github --test live_repository_snapshot --locked -- --ignored
+cargo test -p automata-ci-provider-github --test live_repository_snapshot --locked -- --ignored
 
 # S3/RustFS contracts. Set AUTOMATA_TEST_S3_ENDPOINT,
 # AUTOMATA_TEST_S3_BUCKET, AUTOMATA_TEST_S3_ACCESS_KEY,

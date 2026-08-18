@@ -7,11 +7,11 @@
 use std::{sync::Arc, time::Duration};
 
 use automata_ci_blob::BlobStoreErrorKind;
-use automata_ci_github::{
+use automata_ci_github_delivery::{GithubDeliveryIngress, GithubDeliveryIngressError};
+use automata_ci_provider_github::{
     GithubWebhookError, MAX_GITHUB_WEBHOOK_BODY_BYTES as VERIFIED_GITHUB_WEBHOOK_BODY_BYTES,
     X_GITHUB_DELIVERY, X_GITHUB_EVENT, X_HUB_SIGNATURE_256,
 };
-use automata_ci_github_delivery::{GithubDeliveryIngress, GithubDeliveryIngressError};
 use axum::{
     Router,
     body::Body,
@@ -327,7 +327,7 @@ impl GithubWebhookHttpOutcome {
 
 #[cfg(test)]
 mod tests {
-    use automata_ci_github::{X_GITHUB_DELIVERY, X_GITHUB_EVENT, X_HUB_SIGNATURE_256};
+    use automata_ci_provider_github::{X_GITHUB_DELIVERY, X_GITHUB_EVENT, X_HUB_SIGNATURE_256};
     use axum::http::{HeaderMap, HeaderValue};
 
     use super::{GithubWebhookIngressRoute, require_github_header_shapes};

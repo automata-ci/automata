@@ -13,7 +13,6 @@ use automata_ci_blob::{
 };
 use automata_ci_core::GitObjectId;
 use automata_ci_core::{Sha256Digest, UnixMillis, WorkflowPlan};
-use automata_ci_github::GITHUB_RAW_EVENT_OBJECT_KEY_PREFIX;
 use automata_ci_github_delivery::{
     GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE, GithubChangedFileSelection,
     GithubChangedFilesDisposition, GithubDeliveryClock, GithubDeliveryPrivateRepositoryAction,
@@ -27,10 +26,11 @@ use automata_ci_github_delivery::{
     GithubPushChangedFilesProvider, GithubPushChangedFilesRequest,
     GithubServerServiceCredentialRelease,
 };
-use automata_ci_provider::ProviderConnectionId;
+use automata_ci_provider::{ExternalRepositoryId, ProviderConnectionId};
+use automata_ci_provider_github::GITHUB_RAW_EVENT_OBJECT_KEY_PREFIX;
 use automata_ci_scm::{
-    ArchiveFormat, RepositoryId as ScmRepositoryId, RepositorySource, RepositorySourcePort,
-    RepositorySourceRequest, ScmError, ScmProviderId,
+    ArchiveFormat, RepositoryId as ScmRepositoryId, RepositorySource, RepositorySourceArchive,
+    RepositorySourceConnection, RepositorySourceRequest, ScmError,
 };
 use automata_ci_store::{
     AcceptProviderDelivery, AdmissionObject, AdmitLogicalWorkflowRun,
@@ -75,6 +75,14 @@ const ALTERNATE_PATH_WORKFLOW: &[u8] = b"name: Alternate Paths CI\non:\n  push:\
 const PULL_REQUEST_WORKFLOW: &[u8] = b"name: Pull Request CI\non: pull_request\njobs:\n  verify:\n    runs-on: linux\n    steps:\n      - run: echo pull-request\n";
 const PULL_REQUEST_PATH_WORKFLOW: &[u8] = b"name: Pull Request Paths CI\non:\n  pull_request:\n    paths: ['src/**']\njobs:\n  verify:\n    runs-on: linux\n    steps:\n      - run: echo pull-request-paths\n";
 
+fn source_connection() -> RepositorySourceConnection {
+    RepositorySourceConnection::new(
+        ProviderConnectionId::from_uuid(Uuid::from_u128(3)).expect("connection"),
+        ExternalRepositoryId::new(REPOSITORY_ID.to_string()).expect("external repository ID"),
+        ScmRepositoryId::new(format!("{OWNER}/{REPOSITORY}")).expect("repository"),
+    )
+}
+
 #[derive(Debug)]
 struct FixedClock;
 
@@ -86,20 +94,16 @@ impl GithubDeliveryClock for FixedClock {
 
 #[derive(Debug)]
 struct FixedSource {
-    source: RepositorySource,
+    source: RepositorySourceArchive,
     visibility: ProviderRepositoryVisibility,
 }
 
 #[async_trait]
-impl RepositorySourcePort for FixedSource {
-    fn provider_id(&self) -> &ScmProviderId {
-        self.source.provider()
-    }
-
+impl RepositorySource for FixedSource {
     async fn fetch_repository_source(
         &self,
         request: RepositorySourceRequest<'_>,
-    ) -> Result<RepositorySource, ScmError> {
+    ) -> Result<RepositorySourceArchive, ScmError> {
         assert_eq!(request.repository(), self.source.repository());
         assert_eq!(request.revision(), self.source.revision());
         assert_eq!(
@@ -631,9 +635,8 @@ async fn harness_with_visibility(
     if let Some(changed_files) = changed_files {
         processor = processor.with_changed_files_provider(changed_files);
     }
-    let source = RepositorySource::from_bytes(
-        ScmProviderId::new("github").expect("provider"),
-        ScmRepositoryId::new(format!("{OWNER}/{REPOSITORY}")).expect("repository"),
+    let source = RepositorySourceArchive::from_bytes(
+        source_connection(),
         GitObjectId::from_provider_hex(AFTER).expect("revision"),
         ArchiveFormat::TarGzip,
         archive(files),
@@ -708,9 +711,8 @@ async fn pull_request_harness_with_visibility(
         logical.clone(),
         Arc::new(GithubWorkflowPlanVerifier::new()),
     );
-    let source = RepositorySource::from_bytes(
-        ScmProviderId::new("github").expect("provider"),
-        ScmRepositoryId::new(format!("{OWNER}/{REPOSITORY}")).expect("repository"),
+    let source = RepositorySourceArchive::from_bytes(
+        source_connection(),
         GitObjectId::from_provider_hex(AFTER).expect("revision"),
         ArchiveFormat::TarGzip,
         archive(files),

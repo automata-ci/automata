@@ -8,7 +8,7 @@ use automata_ci_action_actions::{
     ActionExecution, ActionMetadataDecoder, GithubActionMetadataDecoder, JavascriptRuntime,
 };
 use automata_ci_blob_s3::{S3AtRestEncryption, S3BlobStoreConfig, StaticS3Credentials};
-use automata_ci_github::GithubHttpEndpoint;
+use automata_ci_provider_github::GithubHttpEndpoint;
 use automata_ci_scm::{RepositoryId, RevisionSpec};
 use url::Url;
 

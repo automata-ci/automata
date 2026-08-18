@@ -1,6 +1,6 @@
-# automata-ci-github
+# automata-ci-provider-github
 
-`automata-ci-github` contains bounded HTTP adapters for GitHub authentication,
+`automata-ci-provider-github` contains bounded HTTP adapters for GitHub authentication,
 membership, and repository APIs. It centralizes trusted-origin policy,
 pagination limits, response validation, and secret-safe error handling for the
 Automata control plane and runner.
@@ -31,14 +31,11 @@ persists its canonical bytes, domain-separated digest, envelope schema, and
 registry schema atomically beside the provider-delivery raw-object coordinates.
 Claim rehydration validates the canonical encoding, both schema identities, the
 raw-object binding, and the provider delivery/repository identity before any
-blob or provider access. Eligible rows without a complete sealed envelope are
-terminally quarantined as `provider_delivery.legacy_unsealed`; partial envelope
-coordinates are rejected by the database. The verified envelope is carried on
+blob or provider access. Exact envelope coordinates are required by the
+greenfield schema. The verified envelope is carried on
 `GithubDeliveryWorkflowRequest` so AUTH-02 can reduce authority from normalized
-facts rather than guessing through raw JSON. Because the schema is still
-greenfield, the durable columns live in `0001_initial_schema.sql`; no additional
-numbered migration is introduced.
+facts rather than guessing through raw JSON.
 
 - [Project documentation](https://github.com/automata-ci/automata/tree/main/docs)
-- API documentation: run `cargo doc -p automata-ci-github --open` from a source checkout.
+- API documentation: run `cargo doc -p automata-ci-provider-github --open` from a source checkout.
 - [Issues and support](https://github.com/automata-ci/automata/issues)

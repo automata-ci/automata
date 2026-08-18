@@ -8,7 +8,7 @@ use automata_ci_core::{
     Sha256Digest, TrustPermissionAuthority, TrustPolicy, TrustSecretAuthority, TrustSourceClass,
     TrustTokenRecursion, TrustUpstreamEvidence,
 };
-use automata_ci_github::{
+use automata_ci_provider_github::{
     GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE, GITHUB_RAW_EVENT_OBJECT_KEY_PREFIX,
     GithubEventEnvelopeError, GithubEventFacts, GithubEventRegistryV1, GithubEventTrustFact,
     GithubSealedEventEnvelopeV1, GithubTrustDerivation, GithubWebhookVerifier,

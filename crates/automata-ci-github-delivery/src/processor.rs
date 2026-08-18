@@ -8,11 +8,11 @@ use automata_ci_core::{
     ContextValue, JobRuntimeContext, Sha256Digest, TrustPolicy, TrustSnapshot, UnixMillis,
     WorkflowEventProvenance,
 };
-use automata_ci_github::{
+use automata_ci_provider_github::{
     GithubTrustDerivation, MAX_GITHUB_COMPARE_PATH_FILTER_FILES,
     MAX_GITHUB_PULL_REQUEST_PATH_FILTER_FILES, derive_github_trust_snapshot,
 };
-use automata_ci_scm::{ArchiveFormat, RepositorySource};
+use automata_ci_scm::{ArchiveFormat, RepositorySourceArchive};
 use automata_ci_store::{
     AuthenticatedGithubDeliveryClaim, GITHUB_PROVIDER_API_ORIGIN, GITHUB_PROVIDER_ARCHIVE_ACCEPT,
     GITHUB_PROVIDER_ARCHIVE_FORMAT, GITHUB_PROVIDER_ARCHIVE_ORIGIN,
@@ -133,7 +133,7 @@ impl fmt::Debug for GithubPullRequestChangedFilesAuthority<'_> {
 pub struct GithubPushChangedFilesRequest<'a> {
     identity: &'a ProviderDeliveryIdentity,
     request_digest: Sha256Digest,
-    push: &'a automata_ci_github::VerifiedGithubPush,
+    push: &'a automata_ci_provider_github::VerifiedGithubPush,
     snapshot: GithubDeliveryClaimSnapshot,
     observed_at: UnixMillis,
     required_through: UnixMillis,
@@ -144,7 +144,7 @@ pub struct GithubPushChangedFilesRequest<'a> {
 pub struct GithubPullRequestChangedFilesRequest<'a> {
     identity: &'a ProviderDeliveryIdentity,
     request_digest: Sha256Digest,
-    pull_request: &'a automata_ci_github::VerifiedGithubPullRequest,
+    pull_request: &'a automata_ci_provider_github::VerifiedGithubPullRequest,
     snapshot: GithubDeliveryClaimSnapshot,
     observed_at: UnixMillis,
     required_through: UnixMillis,
@@ -166,7 +166,7 @@ impl GithubPullRequestChangedFilesRequest<'_> {
 
     /// Returns the strictly rehydrated authenticated pull-request evidence.
     #[must_use]
-    pub const fn pull_request(&self) -> &automata_ci_github::VerifiedGithubPullRequest {
+    pub const fn pull_request(&self) -> &automata_ci_provider_github::VerifiedGithubPullRequest {
         self.pull_request
     }
 
@@ -236,7 +236,7 @@ impl GithubPushChangedFilesRequest<'_> {
 
     /// Returns the strictly rehydrated authenticated push evidence.
     #[must_use]
-    pub const fn push(&self) -> &automata_ci_github::VerifiedGithubPush {
+    pub const fn push(&self) -> &automata_ci_provider_github::VerifiedGithubPush {
         self.push
     }
 
@@ -395,8 +395,8 @@ pub trait GithubPushChangedFilesProvider: fmt::Debug + Send + Sync {
 
 #[derive(Clone, Copy)]
 enum ChangedFilesEvent<'event> {
-    Push(&'event automata_ci_github::VerifiedGithubPush),
-    PullRequest(&'event automata_ci_github::VerifiedGithubPullRequest),
+    Push(&'event automata_ci_provider_github::VerifiedGithubPush),
+    PullRequest(&'event automata_ci_provider_github::VerifiedGithubPullRequest),
 }
 
 impl ChangedFilesEvent<'_> {
@@ -464,22 +464,22 @@ impl GithubDeliveryWorkflowAdmissionProcessor {
             return Err(invalid_processor_state("accepted_frontend_without_plan"));
         };
         let metadata = match request.event() {
-            automata_ci_github::VerifiedGithubWebhook::Push(push) => {
+            automata_ci_provider_github::VerifiedGithubWebhook::Push(push) => {
                 GithubEventMetadata::push(push.deleted())
             }
-            automata_ci_github::VerifiedGithubWebhook::PullRequest(pull_request) => {
+            automata_ci_provider_github::VerifiedGithubWebhook::PullRequest(pull_request) => {
                 GithubEventMetadata::pull_request(
                     pull_request.action().as_str(),
                     pull_request.base_ref(),
                 )
             }
-            automata_ci_github::VerifiedGithubWebhook::MergeGroup(merge_group) => {
+            automata_ci_provider_github::VerifiedGithubWebhook::MergeGroup(merge_group) => {
                 GithubEventMetadata::merge_group(
                     merge_group.action().as_str(),
                     merge_group.base_ref().full(),
                 )
             }
-            automata_ci_github::VerifiedGithubWebhook::RepositoryDispatch(dispatch) => {
+            automata_ci_provider_github::VerifiedGithubWebhook::RepositoryDispatch(dispatch) => {
                 GithubEventMetadata::repository_dispatch(dispatch.event_type())
             }
             _ => return Err(invalid_processor_state("unsupported_authenticated_event")),
@@ -506,7 +506,7 @@ impl GithubDeliveryWorkflowAdmissionProcessor {
         source_plan: &GithubWorkflowSourcePlan,
     ) -> Result<ProviderDeliveryWorkflowConclusion, GithubDeliveryWorkflowProcessorError> {
         let metadata = match request.event() {
-            automata_ci_github::VerifiedGithubWebhook::Push(push) => {
+            automata_ci_provider_github::VerifiedGithubWebhook::Push(push) => {
                 let Some(changed_files) = self
                     .resolve_changed_files(request, ChangedFilesEvent::Push(push))
                     .await?
@@ -515,7 +515,7 @@ impl GithubDeliveryWorkflowAdmissionProcessor {
                 };
                 GithubEventMetadata::push_with_changed_files(push.deleted(), changed_files)
             }
-            automata_ci_github::VerifiedGithubWebhook::PullRequest(pull_request) => {
+            automata_ci_provider_github::VerifiedGithubWebhook::PullRequest(pull_request) => {
                 let Some(changed_files) = self
                     .resolve_changed_files(request, ChangedFilesEvent::PullRequest(pull_request))
                     .await?
@@ -528,7 +528,7 @@ impl GithubDeliveryWorkflowAdmissionProcessor {
                     changed_files,
                 )
             }
-            automata_ci_github::VerifiedGithubWebhook::RepositoryDispatch(_) => {
+            automata_ci_provider_github::VerifiedGithubWebhook::RepositoryDispatch(_) => {
                 return Ok(failed(
                     "github.workflow.repository_dispatch_changed_files_unsupported",
                 ));
@@ -793,7 +793,7 @@ impl GithubDeliveryWorkflowAdmissionProcessor {
             CompilationDisposition::RequiresChangedFiles => {
                 if matches!(
                     request.event(),
-                    automata_ci_github::VerifiedGithubWebhook::RepositoryDispatch(_)
+                    automata_ci_provider_github::VerifiedGithubWebhook::RepositoryDispatch(_)
                 ) {
                     return Ok(failed(
                         "github.workflow.repository_dispatch_changed_files_unsupported",
@@ -918,7 +918,7 @@ fn event_trust_snapshot(
     let mut derivation = GithubTrustDerivation::new();
     if matches!(
         request.event(),
-        automata_ci_github::VerifiedGithubWebhook::RepositoryDispatch(_)
+        automata_ci_provider_github::VerifiedGithubWebhook::RepositoryDispatch(_)
     ) {
         derivation = derivation
             .with_repository_dispatch_revision(request.repository_source().revision().to_string());
@@ -1012,10 +1012,10 @@ fn changed_files_result(
 
 fn provider_changed_file_limit(request: &GithubDeliveryWorkflowRequest<'_>) -> Option<usize> {
     match request.event() {
-        automata_ci_github::VerifiedGithubWebhook::Push(_) => {
+        automata_ci_provider_github::VerifiedGithubWebhook::Push(_) => {
             Some(MAX_GITHUB_COMPARE_PATH_FILTER_FILES)
         }
-        automata_ci_github::VerifiedGithubWebhook::PullRequest(_) => {
+        automata_ci_provider_github::VerifiedGithubWebhook::PullRequest(_) => {
             Some(MAX_GITHUB_PULL_REQUEST_PATH_FILTER_FILES)
         }
         _ => None,
@@ -1290,7 +1290,7 @@ fn compile(
 }
 
 fn repository_workflow_sources(
-    source: &RepositorySource,
+    source: &RepositorySourceArchive,
     evidence: &ManifestPinnedGithubDeliveryEvidence,
 ) -> Result<Vec<RepositoryWorkflowSource>, GithubDeliveryWorkflowProcessorError> {
     let limits = evidence.manifest().limits();
@@ -1348,7 +1348,7 @@ fn valid_authenticated_event_request(request: &GithubDeliveryWorkflowRequest<'_>
         ProviderRepositoryVisibility::Private => GITHUB_PROVIDER_PRIVATE_SOURCE_AUTHENTICATION,
     };
     let push_policy_matches = match event {
-        automata_ci_github::VerifiedGithubWebhook::Push(push) => {
+        automata_ci_provider_github::VerifiedGithubWebhook::Push(push) => {
             let commit_count = u64::try_from(push.commit_count()).unwrap_or(u64::MAX);
             let path_evidence = match push.complete_pushed_commit_revisions() {
                 Some(revisions) => {
@@ -1361,9 +1361,9 @@ fn valid_authenticated_event_request(request: &GithubDeliveryWorkflowRequest<'_>
                 && commit_count <= manifest.limits().push_webhook_max_commits()
                 && path_evidence
         }
-        automata_ci_github::VerifiedGithubWebhook::PullRequest(_)
-        | automata_ci_github::VerifiedGithubWebhook::MergeGroup(_)
-        | automata_ci_github::VerifiedGithubWebhook::RepositoryDispatch(_) => true,
+        automata_ci_provider_github::VerifiedGithubWebhook::PullRequest(_)
+        | automata_ci_provider_github::VerifiedGithubWebhook::MergeGroup(_)
+        | automata_ci_provider_github::VerifiedGithubWebhook::RepositoryDispatch(_) => true,
         _ => false,
     };
     identity.provider() == GITHUB_PROVIDER
@@ -1380,10 +1380,10 @@ fn valid_authenticated_event_request(request: &GithubDeliveryWorkflowRequest<'_>
             (identity.repository_visibility(), repository.visibility()),
             (
                 ProviderRepositoryVisibility::Public,
-                automata_ci_github::GithubRepositoryVisibility::Public
+                automata_ci_provider_github::GithubRepositoryVisibility::Public
             ) | (
                 ProviderRepositoryVisibility::Private,
-                automata_ci_github::GithubRepositoryVisibility::Private
+                automata_ci_provider_github::GithubRepositoryVisibility::Private
             )
         )
         && identity.repository_identity() == repository.full_name()
@@ -1393,7 +1393,8 @@ fn valid_authenticated_event_request(request: &GithubDeliveryWorkflowRequest<'_>
         && raw_size <= manifest.limits().webhook_max_body_bytes()
         && event_coordinates_match
         && push_policy_matches
-        && source.provider().as_str() == GITHUB_PROVIDER
+        && source.connection_id() == identity.connection_id()
+        && source.external_repository_id().as_str() == repository.id().get().to_string()
         && source.repository().as_str() == repository.full_name()
         && source_revision_matches
         && source.format() == ArchiveFormat::TarGzip
@@ -1413,12 +1414,12 @@ fn valid_authenticated_event_request(request: &GithubDeliveryWorkflowRequest<'_>
 }
 
 fn authenticated_event_coordinates_match(
-    event: &automata_ci_github::VerifiedGithubWebhook,
+    event: &automata_ci_provider_github::VerifiedGithubWebhook,
     evidence: &ManifestPinnedGithubDeliveryEvidence,
     authenticated_event: &automata_ci_store::GithubAuthenticatedEvent,
 ) -> bool {
     match event {
-        automata_ci_github::VerifiedGithubWebhook::RepositoryDispatch(dispatch) => {
+        automata_ci_provider_github::VerifiedGithubWebhook::RepositoryDispatch(dispatch) => {
             authenticated_event.kind()
                 == automata_ci_store::GithubAuthenticatedEventKind::RepositoryDispatch
                 && authenticated_event.git_ref() == dispatch.git_ref()
@@ -1433,12 +1434,12 @@ fn authenticated_event_coordinates_match(
 }
 
 fn authenticated_event_source_matches(
-    event: &automata_ci_github::VerifiedGithubWebhook,
+    event: &automata_ci_provider_github::VerifiedGithubWebhook,
     evidence: &ManifestPinnedGithubDeliveryEvidence,
-    source: &RepositorySource,
+    source: &RepositorySourceArchive,
 ) -> bool {
     match event {
-        automata_ci_github::VerifiedGithubWebhook::RepositoryDispatch(_) => evidence
+        automata_ci_provider_github::VerifiedGithubWebhook::RepositoryDispatch(_) => evidence
             .repository_dispatch_resolution()
             .is_some_and(|resolution| {
                 resolution.source_revision() == evidence.check_head_sha()
@@ -1450,16 +1451,16 @@ fn authenticated_event_source_matches(
 }
 
 fn authenticated_event_source_revision(
-    event: &automata_ci_github::VerifiedGithubWebhook,
+    event: &automata_ci_provider_github::VerifiedGithubWebhook,
 ) -> Option<GitObjectId> {
     match event {
-        automata_ci_github::VerifiedGithubWebhook::Push(push) if !push.deleted() => {
+        automata_ci_provider_github::VerifiedGithubWebhook::Push(push) if !push.deleted() => {
             GitObjectId::from_provider_hex(push.after_commit_sha()).ok()
         }
-        automata_ci_github::VerifiedGithubWebhook::PullRequest(pull_request) => {
+        automata_ci_provider_github::VerifiedGithubWebhook::PullRequest(pull_request) => {
             Some(*pull_request.head_revision())
         }
-        automata_ci_github::VerifiedGithubWebhook::MergeGroup(merge_group) => {
+        automata_ci_provider_github::VerifiedGithubWebhook::MergeGroup(merge_group) => {
             Some(*merge_group.head_revision())
         }
         _ => None,
@@ -1556,16 +1557,16 @@ mod renewal_tests {
     use automata_ci_auth::secret::SecretString;
     use automata_ci_blob::{BlobKey, BlobPayload, MediaType, MemoryBlobStore};
     use automata_ci_core::{Sha256Digest, UnixMillis};
-    use automata_ci_github::{
+    use automata_ci_provider::{ExternalRepositoryId, ProviderConnectionId};
+    use automata_ci_provider_github::{
         GITHUB_EVENT_ENVELOPE_V1_MEDIA_TYPE, GITHUB_RAW_EVENT_OBJECT_KEY_PREFIX,
         GithubRepositoryVisibility, GithubSealedEventEnvelopeV1, GithubWebhookBodyDigest,
         StoredAuthenticatedGithubWebhook, VerifiedGithubPush, VerifiedGithubWebhook,
         rehydrate_stored_authenticated_github_webhook,
     };
-    use automata_ci_provider::ProviderConnectionId;
     use automata_ci_scm::{
-        ArchiveFormat, RepositoryId as ScmRepositoryId, RepositorySource, RepositorySourcePort,
-        RepositorySourceRequest, ScmError, ScmProviderId,
+        ArchiveFormat, RepositoryId as ScmRepositoryId, RepositorySource, RepositorySourceArchive,
+        RepositorySourceConnection, RepositorySourceRequest, ScmError,
     };
     use automata_ci_store::{
         AcceptManifestPinnedGithubDelivery, AcceptProviderDelivery, AdmissionObject,
@@ -1720,18 +1721,14 @@ mod renewal_tests {
     }
 
     #[derive(Debug)]
-    struct UnusedSource(ScmProviderId);
+    struct UnusedSource;
 
     #[async_trait]
-    impl RepositorySourcePort for UnusedSource {
-        fn provider_id(&self) -> &ScmProviderId {
-            &self.0
-        }
-
+    impl RepositorySource for UnusedSource {
         async fn fetch_repository_source(
             &self,
             _request: RepositorySourceRequest<'_>,
-        ) -> Result<RepositorySource, ScmError> {
+        ) -> Result<RepositorySourceArchive, ScmError> {
             panic!("source fetch is bypassed by the fetched-source renewal test")
         }
     }
@@ -2157,7 +2154,7 @@ mod renewal_tests {
         push: VerifiedGithubPush,
         event_envelope: GithubSealedEventEnvelopeV1,
         evidence: ManifestPinnedGithubDeliveryEvidence,
-        source: RepositorySource,
+        source: RepositorySourceArchive,
     }
 
     fn fixture() -> RenewalFixture {
@@ -2201,9 +2198,14 @@ mod renewal_tests {
         };
         let claimed = claimed(raw_event, durable_event_envelope);
         let evidence = subject_evidence(&claimed, &push);
-        let source = RepositorySource::from_bytes(
-            ScmProviderId::new("github").expect("provider"),
-            ScmRepositoryId::new(format!("{OWNER}/{REPOSITORY}")).expect("repository"),
+        let repository = ScmRepositoryId::new(format!("{OWNER}/{REPOSITORY}")).expect("repository");
+        let source = RepositorySourceArchive::from_bytes(
+            RepositorySourceConnection::new(
+                claimed.identity().connection_id(),
+                ExternalRepositoryId::new(REPOSITORY_ID.to_string())
+                    .expect("external repository ID"),
+                repository,
+            ),
             automata_ci_core::GitObjectId::from_provider_hex(AFTER).expect("revision"),
             ArchiveFormat::TarGzip,
             workflow_archive(),
@@ -2401,9 +2403,7 @@ mod renewal_tests {
             .with_changed_files_provider(changed_files);
         GithubDeliveryWorker::new(
             Arc::new(MemoryBlobStore::default()),
-            Arc::new(UnusedSource(
-                ScmProviderId::new("github").expect("source provider"),
-            )),
+            Arc::new(UnusedSource),
             Arc::new(processor),
             deliveries,
             Arc::new(UnusedSubjectEvidence),
@@ -2450,7 +2450,7 @@ mod renewal_tests {
             .expect("successor deadline");
         let lease = GithubDeliveryClaimLease::new(fixture.claimed.clone(), predecessor_deadline);
         let prepared = PreparedGithubDelivery::from_authenticated_event(
-            automata_ci_github::VerifiedGithubWebhook::Push(fixture.push.clone()),
+            automata_ci_provider_github::VerifiedGithubWebhook::Push(fixture.push.clone()),
             fixture.event_envelope.clone(),
             fixture.evidence.clone(),
         );
@@ -2533,7 +2533,7 @@ mod renewal_tests {
         let lease = GithubDeliveryClaimLease::new(fixture.claimed.clone(), predecessor_deadline);
 
         let prepared = PreparedGithubDelivery::from_authenticated_event(
-            automata_ci_github::VerifiedGithubWebhook::Push(fixture.push.clone()),
+            automata_ci_provider_github::VerifiedGithubWebhook::Push(fixture.push.clone()),
             fixture.event_envelope.clone(),
             fixture.evidence.clone(),
         );

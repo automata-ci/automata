@@ -177,7 +177,7 @@ run_podman() {
 }
 
 run_github_live() {
-  run_ignored_command cargo test -p automata-ci-github --test live_repository_snapshot \
+  run_ignored_command cargo test -p automata-ci-provider-github --test live_repository_snapshot \
     --all-features --locked -- \
     --ignored --test-threads=1
 }

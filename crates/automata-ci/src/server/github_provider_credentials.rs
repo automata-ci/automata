@@ -21,9 +21,6 @@ use automata_ci_credential_github::{
     GithubServerServiceResolutionError, PendingGithubServerServiceCorruptionCleanup,
     PendingGithubServerServiceHandoffRelease, github_server_service_credential_request,
 };
-use automata_ci_github::{
-    GithubHttpEndpoint, GithubWorkflowPermissionDefaults, GithubWorkflowPermissionDefaultsRequest,
-};
 use automata_ci_github_delivery::{
     GithubChecksCredentialProvider, GithubChecksCredentialProviderError,
     GithubChecksCredentialRequest, GithubChecksServerServiceCredential,
@@ -33,6 +30,9 @@ use automata_ci_github_delivery::{
     GithubScheduleSourceCredential, GithubScheduleSourceCredentialProvider,
     GithubScheduleSourceCredentialProviderError, GithubScheduleSourceCredentialRequest,
     GithubServerServiceCredentialRelease,
+};
+use automata_ci_provider_github::{
+    GithubHttpEndpoint, GithubWorkflowPermissionDefaults, GithubWorkflowPermissionDefaultsRequest,
 };
 use automata_ci_store::{
     AcquireGithubServerServiceHandoff, GithubCheckSubjectIdentity, GithubProviderManifest,

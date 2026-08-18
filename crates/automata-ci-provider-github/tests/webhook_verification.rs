@@ -1,6 +1,6 @@
 use crate::support::{json_body, signed_webhook_headers};
 
-use automata_ci_github::{
+use automata_ci_provider_github::{
     GithubPushRefKind, GithubRepositoryVisibility, GithubWebhookError, GithubWebhookEventMetadata,
     GithubWebhookVerifier, MAX_GITHUB_PUSH_COMMITS, MAX_GITHUB_WEBHOOK_BODY_BYTES,
     MAX_GITHUB_WEBHOOK_SECRET_BYTES, X_GITHUB_DELIVERY, X_GITHUB_EVENT, X_HUB_SIGNATURE_256,
@@ -677,7 +677,7 @@ fn commit_entries(count: usize) -> Vec<Value> {
 
 fn verify_payload(
     payload: &Value,
-) -> Result<automata_ci_github::VerifiedGithubPush, GithubWebhookError> {
+) -> Result<automata_ci_provider_github::VerifiedGithubPush, GithubWebhookError> {
     let body = json_body(payload);
     GithubWebhookVerifier::new(SECRET)
         .expect("verifier")

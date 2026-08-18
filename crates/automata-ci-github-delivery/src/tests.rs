@@ -14,11 +14,11 @@ use automata_ci_blob::{
     PutBlobOutcome, VerifiedBlob,
 };
 use automata_ci_core::{RunId, Sha256Digest, UnixMillis};
-use automata_ci_github::{
+use automata_ci_provider::ProviderConnectionId;
+use automata_ci_provider_github::{
     GithubWebhookError, GithubWebhookVerifier, MAX_GITHUB_WEBHOOK_BODY_BYTES, X_GITHUB_DELIVERY,
     X_GITHUB_EVENT, X_HUB_SIGNATURE_256,
 };
-use automata_ci_provider::ProviderConnectionId;
 use automata_ci_store::{
     AcceptManifestPinnedGithubDelivery, AcceptManifestPinnedGithubRepositoryDispatch,
     AcceptProviderDelivery, AdmissionObject, ClaimProviderDelivery, ClaimedProviderDelivery,
@@ -1763,7 +1763,7 @@ fn repository_visibility_is_an_independent_request_digest_field() {
         .expect("identity")
     };
 
-    let event = automata_ci_github::VerifiedGithubWebhook::Push(push);
+    let event = automata_ci_provider_github::VerifiedGithubWebhook::Push(push);
     let private = canonical_event_request_digest(
         &headers,
         &event,

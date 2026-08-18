@@ -342,7 +342,9 @@ fn internal_object_store_bucket_initialization_is_hidden_exact_and_redacted() {
     let Command::Internal(internal) = cli.command else {
         panic!("internal command expected");
     };
-    let InternalCommand::ObjectStore(object_store) = internal.command;
+    let InternalCommand::ObjectStore(object_store) = internal.command else {
+        panic!("expected object-store command")
+    };
     let InternalObjectStoreCommand::EnsureBucket(args) = object_store.command;
     assert_eq!(args.s3.s3_tls_trust, S3TlsTrustMode::PrivateCa);
     let debug = format!("{args:?}");
@@ -399,7 +401,9 @@ fn internal_private_ca_raw_values_become_redacted_invalid_sources() {
     let Command::Internal(internal) = cli.command else {
         panic!("internal command expected");
     };
-    let InternalCommand::ObjectStore(object_store) = internal.command;
+    let InternalCommand::ObjectStore(object_store) = internal.command else {
+        panic!("expected object-store command")
+    };
     let InternalObjectStoreCommand::EnsureBucket(args) = object_store.command;
     assert!(matches!(
         args.s3.s3_private_ca_source,

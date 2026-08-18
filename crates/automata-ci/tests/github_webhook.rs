@@ -19,15 +19,15 @@ use automata_ci_blob::{
     PutBlobOutcome, VerifiedBlob,
 };
 use automata_ci_core::{RunId, Sha256Digest, UnixMillis};
-use automata_ci_github::{
-    GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE, GithubWebhookVerifier, MAX_GITHUB_WEBHOOK_BODY_BYTES,
-    X_GITHUB_DELIVERY, X_GITHUB_EVENT, X_HUB_SIGNATURE_256,
-};
 use automata_ci_github_delivery::{
     GithubDeliveryClock, GithubDeliveryConnection, GithubDeliveryIngress,
     GithubDeliveryRepositories,
 };
 use automata_ci_provider::ProviderConnectionId;
+use automata_ci_provider_github::{
+    GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE, GithubWebhookVerifier, MAX_GITHUB_WEBHOOK_BODY_BYTES,
+    X_GITHUB_DELIVERY, X_GITHUB_EVENT, X_HUB_SIGNATURE_256,
+};
 use automata_ci_store::{
     AcceptManifestPinnedGithubDelivery, AdmissionObject, GITHUB_PROVIDER_RUNNER_POLICY_MEDIA_TYPE,
     GithubAuthenticatedEventKind, GithubCheckName, GithubCheckSubjectId, GithubProviderManifest,

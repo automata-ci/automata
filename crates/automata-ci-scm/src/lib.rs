@@ -5,10 +5,12 @@
 //! [`GitObjectId`](automata_ci_core::GitObjectId) that identifies immutable provider state before they
 //! download an archive. The resulting [`RepositorySnapshot`] retains both
 //! values, the exact archive bytes, and a locally computed SHA-256 digest.
-//! Separately, [`RepositorySourcePort`] accepts only a
-//! [`GitObjectId`](automata_ci_core::GitObjectId) and
-//! returns [`RepositorySource`] after proving the provider resolved that exact
-//! commit; it has no authority to fall back to mutable selector resolution.
+//! Separately, [`RepositorySource`] is selected for one configured provider
+//! instance. It accepts a connection and exact
+//! [`GitObjectId`](automata_ci_core::GitObjectId), then returns a
+//! [`RepositorySourceArchive`] after proving the provider resolved that exact
+//! repository and commit. It has no authority to fall back to mutable selector
+//! resolution.
 //!
 //! Credentials are borrowed only for one [`SnapshotRequest`]. They are redacted
 //! from request diagnostics and are never retained in a snapshot or its errors.
@@ -35,7 +37,8 @@ pub use changed_files::{
 };
 pub use model::{
     ArchiveFormat, ArchiveLimits, ArchiveLimitsError, RepositoryId, RepositoryIdError,
-    RepositorySnapshot, RepositorySource, RepositorySourceRequest, RevisionError, RevisionSpec,
+    RepositorySnapshot, RepositorySourceArchive, RepositorySourceConnection,
+    RepositorySourceRedirectPolicy, RepositorySourceRequest, RevisionError, RevisionSpec,
     ScmProviderId, ScmProviderIdError, SnapshotRequest,
 };
-pub use port::{RepositorySourcePort, ScmError, ScmErrorKind, ScmProvider};
+pub use port::{RepositorySource, ScmError, ScmErrorKind, ScmProvider};

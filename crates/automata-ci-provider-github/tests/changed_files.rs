@@ -7,7 +7,7 @@ use std::{
 
 use automata_ci_auth::secret::SecretString;
 use automata_ci_core::GitObjectId;
-use automata_ci_github::{
+use automata_ci_provider_github::{
     GithubChangedFilesEvidenceDigest, GithubHttpEndpoint, GithubHttpLimits,
     GithubPullRequestDiffAuthority, GithubPullRequestDiffOutcome, GithubPullRequestDiffRequest,
     GithubPushDiffAuthority, GithubPushDiffIncompleteReason, GithubPushDiffOutcome,

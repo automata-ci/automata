@@ -130,7 +130,7 @@ See [Workflow reruns](workflow-reruns.md) for the CLI/API contract and selection
 
 ## Maintainer map
 
-- Provider models/client: [`checks.rs`](../crates/automata-ci-github/src/checks.rs).
+- Provider models/client: [`checks.rs`](../crates/automata-ci-provider-github/src/checks.rs).
 - Presentation: [`checks_presentation.rs`](../crates/automata-ci-github-delivery/src/checks_presentation.rs).
 - Publisher/recovery: [`checks_publisher.rs`](../crates/automata-ci-github-delivery/src/checks_publisher.rs).
 - Durable API: [store `github_checks.rs`](../crates/automata-ci-store/src/github_checks.rs).
@@ -138,7 +138,7 @@ See [Workflow reruns](workflow-reruns.md) for the CLI/API contract and selection
 - Web model/authorization: [`live.rs`](../crates/automata-ci/src/app/web/live.rs).
 - Routes/security: [`routes.rs`](../crates/automata-ci/src/app/web/routes.rs).
 - Browser polling: [`JobLogPage.tsx`](../ui/src/pages/JobLogPage.tsx).
-- Webhook normalization: [`webhook_event.rs`](../crates/automata-ci-github/src/webhook_event.rs).
+- Webhook normalization: [`webhook_event.rs`](../crates/automata-ci-provider-github/src/webhook_event.rs).
 - Delivery/rerun admission: [delivery `lib.rs`](../crates/automata-ci-github-delivery/src/lib.rs).
 - Browser rerun: [server](../crates/automata-ci/src/server/workflow_rerun.rs) and [API](../crates/automata-ci/src/app/workflow_rerun_api.rs).
 

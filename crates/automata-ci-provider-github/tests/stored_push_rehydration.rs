@@ -1,6 +1,6 @@
 use crate::support::{json_body, signed_webhook_headers, webhook_body_digest};
 
-use automata_ci_github::{
+use automata_ci_provider_github::{
     GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE, GithubRepositoryVisibility, GithubStoredWebhookError,
     GithubWebhookBodyDigest, GithubWebhookVerifier, MAX_GITHUB_WEBHOOK_BODY_BYTES,
     StoredAuthenticatedGithubWebhook, VerifiedGithubPush, VerifiedGithubWebhook,

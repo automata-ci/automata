@@ -7,13 +7,13 @@ use std::{
 use automata_ci_auth::secret::SecretString;
 use automata_ci_blob::{BlobDescriptor, BlobKey, MediaType};
 use automata_ci_core::{Sha256Digest, UnixMillis};
-use automata_ci_github::{
+use automata_ci_provider::ProviderConnectionId;
+use automata_ci_provider_github::{
     GITHUB_API_VERSION, GITHUB_EVENT_ENVELOPE_V1_MEDIA_TYPE, GITHUB_RAW_EVENT_OBJECT_KEY_PREFIX,
     GithubHttpEndpoint, GithubHttpLimits, GithubRepositoryVisibility, GithubSealedEventEnvelopeV1,
     GithubWebhookBodyDigest, StoredAuthenticatedGithubWebhook, VerifiedGithubPush,
     VerifiedGithubWebhook, rehydrate_stored_authenticated_github_webhook,
 };
-use automata_ci_provider::ProviderConnectionId;
 use automata_ci_store::{
     AdmissionObject, ClaimedProviderDelivery, ObjectKey, ProviderDeliveryClaimFence,
     ProviderDeliveryClaimOwnerId, ProviderDeliveryEventEnvelope, ProviderDeliveryId,

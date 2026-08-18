@@ -1,8 +1,9 @@
 use automata_ci_auth::{github::GithubEndpointError, secret::SecretString};
 use automata_ci_core::GitObjectId;
 use automata_ci_scm::{
-    ArchiveFormat, RepositorySnapshot, RepositorySource, RepositorySourcePort,
-    RepositorySourceRequest, ScmError, ScmErrorKind, ScmProvider, ScmProviderId, SnapshotRequest,
+    ArchiveFormat, RepositorySnapshot, RepositorySource, RepositorySourceArchive,
+    RepositorySourceRedirectPolicy, RepositorySourceRequest, ScmError, ScmErrorKind, ScmProvider,
+    ScmProviderId, SnapshotRequest,
 };
 use bytes::{Bytes, BytesMut};
 use reqwest::{
@@ -26,6 +27,12 @@ const X_RATE_LIMIT_REMAINING: &str = "x-ratelimit-remaining";
 #[derive(Deserialize)]
 struct CommitResponse {
     sha: String,
+}
+
+#[derive(Deserialize)]
+struct RepositoryResponse {
+    id: u64,
+    full_name: String,
 }
 
 impl GithubHttpEndpoint {
@@ -115,6 +122,32 @@ impl GithubHttpEndpoint {
         Ok(())
     }
 
+    async fn prove_repository_identity(
+        &self,
+        request: &RepositorySourceRequest<'_>,
+    ) -> Result<(), ScmError> {
+        let endpoint = self.repository_url(request.repository(), &[])?;
+        let response = self
+            .authenticated_get(endpoint, request.credential())?
+            .send()
+            .await
+            .map_err(|_| ScmError::new(ScmErrorKind::Unavailable))?;
+        reject_api_status(&response)?;
+        let response =
+            read_json_response(response, self.trusted.limits().max_response_bytes, false)
+                .await
+                .map_err(map_endpoint_error)?;
+        let repository: RepositoryResponse =
+            decode_json(&response.body).map_err(map_endpoint_error)?;
+        if repository.id == 0
+            || repository.id.to_string() != request.connection().external_repository_id().as_str()
+            || repository.full_name != request.repository().as_str()
+        {
+            return Err(ScmError::new(ScmErrorKind::InvalidResponse));
+        }
+        Ok(())
+    }
+
     async fn archive_redirect(
         &self,
         request: &SnapshotRequest<'_>,
@@ -138,6 +171,9 @@ impl GithubHttpEndpoint {
         &self,
         request: &RepositorySourceRequest<'_>,
     ) -> Result<Url, ScmError> {
+        if request.redirect_policy() != RepositorySourceRedirectPolicy::ConfiguredArchiveOrigin {
+            return Err(ScmError::new(ScmErrorKind::InvalidResponse));
+        }
         let revision = request.revision().to_string();
         let endpoint = self.repository_url(request.repository(), &["tarball", &revision])?;
         let response = self
@@ -243,24 +279,20 @@ impl ScmProvider for GithubHttpEndpoint {
 }
 
 #[async_trait::async_trait]
-impl RepositorySourcePort for GithubHttpEndpoint {
-    fn provider_id(&self) -> &ScmProviderId {
-        &self.scm_provider_id
-    }
-
+impl RepositorySource for GithubHttpEndpoint {
     async fn fetch_repository_source(
         &self,
         request: RepositorySourceRequest<'_>,
-    ) -> Result<RepositorySource, ScmError> {
+    ) -> Result<RepositorySourceArchive, ScmError> {
+        self.prove_repository_identity(&request).await?;
         if request.credential().is_none() {
             let location =
                 self.exact_public_archive_location(request.repository(), request.revision())?;
             let bytes = self
                 .download_archive(location, request.limits().maximum_bytes())
                 .await?;
-            return Ok(RepositorySource::from_bytes(
-                self.scm_provider_id.clone(),
-                request.repository().clone(),
+            return Ok(RepositorySourceArchive::from_bytes(
+                request.connection().clone(),
                 *request.revision(),
                 ArchiveFormat::TarGzip,
                 bytes,
@@ -271,9 +303,8 @@ impl RepositorySourcePort for GithubHttpEndpoint {
         let bytes = self
             .download_archive(location, request.limits().maximum_bytes())
             .await?;
-        Ok(RepositorySource::from_bytes(
-            self.scm_provider_id.clone(),
-            request.repository().clone(),
+        Ok(RepositorySourceArchive::from_bytes(
+            request.connection().clone(),
             *request.revision(),
             ArchiveFormat::TarGzip,
             bytes,

@@ -48,12 +48,12 @@ use automata_ci_control::runner_control::{
 };
 use automata_ci_control::scheduling::{DeterministicScheduler, SchedulerPolicy};
 use automata_ci_core::RunId;
-use automata_ci_github::MAX_GITHUB_WEBHOOK_SECRET_BYTES;
 use automata_ci_job_executor_actions::{
     ActionPreparationPort, NoRepositoryCredentials, ResolvedBundleActionPreparer,
 };
 use automata_ci_key_management::KeyEncryptionProvider;
 use automata_ci_protocol::ProtocolLimits;
+use automata_ci_provider_github::MAX_GITHUB_WEBHOOK_SECRET_BYTES;
 use automata_ci_provisioning::{
     GithubProviderConfigurationApplier, GithubProviderDesiredStateReader,
     ProvisioningWorkloadAuthenticator, WorkspaceEntitlementApplier,
