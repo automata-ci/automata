@@ -59,7 +59,8 @@ pub(super) async fn reconcile_all_direct_check(
         r"
         SELECT aggregate.id, aggregate.desired_state,
                aggregate.desired_conclusion, aggregate.terminal_cause,
-               aggregate.desired_revision, aggregate.desired_updated_at_ms
+               aggregate.desired_revision, aggregate.desired_updated_at_ms,
+               evidence.aggregate_check_kind
         FROM github_provider_delivery_evidence AS evidence
         JOIN provider_delivery_inbox AS inbox
           ON inbox.id = evidence.provider_delivery_id
@@ -133,18 +134,27 @@ pub(super) async fn reconcile_all_direct_check(
     .fetch_one(&mut **transaction)
     .await?;
 
-    let desired = desired_aggregate(AggregateCounts {
-        failed: row.try_get("failed_count")?,
-        admitted: row.try_get("admitted_count")?,
-        children: row.try_get("child_count")?,
-        terminal: row.try_get("terminal_count")?,
-        failure: row.try_get("failure_count")?,
-        timed_out: row.try_get("timed_out_count")?,
-        cancelled: row.try_get("cancelled_count")?,
-        action_required: row.try_get("action_required_count")?,
-        success: row.try_get("success_count")?,
-        skipped: row.try_get("skipped_count")?,
-    })?;
+    let aggregate_check_kind: String = aggregate.try_get("aggregate_check_kind")?;
+    let required = match aggregate_check_kind.as_str() {
+        "required" => true,
+        "auxiliary" => false,
+        _ => return Err(GithubCheckAggregationError::CorruptData),
+    };
+    let desired = desired_aggregate(
+        AggregateCounts {
+            failed: row.try_get("failed_count")?,
+            admitted: row.try_get("admitted_count")?,
+            children: row.try_get("child_count")?,
+            terminal: row.try_get("terminal_count")?,
+            failure: row.try_get("failure_count")?,
+            timed_out: row.try_get("timed_out_count")?,
+            cancelled: row.try_get("cancelled_count")?,
+            action_required: row.try_get("action_required_count")?,
+            success: row.try_get("success_count")?,
+            skipped: row.try_get("skipped_count")?,
+        },
+        required,
+    )?;
 
     let subject_id: Uuid = aggregate.try_get("id")?;
     let state: String = aggregate.try_get("desired_state")?;
@@ -230,6 +240,7 @@ struct AggregateCounts {
 
 fn desired_aggregate(
     counts: AggregateCounts,
+    required: bool,
 ) -> Result<DesiredAggregate, GithubCheckAggregationError> {
     let classified_terminal = counts.failure
         + counts.timed_out
@@ -246,7 +257,7 @@ fn desired_aggregate(
     Ok(if counts.failed > 0 {
         DesiredAggregate::Terminal("failure", "workflow_failure")
     } else if counts.admitted == 0 {
-        DesiredAggregate::Terminal("skipped", "workflow_skipped")
+        skipped_aggregate(required)
     } else if counts.terminal < counts.admitted {
         DesiredAggregate::InProgress
     } else if counts.failure > 0 {
@@ -260,8 +271,16 @@ fn desired_aggregate(
     } else if counts.success > 0 {
         DesiredAggregate::Terminal("success", "workflow_success")
     } else {
-        DesiredAggregate::Terminal("skipped", "workflow_skipped")
+        skipped_aggregate(required)
     })
+}
+
+const fn skipped_aggregate(required: bool) -> DesiredAggregate {
+    if required {
+        DesiredAggregate::Terminal("failure", "workflow_failure")
+    } else {
+        DesiredAggregate::Terminal("skipped", "workflow_skipped")
+    }
 }
 
 async fn update_aggregate(
@@ -307,24 +326,30 @@ mod tests {
     #[test]
     fn admitted_workflows_cannot_complete_the_required_check_before_results() {
         assert_eq!(
-            desired_aggregate(AggregateCounts {
-                admitted: 2,
-                children: 2,
-                terminal: 1,
-                success: 1,
-                ..AggregateCounts::default()
-            })
+            desired_aggregate(
+                AggregateCounts {
+                    admitted: 2,
+                    children: 2,
+                    terminal: 1,
+                    success: 1,
+                    ..AggregateCounts::default()
+                },
+                true,
+            )
             .expect("consistent aggregate"),
             DesiredAggregate::InProgress
         );
         assert_eq!(
-            desired_aggregate(AggregateCounts {
-                admitted: 2,
-                children: 2,
-                terminal: 2,
-                success: 2,
-                ..AggregateCounts::default()
-            })
+            desired_aggregate(
+                AggregateCounts {
+                    admitted: 2,
+                    children: 2,
+                    terminal: 2,
+                    success: 2,
+                    ..AggregateCounts::default()
+                },
+                true,
+            )
             .expect("consistent aggregate"),
             DesiredAggregate::Terminal("success", "workflow_success")
         );
@@ -333,23 +358,52 @@ mod tests {
     #[test]
     fn aggregate_propagates_pre_admission_and_terminal_failures() {
         assert_eq!(
-            desired_aggregate(AggregateCounts {
-                failed: 1,
-                ..AggregateCounts::default()
-            })
+            desired_aggregate(
+                AggregateCounts {
+                    failed: 1,
+                    ..AggregateCounts::default()
+                },
+                true,
+            )
             .expect("consistent aggregate"),
             DesiredAggregate::Terminal("failure", "workflow_failure")
         );
         assert_eq!(
-            desired_aggregate(AggregateCounts {
-                admitted: 1,
-                children: 1,
-                terminal: 1,
-                failure: 1,
-                ..AggregateCounts::default()
-            })
+            desired_aggregate(
+                AggregateCounts {
+                    admitted: 1,
+                    children: 1,
+                    terminal: 1,
+                    failure: 1,
+                    ..AggregateCounts::default()
+                },
+                true,
+            )
             .expect("consistent aggregate"),
             DesiredAggregate::Terminal("failure", "workflow_failure")
         );
+    }
+
+    #[test]
+    fn required_aggregate_can_never_conclude_skipped() {
+        for counts in [
+            AggregateCounts::default(),
+            AggregateCounts {
+                admitted: 2,
+                children: 2,
+                terminal: 2,
+                skipped: 2,
+                ..AggregateCounts::default()
+            },
+        ] {
+            assert_eq!(
+                desired_aggregate(counts, true).expect("consistent required aggregate"),
+                DesiredAggregate::Terminal("failure", "workflow_failure")
+            );
+            assert_eq!(
+                desired_aggregate(counts, false).expect("consistent auxiliary aggregate"),
+                DesiredAggregate::Terminal("skipped", "workflow_skipped")
+            );
+        }
     }
 }

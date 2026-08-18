@@ -197,6 +197,7 @@ fn fixture_subject_evidence_with_selection_and_head(
         check_head_sha,
         GithubAuthenticatedEvent::new(GithubAuthenticatedEventKind::Push, authenticated_git_ref)
             .expect("authenticated event"),
+        automata_ci_store::GithubDeliveryCheckKind::Required,
         accepted_at,
     )
     .expect("fixture subject evidence")

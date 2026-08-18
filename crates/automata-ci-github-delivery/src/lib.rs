@@ -90,16 +90,16 @@ use automata_ci_provider::ProviderConnectionId;
 use automata_ci_provider_github::VerifiedGithubPush;
 use automata_ci_provider_github::{
     GITHUB_EVENT_ENVELOPE_V1_MEDIA_TYPE, GITHUB_RAW_EVENT_OBJECT_KEY_PREFIX, GithubCheckRunAction,
-    GithubRepositoryVisibility, GithubSealedEventEnvelopeV1, GithubWebhookError,
-    GithubWebhookVerifier, VerifiedGithubWebhook, X_GITHUB_DELIVERY, X_GITHUB_EVENT,
-    X_HUB_SIGNATURE_256,
+    GithubMergeGroupAction, GithubPullRequestAction, GithubRepositoryVisibility,
+    GithubSealedEventEnvelopeV1, GithubWebhookError, GithubWebhookVerifier, VerifiedGithubWebhook,
+    X_GITHUB_DELIVERY, X_GITHUB_EVENT, X_HUB_SIGNATURE_256,
 };
 use automata_ci_store::{
     AcceptManifestPinnedGithubDelivery, AcceptManifestPinnedGithubRepositoryDispatch,
     AcceptProviderDelivery, AdmissionObject, GithubAuthenticatedEvent,
     GithubAuthenticatedEventKind, GithubCheckAppId, GithubCheckRerunAction,
     GithubCheckRerunRepository, GithubCheckRerunRequest, GithubCheckRerunStoreError,
-    GithubCheckRerunTarget, GithubCheckRunId, GithubCheckSuiteId,
+    GithubCheckRerunTarget, GithubCheckRunId, GithubCheckSuiteId, GithubDeliveryCheckKind,
     GithubProviderWebhookVerifierFingerprint, GithubRepositoryDispatchEvidenceRepository,
     GithubServerServiceRevision, GithubSubjectEvidenceRepository, GithubSubjectEvidenceStoreError,
     ManifestPinnedGithubDeliveryReceipt, ObjectKey, PendingGithubRepositoryDispatchReceipt,
@@ -595,6 +595,7 @@ impl GithubDeliveryIngress {
         }
         let connection = self.selected_connection(selected.connection_index)?;
         let event_coordinates = authenticated_event_coordinates(&selected.event)?;
+        let check_kind = delivery_check_kind(&selected.event, connection)?;
         let prepared = self
             .persist_authenticated_event(headers, &selected, connection)
             .await?;
@@ -603,6 +604,7 @@ impl GithubDeliveryIngress {
             selected.signed_repository_owner_id,
             connection.repository_owner_id,
             event_coordinates.event,
+            check_kind,
             event_coordinates.head_sha,
             self.verifier_fingerprint,
             self.verifier_revision,
@@ -1094,9 +1096,10 @@ fn authenticated_event_coordinates(
             } else {
                 push.after_commit_sha()
             };
+            let git_ref = push.git_ref().full().to_owned();
             (
                 GithubAuthenticatedEventKind::Push,
-                push.git_ref().full().to_owned(),
+                git_ref,
                 github_check_head_sha(revision)?,
             )
         }
@@ -1118,6 +1121,41 @@ fn authenticated_event_coordinates(
         event,
         head_sha: revision,
     })
+}
+
+fn delivery_check_kind(
+    event: &VerifiedGithubWebhook,
+    connection: &GithubDeliveryConnection,
+) -> Result<GithubDeliveryCheckKind, GithubDeliveryIngressError> {
+    match event {
+        VerifiedGithubWebhook::Push(push) => Ok(
+            if connection.default_branch_ref() == Some(push.git_ref().full()) {
+                GithubDeliveryCheckKind::Required
+            } else {
+                GithubDeliveryCheckKind::Auxiliary
+            },
+        ),
+        VerifiedGithubWebhook::PullRequest(pull_request) => Ok(
+            if matches!(
+                pull_request.action(),
+                GithubPullRequestAction::Opened
+                    | GithubPullRequestAction::Reopened
+                    | GithubPullRequestAction::Synchronize
+            ) {
+                GithubDeliveryCheckKind::Required
+            } else {
+                GithubDeliveryCheckKind::Auxiliary
+            },
+        ),
+        VerifiedGithubWebhook::MergeGroup(merge_group) => Ok(
+            if merge_group.action() == GithubMergeGroupAction::ChecksRequested {
+                GithubDeliveryCheckKind::Required
+            } else {
+                GithubDeliveryCheckKind::Auxiliary
+            },
+        ),
+        _ => Err(GithubDeliveryIngressError::InvariantViolation),
+    }
 }
 
 #[cfg(test)]

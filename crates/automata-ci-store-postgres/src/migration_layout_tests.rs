@@ -233,6 +233,10 @@ const CANONICAL_MIGRATIONS: &[(&str, &str)] = &[
         "0057_merge_queue_check_aggregation.sql",
         "447aeb41ee79fe0e96431183dbb850b19769cadcaa7f43bab1efea07dd3b84290cfe034e4682b337abeb06d577d9f639",
     ),
+    (
+        "0058_required_check_event_isolation.sql",
+        "ea67c5ce5f63d1fedffc66d92d7cf871cb0c0ec363f9312d3aebf12a015cd76a7c24c03c269558db395abbcc94390365",
+    ),
 ];
 
 const BASELINE_MIGRATION_COUNT: u32 = 26;
@@ -369,6 +373,32 @@ fn github_workflow_limit_matches_the_product_manifest_contract() {
         512_000,
         "product and durable GitHub workflow byte limits diverged"
     );
+}
+
+#[test]
+fn required_github_check_identity_is_event_isolated_and_never_skipped() {
+    let source = include_str!("../migrations/0058_required_check_event_isolation.sql");
+
+    for required in [
+        "ADD COLUMN aggregate_check_kind text NOT NULL DEFAULT 'required'",
+        "CHECK (aggregate_check_kind IN ('required', 'auxiliary'))",
+        "CREATE FUNCTION automata_github_auxiliary_check_name(TEXT)",
+        "CREATE FUNCTION automata_github_required_check_name(TEXT)",
+        "CREATE FUNCTION automata_github_required_check_not_skipped()",
+        "github_check_subjects_required_not_skipped",
+        "evidence.aggregate_check_kind = 'required'",
+        "CREATE OR REPLACE FUNCTION automata_github_check_subject_delivery_evidence_exact()",
+        "automata_github_workflow_check_name(",
+        "WHEN authority.aggregate_check_kind = 'required' THEN",
+        "automata_github_required_check_name(authority.check_name)",
+        "WHEN authority.aggregate_check_kind = 'auxiliary' THEN",
+        "automata_github_auxiliary_check_name(authority.check_name)",
+    ] {
+        assert!(
+            source.contains(required),
+            "required-Check isolation migration lost contract: {required}"
+        );
+    }
 }
 
 #[test]

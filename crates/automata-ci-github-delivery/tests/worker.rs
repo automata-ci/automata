@@ -567,6 +567,7 @@ impl FixtureSubjectEvidence {
             check_head_sha,
             GithubAuthenticatedEvent::new(GithubAuthenticatedEventKind::Push, "refs/heads/main")
                 .expect("authenticated event"),
+            automata_ci_store::GithubDeliveryCheckKind::Required,
             claimed.receipt().accepted_at(),
         )
         .expect("historical subject evidence");
@@ -617,6 +618,7 @@ impl FixtureSubjectEvidence {
                 base.check_subject_id(),
                 base.check_head_sha(),
                 event,
+                base.check_kind(),
                 base.accepted_at(),
             )
             .expect("authenticated event evidence");

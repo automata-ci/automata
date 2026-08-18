@@ -14,6 +14,11 @@
 //! refreshes a token implicitly. All public failures are sanitized
 //! classifications that omit provider bodies, URLs, keys, assertions, and
 //! bearer tokens.
+//!
+//! The broker also exposes a bounded, authenticated observation of effective
+//! installation event subscriptions and repository permissions. It does not
+//! embed product capability policy; the composing runtime validates the
+//! observed facts before enabling the relevant provider path.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -22,6 +27,7 @@ mod adapter;
 mod authority_coordinator;
 mod authority_issuer;
 mod config;
+mod installation_contract;
 mod response;
 mod runtime_authority;
 mod runtime_authority_lifecycle;
@@ -51,6 +57,10 @@ pub use automata_ci_scm::credential::ProviderResourceId as GithubAppIssuer;
 pub use config::{
     GITHUB_API_VERSION, GithubAppConfigurationError, GithubAppCredentialConfig,
     GithubAppHttpLimits, GithubInstallationId,
+};
+pub use installation_contract::{
+    GithubAppInstallationCapabilities, GithubAppInstallationObservationError,
+    GithubAppInstallationPermission,
 };
 pub use runtime_authority::{
     GithubInstallationTokenCandidateError, GithubInstallationTokenIndeterminate,

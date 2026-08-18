@@ -425,13 +425,22 @@ registration-wide permissions are Administration read, Checks write, Contents
 read, Pull requests read, and Merge queues read; Automata's repository-source
 authority remains scoped separately per repository. Administration read is
 required to authenticate the repository's effective Actions permission defaults.
-A missing permission or provider `403` fails startup, and an expired or invalid
-observation keeps later workflow admission fail-closed. Each event must satisfy
-its exact configured
+A startup attestation reads each effective installation with an App JWT and
+requires the configured App and installation identities, the `merge_group`
+subscription, and Merge queues read. Missing capability, installation approval,
+or a rejected observation fails startup. An expired or invalid permissions
+observation keeps later workflow admission fail-closed. Each event must satisfy its exact configured
 source-selection policy; an unconfigured event, source, or revision is rejected
 rather than silently generalized. Rotations advance the relevant configuration,
 verifier, manifest, policy, and authority revisions rather than reusing an old
 identity with changed bytes.
+
+The repository ruleset must require `<configured Check base> / required` from
+the Automata GitHub App. The bare configured base is never published. Workflow
+and auxiliary event Checks have separate derived names and cannot satisfy the
+required context. Change the App capability first, deploy the new runtime and
+migration, then change the ruleset from the old context to the derived required
+context; the transition intentionally fails closed and has no compatibility alias.
 
 ## Repository publication
 
