@@ -126,14 +126,18 @@ end-to-end gate are implemented together. The checked-in candidate image
 contract is deliberately unsigned and is not evidence of a built or tested
 image.
 
-The macOS profile supports Bash and `sh` `run:` steps, plus optional explicitly
-configured Python and PowerShell Core interpreters. Startup probes every
-configured interpreter inside a cold-booted, digest-attested macOS 15-or-newer
-ARM64 VM.
+The macOS profile supports Bash and `sh` `run:` steps, composite, repository,
+and admitted local actions, plus explicitly configured Node action generations
+and optional Python and PowerShell Core interpreters. Startup probes every
+configured interpreter and Node runtime inside a cold-booted, digest-attested
+macOS 15-or-newer ARM64 VM. Credential-free HTTP(S) routes for repository,
+Results, and OIDC authorities cross only the exact allowlisted Virtio-socket
+runtime proxy; the VM still has no general network device.
 The provider is single-slot; Virtualization.framework fixes whole-vCPU and
 memory size, and the guest applies the process ceiling before workflow traffic.
 The VM has no virtual NIC or host directory share. It does not advertise
-actions, containers, services, GPUs, or ephemeral-disk capacity.
+Docker actions, job containers, service containers, GPUs, or ephemeral-disk
+capacity.
 Template artifacts and mutable clones must live on one pinned, quota-bounded
 APFS volume that is alone in a dedicated non-boot container.
 

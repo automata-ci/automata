@@ -2,7 +2,7 @@
 #![deny(warnings)]
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fmt::Write as _,
     fs, io,
     net::{Ipv4Addr, SocketAddr},
@@ -24,9 +24,9 @@ use automata_ci_core::{
     JobAuthorityProfile, JobConclusion, JobContentReference, JobExecutionContext, JobId,
     JobInstanceIdentity, JobIr, JobIrEnvelope, JobPermissionRequest, JobResourceAllocation,
     JobRuntimeContext, JobSource, Lease, LeaseId, LogAck, OperatingSystem, OperationId,
-    ResourceCapacity, RunId, RunValueTemplates, RunnerId, RunnerRequirements, RunnerSessionId,
-    RuntimeBoolean, SemanticStep, Sha256Digest, ShellTemplate, StepId, StepIr, StrategyContext,
-    UnixMillis, ValueTemplate, WorkflowId,
+    ResourceCapacity, RunId, RunValueTemplates, RunnerFeature, RunnerId, RunnerRequirements,
+    RunnerSessionId, RuntimeBoolean, SemanticStep, Sha256Digest, ShellTemplate, StepId, StepIr,
+    StrategyContext, UnixMillis, ValueTemplate, WorkflowId,
 };
 #[cfg(target_os = "macos")]
 use automata_ci_core::{ExpressionProgram, ValueSource};
@@ -89,7 +89,7 @@ const VM_STORAGE_VOLUME_UUID_ENV: &str = "AUTOMATA_MACOS_VM_STORAGE_VOLUME_UUID"
 #[cfg(target_os = "macos")]
 const VM_STORAGE_QUOTA_BYTES_ENV: &str = "AUTOMATA_MACOS_VM_STORAGE_QUOTA_BYTES";
 #[cfg(target_os = "macos")]
-const DIFFERENTIAL_REFERENCE: &str = "differential.bash=ok\nisolation.cpu=4\nisolation.memory=8589934592\nisolation.process_limit=512\nisolation.no_host_helper=true\nisolation.no_ethernet=true\ndifferential.sh=ok\ndifferential.environment=command-file\ndifferential.output=vm-output\ndifferential.workspace=true\ndifferential.conclusion=success\n";
+const DIFFERENTIAL_REFERENCE: &str = "differential.bash=ok\nisolation.cpu=4\nisolation.memory=8589934592\nisolation.process_limit=512\nisolation.no_host_helper=true\nisolation.no_ethernet=true\nactions.node20=ok\nactions.node24=ok\ndifferential.sh=ok\ndifferential.environment=command-file\ndifferential.output=vm-output\ndifferential.workspace=true\ndifferential.conclusion=success\n";
 const TEARDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -98,7 +98,7 @@ const TEARDOWN_TIMEOUT: Duration = Duration::from_secs(10);
     ignore = "requires a sealed VM template on a physical Apple Silicon runner"
 )]
 #[allow(clippy::too_many_lines)]
-async fn shipped_runner_process_executes_a_claimed_isolated_shell_job() {
+async fn shipped_runner_process_executes_a_claimed_isolated_job_with_action_runtimes() {
     let root = TemporaryRoot::new();
     let runner_id = RunnerId::new();
     let session_id = RunnerSessionId::new();
@@ -194,6 +194,16 @@ async fn shipped_runner_process_executes_a_claimed_isolated_shell_job() {
         observation.hello_operating_system,
         Some(platform_operating_system())
     );
+    for feature in [
+        RunnerFeature::JAVASCRIPT_ACTIONS,
+        RunnerFeature::NODE20_ACTIONS,
+        RunnerFeature::NODE24_ACTIONS,
+    ] {
+        assert!(
+            observation.hello_features.contains(&feature),
+            "physical macOS runner omitted configured action feature {feature:?}"
+        );
+    }
     assert!(
         observation.accepted,
         "runner did not accept the offered lease"
@@ -372,7 +382,7 @@ fn macos_steps() -> Vec<StepIr> {
         RuntimeBoolean::literal(false),
         SemanticStep::run(RunValueTemplates::new(
             ValueTemplate::literal(
-                "set -eu\ntest \"$(/usr/sbin/sysctl -n hw.ncpu)\" = 4\ntest \"$(/usr/sbin/sysctl -n hw.memsize)\" = 8589934592\ntest \"$(ulimit -u)\" = 512\ntest ! -e /Library/Automata/bin/automata-macos-vm-helper\nif /sbin/ifconfig -l | /usr/bin/tr ' ' '\\n' | /usr/bin/grep -Eq '^en[0-9]+$'; then exit 1; fi\nprintf 'differential.bash=ok\\nisolation.cpu=4\\nisolation.memory=8589934592\\nisolation.process_limit=512\\nisolation.no_host_helper=true\\nisolation.no_ethernet=true\\n'\nprintf 'AUTOMATA_DIFFERENTIAL_ENV=command-file\\n' >> \"$GITHUB_ENV\"\nprintf 'fixture=vm-output\\n' >> \"$GITHUB_OUTPUT\"\nprintf '%s\\n' vm-workspace > differential-artifact.txt",
+                "set -eu\ntest \"$(/usr/sbin/sysctl -n hw.ncpu)\" = 4\ntest \"$(/usr/sbin/sysctl -n hw.memsize)\" = 8589934592\ntest \"$(ulimit -u)\" = 512\ntest ! -e /Library/Automata/bin/automata-macos-vm-helper\nif /sbin/ifconfig -l | /usr/bin/tr ' ' '\\n' | /usr/bin/grep -Eq '^en[0-9]+$'; then exit 1; fi\ncase \"$(/Library/Automata/externals/node20/bin/node --version)\" in v20.*) ;; *) exit 1 ;; esac\ncase \"$(/Library/Automata/externals/node24/bin/node --version)\" in v24.*) ;; *) exit 1 ;; esac\nprintf 'differential.bash=ok\\nisolation.cpu=4\\nisolation.memory=8589934592\\nisolation.process_limit=512\\nisolation.no_host_helper=true\\nisolation.no_ethernet=true\\nactions.node20=ok\\nactions.node24=ok\\n'\nprintf 'AUTOMATA_DIFFERENTIAL_ENV=command-file\\n' >> \"$GITHUB_ENV\"\nprintf 'fixture=vm-output\\n' >> \"$GITHUB_OUTPUT\"\nprintf '%s\\n' vm-workspace > differential-artifact.txt",
             )
             .expect("producer command"),
             ShellTemplate::named(ValueTemplate::literal("bash").expect("Bash shell")),
@@ -630,6 +640,7 @@ async fn write_all(stream: &TcpStream, mut bytes: &[u8]) -> io::Result<()> {
 struct ProcessObservation {
     hello_runner_id: Option<RunnerId>,
     hello_operating_system: Option<OperatingSystem>,
+    hello_features: BTreeSet<RunnerFeature>,
     accepted: bool,
     command_cursor: Option<CommandCursor>,
     runtime_authority_progress: RuntimeAuthorityProgress,
@@ -729,6 +740,10 @@ impl ProcessFlowHandler {
         state.observation.hello_runner_id = Some(hello.runner().runner_id());
         state.observation.hello_operating_system =
             Some(hello.runner().platform().operating_system().clone());
+        state
+            .observation
+            .hello_features
+            .clone_from(hello.runner().features());
         if hello.runner().runner_id() != self.runner_id
             || hello.runner().platform().operating_system() != &platform_operating_system()
         {
@@ -1251,7 +1266,7 @@ fn write_runner_config(
             "maximum_output_bytes": 1_048_576,
             "runner_root": "/Users/automata-job/runner",
             "home": "/Users/automata-job",
-            "path": "/usr/bin:/bin:/usr/sbin:/sbin",
+            "path": "/Library/Automata/externals/node24/bin:/Library/Automata/externals/node20/bin:/usr/bin:/bin:/usr/sbin:/sbin",
             "temp": "/Users/automata-job/tmp",
             "tool_cache": "/Users/automata-job/tool-cache",
             "toolchain": {
@@ -1266,8 +1281,8 @@ fn write_runner_config(
                 "sha256sum": "/usr/bin/shasum",
                 "node12": null,
                 "node16": null,
-                "node20": null,
-                "node24": null,
+                "node20": "/Library/Automata/externals/node20/bin/node",
+                "node24": "/Library/Automata/externals/node24/bin/node",
             },
         },
         "object_store": {
