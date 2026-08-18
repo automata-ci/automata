@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 use crate::{
     Cancellation, EnvironmentProfile, ExecutionEndpoint, NetworkPolicy, OperationId,
     ProviderCapabilities, ProviderError, ProviderId, ResourceLimits, RootFilesystemPolicy,
-    SandboxEnvironment, SandboxGeneration, SandboxHandle, SandboxPrivilegePolicy,
-    ServiceContainerBindings, ServiceContainerSpecs, TargetPath,
+    RuntimeServiceRoutes, SandboxEnvironment, SandboxGeneration, SandboxHandle,
+    SandboxPrivilegePolicy, ServiceContainerBindings, ServiceContainerSpecs, TargetPath,
 };
 
 /// Runner custody coordinates for one sandbox request.
@@ -49,6 +49,7 @@ pub struct SandboxSpec {
     resources: ResourceLimits,
     resource_allocation: Option<JobResourceAllocation>,
     services: ServiceContainerSpecs,
+    runtime_service_routes: RuntimeServiceRoutes,
 }
 
 impl SandboxSpec {
@@ -83,6 +84,7 @@ impl SandboxSpec {
             resources,
             resource_allocation: None,
             services: ServiceContainerSpecs::empty(),
+            runtime_service_routes: RuntimeServiceRoutes::empty(),
         }
     }
 
@@ -213,6 +215,20 @@ impl SandboxSpec {
     #[must_use]
     pub const fn services(&self) -> &ServiceContainerSpecs {
         &self.services
+    }
+
+    /// Adds the exact credential-free HTTP(S) origins which a provider-owned
+    /// runtime-service proxy must enforce for this sandbox generation.
+    #[must_use]
+    pub fn with_runtime_service_routes(mut self, routes: RuntimeServiceRoutes) -> Self {
+        self.runtime_service_routes = routes;
+        self
+    }
+
+    /// Returns the exact origins requested through the runtime-service proxy.
+    #[must_use]
+    pub const fn runtime_service_routes(&self) -> &RuntimeServiceRoutes {
+        &self.runtime_service_routes
     }
 }
 
@@ -422,7 +438,9 @@ pub trait SandboxProvider: fmt::Debug + Send + Sync {
     ///
     /// Reusing an operation identifier with different request material must
     /// fail closed. A successful replay returns the same generation-fenced
-    /// resource rather than creating another sandbox.
+    /// resource rather than creating another sandbox. Providers which do not
+    /// advertise [`crate::SandboxCapability::RuntimeServiceProxy`] must reject
+    /// a nonempty [`SandboxSpec::runtime_service_routes`] request.
     ///
     /// # Errors
     ///

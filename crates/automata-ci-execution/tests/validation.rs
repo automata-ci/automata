@@ -6,12 +6,14 @@ use automata_ci_execution::{
     ExecutionOutput, ExecutionOutputRecord, ExecutionOutputStream, ExecutionTermination,
     ImmutableImage, MAX_EXECUTION_OUTPUT_BYTES, MAX_EXECUTION_OUTPUT_RECORD_BYTES,
     MAX_EXECUTION_OUTPUT_RECORDS, NetworkPolicy, OperationId, ProviderCapabilities, ProviderId,
-    ResourceLimits, RootFilesystemPolicy, RunnerId, SandboxCapability, SandboxCustody,
-    SandboxEnvironment, SandboxGeneration, SandboxHandle, SandboxPrivilegePolicy, SandboxSpec,
-    ServiceContainerBinding, ServiceContainerBindings, ServiceContainerSpec, ServiceContainerSpecs,
-    ServiceHealthOverrides, ServiceHealthPolicy, ServiceNetwork, ServicePort, ServicePortBinding,
-    ServiceTransportProtocol, Sha256Digest, TargetPath, ValueError,
+    ResourceLimits, RootFilesystemPolicy, RunnerId, RuntimeServiceProtocol, RuntimeServiceRoute,
+    RuntimeServiceRoutes, SandboxCapability, SandboxCustody, SandboxEnvironment, SandboxGeneration,
+    SandboxHandle, SandboxPrivilegePolicy, SandboxSpec, ServiceContainerBinding,
+    ServiceContainerBindings, ServiceContainerSpec, ServiceContainerSpecs, ServiceHealthOverrides,
+    ServiceHealthPolicy, ServiceNetwork, ServicePort, ServicePortBinding, ServiceTransportProtocol,
+    Sha256Digest, TargetPath, ValueError,
 };
+use url::Url;
 
 #[test]
 fn only_termination_authorizes_backend_termination_handling() {
@@ -43,6 +45,42 @@ fn custody() -> SandboxCustody {
     SandboxCustody::ProfileAdmission {
         runner_id: RunnerId::new(),
     }
+}
+
+#[test]
+fn runtime_service_routes_are_exact_credential_free_origins() {
+    let https = RuntimeServiceRoute::from_url(
+        &Url::parse("https://Results.Example.test/artifacts?version=2").expect("URL"),
+    )
+    .expect("HTTPS route");
+    assert_eq!(https.protocol(), RuntimeServiceProtocol::Https);
+    assert_eq!(https.host(), "results.example.test");
+    assert_eq!(https.port().get(), 443);
+
+    let ipv6 =
+        RuntimeServiceRoute::from_url(&Url::parse("http://[2001:db8::1]:8080/oidc").expect("URL"))
+            .expect("HTTP IPv6 route");
+    assert_eq!(ipv6.protocol(), RuntimeServiceProtocol::Http);
+    assert_eq!(ipv6.host(), "2001:db8::1");
+    assert_eq!(ipv6.port().get(), 8080);
+
+    let routes = RuntimeServiceRoutes::new([https.clone(), ipv6.clone(), https.clone()])
+        .expect("bounded route set");
+    assert_eq!(routes.as_slice(), &[ipv6, https.clone()]);
+    assert_eq!(
+        RuntimeServiceRoute::from_url(
+            &Url::parse("https://token@example.test/").expect("credential URL")
+        ),
+        Err(ValueError::InvalidRuntimeServiceRoute)
+    );
+    assert_eq!(
+        RuntimeServiceRoute::from_url(&Url::parse("ssh://example.test/").expect("SSH URL")),
+        Err(ValueError::InvalidRuntimeServiceRoute)
+    );
+    assert_eq!(
+        RuntimeServiceRoutes::new(std::iter::repeat_n(https, 17)),
+        Err(ValueError::InvalidRuntimeServiceRoute)
+    );
 }
 
 #[test]
@@ -101,6 +139,7 @@ fn image_profile_and_spec_are_exact_and_never_resolve_hosted_labels() {
         ResourceLimits::new(512 * 1024 * 1024, 2_000, 256).expect("limits"),
     );
     assert_eq!(spec.privilege(), SandboxPrivilegePolicy::Unprivileged);
+    assert!(spec.runtime_service_routes().is_empty());
     let administrative = spec
         .clone()
         .with_privilege(SandboxPrivilegePolicy::Administrator);

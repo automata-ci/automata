@@ -36,6 +36,7 @@
 mod capability;
 mod endpoint;
 mod error;
+mod runtime_service;
 mod sandbox;
 mod service;
 mod value;
@@ -55,6 +56,9 @@ pub use endpoint::{
 pub use error::{
     ExecutionError, ExecutionErrorKind, ExecutionStage, OperationOutcome, ProviderError,
     ProviderErrorKind, ProviderStage, ValueError,
+};
+pub use runtime_service::{
+    MAX_RUNTIME_SERVICE_ROUTES, RuntimeServiceProtocol, RuntimeServiceRoute, RuntimeServiceRoutes,
 };
 pub use sandbox::{
     DestroyDisposition, DestroySandbox, SandboxCustody, SandboxInspection, SandboxProvider,

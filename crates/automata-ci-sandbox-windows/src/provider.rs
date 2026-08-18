@@ -1531,6 +1531,7 @@ fn validate_spec(spec: &SandboxSpec) -> Result<(), ProviderError> {
         || spec.root_filesystem() != RootFilesystemPolicy::Writable
         || spec.privilege() != SandboxPrivilegePolicy::Unprivileged
         || !spec.services().is_empty()
+        || !spec.runtime_service_routes().is_empty()
         || spec.scratch().is_some()
         || spec.workspace().platform() != TargetPlatform::Windows
         || !windows_descendant_or_equal(spec.workspace(), spec.profile().workspace())

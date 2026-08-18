@@ -84,6 +84,7 @@ fn validated_allocation(
 ) -> Result<JobResourceAllocation, automata_ci_execution::ProviderError> {
     if spec.network() != SandboxNetworkPolicy::Disabled
         || !spec.services().is_empty()
+        || !spec.runtime_service_routes().is_empty()
         || spec.privilege() != automata_ci_execution::SandboxPrivilegePolicy::Unprivileged
         || !spec.has_coherent_resource_contract()
     {

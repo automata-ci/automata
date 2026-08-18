@@ -150,6 +150,24 @@ impl Fixture {
         Self::with_default_environment(actions, responses, ExecutionEnvironment::empty())
     }
 
+    pub fn without_runtime_service_proxy(
+        actions: Vec<PreparedAction>,
+        responses: Vec<PhaseResponse>,
+    ) -> Self {
+        Self::with_platform_components_and_timeout_and_node_and_runtime_service_proxy(
+            actions,
+            responses,
+            ExecutionEnvironment::empty(),
+            true,
+            Arc::new(FakeJobContent::default()),
+            Arc::new(FakeContexts::readable_secret()),
+            Duration::from_mins(5),
+            TargetPlatform::Posix,
+            true,
+            false,
+        )
+    }
+
     pub fn without_node(actions: Vec<PreparedAction>, responses: Vec<PhaseResponse>) -> Self {
         Self::with_platform_components_and_timeout_and_node(
             actions,
@@ -522,6 +540,33 @@ impl Fixture {
         platform: TargetPlatform,
         configure_node: bool,
     ) -> Self {
+        Self::with_platform_components_and_timeout_and_node_and_runtime_service_proxy(
+            actions,
+            responses,
+            default_environment,
+            service_containers,
+            content,
+            contexts,
+            timeout,
+            platform,
+            configure_node,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn with_platform_components_and_timeout_and_node_and_runtime_service_proxy(
+        actions: Vec<PreparedAction>,
+        responses: Vec<PhaseResponse>,
+        default_environment: ExecutionEnvironment,
+        service_containers: bool,
+        content: Arc<dyn JobContentPort>,
+        contexts: Arc<dyn GithubContextPort>,
+        timeout: Duration,
+        platform: TargetPlatform,
+        configure_node: bool,
+        runtime_service_proxy: bool,
+    ) -> Self {
         let environment = match platform {
             TargetPlatform::Posix => sandbox_environment(default_environment),
             TargetPlatform::Windows => windows_sandbox_environment(default_environment),
@@ -542,6 +587,7 @@ impl Fixture {
             environment.clone(),
             Arc::clone(&endpoint_state),
             service_containers,
+            runtime_service_proxy,
         ));
         let catalog = Arc::new(
             ImmutableSandboxEnvironmentCatalog::new([environment.clone()]).expect("valid catalog"),
@@ -1891,6 +1937,7 @@ impl FakeProvider {
         environment: SandboxEnvironment,
         endpoint_state: Arc<Mutex<EndpointState>>,
         service_containers: bool,
+        runtime_service_proxy: bool,
     ) -> Self {
         let id = ProviderId::new("fake").expect("valid provider");
         let handle = SandboxHandle::new(id.clone(), "sandbox-1").expect("valid handle");
@@ -1922,6 +1969,9 @@ impl FakeProvider {
         ];
         if administrator {
             capabilities.push(SandboxCapability::Administrator);
+        }
+        if runtime_service_proxy {
+            capabilities.push(SandboxCapability::RuntimeServiceProxy);
         }
         if service_containers && environment.workspace().platform() == TargetPlatform::Posix {
             capabilities.push(SandboxCapability::ServiceContainers);

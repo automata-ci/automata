@@ -922,6 +922,7 @@ fn validate_spec(
         && spec.resources().memory_bytes() >= template.minimum_memory_bytes
         && spec.resources().pids() == template.process_limit
         && spec.services().is_empty()
+        && spec.runtime_service_routes().is_empty()
         && spec.has_coherent_resource_contract()
         && !spec
             .profile()

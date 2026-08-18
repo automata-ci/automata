@@ -15,8 +15,9 @@ use automata_ci_workflow_actions::{GithubConditionCompiler, GithubConditionPhase
 
 use support::{
     Fixture, PHASE_FILE_ENVIRONMENT_NAMES, PhaseResponse, SECRET, credential_free_envelope,
-    envelope_with_environment, envelope_with_working_directory, environment_map, run_step,
-    run_step_with_command_template, run_step_with_named_shell, run_step_with_working_directory,
+    envelope, envelope_with_environment, envelope_with_working_directory, environment_map,
+    run_step, run_step_with_command_template, run_step_with_named_shell,
+    run_step_with_working_directory,
 };
 
 #[tokio::test]
@@ -939,6 +940,25 @@ fn assert_sandbox_spec(fixture: &Fixture, runner_id: RunnerId, slot_ordinal: u16
             slot_ordinal: observed_slot,
         } if observed_runner == runner_id && observed_slot.get() == slot_ordinal
     ));
+}
+
+#[tokio::test]
+async fn provider_without_runtime_service_proxy_receives_no_authority_routes() {
+    let fixture =
+        Fixture::without_runtime_service_proxy(Vec::new(), vec![PhaseResponse::success()]);
+    let request = fixture.request(envelope(vec![run_step("step", "Step", "true")]));
+    let events: Arc<dyn ExecutionEvents> = fixture.events.clone();
+
+    let result = fixture
+        .executor
+        .execute(request, events, ExecutionCancellation::new())
+        .await
+        .expect("job executes without a runtime-service proxy");
+
+    assert_eq!(result.conclusion(), JobConclusion::Success);
+    let specs = fixture.provider.specs();
+    assert_eq!(specs.len(), 1);
+    assert!(specs[0].runtime_service_routes().is_empty());
 }
 
 #[tokio::test]

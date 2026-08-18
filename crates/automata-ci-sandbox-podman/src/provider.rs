@@ -4354,6 +4354,7 @@ fn validate_spec(spec: &SandboxSpec) -> Result<(), ProviderError> {
     };
     if spec.profile().image().is_none()
         || spec.scratch().is_some()
+        || !spec.runtime_service_routes().is_empty()
         || spec.network() == NetworkPolicy::Host
         || spec.root_filesystem() == RootFilesystemPolicy::Host
         || spec.privilege() == SandboxPrivilegePolicy::Host

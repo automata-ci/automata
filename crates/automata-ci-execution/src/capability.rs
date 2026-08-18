@@ -23,10 +23,15 @@ pub enum SandboxCapability {
     CopyFrom,
     /// Injects validated process-environment variables at execution time.
     EnvironmentInjection,
-    /// Enforces a sandbox with networking completely disabled.
+    /// Enforces a sandbox with general guest networking completely disabled.
+    /// A separately requested [`Self::RuntimeServiceProxy`] remains an exact,
+    /// provider-filtered side channel and does not weaken this boundary.
     NetworkDisabled,
     /// Enforces an isolated network that permits provider-controlled egress.
     PrivateEgress,
+    /// Exposes only exact job-bound HTTP(S) origins through a
+    /// provider-controlled proxy, independently of general guest networking.
+    RuntimeServiceProxy,
     /// Runs a trusted workload on the host network without network isolation.
     HostNetwork,
     /// Launches workloads with a read-only root filesystem.
