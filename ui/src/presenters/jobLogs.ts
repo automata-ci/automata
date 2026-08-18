@@ -1,25 +1,31 @@
 import type {
+  LiveLogChannel,
   LiveLogGroup,
   LiveLogGroupFinishedRecord,
-  LiveLogLineRecord,
   LiveLogRecord,
 } from "../logs/sse";
+import { TerminalTranscript, type TerminalLine } from "../logs/terminal";
 
 export interface LogGroupView extends LiveLogGroup {
   readonly startedAtMs: number;
   readonly finishedAtMs: number | null;
   readonly conclusion: LiveLogGroupFinishedRecord["conclusion"] | null;
-  readonly lines: readonly LiveLogLineRecord[];
+  readonly lines: readonly TerminalLine[];
+}
+
+interface LogGroupState extends LogGroupView {
+  readonly transcripts: Readonly<Record<LiveLogChannel, TerminalTranscript>>;
+  completeLines: TerminalLine[];
 }
 
 export interface InitialLogViewState {
   readonly expanded: ReadonlySet<string>;
-  readonly groups: Map<string, LogGroupView>;
+  readonly groups: Map<string, LogGroupState>;
   readonly ordered: readonly LogGroupView[];
 }
 
 export function replayLogRecords(records: readonly LiveLogRecord[]): InitialLogViewState {
-  const groups = new Map<string, LogGroupView>();
+  const groups = new Map<string, LogGroupState>();
   for (const record of records) applyLogRecord(groups, record);
   return {
     groups,
@@ -33,7 +39,7 @@ export function replayLogRecords(records: readonly LiveLogRecord[]): InitialLogV
 }
 
 export function applyLogRecord(
-  groups: Map<string, LogGroupView>,
+  groups: Map<string, LogGroupState>,
   record: LiveLogRecord,
 ): void {
   if (record.type === "group_started") {
@@ -41,25 +47,42 @@ export function applyLogRecord(
     if (record.group.parentId !== null && !groups.has(record.group.parentId)) {
       throw new Error("the log stream referenced an unknown parent group");
     }
+    const completeLines: TerminalLine[] = [];
     groups.set(record.group.id, {
       ...record.group,
       startedAtMs: record.emittedAtMs,
       finishedAtMs: null,
       conclusion: null,
-      lines: [],
+      lines: completeLines,
+      transcripts: {
+        stdout: new TerminalTranscript(),
+        stderr: new TerminalTranscript(),
+        system: new TerminalTranscript(),
+      },
+      completeLines,
     });
     return;
   }
   const group = groups.get(record.groupId);
   if (group === undefined) throw new Error("the log stream referenced an unknown group");
   if (group.conclusion !== null) throw new Error("the log stream referenced a finished group");
-  if (record.type === "line") {
-    groups.set(record.groupId, { ...group, lines: [...group.lines, record] });
+  if (record.type === "output") {
+    group.completeLines = insertCompletedLines(group.completeLines, group.transcripts[record.channel].push(record));
+    groups.set(record.groupId, {
+      ...group,
+      lines: terminalLines(group.transcripts, group.completeLines),
+    });
   } else {
+    group.completeLines = insertCompletedLines(group.completeLines, [
+      ...group.transcripts.stdout.finish(),
+      ...group.transcripts.stderr.finish(),
+      ...group.transcripts.system.finish(),
+    ]);
     groups.set(record.groupId, {
       ...group,
       finishedAtMs: record.emittedAtMs,
       conclusion: record.conclusion,
+      lines: group.completeLines,
     });
   }
 }
@@ -69,7 +92,54 @@ export function orderedLogGroups(
 ): readonly LogGroupView[] {
   return [...groups.values()].sort(
     (left, right) => left.ordinal - right.ordinal || left.id.localeCompare(right.id),
-  );
+  ).map((group) => {
+    if (!isLogGroupState(group)) return group;
+    const { transcripts: _transcripts, completeLines: _completeLines, ...view } = group;
+    return view;
+  });
+}
+
+function isLogGroupState(group: LogGroupView): group is LogGroupState {
+  return "transcripts" in group && "completeLines" in group;
+}
+
+function terminalLines(
+  transcripts: Readonly<Record<LiveLogChannel, TerminalTranscript>>,
+  completeLines: readonly TerminalLine[],
+): readonly TerminalLine[] {
+  const pending = [
+    transcripts.stdout.currentLine(),
+    transcripts.stderr.currentLine(),
+    transcripts.system.currentLine(),
+  ].filter((line): line is TerminalLine => line !== null);
+  if (pending.length === 0) return completeLines;
+  return [...completeLines, ...pending].sort((left, right) => compareSequence(left.sourceSequence, right.sourceSequence));
+}
+
+function insertCompletedLines(target: TerminalLine[], additions: readonly TerminalLine[]): TerminalLine[] {
+  for (const line of additions) {
+    const tail = target[target.length - 1];
+    if (tail === undefined || compareSequence(tail.sourceSequence, line.sourceSequence) <= 0) {
+      target.push(line);
+      continue;
+    }
+    let lower = 0;
+    let upper = target.length;
+    while (lower < upper) {
+      const middle = (lower + upper) >>> 1;
+      if (compareSequence(target[middle]?.sourceSequence ?? "0", line.sourceSequence) <= 0) lower = middle + 1;
+      else upper = middle;
+    }
+    const reordered = [...target];
+    reordered.splice(lower, 0, line);
+    target = reordered;
+  }
+  return target;
+}
+
+function compareSequence(left: string, right: string): number {
+  if (left.length !== right.length) return left.length - right.length;
+  return left === right ? 0 : left < right ? -1 : 1;
 }
 
 export function projectVisibleLogGroups(
@@ -89,10 +159,10 @@ export function projectVisibleLogGroups(
     }));
 }
 
-function logLineMatches(line: LiveLogLineRecord, query: string): boolean {
+function logLineMatches(line: TerminalLine, query: string): boolean {
   return line.text.toLocaleLowerCase().includes(query) ||
     line.channel.includes(query) ||
-    line.sequence.includes(query);
+    line.number.includes(query);
 }
 
 export function toggleSet(values: ReadonlySet<string>, id: string): ReadonlySet<string> {
@@ -120,13 +190,16 @@ export function logGroupStatus(group: LogGroupView): string {
 }
 
 export function logTime(milliseconds: number): string {
-  return new Intl.DateTimeFormat(undefined, {
+  logTimeFormatter ??= new Intl.DateTimeFormat(undefined, {
     hour: "2-digit",
     minute: "2-digit",
     second: "2-digit",
     hour12: false,
-  }).format(milliseconds);
+  });
+  return logTimeFormatter.format(milliseconds);
 }
+
+let logTimeFormatter: Intl.DateTimeFormat | undefined;
 
 export function logGroupPanelId(value: string): string {
   let encoded = "";

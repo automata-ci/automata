@@ -6,7 +6,7 @@ use thiserror::Error;
 use crate::{AttemptId, JobConclusion, LogStreamId, UnixMillis};
 
 /// Current durable execution-log document schema.
-pub const LOG_SCHEMA_VERSION: u16 = 2;
+pub const LOG_SCHEMA_VERSION: u16 = 3;
 
 /// Defensive maximum for one wire frame; larger writes must be chunked.
 pub const MAX_LOG_FRAME_BYTES: usize = 1_048_576;
@@ -152,7 +152,7 @@ pub enum LogGroupKind {
     Cleanup,
 }
 
-/// Immutable metadata announced before a group can own log lines.
+/// Immutable metadata announced before a group can own output bytes.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct LogGroup {
     id: LogGroupId,
@@ -251,13 +251,13 @@ fn invalid_log_group_name_character(character: char) -> bool {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum LogRecord {
-    /// Announces immutable metadata before the group owns any lines.
+    /// Announces immutable metadata before the group owns any output bytes.
     GroupStarted {
         /// Immutable metadata for the newly active group.
         group: LogGroup,
     },
-    /// One output payload explicitly owned by a previously announced group.
-    Line {
+    /// One output-byte payload explicitly owned by a previously announced group.
+    Output {
         /// Group that owns the output bytes.
         group_id: LogGroupId,
         /// Logical source of the output bytes.
@@ -309,13 +309,13 @@ impl LogFrame {
         )
     }
 
-    /// Creates one group-owned output line record.
+    /// Creates one group-owned output-byte record.
     ///
     /// # Errors
     ///
     /// Returns [`LogValidationError`] when the payload is empty or exceeds
     /// [`MAX_LOG_FRAME_BYTES`].
-    pub fn line(
+    pub fn output(
         stream_id: LogStreamId,
         attempt_id: AttemptId,
         sequence: LogSequence,
@@ -329,7 +329,7 @@ impl LogFrame {
             attempt_id,
             sequence,
             emitted_at,
-            LogRecord::Line {
+            LogRecord::Output {
                 group_id,
                 channel,
                 payload,
@@ -416,9 +416,9 @@ impl LogFrame {
         }
         match &self.record {
             LogRecord::GroupStarted { group } => group.validate()?,
-            LogRecord::Line { payload, .. } => {
+            LogRecord::Output { payload, .. } => {
                 if payload.is_empty() {
-                    return Err(LogValidationError::EmptyLine);
+                    return Err(LogValidationError::EmptyOutput);
                 }
                 if log_frame_byte_rejection(payload.len()).is_some() {
                     return Err(LogValidationError::FrameTooLarge {
@@ -472,7 +472,7 @@ impl LogFrame {
     #[must_use]
     pub const fn channel(&self) -> Option<LogChannel> {
         match self.record {
-            LogRecord::Line { channel, .. } => Some(channel),
+            LogRecord::Output { channel, .. } => Some(channel),
             LogRecord::GroupStarted { .. }
             | LogRecord::GroupFinished { .. }
             | LogRecord::StreamFinished => None,
@@ -483,7 +483,7 @@ impl LogFrame {
     #[must_use]
     pub fn payload(&self) -> &[u8] {
         match &self.record {
-            LogRecord::Line { payload, .. } => payload,
+            LogRecord::Output { payload, .. } => payload,
             LogRecord::GroupStarted { .. }
             | LogRecord::GroupFinished { .. }
             | LogRecord::StreamFinished => &[],
@@ -611,9 +611,9 @@ pub enum LogValidationError {
         /// Schema version found at the interchange boundary.
         received: u16,
     },
-    /// A line record carried no bytes.
-    #[error("a log line cannot have an empty payload")]
-    EmptyLine,
+    /// An output record carried no bytes.
+    #[error("a log output record cannot have an empty payload")]
+    EmptyOutput,
     /// A group identity was empty.
     #[error("a log group identity cannot be empty")]
     EmptyGroupId,

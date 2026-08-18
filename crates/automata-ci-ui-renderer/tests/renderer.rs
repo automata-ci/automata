@@ -35,6 +35,7 @@ fn valid_request() -> Value {
                 "viewer": null,
                 "navigation": [
                     { "label": "Repositories", "href": "/repositories", "current": false },
+                    { "label": "Runners", "href": "/runners", "current": false },
                     { "label": "Actions", "href": "/automata-ci/automata/actions", "current": true }
                 ]
             },
@@ -113,6 +114,7 @@ fn job_log_request(log_visibility: &str) -> Value {
             "viewer": null,
             "navigation": [
                 { "label": "Repositories", "href": "/repositories", "current": false },
+                { "label": "Runners", "href": "/runners", "current": false },
                 { "label": "Actions", "href": "/automata-ci/automata/actions", "current": true }
             ]
         },
@@ -185,7 +187,8 @@ fn repository_directory_request() -> Value {
                 "description": "Browse repositories available under your current access.",
                 "viewer": { "displayName": "Ada" },
                 "navigation": [
-                    { "label": "Repositories", "href": "/repositories", "current": true }
+                    { "label": "Repositories", "href": "/repositories", "current": true },
+                    { "label": "Runners", "href": "/runners", "current": false }
                 ]
             },
             "heading": "Repositories",

@@ -44,9 +44,9 @@ use super::web::{
 pub(crate) const BROWSER_LIVE_LOG_TICKET_PATH: &str =
     "/{owner}/{repository}/actions/runs/{run_id}/jobs/{job_id}/live-ticket";
 /// Credential-only public endpoint used by the reference streaming transport.
-pub(crate) const LIVE_LOG_SSE_PATH: &str = "/live/v2/logs";
+pub(crate) const LIVE_LOG_SSE_PATH: &str = "/live/v3/logs";
 
-const TICKET_PREFIX: &str = "allt_v2_";
+const TICKET_PREFIX: &str = "allt_v3_";
 const TICKET_RANDOM_BYTES: usize = 32;
 const TICKET_ENCODED_BYTES: usize = 43;
 const TICKET_LENGTH: usize = TICKET_PREFIX.len() + TICKET_ENCODED_BYTES;
@@ -568,7 +568,6 @@ struct SseLogDocument<'a> {
     stream_id: String,
     /// Decimal text preserves the complete u64 identity in JavaScript.
     sequence: String,
-    fragment: Option<u32>,
     emitted_at_ms: i64,
     #[serde(flatten)]
     record: SseLogRecord<'a>,
@@ -584,10 +583,11 @@ enum SseLogRecord<'a> {
     GroupStarted {
         group: SseLogGroup<'a>,
     },
-    Line {
+    Output {
         group_id: &'a str,
         channel: &'static str,
-        text: &'a str,
+        part: u32,
+        data_base64: &'a str,
     },
     GroupFinished {
         group_id: &'a str,
@@ -606,31 +606,30 @@ struct SseLogGroup<'a> {
 }
 
 fn sse_log_event(scope: &HumanLiveLogScope, record: &LiveLogRecord) -> Result<Bytes, ()> {
-    let (sequence, fragment, emitted_at_ms, payload) = match &record.record {
+    let (sequence, emitted_at_ms, payload) = match &record.record {
         LogRecord::GroupStarted {
             sequence,
             emitted_at,
             group,
         } => (
             *sequence,
-            None,
             emitted_at.get(),
             SseLogRecord::GroupStarted {
                 group: sse_log_group(group),
             },
         ),
-        LogRecord::Line(line) => (
-            line.sequence,
-            line.fragment,
-            line.emitted_at.get(),
-            SseLogRecord::Line {
-                group_id: &line.group_id,
-                channel: match line.channel {
+        LogRecord::Output(output) => (
+            output.sequence,
+            output.emitted_at.get(),
+            SseLogRecord::Output {
+                group_id: &output.group_id,
+                channel: match output.channel {
                     LogChannel::Stdout => "stdout",
                     LogChannel::Stderr => "stderr",
                     LogChannel::System => "system",
                 },
-                text: &line.text,
+                part: output.part,
+                data_base64: &output.data_base64,
             },
         ),
         LogRecord::GroupFinished {
@@ -640,7 +639,6 @@ fn sse_log_event(scope: &HumanLiveLogScope, record: &LiveLogRecord) -> Result<By
             conclusion,
         } => (
             *sequence,
-            None,
             emitted_at.get(),
             SseLogRecord::GroupFinished {
                 group_id,
@@ -658,7 +656,6 @@ fn sse_log_event(scope: &HumanLiveLogScope, record: &LiveLogRecord) -> Result<By
         protocol_version: HUMAN_LIVE_LOG_PROTOCOL_VERSION,
         stream_id: scope.stream_id().to_string(),
         sequence: sequence.to_string(),
-        fragment,
         emitted_at_ms,
         record: payload,
     };
@@ -962,7 +959,7 @@ mod tests {
         assert!(ticket.expose_secret().starts_with(TICKET_PREFIX));
         assert_eq!(ticket.expose_secret().len(), TICKET_LENGTH);
         assert!(ticket_digest(ticket.expose_secret()).is_ok());
-        assert!(ticket_digest("allt_v2_not-canonical").is_err());
+        assert!(ticket_digest("allt_v3_not-canonical").is_err());
         assert!(!format!("{ticket:?}").contains(ticket.expose_secret()));
     }
 
@@ -972,12 +969,12 @@ mod tests {
             protocol_version: HUMAN_LIVE_LOG_PROTOCOL_VERSION,
             stream_id: Uuid::from_u128(5).to_string(),
             sequence: u64::MAX.to_string(),
-            fragment: None,
             emitted_at_ms: 1_777_890_010_000,
-            record: SseLogRecord::Line {
+            record: SseLogRecord::Output {
                 group_id: "phase/1",
                 channel: "stdout",
-                text: "complete",
+                part: 0,
+                data_base64: "Y29tcGxldGU",
             },
         };
 
@@ -995,7 +992,6 @@ mod tests {
             protocol_version: HUMAN_LIVE_LOG_PROTOCOL_VERSION,
             stream_id: Uuid::from_u128(5).to_string(),
             sequence: "2".to_owned(),
-            fragment: None,
             emitted_at_ms: 1_777_890_010_000,
             record: SseLogRecord::GroupFinished {
                 group_id: "phase/1",
@@ -1014,7 +1010,7 @@ mod tests {
         assert_eq!(
             sse_complete_event("checkpoint_terminal"),
             Bytes::from_static(
-                b"id: checkpoint_terminal\nevent: complete\ndata: {\"protocolVersion\":2}\n\n",
+                b"id: checkpoint_terminal\nevent: complete\ndata: {\"protocolVersion\":3}\n\n",
             ),
         );
     }

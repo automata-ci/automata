@@ -203,6 +203,8 @@
 
 .log-line {
   display: grid;
+  content-visibility: auto;
+  contain-intrinsic-block-size: auto 26px;
   grid-column: 1 / -1;
   grid-template-columns: subgrid;
   min-height: 26px;
@@ -247,6 +249,16 @@
 
 .log-line[data-channel="stderr"] > code {
   color: var(--log-danger);
+}
+
+.terminal-text {
+  border-radius: 2px;
+}
+
+.terminal-link {
+  color: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
 }
 
 .log-group__empty,

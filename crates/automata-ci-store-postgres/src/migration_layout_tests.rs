@@ -221,6 +221,10 @@ const FROZEN_MIGRATIONS: &[(&str, &str)] = &[
         "0054_provider_neutral_workload_oidc.sql",
         "6bcb92936a5882ee9d085e8bef4da2c95903d0e75860d08dd52a140c18b94351dccb4263e0f0dd40964b337c3101dc53",
     ),
+    (
+        "0055_terminal_log_output_v3.sql",
+        "aad28f96b40e06578af7609ef1ef9073315c4a2cf3e9b04d464eb44762ce59f4b3613e73c18710c491ca3d6e1064571f",
+    ),
 ];
 
 const BASELINE_MIGRATION_COUNT: u32 = 26;
@@ -598,6 +602,30 @@ fn structured_live_logs_are_a_current_only_destructive_cutover() {
         assert!(
             !source.contains(forbidden),
             "structured-log migration retained compatibility surface: {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn terminal_log_output_v3_is_a_current_only_destructive_cutover() {
+    let source = include_str!("../migrations/0055_terminal_log_output_v3.sql");
+
+    for required in [
+        "DELETE FROM human_live_log_tickets",
+        "DELETE FROM attempt_log_streams",
+        "DROP CONSTRAINT attempt_log_streams_schema_current",
+        "CHECK (log_schema = 3)",
+        "CHECK (protocol_version = 3)",
+    ] {
+        assert!(
+            source.contains(required),
+            "terminal-log migration lost hard-cutover contract: {required}"
+        );
+    }
+    for forbidden in ["IF NOT EXISTS", "IN (2, 3)"] {
+        assert!(
+            !source.contains(forbidden),
+            "terminal-log migration retained compatibility surface: {forbidden}"
         );
     }
 }

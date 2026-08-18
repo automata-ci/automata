@@ -6,7 +6,7 @@ use automata_ci_core::{
 #[test]
 fn log_frame_and_ack_schemas_reject_noncurrent_versions() {
     let stream = LogStreamId::new();
-    let frame = LogFrame::line(
+    let frame = LogFrame::output(
         stream,
         AttemptId::new(),
         LogSequence::new(0),
@@ -56,7 +56,7 @@ fn ack_is_exclusive_at_zero_and_advances_contiguously() {
 
 #[test]
 fn log_frame_json_round_trip_preserves_arbitrary_bytes() {
-    let frame = LogFrame::line(
+    let frame = LogFrame::output(
         LogStreamId::new(),
         AttemptId::new(),
         LogSequence::new(0),

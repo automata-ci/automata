@@ -1282,7 +1282,7 @@ pub struct LogGroup {
     pub ordinal: u32,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct LogLine {
+pub struct LogOutput {
     #[prost(string, tag = "1")]
     pub group_id: ::prost::alloc::string::String,
     #[prost(enumeration = "LogChannel", tag = "2")]
@@ -1321,7 +1321,7 @@ pub mod log_frame {
         #[prost(message, tag = "9")]
         GroupStarted(super::LogGroup),
         #[prost(message, tag = "10")]
-        Line(super::LogLine),
+        Output(super::LogOutput),
         #[prost(message, tag = "11")]
         GroupFinished(super::LogGroupFinished),
         #[prost(message, tag = "12")]

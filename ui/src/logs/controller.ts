@@ -54,7 +54,7 @@ export interface LiveLogFailure {
 interface RecordIdentity {
   readonly streamId: string;
   readonly sequence: string;
-  readonly fragment: number | null;
+  readonly part: number;
 }
 
 interface LiveLogTransportDriver {
@@ -281,7 +281,7 @@ export class LiveLogController {
     this.#lastRecord = {
       streamId: record.streamId,
       sequence: record.sequence,
-      fragment: record.fragment,
+      part: record.type === "output" ? record.part : 0,
     };
     this.#checkpoint = nextCheckpoint;
     return true;
@@ -297,13 +297,11 @@ function compareRecord(current: LiveLogRecord, previous: RecordIdentity): number
   if (sequence !== 0) {
     return sequence;
   }
-  if (current.fragment === previous.fragment) {
+  const part = current.type === "output" ? current.part : 0;
+  if (part === previous.part) {
     return 0;
   }
-  if (current.fragment === null || previous.fragment === null) {
-    return -1;
-  }
-  return current.fragment < previous.fragment ? -1 : 1;
+  return part < previous.part ? -1 : 1;
 }
 
 function selectTransport(access: LiveLogAccess): {

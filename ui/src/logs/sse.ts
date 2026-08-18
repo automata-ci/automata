@@ -7,7 +7,8 @@ import {
 const MAX_SSE_CHUNK_BYTES = 1024 * 1024;
 const MAX_SSE_BUFFER_CODE_UNITS = 1024 * 1024;
 const MAX_SSE_EVENT_CODE_UNITS = 512 * 1024;
-const MAX_LOG_TEXT_BYTES = 65_536;
+const MAX_LOG_OUTPUT_BYTES = 48 * 1024;
+const MAX_LOG_OUTPUT_BASE64_BYTES = 64 * 1024;
 const MAX_U64_DECIMAL = "18446744073709551615";
 const MAX_U32 = 4_294_967_295;
 const MIN_TIMESTAMP_MS = -62_167_219_200_000;
@@ -16,7 +17,6 @@ const STREAM_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[
 const GROUP_ID = /^[A-Za-z0-9:._/-]{1,256}$/u;
 const DECIMAL = /^(0|[1-9][0-9]{0,19})$/u;
 const CONTROL_CHARACTER = /[\u0000-\u001f\u007f-\u009f]/u;
-const CONTROL_CHARACTER_EXCEPT_TAB = /[\u0000-\u0008\u000a-\u001f\u007f-\u009f]/u;
 const BIDI_FORMATTING_CHARACTER =
   /[\u061c\u200e-\u200f\u202a-\u202e\u2066-\u2069]/u;
 
@@ -26,7 +26,6 @@ interface LiveLogRecordBase {
   readonly streamId: string;
   /** Canonical decimal text keeps the Core u64 sequence lossless in JS. */
   readonly sequence: string;
-  readonly fragment: number | null;
   readonly emittedAtMs: number;
 }
 
@@ -50,11 +49,12 @@ export interface LiveLogGroupStartedRecord extends LiveLogRecordBase {
   readonly group: LiveLogGroup;
 }
 
-export interface LiveLogLineRecord extends LiveLogRecordBase {
-  readonly type: "line";
+export interface LiveLogOutputRecord extends LiveLogRecordBase {
+  readonly type: "output";
   readonly groupId: string;
   readonly channel: LiveLogChannel;
-  readonly text: string;
+  readonly part: number;
+  readonly data: Uint8Array;
 }
 
 export interface LiveLogGroupFinishedRecord extends LiveLogRecordBase {
@@ -65,7 +65,7 @@ export interface LiveLogGroupFinishedRecord extends LiveLogRecordBase {
 
 export type LiveLogRecord =
   | LiveLogGroupStartedRecord
-  | LiveLogLineRecord
+  | LiveLogOutputRecord
   | LiveLogGroupFinishedRecord;
 
 export interface SseConnectionOptions {
@@ -350,7 +350,6 @@ function parseLogRecord(data: string): LiveLogRecord {
     "protocolVersion",
     "streamId",
     "sequence",
-    "fragment",
     "emittedAtMs",
     "type",
   ];
@@ -368,14 +367,6 @@ function parseLogRecord(data: string): LiveLogRecord {
     throw new LiveLogProtocolError("the log record sequence is invalid");
   }
   if (
-    record.fragment !== null &&
-    (!Number.isInteger(record.fragment) ||
-      (record.fragment as number) < 1 ||
-      (record.fragment as number) > MAX_U32)
-  ) {
-    throw new LiveLogProtocolError("the log record fragment is invalid");
-  }
-  if (
     !Number.isSafeInteger(record.emittedAtMs) ||
     (record.emittedAtMs as number) < MIN_TIMESTAMP_MS ||
     (record.emittedAtMs as number) > MAX_TIMESTAMP_MS
@@ -385,19 +376,15 @@ function parseLogRecord(data: string): LiveLogRecord {
   const base = {
     streamId: record.streamId,
     sequence: record.sequence,
-    fragment: record.fragment as number | null,
     emittedAtMs: record.emittedAtMs as number,
   };
   switch (record.type) {
     case "group_started":
       exactKeys(record, [...commonKeys, "group"], "group-started log record");
-      if (record.fragment !== null) {
-        throw new LiveLogProtocolError("a group-started record cannot be fragmented");
-      }
       return { ...base, type: "group_started", group: parseLogGroup(record.group) };
-    case "line": {
-      exactKeys(record, [...commonKeys, "groupId", "channel", "text"], "line log record");
-      const groupId = logGroupId(record.groupId, "line group ID");
+    case "output": {
+      exactKeys(record, [...commonKeys, "groupId", "channel", "part", "dataBase64"], "output log record");
+      const groupId = logGroupId(record.groupId, "output group ID");
       if (
         record.channel !== "stdout" &&
         record.channel !== "stderr" &&
@@ -405,27 +392,20 @@ function parseLogRecord(data: string): LiveLogRecord {
       ) {
         throw new LiveLogProtocolError("the log record channel is invalid");
       }
-      if (
-        typeof record.text !== "string" ||
-        new TextEncoder().encode(record.text).byteLength > MAX_LOG_TEXT_BYTES ||
-        CONTROL_CHARACTER_EXCEPT_TAB.test(record.text) ||
-        BIDI_FORMATTING_CHARACTER.test(record.text)
-      ) {
-        throw new LiveLogProtocolError("the log record text is invalid");
+      if (!Number.isInteger(record.part) || (record.part as number) < 0 || (record.part as number) > MAX_U32) {
+        throw new LiveLogProtocolError("the log output part is invalid");
       }
       return {
         ...base,
-        type: "line",
+        type: "output",
         groupId,
         channel: record.channel,
-        text: record.text,
+        part: record.part as number,
+        data: decodeCanonicalBase64Url(record.dataBase64),
       };
     }
     case "group_finished":
       exactKeys(record, [...commonKeys, "groupId", "conclusion"], "group-finished log record");
-      if (record.fragment !== null) {
-        throw new LiveLogProtocolError("a group-finished record cannot be fragmented");
-      }
       if (
         record.conclusion !== "success" &&
         record.conclusion !== "failure" &&
@@ -483,6 +463,68 @@ function logGroupId(value: unknown, label: string): string {
     throw new LiveLogProtocolError(`the ${label} is invalid`);
   }
   return value;
+}
+
+function decodeCanonicalBase64Url(value: unknown): Uint8Array {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.length > MAX_LOG_OUTPUT_BASE64_BYTES ||
+    value.length % 4 === 1
+  ) {
+    throw new LiveLogProtocolError("the log output data is invalid");
+  }
+  const outputLength = Math.floor(value.length * 6 / 8);
+  if (outputLength === 0 || outputLength > MAX_LOG_OUTPUT_BYTES) {
+    throw new LiveLogProtocolError("the log output data is invalid");
+  }
+  const output = new Uint8Array(outputLength);
+  let input = 0;
+  let written = 0;
+  while (input + 4 <= value.length) {
+    const first = base64UrlValue(value.charCodeAt(input));
+    const second = base64UrlValue(value.charCodeAt(input + 1));
+    const third = base64UrlValue(value.charCodeAt(input + 2));
+    const fourth = base64UrlValue(value.charCodeAt(input + 3));
+    if (first < 0 || second < 0 || third < 0 || fourth < 0) {
+      throw new LiveLogProtocolError("the log output data is invalid");
+    }
+    output[written] = (first << 2) | (second >> 4);
+    output[written + 1] = (second << 4) | (third >> 2);
+    output[written + 2] = (third << 6) | fourth;
+    input += 4;
+    written += 3;
+  }
+  const remaining = value.length - input;
+  if (remaining === 2) {
+    const first = base64UrlValue(value.charCodeAt(input));
+    const second = base64UrlValue(value.charCodeAt(input + 1));
+    if (first < 0 || second < 0 || (second & 0x0f) !== 0) {
+      throw new LiveLogProtocolError("the log output data is invalid");
+    }
+    output[written] = (first << 2) | (second >> 4);
+  } else if (remaining === 3) {
+    const first = base64UrlValue(value.charCodeAt(input));
+    const second = base64UrlValue(value.charCodeAt(input + 1));
+    const third = base64UrlValue(value.charCodeAt(input + 2));
+    if (first < 0 || second < 0 || third < 0 || (third & 0x03) !== 0) {
+      throw new LiveLogProtocolError("the log output data is invalid");
+    }
+    output[written] = (first << 2) | (second >> 4);
+    output[written + 1] = (second << 4) | (third >> 2);
+  } else if (remaining !== 0) {
+    throw new LiveLogProtocolError("the log output data is invalid");
+  }
+  return output;
+}
+
+function base64UrlValue(code: number): number {
+  if (code >= 65 && code <= 90) return code - 65;
+  if (code >= 97 && code <= 122) return code - 71;
+  if (code >= 48 && code <= 57) return code + 4;
+  if (code === 45) return 62;
+  if (code === 95) return 63;
+  return -1;
 }
 
 function parseProtocolEnvelope(data: string, label: string): ProtocolEnvelope {

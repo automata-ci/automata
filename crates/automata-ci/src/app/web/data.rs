@@ -41,13 +41,13 @@ pub(crate) const REPOSITORY_PAGE_SIZE: usize = 25;
 pub(crate) const RUN_JOB_PAGE_SIZE: usize = 200;
 /// Maximum number of structured log records returned by one replay batch.
 pub(crate) const LIVE_LOG_BATCH_RECORD_LIMIT: usize = 200;
-/// Maximum decoded text admitted to one replay batch.
+/// Maximum decoded output bytes admitted to one replay batch.
 ///
 /// The bound limits one transport write and the browser work required to apply
 /// it while replay catches up to the live tail.
 pub(crate) const LIVE_LOG_BATCH_DECODED_BYTES: usize = 128 * 1024;
-/// Maximum text admitted to one rendered log line.
-pub(crate) const LOG_LINE_BYTES: usize = 64 * 1024;
+/// Maximum raw bytes admitted to one browser output record before base64 encoding.
+pub(crate) const LOG_OUTPUT_CHUNK_BYTES: usize = 48 * 1024;
 /// Fixed member page size for the authenticated RBAC user list.
 pub(crate) const RBAC_USER_PAGE_SIZE: u16 = 50;
 /// Fixed role page size for the authenticated RBAC role list.
@@ -1252,7 +1252,7 @@ pub(crate) enum LogRecord {
         emitted_at: UnixMillis,
         group: LogGroup,
     },
-    Line(LogLine),
+    Output(LogOutput),
     GroupFinished {
         sequence: u64,
         emitted_at: UnixMillis,
@@ -1262,14 +1262,15 @@ pub(crate) enum LogRecord {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct LogLine {
+pub(crate) struct LogOutput {
     pub(crate) sequence: u64,
-    /// One-based fragment when a durable frame exceeds the UI line limit.
-    pub(crate) fragment: Option<u32>,
+    /// Zero-based transport part within one durable output frame.
+    pub(crate) part: u32,
     pub(crate) emitted_at: UnixMillis,
     pub(crate) group_id: String,
     pub(crate) channel: LogChannel,
-    pub(crate) text: String,
+    /// Canonical URL-safe base64 without padding.
+    pub(crate) data_base64: String,
 }
 
 pub(crate) type ArtifactBody =

@@ -1,5 +1,8 @@
 import type { RefObject } from "react";
 import type { LogGroupView } from "../presenters/jobLogs";
+import type { TerminalLine } from "../logs/terminal";
+
+export type LogOutputSubscriber = (lines: readonly TerminalLine[]) => void;
 
 export type LogConnectionState =
   | "idle"
@@ -25,6 +28,7 @@ export interface JobLogsViewState {
   readonly query: string;
   readonly running: boolean;
   readonly streamError: string | null;
+  readonly subscribeOutput: (groupId: string, subscriber: LogOutputSubscriber) => () => void;
   readonly viewerRef?: RefObject<HTMLDivElement | null>;
   readonly visibleGroups: readonly LogGroupView[];
 }

@@ -1,6 +1,5 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import type { LiveLogLineRecord } from "../../src/logs/sse";
 import { replayLogRecords, type LogGroupView } from "../../src/presenters/jobLogs";
 import { previewJobLog, previewJobLogRecords } from "../../src/preview/models";
 import { PREVIEW_PRIMARY_RUN_ID } from "../../src/preview/sampleData";
@@ -68,16 +67,9 @@ describe("job log presentation states", () => {
       />,
     )).toContain("No output");
 
-    const line: LiveLogLineRecord = {
-      channel: "stderr",
-      emittedAtMs: 1_000,
-      fragment: 2,
-      groupId: group.id,
-      sequence: "7",
-      streamId: "12345678-1234-4123-8123-123456789abc",
-      text: "fragmented",
-      type: "line",
-    };
+    const sourceLine = group.lines[0];
+    if (sourceLine === undefined) throw new Error("preview group has no output line");
+    const line = { ...sourceLine, key: "7:0:2", number: "7.2", channel: "stderr" as const };
     expect(renderToStaticMarkup(
       <JobLogPageView
         logs={logs({
@@ -105,6 +97,7 @@ function logs(overrides: Partial<JobLogsViewState> = {}): JobLogsViewState {
     query: "",
     running: false,
     streamError: null,
+    subscribeOutput: () => () => undefined,
     visibleGroups: [],
     ...overrides,
   };
