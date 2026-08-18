@@ -4,16 +4,16 @@
 #![deny(missing_docs)]
 
 mod clock;
-mod control;
 mod ingress;
+mod runtime;
 mod worker;
 
 pub use clock::{ProviderDeliveryClock, ProviderDeliveryClockError, SystemProviderDeliveryClock};
-pub use control::{
-    ProviderControlHandler, ProviderControlHandlerRegistry, ProviderControlHandlerRegistryError,
-    ProviderControlHandlingError, ProviderProcessingDispatcher, ProviderTriggerProcessor,
-};
 pub use ingress::{PreparedProviderWebhook, ProviderDeliveryIngress, ProviderDeliveryIngressError};
+pub use runtime::{
+    ProviderControlHandlingError, ProviderProcessingDispatcher, ProviderRuntimeAdapter,
+    ProviderRuntimeAdapterRegistry, ProviderRuntimeAdapterRegistryError, ProviderTriggerOutcome,
+};
 pub use worker::{
     ProviderProcessingLease, ProviderProcessingOutcome, ProviderProcessingProcessor,
     ProviderProcessingWorker, ProviderProcessingWorkerConfig, ProviderProcessingWorkerError,

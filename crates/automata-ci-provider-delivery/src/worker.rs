@@ -482,32 +482,44 @@ mod tests {
     }
 
     #[derive(Debug)]
-    struct RecordingControlHandler {
+    struct RecordingRuntimeAdapter {
         provider_type: ProviderTypeId,
         source_delivery_id: Option<ProviderDeliveryId>,
-        calls: AtomicUsize,
+        control_calls: AtomicUsize,
+        trigger_calls: AtomicUsize,
     }
 
     #[derive(Debug)]
-    struct IdempotentControlHandler {
+    struct IdempotentRuntimeAdapter {
         provider_type: ProviderTypeId,
         handled: AtomicBool,
-        calls: AtomicUsize,
+        control_calls: AtomicUsize,
         effects: AtomicUsize,
+        trigger_calls: AtomicUsize,
     }
 
     #[async_trait]
-    impl crate::ProviderControlHandler for IdempotentControlHandler {
+    impl crate::ProviderRuntimeAdapter for IdempotentRuntimeAdapter {
         fn provider_type(&self) -> &ProviderTypeId {
             &self.provider_type
         }
 
-        async fn handle(
+        async fn process_trigger(
+            &self,
+            _trigger: &VerifiedProviderTriggerDelivery,
+            _invocation: &ClaimedProviderProcessing,
+            _lease: &ProviderProcessingLease,
+        ) -> crate::ProviderTriggerOutcome {
+            self.trigger_calls.fetch_add(1, Ordering::SeqCst);
+            crate::ProviderTriggerOutcome::Complete
+        }
+
+        async fn handle_control(
             &self,
             _control: &VerifiedProviderControlDelivery,
             _lease: &ProviderProcessingLease,
         ) -> Result<Option<ProviderDeliveryId>, crate::ProviderControlHandlingError> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.control_calls.fetch_add(1, Ordering::SeqCst);
             if !self.handled.swap(true, Ordering::SeqCst) {
                 self.effects.fetch_add(1, Ordering::SeqCst);
             }
@@ -516,34 +528,29 @@ mod tests {
     }
 
     #[async_trait]
-    impl crate::ProviderControlHandler for RecordingControlHandler {
+    impl crate::ProviderRuntimeAdapter for RecordingRuntimeAdapter {
         fn provider_type(&self) -> &ProviderTypeId {
             &self.provider_type
         }
 
-        async fn handle(
+        async fn process_trigger(
+            &self,
+            _trigger: &VerifiedProviderTriggerDelivery,
+            _invocation: &ClaimedProviderProcessing,
+            _lease: &ProviderProcessingLease,
+        ) -> crate::ProviderTriggerOutcome {
+            self.trigger_calls.fetch_add(1, Ordering::SeqCst);
+            crate::ProviderTriggerOutcome::Complete
+        }
+
+        async fn handle_control(
             &self,
             _control: &VerifiedProviderControlDelivery,
             lease: &ProviderProcessingLease,
         ) -> Result<Option<ProviderDeliveryId>, crate::ProviderControlHandlingError> {
             assert!(lease.current().expires_at() > lease.current().claimed_at());
-            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.control_calls.fetch_add(1, Ordering::SeqCst);
             Ok(self.source_delivery_id)
-        }
-    }
-
-    #[derive(Debug)]
-    struct RecordingTriggerProcessor(AtomicUsize);
-
-    #[async_trait]
-    impl crate::ProviderTriggerProcessor for RecordingTriggerProcessor {
-        async fn process_trigger(
-            &self,
-            _invocation: &ClaimedProviderProcessing,
-            _lease: &ProviderProcessingLease,
-        ) -> ProviderProcessingOutcome {
-            self.0.fetch_add(1, Ordering::SeqCst);
-            ProviderProcessingOutcome::Complete
         }
     }
 
@@ -749,20 +756,17 @@ mod tests {
             bindings: AtomicUsize::new(0),
             completed: Mutex::new(None),
         });
-        let handler = Arc::new(RecordingControlHandler {
+        let runtime = Arc::new(RecordingRuntimeAdapter {
             provider_type: ProviderTypeId::new("github").expect("provider type"),
             source_delivery_id: Some(source_delivery_id),
-            calls: AtomicUsize::new(0),
+            control_calls: AtomicUsize::new(0),
+            trigger_calls: AtomicUsize::new(0),
         });
-        let triggers = Arc::new(RecordingTriggerProcessor(AtomicUsize::new(0)));
-        let handlers = crate::ProviderControlHandlerRegistry::new([
-            Arc::clone(&handler) as Arc<dyn crate::ProviderControlHandler>
+        let runtimes = crate::ProviderRuntimeAdapterRegistry::new([
+            Arc::clone(&runtime) as Arc<dyn crate::ProviderRuntimeAdapter>
         ])
-        .expect("handler registry");
-        let processor = Arc::new(crate::ProviderProcessingDispatcher::new(
-            handlers,
-            Arc::clone(&triggers) as Arc<dyn crate::ProviderTriggerProcessor>,
-        ));
+        .expect("runtime registry");
+        let processor = Arc::new(crate::ProviderProcessingDispatcher::new(runtimes));
         let worker = ProviderProcessingWorker::new(
             worker_id,
             Arc::clone(&repository) as Arc<dyn ProviderProcessingRepository>,
@@ -776,8 +780,8 @@ mod tests {
             ProviderProcessingWorkerOutcome::Completed
         );
         assert_eq!(repository.bindings.load(Ordering::SeqCst), 1);
-        assert_eq!(handler.calls.load(Ordering::SeqCst), 1);
-        assert_eq!(triggers.0.load(Ordering::SeqCst), 0);
+        assert_eq!(runtime.control_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(runtime.trigger_calls.load(Ordering::SeqCst), 0);
         assert_eq!(
             repository
                 .completed
@@ -789,23 +793,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn trigger_dispatch_requires_the_exact_provider_runtime() {
+        let worker_id = ProviderProcessingWorkerId::new();
+        let direct = claimed(worker_id);
+        let github = Arc::new(RecordingRuntimeAdapter {
+            provider_type: ProviderTypeId::new("github").expect("provider type"),
+            source_delivery_id: None,
+            control_calls: AtomicUsize::new(0),
+            trigger_calls: AtomicUsize::new(0),
+        });
+        let runtimes = crate::ProviderRuntimeAdapterRegistry::new([
+            Arc::clone(&github) as Arc<dyn crate::ProviderRuntimeAdapter>
+        ])
+        .expect("runtime registry");
+        let dispatcher = crate::ProviderProcessingDispatcher::new(runtimes);
+        let (_updates, view) = watch::channel(direct.fence());
+        let lease = ProviderProcessingLease::new(view);
+
+        assert_eq!(
+            dispatcher.process(&direct, &lease).await,
+            ProviderProcessingOutcome::Complete
+        );
+        assert_eq!(github.trigger_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(github.control_calls.load(Ordering::SeqCst), 0);
+
+        let forgejo = Arc::new(RecordingRuntimeAdapter {
+            provider_type: ProviderTypeId::new("forgejo").expect("provider type"),
+            source_delivery_id: None,
+            control_calls: AtomicUsize::new(0),
+            trigger_calls: AtomicUsize::new(0),
+        });
+        let runtimes = crate::ProviderRuntimeAdapterRegistry::new([
+            Arc::clone(&forgejo) as Arc<dyn crate::ProviderRuntimeAdapter>
+        ])
+        .expect("runtime registry");
+        let dispatcher = crate::ProviderProcessingDispatcher::new(runtimes);
+
+        assert_eq!(
+            dispatcher.process(&direct, &lease).await,
+            ProviderProcessingOutcome::Fail(ProviderProcessingFailure::InvalidEvidence)
+        );
+        assert_eq!(forgejo.trigger_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(forgejo.control_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
     async fn handled_control_without_trigger_provenance_completes_directly() {
         let worker_id = ProviderProcessingWorkerId::new();
         let (control, _bound, _source_delivery_id) = rerun_claims(worker_id);
-        let handler = Arc::new(RecordingControlHandler {
+        let runtime = Arc::new(RecordingRuntimeAdapter {
             provider_type: ProviderTypeId::new("github").expect("provider type"),
             source_delivery_id: None,
-            calls: AtomicUsize::new(0),
+            control_calls: AtomicUsize::new(0),
+            trigger_calls: AtomicUsize::new(0),
         });
-        let triggers = Arc::new(RecordingTriggerProcessor(AtomicUsize::new(0)));
-        let handlers = crate::ProviderControlHandlerRegistry::new([
-            Arc::clone(&handler) as Arc<dyn crate::ProviderControlHandler>
+        let runtimes = crate::ProviderRuntimeAdapterRegistry::new([
+            Arc::clone(&runtime) as Arc<dyn crate::ProviderRuntimeAdapter>
         ])
-        .expect("handler registry");
-        let dispatcher = crate::ProviderProcessingDispatcher::new(
-            handlers,
-            Arc::clone(&triggers) as Arc<dyn crate::ProviderTriggerProcessor>,
-        );
+        .expect("runtime registry");
+        let dispatcher = crate::ProviderProcessingDispatcher::new(runtimes);
         let (_updates, view) = watch::channel(control.fence());
         let lease = ProviderProcessingLease::new(view);
 
@@ -813,29 +859,26 @@ mod tests {
             dispatcher.process(&control, &lease).await,
             ProviderProcessingOutcome::Complete
         );
-        assert_eq!(handler.calls.load(Ordering::SeqCst), 1);
-        assert_eq!(triggers.0.load(Ordering::SeqCst), 0);
+        assert_eq!(runtime.control_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(runtime.trigger_calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
     async fn control_replay_after_completion_crash_is_idempotent() {
         let worker_id = ProviderProcessingWorkerId::new();
         let (control, _bound, _source_delivery_id) = rerun_claims(worker_id);
-        let handler = Arc::new(IdempotentControlHandler {
+        let runtime = Arc::new(IdempotentRuntimeAdapter {
             provider_type: ProviderTypeId::new("github").expect("provider type"),
             handled: AtomicBool::new(false),
-            calls: AtomicUsize::new(0),
+            control_calls: AtomicUsize::new(0),
             effects: AtomicUsize::new(0),
+            trigger_calls: AtomicUsize::new(0),
         });
-        let triggers = Arc::new(RecordingTriggerProcessor(AtomicUsize::new(0)));
-        let handlers = crate::ProviderControlHandlerRegistry::new([
-            Arc::clone(&handler) as Arc<dyn crate::ProviderControlHandler>
+        let runtimes = crate::ProviderRuntimeAdapterRegistry::new([
+            Arc::clone(&runtime) as Arc<dyn crate::ProviderRuntimeAdapter>
         ])
-        .expect("handler registry");
-        let dispatcher = crate::ProviderProcessingDispatcher::new(
-            handlers,
-            Arc::clone(&triggers) as Arc<dyn crate::ProviderTriggerProcessor>,
-        );
+        .expect("runtime registry");
+        let dispatcher = crate::ProviderProcessingDispatcher::new(runtimes);
         let (_updates, view) = watch::channel(control.fence());
         let lease = ProviderProcessingLease::new(view);
 
@@ -849,9 +892,9 @@ mod tests {
             dispatcher.process(&control, &lease).await,
             ProviderProcessingOutcome::Complete
         );
-        assert_eq!(handler.calls.load(Ordering::SeqCst), 2);
-        assert_eq!(handler.effects.load(Ordering::SeqCst), 1);
-        assert_eq!(triggers.0.load(Ordering::SeqCst), 0);
+        assert_eq!(runtime.control_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(runtime.effects.load(Ordering::SeqCst), 1);
+        assert_eq!(runtime.trigger_calls.load(Ordering::SeqCst), 0);
     }
 
     #[test]
