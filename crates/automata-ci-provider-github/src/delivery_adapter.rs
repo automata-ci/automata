@@ -115,14 +115,14 @@ impl DeliveryAdapter for GithubDeliveryAdapter {
     fn normalize(
         &self,
         authenticated: AuthenticatedProviderWebhook,
-    ) -> ProviderDeliveryNormalization {
+    ) -> Result<ProviderDeliveryNormalization, automata_ci_provider::ProviderWebhookError> {
         normalize_authenticated(authenticated)
     }
 }
 
 fn normalize_authenticated(
     authenticated: AuthenticatedProviderWebhook,
-) -> ProviderDeliveryNormalization {
+) -> Result<ProviderDeliveryNormalization, automata_ci_provider::ProviderWebhookError> {
     let request = authenticated.request();
     let instance_id = request.endpoint().instance_id();
     let delivery_header = selected_header(request, X_GITHUB_DELIVERY)
@@ -151,22 +151,14 @@ fn normalize_authenticated(
     )
     .and_then(AuthenticatedGithubWebhook::normalize);
 
-    let native = match native {
-        Ok(native) => native,
-        Err(error) => {
-            return rejected(
-                authenticated,
-                external_delivery,
-                event_type,
-                None,
-                match error {
-                    GithubWebhookError::UnsupportedEvent => ProviderDeliveryRejection::UnknownEvent,
-                    _ => ProviderDeliveryRejection::InvalidPayload,
-                },
-            );
-        }
+    let Ok(native) = native else {
+        return Err(automata_ci_provider::ProviderWebhookError::PayloadIdentityMismatch);
     };
     let repository = external_repository(instance_id, native.repository());
+    let connection = request
+        .connection_for_repository(&repository)
+        .cloned()
+        .ok_or(automata_ci_provider::ProviderWebhookError::PayloadIdentityMismatch)?;
     let observations =
         observations(&native).expect("fixed GitHub delivery observations satisfy the common bound");
     if matches!(
@@ -176,13 +168,14 @@ fn normalize_authenticated(
         let control = match normalize_control(request, &native) {
             Ok(control) => control,
             Err(reason) => {
-                return rejected(
+                return Ok(rejected(
                     authenticated,
+                    connection,
                     external_delivery,
                     event_type,
                     Some(repository),
                     reason,
-                );
+                ));
             }
         };
         let draft = ProviderControlDeliveryDraft::new(
@@ -190,22 +183,24 @@ fn normalize_authenticated(
             external_delivery,
             event_type,
             authenticated,
+            connection,
             control,
             observations,
         )
         .expect("GitHub control normalization preserves common endpoint identities");
-        return ProviderDeliveryNormalization::Control(Box::new(draft));
+        return Ok(ProviderDeliveryNormalization::Control(Box::new(draft)));
     }
     let trigger = match normalize_trigger(request, &native) {
         Ok(trigger) => trigger,
         Err(reason) => {
-            return rejected(
+            return Ok(rejected(
                 authenticated,
+                connection,
                 external_delivery,
                 event_type,
                 Some(repository),
                 reason,
-            );
+            ));
         }
     };
     let draft = ProviderTriggerDeliveryDraft::new(
@@ -213,11 +208,12 @@ fn normalize_authenticated(
         external_delivery,
         event_type,
         authenticated,
+        connection,
         &trigger,
         observations,
     )
     .expect("GitHub normalization preserves common endpoint identities");
-    ProviderDeliveryNormalization::Trigger(Box::new(draft))
+    Ok(ProviderDeliveryNormalization::Trigger(Box::new(draft)))
 }
 
 fn normalize_control(
@@ -459,7 +455,11 @@ fn target_repository(
     installation_id: u64,
     native: &GithubWebhookRepository,
 ) -> Result<ProviderRepository, ProviderDeliveryRejection> {
-    let configuration = request.connection().configuration();
+    let external_identity = external_repository(request.endpoint().instance_id(), native);
+    let connection = request
+        .connection_for_repository(&external_identity)
+        .ok_or(ProviderDeliveryRejection::PayloadIdentityMismatch)?;
+    let configuration = connection.configuration();
     let policy = decode_connection(configuration.adapter_policy())
         .map_err(|_| ProviderDeliveryRejection::IncompleteEvent)?;
     let external_id = native.id().to_string();
@@ -585,6 +585,7 @@ fn empty_observations() -> ProviderDeliveryObservations {
 
 fn rejected(
     authenticated: AuthenticatedProviderWebhook,
+    connection: automata_ci_provider::ProviderConnectionManifest,
     external_delivery: ExternalDeliveryIdentity,
     event_type: ProviderEventName,
     repository: Option<ExternalRepositoryIdentity>,
@@ -595,6 +596,7 @@ fn rejected(
         external_delivery,
         event_type,
         authenticated,
+        connection,
         repository,
         reason,
         empty_observations(),

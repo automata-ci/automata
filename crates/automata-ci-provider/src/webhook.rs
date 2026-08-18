@@ -1,6 +1,11 @@
 //! Opaque webhook endpoints and authenticate-before-parse adapter contracts.
 
-use std::{collections::BTreeMap, fmt, num::NonZeroU64, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+    num::NonZeroU64,
+    sync::Arc,
+};
 
 use automata_ci_blob::{BlobDescriptor, BlobKey, MediaType};
 use automata_ci_core::{Sha256Digest, UnixMillis};
@@ -31,6 +36,8 @@ pub const MAX_PROVIDER_WEBHOOK_HEADER_VALUE_BYTES: usize = 4 * 1_024;
 pub const MAX_PROVIDER_WEBHOOK_HEADER_BYTES: usize = 16 * 1_024;
 /// Maximum simultaneous secret generations accepted by one endpoint.
 pub const MAX_PROVIDER_WEBHOOK_SECRET_CANDIDATES: usize = 4;
+/// Maximum active repository connections resolved behind one provider endpoint.
+pub const MAX_PROVIDER_WEBHOOK_CONNECTIONS: usize = 4_096;
 /// Maximum canonical adapter observations retained with one delivery.
 pub const MAX_PROVIDER_DELIVERY_OBSERVATION_BYTES: usize = 16 * 1_024;
 /// Media type used for exact authenticated raw webhook bodies.
@@ -118,7 +125,7 @@ impl ProviderWebhookSecretReference {
     }
 }
 
-/// Immutable connection-bound webhook endpoint revision.
+/// Immutable provider-instance webhook endpoint revision.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProviderWebhookEndpointManifest {
     endpoint_id: ProviderWebhookEndpointId,
@@ -127,8 +134,6 @@ pub struct ProviderWebhookEndpointManifest {
     provider_type: ProviderTypeId,
     instance_id: ProviderInstanceId,
     provider_revision: ProviderConfigurationRevision,
-    connection_id: ProviderConnectionId,
-    connection_revision: ProviderConnectionRevision,
     body_limit: NonZeroU64,
     raw_retention_millis: NonZeroU64,
     secret_references: Vec<ProviderWebhookSecretReference>,
@@ -151,8 +156,6 @@ impl ProviderWebhookEndpointManifest {
         provider_type: ProviderTypeId,
         instance_id: ProviderInstanceId,
         provider_revision: ProviderConfigurationRevision,
-        connection_id: ProviderConnectionId,
-        connection_revision: ProviderConnectionRevision,
         body_limit: u64,
         raw_retention_millis: u64,
         mut secret_references: Vec<ProviderWebhookSecretReference>,
@@ -187,8 +190,6 @@ impl ProviderWebhookEndpointManifest {
             provider_type,
             instance_id,
             provider_revision,
-            connection_id,
-            connection_revision,
             body_limit,
             raw_retention_millis,
             secret_references,
@@ -231,18 +232,6 @@ impl ProviderWebhookEndpointManifest {
     #[must_use]
     pub const fn provider_revision(&self) -> ProviderConfigurationRevision {
         self.provider_revision
-    }
-
-    /// Returns the only connection allowed to use this endpoint.
-    #[must_use]
-    pub const fn connection_id(&self) -> ProviderConnectionId {
-        self.connection_id
-    }
-
-    /// Returns the exact connection policy revision bound to ingress.
-    #[must_use]
-    pub const fn connection_revision(&self) -> ProviderConnectionRevision {
-        self.connection_revision
     }
 
     /// Returns the exact body byte limit applied before adapter invocation.
@@ -291,12 +280,10 @@ impl ProviderWebhookEndpointManifest {
             || self.revision.get() != next
             || self.provider_type != prior.provider_type
             || self.instance_id != prior.instance_id
-            || self.connection_id != prior.connection_id
             || self.created_at != prior.created_at
             || prior.state == ProviderWebhookEndpointState::Retired
             || (self.state == prior.state
                 && self.provider_revision == prior.provider_revision
-                && self.connection_revision == prior.connection_revision
                 && self.body_limit == prior.body_limit
                 && self.raw_retention_millis == prior.raw_retention_millis
                 && self.secret_references == prior.secret_references
@@ -588,7 +575,7 @@ pub enum ProviderWebhookMethod {
 /// Bounded raw request passed to a delivery adapter before payload parsing.
 pub struct ProviderWebhookRequest {
     endpoint: ProviderWebhookEndpointManifest,
-    connection: ProviderConnectionManifest,
+    connections: Vec<ProviderConnectionManifest>,
     method: ProviderWebhookMethod,
     headers: ProviderWebhookHeaders,
     body: Vec<u8>,
@@ -601,11 +588,12 @@ impl ProviderWebhookRequest {
     ///
     /// # Errors
     ///
-    /// Rejects disabled endpoints, mismatched connection policy, excessive body
-    /// bytes, or pre-epoch receipt time.
+    /// Rejects disabled endpoints, an empty, excessive, duplicate, inactive,
+    /// or cross-instance connection registry, excessive body bytes, or
+    /// pre-epoch receipt time.
     pub fn new(
         endpoint: ProviderWebhookEndpointManifest,
-        connection: ProviderConnectionManifest,
+        mut connections: Vec<ProviderConnectionManifest>,
         method: ProviderWebhookMethod,
         headers: ProviderWebhookHeaders,
         body: Vec<u8>,
@@ -614,14 +602,21 @@ impl ProviderWebhookRequest {
         if endpoint.state() != ProviderWebhookEndpointState::Active {
             return Err(ProviderWebhookError::EndpointInactive);
         }
-        let configuration = connection.configuration();
-        if connection.connection_id() != endpoint.connection_id()
-            || connection.revision() != endpoint.connection_revision()
-            || connection.state() != ProviderLifecycleState::Active
-            || configuration.repository().instance_id() != endpoint.instance_id()
-            || configuration.provider_revision() != endpoint.provider_revision()
+        connections.sort_by_key(ProviderConnectionManifest::connection_id);
+        let mut connection_ids = BTreeSet::new();
+        let mut repositories = BTreeSet::new();
+        if connections.is_empty()
+            || connections.len() > MAX_PROVIDER_WEBHOOK_CONNECTIONS
+            || connections.iter().any(|connection| {
+                let configuration = connection.configuration();
+                connection.state() != ProviderLifecycleState::Active
+                    || configuration.repository().instance_id() != endpoint.instance_id()
+                    || configuration.provider_revision() != endpoint.provider_revision()
+                    || !connection_ids.insert(connection.connection_id())
+                    || !repositories.insert(configuration.repository().clone())
+            })
         {
-            return Err(ProviderWebhookError::EndpointConnectionMismatch);
+            return Err(ProviderWebhookError::InvalidEndpointConnections);
         }
         if body.len() as u64 > endpoint.body_limit() {
             return Err(ProviderWebhookError::BodyTooLarge);
@@ -632,7 +627,7 @@ impl ProviderWebhookRequest {
         let body_digest = Sha256Digest::from_bytes(Sha256::digest(&body).into());
         Ok(Self {
             endpoint,
-            connection,
+            connections,
             method,
             headers,
             body,
@@ -647,10 +642,21 @@ impl ProviderWebhookRequest {
         &self.endpoint
     }
 
-    /// Returns the exact connection and adapter policy bound to this endpoint.
+    /// Returns active candidate connections in canonical identity order.
     #[must_use]
-    pub const fn connection(&self) -> &ProviderConnectionManifest {
-        &self.connection
+    pub fn connections(&self) -> &[ProviderConnectionManifest] {
+        &self.connections
+    }
+
+    /// Selects one exact repository connection after authenticated payload parsing.
+    #[must_use]
+    pub fn connection_for_repository(
+        &self,
+        repository: &ExternalRepositoryIdentity,
+    ) -> Option<&ProviderConnectionManifest> {
+        self.connections
+            .iter()
+            .find(|connection| connection.configuration().repository() == repository)
     }
 
     /// Returns the exact request method.
@@ -689,7 +695,7 @@ impl fmt::Debug for ProviderWebhookRequest {
         formatter
             .debug_struct("ProviderWebhookRequest")
             .field("endpoint", &self.endpoint)
-            .field("connection", &self.connection)
+            .field("connection_count", &self.connections.len())
             .field("method", &self.method)
             .field("headers", &self.headers)
             .field("body", &"[REDACTED]")
@@ -849,6 +855,7 @@ struct ProviderDeliveryDraftEvidence {
     external_delivery: ExternalDeliveryIdentity,
     event_type: ProviderEventName,
     authenticated: AuthenticatedProviderWebhook,
+    connection: ProviderConnectionManifest,
     observations: ProviderDeliveryObservations,
 }
 
@@ -858,9 +865,12 @@ impl ProviderDeliveryDraftEvidence {
         external_delivery: ExternalDeliveryIdentity,
         event_type: ProviderEventName,
         authenticated: AuthenticatedProviderWebhook,
+        connection: ProviderConnectionManifest,
         observations: ProviderDeliveryObservations,
     ) -> Result<Self, ProviderWebhookError> {
-        if external_delivery.instance_id() != authenticated.request().endpoint().instance_id() {
+        if external_delivery.instance_id() != authenticated.request().endpoint().instance_id()
+            || !authenticated.request().connections().contains(&connection)
+        {
             return Err(ProviderWebhookError::PayloadIdentityMismatch);
         }
         Ok(Self {
@@ -868,12 +878,17 @@ impl ProviderDeliveryDraftEvidence {
             external_delivery,
             event_type,
             authenticated,
+            connection,
             observations,
         })
     }
 
     fn request(&self) -> &ProviderWebhookRequest {
         self.authenticated.request()
+    }
+
+    fn connection(&self) -> &ProviderConnectionManifest {
+        &self.connection
     }
 
     fn seal(
@@ -893,8 +908,8 @@ impl ProviderDeliveryDraftEvidence {
             endpoint.provider_type().clone(),
             endpoint.instance_id(),
             endpoint.provider_revision(),
-            endpoint.connection_id(),
-            endpoint.connection_revision(),
+            self.connection.connection_id(),
+            self.connection.revision(),
             self.external_delivery,
             self.event_type,
             self.authenticated.request().received_at(),
@@ -1012,13 +1027,13 @@ impl ProviderDeliveryEvidence {
         self.provider_revision
     }
 
-    /// Returns the endpoint-bound connection.
+    /// Returns the exact repository connection selected after authentication.
     #[must_use]
     pub const fn connection_id(&self) -> ProviderConnectionId {
         self.connection_id
     }
 
-    /// Returns the exact endpoint-bound connection policy revision.
+    /// Returns the selected repository connection policy revision.
     #[must_use]
     pub const fn connection_revision(&self) -> ProviderConnectionRevision {
         self.connection_revision
@@ -1085,6 +1100,7 @@ impl ProviderTriggerDeliveryDraft {
         external_delivery: ExternalDeliveryIdentity,
         event_type: ProviderEventName,
         authenticated: AuthenticatedProviderWebhook,
+        connection: ProviderConnectionManifest,
         trigger: &NormalizedTrigger,
         observations: ProviderDeliveryObservations,
     ) -> Result<Self, ProviderWebhookError> {
@@ -1093,10 +1109,11 @@ impl ProviderTriggerDeliveryDraft {
             external_delivery,
             event_type,
             authenticated,
+            connection,
             observations,
         )?;
-        if trigger.target_repository().identity().instance_id()
-            != evidence.request().endpoint().instance_id()
+        if trigger.target_repository().identity()
+            != evidence.connection().configuration().repository()
         {
             return Err(ProviderWebhookError::PayloadIdentityMismatch);
         }
@@ -1125,6 +1142,7 @@ impl ProviderControlDeliveryDraft {
         external_delivery: ExternalDeliveryIdentity,
         event_type: ProviderEventName,
         authenticated: AuthenticatedProviderWebhook,
+        connection: ProviderConnectionManifest,
         control: ProviderControl,
         observations: ProviderDeliveryObservations,
     ) -> Result<Self, ProviderWebhookError> {
@@ -1133,9 +1151,10 @@ impl ProviderControlDeliveryDraft {
             external_delivery,
             event_type,
             authenticated,
+            connection,
             observations,
         )?;
-        if control.repository().instance_id() != evidence.request().endpoint().instance_id() {
+        if control.repository() != evidence.connection().configuration().repository() {
             return Err(ProviderWebhookError::PayloadIdentityMismatch);
         }
         Ok(Self { evidence, control })
@@ -1162,6 +1181,7 @@ impl RejectedProviderDeliveryDraft {
         external_delivery: ExternalDeliveryIdentity,
         event_type: ProviderEventName,
         authenticated: AuthenticatedProviderWebhook,
+        connection: ProviderConnectionManifest,
         repository: Option<ExternalRepositoryIdentity>,
         reason: ProviderDeliveryRejection,
         observations: ProviderDeliveryObservations,
@@ -1171,11 +1191,12 @@ impl RejectedProviderDeliveryDraft {
             external_delivery,
             event_type,
             authenticated,
+            connection,
             observations,
         )?;
         if repository
             .as_ref()
-            .is_some_and(|value| value.instance_id() != evidence.request().endpoint().instance_id())
+            .is_some_and(|value| value != evidence.connection().configuration().repository())
         {
             return Err(ProviderWebhookError::PayloadIdentityMismatch);
         }
@@ -1445,11 +1466,17 @@ pub trait DeliveryAdapter: fmt::Debug + Send + Sync {
         request: ProviderWebhookAuthenticationRequest,
     ) -> Result<AuthenticatedProviderWebhook, ProviderWebhookAuthenticationError>;
 
-    /// Parses and normalizes only an authenticated request typestate.
+    /// Parses, selects one exact repository connection, and normalizes only an
+    /// authenticated request typestate.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed payloads and events that do not select exactly one
+    /// active connection behind the authenticated provider endpoint.
     fn normalize(
         &self,
         authenticated: AuthenticatedProviderWebhook,
-    ) -> ProviderDeliveryNormalization;
+    ) -> Result<ProviderDeliveryNormalization, ProviderWebhookError>;
 }
 
 /// Immutable exact registry of statically linked delivery adapters.
@@ -1623,9 +1650,9 @@ pub enum ProviderWebhookError {
     /// A successor changed immutable binding or violated revision/lifecycle rules.
     #[error("provider webhook endpoint successor is invalid")]
     InvalidEndpointSuccessor,
-    /// The resolved connection disagreed with the endpoint's exact binding.
-    #[error("provider webhook endpoint connection binding is invalid")]
-    EndpointConnectionMismatch,
+    /// Resolved active connections were empty, excessive, duplicate, or cross-instance.
+    #[error("provider webhook endpoint connections are invalid")]
+    InvalidEndpointConnections,
     /// The selected endpoint is disabled or retired.
     #[error("provider webhook endpoint is inactive")]
     EndpointInactive,

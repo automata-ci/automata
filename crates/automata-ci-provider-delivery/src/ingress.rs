@@ -141,7 +141,7 @@ impl PreparedProviderWebhook {
         headers: ProviderWebhookHeaders,
         body: Vec<u8>,
     ) -> Result<ProviderDeliveryAcceptOutcome, ProviderDeliveryIngressError> {
-        let (endpoint, connection, candidates) = self.record.into_parts();
+        let (endpoint, connections, candidates) = self.record.into_parts();
         let adapter = self
             .adapters
             .resolve(&endpoint)
@@ -157,7 +157,7 @@ impl PreparedProviderWebhook {
         }
         let request = ProviderWebhookRequest::new(
             endpoint,
-            connection,
+            connections,
             method,
             headers,
             body,
@@ -170,7 +170,7 @@ impl PreparedProviderWebhook {
                     .map_err(request_error)?,
             )
             .map_err(authentication_error)?;
-        let normalization = adapter.normalize(authenticated);
+        let normalization = adapter.normalize(authenticated).map_err(request_error)?;
         let descriptor = normalization.raw_descriptor().map_err(request_error)?;
         let payload = BlobPayload::verify(
             descriptor.clone(),

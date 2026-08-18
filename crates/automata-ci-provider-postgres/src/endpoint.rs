@@ -1,11 +1,10 @@
 use automata_ci_core::UnixMillis;
 use automata_ci_provider::{
-    ProviderConfigurationRevision, ProviderConnectionId, ProviderConnectionRevision,
-    ProviderDeliveryRepositoryError, ProviderInstanceId, ProviderRepositoryError,
-    ProviderSaveOutcome, ProviderSecretGeneration, ProviderSecretName, ProviderTypeId,
-    ProviderWebhookEndpointId, ProviderWebhookEndpointManifest, ProviderWebhookEndpointRecord,
-    ProviderWebhookEndpointRevision, ProviderWebhookEndpointState, ProviderWebhookSecretCandidates,
-    ProviderWebhookSecretReference,
+    ProviderConfigurationRevision, ProviderDeliveryRepositoryError, ProviderInstanceId,
+    ProviderRepositoryError, ProviderSaveOutcome, ProviderSecretGeneration, ProviderSecretName,
+    ProviderTypeId, ProviderWebhookEndpointId, ProviderWebhookEndpointManifest,
+    ProviderWebhookEndpointRecord, ProviderWebhookEndpointRevision, ProviderWebhookEndpointState,
+    ProviderWebhookSecretCandidates, ProviderWebhookSecretReference,
 };
 use sqlx::{FromRow, Postgres, Transaction};
 
@@ -19,8 +18,6 @@ struct EndpointRow {
     provider_type: String,
     provider_instance_id: uuid::Uuid,
     provider_revision: i64,
-    connection_id: uuid::Uuid,
-    connection_revision: i64,
     body_limit: i64,
     raw_retention_millis: i64,
     candidate_count: i16,
@@ -120,16 +117,19 @@ impl PostgresProviderManifestRepository {
             JOIN provider_instance_revisions AS instance
               ON instance.instance_id = instance_current.instance_id
              AND instance.revision = instance_current.revision
-            JOIN provider_connection_current AS connection_current
-              ON connection_current.connection_id = endpoint.connection_id
-             AND connection_current.revision = endpoint.connection_revision
-            JOIN provider_connection_revisions AS connection
-              ON connection.connection_id = connection_current.connection_id
-             AND connection.revision = connection_current.revision
             WHERE endpoint.endpoint_id = $1
               AND endpoint.lifecycle_state = 'active'
               AND instance.lifecycle_state = 'active'
-              AND connection.lifecycle_state = 'active'
+              AND EXISTS (
+                  SELECT 1
+                  FROM provider_connection_current AS connection_current
+                  JOIN provider_connection_revisions AS connection
+                    ON connection.connection_id = connection_current.connection_id
+                   AND connection.revision = connection_current.revision
+                  WHERE connection.provider_instance_id = endpoint.provider_instance_id
+                    AND connection.provider_revision = endpoint.provider_revision
+                    AND connection.lifecycle_state = 'active'
+              )
             ",
         )
         .bind(endpoint_id.as_uuid())
@@ -170,11 +170,10 @@ impl PostgresProviderManifestRepository {
             return Err(ProviderDeliveryRepositoryError::Corrupt);
         }
         let endpoint = decode_endpoint(row, references.clone())?;
-        let connection = self
-            .load_connection_inner(endpoint.connection_id(), endpoint.connection_revision())
+        let connections = self
+            .active_connections_inner(endpoint.instance_id(), endpoint.provider_revision())
             .await
-            .map_err(map_manifest_error)?
-            .ok_or(ProviderDeliveryRepositoryError::Corrupt)?;
+            .map_err(map_manifest_error)?;
         let mut secrets = Vec::with_capacity(references.len());
         for reference in references {
             let secret = self
@@ -191,7 +190,7 @@ impl PostgresProviderManifestRepository {
         }
         let candidates = ProviderWebhookSecretCandidates::new(&endpoint, secrets)
             .map_err(|_| ProviderDeliveryRepositoryError::Corrupt)?;
-        ProviderWebhookEndpointRecord::new(endpoint, connection, candidates)
+        ProviderWebhookEndpointRecord::new(endpoint, connections, candidates)
             .map(Some)
             .map_err(|_| ProviderDeliveryRepositoryError::Corrupt)
     }
@@ -206,24 +205,26 @@ async fn ensure_endpoint_references(
         SELECT EXISTS (
             SELECT 1
             FROM provider_instance_revisions AS instance
-            JOIN provider_connection_revisions AS connection
-              ON connection.connection_id = $4
-             AND connection.revision = $5
-             AND connection.provider_instance_id = instance.instance_id
-             AND connection.provider_revision = instance.revision
             WHERE instance.instance_id = $1
               AND instance.revision = $2
               AND instance.provider_type = $3
               AND instance.lifecycle_state = 'active'
-              AND connection.lifecycle_state = 'active'
+              AND EXISTS (
+                  SELECT 1
+                  FROM provider_connection_current AS current
+                  JOIN provider_connection_revisions AS connection
+                    ON connection.connection_id = current.connection_id
+                   AND connection.revision = current.revision
+                  WHERE connection.provider_instance_id = instance.instance_id
+                    AND connection.provider_revision = instance.revision
+                    AND connection.lifecycle_state = 'active'
+              )
         )
         ",
     )
     .bind(endpoint.instance_id().as_uuid())
     .bind(durable_u64(endpoint.provider_revision().get())?)
     .bind(endpoint.provider_type().as_str())
-    .bind(endpoint.connection_id().as_uuid())
-    .bind(durable_u64(endpoint.connection_revision().get())?)
     .fetch_one(&mut **transaction)
     .await
     .map_err(unavailable)?;
@@ -262,10 +263,9 @@ async fn insert_endpoint(
         r"
         INSERT INTO provider_webhook_endpoint_revisions (
             endpoint_id, revision, lifecycle_state, provider_type,
-            provider_instance_id, provider_revision, connection_id,
-            connection_revision, body_limit, raw_retention_millis,
+            provider_instance_id, provider_revision, body_limit, raw_retention_millis,
             candidate_count, created_at_ms, retired_at_ms
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
         ",
     )
     .bind(endpoint.endpoint_id().as_uuid())
@@ -274,8 +274,6 @@ async fn insert_endpoint(
     .bind(endpoint.provider_type().as_str())
     .bind(endpoint.instance_id().as_uuid())
     .bind(durable_u64(endpoint.provider_revision().get())?)
-    .bind(endpoint.connection_id().as_uuid())
-    .bind(durable_u64(endpoint.connection_revision().get())?)
     .bind(durable_u64(endpoint.body_limit())?)
     .bind(durable_u64(endpoint.raw_retention_millis())?)
     .bind(
@@ -390,10 +388,6 @@ fn decode_endpoint(
         ProviderInstanceId::from_uuid(row.provider_instance_id)
             .map_err(|_| ProviderDeliveryRepositoryError::Corrupt)?,
         ProviderConfigurationRevision::new(positive_u64(row.provider_revision)?)
-            .map_err(|_| ProviderDeliveryRepositoryError::Corrupt)?,
-        ProviderConnectionId::from_uuid(row.connection_id)
-            .map_err(|_| ProviderDeliveryRepositoryError::Corrupt)?,
-        ProviderConnectionRevision::new(positive_u64(row.connection_revision)?)
             .map_err(|_| ProviderDeliveryRepositoryError::Corrupt)?,
         positive_u64(row.body_limit)?,
         positive_u64(row.raw_retention_millis)?,
