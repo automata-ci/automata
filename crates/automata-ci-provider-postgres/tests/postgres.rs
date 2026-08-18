@@ -462,6 +462,7 @@ fn verified_delivery(
 fn verified_control(
     endpoint: &ProviderWebhookEndpointManifest,
     delivery_id: ProviderDeliveryId,
+    external_delivery_id: &str,
     raw_body: &[u8],
 ) -> VerifiedProviderControlDelivery {
     let raw = provider_raw_webhook_descriptor(secret_digest(raw_body), raw_body.len() as u64)
@@ -477,7 +478,7 @@ fn verified_control(
         endpoint.connection_revision(),
         ExternalDeliveryIdentity::new(
             endpoint.instance_id(),
-            ExternalDeliveryId::new("control-100").expect("external delivery"),
+            ExternalDeliveryId::new(external_delivery_id).expect("external delivery"),
         ),
         ProviderEventName::new("check_run").expect("event type"),
         UnixMillis::new(8_000),
@@ -690,6 +691,7 @@ async fn endpoint_secrets_replay_conflicts_and_worker_fences_are_exact() -> Test
         let control = ProviderDelivery::Control(Box::new(verified_control(
             &endpoint,
             control_id,
+            "control-100",
             b"control-body",
         )));
         let ProviderDeliveryAcceptOutcome::Inserted(control_receipt) = repository
@@ -706,6 +708,7 @@ async fn endpoint_secrets_replay_conflicts_and_worker_fences_are_exact() -> Test
         let replay = ProviderDelivery::Control(Box::new(verified_control(
             &endpoint,
             ProviderDeliveryId::from_uuid(Uuid::from_u128(108))?,
+            "control-100",
             b"control-body",
         )));
         assert!(matches!(
@@ -762,6 +765,37 @@ async fn endpoint_secrets_replay_conflicts_and_worker_fences_are_exact() -> Test
                 .state(),
             ProviderProcessingState::Completed
         );
+
+        let unbound_control_id = ProviderDeliveryId::from_uuid(Uuid::from_u128(109))?;
+        let unbound_control = ProviderDelivery::Control(Box::new(verified_control(
+            &endpoint,
+            unbound_control_id,
+            "control-without-trigger-source",
+            b"schedule-control-body",
+        )));
+        repository
+            .accept_delivery(AcceptProviderDelivery::new(
+                unbound_control,
+                UnixMillis::new(8_600),
+            )?)
+            .await?;
+        let unbound_claim = repository
+            .claim_processing(ClaimProviderProcessing::new(
+                worker,
+                UnixMillis::new(8_700),
+                1_000,
+            )?)
+            .await?
+            .expect("unbound control claim");
+        assert_eq!(unbound_claim.receipt().source_delivery_id(), None);
+        let unbound_completed = repository
+            .complete_processing(CompleteProviderProcessing::new(
+                unbound_claim.fence(),
+                UnixMillis::new(8_800),
+            )?)
+            .await?;
+        assert_eq!(unbound_completed.state(), ProviderProcessingState::Completed);
+        assert_eq!(unbound_completed.source_delivery_id(), None);
 
         let disabled_connection = ProviderConnectionManifest::new(
             connection.connection_id(),
