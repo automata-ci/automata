@@ -147,6 +147,7 @@ async function verifyScreenshotOutput() {
     "repositories",
     "repositories-empty",
     "workflow-runs",
+    "runners",
     "run-summary",
     "job-logs",
     "repository-access-settings",

@@ -19,6 +19,7 @@
 @import "./styles/pages/run-detail.css" layer(pages);
 @import "./styles/pages/job-log.css" layer(pages);
 @import "./styles/pages/repository-directory.css" layer(pages);
+@import "./styles/pages/runner-directory.css" layer(pages);
 @import "./styles/pages/repository-settings.css" layer(pages);
 @import "./styles/pages/repository-secrets.css" layer(pages);
 @import "./styles/pages/rbac-management.css" layer(pages);

@@ -57,6 +57,7 @@ const GITHUB_AUTHORIZATION_ORIGIN: &str = "https://github.com";
 const RBAC_USERS_RETURN_PATH: &str = "/settings/access/users";
 const RBAC_ROLES_RETURN_PATH: &str = "/settings/access/roles";
 const RBAC_DIRECT_BINDINGS_RETURN_PATH: &str = "/settings/access/direct-bindings";
+const RUNNERS_RETURN_PATH: &str = "/runners";
 
 #[derive(Clone)]
 struct WebState {
@@ -248,6 +249,7 @@ fn router_with_optional_rbac_data(
     let router = Router::new()
         .route("/", get(root_redirect))
         .route("/repositories", get(repository_directory))
+        .route("/runners", get(runner_directory))
         .route("/{owner}/{repository}/actions", get(repository_runs))
         .route(
             "/{owner}/{repository}/actions/workflows/{workflow_id}",
@@ -1072,6 +1074,68 @@ async fn root_redirect(RawQuery(raw_query): RawQuery) -> Response<Body> {
         return bad_request();
     }
     permanent_redirect("/repositories")
+}
+
+async fn runner_directory(
+    State(state): State<WebState>,
+    context: Option<Extension<RequestContext>>,
+    snapshot: Option<Extension<AuthenticatedRequestSnapshot>>,
+    csrf: Option<Extension<Arc<CsrfToken>>>,
+    RawQuery(raw_query): RawQuery,
+) -> Response<Body> {
+    if raw_query.is_some() {
+        return bad_request();
+    }
+    let Some(rbac_data) = state.rbac_data.as_ref() else {
+        return not_found();
+    };
+    let context = request_context(&state, context);
+    let public = rbac_data.runner_directory_is_public();
+    let outcome = if public {
+        rbac_data.public_runner_directory(context.tenant_id()).await
+    } else {
+        let Some(Extension(snapshot)) = snapshot else {
+            return rbac_unauthorized(RUNNERS_RETURN_PATH);
+        };
+        if !rbac_request_context_matches(&context, &snapshot) {
+            error!("authenticated runner-directory context did not match its request snapshot");
+            return internal_server_error();
+        }
+        rbac_data.runner_directory(&snapshot).await
+    };
+    let page = match outcome {
+        Ok(RbacWebReadOutcome::Authorized(page)) => page,
+        Ok(RbacWebReadOutcome::Forbidden) => return rbac_forbidden(),
+        Ok(RbacWebReadOutcome::SessionStale) => return rbac_unauthorized(RUNNERS_RETURN_PATH),
+        Ok(RbacWebReadOutcome::NotFound) => return rbac_not_found(),
+        Err(error) => return rbac_data_error_response(error),
+    };
+    let csrf = csrf.map(|Extension(csrf)| csrf);
+    let ShellMutationResolution::Valid(mutation) = shell_mutation(&context, csrf.as_deref()) else {
+        return internal_server_error();
+    };
+    let csp_nonce = match new_csp_nonce() {
+        Ok(nonce) => nonce,
+        Err(error) => {
+            error!(%error, "failed to generate a runner-directory CSP nonce");
+            return internal_server_error();
+        }
+    };
+    let request_json = match model::runner_directory(
+        client_assets(),
+        csp_nonce.clone(),
+        &context,
+        mutation,
+        public,
+        &page,
+    ) {
+        Ok(request) => request,
+        Err(error) => {
+            error!(%error, "failed to assemble runner-directory page");
+            return internal_server_error();
+        }
+    };
+    render(state, request_json, csp_nonce).await
 }
 
 async fn repository_directory(
@@ -2222,6 +2286,8 @@ mod tests {
             ManagementRoleBindingRecord, ManagementRoleBindingSource, ManagementScopeRecord,
             MemberRecord, MemberStatus, ProviderRoleMappingId, RoleBindingId, RoleBindingStatus,
             RoleDetailRecord, RoleId, RoleKind, RolePermissionRecord, RoleRecord,
+            RunnerDirectoryDesiredState, RunnerDirectoryPage, RunnerDirectoryRecord,
+            RunnerDirectoryStatus,
         },
         request_auth::ViewerDisplayMetadata,
         secret::{CsrfToken, SecretString},
@@ -2540,6 +2606,8 @@ mod tests {
 
     #[derive(Clone, Debug, Eq, PartialEq)]
     enum RecordedRbacCall {
+        RunnerDirectory,
+        PublicRunnerDirectory,
         UserList(RbacUserListRequest),
         UserDetail(RbacUserDetailRequest),
         RoleList(RbacRoleListRequest),
@@ -2550,6 +2618,7 @@ mod tests {
     #[derive(Debug)]
     struct FakeRbacData {
         outcome: FakeRbacOutcome,
+        public_runner_directory: bool,
         calls: Mutex<Vec<RecordedRbacCall>>,
     }
 
@@ -2557,8 +2626,14 @@ mod tests {
         fn new(outcome: FakeRbacOutcome) -> Self {
             Self {
                 outcome,
+                public_runner_directory: false,
                 calls: Mutex::new(Vec::new()),
             }
+        }
+
+        fn public(mut self) -> Self {
+            self.public_runner_directory = true;
+            self
         }
 
         fn calls(&self) -> Vec<RecordedRbacCall> {
@@ -2583,6 +2658,62 @@ mod tests {
 
     #[async_trait]
     impl RbacWebData for FakeRbacData {
+        fn runner_directory_is_public(&self) -> bool {
+            self.public_runner_directory
+        }
+
+        async fn runner_directory(
+            &self,
+            _snapshot: &AuthenticatedRequestSnapshot,
+        ) -> Result<RbacWebReadOutcome<RunnerDirectoryPage>, RbacWebDataError> {
+            self.calls
+                .lock()
+                .expect("fake RBAC data mutex must remain available")
+                .push(RecordedRbacCall::RunnerDirectory);
+            self.result(
+                RunnerDirectoryPage::new(vec![
+                    RunnerDirectoryRecord::new(
+                        "linux-01",
+                        Some("general".to_owned()),
+                        vec!["self-hosted".to_owned(), "linux".to_owned()],
+                        4,
+                        1,
+                        RunnerDirectoryStatus::Online,
+                        RunnerDirectoryDesiredState::Active,
+                        Some(1_786_985_700_000),
+                    )
+                    .expect("runner directory record"),
+                ])
+                .expect("runner directory page"),
+            )
+        }
+
+        async fn public_runner_directory(
+            &self,
+            _tenant_id: &TenantId,
+        ) -> Result<RbacWebReadOutcome<RunnerDirectoryPage>, RbacWebDataError> {
+            self.calls
+                .lock()
+                .expect("fake RBAC data mutex must remain available")
+                .push(RecordedRbacCall::PublicRunnerDirectory);
+            self.result(
+                RunnerDirectoryPage::new(vec![
+                    RunnerDirectoryRecord::new(
+                        "linux-01",
+                        Some("general".to_owned()),
+                        vec!["self-hosted".to_owned(), "linux".to_owned()],
+                        4,
+                        1,
+                        RunnerDirectoryStatus::Online,
+                        RunnerDirectoryDesiredState::Active,
+                        Some(1_786_985_700_000),
+                    )
+                    .expect("runner directory record"),
+                ])
+                .expect("runner directory page"),
+            )
+        }
+
         async fn list_users(
             &self,
             _snapshot: &AuthenticatedRequestSnapshot,
@@ -3185,6 +3316,21 @@ mod tests {
         (app, renderer, rbac_data)
     }
 
+    fn public_runner_test_router() -> (Router, Arc<RecordingRenderer>, Arc<FakeRbacData>) {
+        let renderer = Arc::new(RecordingRenderer::default());
+        let data: Arc<dyn WebData> = Arc::new(FakeWebData::new(FakeOutcome::Found));
+        let rbac_data = Arc::new(FakeRbacData::new(FakeRbacOutcome::Found).public());
+        let tenant = TenantId::new("acme-production").expect("test tenant must be valid");
+        let app = router_with_data_and_rbac(
+            renderer.clone(),
+            4,
+            data,
+            rbac_data.clone(),
+            RequestContext::anonymous(tenant),
+        );
+        (app, renderer, rbac_data)
+    }
+
     fn rbac_mutation_test_router(
         capabilities: Option<ManagementMutationCapabilities>,
         grant_options: Option<DirectBindingGrantOptionsState>,
@@ -3502,6 +3648,45 @@ mod tests {
         app.layer(Extension(context))
             .layer(Extension(snapshot))
             .layer(Extension(Arc::new(csrf)))
+    }
+
+    #[tokio::test]
+    async fn runner_directory_requires_permission_and_projects_only_safe_operations_metadata() {
+        let (app, renderer, rbac_data) = rbac_test_router(FakeRbacOutcome::Found);
+        let anonymous = get(&app, "/runners").await;
+        assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
+        assert!(renderer.requests().is_empty());
+
+        let response = get(&authenticated_rbac_router(app), "/runners").await;
+        let page = renderer.page();
+        assert_page_headers(&response, &page);
+        assert_eq!(page["page"]["kind"], "runner-directory");
+        assert_eq!(page["page"]["visibility"], "private");
+        assert_eq!(page["page"]["counts"]["total"], 1);
+        assert_eq!(page["page"]["counts"]["online"], 1);
+        assert_eq!(page["page"]["counts"]["busySlots"], 1);
+        assert_eq!(page["page"]["counts"]["totalSlots"], 4);
+        assert_eq!(page["page"]["runners"][0]["name"], "linux-01");
+        assert_eq!(page["page"]["runners"][0]["group"], "general");
+        assert!(page["page"]["runners"][0].get("id").is_none());
+        assert!(page["page"]["runners"][0].get("sessionId").is_none());
+        assert_eq!(rbac_data.calls(), vec![RecordedRbacCall::RunnerDirectory]);
+    }
+
+    #[tokio::test]
+    async fn explicitly_public_runner_directory_is_available_without_a_session() {
+        let (app, renderer, rbac_data) = public_runner_test_router();
+        let response = get(&app, "/runners").await;
+        let page = renderer.page();
+
+        assert_page_headers(&response, &page);
+        assert_eq!(page["page"]["kind"], "runner-directory");
+        assert_eq!(page["page"]["visibility"], "public");
+        assert_eq!(page["page"]["runners"][0]["name"], "linux-01");
+        assert_eq!(
+            rbac_data.calls(),
+            vec![RecordedRbacCall::PublicRunnerDirectory]
+        );
     }
 
     #[tokio::test]
@@ -4259,13 +4444,14 @@ mod tests {
         assert_eq!(page["page"]["shell"]["homeHref"], "/repositories");
         assert_eq!(
             page["page"]["shell"]["navigation"].as_array().map(Vec::len),
-            Some(2)
+            Some(3)
         );
         assert_eq!(
             page["page"]["shell"]["navigation"][0]["label"],
             "Repositories"
         );
-        assert_eq!(page["page"]["shell"]["navigation"][1]["label"], "Actions");
+        assert_eq!(page["page"]["shell"]["navigation"][1]["label"], "Runners");
+        assert_eq!(page["page"]["shell"]["navigation"][2]["label"], "Actions");
         assert_eq!(page["page"]["runs"][0]["id"], RUN_ID);
         assert_eq!(page["page"]["runs"][0]["number"], "1842");
         assert_ne!(
@@ -4372,7 +4558,7 @@ mod tests {
         assert_page_headers(&response, &page);
         assert_eq!(
             page["page"]["shell"]["navigation"].as_array().map(Vec::len),
-            Some(2)
+            Some(3)
         );
 
         let (composed_app, composed_renderer, _) = rbac_test_router(FakeRbacOutcome::Found);
@@ -4388,10 +4574,11 @@ mod tests {
             page["page"]["shell"]["navigation"][0]["label"],
             "Repositories"
         );
-        assert_eq!(page["page"]["shell"]["navigation"][1]["label"], "Actions");
-        assert_eq!(page["page"]["shell"]["navigation"][2]["label"], "Access");
+        assert_eq!(page["page"]["shell"]["navigation"][1]["label"], "Runners");
+        assert_eq!(page["page"]["shell"]["navigation"][2]["label"], "Actions");
+        assert_eq!(page["page"]["shell"]["navigation"][3]["label"], "Access");
         assert_eq!(
-            page["page"]["shell"]["navigation"][2]["href"],
+            page["page"]["shell"]["navigation"][3]["href"],
             RBAC_USERS_RETURN_PATH
         );
 
@@ -4406,7 +4593,7 @@ mod tests {
         assert_page_headers(&response, &page);
         assert_eq!(
             page["page"]["shell"]["navigation"].as_array().map(Vec::len),
-            Some(2)
+            Some(3)
         );
     }
 

@@ -9,6 +9,7 @@ import {
   previewRepositorySettings,
   previewRunDetail,
   previewRunList,
+  previewRunnerDirectory,
 } from "../../src/preview/models";
 import {
   previewRepository,
@@ -54,6 +55,22 @@ describe("preview model projections", () => {
     ]);
     expect(directory.pagination.label).toBe("1 repository on this page");
     expect(previewRepositoryDirectory(true).repositories).toEqual([]);
+  });
+
+  it("projects a safe runner fleet summary without durable identities", () => {
+    const directory = previewRunnerDirectory();
+    expect(directory.counts).toEqual({
+      total: 3,
+      online: 2,
+      busySlots: 3,
+      totalSlots: 12,
+    });
+    expect(directory.runners.map((runner) => runner.name)).toEqual([
+      "linux-01",
+      "arm64-01",
+      "linux-02",
+    ]);
+    expect(JSON.stringify(directory)).not.toMatch(/runnerId|sessionId|capabilities/iu);
   });
   it("keeps list, run, job, and workflow routes mutually consistent", () => {
     const runIds = new Set<string>();
@@ -282,6 +299,7 @@ describe("preview model projections", () => {
       expect(page?.shell.homeHref).toBe("?view=repositories");
       expect(page?.shell.navigation).toEqual([
         { label: "Repositories", href: "?view=repositories" },
+        { label: "Runners", href: "?view=runners" },
         { label: "Access", href: "?view=users", current: true },
       ]);
       expect(JSON.stringify(page)).not.toContain("csrf");

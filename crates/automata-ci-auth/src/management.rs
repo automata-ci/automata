@@ -20,6 +20,7 @@ use crate::{
 };
 
 const MAX_DISPLAY_NAME_BYTES: usize = 255;
+const MAX_RUNNER_LABEL_BYTES: usize = 4_096;
 const MAX_REASON_BYTES: usize = 1_024;
 const MAX_REQUEST_ID_BYTES: usize = 255;
 const MAX_PAGE_SIZE: u16 = 100;
@@ -42,7 +43,12 @@ pub mod permissions {
     pub const ROLES_MANAGE: &str = "roles:manage";
     /// Allows granting or revoking direct scoped role bindings.
     pub const ROLE_BINDINGS_MANAGE: &str = "role-bindings:manage";
+    /// Allows reading tenant runner health and capacity metadata.
+    pub const RUNNERS_READ: &str = "runners:read";
 }
+
+/// Maximum number of runners returned by the bounded human directory.
+pub const RUNNER_DIRECTORY_LIMIT: usize = 500;
 
 macro_rules! uuid_id {
     ($name:ident, $error:ident, $label:literal) => {
@@ -2156,6 +2162,153 @@ pub enum ManagementDetailOutcome<T> {
     NotFound,
 }
 
+/// Public-safe operational state for one tenant runner.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RunnerDirectoryStatus {
+    /// The control plane currently has a live runner session.
+    Online,
+    /// The runner has no live control-plane session.
+    Offline,
+}
+
+/// Operator-requested scheduling state for one tenant runner.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RunnerDirectoryDesiredState {
+    /// The runner may accept new work.
+    Active,
+    /// Existing work may finish but new work is not assigned.
+    Draining,
+    /// The runner is administratively disabled.
+    Disabled,
+}
+
+/// Presentation-safe runner metadata. Durable runner and session identifiers,
+/// network identity, and raw capability documents are intentionally absent.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RunnerDirectoryRecord {
+    name: String,
+    group: Option<String>,
+    labels: Vec<String>,
+    slots: u16,
+    busy_slots: u16,
+    status: RunnerDirectoryStatus,
+    desired_state: RunnerDirectoryDesiredState,
+    last_seen_at_ms: Option<i64>,
+}
+
+impl RunnerDirectoryRecord {
+    /// Creates one bounded directory row.
+    ///
+    /// # Errors
+    ///
+    /// Rejects unsafe display text, invalid capacity, or negative timestamps.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        name: impl Into<String>,
+        group: Option<String>,
+        labels: Vec<String>,
+        slots: u16,
+        busy_slots: u16,
+        status: RunnerDirectoryStatus,
+        desired_state: RunnerDirectoryDesiredState,
+        last_seen_at_ms: Option<i64>,
+    ) -> Result<Self, ManagementValueError> {
+        let name = name.into();
+        validate_display_name(&name)?;
+        if group
+            .as_deref()
+            .is_some_and(|value| validate_display_name(value).is_err())
+            || labels.len() > 64
+            || labels
+                .iter()
+                .any(|value| validate_display_name(value).is_err())
+            || labels.iter().map(String::len).sum::<usize>() > MAX_RUNNER_LABEL_BYTES
+            || slots == 0
+            || busy_slots > slots
+            || last_seen_at_ms.is_some_and(|value| value < 0)
+        {
+            return Err(ManagementValueError::InvalidRunnerDirectoryRecord);
+        }
+        Ok(Self {
+            name,
+            group,
+            labels,
+            slots,
+            busy_slots,
+            status,
+            desired_state,
+            last_seen_at_ms,
+        })
+    }
+
+    #[must_use]
+    /// Returns the human-facing runner name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    #[must_use]
+    /// Returns the optional human-facing runner group.
+    pub fn group(&self) -> Option<&str> {
+        self.group.as_deref()
+    }
+    #[must_use]
+    /// Returns bounded scheduling labels.
+    pub fn labels(&self) -> &[String] {
+        &self.labels
+    }
+    #[must_use]
+    /// Returns total execution slots.
+    pub const fn slots(&self) -> u16 {
+        self.slots
+    }
+    #[must_use]
+    /// Returns slots currently occupied by nonterminal attempts.
+    pub const fn busy_slots(&self) -> u16 {
+        self.busy_slots
+    }
+    #[must_use]
+    /// Returns the observed connectivity state.
+    pub const fn status(&self) -> RunnerDirectoryStatus {
+        self.status
+    }
+    #[must_use]
+    /// Returns the operator-requested scheduling state.
+    pub const fn desired_state(&self) -> RunnerDirectoryDesiredState {
+        self.desired_state
+    }
+    #[must_use]
+    /// Returns the last observed contact time in Unix milliseconds.
+    pub const fn last_seen_at_ms(&self) -> Option<i64> {
+        self.last_seen_at_ms
+    }
+}
+
+/// Current authorized runner directory for one tenant.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RunnerDirectoryPage {
+    runners: Vec<RunnerDirectoryRecord>,
+}
+
+impl RunnerDirectoryPage {
+    /// Creates a complete bounded directory.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a directory larger than the released complete-read limit.
+    pub fn new(runners: Vec<RunnerDirectoryRecord>) -> Result<Self, ManagementValueError> {
+        if runners.len() > RUNNER_DIRECTORY_LIMIT {
+            return Err(ManagementValueError::OversizedPage);
+        }
+        Ok(Self { runners })
+    }
+
+    #[must_use]
+    /// Returns every runner in canonical directory order.
+    pub fn runners(&self) -> &[RunnerDirectoryRecord] {
+        &self.runners
+    }
+}
+
 /// Closed result of a revision-guarded management mutation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ManagementMutationOutcome<T> {
@@ -2233,6 +2386,24 @@ pub trait HumanRbacManagementRepository: fmt::Debug + Send + Sync {
         &'a self,
         request: &'a ReadDirectBindingGrantOptions,
     ) -> ManagementReadFuture<'a, DirectBindingGrantOptionsState>;
+
+    /// Lists the complete bounded tenant runner directory after checking
+    /// `runners:read` against current durable actor authority.
+    fn list_runner_directory<'a>(
+        &'a self,
+        _actor: &'a ManagementActor,
+    ) -> ManagementReadFuture<'a, RunnerDirectoryPage> {
+        Box::pin(async { Err(ManagementRepositoryError::Unavailable) })
+    }
+
+    /// Lists the public-safe tenant runner projection without actor authority.
+    /// Callers must expose this only behind explicit deployment publication policy.
+    fn list_public_runner_directory<'a>(
+        &'a self,
+        _tenant_id: &'a TenantId,
+    ) -> ManagementReadFuture<'a, RunnerDirectoryPage> {
+        Box::pin(async { Err(ManagementRepositoryError::Unavailable) })
+    }
 
     /// Lists members after checking `members:read`.
     fn list_members<'a>(
@@ -2349,6 +2520,9 @@ pub enum ManagementValueError {
     /// A display label was visually blank, oversized, control-bearing, or bidi-formatted.
     #[error("management display name is invalid")]
     InvalidDisplayName,
+    /// A runner directory row exceeded its safe presentation or capacity bounds.
+    #[error("runner directory record is invalid")]
+    InvalidRunnerDirectoryRecord,
     #[error("provider login is invalid")]
     /// Provider login metadata was visually blank, oversized, control-bearing, or bidi-formatted.
     InvalidProviderLogin,

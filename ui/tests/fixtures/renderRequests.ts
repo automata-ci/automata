@@ -29,6 +29,11 @@ const shell: ShellModel = {
       current: false,
     },
     {
+      label: "Runners",
+      href: "/runners",
+      current: false,
+    },
+    {
       label: "Actions",
       href: "/automata-ci/automata/actions",
       current: true,
@@ -69,7 +74,10 @@ export const repositoryDirectoryRequest: RenderRequest = {
       signOut: null,
       documentTitle: "Repositories · Automata",
       viewer: null,
-      navigation: [{ label: "Repositories", href: "/repositories", current: true }],
+      navigation: [
+        { label: "Repositories", href: "/repositories", current: true },
+        { label: "Runners", href: "/runners", current: false },
+      ],
     },
     heading: "Repositories",
     summary: "Browse repositories available under your current access.",
@@ -96,7 +104,10 @@ export const repositorySecretsDirectoryRequest: RenderRequest = {
     shell: {
       ...shell,
       documentTitle: "Repositories · Automata",
-      navigation: [{ label: "Repositories", href: "/repositories", current: true }],
+      navigation: [
+        { label: "Repositories", href: "/repositories", current: true },
+        { label: "Runners", href: "/runners", current: false },
+      ],
     },
     heading: "Repositories",
     summary: "Browse repositories available under your current access.",
@@ -113,6 +124,52 @@ export const repositorySecretsDirectoryRequest: RenderRequest = {
       nextHref: null,
       label: "1 repository on this page",
     },
+  },
+};
+
+export const runnerDirectoryRequest: RenderRequest = {
+  ...common,
+  page: {
+    kind: "runner-directory",
+    shell: {
+      ...shell,
+      signIn: { action: "/auth/github/login", returnPath: "/runners" },
+      signOut: null,
+      documentTitle: "Runners · Automata",
+      viewer: null,
+      navigation: [
+        { label: "Repositories", href: "/repositories", current: false },
+        { label: "Runners", href: "/runners", current: true },
+      ],
+    },
+    heading: "Runners",
+    summary: "Review runner availability, scheduling state, labels, and capacity.",
+    visibility: "public",
+    counts: { total: 2, online: 1, busySlots: 1, totalSlots: 8 },
+    runners: [
+      {
+        name: "linux-01",
+        group: "general",
+        labels: ["self-hosted", "linux", "x64"],
+        status: { label: "Online", tone: "success" },
+        desiredState: "active",
+        desiredStateLabel: "Accepting jobs",
+        busySlots: 1,
+        totalSlots: 4,
+        lastSeenAt: { iso: "2026-08-18T01:30:00Z", label: "18 Aug 2026, 01:30 UTC" },
+      },
+      {
+        name: "linux-02",
+        group: "general",
+        labels: ["self-hosted", "linux", "arm64"],
+        status: { label: "Offline", tone: "neutral" },
+        desiredState: "draining",
+        desiredStateLabel: "Draining",
+        busySlots: 0,
+        totalSlots: 4,
+        lastSeenAt: { iso: "2026-08-18T01:20:00Z", label: "18 Aug 2026, 01:20 UTC" },
+      },
+    ],
   },
 };
 
@@ -359,6 +416,7 @@ export const deepLinkSignInRequest: RenderRequest = {
       viewer: null,
       navigation: [
         { label: "Repositories", href: "/repositories", current: true },
+        { label: "Runners", href: "/runners", current: false },
       ],
     },
   },
@@ -491,6 +549,10 @@ const rbacShell: ShellModel = {
     {
       label: "Repositories",
       href: "/repositories",
+    },
+    {
+      label: "Runners",
+      href: "/runners",
     },
     {
       label: "Access",

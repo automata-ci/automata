@@ -36,6 +36,11 @@ const previewPages = [
     heading: "Workflow runs",
   },
   {
+    name: "runners",
+    url: "./?view=runners",
+    heading: "Runners",
+  },
+  {
     name: "run-summary",
     url: "./?view=run",
     heading: "Build and test release candidate",
@@ -1114,7 +1119,7 @@ test("account and theme controls remain usable together at 320px", async ({
   });
 
   await expectNoDocumentOverflow(page);
-  for (const linkName of ["Repositories", "Access"] as const) {
+  for (const linkName of ["Repositories", "Runners", "Access"] as const) {
     await expect(
       page
         .getByRole("navigation", { name: "Primary navigation" })
@@ -1159,7 +1164,7 @@ test("the shell compacts cleanly through the 641px transition", async ({
       scroll: element.scrollWidth,
     }));
     expect(navigationWidths.scroll - navigationWidths.client).toBeLessThanOrEqual(1);
-    for (const label of ["Repositories", "Access"]) {
+    for (const label of ["Repositories", "Runners", "Access"]) {
       await expect(
         navigation.getByRole("link", { name: label, exact: true }),
       ).toBeInViewport({ ratio: 1 });

@@ -18,10 +18,11 @@ use automata_ci_auth::{
         ManagementReadOutcome, ManagementRepositoryError, ManagementRevision,
         ManagementRoleBindingCursor, ManagementRoleBindingRecord, ManagementRoleBindingSource,
         ManagementScopeRecord, MemberRecord, MemberStatus, ProviderRoleMappingId,
-        ReadDirectBindingGrantOptions, ReadManagementMutationCapabilities, ReadMemberDetail,
-        ReadRoleDetail, RevokeRole, RoleBindingId, RoleBindingRecord, RoleBindingStatus,
-        RoleDetailRecord, RoleId, RoleKind, RolePermissionRecord, RoleRecord, SetRolePermission,
-        UpdateRole, permissions,
+        RUNNER_DIRECTORY_LIMIT, ReadDirectBindingGrantOptions, ReadManagementMutationCapabilities,
+        ReadMemberDetail, ReadRoleDetail, RevokeRole, RoleBindingId, RoleBindingRecord,
+        RoleBindingStatus, RoleDetailRecord, RoleId, RoleKind, RolePermissionRecord, RoleRecord,
+        RunnerDirectoryDesiredState, RunnerDirectoryPage, RunnerDirectoryRecord,
+        RunnerDirectoryStatus, SetRolePermission, UpdateRole, permissions,
     },
 };
 use sqlx::{FromRow, PgPool, Postgres, Transaction};
@@ -335,6 +336,87 @@ struct MemberRow {
     membership_status: String,
     authorization_revision: i64,
     membership_revision: i64,
+}
+
+#[derive(FromRow)]
+struct RunnerDirectoryRow {
+    name: String,
+    group_name: Option<String>,
+    labels: Vec<String>,
+    slots: i32,
+    busy_slots: i64,
+    status: String,
+    desired_state: String,
+    last_seen_at_ms: Option<i64>,
+}
+
+impl RunnerDirectoryRow {
+    fn into_record(self) -> Result<RunnerDirectoryRecord, ManagementRepositoryError> {
+        let status = match self.status.as_str() {
+            "online" => RunnerDirectoryStatus::Online,
+            "offline" => RunnerDirectoryStatus::Offline,
+            _ => return Err(ManagementRepositoryError::CorruptData),
+        };
+        let desired_state = match self.desired_state.as_str() {
+            "active" => RunnerDirectoryDesiredState::Active,
+            "draining" => RunnerDirectoryDesiredState::Draining,
+            "disabled" => RunnerDirectoryDesiredState::Disabled,
+            _ => return Err(ManagementRepositoryError::CorruptData),
+        };
+        RunnerDirectoryRecord::new(
+            self.name,
+            self.group_name,
+            self.labels,
+            u16::try_from(self.slots).map_err(|_| ManagementRepositoryError::CorruptData)?,
+            u16::try_from(self.busy_slots).map_err(|_| ManagementRepositoryError::CorruptData)?,
+            status,
+            desired_state,
+            self.last_seen_at_ms,
+        )
+        .map_err(|_| ManagementRepositoryError::CorruptData)
+    }
+}
+
+async fn load_runner_directory(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &str,
+) -> Result<RunnerDirectoryPage, ManagementRepositoryError> {
+    let rows = sqlx::query_as::<_, RunnerDirectoryRow>(
+        r"
+        SELECT runner.name, runner_group.name AS group_name, runner.labels,
+               runner.slots,
+               count(DISTINCT attempt.runner_slot) FILTER (
+                   WHERE attempt.lifecycle IN (
+                       'leased', 'preparing', 'running', 'cancelling', 'finalizing'
+                   )
+               )::BIGINT AS busy_slots,
+               runner.status, runner.desired_state, runner.last_seen_at_ms
+        FROM runners AS runner
+        LEFT JOIN runner_groups AS runner_group
+          ON runner_group.id = runner.group_id
+         AND runner_group.tenant_id = runner.tenant_id
+        LEFT JOIN job_attempts AS attempt ON attempt.runner_id = runner.id
+        WHERE runner.tenant_id = $1
+        GROUP BY runner.id, runner.name, runner.normalized_name, runner_group.name,
+                 runner.labels, runner.slots, runner.status, runner.desired_state,
+                 runner.last_seen_at_ms
+        ORDER BY runner.normalized_name, runner.id
+        LIMIT $2
+        ",
+    )
+    .bind(tenant_id)
+    .bind(i64::try_from(RUNNER_DIRECTORY_LIMIT + 1).expect("runner directory limit fits i64"))
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(map_database_error)?;
+    if rows.len() > RUNNER_DIRECTORY_LIMIT {
+        return Err(ManagementRepositoryError::CorruptData);
+    }
+    let runners = rows
+        .into_iter()
+        .map(RunnerDirectoryRow::into_record)
+        .collect::<Result<Vec<_>, _>>()?;
+    RunnerDirectoryPage::new(runners).map_err(|_| ManagementRepositoryError::CorruptData)
 }
 
 impl MemberRow {
@@ -1572,6 +1654,47 @@ impl HumanRbacManagementRepository for PostgresHumanRbacManagementRepository {
                 load_direct_binding_grant_options(&mut transaction, &authorized_actor).await?;
             commit(transaction).await?;
             Ok(ManagementReadOutcome::Authorized(options))
+        })
+    }
+
+    fn list_runner_directory<'a>(
+        &'a self,
+        actor: &'a ManagementActor,
+    ) -> ManagementReadFuture<'a, RunnerDirectoryPage> {
+        Box::pin(async move {
+            let mut transaction = begin_read(&self.pool).await?;
+            let authorized_actor = match authorize_read(
+                &mut transaction,
+                actor,
+                &[permissions::RUNNERS_READ],
+            )
+            .await?
+            {
+                ManagementReadOutcome::Forbidden => {
+                    commit(transaction).await?;
+                    return Ok(ManagementReadOutcome::Forbidden);
+                }
+                ManagementReadOutcome::SessionStale => {
+                    commit(transaction).await?;
+                    return Ok(ManagementReadOutcome::SessionStale);
+                }
+                ManagementReadOutcome::Authorized(actor) => actor,
+            };
+            let page = load_runner_directory(&mut transaction, &authorized_actor.tenant_id).await?;
+            commit(transaction).await?;
+            Ok(ManagementReadOutcome::Authorized(page))
+        })
+    }
+
+    fn list_public_runner_directory<'a>(
+        &'a self,
+        tenant_id: &'a TenantId,
+    ) -> ManagementReadFuture<'a, RunnerDirectoryPage> {
+        Box::pin(async move {
+            let mut transaction = begin_read(&self.pool).await?;
+            let page = load_runner_directory(&mut transaction, tenant_id.as_str()).await?;
+            commit(transaction).await?;
+            Ok(ManagementReadOutcome::Authorized(page))
         })
     }
 

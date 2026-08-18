@@ -16,7 +16,7 @@ use automata_ci_auth::{
         ManagementRevision, ManagementRoleBindingCursor, ManagementRoleBindingRecord, MemberRecord,
         ReadDirectBindingGrantOptions, ReadManagementMutationCapabilities, ReadMemberDetail,
         ReadRoleDetail, RevokeRole, RoleBindingId, RoleBindingStatus, RoleDetailRecord, RoleId,
-        RoleKind, RoleRecord, SetRolePermission, UpdateRole,
+        RoleKind, RoleRecord, RunnerDirectoryPage, SetRolePermission, UpdateRole,
     },
     request_auth::AuthenticatedRequestSnapshot,
     time::Clock,
@@ -323,6 +323,27 @@ pub(crate) enum RbacWebDataError {
 /// Authenticated, authorization-aware read boundary for RBAC web pages.
 #[async_trait]
 pub(crate) trait RbacWebData: fmt::Debug + Send + Sync {
+    /// Whether this deployment explicitly publishes safe runner metadata anonymously.
+    fn runner_directory_is_public(&self) -> bool {
+        false
+    }
+
+    /// Reads the current public-safe runner directory using fresh RBAC authority.
+    async fn runner_directory(
+        &self,
+        _snapshot: &AuthenticatedRequestSnapshot,
+    ) -> Result<RbacWebReadOutcome<RunnerDirectoryPage>, RbacWebDataError> {
+        Err(RbacWebDataError::Unavailable)
+    }
+
+    /// Reads the same safe projection for an explicitly public deployment.
+    async fn public_runner_directory(
+        &self,
+        _tenant_id: &TenantId,
+    ) -> Result<RbacWebReadOutcome<RunnerDirectoryPage>, RbacWebDataError> {
+        Err(RbacWebDataError::Unavailable)
+    }
+
     async fn mutation_capabilities(
         &self,
         _snapshot: &AuthenticatedRequestSnapshot,
@@ -381,6 +402,7 @@ pub(crate) trait RbacWebData: fmt::Debug + Send + Sync {
 pub(crate) struct ManagementRbacWebData {
     repository: std::sync::Arc<dyn HumanRbacManagementRepository>,
     clock: std::sync::Arc<dyn Clock>,
+    public_runner_directory: bool,
 }
 
 impl ManagementRbacWebData {
@@ -388,7 +410,17 @@ impl ManagementRbacWebData {
         repository: std::sync::Arc<dyn HumanRbacManagementRepository>,
         clock: std::sync::Arc<dyn Clock>,
     ) -> Self {
-        Self { repository, clock }
+        Self {
+            repository,
+            clock,
+            public_runner_directory: false,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn with_public_runner_directory(mut self, enabled: bool) -> Self {
+        self.public_runner_directory = enabled;
+        self
     }
 
     fn actor(
@@ -432,6 +464,45 @@ impl fmt::Debug for ManagementRbacWebData {
 )]
 #[async_trait]
 impl RbacWebData for ManagementRbacWebData {
+    fn runner_directory_is_public(&self) -> bool {
+        self.public_runner_directory
+    }
+
+    async fn runner_directory(
+        &self,
+        snapshot: &AuthenticatedRequestSnapshot,
+    ) -> Result<RbacWebReadOutcome<RunnerDirectoryPage>, RbacWebDataError> {
+        match self
+            .repository
+            .list_runner_directory(&self.actor(snapshot)?)
+            .await
+        {
+            Ok(ManagementReadOutcome::Authorized(page)) => Ok(RbacWebReadOutcome::Authorized(page)),
+            Ok(ManagementReadOutcome::Forbidden) => Ok(RbacWebReadOutcome::Forbidden),
+            Ok(ManagementReadOutcome::SessionStale) => Ok(RbacWebReadOutcome::SessionStale),
+            Err(error) => Err(repository_error(error)),
+        }
+    }
+
+    async fn public_runner_directory(
+        &self,
+        tenant_id: &TenantId,
+    ) -> Result<RbacWebReadOutcome<RunnerDirectoryPage>, RbacWebDataError> {
+        if !self.public_runner_directory {
+            return Ok(RbacWebReadOutcome::Forbidden);
+        }
+        match self
+            .repository
+            .list_public_runner_directory(tenant_id)
+            .await
+        {
+            Ok(ManagementReadOutcome::Authorized(page)) => Ok(RbacWebReadOutcome::Authorized(page)),
+            Ok(ManagementReadOutcome::Forbidden) => Ok(RbacWebReadOutcome::Forbidden),
+            Ok(ManagementReadOutcome::SessionStale) => Ok(RbacWebReadOutcome::SessionStale),
+            Err(error) => Err(repository_error(error)),
+        }
+    }
+
     async fn mutation_capabilities(
         &self,
         snapshot: &AuthenticatedRequestSnapshot,

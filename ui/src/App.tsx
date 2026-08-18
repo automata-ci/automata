@@ -1,10 +1,11 @@
 import type { ReactNode } from "react";
 import type { PageModel } from "./models";
-import type { LiveLogRecord } from "./liveLogs/sse";
+import type { LiveLogRecord } from "./logs/sse";
 import { ThemeToggle } from "./components/ThemeToggle";
 import { JobLogPage } from "./pages/JobLogPage";
 import { DeepLinkSignInPage } from "./pages/DeepLinkSignInPage";
 import { RepositoryDirectoryPage } from "./pages/RepositoryDirectoryPage";
+import { RunnerDirectoryPage } from "./pages/RunnerDirectoryPage";
 import { RepositorySettingsPage } from "./pages/RepositorySettingsPage";
 import { RepositorySecretsPage } from "./pages/RepositorySecretsPage";
 import { RunDetailPage } from "./pages/RunDetailPage";
@@ -29,6 +30,8 @@ export function App({ page, shellUtility }: AppProps) {
       return <SetupPage model={page} shellUtility={utility} />;
     case "repository-directory":
       return <RepositoryDirectoryPage model={page} shellUtility={utility} />;
+    case "runner-directory":
+      return <RunnerDirectoryPage model={page} shellUtility={utility} />;
     case "run-list":
       return <RunListPage model={page} shellUtility={utility} />;
     case "run-detail":

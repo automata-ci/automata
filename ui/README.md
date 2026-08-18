@@ -44,7 +44,7 @@ separate:
 ```text
 src/
 ├── components/   reusable landmarks and presentation components
-├── liveLogs/      resumable transport controller and strict SSE adapter
+├── logs/          resumable transport controller and strict SSE adapter
 ├── pages/        page composition and page-local derived view state
 ├── presentation/ shared status, timing, and event copy derivation
 ├── preview/      representative sample data, projections, and demo routing

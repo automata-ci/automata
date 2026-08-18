@@ -18,6 +18,7 @@ import {
   repositoryDirectoryRequest,
   repositorySecretsDirectoryRequest,
   repositorySettingsRequest,
+  runnerDirectoryRequest,
   roleDetailRequest,
   roleListRequest,
   runDetailRequest,
@@ -129,6 +130,7 @@ describe("render request validation", () => {
 
   it.each([
     ["repository-directory", repositoryDirectoryRequest],
+    ["runner-directory", runnerDirectoryRequest],
     ["repository-directory-secrets", repositorySecretsDirectoryRequest],
     ["run-list", runListRequest],
     ["run-detail", runDetailRequest],
@@ -602,7 +604,7 @@ describe("render request validation", () => {
 
   it("requires one unambiguous current primary-navigation item", () => {
     const noneCurrent = cloneRequest(runListRequest);
-    delete getRecord(noneCurrent, ["page", "shell", "navigation", 1]).current;
+    delete getRecord(noneCurrent, ["page", "shell", "navigation", 2]).current;
     expect(() => validateRenderRequest(noneCurrent)).toThrow(
       "at $.page.shell.navigation",
     );

@@ -134,6 +134,33 @@ export interface RepositoryDirectoryPageModel {
   };
 }
 
+export interface RunnerDirectoryItemModel {
+  readonly name: string;
+  readonly group: string | null;
+  readonly labels: readonly string[];
+  readonly status: StatusModel;
+  readonly desiredState: "active" | "draining" | "disabled";
+  readonly desiredStateLabel: string;
+  readonly busySlots: number;
+  readonly totalSlots: number;
+  readonly lastSeenAt: TimestampModel | null;
+}
+
+export interface RunnerDirectoryPageModel {
+  readonly kind: "runner-directory";
+  readonly shell: ShellModel;
+  readonly heading: string;
+  readonly summary: string;
+  readonly visibility: "private" | "public";
+  readonly counts: {
+    readonly total: number;
+    readonly online: number;
+    readonly busySlots: number;
+    readonly totalSlots: number;
+  };
+  readonly runners: readonly RunnerDirectoryItemModel[];
+}
+
 export interface SetupPageModel {
   readonly kind: "setup";
   readonly shell: ShellModel;
@@ -611,6 +638,7 @@ export type DirectBindingListPageModel = DirectBindingListPageBaseModel &
 export type PageModel =
   | SetupPageModel
   | RepositoryDirectoryPageModel
+  | RunnerDirectoryPageModel
   | RunListPageModel
   | RunDetailPageModel
   | JobLogPageModel

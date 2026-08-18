@@ -703,6 +703,11 @@ pub struct ServerArgs {
     #[arg(long, env = "AUTOMATA_RUNNER_PUBLIC_URL", value_name = "URL")]
     pub runner_public_url: Option<String>,
 
+    /// Publish presentation-safe runner health and capacity at `/runners`.
+    /// Without this flag the page requires current `runners:read` authority.
+    #[arg(long, env = "AUTOMATA_RUNNER_DIRECTORY_PUBLIC")]
+    pub runner_directory_public: bool,
+
     /// Dedicated GitHub Actions Results HTTP listen address.
     ///
     /// Production HTTPS is normally terminated by a trusted reverse proxy in

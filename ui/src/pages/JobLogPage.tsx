@@ -6,9 +6,9 @@ import type {
   LiveLogGroupFinishedRecord,
   LiveLogLineRecord,
   LiveLogRecord,
-} from "../liveLogs/sse";
-import { LiveLogController, type LiveLogControllerState } from "../liveLogs/controller";
-import { createSameOriginLiveLogAccessProvider } from "../liveLogs/protocol";
+} from "../logs/sse";
+import { LiveLogController, type LiveLogControllerState } from "../logs/controller";
+import { createSameOriginLiveLogAccessProvider } from "../logs/protocol";
 import { ActionsLayout } from "../components/ActionsLayout";
 import { Breadcrumbs } from "../components/Breadcrumbs";
 import { RunNavigation } from "../components/RunNavigation";
@@ -66,7 +66,9 @@ export function JobLogPage({ model, shellUtility, initialRecords = [] }: JobLogP
         }
       },
       onStateChange: (state) => setConnection(state.kind),
-      onFailure: (failure) => setStreamError(failure.message),
+      onFailure: () => setStreamError(
+        "The log stream could not be opened. Refresh the page to try again.",
+      ),
     });
     const start = () => {
       void controller.start().catch(() =>
@@ -99,6 +101,7 @@ export function JobLogPage({ model, shellUtility, initialRecords = [] }: JobLogP
   );
   const canExpand = visibleGroups.length === 0 || visibleGroups.some((group) => !expanded.has(group.id));
   const running = model.job.status.tone === "queued" || model.job.status.tone === "running";
+  const logToolsAvailable = model.live !== null || groups.length > 0 || running;
 
   return (
     <Shell shell={model.shell} repository={model.repository} utility={shellUtility}>
@@ -137,9 +140,9 @@ export function JobLogPage({ model, shellUtility, initialRecords = [] }: JobLogP
             <div className="log-toolbar">
               <div className="log-toolbar__title">
                 <h2 id="job-logs-heading">Job logs</h2>
-                <StreamState state={connection} running={running} />
+                <StreamState available={logToolsAvailable} state={connection} running={running} />
               </div>
-              {model.logVisibility === "full" ? (
+              {model.logVisibility === "full" && logToolsAvailable ? (
                 <div className="log-toolbar__actions">
                   <label className="log-search">
                     <span className="sr-only">Search job logs</span>
@@ -195,7 +198,15 @@ export function JobLogPage({ model, shellUtility, initialRecords = [] }: JobLogP
                 tabIndex={0}
               >
                 {visibleGroups.length === 0 ? (
-                  <div className="log-empty">{normalizedQuery === "" ? "Waiting for log output…" : "No steps match your search."}</div>
+                  <div className="log-empty">
+                    {normalizedQuery !== ""
+                      ? "No steps match your search."
+                      : streamError !== null
+                        ? "Log output could not be loaded."
+                      : running
+                        ? "Waiting for log output…"
+                        : "Logs are unavailable for this job."}
+                  </div>
                 ) : visibleGroups.map((group) => (
                   <LogGroupPanel
                     expanded={expanded.has(group.id) || normalizedQuery !== ""}
@@ -258,8 +269,8 @@ function LogLine({ line }: { readonly line: LiveLogLineRecord }) {
   );
 }
 
-function StreamState({ state, running }: { readonly state: ConnectionState; readonly running: boolean }) {
-  const label = state === "open" ? "Live" : state === "reconnecting" || state === "connecting" ? "Connecting" : state === "complete" ? "Complete" : state === "failed" ? "Failed" : running ? "Waiting" : "Loaded";
+function StreamState({ available, state, running }: { readonly available: boolean; readonly state: ConnectionState; readonly running: boolean }) {
+  const label = !available && !running ? "Unavailable" : state === "open" ? "Live" : state === "reconnecting" || state === "connecting" ? "Connecting" : state === "complete" ? "Complete" : state === "failed" ? "Failed" : running ? "Waiting" : "Loaded";
   return <span className="log-stream-state" data-state={state}><span aria-hidden="true" />{label}</span>;
 }
 

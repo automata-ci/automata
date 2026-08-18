@@ -8,7 +8,7 @@ import {
   type LiveLogFetch,
   type LiveLogFailure,
   type LiveLogRecord,
-} from "../../src/liveLogs";
+} from "../../src/logs";
 
 const STREAM_ID = "00000000-0000-4000-8000-000000000005";
 const TICKET_ONE = `allt_v2_${"A".repeat(43)}`;
@@ -137,6 +137,35 @@ describe("live-log capability validation", () => {
   ])("rejects invalid normalized access %#", (value, message) => {
     expect(() => validateLiveLogAccess(value as LiveLogAccess)).toThrow(message);
   });
+});
+
+describe("live-log ticket rejection", () => {
+  it.each([401, 403, 404])(
+    "fails immediately when the ticket endpoint returns %i",
+    async (status) => {
+      const ticketFetch = vi.fn<LiveLogFetch>(async () =>
+        new Response(null, { status }),
+      );
+      const failure = vi.fn();
+      const controller = new LiveLogController({
+        access: createSameOriginLiveLogAccessProvider({
+          endpoint: "/octo/repo/actions/runs/run/jobs/job/live-ticket",
+          documentUrl: "https://ci.example/octo/repo/actions/runs/run/jobs/job",
+          fetch: ticketFetch,
+        }),
+        onFailure: failure,
+        onRecord: vi.fn(),
+      });
+
+      await controller.start();
+
+      expect(ticketFetch).toHaveBeenCalledOnce();
+      expect(failure).toHaveBeenCalledWith({
+        code: "ticket",
+        message: `the live-log ticket endpoint returned ${status}`,
+      });
+    },
+  );
 });
 
 describe("live-log transport controller", () => {

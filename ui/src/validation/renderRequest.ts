@@ -2,6 +2,7 @@ import type { RenderRequest } from "../models";
 import { validateJobLogPage } from "./jobLogModel";
 import { validateDeepLinkSignInPage } from "./deepLinkSignInModel";
 import { validateRepositoryDirectoryPage } from "./repositoryDirectoryModel";
+import { validateRunnerDirectoryPage } from "./runnerDirectoryModel";
 import { validateRepositorySettingsPage } from "./repositorySettingsModel";
 import { validateRepositorySecretsPage } from "./repositorySecretsModel";
 import {
@@ -95,6 +96,8 @@ function validatePage(value: unknown, path: string): void {
     validateSetupPage(page, path);
   } else if (kind === "repository-directory") {
     validateRepositoryDirectoryPage(page, path);
+  } else if (kind === "runner-directory") {
+    validateRunnerDirectoryPage(page, path);
   } else if (kind === "run-list") {
     validateRunListPage(page, path);
   } else if (kind === "run-detail") {

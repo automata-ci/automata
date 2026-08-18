@@ -5,7 +5,7 @@ import { EmptyState } from "./components/EmptyState";
 import { Shell } from "./components/Shell";
 import { ThemeToggle } from "./components/ThemeToggle";
 import type { PageModel } from "./models";
-import type { LiveLogRecord } from "./liveLogs/sse";
+import type { LiveLogRecord } from "./logs/sse";
 import "./styles.css";
 import "./styles/pages/preview.css";
 import { installPreviewFormRouting } from "./preview/formRouting";
@@ -23,6 +23,7 @@ import {
   previewRepositorySecrets,
   previewRunDetail,
   previewRunList,
+  previewRunnerDirectory,
 } from "./preview/models";
 import {
   PREVIEW_RBAC_VIEWS,
@@ -68,6 +69,15 @@ if (view === null || view === "repositories" || view === "repositories-empty") {
     renderNotFound("Run not found", "That workflow run is not part of this demo.");
   } else {
     renderPreviewPage(runDetail);
+  }
+} else if (view === "runners") {
+  if (isPreviewRepositoryDirectoryStateSupported(searchParameters)) {
+    renderPreviewPage(previewRunnerDirectory());
+  } else {
+    renderNotFound(
+      "Page not found",
+      "Those runner directory parameters are not part of this demo.",
+    );
   }
 } else if (view === "job") {
   const jobLog = isPreviewJobLogStateSupported(searchParameters)
