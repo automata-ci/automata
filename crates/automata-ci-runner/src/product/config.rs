@@ -147,9 +147,10 @@ impl RunnerProductConfig {
 
     /// Returns the validated durable registration ceiling for this runner identity.
     ///
-    /// Image promotion and live profile admission may add Windows action
-    /// capabilities only to the ephemeral runtime inventory. They are never
-    /// included in this pre-admission registration or diagnostic surface.
+    /// Windows image promotion and live profile admission can further restrict
+    /// this ceiling, but they do not add action or Node runtime capabilities.
+    /// Those features remain unavailable until a broker-owned materializer has
+    /// a production provider.
     #[must_use]
     pub const fn inventory(&self) -> &RunnerCapabilities {
         &self.inventory
@@ -252,10 +253,11 @@ impl RunnerProductConfig {
     }
 
     /// Applies one Windows image-evidence verifier before this configuration
-    /// can compose Windows action runtimes after live profile admission.
+    /// can participate in Windows enrollment admission.
     ///
     /// The configuration is consumed so a failed or weaker re-verification
     /// cannot leave a previously promoted image admission available to a caller.
+    /// Promotion does not authorize action or Node runtime capabilities.
     /// Non-Windows configurations pass through unchanged.
     ///
     /// # Errors
@@ -1919,27 +1921,12 @@ fn executor_runtime_features(
     features
 }
 
-pub(super) fn promoted_windows_runtime_features(
+pub(super) fn windows_enrollment_runtime_features(
     toolchain: &ToolchainConfig,
 ) -> BTreeSet<RunnerFeature> {
-    let mut features = executor_runtime_features(toolchain, ProviderKind::WindowsHyperV);
-    features.extend([
-        RunnerFeature::COMPOSITE_ACTIONS,
-        RunnerFeature::REPOSITORY_ACTIONS,
-        RunnerFeature::LOCAL_ACTIONS,
-    ]);
-    for (available, feature) in [
-        (toolchain.node12().is_some(), RunnerFeature::NODE12_ACTIONS),
-        (toolchain.node16().is_some(), RunnerFeature::NODE16_ACTIONS),
-        (toolchain.node20().is_some(), RunnerFeature::NODE20_ACTIONS),
-        (toolchain.node24().is_some(), RunnerFeature::NODE24_ACTIONS),
-    ] {
-        if available {
-            features.insert(feature);
-            features.insert(RunnerFeature::JAVASCRIPT_ACTIONS);
-        }
-    }
-    features
+    // Windows action and Node capabilities remain absent until a broker-owned
+    // materializer ships with its first production provider implementation.
+    executor_runtime_features(toolchain, ProviderKind::WindowsHyperV)
 }
 
 #[cfg(test)]

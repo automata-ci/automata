@@ -38,9 +38,9 @@ pub enum WindowsImageAdmission {
 }
 
 impl WindowsImageAdmission {
-    /// Reports whether action runtimes may be composed and advertised.
+    /// Reports whether the configured image has verified external promotion.
     #[must_use]
-    pub const fn permits_actions(self) -> bool {
+    pub const fn is_promoted(self) -> bool {
         matches!(self, Self::Promoted)
     }
 }
@@ -870,10 +870,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn admission_only_permits_actions_after_external_promotion() {
-        assert!(!WindowsImageAdmission::Unverified.permits_actions());
-        assert!(!WindowsImageAdmission::Candidate.permits_actions());
-        assert!(WindowsImageAdmission::Promoted.permits_actions());
+    fn admission_reports_only_verified_external_promotion() {
+        assert!(!WindowsImageAdmission::Unverified.is_promoted());
+        assert!(!WindowsImageAdmission::Candidate.is_promoted());
+        assert!(WindowsImageAdmission::Promoted.is_promoted());
     }
 
     #[test]

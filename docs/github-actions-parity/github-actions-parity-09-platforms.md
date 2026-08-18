@@ -38,11 +38,11 @@ startup orphan check are component recovery, but they do not replace a
 restricted management broker, independent watchdog, or real engine/host fault
 evidence. A broker-verifiable signed admission grant, managed egress,
 credential delivery, a signed image factory, and dedicated-host acceptance
-also remain open. The source tree has component support for Windows action
-materialization and JavaScript/composite execution, but the checked-in image
-evidence is an unsigned candidate. It therefore advertises shell-only
-capacity. Job and service containers, egress, devices, and parallel capacity
-remain unsupported.
+also remain open. Path-based Windows action helpers exist, but they do not
+retain file identity across the broker authority boundary and are not an
+admitted production materializer. Windows therefore advertises shell-only
+capacity and rejects action steps before provider mutation. Job and service
+containers, egress, devices, and parallel capacity remain unsupported.
 
 The detailed
 [Windows runner isolation plan](../platforms/windows.md) makes one fresh
@@ -56,11 +56,12 @@ Image admission now verifies a digest-bound Windows Server 2025 Server Core
 manifest and lock together with provenance, SPDX SBOM, patch, and revocation
 metadata. It binds the exact guest/workspace and configured PowerShell, cmd,
 tar, hash-helper, and Node-generation paths. A canonical external Ed25519
-promotion envelope plus successful fresh-container probes are both required
-before runner composition adds JavaScript, composite, repository, local-action,
-or Node-generation features. Candidate, missing, mismatched, revoked, or
-substituted material never gains those features. These are component gates,
-not a signed image factory or physical-host evidence.
+promotion envelope and fresh-container probes validate image evidence, but do
+not add JavaScript, composite, repository, local-action, or Node-generation
+features. Those capabilities remain absent until a broker-owned materializer
+ships with a production provider. Candidate, missing, mismatched, revoked, or
+substituted material likewise never gains them. These are component gates, not
+a signed image factory or physical-host evidence.
 
 Windows enrollment now has a typed pre-enrollment admission contract. Its
 short-lived authenticated receipt binds the runner, broker/provider identity,
@@ -69,11 +70,10 @@ policy, and canonical capability set;
 only an opaque restricted-broker custody handle is durable across retries.
 The production broker caller is a separate integration gate. It must fail
 closed when custody is absent, stale, expired, or mismatched, and runtime startup
-must independently repeat profile/tool admission. Once composed,
-an admitted action/Node feature can exist in both durable registration and live
-observation instead of being removed by their least-authority intersection.
-This interface and its injected tests are not a promoted image or physical-host
-release claim.
+must independently repeat profile/tool admission. Action and Node features stay
+out of both durable registration and live observation until retained-identity
+materialization is part of that broker path. This interface and its injected
+tests are not a promoted image or physical-host release claim.
 
 Current component placement foundation binds GitHub-projected Windows jobs to
 both VM-grade isolation and the exact
@@ -127,15 +127,15 @@ Tasks:
   a fresh Windows sandbox.
 - [x] Bind exact tool versions, architecture, paths, and digests through the
   candidate manifest and externally signed promotion interface.
-- [x] Withhold all Windows action and Node capabilities unless image
-  verification and every configured live tool probe succeed.
-- [x] Add a Windows-specific in-sandbox materialization path with exact archive
-  digest verification and subpath provenance.
-- [x] Reject traversal, links, special entries, reserved/illegal Windows names,
+- [x] Withhold all Windows action and Node capabilities until a broker-owned
+  production materializer is available.
+- [ ] Add a broker-owned materialization path that retains archive and tree
+  identity through verification, extraction, metadata reads, and execution.
+- [ ] Reject traversal, links, special entries, reserved/illegal Windows names,
   case-fold collisions, stale destinations, digest mismatch, and reparse-tree
-  escape before metadata or action execution.
-- [x] Support in-sandbox local metadata reads and exact action cleanup phases at
-  the executor component boundary.
+  escape under retained broker handles.
+- [ ] Support broker-mediated local metadata reads and exact action cleanup
+  phases without reopening mutable paths.
 - [ ] Add and qualify Git, Git Bash, zstd, and any optional Python distribution
   required by the released action profile.
 - [ ] Publish real image/tool versions and digests from the external image
@@ -145,10 +145,10 @@ Tasks:
 
 Acceptance:
 
-- [x] Product startup probes every configured action tool inside a fresh
-  sandbox before registration; injected component tests exercise this gate.
-- [x] Candidate or missing Node-generation evidence removes JavaScript and
-  exact Node capabilities without removing plain run steps.
+- [x] Candidate image validation checks configured action-tool evidence without
+  advertising action capabilities.
+- [x] JavaScript and exact Node capabilities remain absent without removing
+  plain run steps.
 - [ ] Linux and Windows produce equivalent immutable action trees.
 
 ### WIN-02 — JavaScript and composite actions on Windows
@@ -158,13 +158,13 @@ WIN-ISO-08 managed data/credential boundary, RUN-01, ACT-01.
 
 Tasks:
 
-- [x] Replace blanket runner-side Windows action rejection with promotion- and
-  live-admission-gated granular capabilities.
-- [x] Execute metadata-selected Node 12/16/20/24 pre, main, and post through
+- [ ] Replace fail-closed Windows action rejection only when broker admission
+  supplies retained materialization authority.
+- [ ] Execute metadata-selected Node 12/16/20/24 pre, main, and post through
   exact configured paths; no generation or `PATH` fallback is allowed.
-- [x] Enable local, repository, composite, and nested-composite executor paths
+- [ ] Enable local, repository, composite, and nested-composite executor paths
   only when their exact runtime capabilities were admitted.
-- [x] Preserve the existing Windows phase-file, environment-casing, and CRLF
+- [ ] Preserve the existing Windows phase-file, environment-casing, and CRLF
   executor behavior for admitted actions.
 - [ ] Populate action contexts and run cleanup after failure/cancellation.
 - [x] Keep Docker actions and containers rejected until separately available.

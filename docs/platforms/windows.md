@@ -118,14 +118,14 @@ those release gates:
 - exact manifest-to-configuration bindings for the guest, workspace,
   `pwsh.exe`, `powershell.exe`, `cmd.exe`, `tar.exe`, the Automata SHA-256
   helper, and any configured Node 12/16/20/24 runtime;
-- fresh-sandbox startup probes for all configured Windows action tools; and
-- bounded Windows action-archive validation, in-container digest verification,
-  extraction, reparse-tree inspection, and exact-generation Node execution.
+- component probe definitions for configured Windows action tools; and
+- bounded archive-validation helpers for a future broker-owned materializer.
 
 Candidate evidence that is internally consistent but lacks the external
-promotion signature remains shell-only. JavaScript, composite, repository,
-local-action, and Node-generation capabilities are composed only after both
-promotion verification and fresh profile probes succeed. The source-level
+promotion signature remains shell-only. Externally promoted evidence also
+remains shell-only until a broker-owned materializer can retain file identity
+through verification and execution. JavaScript, composite, repository,
+local-action, and Node-generation capabilities are not advertised. The source-level
 pre-enrollment admission contract binds the runner, broker/provider identity,
 exact enrollment transaction, exact environment and
 resource/tool probe policy, image manifest/lock and signed-promotion identity,
@@ -408,8 +408,9 @@ The optional promotion configuration names an envelope, pinned key identifier,
 and Ed25519 public key. A canonical signed payload must explicitly promote and
 accept provenance, SBOM, patch, and revocation subjects while binding the exact
 profile, manifest, lock, base/output images, all evidence digests, and
-revocation generation. Without it the image remains a candidate and action
-capabilities stay absent.
+revocation generation. Promotion qualifies the image evidence for enrollment;
+it does not authorize action or Node capabilities, which stay absent until a
+broker-owned retained-identity materializer has a production provider.
 
 Example values and the checked-in candidate files are contract fixtures, not
 deployable image or runtime attestations. Operators must replace every
@@ -799,7 +800,7 @@ and the broker can mutate only exact generation-bound Automata resources.
 - [x] Add bounded verifier interfaces for manifest, lock, provenance, SPDX
       SBOM, patch, revocation, and external Ed25519 promotion metadata.
 - [x] Keep checked-in fixtures explicitly candidate-only and withhold action
-      capabilities without a valid external promotion envelope.
+      and Node capabilities even after evidence promotion.
 - [ ] Define the exact Server Core host/image compatibility matrix.
 - [ ] Build a digest-pinned image containing guest executable and reviewed
       shells/tools without job-time mutable installation.
@@ -939,11 +940,11 @@ WIN-ISO-06 through WIN-ISO-09 as applicable.
 - [x] Implement exact PowerShell 7, Windows PowerShell, cmd, and optional
       Python argv, encoding, CRLF, environment, working-directory, and exit
       semantics at the component boundary.
-- [x] Implement exact-generation Node action pre/main/post and composite phase
-      execution inside the same sandbox at the component boundary.
-- [x] Implement action materialization without host extraction or host mounts,
-      including bounded Windows archive-name/link/collision checks, in-sandbox
-      digest verification, extraction, and reparse-tree validation.
+- [ ] Implement exact-generation Node action pre/main/post and composite phase
+      execution behind broker-owned retained materialization authority.
+- [ ] Implement action materialization without host extraction or host mounts,
+      retaining file identity across bounded archive checks, digest
+      verification, extraction, metadata reads, and reparse-tree validation.
 - [ ] Prove those runtime and materialization paths in the shipped product on a
       promoted image and dedicated Windows Hyper-V host.
 - [ ] Support only product artifact/cache/source interfaces accepted by their
@@ -953,7 +954,7 @@ WIN-ISO-06 through WIN-ISO-09 as applicable.
       before user code unless separately accepted.
 
 Exit: the exact action-ready profile passes through shipped product processes
-without changing the isolation boundary.
+without changing the isolation boundary or reopening mutable paths.
 
 ### WIN-ISO-11 — Hostile and fault acceptance
 
