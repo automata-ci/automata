@@ -35,6 +35,7 @@ mod processor;
 mod result_adapter;
 mod schedule;
 mod service;
+mod trigger_handler;
 mod worker;
 
 pub use checks_publisher::{
@@ -44,7 +45,7 @@ pub use checks_publisher::{
     GithubChecksPublisherError, GithubChecksPublisherOutcome, GithubChecksServerServiceCredential,
 };
 
-pub use common_runtime::{GithubProviderRuntimeAdapter, GithubTriggerHandler};
+pub use common_runtime::GithubProviderRuntimeAdapter;
 
 pub use result_adapter::{
     GithubResultCredential, GithubResultCredentialProvider, GithubResultCredentialProviderError,
@@ -68,6 +69,13 @@ pub use service::{
     GithubDeliverySourceCredentialBinding, GithubDeliverySourceCredentialProvider,
     GithubDeliverySourceCredentialProviderError, GithubDeliverySourceCredentialRequest,
     GithubDeliverySourceCredentialValueError, GithubServerServiceCredentialRelease,
+};
+
+pub use trigger_handler::{
+    GithubTriggerCredential, GithubTriggerCredentialOperation, GithubTriggerCredentialProvider,
+    GithubTriggerCredentialProviderError, GithubTriggerCredentialRelease,
+    GithubTriggerCredentialRequest, GithubTriggerCredentialValueError, GithubTriggerHandler,
+    GithubWorkflowTriggerHandler, GithubWorkflowTriggerHandlerError,
 };
 
 pub use schedule::{

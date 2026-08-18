@@ -537,6 +537,7 @@ fn workflow_selected(selection: &ProviderWorkflowSource, path: &str) -> bool {
     }
 }
 
+#[allow(clippy::case_sensitive_file_extension_comparisons)]
 fn valid_actions_workflow_selection(selection: &ProviderWorkflowSource) -> bool {
     match selection {
         ProviderWorkflowSource::Directory(path) => path.as_str() == ".ci/workflows",

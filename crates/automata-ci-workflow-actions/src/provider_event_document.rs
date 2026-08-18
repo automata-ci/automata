@@ -303,8 +303,10 @@ mod tests {
         ));
         let metadata = ProviderEventMetadata::from_normalized_trigger(&pull_request);
         assert!(metadata.matches_normalized_trigger(&pull_request));
-        assert!(!ProviderEventMetadata::pull_request("edited", "main")
-            .matches_normalized_trigger(&pull_request));
+        assert!(
+            !ProviderEventMetadata::pull_request("edited", "main")
+                .matches_normalized_trigger(&pull_request)
+        );
         let pull_request = ActionsProviderEventDocument::from_normalized_trigger(&pull_request)
             .expect("pull request document");
         let pull_value: Value =

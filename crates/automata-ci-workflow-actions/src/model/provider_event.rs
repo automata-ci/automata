@@ -230,10 +230,7 @@ impl ProviderEventMetadata {
                 action == pull_request_activity_name(pull_request.activity())
                     && base_ref == pull_request.base_ref().short_name()
             }
-            (
-                Self::MergeGroup { action, base_ref },
-                NormalizedTrigger::MergeQueue(merge_queue),
-            ) => {
+            (Self::MergeGroup { action, base_ref }, NormalizedTrigger::MergeQueue(merge_queue)) => {
                 action == merge_queue_activity_name(merge_queue.activity())
                     && base_ref == merge_queue.target_ref().full()
             }
@@ -242,6 +239,30 @@ impl ProviderEventMetadata {
                 NormalizedTrigger::RepositoryDispatch(dispatch),
             ) => event_type == dispatch.event_type().as_str(),
             _ => false,
+        }
+    }
+
+    /// Attaches provider-verified changed-file selection without allowing the
+    /// adapter to reconstruct or alter normalized event identity.
+    ///
+    /// Returns `None` when changed files do not apply to this event kind.
+    #[must_use]
+    pub fn with_changed_files(self, changed_files: ProviderChangedFiles) -> Option<Self> {
+        match self {
+            Self::Push { deleted, .. } => {
+                Some(Self::push_with_changed_files(deleted, changed_files))
+            }
+            Self::PullRequest {
+                action, base_ref, ..
+            } => Some(Self::pull_request_with_changed_files(
+                action,
+                base_ref,
+                changed_files,
+            )),
+            Self::MergeGroup { .. }
+            | Self::RepositoryDispatch { .. }
+            | Self::Schedule { .. }
+            | Self::WorkflowDispatch { .. } => None,
         }
     }
 
@@ -363,6 +384,26 @@ mod tests {
         assert_eq!(
             merge_queue_activity_name(MergeQueueActivity::Removed),
             "destroyed"
+        );
+    }
+
+    #[test]
+    fn changed_files_refine_only_supported_event_kinds() {
+        let push = ProviderEventMetadata::push(false)
+            .with_changed_files(ProviderChangedFiles::complete(["src/lib.rs"]))
+            .expect("push supports changed files");
+        assert!(matches!(
+            push,
+            ProviderEventMetadata::Push {
+                deleted: false,
+                changed_files: Some(_)
+            }
+        ));
+
+        assert!(
+            ProviderEventMetadata::merge_group("checks_requested", "refs/heads/main")
+                .with_changed_files(ProviderChangedFiles::bypass_path_filters())
+                .is_none()
         );
     }
 }
