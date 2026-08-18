@@ -1086,10 +1086,22 @@ async fn load_management_direct_bindings(
          AND membership.principal_id=binding.principal_id
         JOIN human_principals AS principal ON principal.id=binding.principal_id
         LEFT JOIN LATERAL (
-            SELECT provider_id,provider_subject,provider_login,display_name
-            FROM human_provider_identities
-            WHERE principal_id=binding.principal_id
-            ORDER BY provider_id,provider_subject
+            SELECT candidate.provider_id,candidate.provider_login,
+                   candidate.display_name
+            FROM (
+                SELECT provider_id,provider_subject AS identity_subject,
+                       provider_login,display_name,0 AS identity_priority
+                FROM human_provider_identities
+                WHERE principal_id=binding.principal_id
+                UNION ALL
+                SELECT issuer AS provider_id,subject::text AS identity_subject,
+                       subject::text AS provider_login,display_name,
+                       1 AS identity_priority
+                FROM delegated_actor_identities
+                WHERE principal_id=binding.principal_id
+            ) AS candidate
+            ORDER BY candidate.identity_priority,candidate.provider_id,
+                     candidate.identity_subject
             LIMIT 1
         ) AS identity ON TRUE
         JOIN rbac_roles AS role
@@ -3091,5 +3103,48 @@ mod tests {
             "ea2556ba-c0e0-42b8-b0ca-bde08a3ba5c4"
         );
         assert_eq!(record.display_name(), Some("CI operator"));
+    }
+
+    #[test]
+    fn delegated_identity_projection_is_a_valid_direct_binding() {
+        let principal_id =
+            Uuid::parse_str("39d3a601-9130-405b-8e1c-fa7de8ad9d8a").expect("principal ID");
+        let record = ManagementDirectBindingRow {
+            tenant_id: "acme-production".to_owned(),
+            id: Uuid::parse_str("e5ccb3f9-5615-4278-b28e-8ae42060ed75").expect("binding ID"),
+            principal_id,
+            provider_id: Some("https://ci.example.test".to_owned()),
+            provider_login: Some("ea2556ba-c0e0-42b8-b0ca-bde08a3ba5c4".to_owned()),
+            principal_display_name: Some("CI operator".to_owned()),
+            membership_status: "active".to_owned(),
+            authorization_revision: 2,
+            membership_revision: 1,
+            role_id: Uuid::parse_str("01fea869-4617-4ed8-a661-2a0e833c2e29").expect("role ID"),
+            role_name: "tenant.admin".to_owned(),
+            role_display_name: "Tenant administrator".to_owned(),
+            scope_kind: "tenant".to_owned(),
+            repository_id: None,
+            repository_tenant_id: None,
+            runner_group_id: None,
+            runner_group_tenant_id: None,
+            scope_display_name: Some("Acme production".to_owned()),
+            assignment_source: "bootstrap".to_owned(),
+            status: "active".to_owned(),
+            valid_until_ms: None,
+            revision: 1,
+        }
+        .into_record("acme-production")
+        .expect("delegated direct-binding projection");
+
+        assert_eq!(record.principal().principal_id().as_uuid(), principal_id);
+        assert_eq!(
+            record.principal().provider_id().as_str(),
+            "https://ci.example.test"
+        );
+        assert_eq!(record.principal().display_name(), Some("CI operator"));
+        assert_eq!(
+            record.source(),
+            ManagementRoleBindingSource::Direct(DirectRoleBindingSource::Bootstrap)
+        );
     }
 }
