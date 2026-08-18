@@ -82,24 +82,9 @@ automata --version
 automata-runner --version
 ```
 
-To inspect the web interface without configuring PostgreSQL, object storage, a
-GitHub App, or a runner:
-
-```console
-automata preview
-```
-
-Open <http://127.0.0.1:8080>, then verify the process from another terminal:
-
-```console
-curl --fail http://127.0.0.1:8080/healthz
-curl --fail http://127.0.0.1:8080/readyz
-```
-
-Preview mode is a UI and health-check process. It does not accept webhooks or
-execute workflows. The [getting-started guide](docs/getting-started.md) also
-shows how to validate a workflow locally and explains what that validation
-does—and does not—prove.
+The [getting-started guide](docs/getting-started.md) continues with read-only
+host and workflow checks. The web interface is part of the complete
+`automata server` process and requires its production dependencies.
 
 ## Write a workflow
 
@@ -171,7 +156,7 @@ curl --fail https://ci.example.com/readyz
 
 `/readyz` checks the database, object store, and autonomous workers. The server
 exits or reports not-ready when a required dependency or credential is missing;
-it never falls back to preview mode.
+it does not start a partial composition.
 
 ## Execution providers
 

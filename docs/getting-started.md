@@ -103,27 +103,6 @@ Repositories connected to the Automata server keep executable workflows under
 `.ci/workflows`. The `.github/workflows` path above is the deliberate local
 inspection boundary; Automata does not use it as a server-side fallback.
 
-## Smoke-test the web process
-
-The dependency-free preview is useful for verifying a source build and the
-embedded server-side renderer:
-
-```console
-automata preview
-```
-
-Open <http://127.0.0.1:8080>, then verify the process from another terminal:
-
-```console
-curl --fail http://127.0.0.1:8080/healthz
-curl --fail http://127.0.0.1:8080/readyz
-```
-
-Preview mode has no repositories because it does not connect to PostgreSQL,
-object storage, GitHub, Results, or runners. Stop it with `Ctrl-C`. The complete
-server never falls back to preview behavior when a production dependency is
-missing.
-
 ## Deploy Automata
 
 The complete path requires:
@@ -139,7 +118,7 @@ command or turnkey deployment bundle. The running composition receives GitHub
 App and repository desired state through its private, mutually-authenticated
 shard-management API. Do not populate its PostgreSQL tables by hand. Until a
 self-hosted provisioning client is available, the supported first-user paths in
-this repository are source installation, preview, host inspection, and local
+this repository are source installation, host inspection, and local
 workflow checking; complete deployment requires the external provisioning
 authority described in the control-plane reference.
 
@@ -196,14 +175,6 @@ rustup show
 
 `rustup show` should list the toolchain selected by `rust-toolchain.toml` while
 you are inside the repository.
-
-### Port 8080 is in use
-
-Choose another loopback port:
-
-```console
-automata preview --listen 127.0.0.1:8180
-```
 
 ### Runner diagnostics report missing capabilities
 

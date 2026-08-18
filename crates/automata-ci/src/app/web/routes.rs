@@ -126,8 +126,7 @@ struct RepositoryDirectoryQuery {
 }
 
 pub fn router(renderer: Arc<dyn Renderer>, max_concurrent_renders: usize) -> Router {
-    let tenant = TenantId::new("preview")
-        .expect("the built-in dependency-free web tenant must remain valid");
+    let tenant = TenantId::new("default").expect("the built-in web tenant must remain valid");
     router_with_data(
         renderer,
         max_concurrent_renders,

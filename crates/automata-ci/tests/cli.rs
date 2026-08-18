@@ -21,16 +21,6 @@ fn server_uses_a_loopback_default() {
 }
 
 #[test]
-fn preview_is_an_explicit_dependency_free_mode() {
-    let cli = Cli::try_parse_from(["automata", "preview"]).expect("CLI must parse");
-
-    let Command::Preview(args) = cli.command else {
-        panic!("preview command expected");
-    };
-    assert_eq!(args.listen.to_string(), "127.0.0.1:8080");
-}
-
-#[test]
 fn local_doctor_is_an_explicit_read_only_preflight() {
     let cli = Cli::try_parse_from([
         "automata", "local", "doctor", "--engine", "docker", "--json",
@@ -499,7 +489,6 @@ fn only_operational_top_level_commands_are_advertised() {
         names,
         [
             "server",
-            "preview",
             "local",
             "auth",
             "secret",
@@ -510,6 +499,7 @@ fn only_operational_top_level_commands_are_advertised() {
         ]
     );
     for unavailable in [
+        "preview",
         "workflow",
         "run",
         "job",
@@ -519,6 +509,7 @@ fn only_operational_top_level_commands_are_advertised() {
     ] {
         assert!(!names.contains(&unavailable));
     }
+    assert!(Cli::try_parse_from(["automata", "preview"]).is_err());
 }
 
 #[test]
@@ -925,7 +916,7 @@ fn operator_options_are_scoped_to_operator_commands() {
 #[test]
 fn operator_options_are_not_advertised_or_accepted_by_non_operator_commands() {
     let mut command = Cli::command();
-    for service in ["server", "preview", "local"] {
+    for service in ["server", "local"] {
         let help = command
             .find_subcommand_mut(service)
             .expect("service command")
@@ -935,7 +926,6 @@ fn operator_options_are_not_advertised_or_accepted_by_non_operator_commands() {
         assert!(!help.contains("--output"), "{service} help");
     }
 
-    assert!(Cli::try_parse_from(["automata", "preview", "--output", "json"]).is_err());
     assert!(
         Cli::try_parse_from([
             "automata",
@@ -945,8 +935,6 @@ fn operator_options_are_not_advertised_or_accepted_by_non_operator_commands() {
         ])
         .is_err()
     );
-
-    assert!(Cli::try_parse_from(["automata", "--output", "json", "preview"]).is_err());
 
     let admin_help = Cli::command()
         .find_subcommand_mut("admin")

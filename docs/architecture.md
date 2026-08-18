@@ -39,10 +39,6 @@ The workspace builds many libraries but distributes two product commands:
   container execution; or disposable macOS VM execution, along with host
   admission, lease renewal, logging, cancellation, and cleanup.
 
-The browser preview is a smaller mode of `automata`; it does not start the
-durable services or runner listener. Production dependencies never fall back
-to preview behavior.
-
 The Windows provider creates one fresh container with explicit Hyper-V
 isolation, disabled networking, `ContainerUser`, a digest-qualified image,
 bounded resources, and no host mounts. It verifies the effective runtime state

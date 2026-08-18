@@ -11,13 +11,9 @@ cargo run --locked -p automata-ci -- --version
 
 For source builds and other installation options, use the repository
 [getting-started guide](https://github.com/automata-ci/automata/blob/main/docs/getting-started.md).
-The command exposes two service modes:
-
-- `automata preview` serves health endpoints and the embedded SSR interface
-  without external dependencies.
-- `automata server` starts the complete current composition and fails unless
-  PostgreSQL, S3-compatible storage, Results configuration, and runner mTLS
-  identity are valid.
+`automata server` starts the complete composition and fails unless PostgreSQL,
+S3-compatible storage, Results configuration, and runner mTLS identity are
+valid.
 
 This page is the configuration reference for the complete server.
 
@@ -125,7 +121,7 @@ object-store, and mandatory autonomous-worker readiness. Load balancers and
 orchestration platforms should use `/readyz` for traffic admission.
 
 Database and object-store checks repeat at the configured readiness interval.
-A missing credential or dependency never falls back to preview mode.
+Startup fails if a required credential or dependency is invalid.
 
 When tuning maintenance, `--stale-runner-session-timeout-seconds` must be
 strictly greater than `--maintenance-interval-seconds`; otherwise startup
@@ -558,17 +554,6 @@ publish the presentation-safe directory with `--runner-directory-public` or
 group, scheduling labels, availability, desired state, capacity, and last
 contact time; durable runner/session identities, network metadata, and raw
 capabilities never cross the web-data boundary.
-
-## Preview mode
-
-```console
-automata preview --listen 127.0.0.1:8080
-```
-
-Preview serves build health, readiness, embedded assets, and the React SSR
-interface. It never starts workflow admission, runner control, scheduling,
-Results, PostgreSQL, or S3 adapters. CI uses it to exercise the fully static
-binary inside a `FROM scratch` image.
 
 Run `automata server --help` for the complete option and environment-variable
 reference.

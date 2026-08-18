@@ -109,32 +109,6 @@ impl fmt::Display for HttpPolicyError {
 
 impl std::error::Error for HttpPolicyError {}
 
-/// Builds the production HTTP application with its isolated UI renderer.
-///
-/// # Errors
-///
-/// Returns an error if the embedded renderer component cannot be compiled or
-/// linked under the configured isolation policy.
-pub fn router() -> Result<Router, RendererInitError> {
-    router_with_readiness(Readiness::all_ready())
-}
-
-/// Builds the production HTTP application over a shared dependency-readiness state.
-///
-/// # Errors
-///
-/// Returns an error if the embedded renderer cannot be initialized.
-pub fn router_with_readiness(readiness: Readiness) -> Result<Router, RendererInitError> {
-    let policy = RenderPolicy::default();
-    let http_policy = HttpPolicy::default();
-    let renderer = Arc::new(WasmtimeRenderer::new(policy)?);
-    Ok(router_with_renderer_policy_and_readiness(
-        renderer,
-        http_policy,
-        readiness,
-    ))
-}
-
 /// Builds the production human router before product-specific API routes and
 /// fixed-label metrics are attached to the fully combined router.
 pub(crate) fn router_with_readiness_web_data(

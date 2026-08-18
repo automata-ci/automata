@@ -216,9 +216,6 @@ onboarding path:
 | Rootless Podman, macOS VM, and native Windows providers | Hardened production or advanced execution profiles | None is the portable Linux-container evaluation provider |
 | Release automation | Guarded Linux x86-64 release flow | Native CLI artifacts and multi-architecture images are not public |
 
-`automata preview` remains a dependency-free SSR and health preview. It is not a
-local CI stack and must remain clearly separate from `automata local run`.
-
 ## Reuse decisions
 
 The following decisions are constraints, not implementation suggestions. A PR
@@ -1112,8 +1109,8 @@ README procedure becomes the tested local flow.
 
 Gate: public download and installer smoke tests pass on all three hosts; the
 README commands are exercised by the same smoke harness; links and anchors
-pass; no Rust toolchain is required; and preview, contributor assembly, native
-execution hosts, and production deployment remain clearly distinguished.
+pass; no Rust toolchain is required; and contributor assembly, native execution
+hosts, and production deployment remain clearly distinguished.
 
 ### 10. Optional public-origin boundary
 
