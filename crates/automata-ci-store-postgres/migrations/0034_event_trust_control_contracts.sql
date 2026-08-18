@@ -256,14 +256,14 @@ CREATE OR REPLACE FUNCTION automata_guard_provider_delivery_workflow_inventory()
 DECLARE
     inbox provider_delivery_inbox%ROWTYPE;
     manifest_digest BYTEA;
-    authenticated_source_revision BYTEA;
+    authenticated_source_revision TEXT;
 BEGIN
     SELECT * INTO inbox
     FROM provider_delivery_inbox
     WHERE id = NEW.inbox_id AND tenant_id = NEW.tenant_id
     FOR SHARE;
     SELECT evidence.provider_manifest_digest,
-           evidence.github_check_head_sha
+           pg_catalog.encode(evidence.github_check_head_sha, 'hex')
       INTO manifest_digest, authenticated_source_revision
     FROM github_provider_delivery_evidence AS evidence
     WHERE evidence.provider_delivery_id = NEW.inbox_id
@@ -370,7 +370,7 @@ $_$;
 
 CREATE FUNCTION automata_event_subject_selection_digest(
     smallint, smallint, bytea, uuid, text, uuid, smallint, uuid,
-    text, text, bytea, bytea, bytea, bigint
+    text, text, text, bytea, bytea, bigint
 ) RETURNS bytea
     LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE
     AS $_$
@@ -387,7 +387,7 @@ SELECT pg_catalog.sha256(
     || pg_catalog.uuid_send($8)
     || automata_event_subject_digest_part(pg_catalog.convert_to($9, 'UTF8'))
     || automata_event_subject_digest_part(pg_catalog.convert_to($10, 'UTF8'))
-    || automata_event_subject_digest_part($11)
+    || automata_event_subject_digest_part(pg_catalog.convert_to($11, 'UTF8'))
     || $12
     || $13
     || pg_catalog.int8send($14)
@@ -500,7 +500,7 @@ BEGIN
       AND selection.subject_id = NEW.subject_id
       AND selection.selection_digest = NEW.selection_digest
       AND run.event_name = selection.event_name
-      AND run.head_sha = selection.source_revision;
+      AND pg_catalog.encode(run.head_sha, 'hex') = selection.source_revision;
     IF NOT FOUND THEN
         RAISE EXCEPTION 'admitted event-subject progress does not match its selected workflow run'
             USING ERRCODE = 'integrity_constraint_violation',
@@ -522,7 +522,7 @@ CREATE TABLE event_subject_selections (
     origin_id uuid NOT NULL,
     event_name text NOT NULL COLLATE pg_catalog."C",
     workflow_path text NOT NULL COLLATE pg_catalog."C",
-    source_revision bytea NOT NULL,
+    source_revision text NOT NULL COLLATE pg_catalog."C",
     source_digest bytea NOT NULL,
     authority_digest bytea NOT NULL,
     selected_at_ms bigint NOT NULL,
@@ -555,8 +555,9 @@ CREATE TABLE event_subject_selections (
         AND left(workflow_path, 1) <> '/'
         AND workflow_path !~ '(^|/)(\.|\.\.)(/|$)'
         AND workflow_path !~ '//'
-        AND octet_length(source_revision) IN (20, 32)
-        AND source_revision <> decode(repeat('00', octet_length(source_revision)), 'hex')
+        AND octet_length(source_revision) BETWEEN 1 AND 1024
+        AND btrim(source_revision) = source_revision
+        AND source_revision !~ '[[:cntrl:]]'
     )),
     CONSTRAINT event_subject_selections_id_canonical CHECK ((
         subject_id = automata_event_subject_id(

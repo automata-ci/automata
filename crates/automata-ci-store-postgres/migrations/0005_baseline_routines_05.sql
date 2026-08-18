@@ -620,7 +620,7 @@ BEGIN
       AND registry.source_revision = NEW.source_revision
       AND registry.github_repository_owner_id = NEW.github_repository_owner_id
       AND registry.default_branch_ref = manifest.git_ref
-      AND NEW.github_check_head_sha = registry.source_revision
+      AND NEW.github_check_head_sha = decode(registry.source_revision, 'hex')
       AND subject.origin_kind = 'scheduled_fire'
       AND subject.provider_delivery_id IS NULL
       AND subject.subject_key = entry.workflow_path
