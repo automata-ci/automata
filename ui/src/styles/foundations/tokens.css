@@ -29,12 +29,14 @@
   --fg-muted: light-dark(#59636e, #9198a1);
   --fg-subtle: light-dark(#6e7781, #7d8590);
   --accent-fg: light-dark(#0969da, #4493f8);
+  --accent-fg-strong: light-dark(#0550ae, #58a6ff);
   --accent-emphasis: light-dark(#0969da, #1f6feb);
   --accent-emphasis-hover: light-dark(#0860ca, #1a65d6);
   --accent-muted: light-dark(rgb(9 105 218 / 12%), rgb(56 139 253 / 18%));
   --fg-on-emphasis: #ffffff;
   --success-fg: light-dark(#1a7f37, #3fb950);
   --danger-fg: light-dark(#d1242f, #f85149);
+  --danger-fg-strong: light-dark(#a40e26, #ff7b72);
   --attention-fg: light-dark(#9a6700, #d29922);
   --neutral-emphasis: light-dark(#656d76, #8b949e);
   --control-bg: light-dark(#f6f8fa, #21262d);

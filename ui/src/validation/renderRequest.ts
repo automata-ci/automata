@@ -33,7 +33,7 @@ import {
 } from "./limits";
 
 /** Exact schema accepted by the server-render request decoder. */
-export const RENDER_REQUEST_SCHEMA_VERSION = 1 as const;
+const RENDER_REQUEST_SCHEMA_VERSION = 1 as const;
 
 /** Validate every field before the model reaches an HTML or URL sink. */
 export function validateRenderRequest(value: unknown): RenderRequest {

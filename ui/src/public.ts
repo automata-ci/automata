@@ -11,6 +11,6 @@ export {
   type SelectableProviderRepository,
 } from "./components/RepositorySelectionList";
 export { ThemeToggle } from "./components/ThemeToggle";
-export { THEME_BOOTSTRAP_SCRIPT } from "./components/useThemePreference";
+export { THEME_BOOTSTRAP_SCRIPT } from "./hooks/useThemePreference";
 export * from "./logs";
 export type * from "./models";

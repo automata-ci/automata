@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   THEME_BOOTSTRAP_SCRIPT,
   useThemePreference,
-} from "../../src/components/useThemePreference";
+} from "../../src/hooks/useThemePreference";
 
 const THEME_STORAGE_KEY = "automata-theme";
 

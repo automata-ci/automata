@@ -38,18 +38,27 @@ and every initial page route remains a complete server-rendered document.
 
 ## Source architecture
 
+The detailed presentation, hook, presenter, and service dependency rules are
+documented in [`src/ARCHITECTURE.md`](src/ARCHITECTURE.md) and enforced by
+`npm run test:architecture`.
+
 The source tree keeps transport, view composition, presentation, and the demo
 separate:
 
 ```text
 src/
 ├── components/   reusable landmarks and presentation components
+├── hooks/         React state, effects, measurement, and browser lifecycle
 ├── logs/          resumable transport controller and strict SSE adapter
-├── pages/        page composition and page-local derived view state
+├── pages/         thin composition containers for validated page models
 ├── presentation/ shared status, timing, and event copy derivation
+├── presenters/    deterministic model-to-view projections
 ├── preview/      representative sample data, projections, and demo routing
+├── services/      host protocol and mutation clients without React
 ├── styles/       layered tokens, layout, components, pages, and conditions
-└── validation/   exact validation of the untrusted host boundary
+├── validation/   exact validation of the untrusted host boundary
+├── viewModels/    contracts passed from behavior into presentation
+└── views/         pure page and feature presentation
 ```
 
 Production pages receive validated initial models and render ordinary links and
@@ -75,6 +84,18 @@ npm run check
 npm audit --audit-level=low
 ```
 
+Run the component workshop locally with:
+
+```sh
+npm run storybook
+```
+
+Storybook uses the production stylesheet and typed CSF stories, includes light
+and dark themes plus desktop, tablet, and mobile viewports, and runs every story
+through Chromium with blocking accessibility checks. `npm run check` enforces
+story coverage, executes the browser stories, and builds the static Storybook
+alongside the production bundles.
+
 Generate production-source coverage for the Vitest unit and integration suites
 with:
 
@@ -96,15 +117,12 @@ Node 24.19.0 baseline:
 
 | Metric | Baseline | Enforced floor | Headroom |
 | --- | ---: | ---: | ---: |
-| Statements | 94.02% | 93% | 1.02 points |
-| Branches | 85.18% | 84% | 1.18 points |
-| Functions | 97.27% | 96% | 1.27 points |
-| Lines | 94.07% | 93% | 1.07 points |
+| Statements | 93.74% | 93% | 0.74 points |
+| Branches | 84.67% | 84% | 0.67 points |
+| Functions | 97.43% | 96% | 1.43 points |
+| Lines | 93.91% | 93% | 0.91 points |
 
-Each floor is a whole-number percentage below the measured result and leaves at
-least 1.02 points of margin. Branches and functions use the next lower whole
-number because truncating those baselines would leave only 0.18 and 0.27 points
-of margin. CI runs this threshold check; raise the floors after reviewed
+CI runs this threshold check on Node 24.19.0; raise the floors after reviewed
 coverage improvements, and lower them only with a new reproducible baseline and
 an explicit justification. These aggregate floors are a regression guard, not
 a substitute for reviewing per-file gaps.
@@ -164,9 +182,11 @@ explicit whole-output cleanup command.
 
 Tests are kept outside production sources: pure contract and URL tests live in
 `tests/unit`, end-to-end SSR/hydration behavior lives in `tests/integration`,
+component browser and accessibility checks live in colocated Storybook stories,
 browser behavior and captures live in `tests/visual`, and adversarial host
-requests live in `tests/fixtures`. `npm run check` runs the unit and integration
-suite, then type-checks, builds, and verifies both outputs:
+requests live in `tests/fixtures`. `npm run check` enforces architecture and
+coverage, runs unit, integration, Storybook, and build-verifier tests, then
+type-checks, builds, and verifies the Storybook and production outputs:
 
 ```text
 dist/

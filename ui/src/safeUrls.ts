@@ -14,7 +14,7 @@ const MAX_U64_DECIMAL = "18446744073709551615";
 // Accommodates a 1,024-byte UTF-8 filter after worst-case percent encoding,
 // its bounded cursor, and the longest canonical Automata route prefix.
 export const MAX_ROUTE_PATH_LENGTH = 4_096;
-export const MAX_ASSET_PATH_LENGTH = 1_024;
+const MAX_ASSET_PATH_LENGTH = 1_024;
 // Git refs use the same 1,024-byte durable bound and can expand threefold.
 export const MAX_GITHUB_SCM_URL_LENGTH = 4_096;
 

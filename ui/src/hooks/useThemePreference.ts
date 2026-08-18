@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 type Theme = "light" | "dark";
-
 const THEME_STORAGE_KEY = "automata-theme";
 
 export const THEME_BOOTSTRAP_SCRIPT = `try{const theme=localStorage.getItem(${JSON.stringify(
@@ -23,25 +22,17 @@ export function useThemePreference(): ThemePreference {
     const storedTheme = readStoredTheme();
     hasExplicitTheme.current = storedTheme !== null;
     applyTheme(storedTheme ?? systemTheme(media), setTheme);
-
     const followSystemTheme = () => {
-      if (!hasExplicitTheme.current) {
-        applyTheme(systemTheme(media), setTheme);
-      }
+      if (!hasExplicitTheme.current) applyTheme(systemTheme(media), setTheme);
     };
     const followStoredTheme = (event: StorageEvent) => {
       const storage = browserLocalStorage();
-      if (storage === null || event.storageArea !== storage) {
-        return;
-      }
-      if (event.key !== THEME_STORAGE_KEY && event.key !== null) {
-        return;
-      }
+      if (storage === null || event.storageArea !== storage) return;
+      if (event.key !== THEME_STORAGE_KEY && event.key !== null) return;
       const nextStoredTheme = parseTheme(event.newValue);
       hasExplicitTheme.current = nextStoredTheme !== null;
       applyTheme(nextStoredTheme ?? systemTheme(media), setTheme);
     };
-
     media?.addEventListener("change", followSystemTheme);
     window.addEventListener("storage", followStoredTheme);
     return () => {

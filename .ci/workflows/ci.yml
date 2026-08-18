@@ -124,7 +124,7 @@ jobs:
   frontend:
     name: Frontend
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 10
     resources:
       limits:
         cpu: "2"
@@ -143,4 +143,5 @@ jobs:
         run: |
           test "$(node --version)" = "v24.19.0"
           npm ci --no-audit --prefer-offline
+          npx --no-install playwright install --with-deps chromium
           npm run check

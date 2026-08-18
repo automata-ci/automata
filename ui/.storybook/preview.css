@@ -1,0 +1,15 @@
+/* Story-only framing keeps component canvases useful at large browser sizes. */
+body.sb-main-padded {
+  padding: 32px;
+}
+
+.sb-main-padded #storybook-root {
+  width: min(100%, 1120px);
+  margin-inline: auto;
+}
+
+@media (max-width: 600px) {
+  body.sb-main-padded {
+    padding: 16px;
+  }
+}
