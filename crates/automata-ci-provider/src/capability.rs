@@ -89,8 +89,6 @@ pub enum PkceSupport {
     Required,
     /// The provider supports PKCE and the adapter always elects to use it.
     Supported,
-    /// The provider does not implement PKCE.
-    Unavailable,
 }
 
 /// Exact Git object formats readable by one provider source adapter.

@@ -21,8 +21,8 @@ const ENVIRONMENT_TEMPLATE_DIGEST_DOMAIN: &[u8] =
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BuiltInCredentialRequirement {
-    /// GitHub's job-bound token exposed as `github.token` and `secrets.GITHUB_TOKEN`.
-    GithubToken,
+    /// Provider repository token exposed through dialect-specific runtime names.
+    WorkflowRepositoryToken,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -45,7 +45,7 @@ impl DiscoveredJobCredentials {
 
 pub(crate) fn built_in_secret_requirement(name: &str) -> Option<BuiltInCredentialRequirement> {
     name.eq_ignore_ascii_case("GITHUB_TOKEN")
-        .then_some(BuiltInCredentialRequirement::GithubToken)
+        .then_some(BuiltInCredentialRequirement::WorkflowRepositoryToken)
 }
 
 pub(crate) fn discover_job_credentials(
@@ -270,7 +270,7 @@ fn index_sensitive(mut target: Trace, index: Trace) -> Result<Trace, CredentialD
         if name.eq_ignore_ascii_case("token") {
             target
                 .built_in
-                .insert(BuiltInCredentialRequirement::GithubToken);
+                .insert(BuiltInCredentialRequirement::WorkflowRepositoryToken);
         }
     }
     target.kind = TraceKind::Value;
@@ -397,7 +397,7 @@ mod tests {
     }
 
     #[test]
-    fn github_token_spellings_are_closed_builtins() {
+    fn actions_token_spellings_require_the_workflow_repository_token() {
         for (root, property) in [("github", "token"), ("secrets", "github_token")] {
             let expression = program(vec![
                 ExpressionInstruction::NamedValue {
@@ -415,7 +415,7 @@ mod tests {
             assert!(secrets.is_empty());
             assert_eq!(
                 built_in,
-                BTreeSet::from([BuiltInCredentialRequirement::GithubToken])
+                BTreeSet::from([BuiltInCredentialRequirement::WorkflowRepositoryToken])
             );
         }
 
@@ -429,7 +429,7 @@ mod tests {
         assert_eq!(duplicate_spellings, BTreeSet::from(["EXTERNAL".to_owned()]));
         assert_eq!(
             built_in,
-            BTreeSet::from([BuiltInCredentialRequirement::GithubToken])
+            BTreeSet::from([BuiltInCredentialRequirement::WorkflowRepositoryToken])
         );
     }
 }

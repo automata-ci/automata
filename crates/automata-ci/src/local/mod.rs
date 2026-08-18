@@ -376,7 +376,7 @@ fn print_human_check_report(report: &LocalCheckReport) {
 
 const fn built_in_credential_name(requirement: BuiltInCredentialRequirement) -> &'static str {
     match requirement {
-        BuiltInCredentialRequirement::GithubToken => "github_token",
+        BuiltInCredentialRequirement::WorkflowRepositoryToken => "workflow_repository_token",
     }
 }
 
