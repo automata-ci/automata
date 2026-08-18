@@ -14,6 +14,11 @@ use super::{
     LABEL_RESOURCE_KIND, LocalEngineErrorCode, MANAGED_VALUE, adapter_api_version,
     complete_request, identity_labels,
 };
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+use super::{
+    FIXED_LOCAL_DOCKER_HOST, connect_exact_endpoint, fixed_client_version,
+    validate_fixed_engine_facts,
+};
 use crate::{
     ComposeFrontend, DockerConnection, Engine, EngineArchitecture, EngineEndpoint, EngineSelection,
     Installation, InstallationId, InstallationName,
@@ -158,7 +163,7 @@ fn selection() -> EngineSelection {
 fn test_adapter() -> (DockerInstallationAdapter, Arc<FakeEngine>) {
     let fake = Arc::new(FakeEngine::new());
     (
-        DockerInstallationAdapter::with_test_engine(selection(), fake.clone()),
+        DockerInstallationAdapter::with_test_engine(&selection(), fake.clone()),
         fake,
     )
 }
@@ -170,6 +175,84 @@ fn adapter_api_is_capped_to_the_bollard_model_ceiling() {
 
     let older = adapter_api_version("1.44").expect("older supported API");
     assert_eq!((older.major, older.minor), (1, 44));
+}
+
+#[test]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn fixed_status_reset_engine_selection_depends_only_on_exact_daemon_facts() {
+    let facts = healthy_facts();
+    let selection = validate_fixed_engine_facts(&facts).unwrap();
+    assert_eq!(selection.connection_host(), FIXED_LOCAL_DOCKER_HOST);
+    assert_eq!(selection.api_version(), "1.48");
+    assert_eq!(selection.engine_id(), facts.engine_id);
+    assert_eq!(selection.server_version(), facts.server_version);
+    assert_eq!(selection.architecture(), EngineArchitecture::Amd64);
+    assert!(
+        connect_exact_endpoint(
+            EngineEndpoint::WindowsNamedPipe,
+            FIXED_LOCAL_DOCKER_HOST,
+            &fixed_client_version()
+        )
+        .is_err()
+    );
+
+    for invalid in [
+        ("operating-system", "windows"),
+        ("architecture", "arm64"),
+        ("minimum-api", "1.49"),
+        ("maximum-api", "1.47"),
+        ("server-version", "27.9.0"),
+        ("engine-id", " engine-identity"),
+    ] {
+        let mut facts = healthy_facts();
+        match invalid {
+            ("operating-system", value) => facts.operating_system = value.to_owned(),
+            ("architecture", value) => facts.architecture = value.to_owned(),
+            ("minimum-api", value) => facts.minimum_api_version = value.to_owned(),
+            ("maximum-api", value) => facts.maximum_api_version = value.to_owned(),
+            ("server-version", value) => facts.server_version = value.to_owned(),
+            ("engine-id", value) => facts.engine_id = value.to_owned(),
+            _ => unreachable!(),
+        }
+        assert_eq!(
+            validate_fixed_engine_facts(&facts).unwrap_err().code(),
+            LocalEngineErrorCode::InvalidEngineResponse,
+            "invalid fixed-socket daemon fact: {}",
+            invalid.0
+        );
+    }
+}
+
+#[tokio::test]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+async fn fixed_status_reset_engine_selection_rejects_post_connection_daemon_drift() {
+    let fake = Arc::new(FakeEngine::new());
+    let adapter = DockerInstallationAdapter::connect_fixed_engine_api(fake.clone(), None)
+        .await
+        .unwrap();
+    fake.mutate(|state| state.facts.engine_id = "replacement-engine".to_owned());
+    assert_eq!(
+        adapter
+            .inspect_identity(&InstallationName::default())
+            .await
+            .unwrap_err()
+            .code(),
+        LocalEngineErrorCode::EngineIdentityChanged
+    );
+
+    let fake = Arc::new(FakeEngine::new());
+    let mut replacement = healthy_facts();
+    replacement.engine_id = "replacement-engine".to_owned();
+    fake.mutate(|state| {
+        state.queued_facts = VecDeque::from([Ok(healthy_facts()), Ok(replacement)]);
+    });
+    assert_eq!(
+        DockerInstallationAdapter::connect_fixed_engine_api(fake, None)
+            .await
+            .unwrap_err()
+            .code(),
+        LocalEngineErrorCode::EngineIdentityChanged
+    );
 }
 
 #[tokio::test]
@@ -533,7 +616,8 @@ async fn live_docker_public_adapter_creates_and_re_adopts_one_exact_anchor() {
     assert_eq!(second.id(), first.id());
 
     let selection = report.selected_engine().expect("ready engine selection");
-    let cleanup_engine = super::BollardEngine::connect(selection).expect("cleanup connection");
+    let cleanup_engine =
+        super::BollardEngine::connect(&selection.validated_engine()).expect("cleanup connection");
     let verified = adapter
         .inspect_identity(&name)
         .await

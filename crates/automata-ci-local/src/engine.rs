@@ -9,12 +9,27 @@ use bollard::{
 };
 use thiserror::Error;
 
+#[cfg(test)]
+use crate::EngineSelection;
 use crate::{
-    ApiVersion, DoctorReport, EngineEndpoint, EngineSelection, Installation, InstallationId,
-    InstallationName, capped_adapter_api, normalize_architecture,
+    ApiVersion, DoctorReport, EngineEndpoint, Installation, InstallationId, InstallationName,
+    ValidatedEngineSelection, capped_adapter_api, normalize_architecture,
 };
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+use crate::{DockerConnection, Engine, EngineArchitecture, canonical_engine_major};
 
 const ENGINE_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+const FIXED_LOCAL_DOCKER_HOST: &str = "unix:///var/run/docker.sock";
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+const FIXED_LOCAL_DOCKER_CONTEXT: &str = "automata-fixed-socket";
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+const FIXED_LOCAL_DOCKER_API: ApiVersion = ApiVersion {
+    major: 1,
+    minor: 48,
+};
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+const MINIMUM_LOCAL_DOCKER_ENGINE_MAJOR: u64 = 28;
 const MANAGED_LABEL_PREFIX: &str = "io.automata.local.";
 const LABEL_MANAGED: &str = "io.automata.local.managed";
 const LABEL_IDENTITY_SCHEMA: &str = "io.automata.local.identity-schema";
@@ -114,7 +129,7 @@ impl LocalEngineError {
 /// image pulling, container lifecycle, or Compose API.
 pub struct DockerInstallationAdapter {
     engine: Arc<dyn EngineApi>,
-    selection: EngineSelection,
+    selection: ValidatedEngineSelection,
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     docker: Option<Docker>,
 }
@@ -146,6 +161,13 @@ impl DockerInstallationAdapter {
         let selection = report
             .selected_engine()
             .ok_or_else(|| LocalEngineError::new(LocalEngineErrorCode::PreflightRequired))?;
+        let selection = selection.validated_engine();
+        Self::connect_validated_engine(&selection).await
+    }
+
+    pub(crate) async fn connect_validated_engine(
+        selection: &ValidatedEngineSelection,
+    ) -> Result<Self, LocalEngineError> {
         let engine = BollardEngine::connect(selection)?;
         #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
         let docker = Some(engine.docker.clone());
@@ -153,6 +175,31 @@ impl DockerInstallationAdapter {
             engine: Arc::new(engine),
             selection: selection.clone(),
             #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+            docker,
+        };
+        adapter.verify_engine().await?;
+        Ok(adapter)
+    }
+
+    /// Connects directly to the one fixed local socket without consulting the
+    /// Docker CLI, current context, Compose, or environment API overrides.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    pub(crate) async fn connect_fixed_engine() -> Result<Self, LocalEngineError> {
+        let engine = BollardEngine::connect_fixed()?;
+        let docker = Some(engine.docker.clone());
+        Self::connect_fixed_engine_api(Arc::new(engine), docker).await
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    async fn connect_fixed_engine_api(
+        engine: Arc<dyn EngineApi>,
+        docker: Option<Docker>,
+    ) -> Result<Self, LocalEngineError> {
+        let facts = engine.engine_facts().await.map_err(map_engine_call)?;
+        let selection = validate_fixed_engine_facts(&facts)?;
+        let adapter = Self {
+            engine,
+            selection,
             docker,
         };
         adapter.verify_engine().await?;
@@ -296,7 +343,15 @@ impl DockerInstallationAdapter {
     }
 
     #[cfg(test)]
-    fn with_test_engine(selection: EngineSelection, engine: Arc<dyn EngineApi>) -> Self {
+    fn with_test_engine(selection: &EngineSelection, engine: Arc<dyn EngineApi>) -> Self {
+        Self::with_test_validated_engine(selection.validated_engine(), engine)
+    }
+
+    #[cfg(test)]
+    fn with_test_validated_engine(
+        selection: ValidatedEngineSelection,
+        engine: Arc<dyn EngineApi>,
+    ) -> Self {
         Self {
             engine,
             selection,
@@ -425,7 +480,7 @@ struct BollardEngine {
 }
 
 impl BollardEngine {
-    fn connect(selection: &EngineSelection) -> Result<Self, LocalEngineError> {
+    fn connect(selection: &ValidatedEngineSelection) -> Result<Self, LocalEngineError> {
         let api = adapter_api_version(selection.api_version())?;
         let version = ClientVersion {
             major_version: usize::from(api.major),
@@ -436,6 +491,76 @@ impl BollardEngine {
             .map_err(|_error| LocalEngineError::new(LocalEngineErrorCode::ConnectionUnavailable))?;
         Ok(Self { docker })
     }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    fn connect_fixed() -> Result<Self, LocalEngineError> {
+        let docker = connect_exact_endpoint(
+            EngineEndpoint::UnixSocket,
+            FIXED_LOCAL_DOCKER_HOST,
+            &fixed_client_version(),
+        )
+        .map_err(|_error| LocalEngineError::new(LocalEngineErrorCode::ConnectionUnavailable))?;
+        Ok(Self { docker })
+    }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn fixed_client_version() -> ClientVersion {
+    ClientVersion {
+        major_version: usize::from(FIXED_LOCAL_DOCKER_API.major),
+        minor_version: usize::from(FIXED_LOCAL_DOCKER_API.minor),
+    }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn validate_fixed_engine_facts(
+    facts: &EngineFacts,
+) -> Result<ValidatedEngineSelection, LocalEngineError> {
+    let invalid = || LocalEngineError::new(LocalEngineErrorCode::InvalidEngineResponse);
+    let minimum_api = canonical_api_version(&facts.minimum_api_version).ok_or_else(invalid)?;
+    let maximum_api = canonical_api_version(&facts.maximum_api_version).ok_or_else(invalid)?;
+    let architecture = normalize_architecture(&facts.architecture).ok_or_else(invalid)?;
+    if facts.operating_system != "linux"
+        || architecture != EngineArchitecture::Amd64
+        || canonical_engine_major(&facts.server_version)
+            .is_none_or(|major| major < MINIMUM_LOCAL_DOCKER_ENGINE_MAJOR)
+        || !valid_engine_id(&facts.engine_id)
+        || minimum_api > FIXED_LOCAL_DOCKER_API
+        || maximum_api < FIXED_LOCAL_DOCKER_API
+    {
+        return Err(invalid());
+    }
+    Ok(ValidatedEngineSelection {
+        engine: Engine::Docker,
+        context_name: FIXED_LOCAL_DOCKER_CONTEXT.to_owned(),
+        endpoint: EngineEndpoint::UnixSocket,
+        engine_id: facts.engine_id.clone(),
+        server_version: facts.server_version.clone(),
+        api_version: format!(
+            "{}.{}",
+            FIXED_LOCAL_DOCKER_API.major, FIXED_LOCAL_DOCKER_API.minor
+        ),
+        architecture,
+        connection: DockerConnection {
+            context_name: FIXED_LOCAL_DOCKER_CONTEXT.to_owned(),
+            host: FIXED_LOCAL_DOCKER_HOST.to_owned(),
+            endpoint: EngineEndpoint::UnixSocket,
+        },
+    })
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn canonical_api_version(value: &str) -> Option<ApiVersion> {
+    let parsed = ApiVersion::parse(value)?;
+    (format!("{}.{}", parsed.major, parsed.minor) == value).then_some(parsed)
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn valid_engine_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 512
+        && value.trim() == value
+        && !value.chars().any(char::is_control)
 }
 
 #[cfg(unix)]

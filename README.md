@@ -131,7 +131,7 @@ The workspace builds two product commands:
 
 | Command | Purpose |
 | --- | --- |
-| `automata` | Run the control plane and perform local inspection, authentication, secret, environment-review, rerun, runner-management, and administration operations |
+| `automata` | Run the control plane and perform local installation inspection and management, authentication, secret, environment-review, rerun, runner-management, and administration operations |
 | `automata-runner` | Enroll an execution host, inspect its capabilities, and execute leased jobs through one configured sandbox provider |
 
 ### Inspect a local repository
@@ -157,7 +157,7 @@ workflows and reports required credentials without exposing values. See the
 [local installation boundary](crates/automata-ci-local/README.md) for the
 snapshot and platform limits.
 
-### Seal a local Docker installation
+### Manage sealed local Docker custody
 
 On x86-64 Linux, `local init` seals an immutable installation into an explicit
 private state directory and twelve owner-specific Docker volumes:
@@ -166,6 +166,10 @@ private state directory and twelve owner-specific Docker volumes:
 automata local init \
   --state-directory /var/lib/automata-local/default \
   --catalog-source file:/srv/automata-release/local-installation-catalog.json
+automata local status \
+  --state-directory /var/lib/automata-local/default --json
+automata local reset \
+  --state-directory /var/lib/automata-local/default --yes
 ```
 
 Init accepts only the fixed local Docker socket and an operator-selected local
@@ -173,10 +177,25 @@ release catalog with its exact catalog-declared sibling candidate. It verifies
 their canonical structure and digests, but does not independently authenticate
 their release provenance. Exact replay reattests the same state and Engine
 custody. Init generates no Compose document, invokes no Compose operation, and
-starts no service. Public `local up`, `down`, `status`, and `reset` commands are
-not part of this slice; `ResetRequired` is detectable but has no remediation
-command yet. See the [local installation boundary](crates/automata-ci-local/README.md)
-for the complete custody and platform contract.
+starts no service. The epoch binds the stable local-filesystem identity of the
+private state root and its held operation lock; copied, restored, or remounted
+custody is rejected.
+
+Status opens only an existing state directory under a shared, nonrepairing lock
+and reports `recorded_sealed` only when canonical host custody and the exact
+Engine identity, image representations, twelve volume labels, attachments, and
+managed-resource union agree. It never starts a helper or inspects bytes inside
+the volumes. Status and reset connect directly to the fixed Docker socket and do
+not depend on the Docker CLI, current context, `DOCKER_API_VERSION`, or Compose
+plugin; init and doctor retain their complete preflight. Reset never prompts and
+requires `--yes`. Before mutation it requires an authority-bound canonical
+epoch plus complete exact Engine custody. Once its topology-bound intent is
+durable, reset reconciles deletion even if cancellation arrives, removes safe
+fixed host records, and retains imported images, the state directory, and its
+original operation lock. Missing or retagged retained images do not prevent
+custody deletion. `automata local run`, `up`, and `down` are not present. See the
+[local installation boundary](crates/automata-ci-local/README.md) for the full
+custody and platform contract.
 
 ## Architecture
 

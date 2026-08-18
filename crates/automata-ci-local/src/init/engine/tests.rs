@@ -783,7 +783,14 @@ struct FakeHelperState {
     volumes: BTreeMap<String, bollard::models::Volume>,
     extra_attachment: bool,
     exit_on_request: bool,
-    fail_cleanup: bool,
+    cleanup: CleanupBehavior,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CleanupBehavior {
+    Succeeds,
+    FailsBeforeApply,
+    AppliesThenFails,
 }
 
 struct FakeHelperDriver {
@@ -1089,7 +1096,7 @@ impl FakeHelperDriver {
                 volumes,
                 extra_attachment: false,
                 exit_on_request: false,
-                fail_cleanup: false,
+                cleanup: CleanupBehavior::Succeeds,
             }),
         }
     }
@@ -1271,7 +1278,7 @@ impl HelperDriver for FakeHelperDriver {
     async fn driver_force_remove(&self, id: &str) -> Result<(), LocalInitError> {
         let mut state = self.state.lock().unwrap();
         state.events.push("remove");
-        if state.fail_cleanup {
+        if state.cleanup == CleanupBehavior::FailsBeforeApply {
             return Err(materialization_failed());
         }
         assert_eq!(id, CONTAINER_ID);
@@ -1285,7 +1292,11 @@ impl HelperDriver for FakeHelperDriver {
         {
             state.by_name = None;
         }
-        Ok(())
+        if state.cleanup == CleanupBehavior::AppliesThenFails {
+            Err(materialization_failed())
+        } else {
+            Ok(())
+        }
     }
 
     async fn driver_volume_attachments(&self, _name: &str) -> Result<Vec<String>, LocalInitError> {
@@ -1695,7 +1706,7 @@ async fn cleanup_failure_dominates_latched_cancellation() {
         cancellation.clone(),
         &contract,
     );
-    driver.state.lock().unwrap().fail_cleanup = true;
+    driver.state.lock().unwrap().cleanup = CleanupBehavior::FailsBeforeApply;
     let result = super::super::cancellation_bounded(
         &cancellation,
         run_materializer_with_driver(&driver, &contract, &request, fingerprint(), &cancellation),
@@ -1709,6 +1720,24 @@ async fn cleanup_failure_dominates_latched_cancellation() {
     assert!(state.by_id.is_some());
     assert!(state.by_name.is_some());
     assert!(state.removed.is_empty());
+}
+
+#[tokio::test]
+async fn reset_helper_cleanup_accepts_an_applied_ambiguous_remove_after_exact_absence_proof() {
+    let installation = installation();
+    let contract = contract(&installation);
+    let driver = FakeHelperDriver::new(InjectedAction::None, CancellationToken::new(), &contract);
+    {
+        let mut state = driver.state.lock().unwrap();
+        state.by_id = Some(driver.template.clone());
+        state.by_name = Some(driver.template.clone());
+        state.cleanup = CleanupBehavior::AppliesThenFails;
+    }
+
+    cleanup_reset_helper_with_driver(&driver, &contract, CONTAINER_ID)
+        .await
+        .unwrap();
+    driver.assert_cleaned();
 }
 
 #[tokio::test]
@@ -2720,5 +2749,219 @@ async fn final_owned_union_census_rejects_every_absence_helper_and_drift_class()
         validate_final_owned_union_with_driver(&union_drift, &installation, fingerprint())
             .await
             .is_err()
+    );
+}
+
+#[test]
+fn reset_preflight_allows_only_the_exact_helper_as_a_volume_attachment() {
+    let helper = ResetHelperBinding {
+        reference: "registry.invalid/automata@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+        image_id: CANDIDATE_CONFIG_ID.to_owned(),
+        container_id: CONTAINER_ID.to_owned(),
+    };
+    validate_reset_attachments(std::slice::from_ref(&helper.container_id), Some(&helper)).unwrap();
+    validate_reset_attachments(&[], None).unwrap();
+    for attachments in [
+        vec!["d".repeat(64)],
+        vec![helper.container_id.clone(), "d".repeat(64)],
+    ] {
+        assert_eq!(
+            validate_reset_attachments(&attachments, Some(&helper))
+                .unwrap_err()
+                .code(),
+            LocalInitErrorCode::EngineResourceMismatch
+        );
+    }
+    assert!(validate_reset_attachments(&["d".repeat(64)], None).is_err());
+}
+
+#[test]
+fn reset_order_is_complete_unique_and_keeps_desired_last() {
+    let order = reset_volume_order();
+    assert_eq!(order.len(), INIT_VOLUME_ORDER.len());
+    assert_eq!(order.last(), Some(&VolumeRole::Desired));
+    assert_eq!(
+        order.into_iter().collect::<BTreeSet<_>>(),
+        INIT_VOLUME_ORDER.into_iter().collect::<BTreeSet<_>>()
+    );
+}
+
+#[test]
+fn reset_progress_accepts_only_an_absent_prefix_and_anchor_last() {
+    for deleted in 0..=12 {
+        let mut presence = [true; 12];
+        presence[..deleted].fill(false);
+        assert_eq!(
+            reset_progress_from_presence(&presence, true).unwrap(),
+            deleted
+        );
+    }
+    assert_eq!(
+        reset_progress_from_presence(&[false; 12], false).unwrap(),
+        13
+    );
+
+    let mut hole = [true; 12];
+    hole[3] = false;
+    assert_eq!(
+        reset_progress_from_presence(&hole, true)
+            .unwrap_err()
+            .code(),
+        LocalInitErrorCode::EngineResourceMismatch
+    );
+    assert_eq!(
+        reset_progress_from_presence(&[true; 12], false)
+            .unwrap_err()
+            .code(),
+        LocalInitErrorCode::EngineResourceMismatch
+    );
+}
+
+#[tokio::test]
+async fn raw_union_supports_reset_suffixes_without_weakening_init_prefixes() {
+    let installation = installation();
+    let expected = Installation::expected(installation.name());
+    let reset_order = reset_volume_order();
+    for deleted in 0..=reset_order.len() {
+        let mut volumes = vec![fake_volume(
+            installation.anchor_volume_name(),
+            &BTreeMap::new(),
+        )];
+        volumes.extend(reset_order[deleted..].iter().map(|role| {
+            let name = volume_name(installation.compose_project().as_str(), *role);
+            let mut volume = fake_volume(&name, &BTreeMap::new());
+            volume
+                .labels
+                .insert("com.example.note".to_owned(), "tolerated".to_owned());
+            volume
+        }));
+        let driver = FakeOwnedUnionDriver {
+            volumes,
+            ..Default::default()
+        };
+        let observed =
+            inspect_owned_union_census_with_driver(&driver, &expected, Some(&installation))
+                .await
+                .unwrap();
+        let presence = reset_order.map(|role| observed.roles.contains(&role));
+        assert_eq!(
+            reset_progress_from_presence(&presence, observed.anchor_present).unwrap(),
+            deleted
+        );
+        if (1..reset_order.len() - 1).contains(&deleted) {
+            assert_eq!(
+                validate_init_owned_union(&observed).unwrap_err().code(),
+                LocalInitErrorCode::EngineResourceMismatch
+            );
+        }
+    }
+
+    let mut contradictory = owned_union_prefix(&installation, true, 1);
+    contradictory.volumes[1].labels.insert(
+        COMPOSE_PROJECT_LABEL.to_owned(),
+        "some-other-project".to_owned(),
+    );
+    assert_eq!(
+        inspect_owned_union_census_with_driver(&contradictory, &expected, Some(&installation),)
+            .await
+            .unwrap_err()
+            .code(),
+        LocalInitErrorCode::EngineResourceMismatch
+    );
+}
+
+struct FakeExactDeleteDriver {
+    outcome: DeleteAttemptOutcome,
+    present_after: bool,
+    trace: Mutex<Vec<&'static str>>,
+}
+
+#[async_trait::async_trait]
+impl ExactVolumeDeleteDriver for FakeExactDeleteDriver {
+    async fn delete_volume_untrusted(&self, _name: &str) -> DeleteAttemptOutcome {
+        self.trace.lock().unwrap().push("delete");
+        self.outcome
+    }
+
+    async fn inspect_volume_present(&self, _name: &str) -> Result<bool, LocalInitError> {
+        self.trace.lock().unwrap().push("inspect");
+        Ok(self.present_after)
+    }
+
+    async fn verify_after_volume_delete(&self) -> Result<(), LocalInitError> {
+        self.trace.lock().unwrap().push("verify");
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn exact_volume_delete_reconciles_success_error_and_timeout_from_observed_absence() {
+    for outcome in [
+        DeleteAttemptOutcome::Completed,
+        DeleteAttemptOutcome::Failed,
+        DeleteAttemptOutcome::TimedOut,
+    ] {
+        let absent = FakeExactDeleteDriver {
+            outcome,
+            present_after: false,
+            trace: Mutex::new(Vec::new()),
+        };
+        remove_volume_and_prove_absent_with_driver(&absent, "owned")
+            .await
+            .unwrap();
+        assert_eq!(
+            *absent.trace.lock().unwrap(),
+            ["delete", "inspect", "verify"]
+        );
+
+        let present = FakeExactDeleteDriver {
+            outcome,
+            present_after: true,
+            trace: Mutex::new(Vec::new()),
+        };
+        assert_eq!(
+            remove_volume_and_prove_absent_with_driver(&present, "owned")
+                .await
+                .unwrap_err()
+                .code(),
+            LocalInitErrorCode::ResetFailed
+        );
+        assert_eq!(*present.trace.lock().unwrap(), ["delete", "inspect"]);
+    }
+}
+
+#[test]
+fn reset_helper_contract_accepts_sealed_config_or_manifest_id_without_live_image_lookup() {
+    let installation = installation();
+    let contract = contract(&installation);
+    let alternate = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+    let mut inspect = valid_helper_inspect(&contract, CONTAINER_ID);
+    inspect.image = Some(alternate.to_owned());
+    validate_helper_image_ids(
+        &inspect,
+        CONTAINER_ID,
+        &contract.name,
+        contract.image,
+        &[contract.image_id, alternate],
+        contract.volumes,
+        &contract.labels,
+    )
+    .unwrap();
+
+    inspect.image =
+        Some("sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_owned());
+    assert_eq!(
+        validate_helper_image_ids(
+            &inspect,
+            CONTAINER_ID,
+            &contract.name,
+            contract.image,
+            &[contract.image_id, alternate],
+            contract.volumes,
+            &contract.labels,
+        )
+        .unwrap_err()
+        .code(),
+        LocalInitErrorCode::MaterializationFailed
     );
 }

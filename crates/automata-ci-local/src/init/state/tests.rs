@@ -38,14 +38,19 @@ impl TestDirectory {
     }
 
     fn private_file(&self, name: &str, bytes: &[u8]) {
+        self.private_file_mode(name, bytes, 0o600);
+    }
+
+    fn private_file_mode(&self, name: &str, bytes: &[u8], mode: u32) {
         let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
-            .mode(0o600)
+            .mode(mode)
             .open(self.join(name))
             .unwrap();
         file.write_all(bytes).unwrap();
         file.sync_all().unwrap();
+        fs::set_permissions(self.join(name), fs::Permissions::from_mode(mode)).unwrap();
     }
 }
 
@@ -533,4 +538,251 @@ fn noncanonical_absolute_paths_are_rejected() {
             "{path}"
         );
     }
+}
+
+#[test]
+fn existing_observers_never_create_or_repair_state() {
+    let parent = TestDirectory::new();
+    let absent = parent.join("absent");
+    assert_eq!(
+        StateRoot::observe_existing(&absent).err().unwrap().code(),
+        LocalInitErrorCode::ResetRequired
+    );
+    assert!(!absent.exists());
+
+    let incomplete = parent.join("incomplete");
+    fs::create_dir(&incomplete).unwrap();
+    fs::set_permissions(&incomplete, fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(
+        StateRoot::observe_existing(&incomplete)
+            .err()
+            .unwrap()
+            .code(),
+        LocalInitErrorCode::ResetRequired
+    );
+    assert!(!incomplete.join(OPERATION_LOCK).exists());
+}
+
+#[test]
+fn shared_observation_is_nonrepairing_and_excludes_a_writer() {
+    let parent = TestDirectory::new();
+    let path = parent.join("state");
+    let writer = StateRoot::acquire(&path).unwrap();
+    writer.store_installation_selection(b"selection\n").unwrap();
+    writer.create_material_root().unwrap();
+    writer.store_epoch(b"epoch\n").unwrap();
+    drop(writer);
+
+    let first = StateRoot::observe_existing(&path).unwrap();
+    let second = StateRoot::observe_existing(&path).unwrap();
+    assert_eq!(
+        StateRoot::acquire_existing(&path).err().unwrap().code(),
+        LocalInitErrorCode::OperationInProgress
+    );
+    assert_eq!(
+        first.snapshot_read_only().unwrap().epoch.unwrap(),
+        b"epoch\n"
+    );
+    drop(second);
+
+    let temporary = temporary_name(CERTIFICATE_RECORD);
+    parent.private_file(&format!("state/{temporary}"), b"certificate\n");
+    assert_eq!(
+        first.snapshot_read_only().unwrap_err().code(),
+        LocalInitErrorCode::ResetRequired
+    );
+    assert!(
+        path.join(temporary).exists(),
+        "status must not publish or unlink"
+    );
+}
+
+#[test]
+fn reset_intent_poison_observation_does_not_publish_its_temporary() {
+    let parent = TestDirectory::new();
+    let path = parent.join("state");
+    let state = StateRoot::acquire(&path).unwrap();
+    let temporary = temporary_name(RESET_INTENT_RECORD);
+    parent.private_file(&format!("state/{temporary}"), b"intent\n");
+
+    assert!(state.reset_intent_present().unwrap());
+    assert!(path.join(&temporary).exists());
+    assert!(!path.join(RESET_INTENT_RECORD).exists());
+}
+
+#[test]
+fn reset_snapshot_accepts_safe_opaque_records_that_strict_status_rejects() {
+    let parent = TestDirectory::new();
+    let path = parent.join("state");
+    let state = StateRoot::acquire(&path).unwrap();
+    parent.private_file("state/material-root", b"");
+    parent.private_file(
+        "state/certificates.json",
+        &vec![b'x'; MAX_CERTIFICATE_RECORD_BYTES + 1],
+    );
+    parent.private_file("state/installation-selection.json", b"not-json\n");
+    parent.private_file("state/materialization.json", b"{malformed}\n");
+    parent.private_file("state/epoch.json", b"epoch-evidence\n");
+
+    let snapshot = state.snapshot_for_reset().unwrap();
+    assert!(snapshot.material_root.present());
+    assert_eq!(snapshot.material_root.completed(), None);
+    assert!(snapshot.certificates.present());
+    assert_eq!(snapshot.certificates.completed(), None);
+    assert_eq!(
+        snapshot.installation_selection.completed(),
+        Some(b"not-json\n".as_slice())
+    );
+    assert_eq!(
+        snapshot.materialization.completed(),
+        Some(b"{malformed}\n".as_slice())
+    );
+    assert_eq!(
+        state.snapshot_read_only().unwrap_err().code(),
+        LocalInitErrorCode::ResetRequired
+    );
+
+    for record in StateRecord::ALL {
+        state.remove_record(record).unwrap();
+    }
+    assert!(state.snapshot_for_reset().unwrap().is_empty());
+    assert!(path.join(OPERATION_LOCK).is_file());
+}
+
+#[test]
+fn reset_snapshot_accepts_owner_only_mode_drift_and_removes_unreadable_evidence() {
+    let parent = TestDirectory::new();
+    let path = parent.join("state");
+    let state = StateRoot::acquire(&path).unwrap();
+    parent.private_file_mode("state/material-root", b"material\n", 0o400);
+    parent.private_file_mode("state/certificates.json", b"opaque\n", 0o000);
+    parent.private_file_mode("state/installation-selection.json", b"malformed\n", 0o700);
+
+    let snapshot = state.snapshot_for_reset().unwrap();
+    assert_eq!(
+        snapshot.material_root.completed(),
+        Some(b"material\n".as_slice())
+    );
+    assert!(snapshot.certificates.present());
+    assert_eq!(snapshot.certificates.completed(), None);
+    assert_eq!(
+        snapshot.installation_selection.completed(),
+        Some(b"malformed\n".as_slice())
+    );
+    for record in StateRecord::ALL {
+        state.remove_record(record).unwrap();
+    }
+    assert!(state.snapshot_for_reset().unwrap().is_empty());
+}
+
+#[test]
+fn reset_authority_records_require_owner_read_but_not_exact_mode() {
+    let readable_parent = TestDirectory::new();
+    let readable_path = readable_parent.join("state");
+    let readable = StateRoot::acquire(&readable_path).unwrap();
+    readable_parent.private_file_mode("state/reset-intent.json", b"intent\n", 0o400);
+    assert_eq!(
+        readable
+            .reconcile_validated_reset_intent(b"intent\n")
+            .unwrap(),
+        b"intent\n"
+    );
+
+    let unreadable_parent = TestDirectory::new();
+    let unreadable_path = unreadable_parent.join("state");
+    let unreadable = StateRoot::acquire(&unreadable_path).unwrap();
+    unreadable_parent.private_file_mode("state/reset-intent.json", b"intent\n", 0o000);
+    assert_eq!(
+        unreadable
+            .reconcile_validated_reset_intent(b"intent\n")
+            .unwrap_err()
+            .code(),
+        LocalInitErrorCode::ResetRequired
+    );
+}
+
+#[test]
+fn reset_snapshot_rejects_unknown_names_and_unsafe_fixed_records() {
+    let parent = TestDirectory::new();
+    let path = parent.join("state");
+    let state = StateRoot::acquire(&path).unwrap();
+    parent.private_file("state/unknown.json", b"unknown\n");
+    assert_eq!(
+        state.snapshot_for_reset().unwrap_err().code(),
+        LocalInitErrorCode::ResetRequired
+    );
+    fs::remove_file(path.join("unknown.json")).unwrap();
+    symlink("/dev/null", path.join(MATERIAL_ROOT)).unwrap();
+    assert_eq!(
+        state.snapshot_for_reset().unwrap_err().code(),
+        LocalInitErrorCode::ResetRequired
+    );
+
+    for mode in [0o640, 0o604, 0o4600] {
+        let parent = TestDirectory::new();
+        let path = parent.join("state");
+        let state = StateRoot::acquire(&path).unwrap();
+        parent.private_file_mode("state/material-root", b"unsafe\n", mode);
+        assert_eq!(
+            state.snapshot_for_reset().unwrap_err().code(),
+            LocalInitErrorCode::ResetRequired,
+            "unsafe mode {mode:o}"
+        );
+    }
+
+    let parent = TestDirectory::new();
+    let path = parent.join("state");
+    let state = StateRoot::acquire(&path).unwrap();
+    parent.private_file("state/material-root", b"linked\n");
+    fs::hard_link(path.join(MATERIAL_ROOT), parent.join("linked-evidence")).unwrap();
+    assert_eq!(
+        state.snapshot_for_reset().unwrap_err().code(),
+        LocalInitErrorCode::ResetRequired
+    );
+}
+
+#[test]
+fn exact_reset_record_erasure_retains_the_original_root_and_lock() {
+    let parent = TestDirectory::new();
+    let path = parent.join("state");
+    let state = StateRoot::acquire(&path).unwrap();
+    let authority = state.authority_sha256();
+    state.create_private(MATERIAL_ROOT, &[0x55; 32]).unwrap();
+    state.create_private(EPOCH_RECORD, b"epoch\n").unwrap();
+    state
+        .create_private(CERTIFICATE_RECORD, b"certificates\n")
+        .unwrap();
+    state
+        .create_private(INSTALLATION_SELECTION, b"selection\n")
+        .unwrap();
+    state
+        .create_private(MATERIALIZATION_RECORD, b"materialization\n")
+        .unwrap();
+    state
+        .create_private(RESET_INTENT_RECORD, b"reset-intent\n")
+        .unwrap();
+
+    for record in [
+        StateRecord::Materialization,
+        StateRecord::Certificates,
+        StateRecord::MaterialRoot,
+        StateRecord::InstallationSelection,
+    ] {
+        state.remove_record(record).unwrap();
+        assert!(
+            path.join(EPOCH_RECORD).exists(),
+            "epoch is the late sentinel"
+        );
+        assert!(path.join(RESET_INTENT_RECORD).exists());
+    }
+    state.remove_record(StateRecord::Epoch).unwrap();
+    assert!(path.join(RESET_INTENT_RECORD).exists());
+    state.remove_record(StateRecord::ResetIntent).unwrap();
+    assert_eq!(
+        state.snapshot_read_only().unwrap(),
+        StateSnapshot::default()
+    );
+    assert!(path.is_dir());
+    assert!(path.join(OPERATION_LOCK).is_file());
+    assert_eq!(state.authority_sha256(), authority);
 }

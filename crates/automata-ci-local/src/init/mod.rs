@@ -6,8 +6,13 @@ mod engine;
 mod epoch;
 mod materializer;
 mod state;
+mod status_reset;
 
 pub(crate) use materializer::run_fixed_materializer;
+pub use status_reset::{
+    LocalInstallationStatus, LocalResetOutcome, LocalResetRequest, LocalStatusReport,
+    LocalStatusRequest, inspect_local_status, reset_local,
+};
 
 use std::{fmt, future::Future, net::Ipv4Addr, num::NonZeroU16, path::PathBuf};
 
@@ -44,14 +49,18 @@ pub enum LocalInitErrorCode {
     InvalidCatalogPayload,
     /// The requested worker capacity was outside the release catalog contract.
     InvalidWorkers,
-    /// Initialization was cancelled before mutation completed.
+    /// A local custody operation was cancelled before a durable reset transaction.
     Cancelled,
-    /// Docker preflight or exact Engine initialization failed.
+    /// Destructive reset was not explicitly confirmed.
+    ConfirmationRequired,
+    /// Docker preflight or exact Engine inspection failed.
     EngineUnavailable,
     /// A Docker resource failed its exact immutable custody contract.
     EngineResourceMismatch,
     /// The fixed materialization helper failed or became ambiguous.
     MaterializationFailed,
+    /// Exact reset reconciliation could not prove the requested resource absent.
+    ResetFailed,
 }
 
 impl LocalInitErrorCode {
@@ -65,7 +74,7 @@ impl LocalInitErrorCode {
             }
             Self::StateCollision => "local initialization state changed concurrently",
             Self::ResetRequired => {
-                "local installation custody is missing, corrupt, or incompatible; reset is required"
+                "local installation custody is missing, incomplete, corrupt, or incompatible; exact init replay or authorized recovery is required"
             }
             Self::InvalidCatalogSource => {
                 "catalog source must be one secure explicit file:/absolute/path"
@@ -79,13 +88,17 @@ impl LocalInitErrorCode {
             Self::InvalidWorkers => {
                 "requested workers exceed the immutable release-catalog capacity"
             }
-            Self::Cancelled => "local initialization was cancelled",
-            Self::EngineUnavailable => "the exact Docker Engine is unavailable for initialization",
+            Self::Cancelled => "the local installation operation was cancelled",
+            Self::ConfirmationRequired => "local reset requires explicit confirmation",
+            Self::EngineUnavailable => "the exact Docker Engine is unavailable for this operation",
             Self::EngineResourceMismatch => {
                 "a deterministic Docker resource disagrees with local installation custody"
             }
             Self::MaterializationFailed => {
                 "the fixed local materialization helper failed or became ambiguous"
+            }
+            Self::ResetFailed => {
+                "local reset could not prove exact owned-resource deletion complete"
             }
         }
     }
@@ -198,6 +211,20 @@ impl StateInstallationSelection {
         }
         Ok(())
     }
+
+    fn from_canonical_bytes(bytes: &[u8]) -> Result<InstallationName, LocalInitError> {
+        let actual: Self = serde_json::from_slice(bytes)
+            .map_err(|_| LocalInitError::new(LocalInitErrorCode::ResetRequired))?;
+        if actual.schema != INSTALLATION_SELECTION_SCHEMA || bytes != actual.canonical_bytes()? {
+            return Err(LocalInitError::new(LocalInitErrorCode::ResetRequired));
+        }
+        let installation = InstallationName::new(actual.installation)
+            .map_err(|_| LocalInitError::new(LocalInitErrorCode::ResetRequired))?;
+        if actual.selector_key != Installation::expected(&installation).selector_key.digest() {
+            return Err(LocalInitError::new(LocalInitErrorCode::ResetRequired));
+        }
+        Ok(installation)
+    }
 }
 
 #[derive(Deserialize, Eq, PartialEq, Serialize)]
@@ -230,6 +257,15 @@ impl StateMaterialization {
         }
         Ok(())
     }
+
+    fn from_canonical_bytes(bytes: &[u8]) -> Result<Sha256Digest, LocalInitError> {
+        let actual: Self = serde_json::from_slice(bytes)
+            .map_err(|_| LocalInitError::new(LocalInitErrorCode::ResetRequired))?;
+        if actual.schema != MATERIALIZATION_SCHEMA || bytes != actual.canonical_bytes()? {
+            return Err(LocalInitError::new(LocalInitErrorCode::ResetRequired));
+        }
+        Ok(actual.epoch_fingerprint)
+    }
 }
 
 impl LocalInitOutcome {
@@ -257,6 +293,9 @@ pub async fn initialize_local(
     request: LocalInitRequest,
 ) -> Result<LocalInitOutcome, LocalInitError> {
     let state = state::StateRoot::acquire(&request.state_directory)?;
+    if state.reset_intent_present()? {
+        return Err(LocalInitError::new(LocalInitErrorCode::ResetRequired));
+    }
     let evidence = state::EvidenceDirectory::open(&request.catalog_source)?;
     let catalog = catalog::VerifiedCatalog::parse(evidence.catalog())?;
     if request.workers.get() > catalog.maximum_parallel_jobs() {

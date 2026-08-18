@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, str::FromStr as _};
 
 use automata_ci_core::Sha256Digest;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use zeroize::Zeroizing;
 
-use crate::Installation;
+use crate::{Installation, InstallationId, InstallationName, MAXIMUM_LOCAL_DOCKER_JOB_SLOTS};
 
 use super::{
     LocalInitError, LocalInitErrorCode,
@@ -125,6 +125,64 @@ impl ImmutableEpoch {
         Ok(actual)
     }
 
+    pub(super) fn from_sealed_bytes(
+        bytes: &[u8],
+        state_authority_sha256: Sha256Digest,
+        material_root: &[u8; 32],
+    ) -> Result<Self, LocalInitError> {
+        let actual = Self::from_authority_bound_bytes(bytes, state_authority_sha256)?;
+        if actual.material_root_sha256 != digest(material_root) {
+            return Err(reset_required());
+        }
+        Ok(actual)
+    }
+
+    pub(super) fn from_authority_bound_bytes(
+        bytes: &[u8],
+        state_authority_sha256: Sha256Digest,
+    ) -> Result<Self, LocalInitError> {
+        if bytes.is_empty() || bytes.len() > MAX_EPOCH_BYTES {
+            return Err(reset_required());
+        }
+        let raw: RawEpoch = serde_json::from_slice(bytes).map_err(|_| reset_required())?;
+        if raw.schema != EPOCH_SCHEMA
+            || raw.material_schema != MATERIAL_SCHEMA
+            || raw.generation != GENERATION
+            || canonical_bytes(&raw)? != bytes
+        {
+            return Err(reset_required());
+        }
+        let actual = Self {
+            schema: EPOCH_SCHEMA,
+            material_schema: MATERIAL_SCHEMA,
+            generation: raw.generation,
+            installation: raw.installation,
+            catalog: raw.catalog,
+            platform: raw.platform,
+            capacity: raw.capacity,
+            profile: raw.profile,
+            images: raw.images,
+            state_authority_sha256: raw.state_authority_sha256,
+            material_root_sha256: raw.material_root_sha256,
+            epoch_fingerprint: raw.epoch_fingerprint,
+            initial_desired_sha256: raw.initial_desired_sha256,
+        };
+        if actual.state_authority_sha256 != state_authority_sha256
+            || actual.recompute_fingerprint() != actual.epoch_fingerprint
+            || actual.platform.host != "linux/x86_64"
+            || actual.platform.engine != "linux/amd64"
+            || actual.capacity.workers == 0
+            || actual.capacity.workers > MAXIMUM_LOCAL_DOCKER_JOB_SLOTS
+            || !valid_catalog_identity(&actual.catalog)
+            || !valid_profile(&actual.profile)
+            || !valid_images(&actual.images)
+        {
+            return Err(reset_required());
+        }
+        actual.installation()?;
+        Ok(actual)
+    }
+
     pub(super) fn canonical_bytes(&self) -> Vec<u8> {
         canonical_bytes(self).expect("closed epoch document is serializable")
     }
@@ -139,6 +197,37 @@ impl ImmutableEpoch {
 
     pub(super) const fn initial_desired_sha256(&self) -> Sha256Digest {
         self.initial_desired_sha256
+    }
+
+    pub(super) const fn workers(&self) -> u16 {
+        self.capacity.workers
+    }
+
+    pub(super) fn installation(&self) -> Result<Installation, LocalInitError> {
+        let name =
+            InstallationName::new(self.installation.name.clone()).map_err(|_| reset_required())?;
+        let id = InstallationId::from_str(&self.installation.id).map_err(|_| reset_required())?;
+        let installation = Installation::verified(name, id);
+        if self.installation.selector_key != installation.selector_key().to_string()
+            || self.installation.compose_project != installation.compose_project().as_str()
+        {
+            return Err(reset_required());
+        }
+        Ok(installation)
+    }
+
+    pub(super) fn image_expectations(&self) -> impl Iterator<Item = EpochImageExpectation<'_>> {
+        self.images
+            .iter()
+            .map(|(role, image)| EpochImageExpectation {
+                role,
+                reference: &image.reference,
+                canonical_repository: &image.canonical_repository,
+                source_kind: &image.source_kind,
+                config_digest: &image.config_digest,
+                manifest_digest: &image.manifest_digest,
+                platform_manifest_digest: image.platform_manifest_digest.as_deref(),
+            })
     }
 
     fn recompute_fingerprint(&self) -> Sha256Digest {
@@ -157,6 +246,35 @@ impl ImmutableEpoch {
             initial_desired_sha256: self.initial_desired_sha256,
         }
         .fingerprint()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct EpochImageExpectation<'a> {
+    pub(super) role: &'a str,
+    pub(super) reference: &'a str,
+    pub(super) canonical_repository: &'a str,
+    pub(super) source_kind: &'a str,
+    pub(super) config_digest: &'a str,
+    pub(super) manifest_digest: &'a str,
+    pub(super) platform_manifest_digest: Option<&'a str>,
+}
+
+impl EpochImageExpectation<'_> {
+    pub(super) fn inspection_reference(self) -> Result<String, LocalInitError> {
+        if self.source_kind == "release-candidate" {
+            let digest = self
+                .manifest_digest
+                .strip_prefix("sha256:")
+                .ok_or_else(reset_required)?;
+            Ok(format!("{}:manifest-{digest}", self.canonical_repository))
+        } else {
+            let (repository, _) = self.reference.rsplit_once('@').ok_or_else(reset_required)?;
+            Ok(format!(
+                "{repository}@{}",
+                self.platform_manifest_digest.ok_or_else(reset_required)?
+            ))
+        }
     }
 }
 
@@ -274,6 +392,84 @@ impl EpochDescriptor {
         hasher.update(bytes);
         Sha256Digest::from_bytes(hasher.finalize().into())
     }
+}
+
+fn valid_catalog_identity(catalog: &EpochCatalog) -> bool {
+    catalog.commit.len() == 40
+        && catalog
+            .commit
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        && !catalog.tag.is_empty()
+        && catalog.tag.len() <= 128
+        && !catalog.version.is_empty()
+        && catalog.version.len() <= 128
+        && catalog
+            .tag
+            .bytes()
+            .chain(catalog.version.bytes())
+            .all(|byte| byte.is_ascii_graphic())
+}
+
+fn valid_profile(profile: &EpochProfile) -> bool {
+    !profile.id.is_empty()
+        && profile.id.len() <= 256
+        && profile.id.bytes().all(|byte| byte.is_ascii_graphic())
+}
+
+fn valid_images(images: &BTreeMap<String, EpochImage>) -> bool {
+    const ROLES: [&str; 7] = [
+        "automata",
+        "postgres",
+        "profile",
+        "runner",
+        "rustfs",
+        "sandbox-guest",
+        "service-proxy",
+    ];
+    if images.keys().map(String::as_str).collect::<Vec<_>>() != ROLES {
+        return false;
+    }
+    images.iter().all(|(role, image)| {
+        let candidate = role == "service-proxy";
+        let expected_kind = if candidate {
+            "release-candidate"
+        } else {
+            "registry"
+        };
+        let expected_platform = (!candidate).then_some(image.platform_manifest_digest.as_deref());
+        image.source_kind == expected_kind
+            && oci_digest(&image.config_digest)
+            && oci_digest(&image.manifest_digest)
+            && if candidate {
+                image.platform_manifest_digest.is_none()
+            } else {
+                expected_platform.flatten().is_some_and(oci_digest)
+            }
+            && canonical_image_text(&image.reference)
+            && canonical_image_text(&image.canonical_repository)
+            && image
+                .reference
+                .rsplit_once('@')
+                .is_some_and(|(_, digest)| digest == image.manifest_digest)
+    })
+}
+
+fn canonical_image_text(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 512
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_graphic() && !matches!(byte, b'\\' | b'\'' | b'\"'))
+}
+
+fn oci_digest(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|hex| {
+        hex.len() == 64
+            && hex
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
 }
 
 pub(super) struct MaterialDeriver {
@@ -404,6 +600,54 @@ pub(super) fn certificate_test_epoch(
         epoch_fingerprint: fingerprint,
         initial_desired_sha256: descriptor.initial_desired_sha256,
     }
+}
+
+#[cfg(test)]
+pub(super) fn authority_test_epoch(
+    installation: &Installation,
+    material_root: &[u8; 32],
+    state_authority_sha256: Sha256Digest,
+) -> ImmutableEpoch {
+    let mut epoch = certificate_test_epoch(installation, material_root);
+    epoch.state_authority_sha256 = state_authority_sha256;
+    epoch.images = [
+        "automata",
+        "postgres",
+        "profile",
+        "runner",
+        "rustfs",
+        "sandbox-guest",
+        "service-proxy",
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, role)| {
+        let config = format!("sha256:{}", format!("{:02x}", index + 1).repeat(32));
+        let manifest = format!("sha256:{}", format!("{:02x}", index + 9).repeat(32));
+        let candidate = role == "service-proxy";
+        (
+            role.to_owned(),
+            EpochImage {
+                reference: format!("registry.invalid/{role}@{manifest}"),
+                canonical_repository: format!("automata.local/{role}"),
+                source_kind: if candidate {
+                    "release-candidate"
+                } else {
+                    "registry"
+                }
+                .to_owned(),
+                config_digest: config,
+                manifest_digest: manifest.clone(),
+                platform_manifest_digest: (!candidate).then_some(manifest),
+                runtime_contract_sha256: Sha256Digest::from_bytes(
+                    [u8::try_from(index).expect("closed image index fits u8") + 1; 32],
+                ),
+            },
+        )
+    })
+    .collect();
+    epoch.epoch_fingerprint = epoch.recompute_fingerprint();
+    epoch
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

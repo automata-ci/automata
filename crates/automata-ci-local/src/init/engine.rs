@@ -19,7 +19,7 @@ use bollard::{
         AttachContainerOptionsBuilder, CreateContainerOptionsBuilder, CreateImageOptionsBuilder,
         ImportImageOptionsBuilder, ListContainersOptionsBuilder, ListNetworksOptionsBuilder,
         ListVolumesOptionsBuilder, LogsOptionsBuilder, RemoveContainerOptionsBuilder,
-        WaitContainerOptionsBuilder,
+        RemoveVolumeOptionsBuilder, WaitContainerOptionsBuilder,
     },
 };
 use bytes::Bytes;
@@ -34,6 +34,7 @@ use crate::{DockerInstallationAdapter, Installation, installation::ExpectedInsta
 use super::{
     LocalInitError, LocalInitErrorCode,
     catalog::{LiveImageEvidence, VerifiedCatalog},
+    epoch::{EpochImageExpectation, ImmutableEpoch},
     materializer::{MaterializeRequest, VolumeRole},
 };
 
@@ -73,6 +74,53 @@ pub(super) struct InitOwnedUnion {
     pub(super) anchor_present: bool,
     pub(super) roles: BTreeSet<VolumeRole>,
     pub(super) helper_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub(super) struct SealedImageStatus {
+    pub(super) role: String,
+    pub(super) source_kind: String,
+    pub(super) inspection_reference: String,
+    pub(super) image_id: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub(super) struct SealedVolumeStatus {
+    pub(super) role: VolumeRole,
+    pub(super) name: String,
+    pub(super) static_material: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct SealedEngineStatus {
+    pub(super) images: Vec<SealedImageStatus>,
+    pub(super) volumes: Vec<SealedVolumeStatus>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ResetHelperBinding {
+    pub(super) reference: String,
+    pub(super) image_id: String,
+    pub(super) container_id: String,
+}
+
+pub(super) struct ResetEnginePreflight {
+    pub(super) helper: Option<ResetHelperBinding>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DeleteAttemptOutcome {
+    Completed,
+    Failed,
+    TimedOut,
+}
+
+#[async_trait::async_trait]
+trait ExactVolumeDeleteDriver: Sync {
+    async fn delete_volume_untrusted(&self, name: &str) -> DeleteAttemptOutcome;
+    async fn inspect_volume_present(&self, name: &str) -> Result<bool, LocalInitError>;
+    async fn verify_after_volume_delete(&self) -> Result<(), LocalInitError>;
 }
 
 struct OwnedUnionVolumes {
@@ -240,6 +288,437 @@ impl<'a> InitEngine<'a> {
         validate_final_owned_union_with_driver(self, installation, epoch_fingerprint).await?;
         self.verify_exact_identity(installation).await?;
         self.verify_selected_engine().await
+    }
+
+    pub(super) async fn inspect_sealed(
+        &self,
+        installation: &Installation,
+        epoch: &ImmutableEpoch,
+    ) -> Result<SealedEngineStatus, LocalInitError> {
+        self.verify_selected_engine().await?;
+        self.verify_installation(installation).await?;
+        let scope = Installation::expected(installation.name());
+        let owned =
+            inspect_owned_union_census_with_driver(self, &scope, Some(installation)).await?;
+        validate_complete_owned_union(&owned, None)?;
+        let images = self.inspect_epoch_images(epoch).await?;
+        let names = volume_names(installation);
+        let expected_labels = expected_volume_labels(installation, epoch.fingerprint());
+        let mut volumes = Vec::with_capacity(VolumeRole::ALL.len());
+        for role in VolumeRole::ALL {
+            let name = names.get(&role).ok_or_else(engine_resource_mismatch)?;
+            let volume = self
+                .inspect_volume(name)
+                .await?
+                .ok_or_else(engine_resource_mismatch)?;
+            validate_volume(
+                &volume,
+                name,
+                expected_labels
+                    .get(&role)
+                    .ok_or_else(engine_resource_mismatch)?,
+            )?;
+            if !self.volume_attachments(name).await?.is_empty() {
+                return Err(engine_resource_mismatch());
+            }
+            volumes.push(SealedVolumeStatus {
+                role,
+                name: name.clone(),
+                static_material: role.is_static(),
+            });
+        }
+        let repeated =
+            inspect_owned_union_census_with_driver(self, &scope, Some(installation)).await?;
+        if repeated != owned {
+            return Err(engine_resource_mismatch());
+        }
+        validate_complete_owned_union(&repeated, None)?;
+        validate_owned_volumes_with_driver(self, installation, epoch.fingerprint(), &repeated)
+            .await?;
+        self.verify_installation(installation).await?;
+        self.verify_selected_engine().await?;
+        Ok(SealedEngineStatus { images, volumes })
+    }
+
+    pub(super) async fn preflight_reset(
+        &self,
+        installation: &Installation,
+        epoch: &ImmutableEpoch,
+    ) -> Result<ResetEnginePreflight, LocalInitError> {
+        self.verify_selected_engine().await?;
+        self.verify_installation(installation).await?;
+        let scope = Installation::expected(installation.name());
+        let owned =
+            inspect_owned_union_census_with_driver(self, &scope, Some(installation)).await?;
+        let automata = epoch
+            .image_expectations()
+            .find(|image| image.role == "automata")
+            .ok_or_else(engine_resource_mismatch)?;
+        let names = volume_names(installation);
+        let expected_labels = expected_volume_labels(installation, epoch.fingerprint());
+        let helper = self
+            .inspect_reset_helper(
+                installation,
+                epoch.fingerprint(),
+                automata,
+                &names,
+                &expected_labels,
+            )
+            .await?;
+        validate_complete_owned_union(
+            &owned,
+            helper.as_ref().map(|helper| helper.container_id.as_str()),
+        )?;
+        for role in VolumeRole::ALL {
+            let name = names.get(&role).ok_or_else(engine_resource_mismatch)?;
+            let volume = self
+                .inspect_volume(name)
+                .await?
+                .ok_or_else(engine_resource_mismatch)?;
+            validate_volume(
+                &volume,
+                name,
+                expected_labels
+                    .get(&role)
+                    .ok_or_else(engine_resource_mismatch)?,
+            )?;
+            let attachments = self.volume_attachments(name).await?;
+            validate_reset_attachments(&attachments, helper.as_ref())?;
+        }
+        let repeated =
+            inspect_owned_union_census_with_driver(self, &scope, Some(installation)).await?;
+        if repeated != owned {
+            return Err(engine_resource_mismatch());
+        }
+        let repeated_helper = self
+            .inspect_reset_helper(
+                installation,
+                epoch.fingerprint(),
+                automata,
+                &names,
+                &expected_labels,
+            )
+            .await?;
+        if repeated_helper != helper {
+            return Err(engine_resource_mismatch());
+        }
+        validate_complete_owned_union(
+            &repeated,
+            helper.as_ref().map(|helper| helper.container_id.as_str()),
+        )?;
+        validate_owned_volumes_with_driver(self, installation, epoch.fingerprint(), &repeated)
+            .await?;
+        self.verify_installation(installation).await?;
+        self.verify_selected_engine().await?;
+        Ok(ResetEnginePreflight { helper })
+    }
+
+    pub(super) async fn cleanup_reset_helper(
+        &self,
+        installation: &Installation,
+        epoch_fingerprint: Sha256Digest,
+        helper: &ResetHelperBinding,
+    ) -> Result<(), LocalInitError> {
+        if !exact_container_id_text(&helper.container_id) {
+            return Err(engine_resource_mismatch());
+        }
+        let names = volume_names(installation);
+        let contract = HelperContract {
+            name: helper_name(installation),
+            image: &helper.reference,
+            image_id: &helper.image_id,
+            volumes: &names,
+            labels: helper_labels(installation, epoch_fingerprint),
+            volume_labels: expected_volume_labels(installation, epoch_fingerprint),
+        };
+        cleanup_reset_helper_with_driver(self, &contract, &helper.container_id).await
+    }
+
+    pub(super) async fn inspect_reset_progress(
+        &self,
+        installation: &Installation,
+        epoch_fingerprint: Sha256Digest,
+    ) -> Result<usize, LocalInitError> {
+        self.verify_selected_engine().await?;
+        let scope = Installation::expected(installation.name());
+        let owned =
+            inspect_owned_union_census_with_driver(self, &scope, Some(installation)).await?;
+        if owned.helper_id.is_some() {
+            return Err(engine_resource_mismatch());
+        }
+        let labels = expected_volume_labels(installation, epoch_fingerprint);
+        let mut presence = [false; 12];
+        for (index, role) in reset_volume_order().into_iter().enumerate() {
+            presence[index] = owned.roles.contains(&role);
+            if !presence[index] {
+                continue;
+            }
+            let name = volume_name(installation.compose_project().as_str(), role);
+            let volume = self
+                .inspect_volume(&name)
+                .await?
+                .ok_or_else(engine_resource_mismatch)?;
+            validate_volume(
+                &volume,
+                &name,
+                labels.get(&role).ok_or_else(engine_resource_mismatch)?,
+            )?;
+            if !self.volume_attachments(&name).await?.is_empty() {
+                return Err(engine_resource_mismatch());
+            }
+        }
+        let anchor = self
+            .adapter
+            .inspect_identity(installation.name())
+            .await
+            .map_err(|_| engine_resource_mismatch())?;
+        let anchor_present = match anchor {
+            Some(actual) if actual == *installation => true,
+            Some(_) => return Err(engine_resource_mismatch()),
+            None => false,
+        };
+        if anchor_present != owned.anchor_present {
+            return Err(engine_resource_mismatch());
+        }
+        let deleted = reset_progress_from_presence(&presence, anchor_present)?;
+        let repeated =
+            inspect_owned_union_census_with_driver(self, &scope, Some(installation)).await?;
+        if repeated != owned {
+            return Err(engine_resource_mismatch());
+        }
+        validate_owned_volumes_with_driver(self, installation, epoch_fingerprint, &repeated)
+            .await?;
+        let repeated_anchor = self
+            .adapter
+            .inspect_identity(installation.name())
+            .await
+            .map_err(|_| engine_resource_mismatch())?;
+        if repeated_anchor
+            .as_ref()
+            .is_some_and(|actual| actual != installation)
+            || repeated_anchor.is_some() != anchor_present
+        {
+            return Err(engine_resource_mismatch());
+        }
+        self.verify_selected_engine().await?;
+        Ok(deleted)
+    }
+
+    pub(super) async fn remove_reset_volume(
+        &self,
+        installation: &Installation,
+        epoch_fingerprint: Sha256Digest,
+        role: VolumeRole,
+    ) -> Result<(), LocalInitError> {
+        self.verify_selected_engine().await?;
+        self.verify_installation(installation).await?;
+        let removed = self
+            .inspect_reset_progress(installation, epoch_fingerprint)
+            .await?;
+        if reset_volume_order().get(removed).copied() != Some(role) {
+            return Err(engine_resource_mismatch());
+        }
+        let name = volume_name(installation.compose_project().as_str(), role);
+        let labels = volume_labels(installation, epoch_fingerprint, role);
+        let volume = self
+            .inspect_volume(&name)
+            .await?
+            .ok_or_else(engine_resource_mismatch)?;
+        validate_volume(&volume, &name, &labels)?;
+        if !self.volume_attachments(&name).await?.is_empty() {
+            return Err(engine_resource_mismatch());
+        }
+        self.remove_volume_and_prove_absent(&name).await
+    }
+
+    pub(super) async fn remove_reset_anchor(
+        &self,
+        installation: &Installation,
+    ) -> Result<(), LocalInitError> {
+        self.verify_selected_engine().await?;
+        self.verify_installation(installation).await?;
+        let scope = Installation::expected(installation.name());
+        let owned =
+            inspect_owned_union_census_with_driver(self, &scope, Some(installation)).await?;
+        if !owned.anchor_present || !owned.roles.is_empty() || owned.helper_id.is_some() {
+            return Err(engine_resource_mismatch());
+        }
+        let repeated =
+            inspect_owned_union_census_with_driver(self, &scope, Some(installation)).await?;
+        if repeated != owned {
+            return Err(engine_resource_mismatch());
+        }
+        self.remove_volume_and_prove_absent(installation.anchor_volume_name())
+            .await?;
+        if self
+            .adapter
+            .inspect_identity(installation.name())
+            .await
+            .map_err(|_| reset_failed())?
+            .is_some()
+        {
+            return Err(reset_failed());
+        }
+        self.verify_selected_engine().await
+    }
+
+    async fn verify_installation(&self, expected: &Installation) -> Result<(), LocalInitError> {
+        let actual = self
+            .adapter
+            .inspect_identity(expected.name())
+            .await
+            .map_err(|_| engine_resource_mismatch())?;
+        if actual.as_ref() != Some(expected) {
+            return Err(engine_resource_mismatch());
+        }
+        Ok(())
+    }
+
+    async fn inspect_epoch_images(
+        &self,
+        epoch: &ImmutableEpoch,
+    ) -> Result<Vec<SealedImageStatus>, LocalInitError> {
+        let mut statuses = Vec::new();
+        for expectation in epoch.image_expectations() {
+            let reference = expectation.inspection_reference()?;
+            let image = self
+                .inspect_image(&reference)
+                .await?
+                .ok_or_else(engine_resource_mismatch)?;
+            validate_epoch_image(expectation, &image)?;
+            self.verify_epoch_image_resolution(expectation, &image)
+                .await?;
+            statuses.push(SealedImageStatus {
+                role: expectation.role.to_owned(),
+                source_kind: expectation.source_kind.to_owned(),
+                inspection_reference: reference,
+                image_id: image
+                    .id
+                    .as_deref()
+                    .ok_or_else(engine_resource_mismatch)?
+                    .to_owned(),
+            });
+        }
+        Ok(statuses)
+    }
+
+    async fn verify_epoch_image_resolution(
+        &self,
+        expectation: EpochImageExpectation<'_>,
+        image: &bollard::models::ImageInspect,
+    ) -> Result<(), LocalInitError> {
+        let image_id = image.id.as_deref().ok_or_else(engine_resource_mismatch)?;
+        let by_id = self
+            .inspect_image(image_id)
+            .await?
+            .ok_or_else(engine_resource_mismatch)?;
+        if &by_id != image {
+            return Err(engine_resource_mismatch());
+        }
+        if expectation.source_kind != "release-candidate" {
+            return Ok(());
+        }
+        let alternate = if image_id == expectation.config_digest {
+            expectation.manifest_digest
+        } else if image_id == expectation.manifest_digest {
+            expectation.config_digest
+        } else {
+            return Err(engine_resource_mismatch());
+        };
+        if self.inspect_image(alternate).await?.is_some() {
+            return Err(engine_resource_mismatch());
+        }
+        let digest_reference = format!(
+            "{}@{}",
+            expectation.canonical_repository, expectation.manifest_digest
+        );
+        let by_digest = self.inspect_image(&digest_reference).await?;
+        if image_id == expectation.manifest_digest {
+            if by_digest.as_ref() != Some(image) {
+                return Err(engine_resource_mismatch());
+            }
+        } else if by_digest.is_some() {
+            return Err(engine_resource_mismatch());
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn inspect_reset_helper(
+        &self,
+        installation: &Installation,
+        epoch_fingerprint: Sha256Digest,
+        image: EpochImageExpectation<'_>,
+        volumes: &BTreeMap<VolumeRole, String>,
+        volume_labels: &BTreeMap<VolumeRole, BTreeMap<String, String>>,
+    ) -> Result<Option<ResetHelperBinding>, LocalInitError> {
+        let name = helper_name(installation);
+        let Some(by_name) = self.inspect_container(&name).await? else {
+            return Ok(None);
+        };
+        if image.source_kind != "registry" {
+            return Err(engine_resource_mismatch());
+        }
+        let reference = image.inspection_reference()?;
+        let accepted_image_ids = [
+            image.config_digest,
+            image
+                .platform_manifest_digest
+                .ok_or_else(engine_resource_mismatch)?,
+        ];
+        let id = exact_container_id(&by_name)?.to_owned();
+        let labels = helper_labels(installation, epoch_fingerprint);
+        validate_helper_image_ids(
+            &by_name,
+            &id,
+            &name,
+            &reference,
+            &accepted_image_ids,
+            volumes,
+            &labels,
+        )?;
+        let by_id = self
+            .inspect_container(&id)
+            .await?
+            .ok_or_else(engine_resource_mismatch)?;
+        validate_helper_image_ids(
+            &by_id,
+            &id,
+            &name,
+            &reference,
+            &accepted_image_ids,
+            volumes,
+            &labels,
+        )?;
+        for (role, volume_name) in volumes {
+            let volume = self
+                .inspect_volume(volume_name)
+                .await?
+                .ok_or_else(engine_resource_mismatch)?;
+            validate_volume(
+                &volume,
+                volume_name,
+                volume_labels
+                    .get(role)
+                    .ok_or_else(engine_resource_mismatch)?,
+            )?;
+            if self.volume_attachments(volume_name).await?.as_slice() != [id.as_str()] {
+                return Err(engine_resource_mismatch());
+            }
+        }
+        let image_id = by_id
+            .image
+            .as_deref()
+            .ok_or_else(engine_resource_mismatch)?;
+        Ok(Some(ResetHelperBinding {
+            reference,
+            image_id: image_id.to_owned(),
+            container_id: id,
+        }))
+    }
+
+    async fn remove_volume_and_prove_absent(&self, name: &str) -> Result<(), LocalInitError> {
+        remove_volume_and_prove_absent_with_driver(self, name).await
     }
 
     pub(super) async fn qualify_images(
@@ -685,6 +1164,31 @@ impl<'a> InitEngine<'a> {
 }
 
 #[async_trait::async_trait]
+impl ExactVolumeDeleteDriver for InitEngine<'_> {
+    async fn delete_volume_untrusted(&self, name: &str) -> DeleteAttemptOutcome {
+        let options = RemoveVolumeOptionsBuilder::default().force(false).build();
+        match tokio::time::timeout(
+            ENGINE_TIMEOUT,
+            self.docker.remove_volume(name, Some(options)),
+        )
+        .await
+        {
+            Ok(Ok(())) => DeleteAttemptOutcome::Completed,
+            Ok(Err(_)) => DeleteAttemptOutcome::Failed,
+            Err(_) => DeleteAttemptOutcome::TimedOut,
+        }
+    }
+
+    async fn inspect_volume_present(&self, name: &str) -> Result<bool, LocalInitError> {
+        Ok(self.inspect_volume(name).await?.is_some())
+    }
+
+    async fn verify_after_volume_delete(&self) -> Result<(), LocalInitError> {
+        self.verify_selected_engine().await
+    }
+}
+
+#[async_trait::async_trait]
 impl OwnedUnionDriver for InitEngine<'_> {
     async fn list_owned_union_volumes(&self) -> Result<OwnedUnionVolumes, LocalInitError> {
         let listed = tokio::time::timeout(
@@ -821,6 +1325,17 @@ async fn inspect_init_owned_union_with_driver<D: OwnedUnionDriver>(
     expected: &ExpectedInstallation,
     installation: Option<&Installation>,
 ) -> Result<InitOwnedUnion, LocalInitError> {
+    let owned = inspect_owned_union_census_with_driver(driver, expected, installation).await?;
+    validate_init_owned_union(&owned)?;
+    Ok(owned)
+}
+
+#[allow(clippy::too_many_lines)]
+async fn inspect_owned_union_census_with_driver<D: OwnedUnionDriver>(
+    driver: &D,
+    expected: &ExpectedInstallation,
+    installation: Option<&Installation>,
+) -> Result<InitOwnedUnion, LocalInitError> {
     let expected_volumes = INIT_VOLUME_ORDER
         .into_iter()
         .map(|role| (volume_name(expected.compose_project.as_str(), role), role))
@@ -859,11 +1374,6 @@ async fn inspect_init_owned_union_with_driver<D: OwnedUnionDriver>(
             return Err(engine_resource_mismatch());
         }
     }
-    let prefix = validate_init_volume_prefix(&roles)?;
-    if !anchor_present && prefix != 0 {
-        return Err(engine_resource_mismatch());
-    }
-
     let containers = driver.list_owned_union_containers().await?;
     if containers.len() > MAX_ENGINE_RESOURCES {
         return Err(engine_resource_mismatch());
@@ -902,10 +1412,6 @@ async fn inspect_init_owned_union_with_driver<D: OwnedUnionDriver>(
             return Err(engine_resource_mismatch());
         }
     }
-    if helper_id.is_some() && prefix != INIT_VOLUME_ORDER.len() {
-        return Err(engine_resource_mismatch());
-    }
-
     let networks = driver.list_owned_union_networks().await?;
     if networks.len() > MAX_ENGINE_RESOURCES
         || networks.iter().any(|network| {
@@ -924,6 +1430,30 @@ async fn inspect_init_owned_union_with_driver<D: OwnedUnionDriver>(
         roles,
         helper_id,
     })
+}
+
+fn validate_init_owned_union(owned: &InitOwnedUnion) -> Result<(), LocalInitError> {
+    let prefix = validate_init_volume_prefix(&owned.roles)?;
+    if !owned.anchor_present && prefix != 0
+        || owned.helper_id.is_some() && prefix != INIT_VOLUME_ORDER.len()
+    {
+        return Err(engine_resource_mismatch());
+    }
+    Ok(())
+}
+
+fn validate_complete_owned_union(
+    owned: &InitOwnedUnion,
+    expected_helper_id: Option<&str>,
+) -> Result<(), LocalInitError> {
+    let expected_roles = INIT_VOLUME_ORDER.into_iter().collect::<BTreeSet<_>>();
+    if !owned.anchor_present
+        || owned.roles != expected_roles
+        || owned.helper_id.as_deref() != expected_helper_id
+    {
+        return Err(engine_resource_mismatch());
+    }
+    Ok(())
 }
 
 fn validate_init_volume_prefix(roles: &BTreeSet<VolumeRole>) -> Result<usize, LocalInitError> {
@@ -968,6 +1498,30 @@ fn resource_labels_related(
         || labels
             .get(COMPOSE_PROJECT_LABEL)
             .is_some_and(|value| value == expected.compose_project.as_str())
+}
+
+async fn remove_volume_and_prove_absent_with_driver<D: ExactVolumeDeleteDriver>(
+    driver: &D,
+    name: &str,
+) -> Result<(), LocalInitError> {
+    let _attempt = driver.delete_volume_untrusted(name).await;
+    if driver.inspect_volume_present(name).await? {
+        return Err(reset_failed());
+    }
+    driver.verify_after_volume_delete().await
+}
+
+fn reset_progress_from_presence(
+    presence: &[bool; 12],
+    anchor_present: bool,
+) -> Result<usize, LocalInitError> {
+    let deleted = presence.iter().take_while(|present| !**present).count();
+    if presence[deleted..].iter().any(|present| !present)
+        || !anchor_present && deleted != presence.len()
+    {
+        return Err(engine_resource_mismatch());
+    }
+    Ok(deleted + usize::from(!anchor_present))
 }
 
 #[async_trait::async_trait]
@@ -1580,6 +2134,27 @@ async fn cleanup_helper<D: HelperDriver>(
     cleanup_failure.map_or(Ok(()), Err)
 }
 
+async fn cleanup_reset_helper_with_driver<D: HelperDriver>(
+    driver: &D,
+    contract: &HelperContract<'_>,
+    pinned_id: &str,
+) -> Result<(), LocalInitError> {
+    let cleanup = cleanup_helper(driver, contract, Some(pinned_id)).await;
+    if cleanup.is_ok() {
+        return Ok(());
+    }
+    let reconciled = async {
+        driver.driver_verify().await?;
+        verify_helper_absence(driver, contract, Some(pinned_id)).await?;
+        driver.driver_verify().await
+    }
+    .await;
+    match reconciled {
+        Ok(()) => Ok(()),
+        Err(_) => cleanup,
+    }
+}
+
 async fn verify_helper_absence<D: HelperDriver>(
     driver: &D,
     contract: &HelperContract<'_>,
@@ -1658,7 +2233,7 @@ fn exact_container_id_text(id: &str) -> bool {
 }
 
 fn volume_names(installation: &Installation) -> BTreeMap<VolumeRole, String> {
-    VolumeRole::ALL
+    INIT_VOLUME_ORDER
         .into_iter()
         .map(|role| {
             (
@@ -1667,6 +2242,69 @@ fn volume_names(installation: &Installation) -> BTreeMap<VolumeRole, String> {
             )
         })
         .collect()
+}
+
+pub(super) fn reset_volume_order() -> [VolumeRole; 12] {
+    let mut roles = INIT_VOLUME_ORDER
+        .into_iter()
+        .filter(|role| *role != VolumeRole::Desired)
+        .collect::<Vec<_>>();
+    roles.push(VolumeRole::Desired);
+    roles
+        .try_into()
+        .expect("the closed reset order contains all twelve roles")
+}
+
+fn validate_epoch_image(
+    expectation: EpochImageExpectation<'_>,
+    image: &bollard::models::ImageInspect,
+) -> Result<(), LocalInitError> {
+    let image_id = image.id.as_deref().ok_or_else(engine_resource_mismatch)?;
+    let accepted_id = if expectation.source_kind == "release-candidate" {
+        image_id == expectation.config_digest || image_id == expectation.manifest_digest
+    } else {
+        image_id == expectation.config_digest
+            || expectation.platform_manifest_digest == Some(image_id)
+    };
+    if !accepted_id
+        || image.os.as_deref() != Some("linux")
+        || image.architecture.as_deref() != Some("amd64")
+        || image.config.is_none()
+    {
+        return Err(engine_resource_mismatch());
+    }
+    if expectation.source_kind == "release-candidate" {
+        let tag = expectation.inspection_reference()?;
+        let digest = format!(
+            "{}@{}",
+            expectation.canonical_repository, expectation.manifest_digest
+        );
+        if image.repo_tags.as_deref() != Some(std::slice::from_ref(&tag))
+            || if image_id == expectation.config_digest {
+                image.repo_digests.as_deref() != Some(&[])
+            } else {
+                image.repo_digests.as_deref() != Some(std::slice::from_ref(&digest))
+            }
+        {
+            return Err(engine_resource_mismatch());
+        }
+    }
+    Ok(())
+}
+
+fn validate_reset_attachments(
+    attachments: &[String],
+    helper: Option<&ResetHelperBinding>,
+) -> Result<(), LocalInitError> {
+    let expected = helper.map(|helper| helper.container_id.as_str());
+    if match expected {
+        Some(expected) => attachments != [expected],
+        None => !attachments.is_empty(),
+    } {
+        Err(engine_resource_mismatch())
+    } else {
+        Ok(())
+    }
 }
 
 pub(super) fn volume_name(compose_project: &str, role: VolumeRole) -> String {
@@ -1719,7 +2357,7 @@ fn expected_volume_labels(
     installation: &Installation,
     epoch_fingerprint: Sha256Digest,
 ) -> BTreeMap<VolumeRole, BTreeMap<String, String>> {
-    VolumeRole::ALL
+    INIT_VOLUME_ORDER
         .into_iter()
         .map(|role| (role, volume_labels(installation, epoch_fingerprint, role)))
         .collect()
@@ -1925,6 +2563,27 @@ fn validate_helper(
     volumes: &BTreeMap<VolumeRole, String>,
     labels: &BTreeMap<String, String>,
 ) -> Result<(), LocalInitError> {
+    validate_helper_image_ids(
+        container,
+        container_id,
+        name,
+        image,
+        &[image_id],
+        volumes,
+        labels,
+    )
+}
+
+#[allow(clippy::too_many_lines)]
+fn validate_helper_image_ids(
+    container: &bollard::models::ContainerInspectResponse,
+    container_id: &str,
+    name: &str,
+    image: &str,
+    accepted_image_ids: &[&str],
+    volumes: &BTreeMap<VolumeRole, String>,
+    labels: &BTreeMap<String, String>,
+) -> Result<(), LocalInitError> {
     let config = container
         .config
         .as_ref()
@@ -1951,7 +2610,10 @@ fn validate_helper(
     if container.id.as_deref() != Some(container_id)
         || !exact_container_id_text(container_id)
         || container.name.as_deref() != Some(format!("/{name}").as_str())
-        || container.image.as_deref() != Some(image_id)
+        || container
+            .image
+            .as_deref()
+            .is_none_or(|image_id| !accepted_image_ids.contains(&image_id))
         || container.platform.as_deref() != Some("linux")
         || config.image.as_deref() != Some(image)
         || config
@@ -2186,6 +2848,10 @@ fn engine_resource_mismatch() -> LocalInitError {
 
 fn materialization_failed() -> LocalInitError {
     LocalInitError::new(LocalInitErrorCode::MaterializationFailed)
+}
+
+fn reset_failed() -> LocalInitError {
+    LocalInitError::new(LocalInitErrorCode::ResetFailed)
 }
 
 #[cfg(test)]

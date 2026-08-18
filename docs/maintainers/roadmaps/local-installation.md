@@ -2,14 +2,16 @@
 
 - Roadmap status: Active
 - Available slice: read-only `automata local doctor`, source-only
-  `automata local check`, x86-64 Linux-only sealed `automata local init`, and
-  explicit runner-schema-6 evaluation through the fixed-relay `LocalDocker`
-  provider; init starts no services and there is no `automata local run` or
-  `up` yet
+  `automata local check`, x86-64 Linux-only sealed `automata local init`,
+  recorded-metadata `status`, exact confirmed `reset`, and explicit
+  runner-schema-6 evaluation through the fixed-relay `LocalDocker` provider;
+  init starts no services and there is no `automata local run`, `up`, or `down`
+  yet
 - Current implementation checkpoints: 2B.1 pinned Docker context and immutable
   identity anchor; 2B.2 verified catalog/image/material/epoch/desired sealing;
-  the evaluation-only 3A provider and closed Results gateway foundation; plus
-  the read-only source-validation portion of 3B
+  2B.3 read-only custody status and exact established reset; the evaluation-only
+  3A provider and closed Results gateway foundation; plus the read-only
+  source-validation portion of 3B
 - Date: 2026-08-17
 
 This roadmap owns the work required to make Automata easy to evaluate on one
@@ -124,6 +126,8 @@ automata local doctor [--json]
 automata local check [WORKFLOW] [--input NAME=VALUE]... [--json]
 automata local init --state-directory ABS --catalog-source file:ABS
   [--installation NAME] [--workers N]
+automata local status --state-directory ABS [--json]
+automata local reset --state-directory ABS --yes
 ```
 
 Init is x86-64 Linux-only and stops after sealed material and canonical desired
@@ -137,9 +141,7 @@ automata local run [WORKFLOW] [--workers N] [--event EVENT]
   [--non-interactive] [--allow-missing-secrets] [--json]
 
 automata local up
-automata local status [--json]
 automata local down
-automata local reset [--yes]
 automata local services logs [SERVICE] [--follow]
 
 automata local runs list
@@ -167,10 +169,13 @@ recovery, and repeated use; their existence must not turn the quickstart into a
 manual assembly guide. `up` never prompts for a workflow, secret, browser, or
 GitHub connection.
 
-Every command that addresses an installation accepts the same
-`--installation NAME` selector. Host-only `doctor` and source-only `check` do
-not invent or select an installation. Any native cache location is an internal
-platform choice, not installation identity or a public lifecycle selector.
+The future converged lifecycle commands that select an installation accept the
+same `--installation NAME` selector. Current sealed init accepts that selector;
+current status and reset instead derive the immutable name and ID from the
+explicit `--state-directory` custody and deliberately accept no separate
+selector. Host-only `doctor` and source-only `check` do not invent or select an
+installation. Any native cache location is an internal platform choice, not
+installation identity or a public lifecycle selector.
 An installation is a repository-agnostic deployment and runner-capacity domain:
 the same selected installation may admit snapshots from different repositories,
 and repository identity never enters its selector key, engine labels, Compose
@@ -201,7 +206,7 @@ onboarding path:
 | --- | --- | --- |
 | `automata local doctor` | Cross-platform host, Docker, Compose, and architecture preflight | It is deliberately read-only; checkpoint 2A retired checkpoint 1's proposed native state-root input, and checkpoint 2B.1 makes installation identity engine-owned |
 | `automata local check` | Deterministic bounded live-worktree archive, exact `.github/workflows` selection, local-only manual event compilation, reachable same-snapshot reusable workflows with typed call-graph and root-secret propagation, and value-free external/built-in credential discovery | It is deliberately read-only and fails closed on Windows; repository identity, local admission, scheduling, execution, and GitHub Checks remain absent |
-| `automata local init` | x86-64 Linux-only exact-socket identity/image/volume adoption, host material and one-time certificate custody, fixed materialization, and sealed canonical desired intent | It has no renderer or Compose document and starts no services; convergence, bootstrap, `up`, `down`, `status`, and reset remain absent |
+| `automata local init`, `status`, and `reset` | x86-64 Linux-only exact-socket identity/image/volume adoption, host material and one-time certificate custody, fixed materialization, sealed canonical desired intent, read-only recorded-custody inspection, and exact confirmed teardown | Status does not live-attest volume contents; reset requires an authority-bound epoch plus complete post-guard Engine custody and retains images; convergence, bootstrap, `up`, and `down` remain absent |
 | `automata-ci-local` Docker boundary | Exact-endpoint anchor and sealed-init management plus a private fixed-relay provider with deterministic closed Results topology | Convergent lifecycle must provision and reattest the renderer-owned shared transit/listener |
 | Control-plane configuration and container build | Complete server configuration and product images | Configuration and bootstrap are manual and Unix-oriented |
 | GitHub workflow crates | Frontend, compiler, typed workflow contracts, reusable-workflow handling | They need a separately authorized local snapshot source |
@@ -409,7 +414,11 @@ time alone never authorizes lock deletion.
 
 #### Exact reset
 
-Reset runs under that lock and uses this ordered transaction:
+This subsection specifies the future converged lifecycle reset after checkpoint
+2C. It includes repositories, service topology, OS credentials, and the
+Engine-held lifecycle lock; it does not describe checkpoint 2B.3's noninteractive
+sealed-custody reset, whose narrower implemented contract is recorded below.
+The converged reset runs under that lock and uses this ordered transaction:
 
 Before confirmation, the command lists the installation-wide repositories,
 history, repository-scoped secrets, and GitHub connections that will be lost;
@@ -435,8 +444,11 @@ reset is never presented as a checkout-local operation.
    labels and requery the exact credential selectors, reporting any residue or
    concurrently created installation rather than claiming success.
 
-No reset path trusts resource IDs from a host file, deletes by broad label
-query, removes a caller-supplied directory, or uses a global prune.
+Ordinary resources are rediscovered by deterministic name and immutable labels;
+the sole host-recorded resource ID is the authority-bound reset intent's
+prevalidated helper ID, which is live-reinspected before exact-ID removal. No
+reset path deletes by broad label query, removes a caller-supplied directory, or
+uses a global prune.
 
 ### Workers and job sandboxes
 
@@ -496,15 +508,17 @@ Jobs receive a copy of the admitted immutable snapshot, never a writable host
 bind. Workflows that require GitHub API authority fail with an actionable
 instruction to connect GitHub or configure a separately supported credential.
 
-### Internal native cache and secrets
+### Required custody and optional native caches
 
-The implementation may use a platform-standard native directory for a
-process-local coordinator lock, discardable inspection cache, or redacted
-diagnostic evidence. That path is internal and is not accepted as a public
-installation selector. Deleting it cannot create, adopt, lose, rebind, or reset
-an installation. Installation identity comes from the immutable external volume
-labels, desired intent comes from the digest-bound config-volume document, and
-live state comes from inspected Compose topology.
+The explicit state directory introduced by sealed init is durable authority,
+not a cache: its stable directory and operation-lock identities bind the epoch,
+and it retains one-time certificate custody. Copying, replacing, or deleting it
+cannot silently adopt or recover an installation. A future platform port may
+add a separate discardable inspection cache or redacted diagnostic evidence,
+but that cache must not contain or select custody and must remain distinct from
+the required state directory. Installation identity is also anchored in the
+immutable external volume, while current status derives bounded live metadata
+directly from the Engine rather than trusting a mirrored inventory.
 
 If a later implementation genuinely needs a crash-safe host document, that
 cross-cutting contract is designed separately after auditing the runner
@@ -568,13 +582,13 @@ restart, and keep local-manager and dependency routes private.
 
 ### Engine and Docker Desktop trust
 
-The active Docker context and daemon are part of installation scope. Doctor,
-status, and every mutation report the selected context and verified engine
-identity; an installation on another context is not silently adopted. A new
-installation plan names the active context before creating its anchor. Context
-switching can therefore make an installation appear absent until the operator
-returns to its daemon, and the documentation treats context migration as a
-separate export/restore operation rather than name reuse.
+For doctor, init, and the future portable lifecycle, the active Docker context
+and daemon are part of installation scope: those operations report the selected
+context and verified engine identity, and do not silently adopt an installation
+from another context. Checkpoint 2B.3 status/reset are the deliberate recovery
+exception: they address only the fixed Linux Docker socket and ignore the
+current CLI context. Future context migration remains a separate export/restore
+operation rather than name reuse.
 
 Anyone authorized to control that daemon is trusted as an installation
 administrator. Docker access can mount or delete volumes, alter labels, inspect
@@ -662,7 +676,10 @@ resource.
 Status: available. Host, Docker, Compose, and architecture behavior remains
 useful and is retained. Checkpoint 2A removed public state-root resolution and
 its readiness gate because checkpoint 2B.1 makes installation identity
-engine-owned and any optional native cache remains internal and discardable.
+engine-owned. Checkpoint 2B.2 later introduced an explicit operator-selected
+private custody directory for epoch material and one-time certificates. That
+directory is authority-bound durable state, not an optional or discardable
+cache.
 
 ### 2A. Retire host lifecycle state and freeze the reuse boundary
 
@@ -776,19 +793,64 @@ The slice persists canonical credential-free desired intent, including the
 imported service-proxy tag plus both acceptable OCI IDs for later reattestation.
 It has no renderer, produces no Compose document, and then stops. Init invokes
 no Compose operation and starts no control plane, relay, bootstrap, database,
-object store, or runner; `up`, `down`, `status`, and `reset` remain absent.
-`ResetRequired` is detectable, but no reset command exists yet. Stateful
+object store, or runner. `local status` is existing-only and nonrepairing: it
+reports `recorded_sealed` only after canonical host custody and exact bounded
+Engine metadata agree, while explicitly leaving volume contents uninspected.
+`local reset` requires an absolute state directory and `--yes`, authorizes an
+authority-bound canonical epoch only after exact complete post-Desired Engine
+custody agrees, completes a durable reconciling deletion transaction, and
+retains images plus the custody root and operation lock. Safe missing or
+malformed non-authority host records do not strand cleanup. Retained image
+absence or retagging does not block custody deletion. `up` and `down` remain
+absent. Stateful
 recovery, adversarial parser and filesystem tests, strict helper-inspection
 tests, and live Docker portable-load qualification cover the sealed boundary.
 This completes checkpoint 2B's material/desired-intent handoff without claiming
 convergence.
 
-### 2C. Convergent Compose lifecycle and exact reset
+#### 2B.3. Read-only recorded status and exact established reset
+
+Status acquires an existing-only shared operation lock and performs no state
+repair, helper creation, or volume-content inspection. Its stable human and JSON
+reports distinguish incomplete custody, recorded sealed metadata, and durable
+reset progress without exposing secret values. Reset requires explicit `--yes`
+and a full all-before-any preflight: an authority-bound canonical epoch,
+positive complete post-Desired ownership, the sealed-epoch-derived contract for
+any present init helper, the identity anchor and twelve roles, no foreign
+attachments, and no unexpected related volumes, containers, or networks.
+Material-root and certificate bytes never authorize deletion; missing or safely
+malformed non-authority records remain removable evidence, while a canonically
+valid conflicting selection or materialization record blocks before mutation.
+That conflict check covers both final records and readable fixed crash
+temporaries; a second different valid authority epoch also blocks, and a
+temp-only epoch must first be published by exact init replay.
+Both commands connect directly to the fixed Docker Unix socket with pinned API
+1.48 and validate/reverify daemon identity, Linux/amd64, Engine 28+, and API
+range. Docker CLI availability, its current context, `DOCKER_API_VERSION`, and
+the Compose plugin are deliberately irrelevant to inspection and teardown;
+init and public doctor retain their full CLI/context/Compose preflight.
+The reset-only reader pins fixed names with no-follow path descriptors and
+accepts only invoking-user-owned regular single-link files with owner-only,
+non-special permissions; unreadable non-authority files are opaque, while epoch
+and reset intent must remain owner-readable. Status retains the exact `0600`
+health contract. Pre-guard and copied custody never authorize Engine mutation.
+
+The authority- and closed-topology-bound reset intent is durable before the
+first deletion and is self-contained for replay even when other host records
+are later lost or corrupted. Replay removes an exact stale init helper first,
+the eleven non-Desired roles, Desired, and the identity anchor, reconciling
+ambiguous outcomes to inspected absence. Cancellation after intent is latched
+while the complete transaction finishes; operation errors still dominate. Only
+after Engine absence is rediscovered are whatever safe fixed host records
+remain removed with epoch and reset intent last. Imported images, the state
+directory, and the original verified operation lock remain.
+
+### 2C. Convergent Compose lifecycle
 
 Build on the completed 2B.2 sealed desired-intent/material handoff. Introduce
 the renderer and its complete executable command surface together, then add
 convergence, digest-labeled replaceable topology, the inert ID-held engine lock,
-union discovery, `up`, `status`, `down`, and exact reset. The command layer
+union discovery, `up`, converged live status, and `down`. The command layer
 remains private until these operations are convergent and their destructive
 boundary is proven.
 
@@ -973,7 +1035,8 @@ Gate: the one-command run works from clean state; the second secret-bearing run
 does not prompt; `--workers 3` overlaps three jobs; history and logs are useful;
 `down -> up` preserves identity, desired digest, `N`, profile, and data; and the
 ordered reset deletes only the prevalidated topology, credentials, anchor, and
-lock, with no residue on immediate reinspection.
+fixed custody records, retaining the state directory and original operation
+lock with no Engine residue on immediate reinspection.
 
 ### 6. Apple Silicon macOS qualification
 
@@ -988,9 +1051,11 @@ Keychain behavior, private discardable cache/lock creation, immutable external
 identity-volume labels, atomic desired-spec updates, interruption, and exact
 reset. The selected context and local driver/scope are reported; identity,
 desired spec, and persistent data survive down/up, Desktop restart, sleep, and
-host reboot. Deleting the host cache leaves Compose discovery and recovery
-correct. The guide records current Docker Desktop prerequisites and terms,
-engine-authorized-user trust, and the factory-reset/uninstall data-loss boundary.
+host reboot. Deleting a separate optional inspection cache leaves discovery
+correct, while missing or moved durable custody fails closed until an explicit
+migration or reset path authorizes recovery. The guide records current Docker
+Desktop prerequisites and terms, engine-authorized-user trust, and the
+factory-reset/uninstall data-loss boundary.
 
 ### 7. Windows x86-64 qualification
 
@@ -1005,10 +1070,12 @@ junction and reparse-point refusal where a cache path is used, long paths,
 immutable external identity-volume labels, interruption, and exact reset.
 The selected context, Linux daemon mode, and local driver/scope are reported;
 identity, desired spec, and persistent data survive down/up, Desktop restart,
-and host reboot. Deleting the host cache leaves Compose discovery and recovery
-correct; no native Windows execution provider is involved. Docker Desktop
-prerequisites, terms, engine-authorized-user trust, and the
-factory-reset/uninstall data-loss boundary are current.
+and host reboot. Deleting a separate optional inspection cache leaves discovery
+correct, while missing or moved durable custody fails closed until an explicit
+migration or reset path authorizes recovery; no native Windows execution
+provider is involved. Docker Desktop prerequisites, terms,
+engine-authorized-user trust, and the factory-reset/uninstall data-loss boundary
+are current.
 
 ### 8A. Frozen signed release candidate
 
