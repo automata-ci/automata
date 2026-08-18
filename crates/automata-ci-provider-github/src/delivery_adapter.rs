@@ -22,7 +22,7 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde::Serialize;
 
 use crate::{
-    GithubCheckRunControl, GithubEventActor, GithubEventActorKind, GithubMergeGroupAction,
+    GithubCheckControl, GithubEventActor, GithubEventActorKind, GithubMergeGroupAction,
     GithubPullRequestAction, GithubRepositoryVisibility, GithubWebhookError, GithubWebhookRef,
     GithubWebhookRefKind, GithubWebhookRepository, GithubWebhookVerifier, VerifiedGithubCheckRun,
     VerifiedGithubMergeGroup, VerifiedGithubPullRequest, VerifiedGithubPush,
@@ -169,7 +169,10 @@ fn normalize_authenticated(
     let repository = external_repository(instance_id, native.repository());
     let observations =
         observations(&native).expect("fixed GitHub delivery observations satisfy the common bound");
-    if matches!(native, VerifiedGithubWebhook::CheckRun(_)) {
+    if matches!(
+        native,
+        VerifiedGithubWebhook::CheckRun(_) | VerifiedGithubWebhook::CheckSuite(_)
+    ) {
         let control = match normalize_control(request, &native) {
             Ok(control) => control,
             Err(reason) => {
@@ -192,15 +195,6 @@ fn normalize_authenticated(
         )
         .expect("GitHub control normalization preserves common endpoint identities");
         return ProviderDeliveryNormalization::Control(Box::new(draft));
-    }
-    if matches!(native, VerifiedGithubWebhook::CheckSuite(_)) {
-        return rejected(
-            authenticated,
-            external_delivery,
-            event_type,
-            Some(repository),
-            ProviderDeliveryRejection::UnsupportedEvent,
-        );
     }
     let trigger = match normalize_trigger(request, &native) {
         Ok(trigger) => trigger,
@@ -232,6 +226,7 @@ fn normalize_control(
 ) -> Result<ProviderControl, ProviderDeliveryRejection> {
     let (repository, object, actor_value, native) = match event {
         VerifiedGithubWebhook::CheckRun(check) => check_run_control(request, check)?,
+        VerifiedGithubWebhook::CheckSuite(suite) => check_suite_control(request, suite)?,
         _ => return Err(ProviderDeliveryRejection::UnsupportedEvent),
     };
     let document = native
@@ -255,7 +250,7 @@ fn check_run_control(
         ExternalRepositoryIdentity,
         GitObjectId,
         ExternalSubjectIdentity,
-        GithubCheckRunControl,
+        GithubCheckControl,
     ),
     ProviderDeliveryRejection,
 > {
@@ -271,13 +266,43 @@ fn check_run_control(
         repository,
         *event.head_revision(),
         actor,
-        GithubCheckRunControl::new(
+        GithubCheckControl::check_run(
             event.installation_id().get(),
             event.app_id().get(),
             event.run_id().get(),
             event.suite_id().get(),
             event.external_id(),
             event.action(),
+        )
+        .map_err(|_| ProviderDeliveryRejection::InvalidPayload)?,
+    ))
+}
+
+fn check_suite_control(
+    request: &ProviderWebhookRequest,
+    event: &crate::VerifiedGithubCheckSuite,
+) -> Result<
+    (
+        ExternalRepositoryIdentity,
+        GitObjectId,
+        ExternalSubjectIdentity,
+        GithubCheckControl,
+    ),
+    ProviderDeliveryRejection,
+> {
+    let repository = target_repository(request, event.installation_id().get(), event.repository())?
+        .identity()
+        .clone();
+    let actor =
+        actor(request, Some(event.actor()))?.ok_or(ProviderDeliveryRejection::IncompleteEvent)?;
+    Ok((
+        repository,
+        *event.head_revision(),
+        actor,
+        GithubCheckControl::check_suite(
+            event.installation_id().get(),
+            event.app_id().get(),
+            event.suite_id().get(),
         )
         .map_err(|_| ProviderDeliveryRejection::InvalidPayload)?,
     ))
@@ -370,6 +395,7 @@ fn normalize_pull_request(
         source,
         branch_ref(event.base_ref())?,
         branch_ref(event.head_ref())?,
+        execution_ref(event.git_ref())?,
         *event.base_revision(),
         *event.head_revision(),
         event.merge_revision(),
@@ -396,6 +422,7 @@ fn normalize_merge_group(
         activity,
         repository,
         git_ref(event.base_ref())?,
+        git_ref(event.head_ref())?,
         *event.base_revision(),
         *event.head_revision(),
         actor(request, event.actor())?,
@@ -505,6 +532,18 @@ fn git_ref(native: &GithubWebhookRef) -> Result<ProviderGitRef, ProviderDelivery
 
 fn branch_ref(value: &str) -> Result<ProviderGitRef, ProviderDeliveryRejection> {
     ProviderGitRef::new(format!("refs/heads/{value}"), ProviderGitRefKind::Branch)
+        .map_err(|_| ProviderDeliveryRejection::InvalidPayload)
+}
+
+fn execution_ref(value: &str) -> Result<ProviderGitRef, ProviderDeliveryRejection> {
+    let kind = if value.starts_with("refs/heads/") {
+        ProviderGitRefKind::Branch
+    } else if value.starts_with("refs/tags/") {
+        ProviderGitRefKind::Tag
+    } else {
+        ProviderGitRefKind::Synthetic
+    };
+    ProviderGitRef::new(value.to_owned(), kind)
         .map_err(|_| ProviderDeliveryRejection::InvalidPayload)
 }
 

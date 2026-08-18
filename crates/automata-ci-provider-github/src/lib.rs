@@ -41,7 +41,7 @@ pub use checks::{
 pub use config::{
     GITHUB_API_VERSION, GithubHttpConfigurationError, GithubHttpLimits, GithubTrustedOrigins,
 };
-pub use control::{GithubCheckRunControl, GithubControlError};
+pub use control::{GithubCheckControl, GithubCheckControlTarget, GithubControlError};
 pub use delivery_adapter::GithubDeliveryAdapter;
 pub use endpoint::GithubHttpEndpoint;
 pub use event::{

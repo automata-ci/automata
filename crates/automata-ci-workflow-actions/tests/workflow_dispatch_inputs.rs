@@ -2,11 +2,11 @@ use crate::support;
 
 use automata_ci_core::{ContextValue, WorkflowEventProvenance};
 use automata_ci_workflow_actions::{
-    CompilationReport, CompileWorkflowRequest, GithubEventMetadata, GithubWorkflowCompiler,
+    CompilationReport, CompileWorkflowRequest, GithubWorkflowCompiler,
     GithubWorkflowDispatchInputDefault, GithubWorkflowDispatchInputType,
     GithubWorkflowDispatchInputValue, GithubWorkflowDispatchInputs,
     GithubWorkflowDispatchInputsError, MAX_GITHUB_WORKFLOW_DISPATCH_INPUT_CHARACTERS,
-    MAX_GITHUB_WORKFLOW_DISPATCH_INPUTS,
+    MAX_GITHUB_WORKFLOW_DISPATCH_INPUTS, ProviderEventMetadata,
 };
 
 const JOB: &str = "jobs:\n  verify:\n    runs-on: linux\n    steps:\n      - run: true\n";
@@ -24,7 +24,7 @@ fn compile(source: &str, inputs: Option<GithubWorkflowDispatchInputs>) -> Compil
                 .expect("revision"),
             )
             .with_git_ref("refs/heads/main"),
-        inputs.map(GithubEventMetadata::workflow_dispatch),
+        inputs.map(ProviderEventMetadata::workflow_dispatch),
     )
 }
 
@@ -335,7 +335,7 @@ fn configured_dispatch_replay_accepts_exact_durable_input_evidence() {
         CompileWorkflowRequest::for_preselected_event_with_metadata(
             parsed.plan().expect("source plan"),
             initial.plan().expect("initial plan").event().clone(),
-            GithubEventMetadata::workflow_dispatch(durable_inputs),
+            ProviderEventMetadata::workflow_dispatch(durable_inputs),
         ),
     );
     assert!(replay.is_accepted(), "{:#?}", replay.diagnostics());

@@ -2,8 +2,8 @@ use crate::support;
 
 use automata_ci_core::WorkflowEventProvenance;
 use automata_ci_workflow_actions::{
-    BooleanValue, DiagnosticKind, GithubEventMetadata, MatrixConfigurations, MatrixDimensionValues,
-    MatrixValue, ScalarResolution, StrategyMatrix,
+    BooleanValue, DiagnosticKind, MatrixConfigurations, MatrixDimensionValues, MatrixValue,
+    ProviderEventMetadata, ScalarResolution, StrategyMatrix,
 };
 
 #[test]
@@ -413,7 +413,7 @@ jobs:
         let report = support::compile(
             parsed.plan().expect("source plan"),
             WorkflowEventProvenance::new("github", "push").with_git_ref("refs/heads/main"),
-            Some(GithubEventMetadata::push(false)),
+            Some(ProviderEventMetadata::push(false)),
         );
         assert!(report.is_accepted(), "{:#?}", report.diagnostics());
         assert!(

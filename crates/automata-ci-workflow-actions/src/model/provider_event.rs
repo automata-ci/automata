@@ -1,14 +1,15 @@
 use std::fmt;
 
 use automata_ci_core::Sha256Digest;
+use automata_ci_provider::{MergeQueueActivity, NormalizedTrigger, PullRequestActivity};
 
 use super::GithubWorkflowDispatchInputs;
 
 /// Provider-verified changed-file selection used by path-filter evaluation.
 #[derive(Clone, Eq, PartialEq)]
 #[non_exhaustive]
-pub enum GithubChangedFiles {
-    /// The exact bounded file list considered by GitHub's diff selection.
+pub enum ProviderChangedFiles {
+    /// The exact bounded file list considered by the provider's diff selection.
     Complete {
         /// Canonical repository-relative path candidates. A rename contributes
         /// both its previous and current path.
@@ -18,14 +19,14 @@ pub enum GithubChangedFiles {
         /// Provider evidence digest when selection used production evidence.
         evidence_digest: Option<Sha256Digest>,
     },
-    /// GitHub bypassed path filtering because the diff could not be produced.
+    /// The provider required path filtering to be bypassed.
     BypassPathFilters {
         /// Provider evidence digest when run-all used production evidence.
         evidence_digest: Option<Sha256Digest>,
     },
 }
 
-impl GithubChangedFiles {
+impl ProviderChangedFiles {
     /// Creates a complete changed-file selection.
     #[must_use]
     pub fn complete(files: impl IntoIterator<Item = impl Into<String>>) -> Self {
@@ -115,7 +116,7 @@ impl GithubChangedFiles {
     }
 }
 
-impl fmt::Debug for GithubChangedFiles {
+impl fmt::Debug for ProviderChangedFiles {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Complete {
@@ -136,7 +137,7 @@ impl fmt::Debug for GithubChangedFiles {
     }
 }
 
-/// Selection metadata from a verified GitHub event or provider invocation.
+/// Selection metadata from a verified provider event or trusted invocation.
 ///
 /// Provider-specific selector fields remain attached only to the compile
 /// request. When changed-file evidence participates in selection, its
@@ -145,24 +146,24 @@ impl fmt::Debug for GithubChangedFiles {
 /// granting provider authority.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
-pub enum GithubEventMetadata {
-    /// A GitHub `push` payload.
+pub enum ProviderEventMetadata {
+    /// A normalized `push` event.
     Push {
         /// The payload's top-level `deleted` value.
         deleted: bool,
         /// Provider-verified diff selection, required only for path filters.
-        changed_files: Option<GithubChangedFiles>,
+        changed_files: Option<ProviderChangedFiles>,
     },
-    /// A GitHub `pull_request` payload.
+    /// A normalized pull-request or merge-request event.
     PullRequest {
         /// The payload's top-level activity `action`.
         action: String,
         /// `pull_request.base.ref`, without a `refs/heads/` prefix.
         base_ref: String,
         /// Provider-verified diff selection, required only for path filters.
-        changed_files: Option<GithubChangedFiles>,
+        changed_files: Option<ProviderChangedFiles>,
     },
-    /// A GitHub `merge_group` payload.
+    /// A normalized merge-queue event.
     MergeGroup {
         /// The payload's top-level activity `action`.
         action: String,
@@ -186,7 +187,27 @@ pub enum GithubEventMetadata {
     },
 }
 
-impl GithubEventMetadata {
+impl ProviderEventMetadata {
+    /// Converts authenticated provider-neutral trigger facts into the event
+    /// vocabulary understood by the Actions workflow dialect.
+    #[must_use]
+    pub fn from_normalized_trigger(trigger: &NormalizedTrigger) -> Self {
+        match trigger {
+            NormalizedTrigger::Push(push) => Self::push(push.after().is_none()),
+            NormalizedTrigger::PullRequest(pull_request) => Self::pull_request(
+                pull_request_activity_name(pull_request.activity()),
+                pull_request.base_ref().short_name(),
+            ),
+            NormalizedTrigger::MergeQueue(merge_queue) => Self::merge_group(
+                merge_queue_activity_name(merge_queue.activity()),
+                merge_queue.target_ref().full(),
+            ),
+            NormalizedTrigger::RepositoryDispatch(dispatch) => {
+                Self::repository_dispatch(dispatch.event_type().as_str())
+            }
+        }
+    }
+
     /// Returns external changed-file evidence used by this event, when present.
     #[must_use]
     pub const fn changed_files_evidence_digest(&self) -> Option<Sha256Digest> {
@@ -215,7 +236,10 @@ impl GithubEventMetadata {
 
     /// Creates metadata for a `push` payload with verified diff selection.
     #[must_use]
-    pub const fn push_with_changed_files(deleted: bool, changed_files: GithubChangedFiles) -> Self {
+    pub const fn push_with_changed_files(
+        deleted: bool,
+        changed_files: ProviderChangedFiles,
+    ) -> Self {
         Self::Push {
             deleted,
             changed_files: Some(changed_files),
@@ -237,7 +261,7 @@ impl GithubEventMetadata {
     pub fn pull_request_with_changed_files(
         action: impl Into<String>,
         base_ref: impl Into<String>,
-        changed_files: GithubChangedFiles,
+        changed_files: ProviderChangedFiles,
     ) -> Self {
         Self::PullRequest {
             action: action.into(),
@@ -277,5 +301,49 @@ impl GithubEventMetadata {
     #[must_use]
     pub const fn workflow_dispatch(inputs: GithubWorkflowDispatchInputs) -> Self {
         Self::WorkflowDispatch { inputs }
+    }
+}
+
+const fn pull_request_activity_name(activity: PullRequestActivity) -> &'static str {
+    match activity {
+        PullRequestActivity::Opened => "opened",
+        PullRequestActivity::Reopened => "reopened",
+        PullRequestActivity::Synchronized => "synchronize",
+        PullRequestActivity::Closed | PullRequestActivity::Merged => "closed",
+        PullRequestActivity::ReadyForReview => "ready_for_review",
+        PullRequestActivity::ConvertedToDraft => "converted_to_draft",
+        PullRequestActivity::MetadataChanged => "edited",
+    }
+}
+
+const fn merge_queue_activity_name(activity: MergeQueueActivity) -> &'static str {
+    match activity {
+        MergeQueueActivity::Queued => "checks_requested",
+        MergeQueueActivity::Removed => "destroyed",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalized_provider_activities_map_to_actions_dialect_names() {
+        assert_eq!(
+            pull_request_activity_name(PullRequestActivity::Synchronized),
+            "synchronize"
+        );
+        assert_eq!(
+            pull_request_activity_name(PullRequestActivity::Merged),
+            "closed"
+        );
+        assert_eq!(
+            merge_queue_activity_name(MergeQueueActivity::Queued),
+            "checks_requested"
+        );
+        assert_eq!(
+            merge_queue_activity_name(MergeQueueActivity::Removed),
+            "destroyed"
+        );
     }
 }

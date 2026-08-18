@@ -8,26 +8,45 @@ use thiserror::Error;
 
 use crate::GithubCheckRunAction;
 
-const SCHEMA: u16 = 1;
+const SCHEMA: u16 = 2;
 
-/// Exact GitHub Check Run target retained inside a common rerun control.
+/// Exact native GitHub Check target retained inside a common rerun control.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct GithubCheckRunControl {
-    installation_id: u64,
-    app_id: u64,
-    run_id: u64,
-    suite_id: u64,
-    external_id: String,
-    action: GithubCheckRunAction,
+pub enum GithubCheckControlTarget {
+    /// Rerun one exact Automata-owned Check Run.
+    Run {
+        /// Exact Check Run identity.
+        run_id: u64,
+        /// Exact parent Check Suite identity.
+        suite_id: u64,
+        /// Automata result-subject identity echoed by GitHub.
+        external_id: String,
+        /// Exact requested Check Run action.
+        action: GithubCheckRunAction,
+    },
+    /// Rerun all eligible Automata Check Runs in one exact Check Suite.
+    Suite {
+        /// Exact Check Suite identity.
+        suite_id: u64,
+    },
 }
 
-impl GithubCheckRunControl {
-    /// Constructs bounded positive GitHub Check Run identity.
+/// Exact GitHub Check rerun target retained inside a common provider control.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GithubCheckControl {
+    installation_id: u64,
+    app_id: u64,
+    target: GithubCheckControlTarget,
+}
+
+impl GithubCheckControl {
+    /// Constructs a bounded Check Run rerun target.
     ///
     /// # Errors
     ///
-    /// Rejects zero, non-durable numeric IDs or an invalid external identity.
-    pub fn new(
+    /// Rejects zero, non-durable numeric IDs, invalid external identity, or a
+    /// non-rerun action.
+    pub fn check_run(
         installation_id: u64,
         app_id: u64,
         run_id: u64,
@@ -36,10 +55,8 @@ impl GithubCheckRunControl {
         action: GithubCheckRunAction,
     ) -> Result<Self, GithubControlError> {
         let external_id = external_id.into();
-        if [installation_id, app_id, run_id, suite_id]
-            .into_iter()
-            .any(|value| value == 0 || i64::try_from(value).is_err())
-            || external_id.is_empty()
+        validate_ids([installation_id, app_id, run_id, suite_id])?;
+        if external_id.is_empty()
             || external_id.len() > 1_024
             || external_id.chars().any(char::is_control)
         {
@@ -48,10 +65,30 @@ impl GithubCheckRunControl {
         Ok(Self {
             installation_id,
             app_id,
-            run_id,
-            suite_id,
-            external_id,
-            action,
+            target: GithubCheckControlTarget::Run {
+                run_id,
+                suite_id,
+                external_id,
+                action,
+            },
+        })
+    }
+
+    /// Constructs a bounded Check Suite rerequest target.
+    ///
+    /// # Errors
+    ///
+    /// Rejects zero or non-durable numeric IDs.
+    pub fn check_suite(
+        installation_id: u64,
+        app_id: u64,
+        suite_id: u64,
+    ) -> Result<Self, GithubControlError> {
+        validate_ids([installation_id, app_id, suite_id])?;
+        Ok(Self {
+            installation_id,
+            app_id,
+            target: GithubCheckControlTarget::Suite { suite_id },
         })
     }
 
@@ -76,7 +113,7 @@ impl GithubCheckRunControl {
                 suite_id,
                 external_id,
                 action,
-            } => Self::new(
+            } => Self::check_run(
                 wire.installation_id,
                 app_id,
                 run_id,
@@ -84,6 +121,9 @@ impl GithubCheckRunControl {
                 external_id,
                 parse_action(&action)?,
             )?,
+            GithubControlTarget::CheckSuite { app_id, suite_id } => {
+                Self::check_suite(wire.installation_id, app_id, suite_id)?
+            }
         };
         if control.document()?.bytes() != document.bytes() {
             return Err(GithubControlError);
@@ -97,16 +137,28 @@ impl GithubCheckRunControl {
     ///
     /// Fails only if canonical serialization violates the common document bound.
     pub fn document(&self) -> Result<ProviderControlDocument, GithubControlError> {
+        let target = match &self.target {
+            GithubCheckControlTarget::Run {
+                run_id,
+                suite_id,
+                external_id,
+                action,
+            } => GithubControlTarget::CheckRun {
+                app_id: self.app_id,
+                run_id: *run_id,
+                suite_id: *suite_id,
+                external_id: external_id.clone(),
+                action: action.as_str().to_owned(),
+            },
+            GithubCheckControlTarget::Suite { suite_id } => GithubControlTarget::CheckSuite {
+                app_id: self.app_id,
+                suite_id: *suite_id,
+            },
+        };
         let bytes = serde_json::to_vec(&GithubControlDocument {
             schema: SCHEMA,
             installation_id: self.installation_id,
-            target: GithubControlTarget::CheckRun {
-                app_id: self.app_id,
-                run_id: self.run_id,
-                suite_id: self.suite_id,
-                external_id: self.external_id.clone(),
-                action: self.action.as_str().to_owned(),
-            },
+            target,
         })
         .map_err(|_| GithubControlError)?;
         if bytes.len() > MAX_PROVIDER_CONTROL_DOCUMENT_BYTES {
@@ -125,34 +177,16 @@ impl GithubCheckRunControl {
         self.installation_id
     }
 
-    /// Returns the GitHub App that owns the Check.
+    /// Returns the GitHub App that owns the Check target.
     #[must_use]
     pub const fn app_id(&self) -> u64 {
         self.app_id
     }
 
-    /// Returns the exact Check Run identity.
+    /// Returns the exact native rerun target.
     #[must_use]
-    pub const fn run_id(&self) -> u64 {
-        self.run_id
-    }
-
-    /// Returns the exact parent Check Suite identity.
-    #[must_use]
-    pub const fn suite_id(&self) -> u64 {
-        self.suite_id
-    }
-
-    /// Returns Automata's external result-subject identity echoed by GitHub.
-    #[must_use]
-    pub fn external_id(&self) -> &str {
-        &self.external_id
-    }
-
-    /// Returns the requested Check Run rerun action.
-    #[must_use]
-    pub const fn action(&self) -> GithubCheckRunAction {
-        self.action
+    pub const fn target(&self) -> &GithubCheckControlTarget {
+        &self.target
     }
 }
 
@@ -174,6 +208,21 @@ enum GithubControlTarget {
         external_id: String,
         action: String,
     },
+    CheckSuite {
+        app_id: u64,
+        suite_id: u64,
+    },
+}
+
+fn validate_ids<const N: usize>(values: [u64; N]) -> Result<(), GithubControlError> {
+    if values
+        .into_iter()
+        .any(|value| value == 0 || i64::try_from(value).is_err())
+    {
+        Err(GithubControlError)
+    } else {
+        Ok(())
+    }
 }
 
 fn parse_action(value: &str) -> Result<GithubCheckRunAction, GithubControlError> {
@@ -196,35 +245,46 @@ mod tests {
     use super::*;
 
     #[test]
-    fn current_document_round_trips_canonically() {
-        let control = GithubCheckRunControl::new(
-            71,
-            501,
-            601,
-            701,
-            "automata-result-subject",
-            GithubCheckRunAction::Rerequested,
-        )
-        .expect("control");
-        let document = control.document().expect("document");
-        assert_eq!(
-            GithubCheckRunControl::decode(&document).expect("decode"),
-            control
-        );
+    fn current_run_and_suite_documents_round_trip_canonically() {
+        for control in [
+            GithubCheckControl::check_run(
+                71,
+                501,
+                601,
+                701,
+                "automata-result-subject",
+                GithubCheckRunAction::Rerequested,
+            )
+            .expect("run control"),
+            GithubCheckControl::check_suite(71, 501, 701).expect("suite control"),
+        ] {
+            let document = control.document().expect("document");
+            assert_eq!(GithubCheckControl::decode(&document), Ok(control));
+        }
     }
 
     #[test]
-    fn unknown_fields_and_noncanonical_bytes_fail_closed() {
-        let schema = ProviderSchemaVersion::new(1).expect("schema");
-        for bytes in [
-            br#"{"schema":1,"installation_id":71,"target":{"kind":"check_run","app_id":501,"run_id":601,"suite_id":701,"external_id":"subject","action":"rerequested","future":true}}"#.to_vec(),
-            br#"{ "schema":1,"installation_id":71,"target":{"kind":"check_run","app_id":501,"run_id":601,"suite_id":701,"external_id":"subject","action":"rerequested"}}"#.to_vec(),
+    fn superseded_unknown_and_noncanonical_documents_fail_closed() {
+        for (schema, bytes) in [
+            (
+                1,
+                br#"{"schema":1,"installation_id":71,"target":{"kind":"check_run","app_id":501,"run_id":601,"suite_id":701,"external_id":"subject","action":"rerequested"}}"#.to_vec(),
+            ),
+            (
+                2,
+                br#"{"schema":2,"installation_id":71,"target":{"kind":"check_suite","app_id":501,"suite_id":701,"future":true}}"#.to_vec(),
+            ),
+            (
+                2,
+                br#"{ "schema":2,"installation_id":71,"target":{"kind":"check_suite","app_id":501,"suite_id":701}}"#.to_vec(),
+            ),
         ] {
-            let document = ProviderControlDocument::new(schema, bytes).expect("bounded document");
-            assert_eq!(
-                GithubCheckRunControl::decode(&document),
-                Err(GithubControlError)
-            );
+            let document = ProviderControlDocument::new(
+                ProviderSchemaVersion::new(schema).expect("schema"),
+                bytes,
+            )
+            .expect("bounded document");
+            assert_eq!(GithubCheckControl::decode(&document), Err(GithubControlError));
         }
     }
 }

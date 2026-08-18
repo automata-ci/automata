@@ -25,10 +25,10 @@ use automata_ci_store::{
     StoreError, WorkflowAdmissionIdempotency,
 };
 use automata_ci_workflow_actions::{
-    CompilationDisposition, CompileWorkflowRequest, GithubChangedFiles, GithubEventMetadata,
-    GithubWorkflowCompiler, GithubWorkflowFrontend, GithubWorkflowSourcePlan, ParseWorkflowRequest,
+    CompilationDisposition, CompileWorkflowRequest, GithubWorkflowCompiler, GithubWorkflowFrontend,
+    GithubWorkflowSourcePlan, ParseWorkflowRequest, ProviderChangedFiles, ProviderEventMetadata,
     RepositoryWorkflowDiscoveryLimits, SourceId, SourceOrigin, SourceProvenance,
-    WorkflowFrontend as _, WorkflowNotSelectedReason, discover_github_delivery_workflows,
+    WorkflowFrontend as _, WorkflowNotSelectedReason, discover_provider_workflows,
 };
 use automata_ci_workflow_service::{
     AdmissionRepositoryCoordinates, RepositoryWorkflowSource, WorkflowAdmissionError,
@@ -456,22 +456,22 @@ impl GithubDeliveryWorkflowAdmissionProcessor {
         };
         let metadata = match request.event() {
             automata_ci_provider_github::VerifiedGithubWebhook::Push(push) => {
-                GithubEventMetadata::push(push.deleted())
+                ProviderEventMetadata::push(push.deleted())
             }
             automata_ci_provider_github::VerifiedGithubWebhook::PullRequest(pull_request) => {
-                GithubEventMetadata::pull_request(
+                ProviderEventMetadata::pull_request(
                     pull_request.action().as_str(),
                     pull_request.base_ref(),
                 )
             }
             automata_ci_provider_github::VerifiedGithubWebhook::MergeGroup(merge_group) => {
-                GithubEventMetadata::merge_group(
+                ProviderEventMetadata::merge_group(
                     merge_group.action().as_str(),
                     merge_group.base_ref().full(),
                 )
             }
             automata_ci_provider_github::VerifiedGithubWebhook::RepositoryDispatch(dispatch) => {
-                GithubEventMetadata::repository_dispatch(dispatch.event_type())
+                ProviderEventMetadata::repository_dispatch(dispatch.event_type())
             }
             _ => return Err(invalid_processor_state("unsupported_authenticated_event")),
         };
@@ -504,7 +504,7 @@ impl GithubDeliveryWorkflowAdmissionProcessor {
                 else {
                     return Ok(failed("github.workflow.changed_files_invalid"));
                 };
-                GithubEventMetadata::push_with_changed_files(push.deleted(), changed_files)
+                ProviderEventMetadata::push_with_changed_files(push.deleted(), changed_files)
             }
             automata_ci_provider_github::VerifiedGithubWebhook::PullRequest(pull_request) => {
                 let Some(changed_files) = self
@@ -513,7 +513,7 @@ impl GithubDeliveryWorkflowAdmissionProcessor {
                 else {
                     return Ok(failed("github.workflow.changed_files_invalid"));
                 };
-                GithubEventMetadata::pull_request_with_changed_files(
+                ProviderEventMetadata::pull_request_with_changed_files(
                     pull_request.action().as_str(),
                     pull_request.base_ref(),
                     changed_files,
@@ -542,7 +542,7 @@ impl GithubDeliveryWorkflowAdmissionProcessor {
         &self,
         request: &GithubDeliveryWorkflowRequest<'_>,
         event: ChangedFilesEvent<'_>,
-    ) -> Result<Option<GithubChangedFiles>, GithubDeliveryWorkflowProcessorError> {
+    ) -> Result<Option<ProviderChangedFiles>, GithubDeliveryWorkflowProcessorError> {
         if let ChangedFilesEvent::Push(push) = event {
             let path_filter_commit_limit = request
                 .manifest_pinned_evidence()
@@ -575,7 +575,7 @@ impl GithubDeliveryWorkflowAdmissionProcessor {
         request: &GithubDeliveryWorkflowRequest<'_>,
         event: ChangedFilesEvent<'_>,
         provider: &dyn GithubPushChangedFilesProvider,
-    ) -> Result<Option<GithubChangedFiles>, GithubDeliveryWorkflowProcessorError> {
+    ) -> Result<Option<ProviderChangedFiles>, GithubDeliveryWorkflowProcessorError> {
         let (authority_selector, action, credentials) = changed_files_context(request, event)?;
         let observed_at = request.clock().now();
         let (requested_snapshot, observed_at) = request
@@ -874,7 +874,7 @@ fn changed_files_result(
     result: GithubChangedFilesDisposition,
     maximum_changed_files: u64,
     request: &GithubDeliveryWorkflowRequest<'_>,
-) -> Result<Option<GithubChangedFiles>, GithubDeliveryWorkflowProcessorError> {
+) -> Result<Option<ProviderChangedFiles>, GithubDeliveryWorkflowProcessorError> {
     match result {
         GithubChangedFilesDisposition::Complete {
             files,
@@ -887,17 +887,19 @@ fn changed_files_result(
                 .into_iter()
                 .flat_map(GithubChangedFileSelection::into_path_candidates);
             let digest = bind_selection_digest(request, b"complete", evidence_digest);
-            Ok(Some(GithubChangedFiles::complete_selection_with_evidence(
-                path_candidates,
-                selected_file_count,
-                digest,
-            )))
+            Ok(Some(
+                ProviderChangedFiles::complete_selection_with_evidence(
+                    path_candidates,
+                    selected_file_count,
+                    digest,
+                ),
+            ))
         }
         GithubChangedFilesDisposition::ProviderRunAll { evidence_digest } => {
             let digest = bind_selection_digest(request, b"provider_run_all", evidence_digest);
-            Ok(Some(GithubChangedFiles::bypass_path_filters_with_evidence(
-                digest,
-            )))
+            Ok(Some(
+                ProviderChangedFiles::bypass_path_filters_with_evidence(digest),
+            ))
         }
         GithubChangedFilesDisposition::RetryableUnavailable => {
             Err(GithubDeliveryWorkflowProcessorError::Unavailable)
@@ -1177,7 +1179,7 @@ fn authenticated_event_provenance(
 fn compile(
     source_plan: &GithubWorkflowSourcePlan,
     event: WorkflowEventProvenance,
-    metadata: GithubEventMetadata,
+    metadata: ProviderEventMetadata,
 ) -> automata_ci_workflow_actions::CompilationReport {
     GithubWorkflowCompiler::new()
         .compile(CompileWorkflowRequest::new(source_plan, event).with_event_metadata(metadata))
@@ -1201,7 +1203,7 @@ fn repository_workflow_sources(
         limits.workflow_max_bytes(),
     )
     .map_err(|_| GithubDeliveryWorkflowProcessorError::InvariantViolation)?;
-    discover_github_delivery_workflows(source.bytes(), discovery_limits)
+    discover_provider_workflows(source.bytes(), discovery_limits)
         .map_err(|_| GithubDeliveryWorkflowProcessorError::InvariantViolation)
         .map(|workflows| {
             workflows

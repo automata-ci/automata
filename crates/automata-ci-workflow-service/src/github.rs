@@ -70,7 +70,7 @@ impl WorkflowPlanVerifier for GithubWorkflowPlanVerifier {
             CompileWorkflowRequest::for_preselected_event_with_metadata(
                 parsed_plan,
                 admission.plan().event().clone(),
-                automata_ci_workflow_actions::GithubEventMetadata::schedule(evidence.cron()),
+                automata_ci_workflow_actions::ProviderEventMetadata::schedule(evidence.cron()),
             )
         } else {
             if admission.event_media_type() == AUTOMATA_WORKFLOW_DISPATCH_EVIDENCE_V1_MEDIA_TYPE {

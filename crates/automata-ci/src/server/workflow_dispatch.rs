@@ -22,7 +22,7 @@ use automata_ci_store::{
     WorkflowDispatchSourceResolutionStoreError,
 };
 use automata_ci_workflow_actions::{
-    RepositoryWorkflowDiscoveryLimits, discover_github_delivery_workflows,
+    RepositoryWorkflowDiscoveryLimits, discover_provider_workflows,
 };
 use automata_ci_workflow_service::{
     GITHUB_WORKFLOW_MEDIA_TYPE, GithubWorkflowDispatchError, GithubWorkflowDispatchInputValue,
@@ -180,9 +180,8 @@ impl OperationalWorkflowDispatchBackend {
             return Err(WorkflowDispatchApiBackendError::Invariant);
         }
         let commit_sha = snapshot.resolved_revision();
-        let workflows =
-            discover_github_delivery_workflows(snapshot.bytes(), discovery_limits(manifest)?)
-                .map_err(|_| WorkflowDispatchApiBackendError::InvalidRequest)?;
+        let workflows = discover_provider_workflows(snapshot.bytes(), discovery_limits(manifest)?)
+            .map_err(|_| WorkflowDispatchApiBackendError::InvalidRequest)?;
         let mut matching = workflows
             .into_iter()
             .filter(|workflow| workflow.path() == claim.workflow_path());

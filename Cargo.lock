@@ -1271,6 +1271,7 @@ version = "0.1.0"
 dependencies = [
  "automata-ci-actions-permissions",
  "automata-ci-core",
+ "automata-ci-provider",
  "automata-ci-schedule",
  "flate2",
  "focaccia",

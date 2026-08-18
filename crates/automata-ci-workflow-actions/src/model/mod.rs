@@ -21,7 +21,7 @@ pub use job::{
     JobResources, Needs, ReusableWorkflowCall, ReusableWorkflowInputs, ReusableWorkflowSecretMap,
     ReusableWorkflowSecrets, RunnerSelection, WorkflowJob,
 };
-pub use provider_event::{GithubChangedFiles, GithubEventMetadata};
+pub use provider_event::{ProviderChangedFiles, ProviderEventMetadata};
 pub use step::{ActionStep, RunStep, Step, StepExecution, StepId};
 pub use strategy::{
     JobStrategy, MatrixConfiguration, MatrixConfigurations, MatrixDimension, MatrixDimensionValues,

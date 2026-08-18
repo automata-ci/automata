@@ -232,9 +232,24 @@ fn all_admission_events_normalize_through_the_common_contract() {
             }
             NormalizedTrigger::PullRequest(pull_request) => {
                 assert!(pull_request.draft());
+                assert_eq!(pull_request.execution_ref().full(), "refs/pull/7/merge");
+                assert_eq!(
+                    delivery.trigger().trigger().workflow_source_revision(),
+                    Some(GitObjectId::from_provider_hex(HEAD_SHA).expect("head object"))
+                );
                 "pull_request"
             }
-            NormalizedTrigger::MergeQueue(_) => "merge_queue",
+            NormalizedTrigger::MergeQueue(merge_queue) => {
+                assert_eq!(
+                    merge_queue.candidate_ref().full(),
+                    "refs/heads/merge-queue/main/group-9"
+                );
+                assert_eq!(
+                    delivery.trigger().trigger().workflow_source_revision(),
+                    Some(GitObjectId::from_provider_hex(GROUP_SHA).expect("group object"))
+                );
+                "merge_queue"
+            }
             NormalizedTrigger::RepositoryDispatch(dispatch) => {
                 assert_eq!(dispatch.input().canonical_bytes(), br#"{"sequence":3}"#);
                 "repository_dispatch"
@@ -304,7 +319,7 @@ fn rerequested_check_run_becomes_an_authenticated_control() {
         serde_json::from_slice::<Value>(delivery.control().document().bytes())
             .expect("canonical document"),
         json!({
-            "schema": 1,
+            "schema": 2,
             "installation_id": 71,
             "target": {
                 "kind": "check_run",
@@ -319,39 +334,65 @@ fn rerequested_check_run_becomes_an_authenticated_control() {
 }
 
 #[test]
-fn multi_target_rerun_events_are_rejected_until_selection_is_common() {
+fn requested_action_controls_are_rejected_until_selection_is_common() {
     let fixture = Fixture::new(ProviderInstanceId::new(), "41");
     let adapter = GithubDeliveryAdapter::new();
     let mut requested_action = check_run_rerequested_payload();
     requested_action["action"] = json!("requested_action");
     requested_action["requested_action"] = json!({"identifier": "rerun_failed"});
 
-    for (payload, event, delivery_id) in [
-        (
-            requested_action,
+    let authenticated = adapter
+        .authenticate(fixture.authentication(
+            &requested_action,
             "check_run",
             "delivery-check-run-rerun-failed",
-        ),
-        (
-            check_suite_rerequested_payload(),
+            CURRENT_SECRET,
+        ))
+        .expect("signature");
+    let normalized = adapter.normalize(authenticated);
+    let descriptor = normalized.raw_descriptor().expect("raw descriptor");
+    let ProviderDelivery::Rejected(delivery) = normalized.seal(descriptor).expect("seal") else {
+        panic!("requested action unexpectedly entered control processing");
+    };
+    assert_eq!(
+        delivery.reason(),
+        ProviderDeliveryRejection::UnsupportedEvent
+    );
+}
+
+#[test]
+fn rerequested_check_suite_becomes_an_authenticated_control() {
+    let fixture = Fixture::new(ProviderInstanceId::new(), "41");
+    let adapter = GithubDeliveryAdapter::new();
+    let authenticated = adapter
+        .authenticate(fixture.authentication(
+            &check_suite_rerequested_payload(),
             "check_suite",
             "delivery-check-suite-rerequested",
-        ),
-    ] {
-        let authenticated = adapter
-            .authenticate(fixture.authentication(&payload, event, delivery_id, CURRENT_SECRET))
-            .expect("signature");
-        let normalized = adapter.normalize(authenticated);
-        let descriptor = normalized.raw_descriptor().expect("raw descriptor");
-        let ProviderDelivery::Rejected(delivery) = normalized.seal(descriptor).expect("seal")
-        else {
-            panic!("{event} unexpectedly entered singleton control processing");
-        };
-        assert_eq!(
-            delivery.reason(),
-            ProviderDeliveryRejection::UnsupportedEvent
-        );
-    }
+            CURRENT_SECRET,
+        ))
+        .expect("signature");
+    let normalized = adapter.normalize(authenticated);
+    let descriptor = normalized.raw_descriptor().expect("raw descriptor");
+    let ProviderDelivery::Control(delivery) = normalized.seal(descriptor).expect("seal") else {
+        panic!("rerequested Check Suite was not admitted as a control");
+    };
+    assert_eq!(delivery.control().kind(), ProviderControlKind::Rerun);
+    assert_eq!(delivery.control().repository().external_id().as_str(), "41");
+    assert_eq!(delivery.control().object().to_string(), HEAD_SHA);
+    assert_eq!(
+        serde_json::from_slice::<Value>(delivery.control().document().bytes())
+            .expect("canonical document"),
+        json!({
+            "schema": 2,
+            "installation_id": 71,
+            "target": {
+                "kind": "check_suite",
+                "app_id": 501,
+                "suite_id": 701
+            }
+        })
+    );
 }
 
 #[test]
