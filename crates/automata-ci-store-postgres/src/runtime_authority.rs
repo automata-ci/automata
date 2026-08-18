@@ -3453,7 +3453,7 @@ async fn lock_exact_authority_graph(
     if !lock_exact_selection_tails(transaction, identity).await? {
         return Ok(false);
     }
-    if !lock_exact_private_runtime_authority(
+    if !lock_exact_repository_contents_runtime_authority(
         transaction,
         identity,
         &origin_kind,
@@ -3788,7 +3788,7 @@ async fn lock_exact_materialization_selection_renewal(
     .map_err(operation_error)
 }
 
-async fn lock_exact_private_runtime_authority(
+async fn lock_exact_repository_contents_runtime_authority(
     transaction: &mut Transaction<'_, Postgres>,
     identity: &GithubRuntimeAuthorityIdentity,
     origin_kind: &str,
@@ -3796,18 +3796,12 @@ async fn lock_exact_private_runtime_authority(
     visibility: &str,
     contents_authority_id: Option<Uuid>,
 ) -> Result<bool, GithubRuntimeAuthorityStoreError> {
-    if visibility == "public"
-        && contents_authority_id.is_none()
-        && github_manifest_origin_is_closed(origin_kind)
-        && !origin_id.is_nil()
-    {
-        return Ok(true);
-    }
-    let Some(contents_authority_id) = contents_authority_id.filter(|_| {
-        visibility == "private"
-            && github_manifest_origin_is_closed(origin_kind)
-            && !origin_id.is_nil()
-    }) else {
+    let Some(contents_authority_id) = closed_repository_contents_authority_origin(
+        visibility,
+        origin_kind,
+        origin_id,
+        contents_authority_id,
+    ) else {
         return Ok(false);
     };
     sqlx::query_scalar(
@@ -3820,6 +3814,7 @@ async fn lock_exact_private_runtime_authority(
          AND manifest.provider_connection_id = evidence.provider_connection_id
          AND manifest.manifest_revision = evidence.provider_manifest_revision
          AND manifest.manifest_digest = evidence.provider_manifest_digest
+         AND manifest.repository_visibility = evidence.repository_visibility
         JOIN github_server_service_authorities AS authority
           ON authority.tenant_id = evidence.tenant_id
          AND authority.id = evidence.repository_contents_authority_id
@@ -3853,6 +3848,7 @@ async fn lock_exact_private_runtime_authority(
           AND manifest.github_app_client_id = $11
           AND manifest.github_app_jwt_issuer_kind = $12
           AND manifest.app_key_spki_sha256 = $13
+          AND evidence.repository_visibility = $14
         FOR SHARE OF manifest, authority
         ",
     )
@@ -3869,10 +3865,24 @@ async fn lock_exact_private_runtime_authority(
     .bind(identity.github_app_client_id().as_str())
     .bind(identity.github_app_jwt_issuer_kind().as_str())
     .bind(identity.app_key_spki_sha256().as_bytes().as_slice())
+    .bind(visibility)
     .fetch_optional(&mut **transaction)
     .await
     .map(|row| row.unwrap_or(false))
     .map_err(operation_error)
+}
+
+fn closed_repository_contents_authority_origin(
+    visibility: &str,
+    origin_kind: &str,
+    origin_id: Uuid,
+    contents_authority_id: Option<Uuid>,
+) -> Option<Uuid> {
+    (matches!(visibility, "public" | "private")
+        && github_manifest_origin_is_closed(origin_kind)
+        && !origin_id.is_nil())
+    .then_some(contents_authority_id)
+    .flatten()
 }
 
 async fn database_now_ms(
@@ -4671,7 +4681,8 @@ fn is_revoke_owner_conflict(error: &sqlx::Error) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::github_manifest_origin_is_closed;
+    use super::{closed_repository_contents_authority_origin, github_manifest_origin_is_closed};
+    use uuid::Uuid;
 
     #[test]
     fn manifest_origins_are_closed_and_exhaustive() {
@@ -4681,5 +4692,58 @@ mod tests {
         for origin in ["", "manual", "workflow_rerun_unsealed"] {
             assert!(!github_manifest_origin_is_closed(origin));
         }
+    }
+
+    #[test]
+    fn standard_runtime_authority_requires_exact_contents_authority_for_both_visibilities() {
+        let origin_id = Uuid::new_v4();
+        let authority_id = Uuid::new_v4();
+        for visibility in ["public", "private"] {
+            assert_eq!(
+                closed_repository_contents_authority_origin(
+                    visibility,
+                    "provider_delivery",
+                    origin_id,
+                    Some(authority_id),
+                ),
+                Some(authority_id),
+            );
+        }
+        assert_eq!(
+            closed_repository_contents_authority_origin(
+                "public",
+                "provider_delivery",
+                origin_id,
+                None,
+            ),
+            None,
+        );
+        assert_eq!(
+            closed_repository_contents_authority_origin(
+                "internal",
+                "provider_delivery",
+                origin_id,
+                Some(authority_id),
+            ),
+            None,
+        );
+        assert_eq!(
+            closed_repository_contents_authority_origin(
+                "public",
+                "manual",
+                origin_id,
+                Some(authority_id),
+            ),
+            None,
+        );
+        assert_eq!(
+            closed_repository_contents_authority_origin(
+                "public",
+                "provider_delivery",
+                Uuid::nil(),
+                Some(authority_id),
+            ),
+            None,
+        );
     }
 }
