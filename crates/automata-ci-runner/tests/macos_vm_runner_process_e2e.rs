@@ -598,12 +598,12 @@ fn repository_action_reference_key() -> String {
 
 fn repository_action_archive() -> Vec<u8> {
     let metadata = b"name: macOS process acceptance\ninputs:\n  fixture:\n    required: true\nruns:\n  using: node24\n  main: dist/index.js\n";
-    let javascript = br#"const fs = require('fs');
+    let javascript = br"const fs = require('fs');
 if (process.env.INPUT_FIXTURE !== 'repository-action-input') process.exit(1);
 fs.appendFileSync(process.env.GITHUB_ENV, 'AUTOMATA_ACTION_ENV=repository-action-env\n');
 fs.appendFileSync(process.env.GITHUB_OUTPUT, 'fixture=repository-action-output\n');
 console.log('actions.repository=ok');
-"#;
+";
     let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
     {
         let mut archive = TarBuilder::new(&mut encoder);
