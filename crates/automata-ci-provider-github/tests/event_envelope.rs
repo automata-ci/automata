@@ -269,6 +269,25 @@ fn merge_group_inherits_exact_upstream_restrictions() {
 }
 
 #[test]
+fn merge_group_without_constituent_evidence_gets_read_only_queue_authority() {
+    let envelope = seal(&normalize(&merge_group_payload(), "merge_group"));
+    let snapshot = derive_github_trust_snapshot(
+        &envelope,
+        &TrustPolicy::current(),
+        &GithubTrustDerivation::new(),
+    )
+    .expect("merge-group trust");
+
+    assert!(snapshot.evidence_complete());
+    assert_eq!(snapshot.source_class(), TrustSourceClass::MergeQueue);
+    assert_eq!(
+        snapshot.authority().permissions(),
+        TrustPermissionAuthority::ReadOnly
+    );
+    assert_eq!(snapshot.authority().secrets(), TrustSecretAuthority::Denied);
+}
+
+#[test]
 fn repository_dispatch_keeps_arbitrary_payload_out_of_policy_facts() {
     let event = normalize(&repository_dispatch_payload(), "repository_dispatch");
     let envelope = seal(&event);

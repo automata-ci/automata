@@ -968,6 +968,7 @@ const fn trust_class_code(value: TrustSourceClass) -> u8 {
         TrustSourceClass::Dependabot => 3,
         TrustSourceClass::Automation => 4,
         TrustSourceClass::Incomplete => 5,
+        TrustSourceClass::MergeQueue => 6,
     }
 }
 const fn profile_code(value: WorkloadCredentialProfile) -> u8 {

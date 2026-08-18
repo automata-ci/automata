@@ -57,9 +57,10 @@ impl GithubTrustDerivation {
 /// Derives one canonical trust snapshot from a sealed facts-only event envelope.
 ///
 /// The raw JSON body is neither accepted nor inspected. Missing actor
-/// classification, merge-group constituents, dispatch recursion, or resolved
-/// revision evidence produces a deny-all snapshot. Conflicting evidence is
-/// rejected.
+/// classification, dispatch recursion, or resolved revision evidence produces
+/// a deny-all snapshot. A provider-authenticated merge group without constituent
+/// evidence receives conservative merge-queue authority. Conflicting evidence
+/// is rejected.
 ///
 /// # Errors
 ///
