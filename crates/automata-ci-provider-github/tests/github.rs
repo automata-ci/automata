@@ -7,6 +7,7 @@ mod changed_files;
 mod checks;
 mod common_changed_files;
 mod configuration;
+mod delivery_adapter;
 mod event_envelope;
 mod factory;
 mod memberships;

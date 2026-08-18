@@ -5,8 +5,8 @@ use crate::support::{
 
 use automata_ci_provider_github::{
     GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE, GithubCheckRunAction, GithubMergeGroupAction,
-    GithubPullRequestAction, GithubPushRefKind, GithubRepositoryVisibility,
-    GithubStoredWebhookError, GithubWebhookError, GithubWebhookVerifier,
+    GithubPullRequestAction, GithubRepositoryVisibility, GithubStoredWebhookError,
+    GithubWebhookError, GithubWebhookRefKind, GithubWebhookVerifier,
     StoredAuthenticatedGithubWebhook, VerifiedGithubWebhook,
     rehydrate_stored_authenticated_github_webhook,
 };
@@ -103,6 +103,7 @@ fn pull_request_normalization_retains_exact_dispatch_evidence() {
     assert_eq!(event.action(), GithubPullRequestAction::Opened);
     assert_eq!(event.action().as_str(), "opened");
     assert!(!event.merged());
+    assert!(!event.draft());
     assert_eq!(event.number().get(), 7);
     assert_eq!(event.repository().owner_id().get(), 11);
     assert_eq!(
@@ -117,7 +118,10 @@ fn pull_request_normalization_retains_exact_dispatch_evidence() {
     );
     assert_eq!(event.head_revision().to_string(), HEAD_SHA);
     assert_eq!(event.base_revision().to_string(), BASE_SHA);
-    assert_eq!(event.merge_revision().to_string(), MERGE_SHA);
+    assert_eq!(
+        event.merge_revision().expect("merge revision").to_string(),
+        MERGE_SHA
+    );
     assert_eq!(event.head_ref(), "feature/topic");
     assert_eq!(event.base_ref(), "main");
     assert_eq!(event.git_ref(), "refs/pull/7/merge");
@@ -153,7 +157,7 @@ fn unmerged_pull_request_without_materialized_merge_revision_uses_head_revision(
     };
     assert!(!event.merged());
     assert_eq!(event.head_revision().to_string(), HEAD_SHA);
-    assert_eq!(event.merge_revision().to_string(), HEAD_SHA);
+    assert_eq!(event.merge_revision(), None);
     assert_eq!(event.git_ref(), "refs/pull/7/merge");
 
     payload["action"] = json!("closed");
@@ -182,7 +186,7 @@ fn merge_group_normalization_retains_exact_dispatch_evidence() {
         "refs/heads/merge-queue/main/group-9"
     );
     assert_eq!(event.head_ref().short_name(), "merge-queue/main/group-9");
-    assert_eq!(event.head_ref().kind(), GithubPushRefKind::Branch);
+    assert_eq!(event.head_ref().kind(), GithubWebhookRefKind::Branch);
     assert_eq!(event.base_ref().full(), "refs/heads/main");
 }
 
@@ -528,6 +532,7 @@ fn pull_request_payload() -> Value {
         "pull_request": {
             "number": 7,
             "merged": false,
+            "draft": false,
             "merge_commit_sha": MERGE_SHA,
             "head": {
                 "ref": "feature/topic",

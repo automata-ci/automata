@@ -170,6 +170,11 @@ impl PostgresProviderManifestRepository {
             return Err(ProviderDeliveryRepositoryError::Corrupt);
         }
         let endpoint = decode_endpoint(row, references.clone())?;
+        let connection = self
+            .load_connection_inner(endpoint.connection_id(), endpoint.connection_revision())
+            .await
+            .map_err(map_manifest_error)?
+            .ok_or(ProviderDeliveryRepositoryError::Corrupt)?;
         let mut secrets = Vec::with_capacity(references.len());
         for reference in references {
             let secret = self
@@ -186,9 +191,9 @@ impl PostgresProviderManifestRepository {
         }
         let candidates = ProviderWebhookSecretCandidates::new(&endpoint, secrets)
             .map_err(|_| ProviderDeliveryRepositoryError::Corrupt)?;
-        Ok(Some(ProviderWebhookEndpointRecord::new(
-            endpoint, candidates,
-        )))
+        ProviderWebhookEndpointRecord::new(endpoint, connection, candidates)
+            .map(Some)
+            .map_err(|_| ProviderDeliveryRepositoryError::Corrupt)
     }
 }
 

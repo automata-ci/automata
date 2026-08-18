@@ -740,6 +740,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "automata-ci-provider-delivery"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "automata-ci-blob",
+ "automata-ci-core",
+ "automata-ci-key-management",
+ "automata-ci-provider",
+ "bytes",
+ "sha2 0.11.0",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "automata-ci-provider-github"
 version = "0.1.0"
 dependencies = [
@@ -748,6 +763,7 @@ dependencies = [
  "automata-ci-auth",
  "automata-ci-blob",
  "automata-ci-core",
+ "automata-ci-key-management",
  "automata-ci-provider",
  "automata-ci-scm",
  "axum",

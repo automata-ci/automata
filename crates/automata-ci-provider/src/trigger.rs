@@ -188,6 +188,56 @@ impl TryFrom<UncheckedProviderGitRef> for ProviderGitRef {
     }
 }
 
+/// Provider-authenticated completeness of the pushed-commit observation.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PushCommitEvidence {
+    /// The provider supplied the complete canonical pushed-commit set.
+    Complete(Vec<GitObjectId>),
+    /// The provider's documented event limit requires path filters to match.
+    ProviderLimitExceeded,
+}
+
+impl PushCommitEvidence {
+    /// Builds a complete, sorted, duplicate-free pushed-commit set.
+    ///
+    /// # Errors
+    ///
+    /// Rejects duplicate commits or a set beyond the common durable bound.
+    pub fn complete(
+        commits: impl IntoIterator<Item = GitObjectId>,
+    ) -> Result<Self, ProviderTriggerError> {
+        let mut value = Self::Complete(commits.into_iter().collect());
+        value.canonicalize()?;
+        Ok(value)
+    }
+
+    /// Returns the complete set, or absence when provider policy bypasses filtering.
+    #[must_use]
+    pub fn complete_commits(&self) -> Option<&[GitObjectId]> {
+        match self {
+            Self::Complete(commits) => Some(commits),
+            Self::ProviderLimitExceeded => None,
+        }
+    }
+
+    fn canonicalize(&mut self) -> Result<(), ProviderTriggerError> {
+        let Self::Complete(commits) = self else {
+            return Ok(());
+        };
+        if commits.len() > MAX_PUSH_COMMIT_EVIDENCE {
+            return Err(ProviderTriggerError::InvalidPushCommitEvidence);
+        }
+        commits.sort_unstable();
+        if commits.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(ProviderTriggerError::InvalidPushCommitEvidence);
+        }
+        Ok(())
+    }
+}
+
+const MAX_PUSH_COMMIT_EVIDENCE: usize = 4_096;
+
 /// Authenticated push trigger.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(try_from = "UncheckedPushTrigger")]
@@ -196,6 +246,7 @@ pub struct PushTrigger {
     git_ref: ProviderGitRef,
     before: Option<GitObjectId>,
     after: Option<GitObjectId>,
+    commit_evidence: PushCommitEvidence,
     forced: bool,
     actor: Option<ExternalSubjectIdentity>,
 }
@@ -207,6 +258,7 @@ struct UncheckedPushTrigger {
     git_ref: ProviderGitRef,
     before: Option<GitObjectId>,
     after: Option<GitObjectId>,
+    commit_evidence: PushCommitEvidence,
     forced: bool,
     actor: Option<ExternalSubjectIdentity>,
 }
@@ -223,6 +275,7 @@ impl PushTrigger {
         git_ref: ProviderGitRef,
         before: Option<GitObjectId>,
         after: Option<GitObjectId>,
+        mut commit_evidence: PushCommitEvidence,
         forced: bool,
         actor: Option<ExternalSubjectIdentity>,
     ) -> Result<Self, ProviderTriggerError> {
@@ -235,12 +288,22 @@ impl PushTrigger {
         {
             return Err(ProviderTriggerError::ObjectAlgorithmMismatch);
         }
+        commit_evidence.canonicalize()?;
+        if commit_evidence.complete_commits().is_some_and(|commits| {
+            let expected = before.or(after).map(GitObjectId::algorithm);
+            commits
+                .iter()
+                .any(|commit| Some(commit.algorithm()) != expected)
+        }) {
+            return Err(ProviderTriggerError::ObjectAlgorithmMismatch);
+        }
         validate_subject_instance(repository.identity(), actor.as_ref())?;
         Ok(Self {
             repository,
             git_ref,
             before,
             after,
+            commit_evidence,
             forced,
             actor,
         })
@@ -270,6 +333,12 @@ impl PushTrigger {
         self.after
     }
 
+    /// Returns complete pushed commits or the provider-limit bypass decision.
+    #[must_use]
+    pub const fn commit_evidence(&self) -> &PushCommitEvidence {
+        &self.commit_evidence
+    }
+
     /// Returns whether the provider authenticated a forced update.
     #[must_use]
     pub const fn forced(&self) -> bool {
@@ -292,6 +361,7 @@ impl TryFrom<UncheckedPushTrigger> for PushTrigger {
             value.git_ref,
             value.before,
             value.after,
+            value.commit_evidence,
             value.forced,
             value.actor,
         )
@@ -891,6 +961,9 @@ pub enum ProviderTriggerError {
     /// Exact objects from one repository event used different hash algorithms.
     #[error("provider trigger Git object algorithms disagree")]
     ObjectAlgorithmMismatch,
+    /// Pushed-commit evidence was duplicated or exceeded its durable bound.
+    #[error("provider push commit evidence is invalid")]
+    InvalidPushCommitEvidence,
     /// Provider-native identities crossed configured instance namespaces.
     #[error("provider trigger identities belong to different instances")]
     InstanceMismatch,
@@ -939,6 +1012,7 @@ mod tests {
                 ProviderGitRef::new("refs/heads/main", ProviderGitRefKind::Branch).expect("branch"),
                 Some(object('a')),
                 Some(object('b')),
+                PushCommitEvidence::complete([object('b')]).expect("commit evidence"),
                 false,
                 None,
             )
@@ -979,6 +1053,7 @@ mod tests {
             ProviderGitRef::new("refs/tags/v1", ProviderGitRefKind::Tag).expect("tag"),
             None,
             None,
+            PushCommitEvidence::complete([]).expect("commit evidence"),
             false,
             None,
         );

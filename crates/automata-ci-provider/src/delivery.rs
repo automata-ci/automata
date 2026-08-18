@@ -7,16 +7,19 @@ use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
 use crate::{
-    ExternalDeliveryIdentity, ProviderDeliveryId, ProviderDeliveryRejection,
-    ProviderDeliveryWorkerId, ProviderSaveOutcome, ProviderWebhookEndpointId,
-    ProviderWebhookEndpointManifest, ProviderWebhookEndpointRevision,
-    ProviderWebhookSecretCandidates, RejectedProviderDelivery, VerifiedProviderDelivery,
+    ExternalDeliveryIdentity, ProviderConnectionManifest, ProviderDeliveryId,
+    ProviderDeliveryRejection, ProviderDeliveryWorkerId, ProviderLifecycleState,
+    ProviderSaveOutcome, ProviderWebhookEndpointId, ProviderWebhookEndpointManifest,
+    ProviderWebhookEndpointRevision, ProviderWebhookError, ProviderWebhookSecretCandidates,
+    RejectedProviderDelivery, VerifiedProviderDelivery,
 };
 
 /// Maximum processing attempts for one admitted provider delivery.
 pub const MAX_PROVIDER_DELIVERY_ATTEMPTS: u16 = 16;
 /// Maximum duration of one delivery worker lease.
 pub const MAX_PROVIDER_DELIVERY_LEASE_MILLIS: i64 = 15 * 60 * 1_000;
+/// Maximum total lifetime of one delivery claim across all renewals.
+pub const MAX_PROVIDER_DELIVERY_TOTAL_CLAIM_MILLIS: i64 = 60 * 60 * 1_000;
 /// Maximum delay before a transiently failed delivery becomes eligible again.
 pub const MAX_PROVIDER_DELIVERY_RETRY_MILLIS: i64 = 24 * 60 * 60 * 1_000;
 
@@ -25,23 +28,47 @@ const DELIVERY_FINGERPRINT_DOMAIN: &[u8] = b"automata.provider.delivery-fingerpr
 /// Decrypted endpoint record returned only at trusted delivery ingress.
 pub struct ProviderWebhookEndpointRecord {
     manifest: ProviderWebhookEndpointManifest,
+    connection: ProviderConnectionManifest,
     secrets: ProviderWebhookSecretCandidates,
 }
 
 impl ProviderWebhookEndpointRecord {
-    /// Binds an endpoint manifest to its exact move-only verification candidates.
-    #[must_use]
-    pub const fn new(
+    /// Binds an endpoint to its exact active connection and move-only candidates.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a connection from another identity or revision.
+    pub fn new(
         manifest: ProviderWebhookEndpointManifest,
+        connection: ProviderConnectionManifest,
         secrets: ProviderWebhookSecretCandidates,
-    ) -> Self {
-        Self { manifest, secrets }
+    ) -> Result<Self, ProviderWebhookError> {
+        let configuration = connection.configuration();
+        if connection.connection_id() != manifest.connection_id()
+            || connection.revision() != manifest.connection_revision()
+            || connection.state() != ProviderLifecycleState::Active
+            || configuration.repository().instance_id() != manifest.instance_id()
+            || configuration.provider_revision() != manifest.provider_revision()
+        {
+            return Err(ProviderWebhookError::EndpointConnectionMismatch);
+        }
+        Ok(Self {
+            manifest,
+            connection,
+            secrets,
+        })
     }
 
     /// Returns endpoint routing and verification policy.
     #[must_use]
     pub const fn manifest(&self) -> &ProviderWebhookEndpointManifest {
         &self.manifest
+    }
+
+    /// Returns the exact repository connection and adapter policy.
+    #[must_use]
+    pub const fn connection(&self) -> &ProviderConnectionManifest {
+        &self.connection
     }
 
     /// Returns exact plaintext candidates at the authentication boundary.
@@ -56,9 +83,10 @@ impl ProviderWebhookEndpointRecord {
         self,
     ) -> (
         ProviderWebhookEndpointManifest,
+        ProviderConnectionManifest,
         ProviderWebhookSecretCandidates,
     ) {
-        (self.manifest, self.secrets)
+        (self.manifest, self.connection, self.secrets)
     }
 }
 
@@ -67,6 +95,7 @@ impl fmt::Debug for ProviderWebhookEndpointRecord {
         formatter
             .debug_struct("ProviderWebhookEndpointRecord")
             .field("manifest", &self.manifest)
+            .field("connection", &self.connection)
             .field("secrets", &self.secrets)
             .finish()
     }
@@ -413,7 +442,10 @@ impl ProviderDeliveryClaimFence {
         let token = NonZeroU64::new(token)
             .filter(|value| i64::try_from(value.get()).is_ok())
             .ok_or(ProviderDeliveryModelError::InvalidFence)?;
-        if claimed_at.get() < 0 || expires_at <= claimed_at {
+        if claimed_at.get() < 0
+            || expires_at <= claimed_at
+            || expires_at.get() - claimed_at.get() > MAX_PROVIDER_DELIVERY_TOTAL_CLAIM_MILLIS
+        {
             return Err(ProviderDeliveryModelError::InvalidFence);
         }
         Ok(Self {
@@ -504,6 +536,70 @@ impl ClaimedProviderDelivery {
     #[must_use]
     pub const fn fence(&self) -> ProviderDeliveryClaimFence {
         self.fence
+    }
+}
+
+/// Command that extends one exact live claim without changing its fence token.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RenewProviderDelivery {
+    fence: ProviderDeliveryClaimFence,
+    renewed_at: UnixMillis,
+    lease_millis: NonZeroU64,
+}
+
+impl RenewProviderDelivery {
+    /// Constructs a strictly extending live-lease renewal.
+    ///
+    /// # Errors
+    ///
+    /// Rejects renewal outside the current lease, excessive per-renewal or
+    /// total duration, overflow, or a deadline that would not extend the claim.
+    pub fn new(
+        fence: ProviderDeliveryClaimFence,
+        renewed_at: UnixMillis,
+        lease_millis: u64,
+    ) -> Result<Self, ProviderDeliveryModelError> {
+        validate_fenced_time(fence, renewed_at)?;
+        let lease_millis = NonZeroU64::new(lease_millis)
+            .filter(|value| value.get() <= MAX_PROVIDER_DELIVERY_LEASE_MILLIS as u64)
+            .ok_or(ProviderDeliveryModelError::InvalidLease)?;
+        let extension = i64::try_from(lease_millis.get())
+            .map_err(|_| ProviderDeliveryModelError::InvalidLease)?;
+        let expires_at = renewed_at
+            .get()
+            .checked_add(extension)
+            .ok_or(ProviderDeliveryModelError::InvalidLease)?;
+        let total_lifetime = expires_at
+            .checked_sub(fence.claimed_at().get())
+            .ok_or(ProviderDeliveryModelError::InvalidLease)?;
+        if expires_at <= fence.expires_at().get()
+            || total_lifetime > MAX_PROVIDER_DELIVERY_TOTAL_CLAIM_MILLIS
+        {
+            return Err(ProviderDeliveryModelError::InvalidLease);
+        }
+        Ok(Self {
+            fence,
+            renewed_at,
+            lease_millis,
+        })
+    }
+
+    /// Returns exact current claim ownership.
+    #[must_use]
+    pub const fn fence(self) -> ProviderDeliveryClaimFence {
+        self.fence
+    }
+
+    /// Returns trusted renewal time within the current lease.
+    #[must_use]
+    pub const fn renewed_at(self) -> UnixMillis {
+        self.renewed_at
+    }
+
+    /// Returns the replacement lease duration from renewal time.
+    #[must_use]
+    pub const fn lease_millis(self) -> u64 {
+        self.lease_millis.get()
     }
 }
 
@@ -710,6 +806,12 @@ pub trait ProviderDeliveryRepository: fmt::Debug + Send + Sync {
         &self,
         request: ClaimProviderDelivery,
     ) -> ProviderDeliveryFuture<'_, Option<ClaimedProviderDelivery>>;
+
+    /// Extends one exact live claim while preserving its fencing token.
+    fn renew_delivery(
+        &self,
+        request: RenewProviderDelivery,
+    ) -> ProviderDeliveryFuture<'_, ProviderDeliveryClaimFence>;
 
     /// Closes an exact live claim successfully.
     fn complete_delivery(

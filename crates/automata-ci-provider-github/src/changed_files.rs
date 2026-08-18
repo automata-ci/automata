@@ -8,7 +8,9 @@ use std::{
 use async_trait::async_trait;
 use automata_ci_auth::{github::GithubEndpointError, secret::SecretString};
 use automata_ci_core::GitObjectId;
-use automata_ci_provider::{NormalizedTrigger, ProviderRepositoryPath, RepositoryVisibility};
+use automata_ci_provider::{
+    NormalizedTrigger, ProviderRepositoryPath, PushCommitEvidence, RepositoryVisibility,
+};
 use automata_ci_scm::{
     ChangedFile, ChangedFileIncompleteReason, ChangedFileNotApplicableReason,
     ChangedFilePageAccumulator, ChangedFilePageEvidence, ChangedFileRead, ChangedFileReader,
@@ -999,14 +1001,22 @@ impl ChangedFileReader for GithubHttpEndpoint {
                     (_, _, true) => GithubPushDiffRange::Forced,
                     (None, Some(_), false) => GithubPushDiffRange::Created,
                     (Some(_), None, false) => GithubPushDiffRange::Deleted,
-                    (Some(before), Some(after), false) => GithubPushDiffRange::Existing {
-                        before,
-                        after,
-                        // The common trigger deliberately retains exact endpoints rather than
-                        // GitHub's provider-specific pushed-commit list. A multi-commit Compare
-                        // response therefore becomes explicit incomplete evidence below.
-                        pushed_commits: vec![after],
-                    },
+                    (Some(before), Some(after), false) => {
+                        let pushed_commits = match push.commit_evidence() {
+                            PushCommitEvidence::Complete(commits) => commits.clone(),
+                            PushCommitEvidence::ProviderLimitExceeded => {
+                                return incomplete_without_pages(
+                                    &request,
+                                    ChangedFileIncompleteReason::ProviderRecordLimit,
+                                );
+                            }
+                        };
+                        GithubPushDiffRange::Existing {
+                            before,
+                            after,
+                            pushed_commits,
+                        }
+                    }
                     (None, None, false) => {
                         return Err(ScmError::new(ScmErrorKind::InvalidResponse));
                     }

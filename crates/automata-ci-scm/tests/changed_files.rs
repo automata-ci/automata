@@ -52,6 +52,11 @@ fn push(repository: ExternalRepositoryIdentity) -> automata_ci_provider::SealedN
             Some(
                 GitObjectId::from_provider_hex("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").unwrap(),
             ),
+            automata_ci_provider::PushCommitEvidence::complete([GitObjectId::from_provider_hex(
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            )
+            .unwrap()])
+            .unwrap(),
             false,
             None,
         )

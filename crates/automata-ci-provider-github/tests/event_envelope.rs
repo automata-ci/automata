@@ -497,6 +497,7 @@ fn pull_request_payload() -> Value {
         "pull_request": {
             "number": 7,
             "merged": false,
+            "draft": false,
             "merge_commit_sha": MERGE_SHA,
             "user": actor(302, "contributor", "User"),
             "head": {

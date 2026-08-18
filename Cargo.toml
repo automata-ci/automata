@@ -25,6 +25,7 @@ members = [
     "crates/automata-ci-workload-oidc",
     "crates/automata-ci-postgres",
     "crates/automata-ci-provider",
+    "crates/automata-ci-provider-delivery",
     "crates/automata-ci-provider-postgres",
     "crates/automata-ci-protocol",
     "crates/automata-ci-protocol-protobuf",

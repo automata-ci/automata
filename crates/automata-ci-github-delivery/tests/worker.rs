@@ -16,7 +16,7 @@ use automata_ci_github_delivery::{
     GithubDeliveryWorkflowProcessorError, GithubDeliveryWorkflowRequest,
 };
 use automata_ci_provider::{ExternalRepositoryId, ProviderConnectionId};
-use automata_ci_provider_github::{GITHUB_RAW_EVENT_OBJECT_KEY_PREFIX, GithubPushRefKind};
+use automata_ci_provider_github::{GITHUB_RAW_EVENT_OBJECT_KEY_PREFIX, GithubWebhookRefKind};
 use automata_ci_scm::{
     ArchiveFormat, RepositoryId as ScmRepositoryId, RepositorySnapshot, RepositorySource,
     RepositorySourceArchive, RepositorySourceConnection, RepositorySourceRequest, ScmError,
@@ -223,7 +223,7 @@ impl ScmProvider for RecordingResolver {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct WorkflowObservation {
     path: String,
-    ref_kind: GithubPushRefKind,
+    ref_kind: GithubWebhookRefKind,
     revision: String,
     source_bytes: usize,
     manifest_revision: u64,
@@ -870,7 +870,7 @@ fn claimed_fixture_with_visibility(
 
 fn pull_request_claimed_fixture() -> ClaimedFixture {
     let body = Bytes::from(format!(
-        r#"{{"action":"opened","number":7,"pull_request":{{"number":7,"merged":false,"merge_commit_sha":"{STALE_MERGE}","head":{{"ref":"feature/topic","sha":"{AFTER}","repo":{{"id":{REPOSITORY_ID},"private":true,"visibility":"private","name":"{REPOSITORY}","full_name":"{OWNER}/{REPOSITORY}","owner":{{"id":{REPOSITORY_OWNER_ID},"login":"{OWNER}"}}}}}},"base":{{"ref":"main","sha":"{BEFORE}","repo":{{"id":{REPOSITORY_ID},"private":true,"visibility":"private","name":"{REPOSITORY}","full_name":"{OWNER}/{REPOSITORY}","owner":{{"id":{REPOSITORY_OWNER_ID},"login":"{OWNER}"}}}}}}}},"repository":{{"id":{REPOSITORY_ID},"private":true,"visibility":"private","name":"{REPOSITORY}","full_name":"{OWNER}/{REPOSITORY}","owner":{{"id":{REPOSITORY_OWNER_ID},"login":"{OWNER}"}}}},"installation":{{"id":{INSTALLATION_ID}}},"sender":{{"id":301}}}}"#
+        r#"{{"action":"opened","number":7,"pull_request":{{"number":7,"merged":false,"draft":false,"merge_commit_sha":"{STALE_MERGE}","head":{{"ref":"feature/topic","sha":"{AFTER}","repo":{{"id":{REPOSITORY_ID},"private":true,"visibility":"private","name":"{REPOSITORY}","full_name":"{OWNER}/{REPOSITORY}","owner":{{"id":{REPOSITORY_OWNER_ID},"login":"{OWNER}"}}}}}},"base":{{"ref":"main","sha":"{BEFORE}","repo":{{"id":{REPOSITORY_ID},"private":true,"visibility":"private","name":"{REPOSITORY}","full_name":"{OWNER}/{REPOSITORY}","owner":{{"id":{REPOSITORY_OWNER_ID},"login":"{OWNER}"}}}}}}}},"repository":{{"id":{REPOSITORY_ID},"private":true,"visibility":"private","name":"{REPOSITORY}","full_name":"{OWNER}/{REPOSITORY}","owner":{{"id":{REPOSITORY_OWNER_ID},"login":"{OWNER}"}}}},"installation":{{"id":{INSTALLATION_ID}}},"sender":{{"id":301}}}}"#
     ));
     let digest = Sha256Digest::from_bytes(Sha256::digest(&body).into());
     let key_text = format!("{GITHUB_RAW_EVENT_OBJECT_KEY_PREFIX}/{digest}.json");
@@ -1214,7 +1214,7 @@ async fn exact_source_and_all_direct_workflows_complete_deterministically() {
         ]
     );
     assert!(workflow_observations.iter().all(|observation| {
-        observation.ref_kind == GithubPushRefKind::Branch
+        observation.ref_kind == GithubWebhookRefKind::Branch
             && observation.revision == AFTER
             && observation.manifest_revision == 1
             && observation.private_source_authority_present

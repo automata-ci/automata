@@ -3,7 +3,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    GithubPushRefKind, MAX_GITHUB_PUSH_COMMITS, VerifiedGithubPush,
+    GithubWebhookRefKind, MAX_GITHUB_PUSH_COMMITS, VerifiedGithubPush,
     webhook::GithubWebhookEventMetadata,
 };
 
@@ -162,7 +162,7 @@ impl GithubPushEventFacts {
 
     /// Returns the closed reference kind.
     #[must_use]
-    pub const fn ref_kind(&self) -> GithubPushRefKind {
+    pub const fn ref_kind(&self) -> GithubWebhookRefKind {
         self.git_ref.kind()
     }
 }

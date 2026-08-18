@@ -11,7 +11,8 @@ use automata_ci_provider::{
     ProviderDeliveryState, ProviderEventName, ProviderInstanceId, ProviderSecretGeneration,
     ProviderSecretName, ProviderTypeId, ProviderWebhookEndpointId, ProviderWebhookEndpointRevision,
     ProviderWebhookSecretReference, ProviderWebhookSignatureEvidence, RejectedProviderDelivery,
-    RetryProviderDelivery, SealedNormalizedTrigger, VerifiedProviderDelivery,
+    RenewProviderDelivery, RetryProviderDelivery, SealedNormalizedTrigger,
+    VerifiedProviderDelivery,
 };
 use sqlx::{FromRow, Postgres, Transaction};
 
@@ -246,6 +247,51 @@ impl PostgresProviderManifestRepository {
             None,
         )
         .await
+    }
+
+    pub(crate) async fn renew_delivery_inner(
+        &self,
+        request: RenewProviderDelivery,
+    ) -> Result<ProviderDeliveryClaimFence, ProviderDeliveryRepositoryError> {
+        let fence = request.fence();
+        let extension = i64::try_from(request.lease_millis())
+            .map_err(|_| ProviderDeliveryRepositoryError::Corrupt)?;
+        let expires_at = request
+            .renewed_at()
+            .get()
+            .checked_add(extension)
+            .ok_or(ProviderDeliveryRepositoryError::Corrupt)?;
+        let renewed = sqlx::query_scalar::<_, i64>(
+            r"
+            UPDATE provider_delivery_records
+            SET claim_expires_at_ms = $5
+            WHERE delivery_id = $1 AND state = 'claimed'
+              AND claim_worker_id = $2 AND claim_fence = $3
+              AND claim_started_at_ms <= $4
+              AND claim_expires_at_ms > $4
+              AND claim_expires_at_ms = $6
+              AND claim_expires_at_ms < $5
+            RETURNING claim_expires_at_ms
+            ",
+        )
+        .bind(fence.delivery_id().as_uuid())
+        .bind(fence.worker_id().as_uuid())
+        .bind(durable_u64(fence.token())?)
+        .bind(request.renewed_at().get())
+        .bind(expires_at)
+        .bind(fence.expires_at().get())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(unavailable)?
+        .ok_or(ProviderDeliveryRepositoryError::ClaimRejected)?;
+        ProviderDeliveryClaimFence::new(
+            fence.delivery_id(),
+            fence.worker_id(),
+            fence.token(),
+            fence.claimed_at(),
+            UnixMillis::new(renewed),
+        )
+        .map_err(|_| ProviderDeliveryRepositoryError::Corrupt)
     }
 
     pub(crate) async fn retry_delivery_inner(

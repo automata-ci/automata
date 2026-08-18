@@ -66,7 +66,7 @@ pub use delivery::{
     ProviderDeliveryFuture, ProviderDeliveryModelError, ProviderDeliveryReceipt,
     ProviderDeliveryReplayFingerprint, ProviderDeliveryRepository, ProviderDeliveryRepositoryError,
     ProviderDeliveryState, ProviderWebhookEndpointRecord, ProviderWebhookEndpointRepository,
-    RetryProviderDelivery,
+    RenewProviderDelivery, RetryProviderDelivery,
 };
 pub use factory::{
     MAX_PROVIDER_FACTORIES, ProviderConfigurationFactory, ProviderConnectionFactoryRequest,
@@ -117,7 +117,7 @@ pub use trigger::{
     MAX_NORMALIZED_TRIGGER_BYTES, MAX_PROVIDER_DISPATCH_INPUT_BYTES, MAX_PROVIDER_EVENT_NAME_BYTES,
     MergeQueueActivity, MergeQueueTrigger, NormalizedTrigger, ProviderDispatchInput,
     ProviderEventName, ProviderGitRef, ProviderGitRefKind, ProviderRepository,
-    ProviderTriggerError, PullRequestActivity, PullRequestTrigger, PushTrigger,
+    ProviderTriggerError, PullRequestActivity, PullRequestTrigger, PushCommitEvidence, PushTrigger,
     RepositoryDispatchTrigger, SealedNormalizedTrigger,
 };
 pub use webhook::{
