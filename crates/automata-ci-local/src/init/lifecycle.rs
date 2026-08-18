@@ -187,6 +187,16 @@ struct BootstrapArtifacts {
     s3_secret_key: Zeroizing<String>,
 }
 
+struct UpLifecycleOperationResult {
+    desired: DesiredSpec,
+    resumed: bool,
+}
+
+struct DownLifecycleOperationResult {
+    desired: DesiredSpec,
+    resumed: bool,
+}
+
 #[derive(Serialize)]
 struct BootstrapRequest {
     schema: &'static str,
@@ -412,7 +422,7 @@ pub async fn up_local(request: LocalUpRequest) -> Result<LocalUpOutcome, LocalIn
                 },
             )
             .await?;
-            return Ok((desired, resumed));
+            return Ok(UpLifecycleOperationResult { desired, resumed });
         }
 
         if initial == LifecycleTopology::Partial {
@@ -689,13 +699,13 @@ pub async fn up_local(request: LocalUpRequest) -> Result<LocalUpOutcome, LocalIn
             .attest_lifecycle_lock(&established.installation, &established.epoch, &holder)
             .await?;
         cancellation_checkpoint(&transaction_cancellation)?;
-        Ok((desired, resumed))
+        Ok(UpLifecycleOperationResult { desired, resumed })
     };
     let operation =
-        lifecycle_operation_bounded(&holder_lost, &transaction_cancellation, operation).await;
+        run_acquired_lifecycle_operation(&holder_lost, &transaction_cancellation, operation).await;
 
     watcher.abort();
-    let (desired, resumed) = match operation {
+    let UpLifecycleOperationResult { desired, resumed } = match operation {
         Ok(value) => value,
         Err(error) => {
             // Dropping retained stdin converts the exact holder into sticky
@@ -866,7 +876,10 @@ pub async fn down_local(request: LocalDownRequest) -> Result<LocalDownOutcome, L
             .await?;
         let resumed = !matches!(initial, LifecycleTopology::Running { .. });
         if initial == LifecycleTopology::Empty {
-            return Ok((desired, true));
+            return Ok(DownLifecycleOperationResult {
+                desired,
+                resumed: true,
+            });
         }
 
         // Stop the scheduler-facing runner before installation-wide sibling
@@ -935,13 +948,13 @@ pub async fn down_local(request: LocalDownRequest) -> Result<LocalDownOutcome, L
             return Err(reset_required());
         }
         cancellation_checkpoint(&transaction_cancellation)?;
-        Ok((desired, resumed))
+        Ok(DownLifecycleOperationResult { desired, resumed })
     };
     let operation =
-        lifecycle_operation_bounded(&holder_lost, &transaction_cancellation, operation).await;
+        run_acquired_lifecycle_operation(&holder_lost, &transaction_cancellation, operation).await;
 
     watcher.abort();
-    let (desired, resumed) = match operation {
+    let DownLifecycleOperationResult { desired, resumed } = match operation {
         Ok(value) => value,
         Err(error) => {
             drop(holder);
@@ -1124,6 +1137,48 @@ async fn publish_replaceable_cas(
     publish_cas(engine, established, target, contents, expected, mutation).await
 }
 
+#[async_trait::async_trait]
+trait ExactCasMaterialAttester: Sync {
+    async fn attest(
+        &self,
+        target: CasTarget,
+        expected: Sha256Digest,
+        expected_attachments: BTreeSet<String>,
+    ) -> Result<(), LocalInitError>;
+}
+
+struct EngineExactCasMaterialAttester<'operation, 'adapter> {
+    engine: &'operation InitEngine<'adapter>,
+    established: &'operation EstablishedLifecycle,
+    mutation: &'operation LifecycleMutationFence,
+}
+
+#[async_trait::async_trait]
+impl ExactCasMaterialAttester for EngineExactCasMaterialAttester<'_, '_> {
+    async fn attest(
+        &self,
+        target: CasTarget,
+        expected: Sha256Digest,
+        expected_attachments: BTreeSet<String>,
+    ) -> Result<(), LocalInitError> {
+        if self
+            .engine
+            .read_lifecycle_cas_digest_with_attachments(
+                &self.established.installation,
+                &self.established.epoch,
+                target,
+                &expected_attachments,
+                self.mutation,
+            )
+            .await?
+            != Some(expected)
+        {
+            return Err(reset_required());
+        }
+        Ok(())
+    }
+}
+
 async fn attest_exact_cas_material(
     engine: &InitEngine<'_>,
     established: &EstablishedLifecycle,
@@ -1133,6 +1188,33 @@ async fn attest_exact_cas_material(
     relay_id: &str,
     runner_id: &str,
     mutation: &LifecycleMutationFence,
+) -> Result<(), LocalInitError> {
+    let attester = EngineExactCasMaterialAttester {
+        engine,
+        established,
+        mutation,
+    };
+    attest_exact_cas_material_with(
+        &attester,
+        established,
+        artifacts,
+        relay,
+        runner_config,
+        relay_id,
+        runner_id,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn attest_exact_cas_material_with(
+    attester: &impl ExactCasMaterialAttester,
+    established: &EstablishedLifecycle,
+    artifacts: &BootstrapArtifacts,
+    relay: &[u8],
+    runner_config: &[u8],
+    relay_id: &str,
+    runner_id: &str,
 ) -> Result<(), LocalInitError> {
     for (target, contents) in [
         (CasTarget::BootstrapRequest, artifacts.request.as_slice()),
@@ -1163,19 +1245,9 @@ async fn attest_exact_cas_material(
             | CasTarget::RunnerS3SecretKey
             | CasTarget::RunnerSpoolKey => BTreeSet::from([runner_id.to_owned()]),
         };
-        if engine
-            .read_lifecycle_cas_digest_with_attachments(
-                &established.installation,
-                &established.epoch,
-                target,
-                &expected_attachments,
-                mutation,
-            )
-            .await?
-            != Some(expected)
-        {
-            return Err(reset_required());
-        }
+        attester
+            .attest(target, expected, expected_attachments)
+            .await?;
     }
     Ok(())
 }
@@ -1395,7 +1467,7 @@ async fn cancellation_bounded<T>(
     }
 }
 
-async fn lifecycle_operation_bounded<T>(
+async fn run_acquired_lifecycle_operation<T>(
     holder_lost: &CancellationToken,
     transaction_cancellation: &CancellationToken,
     operation: impl Future<Output = Result<T, LocalInitError>>,
@@ -1408,7 +1480,13 @@ async fn lifecycle_operation_bounded<T>(
     tokio::select! {
         biased;
         () = holder_lost.cancelled() => Err(reset_required()),
-        result = &mut operation => result,
+        result = &mut operation => {
+            if holder_lost.is_cancelled() {
+                Err(reset_required())
+            } else {
+                result
+            }
+        },
     }
 }
 

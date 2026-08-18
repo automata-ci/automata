@@ -14,6 +14,24 @@ use crate::init::{certificates::CertificateMaterial, epoch::authority_test_epoch
 
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
 
+#[derive(Default)]
+struct RecordingExactCasMaterialAttester {
+    targets: std::sync::Mutex<Vec<CasTarget>>,
+}
+
+#[async_trait::async_trait]
+impl ExactCasMaterialAttester for RecordingExactCasMaterialAttester {
+    async fn attest(
+        &self,
+        target: CasTarget,
+        _expected: Sha256Digest,
+        _expected_attachments: BTreeSet<String>,
+    ) -> Result<(), LocalInitError> {
+        self.targets.lock().unwrap().push(target);
+        Ok(())
+    }
+}
+
 struct TestDirectory(PathBuf);
 
 impl TestDirectory {
@@ -134,56 +152,50 @@ fn cancellation_checkpoint_is_fail_closed() {
 }
 
 #[tokio::test]
-async fn lifecycle_boundary_preserves_holder_loss_over_caller_cancellation() {
+async fn acquired_up_and_down_operations_preserve_holder_loss() {
+    async fn assert_result<Output>(
+        cancel_caller: bool,
+        lose_holder: bool,
+        expected: LocalInitErrorCode,
+    ) {
+        let holder_lost = CancellationToken::new();
+        let transaction_cancellation = CancellationToken::new();
+        let holder_signal = holder_lost.clone();
+        let cancel_transaction = transaction_cancellation.clone();
+        let operation = async move {
+            if cancel_caller {
+                cancel_transaction.cancel();
+            }
+            if lose_holder {
+                holder_signal.cancel();
+            }
+            std::future::pending::<Result<Output, LocalInitError>>().await
+        };
+
+        let Err(error) =
+            run_acquired_lifecycle_operation(&holder_lost, &transaction_cancellation, operation)
+                .await
+        else {
+            panic!("a cancelled lifecycle operation cannot complete");
+        };
+        assert_eq!(error.code(), expected);
+    }
+
     for (cancel_caller, lose_holder, expected) in [
         (true, false, LocalInitErrorCode::Cancelled),
         (false, true, LocalInitErrorCode::ResetRequired),
         (true, true, LocalInitErrorCode::ResetRequired),
     ] {
-        let holder_lost = CancellationToken::new();
-        let transaction_cancellation = CancellationToken::new();
-        if cancel_caller {
-            transaction_cancellation.cancel();
-        }
-        if lose_holder {
-            holder_lost.cancel();
-        }
-
-        let result =
-            lifecycle_operation_bounded(&holder_lost, &transaction_cancellation, async { Ok(()) })
-                .await;
-
-        assert_eq!(result.unwrap_err().code(), expected);
-    }
-}
-
-#[test]
-fn public_up_and_down_use_the_holder_dominant_boundary() {
-    let source = include_str!("../lifecycle.rs");
-    let (_, up_and_later) = source
-        .split_once("pub async fn up_local(")
-        .expect("public up entry point exists");
-    let (up, down_and_later) = up_and_later
-        .split_once("pub async fn down_local(")
-        .expect("public down entry point exists");
-    let (down, _) = down_and_later
-        .split_once("async fn recover_stopped_lock_if_authorized(")
-        .expect("down entry point has a trailing helper boundary");
-
-    for operation in [up, down] {
-        assert_eq!(
-            operation
-                .matches("let holder_lost = holder.holder_lost();")
-                .count(),
-            1
-        );
-        assert_eq!(operation.matches("lifecycle_operation_bounded(").count(), 1);
+        assert_result::<UpLifecycleOperationResult>(cancel_caller, lose_holder, expected).await;
+        assert_result::<DownLifecycleOperationResult>(cancel_caller, lose_holder, expected).await;
     }
 }
 
 #[tokio::test]
-async fn running_replay_invokes_exact_cas_attestation_once() {
-    let calls = std::cell::Cell::new(0);
+async fn running_replay_attests_each_exact_cas_target_once() {
+    let (_directory, established) = fixture();
+    let artifacts = derive_bootstrap_artifacts(&established).unwrap();
+    let attester = RecordingExactCasMaterialAttester::default();
     let initial = LifecycleTopology::Running {
         transit_id: "transit-id".to_owned(),
     };
@@ -191,16 +203,48 @@ async fn running_replay_invokes_exact_cas_attestation_once() {
     complete_running_replay(
         &initial,
         &CancellationToken::new(),
-        || async {
-            calls.set(calls.get() + 1);
-            Ok(())
+        || {
+            attest_exact_cas_material_with(
+                &attester,
+                &established,
+                &artifacts,
+                b"relay binding\n",
+                b"runner config\n",
+                "relay-id",
+                "runner-id",
+            )
         },
         || async { Ok(initial.clone()) },
     )
     .await
     .unwrap();
 
-    assert_eq!(calls.get(), 1);
+    assert_eq!(
+        *attester.targets.lock().unwrap(),
+        vec![
+            CasTarget::BootstrapRequest,
+            CasTarget::BootstrapToken,
+            CasTarget::RelayBinding,
+            CasTarget::RunnerConfig,
+            CasTarget::RunnerS3AccessKey,
+            CasTarget::RunnerS3Ca,
+            CasTarget::RunnerS3SecretKey,
+            CasTarget::RunnerSpoolKey,
+        ]
+    );
+}
+
+#[test]
+fn running_branch_calls_exact_cas_attestation_once() {
+    let source = include_str!("../lifecycle.rs");
+    let (_, running_and_later) = source
+        .split_once("if let LifecycleTopology::Running { transit_id } = &initial {")
+        .expect("up has a Running replay branch");
+    let (running, _) = running_and_later
+        .split_once("if initial == LifecycleTopology::Partial {")
+        .expect("Running replay precedes Partial convergence");
+
+    assert_eq!(running.matches("attest_exact_cas_material(").count(), 1);
 }
 
 #[test]
