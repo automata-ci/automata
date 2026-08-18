@@ -249,6 +249,7 @@ const fn error_kind_tag(kind: ExecutionErrorKind) -> u8 {
         ExecutionErrorKind::OutputLimitExceeded => 7,
         ExecutionErrorKind::BackendRejected => 8,
         ExecutionErrorKind::LocalStorage => 9,
+        ExecutionErrorKind::OutputRejected => 10,
     }
 }
 
@@ -264,6 +265,7 @@ const fn decode_error_kind(tag: u8) -> Result<ExecutionErrorKind, ()> {
         7 => Ok(ExecutionErrorKind::OutputLimitExceeded),
         8 => Ok(ExecutionErrorKind::BackendRejected),
         9 => Ok(ExecutionErrorKind::LocalStorage),
+        10 => Ok(ExecutionErrorKind::OutputRejected),
         _ => Err(()),
     }
 }

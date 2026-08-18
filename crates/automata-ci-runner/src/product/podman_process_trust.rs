@@ -975,12 +975,22 @@ mod tests {
             1_024,
         );
         let executor = SystemCommandExecutor;
-        let first = executor.execute(&request, options.process_environment(), &NeverCancelled);
+        let first = executor.execute(
+            &request,
+            options.process_environment(),
+            &NeverCancelled,
+            automata_ci_execution::discard_execution_output(),
+        );
         assert_eq!(first.termination(), CommandTermination::Exited(Some(0)));
 
         executable_file(&fixture.conmon, b"replacement executable");
         assert_eq!(fixture.trust.revalidate(), Err(TrustError::Changed));
-        let second = executor.execute(&request, options.process_environment(), &NeverCancelled);
+        let second = executor.execute(
+            &request,
+            options.process_environment(),
+            &NeverCancelled,
+            automata_ci_execution::discard_execution_output(),
+        );
         assert_eq!(second.termination(), CommandTermination::FailedToStart);
         assert_eq!(
             fs::read_to_string(&fixture.marker).expect("read spawn marker"),

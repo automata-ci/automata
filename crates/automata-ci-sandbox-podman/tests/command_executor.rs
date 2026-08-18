@@ -11,11 +11,15 @@ use std::{
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
+        mpsc,
     },
     time::{Duration, Instant},
 };
 
-use automata_ci_execution::{Cancellation, ExecutionOutputStream, NeverCancelled};
+use automata_ci_execution::{
+    Cancellation, ExecutionOutputRecord, ExecutionOutputSink, ExecutionOutputSinkError,
+    ExecutionOutputStream, NeverCancelled,
+};
 use automata_ci_sandbox_podman::{
     CommandRequest, CommandTermination, PodmanBinary, PodmanCommandExecutor, PodmanLaunchTrust,
     PodmanLaunchTrustHandle, PodmanOptions, PodmanProcessEnvironment, PodmanStateRoot,
@@ -44,12 +48,97 @@ impl Cancellation for AtomicCancellation {
 }
 
 #[derive(Debug)]
+struct ChannelOutputSink(mpsc::Sender<Vec<u8>>);
+
+impl ExecutionOutputSink for ChannelOutputSink {
+    fn observe(&self, record: &ExecutionOutputRecord) -> Result<(), ExecutionOutputSinkError> {
+        if !record.is_end_of_stream() && record.stream() == ExecutionOutputStream::Stdout {
+            self.0
+                .send(record.bytes().to_vec())
+                .map_err(|_| ExecutionOutputSinkError)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct RejectOutput;
+
+impl ExecutionOutputSink for RejectOutput {
+    fn observe(&self, _record: &ExecutionOutputRecord) -> Result<(), ExecutionOutputSinkError> {
+        Err(ExecutionOutputSinkError)
+    }
+}
+
+#[derive(Debug)]
 struct TestTrust(Arc<AtomicBool>);
 
 impl PodmanLaunchTrust for TestTrust {
     fn revalidate(&self) -> bool {
         self.0.load(Ordering::Acquire)
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn system_executor_publishes_output_before_the_command_exits() {
+    let scratch = ScratchRoot::new("command-live-output");
+    let environment = environment(scratch.path());
+    let request = CommandRequest::new(
+        executable(&["/bin/sh", "/usr/bin/sh"]),
+        vec![
+            OsString::from("-c"),
+            OsString::from("printf first; /bin/sleep 1; printf second"),
+        ],
+        Duration::from_secs(5),
+        Instant::now() + Duration::from_secs(5),
+        1_024,
+    );
+    let (sender, receiver) = mpsc::channel();
+    let sink = Arc::new(ChannelOutputSink(sender));
+
+    std::thread::scope(|scope| {
+        let execution = scope
+            .spawn(|| SystemCommandExecutor.execute(&request, &environment, &NeverCancelled, sink));
+        assert_eq!(
+            receiver
+                .recv_timeout(Duration::from_millis(500))
+                .expect("the first record arrives while the command is sleeping"),
+            b"first"
+        );
+        let output = execution.join().expect("command execution");
+        assert_eq!(output.termination(), CommandTermination::Exited(Some(0)));
+        assert_eq!(output.stdout(), b"firstsecond");
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn system_executor_terminates_the_command_when_output_is_rejected() {
+    let scratch = ScratchRoot::new("command-output-rejected");
+    let environment = environment(scratch.path());
+    let request = CommandRequest::new(
+        executable(&["/bin/sh", "/usr/bin/sh"]),
+        vec![
+            OsString::from("-c"),
+            OsString::from("printf rejected; /bin/sleep 30"),
+        ],
+        Duration::from_secs(10),
+        Instant::now() + Duration::from_secs(10),
+        1_024,
+    );
+    let started = Instant::now();
+
+    let output = SystemCommandExecutor.execute(
+        &request,
+        &environment,
+        &NeverCancelled,
+        Arc::new(RejectOutput),
+    );
+
+    assert!(output.output_was_rejected());
+    assert_eq!(output.termination(), CommandTermination::Cancelled);
+    assert!(started.elapsed() < Duration::from_secs(2));
 }
 
 #[cfg(unix)]
@@ -72,7 +161,12 @@ fn system_executor_cancels_and_reaps_without_a_shell() {
         1_024,
     );
 
-    let output = SystemCommandExecutor.execute(&request, &environment, cancellation.as_ref());
+    let output = SystemCommandExecutor.execute(
+        &request,
+        &environment,
+        cancellation.as_ref(),
+        automata_ci_execution::discard_execution_output(),
+    );
     worker.join().expect("cancellation trigger");
 
     assert_eq!(output.termination(), CommandTermination::Cancelled);
@@ -98,7 +192,12 @@ fn system_executor_kills_descendants_before_reaping_an_exited_leader() {
         1_024,
     );
 
-    let output = SystemCommandExecutor.execute(&request, &environment, &NeverCancelled);
+    let output = SystemCommandExecutor.execute(
+        &request,
+        &environment,
+        &NeverCancelled,
+        automata_ci_execution::discard_execution_output(),
+    );
 
     assert_eq!(output.termination(), CommandTermination::Exited(Some(23)));
     assert_recorded_process_gone(&pid_file, "normal leader exit");
@@ -133,7 +232,12 @@ fn system_executor_cancellation_kills_the_full_process_group() {
         1_024,
     );
 
-    let output = SystemCommandExecutor.execute(&request, &environment, cancellation.as_ref());
+    let output = SystemCommandExecutor.execute(
+        &request,
+        &environment,
+        cancellation.as_ref(),
+        automata_ci_execution::discard_execution_output(),
+    );
     worker.join().expect("cancellation trigger must finish");
 
     assert_eq!(output.termination(), CommandTermination::Cancelled);
@@ -154,7 +258,12 @@ fn output_is_bounded_across_process_streams_and_debug_is_redacted() {
         32,
     );
 
-    let output = SystemCommandExecutor.execute(&request, &environment, &NeverCancelled);
+    let output = SystemCommandExecutor.execute(
+        &request,
+        &environment,
+        &NeverCancelled,
+        automata_ci_execution::discard_execution_output(),
+    );
 
     assert_eq!(output.termination(), CommandTermination::Exited(Some(0)));
     assert_eq!(output.stdout().len() + output.stderr().len(), 32);
@@ -184,8 +293,18 @@ fn exact_output_limit_is_complete_and_one_extra_byte_is_incomplete() {
         8,
     );
 
-    let exact = SystemCommandExecutor.execute(&exact, &environment, &NeverCancelled);
-    let one_over = SystemCommandExecutor.execute(&one_over, &environment, &NeverCancelled);
+    let exact = SystemCommandExecutor.execute(
+        &exact,
+        &environment,
+        &NeverCancelled,
+        automata_ci_execution::discard_execution_output(),
+    );
+    let one_over = SystemCommandExecutor.execute(
+        &one_over,
+        &environment,
+        &NeverCancelled,
+        automata_ci_execution::discard_execution_output(),
+    );
 
     assert_eq!(exact.stdout(), b"12345678");
     assert!(!exact.was_truncated());
@@ -210,7 +329,12 @@ fn anonymous_stdin_is_exact_and_debug_redacted() {
     )
     .with_stdin(payload.clone());
 
-    let output = SystemCommandExecutor.execute(&request, &environment, &NeverCancelled);
+    let output = SystemCommandExecutor.execute(
+        &request,
+        &environment,
+        &NeverCancelled,
+        automata_ci_execution::discard_execution_output(),
+    );
 
     assert_eq!(output.termination(), CommandTermination::Exited(Some(0)));
     assert!(output.stdin_was_fully_written());
@@ -259,7 +383,12 @@ fn early_child_exit_reports_incomplete_stdin_without_deadlock() {
     .with_stdin(vec![0x53; 4 * 1024 * 1024]);
     let started = Instant::now();
 
-    let output = SystemCommandExecutor.execute(&request, &environment, &NeverCancelled);
+    let output = SystemCommandExecutor.execute(
+        &request,
+        &environment,
+        &NeverCancelled,
+        automata_ci_execution::discard_execution_output(),
+    );
 
     assert_eq!(output.termination(), CommandTermination::Exited(Some(0)));
     assert!(!output.stdin_was_fully_written());
@@ -286,7 +415,12 @@ fn blocked_stdin_honors_cancellation_and_timeout_without_deadlock() {
     )
     .with_stdin(vec![0x43; 4 * 1024 * 1024]);
     let started = Instant::now();
-    let cancelled = SystemCommandExecutor.execute(&request, &environment, cancellation.as_ref());
+    let cancelled = SystemCommandExecutor.execute(
+        &request,
+        &environment,
+        cancellation.as_ref(),
+        automata_ci_execution::discard_execution_output(),
+    );
     worker.join().expect("cancellation trigger");
     assert_eq!(cancelled.termination(), CommandTermination::Cancelled);
     assert!(!cancelled.stdin_was_fully_written());
@@ -301,7 +435,12 @@ fn blocked_stdin_honors_cancellation_and_timeout_without_deadlock() {
     )
     .with_stdin(vec![0x54; 4 * 1024 * 1024]);
     let started = Instant::now();
-    let timed_out = SystemCommandExecutor.execute(&request, &environment, &NeverCancelled);
+    let timed_out = SystemCommandExecutor.execute(
+        &request,
+        &environment,
+        &NeverCancelled,
+        automata_ci_execution::discard_execution_output(),
+    );
     assert_eq!(timed_out.termination(), CommandTermination::TimedOut);
     assert!(!timed_out.stdin_was_fully_written());
     assert!(started.elapsed() < Duration::from_secs(2));
@@ -320,7 +459,12 @@ fn process_environment_is_cleared_to_the_explicit_allowlist() {
         4_096,
     );
 
-    let output = SystemCommandExecutor.execute(&request, &environment, &NeverCancelled);
+    let output = SystemCommandExecutor.execute(
+        &request,
+        &environment,
+        &NeverCancelled,
+        automata_ci_execution::discard_execution_output(),
+    );
     let values = std::str::from_utf8(output.stdout()).expect("environment output is UTF-8");
     let values = values
         .lines()

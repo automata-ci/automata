@@ -7,9 +7,9 @@ use std::{
 use automata_ci_execution::{
     Cancellation, CopyFromRequest, CopyToRequest, ExecutionCommand, ExecutionEndpoint,
     ExecutionError, ExecutionErrorKind, ExecutionOutput, ExecutionOutputRecord,
-    ExecutionOutputStream, ExecutionSignal, ExecutionStage, ExecutionTermination, NeverCancelled,
-    OperationId, ProviderErrorKind, ProviderStage, SandboxCapability, SandboxHandle, SignalRequest,
-    WaitRequest,
+    ExecutionOutputSink, ExecutionOutputStream, ExecutionSignal, ExecutionStage,
+    ExecutionTermination, NeverCancelled, OperationId, ProviderErrorKind, ProviderStage,
+    SandboxCapability, SandboxHandle, SignalRequest, WaitRequest,
 };
 use automata_ci_sandbox_guest::{
     GUEST_PROTOCOL_VERSION, GuestOutputStream, GuestRejection, GuestRequest, GuestResponse,
@@ -28,6 +28,19 @@ const ENDPOINT_CAPABILITIES: &[SandboxCapability] = &[
     SandboxCapability::CopyFrom,
     SandboxCapability::EnvironmentInjection,
 ];
+
+fn publish_output(
+    result: Result<ExecutionOutput, ExecutionError>,
+    sink: &dyn ExecutionOutputSink,
+) -> Result<ExecutionOutput, ExecutionError> {
+    let output = result?;
+    for record in output.records() {
+        sink.observe(record).map_err(|_| {
+            error::execution(ExecutionErrorKind::OutputRejected, ExecutionStage::Exec)
+        })?;
+    }
+    Ok(output)
+}
 const MAX_REPLAY_ENTRIES: usize = 256;
 const MAX_REPLAY_BYTES: usize = 64 * 1024 * 1024;
 const REPLAY_ENTRY_OVERHEAD: usize = 256;
@@ -275,6 +288,7 @@ impl ExecutionEndpoint for WindowsHyperVExecutionEndpoint {
         &self,
         request: &ExecutionCommand,
         cancellation: &dyn Cancellation,
+        output: Arc<dyn ExecutionOutputSink>,
     ) -> Result<ExecutionOutput, ExecutionError> {
         let _operation = self.operation_lock.lock().map_err(|_| {
             error::execution(ExecutionErrorKind::LocalStorage, ExecutionStage::Exec)
@@ -284,7 +298,7 @@ impl ExecutionEndpoint for WindowsHyperVExecutionEndpoint {
             self.replay(request.operation_id(), &fingerprint, ExecutionStage::Exec)?
         {
             return match replay {
-                ReplayResult::Exec(result) => result,
+                ReplayResult::Exec(result) => publish_output(result, output.as_ref()),
                 ReplayResult::Signal(_)
                 | ReplayResult::Wait(_)
                 | ReplayResult::CopyTo(_)
@@ -301,7 +315,7 @@ impl ExecutionEndpoint for WindowsHyperVExecutionEndpoint {
             ReplayResult::Exec(result.clone()),
             ExecutionStage::Exec,
         )?;
-        result
+        publish_output(result, output.as_ref())
     }
 
     fn signal(

@@ -577,6 +577,7 @@ impl PodmanCommandExecutor for FakePodman {
         request: &CommandRequest,
         environment: &PodmanProcessEnvironment,
         cancellation: &dyn automata_ci_execution::Cancellation,
+        _output: std::sync::Arc<dyn automata_ci_execution::ExecutionOutputSink>,
     ) -> CommandOutput {
         if cancellation.disposition().requires_termination() {
             return interrupted_before_input(request, CommandTermination::Cancelled);

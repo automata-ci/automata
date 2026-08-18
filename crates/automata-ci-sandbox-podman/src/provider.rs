@@ -12,12 +12,12 @@ use std::{
 use automata_ci_core::Sha256Digest;
 use automata_ci_execution::{
     Cancellation, ContainerHandle, DestroyDisposition, DestroySandbox, EnvironmentProfile,
-    ExecutionEnvironment, NetworkPolicy, NeverCancelled, OperationOutcome, ProviderCapabilities,
-    ProviderError, ProviderErrorKind, ProviderId, ProviderStage, RootFilesystemPolicy,
-    SandboxCapability, SandboxCustody, SandboxHandle, SandboxInspection, SandboxPrivilegePolicy,
-    SandboxProvider, SandboxRecord, SandboxSpec, SandboxState, ServiceContainerBinding,
-    ServiceContainerBindings, ServiceContainerSpec, ServiceHealthPolicy, ServiceNetwork,
-    ServicePortBinding, ServiceTransportProtocol,
+    ExecutionEnvironment, ExecutionOutputSink, NetworkPolicy, NeverCancelled, OperationOutcome,
+    ProviderCapabilities, ProviderError, ProviderErrorKind, ProviderId, ProviderStage,
+    RootFilesystemPolicy, SandboxCapability, SandboxCustody, SandboxHandle, SandboxInspection,
+    SandboxPrivilegePolicy, SandboxProvider, SandboxRecord, SandboxSpec, SandboxState,
+    ServiceContainerBinding, ServiceContainerBindings, ServiceContainerSpec, ServiceHealthPolicy,
+    ServiceNetwork, ServicePortBinding, ServiceTransportProtocol, discard_execution_output,
 };
 use sha2::{Digest as _, Sha256};
 
@@ -358,6 +358,35 @@ pub(crate) struct PodmanInner {
     capabilities: ProviderCapabilities,
     handle_locks: Mutex<BTreeMap<String, Weak<Mutex<()>>>>,
     docker_services: Mutex<BTreeMap<String, JobDockerService>>,
+}
+
+pub(crate) struct EndpointExecution<'environment> {
+    arguments: Vec<OsString>,
+    environment: EnvironmentDocument<'environment>,
+    timeout: Duration,
+    output_limit: usize,
+    stage: automata_ci_execution::ExecutionStage,
+    output: Arc<dyn ExecutionOutputSink>,
+}
+
+impl<'environment> EndpointExecution<'environment> {
+    pub(crate) fn new(
+        arguments: Vec<OsString>,
+        environment: EnvironmentDocument<'environment>,
+        timeout: Duration,
+        output_limit: usize,
+        stage: automata_ci_execution::ExecutionStage,
+        output: Arc<dyn ExecutionOutputSink>,
+    ) -> Self {
+        Self {
+            arguments,
+            environment,
+            timeout,
+            output_limit,
+            stage,
+            output,
+        }
+    }
 }
 
 impl fmt::Debug for PodmanInner {
@@ -3851,29 +3880,30 @@ impl PodmanInner {
         self.execute_observed(&request, cancellation, PodmanCommandStage::Endpoint(stage))
     }
 
-    pub(crate) fn run_endpoint_with_environment(
+    pub(crate) fn run_endpoint_execution(
         &self,
-        arguments: Vec<OsString>,
-        environment_document: EnvironmentDocument,
-        timeout: Duration,
-        output_limit: usize,
+        execution: EndpointExecution<'_>,
         cancellation: &dyn Cancellation,
-        stage: automata_ci_execution::ExecutionStage,
     ) -> CommandOutput {
         let deadline = Instant::now()
-            .checked_add(timeout)
+            .checked_add(execution.timeout)
             .unwrap_or_else(Instant::now);
         let mut request = CommandRequest::new(
             self.options.binary().as_path().to_path_buf(),
-            arguments,
-            timeout,
+            execution.arguments,
+            execution.timeout,
             deadline,
-            output_limit,
+            execution.output_limit,
         );
-        if !environment_document.is_empty() {
-            request = request.with_environment_stdin(environment_document);
+        if !execution.environment.is_empty() {
+            request = request.with_environment_stdin(execution.environment);
         }
-        self.execute_observed(&request, cancellation, PodmanCommandStage::Endpoint(stage))
+        self.execute_observed_with_output(
+            &request,
+            cancellation,
+            PodmanCommandStage::Endpoint(execution.stage),
+            execution.output,
+        )
     }
 
     pub(crate) fn run_endpoint_transport(
@@ -3959,6 +3989,16 @@ impl PodmanInner {
         cancellation: &dyn Cancellation,
         stage: PodmanCommandStage,
     ) -> CommandOutput {
+        self.execute_observed_with_output(request, cancellation, stage, discard_execution_output())
+    }
+
+    fn execute_observed_with_output(
+        &self,
+        request: &CommandRequest,
+        cancellation: &dyn Cancellation,
+        stage: PodmanCommandStage,
+        output: Arc<dyn ExecutionOutputSink>,
+    ) -> CommandOutput {
         self.observer.observe(PodmanEvent::CommandStarted { stage });
         let started = Instant::now();
         let output = if self
@@ -3969,8 +4009,12 @@ impl PodmanInner {
         {
             rejected_before_executor(request)
         } else {
-            self.executor
-                .execute(request, self.options.process_environment(), cancellation)
+            self.executor.execute(
+                request,
+                self.options.process_environment(),
+                cancellation,
+                output,
+            )
         };
         self.observer.observe(PodmanEvent::CommandCompleted {
             stage,

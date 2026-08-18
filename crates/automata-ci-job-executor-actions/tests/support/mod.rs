@@ -1542,13 +1542,17 @@ impl ExecutionEndpoint for FakeEndpoint {
         &self,
         request: &ExecutionCommand,
         cancellation: &dyn Cancellation,
+        output: Arc<dyn automata_ci_execution::ExecutionOutputSink>,
     ) -> Result<ExecutionOutput, ExecutionError> {
         let program = request.argv().program().as_str();
         let mut state = self.state.lock().expect("endpoint lock");
         state.commands.push(request.clone());
         if cancellation.disposition().requires_termination() {
-            return execution_output(ExecutionTermination::Cancelled, Vec::new(), false)
-                .map_err(|_| execution_error(ExecutionStage::Exec));
+            return publish_execution_output(
+                execution_output(ExecutionTermination::Cancelled, Vec::new(), false)
+                    .map_err(|_| execution_error(ExecutionStage::Exec)),
+                output.as_ref(),
+            );
         }
         if request
             .argv()
@@ -1585,24 +1589,30 @@ impl ExecutionEndpoint for FakeEndpoint {
                     None
                 }
             });
-            return execution_output(
-                selected
-                    .as_ref()
-                    .map_or(ExecutionTermination::Exited(44), |_| {
-                        ExecutionTermination::Exited(0)
-                    }),
-                selected
-                    .map(|bytes| vec![(ExecutionOutputStream::Stdout, bytes)])
-                    .unwrap_or_default(),
-                false,
-            )
-            .map_err(|_| execution_error(ExecutionStage::Exec));
+            return publish_execution_output(
+                execution_output(
+                    selected
+                        .as_ref()
+                        .map_or(ExecutionTermination::Exited(44), |_| {
+                            ExecutionTermination::Exited(0)
+                        }),
+                    selected
+                        .map(|bytes| vec![(ExecutionOutputStream::Stdout, bytes)])
+                        .unwrap_or_default(),
+                    false,
+                )
+                .map_err(|_| execution_error(ExecutionStage::Exec)),
+                output.as_ref(),
+            );
         }
         if matches!(program, "/usr/bin/install" | "/usr/bin/tar")
             || program.eq_ignore_ascii_case(r"C:\automata\tools\tar\tar.exe")
         {
-            return execution_output(ExecutionTermination::Exited(0), Vec::new(), false)
-                .map_err(|_| execution_error(ExecutionStage::Exec));
+            return publish_execution_output(
+                execution_output(ExecutionTermination::Exited(0), Vec::new(), false)
+                    .map_err(|_| execution_error(ExecutionStage::Exec)),
+                output.as_ref(),
+            );
         }
         if program.eq_ignore_ascii_case(r"C:\Program Files\PowerShell\7\pwsh.exe")
             && request
@@ -1611,8 +1621,11 @@ impl ExecutionEndpoint for FakeEndpoint {
                 .iter()
                 .any(|argument| argument.contains("[System.IO.Directory]::CreateDirectory"))
         {
-            return execution_output(ExecutionTermination::Exited(0), Vec::new(), false)
-                .map_err(|_| execution_error(ExecutionStage::Exec));
+            return publish_execution_output(
+                execution_output(ExecutionTermination::Exited(0), Vec::new(), false)
+                    .map_err(|_| execution_error(ExecutionStage::Exec)),
+                output.as_ref(),
+            );
         }
         if program.eq_ignore_ascii_case(r"C:\Program Files\PowerShell\7\pwsh.exe")
             && request
@@ -1621,8 +1634,11 @@ impl ExecutionEndpoint for FakeEndpoint {
                 .iter()
                 .any(|argument| argument.contains("FileAttributes]::ReparsePoint"))
         {
-            return execution_output(ExecutionTermination::Exited(0), Vec::new(), false)
-                .map_err(|_| execution_error(ExecutionStage::Exec));
+            return publish_execution_output(
+                execution_output(ExecutionTermination::Exited(0), Vec::new(), false)
+                    .map_err(|_| execution_error(ExecutionStage::Exec)),
+                output.as_ref(),
+            );
         }
         if program.eq_ignore_ascii_case(r"C:\automata\tools\hash\automata-sha256.exe") {
             let archive = request
@@ -1630,7 +1646,7 @@ impl ExecutionEndpoint for FakeEndpoint {
                 .arguments()
                 .first()
                 .expect("Windows action archive path");
-            let (termination, output) = state.files.get(archive).map_or_else(
+            let (termination, records) = state.files.get(archive).map_or_else(
                 || (ExecutionTermination::Exited(44), Vec::new()),
                 |bytes| {
                     (
@@ -1642,11 +1658,14 @@ impl ExecutionEndpoint for FakeEndpoint {
                     )
                 },
             );
-            return execution_output(termination, output, false)
-                .map_err(|_| execution_error(ExecutionStage::Exec));
+            return publish_execution_output(
+                execution_output(termination, records, false)
+                    .map_err(|_| execution_error(ExecutionStage::Exec)),
+                output.as_ref(),
+            );
         }
-        if let Some(output) = artifact_hash_output(request, &state.files) {
-            return output;
+        if let Some(result) = artifact_hash_output(request, &state.files) {
+            return publish_execution_output(result, output.as_ref());
         }
         let is_hash_files = program == "/opt/node24/bin/node"
             && request
@@ -1675,8 +1694,11 @@ impl ExecutionEndpoint for FakeEndpoint {
             apply_phase_response_files(request, &mut state, &response);
         }
         state.cancellation_before_copy_from = response.cancellation_before_copy_from;
-        execution_output(response.termination, response.output, response.truncated)
-            .map_err(|_| execution_error(ExecutionStage::Exec))
+        publish_execution_output(
+            execution_output(response.termination, response.output, response.truncated)
+                .map_err(|_| execution_error(ExecutionStage::Exec)),
+            output.as_ref(),
+        )
     }
 
     fn signal(
@@ -1808,6 +1830,19 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 
 fn execution_error(stage: ExecutionStage) -> ExecutionError {
     ExecutionError::new(ExecutionErrorKind::UnsupportedCapability, stage)
+}
+
+fn publish_execution_output(
+    result: Result<ExecutionOutput, ExecutionError>,
+    sink: &dyn automata_ci_execution::ExecutionOutputSink,
+) -> Result<ExecutionOutput, ExecutionError> {
+    let output = result?;
+    for record in output.records() {
+        sink.observe(record).map_err(|_| {
+            ExecutionError::new(ExecutionErrorKind::OutputRejected, ExecutionStage::Exec)
+        })?;
+    }
+    Ok(output)
 }
 
 fn execution_output(

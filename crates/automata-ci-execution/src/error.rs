@@ -244,6 +244,8 @@ pub enum ExecutionErrorKind {
     InvalidState,
     /// Captured or transferred bytes would exceed the request's hard limit.
     OutputLimitExceeded,
+    /// The caller's incremental output sink rejected an observed record.
+    OutputRejected,
     /// The execution backend rejected an otherwise valid operation.
     BackendRejected,
     /// Runner-local durable or temporary storage failed.

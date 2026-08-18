@@ -1,4 +1,8 @@
-use std::{collections::BTreeSet, fmt, sync::Arc};
+use std::{
+    collections::BTreeSet,
+    fmt,
+    sync::{Arc, Mutex},
+};
 
 use aho_corasick::{AhoCorasick, AhoCorasickKind, MatchKind};
 use automata_ci_actions_runtime::{
@@ -7,7 +11,9 @@ use automata_ci_actions_runtime::{
 };
 use automata_ci_auth::output_policy::SecretExposureClass;
 use automata_ci_core::{JobSecretExposure, LogChannel, LogGroupId, MAX_LOG_FRAME_BYTES};
-use automata_ci_execution::{ExecutionOutputRecord, ExecutionOutputStream};
+use automata_ci_execution::{
+    ExecutionOutputRecord, ExecutionOutputSink, ExecutionOutputSinkError, ExecutionOutputStream,
+};
 use automata_ci_runner_runtime::{ExecutionEvents, LogEvent};
 use zeroize::Zeroize as _;
 
@@ -17,6 +23,232 @@ const MAX_MASKS: usize = 4_096;
 const MAX_MASK_BYTES: usize = 1_048_576;
 const MASK_REPLACEMENT: &[u8] = b"***";
 pub(crate) const DIAGNOSTICS_LOG_GROUP_ID: &str = "job/diagnostics";
+
+pub(crate) struct PhaseOutputSink {
+    state: Mutex<PhaseOutputState>,
+}
+
+struct PhaseOutputState {
+    session: ActionsWorkflowCommandSession,
+    maximum_line_bytes: usize,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    masker: SecretMasker,
+    group_id: LogGroupId,
+    events: Arc<dyn ExecutionEvents>,
+    cancellation: Arc<dyn Fn() -> bool + Send + Sync>,
+    annotations: Vec<Annotation>,
+    failure: Option<ExecutorAdapterError>,
+    finished: bool,
+}
+
+pub(crate) struct PhaseOutputCompletion {
+    pub(crate) masker: SecretMasker,
+    pub(crate) annotations: Vec<Annotation>,
+    pub(crate) failure: Option<ExecutorAdapterError>,
+}
+
+impl PhaseOutputSink {
+    pub(crate) fn new(
+        limits: WorkflowCommandLimits,
+        policy: WorkflowCommandPolicy,
+        masker: SecretMasker,
+        group_id: LogGroupId,
+        events: Arc<dyn ExecutionEvents>,
+        cancellation: Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> Self {
+        let maximum_line_bytes = limits.maximum_line_bytes();
+        Self {
+            state: Mutex::new(PhaseOutputState {
+                session: ActionsWorkflowCommandSession::new(limits, policy),
+                maximum_line_bytes,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+                masker,
+                group_id,
+                events,
+                cancellation,
+                annotations: Vec::new(),
+                failure: None,
+                finished: false,
+            }),
+        }
+    }
+
+    pub(crate) fn finish(&self) -> PhaseOutputCompletion {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !state.finished
+            && state.failure.is_none()
+            && let Err(error) = state.finish_streams()
+        {
+            state.failure = Some(error);
+        }
+        state.finished = true;
+        PhaseOutputCompletion {
+            masker: std::mem::replace(&mut state.masker, SecretMasker::new()),
+            annotations: std::mem::take(&mut state.annotations),
+            failure: state.failure,
+        }
+    }
+}
+
+impl fmt::Debug for PhaseOutputSink {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PhaseOutputSink")
+            .finish_non_exhaustive()
+    }
+}
+
+impl ExecutionOutputSink for PhaseOutputSink {
+    fn observe(&self, record: &ExecutionOutputRecord) -> Result<(), ExecutionOutputSinkError> {
+        let mut state = self.state.lock().map_err(|_| ExecutionOutputSinkError)?;
+        if state.finished || state.failure.is_some() {
+            return Err(ExecutionOutputSinkError);
+        }
+        if let Err(error) = state.observe(record) {
+            state.failure = Some(error);
+            return Err(ExecutionOutputSinkError);
+        }
+        Ok(())
+    }
+}
+
+impl PhaseOutputState {
+    fn observe(&mut self, record: &ExecutionOutputRecord) -> Result<(), ExecutorAdapterError> {
+        self.ensure_active()?;
+        let channel = match record.stream() {
+            ExecutionOutputStream::Stdout => LogChannel::Stdout,
+            ExecutionOutputStream::Stderr => LogChannel::Stderr,
+        };
+        if record.is_end_of_stream() {
+            return self.finish_stream(record.stream(), channel);
+        }
+        let buffer = match record.stream() {
+            ExecutionOutputStream::Stdout => &mut self.stdout,
+            ExecutionOutputStream::Stderr => &mut self.stderr,
+        };
+        buffer.extend_from_slice(record.bytes());
+        self.process_complete_lines(record.stream(), channel)?;
+        let buffer = match record.stream() {
+            ExecutionOutputStream::Stdout => &self.stdout,
+            ExecutionOutputStream::Stderr => &self.stderr,
+        };
+        if buffer.len() > self.maximum_line_bytes {
+            return Err(ExecutorAdapterError::new(
+                ExecutorAdapterErrorKind::InvalidJob,
+            ));
+        }
+        Ok(())
+    }
+
+    fn process_complete_lines(
+        &mut self,
+        stream: ExecutionOutputStream,
+        channel: LogChannel,
+    ) -> Result<(), ExecutorAdapterError> {
+        loop {
+            self.ensure_active()?;
+            let newline = match stream {
+                ExecutionOutputStream::Stdout => self.stdout.iter().position(|byte| *byte == b'\n'),
+                ExecutionOutputStream::Stderr => self.stderr.iter().position(|byte| *byte == b'\n'),
+            };
+            let Some(newline) = newline else {
+                return Ok(());
+            };
+            let mut line = match stream {
+                ExecutionOutputStream::Stdout => self.stdout.drain(..=newline).collect::<Vec<_>>(),
+                ExecutionOutputStream::Stderr => self.stderr.drain(..=newline).collect::<Vec<_>>(),
+            };
+            line.pop();
+            self.process_line(&line, true, channel)?;
+        }
+    }
+
+    fn finish_stream(
+        &mut self,
+        stream: ExecutionOutputStream,
+        channel: LogChannel,
+    ) -> Result<(), ExecutorAdapterError> {
+        let line = match stream {
+            ExecutionOutputStream::Stdout => std::mem::take(&mut self.stdout),
+            ExecutionOutputStream::Stderr => std::mem::take(&mut self.stderr),
+        };
+        if !line.is_empty() {
+            self.process_line(&line, false, channel)?;
+        }
+        Ok(())
+    }
+
+    fn finish_streams(&mut self) -> Result<(), ExecutorAdapterError> {
+        self.finish_stream(ExecutionOutputStream::Stdout, LogChannel::Stdout)?;
+        self.finish_stream(ExecutionOutputStream::Stderr, LogChannel::Stderr)
+    }
+
+    fn process_line(
+        &mut self,
+        mut content: &[u8],
+        newline: bool,
+        channel: LogChannel,
+    ) -> Result<(), ExecutorAdapterError> {
+        self.ensure_active()?;
+        if newline && content.last() == Some(&b'\r') {
+            content = &content[..content.len() - 1];
+        }
+        let line = self
+            .session
+            .process_line(content)
+            .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::InvalidJob))?;
+        register_dynamic_masks(&line, &mut self.masker)?;
+        let result = match line {
+            WorkflowLine::Output(output) => emit_line(
+                output.as_str().as_bytes(),
+                newline,
+                &self.group_id,
+                channel,
+                &mut self.masker,
+                &self.events,
+            ),
+            WorkflowLine::Command(WorkflowCommandEvent::Annotation(annotation)) => {
+                emit_line(
+                    annotation.message().as_bytes(),
+                    true,
+                    &self.group_id,
+                    channel,
+                    &mut self.masker,
+                    &self.events,
+                )?;
+                self.ensure_active()?;
+                self.annotations.push(annotation);
+                Ok(())
+            }
+            WorkflowLine::Command(WorkflowCommandEvent::BeginGroup(group)) => emit_line(
+                group.title().as_bytes(),
+                true,
+                &self.group_id,
+                channel,
+                &mut self.masker,
+                &self.events,
+            ),
+            WorkflowLine::Command(_) => Ok(()),
+        };
+        result?;
+        self.ensure_active()
+    }
+
+    fn ensure_active(&self) -> Result<(), ExecutorAdapterError> {
+        if (self.cancellation)() {
+            Err(ExecutorAdapterError::new(
+                ExecutorAdapterErrorKind::Cancelled,
+            ))
+        } else {
+            Ok(())
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum MaskLimitRejection {
@@ -210,214 +442,6 @@ impl fmt::Debug for SecretMasker {
     }
 }
 
-pub(crate) struct ParsedOutput {
-    lines: Vec<ParsedOutputLine>,
-}
-
-#[cfg(test)]
-#[allow(
-    dead_code,
-    reason = "used by the external source-level regression harness"
-)]
-impl ParsedOutput {
-    pub(crate) fn output_lines(&self) -> Vec<(LogChannel, bool, String)> {
-        self.lines
-            .iter()
-            .filter_map(|line| match &line.parsed {
-                WorkflowLine::Output(output) => {
-                    Some((line.channel, line.newline, output.as_str().to_owned()))
-                }
-                WorkflowLine::Command(_) => None,
-            })
-            .collect()
-    }
-}
-
-struct ParsedOutputLine {
-    channel: LogChannel,
-    newline: bool,
-    parsed: WorkflowLine,
-}
-
-#[cfg(test)]
-#[allow(dead_code)]
-pub(crate) fn parse_output(
-    records: &[ExecutionOutputRecord],
-    limits: WorkflowCommandLimits,
-    policy: WorkflowCommandPolicy,
-    masker: &mut SecretMasker,
-) -> Result<ParsedOutput, ExecutorAdapterError> {
-    parse_output_with_cancellation(records, limits, policy, masker, &|| false)
-}
-
-pub(crate) fn parse_output_with_cancellation(
-    records: &[ExecutionOutputRecord],
-    limits: WorkflowCommandLimits,
-    policy: WorkflowCommandPolicy,
-    masker: &mut SecretMasker,
-    cancellation: &dyn Fn() -> bool,
-) -> Result<ParsedOutput, ExecutorAdapterError> {
-    let mut session = ActionsWorkflowCommandSession::new(limits, policy);
-    let mut stdout = Vec::new();
-    let mut stderr = Vec::new();
-    let mut parsed = Vec::new();
-    for record in records {
-        require_not_cancelled(cancellation)?;
-        let (buffer, channel) = match record.stream() {
-            ExecutionOutputStream::Stdout => (&mut stdout, LogChannel::Stdout),
-            ExecutionOutputStream::Stderr => (&mut stderr, LogChannel::Stderr),
-        };
-        if record.is_end_of_stream() {
-            if !buffer.is_empty() {
-                require_not_cancelled(cancellation)?;
-                parse_line(buffer, false, channel, &mut session, masker, &mut parsed)?;
-                require_not_cancelled(cancellation)?;
-                buffer.clear();
-            }
-            continue;
-        }
-        buffer.extend_from_slice(record.bytes());
-        parse_complete_lines(
-            buffer,
-            channel,
-            &mut session,
-            masker,
-            &mut parsed,
-            cancellation,
-        )?;
-        if buffer.len() > limits.maximum_line_bytes() {
-            return Err(ExecutorAdapterError::new(
-                ExecutorAdapterErrorKind::InvalidJob,
-            ));
-        }
-    }
-    require_not_cancelled(cancellation)?;
-    Ok(ParsedOutput { lines: parsed })
-}
-
-pub(crate) fn process_output(
-    parsed: ParsedOutput,
-    group_id: &LogGroupId,
-    masker: &mut SecretMasker,
-    events: &Arc<dyn ExecutionEvents>,
-    annotations: &mut Vec<Annotation>,
-    cancellation: &dyn Fn() -> bool,
-) -> Result<(), ExecutorAdapterError> {
-    for line in parsed.lines {
-        require_not_cancelled(cancellation)?;
-        match line.parsed {
-            WorkflowLine::Output(output) => {
-                emit_line_with_cancellation(
-                    output.as_str().as_bytes(),
-                    line.newline,
-                    group_id,
-                    line.channel,
-                    masker,
-                    events,
-                    Some(cancellation),
-                )?;
-            }
-            WorkflowLine::Command(command) => match command {
-                WorkflowCommandEvent::Annotation(annotation) => {
-                    emit_line_with_cancellation(
-                        annotation.message().as_bytes(),
-                        true,
-                        group_id,
-                        line.channel,
-                        masker,
-                        events,
-                        Some(cancellation),
-                    )?;
-                    annotations.push(annotation);
-                }
-                WorkflowCommandEvent::BeginGroup(group) => {
-                    emit_line_with_cancellation(
-                        group.title().as_bytes(),
-                        true,
-                        group_id,
-                        line.channel,
-                        masker,
-                        events,
-                        Some(cancellation),
-                    )?;
-                }
-                WorkflowCommandEvent::RegisterMask(_)
-                | WorkflowCommandEvent::Debug(_)
-                | WorkflowCommandEvent::EndGroup
-                | WorkflowCommandEvent::StopCommands(_)
-                | WorkflowCommandEvent::ResumeCommands
-                | WorkflowCommandEvent::Matcher(_)
-                | WorkflowCommandEvent::EchoChanged(_)
-                | WorkflowCommandEvent::Notice(_) => {}
-            },
-        }
-        require_not_cancelled(cancellation)?;
-    }
-    Ok(())
-}
-
-fn require_not_cancelled(cancellation: &dyn Fn() -> bool) -> Result<(), ExecutorAdapterError> {
-    if cancellation() {
-        Err(ExecutorAdapterError::new(
-            ExecutorAdapterErrorKind::Cancelled,
-        ))
-    } else {
-        Ok(())
-    }
-}
-
-fn parse_complete_lines(
-    buffer: &mut Vec<u8>,
-    channel: LogChannel,
-    processor: &mut dyn WorkflowCommandProcessor,
-    masker: &mut SecretMasker,
-    parsed: &mut Vec<ParsedOutputLine>,
-    cancellation: &dyn Fn() -> bool,
-) -> Result<(), ExecutorAdapterError> {
-    let mut consumed = 0;
-    while let Some(relative) = buffer[consumed..].iter().position(|byte| *byte == b'\n') {
-        require_not_cancelled(cancellation)?;
-        let newline = consumed + relative;
-        parse_line(
-            &buffer[consumed..newline],
-            true,
-            channel,
-            processor,
-            masker,
-            parsed,
-        )?;
-        require_not_cancelled(cancellation)?;
-        consumed = newline + 1;
-    }
-    if consumed != 0 {
-        buffer.drain(..consumed);
-    }
-    Ok(())
-}
-
-fn parse_line(
-    mut content: &[u8],
-    newline: bool,
-    channel: LogChannel,
-    processor: &mut dyn WorkflowCommandProcessor,
-    masker: &mut SecretMasker,
-    parsed: &mut Vec<ParsedOutputLine>,
-) -> Result<(), ExecutorAdapterError> {
-    if newline && content.last() == Some(&b'\r') {
-        content = &content[..content.len() - 1];
-    }
-    let line = processor
-        .process_line(content)
-        .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::InvalidJob))?;
-    register_dynamic_masks(&line, masker)?;
-    parsed.push(ParsedOutputLine {
-        channel,
-        newline,
-        parsed: line,
-    });
-    Ok(())
-}
-
 fn register_dynamic_masks(
     line: &WorkflowLine,
     masker: &mut SecretMasker,
@@ -485,23 +509,6 @@ fn emit_line(
     masker: &mut SecretMasker,
     events: &Arc<dyn ExecutionEvents>,
 ) -> Result<(), ExecutorAdapterError> {
-    emit_line_with_cancellation(content, newline, group_id, channel, masker, events, None)
-}
-
-fn emit_line_with_cancellation(
-    content: &[u8],
-    newline: bool,
-    group_id: &LogGroupId,
-    channel: LogChannel,
-    masker: &mut SecretMasker,
-    events: &Arc<dyn ExecutionEvents>,
-    cancellation: Option<&dyn Fn() -> bool>,
-) -> Result<(), ExecutorAdapterError> {
-    if cancellation.is_some_and(|check| check()) {
-        return Err(ExecutorAdapterError::new(
-            ExecutorAdapterErrorKind::Cancelled,
-        ));
-    }
     let mut payload = masker.mask(content)?;
     if newline {
         payload.push(b'\n');
@@ -510,20 +517,9 @@ fn emit_line_with_cancellation(
         return Ok(());
     }
     for chunk in payload.chunks(MAX_LOG_FRAME_BYTES) {
-        if cancellation.is_some_and(|check| check()) {
-            return Err(ExecutorAdapterError::new(
-                ExecutorAdapterErrorKind::Cancelled,
-            ));
-        }
-        let emitted = events
+        events
             .emit_log(LogEvent::new(group_id.clone(), channel, chunk.to_vec()))
-            .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::Internal));
-        if cancellation.is_some_and(|check| check()) {
-            return Err(ExecutorAdapterError::new(
-                ExecutorAdapterErrorKind::Cancelled,
-            ));
-        }
-        emitted?;
+            .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::Internal))?;
     }
     Ok(())
 }
@@ -534,8 +530,6 @@ const fn resource_exhausted() -> ExecutorAdapterError {
 
 #[cfg(test)]
 mod cancellation_tests {
-    use std::cell::Cell;
-
     use super::*;
 
     #[test]
@@ -555,40 +549,6 @@ mod cancellation_tests {
         assert_eq!(
             mask_aggregate_bytes_rejection(MAX_MASK_BYTES + 1),
             Some(MaskLimitRejection::AggregateBytes)
-        );
-    }
-
-    #[test]
-    fn parsing_stops_before_the_next_line_and_mask_after_cancellation() {
-        let records = [ExecutionOutputRecord::data(
-            ExecutionOutputStream::Stdout,
-            b"::add-mask::first-secret\n::add-mask::second-secret\n".to_vec(),
-        )
-        .expect("bounded output record")];
-        let checks = Cell::new(0_usize);
-        let cancellation = || {
-            let observed = checks.get();
-            checks.set(observed + 1);
-            observed >= 2
-        };
-        let mut masker = SecretMasker::new();
-
-        let error = parse_output_with_cancellation(
-            &records,
-            WorkflowCommandLimits::default(),
-            WorkflowCommandPolicy::new(false),
-            &mut masker,
-            &cancellation,
-        )
-        .err()
-        .expect("the cancellation boundary stops parsing");
-
-        let _ = error;
-        assert!(masker.contains_secret("first-secret").expect("first mask"));
-        assert!(
-            !masker
-                .contains_secret("second-secret")
-                .expect("second mask remains absent")
         );
     }
 }
