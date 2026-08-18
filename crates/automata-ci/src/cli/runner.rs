@@ -17,7 +17,7 @@ use zeroize::Zeroizing;
 use super::{
     OutputFormat, RunnerArgs, RunnerCommand,
     auth::{CliServerOrigin, auth_client, bearer_header, decode_json_response},
-    credential_store::{CliAuthProcessLock, CliCredentialStore, SecretServiceCredentialStore},
+    credential_store::{CliAuthProcessLock, CliCredentialStore, PlatformCredentialStore},
 };
 
 const ENROLLMENTS_PATH: &str = "/api/v1/runner-enrollments";
@@ -42,7 +42,7 @@ pub(crate) async fn execute_runner_command(
                 println!("discarded the pending runner enrollment token receipt");
                 return Ok(());
             }
-            let store = SecretServiceCredentialStore::discover()
+            let store = PlatformCredentialStore::discover()
                 .context("CLI session custody is unavailable")?;
             let issued = create_token(
                 &origin,

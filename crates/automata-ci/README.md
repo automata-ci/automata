@@ -335,7 +335,7 @@ forms and reauthorizes the actor from current durable state; caller-provided
 roles and revisions are not authority. Dedicated RBAC CLI commands are not
 available.
 
-On Linux, the operational device client is:
+On Linux and macOS, the operational device client is:
 
 ```console
 automata auth --server-url https://ci.example.test login
@@ -343,13 +343,15 @@ automata auth --server-url https://ci.example.test status
 automata auth --server-url https://ci.example.test logout
 ```
 
-It requires `secret-tool` and an unlocked OS Secret Service. There is no
-plaintext credential-file fallback. A completed device flow first creates an
-unusable server-side `pending_activation` session for no more than five minutes;
-the client stores and verifies the credential before activating it. Status can
-retry an indeterminate activation. The operator is responsible for selecting a
-Secret Service with encrypted backing storage because Automata cannot attest
-the external keyring implementation. Complete GitHub provider configuration
+Linux requires `secret-tool` and an unlocked OS Secret Service. macOS uses
+Security.framework and requires an unlocked writable default user Keychain;
+Keychain access is deliberately noninteractive and fails closed when locked.
+There is no plaintext credential-file fallback. A completed device flow first
+creates an unusable server-side `pending_activation` session for no more than
+five minutes; the client stores and verifies the credential before activating
+it. Status can retry an indeterminate activation. On Linux, the operator is
+responsible for selecting a Secret Service with encrypted backing storage
+because Automata cannot attest the external keyring implementation. Complete GitHub provider configuration
 adds the exact signed webhook, public/private source-delivery, bounded periodic
 schedule discovery, fenced Check Runs, scoped App-credential runtime, and exact lease-bound repository authority
 for an already-materialized Standard GitHub job. CredentialFree jobs receive
@@ -381,7 +383,7 @@ automata environment-review --server-url https://ci.example.test \
   --decision approve --output json
 ```
 
-The command uses the same Secret Service-only CLI session custody, accepts
+The command uses the same OS credential-manager-only CLI session custody, accepts
 `approve` or `reject`, and returns only the closed gate state. It does not retry
 the mutation automatically; an indeterminate result may be retried only with
 the exact same repository UUID, attempt UUID, and decision.
@@ -468,8 +470,10 @@ operation. With human authentication configured, the server also exposes
 authenticated, repository-scoped HTTP routes for metadata reads,
 create/replace, delete, provider inspection, and built-in-provider activation.
 
-The Linux operator CLI exposes a repository-scoped subset when its CLI session
-is stored in an unlocked Secret Service and `secret-tool` remains available:
+The Linux and macOS operator CLI exposes a repository-scoped subset when its
+CLI session is stored in the available OS credential manager (`secret-tool`
+plus an unlocked Secret Service on Linux, or an unlocked default user Keychain
+on macOS):
 
 ```console
 automata secret --server-url https://ci.example.test provider status

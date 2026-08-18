@@ -32,7 +32,7 @@ use super::{
         CliServerOrigin, auth_client, bearer_header, decode_json_response,
         discard_bounded_response, retry_after_seconds,
     },
-    credential_store::{CliAuthProcessLock, CliCredentialStore, SecretServiceCredentialStore},
+    credential_store::{CliAuthProcessLock, CliCredentialStore, PlatformCredentialStore},
     output::escaped_table_value,
 };
 use crate::app::secret_api::{
@@ -64,7 +64,7 @@ pub(crate) async fn execute_secret_command(
     let _process_lock = CliAuthProcessLock::acquire(origin.as_str())
         .context("CLI secret operation could not be serialized")?;
     let store =
-        SecretServiceCredentialStore::discover().context("CLI session custody is unavailable")?;
+        PlatformCredentialStore::discover().context("CLI session custody is unavailable")?;
     execute_secret_command_with(origin, output, command, &store).await
 }
 

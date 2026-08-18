@@ -16,7 +16,7 @@ variable-value delivery remain unsupported.
 | Capability | Status | Limit |
 | --- | --- | --- |
 | Browser login | Available when configured | GitHub App web flow; browser routes accept browser sessions only. |
-| CLI login | Available on Linux | Requires `secret-tool` and an unlocked Secret Service. |
+| CLI login | Available on Linux and macOS | Linux requires `secret-tool` and an unlocked Secret Service; macOS requires an unlocked writable default user Keychain. |
 | Initial installation | Available when armed | Anonymous `/setup` is one-use and restricted to one configured numeric GitHub user ID. |
 | RBAC | Available when authentication is configured | Roles, permissions, direct bindings, and numeric GitHub organization/team mappings resolve on every request. |
 | RBAC management | Available in browser and JSON API | There are no dedicated RBAC CLI commands. Organization/team mapping management is not exposed. |
@@ -83,17 +83,21 @@ The client accepts HTTPS and literal loopback HTTP. It does not follow redirects
 or use proxy environment variables. The verification URL and device code are
 written to the controlling terminal, not ordinary stdout, stderr, or JSON.
 
-On Linux, the client stores one credential per canonical server origin in the
-OS Secret Service and verifies it by reading it back. It rejects ambiguous
-matches and has no plaintext-file fallback. Automata verifies the Secret
-Service protocol; the operator is responsible for choosing an implementation
-whose database is encrypted at rest.
+The client stores one credential per canonical server origin in the operating
+system credential manager and verifies it by reading it back. Linux uses the OS
+Secret Service through `secret-tool`; macOS uses the default user Keychain
+through Security.framework. It rejects ambiguous matches and has no
+plaintext-file fallback. Keychain access is noninteractive, so a locked macOS
+Keychain fails closed; unlock it in the operator session before running the
+CLI. On Linux, Automata verifies the Secret Service protocol, while the
+operator remains responsible for choosing an implementation whose database is
+encrypted at rest.
 
 ### Crash-safe CLI activation
 
 The device flow first creates a `pending_activation` session with a lifetime of
 at most five minutes. That session cannot authenticate API requests. The client
-stores and verifies the bearer in Secret Service, then activates the exact
+stores and verifies the bearer in the OS credential manager, then activates the exact
 credential on the server.
 
 `auth status` retries activation if the client stopped after storing the bearer
@@ -116,7 +120,7 @@ automata rerun --server-url https://ci.example.test \
   --selection entire-workflow --output json
 ```
 
-The client loads the server-scoped CLI session from Secret Service, applies a
+The client loads the server-scoped CLI session from the OS credential manager, applies a
 bounded retry policy, and uses one operation UUID throughout. Successful output
 includes that UUID. If the final result is indeterminate, retry the exact same
 request with the error's `--operation-id` value. See
@@ -136,7 +140,7 @@ automata environment-review --server-url https://ci.example.test \
 
 Use `--decision reject` to reject the request. Both UUIDs must use non-nil,
 lowercase, hyphenated canonical form. The client loads only the server-scoped
-Secret Service session and returns the current closed gate state: `waiting`,
+OS credential-manager session and returns the current closed gate state: `waiting`,
 `resolving`, `ready`, `rejected`, `expired`, or `cancelled`.
 
 The command sends a mutation only once. If transport fails or the server cannot

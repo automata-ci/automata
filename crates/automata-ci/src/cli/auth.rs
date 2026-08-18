@@ -27,7 +27,7 @@ use zeroize::Zeroizing;
 
 use super::{
     AuthCommand, OutputFormat,
-    credential_store::{CliAuthProcessLock, CliCredentialStore, SecretServiceCredentialStore},
+    credential_store::{CliAuthProcessLock, CliCredentialStore, PlatformCredentialStore},
     output::escaped_table_value,
 };
 use crate::app::github_auth::{
@@ -51,7 +51,7 @@ pub(crate) async fn execute_auth_command(
     let _process_lock = CliAuthProcessLock::acquire(origin.as_str())
         .context("CLI authentication operation could not be serialized")?;
     let store = Arc::new(
-        SecretServiceCredentialStore::discover().context("CLI session custody is unavailable")?,
+        PlatformCredentialStore::discover().context("CLI session custody is unavailable")?,
     );
     let prompt: Box<dyn DeviceAuthorizationPrompt> = match command {
         AuthCommand::Login => Box::new(

@@ -11,7 +11,7 @@ use super::{
     auth::{
         CliServerOrigin, auth_client, bearer_header, decode_json_response, discard_bounded_response,
     },
-    credential_store::{CliAuthProcessLock, CliCredentialStore, SecretServiceCredentialStore},
+    credential_store::{CliAuthProcessLock, CliCredentialStore, PlatformCredentialStore},
 };
 
 const ENVIRONMENT_REVIEW_BASE: &str = "/api/v1/repositories";
@@ -27,7 +27,7 @@ pub(crate) async fn execute_environment_review_command(
     let _process_lock = CliAuthProcessLock::acquire(origin.as_str())
         .context("CLI environment-review operation could not be serialized")?;
     let store =
-        SecretServiceCredentialStore::discover().context("CLI session custody is unavailable")?;
+        PlatformCredentialStore::discover().context("CLI session custody is unavailable")?;
     let completed = execute_environment_review_command_with(origin, args, &store).await?;
     print_environment_review(output, &completed)
 }
