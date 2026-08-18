@@ -2,8 +2,10 @@ import Darwin
 import Foundation
 import Virtualization
 
-private let helperProtocol: UInt16 = 1
+private let helperProtocol: UInt16 = 2
 private let maximumFrameBytes = 32 * 1024 * 1024
+private let runtimeProxyHostPort: UInt32 = 10251
+private let runtimeProxySessionLimit = 16
 private let launchRequestKeys: Set<String> = [
   "protocol", "attempt_id", "source_disk_image", "source_auxiliary_storage",
   "attempt_directory", "hardware_model_base64", "cpu_count", "memory_bytes",
@@ -12,6 +14,7 @@ private let launchRequestKeys: Set<String> = [
   "expected_architecture", "expected_job_uid", "expected_job_gid",
   "expected_process_limit", "minimum_cpu_count", "minimum_memory_bytes",
   "handshake_nonce", "boot_timeout_millis", "stop_timeout_millis",
+  "runtime_proxy_socket",
 ]
 
 private struct LaunchRequest: Decodable {
@@ -39,6 +42,7 @@ private struct LaunchRequest: Decodable {
   let handshakeNonce: String
   let bootTimeoutMillis: UInt64
   let stopTimeoutMillis: UInt64
+  let runtimeProxySocket: String?
 
   private enum CodingKeys: String, CodingKey {
     case protocolVersion = "protocol"
@@ -65,6 +69,7 @@ private struct LaunchRequest: Decodable {
     case handshakeNonce = "handshake_nonce"
     case bootTimeoutMillis = "boot_timeout_millis"
     case stopTimeoutMillis = "stop_timeout_millis"
+    case runtimeProxySocket = "runtime_proxy_socket"
   }
 }
 
@@ -174,6 +179,123 @@ private func supportedMacOSVersion(_ value: String) -> Bool {
   return components.allSatisfy { component in
     !component.isEmpty && component.utf8.count <= 4
       && component.utf8.allSatisfy { byte in byte >= 48 && byte <= 57 }
+  }
+}
+
+private func validRuntimeProxySocket(_ path: String?, attemptDirectory: String) -> Bool {
+  guard let path else { return true }
+  guard let normalized = normalizedAbsolute(path), normalized == path else { return false }
+  let url = URL(fileURLWithPath: path)
+  guard url.deletingLastPathComponent().path == attemptDirectory,
+    url.lastPathComponent == "runtime-proxy.sock"
+  else {
+    return false
+  }
+  var status = stat()
+  return lstat(path, &status) == 0
+    && status.st_mode & S_IFMT == S_IFSOCK
+    && status.st_uid == geteuid()
+    && status.st_nlink == 1
+    && status.st_mode & 0o077 == 0
+}
+
+private func connectRuntimeProxySocket(_ path: String) -> Int32? {
+  let descriptor = socket(AF_UNIX, SOCK_STREAM, 0)
+  guard descriptor >= 0 else { return nil }
+  _ = fcntl(descriptor, F_SETFD, FD_CLOEXEC)
+  var address = sockaddr_un()
+  let maximumPathBytes = MemoryLayout.size(ofValue: address.sun_path)
+  guard path.utf8.count < maximumPathBytes else {
+    close(descriptor)
+    return nil
+  }
+  address.sun_len = UInt8(MemoryLayout<sockaddr_un>.size)
+  address.sun_family = sa_family_t(AF_UNIX)
+  path.withCString { source in
+    withUnsafeMutablePointer(to: &address.sun_path) { tuple in
+      tuple.withMemoryRebound(to: CChar.self, capacity: maximumPathBytes) { destination in
+        _ = strlcpy(destination, source, maximumPathBytes)
+      }
+    }
+  }
+  let connected = withUnsafePointer(to: &address) {
+    $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+      Darwin.connect(descriptor, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+    }
+  }
+  guard connected == 0 else {
+    close(descriptor)
+    return nil
+  }
+  return descriptor
+}
+
+private func copyRuntimeProxyStream(from source: Int32, to destination: Int32) {
+  var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+  while true {
+    let count = Darwin.read(source, &buffer, buffer.count)
+    if count == 0 { break }
+    if count < 0 {
+      if errno == EINTR { continue }
+      break
+    }
+    var offset = 0
+    while offset < count {
+      let written = buffer.withUnsafeBytes { bytes in
+        Darwin.write(destination, bytes.baseAddress!.advanced(by: offset), count - offset)
+      }
+      if written < 0, errno == EINTR { continue }
+      if written <= 0 {
+        _ = shutdown(destination, SHUT_WR)
+        return
+      }
+      offset += written
+    }
+  }
+  _ = shutdown(destination, SHUT_WR)
+}
+
+private final class RuntimeProxyListener: NSObject, VZVirtioSocketListenerDelegate {
+  private let socketPath: String
+  private let slots = DispatchSemaphore(value: runtimeProxySessionLimit)
+
+  init(socketPath: String) {
+    self.socketPath = socketPath
+    super.init()
+  }
+
+  func listener(
+    _ listener: VZVirtioSocketListener,
+    shouldAcceptNewConnection connection: VZVirtioSocketConnection,
+    from socketDevice: VZVirtioSocketDevice
+  ) -> Bool {
+    guard connection.destinationPort == runtimeProxyHostPort,
+      slots.wait(timeout: .now()) == .success
+    else {
+      return false
+    }
+    guard let upstream = connectRuntimeProxySocket(socketPath) else {
+      slots.signal()
+      return false
+    }
+    DispatchQueue.global(qos: .utility).async { [slots] in
+      let pumps = DispatchGroup()
+      for (source, destination) in [
+        (connection.fileDescriptor, upstream),
+        (upstream, connection.fileDescriptor),
+      ] {
+        pumps.enter()
+        DispatchQueue.global(qos: .utility).async {
+          copyRuntimeProxyStream(from: source, to: destination)
+          pumps.leave()
+        }
+      }
+      pumps.wait()
+      connection.close()
+      close(upstream)
+      slots.signal()
+    }
+    return true
   }
 }
 
@@ -573,7 +695,8 @@ private func run(lockPath: String) throws {
     let sourceDisk = normalizedAbsolute(request.sourceDiskImage),
     let sourceAuxiliary = normalizedAbsolute(request.sourceAuxiliaryStorage),
     URL(fileURLWithPath: normalizedLock).deletingLastPathComponent().path == attemptDirectory,
-    URL(fileURLWithPath: attemptDirectory).lastPathComponent == request.attemptID
+    URL(fileURLWithPath: attemptDirectory).lastPathComponent == request.attemptID,
+    validRuntimeProxySocket(request.runtimeProxySocket, attemptDirectory: attemptDirectory)
   else {
     throw HelperFailure(rejection: .invalidRequest)
   }
@@ -601,19 +724,29 @@ private func run(lockPath: String) throws {
   guard let device = machine.socketDevices.first as? VZVirtioSocketDevice else {
     throw HelperFailure(rejection: .invalidConfiguration)
   }
+  var runtimeProxyListener: RuntimeProxyListener?
+  if let socketPath = request.runtimeProxySocket {
+    let delegate = RuntimeProxyListener(socketPath: socketPath)
+    let listener = VZVirtioSocketListener()
+    listener.delegate = delegate
+    device.setSocketListener(listener, forPort: runtimeProxyHostPort)
+    runtimeProxyListener = delegate
+  }
   let deadline = DispatchTime.now() + .milliseconds(Int(clamping: request.bootTimeoutMillis))
   try attestGuest(request: request, device: device, queue: queue, deadline: deadline)
   emit(status: "ready")
 
-  while let requestFrame = try readFrame(FileHandle.standardInput, allowEOF: true) {
-    let response = try exchange(
-      requestFrame,
-      device: device,
-      port: request.guestPort,
-      queue: queue,
-      deadline: .now() + .seconds(24 * 60 * 60)
-    )
-    try writeFrame(response, to: FileHandle.standardOutput)
+  try withExtendedLifetime(runtimeProxyListener) {
+    while let requestFrame = try readFrame(FileHandle.standardInput, allowEOF: true) {
+      let response = try exchange(
+        requestFrame,
+        device: device,
+        port: request.guestPort,
+        queue: queue,
+        deadline: .now() + .seconds(24 * 60 * 60)
+      )
+      try writeFrame(response, to: FileHandle.standardOutput)
+    }
   }
 }
 

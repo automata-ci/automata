@@ -64,6 +64,21 @@ Only `network: "disabled"` is implemented. Private egress is intentionally
 rejected until a separate authenticated host broker exists; attaching a NAT
 device would weaken the current contract.
 
+The protocol-2 host helper and newly provisioned guest bridge contain the
+closed transport primitive for that broker. The guest bridge owns only
+`127.0.0.1:18081`, permits at most 16 concurrent relays, and connects to the
+host only through fixed Virtio socket port 10251. The helper registers that
+port only when its launch request names the owner-only Unix socket
+`runtime-proxy.sock` directly inside the current attempt directory. It rejects
+another path, owner, file type, link count, or group/other permission.
+
+The current runner deliberately sends `null`, so no host listener or runtime
+service route is available and no network capability is advertised. A later
+slice must supply an attempt-scoped broker that authenticates and restricts
+exact GitHub and Results routes before the runner may expose the guest
+loopback endpoint. This transport is not a generic TCP proxy and does not
+justify adding a VM network device.
+
 ## Build and sign the host tools
 
 Use Xcode's Swift toolchain on Apple Silicon:

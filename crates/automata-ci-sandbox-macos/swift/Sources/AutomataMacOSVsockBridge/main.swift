@@ -3,6 +3,9 @@ import Foundation
 
 private let maximumFrameBytes = 32 * 1024 * 1024
 private let guestProtocol: UInt16 = 3
+private let runtimeProxyGuestPort: UInt16 = 18081
+private let runtimeProxyHostPort: UInt32 = 10251
+private let runtimeProxySessionLimit = 16
 
 private enum BridgeFailure: String, Error {
   case guestClientExit = "guest_client_exit"
@@ -14,10 +17,139 @@ private enum BridgeFailure: String, Error {
   case requestFrame = "request_frame"
   case requestRejected = "request_rejected"
   case responseWrite = "response_write"
+  case runtimeProxyBind = "runtime_proxy_bind"
+  case runtimeProxyConnect = "runtime_proxy_connect"
+  case runtimeProxyListen = "runtime_proxy_listen"
   case socketBind = "socket_bind"
   case socketCreate = "socket_create"
   case socketListen = "socket_listen"
   case socketAccept = "socket_accept"
+}
+
+private func setCloseOnExec(_ descriptor: Int32) {
+  _ = fcntl(descriptor, F_SETFD, FD_CLOEXEC)
+}
+
+private func runtimeProxyListener() throws -> Int32 {
+  let descriptor = socket(AF_INET, SOCK_STREAM, 0)
+  guard descriptor >= 0 else { throw BridgeFailure.runtimeProxyListen }
+  setCloseOnExec(descriptor)
+  var reuse: Int32 = 1
+  _ = setsockopt(
+    descriptor,
+    SOL_SOCKET,
+    SO_REUSEADDR,
+    &reuse,
+    socklen_t(MemoryLayout<Int32>.size)
+  )
+  var address = sockaddr_in()
+  address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+  address.sin_family = sa_family_t(AF_INET)
+  address.sin_port = runtimeProxyGuestPort.bigEndian
+  address.sin_addr = in_addr(s_addr: inet_addr("127.0.0.1"))
+  let bound = withUnsafePointer(to: &address) {
+    $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+      Darwin.bind(descriptor, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+    }
+  }
+  guard bound == 0 else {
+    close(descriptor)
+    throw BridgeFailure.runtimeProxyBind
+  }
+  guard Darwin.listen(descriptor, Int32(runtimeProxySessionLimit)) == 0 else {
+    close(descriptor)
+    throw BridgeFailure.runtimeProxyListen
+  }
+  return descriptor
+}
+
+private func connectRuntimeProxyHost() throws -> Int32 {
+  let descriptor = socket(AF_VSOCK, SOCK_STREAM, 0)
+  guard descriptor >= 0 else { throw BridgeFailure.runtimeProxyConnect }
+  setCloseOnExec(descriptor)
+  var address = sockaddr_vm()
+  address.svm_len = UInt8(MemoryLayout<sockaddr_vm>.size)
+  address.svm_family = sa_family_t(AF_VSOCK)
+  address.svm_port = runtimeProxyHostPort
+  address.svm_cid = UInt32(VMADDR_CID_HOST)
+  let connected = withUnsafePointer(to: &address) {
+    $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+      Darwin.connect(descriptor, $0, socklen_t(MemoryLayout<sockaddr_vm>.size))
+    }
+  }
+  guard connected == 0 else {
+    close(descriptor)
+    throw BridgeFailure.runtimeProxyConnect
+  }
+  return descriptor
+}
+
+private func copyStream(from source: Int32, to destination: Int32) {
+  var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+  while true {
+    let count = Darwin.read(source, &buffer, buffer.count)
+    if count == 0 { break }
+    if count < 0 {
+      if errno == EINTR { continue }
+      break
+    }
+    var offset = 0
+    while offset < count {
+      let written = buffer.withUnsafeBytes { bytes in
+        Darwin.write(destination, bytes.baseAddress!.advanced(by: offset), count - offset)
+      }
+      if written < 0, errno == EINTR { continue }
+      if written <= 0 {
+        _ = shutdown(destination, SHUT_WR)
+        return
+      }
+      offset += written
+    }
+  }
+  _ = shutdown(destination, SHUT_WR)
+}
+
+private func relayRuntimeProxy(client: Int32, host: Int32) {
+  let pumps = DispatchGroup()
+  for (source, destination) in [(client, host), (host, client)] {
+    pumps.enter()
+    DispatchQueue.global(qos: .utility).async {
+      copyStream(from: source, to: destination)
+      pumps.leave()
+    }
+  }
+  pumps.wait()
+  close(client)
+  close(host)
+}
+
+private func serveRuntimeProxy(listener: Int32) -> Never {
+  let slots = DispatchSemaphore(value: runtimeProxySessionLimit)
+  while true {
+    let client = accept(listener, nil, nil)
+    if client < 0 {
+      if errno == EINTR { continue }
+      diagnose(.socketAccept)
+      continue
+    }
+    setCloseOnExec(client)
+    guard slots.wait(timeout: .now()) == .success else {
+      close(client)
+      continue
+    }
+    let host: Int32
+    do {
+      host = try connectRuntimeProxyHost()
+    } catch {
+      close(client)
+      slots.signal()
+      continue
+    }
+    DispatchQueue.global(qos: .utility).async {
+      relayRuntimeProxy(client: client, host: host)
+      slots.signal()
+    }
+  }
 }
 
 private struct RequestEnvelope: Decodable {
@@ -227,6 +359,10 @@ private func main() -> Int32 {
     return 64
   }
   do {
+    let runtimeListener = try runtimeProxyListener()
+    DispatchQueue(label: "dev.automata.macos-vm.runtime-proxy").async {
+      serveRuntimeProxy(listener: runtimeListener)
+    }
     let listener = try listen(port: port)
     serve(listener: listener, guestClient: arguments[4], unixSocket: arguments[6])
   } catch let failure as BridgeFailure {

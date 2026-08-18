@@ -24,6 +24,12 @@ macOS version/build, architecture, dedicated non-admin UID/GID, and sealed
 process ceiling. The root guest bridge admits only that exact configuration;
 the agent applies it before executing commands as the dedicated guest identity.
 
+The bridge also contains a closed, bounded guest-loopback relay for future
+runtime services. The host helper exposes its fixed Virtio socket port only
+when given an owner-only Unix socket inside the current attempt directory. The
+runner currently supplies no socket, so the relay cannot reach the host and
+does not add a network capability.
+
 Lifecycle mutations remain replay-safe and generation-fenced. A new journal
 namespace deliberately rejects the deleted native provider's state instead of
 migrating it. Startup reconciles every incomplete VM attempt while holding its
