@@ -2,11 +2,26 @@
 use automata_ci::cli::InternalLocalCommand;
 use automata_ci::cli::{
     AuthCommand, Cli, Command, DatabaseTransport, EnvironmentReviewDecision, InternalCommand,
-    InternalObjectStoreCommand, LocalCommand, LocalContainerEngine, OutputFormat, RepositoryRef,
-    RerunSelection, S3TlsTrustMode, SecretCommand, SecretProviderCommand, SecretScope,
+    InternalObjectStoreArgs, InternalObjectStoreCommand, LocalCommand, LocalContainerEngine,
+    OutputFormat, RepositoryRef, RerunSelection, S3TlsTrustMode, SecretCommand,
+    SecretProviderCommand, SecretScope,
 };
 use automata_ci::server::{SecretSource, ServerConfig, ServerConfigError};
 use clap::{CommandFactory as _, Parser as _};
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn expect_internal_object_store(command: InternalCommand) -> Box<InternalObjectStoreArgs> {
+    match command {
+        InternalCommand::ObjectStore(args) => args,
+        InternalCommand::Local(_) => panic!("expected object-store command"),
+    }
+}
+
+#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+fn expect_internal_object_store(command: InternalCommand) -> Box<InternalObjectStoreArgs> {
+    let InternalCommand::ObjectStore(args) = command;
+    args
+}
 
 #[test]
 fn server_uses_a_loopback_default() {
@@ -342,9 +357,7 @@ fn internal_object_store_bucket_initialization_is_hidden_exact_and_redacted() {
     let Command::Internal(internal) = cli.command else {
         panic!("internal command expected");
     };
-    let InternalCommand::ObjectStore(object_store) = internal.command else {
-        panic!("expected object-store command")
-    };
+    let object_store = expect_internal_object_store(internal.command);
     let InternalObjectStoreCommand::EnsureBucket(args) = object_store.command;
     assert_eq!(args.s3.s3_tls_trust, S3TlsTrustMode::PrivateCa);
     let debug = format!("{args:?}");
@@ -401,9 +414,7 @@ fn internal_private_ca_raw_values_become_redacted_invalid_sources() {
     let Command::Internal(internal) = cli.command else {
         panic!("internal command expected");
     };
-    let InternalCommand::ObjectStore(object_store) = internal.command else {
-        panic!("expected object-store command")
-    };
+    let object_store = expect_internal_object_store(internal.command);
     let InternalObjectStoreCommand::EnsureBucket(args) = object_store.command;
     assert!(matches!(
         args.s3.s3_private_ca_source,

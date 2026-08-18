@@ -50,6 +50,7 @@ use automata_ci_store::{
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
     net::TcpListener,
+    sync::Notify,
     task::JoinHandle,
 };
 use url::Url;
@@ -104,6 +105,7 @@ struct FakeOutbox {
     annotation_begin_delay_millis: AtomicUsize,
     claim_time_offset: AtomicI64,
     claim_delay_millis: AtomicUsize,
+    claim_delay_started: Notify,
     terminal_result: Mutex<Option<BlobDescriptor>>,
     annotation_progress: Mutex<GithubCheckAnnotationProgress>,
     annotation_batch_started_at: Mutex<Option<UnixMillis>>,
@@ -129,6 +131,7 @@ impl FakeOutbox {
             annotation_begin_delay_millis: AtomicUsize::new(0),
             claim_time_offset: AtomicI64::new(0),
             claim_delay_millis: AtomicUsize::new(0),
+            claim_delay_started: Notify::new(),
             terminal_result: Mutex::new(None),
             annotation_progress: Mutex::new(GithubCheckAnnotationProgress::default()),
             annotation_batch_started_at: Mutex::new(None),
@@ -160,6 +163,7 @@ impl GithubCheckProjectionOutbox for FakeOutbox {
         self.event("store:claim");
         let claim_delay_millis = self.claim_delay_millis.load(Ordering::SeqCst);
         if claim_delay_millis > 0 {
+            self.claim_delay_started.notify_one();
             tokio::time::sleep(Duration::from_millis(
                 u64::try_from(claim_delay_millis)
                     .map_err(|_| GithubCheckStoreError::CorruptData)?,
@@ -846,6 +850,7 @@ impl ResponseSpec {
 struct FixtureServer {
     endpoint: GithubHttpEndpoint,
     requests: Arc<Mutex<Vec<RecordedRequest>>>,
+    request_received: Arc<Notify>,
     task: JoinHandle<()>,
 }
 
@@ -861,6 +866,8 @@ impl FixtureServer {
         let address = listener.local_addr().expect("fixture address");
         let requests = Arc::new(Mutex::new(Vec::new()));
         let task_requests = Arc::clone(&requests);
+        let request_received = Arc::new(Notify::new());
+        let task_request_received = Arc::clone(&request_received);
         let task = tokio::spawn(async move {
             for response in responses {
                 let (mut stream, _) = listener.accept().await.expect("accept request");
@@ -870,6 +877,7 @@ impl FixtureServer {
                     .expect("events lock")
                     .push(format!("http:{} {}", request.method, request.target));
                 task_requests.lock().expect("requests lock").push(request);
+                task_request_received.notify_one();
                 if !response.delay.is_zero() {
                     tokio::time::sleep(response.delay).await;
                 }
@@ -892,12 +900,24 @@ impl FixtureServer {
         Self {
             endpoint,
             requests,
+            request_received,
             task,
         }
     }
 
     fn requests(&self) -> Vec<RecordedRequest> {
         self.requests.lock().expect("requests lock").clone()
+    }
+
+    async fn wait_for_request_without_advancing_time(&self) {
+        let notified = self.request_received.notified();
+        tokio::pin!(notified);
+        loop {
+            tokio::select! {
+                () = &mut notified => return,
+                () = tokio::task::yield_now() => {}
+            }
+        }
     }
 }
 
@@ -1118,8 +1138,17 @@ async fn slow_claim_response_cannot_extend_a_blocked_provider_past_the_claim_hor
         .claim_delay_millis
         .store(900, Ordering::SeqCst);
 
+    let (outcome, ()) = tokio::join!(harness.run(), async {
+        harness.outbox.claim_delay_started.notified().await;
+        tokio::time::advance(Duration::from_millis(900)).await;
+        harness
+            .server
+            .wait_for_request_without_advancing_time()
+            .await;
+    });
+
     assert!(matches!(
-        harness.run().await,
+        outcome,
         Err(GithubChecksPublisherError::ProviderDeadlineExceeded)
     ));
     assert_eq!(harness.release_calls(), 1);
@@ -1208,8 +1237,13 @@ async fn timed_out_provider_action_releases_once_after_the_future_ends() {
     )
     .await;
 
+    let (outcome, ()) = tokio::join!(
+        harness.run(),
+        harness.server.wait_for_request_without_advancing_time()
+    );
+
     assert!(matches!(
-        harness.run().await,
+        outcome,
         Err(GithubChecksPublisherError::ProviderDeadlineExceeded)
     ));
     assert_eq!(harness.release_calls(), 1);
