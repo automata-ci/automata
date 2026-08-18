@@ -160,6 +160,11 @@ impl FileActionReferenceIndex {
         })
     }
 
+    #[cfg(all(test, unix))]
+    fn duplicate_lock_for_test(&self) -> rustix::fd::OwnedFd {
+        self.inner.directory.duplicate_lock_for_test()
+    }
+
     fn get_sync(
         &self,
         reference: &ImmutableActionReference,

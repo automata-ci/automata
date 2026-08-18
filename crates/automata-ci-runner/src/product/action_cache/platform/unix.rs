@@ -24,7 +24,7 @@ const FILE_MODE: Mode = Mode::from_raw_mode(0o600);
 
 pub(crate) struct PlatformDirectory {
     root_fd: OwnedFd,
-    _lock_fd: OwnedFd,
+    lock_fd: OwnedFd,
 }
 
 impl PlatformDirectory {
@@ -78,8 +78,13 @@ impl PlatformDirectory {
         }
         Ok(Self {
             root_fd: current,
-            _lock_fd: lock_fd,
+            lock_fd,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn duplicate_lock_for_test(&self) -> OwnedFd {
+        rustix::io::dup(&self.lock_fd).expect("duplicate action-reference index lock")
     }
 
     pub(crate) fn cleanup_staging(&self) -> Result<(), ActionReferenceIndexError> {
@@ -165,6 +170,15 @@ impl PlatformDirectory {
         .map_err(|_| CommitFailure::new(unavailable(), false))?;
         fs::fsync(&self.root_fd).map_err(|_| CommitFailure::new(unavailable(), true))?;
         Ok(())
+    }
+}
+
+impl Drop for PlatformDirectory {
+    fn drop(&mut self) {
+        // A fork inherits this open file description before `CLOEXEC` can
+        // close its descriptor. Unlock explicitly so teardown does not wait
+        // for every inherited duplicate to close.
+        let _ = flock(&self.lock_fd, FlockOperation::Unlock);
     }
 }
 

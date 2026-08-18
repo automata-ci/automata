@@ -42,6 +42,20 @@ async fn bounded_index_survives_reopen_and_evicts_oldest_reference() {
     assert!(reopened.get(first.reference()).await.unwrap().is_none());
 }
 
+#[cfg(unix)]
+#[test]
+fn dropping_index_unlocks_a_fork_inherited_descriptor() {
+    let scratch = Scratch::new("inherited-lock");
+    let root = scratch.root();
+    let index = FileActionReferenceIndex::open(root.clone(), ActionReferenceIndexLimits::default())
+        .unwrap();
+    let inherited = index.duplicate_lock_for_test();
+
+    drop(index);
+    drop(FileActionReferenceIndex::open(root, ActionReferenceIndexLimits::default()).unwrap());
+    drop(inherited);
+}
+
 #[tokio::test]
 async fn concurrent_identical_fill_creates_exactly_one_mapping() {
     let scratch = Scratch::new("concurrent-fill");

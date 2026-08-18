@@ -41,6 +41,19 @@ async fn archive_cache_reopens_with_lock_and_archive_content() {
 }
 
 #[test]
+fn dropping_archive_cache_unlocks_a_fork_inherited_descriptor() {
+    let scratch = Scratch::new("inherited-lock");
+    let root = scratch.root();
+    let cache =
+        FileActionArchiveCache::open(root.clone(), ActionArchiveCacheLimits::default()).unwrap();
+    let inherited = cache.duplicate_lock_for_test();
+
+    drop(cache);
+    drop(FileActionArchiveCache::open(root, ActionArchiveCacheLimits::default()).unwrap());
+    drop(inherited);
+}
+
+#[test]
 fn archive_cache_rejects_non_directory_and_symlink_roots() {
     let scratch = Scratch::new("unsafe-roots");
     fs::create_dir_all(scratch.path()).unwrap();
