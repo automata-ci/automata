@@ -175,13 +175,22 @@ Back up the host, then use Disk Utility's documented
 to create the fixed container. Do not use **Add APFS Volume** on `Macintosh HD`. Provision the
 container with enough capacity for the chosen quota and APFS overhead. Make the
 final volume its sole member and assign a whole-GiB quota between 64 GiB and
-1 TiB. The quota must exceed the sealed virtual disk length plus auxiliary
-storage plus 32 GiB of provider headroom. For example, the minimum 64 GiB
-template can use a 100 GiB (`107374182400` byte) quota; a 128 GiB template needs
-a larger quota. Apple's Disk Utility **Size Options** UI can set the quota. If a
-bootstrap volume was created during partitioning, add the quota-bearing volume
-and remove the bootstrap volume only after resolving the exact device
-identifiers with `diskutil apfs list`.
+1 TiB. After the sealed template and provider state have consumed their APFS
+blocks, both the volume's remaining quota and the container's free capacity
+must still be at least the virtual disk's logical length, plus the auxiliary
+storage's logical length, plus 32 GiB of provider headroom.
+
+Do not size the quota from the virtual disk length alone. The sealed template's
+allocated blocks are separate existing consumption: a 64 GiB virtual disk
+whose template files consume 24 GiB needs more than 120 GiB of usable quota,
+plus APFS and operational margin. A 128 GiB quota may satisfy that example, but
+only after measuring the sealed template and checking `Capacity In Use` and
+`Capacity Free` in `diskutil apfs list`. A 100 GiB quota does not satisfy that
+example even though 64 GiB plus the 32 GiB headroom is less than 100 GiB.
+Apple's Disk Utility **Size Options** UI can set the quota. If a bootstrap
+volume was created during partitioning, add the quota-bearing volume and remove
+the bootstrap volume only after resolving the exact device identifiers with
+`diskutil apfs list`.
 
 Verify the mounted result and record the volume UUID:
 
@@ -218,10 +227,10 @@ At startup Automata independently resolves `df` and `diskutil -plist` data. It
 rejects the startup container, sibling volumes, virtual or disk-image backing
 stores, disabled ownership enforcement, APFS roles, UUID/device/quota
 mismatches, cross-volume template files, a read-only filesystem, a mutable or
-non-root-owned state-directory ancestry, and less free space than the full
-virtual disk plus auxiliary storage plus 32 GiB. A quota is not an
-ephemeral-disk claim: the guest still sees its fixed template disk, so
-`ephemeral_disk_bytes` remains zero.
+non-root-owned state-directory ancestry, and less remaining quota or container
+free space than the full virtual disk plus auxiliary storage plus 32 GiB. A
+quota is not an ephemeral-disk claim: the guest still sees its fixed template
+disk, so `ephemeral_disk_bytes` remains zero.
 
 ## Build and seal a template
 
@@ -440,7 +449,7 @@ AUTOMATA_MACOS_VM_TEMPLATE_MANIFEST=/Volumes/AutomataVM/templates/macos-15-arm64
 AUTOMATA_MACOS_VM_TEMPLATE_SHA256=<manifest-sha256> \
 AUTOMATA_MACOS_VM_STORAGE_ROOT=/Volumes/AutomataVM/e2e-state \
 AUTOMATA_MACOS_VM_STORAGE_VOLUME_UUID=<uppercase-volume-uuid> \
-AUTOMATA_MACOS_VM_STORAGE_QUOTA_BYTES=107374182400 \
+AUTOMATA_MACOS_VM_STORAGE_QUOTA_BYTES=<exact-volume-quota-bytes> \
 cargo test --locked -p automata-ci-runner --test runner -- \
   macos_vm_runner_process_e2e::shipped_runner_process_executes_a_claimed_isolated_job_with_action_runtimes \
   --ignored --nocapture --test-threads=1
