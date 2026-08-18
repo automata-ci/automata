@@ -1291,13 +1291,13 @@ mod cgroup_tests {
 }
 
 /// Long-running, local Podman subprocess owned by one adapter operation.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 pub(crate) struct PersistentPodmanProcess {
     child: Child,
     active: bool,
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 impl fmt::Debug for PersistentPodmanProcess {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -1307,7 +1307,7 @@ impl fmt::Debug for PersistentPodmanProcess {
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 impl PersistentPodmanProcess {
     pub(crate) fn spawn(
         program: &Path,
@@ -1355,7 +1355,7 @@ impl PersistentPodmanProcess {
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 impl Drop for PersistentPodmanProcess {
     fn drop(&mut self) {
         self.stop();

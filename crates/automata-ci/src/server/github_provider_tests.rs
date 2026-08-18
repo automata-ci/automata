@@ -146,7 +146,9 @@ fn mixed_document() -> Value {
 }
 
 fn config_file(name: &str) -> PathBuf {
-    let directory = std::env::temp_dir().join(format!(
+    let temporary_directory =
+        fs::canonicalize(std::env::temp_dir()).expect("canonical temporary directory");
+    let directory = temporary_directory.join(format!(
         "automata-github-provider-bootstrap-{}",
         std::process::id()
     ));

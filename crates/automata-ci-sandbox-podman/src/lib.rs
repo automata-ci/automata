@@ -10,9 +10,9 @@
 
 mod command;
 mod config;
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 mod docker;
-#[cfg(not(unix))]
+#[cfg(not(target_os = "linux"))]
 #[path = "docker_unsupported.rs"]
 mod docker;
 mod docker_contract;

@@ -174,7 +174,9 @@ fn loopback_transport_builds_one_exact_emulator_origin() {
 
 fn config_file() -> PathBuf {
     let sequence = CONFIG_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let directory = std::env::temp_dir().join(format!(
+    let temporary_directory =
+        fs::canonicalize(std::env::temp_dir()).expect("canonical temporary directory");
+    let directory = temporary_directory.join(format!(
         "automata-github-provider-runtime-{}-{sequence}",
         std::process::id()
     ));

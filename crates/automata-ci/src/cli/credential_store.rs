@@ -791,7 +791,7 @@ mod tests {
     #[test]
     fn per_origin_lock_is_private_exclusive_and_reacquirable() {
         let _spawn_guard = PROCESS_SPAWN_GATE.blocking_lock();
-        let root = std::env::temp_dir().join(format!(
+        let root = canonical_temporary_directory().join(format!(
             "automata-auth-lock-{}-{}",
             std::process::id(),
             NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed)
@@ -984,7 +984,7 @@ esac
     }
 
     fn test_directory(label: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!(
+        let root = canonical_temporary_directory().join(format!(
             "automata-{label}-{}-{}",
             std::process::id(),
             NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed)
@@ -992,6 +992,10 @@ esac
         std::fs::create_dir(&root).unwrap();
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
         root
+    }
+
+    fn canonical_temporary_directory() -> PathBuf {
+        std::fs::canonicalize(std::env::temp_dir()).expect("canonical temporary directory")
     }
 
     fn write_test_program(root: &Path, contents: &str) -> PathBuf {

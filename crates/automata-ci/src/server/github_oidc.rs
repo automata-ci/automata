@@ -964,6 +964,7 @@ norlX3KEHNe7cTke5cP4OA==";
     fn write_private_test_file(name: &str, bytes: &[u8]) -> PathBuf {
         let test_root =
             std::env::var_os("CARGO_TARGET_TMPDIR").map_or_else(std::env::temp_dir, PathBuf::from);
+        let test_root = fs::canonicalize(test_root).expect("canonical test key root");
         let directory = test_root.join(format!(
             "automata-ci-github-oidc-product-{}",
             std::process::id()

@@ -1148,7 +1148,11 @@ mod tests {
             .enumerate()
             .map(|(index, kind)| WindowsHostInputDescriptor {
                 kind,
-                absolute_path: PathBuf::from(format!(r"C:\trusted\input-{index}.bin")),
+                absolute_path: if cfg!(windows) {
+                    PathBuf::from(format!(r"C:\trusted\input-{index}.bin"))
+                } else {
+                    PathBuf::from(format!("/trusted/input-{index}.bin"))
+                },
                 expected_sha256: Sha256Digest::from_bytes(
                     [u8::try_from(index).expect("bounded input index") + 20; 32],
                 ),

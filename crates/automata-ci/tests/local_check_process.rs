@@ -233,10 +233,9 @@ impl HostileGitEnvironment {
         let trace = root.join("git-trace-private-path-marker");
         let trace2 = root.join("git-trace2-private-path-marker");
         let trace2_perf = root.join("git-trace2-perf-private-path-marker");
-        let socket_path = std::env::temp_dir().join(format!(
-            "automata-local-check-{}.socket",
-            Uuid::new_v4().simple()
-        ));
+        let nonce = Uuid::new_v4().simple().to_string();
+        let socket_path =
+            std::env::temp_dir().join(format!("a-{}-{}.sock", std::process::id(), &nonce[..12]));
         let listener = UnixListener::bind(&socket_path).expect("bind hostile trace2 socket");
         listener
             .set_nonblocking(true)

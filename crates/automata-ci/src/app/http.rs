@@ -553,14 +553,17 @@ mod tests {
         setup_page_availability: Option<Arc<dyn web::SetupPageAvailability>>,
     ) -> Router {
         let tenant = TenantId::new("rbac-composition-test").expect("test tenant");
-        router_with_readiness_web_data(
+        let router = router_with_readiness_web_data(
             Readiness::all_ready(),
             Arc::new(web::EmptyWebData),
             rbac_data,
             setup_page_availability,
             web::RequestContext::anonymous(tenant),
         )
-        .expect("embedded renderer")
+        .expect("embedded renderer");
+        let metrics =
+            ControlPlaneMetrics::new(BuildInfo::current()).expect("control-plane metrics");
+        finalize_combined_router(router, metrics)
     }
 
     #[tokio::test]
