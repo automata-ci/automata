@@ -21,7 +21,14 @@ export const Running: Story = {
 export const StatusMatrix: Story = {
   args: { status: { label: "Queued", tone: "queued" } },
   render: () => (
-    <div style={{ alignItems: "flex-start", display: "flex", flexDirection: "column", gap: 12 }}>
+    <div
+      style={{
+        alignItems: "flex-start",
+        display: "flex",
+        flexDirection: "column",
+        gap: 12,
+      }}
+    >
       <StatusBadge status={{ label: "Queued", tone: "queued" }} />
       <StatusBadge status={{ label: "In progress", tone: "running" }} />
       <StatusBadge status={{ label: "Succeeded", tone: "success" }} />

@@ -36,9 +36,18 @@ export const Default: Story = {
 export const Catalog: Story = {
   args: { name: "actions" },
   render: () => (
-    <div style={{ display: "grid", gap: 16, gridTemplateColumns: "repeat(3, 1fr)" }}>
+    <div
+      style={{
+        display: "grid",
+        gap: 16,
+        gridTemplateColumns: "repeat(3, 1fr)",
+      }}
+    >
       {iconNames.map((name) => (
-        <span key={name} style={{ alignItems: "center", display: "flex", gap: 8 }}>
+        <span
+          key={name}
+          style={{ alignItems: "center", display: "flex", gap: 8 }}
+        >
           <Icon name={name} size={20} />
           {name}
         </span>

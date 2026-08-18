@@ -15,7 +15,9 @@ type Story = StoryObj<typeof meta>;
 export const Light: Story = {
   args: { onToggle: fn(), theme: "light" },
   play: async ({ args, canvas, userEvent }) => {
-    await userEvent.click(canvas.getByRole("button", { name: "Use dark theme" }));
+    await userEvent.click(
+      canvas.getByRole("button", { name: "Use dark theme" }),
+    );
     await expect(args.onToggle).toHaveBeenCalledOnce();
   },
 };

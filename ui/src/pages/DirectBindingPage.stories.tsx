@@ -3,7 +3,11 @@ import { previewDirectBindings } from "../preview/rbacModels";
 import { DirectBindingPage } from "./DirectBindingPage";
 
 const model = previewDirectBindings();
-const meta = { component: DirectBindingPage, title: "Pages/Access/Direct Bindings" } satisfies Meta<typeof DirectBindingPage>;
+const meta = {
+  component: DirectBindingPage,
+  parameters: { layout: "fullscreen" },
+  title: "Pages/Access/Direct Bindings",
+} satisfies Meta<typeof DirectBindingPage>;
 export default meta;
 type Story = StoryObj<typeof meta>;
 export const ReadOnly: Story = { args: { model } };

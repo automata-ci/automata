@@ -23,7 +23,10 @@ const preview: Preview = {
     controls: {
       expanded: true,
     },
-    layout: "fullscreen",
+    // Isolated components should have breathing room by default. Page and
+    // shell stories opt into fullscreen explicitly so their real layout is
+    // still exercised edge to edge.
+    layout: "padded",
     options: {
       storySort: {
         order: ["Foundations", "Components", "Features", "Pages"],

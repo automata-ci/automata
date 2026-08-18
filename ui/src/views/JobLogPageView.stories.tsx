@@ -8,7 +8,9 @@ import { JobLogPageView } from "./JobLogPageView";
 
 const model = previewJobLog(PREVIEW_PRIMARY_RUN_ID, null);
 if (model === null) throw new Error("job-log preview fixture is unavailable");
-const initial = replayLogRecords(previewJobLogRecords(PREVIEW_PRIMARY_RUN_ID, null));
+const initial = replayLogRecords(
+  previewJobLogRecords(PREVIEW_PRIMARY_RUN_ID, null),
+);
 const logs: JobLogsViewState = {
   canExpand: false,
   connection: "complete",
@@ -29,6 +31,7 @@ const logs: JobLogsViewState = {
 const meta = {
   args: { logs, model },
   component: JobLogPageView,
+  parameters: { layout: "fullscreen" },
   title: "Pages/Job Logs",
 } satisfies Meta<typeof JobLogPageView>;
 
@@ -52,15 +55,41 @@ export const Complete: Story = {
     await expect(args.logs.onToggleFollowing).toHaveBeenCalledOnce();
 
     const firstGroup = initial.ordered[0];
-    if (firstGroup === undefined) throw new Error("job-log story has no groups");
-    const groupName = canvas.getByText(firstGroup.name, { selector: ".log-group__name" });
+    if (firstGroup === undefined)
+      throw new Error("job-log story has no groups");
+    const groupName = canvas.getByText(firstGroup.name, {
+      selector: ".log-group__name",
+    });
     await userEvent.click(groupName);
     await expect(args.logs.onToggleGroup).toHaveBeenCalledWith(firstGroup.id);
 
-    await userEvent.type(canvas.getByRole("searchbox", { name: "Search job logs" }), "error");
+    await userEvent.type(
+      canvas.getByRole("searchbox", { name: "Search job logs" }),
+      "error",
+    );
     await expect(args.logs.onQueryChange).toHaveBeenCalled();
   },
 };
-export const Waiting: Story = { args: { logs: { ...logs, connection: "connecting", running: true, visibleGroups: [] } } };
-export const StreamFailure: Story = { args: { logs: { ...logs, connection: "failed", streamError: "The log stream could not be opened.", visibleGroups: [] } } };
-export const Restricted: Story = { args: { model: { ...model, logVisibility: "restricted", live: null } } };
+export const Waiting: Story = {
+  args: {
+    logs: {
+      ...logs,
+      connection: "connecting",
+      running: true,
+      visibleGroups: [],
+    },
+  },
+};
+export const StreamFailure: Story = {
+  args: {
+    logs: {
+      ...logs,
+      connection: "failed",
+      streamError: "The log stream could not be opened.",
+      visibleGroups: [],
+    },
+  },
+};
+export const Restricted: Story = {
+  args: { model: { ...model, logVisibility: "restricted", live: null } },
+};

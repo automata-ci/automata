@@ -22,6 +22,7 @@ const model: SetupPageModel = {
 const meta = {
   args: { model, onSubmit: fn() },
   component: SetupPageView,
+  parameters: { layout: "fullscreen" },
   title: "Pages/Setup",
 } satisfies Meta<typeof SetupPageView>;
 
@@ -34,8 +35,13 @@ export const Ready: Story = {
     onSubmit: fn((event) => event.preventDefault()),
   },
   play: async ({ args, canvas, userEvent }) => {
-    await userEvent.type(canvas.getByLabelText("Bootstrap token"), "one-time-token");
-    await userEvent.click(canvas.getByRole("button", { name: "Continue with GitHub" }));
+    await userEvent.type(
+      canvas.getByLabelText("Bootstrap token"),
+      "one-time-token",
+    );
+    await userEvent.click(
+      canvas.getByRole("button", { name: "Continue with GitHub" }),
+    );
     await expect(args.onSubmit).toHaveBeenCalledOnce();
   },
 };

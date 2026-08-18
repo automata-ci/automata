@@ -20,6 +20,7 @@ const form: PublicationPolicyFormState = {
 const meta = {
   args: { form, model: readOnlyModel },
   component: RepositorySettingsPageView,
+  parameters: { layout: "fullscreen" },
   title: "Pages/Repository Settings",
 } satisfies Meta<typeof RepositorySettingsPageView>;
 
@@ -35,9 +36,15 @@ export const Editable: Story = {
   play: async ({ args, canvas, userEvent }) => {
     const publicOptions = canvas.getAllByRole("radio", { name: /Public/ });
     const jobLogsPublic = publicOptions[1];
-    if (jobLogsPublic === undefined) throw new Error("public audience option is missing");
+    if (jobLogsPublic === undefined)
+      throw new Error("public audience option is missing");
     await userEvent.click(jobLogsPublic);
     await expect(args.form.onChange).toHaveBeenCalledWith("logs", "public");
   },
 };
-export const Saving: Story = { args: { form: { ...form, isSubmitting: true, saveDisabled: true }, model: editableModel } };
+export const Saving: Story = {
+  args: {
+    form: { ...form, isSubmitting: true, saveDisabled: true },
+    model: editableModel,
+  },
+};
