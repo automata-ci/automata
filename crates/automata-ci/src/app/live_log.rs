@@ -575,7 +575,11 @@ struct SseLogDocument<'a> {
 }
 
 #[derive(Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(
+    tag = "type",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
 enum SseLogRecord<'a> {
     GroupStarted {
         group: SseLogGroup<'a>,
@@ -980,7 +984,29 @@ mod tests {
         let json = serde_json::to_string(&document).expect("SSE JSON");
 
         assert!(json.contains(r#""sequence":"18446744073709551615""#));
+        assert!(json.contains(r#""groupId":"phase/1""#));
+        assert!(!json.contains(r#""group_id""#));
         assert!(!json.contains(r#""sequence":18446744073709551615"#));
+    }
+
+    #[test]
+    fn every_sse_record_uses_the_browser_protocol_field_names() {
+        let finished = SseLogDocument {
+            protocol_version: HUMAN_LIVE_LOG_PROTOCOL_VERSION,
+            stream_id: Uuid::from_u128(5).to_string(),
+            sequence: "2".to_owned(),
+            fragment: None,
+            emitted_at_ms: 1_777_890_010_000,
+            record: SseLogRecord::GroupFinished {
+                group_id: "phase/1",
+                conclusion: "success",
+            },
+        };
+
+        let json = serde_json::to_string(&finished).expect("SSE JSON");
+
+        assert!(json.contains(r#""groupId":"phase/1""#));
+        assert!(!json.contains(r#""group_id""#));
     }
 
     #[test]

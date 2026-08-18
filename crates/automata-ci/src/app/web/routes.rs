@@ -1058,13 +1058,6 @@ async fn installation_setup(
             HeaderName::from_static("content-security-policy"),
             setup_csp,
         );
-        // A form POST uses the document's referrer policy when serializing its
-        // Origin header. `no-referrer` therefore produces `Origin: null`, which
-        // cannot satisfy the setup route's exact same-origin admission check.
-        response.headers_mut().insert(
-            HeaderName::from_static("referrer-policy"),
-            HeaderValue::from_static("same-origin"),
-        );
     }
     response
 }
@@ -1965,13 +1958,6 @@ fn html_response(html: String, csp_nonce: &str) -> Response<Body> {
         return internal_server_error();
     };
     apply_page_headers(response.headers_mut(), csp);
-    // Signed-out pages post to the same-origin login receiver, which redirects
-    // the browser to GitHub. Browsers enforce `form-action` across that entire
-    // redirect chain, and the login receiver requires an exact Origin header.
-    response.headers_mut().insert(
-        HeaderName::from_static("referrer-policy"),
-        HeaderValue::from_static("same-origin"),
-    );
     response
 }
 
@@ -1984,7 +1970,9 @@ fn apply_page_headers(headers: &mut HeaderMap, csp: HeaderValue) {
     );
     headers.insert(
         HeaderName::from_static("referrer-policy"),
-        HeaderValue::from_static("no-referrer"),
+        // Native forms require an exact same-origin Origin header. This policy
+        // preserves that evidence without disclosing a path cross-origin.
+        HeaderValue::from_static("same-origin"),
     );
     headers.insert(
         HeaderName::from_static("x-content-type-options"),
@@ -2258,14 +2246,17 @@ fn error_page_response_with_action_markup(
 }
 
 pub(crate) fn apply_static_page_headers(headers: &mut HeaderMap) {
-    apply_page_headers(
-        headers,
-        HeaderValue::from_static(
-            "default-src 'none'; base-uri 'none'; connect-src 'self'; font-src data:; \
-             form-action 'self'; frame-ancestors 'none'; img-src 'self' data:; \
-             script-src 'none'; style-src 'self'",
-        ),
-    );
+    apply_page_headers(headers, static_page_content_security_policy());
+}
+
+fn static_page_content_security_policy() -> HeaderValue {
+    // Signed-out static pages post to the local login receiver, whose success
+    // redirects to GitHub. Browsers enforce form-action across that chain.
+    HeaderValue::from_static(
+        "default-src 'none'; base-uri 'none'; connect-src 'self'; font-src data:; \
+         form-action 'self' https://github.com; frame-ancestors 'none'; \
+         img-src 'self' data:; script-src 'none'; style-src 'self'",
+    )
 }
 
 #[cfg(test)]
@@ -3618,7 +3609,7 @@ mod tests {
         assert_eq!(response.headers()[CACHE_CONTROL], PAGE_CACHE_CONTROL);
         assert_eq!(response.headers()["x-content-type-options"], "nosniff");
         assert_eq!(response.headers()["x-frame-options"], "DENY");
-        assert_eq!(response.headers()["referrer-policy"], "no-referrer");
+        assert_eq!(response.headers()["referrer-policy"], "same-origin");
         assert_eq!(
             response.headers()["cross-origin-opener-policy"],
             "same-origin"
@@ -3628,6 +3619,8 @@ mod tests {
             .expect("error-page CSP must be valid text");
         assert!(csp.contains("script-src 'none'"));
         assert!(csp.contains("frame-ancestors 'none'"));
+        assert!(csp.contains("form-action 'self' https://github.com"));
+        assert!(!csp.contains("form-action *"));
         assert!(!csp.contains("nonce-"));
     }
 
