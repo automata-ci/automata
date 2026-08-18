@@ -8,6 +8,7 @@ use automata_ci_auth::{
     session_credential::SessionCredential,
 };
 use automata_ci_core::RunnerGroup;
+use automata_ci_protocol::{RUNNER_ENROLLMENT_REDEEM_PATH, RUNNER_ENROLLMENTS_PATH};
 use bytes::Bytes;
 use reqwest::{Client, StatusCode, header};
 use serde::{Deserialize, Serialize};
@@ -20,7 +21,6 @@ use super::{
     credential_store::{CliAuthProcessLock, CliCredentialStore, PlatformCredentialStore},
 };
 
-const ENROLLMENTS_PATH: &str = "/api/v1/runner-enrollments";
 const CREATE_ATTEMPTS: usize = 3;
 
 pub(crate) async fn execute_runner_command(
@@ -84,7 +84,7 @@ async fn create_token(
     if document.enrollment_id != pending.operation_id
         || document.runner_group != group
         || document.expires_at_ms <= 0
-        || document.redeem_url != "/api/v1/runner-enrollments/redeem"
+        || document.redeem_url != RUNNER_ENROLLMENT_REDEEM_PATH
     {
         bail!("control plane returned inconsistent runner enrollment token metadata");
     }
@@ -174,7 +174,7 @@ async fn send(
         serde_json::to_vec(body).context("runner enrollment token request could not be encoded")?,
     );
     client
-        .post(origin.endpoint(ENROLLMENTS_PATH))
+        .post(origin.endpoint(RUNNER_ENROLLMENTS_PATH))
         .header(header::AUTHORIZATION, bearer_header(credential)?)
         .header(header::CONTENT_TYPE, "application/json")
         .body(Bytes::from_owner(encoded))

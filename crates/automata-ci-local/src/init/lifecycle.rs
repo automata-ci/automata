@@ -11,7 +11,7 @@
 
 use std::{collections::BTreeSet, fmt, future::Future, path::PathBuf};
 
-use automata_ci_core::{OperationId, Sha256Digest};
+use automata_ci_core::{OperationId, RunnerGroup, Sha256Digest};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::Serialize;
 use sha2::{Digest as _, Sha256};
@@ -21,7 +21,7 @@ use zeroize::Zeroizing;
 
 use crate::{
     DesiredSpec, DockerInstallationAdapter, DoctorRequest, EngineRequest, Installation,
-    InstallationName, inspect,
+    InstallationName, LOCAL_BOOTSTRAP_RUNNER_REQUEST_SCHEMA, LocalBootstrapRunnerRequest, inspect,
 };
 
 use super::{
@@ -197,16 +197,97 @@ struct DownLifecycleOperationResult {
     resumed: bool,
 }
 
-#[derive(Serialize)]
-struct BootstrapRequest {
-    schema: &'static str,
-    bootstrap_operation_id: uuid::Uuid,
-    tenant: BootstrapTenant,
-    installation_authority_source_sha256: Sha256Digest,
-    runner_id: uuid::Uuid,
-    enrollment_id: uuid::Uuid,
-    runner_group: &'static str,
-    token_lifetime_seconds: u64,
+struct AcquiredLifecycleSignals {
+    holder_lost: CancellationToken,
+    transaction_cancellation: CancellationToken,
+    watcher: JoinHandle<()>,
+}
+
+impl AcquiredLifecycleSignals {
+    fn new(caller: &CancellationToken, holder: &LifecycleLockHolder) -> Self {
+        Self::from_signals(caller, holder.holder_lost())
+    }
+
+    fn from_signals(caller: &CancellationToken, holder_lost: CancellationToken) -> Self {
+        let (transaction_cancellation, watcher) =
+            linked_cancellation_from_holder_loss(caller, holder_lost.clone());
+        Self {
+            holder_lost,
+            transaction_cancellation,
+            watcher,
+        }
+    }
+
+    const fn cancellation(&self) -> &CancellationToken {
+        &self.transaction_cancellation
+    }
+
+    async fn run<T>(
+        &self,
+        operation: impl Future<Output = Result<T, LocalInitError>>,
+    ) -> Result<T, LocalInitError> {
+        run_acquired_lifecycle_operation(
+            &self.holder_lost,
+            &self.transaction_cancellation,
+            operation,
+        )
+        .await
+    }
+}
+
+impl Drop for AcquiredLifecycleSignals {
+    fn drop(&mut self) {
+        self.watcher.abort();
+    }
+}
+
+struct AcquiredLifecycleGuard {
+    holder: LifecycleLockHolder,
+    signals: AcquiredLifecycleSignals,
+}
+
+impl AcquiredLifecycleGuard {
+    fn new(caller: &CancellationToken, holder: LifecycleLockHolder) -> Self {
+        let signals = AcquiredLifecycleSignals::new(caller, &holder);
+        Self { holder, signals }
+    }
+
+    const fn holder(&self) -> &LifecycleLockHolder {
+        &self.holder
+    }
+
+    const fn cancellation(&self) -> &CancellationToken {
+        self.signals.cancellation()
+    }
+
+    fn mutation_fence(&self, caller: &CancellationToken) -> LifecycleMutationFence {
+        self.holder.mutation_fence(caller)
+    }
+
+    async fn run<T>(
+        &self,
+        operation: impl Future<Output = Result<T, LocalInitError>>,
+    ) -> Result<T, LocalInitError> {
+        self.signals.run(operation).await
+    }
+
+    fn finish<T>(
+        self,
+        result: Result<T, LocalInitError>,
+    ) -> Result<(LifecycleLockHolder, T), LocalInitError> {
+        let Self { holder, signals } = self;
+        drop(signals);
+        match result {
+            Ok(value) => Ok((holder, value)),
+            Err(error) => {
+                // Dropping retained stdin converts the exact holder into sticky
+                // stopped recovery evidence. An accepted daemon mutation is
+                // never reported as rolled back.
+                drop(holder);
+                Err(error)
+            }
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -272,13 +353,17 @@ pub async fn up_local(request: LocalUpRequest) -> Result<LocalUpOutcome, LocalIn
             OperationId::new(),
         )
         .await?;
-    let holder_lost = holder.holder_lost();
-    let (transaction_cancellation, watcher) = linked_cancellation(&request.cancellation, &holder);
-    let mutation_fence = holder.mutation_fence(&request.cancellation);
+    let acquired = AcquiredLifecycleGuard::new(&request.cancellation, holder);
+    let transaction_cancellation = acquired.cancellation().clone();
+    let mutation_fence = acquired.mutation_fence(&request.cancellation);
 
     let operation = async {
         engine
-            .attest_lifecycle_lock(&established.installation, &established.epoch, &holder)
+            .attest_lifecycle_lock(
+                &established.installation,
+                &established.epoch,
+                acquired.holder(),
+            )
             .await?;
         engine
             .preflight_lifecycle_volumes(&established.installation, &established.epoch)
@@ -290,7 +375,7 @@ pub async fn up_local(request: LocalUpRequest) -> Result<LocalUpOutcome, LocalIn
                 &expected_desired,
                 &rendered.expected,
                 derive_bootstrap_artifacts(&established)?.runner_id,
-                &holder,
+                acquired.holder(),
                 &transaction_cancellation,
                 &mutation_fence,
             )
@@ -303,7 +388,11 @@ pub async fn up_local(request: LocalUpRequest) -> Result<LocalUpOutcome, LocalIn
         )
         .await?;
         engine
-            .attest_lifecycle_lock(&established.installation, &established.epoch, &holder)
+            .attest_lifecycle_lock(
+                &established.installation,
+                &established.epoch,
+                acquired.holder(),
+            )
             .await?;
 
         let initial = engine
@@ -341,7 +430,11 @@ pub async fn up_local(request: LocalUpRequest) -> Result<LocalUpOutcome, LocalIn
             return Err(reset_required());
         }
         engine
-            .attest_lifecycle_lock(&established.installation, &established.epoch, &holder)
+            .attest_lifecycle_lock(
+                &established.installation,
+                &established.epoch,
+                acquired.holder(),
+            )
             .await?;
         let resumed = initial != LifecycleTopology::Empty;
         if let LifecycleTopology::Running { transit_id } = &initial {
@@ -396,21 +489,21 @@ pub async fn up_local(request: LocalUpRequest) -> Result<LocalUpOutcome, LocalIn
             // lifetime. Completion replay is therefore a read-only
             // attestation branch: it must never rerun enrollment or any other
             // mutating one-off beside the admitted steady services.
+            let attester = EngineExactCasMaterialAttester {
+                engine: &engine,
+                established: &established,
+                mutation: &mutation_fence,
+            };
             complete_running_replay(
+                &attester,
+                &established,
+                &artifacts,
+                &relay,
+                &runner_config,
+                &relay_id,
+                &runner_container_id,
                 &initial,
                 &transaction_cancellation,
-                || {
-                    attest_exact_cas_material(
-                        &engine,
-                        &established,
-                        &artifacts,
-                        &relay,
-                        &runner_config,
-                        &relay_id,
-                        &runner_container_id,
-                        &mutation_fence,
-                    )
-                },
                 || {
                     engine.inspect_lifecycle_topology(
                         &established.installation,
@@ -480,7 +573,11 @@ pub async fn up_local(request: LocalUpRequest) -> Result<LocalUpOutcome, LocalIn
                 .preflight_lifecycle_volumes(&established.installation, &established.epoch)
                 .await?;
             engine
-                .attest_lifecycle_lock(&established.installation, &established.epoch, &holder)
+                .attest_lifecycle_lock(
+                    &established.installation,
+                    &established.epoch,
+                    acquired.holder(),
+                )
                 .await?;
         }
 
@@ -489,7 +586,11 @@ pub async fn up_local(request: LocalUpRequest) -> Result<LocalUpOutcome, LocalIn
             .ensure_results_transit(&established.installation, &desired, &mutation_fence)
             .await?;
         engine
-            .attest_lifecycle_lock(&established.installation, &established.epoch, &holder)
+            .attest_lifecycle_lock(
+                &established.installation,
+                &established.epoch,
+                acquired.holder(),
+            )
             .await?;
 
         cli.execute(
@@ -513,7 +614,11 @@ pub async fn up_local(request: LocalUpRequest) -> Result<LocalUpOutcome, LocalIn
                 .await?;
         }
         engine
-            .attest_lifecycle_lock(&established.installation, &established.epoch, &holder)
+            .attest_lifecycle_lock(
+                &established.installation,
+                &established.epoch,
+                acquired.holder(),
+            )
             .await?;
 
         let artifacts = derive_bootstrap_artifacts(&established)?;
@@ -571,7 +676,11 @@ pub async fn up_local(request: LocalUpRequest) -> Result<LocalUpOutcome, LocalIn
         )
         .await?;
         engine
-            .attest_lifecycle_lock(&established.installation, &established.epoch, &holder)
+            .attest_lifecycle_lock(
+                &established.installation,
+                &established.epoch,
+                acquired.holder(),
+            )
             .await?;
 
         cli.execute(
@@ -625,7 +734,11 @@ pub async fn up_local(request: LocalUpRequest) -> Result<LocalUpOutcome, LocalIn
         )
         .await?;
         engine
-            .attest_lifecycle_lock(&established.installation, &established.epoch, &holder)
+            .attest_lifecycle_lock(
+                &established.installation,
+                &established.epoch,
+                acquired.holder(),
+            )
             .await?;
 
         run_oneoff(
@@ -696,25 +809,18 @@ pub async fn up_local(request: LocalUpRequest) -> Result<LocalUpOutcome, LocalIn
             return Err(reset_required());
         }
         engine
-            .attest_lifecycle_lock(&established.installation, &established.epoch, &holder)
+            .attest_lifecycle_lock(
+                &established.installation,
+                &established.epoch,
+                acquired.holder(),
+            )
             .await?;
         cancellation_checkpoint(&transaction_cancellation)?;
         Ok(UpLifecycleOperationResult { desired, resumed })
     };
-    let operation =
-        run_acquired_lifecycle_operation(&holder_lost, &transaction_cancellation, operation).await;
-
-    watcher.abort();
-    let UpLifecycleOperationResult { desired, resumed } = match operation {
-        Ok(value) => value,
-        Err(error) => {
-            // Dropping retained stdin converts the exact holder into sticky
-            // stopped recovery evidence. We never claim that an accepted
-            // daemon mutation was rolled back.
-            drop(holder);
-            return Err(error);
-        }
-    };
+    let operation = acquired.run(operation).await;
+    let (holder, operation) = acquired.finish(operation)?;
+    let UpLifecycleOperationResult { desired, resumed } = operation;
     engine
         .release_lifecycle_lock(&established.installation, &established.epoch, holder)
         .await?;
@@ -807,13 +913,17 @@ pub async fn down_local(request: LocalDownRequest) -> Result<LocalDownOutcome, L
             OperationId::new(),
         )
         .await?;
-    let holder_lost = holder.holder_lost();
-    let (transaction_cancellation, watcher) = linked_cancellation(&request.cancellation, &holder);
-    let mutation_fence = holder.mutation_fence(&request.cancellation);
+    let acquired = AcquiredLifecycleGuard::new(&request.cancellation, holder);
+    let transaction_cancellation = acquired.cancellation().clone();
+    let mutation_fence = acquired.mutation_fence(&request.cancellation);
 
     let operation = async {
         engine
-            .attest_lifecycle_lock(&established.installation, &established.epoch, &holder)
+            .attest_lifecycle_lock(
+                &established.installation,
+                &established.epoch,
+                acquired.holder(),
+            )
             .await?;
         engine
             .preflight_lifecycle_volumes(&established.installation, &established.epoch)
@@ -825,7 +935,7 @@ pub async fn down_local(request: LocalDownRequest) -> Result<LocalDownOutcome, L
                 &expected_desired,
                 &rendered.expected,
                 derive_bootstrap_artifacts(&established)?.runner_id,
-                &holder,
+                acquired.holder(),
                 &transaction_cancellation,
                 &mutation_fence,
             )
@@ -872,7 +982,11 @@ pub async fn down_local(request: LocalDownRequest) -> Result<LocalDownOutcome, L
             return Err(reset_required());
         }
         engine
-            .attest_lifecycle_lock(&established.installation, &established.epoch, &holder)
+            .attest_lifecycle_lock(
+                &established.installation,
+                &established.epoch,
+                acquired.holder(),
+            )
             .await?;
         let resumed = !matches!(initial, LifecycleTopology::Running { .. });
         if initial == LifecycleTopology::Empty {
@@ -894,7 +1008,11 @@ pub async fn down_local(request: LocalDownRequest) -> Result<LocalDownOutcome, L
         )
         .await?;
         engine
-            .attest_lifecycle_lock(&established.installation, &established.epoch, &holder)
+            .attest_lifecycle_lock(
+                &established.installation,
+                &established.epoch,
+                acquired.holder(),
+            )
             .await?;
         engine
             .remove_local_docker_children(
@@ -914,7 +1032,11 @@ pub async fn down_local(request: LocalDownRequest) -> Result<LocalDownOutcome, L
         )
         .await?;
         engine
-            .attest_lifecycle_lock(&established.installation, &established.epoch, &holder)
+            .attest_lifecycle_lock(
+                &established.installation,
+                &established.epoch,
+                acquired.holder(),
+            )
             .await?;
         engine
             .remove_results_transit_if_present(&established.installation, &desired, &mutation_fence)
@@ -950,17 +1072,9 @@ pub async fn down_local(request: LocalDownRequest) -> Result<LocalDownOutcome, L
         cancellation_checkpoint(&transaction_cancellation)?;
         Ok(DownLifecycleOperationResult { desired, resumed })
     };
-    let operation =
-        run_acquired_lifecycle_operation(&holder_lost, &transaction_cancellation, operation).await;
-
-    watcher.abort();
-    let DownLifecycleOperationResult { desired, resumed } = match operation {
-        Ok(value) => value,
-        Err(error) => {
-            drop(holder);
-            return Err(error);
-        }
-    };
+    let operation = acquired.run(operation).await;
+    let (holder, operation) = acquired.finish(operation)?;
+    let DownLifecycleOperationResult { desired, resumed } = operation;
     engine
         .release_lifecycle_lock(&established.installation, &established.epoch, holder)
         .await?;
@@ -1063,7 +1177,7 @@ async fn load_sealed_desired(
     let desired = DesiredSpec::from_canonical_bytes(&desired_bytes, &established.installation)
         .map_err(|_| reset_required())?;
     if desired_sha256 != established.epoch.initial_desired_sha256()
-        || Some(desired.plan_digest()) != established.epoch.desired_plan_sha256()
+        || desired.plan_digest() != established.epoch.desired_plan_sha256()
     {
         return Err(reset_required());
     }
@@ -1179,33 +1293,6 @@ impl ExactCasMaterialAttester for EngineExactCasMaterialAttester<'_, '_> {
     }
 }
 
-async fn attest_exact_cas_material(
-    engine: &InitEngine<'_>,
-    established: &EstablishedLifecycle,
-    artifacts: &BootstrapArtifacts,
-    relay: &[u8],
-    runner_config: &[u8],
-    relay_id: &str,
-    runner_id: &str,
-    mutation: &LifecycleMutationFence,
-) -> Result<(), LocalInitError> {
-    let attester = EngineExactCasMaterialAttester {
-        engine,
-        established,
-        mutation,
-    };
-    attest_exact_cas_material_with(
-        &attester,
-        established,
-        artifacts,
-        relay,
-        runner_config,
-        relay_id,
-        runner_id,
-    )
-    .await
-}
-
 #[allow(clippy::too_many_arguments)]
 async fn attest_exact_cas_material_with(
     attester: &impl ExactCasMaterialAttester,
@@ -1252,19 +1339,33 @@ async fn attest_exact_cas_material_with(
     Ok(())
 }
 
-async fn complete_running_replay<Attest, Attestation, Inspect, Inspection>(
+#[allow(clippy::too_many_arguments)]
+async fn complete_running_replay<Inspect, Inspection>(
+    attester: &impl ExactCasMaterialAttester,
+    established: &EstablishedLifecycle,
+    artifacts: &BootstrapArtifacts,
+    relay: &[u8],
+    runner_config: &[u8],
+    relay_id: &str,
+    runner_id: &str,
     initial: &LifecycleTopology,
     cancellation: &CancellationToken,
-    attest_exact_material: Attest,
     inspect_topology: Inspect,
 ) -> Result<(), LocalInitError>
 where
-    Attest: FnOnce() -> Attestation,
-    Attestation: Future<Output = Result<(), LocalInitError>>,
     Inspect: FnOnce() -> Inspection,
     Inspection: Future<Output = Result<LifecycleTopology, LocalInitError>>,
 {
-    attest_exact_material().await?;
+    attest_exact_cas_material_with(
+        attester,
+        established,
+        artifacts,
+        relay,
+        runner_config,
+        relay_id,
+        runner_id,
+    )
+    .await?;
     let repeated = inspect_topology().await?;
     if &repeated != initial {
         return Err(reset_required());
@@ -1380,8 +1481,8 @@ fn derive_bootstrap_artifacts(
         &established.epoch,
     );
     let runner_id = deriver.uuid(b"lifecycle/runner-id");
-    let request = BootstrapRequest {
-        schema: "automata.local/bootstrap-runner-request/v1",
+    let request = LocalBootstrapRunnerRequest {
+        schema: LOCAL_BOOTSTRAP_RUNNER_REQUEST_SCHEMA.to_owned(),
         bootstrap_operation_id: deriver.uuid(b"lifecycle/bootstrap-operation-id"),
         tenant: BootstrapTenant {
             tenant_id: format!("local-{}", established.installation.id().as_uuid().simple()),
@@ -1390,7 +1491,7 @@ fn derive_bootstrap_artifacts(
         installation_authority_source_sha256: established.epoch.material_root_sha256(),
         runner_id,
         enrollment_id: deriver.uuid(b"lifecycle/runner-enrollment-id"),
-        runner_group: "default",
+        runner_group: RunnerGroup::new("default").expect("fixed runner group is valid"),
         token_lifetime_seconds: 3_600,
     };
     let request = canonical_bytes(&request)?;
@@ -1416,14 +1517,13 @@ fn derive_bootstrap_artifacts(
     })
 }
 
-pub(super) fn linked_cancellation(
+fn linked_cancellation_from_holder_loss(
     caller: &CancellationToken,
-    holder: &LifecycleLockHolder,
+    holder_lost: CancellationToken,
 ) -> (CancellationToken, JoinHandle<()>) {
     let linked = CancellationToken::new();
     let child = linked.clone();
     let caller = caller.clone();
-    let holder_lost = holder.holder_lost();
     let watcher = tokio::spawn(async move {
         tokio::select! {
             () = caller.cancelled() => {}
@@ -1432,6 +1532,13 @@ pub(super) fn linked_cancellation(
         child.cancel();
     });
     (linked, watcher)
+}
+
+pub(super) fn linked_cancellation(
+    caller: &CancellationToken,
+    holder: &LifecycleLockHolder,
+) -> (CancellationToken, JoinHandle<()>) {
+    linked_cancellation_from_holder_loss(caller, holder.holder_lost())
 }
 
 fn lower_hex(bytes: &[u8]) -> String {

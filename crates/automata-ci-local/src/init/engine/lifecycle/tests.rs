@@ -520,11 +520,7 @@ mod daemon_generation_tests {
             }
         });
         start.await.unwrap();
-        assert!(
-            tokio::time::timeout(Duration::from_millis(10), Arc::clone(&gate).lock_owned())
-                .await
-                .is_err()
-        );
+        assert!(Arc::clone(&gate).try_lock_owned().is_err());
         finish.send(()).unwrap();
         running.await.unwrap().unwrap();
 

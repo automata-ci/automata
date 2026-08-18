@@ -70,35 +70,55 @@ impl Drop for TestDirectory {
 struct FakeResetDriver {
     state: Mutex<FakeResetState>,
     cancellation: CancellationToken,
+    holder_lost: CancellationToken,
 }
 
 struct FakeResetState {
     progress: usize,
-    helper: bool,
-    fail_helper: bool,
-    fail_at: Option<usize>,
-    fail_anchor: bool,
-    fail_inspect_at: Option<usize>,
+    phase: FakeResetPhase,
+    failure: Option<FakeResetFailure>,
     inspect_count: usize,
     cancel_at: Option<usize>,
+    lose_holder_at: Option<usize>,
     trace: Vec<String>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FakeResetPhase {
+    Topology,
+    Volumes,
+    AnchorRemoved,
+    Complete,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FakeResetFailure {
+    Topology,
+    Inspect(usize),
+    Volume(usize),
+    Anchor,
+    Lock,
+}
+
 impl FakeResetDriver {
-    fn new(progress: usize, helper: bool) -> Self {
+    fn new(progress: usize, topology_present: bool) -> Self {
+        assert!(progress <= 12);
         Self {
             state: Mutex::new(FakeResetState {
                 progress,
-                helper,
-                fail_helper: false,
-                fail_at: None,
-                fail_anchor: false,
-                fail_inspect_at: None,
+                phase: if topology_present {
+                    FakeResetPhase::Topology
+                } else {
+                    FakeResetPhase::Volumes
+                },
+                failure: None,
                 inspect_count: 0,
                 cancel_at: None,
+                lose_holder_at: None,
                 trace: Vec::new(),
             }),
             cancellation: CancellationToken::new(),
+            holder_lost: CancellationToken::new(),
         }
     }
 
@@ -107,35 +127,37 @@ impl FakeResetDriver {
     }
 }
 
-#[async_trait::async_trait]
+#[async_trait::async_trait(?Send)]
 impl ResetMutationDriver for FakeResetDriver {
-    async fn cleanup_helper(
-        &self,
-        _installation: &Installation,
-        _epoch_fingerprint: Sha256Digest,
-        _helper: &ResetHelperBinding,
-    ) -> Result<(), LocalInitError> {
+    fn holder_lost(&self) -> CancellationToken {
+        self.holder_lost.clone()
+    }
+
+    async fn remove_topology(&mut self) -> Result<(), LocalInitError> {
+        if self.holder_lost.is_cancelled() {
+            return Err(reset_required());
+        }
         let mut state = self.state.lock().unwrap();
-        assert!(state.helper);
-        state.trace.push("helper".to_owned());
-        if state.fail_helper {
+        assert_eq!(state.phase, FakeResetPhase::Topology);
+        state.trace.push("topology".to_owned());
+        if state.failure == Some(FakeResetFailure::Topology) {
             return Err(LocalInitError::new(LocalInitErrorCode::ResetFailed));
         }
-        state.helper = false;
+        state.phase = FakeResetPhase::Volumes;
         Ok(())
     }
 
-    async fn inspect_progress(
-        &self,
-        _installation: &Installation,
-        _epoch_fingerprint: Sha256Digest,
-    ) -> Result<usize, LocalInitError> {
+    async fn inspect_progress(&mut self) -> Result<usize, LocalInitError> {
+        if self.holder_lost.is_cancelled() {
+            return Err(reset_required());
+        }
         let mut state = self.state.lock().unwrap();
+        assert_eq!(state.phase, FakeResetPhase::Volumes);
         let progress = state.progress;
         state.trace.push(format!("inspect:{progress}"));
         let inspection = state.inspect_count;
         state.inspect_count += 1;
-        if state.fail_inspect_at == Some(inspection) {
+        if state.failure == Some(FakeResetFailure::Inspect(inspection)) {
             return Err(LocalInitError::new(
                 LocalInitErrorCode::EngineResourceMismatch,
             ));
@@ -144,33 +166,47 @@ impl ResetMutationDriver for FakeResetDriver {
     }
 
     async fn remove_volume(
-        &self,
-        _installation: &Installation,
-        _epoch_fingerprint: Sha256Digest,
+        &mut self,
         role: super::super::materializer::VolumeRole,
     ) -> Result<(), LocalInitError> {
+        if self.holder_lost.is_cancelled() {
+            return Err(reset_required());
+        }
         let mut state = self.state.lock().unwrap();
+        assert_eq!(state.phase, FakeResetPhase::Volumes);
         let index = state.progress;
         assert_eq!(reset_volume_order()[index], role);
         state.trace.push(format!("volume:{}", role.name()));
         if state.cancel_at == Some(index) {
             self.cancellation.cancel();
         }
-        if state.fail_at == Some(index) {
+        if state.lose_holder_at == Some(index) {
+            self.holder_lost.cancel();
+        }
+        if state.failure == Some(FakeResetFailure::Volume(index)) {
             return Err(LocalInitError::new(LocalInitErrorCode::ResetFailed));
         }
         state.progress += 1;
         Ok(())
     }
 
-    async fn remove_anchor(&self, _installation: &Installation) -> Result<(), LocalInitError> {
+    async fn remove_anchor_and_release_lock(&mut self) -> Result<(), LocalInitError> {
+        if self.holder_lost.is_cancelled() {
+            return Err(reset_required());
+        }
         let mut state = self.state.lock().unwrap();
+        assert_eq!(state.phase, FakeResetPhase::Volumes);
         assert_eq!(state.progress, 12);
         state.trace.push("anchor".to_owned());
-        if state.fail_anchor {
+        if state.failure == Some(FakeResetFailure::Anchor) {
             return Err(LocalInitError::new(LocalInitErrorCode::ResetFailed));
         }
-        state.progress = 13;
+        state.phase = FakeResetPhase::AnchorRemoved;
+        state.trace.push("lock".to_owned());
+        if state.failure == Some(FakeResetFailure::Lock) {
+            return Err(LocalInitError::new(LocalInitErrorCode::ResetFailed));
+        }
+        state.phase = FakeResetPhase::Complete;
         Ok(())
     }
 }
@@ -188,24 +224,17 @@ fn helper() -> ResetHelperBinding {
 }
 
 #[tokio::test]
-async fn destructive_reset_is_helper_first_desired_twelfth_anchor_last_and_latched() {
-    let driver = FakeResetDriver::new(0, true);
+async fn destructive_reset_is_topology_first_desired_twelfth_anchor_then_lock_and_latched() {
+    let mut driver = FakeResetDriver::new(0, true);
     driver.state.lock().unwrap().cancel_at = Some(0);
-    let installation = installation();
-    let fingerprint = Sha256Digest::from_bytes([7; 32]);
-    let completed_after_cancellation = drive_engine_reset(
-        &driver,
-        &installation,
-        fingerprint,
-        Some(&helper()),
-        &driver.cancellation,
-    )
-    .await
-    .unwrap();
+    let cancellation = driver.cancellation.clone();
+    let completed_after_cancellation = drive_engine_reset(&mut driver, false, &cancellation)
+        .await
+        .unwrap();
 
     assert!(completed_after_cancellation);
     let trace = driver.trace();
-    assert_eq!(trace.first().map(String::as_str), Some("helper"));
+    assert_eq!(trace.first().map(String::as_str), Some("topology"));
     assert_eq!(
         trace
             .iter()
@@ -216,25 +245,20 @@ async fn destructive_reset_is_helper_first_desired_twelfth_anchor_last_and_latch
     assert_eq!(
         trace.iter().rposition(|event| event == "anchor"),
         Some(trace.len() - 2),
-        "the final progress proof follows anchor deletion"
+        "the lifecycle lock is the only mutation after anchor deletion"
     );
-    assert_eq!(trace.last().map(String::as_str), Some("inspect:13"));
+    assert_eq!(trace.last().map(String::as_str), Some("lock"));
 }
 
 #[tokio::test]
 async fn pre_cancelled_destructive_replay_still_completes_and_reports_the_latch() {
-    let driver = FakeResetDriver::new(7, false);
+    let mut driver = FakeResetDriver::new(7, false);
     driver.cancellation.cancel();
+    let cancellation = driver.cancellation.clone();
 
-    let completed_after_cancellation = drive_engine_reset(
-        &driver,
-        &installation(),
-        Sha256Digest::from_bytes([0x71; 32]),
-        None,
-        &driver.cancellation,
-    )
-    .await
-    .unwrap();
+    let completed_after_cancellation = drive_engine_reset(&mut driver, true, &cancellation)
+        .await
+        .unwrap();
 
     assert!(completed_after_cancellation);
     assert_eq!(
@@ -245,26 +269,17 @@ async fn pre_cancelled_destructive_replay_still_completes_and_reports_the_latch(
             .count(),
         5
     );
-    assert_eq!(
-        driver.trace().last().map(String::as_str),
-        Some("inspect:13")
-    );
+    assert_eq!(driver.trace().last().map(String::as_str), Some("lock"));
 }
 
 #[tokio::test]
 async fn reset_replay_resumes_at_the_exact_absent_prefix() {
-    let installation = installation();
-    for progress in 0..=13 {
-        let driver = FakeResetDriver::new(progress, false);
-        drive_engine_reset(
-            &driver,
-            &installation,
-            Sha256Digest::from_bytes([8; 32]),
-            None,
-            &driver.cancellation,
-        )
-        .await
-        .unwrap();
+    for progress in 0..=12 {
+        let mut driver = FakeResetDriver::new(progress, false);
+        let cancellation = driver.cancellation.clone();
+        drive_engine_reset(&mut driver, true, &cancellation)
+            .await
+            .unwrap();
 
         let trace = driver.trace();
         let removed = trace
@@ -272,7 +287,7 @@ async fn reset_replay_resumes_at_the_exact_absent_prefix() {
             .filter(|event| event.starts_with("volume:"))
             .cloned()
             .collect::<Vec<_>>();
-        let expected = reset_volume_order()[progress.min(12)..]
+        let expected = reset_volume_order()[progress..]
             .iter()
             .map(|role| format!("volume:{}", role.name()))
             .collect::<Vec<_>>();
@@ -282,29 +297,25 @@ async fn reset_replay_resumes_at_the_exact_absent_prefix() {
                 .iter()
                 .filter(|event| event.as_str() == "anchor")
                 .count(),
-            usize::from(progress <= 12),
+            1,
             "anchor replay prefix {progress}"
         );
+        assert_eq!(trace.last().map(String::as_str), Some("lock"));
     }
 }
 
 #[tokio::test]
 async fn reset_failure_dominates_latched_cancellation_and_stops_later_mutations() {
-    let driver = FakeResetDriver::new(0, false);
+    let mut driver = FakeResetDriver::new(0, false);
     {
         let mut state = driver.state.lock().unwrap();
         state.cancel_at = Some(2);
-        state.fail_at = Some(2);
+        state.failure = Some(FakeResetFailure::Volume(2));
     }
-    let error = drive_engine_reset(
-        &driver,
-        &installation(),
-        Sha256Digest::from_bytes([9; 32]),
-        None,
-        &driver.cancellation,
-    )
-    .await
-    .unwrap_err();
+    let cancellation = driver.cancellation.clone();
+    let error = drive_engine_reset(&mut driver, true, &cancellation)
+        .await
+        .unwrap_err();
     assert_eq!(error.code(), LocalInitErrorCode::ResetFailed);
     assert!(driver.cancellation.is_cancelled());
     assert_eq!(
@@ -320,53 +331,35 @@ async fn reset_failure_dominates_latched_cancellation_and_stops_later_mutations(
 
 #[tokio::test]
 async fn every_last_preflight_or_ordered_delete_failure_stops_later_mutation() {
-    let installation = installation();
-    let fingerprint = Sha256Digest::from_bytes([0x44; 32]);
-
-    let preflight = FakeResetDriver::new(0, false);
-    preflight.state.lock().unwrap().fail_inspect_at = Some(0);
+    let mut preflight = FakeResetDriver::new(0, false);
+    preflight.state.lock().unwrap().failure = Some(FakeResetFailure::Inspect(0));
+    let cancellation = preflight.cancellation.clone();
     assert_eq!(
-        drive_engine_reset(
-            &preflight,
-            &installation,
-            fingerprint,
-            None,
-            &preflight.cancellation,
-        )
-        .await
-        .unwrap_err()
-        .code(),
+        drive_engine_reset(&mut preflight, true, &cancellation)
+            .await
+            .unwrap_err()
+            .code(),
         LocalInitErrorCode::EngineResourceMismatch
     );
     assert_eq!(preflight.trace(), ["inspect:0"]);
 
-    let helper_failure = FakeResetDriver::new(0, true);
-    helper_failure.state.lock().unwrap().fail_helper = true;
+    let mut topology_failure = FakeResetDriver::new(0, true);
+    topology_failure.state.lock().unwrap().failure = Some(FakeResetFailure::Topology);
+    let cancellation = topology_failure.cancellation.clone();
     assert!(
-        drive_engine_reset(
-            &helper_failure,
-            &installation,
-            fingerprint,
-            Some(&helper()),
-            &helper_failure.cancellation,
-        )
-        .await
-        .is_err()
+        drive_engine_reset(&mut topology_failure, false, &cancellation)
+            .await
+            .is_err()
     );
-    assert_eq!(helper_failure.trace(), ["helper"]);
+    assert_eq!(topology_failure.trace(), ["topology"]);
 
-    let desired_failure = FakeResetDriver::new(0, false);
-    desired_failure.state.lock().unwrap().fail_at = Some(11);
+    let mut desired_failure = FakeResetDriver::new(0, false);
+    desired_failure.state.lock().unwrap().failure = Some(FakeResetFailure::Volume(11));
+    let cancellation = desired_failure.cancellation.clone();
     assert!(
-        drive_engine_reset(
-            &desired_failure,
-            &installation,
-            fingerprint,
-            None,
-            &desired_failure.cancellation,
-        )
-        .await
-        .is_err()
+        drive_engine_reset(&mut desired_failure, true, &cancellation)
+            .await
+            .is_err()
     );
     assert!(
         !desired_failure
@@ -375,23 +368,50 @@ async fn every_last_preflight_or_ordered_delete_failure_stops_later_mutation() {
             .any(|event| event == "anchor")
     );
 
-    let anchor_failure = FakeResetDriver::new(0, false);
-    anchor_failure.state.lock().unwrap().fail_anchor = true;
+    let mut anchor_failure = FakeResetDriver::new(0, false);
+    anchor_failure.state.lock().unwrap().failure = Some(FakeResetFailure::Anchor);
+    let cancellation = anchor_failure.cancellation.clone();
     assert!(
-        drive_engine_reset(
-            &anchor_failure,
-            &installation,
-            fingerprint,
-            None,
-            &anchor_failure.cancellation,
-        )
-        .await
-        .is_err()
+        drive_engine_reset(&mut anchor_failure, true, &cancellation)
+            .await
+            .is_err()
     );
     assert_eq!(
         anchor_failure.trace().last().map(String::as_str),
         Some("anchor")
     );
+
+    let mut lock_failure = FakeResetDriver::new(12, false);
+    lock_failure.state.lock().unwrap().failure = Some(FakeResetFailure::Lock);
+    let cancellation = lock_failure.cancellation.clone();
+    assert!(
+        drive_engine_reset(&mut lock_failure, true, &cancellation)
+            .await
+            .is_err()
+    );
+    assert_eq!(lock_failure.trace(), ["inspect:12", "anchor", "lock"]);
+}
+
+#[tokio::test]
+async fn holder_loss_stops_the_ordered_transaction_before_later_mutations() {
+    let mut driver = FakeResetDriver::new(0, false);
+    driver.state.lock().unwrap().lose_holder_at = Some(2);
+    let cancellation = driver.cancellation.clone();
+
+    let error = drive_engine_reset(&mut driver, true, &cancellation)
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code(), LocalInitErrorCode::ResetRequired);
+    assert_eq!(
+        driver
+            .trace()
+            .iter()
+            .filter(|event| event.starts_with("volume:"))
+            .count(),
+        3
+    );
+    assert!(!driver.trace().iter().any(|event| event == "anchor"));
 }
 
 struct FakeHostResetDriver {
@@ -511,51 +531,6 @@ fn reset_authority_survives_missing_or_safe_malformed_non_authority_records() {
         validate_reset_host_state(&state, &state.snapshot_for_reset().unwrap()).unwrap();
     assert_eq!(malformed.installation, installation);
     assert_eq!(malformed.epoch, epoch);
-}
-
-#[test]
-fn legacy_v1_epoch_remains_status_and_reset_authority_but_requires_reset_for_lifecycle() {
-    let directory = TestDirectory::new();
-    let state = StateRoot::acquire(&directory.state_path()).unwrap();
-    let installation = installation();
-    let selection = StateInstallationSelection::new(installation.name());
-    state
-        .store_installation_selection(&selection.canonical_bytes().unwrap())
-        .unwrap();
-    let material_root = state.create_material_root().unwrap();
-    let epoch = super::super::epoch::legacy_test_epoch(
-        &installation,
-        &material_root,
-        state.authority_sha256(),
-    );
-    state.store_epoch(&epoch.canonical_bytes()).unwrap();
-    let deriver = MaterialDeriver::new(material_root, &installation, &epoch);
-    certificates::load_or_issue(&state, &deriver, &epoch, false).unwrap();
-    state
-        .store_materialization(
-            &StateMaterialization::new(epoch.fingerprint())
-                .canonical_bytes()
-                .unwrap(),
-        )
-        .unwrap();
-
-    match validate_host_state(&state, &state.snapshot_read_only().unwrap()).unwrap() {
-        ValidatedHostState::Established(established) => {
-            assert_eq!(established.installation, installation);
-            assert_eq!(established.epoch, epoch);
-        }
-        ValidatedHostState::Incomplete { .. } => panic!("sealed v1 must remain observable"),
-    }
-    let reset = validate_reset_host_state(&state, &state.snapshot_for_reset().unwrap()).unwrap();
-    assert_eq!(reset.installation, installation);
-    assert_eq!(reset.epoch, epoch);
-    assert_eq!(
-        epoch
-            .require_current_lifecycle_contract()
-            .unwrap_err()
-            .code(),
-        LocalInitErrorCode::ResetRequired
-    );
 }
 
 #[test]
@@ -1260,36 +1235,84 @@ async fn status_api_rejects_a_restored_old_intent_against_new_canonical_custody(
     assert_eq!(error.code(), LocalInitErrorCode::ResetRequired);
 }
 
-fn public_status_reports(
-    fingerprint: Sha256Digest,
-) -> (LocalStatusReport, LocalStatusReport, LocalStatusReport) {
-    let recorded = LocalStatusReport {
-        schema: STATUS_SCHEMA,
-        status: LocalInstallationStatus::RecordedSealed,
-        installation: Some("default".to_owned()),
-        installation_id: Some("11111111-1111-4111-8111-111111111111".to_owned()),
-        workers: Some(1),
-        epoch_fingerprint: Some(fingerprint),
-        records: StatusRecords {
-            installation_selection: true.into(),
-            material_root: true.into(),
-            epoch: true.into(),
-            certificates: true.into(),
-            materialization: true.into(),
-            reset_intent: false.into(),
-        },
-        engine: Some(StatusEngine {
-            identity: "exact",
-            image_representations: "exact",
-            images: Vec::new(),
-            owned_union: "exact",
-            volumes: Vec::new(),
-            attachments: "absent",
-            unknown_managed_resources: "absent",
-        }),
-        volume_contents: "not_inspected",
-        reset: None,
+fn public_status_reports() -> (
+    Sha256Digest,
+    [LocalStatusReport; 5],
+    LocalStatusReport,
+    LocalStatusReport,
+) {
+    let installation = Installation::verified(
+        InstallationName::default(),
+        InstallationId::parse_canonical("11111111-1111-4111-8111-111111111111").unwrap(),
+    );
+    let epoch = super::super::epoch::authority_test_epoch(
+        &installation,
+        &[0x34; 32],
+        Sha256Digest::from_bytes([0x35; 32]),
+    );
+    let fingerprint = epoch.fingerprint();
+    let established = EstablishedState {
+        installation,
+        epoch,
+        material_root: Some([0x34; 32]),
     };
+    let records = StatusRecords {
+        installation_selection: true.into(),
+        material_root: true.into(),
+        epoch: true.into(),
+        certificates: true.into(),
+        materialization: true.into(),
+        reset_intent: false.into(),
+    };
+    let engine = SealedEngineStatus {
+        images: Vec::new(),
+        volumes: Vec::new(),
+    };
+    let lifecycle = [
+        lifecycle_report(
+            records.clone(),
+            &established,
+            LocalInstallationStatus::RecordedSealed,
+            LifecycleReportEvidence::Engine {
+                custody: engine.clone(),
+                attachments: "absent",
+            },
+        ),
+        lifecycle_report(
+            records.clone(),
+            &established,
+            LocalInstallationStatus::Running,
+            LifecycleReportEvidence::Engine {
+                custody: engine.clone(),
+                attachments: "exact_running_topology",
+            },
+        ),
+        lifecycle_report(
+            records.clone(),
+            &established,
+            LocalInstallationStatus::LifecycleInProgress,
+            LifecycleReportEvidence::Guarded {
+                volume_contents: "indeterminate_while_busy",
+            },
+        ),
+        lifecycle_report(
+            records.clone(),
+            &established,
+            LocalInstallationStatus::LifecycleRecoveryRequired,
+            LifecycleReportEvidence::Guarded {
+                volume_contents: "stopped_lock_recovery_required",
+            },
+        ),
+        lifecycle_report(
+            records,
+            &established,
+            LocalInstallationStatus::Degraded,
+            LifecycleReportEvidence::Engine {
+                custody: engine,
+                attachments: "exact_partial_topology",
+            },
+        ),
+    ];
     let incomplete = LocalStatusReport {
         schema: STATUS_SCHEMA,
         status: LocalInstallationStatus::Incomplete,
@@ -1331,22 +1354,106 @@ fn public_status_reports(
             total_resources: 13,
         }),
     };
-    (recorded, incomplete, resetting)
+    (fingerprint, lifecycle, incomplete, resetting)
 }
 
 #[test]
-fn current_reset_os_credential_selector_union_is_exactly_empty() {
-    let installation = Installation::verified(InstallationName::default(), InstallationId::new());
-    assert!(LOCAL_OS_CREDENTIAL_SELECTORS.is_empty());
-    assert!(preflight_empty_os_credential_selectors(&installation).is_ok());
-    assert!(delete_empty_os_credential_selectors(&installation).is_ok());
-    assert!(requery_empty_os_credential_selectors(&installation).is_ok());
+fn lifecycle_status_classifier_preserves_lock_dominance_and_topology() {
+    let operation_id = OperationId::new();
+    let absent = LifecycleLockObservation::Absent;
+    let live = LifecycleLockObservation::Live {
+        id: "a".repeat(64),
+        operation_id,
+    };
+    let stopped = LifecycleLockObservation::Stopped {
+        id: "b".repeat(64),
+        operation_id,
+    };
+    let topologies = [
+        (
+            LifecycleTopology::Empty,
+            LocalInstallationStatus::RecordedSealed,
+        ),
+        (
+            LifecycleTopology::Running {
+                transit_id: "c".repeat(64),
+            },
+            LocalInstallationStatus::Running,
+        ),
+        (
+            LifecycleTopology::Partial,
+            LocalInstallationStatus::Degraded,
+        ),
+    ];
+
+    for (topology, expected) in &topologies {
+        assert_eq!(classify_lifecycle_status(&absent, topology), *expected);
+        assert_eq!(
+            classify_lifecycle_status(&live, topology),
+            LocalInstallationStatus::LifecycleInProgress,
+        );
+        assert_eq!(
+            classify_lifecycle_status(&stopped, topology),
+            LocalInstallationStatus::LifecycleRecoveryRequired,
+        );
+    }
 }
 
 #[test]
 fn stable_status_json_is_exact_and_redacted_for_every_public_state() {
-    let fingerprint = Sha256Digest::from_bytes([0x33; 32]);
-    let (recorded, incomplete, resetting) = public_status_reports(fingerprint);
+    let (
+        fingerprint,
+        [
+            recorded,
+            running,
+            lifecycle_in_progress,
+            lifecycle_recovery_required,
+            degraded,
+        ],
+        incomplete,
+        resetting,
+    ) = public_status_reports();
+
+    let recorded_json = serde_json::json!({
+        "schema": "automata.local/status/v1",
+        "status": "recorded_sealed",
+        "installation": "default",
+        "installation_id": "11111111-1111-4111-8111-111111111111",
+        "workers": 1,
+        "epoch_fingerprint": fingerprint.to_string(),
+        "records": {
+            "installation_selection": true,
+            "material_root": true,
+            "epoch": true,
+            "certificates": true,
+            "materialization": true,
+            "reset_intent": false
+        },
+        "engine": {
+            "identity": "exact",
+            "image_representations": "exact",
+            "images": [],
+            "owned_union": "exact",
+            "volumes": [],
+            "attachments": "absent",
+            "unknown_managed_resources": "absent"
+        },
+        "volume_contents": "not_inspected",
+        "reset": null
+    });
+    let lifecycle_json = |status: &str, attachments: &str| {
+        let mut value = recorded_json.clone();
+        value["status"] = serde_json::json!(status);
+        value["engine"]["attachments"] = serde_json::json!(attachments);
+        value
+    };
+    let guarded_json = |status: &str, volume_contents: &str| {
+        let mut value = recorded_json.clone();
+        value["status"] = serde_json::json!(status);
+        value["engine"] = serde_json::Value::Null;
+        value["volume_contents"] = serde_json::json!(volume_contents);
+        value
+    };
 
     let cases = [
         (
@@ -1371,35 +1478,22 @@ fn stable_status_json_is_exact_and_redacted_for_every_public_state() {
                 "reset": null
             }),
         ),
+        (recorded, recorded_json.clone()),
+        (running, lifecycle_json("running", "exact_running_topology")),
         (
-            recorded,
-            serde_json::json!({
-                "schema": "automata.local/status/v1",
-                "status": "recorded_sealed",
-                "installation": "default",
-                "installation_id": "11111111-1111-4111-8111-111111111111",
-                "workers": 1,
-                "epoch_fingerprint": fingerprint.to_string(),
-                "records": {
-                    "installation_selection": true,
-                    "material_root": true,
-                    "epoch": true,
-                    "certificates": true,
-                    "materialization": true,
-                    "reset_intent": false
-                },
-                "engine": {
-                    "identity": "exact",
-                    "image_representations": "exact",
-                    "images": [],
-                    "owned_union": "exact",
-                    "volumes": [],
-                    "attachments": "absent",
-                    "unknown_managed_resources": "absent"
-                },
-                "volume_contents": "not_inspected",
-                "reset": null
-            }),
+            lifecycle_in_progress,
+            guarded_json("lifecycle_in_progress", "indeterminate_while_busy"),
+        ),
+        (
+            lifecycle_recovery_required,
+            guarded_json(
+                "lifecycle_recovery_required",
+                "stopped_lock_recovery_required",
+            ),
+        ),
+        (
+            degraded,
+            lifecycle_json("degraded", "exact_partial_topology"),
         ),
         (
             resetting,

@@ -43,6 +43,10 @@ use crate::migration::MIGRATOR;
 const DATABASE_URL_ENVIRONMENT: &str = "AUTOMATA_TEST_DATABASE_URL";
 const TEST_SCHEMA: &str = "automata_test";
 const MINIMUM_POSTGRES_VERSION: i32 = 180_000;
+const LEGACY_TENANT_ID: &str = "upgrade-human-token";
+const LEGACY_TENANT_DISPLAY_NAME: &str = " Upgrade human tenant ";
+const LEGACY_PROVIDER_ID: &str = "github";
+const LEGACY_PROVIDER_SUBJECT: &str = "upgrade-human-subject";
 
 type TestError = Box<dyn std::error::Error + Send + Sync + 'static>;
 type TestResult<T = ()> = Result<T, TestError>;
@@ -301,6 +305,46 @@ struct StoredInstallationBootstrapToken {
     expires_at_ms: i64,
 }
 
+#[derive(sqlx::FromRow)]
+struct StoredLegacyHumanConsumption {
+    consumed_at_ms: Option<i64>,
+    consumed_runner_id: Option<Uuid>,
+    redeem_operation_id: Option<Uuid>,
+    redeem_request_sha256: Option<Vec<u8>>,
+    redeem_response: Option<Vec<u8>>,
+    redeem_certificate_leaf_sha256: Option<Vec<u8>>,
+    redeem_predecessor_certificate_leaf_sha256: Option<Vec<u8>>,
+    redeem_predecessor_certificate_expires_at_seconds: Option<i64>,
+    redeem_certificate_expires_at_seconds: Option<i64>,
+}
+
+#[derive(sqlx::FromRow)]
+struct StoredLegacyHumanInstallation {
+    state: String,
+    configuration_mode: Option<String>,
+    tenant_id: Option<String>,
+    tenant_display_name: Option<String>,
+    configured_tenant_id: Option<String>,
+    configured_principal_id: Option<Uuid>,
+    setup_transaction_id: Option<Uuid>,
+    configured_at_ms: Option<i64>,
+    revision: i64,
+    deployment_authority_sha256: Option<Vec<u8>>,
+    deployment_bootstrap_operation_id: Option<Uuid>,
+    deployment_bootstrap_audit_event_id: Option<Uuid>,
+}
+
+#[derive(Debug)]
+struct LegacyHumanUpgradeFixture {
+    now_ms: i64,
+    principal_id: Uuid,
+    session_id: Uuid,
+    authorization_revision: i64,
+    runner_group_id: Uuid,
+    enrollment_id: Uuid,
+    token_sha256: [u8; 32],
+}
+
 struct TrustStore(BTreeMap<String, WindowsRunnerAdmissionTrustAnchor>);
 
 impl WindowsRunnerAdmissionTrustStore for TrustStore {
@@ -505,6 +549,162 @@ fn assert_constraint(error: &sqlx::Error, expected: &str) {
         .as_database_error()
         .and_then(sqlx::error::DatabaseError::constraint);
     assert_eq!(actual, Some(expected), "unexpected database error: {error}");
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the fixture builds one referentially complete 0051 human authority shared by both migration branches"
+)]
+async fn seed_0051_human_upgrade_fixture(
+    database: &TestDatabase,
+) -> TestResult<LegacyHumanUpgradeFixture> {
+    let predecessor = sqlx::migrate::Migrator::with_migrations(
+        MIGRATOR
+            .iter()
+            .filter(|migration| migration.version <= 51)
+            .cloned()
+            .collect(),
+    );
+    predecessor.run(database.pool()).await?;
+    let predecessor_version: i64 = sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations")
+        .fetch_one(database.pool())
+        .await?;
+    assert_eq!(predecessor_version, 51);
+
+    let now_ms: i64 = sqlx::query_scalar(
+        "SELECT floor(extract(epoch FROM pg_catalog.clock_timestamp()))::BIGINT * 1000",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    sqlx::query(
+        "INSERT INTO tenants (id,display_name,created_at_ms,updated_at_ms) VALUES ($1,$2,$3,$3)",
+    )
+    .bind(LEGACY_TENANT_ID)
+    .bind(LEGACY_TENANT_DISPLAY_NAME)
+    .bind(now_ms)
+    .execute(database.pool())
+    .await?;
+
+    let principal_id = Uuid::new_v4();
+    sqlx::query(
+        r"
+        INSERT INTO human_principals (
+            id,status,display_name,created_at_ms,updated_at_ms
+        ) VALUES ($1,'active','Upgrade human',$2,$2)
+        ",
+    )
+    .bind(principal_id)
+    .bind(now_ms)
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r"
+        INSERT INTO human_provider_identities (
+            principal_id,provider_id,provider_subject,provider_login,
+            normalized_login,display_name,first_authenticated_at_ms,
+            last_authenticated_at_ms,last_observed_at_ms,created_at_ms,updated_at_ms
+        ) VALUES ($1,$2,$3,'upgrade-human',
+                  'upgrade-human','Upgrade human',$4,$4,$4,$4,$4)
+        ",
+    )
+    .bind(principal_id)
+    .bind(LEGACY_PROVIDER_ID)
+    .bind(LEGACY_PROVIDER_SUBJECT)
+    .bind(now_ms)
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r"
+        INSERT INTO tenant_human_memberships (
+            tenant_id,principal_id,status,created_at_ms,updated_at_ms
+        ) VALUES ($1,$2,'active',$3,$3)
+        ",
+    )
+    .bind(LEGACY_TENANT_ID)
+    .bind(principal_id)
+    .bind(now_ms)
+    .execute(database.pool())
+    .await?;
+    let authorization_revision: i64 = sqlx::query_scalar(
+        "SELECT authorization_revision FROM tenant_human_memberships WHERE tenant_id=$1 AND principal_id=$2",
+    )
+    .bind(LEGACY_TENANT_ID)
+    .bind(principal_id)
+    .fetch_one(database.pool())
+    .await?;
+
+    let session_id = Uuid::new_v4();
+    sqlx::query(
+        r"
+        INSERT INTO human_sessions (
+            id,tenant_id,principal_id,provider_id,provider_subject,
+            session_kind,audience,token_hash,token_hash_key_id,
+            authorization_revision,issued_at_ms,last_seen_at_ms,
+            idle_expires_at_ms,expires_at_ms
+        ) VALUES ($1,$2,$3,$4,$5,
+                  'browser','automata.web',$6,$7,$8,$9,$9,$10,$11)
+        ",
+    )
+    .bind(session_id)
+    .bind(LEGACY_TENANT_ID)
+    .bind(principal_id)
+    .bind(LEGACY_PROVIDER_ID)
+    .bind(LEGACY_PROVIDER_SUBJECT)
+    .bind(session_id.as_bytes().repeat(2))
+    .bind(format!("migration-0061-{session_id}"))
+    .bind(authorization_revision)
+    .bind(now_ms - 1_000)
+    .bind(now_ms + 600_000)
+    .bind(now_ms + 1_200_000)
+    .execute(database.pool())
+    .await?;
+
+    let runner_group_id = Uuid::new_v4();
+    sqlx::query(
+        r"
+        INSERT INTO runner_groups (
+            id,tenant_id,name,normalized_name,created_at_ms,updated_at_ms
+        ) VALUES ($1,$2,'upgrade','upgrade',$3,$3)
+        ",
+    )
+    .bind(runner_group_id)
+    .bind(LEGACY_TENANT_ID)
+    .bind(now_ms)
+    .execute(database.pool())
+    .await?;
+
+    let enrollment_id = Uuid::new_v4();
+    let token_sha256 = [0x62_u8; 32];
+    sqlx::query(
+        r"
+        INSERT INTO runner_enrollment_tokens (
+            id,tenant_id,runner_group_id,token_sha256,
+            issued_by_principal_id,issued_by_session_id,
+            issued_authorization_revision,issued_at_ms,expires_at_ms
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+        ",
+    )
+    .bind(enrollment_id)
+    .bind(LEGACY_TENANT_ID)
+    .bind(runner_group_id)
+    .bind(token_sha256.as_slice())
+    .bind(principal_id)
+    .bind(session_id)
+    .bind(authorization_revision)
+    .bind(now_ms)
+    .bind(now_ms + 600_000)
+    .execute(database.pool())
+    .await?;
+
+    Ok(LegacyHumanUpgradeFixture {
+        now_ms,
+        principal_id,
+        session_id,
+        authorization_revision,
+        runner_group_id,
+        enrollment_id,
+        token_sha256,
+    })
 }
 
 #[tokio::test]
@@ -1535,36 +1735,16 @@ async fn migration_0061_fresh_database_supports_exact_deployment_bootstrap() -> 
 )]
 async fn migration_0061_upgrades_0051_human_installation_and_token_exactly() -> TestResult {
     run_with_unmigrated_database(|database| async move {
-        const TENANT_ID: &str = "upgrade-human-token";
-        const TENANT_DISPLAY_NAME: &str = " Upgrade human tenant ";
-
-        let predecessor = sqlx::migrate::Migrator::with_migrations(
-            MIGRATOR
-                .iter()
-                .filter(|migration| migration.version <= 51)
-                .cloned()
-                .collect(),
-        );
-        predecessor.run(database.pool()).await?;
-        let predecessor_version: i64 =
-            sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations")
-                .fetch_one(database.pool())
-                .await?;
-        assert_eq!(predecessor_version, 51);
-
-        let now_ms: i64 = sqlx::query_scalar(
-            "SELECT floor(extract(epoch FROM pg_catalog.clock_timestamp()))::BIGINT * 1000",
-        )
-        .fetch_one(database.pool())
-        .await?;
-        sqlx::query(
-            "INSERT INTO tenants (id,display_name,created_at_ms,updated_at_ms) VALUES ($1,$2,$3,$3)",
-        )
-        .bind(TENANT_ID)
-        .bind(TENANT_DISPLAY_NAME)
-        .bind(now_ms)
-        .execute(database.pool())
-        .await?;
+        let fixture = seed_0051_human_upgrade_fixture(&database).await?;
+        let LegacyHumanUpgradeFixture {
+            now_ms,
+            principal_id,
+            session_id,
+            authorization_revision,
+            enrollment_id,
+            token_sha256,
+            ..
+        } = fixture;
         sqlx::query(
             r"
             UPDATE human_auth_installation_state
@@ -1579,121 +1759,16 @@ async fn migration_0061_upgrades_0051_human_installation_and_token_exactly() -> 
         )
         .bind([0x61_u8; 32].as_slice())
         .bind(now_ms + 600_000)
-        .bind(TENANT_ID)
-        .bind(TENANT_DISPLAY_NAME)
+        .bind(LEGACY_TENANT_ID)
+        .bind(LEGACY_TENANT_DISPLAY_NAME)
         .bind(now_ms)
-        .execute(database.pool())
-        .await?;
-
-        let principal_id = Uuid::new_v4();
-        sqlx::query(
-            r"
-            INSERT INTO human_principals (
-                id,status,display_name,created_at_ms,updated_at_ms
-            ) VALUES ($1,'active','Upgrade human',$2,$2)
-            ",
-        )
-        .bind(principal_id)
-        .bind(now_ms)
-        .execute(database.pool())
-        .await?;
-        sqlx::query(
-            r"
-            INSERT INTO human_provider_identities (
-                principal_id,provider_id,provider_subject,provider_login,
-                normalized_login,display_name,first_authenticated_at_ms,
-                last_authenticated_at_ms,last_observed_at_ms,created_at_ms,updated_at_ms
-            ) VALUES ($1,'github','upgrade-human-subject','upgrade-human',
-                      'upgrade-human','Upgrade human',$2,$2,$2,$2,$2)
-            ",
-        )
-        .bind(principal_id)
-        .bind(now_ms)
-        .execute(database.pool())
-        .await?;
-        sqlx::query(
-            r"
-            INSERT INTO tenant_human_memberships (
-                tenant_id,principal_id,status,created_at_ms,updated_at_ms
-            ) VALUES ($1,$2,'active',$3,$3)
-            ",
-        )
-        .bind(TENANT_ID)
-        .bind(principal_id)
-        .bind(now_ms)
-        .execute(database.pool())
-        .await?;
-        let authorization_revision: i64 = sqlx::query_scalar(
-            "SELECT authorization_revision FROM tenant_human_memberships WHERE tenant_id=$1 AND principal_id=$2",
-        )
-        .bind(TENANT_ID)
-        .bind(principal_id)
-        .fetch_one(database.pool())
-        .await?;
-        let session_id = Uuid::new_v4();
-        sqlx::query(
-            r"
-            INSERT INTO human_sessions (
-                id,tenant_id,principal_id,provider_id,provider_subject,
-                session_kind,audience,token_hash,token_hash_key_id,
-                authorization_revision,issued_at_ms,last_seen_at_ms,
-                idle_expires_at_ms,expires_at_ms
-            ) VALUES ($1,$2,$3,'github','upgrade-human-subject',
-                      'browser','automata.web',$4,$5,$6,$7,$7,$8,$9)
-            ",
-        )
-        .bind(session_id)
-        .bind(TENANT_ID)
-        .bind(principal_id)
-        .bind(session_id.as_bytes().repeat(2))
-        .bind(format!("migration-0061-{session_id}"))
-        .bind(authorization_revision)
-        .bind(now_ms - 1_000)
-        .bind(now_ms + 600_000)
-        .bind(now_ms + 1_200_000)
-        .execute(database.pool())
-        .await?;
-        let runner_group_id = Uuid::new_v4();
-        sqlx::query(
-            r"
-            INSERT INTO runner_groups (
-                id,tenant_id,name,normalized_name,created_at_ms,updated_at_ms
-            ) VALUES ($1,$2,'upgrade','upgrade',$3,$3)
-            ",
-        )
-        .bind(runner_group_id)
-        .bind(TENANT_ID)
-        .bind(now_ms)
-        .execute(database.pool())
-        .await?;
-        let enrollment_id = Uuid::new_v4();
-        let token_sha256 = [0x62_u8; 32];
-        sqlx::query(
-            r"
-            INSERT INTO runner_enrollment_tokens (
-                id,tenant_id,runner_group_id,token_sha256,
-                issued_by_principal_id,issued_by_session_id,
-                issued_authorization_revision,issued_at_ms,expires_at_ms
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-            ",
-        )
-        .bind(enrollment_id)
-        .bind(TENANT_ID)
-        .bind(runner_group_id)
-        .bind(token_sha256.as_slice())
-        .bind(principal_id)
-        .bind(session_id)
-        .bind(authorization_revision)
-        .bind(now_ms)
-        .bind(now_ms + 600_000)
         .execute(database.pool())
         .await?;
 
         MIGRATOR.run(database.pool()).await?;
-        let applied_version: i64 =
-            sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations")
-                .fetch_one(database.pool())
-                .await?;
+        let applied_version: i64 = sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations")
+            .fetch_one(database.pool())
+            .await?;
         assert_eq!(applied_version, 61);
         let relation_names: (Option<String>, Option<String>) = sqlx::query_as(
             r"
@@ -1704,7 +1779,10 @@ async fn migration_0061_upgrades_0051_human_installation_and_token_exactly() -> 
         )
         .fetch_one(database.pool())
         .await?;
-        assert_eq!(relation_names, (None, Some("installation_state".to_owned())));
+        assert_eq!(
+            relation_names,
+            (None, Some("installation_state".to_owned()))
+        );
         let upgraded_installation: (String, Option<String>, Option<String>, Option<String>, i64) =
             sqlx::query_as(
                 r"
@@ -1719,17 +1797,17 @@ async fn migration_0061_upgrades_0051_human_installation_and_token_exactly() -> 
             (
                 "pending".to_owned(),
                 Some("human".to_owned()),
-                Some(TENANT_ID.to_owned()),
-                Some(TENANT_DISPLAY_NAME.to_owned()),
+                Some(LEGACY_TENANT_ID.to_owned()),
+                Some(LEGACY_TENANT_DISPLAY_NAME.to_owned()),
                 2,
             )
         );
         let tenant_display_name: String =
             sqlx::query_scalar("SELECT display_name FROM tenants WHERE id=$1")
-                .bind(TENANT_ID)
+                .bind(LEGACY_TENANT_ID)
                 .fetch_one(database.pool())
                 .await?;
-        assert_eq!(tenant_display_name, TENANT_DISPLAY_NAME);
+        assert_eq!(tenant_display_name, LEGACY_TENANT_DISPLAY_NAME);
         let upgraded_token: StoredInstallationBootstrapToken = sqlx::query_as(
             r"
             SELECT issuer_kind,issued_by_principal_id,issued_by_session_id,
@@ -1780,13 +1858,13 @@ async fn migration_0061_upgrades_0051_human_installation_and_token_exactly() -> 
             PostgresInstallationAuthorityRepository::new(database.pool().clone());
         let crossed = installation_repository
             .configure_deployment(ConfigureDeploymentInstallation::new(
-                    [0x64; 32],
-                    Uuid::new_v4(),
-                    InstallationTenant::new(
-                        TenantId::new("crossed-deployment")?,
-                        "Crossed deployment",
-                    )?,
-                )?)
+                [0x64; 32],
+                Uuid::new_v4(),
+                InstallationTenant::new(
+                    TenantId::new("crossed-deployment")?,
+                    "Crossed deployment",
+                )?,
+            )?)
             .await
             .map_err(|error| {
                 message_error(format!(
@@ -1796,6 +1874,376 @@ async fn migration_0061_upgrades_0051_human_installation_and_token_exactly() -> 
         assert!(matches!(
             crossed,
             ConfigureDeploymentInstallationOutcome::Conflict
+        ));
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL 18 via AUTOMATA_TEST_DATABASE_URL"]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the configured singleton and consumed token must cross the migration together as one legacy authority witness"
+)]
+async fn migration_0061_upgrades_configured_human_and_consumed_token_exactly() -> TestResult {
+    run_with_unmigrated_database(|database| async move {
+        let fixture = seed_0051_human_upgrade_fixture(&database).await?;
+        let LegacyHumanUpgradeFixture {
+            now_ms,
+            principal_id,
+            session_id,
+            authorization_revision,
+            runner_group_id,
+            enrollment_id,
+            token_sha256,
+        } = fixture;
+
+        let armed = sqlx::query(
+            r"
+            UPDATE human_auth_installation_state
+            SET state='pending',bootstrap_token_hash=$1,
+                bootstrap_hash_key_id='configured-upgrade-key',
+                expected_provider_id=$2,expected_provider_subject=$3,
+                challenge_expires_at_ms=$4,target_tenant_id=$5,
+                target_tenant_display_name=$6,updated_at_ms=$7,
+                revision=revision+1
+            WHERE singleton=TRUE AND state='unconfigured'
+            ",
+        )
+        .bind([0x65_u8; 32].as_slice())
+        .bind(LEGACY_PROVIDER_ID)
+        .bind(LEGACY_PROVIDER_SUBJECT)
+        .bind(now_ms + 600_000)
+        .bind(LEGACY_TENANT_ID)
+        .bind(LEGACY_TENANT_DISPLAY_NAME)
+        .bind(now_ms)
+        .execute(database.pool())
+        .await?;
+        assert_eq!(armed.rows_affected(), 1);
+
+        let setup_transaction_id = Uuid::new_v4();
+        sqlx::query(
+            r"
+            INSERT INTO human_login_transactions (
+                id,tenant_id,purpose,flow_kind,provider_id,return_path,
+                state_hash,state_hash_key_id,browser_binding_hash,
+                browser_binding_hash_key_id,poll_proof_hash,
+                poll_proof_hash_key_id,encrypted_payload,payload_nonce,
+                wrapped_data_key,encryption_key_id,encryption_schema,
+                poll_interval_ms,next_poll_at_ms,created_at_ms,updated_at_ms,
+                expires_at_ms
+            ) VALUES (
+                $1,NULL,'installation_setup','browser',$2,NULL,
+                $3,'configured-upgrade-state',$4,
+                'configured-upgrade-browser',NULL,NULL,$5,$6,$7,
+                'configured-upgrade-envelope',1,NULL,NULL,$8,$8,$9
+            )
+            ",
+        )
+        .bind(setup_transaction_id)
+        .bind(LEGACY_PROVIDER_ID)
+        .bind([0x66_u8; 32].as_slice())
+        .bind([0x67_u8; 32].as_slice())
+        .bind(vec![0x68_u8; 17])
+        .bind(vec![0x69_u8; 12])
+        .bind(vec![0x6a_u8; 32])
+        .bind(now_ms)
+        .bind(now_ms + 600_000)
+        .execute(database.pool())
+        .await?;
+        let bound = sqlx::query(
+            r"
+            UPDATE human_auth_installation_state
+            SET setup_transaction_id=$1,updated_at_ms=$2,revision=revision+1
+            WHERE singleton=TRUE AND state='pending'
+              AND setup_transaction_id IS NULL
+            ",
+        )
+        .bind(setup_transaction_id)
+        .bind(now_ms)
+        .execute(database.pool())
+        .await?;
+        assert_eq!(bound.rows_affected(), 1);
+
+        let consumed_login = sqlx::query(
+            r"
+            UPDATE human_login_transactions
+            SET status='consumed',consumed_at_ms=$2,updated_at_ms=$2,
+                revision=revision+1
+            WHERE id=$1 AND status='pending'
+            ",
+        )
+        .bind(setup_transaction_id)
+        .bind(now_ms)
+        .execute(database.pool())
+        .await?;
+        assert_eq!(consumed_login.rows_affected(), 1);
+        let completed_login = sqlx::query(
+            r"
+            UPDATE human_login_transactions
+            SET status='succeeded',completed_principal_id=$2,updated_at_ms=$3,
+                revision=revision+1
+            WHERE id=$1 AND status='consumed'
+            ",
+        )
+        .bind(setup_transaction_id)
+        .bind(principal_id)
+        .bind(now_ms)
+        .execute(database.pool())
+        .await?;
+        assert_eq!(completed_login.rows_affected(), 1);
+        let configured = sqlx::query(
+            r"
+            UPDATE human_auth_installation_state
+            SET state='configured',bootstrap_token_hash=NULL,
+                bootstrap_hash_key_id=NULL,challenge_expires_at_ms=NULL,
+                configured_tenant_id=$1,configured_principal_id=$2,
+                configured_at_ms=$3,updated_at_ms=$3,revision=revision+1
+            WHERE singleton=TRUE AND state='pending'
+              AND setup_transaction_id=$4
+            ",
+        )
+        .bind(LEGACY_TENANT_ID)
+        .bind(principal_id)
+        .bind(now_ms)
+        .bind(setup_transaction_id)
+        .execute(database.pool())
+        .await?;
+        assert_eq!(configured.rows_affected(), 1);
+
+        let consumed_runner = RunnerId::new();
+        let runner_group = RunnerGroup::new("upgrade")?;
+        let runner_capabilities = RunnerCapabilities::new(
+            consumed_runner,
+            RunnerPlatform::new(OperatingSystem::Linux, Architecture::X86_64),
+        )
+        .with_groups([runner_group]);
+        let runner_labels = runner_capabilities
+            .labels()
+            .iter()
+            .map(automata_ci_core::RunnerLabel::as_str)
+            .collect::<Vec<_>>();
+        sqlx::query(
+            r"
+            INSERT INTO runners (
+                id,tenant_id,group_id,name,normalized_name,labels,capabilities,
+                slots,status,generation,created_at_ms,updated_at_ms,
+                external_identity,desired_state
+            ) VALUES (
+                $1,$2,$3,'upgrade-runner','upgrade-runner',$4,$5,$6,
+                'offline',1,$7,$7,$8,'active'
+            )
+            ",
+        )
+        .bind(consumed_runner.as_uuid())
+        .bind(LEGACY_TENANT_ID)
+        .bind(runner_group_id)
+        .bind(runner_labels)
+        .bind(serde_json::to_value(&runner_capabilities)?)
+        .bind(i32::from(runner_capabilities.max_parallel_jobs()))
+        .bind(now_ms)
+        .bind(format!(
+            "automata:runner:{}",
+            consumed_runner.as_uuid().hyphenated()
+        ))
+        .execute(database.pool())
+        .await?;
+
+        let redeem_operation_id = Uuid::new_v4();
+        let redeem_request_sha256 = [0x6b_u8; 32];
+        let redeem_response = br#"{"runner":"upgrade-runner","source":"0051"}"#.to_vec();
+        let certificate_expires_at_seconds = now_ms.div_euclid(1_000) + 3_600;
+        let consumed_token = sqlx::query(
+            r"
+            UPDATE runner_enrollment_tokens
+            SET consumed_at_ms=$2,consumed_runner_id=$3,
+                redeem_operation_id=$4,redeem_request_sha256=$5,
+                redeem_response=$6,redeem_certificate_expires_at_seconds=$7
+            WHERE id=$1 AND consumed_at_ms IS NULL
+            ",
+        )
+        .bind(enrollment_id)
+        .bind(now_ms)
+        .bind(consumed_runner.as_uuid())
+        .bind(redeem_operation_id)
+        .bind(redeem_request_sha256.as_slice())
+        .bind(&redeem_response)
+        .bind(certificate_expires_at_seconds)
+        .execute(database.pool())
+        .await?;
+        assert_eq!(consumed_token.rows_affected(), 1);
+        sqlx::query(
+            r"
+            INSERT INTO runner_machine_certificates (
+                leaf_sha256,runner_id,expires_at_seconds
+            ) VALUES ($1,$2,$3)
+            ",
+        )
+        .bind([0x6c_u8; 32].as_slice())
+        .bind(consumed_runner.as_uuid())
+        .bind(certificate_expires_at_seconds)
+        .execute(database.pool())
+        .await?;
+
+        MIGRATOR.run(database.pool()).await?;
+        let applied_version: i64 = sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations")
+            .fetch_one(database.pool())
+            .await?;
+        assert_eq!(applied_version, 61);
+
+        let upgraded_installation: StoredLegacyHumanInstallation = sqlx::query_as(
+            r"
+            SELECT state,configuration_mode,tenant_id,tenant_display_name,
+                   configured_tenant_id,configured_principal_id,
+                   setup_transaction_id,configured_at_ms,revision,
+                   deployment_authority_sha256,
+                   deployment_bootstrap_operation_id,
+                   deployment_bootstrap_audit_event_id
+            FROM installation_state WHERE singleton=TRUE
+            ",
+        )
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(upgraded_installation.state, "configured");
+        assert_eq!(
+            upgraded_installation.configuration_mode.as_deref(),
+            Some("human")
+        );
+        assert_eq!(
+            upgraded_installation.tenant_id.as_deref(),
+            Some(LEGACY_TENANT_ID)
+        );
+        assert_eq!(
+            upgraded_installation.tenant_display_name.as_deref(),
+            Some(LEGACY_TENANT_DISPLAY_NAME)
+        );
+        assert_eq!(
+            upgraded_installation.configured_tenant_id.as_deref(),
+            Some(LEGACY_TENANT_ID)
+        );
+        assert_eq!(
+            upgraded_installation.configured_principal_id,
+            Some(principal_id)
+        );
+        assert_eq!(
+            upgraded_installation.setup_transaction_id,
+            Some(setup_transaction_id)
+        );
+        assert_eq!(upgraded_installation.configured_at_ms, Some(now_ms));
+        assert_eq!(upgraded_installation.revision, 4);
+        assert_eq!(upgraded_installation.deployment_authority_sha256, None);
+        assert_eq!(
+            upgraded_installation.deployment_bootstrap_operation_id,
+            None
+        );
+        assert_eq!(
+            upgraded_installation.deployment_bootstrap_audit_event_id,
+            None
+        );
+
+        let upgraded_token: StoredInstallationBootstrapToken = sqlx::query_as(
+            r"
+            SELECT issuer_kind,issued_by_principal_id,issued_by_session_id,
+                   issued_authorization_revision,installation_authority_sha256,
+                   installation_runner_id,installation_generation,
+                   installation_predecessor_enrollment_id,
+                   issued_at_ms,last_refreshed_at_ms,expires_at_ms
+            FROM runner_enrollment_tokens WHERE id=$1
+            ",
+        )
+        .bind(enrollment_id)
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(upgraded_token.issuer_kind, "human");
+        assert_eq!(upgraded_token.issued_by_principal_id, Some(principal_id));
+        assert_eq!(upgraded_token.issued_by_session_id, Some(session_id));
+        assert_eq!(
+            upgraded_token.issued_authorization_revision,
+            Some(authorization_revision)
+        );
+        assert_eq!(upgraded_token.installation_authority_sha256, None);
+        assert_eq!(upgraded_token.installation_runner_id, None);
+        assert_eq!(upgraded_token.installation_generation, None);
+        assert_eq!(upgraded_token.installation_predecessor_enrollment_id, None);
+        assert_eq!(upgraded_token.last_refreshed_at_ms, None);
+        assert_eq!(upgraded_token.issued_at_ms, now_ms);
+        assert_eq!(upgraded_token.expires_at_ms, now_ms + 600_000);
+
+        let upgraded_consumption: StoredLegacyHumanConsumption = sqlx::query_as(
+            r"
+            SELECT consumed_at_ms,consumed_runner_id,redeem_operation_id,
+                   redeem_request_sha256,redeem_response,
+                   redeem_certificate_leaf_sha256,
+                   redeem_predecessor_certificate_leaf_sha256,
+                   redeem_predecessor_certificate_expires_at_seconds,
+                   redeem_certificate_expires_at_seconds
+            FROM runner_enrollment_tokens WHERE id=$1
+            ",
+        )
+        .bind(enrollment_id)
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(upgraded_consumption.consumed_at_ms, Some(now_ms));
+        assert_eq!(
+            upgraded_consumption.consumed_runner_id,
+            Some(consumed_runner.as_uuid())
+        );
+        assert_eq!(
+            upgraded_consumption.redeem_operation_id,
+            Some(redeem_operation_id)
+        );
+        assert_eq!(
+            upgraded_consumption.redeem_request_sha256.as_deref(),
+            Some(redeem_request_sha256.as_slice())
+        );
+        assert_eq!(
+            upgraded_consumption.redeem_response.as_deref(),
+            Some(redeem_response.as_slice())
+        );
+        assert_eq!(upgraded_consumption.redeem_certificate_leaf_sha256, None);
+        assert_eq!(
+            upgraded_consumption.redeem_predecessor_certificate_leaf_sha256,
+            None
+        );
+        assert_eq!(
+            upgraded_consumption.redeem_predecessor_certificate_expires_at_seconds,
+            None
+        );
+        assert_eq!(
+            upgraded_consumption.redeem_certificate_expires_at_seconds,
+            Some(certificate_expires_at_seconds)
+        );
+
+        let enrollment_repository =
+            PostgresRunnerEnrollmentRepository::new(database.pool().clone());
+        let replay = enrollment_repository
+            .prepare_runner_enrollment(PrepareRunnerEnrollment {
+                token_sha256,
+                operation_id: redeem_operation_id,
+                request_sha256: redeem_request_sha256,
+            })
+            .await
+            .map_err(|error| {
+                message_error(format!(
+                    "upgraded consumed human token was rejected as corrupt: {error:?}"
+                ))
+            })?;
+        assert!(matches!(
+            replay,
+            RunnerEnrollmentPrepareOutcome::Replayed(response)
+                if response == redeem_response
+        ));
+        let consumed_retry = enrollment_repository
+            .prepare_runner_enrollment(PrepareRunnerEnrollment {
+                token_sha256,
+                operation_id: Uuid::new_v4(),
+                request_sha256: [0x6d; 32],
+            })
+            .await?;
+        assert!(matches!(
+            consumed_retry,
+            RunnerEnrollmentPrepareOutcome::Rejected
         ));
         Ok(())
     })

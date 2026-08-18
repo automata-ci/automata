@@ -2,7 +2,8 @@
 //!
 //! The crate owns Docker Engine discovery and exact local workflow inspection
 //! without depending on the product CLI. On x86-64 Linux it also owns sealed
-//! initialization, recorded-custody status, and exact confirmed reset;
+//! initialization, convergent `up`/`down` lifecycle management,
+//! recorded-custody status, and exact confirmed reset;
 //! [`inspect`] and [`check_workflow`] remain read-only and create no engine
 //! resources, admission records, or host state.
 
@@ -18,6 +19,7 @@ use tokio::{
     time::timeout,
 };
 
+mod bootstrap_contract;
 mod check;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 mod desired_spec;
@@ -42,6 +44,7 @@ mod snapshot;
 mod snapshot;
 mod snapshot_limits;
 
+pub use bootstrap_contract::{LOCAL_BOOTSTRAP_RUNNER_REQUEST_SCHEMA, LocalBootstrapRunnerRequest};
 pub use check::{
     LocalCheckDiagnostic, LocalCheckIssue, LocalCheckIssueCode, LocalCheckReport,
     LocalCheckRequest, LocalCheckSource, LocalCheckedJob, LocalCheckedWorkflow, check_workflow,
@@ -153,6 +156,21 @@ pub fn run_local_lifecycle_lock_holder() -> Result<(), LocalInitError> {
 #[doc(hidden)]
 pub fn run_local_readiness_check() -> Result<(), LocalInitError> {
     lifecycle_helper::check_ready()
+}
+
+/// Returns the canonical fixed renderer contract fixture used by release attestation.
+///
+/// This hidden boundary lets downstream consumers validate the exact production
+/// wire documents instead of maintaining producer-shaped test fixtures.
+///
+/// # Errors
+///
+/// Returns an invalid-catalog failure if the fixed desired inputs cannot be
+/// rendered into the closed canonical fixture.
+#[cfg(all(feature = "test-support", target_os = "linux", target_arch = "x86_64"))]
+#[doc(hidden)]
+pub fn local_renderer_contract_fixture() -> Result<Vec<u8>, LocalInitError> {
+    init::renderer_contract_fixture_bytes()
 }
 pub use local_docker_error::{LocalDockerError, LocalDockerErrorCode};
 pub use results_transport::LocalDockerResultsTransport;

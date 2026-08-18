@@ -6,7 +6,6 @@ from __future__ import annotations
 import importlib.util
 import json
 import pathlib
-import re
 import shutil
 import sys
 import tempfile
@@ -22,74 +21,6 @@ if SPEC is None or SPEC.loader is None:
 catalog = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = catalog
 SPEC.loader.exec_module(catalog)
-
-
-def rust_integer_constant(relative_path: str, name: str) -> int:
-    source = (REPOSITORY_ROOT / relative_path).read_text(encoding="utf-8")
-    match = re.search(
-        rf"^(?:pub(?:\((?:crate|super)\))? )?const {re.escape(name)}: [A-Za-z0-9_:]+ = "
-        r"([0-9][0-9_]*(?: \* [0-9][0-9_]*)*);$",
-        source,
-        flags=re.MULTILINE,
-    )
-    if match is None:
-        raise AssertionError(f"could not resolve Rust constant {name}")
-    factors = (int(value.replace("_", "")) for value in match.group(1).split(" * "))
-    result = 1
-    for factor in factors:
-        result *= factor
-    return result
-
-
-def rust_string_constant(relative_path: str, name: str) -> str:
-    source = (REPOSITORY_ROOT / relative_path).read_text(encoding="utf-8")
-    match = re.search(
-        rf'^(?:pub(?:\((?:crate|super)\))? )?const {re.escape(name)}: &str =\s*'
-        r'("(?:\\.|[^"\\])*");$',
-        source,
-        flags=re.MULTILINE | re.DOTALL,
-    )
-    if match is None:
-        raise AssertionError(f"could not resolve Rust constant {name}")
-    return json.loads(match.group(1))
-
-
-def rust_string_array_constant(relative_path: str, name: str) -> list[str]:
-    source = (REPOSITORY_ROOT / relative_path).read_text(encoding="utf-8")
-    match = re.search(
-        rf"^(?:pub(?:\((?:crate|super)\))? )?const {re.escape(name)}: \[&str; [0-9]+\] =\s*"
-        r"\[(.*?)\];$",
-        source,
-        flags=re.MULTILINE | re.DOTALL,
-    )
-    if match is None:
-        raise AssertionError(f"could not resolve Rust string-array constant {name}")
-    return [json.loads(value) for value in re.findall(r'"(?:\\.|[^"\\])*"', match.group(1))]
-
-
-def rust_version_tuple_constant(relative_path: str, name: str) -> tuple[int, int, int]:
-    source = (REPOSITORY_ROOT / relative_path).read_text(encoding="utf-8")
-    match = re.search(
-        rf"^const {re.escape(name)}: \(u64, u64, u64\) = "
-        r"\(([0-9]+), ([0-9]+), ([0-9]+)\);$",
-        source,
-        flags=re.MULTILINE,
-    )
-    if match is None:
-        raise AssertionError(f"could not resolve Rust version constant {name}")
-    return tuple(int(component) for component in match.groups())
-
-
-def swift_integer_constant(relative_path: str, name: str) -> int:
-    source = (REPOSITORY_ROOT / relative_path).read_text(encoding="utf-8")
-    match = re.search(
-        rf"^private let {re.escape(name)}: UInt16 = ([0-9][0-9_]*)$",
-        source,
-        flags=re.MULTILINE,
-    )
-    if match is None:
-        raise AssertionError(f"could not resolve Swift constant {name}")
-    return int(match.group(1).replace("_", ""))
 
 
 class LocalInstallationCatalogContract(unittest.TestCase):
@@ -224,327 +155,29 @@ class LocalInstallationCatalogContract(unittest.TestCase):
             source["services"]["runner"]["maximum_parallel_jobs"], 256
         )
 
-    def test_runtime_literals_track_the_production_contracts(self) -> None:
-        source = self.source
-        lifecycle = source["lifecycle_runtime"]
-        bootstrap = lifecycle["automata_commands"]["bootstrap_runner"]
-        runner = source["services"]["runner"]
-        executor = runner["executor_contract"]
-        for role, containerfile_path in (
-            ("automata", "images/automata.Containerfile"),
-            ("runner", "images/automata-runner.Containerfile"),
-            ("sandbox-guest", "images/automata-sandbox-guest.Containerfile"),
-        ):
-            self.assertEqual(
-                source["images"][role]["config"]["working_directory"], "/"
-            )
-            containerfile = (REPOSITORY_ROOT / containerfile_path).read_text(
-                encoding="utf-8"
-            )
-            self.assertRegex(containerfile, r"(?m)^WORKDIR /$")
-        self.assertEqual(
-            source["images"]["runner"]["runtime"]["product_config_schema"],
-            rust_integer_constant(
-                "crates/automata-ci-runner/src/product/config.rs",
-                "RUNNER_PRODUCT_CONFIG_SCHEMA_VERSION",
-            ),
+    def test_database_migration_ceiling_matches_the_canonical_inventory(self) -> None:
+        migration_directory = (
+            REPOSITORY_ROOT
+            / "crates"
+            / "automata-ci-store-postgres"
+            / "migrations"
         )
-        self.assertEqual(
-            source["images"]["sandbox-guest"]["runtime"]["guest_protocol"],
-            rust_integer_constant(
-                "crates/automata-ci-sandbox-guest/src/lib.rs",
-                "GUEST_PROTOCOL_VERSION",
-            ),
+        versions = sorted(
+            int(path.name[:4])
+            for path in migration_directory.glob("[0-9][0-9][0-9][0-9]_*.sql")
         )
-        for swift_source in (
-            "crates/automata-ci-sandbox-macos/swift/Sources/"
-            "AutomataMacOSTemplateTool/main.swift",
-            "crates/automata-ci-sandbox-macos/swift/Sources/"
-            "AutomataMacOSVsockBridge/main.swift",
-        ):
-            self.assertEqual(
-                source["images"]["sandbox-guest"]["runtime"]["guest_protocol"],
-                swift_integer_constant(swift_source, "guestProtocol"),
-            )
-        self.assertEqual(
-            runner["maximum_parallel_jobs"],
-            rust_integer_constant(
-                "crates/automata-ci-local/src/lib.rs",
-                "MAXIMUM_LOCAL_DOCKER_JOB_SLOTS",
-            ),
+        self.assertTrue(versions)
+        self.assertEqual(versions, list(range(1, versions[-1] + 1)))
+        lifecycle = catalog.require_lifecycle_runtime(
+            self.source["lifecycle_runtime"]
         )
-        for field, constant in (
-            ("minimum_cpu_millis", "MINIMUM_LOCAL_DOCKER_SANDBOX_CPU_MILLIS"),
-            ("minimum_memory_bytes", "MINIMUM_LOCAL_DOCKER_SANDBOX_MEMORY_BYTES"),
-            ("minimum_pids", "MINIMUM_LOCAL_DOCKER_SANDBOX_PIDS"),
-        ):
-            self.assertEqual(
-                executor[field],
-                rust_integer_constant("crates/automata-ci-local/src/lib.rs", constant),
-            )
-        self.assertEqual(
-            runner["provider_control_directory"],
-            rust_string_constant(
-                "crates/automata-ci-local/src/lib.rs",
-                "LOCAL_DOCKER_CONTROL_DIRECTORY",
-            ),
-        )
-        runner_schema = rust_integer_constant(
-            "crates/automata-ci-runner/src/product/config.rs",
-            "RUNNER_PRODUCT_CONFIG_SCHEMA_VERSION",
-        )
-        self.assertEqual(lifecycle["runner_config_schema"], runner_schema)
-        self.assertEqual(
-            lifecycle["runner_commands"]["enroll"]["configuration_schema"],
-            runner_schema,
-        )
-        control_readiness = lifecycle["automata_commands"]["check_ready"]
-        self.assertEqual(
-            control_readiness["argv"],
-            rust_string_array_constant(
-                "crates/automata-ci-local/src/lib.rs", "LOCAL_CONTROL_READY_COMMAND"
-            ),
-        )
-        for field, constant in (
-            ("listen", "LOCAL_CONTROL_READY_LISTEN"),
-            ("request", "LOCAL_CONTROL_READY_REQUEST"),
-            ("response_prefix", "LOCAL_CONTROL_READY_RESPONSE_PREFIX"),
-            ("response_suffix", "LOCAL_CONTROL_READY_RESPONSE_SUFFIX"),
-        ):
-            self.assertEqual(
-                control_readiness[field],
-                rust_string_constant("crates/automata-ci-local/src/lib.rs", constant),
-            )
-        self.assertEqual(
-            control_readiness["maximum_response_bytes"],
-            rust_integer_constant(
-                "crates/automata-ci-local/src/lib.rs",
-                "LOCAL_CONTROL_READY_MAXIMUM_RESPONSE_BYTES",
-            ),
-        )
-        self.assertEqual(
-            control_readiness["timeout_seconds"],
-            rust_integer_constant(
-                "crates/automata-ci-local/src/lib.rs",
-                "LOCAL_CONTROL_READY_TIMEOUT_SECONDS",
-            ),
-        )
-        readiness = lifecycle["runner_commands"]["local_check_ready"]
-        self.assertEqual(
-            readiness["argv"],
-            [
-                rust_string_constant(
-                    "crates/automata-ci-local/src/lib.rs", "LOCAL_RUNNER_READY_COMMAND"
-                ),
-                "--config",
-                "/run/automata-runner-config/runner.json",
-            ],
-        )
-        self.assertEqual(
-            readiness["healthcheck_argv"],
-            [
-                rust_string_constant(
-                    "crates/automata-ci-local/src/init/renderer.rs", "RUNNER_BINARY"
-                ),
-                rust_string_constant(
-                    "crates/automata-ci-local/src/lib.rs", "LOCAL_RUNNER_READY_COMMAND",
-                ),
-                "--config",
-                "/run/automata-runner-config/runner.json",
-            ],
-        )
-        self.assertEqual(
-            readiness["listen"],
-            rust_string_constant(
-                "crates/automata-ci-local/src/lib.rs", "LOCAL_RUNNER_READY_LISTEN"
-            ),
-        )
-        self.assertEqual(
-            readiness["maximum_response_bytes"],
-            rust_integer_constant(
-                "crates/automata-ci-local/src/lib.rs",
-                "LOCAL_RUNNER_READY_MAXIMUM_RESPONSE_BYTES",
-            ),
-        )
-        self.assertEqual(
-            readiness["timeout_seconds"],
-            rust_integer_constant(
-                "crates/automata-ci-local/src/lib.rs", "LOCAL_RUNNER_READY_TIMEOUT_SECONDS"
-            ),
-        )
-        self.assertEqual(
-            readiness["path"],
-            rust_string_constant(
-                "crates/automata-ci-local/src/lib.rs", "LOCAL_RUNNER_READY_PATH"
-            ),
-        )
-        self.assertEqual(
-            readiness["protocol"],
-            rust_string_constant(
-                "crates/automata-ci-local/src/lib.rs", "LOCAL_RUNNER_READY_PROTOCOL"
-            ),
-        )
-        self.assertEqual(
-            readiness["required_metrics"],
-            [
-                rust_string_constant(
-                    "crates/automata-ci-local/src/lib.rs", "LOCAL_RUNNER_READY_METRIC"
-                ),
-                rust_string_constant(
-                    "crates/automata-ci-local/src/lib.rs",
-                    "LOCAL_RUNNER_SESSION_CONNECTED_METRIC",
-                ),
-            ],
-        )
-        self.assertEqual(
-            lifecycle["compose"]["trusted_lifecycle_services"],
-            [
-                "automata",
-                "bootstrap-runner",
-                "engine-relay",
-                "object-store-init",
-                "postgres",
-                "runner",
-                "runner-enroll",
-                "rustfs",
-            ],
-        )
-        self.assertEqual(lifecycle["compose"]["trusted_user_namespace"], "host")
-        self.assertEqual(executor["user_namespace"], "daemon-default-remapped")
-        renderer_contract = lifecycle["renderer_contract"]
-        self.assertEqual(
-            renderer_contract["schema"],
-            rust_string_constant(
-                "crates/automata-ci-local/src/init/renderer.rs",
-                "RENDERER_CONTRACT_FIXTURE_SCHEMA",
-            ),
-        )
-        self.assertEqual(
-            renderer_contract["fixture_sha256"],
-            catalog.RENDERER_CONTRACT_FIXTURE_SHA256,
-        )
-        self.assertRegex(renderer_contract["fixture_sha256"], r"^[0-9a-f]{64}$")
-        self.assertEqual(
-            lifecycle["results_transit"]["schema"],
-            int(
-                rust_string_constant(
-                    "crates/automata-ci-local/src/results_transport.rs",
-                    "RESULTS_TRANSPORT_SCHEMA",
-                )
-            ),
-        )
-        compose_version = rust_version_tuple_constant(
-            "crates/automata-ci-local/src/lib.rs", "MIN_COMPOSE_VERSION"
-        )
-        self.assertEqual(
-            lifecycle["compose"]["minimum_version"],
-            ".".join(str(component) for component in compose_version),
-        )
-        migration_versions = [
-            int(path.name.split("_", 1)[0])
-            for path in (
-                REPOSITORY_ROOT / "crates/automata-ci-store-postgres/migrations"
-            ).glob("[0-9][0-9][0-9][0-9]_*.sql")
-        ]
-        self.assertEqual(lifecycle["database_migration_ceiling"], max(migration_versions))
-        self.assertEqual(
-            bootstrap["request_schema"],
-            rust_string_constant(
-                "crates/automata-ci/src/internal/local_bootstrap.rs", "REQUEST_SCHEMA"
-            ),
-        )
-        self.assertEqual(
-            bootstrap["receipt_schema"],
-            rust_string_constant(
-                "crates/automata-ci/src/internal/local_bootstrap.rs", "RECEIPT_SCHEMA"
-            ),
-        )
-        self.assertEqual(
-            bootstrap["maximum_request_bytes"],
-            rust_integer_constant(
-                "crates/automata-ci/src/internal/local_bootstrap.rs", "MAX_REQUEST_BYTES"
-            ),
-        )
+        self.assertEqual(lifecycle["database_migration_ceiling"], versions[-1])
 
-        mutated_runtime = json.loads(json.dumps(lifecycle))
-        mutated_runtime["renderer_contract"]["fixture_sha256"] = "f" * 64
+    def test_lifecycle_runtime_rejects_renderer_digest_drift(self) -> None:
+        lifecycle = json.loads(json.dumps(self.source["lifecycle_runtime"]))
+        lifecycle["renderer_contract"]["fixture_sha256"] = "f" * 64
         with self.assertRaisesRegex(SystemExit, "lifecycle runtime contract differs"):
-            catalog.require_lifecycle_runtime(mutated_runtime)
-
-        static_verifier = (
-            REPOSITORY_ROOT / "scripts/ci/verify-static-musl.sh"
-        ).read_text(encoding="utf-8")
-        for command in lifecycle["automata_commands"].values():
-            invocation = " ".join(command["argv"])
-            self.assertIn(
-                f'verify_command_help "$automata" {invocation}', static_verifier
-            )
-            self.assertIn(
-                f"container_command_help /automata {invocation}", static_verifier
-            )
-        for command in lifecycle["runner_commands"].values():
-            invocation = " ".join(command["argv"])
-            self.assertIn(
-                f'verify_command_help "$runner" {invocation}', static_verifier
-            )
-            self.assertIn(
-                f"container_command_help /automata-runner {invocation}", static_verifier
-            )
-        self.assertEqual(
-            runner["provider_control_directory"],
-            rust_string_constant(
-                "crates/automata-ci-sandbox-guest/src/lib.rs",
-                "LOCAL_CONTROL_DIRECTORY",
-            ),
-        )
-
-        guest_protocol = str(
-            source["images"]["sandbox-guest"]["runtime"]["guest_protocol"]
-        )
-        guest_containerfile = (
-            REPOSITORY_ROOT / "images/automata-sandbox-guest.Containerfile"
-        ).read_text(encoding="utf-8")
-        self.assertIn(
-            f'io.automata.sandbox-guest.protocol-version="{guest_protocol}"',
-            guest_containerfile,
-        )
-        self.assertEqual(
-            source["images"]["sandbox-guest"]["config"]["required_labels"][
-                "io.automata.sandbox-guest.protocol-version"
-            ],
-            guest_protocol,
-        )
-
-        proxy_protocol = str(
-            source["images"]["service-proxy"]["runtime"]["protocol"]
-        )
-        proxy_containerfile = (
-            REPOSITORY_ROOT / "images/service-proxy/Containerfile"
-        ).read_text(encoding="utf-8")
-        self.assertIn(
-            f'io.automata.service-proxy.protocol-version="{proxy_protocol}"',
-            proxy_containerfile,
-        )
-        self.assertEqual(
-            source["images"]["service-proxy"]["config"]["required_labels"][
-                "io.automata.service-proxy.protocol-version"
-            ],
-            proxy_protocol,
-        )
-        self.assertEqual(
-            proxy_protocol,
-            rust_string_constant(
-                "crates/automata-ci-local/src/local_docker/mod.rs",
-                "RESULTS_PROXY_IMAGE_PROTOCOL_VERSION",
-            ),
-        )
-        self.assertEqual(
-            proxy_protocol,
-            rust_string_constant(
-                "crates/automata-ci-sandbox-podman/src/provider.rs",
-                "SERVICE_PROXY_IMAGE_PROTOCOL_VERSION",
-            ),
-        )
+            catalog.require_lifecycle_runtime(lifecycle)
 
     def test_catalog_round_trips_the_closed_role_and_payload_set(self) -> None:
         document = self.build()

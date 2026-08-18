@@ -202,7 +202,7 @@ pub(super) fn validate_lifecycle_disposable_helper(
             let replacement = labels
                 .get("io.automata.local.cas-replacement-sha256")
                 .ok_or_else(engine_resource_mismatch)?;
-            let expected_plan = epoch.desired_plan_sha256().map(|digest| digest.to_string());
+            let expected_plan = epoch.desired_plan_sha256().to_string();
             if (expected != "absent"
                 && expected
                     .parse::<Sha256Digest>()
@@ -219,7 +219,7 @@ pub(super) fn validate_lifecycle_disposable_helper(
                     != Some(&installation.selector_key().to_string())
                 || labels.get(LABEL_COMPOSE_PROJECT) != Some(&project.to_string())
                 || labels.get(LABEL_EPOCH) != Some(&epoch.fingerprint().to_string())
-                || labels.get(LABEL_PLAN) != expected_plan.as_ref()
+                || labels.get(LABEL_PLAN) != Some(&expected_plan)
                 || labels
                     .get("io.automata.local.cas-target")
                     .map(String::as_str)

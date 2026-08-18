@@ -472,10 +472,10 @@ reset runs under that lock and uses this ordered transaction:
 
 The current lifecycle creates no OS credential-store entries: its exact OS
 credential-selector set is closed and empty until the later public
-onboarding/credential-store slice. Reset preflights and requeries that empty
-set and does not claim to delete host keyring entries. Current certificates,
-keys, and service credentials remain covered by exact state-root and volume
-custody deletion.
+onboarding/credential-store slice. No OS credential mutation or inspection is
+part of the current reset, and it does not claim to delete host keyring entries.
+Current certificates, keys, and service credentials remain covered by exact
+state-root and volume custody deletion.
 
 Before confirmation, the command lists the installation-wide repositories,
 history, repository-scoped secrets, and GitHub connections that will be lost;
@@ -486,19 +486,16 @@ reset is never presented as a checkout-local operation.
    attachments, the desired-spec and identity volumes, and the lock ID;
 2. prevalidate every candidate's role-specific managed-label allowlist,
    identity, digest where replaceable, driver/options where a volume, realized
-   configuration, and attachment graph, plus the current exact empty OS
-   credential-selector set; any unknown, foreign, or indeterminate
+   configuration, and attachment graph; any unknown, foreign, or indeterminate
    candidate stops before the first mutation;
 3. tear down the exact replaceable topology, then exact persistent service and
    desired-spec volumes, re-inspecting after each bounded phase while preserving
    the identity anchor and lock;
-4. revalidate the current empty OS credential-selector set (the later
-   onboarding slice replaces this no-op with exact credential deletion);
-5. rediscover, require that only the validated identity anchor and lock remain,
+4. rediscover, require that only the validated identity anchor and lock remain,
    then remove the re-inspected identity anchor last among installation data;
-6. re-inspect and release the exact retained lock ID last; and
-7. immediately rediscover by deterministic names, Compose project, and managed
-   labels and requery the empty credential-selector set, reporting any residue or
+5. re-inspect and release the exact retained lock ID last; and
+6. immediately rediscover by deterministic names, Compose project, and managed
+   labels, reporting any residue or
    concurrently created installation rather than claiming success.
 
 Ordinary resources are rediscovered by deterministic name and immutable labels;
@@ -942,8 +939,7 @@ prove graceful ID-based release only after child quiescence, busy-live behavior,
 manager-crash, EOF-before-release-frame, and invalid-frame retention as a
 stopped recovery-required record, cancellation on holder-stream loss, and no
 automatic or age-based stale deletion. Reset tests
-prove all-before-any validation, ordered topology and the current empty
-OS-credential-selector preflight/requery,
+prove all-before-any validation, ordered topology and volume deletion,
 anchor-last, lock-last, and immediate reinspection. Deleting an optional host
 cache cannot affect installation identity or recovery. `down -> up` preserves
 the desired `N`, profile, render inputs, data, and run history.

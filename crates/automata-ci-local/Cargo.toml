@@ -13,6 +13,9 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 
+[features]
+test-support = []
+
 [dependencies]
 async-trait.workspace = true
 automata-ci-execution.workspace = true
@@ -31,7 +34,6 @@ http.workspace = true
 http-body-util.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
-processkit.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -51,6 +53,12 @@ rustix = { workspace = true, features = ["net", "thread"] }
 time.workspace = true
 x509-parser.workspace = true
 zeroize.workspace = true
+
+[target.'cfg(any(windows, all(target_os = "linux", target_arch = "x86_64")))'.dependencies]
+processkit.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true

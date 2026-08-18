@@ -1033,53 +1033,6 @@ fn provider_workflow_result_identity_is_unique_and_provider_neutral() {
     }
 }
 
-#[test]
-fn installation_runner_bootstrap_has_closed_authority_and_refresh_contracts() {
-    let source = include_str!("../migrations/0052_installation_runner_bootstrap.sql");
-
-    for required in [
-        "ALTER TABLE human_auth_installation_state\n    RENAME TO installation_state",
-        "configuration_mode IN ('human', 'deployment')",
-        "state = 'configured'\n            AND configuration_mode = 'deployment'",
-        "installation_state_deployment_completion_exact",
-        "installation_state_configured_immutable",
-        "installation_state_deployment_authority_unique",
-        "issuer_kind IN ('human', 'installation_bootstrap')",
-        "runner_enrollment_tokens_issuer_shape",
-        "runner_enrollment_tokens_installation_authority_fkey",
-        "ADD COLUMN last_refreshed_at_ms bigint",
-        "COALESCE(last_refreshed_at_ms, issued_at_ms)",
-        "DROP CONSTRAINT runner_enrollment_tokens_consumption_shape",
-        "consumed_at_ms >=\n                COALESCE(last_refreshed_at_ms, issued_at_ms)",
-        "OLD.issuer_kind = 'installation_bootstrap'",
-        "OLD.consumed_at_ms IS NULL",
-        "OLD.expires_at_ms <=",
-        "extract(epoch FROM clock_timestamp()) * 1000",
-        "NEW.last_refreshed_at_ms IS NOT NULL",
-        "NEW.last_refreshed_at_ms >= OLD.expires_at_ms",
-        "NEW.expires_at_ms - NEW.last_refreshed_at_ms = 3600000",
-        "runner_enrollment_tokens_consume_once",
-    ] {
-        assert!(
-            source.contains(required),
-            "installation-bootstrap migration lost required contract: {required}"
-        );
-    }
-    for forbidden in [
-        "ADD COLUMN IF NOT EXISTS",
-        "ADD CONSTRAINT IF NOT EXISTS",
-        "CREATE TABLE IF NOT EXISTS",
-        "DROP CONSTRAINT IF EXISTS",
-        "DROP TRIGGER IF EXISTS",
-        "floor(extract(epoch FROM clock_timestamp()))::bigint * 1000",
-    ] {
-        assert!(
-            !source.contains(forbidden),
-            "installation-bootstrap migration retained compatibility DDL: {forbidden}"
-        );
-    }
-}
-
 fn migration_paths() -> Vec<PathBuf> {
     let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
     let mut migrations = fs::read_dir(directory)

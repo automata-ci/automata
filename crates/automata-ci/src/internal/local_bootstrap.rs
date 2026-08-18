@@ -18,7 +18,8 @@ use automata_ci_auth_postgres::{
         InstallationBootstrapRunnerEnrollmentTokenRecord,
     },
 };
-use automata_ci_core::{RunnerGroup, Sha256Digest};
+use automata_ci_core::Sha256Digest;
+use automata_ci_local::{LOCAL_BOOTSTRAP_RUNNER_REQUEST_SCHEMA, LocalBootstrapRunnerRequest};
 use automata_ci_store_postgres::{
     MAX_POSTGRES_PRIVATE_CA_PEM_BYTES, PostgresConnectionConfig, PostgresStore,
     PostgresTransportSecurity,
@@ -35,7 +36,7 @@ use crate::{
     server::SecretSource,
 };
 
-pub(super) const REQUEST_SCHEMA: &str = "automata.local/bootstrap-runner-request/v1";
+pub(super) const REQUEST_SCHEMA: &str = LOCAL_BOOTSTRAP_RUNNER_REQUEST_SCHEMA;
 pub(super) const RECEIPT_SCHEMA: &str = "automata.local/bootstrap-runner-receipt/v1";
 const MAX_DATABASE_URL_BYTES: usize = 16 * 1_024;
 const MAX_REQUEST_BYTES: usize = 4 * 1_024;
@@ -76,34 +77,7 @@ pub(super) async fn execute(args: &InternalBootstrapRunnerArgs) -> Result<()> {
     Ok(())
 }
 
-#[derive(Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-struct BootstrapRunnerRequest {
-    schema: String,
-    bootstrap_operation_id: Uuid,
-    tenant: InstallationTenant,
-    installation_authority_source_sha256: Sha256Digest,
-    runner_id: Uuid,
-    enrollment_id: Uuid,
-    runner_group: RunnerGroup,
-    token_lifetime_seconds: u64,
-}
-
-impl fmt::Debug for BootstrapRunnerRequest {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("BootstrapRunnerRequest")
-            .field("schema", &self.schema)
-            .field("bootstrap_operation_id", &self.bootstrap_operation_id)
-            .field("tenant", &self.tenant)
-            .field("installation_authority_source_sha256", &"[redacted]")
-            .field("runner_id", &self.runner_id)
-            .field("enrollment_id", &self.enrollment_id)
-            .field("runner_group", &self.runner_group)
-            .field("token_lifetime_seconds", &self.token_lifetime_seconds)
-            .finish()
-    }
-}
+type BootstrapRunnerRequest = LocalBootstrapRunnerRequest<InstallationTenant>;
 
 struct PreparedBootstrapRunner {
     database_url: Zeroizing<String>,
@@ -1054,6 +1028,7 @@ enum BootstrapRunnerError {
 #[cfg(test)]
 mod tests {
     use automata_ci_auth::{human::TenantId, installation::InstallationTenant};
+    use automata_ci_core::RunnerGroup;
 
     use super::*;
 

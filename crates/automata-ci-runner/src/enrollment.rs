@@ -7,6 +7,10 @@ use std::{
 
 use anyhow::{Context as _, Result, bail};
 use automata_ci_auth::secret::{RunnerEnrollmentToken, SecretString};
+use automata_ci_protocol::{
+    RUNNER_ENROLLMENT_RECOVER_PATH, RUNNER_ENROLLMENT_REDEEM_PATH,
+    RunnerEnrollmentRecoveryPredecessor,
+};
 use bytes::Bytes;
 use reqwest::{Client, StatusCode, Url, header, redirect::Policy};
 use serde::{Deserialize, Serialize};
@@ -24,8 +28,6 @@ use crate::{
     product::{RunnerProductConfig, ScalarLineEnding, SecretSource, normalize_scalar_bytes},
 };
 
-const REDEEM_PATH: &str = "/api/v1/runner-enrollments/redeem";
-const RECOVER_PATH: &str = "/api/v1/runner-enrollments/recover";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -118,15 +120,17 @@ pub(super) async fn enroll(args: &EnrollArgs) -> Result<()> {
     }
     let endpoint = origin
         .join(if stage.is_recovery() {
-            RECOVER_PATH
+            RUNNER_ENROLLMENT_RECOVER_PATH
         } else {
-            REDEEM_PATH
+            RUNNER_ENROLLMENT_REDEEM_PATH
         })
         .context("runner enrollment endpoint is invalid")?;
     let recovery_predecessor = stage.recovery_predecessor().map(
-        |(certificate_leaf_sha256, certificate_expires_at_seconds)| RecoveryPredecessorRequest {
-            certificate_leaf_sha256,
-            certificate_expires_at_seconds,
+        |(certificate_leaf_sha256, certificate_expires_at_seconds)| {
+            RunnerEnrollmentRecoveryPredecessor {
+                certificate_leaf_sha256,
+                certificate_expires_at_seconds,
+            }
         },
     );
     let body = RedeemRequest {
@@ -335,13 +339,7 @@ struct RedeemRequest<'a> {
     capabilities: &'a automata_ci_core::RunnerCapabilities,
     csr_pem: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
-    recovery_predecessor: Option<RecoveryPredecessorRequest>,
-}
-
-#[derive(Clone, Copy, Serialize)]
-struct RecoveryPredecessorRequest {
-    certificate_leaf_sha256: [u8; 32],
-    certificate_expires_at_seconds: i64,
+    recovery_predecessor: Option<RunnerEnrollmentRecoveryPredecessor>,
 }
 
 #[derive(Deserialize, Serialize)]

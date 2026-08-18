@@ -275,7 +275,7 @@ pub(super) fn renderer_contract_fixture_sha256() -> Result<Sha256Digest, super::
     Ok(Sha256Digest::from_bytes(Sha256::digest(bytes).into()))
 }
 
-fn renderer_contract_fixture_bytes() -> Result<Vec<u8>, super::LocalInitError> {
+pub(crate) fn renderer_contract_fixture_bytes() -> Result<Vec<u8>, super::LocalInitError> {
     let invalid_catalog = || super::LocalInitError::new(super::LocalInitErrorCode::InvalidCatalog);
     let installation_id = InstallationId::parse_canonical(
         crate::desired_spec::RENDERER_CONTRACT_FIXTURE_INSTALLATION_ID,
@@ -1727,6 +1727,12 @@ mod tests {
                 "{field} must retain its exact final newline as a JSON string"
             );
         }
+        assert!(crate::engine_relay::accepts_relay_binding_contract(
+            fixture["relay_binding"]
+                .as_str()
+                .expect("fixture relay binding is text")
+                .as_bytes(),
+        ));
         assert_eq!(
             fixture["expected"]["containers"]
                 .as_object()

@@ -969,10 +969,7 @@ pub(super) fn cas_writer_labels(
         (LABEL_EPOCH.to_owned(), epoch.fingerprint().to_string()),
         (
             LABEL_PLAN.to_owned(),
-            epoch
-                .desired_plan_sha256()
-                .expect("lifecycle CAS requires epoch v2")
-                .to_string(),
+            epoch.desired_plan_sha256().to_string(),
         ),
         (LABEL_RESOURCE_KIND.to_owned(), CAS_WRITER_KIND.to_owned()),
         (

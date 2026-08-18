@@ -509,7 +509,7 @@ fn validate_lifecycle_runtime(value: &Value) -> Result<(), LocalInitError> {
         || bootstrap_runner
             .get("request_schema")
             .and_then(Value::as_str)
-            != Some("automata.local/bootstrap-runner-request/v1")
+            != Some(crate::LOCAL_BOOTSTRAP_RUNNER_REQUEST_SCHEMA)
         || bootstrap_runner
             .get("receipt_schema")
             .and_then(Value::as_str)
@@ -649,6 +649,15 @@ fn validate_lifecycle_runtime(value: &Value) -> Result<(), LocalInitError> {
 fn validate_renderer_service_contracts(
     images: &BTreeMap<String, RawImage>,
 ) -> Result<(), LocalInitError> {
+    let sandbox_guest = images.get("sandbox-guest").ok_or_else(invalid_catalog)?;
+    let sandbox_guest_runtime = object(&sandbox_guest.runtime)?;
+    if sandbox_guest_runtime
+        .get("guest_protocol")
+        .and_then(Value::as_u64)
+        != Some(u64::from(automata_ci_sandbox_guest::GUEST_PROTOCOL_VERSION))
+    {
+        return Err(invalid_catalog());
+    }
     let runner = images.get("runner").ok_or_else(invalid_catalog)?;
     let runner_runtime = object(&runner.runtime)?;
     if runner_runtime.get("binary").and_then(Value::as_str) != Some(super::renderer::RUNNER_BINARY)
@@ -978,9 +987,9 @@ fn validate_scope_and_services(scope: &Value, services: &Value) -> Result<(), Lo
         "executor": "github",
         "executor_contract": {
             "ephemeral_disk_bytes": 0,
-            "minimum_cpu_millis": 1000,
-            "minimum_memory_bytes": 268_435_456,
-            "minimum_pids": 3,
+            "minimum_cpu_millis": crate::MINIMUM_LOCAL_DOCKER_SANDBOX_CPU_MILLIS,
+            "minimum_memory_bytes": crate::MINIMUM_LOCAL_DOCKER_SANDBOX_MEMORY_BYTES,
+            "minimum_pids": crate::MINIMUM_LOCAL_DOCKER_SANDBOX_PIDS,
             "network": "private_egress",
             "privilege": "administrator",
             "root_filesystem": "writable",
@@ -988,10 +997,10 @@ fn validate_scope_and_services(scope: &Value, services: &Value) -> Result<(), Lo
             "user_namespace": "daemon-default-remapped",
             "workspace": "/__w"
         },
-        "maximum_parallel_jobs": 256,
+        "maximum_parallel_jobs": crate::MAXIMUM_LOCAL_DOCKER_JOB_SLOTS,
         "profile_role": "profile",
         "provider": "local-docker",
-        "provider_control_directory": "/automata-control",
+        "provider_control_directory": crate::LOCAL_DOCKER_CONTROL_DIRECTORY,
         "sandbox_guest_role": "sandbox-guest",
         "service_proxy_role": "service-proxy"
     });

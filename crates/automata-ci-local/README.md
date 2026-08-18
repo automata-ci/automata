@@ -161,9 +161,9 @@ foreign-attached state before mutation. Missing or safe malformed material,
 certificate, selector, and commit records are not deletion authority and do not
 strand cleanup; a canonically valid conflicting selector or commit blocks.
 The current lifecycle creates no OS credential-store entries: its exact
-credential-selector set is closed and empty until the public onboarding slice,
-and reset preflights and requeries that empty set without claiming to remove
-host-keyring entries.
+credential-selector set is closed and empty until the public onboarding slice.
+No OS credential mutation or inspection is part of the current reset, and it
+does not claim to remove host-keyring entries.
 Status and reset use Bollard directly at the fixed Docker socket with pinned API
 1.48; Docker CLI availability, current context, `DOCKER_API_VERSION`, and
 Compose readiness affect neither status nor reset. Init and doctor retain the

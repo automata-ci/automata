@@ -487,30 +487,6 @@ impl<'a> InitEngine<'a> {
         Ok(ResetEnginePreflight { helper })
     }
 
-    #[cfg(test)]
-    pub(super) async fn cleanup_reset_helper(
-        &self,
-        installation: &Installation,
-        epoch_fingerprint: Sha256Digest,
-        helper: &ResetHelperBinding,
-    ) -> Result<(), LocalInitError> {
-        if !exact_container_id_text(&helper.container_id) {
-            return Err(engine_resource_mismatch());
-        }
-        let names = volume_names(installation);
-        let contract = HelperContract {
-            name: helper_name(installation),
-            image: &helper.reference,
-            image_id: &helper.image_id,
-            volumes: &names,
-            labels: helper_labels(installation, epoch_fingerprint),
-            volume_labels: expected_volume_labels(installation, epoch_fingerprint),
-            baseline_attachments: BTreeMap::new(),
-            mode: HelperMode::Mutating,
-        };
-        cleanup_reset_helper_with_driver(self, &contract, &helper.container_id).await
-    }
-
     pub(super) async fn inspect_reset_progress(
         &self,
         installation: &Installation,
@@ -589,76 +565,6 @@ impl<'a> InitEngine<'a> {
         }
         self.verify_selected_engine().await?;
         Ok(deleted)
-    }
-
-    #[cfg(test)]
-    pub(super) async fn remove_reset_volume(
-        &self,
-        installation: &Installation,
-        epoch_fingerprint: Sha256Digest,
-        role: VolumeRole,
-    ) -> Result<(), LocalInitError> {
-        self.verify_selected_engine().await?;
-        self.verify_installation(installation).await?;
-        let removed = self
-            .inspect_reset_progress(installation, epoch_fingerprint)
-            .await?;
-        if reset_volume_order().get(removed).copied() != Some(role) {
-            return Err(engine_resource_mismatch());
-        }
-        let name = volume_name(installation.compose_project().as_str(), role);
-        let labels = volume_labels(installation, epoch_fingerprint, role);
-        let volume = self
-            .inspect_volume(&name)
-            .await?
-            .ok_or_else(engine_resource_mismatch)?;
-        validate_volume(&volume, &name, &labels)?;
-        if !self.volume_attachments(&name).await?.is_empty() {
-            return Err(engine_resource_mismatch());
-        }
-        self.remove_volume_and_prove_absent(&name).await
-    }
-
-    #[cfg(test)]
-    pub(super) async fn remove_reset_anchor(
-        &self,
-        installation: &Installation,
-    ) -> Result<(), LocalInitError> {
-        self.verify_selected_engine().await?;
-        self.verify_installation(installation).await?;
-        let scope = Installation::expected(installation.name());
-        let owned = inspect_owned_union_census_with_driver_excluding(
-            self,
-            &scope,
-            Some(installation),
-            None,
-        )
-        .await?;
-        if !owned.anchor_present || !owned.roles.is_empty() || owned.helper_id.is_some() {
-            return Err(engine_resource_mismatch());
-        }
-        let repeated = inspect_owned_union_census_with_driver_excluding(
-            self,
-            &scope,
-            Some(installation),
-            None,
-        )
-        .await?;
-        if repeated != owned {
-            return Err(engine_resource_mismatch());
-        }
-        self.remove_volume_and_prove_absent(installation.anchor_volume_name())
-            .await?;
-        if self
-            .adapter
-            .inspect_identity(installation.name())
-            .await
-            .map_err(|_| reset_failed())?
-            .is_some()
-        {
-            return Err(reset_failed());
-        }
-        self.verify_selected_engine().await
     }
 
     async fn verify_installation(&self, expected: &Installation) -> Result<(), LocalInitError> {

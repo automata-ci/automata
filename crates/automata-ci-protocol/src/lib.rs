@@ -6,11 +6,13 @@
 //! Production runner transport is encoded by a separately versioned Protobuf
 //! adapter. Rust's in-memory representation is never itself a wire format.
 
+pub mod enrollment;
 pub mod message;
 pub mod negotiation;
 pub mod windows_admission;
 pub mod windows_admission_renewal;
 
+pub use enrollment::*;
 pub use message::*;
 pub use negotiation::*;
 pub use windows_admission::*;

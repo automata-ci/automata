@@ -759,6 +759,11 @@ fn decode_binding(bytes: &[u8]) -> Result<RelayBinding> {
     Ok(binding)
 }
 
+#[cfg(test)]
+pub(crate) fn accepts_relay_binding_contract(bytes: &[u8]) -> bool {
+    decode_binding(bytes).is_ok()
+}
+
 impl RelayBinding {
     fn validate(&self) -> Result<()> {
         ensure!(
@@ -1140,6 +1145,19 @@ async fn serve_connections(
     cancellation: CancellationToken,
     limits: RelayLimits,
 ) -> Result<()> {
+    serve_connections_using(listener, upstream, cancellation, limits, || {}).await
+}
+
+async fn serve_connections_using<AtCapacity>(
+    listener: UnixListener,
+    upstream: Arc<UpstreamSocket>,
+    cancellation: CancellationToken,
+    limits: RelayLimits,
+    mut at_capacity: AtCapacity,
+) -> Result<()>
+where
+    AtCapacity: FnMut(),
+{
     ensure!(
         limits.maximum_connections > 0,
         "engine relay connection limit must be positive"
@@ -1149,6 +1167,7 @@ async fn serve_connections(
 
     loop {
         if tasks.len() >= limits.maximum_connections {
+            at_capacity();
             tokio::select! {
                 () = cancellation.cancelled() => break,
                 joined = tasks.join_next() => {
@@ -1277,6 +1296,31 @@ where
 
     let (downstream_read, downstream_write) = downstream.into_split();
     let (upstream_read, upstream_write) = upstream.into_split();
+    relay_connected_halves(
+        downstream_read,
+        downstream_write,
+        upstream_read,
+        upstream_write,
+        cancellation,
+        limits,
+    )
+    .await
+}
+
+async fn relay_connected_halves<DownstreamRead, DownstreamWrite, UpstreamRead, UpstreamWrite>(
+    downstream_read: DownstreamRead,
+    downstream_write: DownstreamWrite,
+    upstream_read: UpstreamRead,
+    upstream_write: UpstreamWrite,
+    cancellation: &CancellationToken,
+    limits: RelayLimits,
+) -> ConnectionEnd
+where
+    DownstreamRead: AsyncRead + Unpin,
+    DownstreamWrite: AsyncWrite + Unpin,
+    UpstreamRead: AsyncRead + Unpin,
+    UpstreamWrite: AsyncWrite + Unpin,
+{
     let (activity, mut observed_activity) = watch::channel(Instant::now());
     let downstream_to_upstream = pump(
         downstream_read,
@@ -1433,6 +1477,7 @@ mod tests {
         os::unix::{fs::PermissionsExt as _, net::UnixListener as StdUnixListener},
         path::{Path, PathBuf},
         sync::Arc,
+        task::{Context, Poll},
         time::Duration,
     };
 
@@ -1441,7 +1486,7 @@ mod tests {
     use tokio::{
         io::{AsyncReadExt as _, AsyncWriteExt as _},
         net::{UnixListener, UnixStream},
-        sync::oneshot,
+        sync::{mpsc, oneshot},
         time::timeout,
     };
     use tokio_util::sync::CancellationToken;
@@ -1451,10 +1496,10 @@ mod tests {
         ConnectionEnd, DirectoryAnchor, FixedEngineFacts, RelayBinding, RelayLimits,
         UpstreamSocket, api_includes_fixed, bind_downstream, decode_binding,
         initial_capability_state_is_exact, inspect_fixed_unix_engine,
-        install_shutdown_signals_using, normalize_engine_architecture, relay_connection,
-        relay_connection_using, remove_exact_stale_downstream, require_pre_runtime_dispatch,
-        require_upstream_socket, same_upstream_authority, serve_connections, upstream_authority,
-        wait_for_shutdown_event,
+        install_shutdown_signals_using, normalize_engine_architecture, relay_connected_halves,
+        relay_connection, relay_connection_using, remove_exact_stale_downstream,
+        require_pre_runtime_dispatch, require_upstream_socket, same_upstream_authority,
+        serve_connections_using, upstream_authority, wait_for_shutdown_event,
     };
 
     const TEST_TIMEOUT: Duration = Duration::from_secs(2);
@@ -1886,43 +1931,65 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn one_way_activity_resets_the_whole_connection_idle_deadline() {
-        let fixture = Fixture::new("shared-idle");
-        let upstream_listener =
-            UnixListener::bind(fixture.socket()).expect("bind upstream test socket");
-        let (mut client, downstream) = UnixStream::pair().expect("create downstream pair");
+        let (mut client, downstream) = tokio::io::duplex(1_024);
+        let (relay_upstream, mut upstream) = tokio::io::duplex(1_024);
+        let (downstream_read, downstream_write) = tokio::io::split(downstream);
+        let (upstream_read, upstream_write) = tokio::io::split(relay_upstream);
         let cancellation = CancellationToken::new();
         let mut limits = test_limits(1);
         limits.idle_timeout = Duration::from_millis(120);
         let relay = tokio::spawn({
             let cancellation = cancellation.clone();
-            let upstream = fixture.upstream();
-            async move { relay_connection(downstream, &upstream, &cancellation, limits).await }
-        });
-        let upstream = tokio::spawn(async move {
-            let (mut stream, _) = upstream_listener.accept().await.expect("accept relay");
-            let mut request = [0_u8; 1];
-            stream.read_exact(&mut request).await.expect("read request");
-            for byte in b"abcd" {
-                tokio::time::sleep(Duration::from_millis(70)).await;
-                stream.write_all(&[*byte]).await.expect("write pulse");
+            async move {
+                relay_connected_halves(
+                    downstream_read,
+                    downstream_write,
+                    upstream_read,
+                    upstream_write,
+                    &cancellation,
+                    limits,
+                )
+                .await
             }
-            stream.shutdown().await.expect("half-close upstream write");
+        });
+        let (request_read_sender, request_read_receiver) = oneshot::channel();
+        let (pulse_sender, mut pulse_receiver) = mpsc::unbounded_channel();
+        let upstream = tokio::spawn(async move {
+            let mut request = [0_u8; 1];
+            upstream
+                .read_exact(&mut request)
+                .await
+                .expect("read request");
+            request_read_sender.send(()).expect("signal request read");
+            while let Some(byte) = pulse_receiver.recv().await {
+                upstream.write_all(&[byte]).await.expect("write pulse");
+            }
+            upstream
+                .shutdown()
+                .await
+                .expect("half-close upstream write");
             let mut remainder = Vec::new();
-            stream
+            upstream
                 .read_to_end(&mut remainder)
                 .await
                 .expect("await downstream half-close");
         });
 
         client.write_all(b"x").await.expect("write request");
-        let mut response = [0_u8; 4];
-        client
-            .read_exact(&mut response)
-            .await
-            .expect("read one-way response activity");
-        assert_eq!(&response, b"abcd");
+        request_read_receiver.await.expect("request read signal");
+        for expected in b"abcd" {
+            tokio::time::advance(Duration::from_millis(70)).await;
+            pulse_sender.send(*expected).expect("request pulse");
+            let mut response = [0_u8; 1];
+            client
+                .read_exact(&mut response)
+                .await
+                .expect("read one-way response activity");
+            assert_eq!(response[0], *expected);
+        }
+        drop(pulse_sender);
         client
             .shutdown()
             .await
@@ -1950,11 +2017,24 @@ mod tests {
             UnixListener::bind(&upstream_path).expect("bind upstream test socket");
         let upstream = fixture.upstream();
         let cancellation = CancellationToken::new();
+        let (capacity_sender, capacity_reached) = oneshot::channel();
         let service = tokio::spawn({
             let cancellation = cancellation.clone();
             let upstream = Arc::clone(&upstream);
+            let mut capacity_sender = Some(capacity_sender);
             async move {
-                serve_connections(downstream_listener, upstream, cancellation, test_limits(2)).await
+                serve_connections_using(
+                    downstream_listener,
+                    upstream,
+                    cancellation,
+                    test_limits(2),
+                    move || {
+                        if let Some(sender) = capacity_sender.take() {
+                            sender.send(()).expect("signal saturated connection gate");
+                        }
+                    },
+                )
+                .await
             }
         });
 
@@ -1972,14 +2052,15 @@ mod tests {
             .await
             .expect("second upstream deadline")
             .expect("second upstream connection");
+        capacity_reached
+            .await
+            .expect("observe saturated connection gate");
         let third_client = UnixStream::connect(&downstream_path)
             .await
             .expect("queue third downstream");
-        assert!(
-            timeout(Duration::from_millis(150), upstream_listener.accept())
-                .await
-                .is_err(),
-            "a third active connection must not reach the upstream socket"
+        assert_no_pending_connection(
+            &upstream_listener,
+            "a third active connection reached the upstream socket",
         );
 
         cancellation.cancel();
@@ -2010,11 +2091,9 @@ mod tests {
             relay_connection(downstream, &upstream, &cancellation, test_limits(1)).await,
             ConnectionEnd::AuthorityChanged
         );
-        assert!(
-            timeout(Duration::from_millis(100), replacement.accept())
-                .await
-                .is_err(),
-            "authority drift must be rejected before an upstream connection"
+        assert_no_pending_connection(
+            &replacement,
+            "authority drift reached the replacement upstream socket",
         );
     }
 
@@ -2065,11 +2144,9 @@ mod tests {
                 .expect("relay task"),
             ConnectionEnd::AuthorityChanged
         );
-        assert!(
-            timeout(Duration::from_millis(100), replacement.accept())
-                .await
-                .is_err(),
-            "failed connect authority drift must not reach the replacement"
+        assert_no_pending_connection(
+            &replacement,
+            "failed connect authority drift reached the replacement upstream socket",
         );
     }
 
@@ -2132,12 +2209,20 @@ mod tests {
         );
         assert_closed_without_payload(&mut client, "downstream").await;
         assert_closed_without_payload(&mut captured_peer, "captured upstream").await;
-        assert!(
-            timeout(Duration::from_millis(100), replacement.accept())
-                .await
-                .is_err(),
-            "successful connect authority drift must not reach the replacement"
+        assert_no_pending_connection(
+            &replacement,
+            "successful connect authority drift reached the replacement upstream socket",
         );
+    }
+
+    fn assert_no_pending_connection(listener: &UnixListener, message: &str) {
+        let waker = futures::task::noop_waker_ref();
+        let mut context = Context::from_waker(waker);
+        match listener.poll_accept(&mut context) {
+            Poll::Pending => {}
+            Poll::Ready(Ok(_)) => panic!("{message}"),
+            Poll::Ready(Err(error)) => panic!("{message}: {error}"),
+        }
     }
 
     async fn assert_closed_without_payload(stream: &mut UnixStream, label: &str) {

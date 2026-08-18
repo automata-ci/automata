@@ -13,7 +13,9 @@ use clap::{CommandFactory as _, Parser as _};
 fn expect_internal_object_store(command: InternalCommand) -> Box<InternalObjectStoreArgs> {
     match command {
         InternalCommand::ObjectStore(args) => args,
-        InternalCommand::Local(_) => panic!("expected object-store command"),
+        InternalCommand::Engine(_) | InternalCommand::Local(_) => {
+            panic!("expected object-store command")
+        }
     }
 }
 

@@ -72,6 +72,7 @@ jobs:
             --lib \
             --no-fail-fast \
             -p automata-ci \
+            -p automata-ci-auth-postgres \
             -p automata-ci-control \
             -p automata-ci-core \
             -p automata-ci-github-delivery \

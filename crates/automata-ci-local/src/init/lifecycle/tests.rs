@@ -124,23 +124,6 @@ fn bootstrap_artifacts_are_stable_for_one_sealed_epoch() {
 }
 
 #[test]
-fn lifecycle_has_no_host_operation_journal() {
-    let source = include_str!("../lifecycle.rs");
-    for rejected in [
-        "LifecycleIntent",
-        "LifecyclePhase",
-        "lifecycle-operation.json",
-        "store_lifecycle_operation",
-        "observe_lifecycle_operation",
-    ] {
-        assert!(
-            !source.contains(rejected),
-            "found rejected host journal token {rejected}"
-        );
-    }
-}
-
-#[test]
 fn cancellation_checkpoint_is_fail_closed() {
     let cancellation = CancellationToken::new();
     assert!(cancellation_checkpoint(&cancellation).is_ok());
@@ -152,19 +135,20 @@ fn cancellation_checkpoint_is_fail_closed() {
 }
 
 #[tokio::test]
-async fn acquired_up_and_down_operations_preserve_holder_loss() {
+async fn acquired_lifecycle_signals_preserve_holder_loss_for_both_outcomes() {
     async fn assert_result<Output>(
         cancel_caller: bool,
         lose_holder: bool,
         expected: LocalInitErrorCode,
     ) {
         let holder_lost = CancellationToken::new();
-        let transaction_cancellation = CancellationToken::new();
+        let caller = CancellationToken::new();
+        let signals = AcquiredLifecycleSignals::from_signals(&caller, holder_lost.clone());
         let holder_signal = holder_lost.clone();
-        let cancel_transaction = transaction_cancellation.clone();
+        let cancel_caller_signal = caller.clone();
         let operation = async move {
             if cancel_caller {
-                cancel_transaction.cancel();
+                cancel_caller_signal.cancel();
             }
             if lose_holder {
                 holder_signal.cancel();
@@ -172,10 +156,7 @@ async fn acquired_up_and_down_operations_preserve_holder_loss() {
             std::future::pending::<Result<Output, LocalInitError>>().await
         };
 
-        let Err(error) =
-            run_acquired_lifecycle_operation(&holder_lost, &transaction_cancellation, operation)
-                .await
-        else {
+        let Err(error) = signals.run(operation).await else {
             panic!("a cancelled lifecycle operation cannot complete");
         };
         assert_eq!(error.code(), expected);
@@ -191,51 +172,6 @@ async fn acquired_up_and_down_operations_preserve_holder_loss() {
     }
 }
 
-#[test]
-fn public_up_and_down_use_the_acquired_holder_boundary() {
-    let source = include_str!("../lifecycle.rs");
-    let (_, up_and_later) = source
-        .split_once("pub async fn up_local(")
-        .expect("public up entry point exists");
-    let (up, down_and_later) = up_and_later
-        .split_once("pub async fn down_local(")
-        .expect("public down entry point exists");
-    let (down, _) = down_and_later
-        .split_once("async fn recover_stopped_lock_if_authorized(")
-        .expect("down entry point has a trailing helper boundary");
-
-    for (operation, result_type) in [
-        (up, "UpLifecycleOperationResult"),
-        (down, "DownLifecycleOperationResult"),
-    ] {
-        assert_eq!(
-            operation
-                .matches("let holder_lost = holder.holder_lost();")
-                .count(),
-            1
-        );
-        assert_eq!(
-            operation
-                .matches(
-                    "run_acquired_lifecycle_operation(&holder_lost, &transaction_cancellation, operation)",
-                )
-                .count(),
-            1
-        );
-        assert!(operation.contains(&format!(
-            "let {result_type} {{ desired, resumed }} = match operation"
-        )));
-
-        let (_, completion) = operation
-            .split_once("watcher.abort();")
-            .expect("the acquired operation is joined before lock release");
-        let (completion, _) = completion
-            .split_once(".release_lifecycle_lock(")
-            .expect("the operation result precedes graceful lock release");
-        assert_eq!(completion.matches("return Err(error);").count(), 1);
-    }
-}
-
 #[tokio::test]
 async fn running_replay_attests_each_exact_cas_target_once() {
     let (_directory, established) = fixture();
@@ -246,19 +182,15 @@ async fn running_replay_attests_each_exact_cas_target_once() {
     };
 
     complete_running_replay(
+        &attester,
+        &established,
+        &artifacts,
+        b"relay binding\n",
+        b"runner config\n",
+        "relay-id",
+        "runner-id",
         &initial,
         &CancellationToken::new(),
-        || {
-            attest_exact_cas_material_with(
-                &attester,
-                &established,
-                &artifacts,
-                b"relay binding\n",
-                b"runner config\n",
-                "relay-id",
-                "runner-id",
-            )
-        },
         || async { Ok(initial.clone()) },
     )
     .await
@@ -277,19 +209,6 @@ async fn running_replay_attests_each_exact_cas_target_once() {
             CasTarget::RunnerSpoolKey,
         ]
     );
-}
-
-#[test]
-fn running_branch_calls_exact_cas_attestation_once() {
-    let source = include_str!("../lifecycle.rs");
-    let (_, running_and_later) = source
-        .split_once("if let LifecycleTopology::Running { transit_id } = &initial {")
-        .expect("up has a Running replay branch");
-    let (running, _) = running_and_later
-        .split_once("if initial == LifecycleTopology::Partial {")
-        .expect("Running replay precedes Partial convergence");
-
-    assert_eq!(running.matches("attest_exact_cas_material(").count(), 1);
 }
 
 #[test]

@@ -15,6 +15,8 @@ pub use lifecycle::{
     LocalDownOutcome, LocalDownRequest, LocalUpOutcome, LocalUpRequest, down_local, up_local,
 };
 pub(crate) use materializer::run_fixed_materializer;
+#[cfg(feature = "test-support")]
+pub(crate) use renderer::renderer_contract_fixture_bytes;
 pub use status_reset::{
     LocalInstallationStatus, LocalResetOutcome, LocalResetRequest, LocalStatusReport,
     LocalStatusRequest, inspect_local_status, reset_local,

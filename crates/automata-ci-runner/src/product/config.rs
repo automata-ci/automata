@@ -3277,3 +3277,28 @@ fn host_architecture() -> Result<Architecture, RunnerProductConfigError> {
         _ => Err(RunnerProductConfigError::InvalidInventory),
     }
 }
+
+#[cfg(all(test, target_os = "linux", target_arch = "x86_64"))]
+mod tests {
+    use super::RunnerProductConfig;
+
+    #[test]
+    fn production_local_renderer_emits_a_current_runner_product_config() {
+        let fixture = automata_ci_local::local_renderer_contract_fixture()
+            .expect("production local renderer contract fixture");
+        let fixture: serde_json::Value =
+            serde_json::from_slice(&fixture).expect("renderer fixture JSON");
+        let runner_config = fixture["runner_config"]
+            .as_str()
+            .expect("renderer fixture runner config");
+        let config = RunnerProductConfig::from_json(runner_config.as_bytes())
+            .expect("production local runner config satisfies the consumer contract");
+        assert_eq!(
+            config.runner_id().to_string(),
+            fixture["inputs"]["runner_id"]
+                .as_str()
+                .expect("renderer fixture runner identity"),
+        );
+        assert!(config.local_docker().is_some());
+    }
+}
