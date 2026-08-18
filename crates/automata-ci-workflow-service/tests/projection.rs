@@ -23,8 +23,8 @@ use automata_ci_store::{
     WorkflowAdmissionIdempotency, WorkflowAdmissionValueError,
 };
 use automata_ci_workflow_actions::{
-    CompileWorkflowRequest, GithubEventMetadata, GithubWorkflowCompiler, GithubWorkflowFrontend,
-    ParseWorkflowRequest, SourceId, SourceOrigin, SourceProvenance, WorkflowFrontend as _,
+    CompileWorkflowRequest, GithubWorkflowCompiler, GithubWorkflowFrontend, ParseWorkflowRequest,
+    ProviderEventMetadata, SourceId, SourceOrigin, SourceProvenance, WorkflowFrontend as _,
 };
 use automata_ci_workflow_service::{
     GithubWorkflowPlanVerifier, WorkflowAdmissionError, WorkflowAdmissionFailure,
@@ -531,7 +531,7 @@ jobs:
                 )
                 .with_git_ref(support::GIT_REF),
         )
-        .with_event_metadata(GithubEventMetadata::push(false)),
+        .with_event_metadata(ProviderEventMetadata::push(false)),
     );
     assert!(compiled.is_accepted(), "{:#?}", compiled.diagnostics());
     let base_context = JobRuntimeContext::new_base(
@@ -599,7 +599,7 @@ fn run_name_request(
                 )
                 .with_git_ref(support::GIT_REF),
         )
-        .with_event_metadata(GithubEventMetadata::push(false)),
+        .with_event_metadata(ProviderEventMetadata::push(false)),
     );
     assert!(compiled.is_accepted(), "{:#?}", compiled.diagnostics());
     let base_context = JobRuntimeContext::new_base(

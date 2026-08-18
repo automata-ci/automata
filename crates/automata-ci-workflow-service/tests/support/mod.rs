@@ -8,8 +8,8 @@ use automata_ci_core::{
 };
 use automata_ci_store::{TenantScope, WorkflowAdmissionIdempotency};
 use automata_ci_workflow_actions::{
-    CompilationReport, CompileWorkflowRequest, GithubEventMetadata, GithubWorkflowCompiler,
-    GithubWorkflowFrontend, ParseWorkflowRequest, SourceId, SourceOrigin, SourceProvenance,
+    CompilationReport, CompileWorkflowRequest, GithubWorkflowCompiler, GithubWorkflowFrontend,
+    ParseWorkflowRequest, ProviderEventMetadata, SourceId, SourceOrigin, SourceProvenance,
     WorkflowFrontend as _,
 };
 use automata_ci_workflow_service::{AdmissionRepositoryCoordinates, WorkflowAdmissionRequest};
@@ -71,7 +71,7 @@ pub fn ci_request_at_path(
         compile_ci_at_path(
             workflow_path,
             "push",
-            Some(GithubEventMetadata::push(false)),
+            Some(ProviderEventMetadata::push(false)),
         ),
     )
 }
@@ -86,7 +86,7 @@ pub fn push_request(tenant: &str) -> WorkflowAdmissionRequest {
 pub fn compile_ci_at_path(
     workflow_path: &str,
     event_name: &str,
-    metadata: Option<GithubEventMetadata>,
+    metadata: Option<ProviderEventMetadata>,
 ) -> CompilationReport {
     let provenance = SourceProvenance::new(
         SourceId::new(workflow_path),

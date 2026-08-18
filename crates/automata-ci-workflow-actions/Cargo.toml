@@ -19,6 +19,7 @@ path = "tests/workflow_actions.rs"
 [dependencies]
 automata-ci-core.workspace = true
 automata-ci-actions-permissions.workspace = true
+automata-ci-provider.workspace = true
 automata-ci-schedule.workspace = true
 flate2.workspace = true
 focaccia.workspace = true

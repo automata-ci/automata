@@ -12,10 +12,10 @@ use automata_ci_store::{
 };
 use automata_ci_store::{RepositoryId, TenantScope, WorkflowAdmissionIdempotency};
 use automata_ci_workflow_actions::{
-    CompilationDisposition, CompileWorkflowRequest, Diagnostic, GithubEventMetadata,
-    GithubWorkflowCompiler, GithubWorkflowDispatchInputValue, GithubWorkflowDispatchInputs,
-    GithubWorkflowDispatchInputsError, GithubWorkflowFrontend, ParseWorkflowRequest, SourceId,
-    SourceOrigin, SourceProvenance, WorkflowFrontend as _,
+    CompilationDisposition, CompileWorkflowRequest, Diagnostic, GithubWorkflowCompiler,
+    GithubWorkflowDispatchInputValue, GithubWorkflowDispatchInputs,
+    GithubWorkflowDispatchInputsError, GithubWorkflowFrontend, ParseWorkflowRequest,
+    ProviderEventMetadata, SourceId, SourceOrigin, SourceProvenance, WorkflowFrontend as _,
 };
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
@@ -409,7 +409,7 @@ impl GithubWorkflowDispatchService {
                     .ok_or(GithubWorkflowDispatchError::InvalidSourcePlan)?,
                 event,
             )
-            .with_event_metadata(GithubEventMetadata::workflow_dispatch(
+            .with_event_metadata(ProviderEventMetadata::workflow_dispatch(
                 request.inputs.clone(),
             )),
         );
@@ -625,8 +625,8 @@ impl GithubWorkflowDispatchEvidence {
             .map_err(|_| GithubWorkflowDispatchEvidenceError::InvalidEncoding)
     }
 
-    pub(crate) fn metadata(&self) -> GithubEventMetadata {
-        GithubEventMetadata::workflow_dispatch(self.inputs.clone())
+    pub(crate) fn metadata(&self) -> ProviderEventMetadata {
+        ProviderEventMetadata::workflow_dispatch(self.inputs.clone())
     }
 
     pub(crate) fn matches_admission(&self, request: &WorkflowAdmissionRequest) -> bool {

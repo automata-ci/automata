@@ -112,9 +112,11 @@ pub enum ProviderGitRefKind {
     Branch,
     /// A reference below `refs/tags/`.
     Tag,
+    /// A provider-managed execution reference outside branch and tag namespaces.
+    Synthetic,
 }
 
-/// Exact full branch or tag reference authenticated by a provider.
+/// Exact full Git reference authenticated by a provider.
 #[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(try_from = "UncheckedProviderGitRef")]
 pub struct ProviderGitRef {
@@ -130,7 +132,7 @@ struct UncheckedProviderGitRef {
 }
 
 impl ProviderGitRef {
-    /// Validates a full branch or tag reference and its declared namespace.
+    /// Validates a full Git reference and its declared namespace.
     ///
     /// # Errors
     ///
@@ -143,10 +145,16 @@ impl ProviderGitRef {
         let prefix = match kind {
             ProviderGitRefKind::Branch => "refs/heads/",
             ProviderGitRefKind::Tag => "refs/tags/",
+            ProviderGitRefKind::Synthetic => "refs/",
         };
         let Some(short) = full.strip_prefix(prefix) else {
             return Err(ProviderTriggerError::InvalidGitRef);
         };
+        if kind == ProviderGitRefKind::Synthetic
+            && (short.starts_with("heads/") || short.starts_with("tags/"))
+        {
+            return Err(ProviderTriggerError::InvalidGitRef);
+        }
         if !valid_ref_name(short) {
             return Err(ProviderTriggerError::InvalidGitRef);
         }
@@ -170,6 +178,7 @@ impl ProviderGitRef {
         match self.kind {
             ProviderGitRefKind::Branch => &self.full["refs/heads/".len()..],
             ProviderGitRefKind::Tag => &self.full["refs/tags/".len()..],
+            ProviderGitRefKind::Synthetic => &self.full["refs/".len()..],
         }
     }
 
@@ -400,6 +409,7 @@ pub struct PullRequestTrigger {
     source_repository: ProviderRepository,
     base_ref: ProviderGitRef,
     head_ref: ProviderGitRef,
+    execution_ref: ProviderGitRef,
     base_object: GitObjectId,
     head_object: GitObjectId,
     merge_object: Option<GitObjectId>,
@@ -417,6 +427,7 @@ struct UncheckedPullRequestTrigger {
     source_repository: ProviderRepository,
     base_ref: ProviderGitRef,
     head_ref: ProviderGitRef,
+    execution_ref: ProviderGitRef,
     base_object: GitObjectId,
     head_object: GitObjectId,
     merge_object: Option<GitObjectId>,
@@ -439,6 +450,7 @@ impl PullRequestTrigger {
         source_repository: ProviderRepository,
         base_ref: ProviderGitRef,
         head_ref: ProviderGitRef,
+        execution_ref: ProviderGitRef,
         base_object: GitObjectId,
         head_object: GitObjectId,
         merge_object: Option<GitObjectId>,
@@ -474,6 +486,7 @@ impl PullRequestTrigger {
             source_repository,
             base_ref,
             head_ref,
+            execution_ref,
             base_object,
             head_object,
             merge_object,
@@ -507,6 +520,24 @@ impl PullRequestTrigger {
         &self.source_repository
     }
 
+    /// Returns the target branch reference.
+    #[must_use]
+    pub const fn base_ref(&self) -> &ProviderGitRef {
+        &self.base_ref
+    }
+
+    /// Returns the source branch reference.
+    #[must_use]
+    pub const fn head_ref(&self) -> &ProviderGitRef {
+        &self.head_ref
+    }
+
+    /// Returns the exact provider ref under which the workflow executes.
+    #[must_use]
+    pub const fn execution_ref(&self) -> &ProviderGitRef {
+        &self.execution_ref
+    }
+
     /// Returns the exact target object.
     #[must_use]
     pub const fn base_object(&self) -> GitObjectId {
@@ -530,6 +561,18 @@ impl PullRequestTrigger {
     pub const fn draft(&self) -> bool {
         self.draft
     }
+
+    /// Returns the triggering actor when supplied by the provider.
+    #[must_use]
+    pub const fn actor(&self) -> Option<&ExternalSubjectIdentity> {
+        self.actor.as_ref()
+    }
+
+    /// Returns the change author when supplied by the provider.
+    #[must_use]
+    pub const fn author(&self) -> Option<&ExternalSubjectIdentity> {
+        self.author.as_ref()
+    }
 }
 
 impl TryFrom<UncheckedPullRequestTrigger> for PullRequestTrigger {
@@ -543,6 +586,7 @@ impl TryFrom<UncheckedPullRequestTrigger> for PullRequestTrigger {
             value.source_repository,
             value.base_ref,
             value.head_ref,
+            value.execution_ref,
             value.base_object,
             value.head_object,
             value.merge_object,
@@ -571,6 +615,7 @@ pub struct MergeQueueTrigger {
     activity: MergeQueueActivity,
     repository: ProviderRepository,
     target_ref: ProviderGitRef,
+    candidate_ref: ProviderGitRef,
     target_object: GitObjectId,
     candidate_object: GitObjectId,
     actor: Option<ExternalSubjectIdentity>,
@@ -583,6 +628,7 @@ struct UncheckedMergeQueueTrigger {
     activity: MergeQueueActivity,
     repository: ProviderRepository,
     target_ref: ProviderGitRef,
+    candidate_ref: ProviderGitRef,
     target_object: GitObjectId,
     candidate_object: GitObjectId,
     actor: Option<ExternalSubjectIdentity>,
@@ -594,11 +640,13 @@ impl MergeQueueTrigger {
     /// # Errors
     ///
     /// Rejects non-branch targets, object-algorithm drift, or cross-instance actors.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         queue_id: ExternalMergeQueueId,
         activity: MergeQueueActivity,
         repository: ProviderRepository,
         target_ref: ProviderGitRef,
+        candidate_ref: ProviderGitRef,
         target_object: GitObjectId,
         candidate_object: GitObjectId,
         actor: Option<ExternalSubjectIdentity>,
@@ -615,6 +663,7 @@ impl MergeQueueTrigger {
             activity,
             repository,
             target_ref,
+            candidate_ref,
             target_object,
             candidate_object,
             actor,
@@ -639,10 +688,34 @@ impl MergeQueueTrigger {
         &self.repository
     }
 
+    /// Returns the merge queue's target branch reference.
+    #[must_use]
+    pub const fn target_ref(&self) -> &ProviderGitRef {
+        &self.target_ref
+    }
+
+    /// Returns the exact provider ref for the queued merge candidate.
+    #[must_use]
+    pub const fn candidate_ref(&self) -> &ProviderGitRef {
+        &self.candidate_ref
+    }
+
+    /// Returns the target branch object from which the candidate was built.
+    #[must_use]
+    pub const fn target_object(&self) -> GitObjectId {
+        self.target_object
+    }
+
     /// Returns the exact synthetic candidate object.
     #[must_use]
     pub const fn candidate_object(&self) -> GitObjectId {
         self.candidate_object
+    }
+
+    /// Returns the triggering actor when supplied by the provider.
+    #[must_use]
+    pub const fn actor(&self) -> Option<&ExternalSubjectIdentity> {
+        self.actor.as_ref()
     }
 }
 
@@ -655,6 +728,7 @@ impl TryFrom<UncheckedMergeQueueTrigger> for MergeQueueTrigger {
             value.activity,
             value.repository,
             value.target_ref,
+            value.candidate_ref,
             value.target_object,
             value.candidate_object,
             value.actor,
@@ -792,6 +866,12 @@ impl RepositoryDispatchTrigger {
     pub const fn input(&self) -> &ProviderDispatchInput {
         &self.input
     }
+
+    /// Returns the triggering actor when supplied by the provider.
+    #[must_use]
+    pub const fn actor(&self) -> Option<&ExternalSubjectIdentity> {
+        self.actor.as_ref()
+    }
 }
 
 impl TryFrom<UncheckedRepositoryDispatchTrigger> for RepositoryDispatchTrigger {
@@ -825,6 +905,34 @@ impl NormalizedTrigger {
             Self::PullRequest(value) => value.target_repository(),
             Self::MergeQueue(value) => value.repository(),
             Self::RepositoryDispatch(value) => value.repository(),
+        }
+    }
+
+    /// Returns the immutable revision from which workflow source is fetched.
+    ///
+    /// Repository dispatch requires a provider-authorized default-branch
+    /// resolution and therefore has no revision at webhook normalization time.
+    #[must_use]
+    pub const fn workflow_source_revision(&self) -> Option<GitObjectId> {
+        match self {
+            Self::Push(push) => push.after(),
+            Self::PullRequest(pull_request) => Some(pull_request.head_object()),
+            Self::MergeQueue(merge_queue) => Some(merge_queue.candidate_object()),
+            Self::RepositoryDispatch(_) => None,
+        }
+    }
+
+    /// Returns the exact ref under which workflow event context executes.
+    ///
+    /// Repository dispatch obtains its configured default-branch ref together
+    /// with the source revision after normalization.
+    #[must_use]
+    pub const fn workflow_execution_ref(&self) -> Option<&ProviderGitRef> {
+        match self {
+            Self::Push(push) => Some(push.git_ref()),
+            Self::PullRequest(pull_request) => Some(pull_request.execution_ref()),
+            Self::MergeQueue(merge_queue) => Some(merge_queue.candidate_ref()),
+            Self::RepositoryDispatch(_) => None,
         }
     }
 
@@ -1035,6 +1143,8 @@ mod tests {
             repository(ProviderInstanceId::new()),
             ProviderGitRef::new("refs/heads/main", ProviderGitRefKind::Branch).expect("base"),
             ProviderGitRef::new("refs/heads/topic", ProviderGitRefKind::Branch).expect("head"),
+            ProviderGitRef::new("refs/pull/7/merge", ProviderGitRefKind::Synthetic)
+                .expect("execution ref"),
             object('a'),
             object('b'),
             None,
@@ -1044,6 +1154,43 @@ mod tests {
         );
 
         assert_eq!(result, Err(ProviderTriggerError::InstanceMismatch));
+    }
+
+    #[test]
+    fn pull_request_retains_provider_execution_coordinates() {
+        let instance_id = ProviderInstanceId::new();
+        let trigger = NormalizedTrigger::PullRequest(
+            PullRequestTrigger::new(
+                ExternalChangeId::new("7").expect("change ID"),
+                PullRequestActivity::Synchronized,
+                repository(instance_id),
+                repository(instance_id),
+                ProviderGitRef::new("refs/heads/main", ProviderGitRefKind::Branch).expect("base"),
+                ProviderGitRef::new("refs/heads/topic", ProviderGitRefKind::Branch).expect("head"),
+                ProviderGitRef::new("refs/pull/7/merge", ProviderGitRefKind::Synthetic)
+                    .expect("execution ref"),
+                object('a'),
+                object('b'),
+                Some(object('c')),
+                false,
+                None,
+                None,
+            )
+            .expect("pull request"),
+        );
+
+        assert_eq!(trigger.workflow_source_revision(), Some(object('b')));
+        assert_eq!(
+            trigger
+                .workflow_execution_ref()
+                .expect("execution ref")
+                .full(),
+            "refs/pull/7/merge"
+        );
+        assert_eq!(
+            ProviderGitRef::new("refs/heads/main", ProviderGitRefKind::Synthetic),
+            Err(ProviderTriggerError::InvalidGitRef)
+        );
     }
 
     #[test]

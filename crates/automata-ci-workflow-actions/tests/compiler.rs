@@ -2,7 +2,7 @@ use crate::support;
 
 use automata_ci_core::{WorkflowEventProvenance, WorkflowPlan, WorkflowPlanVersion};
 use automata_ci_workflow_actions::{
-    CompilationDisposition, DiagnosticKind, GithubEventMetadata, WorkflowNotSelectedReason,
+    CompilationDisposition, DiagnosticKind, ProviderEventMetadata, WorkflowNotSelectedReason,
 };
 
 fn event(name: &str) -> WorkflowEventProvenance {
@@ -20,8 +20,8 @@ fn event(name: &str) -> WorkflowEventProvenance {
 fn compile(source: &str, event_name: &str) -> automata_ci_workflow_actions::CompilationReport {
     let parsed = support::parse(source);
     let metadata = match event_name {
-        "push" => Some(GithubEventMetadata::push(false)),
-        "pull_request" => Some(GithubEventMetadata::pull_request("opened", "main")),
+        "push" => Some(ProviderEventMetadata::push(false)),
+        "pull_request" => Some(ProviderEventMetadata::pull_request("opened", "main")),
         _ => None,
     };
     support::compile(

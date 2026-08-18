@@ -2,8 +2,8 @@ use crate::support;
 
 use automata_ci_core::{Sha256Digest, WorkflowEventProvenance};
 use automata_ci_workflow_actions::{
-    CompilationDisposition, CompilationReport, CompileWorkflowRequest, GithubChangedFiles,
-    GithubEventMetadata, GithubWorkflowCompiler, WorkflowNotSelectedReason,
+    CompilationDisposition, CompilationReport, CompileWorkflowRequest, GithubWorkflowCompiler,
+    ProviderChangedFiles, ProviderEventMetadata, WorkflowNotSelectedReason,
 };
 
 const FILTERED_WORKFLOW: &str = "on:\n  push:\n    branches: [main]\n  pull_request:\n  workflow_dispatch:\njobs:\n  test:\n    runs-on: linux\n    steps:\n      - run: true\n";
@@ -23,7 +23,7 @@ fn event(name: &str, git_ref: &str) -> WorkflowEventProvenance {
 fn compile(
     source: &str,
     event: WorkflowEventProvenance,
-    metadata: Option<GithubEventMetadata>,
+    metadata: Option<ProviderEventMetadata>,
 ) -> CompilationReport {
     let parsed = support::parse_accepted(source);
     support::compile(parsed.plan().expect("source plan"), event, metadata)
@@ -34,24 +34,24 @@ fn filtered_workflow_selects_only_live_main_pushes() {
     let main = compile(
         FILTERED_WORKFLOW,
         event("push", "refs/heads/main"),
-        Some(GithubEventMetadata::push(false)),
+        Some(ProviderEventMetadata::push(false)),
     );
     assert!(main.is_accepted(), "{:#?}", main.diagnostics());
 
     for (git_ref, metadata, reason) in [
         (
             "refs/heads/feature/not-main",
-            GithubEventMetadata::push(false),
+            ProviderEventMetadata::push(false),
             WorkflowNotSelectedReason::EventFiltersNotMatched,
         ),
         (
             "refs/tags/main",
-            GithubEventMetadata::push(false),
+            ProviderEventMetadata::push(false),
             WorkflowNotSelectedReason::EventFiltersNotMatched,
         ),
         (
             "refs/heads/main",
-            GithubEventMetadata::push(true),
+            ProviderEventMetadata::push(true),
             WorkflowNotSelectedReason::DeletedPush,
         ),
     ] {
@@ -69,7 +69,7 @@ fn event_absence_is_structured_non_selection_without_diagnostics() {
         &compile(
             source,
             event("push", "refs/heads/main"),
-            Some(GithubEventMetadata::push(false)),
+            Some(ProviderEventMetadata::push(false)),
         ),
         WorkflowNotSelectedReason::EventNotConfigured,
     );
@@ -82,7 +82,7 @@ fn event_absence_does_not_compile_an_unrelated_workflow_body() {
         &compile(
             source,
             event("pull_request", "refs/pull/1/merge"),
-            Some(GithubEventMetadata::pull_request("opened", "main")),
+            Some(ProviderEventMetadata::pull_request("opened", "main")),
         ),
         WorkflowNotSelectedReason::EventNotConfigured,
     );
@@ -94,7 +94,7 @@ fn path_filter_demand_does_not_compile_the_workflow_body() {
     let report = compile(
         source,
         event("pull_request", "refs/pull/1/merge"),
-        Some(GithubEventMetadata::pull_request("opened", "main")),
+        Some(ProviderEventMetadata::pull_request("opened", "main")),
     );
     assert_eq!(
         report.disposition(),
@@ -114,7 +114,7 @@ fn a_selected_event_still_rejects_an_unsupported_workflow_body() {
         &compile(
             source,
             event("pull_request", "refs/pull/1/merge"),
-            Some(GithubEventMetadata::pull_request("opened", "main")),
+            Some(ProviderEventMetadata::pull_request("opened", "main")),
         ),
         "github.compile.deployment_environment_unavailable",
     );
@@ -126,7 +126,9 @@ fn repository_dispatch_types_select_only_the_exact_custom_event() {
     let matching = compile(
         filtered,
         event("repository_dispatch", "refs/heads/main"),
-        Some(GithubEventMetadata::repository_dispatch("synthetic_signal")),
+        Some(ProviderEventMetadata::repository_dispatch(
+            "synthetic_signal",
+        )),
     );
     assert!(matching.is_accepted(), "{:#?}", matching.diagnostics());
 
@@ -134,7 +136,9 @@ fn repository_dispatch_types_select_only_the_exact_custom_event() {
         &compile(
             filtered,
             event("repository_dispatch", "refs/heads/main"),
-            Some(GithubEventMetadata::repository_dispatch("unmatched_signal")),
+            Some(ProviderEventMetadata::repository_dispatch(
+                "unmatched_signal",
+            )),
         ),
         WorkflowNotSelectedReason::EventFiltersNotMatched,
     );
@@ -143,7 +147,7 @@ fn repository_dispatch_types_select_only_the_exact_custom_event() {
     let any_custom = compile(
         unfiltered,
         event("repository_dispatch", "refs/heads/main"),
-        Some(GithubEventMetadata::repository_dispatch("any_signal")),
+        Some(ProviderEventMetadata::repository_dispatch("any_signal")),
     );
     assert!(any_custom.is_accepted(), "{:#?}", any_custom.diagnostics());
 }
@@ -163,7 +167,7 @@ fn repository_dispatch_requires_exact_bounded_metadata() {
         &compile(
             source,
             event("repository_dispatch", "refs/heads/main"),
-            Some(GithubEventMetadata::push(false)),
+            Some(ProviderEventMetadata::push(false)),
         ),
         "github.compile.event_metadata_mismatch",
     );
@@ -172,7 +176,7 @@ fn repository_dispatch_requires_exact_bounded_metadata() {
             &compile(
                 source,
                 event("repository_dispatch", "refs/heads/main"),
-                Some(GithubEventMetadata::repository_dispatch(event_type)),
+                Some(ProviderEventMetadata::repository_dispatch(event_type)),
             ),
             "github.compile.invalid_repository_dispatch_metadata",
         );
@@ -185,7 +189,7 @@ fn pull_requests_use_github_default_actions() {
         let report = compile(
             FILTERED_WORKFLOW,
             event("pull_request", "refs/pull/42/merge"),
-            Some(GithubEventMetadata::pull_request(action, "main")),
+            Some(ProviderEventMetadata::pull_request(action, "main")),
         );
         assert!(
             report.is_accepted(),
@@ -198,7 +202,7 @@ fn pull_requests_use_github_default_actions() {
         &compile(
             FILTERED_WORKFLOW,
             event("pull_request", "refs/pull/42/merge"),
-            Some(GithubEventMetadata::pull_request("closed", "main")),
+            Some(ProviderEventMetadata::pull_request("closed", "main")),
         ),
         WorkflowNotSelectedReason::EventFiltersNotMatched,
     );
@@ -210,7 +214,7 @@ fn pull_request_branch_filters_use_target_base_never_event_or_head_ref() {
     let matching_base = compile(
         source,
         event("pull_request", "refs/heads/feature/head"),
-        Some(GithubEventMetadata::pull_request("opened", "main")),
+        Some(ProviderEventMetadata::pull_request("opened", "main")),
     );
     assert!(
         matching_base.is_accepted(),
@@ -222,7 +226,10 @@ fn pull_request_branch_filters_use_target_base_never_event_or_head_ref() {
         &compile(
             source,
             event("pull_request", "refs/heads/main"),
-            Some(GithubEventMetadata::pull_request("opened", "feature/head")),
+            Some(ProviderEventMetadata::pull_request(
+                "opened",
+                "feature/head",
+            )),
         ),
         WorkflowNotSelectedReason::EventFiltersNotMatched,
     );
@@ -234,7 +241,7 @@ fn explicit_pull_request_types_replace_the_default_action_set() {
     let closed = compile(
         source,
         event("pull_request", "refs/pull/42/merge"),
-        Some(GithubEventMetadata::pull_request("closed", "main")),
+        Some(ProviderEventMetadata::pull_request("closed", "main")),
     );
     assert!(closed.is_accepted(), "{:#?}", closed.diagnostics());
 
@@ -242,7 +249,7 @@ fn explicit_pull_request_types_replace_the_default_action_set() {
         &compile(
             source,
             event("pull_request", "refs/pull/42/merge"),
-            Some(GithubEventMetadata::pull_request("opened", "main")),
+            Some(ProviderEventMetadata::pull_request("opened", "main")),
         ),
         WorkflowNotSelectedReason::EventFiltersNotMatched,
     );
@@ -254,7 +261,7 @@ fn ordered_negative_patterns_exclude_and_later_reinclude() {
     let reincluded = compile(
         source,
         event("push", "refs/heads/releases/beta/3-alpha"),
-        Some(GithubEventMetadata::push(false)),
+        Some(ProviderEventMetadata::push(false)),
     );
     assert!(reincluded.is_accepted(), "{:#?}", reincluded.diagnostics());
 
@@ -262,7 +269,7 @@ fn ordered_negative_patterns_exclude_and_later_reinclude() {
         &compile(
             source,
             event("push", "refs/heads/releases/10-alpha"),
-            Some(GithubEventMetadata::push(false)),
+            Some(ProviderEventMetadata::push(false)),
         ),
         WorkflowNotSelectedReason::EventFiltersNotMatched,
     );
@@ -274,7 +281,7 @@ fn push_branch_and_tag_filters_are_ref_kind_specific() {
     let tag = compile(
         source,
         event("push", "refs/tags/v2.10.1"),
-        Some(GithubEventMetadata::push(false)),
+        Some(ProviderEventMetadata::push(false)),
     );
     assert!(tag.is_accepted(), "{:#?}", tag.diagnostics());
 
@@ -282,7 +289,7 @@ fn push_branch_and_tag_filters_are_ref_kind_specific() {
         &compile(
             source,
             event("push", "refs/heads/v2.10.1"),
-            Some(GithubEventMetadata::push(false)),
+            Some(ProviderEventMetadata::push(false)),
         ),
         WorkflowNotSelectedReason::EventFiltersNotMatched,
     );
@@ -294,7 +301,7 @@ fn changed_file_filters_require_verified_metadata_and_honor_ordered_patterns() {
     let missing = compile(
         source,
         event("push", "refs/heads/main"),
-        Some(GithubEventMetadata::push(false)),
+        Some(ProviderEventMetadata::push(false)),
     );
     assert_eq!(
         missing.disposition(),
@@ -308,9 +315,9 @@ fn changed_file_filters_require_verified_metadata_and_honor_ordered_patterns() {
         missing.diagnostics()
     );
 
-    let matching = GithubEventMetadata::push_with_changed_files(
+    let matching = ProviderEventMetadata::push_with_changed_files(
         false,
-        GithubChangedFiles::complete(["src/generated/keep.rs"]),
+        ProviderChangedFiles::complete(["src/generated/keep.rs"]),
     );
     let report = compile(source, event("push", "refs/heads/main"), Some(matching));
     assert!(report.is_accepted(), "{:#?}", report.diagnostics());
@@ -320,9 +327,9 @@ fn changed_file_filters_require_verified_metadata_and_honor_ordered_patterns() {
             &compile(
                 source,
                 event("push", "refs/heads/main"),
-                Some(GithubEventMetadata::push_with_changed_files(
+                Some(ProviderEventMetadata::push_with_changed_files(
                     false,
-                    GithubChangedFiles::complete([path]),
+                    ProviderChangedFiles::complete([path]),
                 )),
             ),
             WorkflowNotSelectedReason::EventFiltersNotMatched,
@@ -337,10 +344,10 @@ fn changed_file_evidence_digest_is_part_of_immutable_event_provenance() {
     let report = compile(
         source,
         event("pull_request", "refs/pull/42/merge"),
-        Some(GithubEventMetadata::pull_request_with_changed_files(
+        Some(ProviderEventMetadata::pull_request_with_changed_files(
             "opened",
             "main",
-            GithubChangedFiles::complete_with_evidence(["src/lib.rs"], expected),
+            ProviderChangedFiles::complete_with_evidence(["src/lib.rs"], expected),
         )),
     );
     assert!(report.is_accepted(), "{:#?}", report.diagnostics());
@@ -351,10 +358,10 @@ fn changed_file_evidence_digest_is_part_of_immutable_event_provenance() {
     let changed_report = compile(
         source,
         event("pull_request", "refs/pull/42/merge"),
-        Some(GithubEventMetadata::pull_request_with_changed_files(
+        Some(ProviderEventMetadata::pull_request_with_changed_files(
             "opened",
             "main",
-            GithubChangedFiles::complete_with_evidence(["src/lib.rs"], changed),
+            ProviderChangedFiles::complete_with_evidence(["src/lib.rs"], changed),
         )),
     );
     let changed_plan = changed_report.plan().expect("changed evidence plan");
@@ -378,9 +385,9 @@ fn changed_file_evidence_digest_is_part_of_immutable_event_provenance() {
 #[test]
 fn workflow_paths_match_native_ci_path_filters() {
     let source = "on:\n  push:\n    paths: ['.ci/workflows/ci.yml']\njobs:\n  test:\n    runs-on: linux\n    steps:\n      - run: true\n";
-    let metadata = GithubEventMetadata::push_with_changed_files(
+    let metadata = ProviderEventMetadata::push_with_changed_files(
         false,
-        GithubChangedFiles::complete([".ci/workflows/ci.yml"]),
+        ProviderChangedFiles::complete([".ci/workflows/ci.yml"]),
     );
     let report = compile(source, event("push", "refs/heads/main"), Some(metadata));
     assert!(report.is_accepted(), "{:#?}", report.diagnostics());
@@ -392,7 +399,7 @@ fn tag_pushes_never_require_changed_file_metadata() {
     let report = compile(
         source,
         event("push", "refs/tags/v1.2.3"),
-        Some(GithubEventMetadata::push(false)),
+        Some(ProviderEventMetadata::push(false)),
     );
     assert!(report.is_accepted(), "{:#?}", report.diagnostics());
 }
@@ -405,10 +412,10 @@ fn paths_ignore_requires_at_least_one_changed_file_outside_the_ignore_set() {
             &compile(
                 source,
                 event("pull_request", "refs/pull/42/merge"),
-                Some(GithubEventMetadata::pull_request_with_changed_files(
+                Some(ProviderEventMetadata::pull_request_with_changed_files(
                     "opened",
                     "main",
-                    GithubChangedFiles::complete(files),
+                    ProviderChangedFiles::complete(files),
                 )),
             ),
             WorkflowNotSelectedReason::EventFiltersNotMatched,
@@ -418,10 +425,10 @@ fn paths_ignore_requires_at_least_one_changed_file_outside_the_ignore_set() {
     let report = compile(
         source,
         event("pull_request", "refs/pull/42/merge"),
-        Some(GithubEventMetadata::pull_request_with_changed_files(
+        Some(ProviderEventMetadata::pull_request_with_changed_files(
             "opened",
             "main",
-            GithubChangedFiles::complete(["docs/readme.md", "src/lib.rs"]),
+            ProviderChangedFiles::complete(["docs/readme.md", "src/lib.rs"]),
         )),
     );
     assert!(report.is_accepted(), "{:#?}", report.diagnostics());
@@ -433,9 +440,9 @@ fn provider_diff_bypass_matches_paths_without_exposing_file_names() {
     let report = compile(
         source,
         event("push", "refs/heads/main"),
-        Some(GithubEventMetadata::push_with_changed_files(
+        Some(ProviderEventMetadata::push_with_changed_files(
             false,
-            GithubChangedFiles::bypass_path_filters(),
+            ProviderChangedFiles::bypass_path_filters(),
         )),
     );
     assert!(report.is_accepted(), "{:#?}", report.diagnostics());
@@ -448,9 +455,9 @@ fn invalid_changed_file_metadata_is_bounded_and_sanitized() {
     let report = compile(
         source,
         event("push", "refs/heads/main"),
-        Some(GithubEventMetadata::push_with_changed_files(
+        Some(ProviderEventMetadata::push_with_changed_files(
             false,
-            GithubChangedFiles::complete([format!("{sentinel}\n")]),
+            ProviderChangedFiles::complete([format!("{sentinel}\n")]),
         )),
     );
     support::assert_rejected_with(&report, "github.compile.invalid_changed_files_metadata");
@@ -464,9 +471,9 @@ fn changed_file_metadata_enforces_event_specific_provider_windows() {
     let report = compile(
         push_source,
         event("push", "refs/heads/main"),
-        Some(GithubEventMetadata::push_with_changed_files(
+        Some(ProviderEventMetadata::push_with_changed_files(
             false,
-            GithubChangedFiles::complete(files),
+            ProviderChangedFiles::complete(files),
         )),
     );
     assert!(report.is_accepted(), "{:#?}", report.diagnostics());
@@ -475,9 +482,9 @@ fn changed_file_metadata_enforces_event_specific_provider_windows() {
     let report = compile(
         push_source,
         event("push", "refs/heads/main"),
-        Some(GithubEventMetadata::push_with_changed_files(
+        Some(ProviderEventMetadata::push_with_changed_files(
             false,
-            GithubChangedFiles::complete(files),
+            ProviderChangedFiles::complete(files),
         )),
     );
     support::assert_rejected_with(&report, "github.compile.invalid_changed_files_metadata");
@@ -487,10 +494,10 @@ fn changed_file_metadata_enforces_event_specific_provider_windows() {
     let report = compile(
         pull_request_source,
         event("pull_request", "refs/pull/42/merge"),
-        Some(GithubEventMetadata::pull_request_with_changed_files(
+        Some(ProviderEventMetadata::pull_request_with_changed_files(
             "opened",
             "main",
-            GithubChangedFiles::complete(files),
+            ProviderChangedFiles::complete(files),
         )),
     );
     assert!(report.is_accepted(), "{:#?}", report.diagnostics());
@@ -499,10 +506,10 @@ fn changed_file_metadata_enforces_event_specific_provider_windows() {
     let report = compile(
         pull_request_source,
         event("pull_request", "refs/pull/42/merge"),
-        Some(GithubEventMetadata::pull_request_with_changed_files(
+        Some(ProviderEventMetadata::pull_request_with_changed_files(
             "opened",
             "main",
-            GithubChangedFiles::complete(files),
+            ProviderChangedFiles::complete(files),
         )),
     );
     support::assert_rejected_with(&report, "github.compile.invalid_changed_files_metadata");
@@ -517,10 +524,10 @@ fn renamed_file_matches_both_previous_and_current_paths() {
         let report = compile(
             &source,
             event("pull_request", "refs/pull/42/merge"),
-            Some(GithubEventMetadata::pull_request_with_changed_files(
+            Some(ProviderEventMetadata::pull_request_with_changed_files(
                 "opened",
                 "main",
-                GithubChangedFiles::complete_selection_with_evidence(
+                ProviderChangedFiles::complete_selection_with_evidence(
                     ["legacy/module.rs", "src/module.rs"],
                     1,
                     Sha256Digest::from_bytes([0x44; 32]),
@@ -557,7 +564,7 @@ fn preselected_recompilation_validates_the_exact_trigger_span() {
     let initial = support::compile(
         parsed.plan().expect("source plan"),
         event("push", "refs/heads/main"),
-        Some(GithubEventMetadata::push(false)),
+        Some(ProviderEventMetadata::push(false)),
     );
     let plan = initial.plan().expect("initial plan");
     let replay =

@@ -2,14 +2,14 @@ use crate::support;
 
 use automata_ci_core::WorkflowEventProvenance;
 use automata_ci_workflow_actions::{
-    CompilationReport, CompileWorkflowRequest, GithubEventMetadata, GithubWorkflowCompiler,
+    CompilationReport, CompileWorkflowRequest, GithubWorkflowCompiler, ProviderEventMetadata,
     WorkflowNotSelectedReason,
 };
 
 fn compile(
     source: &str,
     event_name: &str,
-    metadata: Option<GithubEventMetadata>,
+    metadata: Option<ProviderEventMetadata>,
 ) -> CompilationReport {
     let parsed = support::parse_accepted(source);
     support::compile(
@@ -78,7 +78,7 @@ fn schedule_admission_requires_the_exact_firing_cron() {
     let matching = compile(
         source,
         "schedule",
-        Some(GithubEventMetadata::schedule("45 16 * * 2,4")),
+        Some(ProviderEventMetadata::schedule("45 16 * * 2,4")),
     );
     assert!(matching.is_accepted(), "{:#?}", matching.diagnostics());
     let parsed = support::parse(source);
@@ -93,7 +93,7 @@ fn schedule_admission_requires_the_exact_firing_cron() {
         &compile(
             source,
             "schedule",
-            Some(GithubEventMetadata::schedule("0 0 * * *")),
+            Some(ProviderEventMetadata::schedule("0 0 * * *")),
         ),
         WorkflowNotSelectedReason::ScheduleNotConfigured,
     );
@@ -102,7 +102,7 @@ fn schedule_admission_requires_the_exact_firing_cron() {
         "github.compile.event_metadata_required",
     );
     support::assert_rejected_with(
-        &compile(source, "schedule", Some(GithubEventMetadata::push(false))),
+        &compile(source, "schedule", Some(ProviderEventMetadata::push(false))),
         "github.compile.event_metadata_mismatch",
     );
 }
@@ -114,7 +114,7 @@ fn merge_group_requires_exact_authenticated_metadata() {
     let selected = compile(
         source,
         "merge_group",
-        Some(GithubEventMetadata::merge_group(
+        Some(ProviderEventMetadata::merge_group(
             "checks_requested",
             "refs/heads/main",
         )),
@@ -125,7 +125,7 @@ fn merge_group_requires_exact_authenticated_metadata() {
     let configured_selected = compile(
         configured,
         "merge_group",
-        Some(GithubEventMetadata::merge_group(
+        Some(ProviderEventMetadata::merge_group(
             "checks_requested",
             "refs/heads/main",
         )),
@@ -140,7 +140,7 @@ fn merge_group_requires_exact_authenticated_metadata() {
         &compile(
             source,
             "merge_group",
-            Some(GithubEventMetadata::merge_group(
+            Some(ProviderEventMetadata::merge_group(
                 "destroyed",
                 "refs/heads/main",
             )),
@@ -151,7 +151,7 @@ fn merge_group_requires_exact_authenticated_metadata() {
         &compile(
             configured,
             "merge_group",
-            Some(GithubEventMetadata::merge_group(
+            Some(ProviderEventMetadata::merge_group(
                 "destroyed",
                 "refs/heads/main",
             )),
@@ -163,7 +163,7 @@ fn merge_group_requires_exact_authenticated_metadata() {
         &compile(
             unsupported_type,
             "merge_group",
-            Some(GithubEventMetadata::merge_group(
+            Some(ProviderEventMetadata::merge_group(
                 "checks_requested",
                 "refs/heads/main",
             )),
@@ -178,7 +178,7 @@ fn merge_group_requires_exact_authenticated_metadata() {
         &compile(
             source,
             "merge_group",
-            Some(GithubEventMetadata::pull_request("opened", "main")),
+            Some(ProviderEventMetadata::pull_request("opened", "main")),
         ),
         "github.compile.event_metadata_mismatch",
     );
@@ -186,7 +186,10 @@ fn merge_group_requires_exact_authenticated_metadata() {
         &compile(
             source,
             "merge_group",
-            Some(GithubEventMetadata::merge_group("checks_requested", "main")),
+            Some(ProviderEventMetadata::merge_group(
+                "checks_requested",
+                "main",
+            )),
         ),
         "github.compile.invalid_merge_group_metadata",
     );
@@ -198,25 +201,25 @@ fn malformed_or_not_yet_evaluable_event_configuration_is_diagnostic() {
         (
             "on: schedule\njobs:\n  test:\n    runs-on: linux\n    steps:\n      - run: true\n",
             "schedule",
-            Some(GithubEventMetadata::schedule("0 0 * * *")),
+            Some(ProviderEventMetadata::schedule("0 0 * * *")),
             "github.compile.schedule_configuration_required",
         ),
         (
             "on:\n  schedule: []\njobs:\n  test:\n    runs-on: linux\n    steps:\n      - run: true\n",
             "schedule",
-            Some(GithubEventMetadata::schedule("0 0 * * *")),
+            Some(ProviderEventMetadata::schedule("0 0 * * *")),
             "github.compile.empty_schedule",
         ),
         (
             "on:\n  schedule:\n    - cron: '0 0 * * *'\n      timezone: Invalid/Nowhere\njobs:\n  test:\n    runs-on: linux\n    steps:\n      - run: true\n",
             "schedule",
-            Some(GithubEventMetadata::schedule("0 0 * * *")),
+            Some(ProviderEventMetadata::schedule("0 0 * * *")),
             "github.compile.invalid_schedule_timezone",
         ),
         (
             "on:\n  schedule:\n    - cron: '0 12 * *'\njobs:\n  test:\n    runs-on: linux\n    steps:\n      - run: true\n",
             "schedule",
-            Some(GithubEventMetadata::schedule("0 12 * *")),
+            Some(ProviderEventMetadata::schedule("0 12 * *")),
             "github.compile.invalid_schedule_cron",
         ),
         (

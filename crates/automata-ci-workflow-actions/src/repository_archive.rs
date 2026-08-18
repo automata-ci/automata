@@ -66,14 +66,14 @@ impl RepositoryWorkflowLocation {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RepositoryWorkflowDiscoveryPolicy {
-    GithubDelivery,
+    ProviderDelivery,
     LocalGithubArchive,
 }
 
 impl RepositoryWorkflowDiscoveryPolicy {
     const fn workflow_location(self) -> RepositoryWorkflowLocation {
         match self {
-            Self::GithubDelivery => RepositoryWorkflowLocation::Automata,
+            Self::ProviderDelivery => RepositoryWorkflowLocation::Automata,
             Self::LocalGithubArchive => RepositoryWorkflowLocation::Github,
         }
     }
@@ -327,7 +327,7 @@ impl RepositoryWorkflowDiscoveryOutcome {
     /// Returns the exact accepted bytes or the closed path-local failure.
     ///
     /// Archive-wide integrity and resource failures are returned by
-    /// [`discover_github_delivery_workflows`] instead of appearing here.
+    /// [`discover_provider_workflows`] instead of appearing here.
     ///
     /// # Errors
     ///
@@ -343,8 +343,8 @@ impl RepositoryWorkflowDiscoveryOutcome {
     }
 }
 
-/// Validates one authenticated GitHub-delivery archive and discovers direct
-/// Automata workflow files.
+/// Validates one authenticated provider archive and discovers direct Automata
+/// workflow files.
 ///
 /// The archive is never extracted. It must contain one explicit, safe root
 /// directory and only canonical paths beneath that root. Every entry and all
@@ -359,14 +359,14 @@ impl RepositoryWorkflowDiscoveryOutcome {
 /// aliased, duplicate, or type-conflicting paths; a prohibited or unsafe link;
 /// unsupported archive metadata; a non-regular workflow entry; a workflow
 /// namespace that conflicts with `policy`; or archive-wide resource exhaustion.
-pub fn discover_github_delivery_workflows(
+pub fn discover_provider_workflows(
     archive_bytes: &[u8],
     limits: RepositoryWorkflowDiscoveryLimits,
 ) -> Result<Vec<RepositoryWorkflowDiscoveryOutcome>, RepositoryWorkflowDiscoveryError> {
     discover_repository_workflows(
         archive_bytes,
         limits,
-        RepositoryWorkflowDiscoveryPolicy::GithubDelivery,
+        RepositoryWorkflowDiscoveryPolicy::ProviderDelivery,
         &|| false,
     )
 }

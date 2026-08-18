@@ -3,7 +3,7 @@ use std::io::Write as _;
 use automata_ci_workflow_actions::{
     MAX_REPOSITORY_WORKFLOW_PATH_BYTES, RepositoryWorkflowDiscoveryError as DiscoveryError,
     RepositoryWorkflowDiscoveryFailure as DiscoveryFailure, RepositoryWorkflowDiscoveryLimits,
-    RepositoryWorkflowDiscoveryOutcome, discover_github_delivery_workflows,
+    RepositoryWorkflowDiscoveryOutcome, discover_provider_workflows,
 };
 use flate2::{Compression, write::GzEncoder};
 
@@ -600,7 +600,7 @@ fn discover_automata_workflows(
     bytes: &[u8],
     limits: RepositoryWorkflowDiscoveryLimits,
 ) -> Result<Vec<RepositoryWorkflowDiscoveryOutcome>, DiscoveryError> {
-    discover_github_delivery_workflows(bytes, limits)
+    discover_provider_workflows(bytes, limits)
 }
 
 fn limits() -> RepositoryWorkflowDiscoveryLimits {

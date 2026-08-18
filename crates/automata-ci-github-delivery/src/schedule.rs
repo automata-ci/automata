@@ -39,9 +39,9 @@ use automata_ci_store::{
     RegisterGithubScheduledCheckSubject, RetryGithubScheduleFire, WorkflowAdmissionIdempotency,
 };
 use automata_ci_workflow_actions::{
-    CompilationDisposition, CompileWorkflowRequest, GithubEventMetadata, GithubWorkflowCompiler,
-    GithubWorkflowFrontend, ParseWorkflowRequest, RepositoryWorkflowDiscoveryLimits, SourceId,
-    SourceOrigin, SourceProvenance, WorkflowFrontend as _, discover_github_delivery_workflows,
+    CompilationDisposition, CompileWorkflowRequest, GithubWorkflowCompiler, GithubWorkflowFrontend,
+    ParseWorkflowRequest, ProviderEventMetadata, RepositoryWorkflowDiscoveryLimits, SourceId,
+    SourceOrigin, SourceProvenance, WorkflowFrontend as _, discover_provider_workflows,
     extract_github_schedule_entries,
 };
 use automata_ci_workflow_service::{
@@ -985,7 +985,7 @@ impl GithubScheduleService {
                 _ => FireFailure::InvalidRegistry,
             })?
             .into_bytes();
-        let workflows = discover_github_delivery_workflows(
+        let workflows = discover_provider_workflows(
             &archive,
             discovery_limits(manifest).map_err(|()| FireFailure::InvalidRegistry)?,
         )
@@ -1108,7 +1108,7 @@ fn compile_claimed_workflow(
         .with_git_ref(claimed.default_branch_ref());
     let report = GithubWorkflowCompiler::new().compile(
         CompileWorkflowRequest::new(source_plan, event).with_event_metadata(
-            GithubEventMetadata::schedule(claimed.entry().cron_expression()),
+            ProviderEventMetadata::schedule(claimed.entry().cron_expression()),
         ),
     );
     match report.disposition() {
@@ -1230,7 +1230,7 @@ fn registry_entries(
     _archive_digest: Sha256Digest,
 ) -> Result<Vec<GithubScheduleRegistryEntry>, ()> {
     let workflows =
-        discover_github_delivery_workflows(archive, discovery_limits(manifest)?).map_err(|_| ())?;
+        discover_provider_workflows(archive, discovery_limits(manifest)?).map_err(|_| ())?;
     let mut definitions = Vec::new();
     for workflow in workflows {
         let (path, source) = workflow.into_parts();

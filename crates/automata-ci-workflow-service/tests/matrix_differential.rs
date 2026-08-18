@@ -6,9 +6,9 @@ use automata_ci_core::{
 };
 use automata_ci_expression_actions::{GithubObject, GithubValue};
 use automata_ci_workflow_actions::{
-    CompilationReport, CompileWorkflowRequest, GithubEventMetadata, GithubFrontendReport,
-    GithubWorkflowCompiler, GithubWorkflowDispatchInputs, GithubWorkflowFrontend,
-    ParseWorkflowRequest, SourceId, SourceOrigin, SourceProvenance, WorkflowFrontend as _,
+    CompilationReport, CompileWorkflowRequest, GithubFrontendReport, GithubWorkflowCompiler,
+    GithubWorkflowDispatchInputs, GithubWorkflowFrontend, ParseWorkflowRequest,
+    ProviderEventMetadata, SourceId, SourceOrigin, SourceProvenance, WorkflowFrontend as _,
 };
 use automata_ci_workflow_service::{
     ActivateLogicalJobRequest, ActivationStatus, GithubActivationContext,
@@ -99,7 +99,7 @@ fn compile_report(source: &str, path: &str) -> CompilationReport {
                 )
                 .with_git_ref("refs/heads/main"),
         )
-        .with_event_metadata(GithubEventMetadata::workflow_dispatch(dispatch)),
+        .with_event_metadata(ProviderEventMetadata::workflow_dispatch(dispatch)),
     )
 }
 

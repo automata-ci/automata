@@ -1,8 +1,8 @@
 use automata_ci_core::WorkflowEventProvenance;
 use automata_ci_workflow_actions::{
-    CompilationDisposition, CompilationReport, CompileWorkflowRequest, GithubEventMetadata,
-    GithubFrontendReport, GithubWorkflowCompiler, GithubWorkflowFrontend, GithubWorkflowSourcePlan,
-    ParseWorkflowRequest, SourceProvenance, WorkflowFrontend, WorkflowNotSelectedReason,
+    CompilationDisposition, CompilationReport, CompileWorkflowRequest, GithubFrontendReport,
+    GithubWorkflowCompiler, GithubWorkflowFrontend, GithubWorkflowSourcePlan, ParseWorkflowRequest,
+    ProviderEventMetadata, SourceProvenance, WorkflowFrontend, WorkflowNotSelectedReason,
 };
 
 pub fn parse(source: &str) -> GithubFrontendReport {
@@ -25,7 +25,7 @@ pub(super) fn parse_accepted(source: &str) -> GithubFrontendReport {
 pub(super) fn compile(
     source_plan: &GithubWorkflowSourcePlan,
     event: WorkflowEventProvenance,
-    metadata: Option<GithubEventMetadata>,
+    metadata: Option<ProviderEventMetadata>,
 ) -> CompilationReport {
     let request = CompileWorkflowRequest::new(source_plan, event);
     let request = match metadata {

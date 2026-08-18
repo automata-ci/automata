@@ -12,9 +12,9 @@ use automata_ci_core::{
 };
 
 use crate::{
-    Diagnostic, DiagnosticKind, DiagnosticSeverity, EventName, EventTrigger, GithubEventMetadata,
-    GithubWorkflowDispatchContract, GithubWorkflowSourcePlan, PreservedField, SourceOrigin,
-    SourceSpan, TriggerConfiguration,
+    Diagnostic, DiagnosticKind, DiagnosticSeverity, EventName, EventTrigger,
+    GithubWorkflowDispatchContract, GithubWorkflowSourcePlan, PreservedField,
+    ProviderEventMetadata, SourceOrigin, SourceSpan, TriggerConfiguration,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -59,8 +59,8 @@ pub struct CompileWorkflowRequest<'plan> {
 #[derive(Clone, Debug)]
 enum EventSelection {
     Unverified,
-    Metadata(GithubEventMetadata),
-    Preselected(Option<GithubEventMetadata>),
+    Metadata(ProviderEventMetadata),
+    Preselected(Option<ProviderEventMetadata>),
     LocalWorkflowDispatch(LocalWorkflowDispatchEvidence),
     LocalWorkflowCall(LocalWorkflowSourceEvidence),
 }
@@ -94,7 +94,7 @@ impl<'plan> CompileWorkflowRequest<'plan> {
 
     /// Attaches verified GitHub provider fields used for trigger selection.
     #[must_use]
-    pub fn with_event_metadata(mut self, metadata: GithubEventMetadata) -> Self {
+    pub fn with_event_metadata(mut self, metadata: ProviderEventMetadata) -> Self {
         self.selection = EventSelection::Metadata(metadata);
         self
     }
@@ -130,7 +130,7 @@ impl<'plan> CompileWorkflowRequest<'plan> {
     pub fn for_preselected_event_with_metadata(
         source_plan: &'plan GithubWorkflowSourcePlan,
         event: WorkflowEventProvenance,
-        metadata: GithubEventMetadata,
+        metadata: ProviderEventMetadata,
     ) -> Self {
         Self {
             source_plan,
@@ -651,7 +651,7 @@ fn compile_preselected_event(
     event: WorkflowEventProvenance,
     workflow_dispatch: bool,
     dispatch_contract: Option<GithubWorkflowDispatchContract>,
-    metadata: Option<&GithubEventMetadata>,
+    metadata: Option<&ProviderEventMetadata>,
     configured_span: &PlanSourceSpan,
     trigger_span: &SourceSpan,
     context: &mut CompileContext<'_>,
