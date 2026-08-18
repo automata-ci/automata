@@ -1,8 +1,8 @@
 .filters {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-bottom: 16px;
+  gap: var(--space-2);
+  margin-bottom: var(--space-4);
 }
 
 .filter-search {
@@ -21,22 +21,42 @@
   transform: translateY(-50%);
 }
 
-.filter-search input,
-.select-control select {
+.form-control {
   width: 100%;
-  min-height: 32px;
+  min-height: 36px;
+  padding: 7px 10px;
   color: var(--fg-default);
   background: var(--canvas-default);
   border: 1px solid var(--border-default);
   border-radius: var(--radius-control);
   box-shadow: var(--control-inset-shadow);
+  font: inherit;
 }
 
-.filter-search input {
+.form-control--compact {
+  min-height: 32px;
+  padding-block: 5px;
+}
+
+.form-control--comfortable {
+  min-height: 40px;
+  padding-block: 8px;
+}
+
+select.form-control {
+  padding-right: 28px;
+}
+
+textarea.form-control {
+  min-height: 64px;
+  resize: vertical;
+}
+
+.filter-search .form-control {
   padding: 5px 10px 5px 34px;
 }
 
-.filter-search input::placeholder {
+.form-control::placeholder {
   color: var(--fg-muted);
   opacity: 1;
 }
@@ -45,14 +65,17 @@
   flex: 0 0 156px;
 }
 
-.select-control select {
-  padding: 4px 28px 4px 10px;
-}
-
-.filter-search input:focus,
-.select-control select:focus {
+.form-control:focus {
   border-color: var(--focus-ring);
   box-shadow: 0 0 0 3px var(--accent-muted);
+}
+
+.choice-control {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  margin: 2px 0 0;
+  accent-color: var(--focus-ring);
 }
 
 .button {
@@ -99,6 +122,17 @@
   background: var(--accent-emphasis-hover);
 }
 
+.button--compact {
+  min-height: 32px;
+  padding: 4px 10px;
+  font-size: 13px;
+}
+
+.button--danger {
+  color: var(--danger-fg);
+  border-color: currentcolor;
+}
+
 .button:disabled,
 .button[aria-disabled="true"] {
   cursor: not-allowed;
@@ -123,6 +157,13 @@
   padding-inline: 4px;
   font-size: 13px;
   white-space: nowrap;
+}
+
+.standalone-pagination {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  margin-top: var(--space-4);
 }
 
 .theme-toggle {

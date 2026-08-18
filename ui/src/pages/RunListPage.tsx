@@ -147,6 +147,7 @@ function RunFilters({
           autoCapitalize="none"
           autoComplete="off"
           autoCorrect="off"
+          className="form-control form-control--compact"
           defaultValue={filters.branch}
           id="run-branch"
           maxLength={RENDER_REQUEST_LIMITS.shortTextLength}
@@ -159,7 +160,12 @@ function RunFilters({
       </div>
       <label className="select-control" htmlFor="run-status">
         <span className="sr-only">Filter by status</span>
-        <select id="run-status" name="status" defaultValue={filters.status}>
+        <select
+          className="form-control form-control--compact"
+          id="run-status"
+          name="status"
+          defaultValue={filters.status}
+        >
           {RUN_STATUS_FILTER_OPTIONS.map((option) => (
             <option value={option.value} key={option.value}>
               {option.label}

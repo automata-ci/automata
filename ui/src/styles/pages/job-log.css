@@ -10,7 +10,7 @@
 .log-viewer {
   overflow: hidden;
   border: 1px solid var(--border-default);
-  border-radius: 6px;
+  border-radius: var(--radius-control);
   background: var(--canvas-default);
 }
 
@@ -19,7 +19,7 @@
   min-height: 56px;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: var(--space-3);
   padding: 10px 12px 10px 16px;
   background: var(--canvas-subtle);
   border-bottom: 1px solid var(--border-default);
@@ -46,12 +46,6 @@
 
 .log-search input {
   width: 100%;
-}
-
-.button--compact {
-  min-height: 32px;
-  padding: 4px 10px;
-  white-space: nowrap;
 }
 
 .log-stream-state {

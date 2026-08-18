@@ -34,6 +34,7 @@ export function RoleListPage({ model, shellUtility }: RoleListPageProps) {
               Policy name
               <input
                 autoComplete="off"
+                className="form-control"
                 maxLength={128}
                 name="name"
                 pattern="[A-Za-z0-9_.:-]+"
@@ -44,6 +45,7 @@ export function RoleListPage({ model, shellUtility }: RoleListPageProps) {
               Display name
               <input
                 autoComplete="off"
+                className="form-control"
                 maxLength={255}
                 name="display_name"
                 onInput={(event) =>

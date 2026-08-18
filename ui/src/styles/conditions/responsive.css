@@ -64,12 +64,6 @@
     flex-direction: column;
   }
 
-  .log-search-form {
-    flex: 0 0 auto;
-    flex-wrap: wrap;
-    justify-content: flex-start;
-  }
-
   .log-search {
     flex: 1 1 180px;
     width: auto;
@@ -79,7 +73,7 @@
 @media (max-width: 767px) {
   .layout-wide,
   .layout-width {
-    padding-inline: 16px;
+    padding-inline: var(--space-4);
   }
 
   .site-header__inner {
@@ -587,8 +581,7 @@
   .run-navigation__summary-link > span,
   .run-navigation__job,
   .button,
-  .filter-search input,
-  .select-control select {
+  .form-control {
     min-height: 40px;
   }
 

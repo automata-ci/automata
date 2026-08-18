@@ -2,13 +2,13 @@
 .layout-width {
   width: min(100%, var(--content-width));
   margin-inline: auto;
-  padding-inline: 32px;
+  padding-inline: var(--space-8);
 }
 
 .page {
   flex: 1 0 auto;
   min-height: calc(100vh - 230px);
-  padding-block: 24px 48px;
+  padding-block: var(--space-6) var(--space-12);
 }
 
 .actions-layout {
@@ -20,7 +20,7 @@
 .actions-content {
   container: actions-content / inline-size;
   min-width: 0;
-  padding-left: 32px;
+  padding-left: var(--space-8);
 }
 
 .page-heading {
@@ -28,8 +28,8 @@
   min-height: 44px;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 24px;
-  margin-bottom: 16px;
+  gap: var(--space-6);
+  margin-bottom: var(--space-4);
 }
 
 .page-heading h1 {

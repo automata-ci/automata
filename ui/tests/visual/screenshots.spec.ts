@@ -207,6 +207,25 @@ test("the built preview remains self-contained at its Pages project path", async
   expect(runtimeIssues).toEqual([]);
 });
 
+test("visible text controls use the shared application skin", async ({ page }) => {
+  let visibleControlCount = 0;
+  for (const previewPage of previewPages) {
+    await page.goto(previewPage.url);
+    await waitForStableRender(page, previewPage.heading);
+    const controls = await visibleTextControlPresentation(page.locator("body"));
+
+    visibleControlCount += controls.length;
+    for (const control of controls) {
+      expect(control.height, previewPage.name).toBeGreaterThanOrEqual(32);
+      expect(control.borderRadius, previewPage.name).toBeGreaterThanOrEqual(6);
+      expect(control.borderWidth, previewPage.name).toBeGreaterThanOrEqual(1);
+      expect(control.background, previewPage.name).not.toBe("rgba(0, 0, 0, 0)");
+      expect(control.fontFamily, previewPage.name).toBe(control.inheritedFontFamily);
+    }
+  }
+  expect(visibleControlCount).toBeGreaterThanOrEqual(3);
+});
+
 test("the global shell keeps its footer at the document edge without repository chrome", async ({
   page,
 }) => {
@@ -425,6 +444,7 @@ test("direct-binding revoke controls stay usable in narrow production cards", as
         labelText.className = "sr-only";
         labelText.textContent = "Revocation reason";
         const input = document.createElement("input");
+        input.className = "form-control form-control--compact";
         input.setAttribute(
           "aria-label",
           "Reason for revoking Release reviewer from Ada Lovelace",
@@ -526,6 +546,7 @@ test("binding presentation follows its content width without hiding actions", as
 test("authorized form fixtures stay bounded without preview capabilities", async ({
   page,
 }) => {
+  let visibleTextControlCount = 0;
   for (const colorScheme of colorSchemes) {
     await page.emulateMedia({ colorScheme, reducedMotion: "reduce" });
     for (const viewport of [
@@ -569,6 +590,16 @@ test("authorized form fixtures stay bounded without preview capabilities", async
           );
         }
 
+        const textControls = await visibleTextControlPresentation(main);
+        visibleTextControlCount += textControls.length;
+        for (const control of textControls) {
+          expect(control.height, fixture.name).toBeGreaterThanOrEqual(32);
+          expect(control.borderRadius, fixture.name).toBeGreaterThanOrEqual(6);
+          expect(control.borderWidth, fixture.name).toBeGreaterThanOrEqual(1);
+          expect(control.background, fixture.name).not.toBe("rgba(0, 0, 0, 0)");
+          expect(control.fontFamily, fixture.name).toBe(control.inheritedFontFamily);
+        }
+
         const firstControl = main
           .locator(
             'input:not([type="hidden"]):visible, select:visible, ' +
@@ -581,6 +612,7 @@ test("authorized form fixtures stay bounded without preview capabilities", async
       }
     }
   }
+  expect(visibleTextControlCount).toBeGreaterThan(0);
 });
 
 test("access management skip navigation bypasses management tabs", async ({
@@ -1883,6 +1915,37 @@ async function hasVisibleOutline(locator: Locator): Promise<boolean> {
       Number.parseFloat(style.outlineWidth) >= 2
     );
   });
+}
+
+async function visibleTextControlPresentation(root: Locator): Promise<readonly {
+  readonly background: string;
+  readonly borderRadius: number;
+  readonly borderWidth: number;
+  readonly fontFamily: string;
+  readonly height: number;
+  readonly inheritedFontFamily: string;
+}[]> {
+  return root
+    .locator(
+      'input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]), select, textarea',
+    )
+    .evaluateAll((elements) =>
+      elements.flatMap((element) => {
+        if (!(element instanceof HTMLElement) || element.offsetParent === null) {
+          return [];
+        }
+        const style = getComputedStyle(element);
+        const bodyStyle = getComputedStyle(document.body);
+        return [{
+          background: style.backgroundColor,
+          borderRadius: Number.parseFloat(style.borderTopLeftRadius),
+          borderWidth: Number.parseFloat(style.borderTopWidth),
+          fontFamily: style.fontFamily,
+          height: element.getBoundingClientRect().height,
+          inheritedFontFamily: bodyStyle.fontFamily,
+        }];
+      }),
+    );
 }
 
 async function replaceText(

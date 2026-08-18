@@ -9,8 +9,8 @@
   grid-template-columns: 24px minmax(0, 1fr) auto;
   min-height: 92px;
   align-items: center;
-  gap: 12px;
-  padding: 14px 16px;
+  gap: var(--space-3);
+  padding: 14px var(--space-4);
   border-bottom: 1px solid var(--border-muted);
 }
 

@@ -47,12 +47,12 @@ export const authorizedManagementFixtures: readonly AuthorizedManagementFixture[
           <div class="repository-secret-form-grid">
             <label>
               <span>Name</span>
-              <input autocomplete="off" name="name" required type="text">
+              <input autocomplete="off" class="form-control" name="name" required type="text">
               <small>Uppercase letters, digits, and underscores.</small>
             </label>
             <label>
               <span>Value</span>
-              <input autocomplete="new-password" maxlength="65536" name="value" required type="password">
+              <input autocomplete="new-password" class="form-control" maxlength="65536" name="value" required type="password">
               <small>Maximum 64 KiB. The value is never returned to your browser.</small>
             </label>
           </div>
@@ -83,7 +83,7 @@ export const authorizedManagementFixtures: readonly AuthorizedManagementFixture[
             <form action="#" method="post">
               <label>
                 <span>Value</span>
-                <input autocomplete="new-password" maxlength="65536" name="value" required type="password">
+                <input autocomplete="new-password" class="form-control" maxlength="65536" name="value" required type="password">
                 <small>Maximum 64 KiB. The value is never returned to your browser.</small>
               </label>
               <button class="button button--primary" type="button">Replace value</button>
@@ -92,7 +92,7 @@ export const authorizedManagementFixtures: readonly AuthorizedManagementFixture[
               <p>
                 This revokes access immediately and schedules retained encrypted versions for deletion.
               </p>
-              <button class="button repository-secret-delete__button" type="button">
+              <button class="button button--danger" type="button">
                 Delete secret
               </button>
             </form>
@@ -110,7 +110,7 @@ export const authorizedManagementFixtures: readonly AuthorizedManagementFixture[
       <form action="/settings/access/users/test/status" class="rbac-native-form" method="post">
         <label>
           Reason for disabling
-          <input maxlength="1024" name="reason" required>
+          <input class="form-control" maxlength="1024" name="reason" required>
         </label>
         <button class="button button--danger" type="submit">Disable member</button>
       </form>
@@ -127,8 +127,8 @@ export const authorizedManagementFixtures: readonly AuthorizedManagementFixture[
           <h2 id="visual-create-role-heading">Create custom role</h2>
         </div>
         <form action="/settings/access/roles" class="rbac-native-form" method="post">
-          <label>Policy name<input name="name" required></label>
-          <label>Display name<input name="display_name" required></label>
+          <label>Policy name<input class="form-control" name="name" required></label>
+          <label>Display name<input class="form-control" name="display_name" required></label>
           <button class="button" type="submit">Create role</button>
         </form>
       </section>
@@ -145,13 +145,13 @@ export const authorizedManagementFixtures: readonly AuthorizedManagementFixture[
           <h2 id="visual-grant-binding-heading">Grant direct role</h2>
         </div>
         <form action="/settings/access/direct-bindings" class="rbac-native-form" method="post">
-          <label>User<select name="principal_id"><option>Ada Lovelace</option></select></label>
-          <label>Role<select name="role_id"><option>Release reviewer</option></select></label>
-          <label>Scope<select name="scope"><option>Production tenant</option></select></label>
+          <label>User<select class="form-control" name="principal_id"><option>Ada Lovelace</option></select></label>
+          <label>Role<select class="form-control" name="role_id"><option>Release reviewer</option></select></label>
+          <label>Scope<select class="form-control" name="scope"><option>Production tenant</option></select></label>
           <label>
             <span id="visual-valid-until-label">Valid until (UTC)</span>
             <small id="visual-valid-until-hint">Leave blank for no expiry.</small>
-            <input aria-describedby="visual-valid-until-hint" aria-labelledby="visual-valid-until-label" name="valid_until" step="60" type="datetime-local">
+            <input aria-describedby="visual-valid-until-hint" aria-labelledby="visual-valid-until-label" class="form-control" name="valid_until" step="60" type="datetime-local">
           </label>
           <button class="button" type="submit">Grant role</button>
         </form>
@@ -196,7 +196,7 @@ function audienceFieldset(
       <div class="audience-options">
         ${options.map(([value, optionLabel, description]) => `
           <label class="audience-option">
-            <input name="${name}" type="radio" value="${value}" ${
+            <input class="choice-control" name="${name}" type="radio" value="${value}" ${
               value === selected ? "checked" : ""
             }>
             <span><strong>${optionLabel}</strong><small>${description}</small></span>

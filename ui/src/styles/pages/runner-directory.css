@@ -2,7 +2,7 @@
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 16px;
+  gap: var(--space-4);
 }
 
 .runner-directory__visibility,
@@ -29,13 +29,14 @@
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   margin: 0;
+  margin-bottom: var(--space-4);
   overflow: hidden;
   border: 1px solid var(--border-default);
   border-radius: var(--radius-control);
 }
 
 .runner-directory__stats > div {
-  padding: 14px 16px;
+  padding: 14px var(--space-4);
   background: var(--canvas-subtle);
 }
 
@@ -65,8 +66,8 @@
 .runner-directory__item {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(420px, auto);
-  gap: 24px;
-  padding: 16px;
+  gap: var(--space-6);
+  padding: var(--space-4);
 }
 
 .runner-directory__item + .runner-directory__item {
@@ -78,7 +79,7 @@
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: var(--space-2);
 }
 
 .runner-directory__name-line strong {
