@@ -24,6 +24,7 @@ use automata_ci_store::{
 
 use super::{
     PostgresStore,
+    github_check_aggregation::{GithubCheckAggregationError, reconcile_all_direct_check},
     github_checks::{github_check_conclusion_name, github_check_terminal_cause_name},
     pg_bigint,
 };
@@ -340,14 +341,15 @@ impl ProviderDeliveryRepository for PostgresStore {
             request.claim().delivery_id(),
         )
         .await?;
-        let terminal_cause = if all_direct {
-            Some(all_direct_completion_check_terminal_cause(
-                request.outcomes(),
-            ))
-        } else {
-            completion_check_terminal_cause(request.outcomes())
-        };
-        if let Some(cause) = terminal_cause {
+        if all_direct {
+            reconcile_all_direct_check(
+                &mut transaction,
+                request.claim().delivery_id().as_uuid(),
+                request.completed_at().get(),
+            )
+            .await
+            .map_err(provider_delivery_aggregation_error)?;
+        } else if let Some(cause) = completion_check_terminal_cause(request.outcomes()) {
             terminalize_pre_admission_check(
                 &mut transaction,
                 request.claim().delivery_id(),
@@ -570,28 +572,6 @@ fn completion_check_terminal_cause(
         Some(GithubCheckTerminalCause::WorkflowFailure)
     } else {
         Some(GithubCheckTerminalCause::WorkflowSkipped)
-    }
-}
-
-fn all_direct_completion_check_terminal_cause(
-    outcomes: &[ProviderDeliveryWorkflowOutcome],
-) -> GithubCheckTerminalCause {
-    if outcomes.iter().any(|outcome| {
-        matches!(
-            outcome.conclusion(),
-            ProviderDeliveryWorkflowConclusion::Failed { .. }
-        )
-    }) {
-        GithubCheckTerminalCause::WorkflowFailure
-    } else if outcomes.iter().any(|outcome| {
-        matches!(
-            outcome.conclusion(),
-            ProviderDeliveryWorkflowConclusion::Admitted { .. }
-        )
-    }) {
-        GithubCheckTerminalCause::WorkflowSuccess
-    } else {
-        GithubCheckTerminalCause::WorkflowSkipped
     }
 }
 
@@ -1475,7 +1455,10 @@ async fn insert_failed_workflow_check(
                evidence.provider_delivery_id, progress.workflow_path,
                evidence.provider_connection_id, evidence.provider_installation_id,
                evidence.github_repository_id, manifest.github_app_id,
-               evidence.github_check_head_sha, manifest.check_name, $2,
+               evidence.github_check_head_sha,
+               automata_github_workflow_check_name(
+                   manifest.check_name, progress.workflow_path
+               ), $2,
                inbox.accepted_at_ms, inbox.accepted_at_ms
         FROM provider_delivery_workflow_progress AS progress
         JOIN provider_delivery_workflow_inventories AS inventory
@@ -2119,4 +2102,13 @@ fn outcome_count_i16(
 
 fn operation_error(error: sqlx::Error) -> ProviderDeliveryStoreError {
     ProviderDeliveryStoreError::operation(error)
+}
+
+fn provider_delivery_aggregation_error(
+    error: GithubCheckAggregationError,
+) -> ProviderDeliveryStoreError {
+    match error {
+        GithubCheckAggregationError::Operation(error) => operation_error(error),
+        GithubCheckAggregationError::CorruptData => ProviderDeliveryStoreError::CorruptData,
+    }
 }
