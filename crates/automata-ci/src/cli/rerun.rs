@@ -16,7 +16,7 @@ use super::{
         CliServerOrigin, auth_client, bearer_header, decode_json_response,
         discard_bounded_response, retry_after_seconds,
     },
-    credential_store::{CliAuthProcessLock, CliCredentialStore, SecretServiceCredentialStore},
+    credential_store::{CliAuthProcessLock, CliCredentialStore, PlatformCredentialStore},
 };
 
 const MAX_REQUEST_ATTEMPTS: usize = 3;
@@ -52,7 +52,7 @@ pub(crate) async fn execute_rerun_command(
     let _process_lock = CliAuthProcessLock::acquire(origin.as_str())
         .context("CLI rerun operation could not be serialized")?;
     let store =
-        SecretServiceCredentialStore::discover().context("CLI session custody is unavailable")?;
+        PlatformCredentialStore::discover().context("CLI session custody is unavailable")?;
     let completed =
         execute_rerun_command_with(origin, args, &store, RetryPolicy::default()).await?;
     print_rerun(output, &completed)

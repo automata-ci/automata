@@ -1,9 +1,10 @@
-//! CLI session custody through the operating system's Secret Service.
+//! CLI session custody through the operating system's credential manager.
 //!
-//! Session bearers are sent to `secret-tool` only over stdin. Searches use an
-//! exact versioned attribute set, enumerate every unlocked match, and accept
-//! exactly zero or one item. Secret output is bounded and zeroized. There is no
-//! plaintext credential-file fallback.
+//! Linux session bearers are sent to `secret-tool` only over stdin. macOS uses
+//! the default user Keychain through Security.framework. Searches use exact,
+//! versioned locators, enumerate up to two matches, and accept exactly zero or
+//! one item. Secret output is bounded and zeroized. There is no plaintext
+//! credential-file fallback.
 
 use std::{
     error::Error,
@@ -13,6 +14,9 @@ use std::{
     io::{Read as _, Write as _},
     os::fd::OwnedFd,
     path::{Path, PathBuf},
+};
+#[cfg(any(not(target_os = "macos"), test))]
+use std::{
     process::{ExitStatus, Stdio},
     time::Duration,
 };
@@ -26,6 +30,7 @@ use rustix::fs::{
 };
 use sha2::{Digest as _, Sha256};
 use subtle::ConstantTimeEq as _;
+#[cfg(any(not(target_os = "macos"), test))]
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
     process::{ChildStdin, ChildStdout, Command},
@@ -33,19 +38,35 @@ use tokio::{
 };
 use zeroize::Zeroizing;
 
+#[cfg(not(target_os = "macos"))]
 const SECRET_TOOL_PATHS: [&str; 2] = ["/usr/bin/secret-tool", "/bin/secret-tool"];
+#[cfg(any(not(target_os = "macos"), test))]
 const APPLICATION_ATTRIBUTE: &str = "application";
+#[cfg(any(not(target_os = "macos"), test))]
 const APPLICATION_VALUE: &str = "automata-ci";
+#[cfg(any(not(target_os = "macos"), test))]
 const SCHEMA_ATTRIBUTE: &str = "credential-schema";
+#[cfg(any(not(target_os = "macos"), test))]
 const SCHEMA_VALUE: &str = "automata-ci.cli-session.v1";
+#[cfg(any(not(target_os = "macos"), test))]
 const ACCOUNT_ATTRIBUTE: &str = "account-id";
+#[cfg(any(not(target_os = "macos"), test))]
 const SERVER_ATTRIBUTE: &str = "server-origin";
+#[cfg(any(not(target_os = "macos"), test))]
 const ITEM_LABEL_OPTION: &str = "--label=Automata CI CLI session";
+#[cfg(any(not(target_os = "macos"), test))]
 const MAX_SEARCH_OUTPUT_BYTES: usize = 16 * 1_024;
 const MAX_STORED_CREDENTIAL_BYTES: usize = 512;
+#[cfg(not(target_os = "macos"))]
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(15);
 const LOCK_DIRECTORY: &str = "automata-ci";
 const MAX_RUNNER_ENROLLMENT_RECEIPT_BYTES: usize = 2 * 1_024;
+#[cfg(target_os = "macos")]
+const MACOS_KEYCHAIN_SERVICE: &str = "dev.automata.ci.cli-session.v1";
+#[cfg(target_os = "macos")]
+const MACOS_KEYCHAIN_RESULT_LIMIT: i64 = 2;
+#[cfg(target_os = "macos")]
+const ERR_SEC_ITEM_NOT_FOUND: i32 = -25_300;
 
 #[async_trait]
 pub(crate) trait CliCredentialStore: fmt::Debug + Send + Sync {
@@ -63,18 +84,227 @@ pub(crate) trait CliCredentialStore: fmt::Debug + Send + Sync {
     async fn remove(&self, server_origin: &str) -> Result<(), CredentialStoreError>;
 }
 
+#[cfg(target_os = "macos")]
+pub(crate) type PlatformCredentialStore = MacOsKeychainCredentialStore;
+#[cfg(not(target_os = "macos"))]
+pub(crate) type PlatformCredentialStore = SecretServiceCredentialStore;
+
+/// Native macOS Keychain adapter used by the operator CLI.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy)]
+pub(crate) struct MacOsKeychainCredentialStore;
+
+#[cfg(target_os = "macos")]
+impl MacOsKeychainCredentialStore {
+    pub(crate) fn discover() -> Result<Self, CredentialStoreError> {
+        with_default_macos_keychain(|_| Ok(()))?;
+        Ok(Self)
+    }
+
+    fn load_exact(server_origin: &str) -> Result<Option<SessionCredential>, CredentialStoreError> {
+        with_default_macos_keychain(|keychain| {
+            match search_macos_keychain(keychain, server_origin)? {
+                MacOsKeychainSearch::Missing => Ok(None),
+                MacOsKeychainSearch::One(credential) => Ok(Some(credential)),
+                MacOsKeychainSearch::Ambiguous => Err(CredentialStoreError::InvalidCredential),
+            }
+        })
+    }
+
+    fn clear_all(server_origin: &str) -> Result<(), CredentialStoreError> {
+        with_default_macos_keychain(|keychain| {
+            delete_macos_keychain_items(keychain, server_origin)?;
+            match search_macos_keychain(keychain, server_origin)? {
+                MacOsKeychainSearch::Missing => Ok(()),
+                MacOsKeychainSearch::One(_) | MacOsKeychainSearch::Ambiguous => {
+                    Err(CredentialStoreError::InvalidCredential)
+                }
+            }
+        })
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl fmt::Debug for MacOsKeychainCredentialStore {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MacOsKeychainCredentialStore")
+            .field("service", &MACOS_KEYCHAIN_SERVICE)
+            .field("credential", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[async_trait]
+impl CliCredentialStore for MacOsKeychainCredentialStore {
+    async fn load(
+        &self,
+        server_origin: &str,
+    ) -> Result<Option<SessionCredential>, CredentialStoreError> {
+        validate_origin_attribute(server_origin)?;
+        Self::load_exact(server_origin)
+    }
+
+    async fn store(
+        &self,
+        server_origin: &str,
+        credential: &SessionCredential,
+    ) -> Result<(), CredentialStoreError> {
+        validate_origin_attribute(server_origin)?;
+        with_default_macos_keychain(|keychain| {
+            if !matches!(
+                search_macos_keychain(keychain, server_origin)?,
+                MacOsKeychainSearch::Missing
+            ) {
+                return Err(CredentialStoreError::AlreadyExists);
+            }
+            keychain
+                .add_generic_password(
+                    MACOS_KEYCHAIN_SERVICE,
+                    &account_id(server_origin),
+                    credential.expose_secret().as_bytes(),
+                )
+                .map_err(|_| CredentialStoreError::Unavailable)?;
+            let verified = match search_macos_keychain(keychain, server_origin) {
+                Ok(MacOsKeychainSearch::One(stored)) => bool::from(
+                    stored
+                        .expose_secret()
+                        .as_bytes()
+                        .ct_eq(credential.expose_secret().as_bytes()),
+                ),
+                Ok(MacOsKeychainSearch::Missing | MacOsKeychainSearch::Ambiguous) => false,
+                Err(error) => {
+                    let _ = delete_macos_keychain_items(keychain, server_origin);
+                    return Err(error);
+                }
+            };
+            if verified {
+                return Ok(());
+            }
+            let _ = delete_macos_keychain_items(keychain, server_origin);
+            Err(CredentialStoreError::InvalidCredential)
+        })
+    }
+
+    async fn remove(&self, server_origin: &str) -> Result<(), CredentialStoreError> {
+        validate_origin_attribute(server_origin)?;
+        match Self::load_exact(server_origin) {
+            Ok(None) => Ok(()),
+            Ok(Some(_)) | Err(CredentialStoreError::InvalidCredential) => {
+                Self::clear_all(server_origin)
+            }
+            Err(error) => Err(error),
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+enum MacOsKeychainSearch {
+    Missing,
+    One(SessionCredential),
+    Ambiguous,
+}
+
+#[cfg(target_os = "macos")]
+fn with_default_macos_keychain<T>(
+    operation: impl FnOnce(
+        &security_framework::os::macos::keychain::SecKeychain,
+    ) -> Result<T, CredentialStoreError>,
+) -> Result<T, CredentialStoreError> {
+    use std::sync::Mutex;
+
+    use security_framework::os::macos::keychain::SecKeychain;
+
+    static KEYCHAIN_INTERACTION: Mutex<()> = Mutex::new(());
+
+    let _serialized_interaction_policy = KEYCHAIN_INTERACTION
+        .lock()
+        .map_err(|_| CredentialStoreError::Unavailable)?;
+    let interaction_allowed =
+        SecKeychain::user_interaction_allowed().map_err(|_| CredentialStoreError::Unavailable)?;
+    let _disabled_interaction = interaction_allowed
+        .then(SecKeychain::disable_user_interaction)
+        .transpose()
+        .map_err(|_| CredentialStoreError::Unavailable)?;
+    let keychain = SecKeychain::default().map_err(|_| CredentialStoreError::Unavailable)?;
+    operation(&keychain)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_keychain_search_options(
+    keychain: &security_framework::os::macos::keychain::SecKeychain,
+    server_origin: &str,
+) -> security_framework::item::ItemSearchOptions {
+    use security_framework::item::{ItemClass, ItemSearchOptions};
+
+    let mut search = ItemSearchOptions::new();
+    search
+        .keychains(std::slice::from_ref(keychain))
+        .class(ItemClass::generic_password())
+        .service(MACOS_KEYCHAIN_SERVICE)
+        .account(&account_id(server_origin));
+    search
+}
+
+#[cfg(target_os = "macos")]
+fn search_macos_keychain(
+    keychain: &security_framework::os::macos::keychain::SecKeychain,
+    server_origin: &str,
+) -> Result<MacOsKeychainSearch, CredentialStoreError> {
+    use security_framework::item::{Limit, SearchResult};
+
+    let results = macos_keychain_search_options(keychain, server_origin)
+        .load_data(true)
+        .limit(Limit::Max(MACOS_KEYCHAIN_RESULT_LIMIT))
+        .search();
+    let mut results = match results {
+        Ok(results) => results,
+        Err(error) if error.code() == ERR_SEC_ITEM_NOT_FOUND => {
+            return Ok(MacOsKeychainSearch::Missing);
+        }
+        Err(_) => return Err(CredentialStoreError::Unavailable),
+    };
+    if results.is_empty() {
+        return Ok(MacOsKeychainSearch::Missing);
+    }
+    if results.len() != 1 {
+        return Ok(MacOsKeychainSearch::Ambiguous);
+    }
+    let SearchResult::Data(bytes) = results.pop().expect("one Keychain search result") else {
+        return Ok(MacOsKeychainSearch::Ambiguous);
+    };
+    let bytes = Zeroizing::new(bytes);
+    parse_lookup_output(&bytes).map(MacOsKeychainSearch::One)
+}
+
+#[cfg(target_os = "macos")]
+fn delete_macos_keychain_items(
+    keychain: &security_framework::os::macos::keychain::SecKeychain,
+    server_origin: &str,
+) -> Result<(), CredentialStoreError> {
+    match macos_keychain_search_options(keychain, server_origin).delete() {
+        Ok(()) => Ok(()),
+        Err(error) if error.code() == ERR_SEC_ITEM_NOT_FOUND => Ok(()),
+        Err(_) => Err(CredentialStoreError::Unavailable),
+    }
+}
+
 /// Linux Secret Service adapter used by the operator CLI.
 ///
 /// A missing or ambiguous Secret Service is a hard failure. Deployment policy
 /// must select a Secret Service implementation whose backing store meets the
 /// installation's encrypted-at-rest requirements.
 #[derive(Clone)]
+#[cfg(any(not(target_os = "macos"), test))]
 pub(crate) struct SecretServiceCredentialStore {
     program: PathBuf,
     operation_timeout: Duration,
 }
 
+#[cfg(any(not(target_os = "macos"), test))]
 impl SecretServiceCredentialStore {
+    #[cfg(not(target_os = "macos"))]
     pub(crate) fn discover() -> Result<Self, CredentialStoreError> {
         SECRET_TOOL_PATHS
             .iter()
@@ -209,6 +439,7 @@ impl SecretServiceCredentialStore {
     }
 }
 
+#[cfg(any(not(target_os = "macos"), test))]
 impl fmt::Debug for SecretServiceCredentialStore {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -221,6 +452,7 @@ impl fmt::Debug for SecretServiceCredentialStore {
 }
 
 #[async_trait]
+#[cfg(any(not(target_os = "macos"), test))]
 impl CliCredentialStore for SecretServiceCredentialStore {
     async fn load(
         &self,
@@ -280,6 +512,7 @@ impl CliCredentialStore for SecretServiceCredentialStore {
     }
 }
 
+#[cfg(any(not(target_os = "macos"), test))]
 async fn write_secret_input(
     mut stdin: Option<ChildStdin>,
     input: Option<&str>,
@@ -294,6 +527,7 @@ async fn write_secret_input(
     }
 }
 
+#[cfg(any(not(target_os = "macos"), test))]
 async fn read_bounded_output(
     stdout: Option<ChildStdout>,
 ) -> Result<Zeroizing<Vec<u8>>, std::io::Error> {
@@ -313,17 +547,20 @@ async fn read_bounded_output(
     Ok(output)
 }
 
+#[cfg(any(not(target_os = "macos"), test))]
 struct SecretToolOutput {
     status: ExitStatus,
     stdout: Zeroizing<Vec<u8>>,
 }
 
+#[cfg(any(not(target_os = "macos"), test))]
 enum SearchResult {
     Missing,
     One(String),
     Ambiguous,
 }
 
+#[cfg(any(not(target_os = "macos"), test))]
 fn parse_search_output(output: &[u8]) -> Result<SearchResult, CredentialStoreError> {
     let text = std::str::from_utf8(output).map_err(|_| CredentialStoreError::InvalidCredential)?;
     if output.is_empty() {
@@ -366,6 +603,7 @@ fn parse_search_output(output: &[u8]) -> Result<SearchResult, CredentialStoreErr
     }
 }
 
+#[cfg(any(not(target_os = "macos"), test))]
 fn valid_secret_service_item_path(path: &str) -> bool {
     !path.is_empty()
         && path.len() <= 2_048
@@ -375,6 +613,7 @@ fn valid_secret_service_item_path(path: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'_'))
 }
 
+#[cfg(any(not(target_os = "macos"), test))]
 fn valid_secret_service_search_field(line: &str) -> bool {
     if line.is_empty() || line.len() > 4_096 || line.bytes().any(|byte| byte.is_ascii_control()) {
         return false;
@@ -457,8 +696,8 @@ pub(crate) struct CliAuthProcessLock {
 impl CliAuthProcessLock {
     pub(crate) fn acquire(server_origin: &str) -> Result<Self, CliAuthLockError> {
         validate_origin_attribute(server_origin).map_err(|_| CliAuthLockError::Unavailable)?;
-        let root = std::env::var_os("XDG_RUNTIME_DIR").ok_or(CliAuthLockError::Unavailable)?;
-        Self::acquire_in(Path::new(&root), server_origin)
+        let root = platform_runtime_directory()?;
+        Self::acquire_in(&root, server_origin)
     }
 
     fn acquire_in(root: &Path, server_origin: &str) -> Result<Self, CliAuthLockError> {
@@ -641,6 +880,18 @@ impl CliAuthProcessLock {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn platform_runtime_directory() -> Result<PathBuf, CliAuthLockError> {
+    std::fs::canonicalize(std::env::temp_dir()).map_err(|_| CliAuthLockError::Unavailable)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn platform_runtime_directory() -> Result<PathBuf, CliAuthLockError> {
+    std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .ok_or(CliAuthLockError::Unavailable)
+}
+
 fn verify_private_regular_file(file: &OwnedFd) -> Result<(), CliAuthLockError> {
     let metadata = fstat(file).map_err(|_| CliAuthLockError::Unavailable)?;
     let current_user = rustix::process::getuid().as_raw();
@@ -750,6 +1001,41 @@ mod tests {
         assert!(validate_origin_attribute("https://ci.example\nsecret").is_err());
         assert!(validate_origin_attribute(&"x".repeat(2_049)).is_err());
         assert_eq!(account_id("https://ci.example").len(), 43);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    #[ignore = "requires an unlocked writable default Keychain"]
+    async fn native_macos_keychain_store_round_trips_and_removes_session() {
+        let origin = format!(
+            "https://keychain-test-{}.automata.invalid",
+            std::process::id()
+        );
+        let credential = SessionCredential::from_raw(SESSION).unwrap();
+        let store = MacOsKeychainCredentialStore::discover().unwrap();
+
+        store.remove(&origin).await.unwrap();
+        assert!(store.load(&origin).await.unwrap().is_none());
+        store.store(&origin, &credential).await.unwrap();
+        assert_eq!(
+            store.load(&origin).await.unwrap().unwrap().expose_secret(),
+            SESSION
+        );
+        assert_eq!(
+            store.store(&origin, &credential).await.unwrap_err(),
+            CredentialStoreError::AlreadyExists
+        );
+        store.remove(&origin).await.unwrap();
+        assert!(store.load(&origin).await.unwrap().is_none());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_macos_runtime_directory_is_canonical_and_private() {
+        let root = platform_runtime_directory().unwrap();
+        assert_eq!(root, std::fs::canonicalize(&root).unwrap());
+        let directory = open_absolute_directory(&root).unwrap();
+        verify_private_directory(&directory).unwrap();
     }
 
     #[test]

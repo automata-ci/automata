@@ -30,8 +30,9 @@ are independent of transport TLS.
    256 bits of entropy; the server stores only a domain-separated SHA-256 digest. The client
    retains an owner-only pending receipt until it has printed the token, so an ambiguous create
    is retried with the exact operation ID and token rather than creating a second credential.
-   This receipt uses the private `XDG_RUNTIME_DIR` and guarantees process-restart recovery within
-   the current login session; it is not a persistent host-reboot credential store.
+   This receipt uses the private `XDG_RUNTIME_DIR` on Linux or the canonical private Darwin user
+   temporary directory on macOS and guarantees process-restart recovery within the current login
+   session; it is not a persistent host-reboot credential store.
 2. Token creation is transactionally reauthorized from current durable `runners:enroll` grants.
    The token is tenant/group scoped, defaults to 15 minutes (one-hour maximum), and is audited.
    The server stores and returns only non-secret metadata; token plaintext stays in the operator

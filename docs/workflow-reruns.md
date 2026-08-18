@@ -29,9 +29,10 @@ automata rerun --server-url https://ci.example.test \
   --job-id 30000000-0000-4000-8000-000000000003
 ```
 
-The CLI loads its bearer only from the same OS Secret Service used by
-`automata auth`; it never accepts or writes a plaintext credential. The command
-uses this CLI-authenticated endpoint:
+The CLI loads its bearer only from the same OS credential manager used by
+`automata auth` (Secret Service on Linux or Keychain on macOS); it never accepts
+or writes a plaintext credential. The command uses this CLI-authenticated
+endpoint:
 
 ```text
 POST /api/v1/repositories/{owner}/{repository}/runs/{source_run_id}/reruns
