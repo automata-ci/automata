@@ -143,12 +143,19 @@ describe("installation setup page", () => {
     await act(async () => root?.unmount());
   });
 
-  it("has an explicit narrow-screen single-column and full-width action contract", () => {
+  it("keeps compound actions spaced and narrow screens single-column", () => {
+    const controls = readFileSync(
+      resolve(process.cwd(), "src/styles/components/controls.css"),
+      "utf8",
+    );
     const stylesheet = readFileSync(
       resolve(process.cwd(), "src/styles/conditions/responsive.css"),
       "utf8",
     );
 
+    expect(controls).toMatch(
+      /\.button\s*\{[\s\S]*gap:\s*6px;/u,
+    );
     expect(stylesheet).toMatch(
       /@media \(max-width: 767px\)[\s\S]*\.setup-page__layout\s*\{[\s\S]*grid-template-columns:\s*minmax\(0, 1fr\);/u,
     );

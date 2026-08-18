@@ -53,8 +53,6 @@
     0 8px 24px rgb(140 149 159 / 20%),
     0 8px 24px rgb(1 4 9 / 80%)
   );
-  --brand-mark-fg: light-dark(#ffffff, #0d1117);
-  --brand-mark-bg: light-dark(#24292f, #f0f6fc);
   --avatar-fg: #ffffff;
   --avatar-bg: #57606a;
 

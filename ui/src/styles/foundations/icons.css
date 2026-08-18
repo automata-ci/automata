@@ -86,6 +86,10 @@
   content: "\e19a";
 }
 
+.ph.ph-circle-notch::before {
+  content: "\eb44";
+}
+
 .ph.ph-warning-circle::before {
   content: "\e4e2";
 }

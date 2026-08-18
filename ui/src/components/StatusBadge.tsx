@@ -9,22 +9,19 @@ export interface StatusBadgeProps {
   readonly labelMode?: "visible" | "accessible" | "none";
 }
 
-type StaticStatusTone = Exclude<StatusModel["tone"], "running">;
-
-const statusIcons: Readonly<Record<StaticStatusTone, string>> = {
+const statusIcons: Readonly<Record<StatusModel["tone"], string>> = {
   neutral: "minus-circle",
   queued: "clock",
+  running: "circle-notch",
   success: "check-circle",
   failure: "x-circle",
   warning: "warning-circle",
 };
 
-export function StatusBadge({ status, labelMode = "visible" }: StatusBadgeProps) {
-  const iconClassName =
-    status.tone === "running"
-      ? "status__icon status__arc"
-      : `ph ph-${statusIcons[status.tone]} status__icon`;
-
+export function StatusBadge({
+  status,
+  labelMode = "visible",
+}: StatusBadgeProps) {
   return (
     <span
       aria-hidden={labelMode === "none" ? "true" : undefined}
@@ -32,8 +29,13 @@ export function StatusBadge({ status, labelMode = "visible" }: StatusBadgeProps)
       className={`status status--${status.tone}`}
       role={labelMode === "accessible" ? "img" : undefined}
     >
-      <i aria-hidden="true" className={iconClassName} />
-      {labelMode === "visible" ? <span className="status__label">{status.label}</span> : null}
+      <i
+        aria-hidden="true"
+        className={`ph ph-${statusIcons[status.tone]} status__icon`}
+      />
+      {labelMode === "visible" ? (
+        <span className="status__label">{status.label}</span>
+      ) : null}
     </span>
   );
 }

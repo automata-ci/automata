@@ -18,12 +18,6 @@
   text-decoration: none;
 }
 
-.wordmark__mark {
-  color: var(--brand-mark-fg);
-  background: var(--brand-mark-bg);
-  border-radius: 50%;
-}
-
 .primary-nav a {
   color: var(--fg-default);
   border-radius: var(--radius-control);

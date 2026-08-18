@@ -2,18 +2,28 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
+import { AutomataMark } from "../../src/components/AutomataMark";
 import { Icon } from "../../src/components/Icon";
 import { StatusBadge } from "../../src/components/StatusBadge";
 import { renderPage } from "../../src/entry-server";
 import { runDetailRequest, runListRequest } from "../fixtures/renderRequests";
 
 describe("icon contract", () => {
-  it("renders both pages with the Phosphor icon font and no inline SVG", () => {
+  it("reserves inline SVG for the official mark and uses Phosphor for interface icons", () => {
     const html = `${renderPage(runListRequest)}${renderPage(runDetailRequest)}`;
 
-    expect(html).not.toContain("<svg");
+    expect(html.match(/<svg/gu)).toHaveLength(2);
+    expect(html).toContain('viewBox="0 0 14 9"');
     expect(html).toContain("ph ph-play-circle");
-    expect(html).toContain("status__arc");
+    expect(html).toContain("ph ph-circle-notch");
+  });
+
+  it("keeps the official Automata mark decorative beside its text label", () => {
+    const html = renderToStaticMarkup(<AutomataMark />);
+
+    expect(html).toContain('aria-hidden="true"');
+    expect(html).toContain('focusable="false"');
+    expect(html.match(/<rect/gu)).toHaveLength(4);
   });
 
   it("includes the bundled Phosphor glyph used by repository settings", () => {
@@ -22,7 +32,7 @@ describe("icon contract", () => {
       "utf8",
     );
 
-    expect(styles).toContain('.ph.ph-gear-six::before');
+    expect(styles).toContain(".ph.ph-gear-six::before");
     expect(styles).toContain('content: "\\e272"');
     expect(renderToStaticMarkup(<Icon name="settings" />)).toContain(
       "ph ph-gear-six",
@@ -35,9 +45,9 @@ describe("icon contract", () => {
       "utf8",
     );
 
-    expect(styles).toContain('.ph.ph-caret-down::before');
+    expect(styles).toContain(".ph.ph-caret-down::before");
     expect(styles).toContain('content: "\\e136"');
-    expect(styles).toContain('.ph.ph-sign-out::before');
+    expect(styles).toContain(".ph.ph-sign-out::before");
     expect(styles).toContain('content: "\\e42a"');
     expect(renderToStaticMarkup(<Icon name="sign-out" />)).toContain(
       "ph ph-sign-out",
@@ -47,24 +57,27 @@ describe("icon contract", () => {
   it.each([
     ["neutral", "minus-circle"],
     ["queued", "clock"],
-    ["running", "arc"],
+    ["running", "circle-notch"],
     ["success", "check-circle"],
     ["failure", "x-circle"],
     ["warning", "warning-circle"],
-  ] as const)("keeps an accessible name for the %s icon-only status", (tone, icon) => {
-    const html = renderToStaticMarkup(
-      <StatusBadge
-        labelMode="accessible"
-        status={{ label: `Status: ${tone}`, tone }}
-      />,
-    );
+  ] as const)(
+    "keeps an accessible name for the %s icon-only status",
+    (tone, icon) => {
+      const html = renderToStaticMarkup(
+        <StatusBadge
+          labelMode="accessible"
+          status={{ label: `Status: ${tone}`, tone }}
+        />,
+      );
 
-    expect(html).toContain(tone === "running" ? "status__arc" : `ph-${icon}`);
-    expect(html).toContain('aria-hidden="true"');
-    expect(html).toContain('role="img"');
-    expect(html).toContain(`aria-label="Status: ${tone}"`);
-    expect(html).not.toContain('class="status__label"');
-  });
+      expect(html).toContain(`ph-${icon}`);
+      expect(html).toContain('aria-hidden="true"');
+      expect(html).toContain('role="img"');
+      expect(html).toContain(`aria-label="Status: ${tone}"`);
+      expect(html).not.toContain('class="status__label"');
+    },
+  );
 
   it("renders visible and decorative status modes without duplicate accessible text", () => {
     const status = { label: "In progress", tone: "running" } as const;

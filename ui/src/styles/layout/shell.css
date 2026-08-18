@@ -33,7 +33,7 @@
   place-items: center;
 }
 
-.wordmark__mark .icon {
+.wordmark__mark svg {
   display: block;
 }
 
