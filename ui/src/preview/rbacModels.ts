@@ -119,13 +119,13 @@ export function previewRbacPage(
 export function previewUserList(): UserListPageModel {
   return {
     kind: "user-list",
-    shell: rbacShell("Users · Access management · Automata"),
+    shell: rbacShell("Members · Access management · Automata"),
     managementNav: managementNav("users"),
-    heading: "Users",
-    summary: "Authenticated tenant members and their current access status.",
+    heading: "Members",
+    summary: "Human and delegated tenant identities and their current access status.",
     users,
     notice: null,
-    pagination: { previousHref: null, nextHref: null, label: "2 users" },
+    pagination: { previousHref: null, nextHref: null, label: "2 members" },
   };
 }
 

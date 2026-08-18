@@ -822,7 +822,7 @@ pub(super) fn rbac_user_list(
                 context,
                 mutation,
                 &return_path,
-                "Users · Access management · Automata".to_owned(),
+                "Members · Access management · Automata".to_owned(),
             )?,
             management_nav: rbac_management_navigation("users"),
             heading: "Members",

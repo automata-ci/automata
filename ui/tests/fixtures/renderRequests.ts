@@ -555,14 +555,14 @@ export const userListRequest: RenderRequest = {
     kind: "user-list",
     shell: {
       ...rbacShell,
-      documentTitle: "Users · Access management · Automata",
+      documentTitle: "Members · Access management · Automata",
     },
     managementNav: { ...managementNav, current: "users" },
     heading: "Members",
     summary: "Review human and delegated tenant identities and their current status.",
     users: [primaryManagedUser, secondaryManagedUser],
     notice: null,
-    pagination: { previousHref: null, nextHref: null, label: "2 users" },
+    pagination: { previousHref: null, nextHref: null, label: "2 members" },
   },
 };
 

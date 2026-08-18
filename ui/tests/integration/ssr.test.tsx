@@ -1459,7 +1459,7 @@ describe("hydration", () => {
         pagination: {
           previousHref: null,
           nextHref: null,
-          label: "0 users",
+          label: "0 members",
         },
       },
     };

@@ -70,7 +70,7 @@ export function UserListPage({ model, shellUtility }: UserListPageProps) {
           </RbacTableRegion>
         )}
       </section>
-      <Pagination label="Users pagination" pagination={model.pagination} />
+      <Pagination label="Members pagination" pagination={model.pagination} />
     </RbacManagement>
   );
 }
