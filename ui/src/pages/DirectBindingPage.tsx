@@ -54,7 +54,7 @@ export function DirectBindingPage({ model, shellUtility }: DirectBindingPageProp
             <AuthorizationMutationFields capability={model.grant} />
             <label>
               User
-              <select name="principal_id" required>
+              <select className="form-control" name="principal_id" required>
                 {model.grant.principals.map((option) => (
                   <option key={option.value} value={option.value}>{option.label}</option>
                 ))}
@@ -62,7 +62,7 @@ export function DirectBindingPage({ model, shellUtility }: DirectBindingPageProp
             </label>
             <label>
               Role
-              <select name="role_id" required>
+              <select className="form-control" name="role_id" required>
                 {model.grant.roles.map((option) => (
                   <option key={option.value} value={option.value}>{option.label}</option>
                 ))}
@@ -70,7 +70,7 @@ export function DirectBindingPage({ model, shellUtility }: DirectBindingPageProp
             </label>
             <label>
               Scope
-              <select name="scope" required>
+              <select className="form-control" name="scope" required>
                 {model.grant.scopes.map((option) => (
                   <option key={option.value} value={option.value}>{option.label}</option>
                 ))}
@@ -84,6 +84,7 @@ export function DirectBindingPage({ model, shellUtility }: DirectBindingPageProp
               <input
                 aria-describedby="direct-binding-valid-until-hint"
                 aria-labelledby="direct-binding-valid-until-label"
+                className="form-control"
                 name="valid_until"
                 step="60"
                 type="datetime-local"
@@ -175,6 +176,7 @@ export function DirectBindingPage({ model, shellUtility }: DirectBindingPageProp
                             <span className="sr-only">Revocation reason</span>
                             <input
                               aria-label={`Reason for revoking ${binding.role.label} from ${binding.principal.label}`}
+                              className="form-control form-control--compact"
                               maxLength={1024}
                               name="reason"
                               onInput={(event) =>

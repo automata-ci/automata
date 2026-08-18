@@ -35,6 +35,7 @@ export function RepositorySelectionList({
           <li className="provider-repositories__item" key={repository.id}>
             <label>
               <input
+                className="choice-control"
                 defaultChecked={repository.selected}
                 name={inputName}
                 type="checkbox"

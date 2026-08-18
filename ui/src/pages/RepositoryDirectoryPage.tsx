@@ -60,7 +60,7 @@ export function RepositoryDirectoryPage({
           )}
         </section>
         {model.pagination.nextHref === null ? null : (
-          <nav aria-label="Repository pages" className="repository-directory__pagination">
+          <nav aria-label="Repository pages" className="standalone-pagination">
             <a className="button button--quiet" href={model.pagination.nextHref} rel="next">
               Next page
             </a>

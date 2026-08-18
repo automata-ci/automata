@@ -100,6 +100,27 @@ describe("stylesheet entrypoint boundaries", () => {
     expect(runDetailStyles).not.toContain(".compact-empty-state");
   });
 
+  it("keeps reusable form, button, and pagination skins in the component layer", () => {
+    const controls = source("styles/components/controls.css");
+    const pageStyles = styleModules()
+      .filter((path) => path.startsWith("styles/pages/"))
+      .map((path) => source(path))
+      .join("\n");
+    const responsiveStyles = source("styles/conditions/responsive.css");
+
+    for (const selector of [
+      ".form-control",
+      ".choice-control",
+      ".button--compact",
+      ".button--danger",
+      ".standalone-pagination",
+    ]) {
+      expect(controls).toContain(selector);
+      expect(pageStyles).not.toContain(selector);
+    }
+    expect(responsiveStyles).not.toContain(".log-search-form");
+  });
+
   it("keeps the account menu anchored, focusable, and coarse-pointer friendly", () => {
     const layoutStyles = source("styles/layout/shell.css");
     const componentStyles = source("styles/components/shell.css");

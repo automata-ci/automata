@@ -88,7 +88,7 @@ export function RepositorySecretsPage({
 
         {model.pagination.firstHref === null &&
         model.pagination.nextHref === null ? null : (
-          <nav aria-label="Secret pages" className="repository-secret-pagination">
+          <nav aria-label="Secret pages" className="standalone-pagination">
             {model.pagination.firstHref === null ? null : (
               <a className="button" href={model.pagination.firstHref}>
                 First page
@@ -196,6 +196,7 @@ function SecretCreateForm({
             <input
               autoCapitalize="characters"
               autoComplete="off"
+              className="form-control"
               maxLength={255}
               name="name"
               pattern="(?!(?:GITHUB|ACTIONS|RUNNER|AUTOMATA)_)[A-Z_][A-Z0-9_]*"
@@ -285,7 +286,7 @@ function SecretRow({
                   This revokes access immediately and schedules retained
                   encrypted versions for deletion.
                 </p>
-                <button className="button repository-secret-delete__button" type="submit">
+                <button className="button button--danger" type="submit">
                   Delete secret
                 </button>
               </form>
@@ -310,6 +311,7 @@ function SecretValueInput({
       <input
         autoCapitalize="none"
         autoComplete="new-password"
+        className="form-control"
         id={id}
         maxLength={maximumValueBytes}
         name="value"

@@ -30,8 +30,8 @@
   display: flex;
   min-height: 36px;
   align-items: center;
-  gap: 8px;
-  margin-bottom: 8px;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
   padding-inline: 8px;
 }
 
@@ -52,7 +52,7 @@
   min-width: 0;
   min-height: 34px;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
   padding: 6px 8px;
 }
 
@@ -81,8 +81,8 @@
 
 .workflow-navigation__section,
 .run-navigation__section {
-  margin-top: 16px;
-  padding-top: 16px;
+  margin-top: var(--space-4);
+  padding-top: var(--space-4);
 }
 
 .workflow-navigation__section-heading,
@@ -104,7 +104,7 @@
   min-width: 0;
   min-height: 44px;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
   padding: 8px 10px;
   list-style: none;
 }
@@ -154,7 +154,7 @@
 
 .breadcrumbs {
   min-width: 0;
-  margin-bottom: 16px;
+  margin-bottom: var(--space-4);
 }
 
 .breadcrumbs__list {
@@ -189,6 +189,6 @@
 .pagination {
   display: flex;
   justify-content: flex-end;
-  gap: 8px;
-  padding: 12px 16px;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
 }

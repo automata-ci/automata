@@ -149,6 +149,7 @@ export function JobLogPage({ model, shellUtility, initialRecords = [] }: JobLogP
                     <input
                       autoCapitalize="none"
                       autoComplete="off"
+                      className="form-control form-control--compact"
                       onChange={(event) => setQuery(event.currentTarget.value)}
                       placeholder="Search logs"
                       spellCheck={false}

@@ -9,8 +9,8 @@
   width: min(100%, var(--header-width));
   min-height: 63px;
   margin-inline: auto;
-  padding-inline: 24px;
-  gap: 24px;
+  padding-inline: var(--space-6);
+  gap: var(--space-6);
 }
 
 .wordmark,
@@ -41,7 +41,7 @@
   display: flex;
   min-width: 0;
   align-items: center;
-  gap: 4px;
+  gap: var(--space-1);
   overflow-x: auto;
   scrollbar-width: none;
 }
@@ -60,7 +60,7 @@
 }
 
 .viewer-link {
-  gap: 8px;
+  gap: var(--space-2);
   max-width: min(200px, 25vw);
 }
 
@@ -69,7 +69,7 @@
   min-width: 0;
   align-items: center;
   justify-self: end;
-  gap: 8px;
+  gap: var(--space-2);
 }
 
 .viewer-menu {
@@ -93,7 +93,7 @@
   width: max-content;
   min-width: 200px;
   max-width: min(280px, calc(100vw - 32px));
-  padding: 8px;
+  padding: var(--space-2);
 }
 
 .viewer-menu__identity {
@@ -115,7 +115,7 @@
   width: 100%;
   min-height: 32px;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
   padding: 6px 8px;
 }
 
@@ -139,7 +139,7 @@
   display: flex;
   min-height: 52px;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
 }
 
 .repo-header__identity a {
@@ -162,7 +162,7 @@
   display: flex;
   min-height: 44px;
   align-items: stretch;
-  gap: 8px;
+  gap: var(--space-2);
   overflow-x: auto;
   scrollbar-width: none;
 }
@@ -180,7 +180,7 @@
 .site-footer .layout-width {
   display: flex;
   justify-content: space-between;
-  gap: 16px;
+  gap: var(--space-4);
 }
 
 .site-footer .layout-width > span {

@@ -12,8 +12,8 @@
   min-width: 0;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
-  padding: 16px;
+  gap: var(--space-4);
+  padding: var(--space-4);
   border-bottom: 1px solid var(--border-muted);
 }
 
@@ -57,19 +57,12 @@
   min-width: 0;
   align-items: flex-start;
   gap: 10px;
-  padding: 12px 16px;
+  padding: var(--space-3) var(--space-4);
   cursor: pointer;
 }
 
 .provider-repositories__item label:hover {
   background: var(--canvas-subtle);
-}
-
-.provider-repositories__item input {
-  width: 16px;
-  height: 16px;
-  flex: 0 0 auto;
-  margin: 2px 0 0;
 }
 
 .provider-repositories__identity {
@@ -89,7 +82,7 @@
 
 .provider-repositories__empty {
   margin: 0;
-  padding: 24px 16px;
+  padding: var(--space-6) var(--space-4);
   color: var(--fg-muted);
   text-align: center;
 }

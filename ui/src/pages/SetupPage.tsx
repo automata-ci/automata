@@ -70,6 +70,7 @@ export function SetupPage({ model, shellUtility }: SetupPageProps) {
                   autoCapitalize="none"
                   autoComplete="new-password"
                   autoCorrect="off"
+                  className="form-control form-control--comfortable"
                   id="setup-bootstrap-token"
                   name="bootstrap_token"
                   required

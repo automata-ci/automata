@@ -285,6 +285,7 @@ function AudienceControls({
                   <label className="audience-option" htmlFor={inputId} key={value}>
                     <input
                       checked={policy[resource.field] === value}
+                      className="choice-control"
                       id={inputId}
                       name={resource.formName}
                       onChange={() => onChange(resource.field, value)}

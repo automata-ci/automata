@@ -1,7 +1,7 @@
 .repository-settings-navigation {
   display: flex;
-  gap: 4px;
-  margin-bottom: 16px;
+  gap: var(--space-1);
+  margin-bottom: var(--space-4);
   overflow-x: auto;
   border-bottom: 1px solid var(--border-muted);
   scrollbar-width: none;

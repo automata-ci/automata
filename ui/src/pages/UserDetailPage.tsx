@@ -69,6 +69,7 @@ export function UserDetailPage({ model, shellUtility }: UserDetailPageProps) {
               <label>
                 Reason for disabling
                 <input
+                  className="form-control"
                   maxLength={1024}
                   name="reason"
                   onInput={(event) =>

@@ -64,6 +64,7 @@ export function RoleDetailPage({ model, shellUtility }: RoleDetailPageProps) {
                 <label>
                   Display name
                   <input
+                    className="form-control"
                     defaultValue={model.role.displayName}
                     maxLength={255}
                     name="display_name"
