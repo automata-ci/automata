@@ -209,6 +209,9 @@ admission. Each attempt carries a lease ID, an increasing fencing token, and a
 negotiated capability snapshot. A delayed or restarted runner can replay an
 acknowledged operation, but it cannot commit through an expired lease.
 
+Local Docker is an explicit schema-7 runner evaluation path through the fixed
+installation relay; `automata local run` is not implemented yet.
+
 Workflow-specific behavior stops before scheduling. The GitHub frontend
 produces a logical plan, activation resolves run-dependent values and bounded
 matrix expansion, and the scheduler leases provider-neutral Job IR. Runners do

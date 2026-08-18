@@ -40,8 +40,9 @@ const JOB_IMAGE_ID: &str =
     "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
 const GUEST_IMAGE_ID: &str =
     "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
-const PROXY_DIGEST: &str = "9999999999999999999999999999999999999999999999999999999999999999";
-const PROXY_IMAGE_ID: &str =
+const PROXY_MANIFEST_IMAGE_ID: &str =
+    "sha256:9999999999999999999999999999999999999999999999999999999999999999";
+const PROXY_CONFIG_IMAGE_ID: &str =
     "sha256:8888888888888888888888888888888888888888888888888888888888888888";
 const TRANSIT_NETWORK_ID: &str = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
 const RESULTS_CONTAINER_ID: &str =
@@ -214,16 +215,8 @@ impl FakeEngine {
             guest.reference().to_owned(),
             inspected_image(&guest, GUEST_IMAGE_ID),
         );
-        let mut inspected_proxy = inspected_image(&proxy, PROXY_IMAGE_ID);
-        inspected_proxy.environment_names = vec!["PATH".to_owned()];
-        inspected_proxy.default_path_only = true;
-        inspected_proxy.user = RESULTS_PROXY_USER.to_owned();
-        inspected_proxy.entrypoint = vec![RESULTS_PROXY_ENTRYPOINT.to_owned()];
-        inspected_proxy.working_directory = "/".to_owned();
-        inspected_proxy.labels.insert(
-            RESULTS_PROXY_IMAGE_PROTOCOL_LABEL.to_owned(),
-            RESULTS_PROXY_IMAGE_PROTOCOL_VERSION.to_owned(),
-        );
+        let mut inspected_proxy = inspected_imported_image(&proxy, PROXY_CONFIG_IMAGE_ID, vec![]);
+        qualify_results_proxy_image(&mut inspected_proxy);
         state
             .images
             .insert(proxy.reference().to_owned(), inspected_proxy);
@@ -286,7 +279,7 @@ impl FakeEngine {
                     "com.docker.network.bridge.gateway_mode_ipv4".to_owned(),
                     "isolated".to_owned(),
                 )]),
-                labels: results_transit_labels(installation),
+                labels: results_transit_labels(installation, results_plan_digest()),
                 containers: BTreeMap::from([(
                     RESULTS_CONTAINER_ID.to_owned(),
                     NetworkEndpoint {
@@ -1098,6 +1091,7 @@ impl Fixture {
 fn inspected_image(image: &ImmutableImage, id: &str) -> InspectedImage {
     InspectedImage {
         id: id.to_owned(),
+        repo_tags: Vec::new(),
         repo_digests: vec![image.reference().to_owned()],
         operating_system: "linux".to_owned(),
         architecture: "amd64".to_owned(),
@@ -1126,17 +1120,59 @@ fn guest_image() -> ImmutableImage {
     .expect("guest image")
 }
 
-fn proxy_image() -> ImmutableImage {
-    ImmutableImage::new(format!(
-        "registry.example/automata/service-proxy@sha256:{PROXY_DIGEST}"
-    ))
-    .expect("proxy image")
+fn proxy_image() -> LocalImportedImage {
+    LocalImportedImage::new(PROXY_CONFIG_IMAGE_ID, PROXY_MANIFEST_IMAGE_ID).expect("proxy image")
+}
+
+fn inspected_imported_image(
+    image: &LocalImportedImage,
+    id: &str,
+    repo_digests: Vec<String>,
+) -> InspectedImage {
+    InspectedImage {
+        id: id.to_owned(),
+        repo_tags: vec![image.reference().to_owned()],
+        repo_digests,
+        operating_system: "linux".to_owned(),
+        architecture: "amd64".to_owned(),
+        declared_volumes: Vec::new(),
+        declared_exposed_ports: Vec::new(),
+        has_healthcheck: false,
+        labels: BTreeMap::new(),
+        environment_names: Vec::new(),
+        default_path_only: false,
+        user: String::new(),
+        entrypoint: Vec::new(),
+        command: Vec::new(),
+        working_directory: String::new(),
+    }
+}
+
+fn qualify_results_proxy_image(image: &mut InspectedImage) {
+    image.environment_names = vec!["PATH".to_owned()];
+    image.default_path_only = true;
+    image.user = RESULTS_PROXY_USER.to_owned();
+    image.entrypoint = vec![RESULTS_PROXY_ENTRYPOINT.to_owned()];
+    image.working_directory = "/".to_owned();
+    image.labels.insert(
+        RESULTS_PROXY_IMAGE_PROTOCOL_LABEL.to_owned(),
+        RESULTS_PROXY_IMAGE_PROTOCOL_VERSION.to_owned(),
+    );
+}
+
+fn proxy_manifest_digest_reference() -> String {
+    format!("automata.local/automata-ci-service-proxy@{PROXY_MANIFEST_IMAGE_ID}")
+}
+
+fn results_plan_digest() -> Sha256Digest {
+    Sha256Digest::from_bytes([0x77; 32])
 }
 
 fn verified_results_transport(installation: &Installation) -> VerifiedResultsTransport {
     VerifiedResultsTransport {
         requested: LocalDockerResultsTransport::new(
             proxy_image(),
+            results_plan_digest(),
             TRANSIT_NETWORK_ID,
             RESULTS_CONTAINER_ID,
             Ipv4Addr::new(10, 91, 0, 2),
@@ -1148,7 +1184,7 @@ fn verified_results_transport(installation: &Installation) -> VerifiedResultsTra
             prefix: 16,
         },
         transit_gateway: Ipv4Addr::new(10, 91, 0, 1),
-        proxy_image_id: PROXY_IMAGE_ID.to_owned(),
+        proxy_image_id: PROXY_CONFIG_IMAGE_ID.to_owned(),
         proxy_image_labels: BTreeMap::from([(
             RESULTS_PROXY_IMAGE_PROTOCOL_LABEL.to_owned(),
             RESULTS_PROXY_IMAGE_PROTOCOL_VERSION.to_owned(),
@@ -2479,6 +2515,82 @@ fn custody_cleanup_survives_image_loss_runtime_drift_and_invalid_state() {
 }
 
 #[test]
+fn custody_cleanup_survives_missing_or_drifted_imported_proxy_image() {
+    for missing in [true, false] {
+        let fixture = Fixture::new();
+        let spec = sandbox_spec();
+        let record = fixture
+            .provider
+            .create(&spec, &NeverCancelled)
+            .expect("create");
+        let names = ResourceNames::for_spec(&fixture.installation, &spec).expect("names");
+        let job_id = fixture.engine.container(&names.job).expect("job").id;
+        let proxy_id = fixture
+            .engine
+            .container(&names.results_proxy)
+            .expect("Results proxy")
+            .id;
+        fixture.engine.mutate(|state| {
+            if missing {
+                state.images.remove(proxy_image().reference());
+            } else {
+                state
+                    .images
+                    .get_mut(proxy_image().reference())
+                    .expect("Results proxy image")
+                    .repo_digests = vec![proxy_manifest_digest_reference()];
+            }
+        });
+
+        let request = DestroySandbox::new(
+            OperationId::from_uuid(Uuid::from_u128(0x171)),
+            record.handle().clone(),
+            record.generation(),
+            spec.custody(),
+        );
+        assert_eq!(
+            fixture
+                .provider
+                .destroy(&request, &NeverCancelled)
+                .expect("custody-only cleanup must not depend on the imported image"),
+            DestroyDisposition::Destroyed
+        );
+        assert!(fixture.engine.container(&names.job).is_none());
+        assert!(fixture.engine.container(&job_id).is_none());
+        assert!(fixture.engine.container(&names.results_proxy).is_none());
+        assert!(fixture.engine.container(&proxy_id).is_none());
+        assert!(
+            !fixture
+                .engine
+                .state
+                .lock()
+                .expect("fake state")
+                .networks
+                .contains_key(&names.results_front)
+        );
+        let image = fixture
+            .engine
+            .state
+            .lock()
+            .expect("fake state")
+            .images
+            .get(proxy_image().reference())
+            .cloned();
+        if missing {
+            assert!(
+                image.is_none(),
+                "destroy must not recreate the imported image"
+            );
+        } else {
+            assert_eq!(
+                image.expect("drifted image remains untouched").repo_digests,
+                [proxy_manifest_digest_reference()]
+            );
+        }
+    }
+}
+
+#[test]
 fn custody_cleanup_rejects_noncanonical_or_extra_managed_labels_before_mutation() {
     for tamper in 0..3 {
         let fixture = Fixture::new();
@@ -3171,11 +3283,261 @@ fn results_transport_rejects_generic_or_public_targets() {
         ),
     ] {
         assert_eq!(
-            LocalDockerResultsTransport::new(proxy_image(), network_id, container_id, address)
-                .expect_err("invalid closed transport")
-                .code(),
+            LocalDockerResultsTransport::new(
+                proxy_image(),
+                results_plan_digest(),
+                network_id,
+                container_id,
+                address,
+            )
+            .expect_err("invalid closed transport")
+            .code(),
             LocalDockerErrorCode::ResultsTransportMismatch
         );
+    }
+}
+
+#[test]
+fn imported_results_proxy_accepts_only_the_two_coupled_engine_representations() {
+    let fixture = Fixture::new();
+    let image = proxy_image();
+    let mut classic = inspected_imported_image(&image, PROXY_CONFIG_IMAGE_ID, vec![]);
+    qualify_results_proxy_image(&mut classic);
+    assert!(verify_results_proxy_image(&fixture.provider.inner.pinned, &image, &classic).is_ok());
+
+    let mut containerd = inspected_imported_image(
+        &image,
+        PROXY_MANIFEST_IMAGE_ID,
+        vec![proxy_manifest_digest_reference()],
+    );
+    qualify_results_proxy_image(&mut containerd);
+    assert!(
+        verify_results_proxy_image(&fixture.provider.inner.pinned, &image, &containerd).is_ok()
+    );
+
+    let mut invalid = Vec::new();
+    let mut config_with_digest = classic.clone();
+    config_with_digest.repo_digests = vec![proxy_manifest_digest_reference()];
+    invalid.push(config_with_digest);
+    let mut manifest_without_digest = containerd.clone();
+    manifest_without_digest.repo_digests.clear();
+    invalid.push(manifest_without_digest);
+    let mut unknown_id = classic.clone();
+    unknown_id.id = format!("sha256:{}", "7a".repeat(32));
+    invalid.push(unknown_id);
+    let mut wrong_tag = classic.clone();
+    wrong_tag.repo_tags = vec!["automata.local/foreign:latest".to_owned()];
+    invalid.push(wrong_tag);
+    let mut extra_tag = classic.clone();
+    extra_tag
+        .repo_tags
+        .push("automata.local/foreign:latest".to_owned());
+    invalid.push(extra_tag);
+    let mut wrong_digest = containerd.clone();
+    wrong_digest.repo_digests = vec![format!("automata.local/foreign@{PROXY_MANIFEST_IMAGE_ID}")];
+    invalid.push(wrong_digest);
+    let mut extra_digest = containerd;
+    extra_digest
+        .repo_digests
+        .push(format!("automata.local/foreign@{PROXY_MANIFEST_IMAGE_ID}"));
+    invalid.push(extra_digest);
+
+    for inspected in invalid {
+        assert_eq!(
+            verify_results_proxy_image(&fixture.provider.inner.pinned, &image, &inspected),
+            Err(LocalDockerErrorCode::ImageMismatch)
+        );
+    }
+}
+
+#[test]
+fn imported_proxy_representation_drift_is_rejected_before_operation_mutation() {
+    let fixture = Fixture::new();
+    fixture.engine.mutate(|state| {
+        state
+            .images
+            .get_mut(proxy_image().reference())
+            .expect("Results proxy image")
+            .repo_digests = vec![proxy_manifest_digest_reference()];
+    });
+    let mutations = fixture.engine.mutation_count();
+
+    let error = fixture
+        .provider
+        .create(&sandbox_spec(), &NeverCancelled)
+        .expect_err("a config ID paired with a RepoDigest must fail closed");
+
+    assert_eq!(error.kind(), ProviderErrorKind::OwnershipMismatch);
+    assert_eq!(fixture.engine.mutation_count(), mutations);
+}
+
+#[test]
+fn attach_and_inspect_reattest_missing_or_drifted_imported_proxy_before_mutation() {
+    for boundary in ["attach", "inspect"] {
+        for missing in [true, false] {
+            let fixture = Fixture::new();
+            let spec = sandbox_spec();
+            let record = fixture
+                .provider
+                .create(&spec, &NeverCancelled)
+                .expect("create before image drift");
+            fixture.engine.mutate(|state| {
+                if missing {
+                    state.images.remove(proxy_image().reference());
+                } else {
+                    state
+                        .images
+                        .get_mut(proxy_image().reference())
+                        .expect("Results proxy image")
+                        .repo_digests = vec![proxy_manifest_digest_reference()];
+                }
+            });
+            let mutations = fixture.engine.mutation_count();
+
+            let error = match boundary {
+                "attach" => fixture
+                    .provider
+                    .attach(record.handle(), &NeverCancelled)
+                    .expect_err("attach must reattest the imported image"),
+                "inspect" => fixture
+                    .provider
+                    .inspect(record.handle(), &NeverCancelled)
+                    .expect_err("inspect must reattest the imported image"),
+                _ => unreachable!(),
+            };
+            assert_eq!(
+                error.kind(),
+                if missing {
+                    ProviderErrorKind::NotFound
+                } else {
+                    ProviderErrorKind::OwnershipMismatch
+                },
+                "unexpected {boundary} result for missing={missing}"
+            );
+            assert_eq!(fixture.engine.mutation_count(), mutations);
+        }
+    }
+}
+
+#[test]
+fn endpoint_exchange_reattests_missing_or_drifted_imported_proxy_before_exec_mutation() {
+    for missing in [true, false] {
+        let fixture = Fixture::new();
+        let spec = sandbox_spec();
+        let record = fixture
+            .provider
+            .create(&spec, &NeverCancelled)
+            .expect("create before image drift");
+        let endpoint = fixture
+            .provider
+            .attach(record.handle(), &NeverCancelled)
+            .expect("attach before image drift");
+        fixture.engine.mutate(|state| {
+            if missing {
+                state.images.remove(proxy_image().reference());
+            } else {
+                state
+                    .images
+                    .get_mut(proxy_image().reference())
+                    .expect("Results proxy image")
+                    .repo_digests = vec![proxy_manifest_digest_reference()];
+            }
+        });
+        let mutations = fixture.engine.mutation_count();
+
+        let error = endpoint
+            .exec(&true_command(&spec, 0x172), &NeverCancelled)
+            .expect_err("endpoint exchange must reattest the imported image");
+        assert_eq!(
+            error.kind(),
+            if missing {
+                ExecutionErrorKind::NotFound
+            } else {
+                ExecutionErrorKind::OwnershipMismatch
+            }
+        );
+        assert_eq!(
+            fixture.engine.mutation_count(),
+            mutations,
+            "no guest exec may be created after imported-image reattestation fails"
+        );
+    }
+}
+
+#[test]
+fn sandbox_fingerprint_binds_proxy_config_manifest_tag_and_desired_plan() {
+    let fixture = Fixture::new();
+    let spec = sandbox_spec();
+    let base = verified_results_transport(&fixture.installation);
+    let base_fingerprint = spec_fingerprint(&spec, &fixture.installation, &guest_image(), &base)
+        .expect("base fingerprint");
+
+    let mut config_changed = base.clone();
+    config_changed.requested.proxy_image = LocalImportedImage::new(
+        format!("sha256:{}", "7a".repeat(32)),
+        PROXY_MANIFEST_IMAGE_ID,
+    )
+    .expect("changed config identity");
+    assert_eq!(
+        config_changed.requested.proxy_image.reference(),
+        base.requested.proxy_image.reference(),
+        "the config-ID variant deliberately holds the derived tag constant"
+    );
+
+    let mut manifest_and_tag_changed = base.clone();
+    manifest_and_tag_changed.requested.proxy_image =
+        LocalImportedImage::new(PROXY_CONFIG_IMAGE_ID, format!("sha256:{}", "7b".repeat(32)))
+            .expect("changed manifest identity");
+    assert_ne!(
+        manifest_and_tag_changed.requested.proxy_image.reference(),
+        base.requested.proxy_image.reference(),
+        "the closed local tag is derived from the manifest identity"
+    );
+
+    let mut plan_changed = base.clone();
+    plan_changed.requested.plan_digest = Sha256Digest::from_bytes([0x78; 32]);
+
+    let variants = [config_changed, manifest_and_tag_changed, plan_changed].map(|results| {
+        spec_fingerprint(&spec, &fixture.installation, &guest_image(), &results)
+            .expect("variant fingerprint")
+    });
+    assert!(
+        variants
+            .iter()
+            .all(|fingerprint| fingerprint != &base_fingerprint)
+    );
+    assert_eq!(variants.into_iter().collect::<BTreeSet<_>>().len(), 3);
+}
+
+#[test]
+fn desired_plan_label_drift_is_rejected_before_operation_mutation() {
+    for (key, replacement) in [
+        (LABEL_PLAN_DIGEST, None),
+        (LABEL_PLAN_DIGEST, Some("00".repeat(32))),
+        (LABEL_RESULTS_TRANSPORT_SCHEMA, Some("1".to_owned())),
+    ] {
+        let fixture = Fixture::new();
+        fixture.engine.mutate(|state| {
+            let labels = &mut state
+                .networks
+                .get_mut(&results_transit_name(&fixture.installation))
+                .expect("Results transit")
+                .labels;
+            if let Some(replacement) = replacement.clone() {
+                labels.insert(key.to_owned(), replacement);
+            } else {
+                labels.remove(key);
+            }
+        });
+        let mutations = fixture.engine.mutation_count();
+
+        let error = fixture
+            .provider
+            .create(&sandbox_spec(), &NeverCancelled)
+            .expect_err("the shared transit must carry the exact desired plan digest");
+
+        assert_eq!(error.kind(), ProviderErrorKind::OwnershipMismatch);
+        assert_eq!(fixture.engine.mutation_count(), mutations);
     }
 }
 
@@ -4085,11 +4447,18 @@ async fn fixed_relay_live_shell_and_javascript_conformance() {
     )
     .expect("guest image");
     let results_transport = LocalDockerResultsTransport::new(
-        ImmutableImage::new(
-            std::env::var("AUTOMATA_LOCAL_DOCKER_RESULTS_PROXY_IMAGE")
-                .expect("set the digest-pinned Results proxy image"),
+        LocalImportedImage::new(
+            std::env::var("AUTOMATA_LOCAL_DOCKER_RESULTS_PROXY_CONFIG_IMAGE_ID")
+                .expect("set the imported Results proxy config image ID"),
+            std::env::var("AUTOMATA_LOCAL_DOCKER_RESULTS_PROXY_MANIFEST_IMAGE_ID")
+                .expect("set the imported Results proxy manifest image ID"),
         )
         .expect("Results proxy image"),
+        Sha256Digest::from_str(
+            &std::env::var("AUTOMATA_LOCAL_DOCKER_DESIRED_PLAN_SHA256")
+                .expect("set the desired-plan SHA-256"),
+        )
+        .expect("desired-plan SHA-256"),
         std::env::var("AUTOMATA_LOCAL_DOCKER_RESULTS_TRANSIT_NETWORK_ID")
             .expect("set the exact Results transit network ID"),
         std::env::var("AUTOMATA_LOCAL_DOCKER_RESULTS_CONTAINER_ID")

@@ -17,11 +17,11 @@ follow the
 [profile publication guide](https://github.com/automata-ci/automata/blob/main/images/github-hosted-ubuntu-24.04-x64/README.md)
 before trusting a protected-main candidate.
 
-Product schema v6 accepts exactly one sandbox provider. Host runners use the
+Product schema v7 accepts exactly one sandbox provider. Host runners use the
 top-level `podman` object and require `state.podman`. Kubernetes and local
 Docker runners omit every provider-specific state root and use a top-level
 `kubernetes` or `local_docker` object. Windows and macOS runners use their
-matching provider name in both locations. All non-v6 schemas,
+matching provider name in both locations. All non-v7 schemas,
 `windows_native`, and the removed macOS native key are rejected, not migrated.
 The Kubernetes runner loads credentials through standard in-cluster or ambient
 kubeconfig discovery; the JSON remains secret-free.
@@ -79,7 +79,12 @@ The evaluation-only local Docker selection has this closed shape:
     "installation_id": "6e561f8b-9098-418d-b573-d82f5c73006e",
     "guest_image": "registry.example/automata/sandbox-guest@sha256:<64 hex digits>",
     "results_transport": {
-      "proxy_image": "registry.example/automata/service-proxy@sha256:<64 hex digits>",
+      "proxy_image": {
+        "reference": "automata.local/automata-ci-service-proxy:manifest-<64 lowercase hex digits>",
+        "config_image_id": "sha256:<64 lowercase hex digits>",
+        "manifest_image_id": "sha256:<64 lowercase hex digits>"
+      },
+      "plan_sha256": "<64 lowercase hex digits>",
       "transit_network_id": "<64 lowercase hex digits>",
       "results_container_id": "<64 lowercase hex digits>",
       "results_address": "10.91.0.2"
@@ -90,10 +95,14 @@ The evaluation-only local Docker selection has this closed shape:
 
 It is available only on Linux and selects no configurable Docker endpoint. The
 runner connects through the fixed private relay, verifies the exact daemon and
-installation anchor, and requires the immutable guest and Results-proxy images
-to be already present. The Results object contains only exact Engine IDs, one
-canonical private numeric address, and a digest pin; ports and topology are not
-configurable. The executor must use `private_egress`, a writable container root,
+installation anchor, and requires the immutable guest and imported
+Results-proxy images to be already present. The supplied proxy tag must be the
+one derived from its manifest ID. Classic Docker must expose that sole tag with
+the config ID and no repository digest; the containerd image store must expose
+the manifest ID with that sole tag and the sole canonical
+repository-at-manifest digest. The Results object also binds the desired-plan
+digest, exact Engine IDs, and one canonical private numeric address; ports and
+topology are not configurable. The executor must use `private_egress`, a writable container root,
 administrator identity, at least 256 MiB of memory, one whole CPU, and three
 processes. `max_parallel_jobs` is bounded to 256 and maps directly to durable
 one-based slot custody. Every environment must launch a container and use POSIX
@@ -126,9 +135,12 @@ custody remains exact. Container-runtime/image or shared-transit damage does not
 by itself block that container cleanup; exact front-network drift blocks destroy,
 and a foreign endpoint can leave the emptied front network for operator recovery.
 Guest, job, and Results-proxy images must not declare volumes, exposed ports, or
-a healthcheck. The
-renderer-owned transit must be an internal isolated private IPv4 bridge with a
-first-host gateway and a `/23`-or-wider prefix.
+a healthcheck. The externally provisioned transit must be an internal isolated
+private IPv4 bridge with a first-host gateway and a `/23`-or-wider prefix. Its
+exact Results-transport-schema-2 labels bind the installation ID, selector key,
+Compose project, resource kind, and configured desired-plan digest. A future
+lifecycle may create that network and declare it external to Compose; the
+runner neither creates nor deletes it.
 
 A Kubernetes selection has this provider-specific shape:
 

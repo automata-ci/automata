@@ -159,9 +159,11 @@ The evaluation-only local Docker provider similarly exposes no host socket,
 bind, or per-job volume. Each job joins one deterministic internal front
 network with a credential-free fixed-port proxy; only the proxy joins the exact
 pre-provisioned Results transit, so jobs have no external DNS or public egress.
-The provider uses one fixed private relay and already-present immutable guest
-and Results-proxy images, then verifies the exact daemon, installation anchor,
-images, transit, running numeric Results target, and peer proxies.
+The provider uses one fixed private relay, an already-present immutable guest,
+and the exact classic/config-ID or containerd/manifest-ID representation of the
+daemon-local imported Results proxy. It verifies the exact daemon,
+installation anchor, desired-plan-bound transit, running numeric Results target,
+and peer proxies on every operation that consumes the shared route.
 The rootful relay daemon must attest daemon-default user-namespace remapping
 plus built-in seccomp and private cgroup namespaces, expose every required
 memory/CPU/PID controller, have AppArmor and SELinux disabled, and exactly match
@@ -221,7 +223,7 @@ falls back to the shared manifest and archive. This local tier can keep that
 runner warm during a simultaneous object-store interruption; another runner
 requires the shared store.
 
-Runner product schema 6 requires an explicit object-store trust policy.
+Runner product schema 7 requires an explicit object-store trust policy.
 `web_pki` uses platform roots; `private_ca` loads exactly one bounded CA through
 an existing secure-input descriptor and installs it into an otherwise empty
 root store. The PEM bytes must use canonical RFC 7468 64-column/LF encoding

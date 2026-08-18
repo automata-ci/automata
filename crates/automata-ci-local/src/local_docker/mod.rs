@@ -33,7 +33,7 @@ use tar::{Builder as TarBuilder, EntryType, Header};
 
 use crate::{
     Installation, InstallationBinding, InstallationId, LocalDockerError, LocalDockerErrorCode,
-    LocalDockerResultsTransport, MINIMUM_LOCAL_DOCKER_SANDBOX_CPU_MILLIS,
+    LocalDockerResultsTransport, LocalImportedImage, MINIMUM_LOCAL_DOCKER_SANDBOX_CPU_MILLIS,
     MINIMUM_LOCAL_DOCKER_SANDBOX_MEMORY_BYTES, MINIMUM_LOCAL_DOCKER_SANDBOX_PIDS,
     normalize_architecture,
 };
@@ -73,9 +73,10 @@ const LABEL_PROFILE_DIGEST: &str = "io.automata.local.profile-sha256";
 const LABEL_SPEC_DIGEST: &str = "io.automata.local.spec-sha256";
 const LABEL_RESOURCE_KIND: &str = "io.automata.local.resource-kind";
 const LABEL_RESULTS_TRANSPORT_SCHEMA: &str = "io.automata.local.results-transport-schema";
+const LABEL_PLAN_DIGEST: &str = "io.automata.local.plan-digest";
 const MANAGED_VALUE: &str = "true";
 const JOB_SCHEMA: &str = "2";
-const RESULTS_TRANSPORT_SCHEMA: &str = "1";
+const RESULTS_TRANSPORT_SCHEMA: &str = "2";
 const CUSTODY_ADMISSION: &str = "profile-admission";
 const CUSTODY_JOB: &str = "job";
 const KIND_JOB: &str = "job-container";
@@ -224,14 +225,14 @@ impl ResultsTransportBudget {
 
 impl LocalDockerProvider {
     /// Connects through the fixed private relay and verifies the exact
-    /// installation anchor, already-present digest-pinned guest and
-    /// Results-proxy images, pre-provisioned transit network, and running
-    /// numeric Results target.
+    /// installation anchor, already-present digest-pinned guest, imported
+    /// Results-proxy identity, pre-provisioned plan-bound transit network, and
+    /// running numeric Results target.
     ///
     /// # Errors
     ///
     /// Returns a redacted failure when daemon identity, installation binding,
-    /// anchor, guest or Results-proxy image identity, shared transit, running
+    /// anchor, guest or imported Results-proxy identity, shared transit, running
     /// Results target, or attached peer-proxy identity is invalid.
     pub(super) async fn connect(
         installation: InstallationBinding,
@@ -466,6 +467,7 @@ impl LocalDockerInner {
         budget: ResultsTransportBudget,
     ) -> Result<(), ProviderErrorKind> {
         self.verify_custody_boundary_kind(cancellation).await?;
+        self.verified_results_proxy_image().await?;
         verify_shared_results_transport_bounded(
             &self.pinned,
             self.engine.as_ref(),
@@ -558,25 +560,6 @@ impl LocalDockerInner {
                 ProviderStage::Validate,
             ));
         }
-        let proxy_image = self
-            .verified_image(&self.results.requested.proxy_image)
-            .await
-            .map_err(|kind| known(kind, ProviderStage::Validate))?;
-        if verify_results_proxy_image(
-            &self.pinned,
-            &self.results.requested.proxy_image,
-            &proxy_image,
-        )
-        .is_err()
-            || proxy_image.id != self.results.proxy_image_id
-            || proxy_image.labels != self.results.proxy_image_labels
-        {
-            return Err(known(
-                ProviderErrorKind::OwnershipMismatch,
-                ProviderStage::Validate,
-            ));
-        }
-
         let fingerprint =
             spec_fingerprint(spec, &self.installation, &self.guest_image, &self.results)?;
         let base_labels = base_labels(spec, &self.installation, &fingerprint);
@@ -980,6 +963,27 @@ impl LocalDockerInner {
             .ok_or(ProviderErrorKind::NotFound)?;
         verify_image(&self.pinned, image, &inspected)
             .map_err(|_| ProviderErrorKind::OwnershipMismatch)?;
+        Ok(inspected)
+    }
+
+    async fn verified_results_proxy_image(&self) -> Result<InspectedImage, ProviderErrorKind> {
+        let inspected = self
+            .engine
+            .inspect_image(self.results.requested.proxy_image.reference())
+            .await
+            .map_err(map_engine_kind)?
+            .ok_or(ProviderErrorKind::NotFound)?;
+        if verify_results_proxy_image(
+            &self.pinned,
+            &self.results.requested.proxy_image,
+            &inspected,
+        )
+        .is_err()
+            || inspected.id != self.results.proxy_image_id
+            || inspected.labels != self.results.proxy_image_labels
+        {
+            return Err(ProviderErrorKind::OwnershipMismatch);
+        }
         Ok(inspected)
     }
 
@@ -2244,6 +2248,7 @@ impl LocalDockerInner {
                 &self.installation,
                 self.runner_id,
                 KIND_JOB,
+                None,
                 ProviderStage::VerifyOwnership,
             )?),
             None => None,
@@ -2255,6 +2260,7 @@ impl LocalDockerInner {
                 &self.installation,
                 self.runner_id,
                 KIND_GUEST_SOURCE,
+                None,
                 ProviderStage::VerifyOwnership,
             )?),
             None => None,
@@ -2266,6 +2272,7 @@ impl LocalDockerInner {
                 &self.installation,
                 self.runner_id,
                 KIND_RESULTS_PROXY,
+                Some(self.results.requested.proxy_image.reference()),
                 ProviderStage::VerifyOwnership,
             )?),
             None => None,
@@ -3213,7 +3220,7 @@ fn spec_fingerprint(
     results: &VerifiedResultsTransport,
 ) -> Result<String, ProviderError> {
     let mut digest = Sha256::new();
-    hash_field(&mut digest, b"automata-local-docker-sandbox-spec-v2");
+    hash_field(&mut digest, b"automata-local-docker-sandbox-spec-v3");
     hash_field(&mut digest, installation.id().as_uuid().as_bytes());
     hash_field(
         &mut digest,
@@ -3272,6 +3279,15 @@ fn spec_fingerprint(
         &mut digest,
         results.requested.proxy_image.reference().as_bytes(),
     );
+    hash_field(
+        &mut digest,
+        results.requested.proxy_image.config_image_id().as_bytes(),
+    );
+    hash_field(
+        &mut digest,
+        results.requested.proxy_image.manifest_image_id().as_bytes(),
+    );
+    hash_field(&mut digest, results.requested.plan_digest.as_bytes());
     hash_field(&mut digest, results.requested.transit_network_id.as_bytes());
     hash_field(
         &mut digest,
@@ -3415,6 +3431,7 @@ fn verify_container_custody(
     installation: &Installation,
     runner_id: RunnerId,
     resource_kind: &str,
+    imported_image_reference: Option<&str>,
     stage: ProviderStage,
 ) -> Result<BaseIdentity, ProviderError> {
     let expected_name = match resource_kind {
@@ -3430,7 +3447,10 @@ fn verify_container_custody(
             .strip_prefix("sha256:")
             .and_then(canonical_digest)
             .is_none()
-        || ImmutableImage::new(container.image.clone()).is_err()
+        || imported_image_reference.map_or_else(
+            || ImmutableImage::new(container.image.clone()).is_err(),
+            |reference| container.image != reference,
+        )
     {
         return Err(known(ProviderErrorKind::OwnershipMismatch, stage));
     }
@@ -3597,6 +3617,21 @@ fn verify_image(
     image: &ImmutableImage,
     inspected: &InspectedImage,
 ) -> Result<(), LocalDockerErrorCode> {
+    verify_image_shape(pinned, inspected)?;
+    if !inspected
+        .repo_digests
+        .iter()
+        .any(|digest| digest == image.reference())
+    {
+        return Err(LocalDockerErrorCode::ImageMismatch);
+    }
+    Ok(())
+}
+
+fn verify_image_shape(
+    pinned: &PinnedDockerEngine,
+    inspected: &InspectedImage,
+) -> Result<(), LocalDockerErrorCode> {
     let valid_id = inspected
         .id
         .strip_prefix("sha256:")
@@ -3612,10 +3647,6 @@ fn verify_image(
             .keys()
             .any(|key| key.starts_with(MANAGED_LABEL_PREFIX))
         || normalize_architecture(&inspected.architecture) != Some(pinned.architecture())
-        || !inspected
-            .repo_digests
-            .iter()
-            .any(|digest| digest == image.reference())
     {
         return Err(LocalDockerErrorCode::ImageMismatch);
     }
@@ -3624,11 +3655,15 @@ fn verify_image(
 
 fn verify_results_proxy_image(
     pinned: &PinnedDockerEngine,
-    image: &ImmutableImage,
+    image: &LocalImportedImage,
     inspected: &InspectedImage,
 ) -> Result<(), LocalDockerErrorCode> {
-    verify_image(pinned, image, inspected)?;
-    if inspected.default_path_only
+    verify_image_shape(pinned, inspected)?;
+    if image.accepts_live_representation(
+        &inspected.id,
+        &inspected.repo_tags,
+        &inspected.repo_digests,
+    ) && inspected.default_path_only
         && inspected.environment_names == ["PATH"]
         && inspected.user == RESULTS_PROXY_USER
         && inspected.entrypoint == [RESULTS_PROXY_ENTRYPOINT]
@@ -3893,7 +3928,7 @@ fn exact_results_transit(
     exact_closed_network(
         network,
         &results_transit_name(installation),
-        &results_transit_labels(installation),
+        &results_transit_labels(installation, transport.plan_digest),
     ) && network.id == transport.transit_network_id
         && network.ipv4_network.prefix <= 23
         && network_host_address(&network.ipv4_network, 1)
@@ -4196,7 +4231,10 @@ fn results_transit_name(installation: &Installation) -> String {
     format!("{}-results-transit", installation.compose_project())
 }
 
-fn results_transit_labels(installation: &Installation) -> BTreeMap<String, String> {
+fn results_transit_labels(
+    installation: &Installation,
+    plan_digest: Sha256Digest,
+) -> BTreeMap<String, String> {
     BTreeMap::from([
         (LABEL_MANAGED.to_owned(), MANAGED_VALUE.to_owned()),
         (
@@ -4215,6 +4253,7 @@ fn results_transit_labels(installation: &Installation) -> BTreeMap<String, Strin
             LABEL_COMPOSE_PROJECT.to_owned(),
             installation.compose_project().to_string(),
         ),
+        (LABEL_PLAN_DIGEST.to_owned(), plan_digest.to_string()),
         (
             LABEL_RESOURCE_KIND.to_owned(),
             KIND_RESULTS_TRANSIT.to_owned(),

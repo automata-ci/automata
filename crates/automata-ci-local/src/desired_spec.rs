@@ -11,6 +11,7 @@ use thiserror::Error;
 
 use crate::{
     ComposeProjectName, EngineArchitecture, Installation, InstallationId, InstallationSelectorKey,
+    LocalImportedImage,
 };
 
 const DESIRED_SPEC_SCHEMA: &str = "automata.local/desired-spec/v1";
@@ -18,7 +19,6 @@ const PLAN_DIGEST_DOMAIN: &[u8] = b"automata/local/desired-plan/v1\0";
 
 const AMD64_PROFILE_ID: &str = "automata.dev/github-hosted-ubuntu-24-04-x64-v1";
 const ARM64_PROFILE_ID: &str = "automata.local/ubuntu-24-04-arm64-container-v1";
-const LOCAL_SERVICE_PROXY_REPOSITORY: &str = "automata.local/automata-ci-service-proxy";
 
 /// Exact content-attested local job profile selected for one installation.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -53,52 +53,6 @@ impl LocalProfile {
             attestation,
             image,
         })
-    }
-}
-
-/// Exact daemon-local service-proxy import identity.
-///
-/// Unlike registry images, a classic Docker image imported from a portable
-/// save archive has no repository digest. The deterministic tag is therefore
-/// retained together with both acceptable content IDs and must be reattested
-/// before every later convergence operation.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct LocalImportedImage {
-    reference: String,
-    config_image_id: String,
-    manifest_image_id: String,
-}
-
-impl LocalImportedImage {
-    /// Derives the sole current local import reference from its OCI identities.
-    ///
-    /// # Errors
-    ///
-    /// Rejects either identity unless it is one canonical lowercase SHA-256
-    /// Docker image ID.
-    pub fn new(
-        config_image_id: impl Into<String>,
-        manifest_image_id: impl Into<String>,
-    ) -> Result<Self, DesiredSpecError> {
-        let config_image_id = config_image_id.into();
-        let manifest_image_id = manifest_image_id.into();
-        if !oci_image_id(&config_image_id) || !oci_image_id(&manifest_image_id) {
-            return Err(DesiredSpecError::new(DesiredSpecErrorCode::ImportedImage));
-        }
-        let manifest_hex = manifest_image_id
-            .strip_prefix("sha256:")
-            .expect("validated OCI image IDs have a SHA-256 prefix");
-        Ok(Self {
-            reference: format!("{LOCAL_SERVICE_PROXY_REPOSITORY}:manifest-{manifest_hex}"),
-            config_image_id,
-            manifest_image_id,
-        })
-    }
-
-    /// Returns the deterministic daemon-local tag.
-    #[must_use]
-    pub fn reference(&self) -> &str {
-        &self.reference
     }
 }
 
@@ -324,8 +278,8 @@ impl DesiredSpec {
                 sandbox_guest: self.images.sandbox_guest.reference(),
                 service_proxy: CanonicalImportedImage {
                     reference: self.images.service_proxy.reference(),
-                    config_image_id: &self.images.service_proxy.config_image_id,
-                    manifest_image_id: &self.images.service_proxy.manifest_image_id,
+                    config_image_id: self.images.service_proxy.config_image_id(),
+                    manifest_image_id: self.images.service_proxy.manifest_image_id(),
                 },
             },
             results_transit: CanonicalResultsTransit {
@@ -369,15 +323,6 @@ fn parse_ipv4(value: &str) -> Result<Ipv4Addr, DesiredSpecError> {
         .ok_or_else(|| DesiredSpecError::new(DesiredSpecErrorCode::ResultsTransit))
 }
 
-fn oci_image_id(value: &str) -> bool {
-    value.strip_prefix("sha256:").is_some_and(|digest| {
-        digest.len() == 64
-            && digest
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    })
-}
-
 const fn architecture_name(architecture: EngineArchitecture) -> &'static str {
     match architecture {
         EngineArchitecture::Amd64 => "linux/amd64",
@@ -401,8 +346,6 @@ pub enum DesiredSpecErrorCode {
     Profile,
     /// Results transit addressing was not canonical, private, or usable.
     ResultsTransit,
-    /// A daemon-local imported image identity was not canonical and exact.
-    ImportedImage,
 }
 
 impl DesiredSpecErrorCode {
@@ -411,7 +354,6 @@ impl DesiredSpecErrorCode {
             Self::Capacity => "desired specification capacity is invalid",
             Self::Profile => "desired specification profile is invalid",
             Self::ResultsTransit => "desired specification Results transit network is invalid",
-            Self::ImportedImage => "desired specification imported image identity is invalid",
         }
     }
 }

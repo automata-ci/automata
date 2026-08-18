@@ -1088,9 +1088,9 @@ async fn status_api_rejects_a_restored_old_intent_against_new_canonical_custody(
     assert_eq!(error.code(), LocalInitErrorCode::ResetRequired);
 }
 
-#[test]
-fn stable_status_json_is_exact_and_redacted_for_every_public_state() {
-    let fingerprint = Sha256Digest::from_bytes([0x33; 32]);
+fn public_status_reports(
+    fingerprint: Sha256Digest,
+) -> (LocalStatusReport, LocalStatusReport, LocalStatusReport) {
     let recorded = LocalStatusReport {
         schema: STATUS_SCHEMA,
         status: LocalInstallationStatus::RecordedSealed,
@@ -1159,6 +1159,13 @@ fn stable_status_json_is_exact_and_redacted_for_every_public_state() {
             total_resources: 13,
         }),
     };
+    (recorded, incomplete, resetting)
+}
+
+#[test]
+fn stable_status_json_is_exact_and_redacted_for_every_public_state() {
+    let fingerprint = Sha256Digest::from_bytes([0x33; 32]);
+    let (recorded, incomplete, resetting) = public_status_reports(fingerprint);
 
     let cases = [
         (

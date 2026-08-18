@@ -28,6 +28,7 @@ mod installation;
 #[cfg(target_os = "linux")]
 mod local_docker;
 mod local_docker_error;
+mod local_imported_image;
 mod results_transport;
 #[cfg(unix)]
 mod snapshot;
@@ -42,8 +43,7 @@ pub use check::{
 };
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub(crate) use desired_spec::{
-    DesiredSpec, DesiredSpecImages, DesiredSpecInput, LocalImportedImage, LocalProfile,
-    ResultsTransit,
+    DesiredSpec, DesiredSpecImages, DesiredSpecInput, LocalProfile, ResultsTransit,
 };
 pub use engine::{DockerInstallationAdapter, LocalEngineError, LocalEngineErrorCode};
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -56,6 +56,7 @@ pub use installation::{
     ComposeProjectName, Installation, InstallationBinding, InstallationId, InstallationIdError,
     InstallationName, InstallationNameError, InstallationSelectorKey,
 };
+pub use local_imported_image::{LocalImportedImage, LocalImportedImageError};
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[doc(hidden)]
 pub fn run_local_init_materializer() -> Result<(), LocalInitError> {
@@ -91,7 +92,7 @@ pub const MAXIMUM_LOCAL_DOCKER_JOB_SLOTS: u16 = 256;
 /// # Errors
 ///
 /// Returns a redacted failure when the relay, daemon identity, installation
-/// binding, anchor, already-present immutable guest or Results-proxy image,
+/// binding, anchor, already-present immutable guest or imported Results-proxy image,
 /// pre-provisioned transit network, or running numeric Results target fails
 /// verification.
 #[cfg(target_os = "linux")]
