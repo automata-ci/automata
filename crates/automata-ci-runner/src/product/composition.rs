@@ -82,6 +82,11 @@ use crate::certificate_renewal::{CertificateRenewal, CertificateRenewalOutcome};
 
 const MAX_S3_ACCESS_KEY_BYTES: usize = 1_024;
 const MAX_S3_SECRET_BYTES: usize = 65_536;
+#[cfg(unix)]
+// The directory name is part of the on-disk format boundary. A representation
+// change must select a new directory so an old immutable index can never make a
+// newly deployed runner fail during composition.
+const ACTION_REFERENCE_INDEX_DIRECTORY: &str = "action-reference-cache-v2";
 const RECOMPOSITION_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(2);
 
 #[cfg(not(target_os = "linux"))]
@@ -1307,7 +1312,9 @@ fn build_action_preparer(
         let state_root = config.state().journal().as_path();
         let local_references: Arc<dyn ActionReferenceIndex> =
             Arc::new(FileActionReferenceIndex::open(
-                ActionReferenceIndexRoot::explicit(state_root.join("action-reference-cache"))?,
+                ActionReferenceIndexRoot::explicit(
+                    state_root.join(ACTION_REFERENCE_INDEX_DIRECTORY),
+                )?,
                 ActionReferenceIndexLimits::default(),
             )?);
         let archives = Arc::new(FileActionArchiveCache::open(
