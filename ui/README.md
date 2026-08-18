@@ -42,8 +42,8 @@ The detailed presentation, hook, presenter, and service dependency rules are
 documented in [`src/ARCHITECTURE.md`](src/ARCHITECTURE.md) and enforced by
 `npm run test:architecture`.
 
-The source tree keeps transport, view composition, presentation, and the demo
-separate:
+The source tree keeps transport, view composition, presentation, and the local
+preview fixture separate:
 
 ```text
 src/
@@ -53,7 +53,7 @@ src/
 ├── pages/         thin composition containers for validated page models
 ├── presentation/ shared status, timing, and event copy derivation
 ├── presenters/    deterministic model-to-view projections
-├── preview/      representative sample data, projections, and demo routing
+├── preview/       representative sample data, projections, and local routing
 ├── services/      host protocol and mutation clients without React
 ├── styles/       layered tokens, layout, components, pages, and conditions
 ├── validation/   exact validation of the untrusted host boundary
@@ -62,13 +62,13 @@ src/
 ```
 
 Production pages receive validated initial models and render ordinary links and
-forms; they do not own generic page-data loading or know how the static demo is
+forms; they do not own generic page-data loading or know how the preview fixture is
 routed. The job-log page replays and tails one structured stream, with
 group-owned panels and in-memory search. The shared live-log package selects
 advertised transports, strictly decodes SSE, advances durable checkpoints, and
 reconnects through the same replay path, as specified by
 [ADR 0005](../docs/architecture-decisions/0005-structured-execution-log-groups.md).
-The demo owns its sample data and its small query-preserving GET adapter, and
+The preview fixture owns its sample data and its small query-preserving GET adapter, and
 production source never imports test fixtures. The adapter is reinstalled on hot
 module replacement so routing changes do not leave a stale submit handler.
 `styles.css` only declares the cascade order and imports the focused modules
@@ -127,20 +127,18 @@ coverage improvements, and lower them only with a new reproducible baseline and
 an explicit justification. These aggregate floors are a regression guard, not
 a substitute for reviewing per-file gaps.
 
-For the interactive static demo, run the Vite development server and open the
-printed local URL. Changes hot-reload in the browser:
+To work on the UI against representative sample data, run the Vite development
+server and open the printed local URL. Changes hot-reload in the browser:
 
 ```sh
 npm run dev
 ```
 
-The demo is explicitly marked as sample data and does not claim that its
-workflow runs were executed. Repository, branch, and commit links point to real
-allowlisted GitHub destinations; artifact downloads remain unavailable because
-the static site has no authenticated backend. The demo requires JavaScript,
-while the production application remains server-rendered. The preview can be
-built and reviewed locally without adding a non-critical publication lane to
-pull-request CI.
+The fixture is explicitly marked as sample data and does not claim that its
+workflow runs were executed. It requires JavaScript and has no authenticated
+backend; the production application remains server-rendered. Use the
+[current Automata CI dashboard run](https://ci.automata-ci.com/automata-ci/automata/actions/runs/99ab4504-ef90-8aa1-ad24-34d1811b1c00)
+to inspect real workflow runs.
 
 The browser suite uses Chromium to exercise the populated and empty repository
 directory, the full run-list → run-summary → job-log path, both read-only
@@ -159,11 +157,11 @@ npm run screenshots
 Capture settings are deterministic: Chromium runs with fixed viewports, UTC,
 `en-US`, reduced motion, disabled screenshot animations, static preview data,
 and a wait for the locally bundled icon font. It owns its preview server instead
-of reusing an ambient process and serves the build from `/automata/`, matching
-the GitHub Pages project-site topology. The preview build verifier rejects
-root-relative executable/style URLs, missing assets, unexpected output, and
-other subpath-breaking output before the browser suite starts, then checks the
-exact non-empty PNG set.
+of reusing an ambient process and serves the build from `/automata/` to exercise
+a non-root deployment path. The preview build verifier rejects root-relative
+executable/style URLs, missing assets, unexpected output, and other
+subpath-breaking output before the browser suite starts, then checks the exact
+non-empty PNG set.
 
 The PNGs are human-review artifacts, not automated pixel-diff baselines. This is
 intentional: committing 72 browser-rendered goldens would make routine Chromium
@@ -172,7 +170,7 @@ The deterministic DOM, layout, theme, and runtime contracts are the automated
 gate; screenshots preserve broad visual review without pretending that file
 creation alone is an assertion. Each matrix case captures in its failure path,
 so visual diagnostics remain available locally and are not presented as
-executed-run evidence. The suite also checks native demo
+executed-run evidence. The suite also checks native preview-fixture
 routing, keyboard focus, mobile disclosures, forced colors, reduced motion,
 theme persistence, and browser runtime errors.
 

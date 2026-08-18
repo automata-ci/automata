@@ -9,10 +9,11 @@ use std::{
 };
 
 use automata_ci::app::http::{
-    HttpPolicy, HttpPolicyError, router, router_with_renderer, router_with_renderer_and_policy,
+    HttpPolicy, HttpPolicyError, router_with_renderer, router_with_renderer_and_policy,
 };
 use automata_ci_ui_renderer::{
-    EmbeddedAsset, RenderError, RenderedPage, Renderer, client_assets, find_asset,
+    EmbeddedAsset, RenderError, RenderPolicy, RenderedPage, Renderer, WasmtimeRenderer,
+    client_assets, find_asset,
 };
 use axum::body::{Body, to_bytes};
 use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE, ETAG, IF_NONE_MATCH};
@@ -120,8 +121,10 @@ async fn repository_directory_is_rendered_with_a_per_response_csp_nonce() {
 }
 
 #[tokio::test]
-async fn production_router_returns_complete_react_html_without_javascript_execution() {
-    let app = router().expect("embedded renderer must initialize");
+async fn embedded_renderer_returns_complete_react_html_without_javascript_execution() {
+    let renderer =
+        WasmtimeRenderer::new(RenderPolicy::default()).expect("embedded renderer must initialize");
+    let app = router_with_renderer(Arc::new(renderer));
     let redirect = app
         .clone()
         .oneshot(

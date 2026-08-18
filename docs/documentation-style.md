@@ -4,6 +4,10 @@ Write for someone who is deciding whether to use Automata, trying it for the
 first time, operating it under pressure, or changing the code. Give that reader
 the fact or action they need before implementation detail.
 
+Describe Automata as working software. Do not put a project-wide development
+status disclaimer in front of the first useful fact. Qualify only the specific
+feature, provider, interface, or distribution channel that has a real limit.
+
 ## Choose the page type
 
 Keep one main purpose per page:
@@ -28,6 +32,11 @@ Use these labels when a status needs to be explicit:
 | Planned | Accepted design or roadmap work that is not implemented. |
 | Unsupported | Rejected, ignored only where the contract says so, or not implemented. |
 | Published | An exact version is visible in the named public registry. |
+
+Most pages do not need status labels. Use them in compatibility tables and
+roadmaps where the distinction changes a user's decision. A supported subset is
+`Available` when the documented path works and rejects behavior outside that
+subset; incomplete parity does not make the whole path experimental.
 
 Do not turn parsing, a unit test, a migration, or an internal API into a product
 claim. Prefer evidence in this order:
@@ -70,6 +79,12 @@ introduces them.
   consequence already shows why it matters.
 - Avoid promotional adjectives and canned contrasts such as “not just X, but
   Y.”
+- Delete presentation phrases such as “this section explores,” “it is worth
+  noting,” “in conclusion,” “paves the way,” and “marks a milestone.”
+- Do not use ornamental words such as “delve,” “showcase,” “pivotal,”
+  “multifaceted,” or “invaluable” where a concrete verb or noun will do.
+- Do not manufacture rhythm with repeated groups of three, bold lead-ins on
+  every bullet, or an intro-list-summary pattern on every page.
 - Do not force ideas into groups of three or give every section the same
   rhythm.
 - Use “currently” only with a dated or verifiable state. Replace it with the
@@ -108,7 +123,9 @@ architecture, compatibility, and implementation plan.
 
 - `Automata` is the project.
 - `automata` and `automata-runner` are commands.
-- `automata-ci` and `automata-ci-runner` are planned crates.io package names.
+- `automata-ci` and `automata-ci-runner` are workspace package names and the
+  intended crates.io names. Call them published only when the registry contains
+  the exact version.
 - Workspace packages use `automata-ci-*`; Rust crate identifiers use
   `automata_ci_*`.
 - `automata-ci-service-proxy` is an internal helper image, not a product image.

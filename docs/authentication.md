@@ -26,8 +26,8 @@ variable-value delivery remain unsupported.
 | Workflow reruns | Available through the bounded CLI | Requires `runs:rerun`; only exact completed-run selections within the current retention and attempt limits are admitted. |
 | Built-in secret provider | Component complete | Values are envelope-encrypted in PostgreSQL; wrapping keys remain outside the database. |
 | External secret providers | Planned | No external adapter is available. |
-| Secret delivery to jobs | Experimental | Eligible Standard jobs can receive exact pinned versions from the built-in provider over an mTLS-only ephemeral exchange. Durable lease state remains value-free, and the runner masks every value before acknowledgement. External/dynamic providers and variable-value delivery are unsupported. |
-| GitHub workload credentials | Experimental | Standard jobs may receive lease-bound repository authority; CredentialFree jobs receive none. |
+| Secret delivery to jobs | Component complete | Eligible Standard jobs can receive exact pinned versions from the built-in provider over an mTLS-only ephemeral exchange. Durable lease state remains value-free, and the runner masks every value before acknowledgement. End-to-end workflow eligibility and protected-environment acceptance remain open; external/dynamic providers and variable-value delivery are unsupported. |
+| GitHub workload credentials | Component complete | Standard jobs may receive lease-bound repository authority; CredentialFree jobs receive none. Broader private-repository and event acceptance remains open. |
 
 ## Enable GitHub human authentication
 

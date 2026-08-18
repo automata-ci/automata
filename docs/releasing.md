@@ -492,10 +492,12 @@ podman manifest inspect \
   "ghcr.io/automata-ci/automata-sandbox-guest:${version}" >/dev/null
 ```
 
-Test the installer on a disposable x86-64 Linux account or container, confirm
-both `--version` outputs, start `automata preview`, and check `/healthz` and
-`/readyz`. Do not test a release by overwriting a production installation
-before the disposable verification passes.
+Test the installer on a disposable x86-64 Linux account or container and
+confirm both `--version` outputs and both top-level `--help` responses. Test a
+complete server deployment separately with its required PostgreSQL, object
+storage, Results, runner mTLS, and provider configuration. Do not test a release
+by overwriting a production installation before the disposable verification
+passes.
 
 ## Retry and failure behavior
 

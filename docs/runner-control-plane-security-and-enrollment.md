@@ -1,8 +1,9 @@
 # Runner control-plane security and enrollment
 
-This is the implementation plan and security contract for runner lifecycle and control-plane
-communication. The enrollment baseline is implemented in this change; later work is explicit so
-rotation, administration, and proxy support cannot grow ad hoc protocols.
+This reference documents the runner identity, enrollment, renewal, transport,
+and credential-custody contract. Enrollment and certificate renewal are
+implemented. The roadmap below separates that available foundation from
+unfinished administration, key-management, scale, and proxy work.
 
 ## Current communication contract
 
@@ -24,7 +25,7 @@ AES-256-GCM keyring. Runner spool payloads use a separate rotation-aware AES-256
 PostgreSQL is verify-full TLS outside explicit loopback development mode. These at-rest controls
 are independent of transport TLS.
 
-## Enrollment flow implemented here
+## Enrollment flow
 
 1. An authenticated operator runs `automata runner token --group GROUP`. The client generates
    256 bits of entropy; the server stores only a domain-separated SHA-256 digest. The client
@@ -80,9 +81,9 @@ command removes the local receipt and exits without issuing a replacement token.
 Client and server CAs may differ. The issuer key must not share storage with runner private keys
 or the control-plane/spool envelope keys.
 
-## Delivery plan
+## Current and planned work
 
-### Phase 1: secure enrollment baseline (this change)
+### Secure enrollment baseline — implemented
 
 - [x] One-time short-lived tokens with digest-only storage and tenant/group scope.
 - [x] Fresh `runners:enroll` authorization plus human and system audit events.

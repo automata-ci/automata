@@ -20,8 +20,9 @@ controlled by the navigation column; reserve viewport queries for shell and
 navigation changes. Do not add rules to `styles.css`, introduce a
 general-purpose utility for a one-off layout, or move page behavior into CSS.
 
-The browser demo imports `pages/preview.css` directly from `../preview.tsx`,
-after the production entrypoint. That module wraps its rules in `@layer pages`
+The local browser preview imports `pages/preview.css` directly from
+`../preview.tsx`, after the production entrypoint. That module wraps its rules
+in `@layer pages`
 so it participates in the declared cascade without shipping preview-only
 selectors in the production client. Preview-only wrappers belong there;
 reusable component states belong in the appropriate `components` module.

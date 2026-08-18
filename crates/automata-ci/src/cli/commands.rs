@@ -13,16 +13,11 @@ use crate::server::{SecretSource, VersionedSecretSource};
 #[derive(Debug, Subcommand)]
 /// Top-level service and operator command selection.
 ///
-/// Server, preview, authentication, repository-secret, environment-review,
+/// Server, authentication, repository-secret, environment-review,
 /// workflow-rerun, and administrative status operations are implemented.
 pub enum Command {
     /// Run the human API, runner control, Results gateway, and SSR interface.
     Server(Box<ServerArgs>),
-    /// Serve only dependency-free health checks and the SSR user interface.
-    ///
-    /// This explicit mode is intended for release-image smoke tests and local
-    /// UI previews. It never starts durable stores, Results, or runner control.
-    Preview(PreviewArgs),
     /// Inspect or manage a disposable local Automata installation.
     Local(LocalArgs),
     /// Authenticate the operator CLI and manage its server-scoped session.
@@ -53,7 +48,7 @@ impl Command {
             Self::Rerun(args) => Some(&args.operator),
             Self::Runner(args) => Some(&args.operator),
             Self::Admin(args) => Some(&args.operator),
-            Self::Server(_) | Self::Preview(_) | Self::Local(_) | Self::Internal(_) => None,
+            Self::Server(_) | Self::Local(_) | Self::Internal(_) => None,
         }
     }
 }
@@ -428,18 +423,6 @@ pub struct OperatorArgs {
     /// Output format for this operator command.
     #[arg(long, global = true, value_enum, default_value_t)]
     pub output: OutputFormat,
-}
-
-#[derive(Debug, Args)]
-/// Arguments for the dependency-free release-image preview server.
-pub struct PreviewArgs {
-    /// Health and SSR TCP listen address.
-    #[arg(
-        long,
-        env = "AUTOMATA_PREVIEW_LISTEN",
-        default_value = "127.0.0.1:8080"
-    )]
-    pub listen: SocketAddr,
 }
 
 /// `PostgreSQL` transport policy selected at the product boundary.

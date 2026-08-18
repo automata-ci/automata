@@ -16,7 +16,7 @@ use super::{LocalInitError, LocalInitErrorCode};
 
 const CATALOG_SCHEMA: &str = "automata.local/release-catalog/v1";
 const SOURCE_SCHEMA: &str = "automata.local/release-catalog-source/v1";
-const SOURCE_SHA256: &str = "1cefc4cf91fcd0d2b4f1a7bcbed1c8179561ace9b4baff76febbf66aed7fcf48";
+const SOURCE_SHA256: &str = "b9961f83612fe1533c8c3565ce8822afe72ad1fbbd833d0a117744f2406dacd4";
 const CANDIDATE_BASENAME: &str = "automata-service-proxy-candidate-x86_64-unknown-linux-musl.tar";
 const CANDIDATE_PATH: &str = concat!(
     "target/service-proxy-publication/",

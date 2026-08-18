@@ -15,7 +15,6 @@ pub mod cli;
 mod internal;
 mod local;
 mod object_store;
-pub mod preview;
 pub mod server;
 /// Cooperative process-shutdown coordination.
 pub mod shutdown;
@@ -59,7 +58,6 @@ fn parse_process_arguments() -> Result<Option<Cli>> {
 async fn execute(cli: Cli) -> Result<()> {
     match &cli.command {
         Command::Server(args) => Box::pin(server::serve(args)).await,
-        Command::Preview(args) => preview::serve(args).await,
         Command::Local(args) => Box::pin(local::execute(args)).await,
         Command::Internal(args) => Box::pin(internal::execute(args)).await,
         command => {

@@ -4,7 +4,7 @@
       "canonical_repository": "automata.local/automata",
       "config": {
         "command": [
-          "preview",
+          "server",
           "--listen",
           "0.0.0.0:8080"
         ],
@@ -134,7 +134,7 @@
           "run"
         ],
         "gid": 65532,
-        "product_config_schema": 7,
+        "product_config_schema": 8,
         "uid": 65532
       },
       "source": {

@@ -8,7 +8,7 @@ evidence from real Windows hosts.
 
 | Field | Value |
 | --- | --- |
-| Status | Component implementation in progress; not accepted for hostile or production workloads |
+| Status | Provider component complete; deployment qualification in progress; not accepted for hostile or production workloads |
 | Selected boundary | One fresh Hyper-V-isolated Windows container per job |
 | Rejected Windows paths | Native host execution, process-isolated containers, and a parallel full-VM provider |
 | Provider and config identity | `windows-hyperv` and `windows_hyperv` |

@@ -103,12 +103,11 @@ cargo test -p automata-ci-core --locked
 
 Replace the package and add a test-name filter for the code you changed.
 
-Run the dependency-free product preview, then verify it from another terminal:
+Verify the public command surface and its focused integration tests:
 
 ```sh
-cargo run --locked --bin automata -- preview
-curl --fail http://127.0.0.1:8080/healthz
-curl --fail http://127.0.0.1:8080/readyz
+cargo run --locked --bin automata -- --help
+cargo test --locked -p automata-ci --test cli
 ```
 
 For frontend hot reload:

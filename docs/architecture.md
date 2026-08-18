@@ -5,10 +5,9 @@
 PostgreSQL coordinates mutable state; S3-compatible storage holds immutable
 payloads.
 
-This page describes the source tree as of 2026-08-14 and separates the current
-composition from the provider roadmap. See [Compatibility](compatibility.md)
-for supported behavior and the [implementation plan](implementation-plan.md)
-for open gates.
+This page describes the running Linux composition and the implemented provider
+boundaries. See [Compatibility](compatibility.md) for feature status and the
+[implementation plan](implementation-plan.md) for open gates.
 
 ## Current composition
 
@@ -39,10 +38,6 @@ The workspace builds many libraries but distributes two product commands:
   evaluation, or Kubernetes Pod execution on Linux; Hyper-V-isolated Windows
   container execution; or disposable macOS VM execution, along with host
   admission, lease renewal, logging, cancellation, and cleanup.
-
-The browser preview is a smaller mode of `automata`; it does not start the
-durable services or runner listener. Production dependencies never fall back
-to preview behavior.
 
 The Windows provider creates one fresh container with explicit Hyper-V
 isolation, disabled networking, `ContainerUser`, a digest-qualified image,
@@ -144,8 +139,8 @@ credential proxy is introduced.
 The Results listener serves job-scoped log, artifact, result, cache, and OIDC
 boundaries. Cache lookup checks the current ref first, then the server-owned
 default branch read-only. Current policy expires entries after seven inactive
-days and applies a 10 GiB LRU quota per repository. Physical object collection
-and the cache management API remain planned.
+days and applies a 10 GiB LRU quota per repository. Artifact deletion and
+garbage collection, plus the cache management API, remain planned.
 
 ## Leases, retries, and cleanup
 
@@ -179,9 +174,9 @@ attempt records the negotiated snapshot.
 
 Service containers illustrate this rule. Registration may allow them only when
 an exact immutable service-proxy image is configured. The runner still removes
-the feature until its provider probe succeeds. The checked-in configuration
-omits the unpublished helper image, so the end-to-end service path remains
-open.
+the feature until its provider probe succeeds. This repository's PostgreSQL CI
+job exercises the complete service-container path; the example runner
+configuration omits the installation-specific service-proxy image digest.
 
 Workload OIDC is implemented at the issuer and Results boundary but is absent
 from supported runner inventories. External TLS, consistent keys across
@@ -230,17 +225,21 @@ same replay path. Rust retains authentication, authorization, and durable
 log-data authority. See
 [ADR 0005](architecture-decisions/0005-structured-execution-log-groups.md).
 
-## Planned providers and topology
+## Provider maturity and future topology
 
-Later gates add independent control-plane roles, multiple replicas,
-Kubernetes-based fleet reconciliation, Firecracker and KVM isolation, Kata,
-KubeVirt, and the broker, managed-egress, and production-acceptance layers for
-the one Windows Hyper-V-container route. The workspace
-already contains disposable macOS Virtualization.framework execution, the Rust
-Kubernetes sandbox adapter, its in-sandbox guest transport, a runner
-product-config variant that uses ambient Kubernetes client authentication, and
-the shared environment-profile startup admission. Fleet reconciliation and
-cluster provisioning remain deployment responsibilities.
+Rootless Podman is the available Linux path used by this repository. The
+workspace also contains disposable macOS Virtualization.framework execution,
+the Rust Kubernetes sandbox adapter, its in-sandbox guest transport, a runner
+product-config variant that uses ambient Kubernetes client authentication,
+the fixed-relay local Docker provider, and the Windows Hyper-V-container
+component. Their remaining qualification and deployment gates are listed in
+[Compatibility](compatibility.md).
+
+Later work adds independent control-plane roles, broader multi-replica
+deployment, Kubernetes fleet reconciliation, Firecracker and KVM isolation,
+Kata, KubeVirt, managed egress, and the broker and physical-host acceptance
+layers required by the Windows route. Cluster provisioning remains a
+deployment responsibility.
 
 Those providers share the scheduler, JobIR, and sandbox contracts. They are not
 available merely because their interfaces or roadmap entries exist. Their

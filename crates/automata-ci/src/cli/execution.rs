@@ -221,7 +221,7 @@ pub async fn execute_control_plane_command(
         }
         Command::Rerun(args) => execute_rerun_command(server_url, output, args).await,
         Command::Runner(args) => execute_runner_command(server_url, output, args).await,
-        Command::Server(_) | Command::Preview(_) | Command::Local(_) | Command::Internal(_) => {
+        Command::Server(_) | Command::Local(_) | Command::Internal(_) => {
             bail!("local, internal, and service commands cannot be sent to a running control plane")
         }
     }

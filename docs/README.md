@@ -1,87 +1,86 @@
-# Documentation
+# Automata documentation
 
-Automata is under active development. Each guide states what works now, what
-has only component-level coverage, and what remains planned.
+Automata runs GitHub Actions workflows on self-hosted infrastructure. Choose a
+page by the task you need to complete; compatibility claims and exact
+configuration values live in their owning references rather than being copied
+across guides.
 
-The quickest ways in are:
+## Start here
 
-| Goal | Start here |
+| Goal | Page |
 | --- | --- |
-| Build from source and inspect the interface | [Getting started](getting-started.md) |
-| Check support for a workflow feature | [Compatibility](compatibility.md) |
-| Prepare a Linux execution host | [Runner bootstrap](../crates/automata-ci-runner/config/README.md) |
-
-The [hosted UI demo](https://automata-ci.github.io/automata/) uses sample data.
-It does not connect to repositories or execute workflows.
+| Build Automata, inspect the UI, and check a workflow | [Getting started](getting-started.md) |
+| Find supported GitHub Actions syntax and runtime behavior | [Compatibility](compatibility.md) |
+| Configure the control plane | [`automata` deployment reference](../crates/automata-ci/README.md) |
+| Enroll and configure a runner | [Runner bootstrap](../crates/automata-ci-runner/config/README.md) |
+| See the system running | [Current Automata CI dashboard run](https://ci.automata-ci.com/automata-ci/automata/actions/runs/99ab4504-ef90-8aa1-ad24-34d1811b1c00) |
 
 ## Operate Automata
 
-- [Authentication and authorization](authentication.md) covers login, roles,
-  permissions, sessions, secrets, protected-environment reviews, and repository
-  visibility.
-- [Post-accept runtime-authority delivery](runtime-authority-delivery.md)
-  defines the value-free lease offer, exact delivery binding, durable custody,
-  restart, cancellation, and fail-closed contracts for workload credentials.
-- [Workflow reruns](workflow-reruns.md) documents the authenticated CLI,
-  idempotent retry identity, exact selections, and current admission limits.
-- [Prometheus and OpenMetrics](observability.md) defines the scrape endpoints,
-  metrics, protocol, and cardinality limits.
-- [macOS runner guide](platforms/macos.md) documents the disposable
-  Virtualization.framework implementation and its deployment gates.
-- [Windows runner isolation plan](platforms/windows.md) defines the
-  Hyper-V-isolated Windows container-only direction, current component scope,
-  threat model, Windows API choices, implementation phases, and release gates
-  that still block hostile Windows workloads.
-- [`automata` control plane](../crates/automata-ci/README.md) documents listener
-  configuration and secret references.
+- [Authentication and authorization](authentication.md): browser and CLI
+  login, roles, sessions, repository visibility, secrets, and protected
+  environment reviews.
+- [GitHub Checks](github-checks.md): Check Run identity, status projection,
+  annotations, links, retries, and recovery.
+- [Workflow reruns](workflow-reruns.md): whole-run, failed-job, and selected-job
+  reruns through the authenticated CLI.
+- [Runner enrollment and control-plane security](runner-control-plane-security-and-enrollment.md):
+  one-time tokens, certificate issuance, renewal, revocation, and audit state.
+- [Runtime authority delivery](runtime-authority-delivery.md): lease-bound
+  workload credentials and value-free durable state.
+- [Observability](observability.md): Prometheus/OpenMetrics endpoints, metrics,
+  cardinality limits, and failure diagnosis.
+- [macOS runners](platforms/macos.md) and [Windows runners](platforms/windows.md):
+  platform-specific isolation, host preparation, and qualification limits.
 
 ## Understand the system
 
-- [Architecture](architecture.md) explains the components, data flow, storage,
-  and trust boundaries.
-- [GitHub Checks](github-checks.md) records the experimental result projection,
-  Details, recovery, annotation, and rerun contracts.
-- [Compatibility](compatibility.md) lists the supported GitHub Actions subsets
-  and the evidence required for broader claims.
-- [GitHub Actions parity backlog](github-actions-parity-backlog.md) records the
-  dated documentation-to-implementation gap audit and implementation checklist.
+- [Architecture](architecture.md) explains the request path, workflow compiler,
+  storage model, leases, recovery, capabilities, and trust boundaries.
+- [Compatibility](compatibility.md) is the source of truth for supported events,
+  syntax, actions, services, artifacts, caches, credentials, and providers.
+- [Conformance testing](conformance-testing.md) defines how compatibility claims
+  are tested against GitHub Actions behavior.
+- [Architecture decisions](architecture-decisions/) record decisions that must
+  remain stable across implementations.
+- [Ubuntu 24.04 runner profile](../images/github-hosted-ubuntu-24.04-x64/README.md)
+  records the immutable image contract behind the Linux execution label.
+- [React SSR UI](../ui/README.md) explains the Rust HTTP and isolated React
+  rendering boundary.
+
+## Work on Automata
+
+- [Development](development.md): repository layout, builds, tests, fixtures,
+  PostgreSQL and object-storage lanes, frontend work, and distribution checks.
+- [Contributing](../CONTRIBUTING.md): issue selection, change requirements,
+  verification, and pull-request expectations.
+- [Documentation style](documentation-style.md): page types, terminology,
+  capability evidence, copy rules, and review checks.
+- [Releasing](releasing.md): release authority, versioning, artifacts,
+  attestations, publication order, and recovery.
+- [Security policy](../SECURITY.md): private vulnerability reporting and the
+  supported security-fix target.
+
+## Maintainer plans
+
+These pages track incomplete work. They are not user documentation and do not
+change the support status recorded in [Compatibility](compatibility.md).
+
+- [Implementation plan](implementation-plan.md)
+- [GitHub Actions parity backlog](github-actions-parity-backlog.md)
 - [GitHub Actions parity execution plan](github-actions-parity-execution-plan.md)
-  turns that audit into dependency-aware work packages for a team of four to
-  six developers.
-- [GitHub Actions parity integration-test plan](github-actions-parity/github-actions-parity-11-integration-tests.md)
-  coordinates the companion conformance repository, live GitHub differential
-  lanes, corpus graduation, and evidence handoff for those work packages.
-- [Implementation plan](implementation-plan.md) tracks completed foundations
-  and the acceptance gates that still block a release.
-- [Local installation and deployment roadmap](maintainers/roadmaps/local-installation.md)
-  records the accepted cross-platform evaluation architecture, merge
-  checkpoints, host qualification gates, and later deployment tracks.
-- [Ubuntu 24.04 execution profile](../images/github-hosted-ubuntu-24.04-x64/README.md)
-  describes the immutable runner image and its publication policy.
-- [React SSR UI](../ui/README.md) explains the build-time frontend and embedded
-  runtime boundary.
+- [Parity work packages](github-actions-parity/)
+- [Local installation roadmap](maintainers/roadmaps/local-installation.md)
+- [Provider platform and Forgejo roadmap](maintainers/roadmaps/provider-platform-and-forgejo.md)
 
-## Work on the project
-
-- [Development](development.md) covers builds, tests, fixtures, frontend work,
-  and external integration-test services.
-- [Contributing](../CONTRIBUTING.md) explains the change and review workflow.
-- [Documentation style](documentation-style.md) defines status labels,
-  terminology, and review checks for these pages.
-- [Releasing](releasing.md) describes repository setup, versioning,
-  publication, and retry behavior.
-- [Changelog](../CHANGELOG.md) records release history.
-- [Security policy](../SECURITY.md) gives the private reporting route.
-
-## Names used for distribution
+## Product names
 
 | Kind | Control plane | Runner |
 | --- | --- | --- |
 | Command | `automata` | `automata-runner` |
-| Planned crates.io package | `automata-ci` | `automata-ci-runner` |
-| Planned GHCR image | `ghcr.io/automata-ci/automata` | `ghcr.io/automata-ci/automata-runner` |
+| Workspace package | `automata-ci` | `automata-ci-runner` |
+| Planned container image | `ghcr.io/automata-ci/automata` | `ghcr.io/automata-ci/automata-runner` |
 
-The wider Rust workspace uses `automata-ci-*` package names and
-`automata_ci_*` crate identifiers. The shorter names are the commands users
-run. None of the planned distribution names is public until its registry shows
-an exact released version.
+The commands are available from a reviewed source checkout. Do not treat a
+package or image name in the release workflow as published until the matching
+version exists in its public registry.

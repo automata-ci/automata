@@ -50,4 +50,7 @@ script live in [`guest/`](guest/). See
 [`docs/platforms/macos.md`](../../docs/platforms/macos.md) for deployment and
 physical-host validation.
 
-Automata is pre-1.0 and not production-ready.
+The provider has component and product-process coverage. Its physical-host test
+is opt-in and requires a sealed template on Apple Silicon, so production
+qualification remains open. See the platform guide for the exact evidence and
+deployment gates.

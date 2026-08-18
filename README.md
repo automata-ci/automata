@@ -1,27 +1,77 @@
 # Automata
 
-Automata runs GitHub Actions workflows on infrastructure you control. It
-accepts repository events, compiles workflow YAML into an immutable execution
-plan, schedules jobs, runs them in isolated sandboxes, streams logs, stores
-artifacts and caches, and reports results through its web interface and GitHub
-Checks.
+Automata is a self-hosted CI system that runs GitHub Actions workflows on your
+own infrastructure. Its working Linux path receives GitHub events, compiles
+workflow YAML into immutable execution plans, schedules jobs, runs them in
+rootless Podman sandboxes, and publishes results to GitHub Checks and the
+Automata web interface.
 
-The end-to-end workflow path works from source. Automata has not published a
-release and has not completed its production-acceptance or full GitHub Actions
-conformance gates. Expect interfaces and deployment requirements to change,
-and check [GitHub Actions compatibility](docs/compatibility.md) before relying
-on a workflow feature.
+[Get started](docs/getting-started.md) ·
+[Compatibility](docs/compatibility.md) ·
+[Deploy](crates/automata-ci/README.md) ·
+[Configure runners](crates/automata-ci-runner/config/README.md) ·
+[Documentation](docs/README.md)
 
-Automata runs this repository's own CI. The
-[public dashboard](https://ci.automata-ci.com/automata-ci/automata/actions)
-shows push and pull-request runs, jobs, runner-redacted logs, and artifacts.
+Automata runs this repository's CI. The
+[current Automata dashboard run](https://ci.automata-ci.com/automata-ci/automata/actions/runs/99ab4504-ef90-8aa1-ad24-34d1811b1c00)
+is the run interface; its repository, log, and artifact visibility follows the
+installation's publication policy. The public
+[Checks for main commit `280cd4f9`](https://github.com/automata-ci/automata/commit/280cd4f9e685ac022c65a920ba24f4f019b0fd25/checks)
+record the aggregate Automata result and its Rust, PostgreSQL, and frontend
+jobs.
 
-## Run workflows
+## What Automata does
 
-You need Git, [rustup](https://rustup.rs/), and a native C/C++ build toolchain.
-The repository pins its Rust toolchain in `rust-toolchain.toml`. No public
-package or image has been published, so build both commands from a reviewed
-source checkout:
+```text
+GitHub event                    Browser and operator CLI
+     │                                    │
+     └────────────── automata ────────────┘
+                            │
+                     PostgreSQL and S3
+                            │
+                  fenced leases over mTLS
+                            │
+                    automata-runner
+                            │
+                   isolated job sandbox
+```
+
+- Uses a documented subset of GitHub Actions workflow syntax and rejects
+  unsupported behavior before scheduling.
+- Keeps mutable coordination in PostgreSQL and immutable workflow, action, log,
+  artifact, and cache data in S3-compatible storage.
+- Runs jobs through capability-aware, fenced leases. A delayed runner cannot
+  commit through an expired lease.
+- Authenticates runners with mutual TLS and keeps runner, provider, human, and
+  workload credentials in separate trust domains.
+- Records structured execution output with checkpointed replay and renders
+  repository, workflow, run, and job views without a Node.js production server.
+- Provides authenticated CLI operations for login, secrets, protected
+  environments, reruns, runner enrollment, and control-plane status.
+
+Automata workflow files live in `.ci/workflows`. Automata does not fall back to
+`.github/workflows` or send unsupported jobs to GitHub-hosted runners.
+
+## Product status
+
+The project is working software, but not every implemented component has the
+same operational evidence.
+
+| Status | Scope |
+| --- | --- |
+| Available | GitHub `push` and `pull_request` ingress; workflow admission; expressions and workflow concurrency used by this repository; per-job CPU and memory limits; exact-commit `actions/checkout`; `run:` steps; rootless Podman execution; service containers; fenced GitHub Checks; and server-rendered run and job pages. The [successful Checks on main commit `280cd4f9`](https://github.com/automata-ci/automata/commit/280cd4f9e685ac022c65a920ba24f4f019b0fd25/checks) exercise this path with Rust, PostgreSQL, and frontend jobs. |
+| Available locally | `automata local doctor`, `automata local check`, and the Linux-only sealed `local init`, read-only `local status`, and confirmed `local reset` custody commands. These commands inspect or prepare state; they do not run a local workflow. |
+| Work in progress | Broader dispatch and schedule paths, reusable workflows, artifact/cache client coverage, managed-secret delivery, workload OIDC, reruns, Buildx, Kubernetes, local Docker execution, and macOS VM execution have implemented boundaries with narrower evidence or missing deployment gates. |
+| Planned or unavailable | Public versioned distribution, standalone GitHub-provider onboarding, `automata local run`/`up`, production Windows runner deployment, container actions, job containers, deployment-environment syntax, and job-level concurrency. |
+
+The [compatibility reference](docs/compatibility.md) owns the detailed status,
+limits, and evidence for each feature. A parser, schema, or component test does
+not make a feature available through the complete product.
+
+## Try it from source
+
+Install Automata from a reviewed source checkout. You need Git,
+[rustup](https://rustup.rs/), and a native C/C++ toolchain.
 
 ```console
 git clone https://github.com/automata-ci/automata.git
@@ -32,217 +82,115 @@ automata --version
 automata-runner --version
 ```
 
-Then bring up the complete path:
+The [getting-started guide](docs/getting-started.md) continues with read-only
+host and workflow checks. The web interface is part of the complete
+`automata server` process and requires its production dependencies.
 
-1. Configure PostgreSQL, S3-compatible object storage, the Results service,
-   runner mutual TLS, and the GitHub App integration. The
-   [`automata` configuration reference](crates/automata-ci/README.md) owns the
-   required server options, secret references, listener boundaries, and
-   startup checks. Start `automata server` only after those inputs are in
-   place.
-2. Prepare a Linux execution host with rootless Podman, enroll its identity,
-   and start `automata-runner run --config /ABSOLUTE/PATH/runner.json` under
-   the same dedicated account that owns the configuration. Follow the
-   [runner bootstrap guide](crates/automata-ci-runner/config/README.md); the
-   runner performs mandatory host and sandbox admission before it accepts a
-   job.
-3. Put Automata workflows in `.ci/workflows`, register the repository through
-   the configured GitHub provider, and push or dispatch a supported event.
-   Automata admits the workflow, leases its jobs to eligible runners, and
-   publishes the results through its UI and GitHub Checks.
+## Write a workflow
 
-After the server starts, verify process and dependency readiness on the human
-listener:
+Connected repositories use the same job-and-step model as GitHub Actions. Save
+this as `.ci/workflows/ci.yml`:
+
+```yaml
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    resources:
+      limits:
+        cpu: "2"
+        memory: 4Gi
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Run tests
+        run: cargo test --locked
+```
+
+`resources` is an Automata extension. Pin remote actions to full commit SHAs;
+Automata resolves them into verified, content-addressed bundles. Check the
+[compatibility reference](docs/compatibility.md) before moving an existing
+workflow, because unsupported syntax fails closed.
+
+## Deploy the complete system
+
+A working installation has three external boundaries:
+
+1. The `automata` control plane, configured with PostgreSQL, S3-compatible
+   object storage, Results signing, runner TLS, and a GitHub App.
+2. One or more `automata-runner` processes, each enrolled once and configured
+   with one sandbox provider.
+3. A connected GitHub repository with workflows under `.ci/workflows`.
+
+The repository does not yet ship a standalone provider-onboarding command or a
+turnkey deployment bundle. The complete running path uses the private,
+mutually-authenticated shard-management API to install GitHub App and repository
+desired state. Do not write those records directly in PostgreSQL. This means a
+source checkout is useful for evaluation and controlled integration work, but
+first-user self-host onboarding is not complete.
+
+Start with the [`automata` deployment and configuration
+reference](crates/automata-ci/README.md), then follow the [runner bootstrap
+guide](crates/automata-ci-runner/config/README.md). The runner guide also
+explains why a normal dynamically linked Cargo build is not a valid Linux
+production probe payload. After the server starts, these endpoints distinguish
+a running process from a ready installation:
 
 ```console
-curl --fail http://127.0.0.1:8080/healthz
-curl --fail http://127.0.0.1:8080/readyz
+curl --fail https://ci.example.com/healthz
+curl --fail https://ci.example.com/readyz
 ```
 
-`/readyz` reports database, object-store, and autonomous-worker readiness. The
-server fails closed when a required dependency or credential is missing; it
-does not fall back to a preview process.
+`/readyz` checks the database, object store, and autonomous workers. The server
+exits or reports not-ready when a required dependency or credential is missing;
+it does not start a partial composition.
 
-## What works
+## Execution providers
 
-Automata's complete path connects these components:
+Rootless Podman on x86-64 Linux is the primary deployment path. The same runner
+also contains provider boundaries for Kubernetes Pods, fixed-relay local
+Docker, macOS Virtualization.framework VMs, and Hyper-V-isolated Windows
+containers. Those providers have different host, image, networking, and
+qualification requirements; do not infer support from a compiled module alone.
 
-```text
-GitHub events                 Browser and operator CLI
-      |                                 |
-      +------------ automata -----------+
-                         |
-                  PostgreSQL and S3
-                         |
-               fenced leases over mTLS
-                         |
-                 automata-runner
-                         |
-             configured sandbox provider
-```
+Use the [compatibility reference](docs/compatibility.md) for the supported
+workflow and provider matrix, and the platform guides for
+[macOS](docs/platforms/macos.md) and [Windows](docs/platforms/windows.md).
 
-The mainline source includes:
+## Documentation
 
-- authenticated GitHub App webhooks, source delivery, scheduled and manually
-  dispatched workflows, fenced Check Runs, and scoped repository credentials;
-- a loss-aware GitHub Actions workflow frontend with expressions, matrices,
-  dependencies, reusable-workflow foundations, JavaScript actions, composite
-  actions, workflow-level concurrency, outputs, and command files;
-- PostgreSQL-backed admission, scheduling, leases, reruns, runner enrollment,
-  authentication, authorization, managed-secret metadata, and result state;
-- S3-compatible immutable storage for workflow and action bundles, logs,
-  artifacts, and CacheService v2 data;
-- mutually authenticated runner sessions with fencing, certificate renewal,
-  cancellation, restart recovery, secret masking, and resumable live logs;
-- rootless Podman execution on Linux, plus experimental Kubernetes, local
-  Docker, macOS Virtualization.framework, and Windows Hyper-V-container
-  provider work at different qualification stages; and
-- a React interface rendered on the server inside a resource-limited WASI
-  component, with browser-side filtering and reconnecting live-log streams.
-
-These are not all at the same release stage. In particular:
-
-| Area | Status | Boundary |
-| --- | --- | --- |
-| Local host and workflow checks | Available | Read-only source-build inspection; no admission or execution |
-| GitHub-to-runner workflow execution | Experimental | Runs real workflows; operating requirements and supported syntax may change |
-| GitHub provider and Checks | Experimental | Authenticated ingress and result projection are composed; production acceptance remains open |
-| Workflow parsing and planning | Component complete | The supported subset feeds real execution; broader GitHub Actions parity remains open |
-| JavaScript and composite actions | Component complete | Exact-commit public actions and supported local composites have focused coverage |
-| Artifacts and CacheService v2 | Component complete | Durable upload, verified reads, signed downloads, and current/default-branch cache lookup have focused coverage |
-| Authentication and UI | Component complete | Tenant RBAC, management APIs, browser forms, repository visibility, and server-rendered run pages are composed |
-| Managed secrets and workload OIDC | Experimental | Implemented behind workflow-eligibility, deployment, and runner-capability gates |
-| Public packages and images | Not published | Build from a reviewed source checkout |
-
-The [compatibility table](docs/compatibility.md) is the source of truth for
-supported events, syntax, actions, services, artifacts, caches, secrets, OIDC,
-and sandbox providers. Notable gaps include container actions, job containers,
-deployment-environment syntax, and job-level concurrency; Automata rejects
-unsupported behavior instead of silently sending work to GitHub-hosted
-runners.
-
-Connected repositories keep Automata workflows under `.ci/workflows`.
-Automata does not use `.github/workflows` as an execution fallback, so a job is
-never routed to GitHub-hosted runners when Automata lacks a feature.
-
-## Commands
-
-The workspace builds two product commands:
-
-| Command | Purpose |
+| If you want to… | Read |
 | --- | --- |
-| `automata` | Run the control plane and perform local installation inspection and management, authentication, secret, environment-review, rerun, runner-management, and administration operations |
-| `automata-runner` | Enroll an execution host, inspect its capabilities, and execute leased jobs through one configured sandbox provider |
+| Evaluate Automata from a checkout | [Getting started](docs/getting-started.md) |
+| Check whether a workflow feature is supported | [GitHub Actions compatibility](docs/compatibility.md) |
+| Install and configure the control plane | [`automata` reference](crates/automata-ci/README.md) |
+| Enroll and run an execution host | [Runner bootstrap](crates/automata-ci-runner/config/README.md) |
+| Understand components and trust boundaries | [Architecture](docs/architecture.md) |
+| Operate authentication, secrets, and access | [Authentication and authorization](docs/authentication.md) |
+| Scrape metrics and diagnose failures | [Observability](docs/observability.md) |
+| Build or contribute to Automata | [Development](docs/development.md) and [Contributing](CONTRIBUTING.md) |
 
-### Inspect a local repository
+The [documentation index](docs/README.md) separates user guides, operator
+references, design explanations, and maintainer plans.
 
-`automata local doctor` checks the supported host tuple, Docker Engine, and
-Compose plugin without creating containers or local state:
+## Contributing and security
 
-```console
-automata local doctor
-automata local doctor --json
-```
+Focused bug fixes, compatibility fixtures, tests, documentation, and design
+feedback are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a
+pull request.
 
-From a Git worktree, `automata local check` analyzes an exact snapshot without
-network access, a GitHub token, workflow admission, or execution:
-
-```console
-automata local check .github/workflows/ci.yml
-```
-
-The selected workflow must be a direct `.github/workflows/*.yml` or `.yaml`
-file with `workflow_dispatch`. The command validates reachable local reusable
-workflows and reports required credentials without exposing values. See the
-[local installation boundary](crates/automata-ci-local/README.md) for the
-snapshot and platform limits.
-
-### Manage sealed local Docker custody
-
-On x86-64 Linux, `local init` seals an immutable installation into an explicit
-private state directory and twelve owner-specific Docker volumes:
-
-```console
-automata local init \
-  --state-directory /var/lib/automata-local/default \
-  --catalog-source file:/srv/automata-release/local-installation-catalog.json
-automata local status \
-  --state-directory /var/lib/automata-local/default --json
-automata local reset \
-  --state-directory /var/lib/automata-local/default --yes
-```
-
-Init accepts only the fixed local Docker socket and an operator-selected local
-release catalog with its exact catalog-declared sibling candidate. It verifies
-their canonical structure and digests, but does not independently authenticate
-their release provenance. Exact replay reattests the same state and Engine
-custody. Init generates no Compose document, invokes no Compose operation, and
-starts no service. The epoch binds the stable local-filesystem identity of the
-private state root and its held operation lock; copied, restored, or remounted
-custody is rejected.
-
-Status opens only an existing state directory under a shared, nonrepairing lock
-and reports `recorded_sealed` only when canonical host custody and the exact
-Engine identity, image representations, twelve volume labels, attachments, and
-managed-resource union agree. It never starts a helper or inspects bytes inside
-the volumes. Status and reset connect directly to the fixed Docker socket and do
-not depend on the Docker CLI, current context, `DOCKER_API_VERSION`, or Compose
-plugin; init and doctor retain their complete preflight. Reset never prompts and
-requires `--yes`. Before mutation it requires an authority-bound canonical
-epoch plus complete exact Engine custody. Once its topology-bound intent is
-durable, reset reconciles deletion even if cancellation arrives, removes safe
-fixed host records, and retains imported images, the state directory, and its
-original operation lock. Missing or retagged retained images do not prevent
-custody deletion. `automata local run`, `up`, and `down` are not present. See the
-[local installation boundary](crates/automata-ci-local/README.md) for the full
-custody and platform contract.
-
-## Architecture
-
-`automata` owns the human API, GitHub ingress, scheduler, Results gateway,
-runner control plane, and web interface. PostgreSQL is the authority for
-mutable state and coordination. S3-compatible storage holds immutable payloads;
-it is never used as a lock or queue.
-
-`automata-runner` accepts a job only after its configured provider passes host
-admission. Each attempt carries a lease ID, an increasing fencing token, and a
-negotiated capability snapshot. A delayed or restarted runner can replay an
-acknowledged operation, but it cannot commit through an expired lease.
-
-Local Docker is an explicit schema-8 runner evaluation path through the fixed
-installation relay; `automata local run` is not implemented yet.
-
-Workflow-specific behavior stops before scheduling. The GitHub frontend
-produces a logical plan, activation resolves run-dependent values and bounded
-matrix expansion, and the scheduler leases provider-neutral Job IR. Runners do
-not parse workflow YAML or evaluate provider syntax.
-
-Read the [architecture overview](docs/architecture.md) for the data flow,
-storage model, recovery behavior, protocol boundaries, and trust domains.
-
-## Develop Automata
-
-Automata is a Rust 2024 workspace. The embedded React interface uses Node.js
-only at build time.
-
-```console
-cargo build --workspace --locked
-cargo test -p automata-ci-core --locked
-```
-
-The full repository checks include Rust formatting, Clippy, unit and
-integration tests, documentation, workflow security checks, frontend tests,
-and production builds. Some suites require PostgreSQL, S3-compatible storage,
-Podman, platform-specific hosts, or extra build tools.
-
-- [Development guide](docs/development.md)
-- [Contributing guide](CONTRIBUTING.md)
-- [Documentation index](docs/README.md)
-- [Implementation and acceptance gates](docs/implementation-plan.md)
-- [Security policy](SECURITY.md)
-
-Report vulnerabilities through the private route in the security policy, not
-a public issue. Other contributions and compatibility reports are welcome
-under the [code of conduct](CODE_OF_CONDUCT.md).
-
-Automata is licensed under the [MIT License](LICENSE).
+Report vulnerabilities through the private route in [SECURITY.md](SECURITY.md),
+not a public issue. Automata is available under the [MIT License](LICENSE).
