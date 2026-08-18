@@ -270,6 +270,18 @@ impl ProviderResultWorker {
         }
     }
 
+    /// Returns the exact connection queue owned by this worker.
+    #[must_use]
+    pub const fn connection_id(&self) -> ProviderConnectionId {
+        self.connection_id
+    }
+
+    /// Returns this process-lifetime worker identity.
+    #[must_use]
+    pub const fn worker_id(&self) -> ProviderResultWorkerId {
+        self.worker_id
+    }
+
     /// Claims and publishes at most one desired result generation.
     ///
     /// # Errors
