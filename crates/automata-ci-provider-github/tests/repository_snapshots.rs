@@ -346,9 +346,8 @@ async fn public_exact_revision_uses_the_immutable_archive_origin_without_api_req
 }
 
 #[tokio::test]
-async fn public_exact_source_proves_identity_then_uses_the_immutable_archive_origin() {
+async fn public_exact_source_uses_the_immutable_archive_origin_without_api_requests() {
     let fixture = FixtureServer::spawn().await;
-    fixture.enqueue(repository_response(42, "automata-ci/automata"));
     fixture.enqueue(ResponseSpec::binary(
         StatusCode::OK,
         "application/x-gzip",
@@ -372,14 +371,12 @@ async fn public_exact_source_proves_identity_then_uses_the_immutable_archive_ori
     assert_eq!(source.revision(), &revision);
     assert_eq!(source.size(), 8);
     let requests = fixture.requests();
-    assert_eq!(requests.len(), 2);
-    assert_eq!(requests[0].uri, "/api/repos/automata-ci/automata");
+    assert_eq!(requests.len(), 1);
     assert_eq!(
-        requests[1].uri,
+        requests[0].uri,
         format!("/automata-ci/automata/legacy.tar.gz/{SHA}")
     );
     assert!(!requests[0].headers.contains_key("authorization"));
-    assert!(!requests[1].headers.contains_key("authorization"));
 }
 
 #[tokio::test]

@@ -284,7 +284,6 @@ impl RepositorySource for GithubHttpEndpoint {
         &self,
         request: RepositorySourceRequest<'_>,
     ) -> Result<RepositorySourceArchive, ScmError> {
-        self.prove_repository_identity(&request).await?;
         if request.credential().is_none() {
             let location =
                 self.exact_public_archive_location(request.repository(), request.revision())?;
@@ -298,6 +297,7 @@ impl RepositorySource for GithubHttpEndpoint {
                 bytes,
             ));
         }
+        self.prove_repository_identity(&request).await?;
         self.prove_exact_revision(&request).await?;
         let location = self.exact_archive_redirect(&request).await?;
         let bytes = self
