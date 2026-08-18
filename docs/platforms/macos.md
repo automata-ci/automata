@@ -376,11 +376,12 @@ When repository-scoped Apple Silicon capacity is provisioned, it must compile
 and lint the Rust and Swift components, inspect the helper entitlement, and
 exercise protocol/configuration failure paths. Before deployment, that physical
 runner must also execute the ignored
-`macos_vm_runner_process_e2e::shipped_runner_process_executes_a_claimed_isolated_shell_job`
+`macos_vm_runner_process_e2e::shipped_runner_process_executes_a_claimed_isolated_job_with_action_runtimes`
 test with the eight `AUTOMATA_MACOS_VM_*` artifact and storage
 variables. That test verifies no Ethernet device, no host helper path,
-memory/vCPU sizing, the sealed process ceiling, shell/output behavior, and
-clone cleanup. Deployment qualification must additionally inject
+memory/vCPU sizing, the sealed process ceiling, configured Node 20 and Node 24
+admission and execution, shell/output behavior, and clone cleanup. Deployment
+qualification must additionally inject
 process-ceiling exhaustion, pipe loss, and helper crashes, reopen the journal,
 and run repeated clean jobs.
 
@@ -397,7 +398,7 @@ AUTOMATA_MACOS_VM_STORAGE_ROOT=/Volumes/AutomataVM/e2e-state \
 AUTOMATA_MACOS_VM_STORAGE_VOLUME_UUID=<uppercase-volume-uuid> \
 AUTOMATA_MACOS_VM_STORAGE_QUOTA_BYTES=107374182400 \
 cargo test --locked -p automata-ci-runner --test runner -- \
-  macos_vm_runner_process_e2e::shipped_runner_process_executes_a_claimed_isolated_shell_job \
+  macos_vm_runner_process_e2e::shipped_runner_process_executes_a_claimed_isolated_job_with_action_runtimes \
   --ignored --nocapture --test-threads=1
 ```
 
