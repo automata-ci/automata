@@ -35,7 +35,7 @@
 }
 
 .rbac-management__navigation a[aria-current="page"] {
-  color: var(--accent-fg);
+  color: var(--accent-fg-strong);
   background: var(--accent-muted);
   font-weight: 600;
 }
@@ -64,7 +64,7 @@
 
 .rbac-notice--conflict,
 .rbac-notice--forbidden {
-  color: var(--danger-fg);
+  color: var(--danger-fg-strong);
 }
 
 .rbac-native-form,

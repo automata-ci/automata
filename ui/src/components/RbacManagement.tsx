@@ -1,4 +1,3 @@
-import { useEffect, useRef, useState } from "react";
 import type { PropsWithChildren, ReactNode } from "react";
 import type {
   ManagedUserStatus,
@@ -9,6 +8,8 @@ import type {
   ShellModel,
 } from "../models";
 import { Shell } from "./Shell";
+import { RbacTableRegionView } from "./RbacTableRegionView";
+import { useOverflowRegion } from "../hooks/useOverflowRegion";
 
 export interface RbacManagementProps extends PropsWithChildren {
   readonly shell: ShellModel;
@@ -99,40 +100,15 @@ export function RbacTableRegion({
   labelledBy,
   children,
 }: RbacTableRegionProps) {
-  const regionRef = useRef<HTMLDivElement>(null);
-  const [isOverflowing, setIsOverflowing] = useState(false);
-
-  useEffect(() => {
-    const region = regionRef.current;
-    if (region === null) return;
-
-    const updateOverflow = () => {
-      setIsOverflowing(region.scrollWidth > region.clientWidth);
-    };
-    updateOverflow();
-    if (typeof ResizeObserver === "undefined") {
-      window.addEventListener("resize", updateOverflow);
-      return () => window.removeEventListener("resize", updateOverflow);
-    }
-
-    const observer = new ResizeObserver(updateOverflow);
-    observer.observe(region);
-    if (region.firstElementChild !== null) {
-      observer.observe(region.firstElementChild);
-    }
-    return () => observer.disconnect();
-  }, []);
-
+  const { isOverflowing, regionRef } = useOverflowRegion();
   return (
-    <div
-      aria-labelledby={labelledBy}
-      className="rbac-table-region"
-      ref={regionRef}
-      role="region"
-      tabIndex={isOverflowing ? 0 : undefined}
+    <RbacTableRegionView
+      isOverflowing={isOverflowing}
+      labelledBy={labelledBy}
+      regionRef={regionRef}
     >
       {children}
-    </div>
+    </RbacTableRegionView>
   );
 }
 

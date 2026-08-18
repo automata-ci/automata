@@ -1,5 +1,5 @@
 import { App } from "./App";
-import { THEME_BOOTSTRAP_SCRIPT } from "./components/useThemePreference";
+import { THEME_BOOTSTRAP_SCRIPT } from "./hooks/useThemePreference";
 import type { RenderRequest } from "./models";
 import { PAGE_MODEL_ELEMENT_ID, serializeForHtml } from "./serialization";
 

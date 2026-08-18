@@ -252,11 +252,16 @@
 .log-group__empty,
 .log-empty {
   padding: 18px 16px;
-  color: var(--log-muted);
+  color: var(--fg-muted);
   font-family: var(--font-sans);
   font-size: 13px;
 }
 
 .log-group__empty {
   grid-column: 1 / -1;
+  color: var(--log-muted);
+}
+
+.log-groups > .log-empty {
+  color: var(--log-muted);
 }
