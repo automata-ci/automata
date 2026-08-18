@@ -54,7 +54,6 @@ const REPLAY_RECEIPT_SQL: &str = r"
            subject.workflow_rerun_run_id AS check_origin_run_id,
            subject.workflow_run_id AS check_workflow_run_id,
            subject.head_sha AS check_subject_head_sha,
-           outbox.subject_id AS outbox_subject_id,
            run_evidence.run_id AS run_evidence_run_id,
            run_evidence.github_check_subject_id AS run_evidence_subject_id,
            run_evidence.github_check_head_sha AS run_evidence_head_sha,
@@ -85,8 +84,6 @@ const REPLAY_RECEIPT_SQL: &str = r"
     LEFT JOIN github_check_subjects AS subject
       ON subject.tenant_id = check_evidence.tenant_id
      AND subject.id = check_evidence.github_check_subject_id
-    LEFT JOIN github_check_projection_outbox AS outbox
-      ON outbox.subject_id = subject.id
     LEFT JOIN github_workflow_rerun_subject_evidence AS run_evidence
       ON run_evidence.tenant_id = check_evidence.tenant_id
      AND run_evidence.operation_id = check_evidence.operation_id
@@ -372,7 +369,7 @@ async fn resolve_github_check_targets(
                   AND subject.github_repository_id = $4
                   AND subject.github_app_id = $5
                   AND subject.head_sha = $6
-                  AND subject.subject_kind = 'workflow'
+                  AND subject.subject_kind = 'job'
                   AND subject.workflow_run_id IS NOT NULL
                   AND subject.desired_state = 'completed'
                   AND outbox.external_suite_id = $7
@@ -961,10 +958,6 @@ fn validate_replay_check_evidence(
             .map_err(operation_error)?
             != Some(evidence.run_id)
         || row
-            .try_get::<Option<Uuid>, _>("outbox_subject_id")
-            .map_err(operation_error)?
-            != evidence.subject_id
-        || row
             .try_get::<Option<Uuid>, _>("run_evidence_run_id")
             .map_err(operation_error)?
             != Some(evidence.run_id)
@@ -1144,11 +1137,12 @@ async fn lock_source_run(
                        WHERE subject.desired_state = 'completed'
                          AND subject.desired_conclusion IS NOT NULL
                          AND subject.terminal_cause IS NOT NULL
-                         AND subject.desired_revision = 3
+                         AND subject.desired_revision IN (2, 3)
                    )::BIGINT AS terminal_count
-            FROM github_check_subjects AS subject
-            WHERE subject.workflow_run_id = run.id
-              AND subject.subject_kind = 'workflow'
+            FROM github_workflow_run_manifest_origins AS origin
+            JOIN github_check_subjects AS subject ON subject.id = origin.github_check_subject_id
+             AND (subject.tenant_id, subject.repository_id) = (origin.tenant_id, origin.repository_id)
+            WHERE origin.run_id = run.id
         ) AS check_projection ON TRUE
         WHERE repository.tenant_id = $1
           AND run.repository_id = $2

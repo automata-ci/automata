@@ -435,12 +435,14 @@ rather than silently generalized. Rotations advance the relevant configuration,
 verifier, manifest, policy, and authority revisions rather than reusing an old
 identity with changed bytes.
 
-The repository ruleset must require `<configured Check base> / required` from
-the Automata GitHub App. The bare configured base is never published. Workflow
-and auxiliary event Checks have separate derived names and cannot satisfy the
-required context. Change the App capability first, deploy the new runtime and
-migration, then change the ruleset from the old context to the derived required
-context; the transition intentionally fails closed and has no compatibility alias.
+The repository ruleset must require the exact configured aggregate Check name
+from the Automata GitHub App (`Automata` in production). Only revision-testing
+events publish that aggregate. Workflow lifecycle and non-revision event
+bookkeeping remain internal; concrete jobs are the only other Check Runs. The
+aggregate name is reserved and cannot also be an evaluated job display name.
+Deploy the runtime and migration, change the configured Check name, and then
+change the ruleset to the same exact name. The transition intentionally fails
+closed and has no compatibility alias.
 
 ## Repository publication
 

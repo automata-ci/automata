@@ -1215,8 +1215,6 @@ async fn load_exact_scheduled_check(
            AND evidence.provider_connection_id = subject.provider_connection_id
            AND evidence.schedule_fire_id = subject.schedule_fire_id
            AND evidence.github_check_subject_id = subject.id
-          JOIN github_check_projection_outbox AS outbox
-            ON outbox.subject_id = subject.id
          WHERE subject.origin_kind = 'scheduled_fire'
            AND subject.provider_delivery_id IS NULL
            AND subject.schedule_fire_id = $1
@@ -1916,11 +1914,11 @@ async fn supersede_current_registry(
     Ok(())
 }
 
-// Logical admission links the workflow Check and records immutable run
+// Logical admission links the internal workflow root and records immutable run
 // evidence before the schedule worker concludes its fire. A crash between
 // those commits leaves the fire claimed even though the run is authoritative.
 // Replacing the registry in that window would delete the runtime row needed to
-// complete the admitted fire and could misclassify its live Check as failed.
+// complete the admitted fire and could misclassify its live execution as failed.
 // The current-registry row is already locked exclusively by the caller, while
 // admission takes a shared lock on it, so this check cannot race a new link.
 async fn reject_supersession_during_admission_completion(

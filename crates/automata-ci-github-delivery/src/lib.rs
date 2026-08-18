@@ -1132,7 +1132,7 @@ fn delivery_check_kind(
             if connection.default_branch_ref() == Some(push.git_ref().full()) {
                 GithubDeliveryCheckKind::Required
             } else {
-                GithubDeliveryCheckKind::Auxiliary
+                GithubDeliveryCheckKind::JobsOnly
             },
         ),
         VerifiedGithubWebhook::PullRequest(pull_request) => Ok(
@@ -1144,14 +1144,14 @@ fn delivery_check_kind(
             ) {
                 GithubDeliveryCheckKind::Required
             } else {
-                GithubDeliveryCheckKind::Auxiliary
+                GithubDeliveryCheckKind::JobsOnly
             },
         ),
         VerifiedGithubWebhook::MergeGroup(merge_group) => Ok(
             if merge_group.action() == GithubMergeGroupAction::ChecksRequested {
                 GithubDeliveryCheckKind::Required
             } else {
-                GithubDeliveryCheckKind::Auxiliary
+                GithubDeliveryCheckKind::JobsOnly
             },
         ),
         _ => Err(GithubDeliveryIngressError::InvariantViolation),

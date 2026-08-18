@@ -1,12 +1,8 @@
-use std::{
-    fmt::Write as _,
-    num::{NonZeroU16, NonZeroU64},
-};
+use std::num::{NonZeroU16, NonZeroU64};
 
 use async_trait::async_trait;
 use automata_ci_blob::BlobDescriptor;
 use automata_ci_core::{GitObjectId, JobId, RunId, Sha256Digest, UnixMillis};
-use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -144,76 +140,6 @@ impl GithubCheckName {
         }
         let bounded = value[..end].trim_end();
         Self::new(bounded.to_owned())
-    }
-
-    /// Derives a distinct, bounded Check name for one discovered workflow.
-    ///
-    /// The configured name remains reserved for the delivery-wide aggregate.
-    /// Long paths retain a full SHA-256 suffix so separate workflows cannot
-    /// accidentally satisfy the aggregate's required status context.
-    ///
-    /// # Errors
-    ///
-    /// Rejects empty or control-bearing workflow paths.
-    pub fn from_workflow_path(
-        aggregate: &Self,
-        workflow_path: &str,
-    ) -> Result<Self, GithubCheckValueError> {
-        if workflow_path.is_empty() || workflow_path.chars().any(char::is_control) {
-            return Err(GithubCheckValueError::InvalidCheckName);
-        }
-        let projected = format!("{} / {workflow_path}", aggregate.as_str());
-        if projected.len() <= MAX_CHECK_NAME_BYTES {
-            return Self::new(projected);
-        }
-
-        let mut digest = String::with_capacity(64);
-        for byte in Sha256::digest(workflow_path.as_bytes()) {
-            write!(&mut digest, "{byte:02x}").expect("writing to a String is infallible");
-        }
-        let suffix = format!(" / workflow-{digest}");
-        let mut prefix_end = MAX_CHECK_NAME_BYTES - suffix.len();
-        while !aggregate.as_str().is_char_boundary(prefix_end) {
-            prefix_end -= 1;
-        }
-        let prefix = aggregate.as_str()[..prefix_end].trim_end();
-        Self::new(format!("{prefix}{suffix}"))
-    }
-
-    /// Derives the required aggregate name for revision-testing events.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error only if an already-validated configured base cannot be
-    /// projected within GitHub's Check-name byte ceiling.
-    pub fn for_required_delivery(configured_base: &Self) -> Result<Self, GithubCheckValueError> {
-        Self::with_suffix(configured_base, " / required")
-    }
-
-    /// Derives the fixed name used by delivery aggregates that must never
-    /// satisfy the repository's required status context.
-    ///
-    /// Delivery activities outside the revision-testing set retain a visible
-    /// aggregate under this distinct bounded name.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error only if an already-validated configured name cannot be
-    /// projected within GitHub's Check-name byte ceiling.
-    pub fn for_auxiliary_delivery(configured_base: &Self) -> Result<Self, GithubCheckValueError> {
-        Self::with_suffix(configured_base, " / auxiliary event")
-    }
-
-    fn with_suffix(configured_base: &Self, suffix: &str) -> Result<Self, GithubCheckValueError> {
-        let mut prefix_end = configured_base
-            .as_str()
-            .len()
-            .min(MAX_CHECK_NAME_BYTES - suffix.len());
-        while !configured_base.as_str().is_char_boundary(prefix_end) {
-            prefix_end -= 1;
-        }
-        let prefix = configured_base.as_str()[..prefix_end].trim_end();
-        Self::new(format!("{prefix}{suffix}"))
     }
 
     /// Returns the validated provider-facing name.

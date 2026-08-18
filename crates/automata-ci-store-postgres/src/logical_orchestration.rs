@@ -1334,7 +1334,10 @@ async fn link_github_check_event_control(
     control_id: EventControlSubjectId,
     run_id: Option<RunId>,
 ) -> Result<(), LogicalWorkflowAdmissionStoreError> {
-    if matches!(origin, EventSubjectOrigin::ManualOperation(_)) {
+    if matches!(
+        origin,
+        EventSubjectOrigin::ManualOperation(_) | EventSubjectOrigin::ProviderDelivery(_)
+    ) {
         return Ok(());
     }
     let linked = if let Some(run_id) = run_id {

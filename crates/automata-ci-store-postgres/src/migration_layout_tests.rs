@@ -245,6 +245,10 @@ const CANONICAL_MIGRATIONS: &[(&str, &str)] = &[
         "0060_provider_installation_binding_generation.sql",
         "ce1b6174a6e19b1b67a090dbaeb3dfbd08b16bdd3c6253ec0be60a64ec9894f67cee662076ba3307a52f2ecc01b74573",
     ),
+    (
+        "0061_job_check_topology.sql",
+        "befdac4d4754eb1b39e6954c95b012b67797fccb7baa248a53c0559162d295b38069f41e78f0e724ded395df965c5e58",
+    ),
 ];
 
 const BASELINE_MIGRATION_COUNT: u32 = 26;
@@ -438,6 +442,40 @@ fn provider_installation_binding_generation_is_independent_and_durable() {
         assert!(
             source.contains(required),
             "provider installation-binding migration lost required contract: {required}"
+        );
+    }
+}
+
+#[test]
+fn github_check_projection_is_one_gate_plus_jobs() {
+    let source = include_str!("../migrations/0061_job_check_topology.sql");
+
+    for required in [
+        "CHECK (aggregate_check_kind IN ('required', 'jobs_only'))",
+        "CREATE OR REPLACE FUNCTION automata_create_github_check_projection_outbox()",
+        "NEW.subject_kind = 'job'",
+        "evidence.github_check_subject_id = NEW.id",
+        "evidence.aggregate_check_kind = 'required'",
+        "NEW.id <> authority.github_check_subject_id",
+        "NEW.check_name IS DISTINCT FROM authority.check_name",
+        "github_check_subjects_job_name_reserved",
+        "DROP FUNCTION automata_github_auxiliary_check_name(TEXT)",
+        "DROP FUNCTION automata_github_required_check_name(TEXT)",
+        "DROP FUNCTION automata_github_workflow_check_name(TEXT, TEXT)",
+    ] {
+        assert!(
+            source.contains(required),
+            "job-only Check topology migration lost contract: {required}"
+        );
+    }
+
+    for forbidden in [
+        "OR NEW.origin_kind IN ('scheduled_fire', 'workflow_rerun')",
+        "ELSE automata_github_workflow_check_name(",
+    ] {
+        assert!(
+            !source.contains(forbidden),
+            "job-only Check topology retained a workflow projection: {forbidden}"
         );
     }
 }

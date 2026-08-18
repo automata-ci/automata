@@ -1958,7 +1958,7 @@ async fn generic_ingress_persists_typed_event_coordinates_without_event_kind_ali
             "delivery-feature-push-v1",
             GithubAuthenticatedEventKind::Push,
             "refs/heads/feature/topic",
-            GithubDeliveryCheckKind::Auxiliary,
+            GithubDeliveryCheckKind::JobsOnly,
         ),
         (
             pull_request_body("opened", false),
@@ -1974,7 +1974,7 @@ async fn generic_ingress_persists_typed_event_coordinates_without_event_kind_ali
             "delivery-pr-metadata-v1",
             GithubAuthenticatedEventKind::PullRequest,
             "refs/pull/7/merge",
-            GithubDeliveryCheckKind::Auxiliary,
+            GithubDeliveryCheckKind::JobsOnly,
         ),
         (
             merge_group_body(),

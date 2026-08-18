@@ -92,16 +92,23 @@ pub(super) async fn insert_github_job_check_subject(
     attempt_id: AttemptId,
     queued_at: UnixMillis,
 ) -> Result<(), GithubJobCheckInsertError> {
-    let job = sqlx::query_as::<_, (Uuid, String, bool)>(
+    let job = sqlx::query_as::<_, (Uuid, String, Option<Uuid>, Option<String>)>(
         r"
         SELECT job.run_id, job.display_name,
-               EXISTS (
-                   SELECT 1
-                   FROM github_check_subjects AS parent
-                   WHERE parent.workflow_run_id = job.run_id
-                     AND parent.subject_kind = 'workflow'
-               )
+               authority.github_check_subject_id, authority.aggregate_check_name
         FROM jobs AS job
+        LEFT JOIN LATERAL (
+            SELECT origin.github_check_subject_id,
+                   manifest.check_name AS aggregate_check_name
+            FROM github_workflow_run_manifest_origins AS origin
+            JOIN github_provider_manifest_revisions AS manifest
+              ON manifest.tenant_id = origin.tenant_id
+             AND manifest.repository_id = origin.repository_id
+             AND manifest.provider_connection_id = origin.provider_connection_id
+             AND manifest.manifest_revision = origin.provider_manifest_revision
+             AND manifest.manifest_digest = origin.provider_manifest_digest
+            WHERE origin.run_id = job.run_id
+        ) AS authority ON TRUE
         WHERE job.id = $1
         FOR KEY SHARE OF job
         ",
@@ -113,12 +120,22 @@ pub(super) async fn insert_github_job_check_subject(
     .ok_or(GithubJobCheckInsertError::CorruptData(
         "GitHub job Check has no durable job",
     ))?;
-    if !job.2 {
+    let Some(parent_id) = job.2 else {
         return Ok(());
-    }
+    };
     let check_name = GithubCheckName::from_job_display_name(&job.1).map_err(|_| {
         GithubJobCheckInsertError::CorruptData("job display name is not Check-safe")
     })?;
+    let Some(aggregate_check_name) = job.3.as_deref() else {
+        return Err(GithubJobCheckInsertError::CorruptData(
+            "GitHub job Check has no aggregate-name authority",
+        ));
+    };
+    if aggregate_check_name == check_name.as_str() {
+        return Err(GithubJobCheckInsertError::CorruptData(
+            "job display name collides with the reserved aggregate Check name",
+        ));
+    }
     let subject_id = Uuid::new_v4();
     let subject_key = format!("job/{}/attempt/{}", job_id.as_uuid(), attempt_id.as_uuid());
     let external_id = format!("automata-check:{subject_id}");
@@ -131,7 +148,7 @@ pub(super) async fn insert_github_job_check_subject(
             head_sha, check_name, external_id, created_at_ms,
             desired_updated_at_ms, origin_kind, schedule_fire_id,
             workflow_rerun_run_id, subject_kind, parent_subject_id,
-            job_id, job_attempt_id
+            job_id, job_attempt_id, workflow_run_id, linked_at_ms
         )
         SELECT $1, parent.tenant_id, parent.repository_id,
                parent.provider_delivery_id, $2,
@@ -139,9 +156,9 @@ pub(super) async fn insert_github_job_check_subject(
                parent.github_repository_id, parent.github_repository_name,
                parent.github_app_id, parent.head_sha, $3, $4, $5, $5,
                parent.origin_kind, parent.schedule_fire_id,
-               parent.workflow_rerun_run_id, 'job', parent.id, $6, $7
+               parent.workflow_rerun_run_id, 'job', parent.id, $6, $7, $9, $5
         FROM github_check_subjects AS parent
-        WHERE parent.workflow_run_id = $8
+        WHERE parent.id = $8
           AND parent.subject_kind = 'workflow'
         RETURNING id
         ",
@@ -153,6 +170,7 @@ pub(super) async fn insert_github_job_check_subject(
     .bind(queued_at.get())
     .bind(job_id.as_uuid())
     .bind(attempt_id.as_uuid())
+    .bind(parent_id)
     .bind(job.0)
     .fetch_optional(&mut **transaction)
     .await
@@ -164,27 +182,6 @@ pub(super) async fn insert_github_job_check_subject(
     if inserted != subject_id {
         return Err(GithubJobCheckInsertError::CorruptData(
             "GitHub job Check identity changed on insert",
-        ));
-    }
-    let linked = sqlx::query(
-        r"
-        UPDATE github_check_subjects
-        SET workflow_run_id = $2, linked_at_ms = $3
-        WHERE id = $1
-          AND subject_kind = 'job'
-          AND workflow_run_id IS NULL
-          AND linked_at_ms IS NULL
-        ",
-    )
-    .bind(subject_id)
-    .bind(job.0)
-    .bind(queued_at.get())
-    .execute(&mut **transaction)
-    .await
-    .map_err(GithubJobCheckInsertError::Operation)?;
-    if linked.rows_affected() != 1 {
-        return Err(GithubJobCheckInsertError::CorruptData(
-            "GitHub job Check did not link exactly once",
         ));
     }
     Ok(())
@@ -1480,13 +1477,11 @@ pub(super) fn decode_subject(
         job_attempt_id,
         workflow_run_id,
     ) {
-        // Scheduled Checks and the delivery aggregate are externally
-        // claimable before logical admission. GitHub includes details_url in
-        // exact create reconciliation, so those roots retain the repository
-        // target after linkage. An all-direct per-workflow Check is inserted
-        // and linked inside the admission transaction, and a rerun Check is
-        // likewise not visible until its run link commits; their first
-        // claimable identity can therefore use the exact workflow-run target.
+        // The required delivery aggregate is externally claimable before
+        // logical admission and therefore retains its repository target.
+        // Schedule and rerun roots are internal lifecycle authority; their
+        // target is decoded only for durable receipts because no outbox row
+        // projects them to GitHub.
         ("workflow", None, None, None, workflow_run_id) => match identity.origin() {
             GithubCheckSubjectOrigin::ScheduledFire(_) => GithubCheckDetailsTarget::Repository,
             GithubCheckSubjectOrigin::ProviderDelivery(_)
