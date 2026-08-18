@@ -56,21 +56,21 @@ CREATE TRIGGER github_check_subjects_update_guard BEFORE UPDATE ON github_check_
 
 CREATE TRIGGER github_check_subjects_wake_projection AFTER UPDATE ON github_check_subjects FOR EACH ROW EXECUTE FUNCTION automata_wake_github_check_projection();
 
-CREATE TRIGGER workload_oidc_authorities_00_historical_standard_profile BEFORE INSERT ON workload_oidc_authorities FOR EACH ROW EXECUTE FUNCTION automata_require_standard_workload_oidc_profile();
+CREATE TRIGGER github_oidc_authorities_00_historical_standard_profile BEFORE INSERT ON github_oidc_authorities FOR EACH ROW EXECUTE FUNCTION automata_require_standard_github_oidc_profile();
 
-CREATE TRIGGER workload_oidc_authorities_insert_guard BEFORE INSERT ON workload_oidc_authorities FOR EACH ROW EXECUTE FUNCTION automata_validate_workload_oidc_authority_insert();
+CREATE TRIGGER github_oidc_authorities_insert_guard BEFORE INSERT ON github_oidc_authorities FOR EACH ROW EXECUTE FUNCTION automata_validate_github_oidc_authority_insert();
 
-CREATE TRIGGER workload_oidc_authorities_reject_update BEFORE DELETE OR UPDATE ON workload_oidc_authorities FOR EACH ROW EXECUTE FUNCTION automata_reject_workload_oidc_authority_mutation();
+CREATE TRIGGER github_oidc_authorities_reject_update BEFORE DELETE OR UPDATE ON github_oidc_authorities FOR EACH ROW EXECUTE FUNCTION automata_reject_github_oidc_authority_mutation();
 
-CREATE TRIGGER workload_oidc_issuance_slots_reject_delete BEFORE DELETE ON workload_oidc_issuance_slots FOR EACH ROW EXECUTE FUNCTION automata_reject_workload_oidc_issuance_delete();
+CREATE TRIGGER github_oidc_issuance_slots_reject_delete BEFORE DELETE ON github_oidc_issuance_slots FOR EACH ROW EXECUTE FUNCTION automata_reject_github_oidc_issuance_delete();
 
-CREATE TRIGGER workload_oidc_issuance_slots_replace BEFORE UPDATE ON workload_oidc_issuance_slots FOR EACH ROW EXECUTE FUNCTION automata_enforce_workload_oidc_issuance_replacement();
+CREATE TRIGGER github_oidc_issuance_slots_replace BEFORE UPDATE ON github_oidc_issuance_slots FOR EACH ROW EXECUTE FUNCTION automata_enforce_github_oidc_issuance_replacement();
 
-CREATE TRIGGER workload_oidc_issuance_slots_validate BEFORE INSERT OR UPDATE ON workload_oidc_issuance_slots FOR EACH ROW EXECUTE FUNCTION automata_validate_workload_oidc_issuance_slot();
+CREATE TRIGGER github_oidc_issuance_slots_validate BEFORE INSERT OR UPDATE ON github_oidc_issuance_slots FOR EACH ROW EXECUTE FUNCTION automata_validate_github_oidc_issuance_slot();
 
-CREATE TRIGGER workload_oidc_key_deadlines_monotonic BEFORE UPDATE ON workload_oidc_key_deadlines FOR EACH ROW EXECUTE FUNCTION automata_enforce_workload_oidc_key_deadline();
+CREATE TRIGGER github_oidc_key_deadlines_monotonic BEFORE UPDATE ON github_oidc_key_deadlines FOR EACH ROW EXECUTE FUNCTION automata_enforce_github_oidc_key_deadline();
 
-CREATE TRIGGER workload_oidc_key_deadlines_reject_delete BEFORE DELETE ON workload_oidc_key_deadlines FOR EACH ROW EXECUTE FUNCTION automata_reject_workload_oidc_issuance_delete();
+CREATE TRIGGER github_oidc_key_deadlines_reject_delete BEFORE DELETE ON github_oidc_key_deadlines FOR EACH ROW EXECUTE FUNCTION automata_reject_github_oidc_issuance_delete();
 
 CREATE TRIGGER github_provider_delivery_evidence_00_authenticated_event BEFORE INSERT ON github_provider_delivery_evidence FOR EACH ROW EXECUTE FUNCTION automata_github_authenticated_event_exact();
 
