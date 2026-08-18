@@ -106,6 +106,7 @@ impl DeliveryAdapter for FakeAdapter {
                 instance_id,
                 ExternalRepositoryId::new("repository-42").expect("repository ID"),
             ),
+            automata_ci_provider::ExternalSubjectId::new("owner-42").expect("owner ID"),
             ProviderRepositoryPath::new("owner/repository").expect("repository path"),
             RepositoryVisibility::Private,
         );

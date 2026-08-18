@@ -129,8 +129,7 @@ fn request_from_compilation(
         AdmissionRepositoryCoordinates::new(
             "github",
             "repository-automata",
-            "automata-ci",
-            "automata",
+            "automata-ci/automata",
         )
         .expect("repository"),
         workflow_path,

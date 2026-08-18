@@ -35,17 +35,18 @@ use super::{
 use automata_ci_provider::ProviderConnectionId;
 use automata_ci_store::{
     AdmissionObject, AdmitLogicalWorkflowRun, AuthenticatedGithubDeliveryClaim,
-    AuthenticatedWorkflowDispatchClaim, AuthenticatedWorkflowDispatchSource,
-    BeginWorkflowDispatchSourceResolution, CompleteWorkflowDispatchSourceResolution,
-    EventControlSubject, EventControlSubjectId, EventSubjectId, EventSubjectOrigin,
-    EventSubjectProgress, EventSubjectSelection, EventSubjectStoreError, EventSubjectTerminalKind,
-    EventSubjectTerminalOutcome, GithubProviderManifestRevision, GithubScheduleFireClaim,
-    GithubServerServiceAuthorityId, GithubServerServiceAuthoritySelector,
-    GithubServerServiceClaimFence, GithubServerServiceRevision, GithubServerServiceWorkerId,
-    GithubSubjectEvidenceStoreError, JobEnvironmentRequirement, LOGICAL_ORCHESTRATION_SCHEMA,
-    LogicalWorkflowAdmissionReceipt, LogicalWorkflowAdmissionRepository,
-    LogicalWorkflowAdmissionStoreError, LogicalWorkflowInvocationId, LogicalWorkflowJobKind,
-    ObjectKey, RecordGithubWorkflowRunSubjectEvidence, RegisterEventSubject, RepositoryId,
+    AuthenticatedProviderDeliveryClaim, AuthenticatedWorkflowDispatchClaim,
+    AuthenticatedWorkflowDispatchSource, BeginWorkflowDispatchSourceResolution,
+    CompleteWorkflowDispatchSourceResolution, EventControlSubject, EventControlSubjectId,
+    EventSubjectId, EventSubjectOrigin, EventSubjectProgress, EventSubjectSelection,
+    EventSubjectStoreError, EventSubjectTerminalKind, EventSubjectTerminalOutcome,
+    GithubProviderManifestRevision, GithubScheduleFireClaim, GithubServerServiceAuthorityId,
+    GithubServerServiceAuthoritySelector, GithubServerServiceClaimFence,
+    GithubServerServiceRevision, GithubServerServiceWorkerId, GithubSubjectEvidenceStoreError,
+    JobEnvironmentRequirement, LOGICAL_ORCHESTRATION_SCHEMA, LogicalWorkflowAdmissionReceipt,
+    LogicalWorkflowAdmissionRepository, LogicalWorkflowAdmissionStoreError,
+    LogicalWorkflowInvocationId, LogicalWorkflowJobKind, ObjectKey,
+    RecordGithubWorkflowRunSubjectEvidence, RegisterEventSubject, RepositoryId,
     ResolveAuthenticatedWorkflowDispatchSource, Sha256Digest, StoreError, TenantScope,
     ValidateGithubWorkflowRunSubjectEvidenceReplay, WORKFLOW_ADMISSION_EPOCH, WORKFLOW_PLAN_SCHEMA,
     WorkflowAdmissionIdempotency, WorkflowAdmissionStoreError, WorkflowDispatchSourceClaim,
@@ -54,6 +55,10 @@ use automata_ci_store::{
 };
 
 enum SubjectEvidenceAdmission {
+    AuthenticatedProvider {
+        current_claim: AuthenticatedProviderDeliveryClaim,
+        observed_at: UnixMillis,
+    },
     AuthenticatedGithub {
         current_claim: AuthenticatedGithubDeliveryClaim,
         observed_at: UnixMillis,
@@ -757,10 +762,13 @@ fn resolved_dispatch_source_from_row(
         provider,
         row.try_get::<String, _>("provider_repository_id")
             .map_err(source_operation_error)?,
-        row.try_get::<String, _>("repository_owner")
-            .map_err(source_operation_error)?,
-        row.try_get::<String, _>("repository_name")
-            .map_err(source_operation_error)?,
+        format!(
+            "{}/{}",
+            row.try_get::<String, _>("repository_owner")
+                .map_err(source_operation_error)?,
+            row.try_get::<String, _>("repository_name")
+                .map_err(source_operation_error)?
+        ),
     )
     .map_err(|_| source_corrupt("resolved repository is invalid"))?;
     let digest = source_digest(
@@ -863,6 +871,23 @@ impl LogicalWorkflowAdmissionRepository for PostgresStore {
         _command: AdmitLogicalWorkflowRun,
     ) -> Result<LogicalWorkflowAdmissionReceipt, LogicalWorkflowAdmissionStoreError> {
         Err(LogicalWorkflowAdmissionStoreError::UnsupportedAdmissionSource)
+    }
+
+    async fn admit_authenticated_provider_delivery(
+        &self,
+        command: AdmitLogicalWorkflowRun,
+        current_claim: AuthenticatedProviderDeliveryClaim,
+        observed_at: UnixMillis,
+    ) -> Result<LogicalWorkflowAdmissionReceipt, LogicalWorkflowAdmissionStoreError> {
+        admit_logical_workflow_transaction(
+            self,
+            command,
+            SubjectEvidenceAdmission::AuthenticatedProvider {
+                current_claim,
+                observed_at,
+            },
+        )
+        .await
     }
 
     async fn admit_authenticated_github_delivery(
@@ -1054,8 +1079,11 @@ fn dispatch_source_from_row(
         provider,
         row.try_get::<String, _>("provider_repository_id")
             .map_err(operation_error)?,
-        row.try_get::<String, _>("owner").map_err(operation_error)?,
-        row.try_get::<String, _>("name").map_err(operation_error)?,
+        format!(
+            "{}/{}",
+            row.try_get::<String, _>("owner").map_err(operation_error)?,
+            row.try_get::<String, _>("name").map_err(operation_error)?
+        ),
     )
     .map_err(|_| StoreError::corrupt_data("signed GitHub repository identity is invalid"))?;
     let repository_owner_id = row
@@ -1109,7 +1137,8 @@ async fn admit_logical_workflow_transaction(
     } else {
         if matches!(
             &subject_evidence,
-            SubjectEvidenceAdmission::AuthenticatedGithub { .. }
+            SubjectEvidenceAdmission::AuthenticatedProvider { .. }
+                | SubjectEvidenceAdmission::AuthenticatedGithub { .. }
                 | SubjectEvidenceAdmission::ScheduledGithub { .. }
         ) {
             resolve_repository(&mut transaction, &command).await?;
@@ -1261,6 +1290,12 @@ async fn record_admitted_event_subject(
         )
         .into());
     }
+    if matches!(
+        subject_evidence,
+        SubjectEvidenceAdmission::AuthenticatedProvider { .. }
+    ) {
+        return Ok(());
+    }
     link_github_check_event_control(
         transaction,
         command,
@@ -1282,6 +1317,12 @@ async fn record_skipped_event_subject(
     let (origin, control_id, _, _) =
         record_event_subject_terminal(transaction, command, subject_evidence, outcome, recorded_at)
             .await?;
+    if matches!(
+        subject_evidence,
+        SubjectEvidenceAdmission::AuthenticatedProvider { .. }
+    ) {
+        return Ok(());
+    }
     link_github_check_event_control(transaction, command, origin, control_id, None).await
 }
 
@@ -1322,7 +1363,12 @@ async fn replay_disabled_event_subject(
         )
         .into());
     }
-    link_github_check_event_control(transaction, command, origin, control.id(), None).await?;
+    if !matches!(
+        subject_evidence,
+        SubjectEvidenceAdmission::AuthenticatedProvider { .. }
+    ) {
+        link_github_check_event_control(transaction, command, origin, control.id(), None).await?;
+    }
     Ok(true)
 }
 
@@ -1545,6 +1591,9 @@ async fn record_event_subject_terminal(
 
 fn event_subject_origin(subject_evidence: &SubjectEvidenceAdmission) -> EventSubjectOrigin {
     match subject_evidence {
+        SubjectEvidenceAdmission::AuthenticatedProvider { current_claim, .. } => {
+            EventSubjectOrigin::ProviderDelivery(current_claim.delivery_id())
+        }
         SubjectEvidenceAdmission::AuthenticatedGithub { current_claim, .. } => {
             EventSubjectOrigin::ProviderDelivery(current_claim.claim().delivery_id())
         }
@@ -1596,6 +1645,24 @@ fn validate_subject_evidence_boundary(
     subject_evidence: &SubjectEvidenceAdmission,
 ) -> Result<(), LogicalWorkflowAdmissionStoreError> {
     match subject_evidence {
+        SubjectEvidenceAdmission::AuthenticatedProvider {
+            current_claim,
+            observed_at,
+        } => {
+            let provider_delivery = matches!(
+                command.idempotency(),
+                WorkflowAdmissionIdempotency::ProviderDelivery(_)
+            );
+            if !provider_delivery
+                || command.admitted_at() != *observed_at
+                || !current_claim.authorizes(*observed_at)
+            {
+                return Err(StoreError::corrupt_data(
+                    "authenticated provider admission has an invalid common boundary",
+                )
+                .into());
+            }
+        }
         SubjectEvidenceAdmission::AuthenticatedGithub {
             current_claim: _,
             observed_at,
@@ -1666,12 +1733,97 @@ fn validate_subject_evidence_boundary(
     Ok(())
 }
 
+async fn validate_provider_selection_authority(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: &AdmitLogicalWorkflowRun,
+    claim: AuthenticatedProviderDeliveryClaim,
+    observed_at: UnixMillis,
+) -> Result<(), LogicalWorkflowAdmissionStoreError> {
+    let fence = claim.fence();
+    let exact = sqlx::query_scalar::<_, bool>(
+        r"
+        SELECT TRUE
+        FROM provider_processing_invocations AS invocation
+        JOIN provider_deliveries AS delivery
+          ON delivery.delivery_id = invocation.source_delivery_id
+         AND delivery.delivery_id = invocation.cause_delivery_id
+         AND delivery.disposition = 'trigger'
+        JOIN provider_connection_revisions AS connection
+          ON connection.connection_id = delivery.connection_id
+         AND connection.revision = delivery.connection_revision
+         AND connection.provider_instance_id = delivery.provider_instance_id
+         AND connection.provider_revision = delivery.provider_revision
+         AND connection.external_repository_id = delivery.repository_external_id
+        JOIN provider_instance_revisions AS provider
+          ON provider.instance_id = delivery.provider_instance_id
+         AND provider.revision = delivery.provider_revision
+         AND provider.provider_type = delivery.provider_type
+         AND provider.configuration_digest = connection.provider_configuration_digest
+         AND provider.capability_digest = connection.capability_digest
+        WHERE invocation.invocation_id = $1
+          AND invocation.source_delivery_id = $2
+          AND invocation.state = 'claimed'
+          AND invocation.attempts = $3
+          AND invocation.claim_worker_id = $4
+          AND invocation.claim_fence = $5
+          AND invocation.claim_started_at_ms = $6
+          AND invocation.claim_expires_at_ms = $7
+          AND invocation.created_at_ms = $8
+          AND $9 >= invocation.claim_started_at_ms
+          AND $9 < invocation.claim_expires_at_ms
+          AND connection.workspace_id = $10
+          AND connection.lifecycle_state = 'active'
+          AND provider.lifecycle_state = 'active'
+          AND delivery.provider_type = $11
+          AND delivery.repository_external_id = $12
+        FOR SHARE OF invocation, delivery, connection, provider
+        ",
+    )
+    .bind(claim.invocation_id().as_uuid())
+    .bind(claim.delivery_id().as_uuid())
+    .bind(i16::try_from(claim.attempt()).expect("attempt fits SMALLINT"))
+    .bind(fence.worker_id().as_uuid())
+    .bind(i64::try_from(fence.token()).map_err(|_| {
+        StoreError::corrupt_data("common provider processing fence exceeds durable range")
+    })?)
+    .bind(fence.claimed_at().get())
+    .bind(fence.expires_at().get())
+    .bind(claim.created_at().get())
+    .bind(observed_at.get())
+    .bind(command.tenant().as_str())
+    .bind(command.repository().provider())
+    .bind(command.repository().provider_repository_id())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(operation_error)?;
+    if exact == Some(true) {
+        Ok(())
+    } else {
+        Err(StoreError::corrupt_data(
+            "common provider processing authority does not match logical admission",
+        )
+        .into())
+    }
+}
+
 async fn validate_subject_selection_authority(
     transaction: &mut Transaction<'_, Postgres>,
     command: &AdmitLogicalWorkflowRun,
     subject_evidence: &SubjectEvidenceAdmission,
 ) -> Result<(), LogicalWorkflowAdmissionStoreError> {
     match subject_evidence {
+        SubjectEvidenceAdmission::AuthenticatedProvider {
+            current_claim,
+            observed_at,
+        } => {
+            validate_provider_selection_authority(
+                transaction,
+                command,
+                *current_claim,
+                *observed_at,
+            )
+            .await
+        }
         SubjectEvidenceAdmission::AuthenticatedGithub { current_claim, .. } => {
             let request = RecordGithubWorkflowRunSubjectEvidence::from_logical_admission(
                 *current_claim,
@@ -1872,7 +2024,7 @@ async fn require_existing_dispatch_repository(
             .try_get::<String, _>("provider_repository_id")
             .map_err(operation_error)?
             == repository.provider_repository_id()
-        && row.try_get::<String, _>("owner").map_err(operation_error)? == repository.owner()
+        && row.try_get::<String, _>("owner").map_err(operation_error)? == repository.namespace()
         && row.try_get::<String, _>("name").map_err(operation_error)? == repository.name();
     if !exact {
         return Err(LogicalWorkflowAdmissionStoreError::WorkflowDispatchAuthorityRejected);
@@ -1902,6 +2054,7 @@ async fn record_new_subject_evidence(
     dispatch_actor: Option<&AuthorizedWorkflowDispatchActor>,
 ) -> Result<(), LogicalWorkflowAdmissionStoreError> {
     match subject_evidence {
+        SubjectEvidenceAdmission::AuthenticatedProvider { .. } => Ok(()),
         SubjectEvidenceAdmission::AuthenticatedGithub {
             current_claim,
             observed_at: _,
@@ -1940,6 +2093,18 @@ async fn validate_replayed_subject_evidence(
     admitted_at: UnixMillis,
 ) -> Result<(), LogicalWorkflowAdmissionStoreError> {
     match subject_evidence {
+        SubjectEvidenceAdmission::AuthenticatedProvider {
+            current_claim,
+            observed_at,
+        } => {
+            validate_provider_selection_authority(
+                transaction,
+                command,
+                *current_claim,
+                *observed_at,
+            )
+            .await
+        }
         SubjectEvidenceAdmission::AuthenticatedGithub {
             current_claim,
             observed_at,
@@ -2688,7 +2853,7 @@ async fn resolve_repository(
     .bind(command.tenant().as_str())
     .bind(repository.provider())
     .bind(repository.provider_repository_id())
-    .bind(repository.owner())
+    .bind(repository.namespace())
     .bind(repository.name())
     .bind(command.admitted_at().get())
     .fetch_one(&mut **transaction)

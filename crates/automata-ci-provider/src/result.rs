@@ -1,4 +1,4 @@
-//! Provider-neutral desired results, fenced publication outbox, and publisher port.
+//! Provider-neutral desired results and fenced publication repository contract.
 
 use std::{
     fmt,
@@ -663,18 +663,15 @@ impl ProviderResultPublicationModel {
     }
 }
 
-/// Deterministic idempotency marker for one exact desired generation.
+/// Deterministic idempotency marker for one provider result subject.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProviderResultMarker(String);
 
 impl ProviderResultMarker {
-    fn derive(subject_id: ProviderResultSubjectId, generation: u64) -> Self {
-        Self(format!(
-            "automata-result:{}:{generation}",
-            subject_id.as_uuid()
-        ))
+    fn derive(subject_id: ProviderResultSubjectId) -> Self {
+        Self(format!("automata-result:{}", subject_id.as_uuid()))
     }
-    /// Returns the marker adapters must persist and reconcile after response loss.
+    /// Returns the stable marker adapters must persist and reconcile after response loss.
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
@@ -789,7 +786,7 @@ impl ClaimedProviderResult {
         {
             return Err(ProviderResultModelError::InvalidClaimBinding);
         }
-        let marker = ProviderResultMarker::derive(subject.subject_id, desired.generation());
+        let marker = ProviderResultMarker::derive(subject.subject_id);
         Ok(Self {
             subject,
             desired,
@@ -1204,23 +1201,6 @@ pub trait ProviderResultRepository: fmt::Debug + Send + Sync {
     fn retry_result(&self, request: RetryProviderResult) -> ProviderResultFuture<'_, ()>;
     /// Terminalizes one claim after permanent failure.
     fn fail_result(&self, request: FailProviderResult) -> ProviderResultFuture<'_, ()>;
-}
-
-/// Publisher future borrowing one claim.
-pub type ResultPublisherFuture<'a> = Pin<
-    Box<
-        dyn Future<Output = Result<ProviderResultPublicationEvidence, ResultPublisherError>>
-            + Send
-            + 'a,
-    >,
->;
-
-/// Narrow adapter capability that reconciles one claim-frozen desired generation.
-pub trait ResultPublisher: fmt::Debug + Send + Sync {
-    /// Returns the exact reconciliation model implemented by this adapter.
-    fn model(&self) -> ProviderResultPublicationModel;
-    /// Reconciles by deterministic marker before creating or mutating provider state.
-    fn publish<'a>(&'a self, claimed: &'a ClaimedProviderResult) -> ResultPublisherFuture<'a>;
 }
 
 /// Sanitized adapter publication failure.

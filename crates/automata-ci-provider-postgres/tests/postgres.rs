@@ -1,33 +1,40 @@
 use std::sync::Arc;
 
-use automata_ci_core::{GitObjectAlgorithm, Sha256Digest, UnixMillis, WorkspaceId};
+use automata_ci_core::{
+    GitObjectAlgorithm, GitObjectId, RunId, Sha256Digest, UnixMillis, WorkspaceId,
+};
 use automata_ci_key_management::{KeyId, LocalAes256GcmKeyring, LocalKeyMaterial, SecretBytes};
 use automata_ci_postgres::test_support::{TestResult, run_with_database};
 use automata_ci_provider::{
     AcceptProviderDelivery, BindProviderProcessingSource, ClaimProviderProcessing,
-    CompleteProviderProcessing, ExternalDeliveryId, ExternalDeliveryIdentity, ExternalRepositoryId,
-    ExternalRepositoryIdentity, ExternalSubjectId, ExternalSubjectIdentity, ExternalSubjectKind,
-    NormalizedTrigger, ProviderArchiveLimits, ProviderCapabilities, ProviderCapability,
-    ProviderConfigurationDocument, ProviderConfigurationRevision, ProviderConnectionConfiguration,
-    ProviderConnectionId, ProviderConnectionManifest, ProviderConnectionPolicyDocument,
-    ProviderConnectionRevision, ProviderControl, ProviderControlDocument, ProviderControlKind,
-    ProviderDefaultBranch, ProviderDelivery, ProviderDeliveryAcceptOutcome,
-    ProviderDeliveryEvidence, ProviderDeliveryId, ProviderDeliveryObservations,
-    ProviderDeliveryRepository as _, ProviderDeliveryRepositoryError, ProviderEventName,
-    ProviderGitRef, ProviderGitRefKind, ProviderInstanceId, ProviderInstanceManifest,
-    ProviderInstanceRecord, ProviderLifecycleState, ProviderManifestRepository as _,
-    ProviderOrigins, ProviderProcessingFailure, ProviderProcessingInput,
-    ProviderProcessingRepository as _, ProviderProcessingRepositoryError, ProviderProcessingState,
-    ProviderProcessingWorkerId, ProviderRepository, ProviderRepositoryError,
-    ProviderRepositoryPath, ProviderRunnerPolicyBinding, ProviderSaveOutcome,
-    ProviderSchemaVersion, ProviderSecret, ProviderSecretBinding, ProviderSecretBindings,
-    ProviderSecretGeneration, ProviderSecretName, ProviderSecretSet, ProviderTypeId,
-    ProviderWebhookEndpointId, ProviderWebhookEndpointManifest,
+    ClaimProviderResult, CompleteProviderProcessing, CompleteProviderResult, DesiredProviderResult,
+    ExternalDeliveryId, ExternalDeliveryIdentity, ExternalRepositoryId, ExternalRepositoryIdentity,
+    ExternalSubjectId, ExternalSubjectIdentity, ExternalSubjectKind, NormalizedTrigger,
+    ProviderArchiveLimits, ProviderCapabilities, ProviderCapability, ProviderConfigurationDocument,
+    ProviderConfigurationRevision, ProviderConnectionConfiguration, ProviderConnectionId,
+    ProviderConnectionManifest, ProviderConnectionPolicyDocument, ProviderConnectionRevision,
+    ProviderControl, ProviderControlDocument, ProviderControlKind, ProviderDefaultBranch,
+    ProviderDelivery, ProviderDeliveryAcceptOutcome, ProviderDeliveryEvidence, ProviderDeliveryId,
+    ProviderDeliveryObservations, ProviderDeliveryRepository as _, ProviderDeliveryRepositoryError,
+    ProviderEventName, ProviderGitRef, ProviderGitRefKind, ProviderInstanceId,
+    ProviderInstanceManifest, ProviderInstanceRecord, ProviderLifecycleState,
+    ProviderManifestRepository as _, ProviderOrigins, ProviderProcessingFailure,
+    ProviderProcessingInput, ProviderProcessingRepository as _, ProviderProcessingRepositoryError,
+    ProviderProcessingState, ProviderProcessingWorkerId, ProviderRepository,
+    ProviderRepositoryError, ProviderRepositoryPath, ProviderResultDetailsUrl, ProviderResultPhase,
+    ProviderResultPublicationEvidence, ProviderResultPublicationModel,
+    ProviderResultRepository as _, ProviderResultRepositoryError, ProviderResultSaveOutcome,
+    ProviderResultSubject, ProviderResultSubjectId, ProviderResultSubjectKind,
+    ProviderResultSummary, ProviderResultTitle, ProviderResultWorkerId,
+    ProviderRunnerPolicyBinding, ProviderSaveOutcome, ProviderSchemaVersion, ProviderSecret,
+    ProviderSecretBinding, ProviderSecretBindings, ProviderSecretGeneration, ProviderSecretName,
+    ProviderSecretSet, ProviderTypeId, ProviderWebhookEndpointId, ProviderWebhookEndpointManifest,
     ProviderWebhookEndpointRepository as _, ProviderWebhookEndpointRevision,
     ProviderWebhookEndpointState, ProviderWebhookSecretReference, ProviderWebhookSignatureEvidence,
     ProviderWorkflowSource, PushCommitEvidence, PushTrigger, RepositoryVisibility,
-    RetryProviderProcessing, SourceReadCapability, VerifiedProviderControlDelivery,
-    VerifiedProviderTriggerDelivery, provider_capability_digest, provider_raw_webhook_descriptor,
+    RetryProviderProcessing, RetryProviderResult, SaveDesiredProviderResult, SourceReadCapability,
+    VerifiedProviderControlDelivery, VerifiedProviderTriggerDelivery, provider_capability_digest,
+    provider_raw_webhook_descriptor,
 };
 use automata_ci_provider_postgres::PostgresProviderManifestRepository;
 use sha2::{Digest as _, Sha256};
@@ -308,6 +315,236 @@ async fn instance_and_connection_revisions_are_atomic_encrypted_and_exact() -> T
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL 18 via AUTOMATA_TEST_DATABASE_URL"]
+#[allow(clippy::too_many_lines)] // One lifecycle proves every durable result transition and fence.
+async fn provider_results_are_contiguous_fenced_and_rehydratable() -> TestResult {
+    run_with_database(|database| async move {
+        let repository = repository(database.pool().clone());
+        let workspace = WorkspaceId::from_uuid(Uuid::from_u128(0x5900))?;
+        sqlx::query(
+            "INSERT INTO tenants (id, display_name, created_at_ms, updated_at_ms) VALUES ($1, 'Provider results', 1, 1)",
+        )
+        .bind(workspace.to_string())
+        .execute(database.pool())
+        .await?;
+        let instance_id = ProviderInstanceId::from_uuid(Uuid::from_u128(0x5901))?;
+        repository
+            .save_instance(instance_record(
+                instance_id,
+                "forgejo",
+                1,
+                TOKEN,
+                1,
+                ProviderLifecycleState::Active,
+                Some(UnixMillis::new(1_001)),
+            ))
+            .await?;
+        let instance = repository
+            .current_instance(instance_id)
+            .await?
+            .expect("provider instance");
+        let connection = connection(workspace, instance.manifest());
+        repository.save_connection(connection.clone()).await?;
+
+        let subject = ProviderResultSubject::new(
+            ProviderResultSubjectId::from_uuid(Uuid::from_u128(0x5902))?,
+            &connection,
+            GitObjectId::from_provider_hex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")?,
+            ProviderResultSubjectKind::WorkflowRun {
+                run_id: RunId::from_uuid(Uuid::from_u128(0x5903)),
+            },
+            1,
+            UnixMillis::new(3_000),
+        )?;
+        let desired = |generation, updated_at, summary| {
+            DesiredProviderResult::new(
+                generation,
+                ProviderResultPhase::Running,
+                None,
+                ProviderResultTitle::new("Automata CI")?,
+                ProviderResultSummary::new(summary)?,
+                ProviderResultDetailsUrl::new(
+                    "https://ci.example/runs/5903"
+                        .parse()
+                        .expect("fixed provider result URL"),
+                )?,
+                Vec::new(),
+                UnixMillis::new(updated_at),
+            )
+        };
+        let first_desired = desired(1, 3_001, "queued")?;
+        assert_eq!(
+            repository
+                .save_desired(SaveDesiredProviderResult::new(
+                    subject.clone(),
+                    first_desired.clone(),
+                )?)
+                .await?,
+            ProviderResultSaveOutcome::Inserted
+        );
+        assert_eq!(
+            repository
+                .save_desired(SaveDesiredProviderResult::new(
+                    subject.clone(),
+                    first_desired,
+                )?)
+                .await?,
+            ProviderResultSaveOutcome::Unchanged
+        );
+
+        let worker = ProviderResultWorkerId::from_uuid(Uuid::from_u128(0x5904))?;
+        let first_claim = repository
+            .claim_result(ClaimProviderResult::new(
+                connection.connection_id(),
+                worker,
+                UnixMillis::new(3_002),
+                1_000,
+            )?)
+            .await?
+            .expect("first result claim");
+        assert_eq!(first_claim.subject(), &subject);
+        assert_eq!(first_claim.attempts(), 1);
+
+        let second_desired = desired(2, 3_003, "running")?;
+        assert_eq!(
+            repository
+                .save_desired(SaveDesiredProviderResult::new(
+                    subject.clone(),
+                    second_desired.clone(),
+                )?)
+                .await?,
+            ProviderResultSaveOutcome::Superseded
+        );
+        let stale_evidence = ProviderResultPublicationEvidence::new(
+            &first_claim,
+            ProviderResultPublicationModel::AppendOnlyCommitStatus,
+            None,
+            first_claim.desired().digest(),
+            UnixMillis::new(3_002),
+        )?;
+        assert_eq!(
+            repository
+                .complete_result(CompleteProviderResult::new(
+                    first_claim.claim(),
+                    stale_evidence,
+                )?)
+                .await,
+            Err(ProviderResultRepositoryError::StaleClaim)
+        );
+
+        let second_claim = repository
+            .claim_result(ClaimProviderResult::new(
+                connection.connection_id(),
+                worker,
+                UnixMillis::new(3_004),
+                1_000,
+            )?)
+            .await?
+            .expect("second result claim");
+        assert_eq!(second_claim.desired(), &second_desired);
+        assert!(second_claim.claim().fence() > first_claim.claim().fence());
+        repository
+            .retry_result(RetryProviderResult::new(
+                second_claim.claim(),
+                UnixMillis::new(3_005),
+                UnixMillis::new(3_100),
+            )?)
+            .await?;
+        assert!(
+            repository
+                .claim_result(ClaimProviderResult::new(
+                    connection.connection_id(),
+                    worker,
+                    UnixMillis::new(3_099),
+                    1_000,
+                )?)
+                .await?
+                .is_none()
+        );
+        let final_claim = repository
+            .claim_result(ClaimProviderResult::new(
+                connection.connection_id(),
+                worker,
+                UnixMillis::new(3_100),
+                1_000,
+            )?)
+            .await?
+            .expect("retried result claim");
+        assert_eq!(final_claim.attempts(), 2);
+        let evidence = ProviderResultPublicationEvidence::new(
+            &final_claim,
+            ProviderResultPublicationModel::AppendOnlyCommitStatus,
+            None,
+            final_claim.desired().digest(),
+            UnixMillis::new(3_101),
+        )?;
+        repository
+            .complete_result(CompleteProviderResult::new(final_claim.claim(), evidence)?)
+            .await?;
+        let state: String = sqlx::query_scalar(
+            "SELECT state FROM provider_result_outbox WHERE subject_id = $1",
+        )
+        .bind(subject.subject_id().as_uuid())
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(state, "completed");
+        assert!(
+            repository
+                .claim_result(ClaimProviderResult::new(
+                    connection.connection_id(),
+                    worker,
+                    UnixMillis::new(4_000),
+                    1_000,
+                )?)
+                .await?
+                .is_none()
+        );
+        let third_desired = desired(3, 4_001, "still running")?;
+        repository
+            .save_desired(SaveDesiredProviderResult::new(
+                subject.clone(),
+                third_desired,
+            )?)
+            .await?;
+        let exhausted_claim = repository
+            .claim_result(ClaimProviderResult::new(
+                connection.connection_id(),
+                worker,
+                UnixMillis::new(4_002),
+                1_000,
+            )?)
+            .await?
+            .expect("exhaustion fixture claim");
+        sqlx::query(
+            "UPDATE provider_result_outbox SET attempts = 64, next_fence = 64, claim_fence = 64, claim_expires_at_ms = 4003 WHERE subject_id = $1",
+        )
+        .bind(subject.subject_id().as_uuid())
+        .execute(database.pool())
+        .await?;
+        assert!(
+            repository
+                .claim_result(ClaimProviderResult::new(
+                    connection.connection_id(),
+                    worker,
+                    UnixMillis::new(4_003),
+                    1_000,
+                )?)
+                .await?
+                .is_none()
+        );
+        let exhausted: (String, Option<String>) = sqlx::query_as(
+            "SELECT state, failure_kind FROM provider_result_outbox WHERE subject_id = $1",
+        )
+        .bind(exhausted_claim.subject().subject_id().as_uuid())
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(exhausted, ("failed".to_owned(), Some("attempt-limit".to_owned())));
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL 18 via AUTOMATA_TEST_DATABASE_URL"]
 #[allow(clippy::too_many_lines)] // One sequence proves relational and ciphertext tamper rejection.
 async fn stale_missing_and_tampered_state_fail_closed() -> TestResult {
     run_with_database(|database| async move {
@@ -405,6 +642,7 @@ fn verified_delivery(
             endpoint.instance_id(),
             ExternalRepositoryId::new("42").expect("repository ID"),
         ),
+        automata_ci_provider::ExternalSubjectId::new("7").expect("owner ID"),
         ProviderRepositoryPath::new("owner/repository").expect("repository path"),
         RepositoryVisibility::Private,
     );

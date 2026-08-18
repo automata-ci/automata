@@ -836,8 +836,7 @@ fn admission_coordinates(
     AdmissionRepositoryCoordinates::new(
         GITHUB_PROVIDER,
         request.identity().repository_id().get().to_string(),
-        repository.owner(),
-        repository.name(),
+        repository.full_name(),
     )
     .map_err(|_| invalid_processor_state("repository_coordinates"))
 }
@@ -1405,6 +1404,7 @@ fn admission_error(error: &WorkflowAdmissionError) -> GithubDeliveryWorkflowProc
         | WorkflowAdmissionError::ConcurrencyEvaluation
         | WorkflowAdmissionError::RunNameEvaluation
         | WorkflowAdmissionError::WorkflowDispatchEvidence
+        | WorkflowAdmissionError::ProviderAdmissionAuthority
         | WorkflowAdmissionError::Serialization
         | WorkflowAdmissionError::Internal => {
             GithubDeliveryWorkflowProcessorError::InvariantViolation
@@ -1424,6 +1424,7 @@ fn admission_error_stage(error: &WorkflowAdmissionError) -> &'static str {
         WorkflowAdmissionError::ConcurrencyEvaluation => "admission_concurrency_evaluation",
         WorkflowAdmissionError::RunNameEvaluation => "admission_run_name_evaluation",
         WorkflowAdmissionError::WorkflowDispatchEvidence => "admission_dispatch_evidence",
+        WorkflowAdmissionError::ProviderAdmissionAuthority => "admission_provider_authority",
         WorkflowAdmissionError::Serialization => "admission_serialization",
         WorkflowAdmissionError::Internal => "admission_internal",
     }

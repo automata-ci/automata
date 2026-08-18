@@ -9,8 +9,8 @@ use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
 use crate::{
-    ExternalChangeId, ExternalMergeQueueId, ExternalRepositoryIdentity, ExternalSubjectIdentity,
-    ProviderDefaultBranch, ProviderRepositoryPath, RepositoryVisibility,
+    ExternalChangeId, ExternalMergeQueueId, ExternalRepositoryIdentity, ExternalSubjectId,
+    ExternalSubjectIdentity, ProviderDefaultBranch, ProviderRepositoryPath, RepositoryVisibility,
 };
 
 /// Maximum UTF-8 bytes in a provider-native event or activity name.
@@ -66,6 +66,7 @@ impl From<ProviderEventName> for String {
 #[serde(deny_unknown_fields)]
 pub struct ProviderRepository {
     identity: ExternalRepositoryIdentity,
+    owner_id: ExternalSubjectId,
     path: ProviderRepositoryPath,
     visibility: RepositoryVisibility,
 }
@@ -75,11 +76,13 @@ impl ProviderRepository {
     #[must_use]
     pub const fn new(
         identity: ExternalRepositoryIdentity,
+        owner_id: ExternalSubjectId,
         path: ProviderRepositoryPath,
         visibility: RepositoryVisibility,
     ) -> Self {
         Self {
             identity,
+            owner_id,
             path,
             visibility,
         }
@@ -89,6 +92,12 @@ impl ProviderRepository {
     #[must_use]
     pub const fn identity(&self) -> &ExternalRepositoryIdentity {
         &self.identity
+    }
+
+    /// Returns the provider-stable repository owner identity.
+    #[must_use]
+    pub const fn owner_id(&self) -> &ExternalSubjectId {
+        &self.owner_id
     }
 
     /// Returns the authenticated provider path retained for display and audit.
@@ -889,7 +898,7 @@ pub enum NormalizedTrigger {
     /// A branch or tag update.
     Push(PushTrigger),
     /// A pull request or merge request.
-    PullRequest(PullRequestTrigger),
+    PullRequest(Box<PullRequestTrigger>),
     /// A provider merge-queue candidate.
     MergeQueue(MergeQueueTrigger),
     /// A provider-authenticated custom repository event.
@@ -932,6 +941,25 @@ impl NormalizedTrigger {
             Self::Push(push) => Some(push.git_ref()),
             Self::PullRequest(pull_request) => Some(pull_request.execution_ref()),
             Self::MergeQueue(merge_queue) => Some(merge_queue.candidate_ref()),
+            Self::RepositoryDispatch(_) => None,
+        }
+    }
+
+    /// Returns the immutable object executed under [`Self::workflow_execution_ref`].
+    ///
+    /// This may differ from [`Self::workflow_source_revision`] for providers
+    /// that compile workflow definitions from a change head while executing a
+    /// provider-created merge candidate.
+    #[must_use]
+    pub fn workflow_execution_revision(&self) -> Option<GitObjectId> {
+        match self {
+            Self::Push(push) => push.after(),
+            Self::PullRequest(pull_request) => Some(
+                pull_request
+                    .merge_object()
+                    .unwrap_or(pull_request.head_object()),
+            ),
+            Self::MergeQueue(merge_queue) => Some(merge_queue.candidate_object()),
             Self::RepositoryDispatch(_) => None,
         }
     }
@@ -1107,6 +1135,7 @@ mod tests {
                 instance_id,
                 ExternalRepositoryId::new("42").expect("repository ID"),
             ),
+            ExternalSubjectId::new("7").expect("owner ID"),
             ProviderRepositoryPath::new("owner/repository").expect("repository path"),
             RepositoryVisibility::Private,
         )
@@ -1159,7 +1188,7 @@ mod tests {
     #[test]
     fn pull_request_retains_provider_execution_coordinates() {
         let instance_id = ProviderInstanceId::new();
-        let trigger = NormalizedTrigger::PullRequest(
+        let trigger = NormalizedTrigger::PullRequest(Box::new(
             PullRequestTrigger::new(
                 ExternalChangeId::new("7").expect("change ID"),
                 PullRequestActivity::Synchronized,
@@ -1177,7 +1206,7 @@ mod tests {
                 None,
             )
             .expect("pull request"),
-        );
+        ));
 
         assert_eq!(trigger.workflow_source_revision(), Some(object('b')));
         assert_eq!(

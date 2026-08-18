@@ -1,20 +1,40 @@
 use std::sync::Arc;
 
 use automata_ci_core::{Sha256Digest, UnixMillis, WorkspaceId};
+use automata_ci_key_management::SecretBytes;
 use automata_ci_provider::{
-    ExternalRepositoryId, ExternalRepositoryIdentity, ProviderArchiveLimits,
-    ProviderConfigurationDocument, ProviderConfigurationFactory, ProviderConfigurationRevision,
-    ProviderConnectionConfiguration, ProviderConnectionId, ProviderConnectionManifest,
-    ProviderConnectionRevision, ProviderDefaultBranch, ProviderFactoryRegistry,
-    ProviderFactoryRegistryError, ProviderInstanceId, ProviderInstanceManifest,
-    ProviderLifecycleState, ProviderOrigins, ProviderRepositoryPath, ProviderRunnerPolicyBinding,
-    ProviderSchemaVersion, ProviderSecretBindings, ProviderSecretSet, ProviderTypeId,
-    ProviderWorkflowSource, RepositoryVisibility, provider_capability_digest,
+    ExternalRepositoryId, ExternalRepositoryIdentity, ProviderArchiveLimits, ProviderCapability,
+    ProviderCapabilityKind, ProviderConfigurationDocument, ProviderConfigurationFactory,
+    ProviderConfigurationRevision, ProviderConnectionConfiguration, ProviderConnectionId,
+    ProviderConnectionManifest, ProviderConnectionRevision, ProviderDefaultBranch,
+    ProviderFactoryRegistry, ProviderFactoryRegistryError, ProviderInstanceId,
+    ProviderInstanceManifest, ProviderLifecycleState, ProviderOrigins, ProviderRepositoryPath,
+    ProviderRunnerPolicyBinding, ProviderSchemaVersion, ProviderSecret, ProviderSecretBinding,
+    ProviderSecretBindings, ProviderSecretGeneration, ProviderSecretName, ProviderSecretSet,
+    ProviderTypeId, ProviderWorkflowSource, RepositoryVisibility, provider_capability_digest,
 };
 use automata_ci_provider_github::{
-    GithubConnectionPolicy, GithubHttpLimits, GithubInstanceConfiguration, GithubProviderFactory,
+    GITHUB_APP_PRIVATE_KEY_SECRET_NAME, GITHUB_WEBHOOK_SECRET_NAME, GithubConnectionPolicy,
+    GithubHttpLimits, GithubInstanceConfiguration, GithubJwtIssuer, GithubProviderFactory,
 };
 use automata_ci_scm::RepositoryId;
+use sha2::{Digest as _, Sha256};
+
+const APP_PRIVATE_KEY: &[u8] = b"-----BEGIN PRIVATE KEY-----\ntest\n-----END PRIVATE KEY-----";
+const WEBHOOK_SECRET: &[u8] = b"provider webhook secret";
+
+#[test]
+fn capabilities_declare_native_rerun_without_requested_actions() {
+    let capabilities = GithubProviderFactory::capabilities().expect("GitHub capabilities");
+    let Some(ProviderCapability::RichChecks(checks)) =
+        capabilities.get(ProviderCapabilityKind::RichChecks)
+    else {
+        panic!("GitHub rich-check capability is missing");
+    };
+    assert!(checks.annotations());
+    assert!(checks.native_rerun());
+    assert!(!checks.external_actions());
+}
 
 fn instance(instance_id: &str, web: &str, api: &str, archive: &str) -> ProviderInstanceManifest {
     let capabilities = GithubProviderFactory::capabilities().expect("GitHub capabilities");
@@ -26,17 +46,57 @@ fn instance(instance_id: &str, web: &str, api: &str, archive: &str) -> ProviderI
         ProviderConfigurationRevision::new(1).expect("revision"),
         ProviderLifecycleState::Active,
         ProviderOrigins::new(web, api).expect("origins"),
-        GithubInstanceConfiguration::new(archive.parse().expect("archive URL"))
-            .expect("instance configuration")
-            .document()
-            .expect("configuration document"),
-        ProviderSecretBindings::empty(),
+        GithubInstanceConfiguration::new(
+            42,
+            "Iv1.automata",
+            GithubJwtIssuer::AppClientId,
+            archive.parse().expect("archive URL"),
+        )
+        .expect("instance configuration")
+        .document()
+        .expect("configuration document"),
+        secret_bindings(),
         provider_capability_digest(&capabilities).expect("capability digest"),
         UnixMillis::new(1_000),
         Some(UnixMillis::new(1_000)),
         None,
     )
     .expect("instance manifest")
+}
+
+fn secret_bindings() -> ProviderSecretBindings {
+    ProviderSecretBindings::new([
+        ProviderSecretBinding::new(
+            ProviderSecretName::new(GITHUB_APP_PRIVATE_KEY_SECRET_NAME).expect("app key name"),
+            ProviderSecretGeneration::new(1).expect("app key generation"),
+            Sha256Digest::from_bytes(Sha256::digest(APP_PRIVATE_KEY).into()),
+        ),
+        ProviderSecretBinding::new(
+            ProviderSecretName::new(GITHUB_WEBHOOK_SECRET_NAME).expect("webhook name"),
+            ProviderSecretGeneration::new(1).expect("webhook generation"),
+            Sha256Digest::from_bytes(Sha256::digest(WEBHOOK_SECRET).into()),
+        ),
+    ])
+    .expect("secret bindings")
+}
+
+fn secret_set(manifest: &ProviderInstanceManifest) -> ProviderSecretSet {
+    ProviderSecretSet::new(
+        manifest.secrets(),
+        [
+            ProviderSecret::new(
+                ProviderSecretName::new(GITHUB_APP_PRIVATE_KEY_SECRET_NAME).expect("app key name"),
+                ProviderSecretGeneration::new(1).expect("app key generation"),
+                SecretBytes::new(APP_PRIVATE_KEY.to_vec()).expect("app private key"),
+            ),
+            ProviderSecret::new(
+                ProviderSecretName::new(GITHUB_WEBHOOK_SECRET_NAME).expect("webhook name"),
+                ProviderSecretGeneration::new(1).expect("webhook generation"),
+                SecretBytes::new(WEBHOOK_SECRET.to_vec()).expect("webhook secret"),
+            ),
+        ],
+    )
+    .expect("secret set")
 }
 
 fn connection(
@@ -116,8 +176,7 @@ fn one_factory_builds_two_isolated_github_instances_and_connections() {
         "https://api.github.second.example/v3/",
         "https://archives.github.second.example/",
     );
-    let secrets =
-        ProviderSecretSet::new(&ProviderSecretBindings::empty(), []).expect("empty secret set");
+    let secrets = secret_set(&first);
     let registry = registry();
     let first_descriptor = registry
         .build_descriptor(first.clone(), &secrets)
@@ -133,14 +192,14 @@ fn one_factory_builds_two_isolated_github_instances_and_connections() {
     let factory = GithubProviderFactory::new();
     let first_source = factory
         .repository_source(
-            &first_descriptor,
+            first_descriptor.manifest(),
             "automata-provider-test/1",
             GithubHttpLimits::default(),
         )
         .expect("first source");
     let second_source = factory
         .repository_source(
-            &second_descriptor,
+            second_descriptor.manifest(),
             "automata-provider-test/1",
             GithubHttpLimits::default(),
         )
@@ -175,10 +234,10 @@ fn one_factory_builds_two_isolated_github_instances_and_connections() {
         .validate_connection(&second_descriptor, &second_connection)
         .expect("second connection");
     let first_binding = factory
-        .source_connection(&first_descriptor, &first_connection)
+        .source_connection(first_descriptor.manifest(), &first_connection)
         .expect("first source binding");
     let second_binding = factory
-        .source_connection(&second_descriptor, &second_connection)
+        .source_connection(second_descriptor.manifest(), &second_connection)
         .expect("second source binding");
     assert_ne!(
         first_binding.connection_id(),
@@ -198,8 +257,7 @@ fn registry_rejects_noncanonical_github_documents_and_cross_instance_connections
         "https://api.github.example/v3/",
         "https://archives.github.example/",
     );
-    let secrets =
-        ProviderSecretSet::new(&ProviderSecretBindings::empty(), []).expect("empty secret set");
+    let secrets = secret_set(&valid);
     let registry = registry();
     let descriptor = registry
         .build_descriptor(valid.clone(), &secrets)
@@ -235,7 +293,7 @@ fn registry_rejects_noncanonical_github_documents_and_cross_instance_connections
         valid.state(),
         valid.origins().clone(),
         noncanonical,
-        ProviderSecretBindings::empty(),
+        valid.secrets().clone(),
         valid.capability_digest(),
         valid.created_at(),
         valid.activated_at(),
@@ -251,8 +309,40 @@ fn registry_rejects_noncanonical_github_documents_and_cross_instance_connections
 #[test]
 fn typed_policies_reject_implicit_or_unsafe_authority() {
     assert!(GithubConnectionPolicy::new(0, RepositoryId::new("owner/repo").unwrap()).is_err());
-    assert!(GithubInstanceConfiguration::new("http://github.example/".parse().unwrap()).is_err());
     assert!(
-        GithubInstanceConfiguration::new("https://user@github.example/".parse().unwrap()).is_err()
+        GithubInstanceConfiguration::new(
+            42,
+            "Iv1.automata",
+            GithubJwtIssuer::AppClientId,
+            "http://github.example/".parse().unwrap(),
+        )
+        .is_err()
+    );
+    assert!(
+        GithubInstanceConfiguration::new(
+            42,
+            "Iv1.automata",
+            GithubJwtIssuer::AppClientId,
+            "https://user@github.example/".parse().unwrap(),
+        )
+        .is_err()
+    );
+    assert!(
+        GithubInstanceConfiguration::new(
+            0,
+            "Iv1.automata",
+            GithubJwtIssuer::AppClientId,
+            "https://github.example/".parse().unwrap(),
+        )
+        .is_err()
+    );
+    assert!(
+        GithubInstanceConfiguration::new(
+            42,
+            "not valid",
+            GithubJwtIssuer::AppClientId,
+            "https://github.example/".parse().unwrap(),
+        )
+        .is_err()
     );
 }

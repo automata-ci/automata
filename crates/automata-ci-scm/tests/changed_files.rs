@@ -47,6 +47,7 @@ fn push(repository: ExternalRepositoryIdentity) -> automata_ci_provider::SealedN
         PushTrigger::new(
             ProviderRepository::new(
                 repository,
+                automata_ci_provider::ExternalSubjectId::new("owner-42").unwrap(),
                 ProviderRepositoryPath::new("org/repository").unwrap(),
                 RepositoryVisibility::Private,
             ),

@@ -943,6 +943,12 @@ pub type ProviderDeliveryFuture<'a, T> =
 pub type ProviderProcessingFuture<'a, T> =
     Pin<Box<dyn Future<Output = Result<T, ProviderProcessingRepositoryError>> + Send + 'a>>;
 
+/// Read-only live source of the latest durably renewed processing fence.
+pub trait ProviderProcessingClaimSource: fmt::Debug + Send + Sync {
+    /// Returns the latest exact claim fence committed by the processing worker.
+    fn current_fence(&self) -> ProviderProcessingClaimFence;
+}
+
 /// Durable opaque endpoint repository with secret-generation custody.
 pub trait ProviderWebhookEndpointRepository: fmt::Debug + Send + Sync {
     /// Atomically stores a first or contiguous endpoint revision.

@@ -17,9 +17,10 @@ use automata_ci_provider::{
     ProviderDeliveryRepository, ProviderInstanceId, ProviderInstanceRecord,
     ProviderManifestRepository, ProviderProcessingFuture, ProviderProcessingReceipt,
     ProviderProcessingRepository, ProviderRepositoryError, ProviderRepositoryFuture,
-    ProviderSaveOutcome, ProviderWebhookEndpointId, ProviderWebhookEndpointManifest,
-    ProviderWebhookEndpointRecord, ProviderWebhookEndpointRepository,
-    ProviderWebhookEndpointRevision, RenewProviderProcessing, RetryProviderProcessing,
+    ProviderResultFuture, ProviderResultRepository, ProviderResultSaveOutcome, ProviderSaveOutcome,
+    ProviderWebhookEndpointId, ProviderWebhookEndpointManifest, ProviderWebhookEndpointRecord,
+    ProviderWebhookEndpointRepository, ProviderWebhookEndpointRevision, RenewProviderProcessing,
+    RetryProviderProcessing,
 };
 use sqlx::{PgPool, Postgres, Transaction};
 
@@ -27,11 +28,13 @@ mod connection;
 mod delivery;
 mod endpoint;
 mod instance;
+mod result;
 
 const SECRET_PURPOSE: &str = "provider/instance-secret:v1";
 const INSTANCE_LOCK_SALT: i64 = 6_692_456_121_835_322_101;
 const CONNECTION_LOCK_SALT: i64 = 7_752_013_457_331_067_413;
 const ENDPOINT_LOCK_SALT: i64 = 6_747_890_046_912_418_703;
+const RESULT_LOCK_SALT: i64 = 5_638_152_860_934_413_377;
 
 /// Atomic `PostgreSQL` provider manifest repository with envelope-encrypted secrets.
 #[derive(Clone)]
@@ -194,6 +197,43 @@ impl ProviderProcessingRepository for PostgresProviderManifestRepository {
         request: FailProviderProcessing,
     ) -> ProviderProcessingFuture<'_, ProviderProcessingReceipt> {
         Box::pin(self.fail_processing_inner(request))
+    }
+}
+
+impl ProviderResultRepository for PostgresProviderManifestRepository {
+    fn save_desired(
+        &self,
+        request: automata_ci_provider::SaveDesiredProviderResult,
+    ) -> ProviderResultFuture<'_, ProviderResultSaveOutcome> {
+        Box::pin(self.save_desired_result_inner(request))
+    }
+
+    fn claim_result(
+        &self,
+        request: automata_ci_provider::ClaimProviderResult,
+    ) -> ProviderResultFuture<'_, Option<automata_ci_provider::ClaimedProviderResult>> {
+        Box::pin(self.claim_result_inner(request))
+    }
+
+    fn complete_result(
+        &self,
+        request: automata_ci_provider::CompleteProviderResult,
+    ) -> ProviderResultFuture<'_, ()> {
+        Box::pin(self.complete_result_inner(request))
+    }
+
+    fn retry_result(
+        &self,
+        request: automata_ci_provider::RetryProviderResult,
+    ) -> ProviderResultFuture<'_, ()> {
+        Box::pin(self.retry_result_inner(request))
+    }
+
+    fn fail_result(
+        &self,
+        request: automata_ci_provider::FailProviderResult,
+    ) -> ProviderResultFuture<'_, ()> {
+        Box::pin(self.fail_result_inner(request))
     }
 }
 

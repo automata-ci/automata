@@ -257,6 +257,10 @@ const CANONICAL_MIGRATIONS: &[(&str, &str)] = &[
         "0063_workspace_billing_permissions.sql",
         "f819ade01646fb633b7d741816b0f75e772585dc1b244017dfea118e88746efaa89e4ef8ebc488c3d2ff67a0b984af7d",
     ),
+    (
+        "0064_provider_result_outbox.sql",
+        "907fe9dda1096eb302443938dc46440206c51274a50c28aa091c8bc6273a41f8b4d53b72b29c5879582e691126f6d2a6",
+    ),
 ];
 
 const BASELINE_MIGRATION_COUNT: u32 = 26;
@@ -841,6 +845,43 @@ fn provider_processing_cutover_is_destructive_single_path_and_fenced() {
         assert!(
             !source.contains(forbidden),
             "provider processing cutover retained a second schema path: {forbidden}",
+        );
+    }
+}
+
+#[test]
+fn provider_result_outbox_is_current_only_provider_neutral_and_fenced() {
+    let source = include_str!("../migrations/0064_provider_result_outbox.sql");
+
+    for required in [
+        "CREATE TABLE provider_result_subjects (",
+        "CREATE TABLE provider_result_outbox (",
+        "CREATE TABLE provider_result_annotations (",
+        "UNIQUE (subject_id, generation)",
+        "state IN ('pending', 'claimed', 'completed', 'failed')",
+        "claim_expires_at_ms - claim_started_at_ms <= 900000",
+        "publication_model IN ('mutable-rich-check', 'append-only-commit-status')",
+        "failure_kind IN (",
+        "CREATE INDEX provider_result_claimable",
+        "WHERE state IN ('pending', 'claimed')",
+    ] {
+        assert!(
+            source.contains(required),
+            "provider result outbox lost required contract: {required}",
+        );
+    }
+    for forbidden in [
+        "github_result",
+        "forgejo_result",
+        "gitlab_result",
+        "CREATE TABLE provider_result_history",
+        "IF EXISTS",
+        "IF NOT EXISTS",
+        " CASCADE",
+    ] {
+        assert!(
+            !source.contains(forbidden),
+            "provider result outbox retained provider-specific or legacy surface: {forbidden}",
         );
     }
 }

@@ -18,6 +18,7 @@ automata-ci-provider.workspace = true
 bytes.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 
 [dev-dependencies]
 automata-ci-key-management.workspace = true

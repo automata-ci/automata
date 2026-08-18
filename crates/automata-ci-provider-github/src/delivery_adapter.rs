@@ -404,7 +404,7 @@ fn normalize_pull_request(
         actor(request, event.source_actor())?,
     )
     .map_err(|_| ProviderDeliveryRejection::InvalidPayload)?;
-    Ok(NormalizedTrigger::PullRequest(trigger))
+    Ok(NormalizedTrigger::PullRequest(Box::new(trigger)))
 }
 
 fn normalize_merge_group(
@@ -481,6 +481,8 @@ fn repository(
     let instance_id = request.endpoint().instance_id();
     Ok(ProviderRepository::new(
         external_repository(instance_id, native),
+        ExternalSubjectId::new(native.owner_id().get().to_string())
+            .map_err(|_| ProviderDeliveryRejection::InvalidPayload)?,
         ProviderRepositoryPath::new(native.full_name().to_owned())
             .map_err(|_| ProviderDeliveryRejection::InvalidPayload)?,
         visibility(native.visibility()),

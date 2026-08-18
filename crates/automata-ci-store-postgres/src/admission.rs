@@ -446,7 +446,7 @@ async fn resolve_repository(
     .bind(command.tenant().as_str())
     .bind(repository.provider())
     .bind(repository.provider_repository_id())
-    .bind(repository.owner())
+    .bind(repository.namespace())
     .bind(repository.name())
     .bind(command.admitted_at().get())
     .fetch_one(&mut **transaction)

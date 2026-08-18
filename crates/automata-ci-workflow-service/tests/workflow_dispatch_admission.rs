@@ -443,8 +443,7 @@ impl Harness {
             self.repository_id,
             self.coordinates.provider(),
             self.coordinates.provider_repository_id(),
-            self.coordinates.owner(),
-            self.coordinates.name(),
+            self.coordinates.path(),
         )
         .expect("repository descriptor");
         let source = AuthenticatedWorkflowDispatchSource::new(
@@ -465,8 +464,7 @@ fn coordinates() -> AdmissionRepositoryCoordinates {
     AdmissionRepositoryCoordinates::new(
         "github",
         "synthetic-repository-42",
-        "automata-ci",
-        "neutral-fixture",
+        "automata-ci/neutral-fixture",
     )
     .expect("repository coordinates")
 }

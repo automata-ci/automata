@@ -4,21 +4,20 @@ use automata_ci_core::{GitObjectId, RunId, Sha256Digest, UnixMillis, WorkspaceId
 use automata_ci_provider::{
     ClaimProviderResult, ClaimedProviderResult, CommitStatusCapability, CommitStatusState,
     CompleteProviderResult, DesiredProviderResult, ExternalRepositoryId,
-    ExternalRepositoryIdentity, ExternalResultId, FailProviderResult,
-    MAX_PROVIDER_RESULT_PUBLICATION_ATTEMPTS, ProviderArchiveLimits, ProviderCapabilities,
-    ProviderCapability, ProviderConfigurationRevision, ProviderConnectionConfiguration,
-    ProviderConnectionId, ProviderConnectionManifest, ProviderConnectionPolicyDocument,
-    ProviderConnectionRevision, ProviderDefaultBranch, ProviderLifecycleState,
-    ProviderRepositoryPath, ProviderResultAnnotation, ProviderResultAnnotationLevel,
-    ProviderResultAnnotationMessage, ProviderResultAnnotationTitle, ProviderResultClaimFence,
-    ProviderResultConclusion, ProviderResultDetailsUrl, ProviderResultFailureKind,
-    ProviderResultFuture, ProviderResultPhase, ProviderResultPublicationEvidence,
-    ProviderResultPublicationModel, ProviderResultRepository, ProviderResultRepositoryError,
-    ProviderResultRetryAfter, ProviderResultSaveOutcome, ProviderResultSubject,
-    ProviderResultSubjectId, ProviderResultSubjectKind, ProviderResultSummary, ProviderResultTitle,
-    ProviderResultWorkerId, ProviderRunnerPolicyBinding, ProviderSchemaVersion,
-    ProviderWorkflowSource, RepositoryVisibility, ResultPublisher, ResultPublisherError,
-    ResultPublisherFuture, RetryProviderResult, RichCheckCapability, SaveDesiredProviderResult,
+    ExternalRepositoryIdentity, FailProviderResult, MAX_PROVIDER_RESULT_PUBLICATION_ATTEMPTS,
+    ProviderArchiveLimits, ProviderCapabilities, ProviderCapability, ProviderConfigurationRevision,
+    ProviderConnectionConfiguration, ProviderConnectionId, ProviderConnectionManifest,
+    ProviderConnectionPolicyDocument, ProviderConnectionRevision, ProviderDefaultBranch,
+    ProviderLifecycleState, ProviderRepositoryPath, ProviderResultAnnotation,
+    ProviderResultAnnotationLevel, ProviderResultAnnotationMessage, ProviderResultAnnotationTitle,
+    ProviderResultClaimFence, ProviderResultConclusion, ProviderResultDetailsUrl,
+    ProviderResultFailureKind, ProviderResultFuture, ProviderResultPhase,
+    ProviderResultPublicationEvidence, ProviderResultPublicationModel, ProviderResultRepository,
+    ProviderResultRepositoryError, ProviderResultRetryAfter, ProviderResultSaveOutcome,
+    ProviderResultSubject, ProviderResultSubjectId, ProviderResultSubjectKind,
+    ProviderResultSummary, ProviderResultTitle, ProviderResultWorkerId,
+    ProviderRunnerPolicyBinding, ProviderSchemaVersion, ProviderWorkflowSource,
+    RepositoryVisibility, RetryProviderResult, RichCheckCapability, SaveDesiredProviderResult,
     StatusHistoryModel,
 };
 use url::Url;
@@ -84,6 +83,18 @@ fn desired(generation: u64, updated_at: i64) -> DesiredProviderResult {
         ProviderResultDetailsUrl::new(Url::parse("https://ci.example/runs/5").unwrap()).unwrap(),
         Vec::new(),
         UnixMillis::new(updated_at),
+    )
+    .unwrap()
+}
+
+fn claim(generation: u64, claimed_at: i64) -> ProviderResultClaimFence {
+    ProviderResultClaimFence::new(
+        subject().subject_id(),
+        generation,
+        ProviderResultWorkerId::from_uuid(Uuid::from_u128(9)).unwrap(),
+        generation,
+        UnixMillis::new(claimed_at),
+        UnixMillis::new(claimed_at + 1_000),
     )
     .unwrap()
 }
@@ -252,99 +263,18 @@ impl ProviderResultRepository for MemoryOutbox {
     }
 }
 
-#[derive(Debug)]
-struct LossyPublisher {
-    model: ProviderResultPublicationModel,
-    state: Mutex<Vec<(String, Sha256Digest)>>,
-    lose_next_response: Mutex<bool>,
-}
+#[test]
+fn mutable_result_marker_is_stable_across_generations() {
+    let first =
+        ClaimedProviderResult::new(subject(), desired(1, 2_001), claim(1, 2_002), 1).unwrap();
+    let second =
+        ClaimedProviderResult::new(subject(), desired(2, 2_003), claim(2, 2_004), 1).unwrap();
 
-impl LossyPublisher {
-    fn new(model: ProviderResultPublicationModel) -> Self {
-        Self {
-            model,
-            state: Mutex::new(Vec::new()),
-            lose_next_response: Mutex::new(true),
-        }
-    }
-
-    fn objects(&self) -> usize {
-        self.state.lock().unwrap().len()
-    }
-}
-
-impl ResultPublisher for LossyPublisher {
-    fn model(&self) -> ProviderResultPublicationModel {
-        self.model
-    }
-
-    fn publish<'a>(&'a self, claimed: &'a ClaimedProviderResult) -> ResultPublisherFuture<'a> {
-        Box::pin(async move {
-            let marker = claimed.marker().as_str().to_owned();
-            let mut state = self.state.lock().unwrap();
-            let existing = state.iter().find(|(candidate, _)| candidate == &marker);
-            if existing.is_none() {
-                match self.model {
-                    ProviderResultPublicationModel::MutableRichCheck => {
-                        state.clear();
-                        state.push((marker.clone(), claimed.desired().digest()));
-                    }
-                    ProviderResultPublicationModel::AppendOnlyCommitStatus => {
-                        state.push((marker.clone(), claimed.desired().digest()));
-                    }
-                }
-                if std::mem::take(&mut *self.lose_next_response.lock().unwrap()) {
-                    return Err(ResultPublisherError::Unavailable);
-                }
-            }
-            ProviderResultPublicationEvidence::new(
-                claimed,
-                self.model,
-                Some(ExternalResultId::new(marker).unwrap()),
-                claimed.desired().digest(),
-                claimed.claimed_at(),
-            )
-            .map_err(|_| ResultPublisherError::InvalidResponse)
-        })
-    }
-}
-
-#[tokio::test]
-async fn mutable_and_append_publishers_reconcile_response_loss_without_duplicates() {
-    for model in [
-        ProviderResultPublicationModel::MutableRichCheck,
-        ProviderResultPublicationModel::AppendOnlyCommitStatus,
-    ] {
-        let outbox = MemoryOutbox::default();
-        outbox
-            .save_desired(SaveDesiredProviderResult::new(subject(), desired(1, 2_001)).unwrap())
-            .await
-            .unwrap();
-        let claimed = outbox
-            .claim_result(
-                ClaimProviderResult::new(
-                    subject().connection_id(),
-                    ProviderResultWorkerId::from_uuid(Uuid::from_u128(9)).unwrap(),
-                    UnixMillis::new(2_002),
-                    1_000,
-                )
-                .unwrap(),
-            )
-            .await
-            .unwrap()
-            .unwrap();
-        let publisher = LossyPublisher::new(model);
-        assert_eq!(
-            publisher.publish(&claimed).await,
-            Err(ResultPublisherError::Unavailable)
-        );
-        let evidence = publisher.publish(&claimed).await.unwrap();
-        assert_eq!(publisher.objects(), 1);
-        outbox
-            .complete_result(CompleteProviderResult::new(claimed.claim(), evidence).unwrap())
-            .await
-            .unwrap();
-    }
+    assert_eq!(first.marker(), second.marker());
+    assert_eq!(
+        first.marker().as_str(),
+        "automata-result:00000000-0000-0000-0000-000000000004"
+    );
 }
 
 #[tokio::test]
@@ -405,7 +335,7 @@ async fn newer_generation_supersedes_and_fences_old_claim_without_a_bridge() {
         .unwrap()
         .unwrap();
     assert_eq!(second.desired().generation(), 2);
-    assert_ne!(second.marker(), first.marker());
+    assert_eq!(second.marker(), first.marker());
 }
 
 #[tokio::test]
@@ -650,4 +580,6 @@ fn publication_models_require_their_exact_declared_capability() {
     .unwrap();
     assert!(ProviderResultPublicationModel::MutableRichCheck.is_declared_by(&rich));
     assert!(!ProviderResultPublicationModel::AppendOnlyCommitStatus.is_declared_by(&rich));
+    assert!(RichCheckCapability::new(false, false, true).is_ok());
+    assert!(RichCheckCapability::new(false, false, false).is_err());
 }

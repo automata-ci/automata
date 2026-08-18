@@ -70,10 +70,11 @@ pub use delivery::{
     MAX_PROVIDER_PROCESSING_RETRY_MILLIS, ProviderDelivery, ProviderDeliveryAcceptOutcome,
     ProviderDeliveryFuture, ProviderDeliveryModelError, ProviderDeliveryReceipt,
     ProviderDeliveryReplayFingerprint, ProviderDeliveryRepository, ProviderDeliveryRepositoryError,
-    ProviderProcessingClaimFence, ProviderProcessingFailure, ProviderProcessingFuture,
-    ProviderProcessingInput, ProviderProcessingReceipt, ProviderProcessingRepository,
-    ProviderProcessingRepositoryError, ProviderProcessingState, ProviderWebhookEndpointRecord,
-    ProviderWebhookEndpointRepository, RenewProviderProcessing, RetryProviderProcessing,
+    ProviderProcessingClaimFence, ProviderProcessingClaimSource, ProviderProcessingFailure,
+    ProviderProcessingFuture, ProviderProcessingInput, ProviderProcessingReceipt,
+    ProviderProcessingRepository, ProviderProcessingRepositoryError, ProviderProcessingState,
+    ProviderWebhookEndpointRecord, ProviderWebhookEndpointRepository, RenewProviderProcessing,
+    RetryProviderProcessing,
 };
 pub use factory::{
     MAX_PROVIDER_FACTORIES, ProviderConfigurationFactory, ProviderConnectionFactoryRequest,
@@ -113,8 +114,8 @@ pub use result::{
     ProviderResultModelError, ProviderResultPhase, ProviderResultPublicationEvidence,
     ProviderResultPublicationModel, ProviderResultRepository, ProviderResultRepositoryError,
     ProviderResultRetryAfter, ProviderResultSaveOutcome, ProviderResultSubject,
-    ProviderResultSubjectKind, ProviderResultSummary, ProviderResultTitle, ResultPublisher,
-    ResultPublisherError, ResultPublisherFuture, RetryProviderResult, SaveDesiredProviderResult,
+    ProviderResultSubjectKind, ProviderResultSummary, ProviderResultTitle, ResultPublisherError,
+    RetryProviderResult, SaveDesiredProviderResult,
 };
 pub use storage::{
     ProviderInstanceRecord, ProviderManifestRepository, ProviderRepositoryError,

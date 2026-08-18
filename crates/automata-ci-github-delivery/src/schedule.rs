@@ -876,8 +876,11 @@ impl GithubScheduleService {
         let coordinates = AdmissionRepositoryCoordinates::new(
             GITHUB_PROVIDER,
             claimed.provider_repository_id(),
-            claimed.repository_owner(),
-            claimed.repository_name(),
+            format!(
+                "{}/{}",
+                claimed.repository_owner(),
+                claimed.repository_name()
+            ),
         )
         .map_err(|_| FireFailure::InvalidRegistry)?;
         let workflow_name = plan.name().map_or_else(

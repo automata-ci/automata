@@ -545,8 +545,7 @@ jobs:
         automata_ci_workflow_service::AdmissionRepositoryCoordinates::new(
             "github",
             "repository-queue",
-            "automata-ci",
-            "automata",
+            "automata-ci/automata",
         )
         .expect("repository"),
         ".ci/workflows/queue.yml",
@@ -613,8 +612,7 @@ fn run_name_request(
         automata_ci_workflow_service::AdmissionRepositoryCoordinates::new(
             "github",
             "repository-run-name",
-            "automata-ci",
-            "automata",
+            "automata-ci/automata",
         )
         .expect("repository"),
         ".ci/workflows/run-name.yml",

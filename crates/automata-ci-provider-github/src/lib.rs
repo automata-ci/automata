@@ -57,7 +57,8 @@ pub use event::{
     GithubWorkflowEventKind, MAX_GITHUB_EVENT_ENVELOPE_BYTES, derive_github_trust_snapshot,
 };
 pub use factory::{
-    GithubConnectionPolicy, GithubFactoryError, GithubInstanceConfiguration, GithubProviderFactory,
+    GITHUB_APP_PRIVATE_KEY_SECRET_NAME, GITHUB_WEBHOOK_SECRET_NAME, GithubConnectionPolicy,
+    GithubFactoryError, GithubInstanceConfiguration, GithubJwtIssuer, GithubProviderFactory,
 };
 pub use webhook::{
     AuthenticatedGithubWebhook, GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE, GithubRepositoryVisibility,

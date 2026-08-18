@@ -4,9 +4,11 @@ use std::{collections::BTreeMap, fmt, sync::Arc};
 
 use async_trait::async_trait;
 use automata_ci_provider::{
-    ClaimedProviderProcessing, ProviderDeliveryId, ProviderProcessingFailure,
-    ProviderProcessingInput, ProviderTypeId, VerifiedProviderControlDelivery,
-    VerifiedProviderTriggerDelivery,
+    ClaimedProviderProcessing, ExternalRepositoryIdentity, ProviderConnectionManifest,
+    ProviderDeliveryEvidence, ProviderDeliveryId, ProviderInstanceRecord, ProviderLifecycleState,
+    ProviderManifestRepository, ProviderProcessingFailure, ProviderProcessingInput,
+    ProviderRepositoryError, ProviderResultSubject, ProviderTypeId,
+    VerifiedProviderControlDelivery, VerifiedProviderTriggerDelivery,
 };
 use thiserror::Error;
 
@@ -25,6 +27,161 @@ pub enum ProviderTriggerOutcome {
     Fail(ProviderProcessingFailure),
 }
 
+/// Exact durable provider and repository configuration for one invocation.
+pub struct ProviderRuntimeContext {
+    provider: ProviderInstanceRecord,
+    connection: ProviderConnectionManifest,
+}
+
+impl ProviderRuntimeContext {
+    /// Returns the exact decrypted provider revision selected at ingress.
+    #[must_use]
+    pub const fn provider(&self) -> &ProviderInstanceRecord {
+        &self.provider
+    }
+
+    /// Returns the exact repository connection revision selected at ingress.
+    #[must_use]
+    pub const fn connection(&self) -> &ProviderConnectionManifest {
+        &self.connection
+    }
+}
+
+impl fmt::Debug for ProviderRuntimeContext {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProviderRuntimeContext")
+            .field("provider", &self.provider)
+            .field("connection", &self.connection)
+            .finish()
+    }
+}
+
+/// Resolves exact immutable provider configuration for processing and publication.
+#[derive(Clone)]
+pub struct ProviderRuntimeContextResolver {
+    manifests: Arc<dyn ProviderManifestRepository>,
+}
+
+impl ProviderRuntimeContextResolver {
+    /// Binds the resolver to the canonical provider manifest repository.
+    #[must_use]
+    pub fn new(manifests: Arc<dyn ProviderManifestRepository>) -> Self {
+        Self { manifests }
+    }
+
+    /// Resolves the exact provider and connection revisions authenticated at ingress.
+    ///
+    /// # Errors
+    ///
+    /// Returns unavailable for transient storage or secret-custody failure and
+    /// invalid evidence for absent, inactive, or inconsistent configuration.
+    pub async fn resolve_delivery(
+        &self,
+        evidence: &ProviderDeliveryEvidence,
+        repository: &ExternalRepositoryIdentity,
+    ) -> Result<ProviderRuntimeContext, ProviderRuntimeContextError> {
+        let provider = self
+            .manifests
+            .load_instance(evidence.instance_id(), evidence.provider_revision())
+            .await
+            .map_err(context_repository_error)?
+            .ok_or(ProviderRuntimeContextError::InvalidEvidence)?;
+        let connection = self
+            .manifests
+            .load_connection(evidence.connection_id(), evidence.connection_revision())
+            .await
+            .map_err(context_repository_error)?
+            .ok_or(ProviderRuntimeContextError::InvalidEvidence)?;
+        if !valid_context(&provider, &connection, repository)
+            || provider.manifest().instance_id() != evidence.instance_id()
+            || provider.manifest().revision() != evidence.provider_revision()
+            || provider.manifest().provider_type() != evidence.provider_type()
+            || connection.connection_id() != evidence.connection_id()
+            || connection.revision() != evidence.connection_revision()
+        {
+            return Err(ProviderRuntimeContextError::InvalidEvidence);
+        }
+        Ok(ProviderRuntimeContext {
+            provider,
+            connection,
+        })
+    }
+
+    /// Resolves the exact provider configuration bound to one durable result subject.
+    ///
+    /// # Errors
+    ///
+    /// Returns unavailable for transient storage or secret-custody failure and
+    /// invalid evidence for absent, inactive, or inconsistent configuration.
+    pub async fn resolve_result(
+        &self,
+        subject: &ProviderResultSubject,
+    ) -> Result<ProviderRuntimeContext, ProviderRuntimeContextError> {
+        let connection = self
+            .manifests
+            .load_connection(subject.connection_id(), subject.connection_revision())
+            .await
+            .map_err(context_repository_error)?
+            .ok_or(ProviderRuntimeContextError::InvalidEvidence)?;
+        let configuration = connection.configuration();
+        let provider = self
+            .manifests
+            .load_instance(
+                configuration.repository().instance_id(),
+                configuration.provider_revision(),
+            )
+            .await
+            .map_err(context_repository_error)?
+            .ok_or(ProviderRuntimeContextError::InvalidEvidence)?;
+        if subject.connection_digest() != connection.digest()
+            || subject.repository() != configuration.repository()
+            || !valid_context(&provider, &connection, subject.repository())
+        {
+            return Err(ProviderRuntimeContextError::InvalidEvidence);
+        }
+        Ok(ProviderRuntimeContext {
+            provider,
+            connection,
+        })
+    }
+}
+
+impl fmt::Debug for ProviderRuntimeContextResolver {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProviderRuntimeContextResolver")
+            .field("manifests", &self.manifests)
+            .finish()
+    }
+}
+
+fn valid_context(
+    provider: &ProviderInstanceRecord,
+    connection: &ProviderConnectionManifest,
+    repository: &ExternalRepositoryIdentity,
+) -> bool {
+    let manifest = provider.manifest();
+    let configuration = connection.configuration();
+    manifest.state() == ProviderLifecycleState::Active
+        && connection.state() == ProviderLifecycleState::Active
+        && configuration.repository() == repository
+        && configuration.provider_revision() == manifest.revision()
+        && configuration.provider_configuration_digest() == manifest.configuration().digest()
+        && configuration.capability_digest() == manifest.capability_digest()
+}
+
+/// Sanitized exact-context resolution failure.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum ProviderRuntimeContextError {
+    /// Manifest persistence or secret custody is temporarily unavailable.
+    #[error("provider runtime context is unavailable")]
+    Unavailable,
+    /// Durable configuration or evidence is missing, inactive, or inconsistent.
+    #[error("provider runtime context evidence is invalid")]
+    InvalidEvidence,
+}
+
 /// Provider-specific runtime operations behind the common processing worker.
 ///
 /// Implementations own provider-native source access, workflow admission, and
@@ -39,6 +196,7 @@ pub trait ProviderRuntimeAdapter: fmt::Debug + Send + Sync {
     /// Processes one authenticated normalized trigger under its live lease.
     async fn process_trigger(
         &self,
+        context: &ProviderRuntimeContext,
         trigger: &VerifiedProviderTriggerDelivery,
         invocation: &ClaimedProviderProcessing,
         lease: &ProviderProcessingLease,
@@ -50,6 +208,7 @@ pub trait ProviderRuntimeAdapter: fmt::Debug + Send + Sync {
     /// is retained only as audit provenance; its admission is never replayed.
     async fn handle_control(
         &self,
+        context: &ProviderRuntimeContext,
         control: &VerifiedProviderControlDelivery,
         lease: &ProviderProcessingLease,
     ) -> Result<Option<ProviderDeliveryId>, ProviderControlHandlingError>;
@@ -106,13 +265,20 @@ impl fmt::Debug for ProviderRuntimeAdapterRegistry {
 /// Processing dispatcher for provider-specific triggers and controls.
 pub struct ProviderProcessingDispatcher {
     runtimes: ProviderRuntimeAdapterRegistry,
+    contexts: ProviderRuntimeContextResolver,
 }
 
 impl ProviderProcessingDispatcher {
     /// Composes the exact provider runtime registry.
     #[must_use]
-    pub const fn new(runtimes: ProviderRuntimeAdapterRegistry) -> Self {
-        Self { runtimes }
+    pub fn new(
+        runtimes: ProviderRuntimeAdapterRegistry,
+        manifests: Arc<dyn ProviderManifestRepository>,
+    ) -> Self {
+        Self {
+            runtimes,
+            contexts: ProviderRuntimeContextResolver::new(manifests),
+        }
     }
 }
 
@@ -121,6 +287,7 @@ impl fmt::Debug for ProviderProcessingDispatcher {
         formatter
             .debug_struct("ProviderProcessingDispatcher")
             .field("runtimes", &self.runtimes)
+            .field("contexts", &self.contexts)
             .finish()
     }
 }
@@ -151,7 +318,21 @@ impl ProviderProcessingProcessor for ProviderProcessingDispatcher {
                         ProviderProcessingFailure::InvalidEvidence,
                     );
                 };
-                match runtime.process_trigger(trigger, invocation, lease).await {
+                let context = match self
+                    .contexts
+                    .resolve_delivery(
+                        trigger.evidence(),
+                        trigger.trigger().trigger().target_repository().identity(),
+                    )
+                    .await
+                {
+                    Ok(context) => context,
+                    Err(error) => return context_processing_outcome(error),
+                };
+                match runtime
+                    .process_trigger(&context, trigger, invocation, lease)
+                    .await
+                {
                     ProviderTriggerOutcome::Complete => ProviderProcessingOutcome::Complete,
                     ProviderTriggerOutcome::Retry(failure) => {
                         ProviderProcessingOutcome::Retry(failure)
@@ -168,7 +349,15 @@ impl ProviderProcessingProcessor for ProviderProcessingDispatcher {
                         ProviderProcessingFailure::InvalidEvidence,
                     );
                 };
-                match runtime.handle_control(control, lease).await {
+                let context = match self
+                    .contexts
+                    .resolve_delivery(control.evidence(), control.control().repository())
+                    .await
+                {
+                    Ok(context) => context,
+                    Err(error) => return context_processing_outcome(error),
+                };
+                match runtime.handle_control(&context, control, lease).await {
                     Ok(Some(source_delivery_id)) => {
                         ProviderProcessingOutcome::ResolveControl(source_delivery_id)
                     }
@@ -188,6 +377,30 @@ impl ProviderProcessingProcessor for ProviderProcessingDispatcher {
                     }
                 }
             }
+        }
+    }
+}
+
+const fn context_repository_error(error: ProviderRepositoryError) -> ProviderRuntimeContextError {
+    match error {
+        ProviderRepositoryError::Unavailable | ProviderRepositoryError::SecretCustody => {
+            ProviderRuntimeContextError::Unavailable
+        }
+        ProviderRepositoryError::Conflict
+        | ProviderRepositoryError::NotFound
+        | ProviderRepositoryError::Corrupt => ProviderRuntimeContextError::InvalidEvidence,
+    }
+}
+
+const fn context_processing_outcome(
+    error: ProviderRuntimeContextError,
+) -> ProviderProcessingOutcome {
+    match error {
+        ProviderRuntimeContextError::Unavailable => {
+            ProviderProcessingOutcome::Retry(ProviderProcessingFailure::DependencyUnavailable)
+        }
+        ProviderRuntimeContextError::InvalidEvidence => {
+            ProviderProcessingOutcome::Fail(ProviderProcessingFailure::InvalidEvidence)
         }
     }
 }
@@ -251,6 +464,7 @@ mod tests {
 
         async fn process_trigger(
             &self,
+            _context: &ProviderRuntimeContext,
             _trigger: &VerifiedProviderTriggerDelivery,
             _invocation: &ClaimedProviderProcessing,
             _lease: &ProviderProcessingLease,
@@ -260,6 +474,7 @@ mod tests {
 
         async fn handle_control(
             &self,
+            _context: &ProviderRuntimeContext,
             _control: &VerifiedProviderControlDelivery,
             _lease: &ProviderProcessingLease,
         ) -> Result<Option<ProviderDeliveryId>, ProviderControlHandlingError> {

@@ -98,6 +98,7 @@ fn push_with_evidence(
         PushTrigger::new(
             ProviderRepository::new(
                 identity(),
+                automata_ci_provider::ExternalSubjectId::new("7").expect("owner ID"),
                 ProviderRepositoryPath::new("octo-org/private-repo").expect("repository path"),
                 RepositoryVisibility::Public,
             ),

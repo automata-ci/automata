@@ -236,8 +236,9 @@ pub struct AdmissionRepository {
     id: RepositoryId,
     provider: String,
     provider_repository_id: String,
-    owner: String,
+    namespace: String,
     name: String,
+    path: String,
 }
 
 impl AdmissionRepository {
@@ -250,27 +251,38 @@ impl AdmissionRepository {
         id: RepositoryId,
         provider: impl Into<String>,
         provider_repository_id: impl Into<String>,
-        owner: impl Into<String>,
-        name: impl Into<String>,
+        path: impl Into<String>,
     ) -> Result<Self, WorkflowAdmissionValueError> {
         let provider = provider.into();
         let provider_repository_id = provider_repository_id.into();
-        let owner = owner.into();
-        let name = name.into();
+        let path = path.into();
+        let (namespace, name) = path
+            .rsplit_once('/')
+            .ok_or(WorkflowAdmissionValueError::InvalidText("repository path"))?;
+        if path
+            .split('/')
+            .any(|segment| segment.is_empty() || matches!(segment, "." | ".."))
+        {
+            return Err(WorkflowAdmissionValueError::InvalidText("repository path"));
+        }
         for (value, field) in [
-            (&provider, "SCM provider"),
-            (&provider_repository_id, "provider repository ID"),
-            (&owner, "repository owner"),
-            (&name, "repository name"),
+            (provider.as_str(), "SCM provider"),
+            (provider_repository_id.as_str(), "provider repository ID"),
+            (path.as_str(), "repository path"),
+            (namespace, "repository namespace"),
+            (name, "repository name"),
         ] {
             validate_text(value, field)?;
         }
+        let namespace = namespace.to_owned();
+        let name = name.to_owned();
         Ok(Self {
             id,
             provider,
             provider_repository_id,
-            owner,
+            namespace,
             name,
+            path,
         })
     }
 
@@ -290,13 +302,18 @@ impl AdmissionRepository {
     }
 
     #[must_use]
-    pub fn owner(&self) -> &str {
-        &self.owner
+    pub fn namespace(&self) -> &str {
+        &self.namespace
     }
 
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    #[must_use]
+    pub fn path(&self) -> &str {
+        &self.path
     }
 }
 
