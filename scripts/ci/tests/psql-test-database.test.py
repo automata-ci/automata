@@ -67,4 +67,29 @@ assert query["argv"][1] == (
 )
 assert "query-secret" not in " ".join(query["argv"])
 
+with tempfile.TemporaryDirectory(prefix="automata-psql-launcher-missing-") as directory:
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "AUTOMATA_TEST_DATABASE_URL": (
+                "postgresql://automata_ci:missing-secret@127.0.0.1/automata_ci"
+            ),
+            "AUTOMATA_PSQL_BINARY": str(pathlib.Path(directory) / "missing-psql"),
+        }
+    )
+    missing = subprocess.run(
+        [str(LAUNCHER), "--command=SELECT 1"],
+        check=False,
+        cwd=REPOSITORY,
+        env=environment,
+        capture_output=True,
+        text=True,
+    )
+    assert missing.returncode != 0
+    assert missing.stdout == ""
+    assert missing.stderr == (
+        "error: psql was not found; set AUTOMATA_PSQL_BINARY to its absolute path\n"
+    )
+    assert "missing-secret" not in missing.stderr
+
 print("secret-safe psql test-database launcher verified")

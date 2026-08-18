@@ -13,6 +13,26 @@ Frontend changes additionally need Node.js 24.19.0 and npm. Local integration
 tests need rootless Podman, `podman-compose`, PostgreSQL client tools, and
 OpenSSL. Static Linux distribution builds also need musl and ELF tooling.
 
+The native Rust workspace, control plane, and PostgreSQL contract suite are
+supported on Apple Silicon macOS. The database scripts require Bash 4 or newer;
+Apple's `/bin/bash` 3.2 is too old. A headless Homebrew setup can provide the
+required shell, PostgreSQL 18 server, and client:
+
+```console
+brew install bash postgresql@18
+brew services start postgresql@18
+export PATH="/opt/homebrew/bin:/opt/homebrew/opt/postgresql@18/bin:$HOME/.cargo/bin:$PATH"
+export AUTOMATA_PSQL_BINARY=/opt/homebrew/opt/postgresql@18/bin/psql
+```
+
+The secret-safe PostgreSQL launcher discovers that Apple Silicon Homebrew path
+and the Intel Homebrew prefix when no override is set. Keep the explicit
+absolute override for nonstandard installations. The repository's ordinary
+Linux CI service is patch-pinned to PostgreSQL 18.4; local integration tests
+accept PostgreSQL 18 or newer, while `verify-postgres-version.sh` requires an
+explicit `AUTOMATA_EXPECTED_POSTGRES_VERSION_NUM` when testing another reviewed
+patch release.
+
 Keep generated scratch data under the ignored `target/` tree. The project does
 not use the host `/tmp`, which may be shared, inode-constrained, or mounted with
 an unsuitable execution policy.
@@ -437,6 +457,11 @@ cargo test -p automata-ci-blob-s3 --test blob_s3 --all-features --locked -- rust
 ./scripts/ci/verify-postgres-version.sh
 ./scripts/ci/run-postgres-tests.sh
 ```
+
+On macOS, run the block from [Toolchains](#toolchains) first. If the installed
+PostgreSQL patch is not CI's pinned 18.4, set
+`AUTOMATA_EXPECTED_POSTGRES_VERSION_NUM` to that reviewed server's exact
+`SHOW server_version_num` value before running the version verifier.
 
 The runner always removes the exact namespace it owns. Use a fresh namespace
 for every invocation when a PostgreSQL service is reused. Individual tests may
