@@ -1567,13 +1567,7 @@ impl InitEngine<'_> {
         self.preflight_lifecycle_volumes(installation, epoch)
             .await?;
         let first_topology = self
-            .inspect_lifecycle_topology(
-                installation,
-                epoch,
-                desired,
-                expected,
-                expected_runner_id,
-            )
+            .inspect_lifecycle_topology(installation, epoch, desired, expected, expected_runner_id)
             .await?;
         let first_identity = self
             .lifecycle_quiescent_identity_census(installation)
@@ -1581,13 +1575,7 @@ impl InitEngine<'_> {
         self.attest_engine_quiescence(expected_id, Some(cancellation))
             .await?;
         let repeated_topology = self
-            .inspect_lifecycle_topology(
-                installation,
-                epoch,
-                desired,
-                expected,
-                expected_runner_id,
-            )
+            .inspect_lifecycle_topology(installation, epoch, desired, expected, expected_runner_id)
             .await?;
         let repeated_identity = self
             .lifecycle_quiescent_identity_census(installation)
@@ -2773,7 +2761,7 @@ impl InitEngine<'_> {
                 expected,
                 desired,
                 &image_config,
-                Some(&live_ids),
+                &live_ids,
                 false,
             )?;
             if present_container_ids
@@ -2989,13 +2977,7 @@ impl InitEngine<'_> {
         // First validate the complete union while runner admission is still
         // live, then remove and prove that exact runner absent as the positive
         // admission fence. No helper or LocalDocker deletion may precede it.
-        self.inspect_lifecycle_topology(
-            installation,
-            epoch,
-            desired,
-            expected,
-            expected_runner_id,
-        )
+        self.inspect_lifecycle_topology(installation, epoch, desired, expected, expected_runner_id)
             .await?;
         let live_ids = self
             .inspect_rendered_live_ids(installation, expected)
@@ -3030,7 +3012,7 @@ impl InitEngine<'_> {
                 expected,
                 desired,
                 &image_config,
-                Some(&live_ids),
+                &live_ids,
                 false,
             )?;
             lifecycle_cancellation_checkpoint(&holder_lost)?;
@@ -3052,13 +3034,7 @@ impl InitEngine<'_> {
         }
         self.attest_lifecycle_lock(installation, epoch, holder)
             .await?;
-        self.inspect_lifecycle_topology(
-            installation,
-            epoch,
-            desired,
-            expected,
-            expected_runner_id,
-        )
+        self.inspect_lifecycle_topology(installation, epoch, desired, expected, expected_runner_id)
             .await?;
         self.cleanup_lifecycle_disposable_helpers(
             installation,
@@ -3111,7 +3087,7 @@ impl InitEngine<'_> {
                     expected,
                     desired,
                     &image_config,
-                    Some(&live_ids),
+                    &live_ids,
                     false,
                 )?;
                 let options = RemoveContainerOptionsBuilder::default()
@@ -3169,13 +3145,7 @@ impl InitEngine<'_> {
         self.remove_results_transit_if_present(installation, desired)
             .await?;
         if self
-            .inspect_lifecycle_topology(
-                installation,
-                epoch,
-                desired,
-                expected,
-                expected_runner_id,
-            )
+            .inspect_lifecycle_topology(installation, epoch, desired, expected, expected_runner_id)
             .await?
             != LifecycleTopology::Empty
         {
@@ -3460,13 +3430,7 @@ impl InitEngine<'_> {
         // before the first helper deletion. Re-pin the helper set afterwards
         // so the deletion loop consumes exactly the union that this census
         // validated, never an earlier snapshot.
-        self.inspect_lifecycle_topology(
-            installation,
-            epoch,
-            desired,
-            expected,
-            expected_runner_id,
-        )
+        self.inspect_lifecycle_topology(installation, epoch, desired, expected, expected_runner_id)
             .await?;
         lifecycle_cancellation_checkpoint(cancellation)?;
         if self
@@ -3910,6 +3874,9 @@ impl InitEngine<'_> {
             .await?
             .and_then(|image| image.config)
             .ok_or_else(engine_resource_mismatch)?;
+        let live_ids = self
+            .inspect_rendered_live_ids(installation, expected)
+            .await?;
         validate_rendered_container(
             container,
             &name,
@@ -3919,7 +3886,7 @@ impl InitEngine<'_> {
             expected,
             desired,
             &image_config,
-            None,
+            &live_ids,
             false,
         )?;
         validate_lifecycle_oneoff_container(
@@ -4036,6 +4003,9 @@ impl InitEngine<'_> {
             .await?
             .and_then(|image| image.config)
             .ok_or_else(engine_resource_mismatch)?;
+        let live_ids = self
+            .inspect_rendered_live_ids(installation, expected)
+            .await?;
         validate_rendered_container(
             &container,
             &name,
@@ -4045,7 +4015,7 @@ impl InitEngine<'_> {
             expected,
             desired,
             &image_config,
-            None,
+            &live_ids,
             true,
         )?;
         validate_lifecycle_service_container(
@@ -4834,7 +4804,7 @@ fn validate_rendered_container(
     expected_topology: &ExpectedLifecycleTopology,
     desired: &DesiredSpec,
     image: &ImageConfig,
-    live_ids: Option<&RenderedLiveIds>,
+    live_ids: &RenderedLiveIds,
     require_running: bool,
 ) -> Result<(), LocalInitError> {
     let id = container
@@ -5403,7 +5373,7 @@ fn validate_rendered_networks(
     expected: &ExpectedContainer,
     expected_topology: &ExpectedLifecycleTopology,
     desired: &DesiredSpec,
-    live_ids: Option<&RenderedLiveIds>,
+    live_ids: &RenderedLiveIds,
 ) -> Result<(), LocalInitError> {
     if let Some(mode) = expected.network_mode.as_deref() {
         if mode == "none" {
@@ -5420,7 +5390,8 @@ fn validate_rendered_networks(
         if mode == "service:automata" {
             let control_name = format!("{}-automata-1", installation.compose_project());
             let expected_control = live_ids
-                .and_then(|ids| ids.control.as_deref())
+                .control
+                .as_deref()
                 .ok_or_else(engine_resource_mismatch)?;
             if host
                 .network_mode
@@ -5506,7 +5477,8 @@ fn validate_rendered_networks(
             .cloned()
             .collect::<BTreeSet<_>>();
         let expected_network_id = live_ids
-            .and_then(|ids| ids.networks.get(&physical))
+            .networks
+            .get(&physical)
             .ok_or_else(engine_resource_mismatch)?;
         if endpoint.ip_address.as_deref() != Some(expected_endpoint.ipv4_address.as_str())
             || ipam.ipv4_address.as_deref() != Some(expected_endpoint.ipv4_address.as_str())
