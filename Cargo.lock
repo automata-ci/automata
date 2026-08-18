@@ -1134,6 +1134,7 @@ dependencies = [
  "async-trait",
  "automata-ci-auth",
  "automata-ci-core",
+ "automata-ci-provider",
  "bytes",
  "serde",
  "serde_json",
