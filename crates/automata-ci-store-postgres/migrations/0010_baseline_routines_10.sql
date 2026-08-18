@@ -1170,7 +1170,7 @@ BEGIN
 END;
 $$;
 
-CREATE FUNCTION automata_require_standard_workload_oidc_profile() RETURNS trigger
+CREATE FUNCTION automata_require_standard_github_oidc_profile() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -1214,9 +1214,9 @@ BEGIN
           AND manifest.authority_profile = 'standard'
           AND concrete.authority_profile = 'standard'
     ) THEN
-        RAISE EXCEPTION 'Automata workload OIDC requires historical Standard authority'
+        RAISE EXCEPTION 'GitHub-compatible OIDC requires historical Standard authority'
             USING ERRCODE = '23514',
-                  CONSTRAINT = 'workload_oidc_historical_standard_authority';
+                  CONSTRAINT = 'github_oidc_historical_standard_authority';
     END IF;
     RETURN NEW;
 END;

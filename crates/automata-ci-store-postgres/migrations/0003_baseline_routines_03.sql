@@ -1311,7 +1311,7 @@ BEGIN
 END;
 $$;
 
-CREATE FUNCTION automata_workload_oidc_claim_set_valid(claims jsonb) RETURNS boolean
+CREATE FUNCTION automata_github_oidc_claim_set_valid(claims jsonb) RETURNS boolean
     LANGUAGE plpgsql IMMUTABLE STRICT
     AS $_$
 DECLARE
@@ -1350,7 +1350,7 @@ SET default_tablespace = '';
 
 SET default_table_access_method = heap;
 
-CREATE TABLE workload_oidc_authorities (
+CREATE TABLE github_oidc_authorities (
     attempt_id uuid NOT NULL,
     fencing_token bigint NOT NULL,
     authority_id uuid NOT NULL,
@@ -1388,7 +1388,7 @@ CREATE TABLE workload_oidc_authorities (
     subject_policy_mode text NOT NULL COLLATE pg_catalog."C",
     subject_policy_revision bigint NOT NULL,
     subject_policy_sha256 bytea NOT NULL,
-    github_run_subject_evidence_sha256 bytea CONSTRAINT workload_oidc_authorities_source_evidence_sha256_not_null NOT NULL,
+    github_run_subject_evidence_sha256 bytea CONSTRAINT github_oidc_authorities_source_evidence_sha256_not_null NOT NULL,
     claim_evidence_sha256 bytea NOT NULL,
     subject text NOT NULL COLLATE pg_catalog."C",
     default_audience text NOT NULL COLLATE pg_catalog."C",
@@ -1396,25 +1396,25 @@ CREATE TABLE workload_oidc_authorities (
     configuration_sha256 bytea NOT NULL,
     request_bearer_key_id text NOT NULL COLLATE pg_catalog."C",
     request_bearer_key_sha256 bytea NOT NULL,
-    request_bearer_verification_skew_seconds smallint CONSTRAINT workload_oidc_authorities_bearer_skew_not_null NOT NULL,
+    request_bearer_verification_skew_seconds smallint CONSTRAINT github_oidc_authorities_request_bearer_verification_sk_not_null NOT NULL,
     id_token_verifier_skew_seconds smallint NOT NULL,
     request_bearer_iat_seconds bigint NOT NULL,
     request_bearer_exp_seconds bigint NOT NULL,
     request_bearer_sha256 bytea NOT NULL,
     reserved_at_ms bigint NOT NULL,
-    CONSTRAINT workload_oidc_authorities_bearer_interval CHECK (((lease_issued_at_ms >= 0) AND (lease_expires_at_ms > lease_issued_at_ms) AND (reserved_at_ms >= lease_issued_at_ms) AND (reserved_at_ms < lease_expires_at_ms) AND (request_bearer_iat_seconds = (lease_issued_at_ms / 1000)) AND ((reserved_at_ms / 1000) < request_bearer_exp_seconds) AND (request_bearer_exp_seconds > request_bearer_iat_seconds) AND ((request_bearer_exp_seconds - request_bearer_iat_seconds) <= 86400) AND (request_bearer_iat_seconds <= '9223372036854775'::bigint) AND (request_bearer_exp_seconds <= '9223372036854775'::bigint) AND ((request_bearer_verification_skew_seconds >= 0) AND (request_bearer_verification_skew_seconds <= 300)) AND ((id_token_verifier_skew_seconds >= 0) AND (id_token_verifier_skew_seconds <= 300)) AND (request_bearer_exp_seconds <= ('9223372036854775807'::bigint - request_bearer_verification_skew_seconds)))),
-    CONSTRAINT workload_oidc_authorities_current_evidence_sha256 CHECK (((octet_length(plan_digest) = 32) AND (octet_length(event_digest) = 32) AND (octet_length(runtime_context_digest) = 32) AND (octet_length(permission_evidence_sha256) = 32) AND (permission_evidence_sha256 = job_ir_digest) AND (octet_length(subject_policy_sha256) = 32) AND (octet_length(github_run_subject_evidence_sha256) = 32) AND (octet_length(claim_evidence_sha256) = 32) AND (octet_length(configuration_sha256) = 32) AND (octet_length(request_bearer_sha256) = 32) AND (octet_length(request_bearer_key_sha256) = 32))),
-    CONSTRAINT workload_oidc_authorities_current_schemas CHECK (((admission_epoch = 1) AND (workflow_plan_schema = 1) AND (job_ir_schema = 1) AND ((job_ir_size_bytes >= 1) AND (job_ir_size_bytes <= 16777216)) AND (octet_length(job_ir_digest) = 32) AND ((octet_length(job_ir_object_key) >= 1) AND (octet_length(job_ir_object_key) <= 1024)) AND (job_ir_object_key !~ '[[:cntrl:]]'::text) AND ("left"(job_ir_object_key, 1) <> '/'::text) AND (job_ir_object_key !~ '(^|/)\.\.(/|$)'::text))),
-    CONSTRAINT workload_oidc_authorities_execution_numbers CHECK (((fencing_token > 0) AND (attempt_number > 0) AND (runner_session_epoch > 0) AND (runner_generation > 0) AND ((runner_slot >= 1) AND (runner_slot <= 65535)))),
-    CONSTRAINT workload_oidc_authorities_github_repository CHECK (((github_repository_id > 0) AND ((octet_length(github_repository_name) >= 3) AND (octet_length(github_repository_name) <= 140)) AND (github_repository_name ~ '^[^/]+/[^/]+$'::text) AND ((octet_length(split_part(github_repository_name, '/'::text, 1)) >= 1) AND (octet_length(split_part(github_repository_name, '/'::text, 1)) <= 39)) AND (split_part(github_repository_name, '/'::text, 1) ~ '^[A-Za-z0-9]([A-Za-z0-9-]{0,37}[A-Za-z0-9])?$'::text) AND (split_part(github_repository_name, '/'::text, 1) !~~ '%--%'::text) AND ((octet_length(split_part(github_repository_name, '/'::text, 2)) >= 1) AND (octet_length(split_part(github_repository_name, '/'::text, 2)) <= 100)) AND (split_part(github_repository_name, '/'::text, 2) ~ '^[A-Za-z0-9._-]+$'::text) AND (split_part(github_repository_name, '/'::text, 2) <> ALL (ARRAY['.'::text, '..'::text])) AND (lower(split_part(github_repository_name, '/'::text, 2)) !~~ '%.git'::text))),
-    CONSTRAINT workload_oidc_authorities_key_id CHECK ((((octet_length(request_bearer_key_id) >= 1) AND (octet_length(request_bearer_key_id) <= 128)) AND (request_bearer_key_id ~ '^[A-Za-z0-9._-]+$'::text))),
-    CONSTRAINT workload_oidc_authorities_non_nil_ids CHECK (((attempt_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (authority_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (repository_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (workflow_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (run_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (invocation_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (logical_job_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (instance_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (job_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (lease_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (runner_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (runner_session_id <> '00000000-0000-0000-0000-000000000000'::uuid))),
-    CONSTRAINT workload_oidc_authorities_permission_exact CHECK ((permission_mode = 'id-token:write'::text)),
-    CONSTRAINT workload_oidc_authorities_principals CHECK ((((octet_length(subject) >= 1) AND (octet_length(subject) <= 2048)) AND (btrim(subject) <> ''::text) AND (subject !~ '[[:cntrl:]]'::text) AND ((octet_length(default_audience) >= 1) AND (octet_length(default_audience) <= 2048)) AND (btrim(default_audience) <> ''::text) AND (default_audience !~ '[[:cntrl:]]'::text) AND automata_workload_oidc_claim_set_valid(additional_claims))),
-    CONSTRAINT workload_oidc_authorities_stable_owner_policy CHECK (((subject_policy_mode = 'stable_owner_evidence'::text) AND (subject_policy_revision > 0) AND (github_owner_id > 0)))
+    CONSTRAINT github_oidc_authorities_bearer_interval CHECK (((lease_issued_at_ms >= 0) AND (lease_expires_at_ms > lease_issued_at_ms) AND (reserved_at_ms >= lease_issued_at_ms) AND (reserved_at_ms < lease_expires_at_ms) AND (request_bearer_iat_seconds = (lease_issued_at_ms / 1000)) AND ((reserved_at_ms / 1000) < request_bearer_exp_seconds) AND (request_bearer_exp_seconds > request_bearer_iat_seconds) AND ((request_bearer_exp_seconds - request_bearer_iat_seconds) <= 86400) AND (request_bearer_iat_seconds <= '9223372036854775'::bigint) AND (request_bearer_exp_seconds <= '9223372036854775'::bigint) AND ((request_bearer_verification_skew_seconds >= 0) AND (request_bearer_verification_skew_seconds <= 300)) AND ((id_token_verifier_skew_seconds >= 0) AND (id_token_verifier_skew_seconds <= 300)) AND (request_bearer_exp_seconds <= ('9223372036854775807'::bigint - request_bearer_verification_skew_seconds)))),
+    CONSTRAINT github_oidc_authorities_current_evidence_sha256 CHECK (((octet_length(plan_digest) = 32) AND (octet_length(event_digest) = 32) AND (octet_length(runtime_context_digest) = 32) AND (octet_length(permission_evidence_sha256) = 32) AND (permission_evidence_sha256 = job_ir_digest) AND (octet_length(subject_policy_sha256) = 32) AND (octet_length(github_run_subject_evidence_sha256) = 32) AND (octet_length(claim_evidence_sha256) = 32) AND (octet_length(configuration_sha256) = 32) AND (octet_length(request_bearer_sha256) = 32) AND (octet_length(request_bearer_key_sha256) = 32))),
+    CONSTRAINT github_oidc_authorities_current_schemas CHECK (((admission_epoch = 1) AND (workflow_plan_schema = 1) AND (job_ir_schema = 1) AND ((job_ir_size_bytes >= 1) AND (job_ir_size_bytes <= 16777216)) AND (octet_length(job_ir_digest) = 32) AND ((octet_length(job_ir_object_key) >= 1) AND (octet_length(job_ir_object_key) <= 1024)) AND (job_ir_object_key !~ '[[:cntrl:]]'::text) AND ("left"(job_ir_object_key, 1) <> '/'::text) AND (job_ir_object_key !~ '(^|/)\.\.(/|$)'::text))),
+    CONSTRAINT github_oidc_authorities_execution_numbers CHECK (((fencing_token > 0) AND (attempt_number > 0) AND (runner_session_epoch > 0) AND (runner_generation > 0) AND ((runner_slot >= 1) AND (runner_slot <= 65535)))),
+    CONSTRAINT github_oidc_authorities_github_repository CHECK (((github_repository_id > 0) AND ((octet_length(github_repository_name) >= 3) AND (octet_length(github_repository_name) <= 140)) AND (github_repository_name ~ '^[^/]+/[^/]+$'::text) AND ((octet_length(split_part(github_repository_name, '/'::text, 1)) >= 1) AND (octet_length(split_part(github_repository_name, '/'::text, 1)) <= 39)) AND (split_part(github_repository_name, '/'::text, 1) ~ '^[A-Za-z0-9]([A-Za-z0-9-]{0,37}[A-Za-z0-9])?$'::text) AND (split_part(github_repository_name, '/'::text, 1) !~~ '%--%'::text) AND ((octet_length(split_part(github_repository_name, '/'::text, 2)) >= 1) AND (octet_length(split_part(github_repository_name, '/'::text, 2)) <= 100)) AND (split_part(github_repository_name, '/'::text, 2) ~ '^[A-Za-z0-9._-]+$'::text) AND (split_part(github_repository_name, '/'::text, 2) <> ALL (ARRAY['.'::text, '..'::text])) AND (lower(split_part(github_repository_name, '/'::text, 2)) !~~ '%.git'::text))),
+    CONSTRAINT github_oidc_authorities_key_id CHECK ((((octet_length(request_bearer_key_id) >= 1) AND (octet_length(request_bearer_key_id) <= 128)) AND (request_bearer_key_id ~ '^[A-Za-z0-9._-]+$'::text))),
+    CONSTRAINT github_oidc_authorities_non_nil_ids CHECK (((attempt_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (authority_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (repository_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (workflow_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (run_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (invocation_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (logical_job_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (instance_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (job_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (lease_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (runner_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (runner_session_id <> '00000000-0000-0000-0000-000000000000'::uuid))),
+    CONSTRAINT github_oidc_authorities_permission_exact CHECK ((permission_mode = 'id-token:write'::text)),
+    CONSTRAINT github_oidc_authorities_principals CHECK ((((octet_length(subject) >= 1) AND (octet_length(subject) <= 2048)) AND (btrim(subject) <> ''::text) AND (subject !~ '[[:cntrl:]]'::text) AND ((octet_length(default_audience) >= 1) AND (octet_length(default_audience) <= 2048)) AND (btrim(default_audience) <> ''::text) AND (default_audience !~ '[[:cntrl:]]'::text) AND automata_github_oidc_claim_set_valid(additional_claims))),
+    CONSTRAINT github_oidc_authorities_stable_owner_policy CHECK (((subject_policy_mode = 'stable_owner_evidence'::text) AND (subject_policy_revision > 0) AND (github_owner_id > 0)))
 );
 
-CREATE FUNCTION automata_workload_oidc_authority_is_current(authority workload_oidc_authorities, observed_at_ms bigint, required_current_before_ms bigint) RETURNS boolean
+CREATE FUNCTION automata_github_oidc_authority_is_current(authority github_oidc_authorities, observed_at_ms bigint, required_current_before_ms bigint) RETURNS boolean
     LANGUAGE sql STABLE
     AS $$
     SELECT EXISTS (

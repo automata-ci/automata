@@ -352,7 +352,7 @@ CREATE TABLE github_membership_snapshots (
     CONSTRAINT github_membership_snapshots_validity CHECK ((valid_until_ms > observed_at_ms))
 );
 
-CREATE TABLE workload_oidc_issuance_slots (
+CREATE TABLE github_oidc_issuance_slots (
     authority_id uuid NOT NULL,
     audience_key_sha256 bytea NOT NULL,
     requested_audience text COLLATE pg_catalog."C",
@@ -365,23 +365,23 @@ CREATE TABLE workload_oidc_issuance_slots (
     expires_at_seconds bigint NOT NULL,
     created_at_seconds bigint NOT NULL,
     updated_at_seconds bigint NOT NULL,
-    CONSTRAINT workload_oidc_issuance_slots_audience CHECK ((((octet_length(resolved_audience) >= 1) AND (octet_length(resolved_audience) <= 2048)) AND (btrim(resolved_audience) <> ''::text) AND (resolved_audience !~ '[[:cntrl:]]'::text))),
-    CONSTRAINT workload_oidc_issuance_slots_digest CHECK ((octet_length(audience_key_sha256) = 32)),
-    CONSTRAINT workload_oidc_issuance_slots_generation CHECK ((generation > 0)),
-    CONSTRAINT workload_oidc_issuance_slots_identity CHECK (((token_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND ((octet_length(signing_key_id) >= 1) AND (octet_length(signing_key_id) <= 128)) AND (signing_key_id ~ '^[A-Za-z0-9._-]+$'::text))),
-    CONSTRAINT workload_oidc_issuance_slots_interval CHECK (((issued_at_seconds >= 0) AND (not_before_seconds >= 0) AND (not_before_seconds <= issued_at_seconds) AND (expires_at_seconds > issued_at_seconds) AND ((expires_at_seconds - issued_at_seconds) <= 3600) AND (issued_at_seconds <= '9223372036854775'::bigint) AND (created_at_seconds >= 0) AND (updated_at_seconds >= created_at_seconds) AND (updated_at_seconds = issued_at_seconds))),
-    CONSTRAINT workload_oidc_issuance_slots_requested_audience CHECK (((requested_audience IS NULL) OR (((octet_length(requested_audience) >= 1) AND (octet_length(requested_audience) <= 2048)) AND (btrim(requested_audience) <> ''::text) AND (requested_audience !~ '[[:cntrl:]]'::text))))
+    CONSTRAINT github_oidc_issuance_slots_audience CHECK ((((octet_length(resolved_audience) >= 1) AND (octet_length(resolved_audience) <= 2048)) AND (btrim(resolved_audience) <> ''::text) AND (resolved_audience !~ '[[:cntrl:]]'::text))),
+    CONSTRAINT github_oidc_issuance_slots_digest CHECK ((octet_length(audience_key_sha256) = 32)),
+    CONSTRAINT github_oidc_issuance_slots_generation CHECK ((generation > 0)),
+    CONSTRAINT github_oidc_issuance_slots_identity CHECK (((token_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND ((octet_length(signing_key_id) >= 1) AND (octet_length(signing_key_id) <= 128)) AND (signing_key_id ~ '^[A-Za-z0-9._-]+$'::text))),
+    CONSTRAINT github_oidc_issuance_slots_interval CHECK (((issued_at_seconds >= 0) AND (not_before_seconds >= 0) AND (not_before_seconds <= issued_at_seconds) AND (expires_at_seconds > issued_at_seconds) AND ((expires_at_seconds - issued_at_seconds) <= 3600) AND (issued_at_seconds <= '9223372036854775'::bigint) AND (created_at_seconds >= 0) AND (updated_at_seconds >= created_at_seconds) AND (updated_at_seconds = issued_at_seconds))),
+    CONSTRAINT github_oidc_issuance_slots_requested_audience CHECK (((requested_audience IS NULL) OR (((octet_length(requested_audience) >= 1) AND (octet_length(requested_audience) <= 2048)) AND (btrim(requested_audience) <> ''::text) AND (requested_audience !~ '[[:cntrl:]]'::text))))
 );
 
-CREATE TABLE workload_oidc_key_deadlines (
+CREATE TABLE github_oidc_key_deadlines (
     key_use text NOT NULL COLLATE pg_catalog."C",
     key_id text NOT NULL COLLATE pg_catalog."C",
     key_sha256 bytea,
     max_not_after_seconds bigint NOT NULL,
     updated_at_seconds bigint NOT NULL,
-    CONSTRAINT workload_oidc_key_deadlines_key CHECK ((((octet_length(key_id) >= 1) AND (octet_length(key_id) <= 128)) AND (key_id ~ '^[A-Za-z0-9._-]+$'::text) AND ((key_sha256 IS NULL) OR (octet_length(key_sha256) = 32)))),
-    CONSTRAINT workload_oidc_key_deadlines_time CHECK (((max_not_after_seconds > 0) AND (updated_at_seconds >= 0) AND (updated_at_seconds <= max_not_after_seconds))),
-    CONSTRAINT workload_oidc_key_deadlines_use CHECK ((key_use = ANY (ARRAY['request_bearer'::text, 'id_token_signing'::text])))
+    CONSTRAINT github_oidc_key_deadlines_key CHECK ((((octet_length(key_id) >= 1) AND (octet_length(key_id) <= 128)) AND (key_id ~ '^[A-Za-z0-9._-]+$'::text) AND ((key_sha256 IS NULL) OR (octet_length(key_sha256) = 32)))),
+    CONSTRAINT github_oidc_key_deadlines_time CHECK (((max_not_after_seconds > 0) AND (updated_at_seconds >= 0) AND (updated_at_seconds <= max_not_after_seconds))),
+    CONSTRAINT github_oidc_key_deadlines_use CHECK ((key_use = ANY (ARRAY['request_bearer'::text, 'id_token_signing'::text])))
 );
 
 CREATE TABLE github_organization_membership_observations (
