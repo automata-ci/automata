@@ -648,6 +648,35 @@ fn presentation_is_canonical_bounded_and_independent_of_provider_features() {
 }
 
 #[test]
+fn result_subject_ids_are_deterministic_connection_scoped_version_eight() {
+    let kind = ProviderResultSubjectKind::WorkflowRun {
+        run_id: RunId::from_uuid(Uuid::from_u128(42)),
+    };
+    let first = ProviderResultSubjectId::derive(connection().connection_id(), &kind);
+    assert_eq!(
+        first,
+        ProviderResultSubjectId::derive(connection().connection_id(), &kind)
+    );
+    assert_eq!(first.as_uuid().get_version_num(), 8);
+    assert_ne!(
+        first,
+        ProviderResultSubjectId::derive(
+            ProviderConnectionId::from_uuid(Uuid::from_u128(99)).unwrap(),
+            &kind,
+        )
+    );
+    assert_ne!(
+        first,
+        ProviderResultSubjectId::derive(
+            connection().connection_id(),
+            &ProviderResultSubjectKind::WorkflowRun {
+                run_id: RunId::from_uuid(Uuid::from_u128(43)),
+            },
+        )
+    );
+}
+
+#[test]
 fn evidence_is_bound_to_the_exact_claim_fence() {
     let claimed = ClaimedProviderResult::new(
         subject(),

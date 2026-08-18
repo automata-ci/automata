@@ -266,7 +266,7 @@ const CANONICAL_MIGRATIONS: &[(&str, &str)] = &[
         "60e84995588ac7378c135bcae3e23e066fb9654ab7a00cb222aa2c9c9d14ed74e30ebd113bb7743eca02a8d44efdd7a0",
     ),
     (
-        "0061_provider_result_projection_digest.sql",
+        "0064_provider_result_projection_digest.sql",
         "596e92a05f58bae5827595da316fc4664a0ba1863386ee5fad19d42df816e222d0cbc9cb29b864314c2e8f14aa8ccf2a",
     ),
 ];
@@ -947,7 +947,7 @@ fn provider_result_recovery_state_is_bounded_and_provider_neutral() {
 
 #[test]
 fn provider_result_projection_digest_is_exact_and_provider_neutral() {
-    let source = include_str!("../migrations/0061_provider_result_projection_digest.sql");
+    let source = include_str!("../migrations/0064_provider_result_projection_digest.sql");
     for required in [
         "ADD COLUMN projection_digest BYTEA NOT NULL",
         "octet_length(projection_digest) = 32",

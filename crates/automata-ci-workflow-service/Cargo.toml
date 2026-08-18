@@ -43,13 +43,13 @@ thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
+url.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true
 automata-ci-blob-s3.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
-url.workspace = true
 
 [lints]
 workspace = true

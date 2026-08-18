@@ -11,6 +11,7 @@ use automata_ci_core::{GitObjectAlgorithm, GitObjectId, JobId, RunId, Sha256Dige
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 use url::Url;
+use uuid::Uuid;
 
 use crate::{
     ExternalRepositoryIdentity, ExternalResultId, ProviderCapabilities, ProviderCapability,
@@ -48,6 +49,7 @@ const RESULT_SUBJECT_DOMAIN: &[u8] = b"automata.provider.result-subject.v1\0";
 const RESULT_PROJECTION_DOMAIN: &[u8] = b"automata.provider.result-projection.v1\0";
 const RESULT_EVIDENCE_DOMAIN: &[u8] = b"automata.provider.result-evidence.v1\0";
 const RESULT_CONTINUATION_DOMAIN: &[u8] = b"automata.provider.result-continuation.v1\0";
+const RESULT_SUBJECT_ID_DOMAIN: &[u8] = b"automata.provider.result-subject-id.v1\0";
 
 /// Exact Automata subject represented by one provider result.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -94,6 +96,33 @@ impl ProviderResultSubjectKind {
                 hash.update(job_id.as_uuid().as_bytes());
             }
         }
+    }
+}
+
+impl ProviderResultSubjectId {
+    /// Derives the stable RFC 9562 version-8 identity for one connection-local
+    /// result subject.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if a UUID carrying mandatory version and variant bits is
+    /// classified as nil, which would indicate a UUID library invariant break.
+    #[must_use]
+    pub fn derive(
+        connection_id: ProviderConnectionId,
+        subject: &ProviderResultSubjectKind,
+    ) -> Self {
+        let mut hash = Sha256::new();
+        hash.update(RESULT_SUBJECT_ID_DOMAIN);
+        hash.update(connection_id.as_uuid().as_bytes());
+        subject.hash_into(&mut hash);
+        let digest = hash.finalize();
+        let mut bytes = [0_u8; 16];
+        bytes.copy_from_slice(&digest[..16]);
+        bytes[6] = (bytes[6] & 0x0f) | 0x80;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        Self::from_uuid(Uuid::from_bytes(bytes))
+            .expect("a domain-separated version-8 result subject ID is non-nil")
     }
 }
 

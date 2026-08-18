@@ -22,7 +22,8 @@ use bytes::Bytes;
 use thiserror::Error;
 
 use crate::{
-    AdmissionRepositoryCoordinates, RepositoryWorkflowSource, WorkflowAdmissionError,
+    AdmissionRepositoryCoordinates, ProviderWorkflowResultRequest, ProviderWorkflowResultService,
+    ProviderWorkflowResultServiceError, RepositoryWorkflowSource, WorkflowAdmissionError,
     WorkflowAdmissionRequest, WorkflowAdmissionRequestError, WorkflowAdmissionResult,
     WorkflowAdmissionService,
 };
@@ -137,13 +138,17 @@ pub struct ProviderWorkflowApplicationRequestError;
 #[derive(Clone)]
 pub struct ProviderWorkflowApplicationService {
     admission: WorkflowAdmissionService,
+    results: ProviderWorkflowResultService,
 }
 
 impl ProviderWorkflowApplicationService {
     /// Composes trigger application over the canonical workflow admission service.
     #[must_use]
-    pub const fn new(admission: WorkflowAdmissionService) -> Self {
-        Self { admission }
+    pub const fn new(
+        admission: WorkflowAdmissionService,
+        results: ProviderWorkflowResultService,
+    ) -> Self {
+        Self { admission, results }
     }
 
     /// Selects every configured workflow and admits each accepted plan.
@@ -170,6 +175,7 @@ impl ProviderWorkflowApplicationService {
         {
             return Ok(ProviderWorkflowApplicationOutcome::RequiresChangedFiles);
         }
+        let (object, attempt, created_at) = result_coordinates(&request)?;
         let mut results = Vec::with_capacity(prepared.len());
         for workflow in prepared {
             let outcome = match workflow.disposition {
@@ -237,6 +243,18 @@ impl ProviderWorkflowApplicationService {
                     ProviderWorkflowRejection::UnsupportedCompilationDisposition,
                 ),
             };
+            self.results
+                .project(ProviderWorkflowResultRequest {
+                    connection: &request.connection,
+                    delivery: &request.delivery,
+                    object,
+                    workflow_path: &workflow.path,
+                    attempt,
+                    created_at,
+                    disposition: outcome,
+                })
+                .await
+                .map_err(provider_result_error)?;
             results.push(ProviderWorkflowApplicationReport {
                 path: workflow.path,
                 disposition: outcome,
@@ -251,8 +269,49 @@ impl fmt::Debug for ProviderWorkflowApplicationService {
         formatter
             .debug_struct("ProviderWorkflowApplicationService")
             .field("admission", &"[workflow admission service]")
+            .field("results", &self.results)
             .finish()
     }
+}
+
+const fn provider_result_error(
+    error: ProviderWorkflowResultServiceError,
+) -> ProviderWorkflowApplicationError {
+    match error {
+        ProviderWorkflowResultServiceError::Unavailable => {
+            ProviderWorkflowApplicationError::Unavailable
+        }
+        ProviderWorkflowResultServiceError::InvalidConfiguration
+        | ProviderWorkflowResultServiceError::InvalidEvidence => {
+            ProviderWorkflowApplicationError::InvalidEvidence
+        }
+        ProviderWorkflowResultServiceError::Inconsistent => {
+            ProviderWorkflowApplicationError::Inconsistent
+        }
+    }
+}
+
+fn result_coordinates(
+    request: &ProviderWorkflowApplicationRequest,
+) -> Result<
+    (
+        automata_ci_core::GitObjectId,
+        u32,
+        automata_ci_core::UnixMillis,
+    ),
+    ProviderWorkflowApplicationError,
+> {
+    let object = request
+        .trust
+        .evidence()
+        .execution_revision()
+        .ok_or(ProviderWorkflowApplicationError::InvalidEvidence)
+        .and_then(|revision| {
+            automata_ci_core::GitObjectId::from_provider_hex(revision)
+                .map_err(|_| ProviderWorkflowApplicationError::InvalidEvidence)
+        })?;
+    let receipt = request.processing.receipt();
+    Ok((object, u32::from(receipt.attempts()), receipt.created_at()))
 }
 
 /// Result of applying every selected workflow in one provider delivery.
