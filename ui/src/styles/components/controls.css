@@ -84,6 +84,7 @@ textarea.form-control {
   align-items: center;
   justify-content: center;
   padding: 5px 12px;
+  gap: 6px;
   color: var(--fg-default);
   background: var(--control-bg);
   border: 1px solid var(--border-default);
@@ -137,6 +138,11 @@ textarea.form-control {
 .button[aria-disabled="true"] {
   cursor: not-allowed;
   opacity: 0.6;
+}
+
+.button[aria-busy="true"] {
+  cursor: progress;
+  opacity: 1;
 }
 
 .button--quiet {

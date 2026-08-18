@@ -1,6 +1,7 @@
 import type { PropsWithChildren, ReactNode } from "react";
 import type { RepositoryModel, ShellModel } from "../models";
 import { isVisibleDisplayCodePoint } from "../unicode";
+import { AutomataMark } from "./AutomataMark";
 import { Icon } from "./Icon";
 
 export interface ShellProps extends PropsWithChildren {
@@ -30,7 +31,7 @@ export function Shell({
         <div className="site-header__inner">
           <a className="wordmark" href={shell.homeHref} aria-label={`${shell.productName} home`}>
             <span className="wordmark__mark" aria-hidden="true">
-              <Icon name="workflow" size={18} />
+              <AutomataMark />
             </span>
             <span className="wordmark__label">{shell.productName}</span>
           </a>

@@ -10,11 +10,11 @@
 }
 
 .status__icon {
-  flex: 0 0 24px;
-  width: 24px;
-  height: 24px;
+  flex: 0 0 20px;
+  width: 20px;
+  height: 20px;
   color: var(--neutral-emphasis);
-  font-size: 24px;
+  font-size: 20px;
 }
 
 .status__label {
@@ -38,13 +38,6 @@
 
 .status--running .status__icon {
   animation: status-spin 1s linear infinite;
-}
-
-.status__arc {
-  border: 2px solid var(--border-muted);
-  border-color: color-mix(in srgb, currentColor 14%, transparent);
-  border-top-color: currentColor;
-  border-radius: 50%;
 }
 
 .status--queued .status__icon {

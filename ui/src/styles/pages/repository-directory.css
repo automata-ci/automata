@@ -72,7 +72,3 @@
   justify-content: flex-end;
   gap: 6px;
 }
-
-.repository-directory__destinations .button {
-  gap: 6px;
-}
