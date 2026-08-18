@@ -23,6 +23,7 @@ mod model;
 mod observer;
 mod orchestration;
 mod port;
+mod provider_trigger;
 mod result_projection;
 mod reusable_runtime;
 mod reusable_workflow;
@@ -85,6 +86,12 @@ pub use observer::{
     WorkflowAdmissionObserver, WorkflowAdmissionStage, WorkflowAdmissionStageOutcome,
 };
 pub use port::{AdmissionClock, AdmissionIdGenerator, WorkflowPlanVerifier};
+pub use provider_trigger::{
+    ProviderWorkflowApplicationError, ProviderWorkflowApplicationOutcome,
+    ProviderWorkflowApplicationReport, ProviderWorkflowApplicationRequest,
+    ProviderWorkflowApplicationRequestError, ProviderWorkflowApplicationService,
+    ProviderWorkflowDisposition, ProviderWorkflowRejection,
+};
 pub use result_projection::{
     LOGICAL_RESULT_PROJECTION_CLAIM_MILLIS, LogicalResultProjectionError,
     LogicalResultProjectionOutcome, LogicalResultProjectionService,

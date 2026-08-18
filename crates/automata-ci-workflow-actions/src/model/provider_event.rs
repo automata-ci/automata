@@ -1,7 +1,9 @@
 use std::fmt;
 
 use automata_ci_core::Sha256Digest;
-use automata_ci_provider::{MergeQueueActivity, NormalizedTrigger, PullRequestActivity};
+use automata_ci_provider::NormalizedTrigger;
+
+use crate::provider_event_document::{merge_queue_activity_name, pull_request_activity_name};
 
 use super::GithubWorkflowDispatchInputs;
 
@@ -208,6 +210,41 @@ impl ProviderEventMetadata {
         }
     }
 
+    /// Reports whether selector metadata retains the normalized trigger's
+    /// immutable event shape and activity fields.
+    ///
+    /// Changed-file evidence may refine only push and pull-request metadata;
+    /// it cannot alter event identity, activity, deletion state, or target ref.
+    #[must_use]
+    pub fn matches_normalized_trigger(&self, trigger: &NormalizedTrigger) -> bool {
+        match (self, trigger) {
+            (Self::Push { deleted, .. }, NormalizedTrigger::Push(push)) => {
+                *deleted == push.after().is_none()
+            }
+            (
+                Self::PullRequest {
+                    action, base_ref, ..
+                },
+                NormalizedTrigger::PullRequest(pull_request),
+            ) => {
+                action == pull_request_activity_name(pull_request.activity())
+                    && base_ref == pull_request.base_ref().short_name()
+            }
+            (
+                Self::MergeGroup { action, base_ref },
+                NormalizedTrigger::MergeQueue(merge_queue),
+            ) => {
+                action == merge_queue_activity_name(merge_queue.activity())
+                    && base_ref == merge_queue.target_ref().full()
+            }
+            (
+                Self::RepositoryDispatch { event_type },
+                NormalizedTrigger::RepositoryDispatch(dispatch),
+            ) => event_type == dispatch.event_type().as_str(),
+            _ => false,
+        }
+    }
+
     /// Returns external changed-file evidence used by this event, when present.
     #[must_use]
     pub const fn changed_files_evidence_digest(&self) -> Option<Sha256Digest> {
@@ -304,28 +341,10 @@ impl ProviderEventMetadata {
     }
 }
 
-const fn pull_request_activity_name(activity: PullRequestActivity) -> &'static str {
-    match activity {
-        PullRequestActivity::Opened => "opened",
-        PullRequestActivity::Reopened => "reopened",
-        PullRequestActivity::Synchronized => "synchronize",
-        PullRequestActivity::Closed | PullRequestActivity::Merged => "closed",
-        PullRequestActivity::ReadyForReview => "ready_for_review",
-        PullRequestActivity::ConvertedToDraft => "converted_to_draft",
-        PullRequestActivity::MetadataChanged => "edited",
-    }
-}
-
-const fn merge_queue_activity_name(activity: MergeQueueActivity) -> &'static str {
-    match activity {
-        MergeQueueActivity::Queued => "checks_requested",
-        MergeQueueActivity::Removed => "destroyed",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use automata_ci_provider::{MergeQueueActivity, PullRequestActivity};
 
     #[test]
     fn normalized_provider_activities_map_to_actions_dialect_names() {
