@@ -15,6 +15,30 @@ use crate::{
 };
 
 pub(crate) const DESIRED_SPEC_SCHEMA: &str = "automata.local/desired-spec/v1";
+pub(crate) const RENDERER_CONTRACT_FIXTURE_INSTALLATION_ID: &str =
+    "11111111-1111-4111-8111-111111111111";
+pub(crate) const RENDERER_CONTRACT_FIXTURE_DESIRED_SPEC: &str = concat!(
+    "{\"schema\":\"automata.local/desired-spec/v1\",",
+    "\"installation\":{\"id\":\"11111111-1111-4111-8111-111111111111\",",
+    "\"selector_key\":\"df06ebed0fcba9b2d00b0476426924f354f73d0d7c6cd4ed2844b52787ccd120\",",
+    "\"compose_project\":\"automata-local-df06ebed0fcba9b2d00b0476426924f3\"},",
+    "\"platform\":{\"architecture\":\"linux/amd64\"},",
+    "\"capacity\":{\"max_parallel_jobs\":3},\"human\":{\"host_port\":8080},",
+    "\"profile\":{\"id\":\"automata.dev/github-hosted-ubuntu-24-04-x64-v1\",",
+    "\"manifest_sha256\":\"0101010101010101010101010101010101010101010101010101010101010101\",",
+    "\"image\":\"registry.example/automata/job@sha256:0101010101010101010101010101010101010101010101010101010101010101\"},",
+    "\"images\":{\"automata\":\"registry.example/automata/automata@sha256:1111111111111111111111111111111111111111111111111111111111111111\",",
+    "\"runner\":\"registry.example/automata/runner@sha256:1212121212121212121212121212121212121212121212121212121212121212\",",
+    "\"postgres\":\"registry.example/automata/postgres@sha256:1313131313131313131313131313131313131313131313131313131313131313\",",
+    "\"rustfs\":\"registry.example/automata/rustfs@sha256:1414141414141414141414141414141414141414141414141414141414141414\",",
+    "\"sandbox_guest\":\"registry.example/automata/sandbox-guest@sha256:1515151515151515151515151515151515151515151515151515151515151515\",",
+    "\"service_proxy\":{\"reference\":\"automata.local/automata-ci-service-proxy:manifest-1717171717171717171717171717171717171717171717171717171717171717\",",
+    "\"config_image_id\":\"sha256:1616161616161616161616161616161616161616161616161616161616161616\",",
+    "\"manifest_image_id\":\"sha256:1717171717171717171717171717171717171717171717171717171717171717\"}},",
+    "\"results_transit\":{\"subnet\":\"172.20.0.0/23\",\"gateway\":\"172.20.0.1\",",
+    "\"results_address\":\"172.20.0.2\"},",
+    "\"plan_sha256\":\"8ee06ca78bc85e89ac5c38d8ba8cc28c999937648937a69190e7bb5b1355645e\"}\n"
+);
 const PLAN_DIGEST_DOMAIN: &[u8] = b"automata/local/desired-plan/v1\0";
 
 const AMD64_PROFILE_ID: &str = "automata.dev/github-hosted-ubuntu-24-04-x64-v1";

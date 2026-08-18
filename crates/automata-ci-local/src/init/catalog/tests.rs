@@ -22,6 +22,34 @@ fn packaged_source_contract_is_the_exact_release_source() {
         digest_hex(include_bytes!("../catalog-v1.source.json")),
         SOURCE_SHA256
     );
+    assert_eq!(
+        validate_current_source_contract().unwrap(),
+        current_source_contract_sha256()
+    );
+}
+
+#[test]
+fn packaged_renderer_contract_is_the_production_fixture_digest() {
+    let source: Value =
+        serde_json::from_slice(include_bytes!("../catalog-v1.source.json")).unwrap();
+    let runtime = source.get("lifecycle_runtime").unwrap();
+    let renderer = runtime.get("renderer_contract").unwrap();
+    assert_eq!(
+        renderer.get("schema").and_then(Value::as_str),
+        Some(super::super::renderer::RENDERER_CONTRACT_FIXTURE_SCHEMA)
+    );
+    let expected_digest = super::super::renderer::renderer_contract_fixture_sha256()
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        renderer.get("fixture_sha256").and_then(Value::as_str),
+        Some(expected_digest.as_str())
+    );
+    validate_lifecycle_runtime(runtime).unwrap();
+
+    let mut mutated = runtime.clone();
+    mutated["renderer_contract"]["fixture_sha256"] = Value::String("f".repeat(64));
+    assert!(validate_lifecycle_runtime(&mutated).is_err());
 }
 
 #[test]

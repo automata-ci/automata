@@ -29,6 +29,10 @@ const RECOVER_PATH: &str = "/api/v1/runner-enrollments/recover";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "enrollment keeps crash-replay classification, token access, HTTP redemption, and exact TLS publication in one auditable custody flow"
+)]
 pub(super) async fn enroll(args: &EnrollArgs) -> Result<()> {
     validate_name(&args.name)?;
     let config = RunnerProductConfig::load(&args.config)
@@ -42,29 +46,29 @@ pub(super) async fn enroll(args: &EnrollArgs) -> Result<()> {
     }
     let destinations = CredentialDestinations::from_config(&config)?;
     let stage = if let Some(stage) = destinations.load_stage(&config, &origin, &args.name)? {
-        if stage.is_recovery() {
-            if let Some(response) = destinations.load_recovery_response()? {
-                destinations.finish_recovery(
-                    &config,
-                    &stage,
-                    &response,
-                    current_unix_time_seconds()?,
-                )?;
-                destinations.complete_recovery()?;
-                let receipt = destinations
-                    .load_response()?
-                    .context("runner enrollment completion receipt is missing")?;
-                let enrolled: RedeemResponse = serde_json::from_slice(&receipt)
-                    .context("runner enrollment receipt is invalid")?;
-                destinations.attest_completed(
-                    &config,
-                    &enrolled,
-                    &receipt,
-                    current_unix_time_seconds()?,
-                )?;
-                println!("runner {} recovery is already complete", config.runner_id());
-                return Ok(());
-            }
+        if stage.is_recovery()
+            && let Some(response) = destinations.load_recovery_response()?
+        {
+            destinations.finish_recovery(
+                &config,
+                &stage,
+                &response,
+                current_unix_time_seconds()?,
+            )?;
+            destinations.complete_recovery()?;
+            let receipt = destinations
+                .load_response()?
+                .context("runner enrollment completion receipt is missing")?;
+            let enrolled: RedeemResponse =
+                serde_json::from_slice(&receipt).context("runner enrollment receipt is invalid")?;
+            destinations.attest_completed(
+                &config,
+                &enrolled,
+                &receipt,
+                current_unix_time_seconds()?,
+            )?;
+            println!("runner {} recovery is already complete", config.runner_id());
+            return Ok(());
         }
         stage
     } else {

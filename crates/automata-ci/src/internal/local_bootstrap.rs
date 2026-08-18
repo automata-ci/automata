@@ -305,6 +305,10 @@ fn decode_canonical_request(
     Ok(request)
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "installation bootstrap keeps deployment authority, token generation, receipt publication, and exact replay in one bounded transaction flow"
+)]
 async fn bootstrap_runner(
     store: &PostgresStore,
     operation: BootstrapRunnerOperation,
@@ -572,6 +576,10 @@ fn persist_receipt(
 }
 
 #[cfg(unix)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "active-token replacement keeps no-follow custody, predecessor CAS, fsync, rename, and post-publication proof visibly contiguous"
+)]
 fn persist_active_token(
     target: &InternalBootstrapFileSource,
     bytes: &[u8],

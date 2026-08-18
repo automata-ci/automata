@@ -7244,15 +7244,20 @@ fn classify_lifecycle_lock(
         return Err(engine_resource_mismatch());
     }
 
+    classify_lifecycle_lock_process_state(state, id, operation_id)
+}
+
+fn classify_lifecycle_lock_process_state(
+    state: &bollard::models::ContainerState,
+    id: &str,
+    operation_id: OperationId,
+) -> Result<LifecycleLockObservation, LocalInitError> {
     match state.running {
         Some(true) if state.pid.is_some_and(|pid| pid > 0) => Ok(LifecycleLockObservation::Live {
             id: id.to_owned(),
             operation_id,
         }),
-        Some(false)
-            if state.pid.is_none_or(|pid| pid == 0)
-                && state.exit_code.is_none_or(|code| code == 0) =>
-        {
+        Some(false) if state.pid.is_none_or(|pid| pid == 0) => {
             Ok(LifecycleLockObservation::Stopped {
                 id: id.to_owned(),
                 operation_id,
@@ -8334,6 +8339,39 @@ mod daemon_generation_tests {
                 .unwrap_err()
                 .code(),
             LocalInitErrorCode::EngineResourceMismatch
+        );
+    }
+
+    #[test]
+    fn interrupted_holder_exit_remains_sticky_stopped_evidence() {
+        let id = "a".repeat(64);
+        let operation_id = OperationId::new();
+        for exit_code in [None, Some(0), Some(1), Some(137)] {
+            let state = bollard::models::ContainerState {
+                running: Some(false),
+                pid: Some(0),
+                exit_code,
+                ..Default::default()
+            };
+            assert_eq!(
+                classify_lifecycle_lock_process_state(&state, &id, operation_id).unwrap(),
+                LifecycleLockObservation::Stopped {
+                    id: id.clone(),
+                    operation_id,
+                },
+                "EOF, partial-frame, and signal exits must remain recoverable exact-ID evidence"
+            );
+        }
+
+        let live = bollard::models::ContainerState {
+            running: Some(true),
+            pid: Some(42),
+            exit_code: Some(1),
+            ..Default::default()
+        };
+        assert_eq!(
+            classify_lifecycle_lock_process_state(&live, &id, operation_id).unwrap(),
+            LifecycleLockObservation::Live { id, operation_id }
         );
     }
 

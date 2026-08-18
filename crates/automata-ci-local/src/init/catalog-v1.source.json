@@ -273,6 +273,21 @@
           "local",
           "bootstrap-runner"
         ],
+        "enrollment_token_custody": {
+          "active_file": "/run/automata-bootstrap/active-runner-enrollment-token",
+          "active_file_mode": "0600",
+          "active_staging_file": "/run/automata-bootstrap/.active-runner-enrollment-token.automata-write",
+          "initial_generation": 0,
+          "parent_gid": 65532,
+          "parent_mode": "0700",
+          "parent_uid": 65532,
+          "receipt_file": "/run/automata-bootstrap/receipt.json",
+          "receipt_file_mode": "0600",
+          "receipt_staging_pattern": "/run/automata-bootstrap/.automata-bootstrap-receipt-<enrollment-id>.tmp",
+          "seed_file": "/run/automata-bootstrap/runner-enrollment-token",
+          "seed_file_mode": "0400",
+          "update_policy": "exact-replay-or-one-generation-exact-predecessor-v1"
+        },
         "maximum_request_bytes": 4096,
         "receipt_schema": "automata.local/bootstrap-runner-receipt/v1",
         "request_schema": "automata.local/bootstrap-runner-request/v1"
@@ -361,7 +376,44 @@
     "compose": {
       "minimum_version": "2.33.1",
       "named_volume_nocopy": true,
-      "project_directory": "/"
+      "project_directory": "/",
+      "trusted_lifecycle_services": [
+        "automata",
+        "bootstrap-runner",
+        "engine-relay",
+        "object-store-init",
+        "postgres",
+        "runner",
+        "runner-enroll",
+        "rustfs"
+      ],
+      "trusted_user_namespace": "host"
+    },
+    "daemon_prerequisites": {
+      "cgroup_version": "2",
+      "default_runtime": "runc",
+      "default_user_namespace": "daemon-default-remapped",
+      "live_restore": false,
+      "post_create_drift": "fail-closed-sticky-lock",
+      "required_controllers": {
+        "cpu_cfs_period": true,
+        "cpu_cfs_quota": true,
+        "memory": true,
+        "pids": true,
+        "swap": true
+      },
+      "required_security_options": [
+        "name=cgroupns",
+        "name=seccomp,profile=builtin",
+        "name=userns"
+      ],
+      "rootful": true,
+      "sole_optional_security_option": "name=no-new-privileges",
+      "trusted_administrator_defaults": {
+        "bridge_default_network_options": {},
+        "default_ulimits": {},
+        "log_options": {}
+      }
     },
     "database_migration_ceiling": 52,
     "engine_relay": {
@@ -414,6 +466,10 @@
       "upstream_socket_mode": "0660",
       "upstream_socket_uid": 0
     },
+    "renderer_contract": {
+      "fixture_sha256": "fc65872459cb7a012f78b10ac74ffd8489f591bd0cb14286d2e121304682c430",
+      "schema": "automata.local/renderer-contract-fixture/v1"
+    },
     "results_transit": {
       "ownership": "lifecycle-created-compose-external",
       "schema": 2
@@ -423,7 +479,16 @@
         "argv": [
           "enroll"
         ],
-        "configuration_schema": 7
+        "configuration_schema": 7,
+        "existing_custody": {
+          "current": "success-before-token-network-or-writer-lock",
+          "invalid": "fail-closed",
+          "recovery_policy": "exact-expired-unrevoked-predecessor-offline-no-live-session-linux",
+          "runner_generation": "atomic-increment",
+          "server_clock": "database-post-lock",
+          "token": "one-use-positive-generation"
+        },
+        "token_source": "file:/run/automata-bootstrap/active-runner-enrollment-token"
       },
       "local_check_ready": {
         "argv": [
@@ -445,7 +510,16 @@
           "automata_ci_runner_ready 1",
           "automata_ci_runner_session_connected 1"
         ],
-        "timeout_seconds": 3
+        "timeout_seconds": 3,
+        "tls_custody": {
+          "completion_receipt": "exact",
+          "config_path": "/run/automata-runner-config/runner.json",
+          "mutation": false,
+          "observation": "two-stable-no-follow-snapshots",
+          "order": "custody-before-metrics",
+          "required_state": "current-exact-completed",
+          "writer_lock": "not-acquired"
+        }
       },
       "run": {
         "argv": [
@@ -507,6 +581,7 @@
         "privilege": "administrator",
         "root_filesystem": "writable",
         "runner_root": "/__automata",
+        "user_namespace": "daemon-default-remapped",
         "workspace": "/__w"
       },
       "maximum_parallel_jobs": 256,

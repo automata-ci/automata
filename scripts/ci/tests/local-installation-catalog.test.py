@@ -216,6 +216,7 @@ class LocalInstallationCatalogContract(unittest.TestCase):
                 "privilege": "administrator",
                 "root_filesystem": "writable",
                 "runner_root": "/__automata",
+                "user_namespace": "daemon-default-remapped",
                 "workspace": "/__w",
             },
         )
@@ -396,6 +397,34 @@ class LocalInstallationCatalogContract(unittest.TestCase):
             ],
         )
         self.assertEqual(
+            lifecycle["compose"]["trusted_lifecycle_services"],
+            [
+                "automata",
+                "bootstrap-runner",
+                "engine-relay",
+                "object-store-init",
+                "postgres",
+                "runner",
+                "runner-enroll",
+                "rustfs",
+            ],
+        )
+        self.assertEqual(lifecycle["compose"]["trusted_user_namespace"], "host")
+        self.assertEqual(executor["user_namespace"], "daemon-default-remapped")
+        renderer_contract = lifecycle["renderer_contract"]
+        self.assertEqual(
+            renderer_contract["schema"],
+            rust_string_constant(
+                "crates/automata-ci-local/src/init/renderer.rs",
+                "RENDERER_CONTRACT_FIXTURE_SCHEMA",
+            ),
+        )
+        self.assertEqual(
+            renderer_contract["fixture_sha256"],
+            catalog.RENDERER_CONTRACT_FIXTURE_SHA256,
+        )
+        self.assertRegex(renderer_contract["fixture_sha256"], r"^[0-9a-f]{64}$")
+        self.assertEqual(
             lifecycle["results_transit"]["schema"],
             int(
                 rust_string_constant(
@@ -436,6 +465,11 @@ class LocalInstallationCatalogContract(unittest.TestCase):
                 "crates/automata-ci/src/internal/local_bootstrap.rs", "MAX_REQUEST_BYTES"
             ),
         )
+
+        mutated_runtime = json.loads(json.dumps(lifecycle))
+        mutated_runtime["renderer_contract"]["fixture_sha256"] = "f" * 64
+        with self.assertRaisesRegex(SystemExit, "lifecycle runtime contract differs"):
+            catalog.require_lifecycle_runtime(mutated_runtime)
 
         static_verifier = (
             REPOSITORY_ROOT / "scripts/ci/verify-static-musl.sh"

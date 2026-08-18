@@ -16,7 +16,7 @@ use super::{LocalInitError, LocalInitErrorCode};
 
 const CATALOG_SCHEMA: &str = "automata.local/release-catalog/v1";
 const SOURCE_SCHEMA: &str = "automata.local/release-catalog-source/v1";
-const SOURCE_SHA256: &str = "bfb18e708b75259b05ef6a7e1f3cec79d8acec357c3f5f467a7a1e2a21ba14be";
+const SOURCE_SHA256: &str = "f47b4d9c59b314ca74b754623c5fa1408ad5144de805820c73f6c4762217e267";
 const CANDIDATE_BASENAME: &str = "automata-service-proxy-candidate-x86_64-unknown-linux-musl.tar";
 const CANDIDATE_PATH: &str = concat!(
     "target/service-proxy-publication/",
@@ -66,6 +66,44 @@ pub(super) fn current_source_contract_sha256() -> Sha256Digest {
     Sha256Digest::from_str(SOURCE_SHA256).expect("the compiled source-contract digest is valid")
 }
 
+/// Authenticates the packaged source contract against the current executable
+/// implementation, including the production renderer fixture.
+///
+/// Existing sealed epochs call this path as well as fresh catalog parsing so a
+/// renderer-only binary drift cannot retain the same literal source digest.
+pub(super) fn validate_current_source_contract() -> Result<Sha256Digest, LocalInitError> {
+    load_current_source_contract()?;
+    Ok(current_source_contract_sha256())
+}
+
+fn load_current_source_contract() -> Result<RawSourceCatalog, LocalInitError> {
+    let source_bytes = include_bytes!("catalog-v1.source.json");
+    if source_bytes.is_empty()
+        || source_bytes.len() > MAX_CATALOG_BYTES
+        || digest_hex(source_bytes) != SOURCE_SHA256
+    {
+        return Err(invalid_catalog());
+    }
+    let source_value = parse_canonical_json(source_bytes)?;
+    let source: RawSourceCatalog =
+        serde_json::from_value(source_value).map_err(|_| invalid_catalog())?;
+    if source.schema != SOURCE_SCHEMA
+        || source.platform
+            != Value::Object(serde_json::Map::from_iter([
+                ("architecture".to_owned(), Value::String("amd64".to_owned())),
+                ("os".to_owned(), Value::String("linux".to_owned())),
+            ]))
+        || source.images.len() != ALL_ROLES.len()
+        || source.images.keys().map(String::as_str).collect::<Vec<_>>() != ALL_ROLES
+    {
+        return Err(invalid_catalog());
+    }
+    validate_lifecycle_runtime(&source.lifecycle_runtime)?;
+    validate_renderer_service_contracts(&source.images)?;
+    validate_scope_and_services(&source.scope, &source.services)?;
+    Ok(source)
+}
+
 #[derive(Clone, Debug)]
 pub(super) struct VerifiedCatalog {
     bytes_sha256: Sha256Digest,
@@ -91,15 +129,8 @@ impl VerifiedCatalog {
         }
         validate_release(&raw.release)?;
 
-        let source_bytes = include_bytes!("catalog-v1.source.json");
-        if digest_hex(source_bytes) != SOURCE_SHA256 {
-            return Err(invalid_catalog());
-        }
-        let source_value = parse_canonical_json(source_bytes)?;
-        let source: RawSourceCatalog =
-            serde_json::from_value(source_value).map_err(|_| invalid_catalog())?;
-        if source.schema != SOURCE_SCHEMA
-            || raw.lifecycle_runtime != source.lifecycle_runtime
+        let source = load_current_source_contract()?;
+        if raw.lifecycle_runtime != source.lifecycle_runtime
             || raw.platform != source.platform
             || raw.scope != source.scope
             || raw.services != source.services
@@ -111,8 +142,6 @@ impl VerifiedCatalog {
         {
             return Err(invalid_catalog());
         }
-        validate_lifecycle_runtime(&source.lifecycle_runtime)?;
-        validate_renderer_service_contracts(&source.images)?;
         validate_scope_and_services(&raw.scope, &raw.services)?;
         let profile = validate_profile(&raw.profile, &source.profile)?;
 
@@ -359,10 +388,29 @@ fn validate_lifecycle_runtime(value: &Value) -> Result<(), LocalInitError> {
             .get("read_cas_digest")
             .ok_or_else(invalid_catalog)?,
     )?;
+    let bootstrap_runner = object(
+        commands
+            .get("bootstrap_runner")
+            .ok_or_else(invalid_catalog)?,
+    )?;
+    let enrollment_token_custody = object(
+        bootstrap_runner
+            .get("enrollment_token_custody")
+            .ok_or_else(invalid_catalog)?,
+    )?;
     let read_desired = object(commands.get("read_desired").ok_or_else(invalid_catalog)?)?;
     let write_cas = object(commands.get("write_cas").ok_or_else(invalid_catalog)?)?;
     let compose = object(runtime.get("compose").ok_or_else(invalid_catalog)?)?;
+    let daemon_prerequisites = runtime
+        .get("daemon_prerequisites")
+        .ok_or_else(invalid_catalog)?;
+    let renderer_contract = object(
+        runtime
+            .get("renderer_contract")
+            .ok_or_else(invalid_catalog)?,
+    )?;
     let runner_commands = object(runtime.get("runner_commands").ok_or_else(invalid_catalog)?)?;
+    let runner_enroll = object(runner_commands.get("enroll").ok_or_else(invalid_catalog)?)?;
     let runner_ready = object(
         runner_commands
             .get("local_check_ready")
@@ -374,6 +422,7 @@ fn validate_lifecycle_runtime(value: &Value) -> Result<(), LocalInitError> {
         crate::MIN_COMPOSE_VERSION.1,
         crate::MIN_COMPOSE_VERSION.2
     );
+    let renderer_fixture_sha256 = super::renderer::renderer_contract_fixture_sha256()?.to_string();
     let results = object(runtime.get("results_transit").ok_or_else(invalid_catalog)?)?;
     if runtime.get("engine_relay") != Some(&crate::engine_relay::lifecycle_contract())
         || materialize.get("request_schema").and_then(Value::as_str)
@@ -423,10 +472,107 @@ fn validate_lifecycle_runtime(value: &Value) -> Result<(), LocalInitError> {
         || read_cas_digest.get("argv")
             != Some(&serde_json::json!(["internal", "local", "read-cas-digest"]))
         || read_cas_digest.get("purpose").and_then(Value::as_str) != Some("expected-old-sha256")
+        || bootstrap_runner.get("argv")
+            != Some(&serde_json::json!([
+                "internal",
+                "local",
+                "bootstrap-runner"
+            ]))
+        || bootstrap_runner
+            .get("maximum_request_bytes")
+            .and_then(Value::as_u64)
+            != Some(4096)
+        || bootstrap_runner
+            .get("request_schema")
+            .and_then(Value::as_str)
+            != Some("automata.local/bootstrap-runner-request/v1")
+        || bootstrap_runner
+            .get("receipt_schema")
+            .and_then(Value::as_str)
+            != Some("automata.local/bootstrap-runner-receipt/v1")
+        || Value::Object(enrollment_token_custody.clone())
+            != serde_json::json!({
+                "active_file": "/run/automata-bootstrap/active-runner-enrollment-token",
+                "active_file_mode": "0600",
+                "active_staging_file": "/run/automata-bootstrap/.active-runner-enrollment-token.automata-write",
+                "initial_generation": 0,
+                "parent_gid": 65_532,
+                "parent_mode": "0700",
+                "parent_uid": 65_532,
+                "receipt_file": "/run/automata-bootstrap/receipt.json",
+                "receipt_file_mode": "0600",
+                "receipt_staging_pattern": "/run/automata-bootstrap/.automata-bootstrap-receipt-<enrollment-id>.tmp",
+                "seed_file": "/run/automata-bootstrap/runner-enrollment-token",
+                "seed_file_mode": "0400",
+                "update_policy": "exact-replay-or-one-generation-exact-predecessor-v1"
+            })
         || compose.get("minimum_version").and_then(Value::as_str) != Some(&minimum_compose)
         || compose.get("named_volume_nocopy").and_then(Value::as_bool) != Some(true)
         || compose.get("project_directory").and_then(Value::as_str)
             != Some(super::compose::COMPOSE_PROJECT_DIRECTORY)
+        || compose.get("trusted_lifecycle_services")
+            != Some(&serde_json::json!([
+                "automata",
+                "bootstrap-runner",
+                "engine-relay",
+                "object-store-init",
+                "postgres",
+                "runner",
+                "runner-enroll",
+                "rustfs"
+            ]))
+        || compose
+            .get("trusted_user_namespace")
+            .and_then(Value::as_str)
+            != Some("host")
+        || daemon_prerequisites
+            != &serde_json::json!({
+                "cgroup_version": "2",
+                "default_runtime": "runc",
+                "default_user_namespace": "daemon-default-remapped",
+                "live_restore": false,
+                "post_create_drift": "fail-closed-sticky-lock",
+                "required_controllers": {
+                    "cpu_cfs_period": true,
+                    "cpu_cfs_quota": true,
+                    "memory": true,
+                    "pids": true,
+                    "swap": true
+                },
+                "required_security_options": [
+                    "name=cgroupns",
+                    "name=seccomp,profile=builtin",
+                    "name=userns"
+                ],
+                "rootful": true,
+                "sole_optional_security_option": "name=no-new-privileges",
+                "trusted_administrator_defaults": {
+                    "bridge_default_network_options": {},
+                    "default_ulimits": {},
+                    "log_options": {}
+                }
+            })
+        || Value::Object(renderer_contract.clone())
+            != serde_json::json!({
+                "fixture_sha256": renderer_fixture_sha256,
+                "schema": super::renderer::RENDERER_CONTRACT_FIXTURE_SCHEMA
+            })
+        || runner_enroll.get("token_source").and_then(Value::as_str)
+            != Some("file:/run/automata-bootstrap/active-runner-enrollment-token")
+        || runner_enroll.get("argv") != Some(&serde_json::json!(["enroll"]))
+        || runner_enroll
+            .get("configuration_schema")
+            .and_then(Value::as_u64)
+            != Some(7)
+        || runner_enroll.get("existing_custody")
+            != Some(&serde_json::json!({
+                "current": "success-before-token-network-or-writer-lock",
+                "invalid": "fail-closed",
+                "recovery_policy": "exact-expired-unrevoked-predecessor-offline-no-live-session-linux",
+                "runner_generation": "atomic-increment",
+                "server_clock": "database-post-lock",
+                "token": "one-use-positive-generation"
+            }))
         || runner_ready.get("argv")
             != Some(&serde_json::json!([
                 crate::LOCAL_RUNNER_READY_COMMAND,
@@ -454,6 +600,16 @@ fn validate_lifecycle_runtime(value: &Value) -> Result<(), LocalInitError> {
                 crate::LOCAL_RUNNER_READY_METRIC,
                 crate::LOCAL_RUNNER_SESSION_CONNECTED_METRIC
             ]))
+        || runner_ready.get("tls_custody")
+            != Some(&serde_json::json!({
+                "completion_receipt": "exact",
+                "config_path": "/run/automata-runner-config/runner.json",
+                "mutation": false,
+                "observation": "two-stable-no-follow-snapshots",
+                "order": "custody-before-metrics",
+                "required_state": "current-exact-completed",
+                "writer_lock": "not-acquired"
+            }))
         || runner_ready.get("timeout_seconds").and_then(Value::as_u64)
             != Some(crate::LOCAL_RUNNER_READY_TIMEOUT_SECONDS)
         || results.get("schema").and_then(Value::as_u64)
@@ -805,6 +961,7 @@ fn validate_scope_and_services(scope: &Value, services: &Value) -> Result<(), Lo
             "privilege": "administrator",
             "root_filesystem": "writable",
             "runner_root": "/__automata",
+            "user_namespace": "daemon-default-remapped",
             "workspace": "/__w"
         },
         "maximum_parallel_jobs": 256,

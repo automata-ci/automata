@@ -134,8 +134,12 @@ automata local reset --state-directory ABS --yes
 ```
 
 The mutating lifecycle is x86-64 Linux-only. Init stops after sealed material
-and canonical desired intent and generates no Compose document; up and down are
-explicit synchronous convergence operations over that exact custody. A stopped
+and canonical desired intent. Catalog/current-epoch authentication computes one
+fixed synthetic Compose/expected-topology fixture in memory to bind the
+production renderer, but init persists no installation-specific Compose document and
+invokes no Compose operation. Up and down are explicit synchronous convergence
+operations over that exact custody; status/reset may render expected topology
+read-only for comparison. A stopped
 holder fails closed by default. The optional recovery flag is explicit operator
 authorization to verify positive Engine/process quiescence and remove only the
 reattested exact stopped lock ID before convergence; live or indeterminate
@@ -376,9 +380,11 @@ resource that realizes that plan.
 The selected rootful daemon must report cgroup v2, the required controllers,
 `runc`, live restore disabled, daemon-default user-namespace remapping, the
 built-in seccomp profile, and private cgroup namespaces. The trusted fixed
-Engine relay explicitly uses `userns_mode: host` only so its root bootstrap can
-open the fixed root-owned socket before dropping authority; untrusted
-`LocalDocker` jobs omit that override and inherit the required daemon remap.
+topology's eight lifecycle services and its fixed custody helpers explicitly
+use `userns_mode: host` to preserve sealed host ownership. The Engine relay
+additionally needs that namespace so its root bootstrap can open the fixed
+root-owned socket before dropping authority; untrusted `LocalDocker` jobs omit
+that override and inherit the required daemon remap.
 Docker `/info` does not expose daemon-wide `log-opts` or the bridge entry in
 `default-network-opts`, and may omit `DefaultUlimits`. Empty values for all
 three are therefore explicit trusted prerequisites. Exact post-create
@@ -844,8 +850,12 @@ uncommitted fixed crash temporaries are safely rebuilt.
 At checkpoint 2B.2, the slice persisted canonical credential-free desired
 intent, including the
 imported service-proxy tag plus both acceptable OCI IDs for later reattestation.
-Init still produces no Compose document and stops without invoking Compose or
-starting a control plane, relay, bootstrap, database, object store, or runner.
+Init still produces no installation-specific Compose document and stops
+without invoking Compose or starting a control plane, relay, bootstrap,
+database, object store, or runner. Current-contract authentication only
+computes the fixed synthetic in-memory renderer fixture described above; the
+fixture is neither persisted nor executed. Status/reset may render expected
+topology read-only.
 At that checkpoint `local status` was existing-only and nonrepairing: it
 reports `recorded_sealed` only after canonical host custody and exact bounded
 Engine metadata agree, while explicitly leaving volume contents uninspected.

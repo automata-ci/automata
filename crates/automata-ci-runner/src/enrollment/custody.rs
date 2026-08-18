@@ -131,9 +131,8 @@ impl CredentialDestinations {
     ) -> Result<Option<CompletedEnrollmentState>> {
         let paths = CredentialPaths::from_config(config)?;
         validate_lexical_destination_set(&paths.all_paths()?)?;
-        let first = match read_completed_snapshot(&paths)? {
-            Some(snapshot) => snapshot,
-            None => return Ok(None),
+        let Some(first) = read_completed_snapshot(&paths)? else {
+            return Ok(None);
         };
         validate_existing_destination_set(&paths.all_paths()?)?;
         let second = read_completed_snapshot(&paths)?
@@ -1882,7 +1881,13 @@ mod tests {
 
     #[test]
     #[cfg(target_os = "linux")]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the security regression constructs and mutates one complete CA, chain, key, receipt, metadata, renewal, and recovery custody fixture"
+    )]
     fn completed_identity_is_accepted_only_when_the_full_tls_custody_is_exact() {
+        use std::os::unix::fs::MetadataExt as _;
+
         let root = std::env::current_dir()
             .expect("current directory")
             .join(format!(
@@ -1932,7 +1937,6 @@ mod tests {
             .persist_exact(roots.as_bytes(), chain.as_bytes(), key.as_bytes())
             .expect("complete credentials");
 
-        use std::os::unix::fs::MetadataExt as _;
         let observed_paths = [
             &destinations.server_roots,
             &destinations.certificate_chain,

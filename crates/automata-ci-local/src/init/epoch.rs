@@ -16,7 +16,7 @@ use crate::{
 
 use super::{
     LocalInitError, LocalInitErrorCode,
-    catalog::{ImageSource, VerifiedCatalog, current_source_contract_sha256},
+    catalog::{ImageSource, VerifiedCatalog, validate_current_source_contract},
 };
 
 const EPOCH_SCHEMA_V1: &str = "automata.local/immutable-epoch/v1";
@@ -167,8 +167,9 @@ impl ImmutableEpoch {
     }
 
     pub(super) fn require_current_lifecycle_contract(&self) -> Result<(), LocalInitError> {
+        let current_source_contract = validate_current_source_contract()?;
         if self.version != EpochVersion::V2
-            || self.catalog.source_contract_sha256 != Some(current_source_contract_sha256())
+            || self.catalog.source_contract_sha256 != Some(current_source_contract)
             || self.desired_plan_sha256.is_none()
         {
             return Err(reset_required());
@@ -279,6 +280,7 @@ impl ImmutableEpoch {
     }
 
     fn decode_canonical(bytes: &[u8]) -> Result<Self, LocalInitError> {
+        validate_current_source_contract()?;
         if bytes.is_empty() || bytes.len() > MAX_EPOCH_BYTES {
             return Err(reset_required());
         }
@@ -718,7 +720,7 @@ pub(super) fn certificate_test_epoch(
             commit: "1111111111111111111111111111111111111111".to_owned(),
             tag: "v1.0.0".to_owned(),
             version: "1.0.0".to_owned(),
-            source_contract_sha256: Some(current_source_contract_sha256()),
+            source_contract_sha256: Some(super::catalog::current_source_contract_sha256()),
         },
         platform: EpochPlatform {
             host: "linux/x86_64".to_owned(),

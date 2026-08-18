@@ -574,6 +574,10 @@ async fn create_enrollment(
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the public redemption boundary keeps preparation, admission, issuance, and atomic receipt consumption visibly contiguous"
+)]
 async fn redeem_enrollment(
     State(state): State<RunnerEnrollmentRedeemApiState>,
     request: Request,
@@ -679,6 +683,10 @@ async fn redeem_enrollment(
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the recovery boundary keeps predecessor admission, certificate issuance, and atomic installation receipt consumption visibly contiguous"
+)]
 async fn recover_enrollment(
     State(state): State<RunnerEnrollmentRedeemApiState>,
     request: Request,
@@ -737,9 +745,8 @@ async fn recover_enrollment(
     {
         return ApiError::InvalidRequest.into_response();
     }
-    let expected_group = match RunnerGroup::new(&prepared.runner_group) {
-        Ok(group) => group,
-        Err(_) => return ApiError::Internal.into_response(),
+    let Ok(expected_group) = RunnerGroup::new(&prepared.runner_group) else {
+        return ApiError::Internal.into_response();
     };
     if document.capabilities.runner_id().as_uuid() != prepared.runner_id
         || document.capabilities.groups() != &std::collections::BTreeSet::from([expected_group])

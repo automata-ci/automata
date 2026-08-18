@@ -1040,6 +1040,10 @@ impl EnrollmentRow {
         self.last_refreshed_at_ms.unwrap_or(self.issued_at_ms)
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the durable enrollment-row shape and every mutually dependent receipt field remain one closed validation predicate"
+    )]
     fn validate(&self) -> Result<(), ManagementRepositoryError> {
         let active_from_ms = self.active_from_ms();
         let valid_installation_shape = match self.issuer_kind.as_str() {
@@ -1840,32 +1844,14 @@ impl PostgresRunnerEnrollmentRepository {
             commit(transaction).await?;
             return Ok(InstallationRunnerRecoveryConsumeOutcome::Rejected);
         }
-        let now_ms = enrollment_database_time_milliseconds(&mut transaction)
+        let prelock_time_ms = enrollment_database_time_milliseconds(&mut transaction)
             .await
             .map_err(map_database_error)?;
-        if row.expires_at_ms <= now_ms {
+        if row.expires_at_ms <= prelock_time_ms {
             commit(transaction).await?;
             return Ok(InstallationRunnerRecoveryConsumeOutcome::Rejected);
         }
-        let now_seconds = now_ms.div_euclid(1_000);
-        if request.certificate_issued_at_seconds < row.active_from_ms().div_euclid(1_000)
-            || request.certificate_issued_at_seconds > now_seconds
-            || request
-                .certificate_expires_at_seconds
-                .checked_sub(now_seconds)
-                .is_none_or(|remaining| {
-                    remaining < MIN_RUNNER_CERTIFICATE_REMAINING_LIFETIME_SECONDS
-                })
-            || request
-                .certificate_expires_at_seconds
-                .checked_sub(request.certificate_issued_at_seconds)
-                .is_none_or(|lifetime| {
-                    !(1..=MAX_RUNNER_CERTIFICATE_LIFETIME_SECONDS).contains(&lifetime)
-                })
-        {
-            return Err(ManagementRepositoryError::InvalidRequest);
-        }
-        let prepared = row.prepared_recovery(now_ms)?;
+        let prepared = row.prepared_recovery(prelock_time_ms)?;
         if prepared.runner_id != request.runner_id {
             commit(transaction).await?;
             return Ok(InstallationRunnerRecoveryConsumeOutcome::Rejected);
@@ -1964,6 +1950,37 @@ impl PostgresRunnerEnrollmentRepository {
         {
             return Err(ManagementRepositoryError::CorruptData);
         }
+        // The token, runner, live-session set, and predecessor certificate are
+        // now locked. Sample the authoritative database clock only after those
+        // potentially blocking authority reads, then repeat every time-bound
+        // admission check. A recovery that waited across either the token or
+        // predecessor boundary must never consume stale authority.
+        let now_ms = enrollment_database_time_milliseconds(&mut transaction)
+            .await
+            .map_err(map_database_error)?;
+        if row.expires_at_ms <= now_ms {
+            commit(transaction).await?;
+            return Ok(InstallationRunnerRecoveryConsumeOutcome::Rejected);
+        }
+        let now_seconds = now_ms.div_euclid(1_000);
+        if request.certificate_issued_at_seconds < row.active_from_ms().div_euclid(1_000)
+            || request.certificate_issued_at_seconds > now_seconds
+            || request
+                .certificate_expires_at_seconds
+                .checked_sub(now_seconds)
+                .is_none_or(|remaining| {
+                    remaining < MIN_RUNNER_CERTIFICATE_REMAINING_LIFETIME_SECONDS
+                })
+            || request
+                .certificate_expires_at_seconds
+                .checked_sub(request.certificate_issued_at_seconds)
+                .is_none_or(|lifetime| {
+                    !(1..=MAX_RUNNER_CERTIFICATE_LIFETIME_SECONDS).contains(&lifetime)
+                })
+        {
+            return Err(ManagementRepositoryError::InvalidRequest);
+        }
+        let prepared = row.prepared_recovery(now_ms)?;
         if predecessor_certificate.revoked_at_seconds.is_some()
             || predecessor_certificate.expires_at_seconds
                 != predecessor.certificate_expires_at_seconds

@@ -1090,7 +1090,8 @@ async fn migration_0052_fresh_database_supports_exact_deployment_bootstrap() -> 
             }
         };
         assert_eq!(linux_recovery.generation, 1);
-        let recovery_now_seconds = clock.now().await?.div_euclid(1_000);
+        let recovery_now_ms = clock.now().await?;
+        let recovery_now_seconds = recovery_now_ms.div_euclid(1_000);
         let ambiguous_live_leaf = [0x86_u8; 32];
         sqlx::query(
             "INSERT INTO runner_machine_certificates (leaf_sha256,runner_id,expires_at_seconds) VALUES ($1,$2,$3)",
@@ -1164,6 +1165,77 @@ async fn migration_0052_fresh_database_supports_exact_deployment_bootstrap() -> 
             InstallationRunnerRecoveryConsumeOutcome::Rejected,
             "a revoked historical leaf must not authorize installation recovery"
         );
+        let mut runner_lock = database.pool().begin().await?;
+        let locked_runner: Uuid = sqlx::query_scalar(
+            "SELECT id FROM runners WHERE id=$1 FOR UPDATE",
+        )
+        .bind(linux_runner_id.as_uuid())
+        .fetch_one(&mut *runner_lock)
+        .await?;
+        assert_eq!(locked_runner, linux_runner_id.as_uuid());
+        let blocked_repository = enrollment_repository.clone();
+        let blocked_request = recovery_consume();
+        let blocked_predecessor = InstallationRunnerRecoveryPredecessor {
+            certificate_leaf_sha256: initial_leaf,
+            certificate_expires_at_seconds: initial_expires_at_seconds,
+        };
+        let blocked_consume = tokio::spawn(async move {
+            blocked_repository
+                .consume_installation_runner_recovery(blocked_request, blocked_predecessor)
+                .await
+        });
+        let mut consume_waits_for_runner = false;
+        for _ in 0..200 {
+            consume_waits_for_runner = sqlx::query_scalar(
+                r"
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM pg_catalog.pg_stat_activity
+                    WHERE datname=pg_catalog.current_database()
+                      AND pid <> pg_catalog.pg_backend_pid()
+                      AND wait_event_type='Lock'
+                      AND query LIKE '%FROM runners%'
+                      AND query LIKE '%FOR UPDATE%'
+                )
+                ",
+            )
+            .fetch_one(database.pool())
+            .await?;
+            if consume_waits_for_runner {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            consume_waits_for_runner,
+            "recovery consumption did not reach the runner authority lock"
+        );
+        clock.set(linux_recovery.expires_at_ms).await?;
+        runner_lock.commit().await?;
+        assert_eq!(
+            blocked_consume.await??,
+            InstallationRunnerRecoveryConsumeOutcome::Rejected,
+            "consumption blocked across token expiry must use a fresh post-lock database time"
+        );
+        let rejected_recovery_state: (i64, Option<i64>, bool) = sqlx::query_as(
+            r"
+            SELECT
+                (SELECT generation FROM runners WHERE id=$1),
+                (SELECT consumed_at_ms FROM runner_enrollment_tokens WHERE id=$2),
+                EXISTS (SELECT 1 FROM runner_machine_certificates WHERE leaf_sha256=$3)
+            ",
+        )
+        .bind(linux_runner_id.as_uuid())
+        .bind(linux_recovery.enrollment_id)
+        .bind(recovered_leaf.as_slice())
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(
+            rejected_recovery_state,
+            (1, None, false),
+            "post-lock token expiry must leave runner, token, and certificate custody unchanged"
+        );
+        clock.set(recovery_now_ms).await?;
         assert_eq!(
             enrollment_repository
                 .consume_installation_runner_recovery(
@@ -1289,7 +1361,7 @@ async fn migration_0052_fresh_database_supports_exact_deployment_bootstrap() -> 
         );
         // The blocked replay was read-only. Restore its pre-boundary test time
         // so the independent revoked-current-leaf gate remains isolated.
-        clock.set(recovery_now_seconds.saturating_mul(1_000)).await?;
+        clock.set(recovery_now_ms).await?;
         let recovery_audits: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM security_audit_events WHERE action='runner.certificate.installation_recover' AND outcome='succeeded'",
         )

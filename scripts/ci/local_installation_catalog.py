@@ -24,7 +24,11 @@ CATALOG_SCHEMA = "automata.local/release-catalog/v1"
 SOURCE_SCHEMA = "automata.local/release-catalog-source/v1"
 SOURCE_PATH = "images/local-installation/catalog-v1.json"
 PACKAGED_SOURCE_PATH = "crates/automata-ci-local/src/init/catalog-v1.source.json"
-SOURCE_SHA256 = "bfb18e708b75259b05ef6a7e1f3cec79d8acec357c3f5f467a7a1e2a21ba14be"
+SOURCE_SHA256 = "f47b4d9c59b314ca74b754623c5fa1408ad5144de805820c73f6c4762217e267"
+RENDERER_CONTRACT_FIXTURE_SCHEMA = "automata.local/renderer-contract-fixture/v1"
+RENDERER_CONTRACT_FIXTURE_SHA256 = (
+    "fc65872459cb7a012f78b10ac74ffd8489f591bd0cb14286d2e121304682c430"
+)
 CATALOG_PATH = "target/distribution/automata-local-installation-catalog.json"
 PROFILE_MANIFEST_PATH = (
     "images/github-hosted-ubuntu-24.04-x64/profile-manifest.json"
@@ -268,8 +272,10 @@ def require_lifecycle_runtime(value: object) -> dict:
         {
             "automata_commands",
             "compose",
+            "daemon_prerequisites",
             "database_migration_ceiling",
             "engine_relay",
+            "renderer_contract",
             "results_transit",
             "runner_commands",
             "runner_config_schema",
@@ -281,6 +287,21 @@ def require_lifecycle_runtime(value: object) -> dict:
         "automata_commands": {
             "bootstrap_runner": {
                 "argv": ["internal", "local", "bootstrap-runner"],
+                "enrollment_token_custody": {
+                    "active_file": "/run/automata-bootstrap/active-runner-enrollment-token",
+                    "active_file_mode": "0600",
+                    "active_staging_file": "/run/automata-bootstrap/.active-runner-enrollment-token.automata-write",
+                    "initial_generation": 0,
+                    "parent_gid": 65532,
+                    "parent_mode": "0700",
+                    "parent_uid": 65532,
+                    "receipt_file": "/run/automata-bootstrap/receipt.json",
+                    "receipt_file_mode": "0600",
+                    "receipt_staging_pattern": "/run/automata-bootstrap/.automata-bootstrap-receipt-<enrollment-id>.tmp",
+                    "seed_file": "/run/automata-bootstrap/runner-enrollment-token",
+                    "seed_file_mode": "0400",
+                    "update_policy": "exact-replay-or-one-generation-exact-predecessor-v1",
+                },
                 "maximum_request_bytes": 4096,
                 "receipt_schema": "automata.local/bootstrap-runner-receipt/v1",
                 "request_schema": "automata.local/bootstrap-runner-request/v1",
@@ -334,6 +355,43 @@ def require_lifecycle_runtime(value: object) -> dict:
             "minimum_version": "2.33.1",
             "named_volume_nocopy": True,
             "project_directory": "/",
+            "trusted_lifecycle_services": [
+                "automata",
+                "bootstrap-runner",
+                "engine-relay",
+                "object-store-init",
+                "postgres",
+                "runner",
+                "runner-enroll",
+                "rustfs",
+            ],
+            "trusted_user_namespace": "host",
+        },
+        "daemon_prerequisites": {
+            "cgroup_version": "2",
+            "default_runtime": "runc",
+            "default_user_namespace": "daemon-default-remapped",
+            "live_restore": False,
+            "post_create_drift": "fail-closed-sticky-lock",
+            "required_controllers": {
+                "cpu_cfs_period": True,
+                "cpu_cfs_quota": True,
+                "memory": True,
+                "pids": True,
+                "swap": True,
+            },
+            "required_security_options": [
+                "name=cgroupns",
+                "name=seccomp,profile=builtin",
+                "name=userns",
+            ],
+            "rootful": True,
+            "sole_optional_security_option": "name=no-new-privileges",
+            "trusted_administrator_defaults": {
+                "bridge_default_network_options": {},
+                "default_ulimits": {},
+                "log_options": {},
+            },
         },
         "database_migration_ceiling": 52,
         "engine_relay": {
@@ -382,6 +440,10 @@ def require_lifecycle_runtime(value: object) -> dict:
             "upstream_socket_mode": "0660",
             "upstream_socket_uid": 0,
         },
+        "renderer_contract": {
+            "fixture_sha256": RENDERER_CONTRACT_FIXTURE_SHA256,
+            "schema": RENDERER_CONTRACT_FIXTURE_SCHEMA,
+        },
         "results_transit": {
             "ownership": "lifecycle-created-compose-external",
             "schema": 2,
@@ -390,6 +452,15 @@ def require_lifecycle_runtime(value: object) -> dict:
             "enroll": {
                 "argv": ["enroll"],
                 "configuration_schema": 7,
+                "existing_custody": {
+                    "current": "success-before-token-network-or-writer-lock",
+                    "invalid": "fail-closed",
+                    "recovery_policy": "exact-expired-unrevoked-predecessor-offline-no-live-session-linux",
+                    "runner_generation": "atomic-increment",
+                    "server_clock": "database-post-lock",
+                    "token": "one-use-positive-generation",
+                },
+                "token_source": "file:/run/automata-bootstrap/active-runner-enrollment-token",
             },
             "local_check_ready": {
                 "argv": [
@@ -411,6 +482,15 @@ def require_lifecycle_runtime(value: object) -> dict:
                     "automata_ci_runner_ready 1",
                     "automata_ci_runner_session_connected 1",
                 ],
+                "tls_custody": {
+                    "completion_receipt": "exact",
+                    "config_path": "/run/automata-runner-config/runner.json",
+                    "mutation": False,
+                    "observation": "two-stable-no-follow-snapshots",
+                    "order": "custody-before-metrics",
+                    "required_state": "current-exact-completed",
+                    "writer_lock": "not-acquired",
+                },
                 "timeout_seconds": 3,
             },
             "run": {

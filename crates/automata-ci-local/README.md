@@ -92,9 +92,11 @@ into a credential.
 Init itself seals only the canonical desired specification together with the
 immutable epoch and material. The desired record includes the local
 service-proxy tag and both acceptable OCI IDs so convergence can reattest the
-same daemon representation. Init generates no Compose document, invokes no
-Compose operation, and starts no service, relay, bootstrap, database, object
-store, or runner.
+same daemon representation. Catalog/current-epoch authentication computes one fixed
+synthetic Compose/expected-topology fixture in memory to bind the production
+renderer, but init generates and persists no installation-specific Compose
+document, invokes no Compose operation, and starts no service, relay,
+bootstrap, database, object store, or runner.
 
 Public `local up --state-directory ABS` qualifies the exact Docker and Compose
 authority, reattests sealed custody, renders the canonical plan, and
@@ -109,9 +111,10 @@ lifecycle journal or detached lifecycle work exists.
 The lifecycle requires rootful Docker with daemon-default user-namespace
 remapping, cgroup v2, the built-in seccomp profile, private cgroup namespaces,
 the required memory/CPU/PID controllers, `runc`, and live restore disabled. All
-eight trusted fixed lifecycle units set `userns_mode: host` so they observe the
-sealed host-owned volume custody; the Engine relay additionally needs that
-namespace to open the root-owned socket before dropping authority. Untrusted
+eight trusted fixed lifecycle services and the fixed custody helpers set
+`userns_mode: host` so they preserve access to sealed host-owned volume
+custody; the Engine relay additionally needs that namespace to open the
+root-owned socket before dropping authority. Untrusted
 `LocalDocker` job containers do not override the user namespace and therefore
 inherit the required daemon remap. Docker `/info` does not expose daemon-wide
 `log-opts` or the bridge entry in `default-network-opts`, and may omit
@@ -124,9 +127,9 @@ Runner bootstrap retains its material-derived token as immutable generation
 zero and publishes a separate active token file. Each consumed generation
 authorizes exactly one deterministic successor under the sealed installation
 authority; unconsumed generations are refreshed in place. This lets an exact
-offline Linux runner recover only after its 30-day leaf is also expired by the
-database clock, without making the seed reusable, changing normal mTLS renewal,
-or admitting a different runner.
+offline Linux runner recover only after its current leaf (normally, and at
+most, 30 days) is also expired by the database clock, without making the seed
+reusable, changing normal mTLS renewal, or admitting a different runner.
 The runner healthcheck also proves current on-volume config/CA/chain/key and
 completion-receipt custody read-only while the steady runner owns the TLS flock.
 
@@ -201,9 +204,11 @@ architecture and must not declare volumes, exposed ports, or a healthcheck. The
 proxy additionally has an exact credential-free runtime shape and must carry
 `io.automata.service-proxy.protocol-version=2`.
 
-The trusted fixed relay service runs in the host user namespace only for its
-bounded socket bootstrap. Untrusted job containers inherit daemon-default
-remapping and separately prove the resulting nonzero UID/GID map.
+All eight trusted fixed lifecycle services and the fixed custody helpers run in
+the host user namespace to preserve sealed host ownership. The Engine relay
+additionally needs that namespace for its bounded socket bootstrap. Untrusted
+job containers inherit daemon-default remapping and separately prove the
+resulting nonzero UID/GID map.
 
 The proxy representation is exact and storage-mode coupled. Classic Docker
 must expose the config ID, the sole canonical local tag, and no repository
@@ -282,8 +287,11 @@ reusable workflows through the shared compiler and credential analysis. It
 does not admit or run work, mint GitHub evidence, request a token, or publish a
 Check Run. Status derives a bounded live Engine inventory on demand rather than
 persisting a mirrored one, and secret values never enter the desired document
-or status output. Init does not generate a Compose document; lifecycle
-rendering occurs only inside explicit up/down convergence.
+or status output. Catalog/current-epoch authentication computes only a fixed
+synthetic renderer fixture; it does not persist or execute that fixture.
+Installation-specific mutation rendering occurs in explicit up/down
+convergence, while status/reset may render the expected topology read-only for
+comparison with live custody.
 
 This crate has no command-line parser. The `automata` product maps its public
 CLI into the high-level local-check and x86-64 Linux init/up/down/status/reset

@@ -507,6 +507,10 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one table keeps every public status state and its exact human rendering adjacent"
+    )]
     fn local_status_human_presentation_is_exact_for_every_public_state() {
         let cases = [
             (

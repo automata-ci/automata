@@ -1,14 +1,16 @@
 //! Pure canonical Docker Compose document for the sealed local lifecycle.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, str};
 
+use automata_ci_core::Sha256Digest;
 use serde::Serialize;
 use serde_json::{Value, json};
+use sha2::{Digest as _, Sha256};
 
 use crate::{
-    DesiredSpec, EngineArchitecture, LIFECYCLE_ENGINE_ID_MAXIMUM_BYTES,
-    LIFECYCLE_SERVER_VERSION_MAXIMUM_BYTES, valid_lifecycle_engine_id,
-    valid_lifecycle_server_version,
+    DesiredSpec, EngineArchitecture, Installation, InstallationId, InstallationName,
+    LIFECYCLE_ENGINE_ID_MAXIMUM_BYTES, LIFECYCLE_SERVER_VERSION_MAXIMUM_BYTES,
+    valid_lifecycle_engine_id, valid_lifecycle_server_version,
 };
 
 use super::{engine::volume_name, materializer::VolumeRole};
@@ -17,6 +19,18 @@ const PLATFORM: &str = "linux/amd64";
 const AUTOMATA_USER: &str = "65532:65532";
 const ROOT_USER: &str = "0:0";
 const LIFECYCLE_PROFILE: &str = "automata-lifecycle";
+
+pub(super) const RENDERER_CONTRACT_FIXTURE_SCHEMA: &str =
+    "automata.local/renderer-contract-fixture/v1";
+const RENDERER_CONTRACT_FIXTURE_ENGINE_ID: &str =
+    "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+const RENDERER_CONTRACT_FIXTURE_ENGINE_API_VERSION: &str = "1.48";
+const RENDERER_CONTRACT_FIXTURE_ENGINE_SERVER_VERSION: &str = "28.0.0";
+const RENDERER_CONTRACT_FIXTURE_RUNNER_ID: &str = "22222222-2222-4222-8222-222222222222";
+const RENDERER_CONTRACT_FIXTURE_TRANSIT_NETWORK_ID: &str =
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const RENDERER_CONTRACT_FIXTURE_RESULTS_CONTAINER_ID: &str =
+    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
 const CONTROL_ROOT: &str = "/run/automata-control";
 pub(super) const POSTGRES_CONFIG_MOUNT: &str = "/run/automata-local/postgres";
@@ -77,13 +91,13 @@ pub(super) struct RenderedTopology {
 /// Typed Engine contract mechanically decoded from the exact rendered
 /// Compose document. Engine convergence consumes this value instead of a
 /// second handwritten service/network allowlist.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub(super) struct ExpectedLifecycleTopology {
     pub(super) containers: BTreeMap<String, ExpectedContainer>,
     pub(super) networks: BTreeMap<String, ExpectedNetwork>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[allow(clippy::struct_excessive_bools)]
 pub(super) struct ExpectedContainer {
     pub(super) service: String,
@@ -126,7 +140,7 @@ impl ExpectedContainer {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize)]
 pub(super) enum ExpectedMountSource {
     Volume(VolumeRole),
     Bind {
@@ -136,7 +150,7 @@ pub(super) enum ExpectedMountSource {
     },
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize)]
 pub(super) struct ExpectedMount {
     pub(super) source: ExpectedMountSource,
     pub(super) target: String,
@@ -144,14 +158,14 @@ pub(super) struct ExpectedMount {
     pub(super) volume_nocopy: bool,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub(super) struct ExpectedEndpoint {
     pub(super) ipv4_address: String,
     pub(super) aliases: Vec<String>,
     pub(super) gateway_priority: i64,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize)]
 pub(super) struct ExpectedPort {
     pub(super) target: u16,
     pub(super) published: u16,
@@ -159,7 +173,7 @@ pub(super) struct ExpectedPort {
     pub(super) protocol: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub(super) struct ExpectedHealthcheck {
     pub(super) test: Vec<String>,
     pub(super) interval: String,
@@ -168,7 +182,7 @@ pub(super) struct ExpectedHealthcheck {
     pub(super) start_period: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub(super) struct ExpectedNetwork {
     pub(super) logical_name: String,
     pub(super) name: String,
@@ -213,6 +227,121 @@ struct RenderedRelayEngine<'a> {
     server_version: &'a str,
     operating_system: &'static str,
     architecture: &'static str,
+}
+
+#[derive(Serialize)]
+struct RendererContractFixture<'a> {
+    schema: &'static str,
+    inputs: RendererContractFixtureInputs<'a>,
+    compose: &'a str,
+    expected: &'a ExpectedLifecycleTopology,
+    topology: RendererContractFixtureTopology<'a>,
+    relay_binding: &'a str,
+    runner_config: &'a str,
+}
+
+#[derive(Serialize)]
+struct RendererContractFixtureInputs<'a> {
+    desired_spec_schema: &'static str,
+    desired_spec: &'static str,
+    installation_id: &'static str,
+    installation_name: &'a str,
+    engine_id: &'a str,
+    engine_api_version: &'a str,
+    engine_server_version: &'a str,
+    engine_architecture: &'static str,
+    runner_id: &'static str,
+    transit_network_id: &'static str,
+    results_container_id: &'static str,
+}
+
+#[derive(Serialize)]
+struct RendererContractFixtureTopology<'a> {
+    control_network_name: &'a str,
+    egress_network_name: &'a str,
+    results_transit_name: &'a str,
+    control_container_name: &'a str,
+    results_address: &'a str,
+}
+
+/// Computes the digest of the production renderer's closed fixed-spec fixture.
+///
+/// # Errors
+///
+/// Returns [`super::LocalInitErrorCode::InvalidCatalog`] if a fixed input or
+/// rendered output cannot be represented by the canonical fixture.
+pub(super) fn renderer_contract_fixture_sha256() -> Result<Sha256Digest, super::LocalInitError> {
+    let bytes = renderer_contract_fixture_bytes()?;
+    Ok(Sha256Digest::from_bytes(Sha256::digest(bytes).into()))
+}
+
+fn renderer_contract_fixture_bytes() -> Result<Vec<u8>, super::LocalInitError> {
+    let invalid_catalog = || super::LocalInitError::new(super::LocalInitErrorCode::InvalidCatalog);
+    let installation_id = InstallationId::parse_canonical(
+        crate::desired_spec::RENDERER_CONTRACT_FIXTURE_INSTALLATION_ID,
+    )
+    .ok_or_else(invalid_catalog)?;
+    let installation = Installation::verified(InstallationName::default(), installation_id);
+    let spec = DesiredSpec::from_canonical_bytes(
+        crate::desired_spec::RENDERER_CONTRACT_FIXTURE_DESIRED_SPEC.as_bytes(),
+        &installation,
+    )
+    .map_err(|_| invalid_catalog())?;
+    let runner_id = uuid::Uuid::parse_str(RENDERER_CONTRACT_FIXTURE_RUNNER_ID)
+        .ok()
+        .filter(|runner_id| runner_id.to_string() == RENDERER_CONTRACT_FIXTURE_RUNNER_ID)
+        .ok_or_else(invalid_catalog)?;
+    let engine = RelayEngineFacts {
+        id: RENDERER_CONTRACT_FIXTURE_ENGINE_ID,
+        api_version: RENDERER_CONTRACT_FIXTURE_ENGINE_API_VERSION,
+        server_version: RENDERER_CONTRACT_FIXTURE_ENGINE_SERVER_VERSION,
+        architecture: EngineArchitecture::Amd64,
+    };
+
+    let rendered = render_compose(&spec);
+    let relay_binding = render_relay_binding(&spec, &engine).map_err(|_| invalid_catalog())?;
+    let runner_config = render_runner_config(
+        &spec,
+        &installation,
+        runner_id,
+        RENDERER_CONTRACT_FIXTURE_TRANSIT_NETWORK_ID,
+        RENDERER_CONTRACT_FIXTURE_RESULTS_CONTAINER_ID,
+    )
+    .map_err(|_| invalid_catalog())?;
+    let compose = str::from_utf8(&rendered.compose_bytes).map_err(|_| invalid_catalog())?;
+    let relay_binding = str::from_utf8(&relay_binding).map_err(|_| invalid_catalog())?;
+    let runner_config = str::from_utf8(&runner_config).map_err(|_| invalid_catalog())?;
+
+    let fixture = RendererContractFixture {
+        schema: RENDERER_CONTRACT_FIXTURE_SCHEMA,
+        inputs: RendererContractFixtureInputs {
+            desired_spec_schema: crate::desired_spec::DESIRED_SPEC_SCHEMA,
+            desired_spec: crate::desired_spec::RENDERER_CONTRACT_FIXTURE_DESIRED_SPEC,
+            installation_id: crate::desired_spec::RENDERER_CONTRACT_FIXTURE_INSTALLATION_ID,
+            installation_name: installation.name().as_str(),
+            engine_id: engine.id,
+            engine_api_version: engine.api_version,
+            engine_server_version: engine.server_version,
+            engine_architecture: "linux/amd64",
+            runner_id: RENDERER_CONTRACT_FIXTURE_RUNNER_ID,
+            transit_network_id: RENDERER_CONTRACT_FIXTURE_TRANSIT_NETWORK_ID,
+            results_container_id: RENDERER_CONTRACT_FIXTURE_RESULTS_CONTAINER_ID,
+        },
+        compose,
+        expected: &rendered.expected,
+        topology: RendererContractFixtureTopology {
+            control_network_name: &rendered.control_network_name,
+            egress_network_name: &rendered.egress_network_name,
+            results_transit_name: &rendered.results_transit_name,
+            control_container_name: &rendered.control_container_name,
+            results_address: &rendered.results_address,
+        },
+        relay_binding,
+        runner_config,
+    };
+    let mut bytes = serde_json::to_vec(&fixture).map_err(|_| invalid_catalog())?;
+    bytes.push(b'\n');
+    Ok(bytes)
 }
 
 pub(super) fn render_relay_binding(
@@ -1541,16 +1670,88 @@ struct ComposeDocument<'a> {
 
 #[cfg(test)]
 mod tests {
+    use automata_ci_core::Sha256Digest;
     use serde_json::Value;
+    use sha2::{Digest as _, Sha256};
 
     use super::{
         POSTGRES_CONFIG_MOUNT, POSTGRES_DATA_MOUNT, POSTGRES_LAUNCH_COMMAND, POSTGRES_PGDATA,
         POSTGRES_READY_BINARY, POSTGRES_SERVER_CERTIFICATE, POSTGRES_SERVER_PRIVATE_KEY,
-        POSTGRES_TMPFS, POSTGRES_USER, RELAY_ROOT, RUNNER_DATA_ROOT, RUNNER_SECRETS_ROOT,
+        POSTGRES_TMPFS, POSTGRES_USER, RELAY_ROOT, RENDERER_CONTRACT_FIXTURE_RESULTS_CONTAINER_ID,
+        RENDERER_CONTRACT_FIXTURE_RUNNER_ID, RENDERER_CONTRACT_FIXTURE_SCHEMA,
+        RENDERER_CONTRACT_FIXTURE_TRANSIT_NETWORK_ID, RUNNER_DATA_ROOT, RUNNER_SECRETS_ROOT,
         RUNNER_TLS_ROOT, RUSTFS_CAT, RUSTFS_ENTRYPOINT, RUSTFS_HEALTH_CLIENT, RUSTFS_SERVER,
-        RUSTFS_SHELL, RUSTFS_TMPFS, RUSTFS_USER, render_compose,
+        RUSTFS_SHELL, RUSTFS_TMPFS, RUSTFS_USER, render_compose, renderer_contract_fixture_bytes,
+        renderer_contract_fixture_sha256,
     };
     use crate::{desired_spec::tests::spec, init::materializer::VolumeRole};
+
+    #[test]
+    fn renderer_contract_fixture_preserves_every_exact_output_as_canonical_text() {
+        let bytes = renderer_contract_fixture_bytes().expect("fixed renderer fixture renders");
+        assert_eq!(bytes.last(), Some(&b'\n'));
+        let fixture: Value =
+            serde_json::from_slice(&bytes).expect("renderer contract fixture is JSON");
+
+        assert_eq!(fixture["schema"], RENDERER_CONTRACT_FIXTURE_SCHEMA);
+        assert_eq!(
+            fixture["inputs"]["desired_spec_schema"],
+            crate::desired_spec::DESIRED_SPEC_SCHEMA
+        );
+        assert_eq!(
+            fixture["inputs"]["installation_id"],
+            crate::desired_spec::RENDERER_CONTRACT_FIXTURE_INSTALLATION_ID
+        );
+        assert_eq!(fixture["inputs"]["installation_name"], "default");
+        assert_eq!(
+            fixture["inputs"]["desired_spec"],
+            crate::desired_spec::RENDERER_CONTRACT_FIXTURE_DESIRED_SPEC
+        );
+        assert_eq!(
+            fixture["inputs"]["runner_id"],
+            RENDERER_CONTRACT_FIXTURE_RUNNER_ID
+        );
+        assert_eq!(
+            fixture["inputs"]["transit_network_id"],
+            RENDERER_CONTRACT_FIXTURE_TRANSIT_NETWORK_ID
+        );
+        assert_eq!(
+            fixture["inputs"]["results_container_id"],
+            RENDERER_CONTRACT_FIXTURE_RESULTS_CONTAINER_ID
+        );
+        for field in ["compose", "relay_binding", "runner_config"] {
+            assert!(
+                fixture[field]
+                    .as_str()
+                    .is_some_and(|output| output.ends_with('\n')),
+                "{field} must retain its exact final newline as a JSON string"
+            );
+        }
+        assert_eq!(
+            fixture["expected"]["containers"]
+                .as_object()
+                .map(serde_json::Map::len),
+            Some(8)
+        );
+        assert_eq!(
+            fixture["expected"]["networks"]
+                .as_object()
+                .map(serde_json::Map::len),
+            Some(2)
+        );
+        assert_eq!(fixture["topology"]["results_address"], "172.20.0.2");
+
+        let expected = Sha256Digest::from_bytes(Sha256::digest(&bytes).into());
+        assert_eq!(
+            renderer_contract_fixture_sha256().expect("fixed renderer fixture hashes"),
+            expected
+        );
+        assert_eq!(
+            renderer_contract_fixture_sha256().expect("fixed renderer fixture rehashes"),
+            expected,
+            "the production fixture is deterministic"
+        );
+    }
 
     #[test]
     fn only_the_relay_can_write_the_engine_relay_volume() {
