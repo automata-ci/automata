@@ -1140,6 +1140,7 @@ mod tests {
             &tenant,
             ViewerDisplayMetadata::new("Neutral User").expect("viewer"),
             authorization,
+            BTreeSet::new(),
         )
         .expect("delegated snapshot");
         DelegatedRepositoryMutationActor::from_snapshot(&snapshot)

@@ -4,18 +4,24 @@
 //! sessions. The issuer authenticates an external actor, while Core remains the
 //! authority for principal mapping, workspace membership, and RBAC.
 
-use std::{fmt, future::Future, pin::Pin};
+use std::{collections::BTreeSet, fmt, future::Future, pin::Pin};
 
 use thiserror::Error;
 use url::Url;
 use uuid::Uuid;
 
 use crate::{
-    authorization::AuthorizationContext, human::PrincipalId, human::TenantId,
-    management::ManagementActor, request_auth::ViewerDisplayMetadata, time::UnixTimestamp,
+    authorization::{AuthorizationContext, Permission},
+    human::PrincipalId,
+    human::TenantId,
+    management::ManagementActor,
+    request_auth::ViewerDisplayMetadata,
+    time::UnixTimestamp,
 };
 
 const MAX_ASSERTION_LIFETIME_SECONDS: u64 = 5 * 60;
+/// Maximum distinct tenant permissions one delegated request may evaluate.
+pub const MAX_DELEGATED_TENANT_PERMISSION_CHECKS: usize = 16;
 
 /// The signed, provider-owned identity metadata accepted by Core.
 #[derive(Clone, Eq, PartialEq)]
@@ -151,6 +157,7 @@ pub struct DelegatedActorRequestSnapshot {
     assertion: DelegatedActorAssertion,
     viewer: ViewerDisplayMetadata,
     authorization: AuthorizationContext,
+    granted_tenant_permissions: BTreeSet<Permission>,
 }
 
 /// Minimal current authority retained for one delegated repository mutation.
@@ -332,9 +339,11 @@ impl DelegatedActorRequestSnapshot {
         expected_tenant_id: &TenantId,
         viewer: ViewerDisplayMetadata,
         authorization: AuthorizationContext,
+        granted_tenant_permissions: BTreeSet<Permission>,
     ) -> Result<Self, DelegatedActorRequestSnapshotError> {
         if authorization.tenant_id() != Some(expected_tenant_id)
             || authorization.principal_id().is_none()
+            || granted_tenant_permissions.len() > MAX_DELEGATED_TENANT_PERMISSION_CHECKS
         {
             return Err(DelegatedActorRequestSnapshotError);
         }
@@ -342,6 +351,7 @@ impl DelegatedActorRequestSnapshot {
             assertion,
             viewer,
             authorization,
+            granted_tenant_permissions,
         })
     }
 
@@ -362,6 +372,15 @@ impl DelegatedActorRequestSnapshot {
     pub const fn authorization(&self) -> &AuthorizationContext {
         &self.authorization
     }
+
+    /// Reports whether current Core authority grants one tenant-scoped permission.
+    ///
+    /// The snapshot contains only permissions explicitly requested during
+    /// resolution; absence therefore always fails closed.
+    #[must_use]
+    pub fn allows_tenant_permission(&self, permission: &Permission) -> bool {
+        self.granted_tenant_permissions.contains(permission)
+    }
 }
 
 /// Sanitized inconsistent delegated snapshot failure.
@@ -374,6 +393,7 @@ pub struct DelegatedActorRequestSnapshotError;
 pub struct ResolveDelegatedActorRequest {
     assertion: DelegatedActorAssertion,
     tenant_id: TenantId,
+    requested_tenant_permissions: BTreeSet<Permission>,
 }
 
 impl ResolveDelegatedActorRequest {
@@ -383,7 +403,24 @@ impl ResolveDelegatedActorRequest {
         Self {
             assertion,
             tenant_id,
+            requested_tenant_permissions: BTreeSet::new(),
         }
+    }
+
+    /// Adds the bounded tenant-scoped permission set that Core must evaluate.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a set larger than the delegated authorization protocol bound.
+    pub fn with_tenant_permissions(
+        mut self,
+        permissions: BTreeSet<Permission>,
+    ) -> Result<Self, DelegatedActorPermissionRequestError> {
+        if permissions.len() > MAX_DELEGATED_TENANT_PERMISSION_CHECKS {
+            return Err(DelegatedActorPermissionRequestError);
+        }
+        self.requested_tenant_permissions = permissions;
+        Ok(self)
     }
 
     /// Returns the verified authority assertion.
@@ -397,7 +434,18 @@ impl ResolveDelegatedActorRequest {
     pub const fn tenant_id(&self) -> &TenantId {
         &self.tenant_id
     }
+
+    /// Returns the exact tenant-scoped permissions requested by the adapter.
+    #[must_use]
+    pub const fn requested_tenant_permissions(&self) -> &BTreeSet<Permission> {
+        &self.requested_tenant_permissions
+    }
 }
+
+/// Sanitized invalid delegated tenant-permission request.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+#[error("delegated tenant permission request is invalid")]
+pub struct DelegatedActorPermissionRequestError;
 
 /// Closed durable resolution result for a verified delegated assertion.
 #[derive(Clone, Debug, Eq, PartialEq)]

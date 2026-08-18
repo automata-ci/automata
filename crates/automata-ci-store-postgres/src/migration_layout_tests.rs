@@ -253,6 +253,10 @@ const CANONICAL_MIGRATIONS: &[(&str, &str)] = &[
         "0062_runner_protocol_v3.sql",
         "3cab21e969aa502ded9cfdf2d0442cb610426072a82506f844961aea72ad13ce7fb9020043e07dce0b4752355bfe3561",
     ),
+    (
+        "0063_workspace_billing_permissions.sql",
+        "31dec0b3f5a4735a540c11fb56a7da0d6f6179394f7583311fc0d134e9465faf7ba9cdc1d1595182e5351e5740b884ae",
+    ),
 ];
 
 const BASELINE_MIGRATION_COUNT: u32 = 26;

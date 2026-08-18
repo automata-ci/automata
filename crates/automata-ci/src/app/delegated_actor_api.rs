@@ -1,17 +1,19 @@
 //! Hosted Core HTTP ingress for short-lived Cloud actor assertions.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     str::FromStr as _,
     sync::Arc,
     time::{Duration, Instant},
 };
 
 use automata_ci_auth::{
+    authorization::Permission,
     delegated_actor::{
         DelegatedActorAssertion, DelegatedActorRequestSnapshot, DelegatedActorResolver,
         DelegatedActorResolverError, DelegatedRepositoryMutationActor,
-        ResolveDelegatedActorOutcome, ResolveDelegatedActorRequest,
+        MAX_DELEGATED_TENANT_PERMISSION_CHECKS, ResolveDelegatedActorOutcome,
+        ResolveDelegatedActorRequest,
     },
     human::TenantId,
     time::UnixTimestamp,
@@ -27,7 +29,7 @@ use uuid::Uuid;
 
 use axum::{
     Json, Router,
-    extract::{Path, Query, RawQuery, State},
+    extract::{DefaultBodyLimit, Path, Query, RawQuery, State, rejection::JsonRejection},
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse as _, Response},
     routing::{get, post},
@@ -53,6 +55,9 @@ use automata_ci_store::HumanLiveLogBrowserOrigin;
 
 /// Protected Core endpoint used by Cloud to resolve the current viewer.
 pub const DELEGATED_ACTOR_VIEWER_PATH: &str = "/internal/v2/workspaces/{workspace_id}/viewer";
+/// Protected Core endpoint used by Cloud to check current tenant permissions.
+pub const DELEGATED_ACTOR_AUTHORIZATION_CHECK_PATH: &str =
+    "/internal/v2/workspaces/{workspace_id}/authorization-checks";
 /// Protected Core endpoint used by Cloud to list repositories visible to one actor.
 pub const DELEGATED_ACTOR_REPOSITORIES_PATH: &str =
     "/internal/v2/workspaces/{workspace_id}/repositories";
@@ -74,6 +79,7 @@ const MAX_JWT_SEGMENT_BYTES: usize = 6 * 1024;
 const MAX_JWKS_BYTES: usize = 64 * 1024;
 const MAX_JWKS_KEYS: usize = 32;
 const MAX_KEY_ID_BYTES: usize = 128;
+const MAX_AUTHORIZATION_CHECK_BODY_BYTES: usize = 4 * 1024;
 const ALLOWED_CLOCK_SKEW_SECONDS: u64 = 30;
 const JWKS_CACHE_LIFETIME: Duration = Duration::from_mins(5);
 
@@ -419,6 +425,28 @@ struct WorkspaceViewerResponse {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct WorkspaceAuthorizationCheckRequest {
+    protocol_version: u8,
+    permissions: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct WorkspaceAuthorizationCheckResponse {
+    protocol_version: u8,
+    workspace_id: String,
+    principal_id: String,
+    authorization_revision: u64,
+    decisions: Vec<WorkspacePermissionDecisionResponse>,
+}
+
+#[derive(Serialize)]
+struct WorkspacePermissionDecisionResponse {
+    permission: String,
+    allowed: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RepositoryDirectoryQuery {
     cursor: Option<String>,
 }
@@ -582,6 +610,11 @@ pub(crate) fn router(
     let mut router = Router::new()
         .route(DELEGATED_ACTOR_VIEWER_PATH, get(workspace_viewer))
         .route(
+            DELEGATED_ACTOR_AUTHORIZATION_CHECK_PATH,
+            post(workspace_authorization_check)
+                .layer(DefaultBodyLimit::max(MAX_AUTHORIZATION_CHECK_BODY_BYTES)),
+        )
+        .route(
             DELEGATED_ACTOR_REPOSITORIES_PATH,
             get(workspace_repositories),
         )
@@ -606,6 +639,76 @@ pub(crate) fn router(
         browser_origin,
         workflow_dispatch,
     })
+}
+
+async fn workspace_authorization_check(
+    State(state): State<DelegatedActorApiState>,
+    Path(workspace_id): Path<String>,
+    headers: HeaderMap,
+    payload: Result<Json<WorkspaceAuthorizationCheckRequest>, JsonRejection>,
+) -> Response {
+    let Ok(workspace_uuid) = canonical_uuid(&workspace_id) else {
+        return status_response(StatusCode::NOT_FOUND);
+    };
+    let Ok(Json(request)) = payload else {
+        return status_response(StatusCode::BAD_REQUEST);
+    };
+    let Some(permissions) = authorization_check_permissions(request) else {
+        return status_response(StatusCode::BAD_REQUEST);
+    };
+    let requested_permissions = permissions.iter().cloned().collect();
+    let snapshot = match resolve_actor_with_tenant_permissions(
+        &state,
+        workspace_uuid,
+        &headers,
+        requested_permissions,
+    )
+    .await
+    {
+        Ok(snapshot) => snapshot,
+        Err(response) => return response,
+    };
+    let authorization = snapshot.authorization();
+    let (Some(principal_id), Some(authorization_revision)) = (
+        authorization.principal_id(),
+        authorization.authorization_revision(),
+    ) else {
+        return status_response(StatusCode::INTERNAL_SERVER_ERROR);
+    };
+    json_response(WorkspaceAuthorizationCheckResponse {
+        protocol_version: 2,
+        workspace_id,
+        principal_id: principal_id.as_str().to_owned(),
+        authorization_revision,
+        decisions: permissions
+            .into_iter()
+            .map(|permission| WorkspacePermissionDecisionResponse {
+                allowed: snapshot.allows_tenant_permission(&permission),
+                permission: permission.into(),
+            })
+            .collect(),
+    })
+}
+
+fn authorization_check_permissions(
+    request: WorkspaceAuthorizationCheckRequest,
+) -> Option<Vec<Permission>> {
+    if request.protocol_version != 2
+        || request.permissions.is_empty()
+        || request.permissions.len() > MAX_DELEGATED_TENANT_PERMISSION_CHECKS
+    {
+        return None;
+    }
+    let mut unique = BTreeSet::new();
+    let mut permissions = Vec::with_capacity(request.permissions.len());
+    for value in request.permissions {
+        let permission = Permission::new(value).ok()?;
+        if !unique.insert(permission.clone()) {
+            return None;
+        }
+        permissions.push(permission);
+    }
+    Some(permissions)
 }
 
 async fn workspace_workflow_dispatch(
@@ -1125,6 +1228,15 @@ async fn resolve_actor(
     workspace_uuid: Uuid,
     headers: &HeaderMap,
 ) -> Result<Box<DelegatedActorRequestSnapshot>, Response> {
+    resolve_actor_with_tenant_permissions(state, workspace_uuid, headers, BTreeSet::new()).await
+}
+
+async fn resolve_actor_with_tenant_permissions(
+    state: &DelegatedActorApiState,
+    workspace_uuid: Uuid,
+    headers: &HeaderMap,
+    requested_tenant_permissions: BTreeSet<Permission>,
+) -> Result<Box<DelegatedActorRequestSnapshot>, Response> {
     let Some(token) = bearer_token(headers) else {
         return Err(unauthorized());
     };
@@ -1139,7 +1251,9 @@ async fn resolve_actor(
     let Ok(tenant_id) = TenantId::new(workspace_uuid.hyphenated().to_string()) else {
         return Err(status_response(StatusCode::NOT_FOUND));
     };
-    let request = ResolveDelegatedActorRequest::new(verified.assertion, tenant_id);
+    let request = ResolveDelegatedActorRequest::new(verified.assertion, tenant_id)
+        .with_tenant_permissions(requested_tenant_permissions)
+        .map_err(|_| status_response(StatusCode::BAD_REQUEST))?;
     match state.resolver.resolve(&request).await {
         Ok(ResolveDelegatedActorOutcome::Authenticated(snapshot)) => Ok(snapshot),
         Ok(
@@ -1300,6 +1414,46 @@ mod tests {
         assert!(!valid_cursor(Some(&"x".repeat(4_097))));
         assert!(valid_branch(Some("refs/heads/main")));
         assert!(!valid_branch(Some("")));
+    }
+
+    #[test]
+    fn authorization_check_accepts_one_exact_bounded_permission_set() {
+        let parsed = authorization_check_permissions(WorkspaceAuthorizationCheckRequest {
+            protocol_version: 2,
+            permissions: vec!["billing:read".to_owned(), "billing:manage".to_owned()],
+        })
+        .expect("authorization permissions");
+        assert_eq!(
+            parsed.iter().map(Permission::as_str).collect::<Vec<_>>(),
+            ["billing:read", "billing:manage"]
+        );
+
+        for rejected in [
+            WorkspaceAuthorizationCheckRequest {
+                protocol_version: 1,
+                permissions: vec!["billing:read".to_owned()],
+            },
+            WorkspaceAuthorizationCheckRequest {
+                protocol_version: 2,
+                permissions: Vec::new(),
+            },
+            WorkspaceAuthorizationCheckRequest {
+                protocol_version: 2,
+                permissions: vec!["billing:read".to_owned(), "billing:read".to_owned()],
+            },
+            WorkspaceAuthorizationCheckRequest {
+                protocol_version: 2,
+                permissions: vec!["billing/read".to_owned()],
+            },
+            WorkspaceAuthorizationCheckRequest {
+                protocol_version: 2,
+                permissions: (0..=MAX_DELEGATED_TENANT_PERMISSION_CHECKS)
+                    .map(|index| format!("billing:test-{index}"))
+                    .collect(),
+            },
+        ] {
+            assert!(authorization_check_permissions(rejected).is_none());
+        }
     }
 
     #[tokio::test]
