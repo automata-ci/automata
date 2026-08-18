@@ -39,7 +39,7 @@ const STATE_AUTHORITY_DOMAIN: &[u8] = b"automata/local/state-authority/v1\0";
 
 pub(super) struct StateRoot {
     directory: OwnedFd,
-    _operation_lock: OwnedFd,
+    operation_lock: OwnedFd,
     authority_sha256: Sha256Digest,
 }
 
@@ -167,7 +167,7 @@ impl StateRoot {
         let authority_sha256 = state_authority_digest(&root_metadata, &lock_metadata);
         let state = Self {
             directory,
-            _operation_lock: operation_lock,
+            operation_lock,
             authority_sha256,
         };
         state.validate_replay_layout()?;
@@ -199,7 +199,7 @@ impl StateRoot {
             revalidate_root_and_lock(&parent, &name, &directory, &operation_lock, &initial_root)?;
         Ok(Self {
             directory,
-            _operation_lock: operation_lock,
+            operation_lock,
             authority_sha256: state_authority_digest(&root_metadata, &lock_metadata),
         })
     }
@@ -858,6 +858,15 @@ impl StateRoot {
             return Err(reset_required());
         }
         Ok(())
+    }
+}
+
+impl Drop for StateRoot {
+    fn drop(&mut self) {
+        // A fork inherits this open file description before `CLOEXEC` can
+        // close its descriptor. Unlock explicitly so teardown does not wait
+        // for every inherited duplicate to close.
+        let _ = fs::flock(&self.operation_lock, FlockOperation::Unlock);
     }
 }
 
