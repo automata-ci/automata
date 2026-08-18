@@ -391,7 +391,7 @@ impl ProviderDeliveryRepository for PostgresStore {
         .bind(request.claim().owner().as_uuid())
         .bind(pg_bigint(request.claim().fence()))
         .bind(inventory.manifest_digest().as_bytes().as_slice())
-        .bind(inventory.source_revision())
+        .bind(inventory.source_revision().as_bytes())
         .bind(inventory.repository_source_digest().as_bytes().as_slice())
         .bind(inventory.digest().as_bytes().as_slice())
         .bind(
@@ -1716,9 +1716,12 @@ async fn load_workflow_inventory_receipt(
     }
     let inventory = ProviderDeliveryWorkflowInventory::new(
         decode_digest(&header, "manifest_digest")?,
-        header
-            .try_get::<String, _>("source_revision")
-            .map_err(operation_error)?,
+        automata_ci_core::GitObjectId::from_durable_bytes(
+            &header
+                .try_get::<Vec<u8>, _>("source_revision")
+                .map_err(operation_error)?,
+        )
+        .map_err(|_| ProviderDeliveryStoreError::CorruptData)?,
         decode_digest(&header, "repository_source_digest")?,
         entries,
     )

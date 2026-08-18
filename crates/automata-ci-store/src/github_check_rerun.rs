@@ -3,12 +3,12 @@
 use std::fmt;
 
 use async_trait::async_trait;
-use automata_ci_core::Sha256Digest;
+use automata_ci_core::{GitObjectId, Sha256Digest};
 use thiserror::Error;
 
 use crate::{
-    GithubCheckAppId, GithubCheckHeadSha, GithubCheckRunId, GithubCheckSuiteId, StoreError,
-    TenantScope, WorkflowRerunReceipt,
+    GithubCheckAppId, GithubCheckRunId, GithubCheckSuiteId, StoreError, TenantScope,
+    WorkflowRerunReceipt,
 };
 use automata_ci_provider::ProviderConnectionId;
 
@@ -80,7 +80,7 @@ pub struct GithubCheckRerunRequest {
     installation_id: u64,
     github_repository_id: u64,
     app_id: GithubCheckAppId,
-    head_sha: GithubCheckHeadSha,
+    head_sha: GitObjectId,
     sender_id: u64,
     delivery_id: String,
     body_sha256: Sha256Digest,
@@ -100,7 +100,7 @@ impl GithubCheckRerunRequest {
         installation_id: u64,
         github_repository_id: u64,
         app_id: GithubCheckAppId,
-        head_sha: GithubCheckHeadSha,
+        head_sha: GitObjectId,
         sender_id: u64,
         delivery_id: impl Into<String>,
         body_sha256: Sha256Digest,
@@ -164,7 +164,7 @@ impl GithubCheckRerunRequest {
     }
     /// Returns the exact selected commit.
     #[must_use]
-    pub const fn head_sha(&self) -> GithubCheckHeadSha {
+    pub const fn head_sha(&self) -> GitObjectId {
         self.head_sha
     }
     /// Returns the signed GitHub user identity.

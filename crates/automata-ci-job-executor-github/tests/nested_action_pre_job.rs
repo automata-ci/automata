@@ -327,7 +327,7 @@ fn repository_step(id: &str, repository: &str) -> StepIr {
         SemanticStep::action(
             ActionReference::Repository {
                 repository: repository.to_owned(),
-                revision: REVISION.to_owned(),
+                selector: REVISION.to_owned(),
                 subpath: None,
             },
             BTreeMap::new(),

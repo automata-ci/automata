@@ -6,7 +6,8 @@ use std::{
 };
 
 use automata_ci_auth::{github::GithubEndpointError, secret::SecretString};
-use automata_ci_scm::{ExactRevision, RepositoryId};
+use automata_ci_core::GitObjectId;
+use automata_ci_scm::RepositoryId;
 use reqwest::{RequestBuilder, StatusCode, header::ACCEPT};
 use ring::digest::{Context as DigestContext, SHA256};
 use serde::Deserialize;
@@ -83,8 +84,8 @@ pub struct GithubPullRequestDiffRequest<'request> {
     repository: &'request RepositoryId,
     head_repository: &'request RepositoryId,
     number: NonZeroU64,
-    base: &'request ExactRevision,
-    head: &'request ExactRevision,
+    base: &'request GitObjectId,
+    head: &'request GitObjectId,
     authority: GithubPullRequestDiffAuthority<'request>,
     deadline: Instant,
 }
@@ -96,8 +97,8 @@ impl<'request> GithubPullRequestDiffRequest<'request> {
         repository: &'request RepositoryId,
         head_repository: &'request RepositoryId,
         number: NonZeroU64,
-        base: &'request ExactRevision,
-        head: &'request ExactRevision,
+        base: &'request GitObjectId,
+        head: &'request GitObjectId,
         authority: GithubPullRequestDiffAuthority<'request>,
         deadline: Instant,
     ) -> Self {
@@ -155,11 +156,11 @@ pub enum GithubPushDiffRange {
     /// An existing non-forced branch update with its complete pushed-commit set.
     Existing {
         /// Exact pre-push commit.
-        before: ExactRevision,
+        before: GitObjectId,
         /// Exact post-push commit.
-        after: ExactRevision,
+        after: GitObjectId,
         /// Complete signed pushed-commit identities, in any order.
-        pushed_commits: Vec<ExactRevision>,
+        pushed_commits: Vec<GitObjectId>,
     },
     /// A newly created branch whose Actions diff base is not exposed by Compare REST.
     Created,
@@ -290,8 +291,8 @@ impl fmt::Debug for GithubChangedFile {
 /// Complete, exact provider evidence for one supported existing-branch push.
 #[derive(Clone, Eq, PartialEq)]
 pub struct GithubCompletePushDiff {
-    before: ExactRevision,
-    after: ExactRevision,
+    before: GitObjectId,
+    after: GitObjectId,
     selected_file_count: usize,
     changed_files: Vec<GithubChangedFile>,
     changed_paths: Vec<String>,
@@ -302,8 +303,8 @@ pub struct GithubCompletePushDiff {
 #[derive(Clone, Eq, PartialEq)]
 pub struct GithubCompletePullRequestDiff {
     number: NonZeroU64,
-    base: ExactRevision,
-    head: ExactRevision,
+    base: GitObjectId,
+    head: GitObjectId,
     selected_file_count: usize,
     changed_files: Vec<GithubChangedFile>,
     changed_paths: Vec<String>,
@@ -321,13 +322,13 @@ impl GithubCompletePullRequestDiff {
 
     /// Returns the exact webhook base revision proven by the response.
     #[must_use]
-    pub const fn base(&self) -> &ExactRevision {
+    pub const fn base(&self) -> &GitObjectId {
         &self.base
     }
 
     /// Returns the exact webhook head revision proven by the response.
     #[must_use]
-    pub const fn head(&self) -> &ExactRevision {
+    pub const fn head(&self) -> &GitObjectId {
         &self.head
     }
 
@@ -409,13 +410,13 @@ pub enum GithubPullRequestDiffOutcome {
 impl GithubCompletePushDiff {
     /// Returns the exact pre-push commit proven by the response.
     #[must_use]
-    pub const fn before(&self) -> &ExactRevision {
+    pub const fn before(&self) -> &GitObjectId {
         &self.before
     }
 
     /// Returns the exact post-push commit proven by the response and final page.
     #[must_use]
-    pub const fn after(&self) -> &ExactRevision {
+    pub const fn after(&self) -> &GitObjectId {
         &self.after
     }
 
@@ -544,9 +545,9 @@ struct PullRequestFile {
 
 struct ExistingDiff<'request> {
     repository: &'request RepositoryId,
-    before: &'request ExactRevision,
-    after: &'request ExactRevision,
-    pushed_commits: &'request [ExactRevision],
+    before: &'request GitObjectId,
+    after: &'request GitObjectId,
+    pushed_commits: &'request [GitObjectId],
     authority: &'request GithubPushDiffAuthority<'request>,
     deadline: Instant,
 }
@@ -555,8 +556,8 @@ struct PullRequestDiff<'request> {
     repository: &'request RepositoryId,
     head_repository: &'request RepositoryId,
     number: NonZeroU64,
-    base: &'request ExactRevision,
-    head: &'request ExactRevision,
+    base: &'request GitObjectId,
+    head: &'request GitObjectId,
     authority: &'request GithubPullRequestDiffAuthority<'request>,
     deadline: Instant,
 }
@@ -567,8 +568,8 @@ struct ChangedFilesEvidenceCoordinates<'request> {
     repository: &'request RepositoryId,
     head_repository: Option<&'request RepositoryId>,
     pull_request_number: Option<NonZeroU64>,
-    base: &'request ExactRevision,
-    head: &'request ExactRevision,
+    base: &'request GitObjectId,
+    head: &'request GitObjectId,
     pull_request_state: Option<&'request str>,
     provider_total_changed_files: Option<u64>,
 }
@@ -710,8 +711,8 @@ impl GithubHttpEndpoint {
             &changed_paths,
         );
         Ok(GithubCompletePushDiff {
-            before: request.before.clone(),
-            after: request.after.clone(),
+            before: *request.before,
+            after: *request.after,
             selected_file_count,
             changed_files,
             changed_paths,
@@ -796,8 +797,8 @@ impl GithubHttpEndpoint {
         );
         Ok(GithubCompletePullRequestDiff {
             number: request.number,
-            base: request.base.clone(),
-            head: request.head.clone(),
+            base: *request.base,
+            head: *request.head,
             selected_file_count: selected_count,
             changed_files,
             changed_paths,
@@ -905,12 +906,12 @@ impl GithubHttpEndpoint {
     fn compare_url(
         &self,
         repository: &RepositoryId,
-        before: &ExactRevision,
-        after: &ExactRevision,
+        before: &GitObjectId,
+        after: &GitObjectId,
         page_number: usize,
     ) -> Result<Url, CompareFailure> {
         let (owner, name) = repository_components(repository)?;
-        let base_head = format!("{}...{}", before.as_str(), after.as_str());
+        let base_head = format!("{before}...{after}");
         let mut endpoint = self.trusted.api_base().clone();
         let mut segments = endpoint
             .path_segments_mut()
@@ -964,9 +965,9 @@ fn repository_components(repository: &RepositoryId) -> Result<(&str, &str), Comp
 }
 
 fn validate_requested_commits(
-    before: &ExactRevision,
-    after: &ExactRevision,
-    commits: &[ExactRevision],
+    before: &GitObjectId,
+    after: &GitObjectId,
+    commits: &[GitObjectId],
 ) -> Result<(), CompareFailure> {
     if before == after
         || commits.is_empty()
@@ -976,21 +977,15 @@ fn validate_requested_commits(
     {
         return Err(invalid_evidence());
     }
-    let unique = commits
-        .iter()
-        .map(ExactRevision::as_str)
-        .collect::<HashSet<_>>();
+    let unique = commits.iter().collect::<HashSet<_>>();
     if unique.len() != commits.len() {
         return Err(invalid_evidence());
     }
     Ok(())
 }
 
-fn canonical_revisions(commits: &[ExactRevision]) -> Vec<&str> {
-    let mut commits = commits
-        .iter()
-        .map(ExactRevision::as_str)
-        .collect::<Vec<_>>();
+fn canonical_revisions(commits: &[GitObjectId]) -> Vec<GitObjectId> {
+    let mut commits = commits.to_vec();
     commits.sort_unstable();
     commits
 }
@@ -1040,8 +1035,8 @@ fn validate_pull_request_snapshot(
 ) -> Result<(), CompareFailure> {
     if snapshot.number != request.number.get()
         || !matches!(snapshot.state.as_str(), "open" | "closed")
-        || snapshot.base.sha != request.base.as_str()
-        || snapshot.head.sha != request.head.as_str()
+        || GitObjectId::from_provider_hex(&snapshot.base.sha).ok() != Some(*request.base)
+        || GitObjectId::from_provider_hex(&snapshot.head.sha).ok() != Some(*request.head)
         || snapshot.base.repo.full_name != request.repository.as_str()
         || snapshot.head.repo.full_name != request.head_repository.as_str()
     {
@@ -1067,7 +1062,7 @@ fn complete_pull_request_file_page(
     let mut changed_files = Vec::with_capacity(files.len());
     let mut filenames = HashSet::with_capacity(files.len());
     for file in files {
-        if ExactRevision::new(&file.sha).is_err() {
+        if GitObjectId::from_provider_hex(&file.sha).is_err() {
             return Err(invalid_evidence());
         }
         let changed_file = complete_changed_file(
@@ -1114,10 +1109,8 @@ fn changed_files_evidence_digest(
         &mut digest,
         coordinates.pull_request_number.map_or(0, NonZeroU64::get),
     );
-    digest_part(&mut digest, coordinates.base.as_str().as_bytes())
-        .expect("exact revision is bounded");
-    digest_part(&mut digest, coordinates.head.as_str().as_bytes())
-        .expect("exact revision is bounded");
+    digest_part(&mut digest, coordinates.base.as_bytes()).expect("exact revision is bounded");
+    digest_part(&mut digest, coordinates.head.as_bytes()).expect("exact revision is bounded");
     digest_optional_part(
         &mut digest,
         coordinates.pull_request_state.map(str::as_bytes),
@@ -1201,7 +1194,7 @@ fn decode_compare_page(response: &JsonResponse) -> Result<ComparePage, CompareFa
 
 fn validate_page_identity(
     page: &ComparePage,
-    before: &ExactRevision,
+    before: &GitObjectId,
     expected_commits: usize,
 ) -> Result<(), CompareFailure> {
     let expected_commits = u64::try_from(expected_commits).map_err(|_| invalid_evidence())?;
@@ -1209,8 +1202,8 @@ fn validate_page_identity(
         || page.behind_by != 0
         || page.ahead_by != expected_commits
         || page.total_commits != expected_commits
-        || page.base_commit.sha != before.as_str()
-        || page.merge_base_commit.sha != before.as_str()
+        || GitObjectId::from_provider_hex(&page.base_commit.sha).ok() != Some(*before)
+        || GitObjectId::from_provider_hex(&page.merge_base_commit.sha).ok() != Some(*before)
     {
         return Err(CompareFailure::Incomplete(
             GithubPushDiffIncompleteReason::DivergedPush,
@@ -1238,13 +1231,17 @@ fn validate_page_length(
 
 fn validate_observed_commits(
     observed: &[String],
-    expected: &[&str],
-    after: &ExactRevision,
+    expected: &[GitObjectId],
+    after: &GitObjectId,
 ) -> Result<(), CompareFailure> {
-    if observed.last().map(String::as_str) != Some(after.as_str()) {
+    let mut canonical = observed
+        .iter()
+        .map(GitObjectId::from_provider_hex)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| invalid_evidence())?;
+    if canonical.last() != Some(after) {
         return Err(invalid_evidence());
     }
-    let mut canonical = observed.iter().map(String::as_str).collect::<Vec<_>>();
     canonical.sort_unstable();
     if canonical != expected || canonical.windows(2).any(|pair| pair[0] == pair[1]) {
         return Err(invalid_evidence());

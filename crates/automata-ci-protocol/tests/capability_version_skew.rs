@@ -1,5 +1,5 @@
 use automata_ci_core::{
-    Architecture, AttemptId, EnvironmentProfile, EnvironmentProfileId, FencingToken,
+    Architecture, AttemptId, EnvironmentProfile, EnvironmentProfileId, FencingToken, GitObjectId,
     IsolationLevel, JobId, JobInstanceIdentity, JobIr, JobIrEnvelope, JobIrVersionRange, JobSource,
     Lease, LeaseId, OperatingSystem, OperationId, RequirementMismatch, RunId, RunValueTemplates,
     RunnerCapabilities, RunnerFeature, RunnerId, RunnerPlatform, RunnerRequirements,
@@ -64,7 +64,8 @@ fn lease_offer(requirements: RunnerRequirements) -> ServerToRunner {
         JobSource::new(
             "github",
             "owner/repository",
-            "0123456789abcdef",
+            GitObjectId::from_provider_hex("0123456789abcdef0123456789abcdef01234567")
+                .expect("revision"),
             ".ci/workflows/ci.yml",
             "push",
         ),

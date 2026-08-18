@@ -6,7 +6,7 @@ use automata_ci_core::{
     ActionReference, Architecture, AttemptId, ContainerCapabilities, ContainerCredentials,
     ContainerFeature, ContainerPort, ContainerSpec, EnvironmentProfile, EnvironmentProfileId,
     ExpressionDialect, ExpressionInstruction, ExpressionLiteral, ExpressionProgram, FencingToken,
-    IsolationLevel, JobConclusion, JobContentReference, JobExecutionContext, JobId,
+    GitObjectId, IsolationLevel, JobConclusion, JobContentReference, JobExecutionContext, JobId,
     JobInstanceIdentity, JobIr, JobIrEnvelope, JobLifecycle, JobPermissionRequest, JobResult,
     JobResultOutput, JobSecretExposure, JobSource, Lease, LeaseGuard, LeaseId, LogAck, LogChannel,
     LogFrame, LogSequence, LogStreamId, MountSource, OperatingSystem, OperationId,
@@ -373,7 +373,8 @@ pub fn rich_job_with_requirements(requirements: RunnerRequirements) -> JobIrEnve
         JobSource::new(
             "github",
             "automata-ci/automata",
-            "0123456789abcdef0123456789abcdef01234567",
+            GitObjectId::from_provider_hex("0123456789abcdef0123456789abcdef01234567")
+                .expect("revision"),
             ".ci/workflows/ci.yml",
             "push",
         ),
@@ -538,7 +539,7 @@ fn rich_steps(step_environment: &BTreeMap<String, ValueSource>) -> Vec<StepIr> {
             SemanticStep::action(
                 ActionReference::Repository {
                     repository: "actions/checkout".to_owned(),
-                    revision: "de0fac2e4500dabe000000000000000000000000".to_owned(),
+                    selector: "de0fac2e4500dabe000000000000000000000000".to_owned(),
                     subpath: Some("sub/action".to_owned()),
                 },
                 step_environment.clone(),

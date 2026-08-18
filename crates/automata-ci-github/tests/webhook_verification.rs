@@ -5,7 +5,6 @@ use automata_ci_github::{
     GithubWebhookVerifier, MAX_GITHUB_PUSH_COMMITS, MAX_GITHUB_WEBHOOK_BODY_BYTES,
     MAX_GITHUB_WEBHOOK_SECRET_BYTES, X_GITHUB_DELIVERY, X_GITHUB_EVENT, X_HUB_SIGNATURE_256,
 };
-use automata_ci_scm::ExactRevision;
 use bytes::Bytes;
 use reqwest::header::HeaderValue;
 use ring::digest;
@@ -60,7 +59,7 @@ fn valid_push_preserves_exact_authenticated_and_provider_evidence() {
         push.complete_pushed_commit_revisions()
             .expect("two commits are complete")
             .iter()
-            .map(ExactRevision::as_str)
+            .map(ToString::to_string)
             .collect::<Vec<_>>(),
         vec![AFTER, PUSHED_OTHER]
     );

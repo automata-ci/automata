@@ -3,7 +3,7 @@
 use std::fmt;
 
 use async_trait::async_trait;
-use automata_ci_core::{RunId, Sha256Digest, UnixMillis};
+use automata_ci_core::{GitObjectId, RunId, Sha256Digest, UnixMillis};
 use automata_ci_schedule::{CronExpression, validate_iana_timezone};
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
@@ -474,7 +474,7 @@ pub struct RegisterGithubScheduleRegistry {
     manifest: GithubProviderManifest,
     repository_owner_id: ProviderRepositoryOwnerId,
     source_authority: GithubScheduleSourceAuthority,
-    source_revision: String,
+    source_revision: GitObjectId,
     archive: GithubScheduleArchive,
     inventory_digest: Sha256Digest,
     entries: Vec<GithubScheduleRegistryEntry>,
@@ -485,8 +485,8 @@ impl RegisterGithubScheduleRegistry {
     ///
     /// # Errors
     ///
-    /// Rejects a source-authority mode, tenant, or revision incompatible with
-    /// the pinned manifest, a non-SHA revision, excessive entries,
+    /// Rejects a source-authority mode or tenant incompatible with the pinned
+    /// manifest, excessive entries,
     /// non-contiguous ordinals, inconsistent source digests for one workflow,
     /// non-canonical ordering and duplicates, or any first-fire cursor that is
     /// not the exact first cron occurrence strictly after discovery. The
@@ -496,16 +496,14 @@ impl RegisterGithubScheduleRegistry {
         discovery_claim: GithubScheduleDiscoveryClaim,
         manifest: GithubProviderManifest,
         source_authority: GithubScheduleSourceAuthority,
-        source_revision: impl Into<String>,
+        source_revision: GitObjectId,
         archive: GithubScheduleArchive,
         entries: Vec<GithubScheduleRegistryEntry>,
     ) -> Result<Self, GithubScheduleValueError> {
-        let source_revision = source_revision.into();
         let Some(repository_owner_id) = manifest.github_repository_owner_id() else {
             return Err(GithubScheduleValueError::RepositoryOwnerMismatch);
         };
-        if !valid_sha1(&source_revision)
-            || !source_authority.is_structurally_compatible_with(&manifest)
+        if !source_authority.is_structurally_compatible_with(&manifest)
             || entries.len() > MAX_GITHUB_REGISTERED_SCHEDULES
             || !entries_are_canonical(&entries)
             || !entries_match_discovery_first_fire(&entries, discovery_claim.claimed_at())
@@ -557,10 +555,10 @@ impl RegisterGithubScheduleRegistry {
         &self.source_authority
     }
 
-    /// Returns the exact 40-character lowercase source SHA.
+    /// Returns the exact immutable source object identity.
     #[must_use]
-    pub fn source_revision(&self) -> &str {
-        &self.source_revision
+    pub const fn source_revision(&self) -> GitObjectId {
+        self.source_revision
     }
 
     /// Returns the immutable repository archive descriptor.
@@ -762,7 +760,7 @@ pub struct ClaimedGithubScheduleFire {
     registry_id: GithubScheduleRegistryId,
     manifest_revision: GithubProviderManifestRevision,
     manifest_digest: Sha256Digest,
-    source_revision: String,
+    source_revision: GitObjectId,
     default_branch_ref: String,
     archive: GithubScheduleArchive,
     entry: GithubScheduleRegistryEntry,
@@ -784,7 +782,7 @@ impl ClaimedGithubScheduleFire {
         registry_id: GithubScheduleRegistryId,
         manifest_revision: GithubProviderManifestRevision,
         manifest_digest: Sha256Digest,
-        source_revision: String,
+        source_revision: GitObjectId,
         default_branch_ref: String,
         archive: GithubScheduleArchive,
         entry: GithubScheduleRegistryEntry,
@@ -871,8 +869,8 @@ impl ClaimedGithubScheduleFire {
 
     /// Returns the exact immutable source SHA.
     #[must_use]
-    pub fn source_revision(&self) -> &str {
-        &self.source_revision
+    pub const fn source_revision(&self) -> GitObjectId {
+        self.source_revision
     }
 
     /// Returns the configured full default-branch ref.
@@ -1245,13 +1243,6 @@ fn schedule_inventory_digest(entries: &[GithubScheduleRegistryEntry]) -> Sha256D
         digest.update(entry.entry_digest().as_bytes());
     }
     Sha256Digest::from_bytes(digest.finalize().into())
-}
-
-fn valid_sha1(value: &str) -> bool {
-    value.len() == 40
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn valid_failure_kind(value: &str) -> bool {

@@ -1,10 +1,11 @@
 mod credential;
 
 use automata_ci_auth::secret::SecretString;
+use automata_ci_core::GitObjectId;
 use automata_ci_scm::{
-    ArchiveFormat, ArchiveLimits, ExactRevision, RepositoryId, RepositorySnapshot,
-    RepositorySource, RepositorySourcePort, RepositorySourceRequest, ResolvedRevision,
-    RevisionSpec, ScmProvider, ScmProviderId, SnapshotRequest,
+    ArchiveFormat, ArchiveLimits, RepositoryId, RepositorySnapshot, RepositorySource,
+    RepositorySourcePort, RepositorySourceRequest, RevisionSpec, ScmProvider, ScmProviderId,
+    SnapshotRequest,
 };
 use bytes::Bytes;
 use static_assertions::assert_obj_safe;
@@ -36,37 +37,6 @@ fn identifiers_are_strict_and_serde_revalidates() {
 }
 
 #[test]
-fn exact_revisions_are_lowercase_full_length_and_serde_revalidates() {
-    const REVISION: &str = "de0fac2e4500dabe0009e67214ff5f5447ce83dd";
-
-    let revision = ExactRevision::new(REVISION).unwrap();
-    assert_eq!(revision.as_str(), REVISION);
-    assert_eq!(
-        serde_json::to_string(&revision).unwrap(),
-        format!(r#""{REVISION}""#)
-    );
-    assert_eq!(
-        serde_json::from_str::<ExactRevision>(&format!(r#""{REVISION}""#)).unwrap(),
-        revision
-    );
-
-    for invalid in [
-        "",
-        "de0fac2e4500dabe0009e67214ff5f5447ce83d",
-        "de0fac2e4500dabe0009e67214ff5f5447ce83ddd",
-        "DE0FAC2E4500DABE0009E67214FF5F5447CE83DD",
-        "ge0fac2e4500dabe0009e67214ff5f5447ce83dd",
-        "de0fac2e4500dabe0009e67214ff5f5447ce83d/",
-    ] {
-        assert!(ExactRevision::new(invalid).is_err(), "accepted {invalid:?}");
-        assert!(
-            serde_json::from_str::<ExactRevision>(&format!(r#""{invalid}""#)).is_err(),
-            "deserialized {invalid:?}"
-        );
-    }
-}
-
-#[test]
 fn request_debug_and_snapshot_never_retain_credentials_in_metadata() {
     let repository = RepositoryId::new("actions/checkout").unwrap();
     let revision = RevisionSpec::new("v6").unwrap();
@@ -85,7 +55,7 @@ fn request_debug_and_snapshot_never_retain_credentials_in_metadata() {
         ScmProviderId::new("github").unwrap(),
         repository,
         revision,
-        ResolvedRevision::new("de0fac2e4500dabe0009e67214ff5f5447ce83dd").unwrap(),
+        GitObjectId::from_provider_hex("de0fac2e4500dabe0009e67214ff5f5447ce83dd").unwrap(),
         ArchiveFormat::TarGzip,
         Bytes::from_static(b"archive"),
     );
@@ -97,7 +67,8 @@ fn request_debug_and_snapshot_never_retain_credentials_in_metadata() {
 #[test]
 fn exact_source_request_redacts_credentials_and_source_binds_one_revision() {
     let repository = RepositoryId::new("automata-ci/automata").unwrap();
-    let revision = ExactRevision::new("de0fac2e4500dabe0009e67214ff5f5447ce83dd").unwrap();
+    let revision =
+        GitObjectId::from_provider_hex("de0fac2e4500dabe0009e67214ff5f5447ce83dd").unwrap();
     let credential = SecretString::new("exact-source-installation-secret").unwrap();
     let request = RepositorySourceRequest::authenticated(
         &repository,
@@ -115,7 +86,7 @@ fn exact_source_request_redacts_credentials_and_source_binds_one_revision() {
     let source = RepositorySource::from_bytes(
         ScmProviderId::new("github").unwrap(),
         repository,
-        revision.clone(),
+        revision,
         ArchiveFormat::TarGzip,
         Bytes::from_static(b"exact source"),
     );

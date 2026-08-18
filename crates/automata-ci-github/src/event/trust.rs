@@ -98,6 +98,9 @@ fn push_evidence(facts: &GithubPushEventFacts) -> Result<TrustEvidence, TrustSna
 fn pull_request_evidence(
     facts: &GithubPullRequestEventFacts,
 ) -> Result<TrustEvidence, TrustSnapshotError> {
+    let source_revision = facts.source_revision().to_string();
+    let target_revision = facts.target_revision().to_string();
+    let execution_revision = facts.execution_revision().to_string();
     let evidence = TrustEvidence::new(
         TrustOriginKind::ProviderWebhook,
         TrustEventKind::PullRequest,
@@ -112,11 +115,7 @@ fn pull_request_evidence(
         facts.target_ref(),
         facts.execution_ref(),
     )
-    .with_revisions(
-        facts.source_revision().as_str(),
-        facts.target_revision().as_str(),
-        facts.execution_revision().as_str(),
-    )
+    .with_revisions(source_revision, target_revision, execution_revision)
     .with_fork(facts.is_fork())
     .with_token_recursion(TrustTokenRecursion::Suppressed);
     let mut evidence = with_event_actor(evidence, facts.actor())?;
@@ -133,13 +132,17 @@ fn merge_group_evidence(
     let repository = repository(facts.target_repository())?;
     let execution_ref = facts.execution_ref().full();
     let target_ref = facts.target_ref().full();
-    let execution_revision = facts.execution_revision().as_str();
-    let target_revision = facts.target_revision().as_str();
+    let execution_revision = facts.execution_revision().to_string();
+    let target_revision = facts.target_revision().to_string();
     let evidence = TrustEvidence::new(TrustOriginKind::ProviderWebhook, TrustEventKind::MergeGroup)
         .with_activity(facts.action().as_str())
         .with_repositories(repository.clone(), repository)
         .with_refs(execution_ref, target_ref, execution_ref)
-        .with_revisions(execution_revision, target_revision, execution_revision)
+        .with_revisions(
+            execution_revision.clone(),
+            target_revision,
+            execution_revision,
+        )
         .with_fork(false)
         .with_token_recursion(TrustTokenRecursion::Suppressed);
     let mut evidence = with_event_actor(evidence, facts.actor())?;

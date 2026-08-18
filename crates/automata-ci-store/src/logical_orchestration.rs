@@ -6,8 +6,8 @@ use std::{
 use async_trait::async_trait;
 use automata_ci_auth::delegated_actor::RepositoryMutationActor;
 use automata_ci_core::{
-    MAX_LOGICAL_JOB_NEEDS, MAX_LOGICAL_JOBS, OperationId, RunId, TrustSnapshot, UnixMillis,
-    WorkflowId, WorkflowJobKey, canonical_git_ref,
+    GitObjectId, MAX_LOGICAL_JOB_NEEDS, MAX_LOGICAL_JOBS, OperationId, RunId, TrustSnapshot,
+    UnixMillis, WorkflowId, WorkflowJobKey, canonical_git_ref,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -185,7 +185,7 @@ pub struct AuthenticatedWorkflowDispatchClaim {
     workflow_id: WorkflowId,
     workflow_path: String,
     git_ref: String,
-    commit_sha: String,
+    commit_sha: GitObjectId,
     source: AdmissionObject,
     operation_id: OperationId,
     event_digest: Sha256Digest,
@@ -217,7 +217,7 @@ impl AuthenticatedWorkflowDispatchClaim {
         workflow_id: WorkflowId,
         workflow_path: impl Into<String>,
         git_ref: impl Into<String>,
-        commit_sha: impl Into<String>,
+        commit_sha: GitObjectId,
         source: AdmissionObject,
         operation_id: OperationId,
         event_digest: Sha256Digest,
@@ -225,13 +225,11 @@ impl AuthenticatedWorkflowDispatchClaim {
     ) -> Result<Self, LogicalWorkflowAdmissionValueError> {
         let workflow_path = workflow_path.into();
         let git_ref = git_ref.into();
-        let commit_sha = commit_sha.into();
         validate_text(&workflow_path, "workflow path")?;
         validate_text(&git_ref, "Git ref")?;
         if !canonical_workflow_dispatch_ref(&git_ref) {
             return Err(LogicalWorkflowAdmissionValueError::InvalidGitRef);
         }
-        decode_commit_sha(&commit_sha)?;
         for (value, field) in [
             (repository_id.as_uuid(), "repository ID"),
             (workflow_id.as_uuid(), "workflow ID"),
@@ -287,8 +285,8 @@ impl AuthenticatedWorkflowDispatchClaim {
 
     /// Returns the exact lowercase commit SHA proven by signed source history.
     #[must_use]
-    pub fn commit_sha(&self) -> &str {
-        &self.commit_sha
+    pub const fn commit_sha(&self) -> GitObjectId {
+        self.commit_sha
     }
 
     /// Returns the exact immutable source descriptor proven by signed history.
@@ -324,7 +322,7 @@ pub struct ResolveAuthenticatedWorkflowDispatchSource {
     repository_id: RepositoryId,
     workflow_id: WorkflowId,
     git_ref: String,
-    commit_sha: String,
+    commit_sha: GitObjectId,
 }
 
 impl fmt::Debug for ResolveAuthenticatedWorkflowDispatchSource {
@@ -349,7 +347,7 @@ impl ResolveAuthenticatedWorkflowDispatchSource {
         repository_id: RepositoryId,
         workflow_id: WorkflowId,
         git_ref: impl Into<String>,
-        commit_sha: impl Into<String>,
+        commit_sha: GitObjectId,
     ) -> Result<Self, LogicalWorkflowAdmissionValueError> {
         let git_ref = git_ref.into();
         validate_text(&git_ref, "Git ref")?;
@@ -361,8 +359,6 @@ impl ResolveAuthenticatedWorkflowDispatchSource {
                 "workflow dispatch source target",
             ));
         }
-        let commit_sha = commit_sha.into();
-        decode_commit_sha(&commit_sha)?;
         Ok(Self {
             actor: actor.into(),
             repository_id,
@@ -397,8 +393,8 @@ impl ResolveAuthenticatedWorkflowDispatchSource {
 
     /// Returns the canonical lowercase commit SHA.
     #[must_use]
-    pub fn commit_sha(&self) -> &str {
-        &self.commit_sha
+    pub const fn commit_sha(&self) -> GitObjectId {
+        self.commit_sha
     }
 }
 
@@ -410,7 +406,7 @@ pub struct AuthenticatedWorkflowDispatchSource {
     workflow_id: WorkflowId,
     workflow_path: String,
     git_ref: String,
-    commit_sha: String,
+    commit_sha: GitObjectId,
     source: AdmissionObject,
 }
 
@@ -436,13 +432,12 @@ impl AuthenticatedWorkflowDispatchSource {
         workflow_id: WorkflowId,
         workflow_path: impl Into<String>,
         git_ref: impl Into<String>,
-        commit_sha: impl Into<String>,
+        commit_sha: GitObjectId,
         source: AdmissionObject,
     ) -> Result<Self, LogicalWorkflowAdmissionValueError> {
         let repository_owner_id = repository_owner_id.into();
         let workflow_path = workflow_path.into();
         let git_ref = git_ref.into();
-        let commit_sha = commit_sha.into();
         validate_text(&repository_owner_id, "provider repository owner ID")?;
         validate_text(&workflow_path, "workflow path")?;
         validate_text(&git_ref, "Git ref")?;
@@ -452,7 +447,6 @@ impl AuthenticatedWorkflowDispatchSource {
         if !canonical_workflow_dispatch_ref(&git_ref) {
             return Err(LogicalWorkflowAdmissionValueError::InvalidGitRef);
         }
-        decode_commit_sha(&commit_sha)?;
         Ok(Self {
             repository,
             repository_owner_id,
@@ -496,8 +490,8 @@ impl AuthenticatedWorkflowDispatchSource {
 
     /// Returns the exact lowercase commit SHA.
     #[must_use]
-    pub fn commit_sha(&self) -> &str {
-        &self.commit_sha
+    pub const fn commit_sha(&self) -> GitObjectId {
+        self.commit_sha
     }
 
     /// Returns the immutable workflow-source object descriptor.
@@ -807,7 +801,7 @@ pub enum WorkflowDispatchSourceResolutionOutcome {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CompleteWorkflowDispatchSourceResolution {
     claim: WorkflowDispatchSourceClaim,
-    commit_sha: String,
+    commit_sha: GitObjectId,
     source: AdmissionObject,
 }
 
@@ -819,11 +813,9 @@ impl CompleteWorkflowDispatchSourceResolution {
     /// Rejects a malformed provider commit SHA.
     pub fn new(
         claim: WorkflowDispatchSourceClaim,
-        commit_sha: impl Into<String>,
+        commit_sha: GitObjectId,
         source: AdmissionObject,
     ) -> Result<Self, LogicalWorkflowAdmissionValueError> {
-        let commit_sha = commit_sha.into();
-        decode_commit_sha(&commit_sha)?;
         Ok(Self {
             claim,
             commit_sha,
@@ -837,8 +829,8 @@ impl CompleteWorkflowDispatchSourceResolution {
     }
     /// Returns the provider-resolved immutable revision.
     #[must_use]
-    pub fn commit_sha(&self) -> &str {
-        &self.commit_sha
+    pub const fn commit_sha(&self) -> GitObjectId {
+        self.commit_sha
     }
     /// Returns the immutable workflow-source object.
     #[must_use]
@@ -910,7 +902,7 @@ pub struct AdmitLogicalWorkflowRun {
     root_invocation_id: LogicalWorkflowInvocationId,
     event_name: String,
     event: AdmissionObject,
-    head_sha: Vec<u8>,
+    head_sha: GitObjectId,
     actor: Option<String>,
     display_title: Option<String>,
     commit_subject: Option<String>,
@@ -947,7 +939,7 @@ impl AdmitLogicalWorkflowRun {
         root_invocation_id: LogicalWorkflowInvocationId,
         event_name: impl Into<String>,
         event: AdmissionObject,
-        head_sha: Vec<u8>,
+        head_sha: GitObjectId,
         jobs: Vec<AdmittedLogicalWorkflowJob>,
         admitted_at: UnixMillis,
     ) -> AdmitLogicalWorkflowRunBuilder {
@@ -1093,8 +1085,8 @@ impl AdmitLogicalWorkflowRun {
 
     /// Returns the immutable head commit digest bytes.
     #[must_use]
-    pub fn head_sha(&self) -> &[u8] {
-        &self.head_sha
+    pub const fn head_sha(&self) -> GitObjectId {
+        self.head_sha
     }
 
     /// Returns the optional event actor projection.
@@ -1233,12 +1225,9 @@ impl AdmitLogicalWorkflowRunBuilder {
         }) {
             return Err(LogicalWorkflowAdmissionValueError::InvalidBaseContext);
         }
-        if !matches!(command.head_sha.len(), 20 | 32) {
-            return Err(LogicalWorkflowAdmissionValueError::InvalidHeadSha);
-        }
         if !command.trust_snapshot.is_construction_placeholder() {
             let evidence = command.trust_snapshot.evidence();
-            let execution_revision = lower_hex(&command.head_sha);
+            let execution_revision = command.head_sha.to_string();
             if evidence.target_repository().is_none_or(|repository| {
                 repository.id() != command.repository.provider_repository_id()
             }) || evidence.execution_ref() != Some(command.git_ref.as_str())
@@ -1470,9 +1459,6 @@ pub enum LogicalWorkflowAdmissionValueError {
     /// The base runtime-context object did not use the current canonical media type.
     #[error("workflow base runtime context is not a current canonical object")]
     InvalidBaseContext,
-    /// The commit digest did not have a supported byte length.
-    #[error("head SHA must contain exactly 20 or 32 bytes")]
-    InvalidHeadSha,
     /// The trust snapshot did not name the exact admitted execution source.
     #[error("workflow trust snapshot disagrees with the admitted repository, ref, or revision")]
     InvalidTrustSnapshot,
@@ -1551,40 +1537,6 @@ fn validate_text(
         return Err(LogicalWorkflowAdmissionValueError::InvalidText(field));
     }
     Ok(())
-}
-
-fn lower_hex(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut encoded = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
-        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
-    }
-    encoded
-}
-
-fn decode_commit_sha(value: &str) -> Result<Vec<u8>, LogicalWorkflowAdmissionValueError> {
-    if !matches!(value.len(), 40 | 64)
-        || !value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
-    {
-        return Err(LogicalWorkflowAdmissionValueError::InvalidHeadSha);
-    }
-    value
-        .as_bytes()
-        .chunks_exact(2)
-        .map(|pair| {
-            let digit = |byte| match byte {
-                b'0'..=b'9' => Some(byte - b'0'),
-                b'a'..=b'f' => Some(byte - b'a' + 10),
-                _ => None,
-            };
-            let high = digit(pair[0]).ok_or(LogicalWorkflowAdmissionValueError::InvalidHeadSha)?;
-            let low = digit(pair[1]).ok_or(LogicalWorkflowAdmissionValueError::InvalidHeadSha)?;
-            Ok((high << 4) | low)
-        })
-        .collect()
 }
 
 fn canonical_workflow_dispatch_ref(value: &str) -> bool {

@@ -17,9 +17,10 @@ use automata_ci_action::{
     RepositoryActionRequest,
 };
 use automata_ci_blob::MemoryBlobStore;
+use automata_ci_core::GitObjectId;
 use automata_ci_scm::{
-    ArchiveFormat, RepositoryId, RepositorySnapshot, ResolvedRevision, RevisionSpec, ScmError,
-    ScmErrorKind, ScmProvider, ScmProviderId, SnapshotRequest,
+    ArchiveFormat, RepositoryId, RepositorySnapshot, RevisionSpec, ScmError, ScmErrorKind,
+    ScmProvider, ScmProviderId, SnapshotRequest,
 };
 use bytes::Bytes;
 use flate2::{Compression, write::GzEncoder};
@@ -53,7 +54,7 @@ impl ScmProvider for OfflineSwitchScm {
             self.provider.clone(),
             request.repository().clone(),
             request.revision().clone(),
-            ResolvedRevision::new(SHA).unwrap(),
+            GitObjectId::from_provider_hex(SHA).unwrap(),
             ArchiveFormat::TarGzip,
             self.archive.clone(),
         ))

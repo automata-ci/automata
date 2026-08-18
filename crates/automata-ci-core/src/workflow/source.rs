@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::Sha256Digest;
+use crate::{GitObjectId, Sha256Digest};
 
 /// One source coordinate: a zero-based byte offset and one-based display position.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
@@ -178,8 +178,15 @@ pub enum PlanSourceOrigin {
         /// Credential-free provider repository identity.
         repository: String,
         /// Immutable revision from which the workflow was read.
-        revision: String,
+        revision: GitObjectId,
         /// Repository-relative workflow source path.
+        path: String,
+    },
+    /// Source captured from a content-addressed local archive rather than an SCM object.
+    Archive {
+        /// Digest of the complete admitted archive snapshot.
+        snapshot_digest: Sha256Digest,
+        /// Archive-relative workflow source path.
         path: String,
     },
     /// Local diagnostic source path that grants no filesystem authority.
@@ -244,7 +251,7 @@ pub struct WorkflowEventProvenance {
     provider: String,
     name: String,
     delivery_id: Option<String>,
-    commit_sha: Option<String>,
+    commit_sha: Option<GitObjectId>,
     git_ref: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     selection_digest: Option<Sha256Digest>,
@@ -275,8 +282,8 @@ impl WorkflowEventProvenance {
 
     /// Attaches the immutable commit selected by the event.
     #[must_use]
-    pub fn with_commit_sha(mut self, commit_sha: impl Into<String>) -> Self {
-        self.commit_sha = Some(commit_sha.into());
+    pub const fn with_commit_sha(mut self, commit_sha: GitObjectId) -> Self {
+        self.commit_sha = Some(commit_sha);
         self
     }
 
@@ -324,8 +331,8 @@ impl WorkflowEventProvenance {
 
     /// Returns the immutable event commit when one was supplied.
     #[must_use]
-    pub fn commit_sha(&self) -> Option<&str> {
-        self.commit_sha.as_deref()
+    pub const fn commit_sha(&self) -> Option<GitObjectId> {
+        self.commit_sha
     }
 
     /// Returns the full event Git reference when one was supplied.

@@ -5,12 +5,11 @@ use std::{
 
 use async_trait::async_trait;
 use automata_ci_blob::BlobDescriptor;
-use automata_ci_scm::{RepositoryId, ResolvedRevision, RevisionSpec, ScmProviderId};
+use automata_ci_core::GitObjectId;
+use automata_ci_scm::{RepositoryId, ScmProviderId};
 use thiserror::Error;
 
 use crate::ActionSubpath;
-
-const GIT_COMMIT_SHA_HEX_BYTES: usize = 40;
 
 /// Exact immutable action identity eligible for reference-index reuse.
 ///
@@ -21,32 +20,25 @@ const GIT_COMMIT_SHA_HEX_BYTES: usize = 40;
 pub struct ImmutableActionReference {
     provider: ScmProviderId,
     repository: RepositoryId,
-    revision: RevisionSpec,
+    revision: GitObjectId,
     subpath: ActionSubpath,
 }
 
 impl ImmutableActionReference {
-    /// Creates a reference pinned to one canonical full Git commit SHA.
-    ///
-    /// # Errors
-    ///
-    /// Rejects revisions other than exactly 40 lowercase hexadecimal bytes.
-    /// This canonical spelling prevents aliases from entering the public cache.
+    /// Creates a reference pinned to one already-validated full Git object ID.
+    #[must_use]
     pub fn new(
         provider: ScmProviderId,
         repository: RepositoryId,
-        revision: RevisionSpec,
+        revision: GitObjectId,
         subpath: ActionSubpath,
-    ) -> Result<Self, ImmutableActionReferenceError> {
-        if !is_canonical_full_commit_sha(revision.as_str()) {
-            return Err(ImmutableActionReferenceError);
-        }
-        Ok(Self {
+    ) -> Self {
+        Self {
             provider,
             repository,
             revision,
             subpath,
-        })
+        }
     }
 
     /// Returns the SCM provider identity.
@@ -63,7 +55,7 @@ impl ImmutableActionReference {
 
     /// Returns the exact requested commit revision.
     #[must_use]
-    pub const fn revision(&self) -> &RevisionSpec {
+    pub const fn revision(&self) -> &GitObjectId {
         &self.revision
     }
 
@@ -78,7 +70,7 @@ impl ImmutableActionReference {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IndexedActionBundle {
     reference: ImmutableActionReference,
-    resolved_revision: ResolvedRevision,
+    resolved_revision: GitObjectId,
     archive: BlobDescriptor,
 }
 
@@ -92,10 +84,10 @@ impl IndexedActionBundle {
     /// media type.
     pub fn new(
         reference: ImmutableActionReference,
-        resolved_revision: ResolvedRevision,
+        resolved_revision: GitObjectId,
         archive: BlobDescriptor,
     ) -> Result<Self, ImmutableActionReferenceError> {
-        if reference.revision().as_str() != resolved_revision.as_str()
+        if *reference.revision() != resolved_revision
             || archive.size() == 0
             || archive.media_type().as_str() != "application/gzip"
             || archive.key().as_str() != format!("actions/v1/sha256/{}.tar.gz", archive.digest())
@@ -117,8 +109,8 @@ impl IndexedActionBundle {
 
     /// Returns the provider-confirmed immutable revision.
     #[must_use]
-    pub const fn resolved_revision(&self) -> &ResolvedRevision {
-        &self.resolved_revision
+    pub const fn resolved_revision(&self) -> GitObjectId {
+        self.resolved_revision
     }
 
     /// Returns the verified shared archive descriptor.
@@ -262,11 +254,4 @@ impl ActionReferenceIndex for MemoryActionReferenceIndex {
         entries.insert(bundle.reference().clone(), bundle);
         Ok(PutActionReferenceOutcome::Created)
     }
-}
-
-fn is_canonical_full_commit_sha(value: &str) -> bool {
-    value.len() == GIT_COMMIT_SHA_HEX_BYTES
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }

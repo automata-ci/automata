@@ -1,7 +1,8 @@
 //! Typed immutable reusable-workflow expansion attached to run admission.
 
 use automata_ci_core::{
-    InvocationInputType, OutputSensitivity, PermissionLevel, Sha256Digest, WorkflowJobKey,
+    GitObjectId, InvocationInputType, OutputSensitivity, PermissionLevel, Sha256Digest,
+    WorkflowJobKey,
 };
 
 use crate::{
@@ -14,7 +15,7 @@ use crate::{
 pub struct AdmittedReusableWorkflowCatalogEntry {
     id: WorkflowSnapshotId,
     workflow_path: String,
-    source_revision: String,
+    source_revision: GitObjectId,
     source: AdmissionObject,
     plan: AdmissionObject,
     invocation_contract_digest: Option<Sha256Digest>,
@@ -30,7 +31,7 @@ impl AdmittedReusableWorkflowCatalogEntry {
     pub fn new(
         id: WorkflowSnapshotId,
         workflow_path: impl Into<String>,
-        source_revision: impl Into<String>,
+        source_revision: GitObjectId,
         source: AdmissionObject,
         plan: AdmissionObject,
         invocation_contract_digest: Option<Sha256Digest>,
@@ -41,7 +42,7 @@ impl AdmittedReusableWorkflowCatalogEntry {
         Self {
             id,
             workflow_path: workflow_path.into(),
-            source_revision: source_revision.into(),
+            source_revision,
             source,
             plan,
             invocation_contract_digest,
@@ -65,8 +66,8 @@ impl AdmittedReusableWorkflowCatalogEntry {
 
     /// Returns the exact lowercase source revision.
     #[must_use]
-    pub fn source_revision(&self) -> &str {
-        &self.source_revision
+    pub const fn source_revision(&self) -> GitObjectId {
+        self.source_revision
     }
 
     /// Returns the exact source object.

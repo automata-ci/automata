@@ -1,8 +1,8 @@
 use automata_ci_auth::{github::GithubEndpointError, secret::SecretString};
+use automata_ci_core::GitObjectId;
 use automata_ci_scm::{
-    ArchiveFormat, ExactRevision, RepositorySnapshot, RepositorySource, RepositorySourcePort,
-    RepositorySourceRequest, ResolvedRevision, ScmError, ScmErrorKind, ScmProvider, ScmProviderId,
-    SnapshotRequest,
+    ArchiveFormat, RepositorySnapshot, RepositorySource, RepositorySourcePort,
+    RepositorySourceRequest, ScmError, ScmErrorKind, ScmProvider, ScmProviderId, SnapshotRequest,
 };
 use bytes::{Bytes, BytesMut};
 use reqwest::{
@@ -67,7 +67,10 @@ impl GithubHttpEndpoint {
         Ok(request)
     }
 
-    async fn resolve_revision(&self, request: &SnapshotRequest<'_>) -> Result<String, ScmError> {
+    async fn resolve_revision(
+        &self,
+        request: &SnapshotRequest<'_>,
+    ) -> Result<GitObjectId, ScmError> {
         validate_github_revision(request.revision().as_str())?;
         let endpoint = self.repository_url(
             request.repository(),
@@ -91,10 +94,8 @@ impl GithubHttpEndpoint {
         &self,
         request: &RepositorySourceRequest<'_>,
     ) -> Result<(), ScmError> {
-        let endpoint = self.repository_url(
-            request.repository(),
-            &["commits", request.revision().as_str()],
-        )?;
+        let revision = request.revision().to_string();
+        let endpoint = self.repository_url(request.repository(), &["commits", &revision])?;
         let response = self
             .authenticated_get(endpoint, request.credential())?
             .send()
@@ -106,7 +107,7 @@ impl GithubHttpEndpoint {
                 .await
                 .map_err(map_endpoint_error)?;
         let commit: CommitResponse = decode_json(&response.body).map_err(map_endpoint_error)?;
-        let resolved = ExactRevision::new(commit.sha)
+        let resolved = GitObjectId::from_provider_hex(commit.sha)
             .map_err(|_| ScmError::new(ScmErrorKind::InvalidResponse))?;
         if &resolved != request.revision() {
             return Err(ScmError::new(ScmErrorKind::InvalidResponse));
@@ -117,10 +118,11 @@ impl GithubHttpEndpoint {
     async fn archive_redirect(
         &self,
         request: &SnapshotRequest<'_>,
-        resolved_revision: &str,
+        resolved_revision: &GitObjectId,
     ) -> Result<Url, ScmError> {
+        let resolved_revision = resolved_revision.to_string();
         let endpoint =
-            self.repository_url(request.repository(), &["tarball", resolved_revision])?;
+            self.repository_url(request.repository(), &["tarball", &resolved_revision])?;
         let response = self
             .authenticated_get(endpoint, request.credential())?
             .send()
@@ -136,10 +138,8 @@ impl GithubHttpEndpoint {
         &self,
         request: &RepositorySourceRequest<'_>,
     ) -> Result<Url, ScmError> {
-        let endpoint = self.repository_url(
-            request.repository(),
-            &["tarball", request.revision().as_str()],
-        )?;
+        let revision = request.revision().to_string();
+        let endpoint = self.repository_url(request.repository(), &["tarball", &revision])?;
         let response = self
             .authenticated_get(endpoint, request.credential())?
             .send()
@@ -181,7 +181,7 @@ impl GithubHttpEndpoint {
     fn exact_public_archive_location(
         &self,
         repository: &automata_ci_scm::RepositoryId,
-        revision: &ExactRevision,
+        revision: &GitObjectId,
     ) -> Result<Url, ScmError> {
         let (owner, name) = repository_path::split(repository.as_str())
             .ok_or_else(|| ScmError::new(ScmErrorKind::InvalidResponse))?;
@@ -193,7 +193,8 @@ impl GithubHttpEndpoint {
         segments.push(owner);
         segments.push(name);
         segments.push("legacy.tar.gz");
-        segments.push(revision.as_str());
+        let revision = revision.to_string();
+        segments.push(&revision);
         drop(segments);
         self.validate_archive_location(location)
     }
@@ -210,19 +211,17 @@ impl ScmProvider for GithubHttpEndpoint {
         request: SnapshotRequest<'_>,
     ) -> Result<RepositorySnapshot, ScmError> {
         if request.credential().is_none()
-            && let Ok(exact) = ExactRevision::new(request.revision().as_str().to_owned())
+            && let Ok(exact) = GitObjectId::from_provider_hex(request.revision().as_str())
         {
             let location = self.exact_public_archive_location(request.repository(), &exact)?;
             let bytes = self
                 .download_archive(location, request.limits().maximum_bytes())
                 .await?;
-            let resolved_revision = ResolvedRevision::new(exact.as_str().to_owned())
-                .map_err(|_| ScmError::new(ScmErrorKind::InvalidResponse))?;
             return Ok(RepositorySnapshot::from_bytes(
                 self.scm_provider_id.clone(),
                 request.repository().clone(),
                 request.revision().clone(),
-                resolved_revision,
+                exact,
                 ArchiveFormat::TarGzip,
                 bytes,
             ));
@@ -232,13 +231,11 @@ impl ScmProvider for GithubHttpEndpoint {
         let bytes = self
             .download_archive(location, request.limits().maximum_bytes())
             .await?;
-        let resolved_revision = ResolvedRevision::new(resolved)
-            .map_err(|_| ScmError::new(ScmErrorKind::InvalidResponse))?;
         Ok(RepositorySnapshot::from_bytes(
             self.scm_provider_id.clone(),
             request.repository().clone(),
             request.revision().clone(),
-            resolved_revision,
+            resolved,
             ArchiveFormat::TarGzip,
             bytes,
         ))
@@ -264,7 +261,7 @@ impl RepositorySourcePort for GithubHttpEndpoint {
             return Ok(RepositorySource::from_bytes(
                 self.scm_provider_id.clone(),
                 request.repository().clone(),
-                request.revision().clone(),
+                *request.revision(),
                 ArchiveFormat::TarGzip,
                 bytes,
             ));
@@ -277,7 +274,7 @@ impl RepositorySourcePort for GithubHttpEndpoint {
         Ok(RepositorySource::from_bytes(
             self.scm_provider_id.clone(),
             request.repository().clone(),
-            request.revision().clone(),
+            *request.revision(),
             ArchiveFormat::TarGzip,
             bytes,
         ))
@@ -307,11 +304,8 @@ fn validate_github_revision(revision: &str) -> Result<(), ScmError> {
     Ok(())
 }
 
-fn validate_commit_sha(value: &str) -> Result<String, ScmError> {
-    if value.len() != 40 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(ScmError::new(ScmErrorKind::InvalidResponse));
-    }
-    Ok(value.to_ascii_lowercase())
+fn validate_commit_sha(value: &str) -> Result<GitObjectId, ScmError> {
+    GitObjectId::from_provider_hex(value).map_err(|_| ScmError::new(ScmErrorKind::InvalidResponse))
 }
 
 fn unique_location(response: &Response) -> Result<Url, ScmError> {

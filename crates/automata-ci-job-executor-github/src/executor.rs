@@ -6701,7 +6701,7 @@ impl ActionIdentity {
         ];
         if let ActionReference::Repository {
             repository,
-            revision,
+            selector,
             ..
         } = &self.reference
         {
@@ -6711,7 +6711,7 @@ impl ActionIdentity {
             ));
             values.push((
                 "GITHUB_ACTION_REF".to_owned(),
-                ResolvedEnvironmentValue::plain(revision),
+                ResolvedEnvironmentValue::plain(selector),
             ));
         }
         values
@@ -7210,10 +7210,10 @@ fn action_reference_key(reference: &ActionReference) -> String {
     match reference {
         ActionReference::Repository {
             repository,
-            revision,
+            selector,
             subpath,
         } => format!(
-            "repository\0{repository}\0{revision}\0{}",
+            "repository\0{repository}\0{selector}\0{}",
             subpath.as_deref().unwrap_or_default()
         ),
         ActionReference::Local { path } => format!("local\0{path}"),
@@ -7273,9 +7273,9 @@ fn action_expression_context<'a>(
     let (repository, revision) = match &identity.reference {
         ActionReference::Repository {
             repository,
-            revision,
+            selector,
             ..
-        } => (repository.as_str(), revision.as_str()),
+        } => (repository.as_str(), selector.as_str()),
         ActionReference::Local { .. } | ActionReference::Container { .. } => ("", ""),
     };
     upsert_github_value(

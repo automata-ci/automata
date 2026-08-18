@@ -1,6 +1,6 @@
 use std::{fmt, num::NonZeroU64};
 
-use automata_ci_scm::ExactRevision;
+use automata_ci_core::GitObjectId;
 use serde::{Deserialize, Serialize};
 
 use crate::{GithubPullRequestAction, VerifiedGithubPullRequest, webhook::normalize_branch_name};
@@ -74,9 +74,9 @@ pub struct GithubPullRequestEventFacts {
     number: NonZeroU64,
     action: GithubPullRequestAction,
     merged: bool,
-    source_revision: ExactRevision,
-    target_revision: ExactRevision,
-    execution_revision: ExactRevision,
+    source_revision: GitObjectId,
+    target_revision: GitObjectId,
+    execution_revision: GitObjectId,
     source_ref: Box<str>,
     target_ref: Box<str>,
     execution_ref: Box<str>,
@@ -92,13 +92,13 @@ impl GithubPullRequestEventFacts {
             number: event.number(),
             action: event.action(),
             merged: event.merged(),
-            source_revision: event.head_revision().clone(),
-            target_revision: event.base_revision().clone(),
+            source_revision: *event.head_revision(),
+            target_revision: *event.base_revision(),
             // Delivery source ingestion and GitHub Checks are bound to the
             // signed head revision. A synchronize webhook may still carry the
             // previous synthetic merge revision while GitHub rematerializes
             // refs/pull/<n>/merge, so that value is not execution authority.
-            execution_revision: event.head_revision().clone(),
+            execution_revision: *event.head_revision(),
             source_ref: event.head_ref().into(),
             target_ref: event.base_ref().into(),
             execution_ref: event.git_ref().into(),
@@ -176,19 +176,19 @@ impl GithubPullRequestEventFacts {
 
     /// Returns the exact source revision.
     #[must_use]
-    pub const fn source_revision(&self) -> &ExactRevision {
+    pub const fn source_revision(&self) -> &GitObjectId {
         &self.source_revision
     }
 
     /// Returns the exact target revision observed by the event.
     #[must_use]
-    pub const fn target_revision(&self) -> &ExactRevision {
+    pub const fn target_revision(&self) -> &GitObjectId {
         &self.target_revision
     }
 
     /// Returns the exact revision GitHub assigned to workflow execution.
     #[must_use]
-    pub const fn execution_revision(&self) -> &ExactRevision {
+    pub const fn execution_revision(&self) -> &GitObjectId {
         &self.execution_revision
     }
 

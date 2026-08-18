@@ -193,10 +193,10 @@ fn action_reference_key(reference: &ActionReference) -> String {
     match reference {
         ActionReference::Repository {
             repository,
-            revision,
+            selector,
             subpath,
         } => format!(
-            "repository\0{repository}\0{revision}\0{}",
+            "repository\0{repository}\0{selector}\0{}",
             subpath.as_deref().unwrap_or_default()
         ),
         ActionReference::Local { path } => format!("local\0{path}"),
@@ -205,13 +205,10 @@ fn action_reference_key(reference: &ActionReference) -> String {
 }
 
 fn immutable_repository_reference(reference: &ActionReference) -> bool {
-    let ActionReference::Repository { revision, .. } = reference else {
+    let ActionReference::Repository { selector, .. } = reference else {
         return false;
     };
-    revision.len() == 40
-        && revision
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    automata_ci_core::GitObjectId::from_provider_hex(selector).is_ok()
 }
 
 #[cfg(test)]
@@ -257,14 +254,14 @@ mod tests {
         }
     }
 
-    fn repository(repository: &str, revision: &str) -> ActionReference {
-        repository_at(repository, revision, None)
+    fn repository(repository: &str, selector: &str) -> ActionReference {
+        repository_at(repository, selector, None)
     }
 
-    fn repository_at(repository: &str, revision: &str, subpath: Option<&str>) -> ActionReference {
+    fn repository_at(repository: &str, selector: &str, subpath: Option<&str>) -> ActionReference {
         ActionReference::Repository {
             repository: repository.to_owned(),
-            revision: revision.to_owned(),
+            selector: selector.to_owned(),
             subpath: subpath.map(str::to_owned),
         }
     }
@@ -468,12 +465,12 @@ mod tests {
     fn repository_cache_keys_are_unambiguous() {
         let first = ActionReference::Repository {
             repository: "synthetic/root".to_owned(),
-            revision: "feature/x".to_owned(),
+            selector: "feature/x".to_owned(),
             subpath: Some("action".to_owned()),
         };
         let second = ActionReference::Repository {
             repository: "synthetic/root".to_owned(),
-            revision: "feature".to_owned(),
+            selector: "feature".to_owned(),
             subpath: Some("x/action".to_owned()),
         };
         assert_ne!(action_reference_key(&first), action_reference_key(&second));

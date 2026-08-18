@@ -721,9 +721,20 @@ fn job_source(value: &core::JobSource) -> wire::JobSource {
     wire::JobSource {
         provider: value.provider().to_owned(),
         repository: value.repository().to_owned(),
-        revision: value.revision().to_owned(),
+        revision: Some(git_object_id(value.revision())),
         workflow_path: value.workflow_path().to_owned(),
         event_name: value.event_name().to_owned(),
+    }
+}
+
+fn git_object_id(value: core::GitObjectId) -> wire::GitObjectId {
+    let algorithm = match value.algorithm() {
+        core::GitObjectAlgorithm::Sha1 => wire::GitObjectAlgorithm::Sha1,
+        core::GitObjectAlgorithm::Sha256 => wire::GitObjectAlgorithm::Sha256,
+    };
+    wire::GitObjectId {
+        algorithm: algorithm as i32,
+        digest: value.as_bytes().to_vec(),
     }
 }
 
@@ -1157,11 +1168,11 @@ fn action_reference(value: &core::ActionReference) -> wire::ActionReference {
     let value = match value {
         core::ActionReference::Repository {
             repository,
-            revision,
+            selector,
             subpath,
         } => Value::Repository(wire::RepositoryAction {
             repository: repository.clone(),
-            revision: revision.clone(),
+            selector: selector.clone(),
             subpath: subpath.clone(),
         }),
         core::ActionReference::Local { path } => Value::LocalPath(path.clone()),

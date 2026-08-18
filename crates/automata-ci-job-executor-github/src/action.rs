@@ -307,7 +307,7 @@ impl ActionPreparationPort for ResolvedBundleActionPreparer {
     ) -> Result<PreparedAction, ActionPreparationError> {
         let ActionReference::Repository {
             repository: repository_name,
-            revision: revision_name,
+            selector,
             subpath,
         } = request.reference()
         else {
@@ -316,7 +316,7 @@ impl ActionPreparationPort for ResolvedBundleActionPreparer {
             ));
         };
         let repository = RepositoryId::new(repository_name.clone()).map_err(|_| internal())?;
-        let revision = RevisionSpec::new(revision_name.clone()).map_err(|_| internal())?;
+        let revision = RevisionSpec::new(selector.clone()).map_err(|_| internal())?;
         let subpath = match subpath {
             Some(value) => ActionSubpath::new(value.clone()).map_err(|_| internal())?,
             None => ActionSubpath::root(),
@@ -379,7 +379,7 @@ impl ActionPreparationPort for ResolvedBundleActionPreparer {
             &self.conditions,
             Some(RepositoryActionSource {
                 repository: bundle.repository().as_str(),
-                revision: bundle.resolved_revision().as_str(),
+                revision: bundle.resolved_revision(),
             }),
         )
     }
@@ -388,7 +388,7 @@ impl ActionPreparationPort for ResolvedBundleActionPreparer {
 #[derive(Clone, Copy)]
 struct RepositoryActionSource<'a> {
     repository: &'a str,
-    revision: &'a str,
+    revision: automata_ci_core::GitObjectId,
 }
 
 enum NestedActionReference {
@@ -558,7 +558,7 @@ fn bind_nested_reference(
             let source = source.ok_or_else(metadata_error)?;
             Ok(ActionReference::Repository {
                 repository: source.repository.to_owned(),
-                revision: source.revision.to_owned(),
+                selector: source.revision.to_string(),
                 subpath: Some(subpath.as_str().to_owned()),
             })
         }
@@ -739,7 +739,7 @@ fn prepare_nested_reference(source: &str) -> Result<NestedActionReference, Actio
     }
     Ok(NestedActionReference::Action(ActionReference::Repository {
         repository: format!("{}/{}", components[0], components[1]),
-        revision: revision.to_owned(),
+        selector: revision.to_owned(),
         subpath: (components.len() > 2).then(|| components[2..].join("/")),
     }))
 }
@@ -838,7 +838,10 @@ mod tests {
             &GithubConditionCompiler::default(),
             Some(RepositoryActionSource {
                 repository: "owner/action",
-                revision: "0123456789abcdef0123456789abcdef01234567",
+                revision: automata_ci_core::GitObjectId::from_provider_hex(
+                    "0123456789abcdef0123456789abcdef01234567",
+                )
+                .expect("revision"),
             }),
         )
         .expect("prepared definition");
@@ -871,7 +874,10 @@ mod tests {
             &GithubConditionCompiler::default(),
             Some(RepositoryActionSource {
                 repository: "owner/action",
-                revision: "0123456789abcdef0123456789abcdef01234567",
+                revision: automata_ci_core::GitObjectId::from_provider_hex(
+                    "0123456789abcdef0123456789abcdef01234567",
+                )
+                .expect("revision"),
             }),
         )
         .expect("prepared definition");
@@ -884,7 +890,7 @@ mod tests {
             step.reference(),
             &ActionReference::Repository {
                 repository: "owner/action".to_owned(),
-                revision: "0123456789abcdef0123456789abcdef01234567".to_owned(),
+                selector: "0123456789abcdef0123456789abcdef01234567".to_owned(),
                 subpath: Some("nested/action".to_owned()),
             }
         );

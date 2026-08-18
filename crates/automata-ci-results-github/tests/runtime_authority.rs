@@ -58,7 +58,10 @@ fn job_for_snapshot(
         JobSource::new(
             "github",
             repository,
-            "0123456789abcdef",
+            automata_ci_core::GitObjectId::from_provider_hex(
+                "0123456789abcdef0123456789abcdef01234567",
+            )
+            .expect("revision"),
             ".ci/workflows/ci.yml",
             event_name,
         ),

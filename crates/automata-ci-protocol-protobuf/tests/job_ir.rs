@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 
 use automata_ci_core::{
     ActionReference, AttemptId, ExpressionDialect, ExpressionInstruction, ExpressionProgram,
-    FencingToken, JobAuthorityProfile, JobContentReference, JobExecutionContext, JobId,
-    JobInstanceIdentity, JobIr, JobIrEnvelope, JobOutputDefinition, JobPermissionGrant,
+    FencingToken, GitObjectId, JobAuthorityProfile, JobContentReference, JobExecutionContext,
+    JobId, JobInstanceIdentity, JobIr, JobIrEnvelope, JobOutputDefinition, JobPermissionGrant,
     JobPermissionRequest, JobSource, Lease, LeaseId, OperationId, OutputSensitivity,
     PermissionLevel, RunId, RunIdAlias, RunValueTemplates, RunnerId, RunnerRequirements,
     RunnerSessionId, RuntimeBoolean, RuntimePositiveInteger, RuntimeTimeoutTemplate, SemanticStep,
@@ -26,6 +26,34 @@ use uuid::Uuid;
 #[allow(clippy::all, clippy::pedantic, dead_code)]
 mod fixture_wire {
     include!("../src/generated/automata.runner.v1.rs");
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct DeletedJobSourceEncoding {
+    #[prost(string, tag = "1")]
+    provider: String,
+    #[prost(string, tag = "2")]
+    repository: String,
+    #[prost(string, tag = "3")]
+    revision: String,
+    #[prost(string, tag = "4")]
+    workflow_path: String,
+    #[prost(string, tag = "5")]
+    event_name: String,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct DeletedJobIrEncoding {
+    #[prost(uint32, tag = "1")]
+    schema_version: u32,
+    #[prost(bytes = "vec", tag = "2")]
+    workflow_id: Vec<u8>,
+    #[prost(message, optional, tag = "3")]
+    source: Option<DeletedJobSourceEncoding>,
+    #[prost(message, optional, tag = "4")]
+    job: Option<fixture_wire::JobIr>,
+    #[prost(message, optional, tag = "5")]
+    execution: Option<fixture_wire::JobExecutionContext>,
 }
 
 fn expression(source: &str, root: &str) -> ExpressionProgram {
@@ -154,7 +182,8 @@ fn current_envelope_with_profile(
         JobSource::new(
             "github",
             "example/project",
-            "0123456789abcdef",
+            GitObjectId::from_provider_hex("0123456789abcdef0123456789abcdef01234567")
+                .expect("revision"),
             ".github/workflows/ci.yml",
             "push",
         ),
@@ -306,6 +335,77 @@ fn run_id_alias_rejects_non_positive_or_inexact_wire_values() {
             })
         ));
     }
+}
+
+#[test]
+fn git_object_ids_round_trip_both_algorithms_and_reject_malformed_wire_values() {
+    let limits = ProtocolLimits::default();
+    for (algorithm, digest) in [
+        (fixture_wire::GitObjectAlgorithm::Sha1, vec![0x11; 20]),
+        (fixture_wire::GitObjectAlgorithm::Sha256, vec![0x22; 32]),
+    ] {
+        let mut value = wire();
+        value
+            .source
+            .as_mut()
+            .expect("source")
+            .revision
+            .as_mut()
+            .expect("revision")
+            .algorithm = algorithm as i32;
+        value
+            .source
+            .as_mut()
+            .expect("source")
+            .revision
+            .as_mut()
+            .expect("revision")
+            .digest = digest.clone();
+        let decoded = decode_job_ir(&value.encode_to_vec(), &limits).expect("decode object ID");
+        assert_eq!(decoded.source().revision().as_bytes(), digest);
+    }
+
+    for (algorithm, digest) in [
+        (
+            fixture_wire::GitObjectAlgorithm::Unspecified as i32,
+            vec![1; 20],
+        ),
+        (i32::MAX, vec![1; 20]),
+        (fixture_wire::GitObjectAlgorithm::Sha1 as i32, vec![1; 32]),
+        (fixture_wire::GitObjectAlgorithm::Sha256 as i32, vec![1; 20]),
+        (fixture_wire::GitObjectAlgorithm::Sha1 as i32, vec![0; 20]),
+    ] {
+        let mut value = wire();
+        value.source.as_mut().expect("source").revision =
+            Some(fixture_wire::GitObjectId { algorithm, digest });
+        assert!(decode_job_ir(&value.encode_to_vec(), &limits).is_err());
+    }
+}
+
+#[test]
+fn deleted_string_revision_wire_is_rejected() {
+    let current = wire();
+    let source = current.source.expect("source");
+    let deleted_encoding = DeletedJobIrEncoding {
+        schema_version: current.schema_version,
+        workflow_id: current.workflow_id,
+        source: Some(DeletedJobSourceEncoding {
+            provider: source.provider,
+            repository: source.repository,
+            revision: "0123456789abcdef0123456789abcdef01234567".into(),
+            workflow_path: source.workflow_path,
+            event_name: source.event_name,
+        }),
+        job: current.job,
+        execution: current.execution,
+    };
+    assert!(
+        decode_job_ir(
+            &deleted_encoding.encode_to_vec(),
+            &ProtocolLimits::default()
+        )
+        .is_err()
+    );
 }
 
 #[test]

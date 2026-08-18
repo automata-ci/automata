@@ -14,7 +14,6 @@ use crate::{
     WorkflowFrontend as _,
 };
 
-const LOCAL_SOURCE_REPOSITORY: &str = "local";
 const MAX_LOCAL_WORKFLOW_SELECTOR_BYTES: usize = 1_024;
 
 /// Closed failure class for exact local GitHub-workflow archive compilation.
@@ -370,12 +369,10 @@ fn compile_source(
             LocalGithubArchiveCompilationFailureKind::WorkflowSource,
         )
     })?;
-    let revision = snapshot_digest.to_string();
     let provenance = SourceProvenance::new(
         SourceId::new(path),
-        SourceOrigin::Repository {
-            repository: Arc::from(LOCAL_SOURCE_REPOSITORY),
-            revision: Arc::from(revision),
+        SourceOrigin::Archive {
+            snapshot_digest,
             path: Arc::from(path),
         },
     );

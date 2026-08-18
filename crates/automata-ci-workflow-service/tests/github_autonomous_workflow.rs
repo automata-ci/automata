@@ -1733,7 +1733,7 @@ fn compile_plan(source: &str) -> automata_ci_core::WorkflowPlan {
         SourceId::new(WORKFLOW_PATH),
         SourceOrigin::Repository {
             repository: Arc::from(REPOSITORY),
-            revision: Arc::from(REVISION),
+            revision: automata_ci_core::GitObjectId::from_provider_hex(REVISION).expect("revision"),
             path: Arc::from(WORKFLOW_PATH),
         },
     );
@@ -1744,7 +1744,9 @@ fn compile_plan(source: &str) -> automata_ci_core::WorkflowPlan {
         parsed.plan().expect("source plan"),
         WorkflowEventProvenance::new("github", "workflow_dispatch")
             .with_delivery_id("synthetic-autonomous")
-            .with_commit_sha(REVISION)
+            .with_commit_sha(
+                automata_ci_core::GitObjectId::from_provider_hex(REVISION).expect("revision"),
+            )
             .with_git_ref(GIT_REF),
     ));
     assert!(compiled.is_accepted(), "{:#?}", compiled.diagnostics());
@@ -3309,7 +3311,7 @@ impl ActionPreparationPort for NestedNode20ActionPreparer {
             .push(request.reference().clone());
         let ActionReference::Repository {
             repository,
-            revision,
+            selector: revision,
             subpath,
         } = request.reference()
         else {
@@ -3336,7 +3338,7 @@ impl ActionPreparationPort for NestedNode20ActionPreparer {
         Ok(prepared_composite_action(
             ActionReference::Repository {
                 repository: repository.clone(),
-                revision: revision.clone(),
+                selector: revision.clone(),
                 subpath: Some("nested".to_owned()),
             },
             "root",
@@ -3356,7 +3358,7 @@ impl ActionPreparationPort for WorkspaceChildActionPreparer {
             .push(request.reference().clone());
         let ActionReference::Repository {
             repository,
-            revision,
+            selector: revision,
             subpath,
         } = request.reference()
         else {
@@ -3593,7 +3595,7 @@ async fn nested_workspace_reference_quarantines_without_fetching_a_parent_reposi
         actions.calls.lock().expect("action calls").as_slice(),
         &[ActionReference::Repository {
             repository: "synthetic/missing-runtime".to_owned(),
-            revision: REVISION.to_owned(),
+            selector: REVISION.to_owned(),
             subpath: None,
         }],
         "workspace syntax must not be rebound into a second repository fetch"

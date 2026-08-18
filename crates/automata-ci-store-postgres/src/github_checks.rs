@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use automata_ci_blob::{BlobDescriptor, BlobKey, MediaType};
-use automata_ci_core::{AttemptId, JobId, RunId, Sha256Digest, UnixMillis};
+use automata_ci_core::{AttemptId, GitObjectId, JobId, RunId, Sha256Digest, UnixMillis};
 use sqlx::{AssertSqlSafe, PgConnection, Postgres, Row as _, Transaction};
 use uuid::Uuid;
 
@@ -13,12 +13,12 @@ use automata_ci_store::{
     ClearGithubCheckAnnotationUncertainty, CompleteGithubCheckProjection,
     GithubCheckAnnotationProgress, GithubCheckAppId, GithubCheckConclusion,
     GithubCheckCreateReconciliation, GithubCheckDesiredProjection, GithubCheckDetailsTarget,
-    GithubCheckHeadSha, GithubCheckName, GithubCheckProjectionAction,
-    GithubCheckProjectionClaimFence, GithubCheckProjectionOutbox, GithubCheckProjectionWorkerId,
-    GithubCheckRunBindingFence, GithubCheckRunCreateFence, GithubCheckRunId, GithubCheckStoreError,
-    GithubCheckSubjectIdentity, GithubCheckSubjectKey, GithubCheckSubjectOrigin,
-    GithubCheckSubjectReceipt, GithubCheckSuiteId, GithubCheckTerminalCause, GithubRepositoryName,
-    GithubScheduleFireId, GithubServerServiceAuthorityId, GithubServerServiceAuthoritySelector,
+    GithubCheckName, GithubCheckProjectionAction, GithubCheckProjectionClaimFence,
+    GithubCheckProjectionOutbox, GithubCheckProjectionWorkerId, GithubCheckRunBindingFence,
+    GithubCheckRunCreateFence, GithubCheckRunId, GithubCheckStoreError, GithubCheckSubjectIdentity,
+    GithubCheckSubjectKey, GithubCheckSubjectOrigin, GithubCheckSubjectReceipt, GithubCheckSuiteId,
+    GithubCheckTerminalCause, GithubRepositoryName, GithubScheduleFireId,
+    GithubServerServiceAuthorityId, GithubServerServiceAuthoritySelector,
     GithubServerServiceRevision, HUMAN_JOB_RESULT_MEDIA_TYPE, InitializeGithubCheckPresentation,
     MAX_GITHUB_CHECK_PROJECTION_ATTEMPTS, MAX_TERMINAL_RESULT_BYTES, ProviderDeliveryId,
     ProviderInstallationId, ProviderRepositoryId, ReleaseUnissuedGithubCheckAnnotationBatch,
@@ -1566,7 +1566,7 @@ fn decode_subject_identity(
             .map_err(|_| GithubCheckStoreError::CorruptData)?;
     let app_id = GithubCheckAppId::new(positive_u64_column(row, "github_app_id")?)
         .map_err(|_| GithubCheckStoreError::CorruptData)?;
-    let head_sha = GithubCheckHeadSha::try_from_slice(&bytes_column(row, "head_sha")?)
+    let head_sha = GitObjectId::from_durable_bytes(&bytes_column(row, "head_sha")?)
         .map_err(|_| GithubCheckStoreError::CorruptData)?;
     let name = GithubCheckName::new(string_column(row, "check_name")?)
         .map_err(|_| GithubCheckStoreError::CorruptData)?;

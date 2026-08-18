@@ -2,7 +2,7 @@ use std::{collections::BTreeMap, fmt, sync::Arc};
 
 use automata_ci_auth::delegated_actor::RepositoryMutationActor;
 use automata_ci_core::{
-    ContextValue, JobRuntimeContext, OperationId, SecretBinding, TrustActorEvidence,
+    ContextValue, GitObjectId, JobRuntimeContext, OperationId, SecretBinding, TrustActorEvidence,
     TrustActorKind, TrustAutomationKind, TrustEventKind, TrustEvidence, TrustOriginKind,
     TrustPolicy, TrustRepositoryEvidence, TrustSnapshot, TrustTokenRecursion,
     WorkflowEventProvenance, WorkflowId, canonical_git_ref,
@@ -115,7 +115,7 @@ pub struct GithubWorkflowDispatchRequest {
     repository_owner_id: String,
     workflow_path: String,
     source: Bytes,
-    commit_sha: String,
+    commit_sha: GitObjectId,
     git_ref: String,
     workflow_name: String,
     inputs: GithubWorkflowDispatchInputs,
@@ -142,7 +142,7 @@ impl fmt::Debug for GithubWorkflowDispatchRequest {
 pub struct DurableGithubWorkflowDispatchRequest {
     authorization: WorkflowDispatchAuthorization,
     git_ref: String,
-    commit_sha: String,
+    commit_sha: GitObjectId,
     inputs: GithubWorkflowDispatchInputs,
     operation_id: OperationId,
     display_title: Option<String>,
@@ -166,14 +166,14 @@ impl DurableGithubWorkflowDispatchRequest {
     pub fn new(
         authorization: WorkflowDispatchAuthorization,
         git_ref: impl Into<String>,
-        commit_sha: impl Into<String>,
+        commit_sha: GitObjectId,
         inputs: GithubWorkflowDispatchInputs,
         operation_id: OperationId,
     ) -> Self {
         Self {
             authorization,
             git_ref: git_ref.into(),
-            commit_sha: commit_sha.into(),
+            commit_sha,
             inputs,
             operation_id,
             display_title: None,
@@ -202,7 +202,7 @@ impl GithubWorkflowDispatchRequest {
         repository_owner_id: impl Into<String>,
         workflow_path: impl Into<String>,
         source: Bytes,
-        commit_sha: impl Into<String>,
+        commit_sha: GitObjectId,
         git_ref: impl Into<String>,
         inputs: GithubWorkflowDispatchInputs,
         operation_id: OperationId,
@@ -215,7 +215,7 @@ impl GithubWorkflowDispatchRequest {
             workflow_name: workflow_path.clone(),
             workflow_path,
             source,
-            commit_sha: commit_sha.into(),
+            commit_sha,
             git_ref: git_ref.into(),
             inputs,
             operation_id,
@@ -246,7 +246,6 @@ impl GithubWorkflowDispatchRequest {
             || self.source.is_empty()
             || !canonical_workflow_dispatch_ref(&self.git_ref)
             || !valid_text(&self.git_ref)
-            || !valid_commit_sha(&self.commit_sha)
             || self
                 .display_title
                 .as_deref()
@@ -287,7 +286,6 @@ impl GithubWorkflowDispatchService {
         if request.operation_id.as_uuid().is_nil()
             || !canonical_workflow_dispatch_ref(&request.git_ref)
             || !valid_text(&request.git_ref)
-            || !valid_commit_sha(&request.commit_sha)
             || request
                 .display_title
                 .as_deref()
@@ -300,7 +298,7 @@ impl GithubWorkflowDispatchService {
             request.authorization.repository_id(),
             request.authorization.workflow_id(),
             &request.git_ref,
-            &request.commit_sha,
+            request.commit_sha,
         )
         .map_err(|_| GithubWorkflowDispatchRequestError::InvalidTarget)?;
         let Some((source, bytes)) = self
@@ -382,12 +380,13 @@ impl GithubWorkflowDispatchService {
         &self,
         request: GithubWorkflowDispatchRequest,
     ) -> Result<WorkflowAdmissionResult, GithubWorkflowDispatchError> {
+        let commit_sha = request.commit_sha;
         let tenant = request.validate()?;
         let provenance = SourceProvenance::new(
             SourceId::new(request.workflow_path.as_str()),
             SourceOrigin::Repository {
                 repository: Arc::from(request.repository.slug()),
-                revision: Arc::from(request.commit_sha.as_str()),
+                revision: commit_sha,
                 path: Arc::from(request.workflow_path.as_str()),
             },
         );
@@ -401,7 +400,7 @@ impl GithubWorkflowDispatchService {
             ));
         }
         let event = WorkflowEventProvenance::new("github", "workflow_dispatch")
-            .with_commit_sha(&request.commit_sha)
+            .with_commit_sha(commit_sha)
             .with_git_ref(&request.git_ref);
         let compiled = GithubWorkflowCompiler::new().compile(
             CompileWorkflowRequest::new(
@@ -445,10 +444,10 @@ impl GithubWorkflowDispatchService {
             plan,
             base_context,
             WorkflowAdmissionIdempotency::operation(request.operation_id),
+            commit_sha,
         )
         .trust_snapshot(trust_snapshot)
         .event_media_type(AUTOMATA_WORKFLOW_DISPATCH_EVIDENCE_V1_MEDIA_TYPE)
-        .commit_sha(&request.commit_sha)
         .git_ref(&request.git_ref)
         .workflow_name(&request.workflow_name)
         .actor(request.authorization.actor().principal_id().as_str())
@@ -469,6 +468,7 @@ impl GithubWorkflowDispatchService {
 fn workflow_dispatch_trust_snapshot(
     request: &GithubWorkflowDispatchRequest,
 ) -> Result<TrustSnapshot, GithubWorkflowDispatchError> {
+    let commit_sha = request.commit_sha.to_string();
     let actor = TrustActorEvidence::new(
         request.authorization.actor().principal_id().as_str(),
         TrustActorKind::User,
@@ -495,9 +495,9 @@ fn workflow_dispatch_trust_snapshot(
                 request.git_ref.as_str(),
             )
             .with_revisions(
-                request.commit_sha.as_str(),
-                request.commit_sha.as_str(),
-                request.commit_sha.as_str(),
+                commit_sha.as_str(),
+                commit_sha.as_str(),
+                commit_sha.as_str(),
             )
             .with_fork(false)
             .with_token_recursion(TrustTokenRecursion::External),
@@ -551,7 +551,7 @@ impl GithubWorkflowDispatchEvidence {
                 workflow_id: request.authorization.workflow_id().as_uuid(),
                 path: request.workflow_path.clone(),
                 git_ref: request.git_ref.clone(),
-                commit_sha: request.commit_sha.clone(),
+                commit_sha: request.commit_sha,
             },
             operation_id: request.operation_id.as_uuid(),
             inputs,
@@ -601,7 +601,6 @@ impl GithubWorkflowDispatchEvidence {
             document.repository.name.as_str(),
             document.workflow.path.as_str(),
             document.workflow.git_ref.as_str(),
-            document.workflow.commit_sha.as_str(),
         ];
         if document.schema != EVIDENCE_SCHEMA
             || document.kind != EVIDENCE_KIND
@@ -613,7 +612,6 @@ impl GithubWorkflowDispatchEvidence {
             || document.repository.provider != "github"
             || texts.into_iter().any(|value| !valid_text(value))
             || !canonical_workflow_dispatch_ref(&document.workflow.git_ref)
-            || !valid_commit_sha(&document.workflow.commit_sha)
             || evidence_inputs(&inputs)? != document.inputs
         {
             return Err(GithubWorkflowDispatchEvidenceError::InvalidDocument);
@@ -715,7 +713,7 @@ struct EvidenceWorkflow {
     workflow_id: Uuid,
     path: String,
     git_ref: String,
-    commit_sha: String,
+    commit_sha: GitObjectId,
 }
 
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
@@ -761,13 +759,6 @@ fn valid_text(value: &str) -> bool {
     !value.is_empty()
         && workflow_dispatch_evidence_text_byte_rejection(value.len()).is_none()
         && !value.chars().any(char::is_control)
-}
-
-fn valid_commit_sha(value: &str) -> bool {
-    matches!(value.len(), 40 | 64)
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
 fn canonical_workflow_dispatch_ref(value: &str) -> bool {
@@ -888,13 +879,28 @@ mod tests {
                 workflow_id: Uuid::new_v4(),
                 path: ".github/workflows/ci.yml".to_owned(),
                 git_ref: "refs/heads/main".to_owned(),
-                commit_sha: "0123456789abcdef0123456789abcdef01234567".to_owned(),
+                commit_sha: GitObjectId::from_provider_hex(
+                    "0123456789abcdef0123456789abcdef01234567",
+                )
+                .expect("commit"),
             },
             operation_id: Uuid::new_v4(),
             inputs: BTreeMap::new(),
         };
         let current = serde_json::to_vec(&document).expect("current evidence");
         GithubWorkflowDispatchEvidence::decode(&current).expect("decode current evidence");
+
+        let mut deleted_encoding =
+            serde_json::to_value(&document).expect("deleted evidence encoding fixture");
+        deleted_encoding["workflow"]["commit_sha"] =
+            serde_json::Value::String(document.workflow.commit_sha.to_string());
+        let deleted_encoding =
+            serde_json::to_vec(&deleted_encoding).expect("deleted evidence encoding");
+        assert_eq!(
+            GithubWorkflowDispatchEvidence::decode(&deleted_encoding),
+            Err(GithubWorkflowDispatchEvidenceError::InvalidEncoding),
+            "accepted the deleted string commit identity encoding"
+        );
 
         for schema in [0, EVIDENCE_SCHEMA.checked_add(1).expect("test schema")] {
             let mut noncurrent = document.clone();

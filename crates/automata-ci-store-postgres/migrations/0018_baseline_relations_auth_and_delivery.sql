@@ -436,12 +436,12 @@ CREATE TABLE provider_delivery_workflow_inventories (
     inbox_id uuid NOT NULL,
     tenant_id text NOT NULL,
     manifest_digest bytea NOT NULL,
-    source_revision text NOT NULL COLLATE pg_catalog."C",
+    source_revision bytea NOT NULL,
     repository_source_digest bytea CONSTRAINT provider_delivery_workflow_in_repository_source_digest_not_null NOT NULL,
     inventory_digest bytea CONSTRAINT provider_delivery_workflow_inventorie_inventory_digest_not_null NOT NULL,
     workflow_count smallint NOT NULL,
     registered_at_ms bigint CONSTRAINT provider_delivery_workflow_inventorie_registered_at_ms_not_null NOT NULL,
-    CONSTRAINT provider_delivery_workflow_inventories_shape CHECK (((octet_length(manifest_digest) = 32) AND (octet_length(repository_source_digest) = 32) AND (octet_length(inventory_digest) = 32) AND ((octet_length(source_revision) >= 1) AND (octet_length(source_revision) <= 1024)) AND (btrim(source_revision) = source_revision) AND (source_revision !~ '[[:cntrl:]]'::text) AND ((workflow_count >= 0) AND (workflow_count <= 256)) AND (registered_at_ms >= 0)))
+    CONSTRAINT provider_delivery_workflow_inventories_shape CHECK (((octet_length(manifest_digest) = 32) AND (octet_length(repository_source_digest) = 32) AND (octet_length(inventory_digest) = 32) AND (octet_length(source_revision) IN (20, 32)) AND (source_revision <> decode(repeat('00'::text, octet_length(source_revision)), 'hex'::text)) AND ((workflow_count >= 0) AND (workflow_count <= 256)) AND (registered_at_ms >= 0)))
 );
 
 CREATE TABLE provider_delivery_workflow_inventory_entries (

@@ -1,7 +1,7 @@
 use std::{collections::BTreeSet, sync::Arc};
 
 use automata_ci_core::{
-    InvocationInputDefault, InvocationInputType, OutputSensitivity, PermissionLevel,
+    GitObjectId, InvocationInputDefault, InvocationInputType, OutputSensitivity, PermissionLevel,
     PlanSourceOrigin, RunId, WorkflowEventProvenance,
 };
 use automata_ci_store::LogicalWorkflowInvocationId;
@@ -21,6 +21,10 @@ const REPOSITORY: &str = "synthetic/repository";
 const REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
 const ROOT_PATH: &str = ".ci/workflows/root.yml";
 const CALLEE_PATH: &str = ".ci/workflows/reusable.yml";
+
+fn revision() -> GitObjectId {
+    GitObjectId::from_provider_hex(REVISION).expect("revision")
+}
 
 const CALLEE: &str = r"name: Reusable
 on:
@@ -79,7 +83,7 @@ fn compile_root(source: &str) -> automata_ci_core::WorkflowPlan {
         SourceId::new(ROOT_PATH),
         SourceOrigin::Repository {
             repository: Arc::from(REPOSITORY),
-            revision: Arc::from(REVISION),
+            revision: automata_ci_core::GitObjectId::from_provider_hex(REVISION).expect("revision"),
             path: Arc::from(ROOT_PATH),
         },
     );
@@ -89,7 +93,9 @@ fn compile_root(source: &str) -> automata_ci_core::WorkflowPlan {
     let compiled = GithubWorkflowCompiler::new().compile(CompileWorkflowRequest::new(
         parsed.plan().expect("source plan"),
         WorkflowEventProvenance::new("github", "workflow_dispatch")
-            .with_commit_sha(REVISION)
+            .with_commit_sha(
+                automata_ci_core::GitObjectId::from_provider_hex(REVISION).expect("revision"),
+            )
             .with_git_ref("refs/heads/main"),
     ));
     assert!(compiled.is_accepted(), "{:#?}", compiled.diagnostics());
@@ -101,7 +107,7 @@ fn catalog(
 ) -> GithubReusableWorkflowCatalog {
     GithubReusableWorkflowCatalog::compile(
         REPOSITORY,
-        REVISION,
+        revision(),
         sources
             .into_iter()
             .map(|(path, source)| RepositoryWorkflowSource::new(path, Bytes::from(source))),
@@ -342,28 +348,6 @@ fn canonical_local_path_resolution_rejects_aliases_and_remote_references() {
 }
 
 #[test]
-fn catalog_requires_a_resolved_lowercase_commit_digest() {
-    for revision in [
-        "main",
-        "0123456789abcdef0123456789abcdef0123456G",
-        "0123456789ABCDEF0123456789ABCDEF01234567",
-    ] {
-        assert_eq!(
-            GithubReusableWorkflowCatalog::compile(
-                REPOSITORY,
-                revision,
-                [RepositoryWorkflowSource::new(
-                    CALLEE_PATH,
-                    Bytes::from_static(CALLEE.as_bytes()),
-                )],
-            ),
-            Err(ReusableWorkflowExpansionError::InvalidRepositoryCoordinate),
-            "revision `{revision}` must fail closed",
-        );
-    }
-}
-
-#[test]
 fn call_stack_cycle_is_rejected_before_any_runnable_graph_exists() {
     let cyclic = r"on:
   workflow_call:
@@ -510,7 +494,7 @@ fn root_plan_must_recompile_from_the_exact_supplied_source() {
 fn catalog_plan_provenance_is_bound_to_one_exact_repository_revision() {
     let exact_catalog = catalog([(CALLEE_PATH, CALLEE.to_owned())]);
     assert_eq!(exact_catalog.repository(), REPOSITORY);
-    assert_eq!(exact_catalog.revision(), REVISION);
+    assert_eq!(exact_catalog.revision(), revision());
     let entry = exact_catalog.entries().next().expect("catalog entry");
     assert_eq!(entry.path(), CALLEE_PATH);
     let PlanSourceOrigin::Repository {
@@ -522,7 +506,7 @@ fn catalog_plan_provenance_is_bound_to_one_exact_repository_revision() {
         panic!("repository provenance");
     };
     assert_eq!(repository, REPOSITORY);
-    assert_eq!(revision, REVISION);
+    assert_eq!(*revision, self::revision());
     assert_eq!(path, CALLEE_PATH);
 }
 
@@ -531,7 +515,7 @@ fn reachable_catalog_ignores_unreferenced_workflows_and_requires_every_edge() {
     let root_plan = compile_root(ROOT);
     let catalog = GithubReusableWorkflowCatalog::compile_reachable(
         REPOSITORY,
-        REVISION,
+        revision(),
         &root_plan,
         [
             RepositoryWorkflowSource::new(CALLEE_PATH, Bytes::from_static(CALLEE.as_bytes())),
@@ -551,7 +535,7 @@ fn reachable_catalog_ignores_unreferenced_workflows_and_requires_every_edge() {
     assert_eq!(
         GithubReusableWorkflowCatalog::compile_reachable(
             REPOSITORY,
-            REVISION,
+            revision(),
             &root_plan,
             [RepositoryWorkflowSource::new(
                 ".ci/workflows/unrelated.yml",

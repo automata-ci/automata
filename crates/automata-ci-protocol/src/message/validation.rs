@@ -181,7 +181,6 @@ fn validate_job(
     for (field, value) in [
         ("source provider", source.provider()),
         ("source repository", source.repository()),
-        ("source revision", source.revision()),
         ("workflow path", source.workflow_path()),
         ("event name", source.event_name()),
         ("job name", envelope.job().name()),
@@ -369,11 +368,11 @@ fn validate_action_reference(
     match reference {
         ActionReference::Repository {
             repository,
-            revision,
+            selector,
             subpath,
         } => {
             validate_nonempty_text("action repository", repository, limits)?;
-            validate_nonempty_text("action revision", revision, limits)?;
+            validate_nonempty_text("action selector", selector, limits)?;
             if let Some(path) = subpath {
                 validate_text("action subpath", path, limits)?;
             }

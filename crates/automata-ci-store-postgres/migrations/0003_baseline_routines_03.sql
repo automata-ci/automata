@@ -1021,7 +1021,7 @@ BEGIN
             OR NEW.github_repository_id <> schedule.github_repository_id
             OR NEW.github_repository_name <> schedule.github_repository_name
             OR NEW.github_app_id <> schedule.github_app_id
-            OR NEW.head_sha <> decode(schedule.source_revision, 'hex')
+            OR NEW.head_sha <> schedule.source_revision
             OR NEW.check_name <> schedule.check_name
         THEN
             RAISE EXCEPTION 'GitHub scheduled Check authority is not exact and live'

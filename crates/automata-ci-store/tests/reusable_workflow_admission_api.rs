@@ -1,6 +1,6 @@
 use automata_ci_core::{
-    InvocationInputType, OutputSensitivity, PermissionLevel, RunId, Sha256Digest, UnixMillis,
-    WorkflowId, WorkflowJobKey,
+    GitObjectAlgorithm, GitObjectId, InvocationInputType, OutputSensitivity, PermissionLevel,
+    RunId, Sha256Digest, UnixMillis, WorkflowId, WorkflowJobKey,
 };
 use automata_ci_store::{
     AdmissionObject, AdmissionRepository, AdmitLogicalWorkflowRun, AdmittedLogicalWorkflowJob,
@@ -19,6 +19,14 @@ const ROOT_PATH: &str = ".ci/workflows/root.yml";
 const CHILD_PATH: &str = ".ci/workflows/child.yml";
 const SOURCE_REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
 const SAMPLE_INPUT_VALUE: &str = "sample-caller-value";
+
+fn source_revision() -> GitObjectId {
+    GitObjectId::from_provider_hex(SOURCE_REVISION).expect("revision")
+}
+
+fn head_revision() -> GitObjectId {
+    GitObjectId::from_bytes(GitObjectAlgorithm::Sha1, &[7; 20]).expect("revision")
+}
 
 fn digest(tag: u8) -> Sha256Digest {
     Sha256Digest::from_bytes([tag; 32])
@@ -86,7 +94,7 @@ fn store_shape_catalog() -> Vec<AdmittedReusableWorkflowCatalogEntry> {
         AdmittedReusableWorkflowCatalogEntry::new(
             snapshot_id(100),
             ROOT_PATH,
-            SOURCE_REVISION,
+            source_revision(),
             root_source(),
             root_plan(),
             None,
@@ -97,7 +105,7 @@ fn store_shape_catalog() -> Vec<AdmittedReusableWorkflowCatalogEntry> {
         AdmittedReusableWorkflowCatalogEntry::new(
             snapshot_id(101),
             CHILD_PATH,
-            SOURCE_REVISION,
+            source_revision(),
             object("child-source.yml", 3, "application/yaml"),
             object(
                 "child-plan.json",
@@ -293,7 +301,7 @@ fn build_command(
         invocation_id(200),
         "push",
         object("event.json", 61, "application/json"),
-        vec![7; 20],
+        head_revision(),
         vec![
             logical_job(call_child, "call-child", 0, root_kind, Vec::new()),
             logical_job(
@@ -343,7 +351,7 @@ fn expansion_summary_and_catalog_preserve_ordered_store_evidence() {
     let root_catalog = &expansion.catalog()[0];
     assert_eq!(root_catalog.id(), snapshot_id(100));
     assert_eq!(root_catalog.workflow_path(), ROOT_PATH);
-    assert_eq!(root_catalog.source_revision(), SOURCE_REVISION);
+    assert_eq!(root_catalog.source_revision(), source_revision());
     assert_eq!(root_catalog.source(), &root_source());
     assert_eq!(root_catalog.plan(), &root_plan());
     assert_eq!(root_catalog.invocation_contract_digest(), None);

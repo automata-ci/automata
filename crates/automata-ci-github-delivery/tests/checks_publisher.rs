@@ -13,6 +13,7 @@ use automata_ci_auth::secret::SecretString;
 use automata_ci_blob::{
     BlobDescriptor, BlobKey, BlobPayload, ImmutableBlobStore as _, MediaType, MemoryBlobStore,
 };
+use automata_ci_core::GitObjectId;
 use automata_ci_core::{
     AttemptId, JobConclusion, JobId, JobResult, JobSecretExposure, RunId, Sha256Digest,
     StepAnnotation, StepAnnotationLevel, StepAnnotationProperty, StepId, StepResult, UnixMillis,
@@ -33,19 +34,18 @@ use automata_ci_store::{
     ClaimedGithubCheckProjection, ClearGithubCheckAnnotationUncertainty,
     CompleteGithubCheckProjection, GithubCheckAnnotationProgress, GithubCheckAppId,
     GithubCheckCreateReconciliation, GithubCheckDesiredProjection, GithubCheckDetailsTarget,
-    GithubCheckHeadSha, GithubCheckName, GithubCheckProjectionAction,
-    GithubCheckProjectionClaimFence, GithubCheckProjectionOutbox, GithubCheckProjectionWorkerId,
-    GithubCheckRunBindingFence, GithubCheckRunCreateFence, GithubCheckRunId, GithubCheckStoreError,
-    GithubCheckSubjectId, GithubCheckSubjectIdentity, GithubCheckSubjectKey,
-    GithubCheckSubjectReceipt, GithubCheckSuiteId, GithubCheckTerminalCause, GithubRepositoryName,
-    GithubServerServiceAction, GithubServerServiceAuthorityId,
-    GithubServerServiceAuthoritySelector, GithubServerServiceClaimFence,
-    GithubServerServiceConsumerClaim, GithubServerServiceConsumerId, GithubServerServiceHandoffId,
-    GithubServerServiceRevision, GithubServerServiceWorkerId, InitializeGithubCheckPresentation,
-    ProviderDeliveryId, ProviderInstallationId, ProviderRepositoryId,
-    ReleaseUnissuedGithubCheckAnnotationBatch, ReleaseUnissuedGithubCheckRunCreate, RepositoryId,
-    ResolveGithubCheckRunCreate, RetryGithubCheckProjection, RetryUncertainGithubCheckAnnotations,
-    TenantScope,
+    GithubCheckName, GithubCheckProjectionAction, GithubCheckProjectionClaimFence,
+    GithubCheckProjectionOutbox, GithubCheckProjectionWorkerId, GithubCheckRunBindingFence,
+    GithubCheckRunCreateFence, GithubCheckRunId, GithubCheckStoreError, GithubCheckSubjectId,
+    GithubCheckSubjectIdentity, GithubCheckSubjectKey, GithubCheckSubjectReceipt,
+    GithubCheckSuiteId, GithubCheckTerminalCause, GithubRepositoryName, GithubServerServiceAction,
+    GithubServerServiceAuthorityId, GithubServerServiceAuthoritySelector,
+    GithubServerServiceClaimFence, GithubServerServiceConsumerClaim, GithubServerServiceConsumerId,
+    GithubServerServiceHandoffId, GithubServerServiceRevision, GithubServerServiceWorkerId,
+    InitializeGithubCheckPresentation, ProviderDeliveryId, ProviderInstallationId,
+    ProviderRepositoryId, ReleaseUnissuedGithubCheckAnnotationBatch,
+    ReleaseUnissuedGithubCheckRunCreate, RepositoryId, ResolveGithubCheckRunCreate,
+    RetryGithubCheckProjection, RetryUncertainGithubCheckAnnotations, TenantScope,
 };
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
@@ -2653,7 +2653,7 @@ fn subject_identity() -> GithubCheckSubjectIdentity {
         ProviderRepositoryId::new(13).expect("provider repository ID"),
         GithubRepositoryName::new("automata-ci/automata").expect("repository name"),
         GithubCheckAppId::new(17).expect("App ID"),
-        GithubCheckHeadSha::new([0x11; 20]).expect("head SHA"),
+        GitObjectId::from_durable_bytes(&[0x11; 20]).expect("head SHA"),
         GithubCheckName::new(NAME).expect("Check name"),
     )
     .expect("subject identity")

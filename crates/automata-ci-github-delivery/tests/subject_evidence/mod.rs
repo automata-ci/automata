@@ -1,9 +1,10 @@
+use automata_ci_core::GitObjectId;
 use automata_ci_core::{Sha256Digest, UnixMillis};
 use automata_ci_store::{
     AdmissionObject, GITHUB_PROVIDER_RUNNER_POLICY_MEDIA_TYPE, GithubAuthenticatedEvent,
-    GithubAuthenticatedEventKind, GithubCheckHeadSha, GithubCheckName, GithubCheckSubjectId,
-    GithubProviderGitRef, GithubProviderManifest, GithubProviderManifestLimits,
-    GithubProviderManifestRevision, GithubProviderOrigins, GithubProviderRunnerPolicyObject,
+    GithubAuthenticatedEventKind, GithubCheckName, GithubCheckSubjectId, GithubProviderGitRef,
+    GithubProviderManifest, GithubProviderManifestLimits, GithubProviderManifestRevision,
+    GithubProviderOrigins, GithubProviderRunnerPolicyObject,
     GithubProviderWebhookVerifierFingerprint, GithubProviderWorkflowSelection,
     GithubRepositoryName, GithubServerServiceAppClientId, GithubServerServiceAppId,
     GithubServerServiceAuthorityId, GithubServerServiceAuthoritySelector,
@@ -87,7 +88,7 @@ pub fn fixture_subject_evidence_with_head(
     repository_owner_id: ProviderRepositoryOwnerId,
     accepted_at: UnixMillis,
     seed: u128,
-    check_head_sha: GithubCheckHeadSha,
+    check_head_sha: GitObjectId,
 ) -> ManifestPinnedGithubDeliveryEvidence {
     fixture_subject_evidence_with_selection_and_head(
         delivery_id,
@@ -131,7 +132,7 @@ fn fixture_subject_evidence_with_selection_and_head(
     seed: u128,
     workflow_selection: GithubProviderWorkflowSelection,
     git_ref: GithubProviderGitRef,
-    check_head_sha: GithubCheckHeadSha,
+    check_head_sha: GitObjectId,
 ) -> ManifestPinnedGithubDeliveryEvidence {
     let authenticated_git_ref = git_ref.as_str().to_owned();
     let app_revision = GithubServerServiceRevision::new(1).expect("App revision");
@@ -210,14 +211,14 @@ fn fixture_subject_evidence_with_selection_and_head(
 /// # Panics
 ///
 /// Panics when the test fixture is not exactly 40 lowercase hexadecimal bytes.
-pub fn fixture_check_head_sha(value: &str) -> GithubCheckHeadSha {
+pub fn fixture_check_head_sha(value: &str) -> GitObjectId {
     let bytes = value.as_bytes();
     assert_eq!(bytes.len(), 40, "fixture head is an exact SHA-1 hex string");
     let mut decoded = [0_u8; 20];
     for (index, pair) in bytes.chunks_exact(2).enumerate() {
         decoded[index] = (fixture_hex_nibble(pair[0]) << 4) | fixture_hex_nibble(pair[1]);
     }
-    GithubCheckHeadSha::new(decoded).expect("fixture head SHA")
+    GitObjectId::from_durable_bytes(&decoded).expect("fixture head SHA")
 }
 
 fn fixture_hex_nibble(value: u8) -> u8 {

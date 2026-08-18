@@ -12,6 +12,7 @@ readme = "README.md"
 publish.workspace = true
 
 [dependencies]
+automata-ci-core.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 uuid.workspace = true

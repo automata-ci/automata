@@ -1,6 +1,6 @@
 use std::fmt;
 
-use automata_ci_scm::ExactRevision;
+use automata_ci_core::GitObjectId;
 use serde::{Deserialize, Serialize};
 
 use crate::{GithubMergeGroupAction, VerifiedGithubMergeGroup};
@@ -43,8 +43,8 @@ pub struct GithubMergeGroupEventFacts {
     actor: Option<GithubEventActor>,
     target_repository: GithubEventRepositoryFacts,
     action: GithubMergeGroupAction,
-    execution_revision: ExactRevision,
-    target_revision: ExactRevision,
+    execution_revision: GitObjectId,
+    target_revision: GitObjectId,
     execution_ref: GithubEventRefFacts,
     target_ref: GithubEventRefFacts,
 }
@@ -55,8 +55,8 @@ impl GithubMergeGroupEventFacts {
             actor: event.actor().cloned(),
             target_repository: GithubEventRepositoryFacts::from_repository(event.repository()),
             action: event.action(),
-            execution_revision: event.head_revision().clone(),
-            target_revision: event.base_revision().clone(),
+            execution_revision: *event.head_revision(),
+            target_revision: *event.base_revision(),
             execution_ref: GithubEventRefFacts::from_ref(event.head_ref()),
             target_ref: GithubEventRefFacts::from_ref(event.base_ref()),
         }
@@ -91,13 +91,13 @@ impl GithubMergeGroupEventFacts {
 
     /// Returns the exact merge-group revision used for execution.
     #[must_use]
-    pub const fn execution_revision(&self) -> &ExactRevision {
+    pub const fn execution_revision(&self) -> &GitObjectId {
         &self.execution_revision
     }
 
     /// Returns the exact target revision observed by the group.
     #[must_use]
-    pub const fn target_revision(&self) -> &ExactRevision {
+    pub const fn target_revision(&self) -> &GitObjectId {
         &self.target_revision
     }
 

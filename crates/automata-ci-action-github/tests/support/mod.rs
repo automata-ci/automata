@@ -5,8 +5,9 @@ use std::io::Cursor;
 use automata_ci_action::{
     ActionBundleLimits, ActionDefinitionDocument, ActionSubpath, inspect_archive,
 };
+use automata_ci_core::GitObjectId;
 use automata_ci_scm::{
-    ArchiveFormat, RepositoryId, RepositorySnapshot, ResolvedRevision, RevisionSpec, ScmProviderId,
+    ArchiveFormat, RepositoryId, RepositorySnapshot, RevisionSpec, ScmProviderId,
 };
 use bytes::Bytes;
 use flate2::{Compression, write::GzEncoder};
@@ -39,7 +40,7 @@ fn definition(name: &str, source: &[u8]) -> ActionDefinitionDocument {
         ScmProviderId::new("github").unwrap(),
         RepositoryId::new("actions/example").unwrap(),
         RevisionSpec::new(SHA).unwrap(),
-        ResolvedRevision::new(SHA).unwrap(),
+        GitObjectId::from_provider_hex(SHA).unwrap(),
         ArchiveFormat::TarGzip,
         Bytes::from(encoder.finish().unwrap()),
     );

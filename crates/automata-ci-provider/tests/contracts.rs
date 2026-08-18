@@ -1,3 +1,4 @@
+use automata_ci_core::GitObjectAlgorithm;
 use automata_ci_provider::{
     AuthorizationCodeLoginCapability, ChangedFileCapability, ChangedFileCompleteness,
     CommitStatusCapability, CommitStatusState, ExternalDeliveryId, ExternalDeliveryIdentity,
@@ -5,12 +6,14 @@ use automata_ci_provider::{
     ExternalSubjectKind, MembershipEvidenceCapability, PkceSupport, ProviderCapabilities,
     ProviderCapabilitiesError, ProviderCapability, ProviderCapabilityKind, ProviderConnectionId,
     ProviderIdentityError, ProviderInstanceId, ProviderTypeId, RepositoryEventCapability,
-    RepositoryEventKind, RichCheckCapability, StatusHistoryModel, WorkloadCredentialCapability,
-    WorkloadCredentialProfile, WorkloadCredentialRevocation,
+    RepositoryEventKind, RichCheckCapability, SourceReadCapability, StatusHistoryModel,
+    WorkloadCredentialCapability, WorkloadCredentialProfile, WorkloadCredentialRevocation,
 };
 use uuid::Uuid;
 
 fn full_capabilities() -> ProviderCapabilities {
+    let source = SourceReadCapability::new([GitObjectAlgorithm::Sha1, GitObjectAlgorithm::Sha256])
+        .expect("source read");
     let events = RepositoryEventCapability::new([
         RepositoryEventKind::Push,
         RepositoryEventKind::PullRequest,
@@ -43,7 +46,7 @@ fn full_capabilities() -> ProviderCapabilities {
     ])
     .expect("membership");
     ProviderCapabilities::new([
-        ProviderCapability::SourceRead,
+        ProviderCapability::SourceRead(source),
         ProviderCapability::RepositoryEvents(events),
         ProviderCapability::ChangedFiles(changes),
         ProviderCapability::CommitStatus(status),
@@ -195,8 +198,12 @@ fn capability_set_rejects_duplicates_and_cross_capability_lies() {
     );
     assert_eq!(
         ProviderCapabilities::new([
-            ProviderCapability::SourceRead,
-            ProviderCapability::SourceRead,
+            ProviderCapability::SourceRead(
+                SourceReadCapability::new([GitObjectAlgorithm::Sha1]).expect("source"),
+            ),
+            ProviderCapability::SourceRead(
+                SourceReadCapability::new([GitObjectAlgorithm::Sha256]).expect("source"),
+            ),
         ]),
         Err(ProviderCapabilitiesError::DuplicateCapability(
             ProviderCapabilityKind::SourceRead
@@ -229,6 +236,7 @@ fn capability_set_rejects_duplicates_and_cross_capability_lies() {
 #[test]
 fn capability_deserialization_revalidates_nested_documents() {
     for invalid in [
+        r#"[{"kind":"source_read","configuration":{"object_algorithms":[]}}]"#,
         r#"[{"kind":"repository_events","configuration":{"events":[]}}]"#,
         r#"[{"kind":"commit_status","configuration":{"states":[],"history_model":"mutable"}}]"#,
         r#"[{"kind":"rich_checks","configuration":{"annotations":false,"external_actions":false,"native_rerun":false}}]"#,

@@ -4,6 +4,7 @@ mod capability_version_skew;
 mod execution_fencing;
 mod execution_lifecycle;
 mod expression_program;
+mod git_object_id;
 mod identifier_contract;
 mod job_ir;
 mod job_ir_version;

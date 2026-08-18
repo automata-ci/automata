@@ -709,7 +709,7 @@ fn build_command(
         ids.logical_invocation_id(run_id),
         request.plan().event().name(),
         event.metadata.clone(),
-        decode_hex(request.commit_sha())?,
+        request.commit_sha(),
         jobs,
         admitted_at,
     )
@@ -1083,7 +1083,7 @@ fn descriptor_digest(domain: &[u8], parts: &[&[u8]]) -> Sha256Digest {
 
 fn catalog_descriptor_digest(
     path: &str,
-    revision: &str,
+    revision: automata_ci_core::GitObjectId,
     source: Sha256Digest,
     plan: Sha256Digest,
     contract: Option<Sha256Digest>,
@@ -1432,7 +1432,7 @@ fn admission_expression_context(
             "run_attempt".to_owned(),
             GithubValue::number(f64::from(request.run_attempt().unwrap_or(1))),
         ),
-        ("sha".to_owned(), GithubValue::string(revision.as_str())),
+        ("sha".to_owned(), GithubValue::string(revision.to_string())),
         (
             "workflow".to_owned(),
             GithubValue::string(request.workflow_name()),
@@ -1443,7 +1443,7 @@ fn admission_expression_context(
         ),
         (
             "workflow_sha".to_owned(),
-            GithubValue::string(revision.as_str()),
+            GithubValue::string(revision.to_string()),
         ),
     ];
     if let Some(actor) = request.actor() {
@@ -1719,13 +1719,13 @@ fn canonical_request_digest(
         request.repository().owner(),
         request.repository().name(),
         request.workflow_path(),
-        request.commit_sha(),
         request.git_ref(),
         request.workflow_name(),
         request.plan().event().name(),
     ] {
         digest_field(&mut digest, value.as_bytes());
     }
+    digest_field(&mut digest, request.commit_sha().as_bytes());
     digest_optional_field(&mut digest, request.actor());
     digest_optional_field(&mut digest, request.display_title());
     digest_optional_field(&mut digest, request.commit_subject());
@@ -1798,26 +1798,6 @@ fn digest_optional_field(digest: &mut Sha256, value: Option<&str>) {
 fn digest_field(digest: &mut Sha256, value: &[u8]) {
     digest.update(u64::try_from(value.len()).unwrap_or(u64::MAX).to_be_bytes());
     digest.update(value);
-}
-
-fn decode_hex(value: &str) -> Result<Vec<u8>, WorkflowAdmissionError> {
-    value
-        .as_bytes()
-        .chunks_exact(2)
-        .map(|pair| {
-            let high = hex_nibble(pair[0]).ok_or(WorkflowAdmissionError::Internal)?;
-            let low = hex_nibble(pair[1]).ok_or(WorkflowAdmissionError::Internal)?;
-            Ok((high << 4) | low)
-        })
-        .collect()
-}
-
-const fn hex_nibble(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        _ => None,
-    }
 }
 
 /// Application-level workflow admission failure.

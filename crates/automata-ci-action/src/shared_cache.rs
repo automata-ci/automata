@@ -5,8 +5,8 @@ use automata_ci_blob::{
     BlobDescriptor, BlobKey, BlobPayload, BlobStoreError, BlobStoreErrorKind, ImmutableRecordStore,
     MediaType, PutBlobOutcome,
 };
-use automata_ci_core::Sha256Digest;
-use automata_ci_scm::{RepositoryId, ResolvedRevision, RevisionSpec, ScmProviderId};
+use automata_ci_core::{GitObjectId, Sha256Digest};
+use automata_ci_scm::{RepositoryId, ScmProviderId};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -153,9 +153,8 @@ struct SharedReferenceDocument {
     schema_version: u16,
     provider: String,
     repository: String,
-    revision: String,
+    revision: GitObjectId,
     subpath: String,
-    resolved_revision: String,
     archive: SharedBlobDescriptor,
 }
 
@@ -167,9 +166,8 @@ impl SharedReferenceDocument {
             schema_version: SHARED_REFERENCE_SCHEMA_VERSION,
             provider: reference.provider().as_str().to_owned(),
             repository: reference.repository().as_str().to_owned(),
-            revision: reference.revision().as_str().to_owned(),
+            revision: *reference.revision(),
             subpath: reference.subpath().as_str().to_owned(),
-            resolved_revision: bundle.resolved_revision().as_str().to_owned(),
             archive: SharedBlobDescriptor {
                 key: archive.key().as_str().to_owned(),
                 digest: archive.digest().to_string(),
@@ -185,24 +183,20 @@ impl SharedReferenceDocument {
         }
         let provider = ScmProviderId::new(self.provider).map_err(|_| corrupt_reference())?;
         let repository = RepositoryId::new(self.repository).map_err(|_| corrupt_reference())?;
-        let revision = RevisionSpec::new(self.revision).map_err(|_| corrupt_reference())?;
+        let revision = self.revision;
         let subpath = if self.subpath.is_empty() {
             ActionSubpath::root()
         } else {
             ActionSubpath::new(self.subpath).map_err(|_| corrupt_reference())?
         };
-        let reference = ImmutableActionReference::new(provider, repository, revision, subpath)
-            .map_err(|_| corrupt_reference())?;
-        let resolved_revision =
-            ResolvedRevision::new(self.resolved_revision).map_err(|_| corrupt_reference())?;
+        let reference = ImmutableActionReference::new(provider, repository, revision, subpath);
         let archive = BlobDescriptor::new(
             BlobKey::new(self.archive.key).map_err(|_| corrupt_reference())?,
             Sha256Digest::from_str(&self.archive.digest).map_err(|_| corrupt_reference())?,
             self.archive.size,
             MediaType::new(self.archive.media_type).map_err(|_| corrupt_reference())?,
         );
-        IndexedActionBundle::new(reference, resolved_revision, archive)
-            .map_err(|_| corrupt_reference())
+        IndexedActionBundle::new(reference, revision, archive).map_err(|_| corrupt_reference())
     }
 }
 
@@ -221,14 +215,14 @@ fn shared_reference_key(
     let mut hasher = Sha256::new();
     hasher.update(SHARED_REFERENCE_KEY_DOMAIN);
     for component in [
-        reference.provider().as_str(),
-        reference.repository().as_str(),
-        reference.revision().as_str(),
-        reference.subpath().as_str(),
+        reference.provider().as_str().as_bytes(),
+        reference.repository().as_str().as_bytes(),
+        reference.revision().as_bytes(),
+        reference.subpath().as_str().as_bytes(),
     ] {
         let length = u64::try_from(component.len()).map_err(|_| corrupt_reference())?;
         hasher.update(length.to_be_bytes());
-        hasher.update(component.as_bytes());
+        hasher.update(component);
     }
     let digest = Sha256Digest::from_bytes(hasher.finalize().into());
     BlobKey::new(format!("actions/references/v1/sha256/{digest}.json"))

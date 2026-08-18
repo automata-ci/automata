@@ -14,9 +14,9 @@ use automata_ci_blob::{
     BlobDescriptor, BlobKey, BlobStoreError, BlobStoreErrorKind, ImmutableBlobStore, MediaType,
 };
 use automata_ci_core::{
-    ContextValue, JobRuntimeContext, OperationId, Sha256Digest, TrustActorEvidence, TrustActorKind,
-    TrustAutomationKind, TrustEventKind, TrustEvidence, TrustOriginKind, TrustPolicy,
-    TrustRepositoryEvidence, TrustTokenRecursion, UnixMillis, WorkflowEventProvenance,
+    ContextValue, GitObjectId, JobRuntimeContext, OperationId, Sha256Digest, TrustActorEvidence,
+    TrustActorKind, TrustAutomationKind, TrustEventKind, TrustEvidence, TrustOriginKind,
+    TrustPolicy, TrustRepositoryEvidence, TrustTokenRecursion, UnixMillis, WorkflowEventProvenance,
     WorkflowPlan,
 };
 use automata_ci_provider::ProviderConnectionId;
@@ -796,10 +796,7 @@ impl GithubScheduleService {
         {
             return Err(GithubScheduleServiceError::SourceRejected);
         }
-        let revision = snapshot.resolved_revision().as_str().to_owned();
-        if automata_ci_scm::ExactRevision::new(revision.clone()).is_err() {
-            return Err(GithubScheduleServiceError::SourceRejected);
-        }
+        let revision = snapshot.resolved_revision();
         let bytes = snapshot.into_bytes();
         let digest = Sha256Digest::from_bytes(Sha256::digest(&bytes).into());
         let key_text = format!("{ARCHIVE_KEY_PREFIX}/{digest}.tar.gz");
@@ -956,6 +953,7 @@ impl GithubScheduleService {
             TrustAutomationKind::None,
         )
         .map_err(|_| FireFailure::InvalidRegistry)?;
+        let source_revision = claimed.source_revision().to_string();
         let trust_snapshot = TrustPolicy::current()
             .evaluate(
                 TrustEvidence::new(TrustOriginKind::Schedule, TrustEventKind::Schedule)
@@ -968,9 +966,9 @@ impl GithubScheduleService {
                         claimed.default_branch_ref(),
                     )
                     .with_revisions(
-                        claimed.source_revision(),
-                        claimed.source_revision(),
-                        claimed.source_revision(),
+                        source_revision.as_str(),
+                        source_revision.as_str(),
+                        source_revision.as_str(),
                     )
                     .with_fork(false)
                     .with_token_recursion(TrustTokenRecursion::External),
@@ -987,10 +985,10 @@ impl GithubScheduleService {
             WorkflowAdmissionIdempotency::operation(OperationId::from_uuid(
                 claim.fire_id().as_uuid(),
             )),
+            claimed.source_revision(),
         )
         .trust_snapshot(trust_snapshot)
         .event_media_type(AUTOMATA_GITHUB_SCHEDULE_EVIDENCE_V1_MEDIA_TYPE)
-        .commit_sha(claimed.source_revision())
         .git_ref(claimed.default_branch_ref())
         .workflow_name(workflow_name)
         .actor(GITHUB_SCHEDULE_SERVICE_ACTOR)
@@ -1151,7 +1149,7 @@ fn compile_claimed_workflow(
                 claimed.repository_owner(),
                 claimed.repository_name()
             )),
-            revision: Arc::from(claimed.source_revision()),
+            revision: claimed.source_revision(),
             path: Arc::from(claimed.entry().workflow_path()),
         },
     );
@@ -1215,7 +1213,7 @@ impl fmt::Debug for GithubScheduleService {
 }
 
 struct DiscoveryArchive {
-    revision: String,
+    revision: GitObjectId,
     digest: Sha256Digest,
     object_key: ObjectKey,
     size: u64,
@@ -1290,7 +1288,7 @@ fn retryable_schedule_error(error: &GithubScheduleServiceError) -> bool {
 fn registry_entries(
     manifest: &GithubProviderManifest,
     claim: GithubScheduleDiscoveryClaim,
-    revision: &str,
+    revision: &GitObjectId,
     archive: &[u8],
     _archive_digest: Sha256Digest,
 ) -> Result<Vec<GithubScheduleRegistryEntry>, ()> {
@@ -1308,7 +1306,7 @@ fn registry_entries(
             SourceId::new(path.clone()),
             SourceOrigin::Repository {
                 repository: Arc::from(manifest.github_repository_name().as_str()),
-                revision: Arc::from(revision),
+                revision: *revision,
                 path: Arc::from(path.clone()),
             },
         );

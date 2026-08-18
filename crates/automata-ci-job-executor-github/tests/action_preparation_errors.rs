@@ -11,14 +11,14 @@ use automata_ci_action::{
 };
 use automata_ci_action_github::GithubActionMetadataDecoder;
 use automata_ci_blob::{ImmutableBlobStore, MemoryBlobStore};
-use automata_ci_core::ActionReference;
+use automata_ci_core::{ActionReference, GitObjectId};
 use automata_ci_job_executor_github::{
     ActionPreparationErrorKind, ActionPreparationPort, ActionPreparationRequest,
     NoRepositoryCredentials, PreparedCompositeStep, ResolvedBundleActionPreparer,
 };
 use automata_ci_scm::{
-    ArchiveFormat, ArchiveLimits, RepositoryId, RepositorySnapshot, ResolvedRevision, RevisionSpec,
-    ScmError, ScmErrorKind, ScmProvider, ScmProviderId, SnapshotRequest,
+    ArchiveFormat, ArchiveLimits, RepositoryId, RepositorySnapshot, RevisionSpec, ScmError,
+    ScmErrorKind, ScmProvider, ScmProviderId, SnapshotRequest,
 };
 use automata_ci_workflow_github::GithubConditionCompiler;
 use bytes::Bytes;
@@ -33,7 +33,7 @@ async fn resolved_bundle_distinguishes_workspace_and_repository_root_children() 
         ScmProviderId::new("github").expect("provider"),
         RepositoryId::new("actions/example").expect("repository"),
         RevisionSpec::new(EXACT_REVISION).expect("requested revision"),
-        ResolvedRevision::new(EXACT_REVISION).expect("resolved revision"),
+        GitObjectId::from_provider_hex(EXACT_REVISION).expect("resolved revision"),
         ArchiveFormat::TarGzip,
         action_archive(&[
             (
@@ -64,7 +64,7 @@ async fn resolved_bundle_distinguishes_workspace_and_repository_root_children() 
     .expect("action preparer");
     let reference = ActionReference::Repository {
         repository: "actions/example".to_owned(),
-        revision: EXACT_REVISION.to_owned(),
+        selector: EXACT_REVISION.to_owned(),
         subpath: Some("actions/parent".to_owned()),
     };
 
@@ -93,7 +93,7 @@ async fn resolved_bundle_distinguishes_workspace_and_repository_root_children() 
         repository.reference(),
         &ActionReference::Repository {
             repository: "actions/example".to_owned(),
-            revision: EXACT_REVISION.to_owned(),
+            selector: EXACT_REVISION.to_owned(),
             subpath: Some("nested/action".to_owned()),
         }
     );
@@ -120,7 +120,7 @@ async fn public_and_arbitrary_action_fetches_never_receive_an_ambient_credential
     for repository in ["actions/checkout", "untrusted-owner/private-action"] {
         let reference = ActionReference::Repository {
             repository: repository.to_owned(),
-            revision: "de0fac2e4500dabe0009e67214ff5f5447ce83dd".to_owned(),
+            selector: "de0fac2e4500dabe0009e67214ff5f5447ce83dd".to_owned(),
             subpath: None,
         };
         let error = preparer
@@ -171,7 +171,7 @@ async fn resolver_failures_map_to_their_sanitized_preparation_layer() {
         .expect("action preparer");
         let reference = ActionReference::Repository {
             repository: "actions/setup-node".to_owned(),
-            revision: "48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e".to_owned(),
+            selector: "48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e".to_owned(),
             subpath: None,
         };
 

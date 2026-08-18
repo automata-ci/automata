@@ -1,5 +1,7 @@
 use async_trait::async_trait;
-use automata_ci_core::{AttemptId, JobId, OperationId, QueuePolicy, RunId, UnixMillis, WorkflowId};
+use automata_ci_core::{
+    AttemptId, GitObjectId, JobId, OperationId, QueuePolicy, RunId, UnixMillis, WorkflowId,
+};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
@@ -475,7 +477,7 @@ pub struct AdmitWorkflowRun {
     run_attempt: u32,
     event_name: String,
     event: AdmissionObject,
-    head_sha: Vec<u8>,
+    head_sha: GitObjectId,
     actor: Option<String>,
     display_title: Option<String>,
     commit_subject: Option<String>,
@@ -510,7 +512,7 @@ impl AdmitWorkflowRun {
         run_attempt: u32,
         event_name: impl Into<String>,
         event: AdmissionObject,
-        head_sha: Vec<u8>,
+        head_sha: GitObjectId,
         jobs: Vec<AdmittedWorkflowJob>,
         admitted_at: UnixMillis,
     ) -> AdmitWorkflowRunBuilder {
@@ -618,8 +620,8 @@ impl AdmitWorkflowRun {
     }
 
     #[must_use]
-    pub fn head_sha(&self) -> &[u8] {
-        &self.head_sha
+    pub const fn head_sha(&self) -> GitObjectId {
+        self.head_sha
     }
 
     #[must_use]
@@ -707,9 +709,6 @@ impl AdmitWorkflowRunBuilder {
             if let Some(value) = value {
                 validate_text(value, field)?;
             }
-        }
-        if !matches!(command.head_sha.len(), 20 | 32) {
-            return Err(WorkflowAdmissionValueError::InvalidHeadSha);
         }
         if command.jobs.is_empty() {
             return Err(WorkflowAdmissionValueError::NoJobs);
@@ -826,8 +825,6 @@ pub enum WorkflowAdmissionValueError {
     InvalidMediaType,
     #[error("JobIR exceeds its durable size limit")]
     InvalidJobIrSize,
-    #[error("head SHA must contain exactly 20 or 32 bytes")]
-    InvalidHeadSha,
     #[error("Git ref must be a canonical full refs/... name")]
     InvalidGitRef,
     #[error("workflow run attempt must fit a positive PostgreSQL INTEGER")]

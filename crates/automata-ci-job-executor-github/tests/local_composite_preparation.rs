@@ -276,7 +276,7 @@ fn checked_out_composite_is_compiled_without_executing_user_code() {
         repository.reference(),
         &ActionReference::Repository {
             repository: "owner/action".to_owned(),
-            revision: "v1".to_owned(),
+            selector: "v1".to_owned(),
             subpath: Some("subdirectory".to_owned()),
         }
     );

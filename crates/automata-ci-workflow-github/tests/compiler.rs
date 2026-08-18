@@ -8,7 +8,12 @@ use automata_ci_workflow_github::{
 fn event(name: &str) -> WorkflowEventProvenance {
     WorkflowEventProvenance::new("github", name)
         .with_delivery_id("compiler-current")
-        .with_commit_sha("0123456789abcdef0123456789abcdef01234567")
+        .with_commit_sha(
+            automata_ci_core::GitObjectId::from_provider_hex(
+                "0123456789abcdef0123456789abcdef01234567",
+            )
+            .expect("revision"),
+        )
         .with_git_ref("refs/heads/main")
 }
 

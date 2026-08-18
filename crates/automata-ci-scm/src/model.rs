@@ -1,7 +1,7 @@
 use std::fmt;
 
 use automata_ci_auth::secret::SecretString;
-use automata_ci_core::Sha256Digest;
+use automata_ci_core::{GitObjectId, Sha256Digest};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -172,61 +172,6 @@ revision_type!(
     RevisionSpec,
     "A user-facing branch, tag, or immutable revision selector. The provider must treat this value as mutable until it resolves the request."
 );
-revision_type!(
-    ResolvedRevision,
-    "The immutable revision proven by an SCM provider before archive download. Adapters must not populate this value with an unresolved mutable name."
-);
-
-/// One canonical, exact Git commit revision.
-///
-/// This value is exactly 40 lowercase hexadecimal ASCII bytes. It is intended
-/// for source requests whose caller already holds an immutable commit identity;
-/// unlike [`RevisionSpec`], it cannot represent a branch, tag, abbreviated
-/// object ID, or another mutable or ambiguous selector.
-#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
-#[serde(try_from = "String", into = "String")]
-pub struct ExactRevision(String);
-
-impl ExactRevision {
-    /// Creates a canonical exact revision.
-    ///
-    /// # Errors
-    ///
-    /// Rejects every value that is not exactly 40 lowercase hexadecimal ASCII
-    /// bytes. Uppercase hexadecimal is rejected rather than normalized.
-    pub fn new(value: impl Into<String>) -> Result<Self, ExactRevisionError> {
-        let value = value.into();
-        if value.len() != 40
-            || !value
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
-        {
-            return Err(ExactRevisionError);
-        }
-        Ok(Self(value))
-    }
-
-    /// Returns the exact canonical revision text.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl TryFrom<String> for ExactRevision {
-    type Error = ExactRevisionError;
-
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::new(value)
-    }
-}
-
-impl From<ExactRevision> for String {
-    fn from(value: ExactRevision) -> Self {
-        value.0
-    }
-}
-
 /// Archive encoding returned by a provider.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -275,7 +220,7 @@ impl Default for ArchiveLimits {
 /// One borrowed, credential-scoped repository snapshot request.
 ///
 /// The requested [`RevisionSpec`] may name mutable provider state. A provider
-/// resolves it to a distinct [`ResolvedRevision`] before returning a snapshot.
+/// resolves it to a distinct [`GitObjectId`] before returning a snapshot.
 /// Any credential is borrowed for this request only and is redacted by the
 /// [`Debug`](fmt::Debug) implementation.
 pub struct SnapshotRequest<'a> {
@@ -367,13 +312,13 @@ impl fmt::Debug for SnapshotRequest<'_> {
 
 /// One borrowed request for source at an already known exact revision.
 ///
-/// The revision is an immutable [`ExactRevision`], so an implementation must
+/// The revision is an immutable [`GitObjectId`], so an implementation must
 /// prove that the provider resolved the request to that byte-exact commit. Any
 /// credential is borrowed for this request only and is redacted by the
 /// [`Debug`](fmt::Debug) implementation.
 pub struct RepositorySourceRequest<'a> {
     repository: &'a RepositoryId,
-    revision: &'a ExactRevision,
+    revision: &'a GitObjectId,
     credential: Option<&'a SecretString>,
     limits: ArchiveLimits,
 }
@@ -386,7 +331,7 @@ impl<'a> RepositorySourceRequest<'a> {
     #[must_use]
     pub const fn public(
         repository: &'a RepositoryId,
-        revision: &'a ExactRevision,
+        revision: &'a GitObjectId,
         limits: ArchiveLimits,
     ) -> Self {
         Self {
@@ -405,7 +350,7 @@ impl<'a> RepositorySourceRequest<'a> {
     #[must_use]
     pub const fn authenticated(
         repository: &'a RepositoryId,
-        revision: &'a ExactRevision,
+        revision: &'a GitObjectId,
         credential: &'a SecretString,
         limits: ArchiveLimits,
     ) -> Self {
@@ -425,7 +370,7 @@ impl<'a> RepositorySourceRequest<'a> {
 
     /// Returns the exact immutable revision requested by the caller.
     #[must_use]
-    pub const fn revision(&self) -> &ExactRevision {
+    pub const fn revision(&self) -> &GitObjectId {
         self.revision
     }
 
@@ -467,7 +412,7 @@ pub struct RepositorySnapshot {
     provider: ScmProviderId,
     repository: RepositoryId,
     requested_revision: RevisionSpec,
-    resolved_revision: ResolvedRevision,
+    resolved_revision: GitObjectId,
     format: ArchiveFormat,
     digest: Sha256Digest,
     bytes: Bytes,
@@ -485,7 +430,7 @@ impl RepositorySnapshot {
         provider: ScmProviderId,
         repository: RepositoryId,
         requested_revision: RevisionSpec,
-        resolved_revision: ResolvedRevision,
+        resolved_revision: GitObjectId,
         format: ArchiveFormat,
         bytes: Bytes,
     ) -> Self {
@@ -524,8 +469,8 @@ impl RepositorySnapshot {
 
     /// Returns the immutable provider revision resolved for the request.
     #[must_use]
-    pub const fn resolved_revision(&self) -> &ResolvedRevision {
-        &self.resolved_revision
+    pub const fn resolved_revision(&self) -> GitObjectId {
+        self.resolved_revision
     }
 
     /// Returns the encoding of the retained archive bytes.
@@ -565,14 +510,14 @@ impl RepositorySnapshot {
 /// Immutable source archive for one caller-supplied exact revision.
 ///
 /// A provider adapter may construct this value only after proving that the
-/// provider resolved the request to the same byte-exact [`ExactRevision`]. It
+/// provider resolved the request to the same byte-exact [`GitObjectId`]. It
 /// retains the exact bounded archive bytes and their local SHA-256 digest, and
 /// contains no credential material.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepositorySource {
     provider: ScmProviderId,
     repository: RepositoryId,
-    revision: ExactRevision,
+    revision: GitObjectId,
     format: ArchiveFormat,
     digest: Sha256Digest,
     bytes: Bytes,
@@ -589,7 +534,7 @@ impl RepositorySource {
     pub fn from_bytes(
         provider: ScmProviderId,
         repository: RepositoryId,
-        revision: ExactRevision,
+        revision: GitObjectId,
         format: ArchiveFormat,
         bytes: Bytes,
     ) -> Self {
@@ -618,7 +563,7 @@ impl RepositorySource {
 
     /// Returns the exact immutable revision represented by this source.
     #[must_use]
-    pub const fn revision(&self) -> &ExactRevision {
+    pub const fn revision(&self) -> &GitObjectId {
         &self.revision
     }
 
@@ -660,11 +605,6 @@ impl RepositorySource {
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 #[error("SCM provider ID is not canonical")]
 pub struct ScmProviderIdError;
-
-/// Error returned when an exact revision is not canonical.
-#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
-#[error("exact revision must be 40 lowercase hexadecimal bytes")]
-pub struct ExactRevisionError;
 
 /// Reason a provider-native repository identity was rejected.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]

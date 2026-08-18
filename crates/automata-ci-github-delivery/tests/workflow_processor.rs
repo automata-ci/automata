@@ -11,6 +11,7 @@ use automata_ci_auth::secret::SecretString;
 use automata_ci_blob::{
     BlobDescriptor, BlobKey, BlobPayload, ImmutableBlobStore as _, MediaType, MemoryBlobStore,
 };
+use automata_ci_core::GitObjectId;
 use automata_ci_core::{Sha256Digest, UnixMillis, WorkflowPlan};
 use automata_ci_github::GITHUB_RAW_EVENT_OBJECT_KEY_PREFIX;
 use automata_ci_github_delivery::{
@@ -28,8 +29,8 @@ use automata_ci_github_delivery::{
 };
 use automata_ci_provider::ProviderConnectionId;
 use automata_ci_scm::{
-    ArchiveFormat, ExactRevision, RepositoryId as ScmRepositoryId, RepositorySource,
-    RepositorySourcePort, RepositorySourceRequest, ScmError, ScmProviderId,
+    ArchiveFormat, RepositoryId as ScmRepositoryId, RepositorySource, RepositorySourcePort,
+    RepositorySourceRequest, ScmError, ScmProviderId,
 };
 use automata_ci_store::{
     AcceptProviderDelivery, AdmissionObject, AdmitLogicalWorkflowRun,
@@ -526,8 +527,8 @@ impl GithubPushChangedFilesProvider for ChangedFiles {
         request: GithubPullRequestChangedFilesRequest<'_>,
     ) -> GithubChangedFilesDisposition {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        assert_eq!(request.pull_request().base_revision().as_str(), BEFORE);
-        assert_eq!(request.pull_request().head_revision().as_str(), AFTER);
+        assert_eq!(request.pull_request().base_revision().to_string(), BEFORE);
+        assert_eq!(request.pull_request().head_revision().to_string(), AFTER);
         let (credential_present, credential_matches) = match request.authority() {
             GithubPullRequestChangedFilesAuthority::PublicAnonymous => (false, false),
             GithubPullRequestChangedFilesAuthority::PrivateInstallationPullRequestsRead(
@@ -540,8 +541,8 @@ impl GithubPushChangedFilesProvider for ChangedFiles {
             .push(ChangedFilesObservation {
                 repository: request.identity().repository_identity().to_owned(),
                 request_digest: request.request_digest(),
-                before: request.pull_request().base_revision().as_str().to_owned(),
-                after: request.pull_request().head_revision().as_str().to_owned(),
+                before: request.pull_request().base_revision().to_string(),
+                after: request.pull_request().head_revision().to_string(),
                 claim: request.snapshot().claim(),
                 attempt: request.snapshot().attempt(),
                 observed_at: request.observed_at(),
@@ -633,7 +634,7 @@ async fn harness_with_visibility(
     let source = RepositorySource::from_bytes(
         ScmProviderId::new("github").expect("provider"),
         ScmRepositoryId::new(format!("{OWNER}/{REPOSITORY}")).expect("repository"),
-        ExactRevision::new(AFTER).expect("revision"),
+        GitObjectId::from_provider_hex(AFTER).expect("revision"),
         ArchiveFormat::TarGzip,
         archive(files),
     );
@@ -710,7 +711,7 @@ async fn pull_request_harness_with_visibility(
     let source = RepositorySource::from_bytes(
         ScmProviderId::new("github").expect("provider"),
         ScmRepositoryId::new(format!("{OWNER}/{REPOSITORY}")).expect("repository"),
-        ExactRevision::new(AFTER).expect("revision"),
+        GitObjectId::from_provider_hex(AFTER).expect("revision"),
         ArchiveFormat::TarGzip,
         archive(files),
     );
@@ -873,7 +874,7 @@ async fn accepted_path_replays_durable_progress_without_readmission() {
     assert_eq!(first.git_ref(), "refs/heads/main");
     assert_eq!(first.event_name(), "push");
     assert_eq!(
-        first.head_sha(),
+        first.head_sha().as_bytes(),
         &[
             0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab,
             0xcd, 0xef, 0x01, 0x23, 0x45, 0x67,
@@ -957,7 +958,7 @@ async fn pull_request_metadata_and_raw_event_reach_logical_admission_exactly() {
     assert_eq!(command.git_ref(), "refs/pull/7/merge");
     assert_eq!(command.workflow_name(), "Pull Request CI");
     assert_eq!(
-        command.head_sha(),
+        command.head_sha().as_bytes(),
         &[
             0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab,
             0xcd, 0xef, 0x01, 0x23, 0x45, 0x67,

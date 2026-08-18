@@ -11,7 +11,12 @@ const FILTERED_WORKFLOW: &str = "on:\n  push:\n    branches: [main]\n  pull_requ
 fn event(name: &str, git_ref: &str) -> WorkflowEventProvenance {
     WorkflowEventProvenance::new("github", name)
         .with_delivery_id("delivery-trigger-selection")
-        .with_commit_sha("0123456789abcdef0123456789abcdef01234567")
+        .with_commit_sha(
+            automata_ci_core::GitObjectId::from_provider_hex(
+                "0123456789abcdef0123456789abcdef01234567",
+            )
+            .expect("revision"),
+        )
         .with_git_ref(git_ref)
 }
 

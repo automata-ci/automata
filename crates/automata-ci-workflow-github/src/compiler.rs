@@ -436,7 +436,14 @@ fn compile_source(
             path,
         } => PlanSourceOrigin::Repository {
             repository: repository.to_string(),
-            revision: revision.to_string(),
+            revision: *revision,
+            path: path.to_string(),
+        },
+        SourceOrigin::Archive {
+            snapshot_digest,
+            path,
+        } => PlanSourceOrigin::Archive {
+            snapshot_digest: *snapshot_digest,
             path: path.to_string(),
         },
         SourceOrigin::LocalPath { path } => PlanSourceOrigin::LocalPath {
@@ -617,8 +624,9 @@ fn validate_event_authority(
         | EventSelection::Metadata(_)
         | EventSelection::Preselected(_) => None,
     } {
-        let SourceOrigin::Repository { revision, .. } =
-            context.source.source().provenance().origin()
+        let SourceOrigin::Archive {
+            snapshot_digest, ..
+        } = context.source.source().provenance().origin()
         else {
             context.semantic(
                 "github.compile.local_source_origin",
@@ -627,7 +635,7 @@ fn validate_event_authority(
             );
             return false;
         };
-        if revision.as_ref() != evidence.snapshot_digest().to_string() {
+        if *snapshot_digest != evidence.snapshot_digest() {
             context.semantic(
                 "github.compile.local_snapshot_mismatch",
                 "local workflow source revision does not match its snapshot evidence",

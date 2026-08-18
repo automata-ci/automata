@@ -1,7 +1,8 @@
 use automata_ci_core::{
-    OperationId, RunId, Sha256Digest, TrustActorEvidence, TrustActorKind, TrustAutomationKind,
-    TrustEventKind, TrustEvidence, TrustOriginKind, TrustPolicy, TrustRepositoryEvidence,
-    TrustSnapshot, TrustTokenRecursion, UnixMillis, WorkflowId, WorkflowJobKey,
+    GitObjectAlgorithm, GitObjectId, OperationId, RunId, Sha256Digest, TrustActorEvidence,
+    TrustActorKind, TrustAutomationKind, TrustEventKind, TrustEvidence, TrustOriginKind,
+    TrustPolicy, TrustRepositoryEvidence, TrustSnapshot, TrustTokenRecursion, UnixMillis,
+    WorkflowId, WorkflowJobKey,
 };
 use automata_ci_store::{
     AdmissionObject, AdmissionRepository, AdmitLogicalWorkflowRun, AdmittedLogicalWorkflowJob,
@@ -20,6 +21,10 @@ fn object(name: &str, digest: u8) -> AdmissionObject {
         "application/json",
     )
     .expect("admission object")
+}
+
+fn git_object(byte: u8) -> GitObjectId {
+    GitObjectId::from_bytes(GitObjectAlgorithm::Sha1, &[byte; 20]).expect("Git object ID")
 }
 
 fn job(
@@ -66,7 +71,7 @@ fn command(
         LogicalWorkflowInvocationId::from_uuid(Uuid::from_u128(5)).expect("root invocation"),
         "push",
         object("event", 3),
-        vec![9; 20],
+        git_object(9),
         jobs,
         UnixMillis::new(1_000),
     )
@@ -126,7 +131,7 @@ fn trust_snapshot_must_bind_the_exact_admitted_execution_origin() {
             LogicalWorkflowInvocationId::from_uuid(Uuid::from_u128(75)).expect("root"),
             "push",
             object("trust-event", 3),
-            vec![9; 20],
+            git_object(9),
             vec![job(
                 LogicalWorkflowJobId::from_uuid(Uuid::from_u128(76)).expect("job"),
                 "only",
@@ -260,7 +265,7 @@ fn durable_logical_identities_reject_nil_sentinels() {
         LogicalWorkflowInvocationId::from_uuid(Uuid::from_u128(24)).expect("root"),
         "push",
         object("nil-event", 3),
-        vec![9; 20],
+        git_object(9),
         vec![job(
             only,
             "only",
@@ -303,7 +308,7 @@ fn durable_logical_identities_reject_nil_sentinels() {
         LogicalWorkflowInvocationId::from_uuid(Uuid::from_u128(30)).expect("root"),
         "push",
         object("operation-event", 3),
-        vec![9; 20],
+        git_object(9),
         vec![job(
             only,
             "only",
@@ -428,7 +433,7 @@ fn run_shape_rejects_invalid_attempt_ref_sha_and_time() {
         Err(LogicalWorkflowAdmissionValueError::NoJobs)
     ));
 
-    let build_with = |run_attempt, git_ref: &str, head_sha: Vec<u8>, admitted_at| {
+    let build_with = |run_attempt, git_ref: &str, head_sha: GitObjectId, admitted_at| {
         AdmitLogicalWorkflowRun::builder(
             TenantScope::from_authenticated_tenant_id("logical-tenant").expect("tenant"),
             WorkflowAdmissionIdempotency::provider_delivery("delivery-shape").expect("idempotency"),
@@ -460,19 +465,15 @@ fn run_shape_rejects_invalid_attempt_ref_sha_and_time() {
         .build()
     };
     assert!(matches!(
-        build_with(0, "refs/heads/main", vec![9; 20], 1),
+        build_with(0, "refs/heads/main", git_object(9), 1),
         Err(LogicalWorkflowAdmissionValueError::InvalidRunAttempt)
     ));
     assert!(matches!(
-        build_with(1, "main", vec![9; 20], 1),
+        build_with(1, "main", git_object(9), 1),
         Err(LogicalWorkflowAdmissionValueError::InvalidGitRef)
     ));
     assert!(matches!(
-        build_with(1, "refs/heads/main", vec![9; 19], 1),
-        Err(LogicalWorkflowAdmissionValueError::InvalidHeadSha)
-    ));
-    assert!(matches!(
-        build_with(1, "refs/heads/main", vec![9; 20], -1),
+        build_with(1, "refs/heads/main", git_object(9), -1),
         Err(LogicalWorkflowAdmissionValueError::InvalidAdmissionTime)
     ));
 }

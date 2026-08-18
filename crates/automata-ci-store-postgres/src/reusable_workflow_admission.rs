@@ -59,7 +59,7 @@ pub(super) async fn insert_reusable_workflow_expansion(
         .bind(command.run_id().as_uuid())
         .bind(entry.id().as_uuid())
         .bind(entry.workflow_path())
-        .bind(entry.source_revision())
+        .bind(entry.source_revision().as_bytes())
         .bind(entry.source().digest().as_bytes().as_slice())
         .bind(entry.source().object_key().as_str())
         .bind(size_i64(entry.source().encoded_size())?)

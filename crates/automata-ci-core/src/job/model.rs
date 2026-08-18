@@ -11,8 +11,8 @@ use super::{
 };
 
 use crate::{
-    JobId, OutputSensitivity, PermissionLevel, RUNNER_REQUIREMENTS_SCHEMA_VERSION, RunId,
-    RunIdAlias, RunnerFeature, RunnerRequirements, Sha256Digest, TrustOidcAuthority,
+    GitObjectId, JobId, OutputSensitivity, PermissionLevel, RUNNER_REQUIREMENTS_SCHEMA_VERSION,
+    RunId, RunIdAlias, RunnerFeature, RunnerRequirements, Sha256Digest, TrustOidcAuthority,
     TrustPermissionAuthority, TrustResultsAuthority, TrustSecretAuthority, TrustSnapshot,
     WorkflowId,
 };
@@ -79,7 +79,7 @@ pub struct JobSource {
     /// Provider-native repository identifier without embedding credentials.
     repository: String,
     /// Immutable commit identifier used by this run.
-    revision: String,
+    revision: GitObjectId,
     /// Repository-relative source workflow path.
     workflow_path: String,
     /// Trigger/event name whose payload was used to plan the job.
@@ -290,14 +290,14 @@ impl JobSource {
     pub fn new(
         provider: impl Into<String>,
         repository: impl Into<String>,
-        revision: impl Into<String>,
+        revision: GitObjectId,
         workflow_path: impl Into<String>,
         event_name: impl Into<String>,
     ) -> Self {
         Self {
             provider: provider.into(),
             repository: repository.into(),
-            revision: revision.into(),
+            revision,
             workflow_path: workflow_path.into(),
             event_name: event_name.into(),
         }
@@ -317,8 +317,8 @@ impl JobSource {
 
     /// Returns the immutable source revision used to plan the job.
     #[must_use]
-    pub fn revision(&self) -> &str {
-        &self.revision
+    pub const fn revision(&self) -> GitObjectId {
+        self.revision
     }
 
     /// Returns the repository-relative workflow source path.
@@ -427,7 +427,6 @@ impl JobIrEnvelope {
         for (field, value) in [
             ("source.provider", self.source.provider.as_str()),
             ("source.repository", self.source.repository.as_str()),
-            ("source.revision", self.source.revision.as_str()),
             ("source.workflow_path", self.source.workflow_path.as_str()),
             (
                 "execution.workflow_name",

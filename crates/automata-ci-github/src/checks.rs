@@ -1,7 +1,8 @@
 use std::{collections::HashSet, fmt};
 
 use automata_ci_auth::{github::GithubEndpointError, secret::SecretString};
-use automata_ci_scm::{ExactRevision, RepositoryId};
+use automata_ci_core::GitObjectId;
+use automata_ci_scm::RepositoryId;
 use reqwest::{
     Response, StatusCode,
     header::{ACCEPT, AUTHORIZATION, HeaderMap, RETRY_AFTER},
@@ -599,7 +600,7 @@ fn canonical_markdown(value: &str) -> bool {
 pub struct GithubCheckRunIdentity {
     app_id: GithubCheckAppId,
     suite_id: GithubCheckSuiteId,
-    head_sha: ExactRevision,
+    head_sha: GitObjectId,
     name: GithubCheckName,
     external_id: GithubCheckExternalId,
     details_url: GithubCheckDetailsUrl,
@@ -611,7 +612,7 @@ impl GithubCheckRunIdentity {
     pub const fn new(
         app_id: GithubCheckAppId,
         suite_id: GithubCheckSuiteId,
-        head_sha: ExactRevision,
+        head_sha: GitObjectId,
         name: GithubCheckName,
         external_id: GithubCheckExternalId,
         details_url: GithubCheckDetailsUrl,
@@ -640,7 +641,7 @@ impl GithubCheckRunIdentity {
 
     /// Returns the expected exact commit revision.
     #[must_use]
-    pub const fn head_sha(&self) -> &ExactRevision {
+    pub const fn head_sha(&self) -> &GitObjectId {
         &self.head_sha
     }
 
@@ -773,7 +774,7 @@ pub enum GithubCheckRunState {
 pub struct GithubCheckSuite {
     id: GithubCheckSuiteId,
     app_id: GithubCheckAppId,
-    head_sha: ExactRevision,
+    head_sha: GitObjectId,
 }
 
 impl GithubCheckSuite {
@@ -791,7 +792,7 @@ impl GithubCheckSuite {
 
     /// Returns the exact suite revision.
     #[must_use]
-    pub const fn head_sha(&self) -> &ExactRevision {
+    pub const fn head_sha(&self) -> &GitObjectId {
         &self.head_sha
     }
 }
@@ -850,7 +851,7 @@ pub enum GithubCheckRunReconciliation {
     /// No exact App/name/SHA/external-id/suite match was observed.
     Missing,
     /// Exactly one fully matching Check Run was observed.
-    Exact(GithubCheckRun),
+    Exact(Box<GithubCheckRun>),
     /// More than one fully matching Check Run was observed.
     Ambiguous,
 }
@@ -1005,8 +1006,8 @@ pub enum GithubChecksError {
 }
 
 #[derive(Serialize)]
-struct CreateSuiteBody<'a> {
-    head_sha: &'a str,
+struct CreateSuiteBody {
+    head_sha: String,
 }
 
 #[derive(Deserialize)]
@@ -1025,7 +1026,7 @@ struct CheckSuitesPage {
 #[derive(Serialize)]
 struct CreateRunBody<'a> {
     name: &'a str,
-    head_sha: &'a str,
+    head_sha: String,
     status: &'static str,
     external_id: &'a str,
     details_url: &'a str,
@@ -1145,7 +1146,7 @@ struct ValidatedRun {
     id: GithubCheckRunId,
     app_id: GithubCheckAppId,
     suite_id: GithubCheckSuiteId,
-    head_sha: ExactRevision,
+    head_sha: GitObjectId,
     name: GithubCheckName,
     external_id: Option<GithubCheckExternalId>,
     details_url: Option<GithubCheckDetailsUrl>,
@@ -1166,13 +1167,13 @@ impl GithubHttpEndpoint {
     pub async fn create_check_suite(
         &self,
         repository: &RepositoryId,
-        head_sha: &ExactRevision,
+        head_sha: &GitObjectId,
         app_id: GithubCheckAppId,
         server_service_token: &SecretString,
     ) -> Result<GithubCheckSuiteCreateOutcome, GithubChecksError> {
         let endpoint = self.checks_repository_url(repository, &["check-suites"])?;
         let body = CreateSuiteBody {
-            head_sha: head_sha.as_str(),
+            head_sha: head_sha.to_string(),
         };
         let Ok(response) =
             authenticated_checks_request(self.client.post(endpoint), server_service_token)?
@@ -1215,13 +1216,14 @@ impl GithubHttpEndpoint {
     async fn resolve_existing_check_suite(
         &self,
         repository: &RepositoryId,
-        head_sha: &ExactRevision,
+        head_sha: &GitObjectId,
         app_id: GithubCheckAppId,
         server_service_token: &SecretString,
     ) -> Result<Option<GithubCheckSuite>, GithubChecksError> {
         let app_id_query = app_id.get().to_string();
-        let mut endpoint = self
-            .checks_repository_url(repository, &["commits", head_sha.as_str(), "check-suites"])?;
+        let head_sha_hex = head_sha.to_string();
+        let mut endpoint =
+            self.checks_repository_url(repository, &["commits", &head_sha_hex, "check-suites"])?;
         endpoint
             .query_pairs_mut()
             .append_pair("app_id", &app_id_query)
@@ -1272,7 +1274,7 @@ impl GithubHttpEndpoint {
         let summary = check_summary("Waiting for a runner.", identity.details_url.as_str());
         let body = CreateRunBody {
             name: identity.name.as_str(),
-            head_sha: identity.head_sha.as_str(),
+            head_sha: identity.head_sha.to_string(),
             status: "queued",
             external_id: identity.external_id.as_str(),
             details_url: identity.details_url.as_str(),
@@ -1719,7 +1721,7 @@ impl GithubHttpEndpoint {
     async fn decode_suite_create_response(
         &self,
         response: Response,
-        expected_sha: &ExactRevision,
+        expected_sha: &GitObjectId,
         expected_app: GithubCheckAppId,
     ) -> Result<GithubCheckSuite, GithubChecksError> {
         let response =
@@ -1749,14 +1751,14 @@ fn check_summary(message: &str, details_url: &str) -> String {
 
 fn validate_suite(
     wire: SuiteResponse,
-    expected_sha: &ExactRevision,
+    expected_sha: &GitObjectId,
     expected_app: GithubCheckAppId,
 ) -> Result<GithubCheckSuite, GithubChecksError> {
     let id = GithubCheckSuiteId::new(wire.id).map_err(|_| GithubChecksError::InvalidResponse)?;
     let app_id =
         GithubCheckAppId::new(wire.app.id).map_err(|_| GithubChecksError::InvalidResponse)?;
-    let head_sha =
-        ExactRevision::new(wire.head_sha).map_err(|_| GithubChecksError::InvalidResponse)?;
+    let head_sha = GitObjectId::from_provider_hex(wire.head_sha)
+        .map_err(|_| GithubChecksError::InvalidResponse)?;
     if app_id != expected_app || &head_sha != expected_sha {
         return Err(GithubChecksError::InvalidResponse);
     }
@@ -1773,8 +1775,8 @@ fn validate_run(wire: RunResponse) -> Result<ValidatedRun, GithubChecksError> {
         GithubCheckAppId::new(wire.app.id).map_err(|_| GithubChecksError::InvalidResponse)?;
     let suite_id = GithubCheckSuiteId::new(wire.check_suite.id)
         .map_err(|_| GithubChecksError::InvalidResponse)?;
-    let head_sha =
-        ExactRevision::new(wire.head_sha).map_err(|_| GithubChecksError::InvalidResponse)?;
+    let head_sha = GitObjectId::from_provider_hex(wire.head_sha)
+        .map_err(|_| GithubChecksError::InvalidResponse)?;
     let name = GithubCheckName::new(wire.name).map_err(|_| GithubChecksError::InvalidResponse)?;
     let external_id = wire
         .external_id
@@ -1870,10 +1872,9 @@ fn finish_reconciliation(
     if ambiguous {
         GithubCheckRunReconciliation::Ambiguous
     } else {
-        exact_match.map_or(
-            GithubCheckRunReconciliation::Missing,
-            GithubCheckRunReconciliation::Exact,
-        )
+        exact_match.map_or(GithubCheckRunReconciliation::Missing, |run| {
+            GithubCheckRunReconciliation::Exact(Box::new(run))
+        })
     }
 }
 

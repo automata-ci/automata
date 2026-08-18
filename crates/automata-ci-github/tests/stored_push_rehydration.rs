@@ -57,7 +57,7 @@ fn durable_rehydration_is_exactly_equivalent_to_the_hmac_path() {
         stored_push
             .complete_pushed_commit_revisions()
             .expect("one pushed commit is complete")[0]
-            .as_str(),
+            .to_string(),
         AFTER
     );
     assert!(!stored_push.path_filter_commit_limit_exceeded());

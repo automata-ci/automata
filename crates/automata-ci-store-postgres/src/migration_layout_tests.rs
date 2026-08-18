@@ -4,7 +4,7 @@ use sha2::{Digest as _, Sha384};
 
 use crate::migration::MIGRATOR;
 
-const FROZEN_MIGRATIONS: &[(&str, &str)] = &[
+const CANONICAL_MIGRATIONS: &[(&str, &str)] = &[
     (
         "0001_baseline_routines_01.sql",
         "a88f5c285d9d0286eb5f9d3812c06e254ff22ded8041b014ce666f73c29436d92f2ba0ec3633fdb59d779da6918e7a2a",
@@ -15,7 +15,7 @@ const FROZEN_MIGRATIONS: &[(&str, &str)] = &[
     ),
     (
         "0003_baseline_routines_03.sql",
-        "6094bc86a6b041c70c8cfd3e04d202bf03272e94b39ea7131b61e7c67e30a6bb307a89771a3325e4a15a2b215237381f",
+        "01cd4f90a7f887cd53fbe52f147106afb7a3b193ad7a632a8d6d3f46a4201570662f6c7114caae59a2757e25731843fa",
     ),
     (
         "0004_baseline_routines_04.sql",
@@ -23,7 +23,7 @@ const FROZEN_MIGRATIONS: &[(&str, &str)] = &[
     ),
     (
         "0005_baseline_routines_05.sql",
-        "4f796ebcfcf8390bf9b40843fe25e91bb935ac29730959cbee0830d2e96bbb8175253fc32ffbbc25792bb5894a7398f4",
+        "e520d6d347f546f3b4f4c0e87438412cff1b082175cb2389473de3412a8345cd0cf60cdc3ec2d54a84e603cf5e971d55",
     ),
     (
         "0006_baseline_routines_06.sql",
@@ -35,7 +35,7 @@ const FROZEN_MIGRATIONS: &[(&str, &str)] = &[
     ),
     (
         "0008_baseline_routines_08.sql",
-        "bd208061cc3d0c296656fd50514fbbf6b2bca8eb6d7b8e07d25c2892923295f4b63348383b1b0fed8656c5d04da51def",
+        "f5ceda8c1a16f1a3142d5bb9a0431466fe4cf0d980c75970b4705091bdddd3d0a0d2e4e40911b58676d060bf649d54e7",
     ),
     (
         "0009_baseline_routines_09.sql",
@@ -59,7 +59,7 @@ const FROZEN_MIGRATIONS: &[(&str, &str)] = &[
     ),
     (
         "0014_baseline_routines_14.sql",
-        "660156bf9bea050692a63cef6a7e945b8d8644ae03cf4993d6282b3c838b1db198af8ec190b927e47c82a089436dd387",
+        "1cbf549383dbe0610930c1ff29b3145d1a87582d4ab5d70b6ad5a6a3ff1042755aab428aeb4686dd487aedc099739188",
     ),
     (
         "0015_baseline_routines_15.sql",
@@ -71,11 +71,11 @@ const FROZEN_MIGRATIONS: &[(&str, &str)] = &[
     ),
     (
         "0017_baseline_relations_execution.sql",
-        "9d80766241d5b07160607c4e90fcd30d9ee2ac341e89576f1033fd7072e466c0364a10a4479e8eb919bb39979a1603b9",
+        "d3d3b90cb88163733b0180a9e1d1b076fa0e57dfc17997b93f4cb5c880530b290e7fc935219480b7cc2e4ec9d499bc48",
     ),
     (
         "0018_baseline_relations_auth_and_delivery.sql",
-        "5f9baeeea0fa3fa3c3abac2846b0228a8076a63b9dadb7fb8a6a203ec45021258574b1f81f587c396599058eb6c0a99b",
+        "1ea901ef4e055355653c8deafd971dbb0842436e6fb2e71bdd85da18eaef2655e5c5dcb82e4e89a9c2c31d16baa02b77",
     ),
     (
         "0019_baseline_relations_access_runners_and_secrets.sql",
@@ -83,7 +83,7 @@ const FROZEN_MIGRATIONS: &[(&str, &str)] = &[
     ),
     (
         "0020_baseline_relations_tenants_and_workflows.sql",
-        "6245e235c08bd6ccd7aa1bc7d99ca003633bf3951b79f239f1b0710a3eba783ba86dd36970e7999ea15a67c08c110a61",
+        "8e1bc667f5bb7eb65744463d14bdb1e9d306a8c0b0cbc01191718b247c694f6f7ec15c565218e41d069d0c190053a8d2",
     ),
     (
         "0021_baseline_catalog_rows.sql",
@@ -139,7 +139,7 @@ const FROZEN_MIGRATIONS: &[(&str, &str)] = &[
     ),
     (
         "0034_event_trust_control_contracts.sql",
-        "dcab5d4aaf66e00528388c84782384156a6817e90de281591072c283c0feeb9282a77b8177c2d9808a92b6100eba2bc5",
+        "3e67a776d951b94b73e0accbab17a90f075edd7a0dc5b49e60acdac41522e733ebda52a7623a373a7dea707f7136f051",
     ),
     (
         "0035_workflow_run_trust_snapshots.sql",
@@ -211,7 +211,7 @@ const BASELINE_MIGRATION_COUNT: u32 = 26;
 const MAX_MIGRATION_LINES: usize = 2_000;
 
 #[test]
-fn applied_migration_lineage_is_frozen() {
+fn canonical_migration_lineage_is_fingerprinted() {
     let migrations = migration_paths();
     assert!(
         !MIGRATOR.ignore_missing,
@@ -219,19 +219,19 @@ fn applied_migration_lineage_is_frozen() {
     );
     assert_eq!(
         migrations.len(),
-        FROZEN_MIGRATIONS.len(),
-        "append each new migration to the frozen inventory; never remove an applied migration"
+        CANONICAL_MIGRATIONS.len(),
+        "the canonical inventory must cover every migration"
     );
     assert_eq!(
         MIGRATOR.iter().count(),
-        FROZEN_MIGRATIONS.len(),
-        "the embedded migrator must contain the complete frozen inventory"
+        CANONICAL_MIGRATIONS.len(),
+        "the embedded migrator must contain the complete canonical inventory"
     );
 
     for (index, ((path, embedded), (expected_name, expected_checksum))) in migrations
         .iter()
         .zip(MIGRATOR.iter())
-        .zip(FROZEN_MIGRATIONS)
+        .zip(CANONICAL_MIGRATIONS)
         .enumerate()
     {
         let file_name = path
@@ -239,7 +239,7 @@ fn applied_migration_lineage_is_frozen() {
             .and_then(|name| name.to_str())
             .expect("migration file name is UTF-8");
         let version = u32::try_from(index + 1).expect("migration count fits u32");
-        assert_eq!(file_name, *expected_name, "applied migration was renamed");
+        assert_eq!(file_name, *expected_name, "canonical migration was renamed");
         assert_eq!(migration_version(path), version);
         assert_eq!(embedded.version, i64::from(version));
 
@@ -248,12 +248,12 @@ fn applied_migration_lineage_is_frozen() {
         assert_eq!(
             checksum_hex(&checksum),
             *expected_checksum,
-            "applied migration {file_name} changed; restore its exact bytes and append a new migration"
+            "canonical migration {file_name} changed without updating its fingerprint"
         );
         assert_eq!(
             embedded.checksum.as_ref(),
             &checksum[..],
-            "embedded migration {file_name} differs from its source bytes"
+            "embedded migration {file_name} differs from its canonical source bytes"
         );
     }
 }

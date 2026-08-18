@@ -300,7 +300,12 @@ fn compile(source: &str) -> WorkflowPlan {
         parsed.plan().expect("source plan"),
         WorkflowEventProvenance::new("github", "workflow_dispatch")
             .with_delivery_id("alias-equivalence")
-            .with_commit_sha("0123456789abcdef0123456789abcdef01234567")
+            .with_commit_sha(
+                automata_ci_core::GitObjectId::from_provider_hex(
+                    "0123456789abcdef0123456789abcdef01234567",
+                )
+                .expect("revision"),
+            )
             .with_git_ref("refs/heads/main"),
         None,
     );

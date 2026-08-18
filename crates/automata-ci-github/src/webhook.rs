@@ -1,6 +1,6 @@
 use std::{fmt, num::NonZeroU64};
 
-use automata_ci_scm::ExactRevision;
+use automata_ci_core::GitObjectId;
 use bytes::{Bytes, BytesMut};
 use reqwest::header::{HeaderMap, HeaderValue};
 use ring::{digest, hmac};
@@ -719,7 +719,7 @@ pub struct VerifiedGithubPush {
     after_commit_sha: Box<str>,
     metadata: GithubWebhookEventMetadata,
     commit_count: usize,
-    complete_pushed_commit_revisions: Option<Box<[ExactRevision]>>,
+    complete_pushed_commit_revisions: Option<Box<[GitObjectId]>>,
 }
 
 impl VerifiedGithubPush {
@@ -800,7 +800,7 @@ impl VerifiedGithubPush {
     /// is not diff-base authority. `Some(empty)` is complete evidence for an
     /// empty array. `None` means the payload contained more than 1,000 commits,
     /// for which GitHub Actions bypasses path-filter diff generation.
-    pub fn complete_pushed_commit_revisions(&self) -> Option<&[ExactRevision]> {
+    pub fn complete_pushed_commit_revisions(&self) -> Option<&[GitObjectId]> {
         self.complete_pushed_commit_revisions.as_deref()
     }
 
@@ -1062,7 +1062,7 @@ struct BoundedCommits(Vec<PushCommitPayload>);
 
 struct NormalizedPushedCommits {
     count: usize,
-    complete_revisions: Option<Box<[ExactRevision]>>,
+    complete_revisions: Option<Box<[GitObjectId]>>,
 }
 
 impl<'de> Deserialize<'de> for BoundedCommits {
@@ -1163,8 +1163,10 @@ fn normalize_pushed_commits(
         if commit.id == ZERO_COMMIT_SHA {
             return Err(GithubWebhookError::InvalidPayload);
         }
-        revisions
-            .push(ExactRevision::new(commit.id).map_err(|_| GithubWebhookError::InvalidPayload)?);
+        revisions.push(
+            GitObjectId::from_provider_hex(commit.id)
+                .map_err(|_| GithubWebhookError::InvalidPayload)?,
+        );
     }
     revisions.sort_unstable();
     if revisions.windows(2).any(|pair| pair[0] == pair[1]) {

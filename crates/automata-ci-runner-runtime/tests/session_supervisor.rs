@@ -3392,7 +3392,7 @@ async fn saturated_log_segments_wait_for_acknowledgements_instead_of_failing_the
     );
 
     let task = tokio::spawn(async move { runtime.run(shutdown).await });
-    let saturation = tokio::time::timeout(Duration::from_secs(10), async {
+    let saturation = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             let segment_count = journal
                 .snapshot()

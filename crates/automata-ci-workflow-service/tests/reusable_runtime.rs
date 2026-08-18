@@ -8,8 +8,8 @@ use automata_ci_blob::{
     BlobDescriptor, BlobKey, BlobPayload, ImmutableBlobStore as _, MediaType, MemoryBlobStore,
 };
 use automata_ci_core::{
-    ContextValue, JobAuthorityProfile, JobRuntimeContext, LogicalResultValue, OutputSensitivity,
-    PermissionLevel, RunId, RunIdAlias, SecretBinding, Sha256Digest, UnixMillis,
+    ContextValue, GitObjectId, JobAuthorityProfile, JobRuntimeContext, LogicalResultValue,
+    OutputSensitivity, PermissionLevel, RunId, RunIdAlias, SecretBinding, Sha256Digest, UnixMillis,
     WorkflowEventProvenance, WorkflowId, WorkflowJobKey,
 };
 use automata_ci_protocol::ProtocolLimits;
@@ -369,7 +369,7 @@ async fn runtime_fixture(
     let root_plan = compile_root(root_source);
     let catalog = GithubReusableWorkflowCatalog::compile(
         REPOSITORY,
-        REVISION,
+        GitObjectId::from_provider_hex(REVISION).expect("revision"),
         [RepositoryWorkflowSource::new(
             CHILD_PATH,
             Bytes::copy_from_slice(child_source.as_bytes()),
@@ -568,7 +568,7 @@ fn compile_root(source: &str) -> automata_ci_core::WorkflowPlan {
         SourceId::new(ROOT_PATH),
         SourceOrigin::Repository {
             repository: Arc::from(REPOSITORY),
-            revision: Arc::from(REVISION),
+            revision: automata_ci_core::GitObjectId::from_provider_hex(REVISION).expect("revision"),
             path: Arc::from(ROOT_PATH),
         },
     );
@@ -578,7 +578,9 @@ fn compile_root(source: &str) -> automata_ci_core::WorkflowPlan {
     let compiled = GithubWorkflowCompiler::new().compile(CompileWorkflowRequest::new(
         parsed.plan().expect("root source plan"),
         WorkflowEventProvenance::new("github", "workflow_dispatch")
-            .with_commit_sha(REVISION)
+            .with_commit_sha(
+                automata_ci_core::GitObjectId::from_provider_hex(REVISION).expect("revision"),
+            )
             .with_git_ref(GIT_REF),
     ));
     assert!(compiled.is_accepted(), "{:#?}", compiled.diagnostics());

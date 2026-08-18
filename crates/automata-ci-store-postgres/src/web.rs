@@ -12,8 +12,8 @@ use automata_ci_auth::{
 };
 use automata_ci_blob::{BlobDescriptor, BlobKey, MediaType};
 use automata_ci_core::{
-    AttemptId, AttemptNumber, JobConclusion, JobId, JobIrVersion, JobLifecycle, LogSequence,
-    LogStreamId, RunId, RunnerId, Sha256Digest, UnixMillis, WorkflowId,
+    AttemptId, AttemptNumber, GitObjectId, JobConclusion, JobId, JobIrVersion, JobLifecycle,
+    LogSequence, LogStreamId, RunId, RunnerId, Sha256Digest, UnixMillis, WorkflowId,
 };
 use sqlx::{PgConnection, Postgres, Row as _, Transaction, postgres::PgRow};
 use thiserror::Error;
@@ -22,8 +22,8 @@ use uuid::Uuid;
 use automata_ci_store::{
     DocumentSchema, HUMAN_JOB_RESULT_MEDIA_TYPE, HUMAN_LOG_SEGMENT_MEDIA_TYPE, HumanArtifactBlock,
     HumanArtifactDownload, HumanArtifactId, HumanArtifactScope, HumanArtifactSummary,
-    HumanAuthorizationTarget, HumanGitCommitId, HumanJob, HumanJobAttempt, HumanJobDetail,
-    HumanJobNavigation, HumanJobScope, HumanLogSegment, HumanLogSegmentCursor, HumanLogSegmentPage,
+    HumanAuthorizationTarget, HumanJob, HumanJobAttempt, HumanJobDetail, HumanJobNavigation,
+    HumanJobScope, HumanLogSegment, HumanLogSegmentCursor, HumanLogSegmentPage,
     HumanLogSegmentPageDirection, HumanLogSegmentQuery, HumanLogStream, HumanOutputPublication,
     HumanRawLogDisposition, HumanRepository, HumanRepositoryCursor, HumanRepositoryListQuery,
     HumanRepositoryPage, HumanRun, HumanRunConclusion, HumanRunCursor, HumanRunDetail,
@@ -584,7 +584,11 @@ fn decode_run(row: &PgRow) -> Result<HumanRun, StoreError> {
         run_number,
         run_attempt,
         event_name: row.try_get("event_name").map_err(operation_error)?,
-        head_commit: HumanGitCommitId::new(row.try_get("head_sha").map_err(operation_error)?)?,
+        head_commit: GitObjectId::from_durable_bytes(
+            &row.try_get::<Vec<u8>, _>("head_sha")
+                .map_err(operation_error)?,
+        )
+        .map_err(|_| StoreError::corrupt_data("workflow run head digest is invalid"))?,
         status,
         conclusion,
         workflow_name: row.try_get("workflow_name").map_err(operation_error)?,

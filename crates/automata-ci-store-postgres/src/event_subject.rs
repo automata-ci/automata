@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use automata_ci_core::{OperationId, RunId, Sha256Digest, UnixMillis};
+use automata_ci_core::{GitObjectId, OperationId, RunId, Sha256Digest, UnixMillis};
 use automata_ci_store::{
     EVENT_CONTROL_SUBJECT_SCHEMA, EVENT_SUBJECT_ORIGIN_REGISTRY_VERSION,
     EVENT_SUBJECT_PROGRESS_SCHEMA, EVENT_SUBJECT_SELECTION_SCHEMA, EventControlSubject,
@@ -191,7 +191,7 @@ pub(super) async fn register_event_subject_in_transaction(
     .bind(origin.as_uuid())
     .bind(desired_selection.event_name())
     .bind(desired_selection.workflow_path())
-    .bind(desired_selection.source_revision())
+    .bind(desired_selection.source_revision().as_bytes())
     .bind(desired_selection.source_digest().as_bytes().as_slice())
     .bind(desired_selection.authority_digest().as_bytes().as_slice())
     .bind(desired_selection.selected_at().get())
@@ -432,8 +432,11 @@ fn decode_selection(row: &PgRow) -> Result<EventSubjectSelection, EventSubjectSt
             .map_err(operation_error)?,
         row.try_get::<String, _>("selection_workflow_path")
             .map_err(operation_error)?,
-        row.try_get::<String, _>("selection_source_revision")
-            .map_err(operation_error)?,
+        GitObjectId::from_durable_bytes(
+            &row.try_get::<Vec<u8>, _>("selection_source_revision")
+                .map_err(operation_error)?,
+        )
+        .map_err(|_| EventSubjectStoreError::CorruptData)?,
         digest_column(row, "selection_source_digest")?,
         digest_column(row, "selection_authority_digest")?,
         UnixMillis::new(row.try_get("selected_at_ms").map_err(operation_error)?),

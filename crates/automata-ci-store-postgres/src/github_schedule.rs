@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use automata_ci_core::{Sha256Digest, UnixMillis};
+use automata_ci_core::{GitObjectId, Sha256Digest, UnixMillis};
 use automata_ci_schedule::CronExpression;
 use sqlx::{AssertSqlSafe, PgPool, Postgres, Row as _, Transaction};
 use uuid::Uuid;
@@ -933,7 +933,7 @@ pub(crate) async fn validate_github_scheduled_run_evidence_in_transaction(
     .bind(command.snapshot_id().as_uuid())
     .bind(command.run_id().as_uuid())
     .bind(command.root_invocation_id().as_uuid())
-    .bind(command.head_sha())
+    .bind(command.head_sha().as_bytes())
     .bind(command.workflow_path())
     .bind(command.source().digest().as_bytes().as_slice())
     .bind(command.event().digest().as_bytes().as_slice())
@@ -973,7 +973,7 @@ fn require_scheduled_command(
         ) == source.github_repository_name
         && command.workflow_path() == source.workflow_path
         && command.git_ref() == source.default_branch_ref
-        && command.head_sha() == decode_sha1(&source.source_revision)?
+        && command.head_sha() == source.source_revision
         && command.source().digest().as_bytes().as_slice()
             == source.workflow_source_digest.as_slice()
         && command.event_name() == "schedule"
@@ -1025,7 +1025,7 @@ async fn link_scheduled_check_to_run(
     .bind(source.repository_id)
     .bind(source.connection_id)
     .bind(&source.workflow_path)
-    .bind(command.head_sha())
+    .bind(command.head_sha().as_bytes())
     .bind(source.registry_id)
     .fetch_optional(&mut **transaction)
     .await
@@ -1076,7 +1076,7 @@ async fn insert_scheduled_run_evidence(
     .bind(claim.claimed_at().get())
     .bind(claim.expires_at().get())
     .bind(subject_id)
-    .bind(command.head_sha())
+    .bind(command.head_sha().as_bytes())
     .bind(command.workflow_path())
     .bind(command.source().digest().as_bytes().as_slice())
     .bind(command.event().digest().as_bytes().as_slice())
@@ -1103,7 +1103,7 @@ struct ScheduledCheckSource {
     manifest_revision: i64,
     manifest_digest: Vec<u8>,
     default_branch_ref: String,
-    source_revision: String,
+    source_revision: GitObjectId,
     workflow_path: String,
     workflow_source_digest: Vec<u8>,
     provider_installation_id: i64,
@@ -1193,7 +1193,7 @@ async fn lock_scheduled_check_source(
         manifest_revision: row.try_get("manifest_revision").map_err(corrupt)?,
         manifest_digest: row.try_get("manifest_digest").map_err(corrupt)?,
         default_branch_ref: row.try_get("default_branch_ref").map_err(corrupt)?,
-        source_revision: row.try_get("source_revision").map_err(corrupt)?,
+        source_revision: git_object_id(&row, "source_revision")?,
         workflow_path: row.try_get("workflow_path").map_err(corrupt)?,
         workflow_source_digest: row.try_get("workflow_source_digest").map_err(corrupt)?,
         provider_installation_id: row.try_get("provider_installation_id").map_err(corrupt)?,
@@ -1238,7 +1238,7 @@ async fn load_exact_scheduled_check(
            AND subject.github_repository_id = $7
            AND subject.github_repository_name = $8
            AND subject.github_app_id = $9
-           AND subject.head_sha = decode($10, 'hex')
+           AND subject.head_sha = $10
            AND subject.check_name = $11
            AND evidence.registry_id = $12
            AND evidence.entry_ordinal = $13
@@ -1263,7 +1263,7 @@ async fn load_exact_scheduled_check(
         .bind(source.github_repository_id)
         .bind(&source.github_repository_name)
         .bind(source.github_app_id)
-        .bind(&source.source_revision)
+        .bind(source.source_revision.as_bytes())
         .bind(&source.check_name)
         .bind(source.registry_id)
         .bind(source.entry_ordinal)
@@ -1313,7 +1313,7 @@ async fn insert_scheduled_check(
             external_id, created_at_ms, desired_updated_at_ms
         ) VALUES (
             $1, $2, $3, 'scheduled_fire', NULL, $4, $5, $6,
-            $7, $8, $9, $10, decode($11, 'hex'), $12, $13, $14, $14
+            $7, $8, $9, $10, $11, $12, $13, $14, $14
         )
         RETURNING {columns}
         ",
@@ -1330,7 +1330,7 @@ async fn insert_scheduled_check(
         .bind(source.github_repository_id)
         .bind(&source.github_repository_name)
         .bind(source.github_app_id)
-        .bind(&source.source_revision)
+        .bind(source.source_revision.as_bytes())
         .bind(&source.check_name)
         .bind(&external_id)
         .bind(recorded_at.get())
@@ -1415,7 +1415,7 @@ async fn insert_scheduled_check_evidence(
             github_check_head_sha, recorded_at_ms
         ) VALUES (
             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-            $13, $14, $15, $16, $17, decode($11, 'hex'), $18
+            $13, $14, $15, $16, $17, $11, $18
         )
         ",
     )
@@ -1429,7 +1429,7 @@ async fn insert_scheduled_check_evidence(
     .bind(source.manifest_revision)
     .bind(&source.manifest_digest)
     .bind(&source.default_branch_ref)
-    .bind(&source.source_revision)
+    .bind(source.source_revision.as_bytes())
     .bind(source.github_repository_owner_id)
     .bind(authority.id)
     .bind(&authority.identity_digest)
@@ -1746,7 +1746,7 @@ async fn exact_registry_replay(
         i64::try_from(request.manifest().revision().get())
             .map_err(|_| GithubScheduleStoreError::CorruptData)?,
     )
-    .bind(request.source_revision())
+    .bind(request.source_revision().as_bytes())
     .bind(request.inventory_digest().as_bytes().as_slice())
     .fetch_optional(&mut **transaction)
     .await
@@ -2100,7 +2100,7 @@ async fn insert_registry_revision(
     .bind(request.manifest().digest().as_bytes().as_slice())
     .bind(i64_from_u64(request.repository_owner_id().get())?)
     .bind(request.manifest().git_ref())
-    .bind(request.source_revision())
+    .bind(request.source_revision().as_bytes())
     .bind(request.source_authority().as_durable_str())
     .bind(private.map(|selector| selector.authority_id().as_uuid()))
     .bind(private_identity_digest)
@@ -2662,7 +2662,7 @@ async fn load_claimed_fire(
         registry_id,
         manifest_revision,
         manifest_digest,
-        row.try_get("source_revision").map_err(corrupt)?,
+        git_object_id(&row, "source_revision")?,
         row.try_get("default_branch_ref").map_err(corrupt)?,
         archive,
         entry,
@@ -2750,6 +2750,14 @@ fn digest(
     Ok(Sha256Digest::from_bytes(bytes))
 }
 
+fn git_object_id(
+    row: &sqlx::postgres::PgRow,
+    column: &str,
+) -> Result<GitObjectId, GithubScheduleStoreError> {
+    let bytes = row.try_get::<Vec<u8>, _>(column).map_err(corrupt)?;
+    GitObjectId::from_durable_bytes(&bytes).map_err(|_| GithubScheduleStoreError::CorruptData)
+}
+
 fn checked_add(left: i64, right: i64) -> Result<i64, GithubScheduleStoreError> {
     left.checked_add(right)
         .filter(|value| *value >= 0)
@@ -2791,26 +2799,5 @@ fn schedule_admission_error(error: GithubScheduleStoreError) -> LogicalWorkflowA
     match error {
         GithubScheduleStoreError::Store(error) => error.into(),
         _ => StoreError::corrupt_data("scheduled GitHub claim evidence was rejected").into(),
-    }
-}
-
-fn decode_sha1(value: &str) -> Result<[u8; 20], LogicalWorkflowAdmissionStoreError> {
-    if value.len() != 40 {
-        return Err(StoreError::corrupt_data("scheduled source SHA is malformed").into());
-    }
-    let mut decoded = [0_u8; 20];
-    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
-        let high = hex_nibble(pair[0])?;
-        let low = hex_nibble(pair[1])?;
-        decoded[index] = (high << 4) | low;
-    }
-    Ok(decoded)
-}
-
-fn hex_nibble(value: u8) -> Result<u8, LogicalWorkflowAdmissionStoreError> {
-    match value {
-        b'0'..=b'9' => Ok(value - b'0'),
-        b'a'..=b'f' => Ok(value - b'a' + 10),
-        _ => Err(StoreError::corrupt_data("scheduled source SHA is malformed").into()),
     }
 }

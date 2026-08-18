@@ -14,8 +14,9 @@ pub use capability::{
     AuthorizationCodeLoginCapability, ChangedFileCapability, ChangedFileCompleteness,
     CommitStatusCapability, CommitStatusState, MembershipEvidenceCapability, PkceSupport,
     ProviderCapabilities, ProviderCapabilitiesError, ProviderCapability, ProviderCapabilityKind,
-    RepositoryEventCapability, RepositoryEventKind, RichCheckCapability, StatusHistoryModel,
-    WorkloadCredentialCapability, WorkloadCredentialProfile, WorkloadCredentialRevocation,
+    RepositoryEventCapability, RepositoryEventKind, RichCheckCapability, SourceReadCapability,
+    StatusHistoryModel, WorkloadCredentialCapability, WorkloadCredentialProfile,
+    WorkloadCredentialRevocation,
 };
 pub use identity::{
     ExternalDeliveryId, ExternalDeliveryIdentity, ExternalRepositoryId, ExternalRepositoryIdentity,

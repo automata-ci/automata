@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use automata_ci_core::GitObjectAlgorithm;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -90,6 +91,50 @@ pub enum PkceSupport {
     Supported,
     /// The provider does not implement PKCE.
     Unavailable,
+}
+
+/// Exact Git object formats readable by one provider source adapter.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(try_from = "UncheckedSourceReadCapability")]
+pub struct SourceReadCapability {
+    object_algorithms: BTreeSet<GitObjectAlgorithm>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UncheckedSourceReadCapability {
+    object_algorithms: BTreeSet<GitObjectAlgorithm>,
+}
+
+impl SourceReadCapability {
+    /// Creates source-read support for at least one exact Git object format.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an empty algorithm set because it would advertise no readable object.
+    pub fn new(
+        object_algorithms: impl IntoIterator<Item = GitObjectAlgorithm>,
+    ) -> Result<Self, ProviderCapabilitiesError> {
+        let object_algorithms = object_algorithms.into_iter().collect::<BTreeSet<_>>();
+        if object_algorithms.is_empty() {
+            return Err(ProviderCapabilitiesError::EmptySourceObjectAlgorithms);
+        }
+        Ok(Self { object_algorithms })
+    }
+
+    /// Returns the exact Git object formats accepted by source reads.
+    #[must_use]
+    pub const fn object_algorithms(&self) -> &BTreeSet<GitObjectAlgorithm> {
+        &self.object_algorithms
+    }
+}
+
+impl TryFrom<UncheckedSourceReadCapability> for SourceReadCapability {
+    type Error = ProviderCapabilitiesError;
+
+    fn try_from(value: UncheckedSourceReadCapability) -> Result<Self, Self::Error> {
+        Self::new(value.object_algorithms)
+    }
 }
 
 /// Declared repository events accepted by one adapter.
@@ -461,7 +506,7 @@ impl TryFrom<UncheckedMembershipEvidenceCapability> for MembershipEvidenceCapabi
 #[serde(tag = "kind", content = "configuration", rename_all = "snake_case")]
 pub enum ProviderCapability {
     /// Exact immutable repository source can be read.
-    SourceRead,
+    SourceRead(SourceReadCapability),
     /// Signed provider events can be normalized.
     RepositoryEvents(RepositoryEventCapability),
     /// Changed-file evidence can be read for declared events.
@@ -487,7 +532,7 @@ impl ProviderCapability {
     #[must_use]
     pub const fn kind(&self) -> ProviderCapabilityKind {
         match self {
-            Self::SourceRead => ProviderCapabilityKind::SourceRead,
+            Self::SourceRead(_) => ProviderCapabilityKind::SourceRead,
             Self::RepositoryEvents(_) => ProviderCapabilityKind::RepositoryEvents,
             Self::ChangedFiles(_) => ProviderCapabilityKind::ChangedFiles,
             Self::CommitStatus(_) => ProviderCapabilityKind::CommitStatus,
@@ -603,6 +648,9 @@ impl From<ProviderCapabilities> for Vec<ProviderCapability> {
 
 fn validate_capability(capability: &ProviderCapability) -> Result<(), ProviderCapabilitiesError> {
     match capability {
+        ProviderCapability::SourceRead(source) if source.object_algorithms().is_empty() => {
+            Err(ProviderCapabilitiesError::EmptySourceObjectAlgorithms)
+        }
         ProviderCapability::RepositoryEvents(events) if events.events().is_empty() => {
             Err(ProviderCapabilitiesError::EmptyRepositoryEvents)
         }
@@ -637,7 +685,7 @@ fn validate_capability(capability: &ProviderCapability) -> Result<(), ProviderCa
         {
             Err(ProviderCapabilitiesError::EmptyMembershipSubjectKinds)
         }
-        ProviderCapability::SourceRead
+        ProviderCapability::SourceRead(_)
         | ProviderCapability::RepositoryEvents(_)
         | ProviderCapability::ChangedFiles(_)
         | ProviderCapability::CommitStatus(_)
@@ -682,6 +730,9 @@ pub enum ProviderCapabilitiesError {
     /// A behavior class was declared more than once.
     #[error("provider capability {0:?} was declared more than once")]
     DuplicateCapability(ProviderCapabilityKind),
+    /// Source reads advertised no exact Git object algorithm.
+    #[error("source read capability must contain at least one Git object algorithm")]
+    EmptySourceObjectAlgorithms,
     /// Repository-event support contained no event class.
     #[error("repository event capability must contain at least one event")]
     EmptyRepositoryEvents,

@@ -74,7 +74,7 @@ fn provenance(path: &str) -> SourceProvenance {
         SourceId::new(path),
         SourceOrigin::Repository {
             repository: Arc::from(REPOSITORY),
-            revision: Arc::from(REVISION),
+            revision: automata_ci_core::GitObjectId::from_provider_hex(REVISION).expect("revision"),
             path: Arc::from(path),
         },
     )
@@ -94,7 +94,9 @@ fn compile_report(source: &str, path: &str) -> CompilationReport {
             parsed.plan().expect("source plan"),
             WorkflowEventProvenance::new("github", "workflow_dispatch")
                 .with_delivery_id("matrix-differential")
-                .with_commit_sha(REVISION)
+                .with_commit_sha(
+                    automata_ci_core::GitObjectId::from_provider_hex(REVISION).expect("revision"),
+                )
                 .with_git_ref("refs/heads/main"),
         )
         .with_event_metadata(GithubEventMetadata::workflow_dispatch(dispatch)),

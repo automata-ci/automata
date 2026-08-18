@@ -316,6 +316,7 @@ version = "0.1.0"
 dependencies = [
  "automata-ci-action",
  "automata-ci-blob-s3",
+ "automata-ci-core",
  "automata-ci-github",
  "automata-ci-scm",
  "bytes",
@@ -766,6 +767,7 @@ dependencies = [
 name = "automata-ci-provider"
 version = "0.1.0"
 dependencies = [
+ "automata-ci-core",
  "serde",
  "serde_json",
  "thiserror",

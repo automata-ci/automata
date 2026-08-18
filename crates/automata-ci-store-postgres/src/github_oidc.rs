@@ -1,7 +1,7 @@
 use std::{collections::BTreeMap, fmt, sync::Arc};
 
 use async_trait::async_trait;
-use automata_ci_core::Sha256Digest;
+use automata_ci_core::{GitObjectId, Sha256Digest};
 use automata_ci_oidc_github::{
     AuthorizedOidcIssuance, OidcAudience, OidcAuthorityId, OidcClaimSet, OidcIssuance,
     OidcIssuanceRepository, OidcKeyId, OidcRepositoryError, OidcRepositoryErrorKind, OidcSubject,
@@ -49,7 +49,7 @@ struct CurrentExecutionRow {
     workflow_path: String,
     event_name: String,
     git_ref: String,
-    head_sha: Vec<u8>,
+    head_sha: GitObjectId,
     workflow_name: String,
     run_number: i64,
     run_attempt: i32,
@@ -977,7 +977,11 @@ fn decode_current_execution(
         workflow_path: field!("workflow_path"),
         event_name: field!("event_name"),
         git_ref: field!("git_ref"),
-        head_sha: field!("github_check_head_sha"),
+        head_sha: GitObjectId::from_durable_bytes(
+            &row.try_get::<Vec<u8>, _>("github_check_head_sha")
+                .map_err(|_| GithubOidcStoreError::CorruptData)?,
+        )
+        .map_err(|_| GithubOidcStoreError::CorruptData)?,
         workflow_name: field!("workflow_name"),
         run_number: field!("run_number"),
         run_attempt: field!("run_attempt"),
@@ -1050,8 +1054,6 @@ fn derive_authority_policy(
         || current.github_owner_id <= 0
         || current.run_number <= 0
         || current.run_attempt <= 0
-        || current.head_sha.len() != 20
-        || current.head_sha.iter().all(|byte| *byte == 0)
     {
         return Err(GithubOidcStoreError::CorruptData);
     }
@@ -1072,7 +1074,7 @@ fn derive_authority_policy(
     let subject = OidcSubject::new(subject).map_err(|_| GithubOidcStoreError::CorruptData)?;
     let default_audience = OidcAudience::new(format!("https://github.com/{repository_owner}"))
         .map_err(|_| GithubOidcStoreError::CorruptData)?;
-    let head_sha = lowercase_hex(&current.head_sha);
+    let head_sha = current.head_sha.to_string();
     let additional_claims = OidcClaimSet::new([
         ("event_name".to_owned(), current.event_name.clone()),
         ("ref".to_owned(), current.git_ref.clone()),
@@ -1121,16 +1123,6 @@ fn derive_authority_policy(
         default_audience,
         additional_claims,
     })
-}
-
-fn lowercase_hex(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut encoded = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
-        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
-    }
-    encoded
 }
 
 #[allow(clippy::too_many_lines)] // One auditable bind sequence commits the exact authority tuple.

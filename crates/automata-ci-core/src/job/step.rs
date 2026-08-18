@@ -436,12 +436,12 @@ impl SemanticStep {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ActionReference {
-    /// Action content fetched from an immutable repository revision.
+    /// Action content fetched from a provider repository selector.
     Repository {
         /// Credential-free provider repository identity.
         repository: String,
-        /// Immutable revision selected by planning.
-        revision: String,
+        /// Provider-native branch, tag, or object selector resolved before execution.
+        selector: String,
         /// Optional path to an action below the repository root.
         subpath: Option<String>,
     },
@@ -462,14 +462,14 @@ impl ActionReference {
         match self {
             Self::Repository {
                 repository,
-                revision,
+                selector,
                 ..
             } => {
                 if repository.trim().is_empty() {
                     return Err(JobValidationError::EmptyField("action repository"));
                 }
-                if revision.trim().is_empty() {
-                    return Err(JobValidationError::EmptyField("action revision"));
+                if selector.trim().is_empty() {
+                    return Err(JobValidationError::EmptyField("action selector"));
                 }
             }
             Self::Local { path } if path.trim().is_empty() => {

@@ -2788,8 +2788,8 @@ mod tests {
         LogStreamId, RunId, Sha256Digest, UnixMillis, WorkflowId,
     };
     use automata_ci_store::{
-        DocumentSchema, HumanAuthorizationTarget, HumanGitCommitId, HumanJob, HumanJobAttempt,
-        HumanJobDetail, HumanJobNavigation, HumanLogSegment, HumanLogSegmentPage, HumanLogStream,
+        DocumentSchema, HumanAuthorizationTarget, HumanJob, HumanJobAttempt, HumanJobDetail,
+        HumanJobNavigation, HumanLogSegment, HumanLogSegmentPage, HumanLogStream,
         HumanOutputPublication, HumanRawLogDisposition, HumanRepository, HumanRepositoryCursor,
         HumanRepositoryPage, HumanRun, HumanRunConclusion, HumanRunCursor, HumanRunPageDirection,
         HumanRunPublication, HumanWorkflow, HumanWorkflowReadRepository, JobIrMetadata, ObjectKey,
@@ -3339,7 +3339,8 @@ mod tests {
             run_number: 42,
             run_attempt: 1,
             event_name: "push".to_owned(),
-            head_commit: HumanGitCommitId::new(vec![7; 20]).expect("commit ID"),
+            head_commit: automata_ci_core::GitObjectId::from_durable_bytes(&[7; 20])
+                .expect("commit ID"),
             status: WorkflowRunStatus::Completed,
             conclusion: Some(HumanRunConclusion::Lost),
             workflow_name: "CI".to_owned(),
@@ -4395,7 +4396,8 @@ mod tests {
             run_number: 1,
             run_attempt: 1,
             event_name: "\u{202e}".to_owned(),
-            head_commit: HumanGitCommitId::new(vec![7; 20]).expect("commit ID"),
+            head_commit: automata_ci_core::GitObjectId::from_durable_bytes(&[7; 20])
+                .expect("commit ID"),
             status: WorkflowRunStatus::Completed,
             conclusion: Some(HumanRunConclusion::Success),
             workflow_name: "\u{200b}".to_owned(),

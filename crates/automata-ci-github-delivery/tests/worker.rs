@@ -6,6 +6,7 @@ use std::{
 use async_trait::async_trait;
 use automata_ci_auth::secret::SecretString;
 use automata_ci_blob::{BlobDescriptor, BlobKey, BlobStoreErrorKind, MediaType};
+use automata_ci_core::GitObjectId;
 use automata_ci_core::{Sha256Digest, UnixMillis};
 use automata_ci_github::{GITHUB_RAW_EVENT_OBJECT_KEY_PREFIX, GithubPushRefKind};
 use automata_ci_github_delivery::{
@@ -17,16 +18,16 @@ use automata_ci_github_delivery::{
 };
 use automata_ci_provider::ProviderConnectionId;
 use automata_ci_scm::{
-    ArchiveFormat, ExactRevision, RepositoryId as ScmRepositoryId, RepositorySnapshot,
-    RepositorySource, RepositorySourcePort, RepositorySourceRequest, ResolvedRevision, ScmError,
-    ScmProvider, ScmProviderId, SnapshotRequest,
+    ArchiveFormat, RepositoryId as ScmRepositoryId, RepositorySnapshot, RepositorySource,
+    RepositorySourcePort, RepositorySourceRequest, ScmError, ScmProvider, ScmProviderId,
+    SnapshotRequest,
 };
 use automata_ci_store::{
     AcceptManifestPinnedGithubRepositoryDispatch, AcceptProviderDelivery, AdmissionObject,
     ClaimProviderDelivery, ClaimedProviderDelivery, CompleteProviderDelivery,
-    GithubAuthenticatedEvent, GithubAuthenticatedEventKind, GithubCheckHeadSha, GithubCheckName,
-    GithubCheckSubjectId, GithubProviderGitRef, GithubProviderManifest,
-    GithubProviderManifestLimits, GithubProviderManifestRevision, GithubProviderOrigins,
+    GithubAuthenticatedEvent, GithubAuthenticatedEventKind, GithubCheckName, GithubCheckSubjectId,
+    GithubProviderGitRef, GithubProviderManifest, GithubProviderManifestLimits,
+    GithubProviderManifestRevision, GithubProviderOrigins,
     GithubProviderWebhookVerifierFingerprint, GithubRepositoryDispatchEvidenceRepository,
     GithubRepositoryDispatchResolution, GithubRepositoryDispatchResolutionAuthority,
     GithubRepositoryName, GithubServerServiceAppClientId, GithubServerServiceAppId,
@@ -138,7 +139,7 @@ impl RepositorySourcePort for RecordingSourcePort {
             .expect("source observations lock")
             .push(SourceObservation {
                 repository: request.repository().as_str().to_owned(),
-                revision: request.revision().as_str().to_owned(),
+                revision: request.revision().to_string(),
                 credential_present: request.credential().is_some(),
                 credential_matches: request
                     .credential()
@@ -321,7 +322,7 @@ impl GithubDeliveryWorkflowProcessor for RecordingProcessor {
                 .push(WorkflowObservation {
                     path: request.workflow_path().to_owned(),
                     ref_kind: push.git_ref().kind(),
-                    revision: request.repository_source().revision().as_str().to_owned(),
+                    revision: request.repository_source().revision().to_string(),
                     source_bytes: request.workflow_source().len(),
                     manifest_revision: request.manifest_pinned_evidence().manifest_revision().get(),
                     private_source_authority_present: request
@@ -339,7 +340,7 @@ impl GithubDeliveryWorkflowProcessor for RecordingProcessor {
                 event_name: request.event().event_name().to_owned(),
                 event_envelope_digest: request.event_envelope().digest(),
                 git_ref: event.git_ref().to_owned(),
-                revision: request.repository_source().revision().as_str().to_owned(),
+                revision: request.repository_source().revision().to_string(),
                 raw_media_type: request.raw_event().media_type().to_owned(),
                 raw_body: request.event().raw_body().clone(),
                 debug: format!("{request:?}"),
@@ -459,7 +460,7 @@ impl ProviderDeliveryRepository for RecordingDeliveries {
 struct FixtureSubjectEvidence(ManifestPinnedGithubDeliveryEvidence);
 
 impl FixtureSubjectEvidence {
-    fn from_claimed(claimed: &ClaimedProviderDelivery, check_head_sha: GithubCheckHeadSha) -> Self {
+    fn from_claimed(claimed: &ClaimedProviderDelivery, check_head_sha: GitObjectId) -> Self {
         let identity = claimed.identity();
         let repository_owner_id =
             ProviderRepositoryOwnerId::new(REPOSITORY_OWNER_ID).expect("owner ID");
@@ -486,7 +487,7 @@ impl FixtureSubjectEvidence {
 
     fn historical(
         claimed: &ClaimedProviderDelivery,
-        check_head_sha: GithubCheckHeadSha,
+        check_head_sha: GitObjectId,
         manifest_revision: u64,
         seed: u128,
     ) -> Self {
@@ -578,7 +579,7 @@ impl FixtureSubjectEvidence {
 
     fn authenticated_event(
         claimed: &ClaimedProviderDelivery,
-        check_head_sha: GithubCheckHeadSha,
+        check_head_sha: GitObjectId,
         kind: GithubAuthenticatedEventKind,
         git_ref: &str,
     ) -> Self {
@@ -773,7 +774,7 @@ struct ClaimedFixture {
     receipt: ProviderDeliveryReceipt,
     descriptor: BlobDescriptor,
     body: Bytes,
-    check_head_sha: GithubCheckHeadSha,
+    check_head_sha: GitObjectId,
 }
 
 fn claimed_with_event_envelope(
@@ -1043,7 +1044,7 @@ fn repository_source(archive: Bytes) -> RepositorySource {
     RepositorySource::from_bytes(
         ScmProviderId::new("github").expect("provider"),
         ScmRepositoryId::new(format!("{OWNER}/{REPOSITORY}")).expect("repository"),
-        ExactRevision::new(AFTER).expect("revision"),
+        GitObjectId::from_provider_hex(AFTER).expect("revision"),
         ArchiveFormat::TarGzip,
         archive,
     )
@@ -1054,7 +1055,7 @@ fn repository_snapshot(archive: Bytes, resolved_revision: &str) -> RepositorySna
         ScmProviderId::new("github").expect("provider"),
         ScmRepositoryId::new(format!("{OWNER}/{REPOSITORY}")).expect("repository"),
         automata_ci_scm::RevisionSpec::new("refs/heads/main").expect("default branch"),
-        ResolvedRevision::new(resolved_revision).expect("resolved revision"),
+        GitObjectId::from_provider_hex(resolved_revision).expect("resolved revision"),
         ArchiveFormat::TarGzip,
         archive,
     )

@@ -16,7 +16,12 @@ fn compile(
         parsed.plan().expect("source plan"),
         WorkflowEventProvenance::new("github", event_name)
             .with_delivery_id("synthetic-event-configuration")
-            .with_commit_sha("0123456789abcdef0123456789abcdef01234567")
+            .with_commit_sha(
+                automata_ci_core::GitObjectId::from_provider_hex(
+                    "0123456789abcdef0123456789abcdef01234567",
+                )
+                .expect("revision"),
+            )
             .with_git_ref("refs/heads/main"),
         metadata,
     )
