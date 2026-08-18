@@ -2,7 +2,7 @@ use std::{
     fmt,
     num::NonZeroU16,
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -29,6 +29,7 @@ use sha2::{Digest as _, Sha256};
 use subtle::ConstantTimeEq as _;
 use zeroize::Zeroizing;
 
+use crate::events::OperationSerialization;
 use crate::{ExecutionEventError, content::ContentOperationCoordinator, endpoint_result};
 
 const ENDPOINT_REPLAY_SCHEMA_VERSION: u16 = 3;
@@ -38,7 +39,7 @@ pub(crate) struct DurableExecutionEndpoint {
     journal: Arc<dyn RunnerJournal>,
     spool: Arc<dyn DurableContentStore>,
     content_operations: Arc<ContentOperationCoordinator>,
-    serial: Arc<Mutex<()>>,
+    operation_serial: Arc<OperationSerialization>,
     session_id: RunnerSessionId,
     slot: RunnerSlotOrdinal,
     guard: LeaseGuard,
@@ -71,7 +72,7 @@ impl DurableExecutionEndpoint {
         journal: Arc<dyn RunnerJournal>,
         spool: Arc<dyn DurableContentStore>,
         content_operations: Arc<ContentOperationCoordinator>,
-        serial: Arc<Mutex<()>>,
+        operation_serial: Arc<OperationSerialization>,
         session_id: RunnerSessionId,
         slot: RunnerSlotOrdinal,
         guard: LeaseGuard,
@@ -110,7 +111,7 @@ impl DurableExecutionEndpoint {
             journal,
             spool,
             content_operations,
-            serial,
+            operation_serial,
             session_id,
             slot,
             guard,
@@ -138,9 +139,9 @@ impl DurableExecutionEndpoint {
         decode: impl FnOnce(&[u8]) -> Result<Result<T, ExecutionError>, ()>,
     ) -> Result<RunResult<T>, ExecutionError> {
         let _serial = self
-            .serial
+            .operation_serial
             .lock()
-            .map_err(|_| execution_error(ExecutionErrorKind::LocalStorage, stage))?;
+            .map_err(|()| execution_error(ExecutionErrorKind::LocalStorage, stage))?;
         let prepared = self.prepare(operation_id, kind, &request_digest, reservation, stage)?;
         if let PreparedOperation::Replay(bytes) = prepared {
             let decoded = decode(&bytes)

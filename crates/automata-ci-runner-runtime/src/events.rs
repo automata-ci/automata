@@ -35,7 +35,27 @@ pub(crate) struct DurableExecutionEvents {
     limits: ProtocolLimits,
     content_operations: Arc<ContentOperationCoordinator>,
     cancellation: ExecutionCancellation,
-    serial: Arc<std::sync::Mutex<()>>,
+    log_serial: Arc<LogSerialization>,
+    operation_serial: Arc<OperationSerialization>,
+}
+
+/// Serializes durable provider and endpoint operations without blocking logs.
+#[derive(Debug, Default)]
+pub(crate) struct OperationSerialization(std::sync::Mutex<()>);
+
+impl OperationSerialization {
+    pub(crate) fn lock(&self) -> Result<std::sync::MutexGuard<'_, ()>, ()> {
+        self.0.lock().map_err(|_| ())
+    }
+}
+
+#[derive(Debug, Default)]
+struct LogSerialization(std::sync::Mutex<()>);
+
+impl LogSerialization {
+    fn lock(&self) -> Result<std::sync::MutexGuard<'_, ()>, ()> {
+        self.0.lock().map_err(|_| ())
+    }
 }
 
 struct LoadedLogTail {
@@ -121,7 +141,8 @@ impl DurableExecutionEvents {
             limits,
             content_operations,
             cancellation,
-            serial: Arc::new(std::sync::Mutex::new(())),
+            log_serial: Arc::new(LogSerialization::default()),
+            operation_serial: Arc::new(OperationSerialization::default()),
         }
     }
 
@@ -444,9 +465,9 @@ impl DurableExecutionEvents {
 
     fn emit_log_blocking(&self, event: &PendingLogRecord) -> Result<(), ExecutionEventError> {
         let _serial = self
-            .serial
+            .log_serial
             .lock()
-            .map_err(|_| ExecutionEventError::InvalidEvent)?;
+            .map_err(|()| ExecutionEventError::InvalidEvent)?;
         self.emit_log_serialized(event)
     }
 
@@ -469,9 +490,9 @@ impl DurableExecutionEvents {
 
     pub(crate) fn ensure_log_stream_closed(&self) -> Result<(), ExecutionEventError> {
         let _serial = self
-            .serial
+            .log_serial
             .lock()
-            .map_err(|_| ExecutionEventError::InvalidEvent)?;
+            .map_err(|()| ExecutionEventError::InvalidEvent)?;
         let stream_id = self.stream_id();
         let snapshot = self
             .journal
@@ -516,7 +537,7 @@ impl ExecutionEvents for DurableExecutionEvents {
             self.journal.clone(),
             self.spool.clone(),
             self.content_operations.clone(),
-            self.serial.clone(),
+            self.operation_serial.clone(),
             self.session.session_id(),
             self.slot,
             self.guard,
@@ -558,9 +579,9 @@ impl ExecutionEvents for DurableExecutionEvents {
         kind: ProviderOperationKind,
     ) -> Result<OperationId, ExecutionEventError> {
         let _serial = self
-            .serial
+            .operation_serial
             .lock()
-            .map_err(|_| ExecutionEventError::InvalidEvent)?;
+            .map_err(|()| ExecutionEventError::InvalidEvent)?;
         let snapshot = self
             .journal
             .snapshot()
