@@ -102,7 +102,7 @@ async fn shipped_runner_process_executes_a_claimed_isolated_job_with_action_runt
     let root = TemporaryRoot::new();
     let runner_id = RunnerId::new();
     let session_id = RunnerSessionId::new();
-    let pki = TestPki::new();
+    let pki = TestPki::new(runner_id);
     let (job, event, runtime_context) = process_job();
     let expected_s3_paths = [
         event.fixture_path(),
@@ -130,21 +130,13 @@ async fn shipped_runner_process_executes_a_claimed_isolated_job_with_action_runt
 
     let s3 = S3Fixture::spawn([event, runtime_context]).await;
     let control = RunningControlServer::spawn(&pki, handler.clone()).await;
-    let config_path = write_runner_config(root.path(), runner_id, control.address, s3.address);
+    let config_path =
+        write_runner_config(root.path(), runner_id, &pki, control.address, s3.address);
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_automata-runner"))
         .arg("run")
         .arg("--config")
         .arg(&config_path)
-        .env("AUTOMATA_PROCESS_E2E_SERVER_ROOTS_PEM", pki.root_pem())
-        .env(
-            "AUTOMATA_PROCESS_E2E_CERTIFICATE_CHAIN_PEM",
-            pki.client.certificate_chain_pem(),
-        )
-        .env(
-            "AUTOMATA_PROCESS_E2E_PRIVATE_KEY_PEM",
-            pki.client.private_key_pem(),
-        )
         .env("AUTOMATA_PROCESS_E2E_SPOOL_KEY_HEX", "11".repeat(32))
         .env("AUTOMATA_PROCESS_E2E_S3_ACCESS_KEY", "process-access")
         .env("AUTOMATA_PROCESS_E2E_S3_SECRET_KEY", "process-secret")
@@ -222,8 +214,14 @@ async fn shipped_runner_process_executes_a_claimed_isolated_job_with_action_runt
         RuntimeAuthorityProgress::Acknowledged,
         "runner did not acknowledge durable adoption of the runtime-authority bundle"
     );
-    assert_eq!(observation.conclusion, Some(JobConclusion::Success));
     let logs = String::from_utf8_lossy(&observation.logs);
+    assert_eq!(
+        observation.conclusion,
+        Some(JobConclusion::Success),
+        "runner job failed; logs={logs:?}; stdout={:?}; stderr={:?}",
+        String::from_utf8_lossy(&stdout),
+        String::from_utf8_lossy(&stderr),
+    );
     assert!(
         logs.contains(SENTINEL),
         "real isolated-shell output did not reach the control plane; logs={logs:?}; stdout={:?}; stderr={:?}",
@@ -1104,7 +1102,7 @@ struct TestPki {
 }
 
 impl TestPki {
-    fn new() -> Self {
+    fn new(runner_id: RunnerId) -> Self {
         let root = certificate_authority();
         let server = leaf_identity(
             "automata process e2e server",
@@ -1113,7 +1111,7 @@ impl TestPki {
             &root,
         );
         let client = leaf_identity(
-            "runner.process-e2e",
+            &runner_id.to_string(),
             Vec::new(),
             ExtendedKeyUsagePurpose::ClientAuth,
             &root,
@@ -1135,6 +1133,10 @@ impl TestPki {
 
     fn root_pem(&self) -> String {
         pem("CERTIFICATE", &self.root)
+    }
+
+    fn client_certificate_chain_pem(&self) -> String {
+        format!("{}{}", self.client.certificate_chain_pem(), self.root_pem())
     }
 
     fn server_tls(&self) -> ServerTlsConfig {
@@ -1192,6 +1194,7 @@ fn pem(label: &str, der: &[u8]) -> String {
 fn write_runner_config(
     root: &Path,
     runner_id: RunnerId,
+    pki: &TestPki,
     control_address: SocketAddr,
     s3_address: SocketAddr,
 ) -> PathBuf {
@@ -1205,6 +1208,14 @@ fn write_runner_config(
     let template_sha256 = process_profile_digest().to_string();
     let storage_volume_uuid = required_macos_vm_environment(VM_STORAGE_VOLUME_UUID_ENV);
     let storage_quota_bytes = required_macos_storage_quota_bytes();
+    let server_roots = write_restricted_file(root, "server-roots.pem", pki.root_pem());
+    let certificate_chain = write_restricted_file(
+        root,
+        "runner-certificate-chain.pem",
+        pki.client_certificate_chain_pem(),
+    );
+    let private_key =
+        write_restricted_file(root, "runner-private-key.pem", pki.client.private_key_pem());
     let config = json!({
         "schema_version": RUNNER_PRODUCT_CONFIG_SCHEMA_VERSION,
         "runner_id": runner_id.to_string(),
@@ -1215,9 +1226,9 @@ fn write_runner_config(
             "macos_virtualization": virtualization,
         },
         "tls": {
-            "server_roots": {"kind": "environment", "name": "AUTOMATA_PROCESS_E2E_SERVER_ROOTS_PEM"},
-            "certificate_chain": {"kind": "environment", "name": "AUTOMATA_PROCESS_E2E_CERTIFICATE_CHAIN_PEM"},
-            "private_key": {"kind": "environment", "name": "AUTOMATA_PROCESS_E2E_PRIVATE_KEY_PEM"},
+            "server_roots": {"kind": "file", "path": server_roots},
+            "certificate_chain": {"kind": "file", "path": certificate_chain},
+            "private_key": {"kind": "file", "path": private_key},
         },
         "spool": {
             "protection_id": "macos-process-e2e-key-v1",
@@ -1312,6 +1323,15 @@ fn write_runner_config(
     fs::set_permissions(&config_path, fs::Permissions::from_mode(0o600))
         .expect("restrict runner config");
     config_path
+}
+
+#[cfg(target_os = "macos")]
+fn write_restricted_file(root: &Path, name: &str, contents: String) -> PathBuf {
+    let path = root.join(name);
+    fs::write(&path, contents).expect("write process E2E TLS fixture");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+        .expect("restrict process E2E TLS fixture");
+    path
 }
 
 #[cfg(target_os = "macos")]
