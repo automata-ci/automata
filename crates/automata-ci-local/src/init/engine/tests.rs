@@ -1499,6 +1499,7 @@ async fn live_read_only_helper_consumes_stdin_eof_and_rejects_a_truncated_prefix
         state.authority_sha256(),
         &material_root,
         desired_sha256,
+        Sha256Digest::from_bytes([0x51; 32]),
     );
     for (role, name) in &names {
         assert!(

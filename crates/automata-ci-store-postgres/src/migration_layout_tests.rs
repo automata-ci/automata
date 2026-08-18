@@ -277,6 +277,10 @@ const CANONICAL_MIGRATIONS: &[(&str, &str)] = &[
         "0068_provider_credential_envelope_revisions.sql",
         "6f8805e0a386ac29de076173d29d1cd62dc7f68c8b318edc014bd206200126d8748ec93a607b18b703216932c4d760db",
     ),
+    (
+        "0052_installation_runner_bootstrap.sql",
+        "db3b304e34e7aa4082aca161d945333253a64983a1bad76d48f48145c006c27715f2926ed916e076d1156dd648da7831",
+    ),
 ];
 
 const BASELINE_MIGRATION_COUNT: u32 = 26;
@@ -1025,6 +1029,51 @@ fn provider_workflow_result_identity_is_unique_and_provider_neutral() {
         assert!(
             !source.contains(forbidden),
             "workflow-result identity retained provider-specific or transitional surface: {forbidden}",
+        );
+    }
+}
+
+#[test]
+fn installation_runner_bootstrap_has_closed_authority_and_refresh_contracts() {
+    let source = include_str!("../migrations/0052_installation_runner_bootstrap.sql");
+
+    for required in [
+        "ALTER TABLE human_auth_installation_state\n    RENAME TO installation_state",
+        "configuration_mode IN ('human', 'deployment')",
+        "state = 'configured'\n            AND configuration_mode = 'deployment'",
+        "installation_state_deployment_completion_exact",
+        "installation_state_configured_immutable",
+        "installation_state_deployment_authority_unique",
+        "issuer_kind IN ('human', 'installation_bootstrap')",
+        "runner_enrollment_tokens_issuer_shape",
+        "runner_enrollment_tokens_installation_authority_fkey",
+        "ADD COLUMN last_refreshed_at_ms bigint",
+        "COALESCE(last_refreshed_at_ms, issued_at_ms)",
+        "DROP CONSTRAINT runner_enrollment_tokens_consumption_shape",
+        "consumed_at_ms >=\n                COALESCE(last_refreshed_at_ms, issued_at_ms)",
+        "OLD.issuer_kind = 'installation_bootstrap'",
+        "OLD.consumed_at_ms IS NULL",
+        "OLD.expires_at_ms <=",
+        "NEW.last_refreshed_at_ms IS NOT NULL",
+        "NEW.last_refreshed_at_ms >= OLD.expires_at_ms",
+        "NEW.expires_at_ms - NEW.last_refreshed_at_ms = 3600000",
+        "runner_enrollment_tokens_consume_once",
+    ] {
+        assert!(
+            source.contains(required),
+            "installation-bootstrap migration lost required contract: {required}"
+        );
+    }
+    for forbidden in [
+        "ADD COLUMN IF NOT EXISTS",
+        "ADD CONSTRAINT IF NOT EXISTS",
+        "CREATE TABLE IF NOT EXISTS",
+        "DROP CONSTRAINT IF EXISTS",
+        "DROP TRIGGER IF EXISTS",
+    ] {
+        assert!(
+            !source.contains(forbidden),
+            "installation-bootstrap migration retained compatibility DDL: {forbidden}"
         );
     }
 }

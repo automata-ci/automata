@@ -2,8 +2,11 @@ use super::*;
 
 #[test]
 fn epoch_domains_are_versioned_and_distinct() {
-    assert_ne!(EPOCH_FINGERPRINT_DOMAIN, MATERIAL_KDF_DOMAIN);
-    assert!(EPOCH_FINGERPRINT_DOMAIN.ends_with(&[0]));
+    assert_ne!(EPOCH_FINGERPRINT_DOMAIN_V1, MATERIAL_KDF_DOMAIN);
+    assert_ne!(EPOCH_FINGERPRINT_DOMAIN_V2, MATERIAL_KDF_DOMAIN);
+    assert_ne!(EPOCH_FINGERPRINT_DOMAIN_V1, EPOCH_FINGERPRINT_DOMAIN_V2);
+    assert!(EPOCH_FINGERPRINT_DOMAIN_V1.ends_with(&[0]));
+    assert!(EPOCH_FINGERPRINT_DOMAIN_V2.ends_with(&[0]));
     assert!(MATERIAL_KDF_DOMAIN.ends_with(&[0]));
 }
 
@@ -118,6 +121,92 @@ fn standalone_epoch_decode_recomputes_authority_material_and_identity() {
         )
         .unwrap_err()
         .code(),
+        LocalInitErrorCode::ResetRequired
+    );
+}
+
+#[test]
+fn exact_parent_v1_golden_remains_status_and_reset_decodable_but_not_lifecycle_current() {
+    let installation = crate::Installation::verified(
+        crate::InstallationName::default(),
+        "11111111-1111-4111-8111-111111111111"
+            .parse()
+            .expect("fixed UUIDv4"),
+    );
+    let epoch = legacy_test_epoch(&installation, &[7; 32], Sha256Digest::from_bytes([5; 32]));
+    let golden = include_bytes!("immutable-epoch-v1.golden.json");
+    let actual = epoch.canonical_bytes();
+    assert_eq!(
+        actual.as_slice(),
+        golden,
+        "lengths actual={} golden={}; first difference={:?}",
+        actual.len(),
+        golden.len(),
+        actual
+            .iter()
+            .zip(golden)
+            .position(|(actual, golden)| actual != golden)
+    );
+    assert_eq!(
+        epoch.fingerprint().to_string(),
+        "86a6bc41fb7135a6d8dd7deee397f5149b73b75d56d23903162c29d1ce7c7b05"
+    );
+    let decoded =
+        ImmutableEpoch::from_authority_bound_bytes(golden, Sha256Digest::from_bytes([5; 32]))
+            .expect("status/reset decoder preserves exact v1 custody");
+    assert_eq!(decoded, epoch);
+    assert_eq!(
+        decoded
+            .require_current_lifecycle_contract()
+            .unwrap_err()
+            .code(),
+        LocalInitErrorCode::ResetRequired
+    );
+}
+
+#[test]
+fn v2_binds_current_source_and_desired_plan_across_replay() {
+    let (epoch, _) = standalone_epoch();
+    epoch
+        .require_current_lifecycle_contract()
+        .expect("exact v2 contract is current");
+
+    let mut wrong_source = epoch.clone();
+    wrong_source.catalog.source_contract_sha256 = Some(Sha256Digest::from_bytes([0x91; 32]));
+    wrong_source.epoch_fingerprint = wrong_source.recompute_fingerprint();
+    assert_eq!(
+        wrong_source
+            .require_current_lifecycle_contract()
+            .unwrap_err()
+            .code(),
+        LocalInitErrorCode::ResetRequired
+    );
+
+    let mut changed_plan = epoch.clone();
+    changed_plan.desired_plan_sha256 = Some(Sha256Digest::from_bytes([0x92; 32]));
+    assert_eq!(
+        ImmutableEpoch::from_authority_bound_bytes(
+            &changed_plan.canonical_bytes(),
+            Sha256Digest::from_bytes([5; 32]),
+        )
+        .unwrap_err()
+        .code(),
+        LocalInitErrorCode::ResetRequired
+    );
+    changed_plan.epoch_fingerprint = changed_plan.recompute_fingerprint();
+    assert_eq!(
+        ImmutableEpoch::from_canonical_bytes(&changed_plan.canonical_bytes(), &epoch)
+            .unwrap_err()
+            .code(),
+        LocalInitErrorCode::ResetRequired
+    );
+
+    let installation = epoch.installation().unwrap();
+    let legacy = legacy_test_epoch(&installation, &[7; 32], Sha256Digest::from_bytes([5; 32]));
+    assert_eq!(
+        ImmutableEpoch::from_canonical_bytes(&legacy.canonical_bytes(), &epoch)
+            .unwrap_err()
+            .code(),
         LocalInitErrorCode::ResetRequired
     );
 }

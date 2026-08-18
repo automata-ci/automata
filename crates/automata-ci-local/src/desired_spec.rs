@@ -1,20 +1,20 @@
 //! Canonical, credential-free desired intent for one local installation.
 
-use std::{net::Ipv4Addr, num::NonZeroU16};
+use std::{net::Ipv4Addr, num::NonZeroU16, str::FromStr as _};
 
-use automata_ci_core::{EnvironmentProfile, Sha256Digest};
+use automata_ci_core::{EnvironmentProfile, EnvironmentProfileId, Sha256Digest};
 use automata_ci_execution::ImmutableImage;
 use automata_ci_runner_journal::MAX_JOURNALED_SLOTS;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
 use crate::{
     ComposeProjectName, EngineArchitecture, Installation, InstallationId, InstallationSelectorKey,
-    LocalImportedImage,
+    LocalImportedImage, MAX_LOCAL_DESIRED_SPEC_BYTES,
 };
 
-const DESIRED_SPEC_SCHEMA: &str = "automata.local/desired-spec/v1";
+pub(crate) const DESIRED_SPEC_SCHEMA: &str = "automata.local/desired-spec/v1";
 const PLAN_DIGEST_DOMAIN: &[u8] = b"automata/local/desired-plan/v1\0";
 
 const AMD64_PROFILE_ID: &str = "automata.dev/github-hosted-ubuntu-24-04-x64-v1";
@@ -54,6 +54,21 @@ impl LocalProfile {
             image,
         })
     }
+
+    #[must_use]
+    pub(crate) const fn architecture(&self) -> EngineArchitecture {
+        self.architecture
+    }
+
+    #[must_use]
+    pub(crate) const fn attestation(&self) -> &EnvironmentProfile {
+        &self.attestation
+    }
+
+    #[must_use]
+    pub(crate) const fn image(&self) -> &ImmutableImage {
+        &self.image
+    }
 }
 
 /// Closed image set retained by desired-spec version one.
@@ -86,6 +101,36 @@ impl DesiredSpecImages {
             sandbox_guest,
             service_proxy,
         }
+    }
+
+    #[must_use]
+    pub(crate) const fn automata(&self) -> &ImmutableImage {
+        &self.automata
+    }
+
+    #[must_use]
+    pub(crate) const fn runner(&self) -> &ImmutableImage {
+        &self.runner
+    }
+
+    #[must_use]
+    pub(crate) const fn postgres(&self) -> &ImmutableImage {
+        &self.postgres
+    }
+
+    #[must_use]
+    pub(crate) const fn rustfs(&self) -> &ImmutableImage {
+        &self.rustfs
+    }
+
+    #[must_use]
+    pub(crate) const fn sandbox_guest(&self) -> &ImmutableImage {
+        &self.sandbox_guest
+    }
+
+    #[must_use]
+    pub(crate) const fn service_proxy(&self) -> &LocalImportedImage {
+        &self.service_proxy
     }
 }
 
@@ -171,6 +216,16 @@ impl ResultsTransit {
         self.subnet.to_string()
     }
 
+    #[must_use]
+    pub(crate) const fn gateway(&self) -> Ipv4Addr {
+        self.gateway
+    }
+
+    #[must_use]
+    pub(crate) const fn results_address(&self) -> Ipv4Addr {
+        self.results_address
+    }
+
     fn overlaps(&self, other: Ipv4Subnet) -> bool {
         self.subnet.overlaps(other)
     }
@@ -195,8 +250,8 @@ impl DesiredSpec {
     ///
     /// # Errors
     ///
-    /// Rejects a Results transit that overlaps either the provider's exact
-    /// installation `/20` pool or the planned deterministic control subnet.
+    /// Rejects a Results transit that overlaps the provider's exact
+    /// installation `/20` pool or either deterministic lifecycle subnet.
     pub fn new(
         installation: &Installation,
         input: DesiredSpecInput,
@@ -205,6 +260,7 @@ impl DesiredSpec {
             .results_transit
             .overlaps(provider_front_pool(installation))
             || input.results_transit.overlaps(control_subnet(installation))
+            || input.results_transit.overlaps(egress_subnet(installation))
         {
             return Err(DesiredSpecError::new(DesiredSpecErrorCode::ResultsTransit));
         }
@@ -223,16 +279,126 @@ impl DesiredSpec {
         Ok(spec)
     }
 
+    /// Decodes the sole canonical desired-spec-v1 document for an already
+    /// verified installation identity.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed, noncanonical, oversized, self-inconsistent, or
+    /// differently installation-bound desired intent.
+    pub(crate) fn from_canonical_bytes(
+        bytes: &[u8],
+        installation: &Installation,
+    ) -> Result<Self, DesiredSpecError> {
+        if bytes.is_empty() || bytes.len() > MAX_LOCAL_DESIRED_SPEC_BYTES {
+            return Err(DesiredSpecError::new(DesiredSpecErrorCode::Document));
+        }
+        let raw: RawDesiredSpec = serde_json::from_slice(bytes)
+            .map_err(|_| DesiredSpecError::new(DesiredSpecErrorCode::Document))?;
+        if raw.schema != DESIRED_SPEC_SCHEMA
+            || raw.installation.id != installation.id().to_string()
+            || raw.installation.selector_key != installation.selector_key().to_string()
+            || raw.installation.compose_project != installation.compose_project().as_str()
+            || raw.platform.architecture != "linux/amd64"
+        {
+            return Err(DesiredSpecError::new(DesiredSpecErrorCode::Document));
+        }
+
+        let profile = LocalProfile::new(
+            EngineArchitecture::Amd64,
+            EnvironmentProfile::new(
+                EnvironmentProfileId::from_str(&raw.profile.id)
+                    .map_err(|_| DesiredSpecError::new(DesiredSpecErrorCode::Profile))?,
+                raw.profile.manifest_sha256,
+            ),
+            immutable_image(raw.profile.image)?,
+        )?;
+        let service_proxy = LocalImportedImage::new(
+            raw.images.service_proxy.config_image_id,
+            raw.images.service_proxy.manifest_image_id,
+        )
+        .map_err(|_| DesiredSpecError::new(DesiredSpecErrorCode::Document))?;
+        if service_proxy.reference() != raw.images.service_proxy.reference {
+            return Err(DesiredSpecError::new(DesiredSpecErrorCode::Document));
+        }
+        let max_parallel_jobs = NonZeroU16::new(raw.capacity.max_parallel_jobs)
+            .ok_or_else(|| DesiredSpecError::new(DesiredSpecErrorCode::Capacity))?;
+        let human_port = NonZeroU16::new(raw.human.host_port)
+            .ok_or_else(|| DesiredSpecError::new(DesiredSpecErrorCode::Document))?;
+        let input = DesiredSpecInput::new(
+            max_parallel_jobs,
+            human_port,
+            profile,
+            DesiredSpecImages::new(
+                immutable_image(raw.images.automata)?,
+                immutable_image(raw.images.runner)?,
+                immutable_image(raw.images.postgres)?,
+                immutable_image(raw.images.rustfs)?,
+                immutable_image(raw.images.sandbox_guest)?,
+                service_proxy,
+            ),
+            ResultsTransit::new(
+                raw.results_transit.subnet,
+                parse_ipv4(&raw.results_transit.gateway)?,
+                parse_ipv4(&raw.results_transit.results_address)?,
+            )?,
+        )?;
+        let spec = Self::new(installation, input)?;
+        if spec.plan_digest != raw.plan_sha256 || spec.canonical_bytes() != bytes {
+            return Err(DesiredSpecError::new(DesiredSpecErrorCode::Document));
+        }
+        Ok(spec)
+    }
+
     /// Returns the sole accepted persisted encoding, including one final newline.
     #[must_use]
     pub fn canonical_bytes(&self) -> Vec<u8> {
         canonical_json(&self.canonical_document(Some(self.plan_digest)))
     }
 
-    #[cfg(test)]
     #[must_use]
-    pub const fn plan_digest(&self) -> Sha256Digest {
+    pub(crate) const fn plan_digest(&self) -> Sha256Digest {
         self.plan_digest
+    }
+
+    #[must_use]
+    pub(crate) const fn installation_id(&self) -> InstallationId {
+        self.installation_id
+    }
+
+    #[must_use]
+    pub(crate) const fn installation_key(&self) -> InstallationSelectorKey {
+        self.installation_key
+    }
+
+    #[must_use]
+    pub(crate) const fn compose_project(&self) -> &ComposeProjectName {
+        &self.compose_project
+    }
+
+    #[must_use]
+    pub(crate) const fn max_parallel_jobs(&self) -> NonZeroU16 {
+        self.max_parallel_jobs
+    }
+
+    #[must_use]
+    pub(crate) const fn human_port(&self) -> NonZeroU16 {
+        self.human_port
+    }
+
+    #[must_use]
+    pub(crate) const fn profile(&self) -> &LocalProfile {
+        &self.profile
+    }
+
+    #[must_use]
+    pub(crate) const fn images(&self) -> &DesiredSpecImages {
+        &self.images
+    }
+
+    #[must_use]
+    pub(crate) const fn results_transit(&self) -> &ResultsTransit {
+        &self.results_transit
     }
 
     fn recompute_plan_digest(&self) -> Sha256Digest {
@@ -292,8 +458,20 @@ impl DesiredSpec {
     }
 }
 
+fn immutable_image(value: String) -> Result<ImmutableImage, DesiredSpecError> {
+    ImmutableImage::new(value).map_err(|_| DesiredSpecError::new(DesiredSpecErrorCode::Document))
+}
+
 fn control_subnet(installation: &Installation) -> Ipv4Subnet {
     control_subnet_from_key(installation.selector_key())
+}
+
+pub(crate) fn control_subnet_for_spec(spec: &DesiredSpec) -> Ipv4Subnet {
+    control_subnet_from_key(spec.installation_key())
+}
+
+pub(crate) fn egress_subnet_for_spec(spec: &DesiredSpec) -> Ipv4Subnet {
+    egress_subnet_from_key(spec.installation_key())
 }
 
 fn control_subnet_from_key(key: InstallationSelectorKey) -> Ipv4Subnet {
@@ -301,6 +479,18 @@ fn control_subnet_from_key(key: InstallationSelectorKey) -> Ipv4Subnet {
     let bytes = digest.as_bytes();
     Ipv4Subnet {
         network: u32::from_be_bytes([172, 16 + (bytes[2] & 0x0f), bytes[3], 0]),
+        prefix: 24,
+    }
+}
+
+fn egress_subnet(installation: &Installation) -> Ipv4Subnet {
+    egress_subnet_from_key(installation.selector_key())
+}
+
+fn egress_subnet_from_key(key: InstallationSelectorKey) -> Ipv4Subnet {
+    let bytes = key.digest();
+    Ipv4Subnet {
+        network: u32::from_be_bytes([192, 168, bytes.as_bytes()[4], 0]),
         prefix: 24,
     }
 }
@@ -340,6 +530,8 @@ fn canonical_json(value: &impl Serialize) -> Vec<u8> {
 /// Stable reason for rejecting a desired specification.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DesiredSpecErrorCode {
+    /// The encoded document was malformed, noncanonical, or self-inconsistent.
+    Document,
     /// Requested runner capacity was zero or exceeded durable slot capacity.
     Capacity,
     /// The profile identity did not match its architecture.
@@ -351,11 +543,87 @@ pub enum DesiredSpecErrorCode {
 impl DesiredSpecErrorCode {
     const fn message(self) -> &'static str {
         match self {
+            Self::Document => "desired specification document is invalid",
             Self::Capacity => "desired specification capacity is invalid",
             Self::Profile => "desired specification profile is invalid",
             Self::ResultsTransit => "desired specification Results transit network is invalid",
         }
     }
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RawDesiredSpec {
+    schema: String,
+    installation: RawInstallation,
+    platform: RawPlatform,
+    capacity: RawCapacity,
+    human: RawHuman,
+    profile: RawProfile,
+    images: RawImages,
+    results_transit: RawResultsTransit,
+    plan_sha256: Sha256Digest,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RawInstallation {
+    id: String,
+    selector_key: String,
+    compose_project: String,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RawPlatform {
+    architecture: String,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RawCapacity {
+    max_parallel_jobs: u16,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RawHuman {
+    host_port: u16,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RawProfile {
+    id: String,
+    manifest_sha256: Sha256Digest,
+    image: String,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RawImages {
+    automata: String,
+    runner: String,
+    postgres: String,
+    rustfs: String,
+    sandbox_guest: String,
+    service_proxy: RawImportedImage,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RawImportedImage {
+    reference: String,
+    config_image_id: String,
+    manifest_image_id: String,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RawResultsTransit {
+    subnet: String,
+    gateway: String,
+    results_address: String,
 }
 
 /// Sanitized desired-spec validation failure.
@@ -476,6 +744,18 @@ impl Ipv4Subnet {
 
     fn first_host(self) -> Ipv4Addr {
         Ipv4Addr::from(self.network + 1)
+    }
+
+    pub(crate) fn address(self, host: u32) -> Ipv4Addr {
+        let address = self
+            .network
+            .checked_add(host)
+            .expect("closed control host offset does not overflow");
+        assert!(
+            address > self.network && address < self.broadcast(),
+            "closed control host is usable"
+        );
+        Ipv4Addr::from(address)
     }
 
     const fn broadcast(self) -> u32 {

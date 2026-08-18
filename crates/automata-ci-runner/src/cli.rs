@@ -77,6 +77,10 @@ pub(crate) enum Command {
     /// Internal one-shot readiness server used by the isolated network probe.
     #[command(name = "__probe-http-ready", hide = true)]
     InternalProbeHttp(InternalProbeHttpArgs),
+    /// Internal fixed local-lifecycle readiness check.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[command(name = automata_ci_local::LOCAL_RUNNER_READY_COMMAND, hide = true)]
+    InternalLocalCheckReady,
 }
 
 #[derive(Debug, Args)]
@@ -227,6 +231,22 @@ mod tests {
             .expect_err("secret-bearing arguments must not exist");
             assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
         }
+    }
+
+    #[test]
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    fn local_readiness_is_a_hidden_argument_free_command() {
+        let cli = Cli::try_parse_from(["automata-runner", "__local-check-ready"])
+            .expect("fixed local readiness command must parse");
+        assert!(matches!(cli.command, Command::InternalLocalCheckReady));
+        assert_eq!(
+            Cli::try_parse_from(["automata-runner", "__local-check-ready", "unexpected"])
+                .unwrap_err()
+                .kind(),
+            ErrorKind::UnknownArgument
+        );
+        let help = Cli::command().render_help().to_string();
+        assert!(!help.contains("__local-check-ready"));
     }
 
     #[test]

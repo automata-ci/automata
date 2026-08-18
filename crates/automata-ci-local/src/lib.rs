@@ -23,8 +23,13 @@ mod check;
 mod desired_spec;
 mod engine;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[path = "engine_relay_linux.rs"]
+mod engine_relay;
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 mod init;
 mod installation;
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+mod lifecycle_helper;
 #[cfg(target_os = "linux")]
 mod local_docker;
 mod local_docker_error;
@@ -46,11 +51,65 @@ pub(crate) use desired_spec::{
     DesiredSpec, DesiredSpecImages, DesiredSpecInput, LocalProfile, ResultsTransit,
 };
 pub use engine::{DockerInstallationAdapter, LocalEngineError, LocalEngineErrorCode};
+
+/// Opaque failure from the fixed image-internal Engine relay boundary.
+///
+/// This type is public only so the product CLI can invoke the sealed local
+/// runtime operation; it is not a generic Docker or relay API.
+#[doc(hidden)]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[derive(Debug)]
+pub struct LocalEngineRelayError {
+    message: String,
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+impl fmt::Display for LocalEngineRelayError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+impl std::error::Error for LocalEngineRelayError {}
+
+/// Runs the exact fixed, privilege-dropping local Engine relay process.
+///
+/// This image-internal entry point accepts no endpoint, identity, or policy
+/// arguments. All authority comes from the fixed mounted socket and canonical
+/// binding document contract.
+///
+/// # Errors
+///
+/// Returns an opaque error if fixed filesystem authority, privilege reduction,
+/// Engine attestation, serving, or exact cleanup fails.
+#[doc(hidden)]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub fn run_fixed_engine_relay_process() -> Result<(), LocalEngineRelayError> {
+    engine_relay::run_process().map_err(|error| LocalEngineRelayError {
+        message: error.message().to_owned(),
+    })
+}
+
+/// Attests the exact fixed downstream relay socket against its binding.
+///
+/// # Errors
+///
+/// Returns an opaque error if the canonical binding, downstream socket
+/// authority, or bounded Docker Engine facts do not match exactly.
+#[doc(hidden)]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub fn check_fixed_engine_relay() -> Result<(), LocalEngineRelayError> {
+    engine_relay::check().map_err(|error| LocalEngineRelayError {
+        message: error.message().to_owned(),
+    })
+}
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub use init::{
     LocalInitError, LocalInitErrorCode, LocalInitOutcome, LocalInitRequest,
     LocalInstallationStatus, LocalResetOutcome, LocalResetRequest, LocalStatusReport,
-    LocalStatusRequest, initialize_local, inspect_local_status, reset_local,
+    LocalStatusRequest, LocalUpOutcome, LocalUpRequest, initialize_local, inspect_local_status,
+    reset_local, up_local,
 };
 pub use installation::{
     ComposeProjectName, Installation, InstallationBinding, InstallationId, InstallationIdError,
@@ -61,6 +120,27 @@ pub use local_imported_image::{LocalImportedImage, LocalImportedImageError};
 #[doc(hidden)]
 pub fn run_local_init_materializer() -> Result<(), LocalInitError> {
     init::run_fixed_materializer()
+}
+
+/// Emits the fixed mounted canonical Desired document.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[doc(hidden)]
+pub fn run_local_desired_reader() -> Result<(), LocalInitError> {
+    lifecycle_helper::read_desired()
+}
+
+/// Applies one fixed root-owned generated-file compare-and-swap request.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[doc(hidden)]
+pub fn run_local_lifecycle_cas() -> Result<(), LocalInitError> {
+    lifecycle_helper::write_cas()
+}
+
+/// Checks the fixed in-container control-plane readiness endpoint.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[doc(hidden)]
+pub fn run_local_readiness_check() -> Result<(), LocalInitError> {
+    lifecycle_helper::check_ready()
 }
 pub use local_docker_error::{LocalDockerError, LocalDockerErrorCode};
 pub use results_transport::LocalDockerResultsTransport;
@@ -123,8 +203,74 @@ const MIN_DOCKER_API: ApiVersion = ApiVersion {
     major: 1,
     minor: 48,
 };
-const MIN_DOCKER_ENGINE_MAJOR: u64 = 28;
-const MIN_COMPOSE_VERSION: (u64, u64, u64) = (2, 20, 0);
+pub(crate) const MIN_DOCKER_ENGINE_MAJOR: u64 = 28;
+const MIN_COMPOSE_VERSION: (u64, u64, u64) = (2, 33, 1);
+pub(crate) const LIFECYCLE_ENGINE_ID_MAXIMUM_BYTES: usize = 256;
+pub(crate) const LIFECYCLE_SERVER_VERSION_MAXIMUM_BYTES: usize = 128;
+pub(crate) const MAX_LOCAL_DESIRED_SPEC_BYTES: usize = 64 * 1_024;
+
+/// Hidden command tokens for the fixed local control-plane readiness check.
+#[doc(hidden)]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub const LOCAL_CONTROL_READY_COMMAND: [&str; 3] = ["internal", "local", "check-ready"];
+/// Fixed loopback listener owned by the sealed local control-plane process.
+#[doc(hidden)]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub const LOCAL_CONTROL_READY_LISTEN: &str = "127.0.0.1:8080";
+/// Exact HTTP request sent by the fixed control-plane readiness helper.
+#[doc(hidden)]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub const LOCAL_CONTROL_READY_REQUEST: &str =
+    "GET /readyz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+/// Maximum accepted control-plane readiness response size.
+#[doc(hidden)]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub const LOCAL_CONTROL_READY_MAXIMUM_RESPONSE_BYTES: usize = 4 * 1_024;
+/// Per-connect/read/write control-plane readiness timeout.
+#[doc(hidden)]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub const LOCAL_CONTROL_READY_TIMEOUT_SECONDS: u64 = 3;
+/// Exact required HTTP response prefix for the control-plane readiness helper.
+#[doc(hidden)]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub const LOCAL_CONTROL_READY_RESPONSE_PREFIX: &str = "HTTP/1.1 200 ";
+/// Exact required HTTP response suffix and readiness body.
+#[doc(hidden)]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub const LOCAL_CONTROL_READY_RESPONSE_SUFFIX: &str = "\r\n\r\nready\n";
+
+/// Hidden command token for the fixed local runner readiness check.
+#[doc(hidden)]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub const LOCAL_RUNNER_READY_COMMAND: &str = "__local-check-ready";
+/// Fixed loopback listener owned by the sealed local runner process.
+#[doc(hidden)]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub const LOCAL_RUNNER_READY_LISTEN: &str = "127.0.0.1:9464";
+/// Fixed HTTP resource exposing the bounded OpenMetrics readiness evidence.
+#[doc(hidden)]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub const LOCAL_RUNNER_READY_PATH: &str = "/metrics";
+/// Catalog name for the fixed local readiness wire protocol.
+#[doc(hidden)]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub const LOCAL_RUNNER_READY_PROTOCOL: &str = "http-1.1-openmetrics-text-1.0.0";
+/// Maximum accepted readiness response size.
+#[doc(hidden)]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub const LOCAL_RUNNER_READY_MAXIMUM_RESPONSE_BYTES: usize = 256 * 1_024;
+/// Per-connect/read/write readiness timeout.
+#[doc(hidden)]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub const LOCAL_RUNNER_READY_TIMEOUT_SECONDS: u64 = 3;
+/// Exact admitted-runner OpenMetrics sample required by the healthcheck.
+#[doc(hidden)]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub const LOCAL_RUNNER_READY_METRIC: &str = "automata_ci_runner_ready 1";
+/// Exact connected-session OpenMetrics sample required by the healthcheck.
+#[doc(hidden)]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub const LOCAL_RUNNER_SESSION_CONNECTED_METRIC: &str = "automata_ci_runner_session_connected 1";
 
 /// Container engine requested by a local-installation operation.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
@@ -316,7 +462,7 @@ impl DoctorIssueCode {
                 "start Docker Engine and allow this user to access its local socket"
             }
             Self::DockerComposeUnavailable => {
-                "install Docker Compose CLI plugin version 2.20.0 or newer"
+                "install Docker Compose CLI plugin version 2.33.1 or newer"
             }
             Self::UntrustedDockerEndpoint => {
                 "select a local Unix socket or Windows named-pipe Docker context"
@@ -335,7 +481,7 @@ impl DoctorIssueCode {
                 "the Docker Engine requires local volumes and bridge networks"
             }
             Self::UnsupportedComposeVersion => {
-                "install Docker Compose plugin version 2.20.0 or newer"
+                "install Docker Compose plugin version 2.33.1 or newer"
             }
         }
     }
@@ -1209,7 +1355,8 @@ fn validate_version(
         .ok_or(DoctorIssueCode::UnsupportedDockerApi)?;
     let adapter_api =
         capped_adapter_api(client_api).ok_or(DoctorIssueCode::UnsupportedDockerApi)?;
-    if server_major < MIN_DOCKER_ENGINE_MAJOR
+    if !valid_lifecycle_server_version(&server.version)
+        || server_major < MIN_DOCKER_ENGINE_MAJOR
         || client_api < MIN_DOCKER_API
         || adapter_api < MIN_DOCKER_API
         || server_api < client_api
@@ -1241,6 +1388,21 @@ fn canonical_engine_major(value: &str) -> Option<u64> {
         return None;
     }
     major.parse().ok()
+}
+
+pub(crate) fn valid_lifecycle_engine_id(value: &str) -> bool {
+    bounded_ascii_graphic(value, LIFECYCLE_ENGINE_ID_MAXIMUM_BYTES)
+}
+
+pub(crate) fn valid_lifecycle_server_version(value: &str) -> bool {
+    bounded_ascii_graphic(value, LIFECYCLE_SERVER_VERSION_MAXIMUM_BYTES)
+        && canonical_engine_major(value).is_some_and(|major| major >= MIN_DOCKER_ENGINE_MAJOR)
+}
+
+fn bounded_ascii_graphic(value: &str, maximum_bytes: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= maximum_bytes
+        && value.bytes().all(|byte| byte.is_ascii_graphic())
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -1316,11 +1478,7 @@ fn validate_info(
     if architecture != version.architecture || info.server_version != version.server_version {
         return Err(DoctorIssueCode::EngineIdentityMismatch);
     }
-    if info.id.is_empty()
-        || info.id.len() > 512
-        || info.id.trim() != info.id
-        || info.id.chars().any(char::is_control)
-    {
+    if !valid_lifecycle_engine_id(&info.id) {
         return Err(DoctorIssueCode::MissingEngineIdentity);
     }
     if !info.plugins.volumes.iter().any(|plugin| plugin == "local")
@@ -1710,7 +1868,13 @@ mod tests {
 
     #[test]
     fn rejects_old_or_malformed_compose_versions() {
-        for version in ["1.29.2", "not-a-version", "2.20.0-rc.1", "2.20.0-"] {
+        for version in [
+            "1.29.2",
+            "2.33.0",
+            "not-a-version",
+            "2.33.1-rc.1",
+            "2.33.1-",
+        ] {
             let mut probes = healthy_probes(CONTEXT_UNIX);
             probes.compose = success(format!(r#"{{"version":"{version}"}}"#).into_bytes());
             assert_eq!(
@@ -1720,7 +1884,7 @@ mod tests {
         }
 
         let mut desktop = healthy_probes(CONTEXT_UNIX);
-        desktop.compose = success(br#"{"version":"v2.32.4-desktop.1"}"#.as_slice());
+        desktop.compose = success(br#"{"version":"v2.33.1-desktop.1"}"#.as_slice());
         assert!(report("linux", "x86_64", &desktop).ready());
     }
 
@@ -1770,7 +1934,7 @@ mod tests {
         let document = serde_json::to_value(failure_report).expect("failure report must serialize");
         assert_eq!(
             document["issues"][3]["message"],
-            "install Docker Compose CLI plugin version 2.20.0 or newer"
+            "install Docker Compose CLI plugin version 2.33.1 or newer"
         );
 
         let probes = ProbeSet {

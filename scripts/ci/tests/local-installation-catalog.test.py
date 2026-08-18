@@ -27,7 +27,7 @@ SPEC.loader.exec_module(catalog)
 def rust_integer_constant(relative_path: str, name: str) -> int:
     source = (REPOSITORY_ROOT / relative_path).read_text(encoding="utf-8")
     match = re.search(
-        rf"^pub const {re.escape(name)}: [A-Za-z0-9_:]+ = "
+        rf"^(?:pub(?:\((?:crate|super)\))? )?const {re.escape(name)}: [A-Za-z0-9_:]+ = "
         r"([0-9][0-9_]*(?: \* [0-9][0-9_]*)*);$",
         source,
         flags=re.MULTILINE,
@@ -44,13 +44,40 @@ def rust_integer_constant(relative_path: str, name: str) -> int:
 def rust_string_constant(relative_path: str, name: str) -> str:
     source = (REPOSITORY_ROOT / relative_path).read_text(encoding="utf-8")
     match = re.search(
-        rf'^(?:pub(?:\(crate\))? )?const {re.escape(name)}: &str = "([^"\\]*)";$',
+        rf'^(?:pub(?:\((?:crate|super)\))? )?const {re.escape(name)}: &str =\s*'
+        r'("(?:\\.|[^"\\])*");$',
+        source,
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    if match is None:
+        raise AssertionError(f"could not resolve Rust constant {name}")
+    return json.loads(match.group(1))
+
+
+def rust_string_array_constant(relative_path: str, name: str) -> list[str]:
+    source = (REPOSITORY_ROOT / relative_path).read_text(encoding="utf-8")
+    match = re.search(
+        rf"^(?:pub(?:\((?:crate|super)\))? )?const {re.escape(name)}: \[&str; [0-9]+\] =\s*"
+        r"\[(.*?)\];$",
+        source,
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    if match is None:
+        raise AssertionError(f"could not resolve Rust string-array constant {name}")
+    return [json.loads(value) for value in re.findall(r'"(?:\\.|[^"\\])*"', match.group(1))]
+
+
+def rust_version_tuple_constant(relative_path: str, name: str) -> tuple[int, int, int]:
+    source = (REPOSITORY_ROOT / relative_path).read_text(encoding="utf-8")
+    match = re.search(
+        rf"^const {re.escape(name)}: \(u64, u64, u64\) = "
+        r"\(([0-9]+), ([0-9]+), ([0-9]+)\);$",
         source,
         flags=re.MULTILINE,
     )
     if match is None:
-        raise AssertionError(f"could not resolve Rust constant {name}")
-    return match.group(1)
+        raise AssertionError(f"could not resolve Rust version constant {name}")
+    return tuple(int(component) for component in match.groups())
 
 
 def swift_integer_constant(relative_path: str, name: str) -> int:
@@ -157,6 +184,10 @@ class LocalInstallationCatalogContract(unittest.TestCase):
 
     def test_source_contract_and_profile_bind_exact_reviewed_bytes(self) -> None:
         source = catalog.load_source(REPOSITORY_ROOT)
+        self.assertEqual(
+            (REPOSITORY_ROOT / catalog.PACKAGED_SOURCE_PATH).read_bytes(),
+            (REPOSITORY_ROOT / catalog.SOURCE_PATH).read_bytes(),
+        )
         self.assertEqual(set(source["images"]), catalog.ROLES)
         self.assertEqual(source["scope"], {"engine": "linux/amd64", "host": "unix"})
         _, candidate_module = catalog.service_proxy_module()
@@ -194,6 +225,8 @@ class LocalInstallationCatalogContract(unittest.TestCase):
 
     def test_runtime_literals_track_the_production_contracts(self) -> None:
         source = self.source
+        lifecycle = source["lifecycle_runtime"]
+        bootstrap = lifecycle["automata_commands"]["bootstrap_runner"]
         runner = source["services"]["runner"]
         executor = runner["executor_contract"]
         for role, containerfile_path in (
@@ -255,6 +288,170 @@ class LocalInstallationCatalogContract(unittest.TestCase):
                 "LOCAL_DOCKER_CONTROL_DIRECTORY",
             ),
         )
+        runner_schema = rust_integer_constant(
+            "crates/automata-ci-runner/src/product/config.rs",
+            "RUNNER_PRODUCT_CONFIG_SCHEMA_VERSION",
+        )
+        self.assertEqual(lifecycle["runner_config_schema"], runner_schema)
+        self.assertEqual(
+            lifecycle["runner_commands"]["enroll"]["configuration_schema"],
+            runner_schema,
+        )
+        control_readiness = lifecycle["automata_commands"]["check_ready"]
+        self.assertEqual(
+            control_readiness["argv"],
+            rust_string_array_constant(
+                "crates/automata-ci-local/src/lib.rs", "LOCAL_CONTROL_READY_COMMAND"
+            ),
+        )
+        for field, constant in (
+            ("listen", "LOCAL_CONTROL_READY_LISTEN"),
+            ("request", "LOCAL_CONTROL_READY_REQUEST"),
+            ("response_prefix", "LOCAL_CONTROL_READY_RESPONSE_PREFIX"),
+            ("response_suffix", "LOCAL_CONTROL_READY_RESPONSE_SUFFIX"),
+        ):
+            self.assertEqual(
+                control_readiness[field],
+                rust_string_constant("crates/automata-ci-local/src/lib.rs", constant),
+            )
+        self.assertEqual(
+            control_readiness["maximum_response_bytes"],
+            rust_integer_constant(
+                "crates/automata-ci-local/src/lib.rs",
+                "LOCAL_CONTROL_READY_MAXIMUM_RESPONSE_BYTES",
+            ),
+        )
+        self.assertEqual(
+            control_readiness["timeout_seconds"],
+            rust_integer_constant(
+                "crates/automata-ci-local/src/lib.rs",
+                "LOCAL_CONTROL_READY_TIMEOUT_SECONDS",
+            ),
+        )
+        readiness = lifecycle["runner_commands"]["local_check_ready"]
+        self.assertEqual(
+            readiness["argv"],
+            [
+                rust_string_constant(
+                    "crates/automata-ci-local/src/lib.rs", "LOCAL_RUNNER_READY_COMMAND"
+                )
+            ],
+        )
+        self.assertEqual(
+            readiness["healthcheck_argv"],
+            [
+                rust_string_constant(
+                    "crates/automata-ci-local/src/init/renderer.rs", "RUNNER_BINARY"
+                ),
+                rust_string_constant(
+                    "crates/automata-ci-local/src/lib.rs", "LOCAL_RUNNER_READY_COMMAND",
+                ),
+            ],
+        )
+        self.assertEqual(
+            readiness["listen"],
+            rust_string_constant(
+                "crates/automata-ci-local/src/lib.rs", "LOCAL_RUNNER_READY_LISTEN"
+            ),
+        )
+        self.assertEqual(
+            readiness["maximum_response_bytes"],
+            rust_integer_constant(
+                "crates/automata-ci-local/src/lib.rs",
+                "LOCAL_RUNNER_READY_MAXIMUM_RESPONSE_BYTES",
+            ),
+        )
+        self.assertEqual(
+            readiness["timeout_seconds"],
+            rust_integer_constant(
+                "crates/automata-ci-local/src/lib.rs", "LOCAL_RUNNER_READY_TIMEOUT_SECONDS"
+            ),
+        )
+        self.assertEqual(
+            readiness["path"],
+            rust_string_constant(
+                "crates/automata-ci-local/src/lib.rs", "LOCAL_RUNNER_READY_PATH"
+            ),
+        )
+        self.assertEqual(
+            readiness["protocol"],
+            rust_string_constant(
+                "crates/automata-ci-local/src/lib.rs", "LOCAL_RUNNER_READY_PROTOCOL"
+            ),
+        )
+        self.assertEqual(
+            readiness["required_metrics"],
+            [
+                rust_string_constant(
+                    "crates/automata-ci-local/src/lib.rs", "LOCAL_RUNNER_READY_METRIC"
+                ),
+                rust_string_constant(
+                    "crates/automata-ci-local/src/lib.rs",
+                    "LOCAL_RUNNER_SESSION_CONNECTED_METRIC",
+                ),
+            ],
+        )
+        self.assertEqual(
+            lifecycle["results_transit"]["schema"],
+            int(
+                rust_string_constant(
+                    "crates/automata-ci-local/src/local_docker/mod.rs",
+                    "RESULTS_TRANSPORT_SCHEMA",
+                )
+            ),
+        )
+        compose_version = rust_version_tuple_constant(
+            "crates/automata-ci-local/src/lib.rs", "MIN_COMPOSE_VERSION"
+        )
+        self.assertEqual(
+            lifecycle["compose"]["minimum_version"],
+            ".".join(str(component) for component in compose_version),
+        )
+        migration_versions = [
+            int(path.name.split("_", 1)[0])
+            for path in (
+                REPOSITORY_ROOT / "crates/automata-ci-store-postgres/migrations"
+            ).glob("[0-9][0-9][0-9][0-9]_*.sql")
+        ]
+        self.assertEqual(lifecycle["database_migration_ceiling"], max(migration_versions))
+        self.assertEqual(
+            bootstrap["request_schema"],
+            rust_string_constant(
+                "crates/automata-ci/src/internal/local_bootstrap.rs", "REQUEST_SCHEMA"
+            ),
+        )
+        self.assertEqual(
+            bootstrap["receipt_schema"],
+            rust_string_constant(
+                "crates/automata-ci/src/internal/local_bootstrap.rs", "RECEIPT_SCHEMA"
+            ),
+        )
+        self.assertEqual(
+            bootstrap["maximum_request_bytes"],
+            rust_integer_constant(
+                "crates/automata-ci/src/internal/local_bootstrap.rs", "MAX_REQUEST_BYTES"
+            ),
+        )
+
+        static_verifier = (
+            REPOSITORY_ROOT / "scripts/ci/verify-static-musl.sh"
+        ).read_text(encoding="utf-8")
+        for command in lifecycle["automata_commands"].values():
+            invocation = " ".join(command["argv"])
+            self.assertIn(
+                f'verify_hidden_help "$automata" {invocation}', static_verifier
+            )
+            self.assertIn(
+                f"container_hidden_help /automata {invocation}", static_verifier
+            )
+        for command in lifecycle["runner_commands"].values():
+            invocation = " ".join(command["argv"])
+            self.assertIn(
+                f'verify_hidden_help "$runner" {invocation}', static_verifier
+            )
+            self.assertIn(
+                f"container_hidden_help /automata-runner {invocation}", static_verifier
+            )
         self.assertEqual(
             runner["provider_control_directory"],
             rust_string_constant(
@@ -407,6 +604,7 @@ class LocalInstallationCatalogContract(unittest.TestCase):
                     "scripts/ci/service-proxy-candidate.py",
                     "scripts/ci/service-proxy-publication.py",
                     "images/local-installation/catalog-v1.json",
+                    catalog.PACKAGED_SOURCE_PATH,
                     catalog.PROFILE_MANIFEST_PATH,
                     catalog.PROFILE_LOCK_PATH,
                 )

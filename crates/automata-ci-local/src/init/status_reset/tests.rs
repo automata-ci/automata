@@ -512,6 +512,51 @@ fn reset_authority_survives_missing_or_safe_malformed_non_authority_records() {
 }
 
 #[test]
+fn legacy_v1_epoch_remains_status_and_reset_authority_but_requires_reset_for_lifecycle() {
+    let directory = TestDirectory::new();
+    let state = StateRoot::acquire(&directory.state_path()).unwrap();
+    let installation = installation();
+    let selection = StateInstallationSelection::new(installation.name());
+    state
+        .store_installation_selection(&selection.canonical_bytes().unwrap())
+        .unwrap();
+    let material_root = state.create_material_root().unwrap();
+    let epoch = super::super::epoch::legacy_test_epoch(
+        &installation,
+        &material_root,
+        state.authority_sha256(),
+    );
+    state.store_epoch(&epoch.canonical_bytes()).unwrap();
+    let deriver = MaterialDeriver::new(material_root, &installation, &epoch);
+    certificates::load_or_issue(&state, &deriver, &epoch, false).unwrap();
+    state
+        .store_materialization(
+            &StateMaterialization::new(epoch.fingerprint())
+                .canonical_bytes()
+                .unwrap(),
+        )
+        .unwrap();
+
+    match validate_host_state(&state, &state.snapshot_read_only().unwrap()).unwrap() {
+        ValidatedHostState::Established(established) => {
+            assert_eq!(established.installation, installation);
+            assert_eq!(established.epoch, epoch);
+        }
+        ValidatedHostState::Incomplete { .. } => panic!("sealed v1 must remain observable"),
+    }
+    let reset = validate_reset_host_state(&state, &state.snapshot_for_reset().unwrap()).unwrap();
+    assert_eq!(reset.installation, installation);
+    assert_eq!(reset.epoch, epoch);
+    assert_eq!(
+        epoch
+            .require_current_lifecycle_contract()
+            .unwrap_err()
+            .code(),
+        LocalInitErrorCode::ResetRequired
+    );
+}
+
+#[test]
 fn unreadable_or_temp_only_epoch_cannot_authorize_a_fresh_reset() {
     let directory = TestDirectory::new();
     let state = StateRoot::acquire(&directory.state_path()).unwrap();

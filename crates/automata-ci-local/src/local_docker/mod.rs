@@ -36,6 +36,15 @@ use crate::{
     LocalDockerResultsTransport, LocalImportedImage, MINIMUM_LOCAL_DOCKER_SANDBOX_CPU_MILLIS,
     MINIMUM_LOCAL_DOCKER_SANDBOX_MEMORY_BYTES, MINIMUM_LOCAL_DOCKER_SANDBOX_PIDS,
     normalize_architecture,
+    results_transport::{
+        ResultsTransitNetworkShape, exact_results_transit_base, results_transit_name,
+    },
+};
+
+pub(crate) use crate::results_transport::RESULTS_TRANSPORT_SCHEMA;
+#[cfg(test)]
+use crate::results_transport::{
+    LABEL_PLAN_DIGEST, LABEL_RESULTS_TRANSPORT_SCHEMA, results_transit_labels,
 };
 
 mod endpoint;
@@ -72,18 +81,14 @@ const LABEL_PROFILE: &str = "io.automata.local.profile";
 const LABEL_PROFILE_DIGEST: &str = "io.automata.local.profile-sha256";
 const LABEL_SPEC_DIGEST: &str = "io.automata.local.spec-sha256";
 const LABEL_RESOURCE_KIND: &str = "io.automata.local.resource-kind";
-const LABEL_RESULTS_TRANSPORT_SCHEMA: &str = "io.automata.local.results-transport-schema";
-const LABEL_PLAN_DIGEST: &str = "io.automata.local.plan-digest";
 const MANAGED_VALUE: &str = "true";
 const JOB_SCHEMA: &str = "2";
-const RESULTS_TRANSPORT_SCHEMA: &str = "2";
 const CUSTODY_ADMISSION: &str = "profile-admission";
 const CUSTODY_JOB: &str = "job";
 const KIND_JOB: &str = "job-container";
 const KIND_GUEST_SOURCE: &str = "guest-source";
 const KIND_RESULTS_FRONT: &str = "results-front-network";
 const KIND_RESULTS_PROXY: &str = "results-proxy-container";
-const KIND_RESULTS_TRANSIT: &str = "results-transit-network";
 const RESULTS_ALIAS: &str = "results.automata.invalid";
 const RESULTS_PROXY_ENTRYPOINT: &str = "/usr/libexec/automata-ci-service-proxy";
 const RESULTS_PROXY_COMMAND: &str = "serve-results-v1";
@@ -98,8 +103,6 @@ const RESULTS_PROXY_PIDS: i64 = 97;
 const RESULTS_PROXY_USER: &str = "65532:65532";
 const RESULTS_FRONT_POOL_PREFIX: u8 = 20;
 const RESULTS_FRONT_NETWORK_PREFIX: u8 = 29;
-const MAX_RESULTS_TRANSIT_PROXIES: u16 = crate::MAXIMUM_LOCAL_DOCKER_JOB_SLOTS + 1;
-const MAX_RESULTS_TRANSIT_ENDPOINTS: u16 = MAX_RESULTS_TRANSIT_PROXIES + 1;
 const MAX_RESULTS_TRANSIT_CONVERGENCE_ATTEMPTS: usize = 8;
 const MAX_RESULTS_TRANSIT_ATTESTATION_CONCURRENCY: usize = 16;
 const RESULTS_TRANSPORT_ATTESTATION_TIMEOUT: Duration = Duration::from_secs(30);
@@ -3922,21 +3925,34 @@ fn exact_results_transit(
     installation: &Installation,
     transport: &LocalDockerResultsTransport,
 ) -> bool {
+    let shape = ResultsTransitNetworkShape {
+        name: network.name.clone(),
+        driver: network.driver.clone(),
+        scope: network.scope.clone(),
+        enable_ipv4: network.enable_ipv4,
+        enable_ipv6: network.enable_ipv6,
+        internal: network.internal,
+        attachable: network.attachable,
+        ingress: network.ingress,
+        config_only: network.config_only,
+        config_from_empty: network.config_from.is_empty(),
+        ipam_driver: network.ipam_driver.clone(),
+        ipam_options: network.ipam_options.clone(),
+        options: network.options.clone(),
+        labels: network.labels.clone(),
+        endpoint_ids: network.containers.keys().cloned().collect(),
+    };
     let unique_addresses = network
         .containers
         .values()
         .map(|endpoint| endpoint.ipv4_address)
         .collect::<BTreeSet<_>>();
-    exact_closed_network(
-        network,
-        &results_transit_name(installation),
-        &results_transit_labels(installation, transport.plan_digest),
-    ) && network.id == transport.transit_network_id
+    exact_results_transit_base(&shape, installation, transport.plan_digest)
+        && network.id == transport.transit_network_id
         && network.ipv4_network.prefix <= 23
         && network_host_address(&network.ipv4_network, 1)
             .is_ok_and(|gateway| network.ipv4_gateway == gateway)
         && !ipv4_networks_overlap(&results_front_pool(installation), &network.ipv4_network)
-        && network.containers.len() <= usize::from(MAX_RESULTS_TRANSIT_ENDPOINTS)
         && unique_addresses.len() == network.containers.len()
         && network
             .containers
@@ -4227,40 +4243,6 @@ fn exact_closed_network(
                 "isolated".to_owned(),
             )])
         && network.labels == *expected_labels
-}
-
-fn results_transit_name(installation: &Installation) -> String {
-    format!("{}-results-transit", installation.compose_project())
-}
-
-fn results_transit_labels(
-    installation: &Installation,
-    plan_digest: Sha256Digest,
-) -> BTreeMap<String, String> {
-    BTreeMap::from([
-        (LABEL_MANAGED.to_owned(), MANAGED_VALUE.to_owned()),
-        (
-            LABEL_RESULTS_TRANSPORT_SCHEMA.to_owned(),
-            RESULTS_TRANSPORT_SCHEMA.to_owned(),
-        ),
-        (
-            LABEL_INSTALLATION_ID.to_owned(),
-            installation.id().to_string(),
-        ),
-        (
-            LABEL_INSTALLATION_KEY.to_owned(),
-            installation.selector_key().to_string(),
-        ),
-        (
-            LABEL_COMPOSE_PROJECT.to_owned(),
-            installation.compose_project().to_string(),
-        ),
-        (LABEL_PLAN_DIGEST.to_owned(), plan_digest.to_string()),
-        (
-            LABEL_RESOURCE_KIND.to_owned(),
-            KIND_RESULTS_TRANSIT.to_owned(),
-        ),
-    ])
 }
 
 fn canonical_object_id(value: &str) -> bool {

@@ -2,12 +2,16 @@
 
 mod catalog;
 mod certificates;
+mod compose;
 mod engine;
 mod epoch;
+mod lifecycle;
 mod materializer;
+mod renderer;
 mod state;
 mod status_reset;
 
+pub use lifecycle::{LocalUpOutcome, LocalUpRequest, up_local};
 pub(crate) use materializer::run_fixed_materializer;
 pub use status_reset::{
     LocalInstallationStatus, LocalResetOutcome, LocalResetRequest, LocalStatusReport,
@@ -293,7 +297,7 @@ pub async fn initialize_local(
     request: LocalInitRequest,
 ) -> Result<LocalInitOutcome, LocalInitError> {
     let state = state::StateRoot::acquire(&request.state_directory)?;
-    if state.reset_intent_present()? {
+    if state.reset_intent_present()? || state.lifecycle_operation_present()? {
         return Err(LocalInitError::new(LocalInitErrorCode::ResetRequired));
     }
     let evidence = state::EvidenceDirectory::open(&request.catalog_source)?;
@@ -398,6 +402,7 @@ pub async fn initialize_local(
         state.authority_sha256(),
         &material_root,
         digest(&desired_bytes),
+        desired.plan_digest(),
     );
     let epoch = if let Some(bytes) = existing_epoch {
         epoch::ImmutableEpoch::from_canonical_bytes(&bytes, &expected_epoch)?

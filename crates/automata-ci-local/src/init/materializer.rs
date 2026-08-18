@@ -23,14 +23,14 @@ use super::{
     epoch::{ImmutableEpoch, MaterialDeriver},
 };
 
-const REQUEST_SCHEMA: &str = "automata.local/materialize-request/v1";
+pub(super) const REQUEST_SCHEMA: &str = "automata.local/materialize-request/v1";
 const MANIFEST_SCHEMA: &str = "automata.local/static-material-manifest/v1";
-const RESPONSE_SCHEMA: &str = "automata.local/materialize-response/v1";
+pub(super) const RESPONSE_SCHEMA: &str = "automata.local/materialize-response/v1";
 const MANIFEST_FILE: &str = ".automata-static-manifest.json";
-const MAX_REQUEST_BYTES: usize = 512 * 1024;
+pub(super) const MAX_REQUEST_BYTES: usize = 512 * 1024;
 const MAX_FILE_BYTES: usize = 128 * 1024;
 const MAX_MANIFEST_BYTES: usize = 16 * 1024;
-const STATIC_FILE_MODE: u32 = 0o400;
+pub(super) const STATIC_FILE_MODE: u32 = 0o400;
 const STATIC_DIRECTORY_MODE: u32 = 0o700;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -401,7 +401,7 @@ fn derived_key_plan(id: FileId, deriver: &MaterialDeriver, purpose: &'static [u8
     plan(id, material.as_slice())
 }
 
-fn s3_access_key(deriver: &MaterialDeriver) -> String {
+pub(super) fn s3_access_key(deriver: &MaterialDeriver) -> String {
     const UPPERCASE_HEX: &[u8; 16] = b"0123456789ABCDEF";
     let material = deriver.bytes(b"s3/access-key", 10);
     let mut encoded = String::with_capacity(20);
@@ -412,7 +412,7 @@ fn s3_access_key(deriver: &MaterialDeriver) -> String {
     encoded
 }
 
-fn s3_secret_key(deriver: &MaterialDeriver) -> Zeroizing<String> {
+pub(super) fn s3_secret_key(deriver: &MaterialDeriver) -> Zeroizing<String> {
     deriver.text(b"s3/secret-key", 30)
 }
 

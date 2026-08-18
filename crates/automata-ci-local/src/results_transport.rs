@@ -1,8 +1,116 @@
-use std::{fmt, net::Ipv4Addr};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+    net::Ipv4Addr,
+};
 
 use automata_ci_core::Sha256Digest;
 
 use crate::{LocalDockerError, LocalDockerErrorCode, LocalImportedImage};
+
+pub(crate) const RESULTS_TRANSPORT_OWNERSHIP: &str = "lifecycle-created-compose-external";
+pub(crate) const RESULTS_TRANSPORT_SCHEMA: &str = "2";
+pub(crate) const RESULTS_TRANSIT_GATEWAY_MODE_KEY: &str =
+    "com.docker.network.bridge.gateway_mode_ipv4";
+pub(crate) const RESULTS_TRANSIT_GATEWAY_MODE_VALUE: &str = "isolated";
+pub(crate) const MAX_RESULTS_TRANSIT_ENDPOINTS: usize =
+    crate::MAXIMUM_LOCAL_DOCKER_JOB_SLOTS as usize + 2;
+
+pub(crate) const LABEL_RESULTS_TRANSPORT_SCHEMA: &str =
+    "io.automata.local.results-transport-schema";
+pub(crate) const LABEL_PLAN_DIGEST: &str = "io.automata.local.plan-digest";
+const LABEL_MANAGED: &str = "io.automata.local.managed";
+const LABEL_INSTALLATION_ID: &str = "io.automata.local.installation-id";
+const LABEL_INSTALLATION_KEY: &str = "io.automata.local.installation-key";
+const LABEL_COMPOSE_PROJECT: &str = "io.automata.local.compose-project";
+const LABEL_RESOURCE_KIND: &str = "io.automata.local.resource-kind";
+const KIND_RESULTS_TRANSIT: &str = "results-transit-network";
+
+/// Shared immutable shape of the lifecycle-owned Results transit.
+///
+/// Both lifecycle convergence and the Local Docker provider normalize their
+/// Engine-specific inspection models into this shape before accepting the
+/// shared network. Keeping one closed predicate prevents either consumer from
+/// silently weakening the other one's custody contract.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ResultsTransitNetworkShape {
+    pub(crate) name: String,
+    pub(crate) driver: String,
+    pub(crate) scope: String,
+    pub(crate) enable_ipv4: bool,
+    pub(crate) enable_ipv6: bool,
+    pub(crate) internal: bool,
+    pub(crate) attachable: bool,
+    pub(crate) ingress: bool,
+    pub(crate) config_only: bool,
+    pub(crate) config_from_empty: bool,
+    pub(crate) ipam_driver: String,
+    pub(crate) ipam_options: BTreeMap<String, String>,
+    pub(crate) options: BTreeMap<String, String>,
+    pub(crate) labels: BTreeMap<String, String>,
+    pub(crate) endpoint_ids: BTreeSet<String>,
+}
+
+pub(crate) fn results_transit_name(installation: &crate::Installation) -> String {
+    format!("{}-results-transit", installation.compose_project())
+}
+
+pub(crate) fn results_transit_labels(
+    installation: &crate::Installation,
+    plan_digest: Sha256Digest,
+) -> BTreeMap<String, String> {
+    BTreeMap::from([
+        (LABEL_MANAGED.to_owned(), "true".to_owned()),
+        (
+            LABEL_RESULTS_TRANSPORT_SCHEMA.to_owned(),
+            RESULTS_TRANSPORT_SCHEMA.to_owned(),
+        ),
+        (
+            LABEL_INSTALLATION_ID.to_owned(),
+            installation.id().to_string(),
+        ),
+        (
+            LABEL_INSTALLATION_KEY.to_owned(),
+            installation.selector_key().to_string(),
+        ),
+        (
+            LABEL_COMPOSE_PROJECT.to_owned(),
+            installation.compose_project().to_string(),
+        ),
+        (LABEL_PLAN_DIGEST.to_owned(), plan_digest.to_string()),
+        (
+            LABEL_RESOURCE_KIND.to_owned(),
+            KIND_RESULTS_TRANSIT.to_owned(),
+        ),
+    ])
+}
+
+pub(crate) fn exact_results_transit_base(
+    shape: &ResultsTransitNetworkShape,
+    installation: &crate::Installation,
+    plan_digest: Sha256Digest,
+) -> bool {
+    shape.name == results_transit_name(installation)
+        && shape.driver == "bridge"
+        && shape.scope == "local"
+        && shape.enable_ipv4
+        && !shape.enable_ipv6
+        && shape.internal
+        && !shape.attachable
+        && !shape.ingress
+        && !shape.config_only
+        && shape.config_from_empty
+        && shape.ipam_driver == "default"
+        && shape.ipam_options.is_empty()
+        && shape.options
+            == BTreeMap::from([(
+                RESULTS_TRANSIT_GATEWAY_MODE_KEY.to_owned(),
+                RESULTS_TRANSIT_GATEWAY_MODE_VALUE.to_owned(),
+            )])
+        && shape.labels == results_transit_labels(installation, plan_digest)
+        && shape.endpoint_ids.len() <= MAX_RESULTS_TRANSIT_ENDPOINTS
+        && shape.endpoint_ids.iter().all(|id| canonical_object_id(id))
+}
 
 /// Closed pre-provisioned Results transport consumed by the local Docker provider.
 ///
@@ -97,7 +205,7 @@ impl fmt::Debug for LocalDockerResultsTransport {
     }
 }
 
-fn canonical_object_id(value: &str) -> bool {
+pub(crate) fn canonical_object_id(value: &str) -> bool {
     value.len() == 64
         && value
             .bytes()

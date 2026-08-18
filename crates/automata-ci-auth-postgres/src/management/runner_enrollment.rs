@@ -1,9 +1,9 @@
 use std::fmt;
 
-use automata_ci_auth::machine::AuthenticatedMachine;
 use automata_ci_auth::management::{
     ManagementActor, ManagementMutationOutcome, ManagementRepositoryError,
 };
+use automata_ci_auth::{installation::InstallationRepositoryError, machine::AuthenticatedMachine};
 use automata_ci_core::{
     IsolationLevel, MAX_REGISTERED_RUNNERS, OperatingSystem, RunnerCapabilities, RunnerFeature,
     RunnerGroup, SandboxFeature, Sha256Digest,
@@ -13,15 +13,22 @@ use sha2::{Digest as _, Sha256};
 use sqlx::{FromRow, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
+use crate::installation::{
+    ConfiguredDeploymentInstallationProof, revalidate_configured_deployment_installation,
+};
+
 use super::{
     AuditDescriptor, AuthorizedActor, MutationAuthorization, authorize_mutation,
     closed_authorization, commit, database_time_milliseconds, finish_applied, map_database_error,
 };
 
 const ACTION_TOKEN_CREATE: &str = "runner.enrollment_token.create";
+const ACTION_TOKEN_BOOTSTRAP: &str = "runner.enrollment_token.installation_bootstrap";
 const ACTION_ENROLL: &str = "runner.enroll";
 const ACTION_CERTIFICATE_RENEW: &str = "runner.certificate.renew";
 const RESOURCE_ENROLLMENT: &str = "runner_enrollment";
+const ISSUER_HUMAN: &str = "human";
+const ISSUER_INSTALLATION_BOOTSTRAP: &str = "installation_bootstrap";
 const RESOURCE_RUNNER_CERTIFICATE: &str = "runner_certificate";
 const MIN_TOKEN_LIFETIME_MS: i64 = 60 * 1_000;
 const MAX_TOKEN_LIFETIME_MS: i64 = 60 * 60 * 1_000;
@@ -68,6 +75,90 @@ impl fmt::Debug for PostgresRunnerEnrollmentRepository {
             .debug_struct("PostgresRunnerEnrollmentRepository")
             .finish_non_exhaustive()
     }
+}
+
+/// Fixed one-hour lifetime of an installation-bootstrap enrollment token.
+pub const INSTALLATION_BOOTSTRAP_ENROLLMENT_TOKEN_LIFETIME_MS: i64 = MAX_TOKEN_LIFETIME_MS;
+
+/// Exact digest-only request for replica-safe installation runner bootstrap.
+#[derive(Clone)]
+pub struct EnsureInstallationBootstrapRunnerEnrollmentToken {
+    installation: ConfiguredDeploymentInstallationProof,
+    enrollment_id: Uuid,
+    token_sha256: [u8; 32],
+    runner_group: RunnerGroup,
+    lifetime_ms: i64,
+}
+
+impl EnsureInstallationBootstrapRunnerEnrollmentToken {
+    /// Constructs one exact, idempotent installation-bootstrap issuance request.
+    ///
+    /// Plaintext token material never crosses this repository boundary. The
+    /// request accepts only the fixed one-hour deployment-bootstrap lifetime.
+    ///
+    /// # Errors
+    ///
+    /// Rejects nil operation identity, an all-zero digest, or a lifetime other
+    /// than the fixed installation-bootstrap enrollment-token lifetime.
+    pub fn new(
+        installation: ConfiguredDeploymentInstallationProof,
+        enrollment_id: Uuid,
+        token_sha256: [u8; 32],
+        runner_group: RunnerGroup,
+        lifetime_ms: i64,
+    ) -> Result<Self, InstallationBootstrapRequestError> {
+        if enrollment_id.is_nil()
+            || token_sha256 == [0; 32]
+            || lifetime_ms != INSTALLATION_BOOTSTRAP_ENROLLMENT_TOKEN_LIFETIME_MS
+        {
+            return Err(InstallationBootstrapRequestError);
+        }
+        Ok(Self {
+            installation,
+            enrollment_id,
+            token_sha256,
+            runner_group,
+            lifetime_ms,
+        })
+    }
+}
+
+impl fmt::Debug for EnsureInstallationBootstrapRunnerEnrollmentToken {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EnsureInstallationBootstrapRunnerEnrollmentToken")
+            .field("enrollment_id", &self.enrollment_id)
+            .field("runner_group", &self.runner_group)
+            .field("lifetime_ms", &self.lifetime_ms)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Sanitized invalid installation-bootstrap enrollment request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InstallationBootstrapRequestError;
+
+impl fmt::Display for InstallationBootstrapRequestError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("installation bootstrap request is invalid")
+    }
+}
+
+impl std::error::Error for InstallationBootstrapRequestError {}
+
+/// Durable outcome of one installation-bootstrap runner token ensure.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum InstallationBootstrapRunnerEnrollmentTokenOutcome {
+    /// A new token row and its success audit event committed together.
+    Applied(RunnerEnrollmentTokenRecord),
+    /// The exact unconsumed token remains live; no durable row changed.
+    Replayed(RunnerEnrollmentTokenRecord),
+    /// The exact expired token received a new one-hour window and audit event.
+    Refreshed(RunnerEnrollmentTokenRecord),
+    /// The exact token was already consumed and can never be refreshed.
+    Consumed(RunnerEnrollmentTokenRecord),
+    /// The operation identity or token digest was already bound differently.
+    Conflict,
 }
 
 /// Maximum lifetime used by the control-plane certificate profile. A leaf is
@@ -639,6 +730,7 @@ struct EnrollmentRow {
     runner_group_id: Uuid,
     runner_group: String,
     issued_at_ms: i64,
+    last_refreshed_at_ms: Option<i64>,
     expires_at_ms: i64,
     consumed_at_ms: Option<i64>,
     consumed_runner_id: Option<Uuid>,
@@ -650,13 +742,109 @@ struct EnrollmentRow {
 
 #[derive(FromRow)]
 struct CreatedEnrollmentRow {
+    id: Uuid,
     tenant_id: String,
     runner_group_id: Uuid,
     runner_group: String,
     token_sha256: Vec<u8>,
-    issued_by_principal_id: Uuid,
+    issuer_kind: String,
+    issued_by_principal_id: Option<Uuid>,
+    issued_by_session_id: Option<Uuid>,
+    issued_authorization_revision: Option<i64>,
+    installation_authority_sha256: Option<Vec<u8>>,
     issued_at_ms: i64,
+    last_refreshed_at_ms: Option<i64>,
     expires_at_ms: i64,
+    consumed_at_ms: Option<i64>,
+}
+
+#[derive(Clone, Copy)]
+enum EnrollmentIssuer<'a> {
+    Human(&'a AuthorizedActor),
+    Installation(&'a ConfiguredDeploymentInstallationProof),
+}
+
+impl EnrollmentIssuer<'_> {
+    fn tenant_id(&self) -> &str {
+        match self {
+            Self::Human(actor) => &actor.tenant_id,
+            Self::Installation(installation) => installation.tenant_id.as_str(),
+        }
+    }
+
+    const fn kind(&self) -> &'static str {
+        match self {
+            Self::Human(_) => ISSUER_HUMAN,
+            Self::Installation(_) => ISSUER_INSTALLATION_BOOTSTRAP,
+        }
+    }
+
+    const fn human_principal_id(&self) -> Option<Uuid> {
+        match self {
+            Self::Human(actor) => Some(actor.principal_id),
+            Self::Installation(_) => None,
+        }
+    }
+
+    const fn human_session_id(&self) -> Option<Uuid> {
+        match self {
+            Self::Human(actor) => Some(actor.session_id),
+            Self::Installation(_) => None,
+        }
+    }
+
+    const fn human_authorization_revision(&self) -> Option<i64> {
+        match self {
+            Self::Human(actor) => Some(actor.authorization_revision),
+            Self::Installation(_) => None,
+        }
+    }
+
+    fn installation_authority_sha256(&self) -> Option<&[u8]> {
+        match self {
+            Self::Human(_) => None,
+            Self::Installation(installation) => {
+                Some(installation.installation_authority_sha256.as_slice())
+            }
+        }
+    }
+}
+
+struct EnrollmentTokenSpec<'a> {
+    enrollment_id: Uuid,
+    token_sha256: &'a [u8; 32],
+    runner_group: &'a str,
+    lifetime_ms: i64,
+}
+
+impl<'a> From<&'a CreateRunnerEnrollmentToken> for EnrollmentTokenSpec<'a> {
+    fn from(request: &'a CreateRunnerEnrollmentToken) -> Self {
+        Self {
+            enrollment_id: request.enrollment_id,
+            token_sha256: &request.token_sha256,
+            runner_group: &request.runner_group,
+            lifetime_ms: request.lifetime_ms,
+        }
+    }
+}
+
+impl<'a> From<&'a EnsureInstallationBootstrapRunnerEnrollmentToken> for EnrollmentTokenSpec<'a> {
+    fn from(request: &'a EnsureInstallationBootstrapRunnerEnrollmentToken) -> Self {
+        Self {
+            enrollment_id: request.enrollment_id,
+            token_sha256: &request.token_sha256,
+            runner_group: request.runner_group.as_str(),
+            lifetime_ms: request.lifetime_ms,
+        }
+    }
+}
+
+enum EnrollmentTokenCreateDecision {
+    Applied(RunnerEnrollmentTokenRecord),
+    Replayed(RunnerEnrollmentTokenRecord),
+    Refreshed(RunnerEnrollmentTokenRecord),
+    Consumed(RunnerEnrollmentTokenRecord),
+    Conflict,
 }
 
 #[derive(FromRow)]
@@ -682,7 +870,12 @@ struct RenewalReceiptRow {
     stored_certificate_expires_at_seconds: Option<i64>,
 }
 impl EnrollmentRow {
+    fn active_from_ms(&self) -> i64 {
+        self.last_refreshed_at_ms.unwrap_or(self.issued_at_ms)
+    }
+
     fn validate(&self) -> Result<(), ManagementRepositoryError> {
+        let active_from_ms = self.active_from_ms();
         if self.id.is_nil()
             || self.runner_group_id.is_nil()
             || self.tenant_id.is_empty()
@@ -690,10 +883,13 @@ impl EnrollmentRow {
             || self.issued_at_ms < 0
             || self
                 .expires_at_ms
-                .checked_sub(self.issued_at_ms)
+                .checked_sub(active_from_ms)
                 .is_none_or(|lifetime| {
                     !(MIN_TOKEN_LIFETIME_MS..=MAX_TOKEN_LIFETIME_MS).contains(&lifetime)
                 })
+            || self
+                .last_refreshed_at_ms
+                .is_some_and(|refreshed| refreshed <= self.issued_at_ms)
         {
             return Err(ManagementRepositoryError::CorruptData);
         }
@@ -713,7 +909,7 @@ impl EnrollmentRow {
                 Some(request),
                 Some(response),
                 Some(certificate_expires_at_seconds),
-            ) if consumed_at_ms >= self.issued_at_ms
+            ) if consumed_at_ms >= active_from_ms
                 && consumed_at_ms < self.expires_at_ms
                 && !runner_id.is_nil()
                 && !operation_id.is_nil()
@@ -813,6 +1009,78 @@ impl PostgresRunnerEnrollmentRepository {
             return Ok(closed_authorization(&authorization));
         };
         create_authorized_runner_enrollment(transaction, actor, descriptor, &request).await
+    }
+
+    /// Ensures the installation-issued runner enrollment token exists exactly.
+    ///
+    /// An exact live retry is read-only. An exact expired and unconsumed token
+    /// receives a new one-hour window on the same row and digest. A consumed
+    /// token is terminal and is never refreshed or rotated.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized repository error when the deployment-installation
+    /// proof is no longer durably exact, storage is unavailable, or enrollment
+    /// state violates its closed issuer and replay contract.
+    pub async fn ensure_installation_bootstrap_runner_enrollment_token(
+        &self,
+        request: EnsureInstallationBootstrapRunnerEnrollmentToken,
+    ) -> Result<InstallationBootstrapRunnerEnrollmentTokenOutcome, ManagementRepositoryError> {
+        let mut transaction = self.pool.begin().await.map_err(map_database_error)?;
+        revalidate_configured_deployment_installation(&mut transaction, &request.installation)
+            .await
+            .map_err(map_installation_error)?;
+        let issuer = EnrollmentIssuer::Installation(&request.installation);
+        let spec = EnrollmentTokenSpec::from(&request);
+        match create_runner_enrollment_token(&mut transaction, issuer, &spec).await? {
+            EnrollmentTokenCreateDecision::Applied(record) => {
+                append_installation_bootstrap_audit_event(
+                    &mut transaction,
+                    &request.installation,
+                    request.enrollment_id,
+                    "succeeded",
+                )
+                .await?;
+                commit(transaction).await?;
+                Ok(InstallationBootstrapRunnerEnrollmentTokenOutcome::Applied(
+                    record,
+                ))
+            }
+            EnrollmentTokenCreateDecision::Replayed(record) => {
+                commit(transaction).await?;
+                Ok(InstallationBootstrapRunnerEnrollmentTokenOutcome::Replayed(
+                    record,
+                ))
+            }
+            EnrollmentTokenCreateDecision::Refreshed(record) => {
+                append_installation_bootstrap_audit_event(
+                    &mut transaction,
+                    &request.installation,
+                    request.enrollment_id,
+                    "succeeded",
+                )
+                .await?;
+                commit(transaction).await?;
+                Ok(InstallationBootstrapRunnerEnrollmentTokenOutcome::Refreshed(record))
+            }
+            EnrollmentTokenCreateDecision::Consumed(record) => {
+                commit(transaction).await?;
+                Ok(InstallationBootstrapRunnerEnrollmentTokenOutcome::Consumed(
+                    record,
+                ))
+            }
+            EnrollmentTokenCreateDecision::Conflict => {
+                append_installation_bootstrap_audit_event(
+                    &mut transaction,
+                    &request.installation,
+                    request.enrollment_id,
+                    "failed",
+                )
+                .await?;
+                commit(transaction).await?;
+                Ok(InstallationBootstrapRunnerEnrollmentTokenOutcome::Conflict)
+            }
+        }
     }
 
     /// Loads non-secret token scope before certificate signing.
@@ -921,7 +1189,7 @@ impl PostgresRunnerEnrollmentRepository {
             return Ok(RunnerEnrollmentConsumeOutcome::Rejected);
         }
         let now_seconds = now_ms.div_euclid(1_000);
-        if request.certificate_issued_at_seconds < row.issued_at_ms.div_euclid(1_000)
+        if request.certificate_issued_at_seconds < row.active_from_ms().div_euclid(1_000)
             || request.certificate_issued_at_seconds > now_seconds
             || request
                 .certificate_expires_at_seconds
@@ -1627,65 +1895,194 @@ async fn create_authorized_runner_enrollment(
     descriptor: AuditDescriptor<'_>,
     request: &CreateRunnerEnrollmentToken,
 ) -> Result<ManagementMutationOutcome<RunnerEnrollmentTokenRecord>, ManagementRepositoryError> {
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,$2))")
-        .bind(request.enrollment_id.hyphenated().to_string())
-        .bind(RUNNER_ENROLLMENT_CREATE_LOCK_SALT)
-        .execute(&mut *transaction)
-        .await
-        .map_err(map_database_error)?;
-    if let Some(existing) = load_created_enrollment(&mut transaction, request.enrollment_id).await?
+    let spec = EnrollmentTokenSpec::from(request);
+    match create_runner_enrollment_token(&mut transaction, EnrollmentIssuer::Human(&actor), &spec)
+        .await?
     {
-        if existing.matches(&actor, request) {
+        EnrollmentTokenCreateDecision::Applied(record) => {
+            finish_applied(transaction, actor, descriptor, record).await
+        }
+        EnrollmentTokenCreateDecision::Replayed(record) => {
             // The original transition already appended its audit event. Exact
             // transport replay returns the durable result without a mutation.
             commit(transaction).await?;
-            return Ok(ManagementMutationOutcome::Applied(
-                RunnerEnrollmentTokenRecord {
-                    enrollment_id: request.enrollment_id,
-                    runner_group_id: existing.runner_group_id,
-                    runner_group: request.runner_group.clone(),
-                    expires_at_ms: existing.expires_at_ms,
-                },
-            ));
+            Ok(ManagementMutationOutcome::Applied(record))
         }
-        return finish_enrollment_conflict(transaction, actor, descriptor).await;
+        EnrollmentTokenCreateDecision::Conflict => {
+            finish_enrollment_conflict(transaction, actor, descriptor).await
+        }
+        EnrollmentTokenCreateDecision::Refreshed(_)
+        | EnrollmentTokenCreateDecision::Consumed(_) => Err(ManagementRepositoryError::CorruptData),
+    }
+}
+
+async fn create_runner_enrollment_token(
+    transaction: &mut Transaction<'_, Postgres>,
+    issuer: EnrollmentIssuer<'_>,
+    request: &EnrollmentTokenSpec<'_>,
+) -> Result<EnrollmentTokenCreateDecision, ManagementRepositoryError> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,$2))")
+        .bind(request.enrollment_id.hyphenated().to_string())
+        .bind(RUNNER_ENROLLMENT_CREATE_LOCK_SALT)
+        .execute(&mut **transaction)
+        .await
+        .map_err(map_database_error)?;
+    if let Some(existing) = load_created_enrollment(transaction, request.enrollment_id).await? {
+        if !existing.matches(issuer, request)? {
+            return Ok(EnrollmentTokenCreateDecision::Conflict);
+        }
+        let record = existing.record();
+        return match issuer {
+            EnrollmentIssuer::Human(_) => Ok(EnrollmentTokenCreateDecision::Replayed(record)),
+            EnrollmentIssuer::Installation(_) if existing.consumed_at_ms.is_some() => {
+                Ok(EnrollmentTokenCreateDecision::Consumed(record))
+            }
+            EnrollmentIssuer::Installation(_) => {
+                let now_ms = database_time_milliseconds(transaction)
+                    .await
+                    .map_err(map_database_error)?;
+                if existing.expires_at_ms > now_ms {
+                    return Ok(EnrollmentTokenCreateDecision::Replayed(record));
+                }
+                let expires_at_ms = now_ms
+                    .checked_add(request.lifetime_ms)
+                    .ok_or(ManagementRepositoryError::InvalidRequest)?;
+                let refreshed = sqlx::query(
+                    r"
+                    UPDATE runner_enrollment_tokens
+                    SET last_refreshed_at_ms=$2,expires_at_ms=$3
+                    WHERE id=$1 AND issuer_kind='installation_bootstrap'
+                      AND consumed_at_ms IS NULL AND expires_at_ms <= $2
+                    ",
+                )
+                .bind(request.enrollment_id)
+                .bind(now_ms)
+                .bind(expires_at_ms)
+                .execute(&mut **transaction)
+                .await
+                .map_err(map_database_error)?;
+                if refreshed.rows_affected() != 1 {
+                    return Err(ManagementRepositoryError::CorruptData);
+                }
+                Ok(EnrollmentTokenCreateDecision::Refreshed(
+                    RunnerEnrollmentTokenRecord {
+                        expires_at_ms,
+                        ..record
+                    },
+                ))
+            }
+        };
     }
     let conflicting_digest: Option<Uuid> = sqlx::query_scalar(
         "SELECT id FROM runner_enrollment_tokens WHERE token_sha256=$1 FOR UPDATE",
     )
     .bind(request.token_sha256.as_slice())
-    .fetch_optional(&mut *transaction)
+    .fetch_optional(&mut **transaction)
     .await
     .map_err(map_database_error)?;
     if conflicting_digest.is_some() {
-        return finish_enrollment_conflict(transaction, actor, descriptor).await;
+        return Ok(EnrollmentTokenCreateDecision::Conflict);
     }
     let Some((group_id, expires_at_ms)) =
-        try_insert_enrollment(&mut transaction, &actor, request).await?
+        try_insert_enrollment(transaction, issuer, request).await?
     else {
-        return finish_enrollment_conflict(transaction, actor, descriptor).await;
+        return Ok(EnrollmentTokenCreateDecision::Conflict);
     };
-    finish_applied(
-        transaction,
-        actor,
-        descriptor,
+    Ok(EnrollmentTokenCreateDecision::Applied(
         RunnerEnrollmentTokenRecord {
             enrollment_id: request.enrollment_id,
             runner_group_id: group_id,
-            runner_group: request.runner_group.clone(),
+            runner_group: request.runner_group.to_owned(),
             expires_at_ms,
         },
-    )
-    .await
+    ))
 }
 
 impl CreatedEnrollmentRow {
-    fn matches(&self, actor: &AuthorizedActor, request: &CreateRunnerEnrollmentToken) -> bool {
-        self.tenant_id == actor.tenant_id
+    fn matches(
+        &self,
+        issuer: EnrollmentIssuer<'_>,
+        request: &EnrollmentTokenSpec<'_>,
+    ) -> Result<bool, ManagementRepositoryError> {
+        self.validate()?;
+        let issuer_matches = match issuer {
+            EnrollmentIssuer::Human(actor) => {
+                self.issuer_kind == ISSUER_HUMAN
+                    && self.issued_by_principal_id == Some(actor.principal_id)
+                    && self.installation_authority_sha256.is_none()
+            }
+            EnrollmentIssuer::Installation(installation) => {
+                self.issuer_kind == ISSUER_INSTALLATION_BOOTSTRAP
+                    && self.issued_by_principal_id.is_none()
+                    && self.issued_by_session_id.is_none()
+                    && self.issued_authorization_revision.is_none()
+                    && self.installation_authority_sha256.as_deref()
+                        == Some(installation.installation_authority_sha256.as_slice())
+            }
+        };
+        let active_from_ms = self.last_refreshed_at_ms.unwrap_or(self.issued_at_ms);
+        Ok(self.tenant_id == issuer.tenant_id()
             && self.runner_group == request.runner_group
-            && self.token_sha256 == request.token_sha256
-            && self.issued_by_principal_id == actor.principal_id
-            && self.expires_at_ms.checked_sub(self.issued_at_ms) == Some(request.lifetime_ms)
+            && self.token_sha256.as_slice() == request.token_sha256.as_slice()
+            && self.expires_at_ms.checked_sub(active_from_ms) == Some(request.lifetime_ms)
+            && issuer_matches)
+    }
+
+    fn validate(&self) -> Result<(), ManagementRepositoryError> {
+        let active_from_ms = self.last_refreshed_at_ms.unwrap_or(self.issued_at_ms);
+        let active_lifetime = self.expires_at_ms.checked_sub(active_from_ms);
+        let valid_issuer = match self.issuer_kind.as_str() {
+            ISSUER_HUMAN => {
+                self.issued_by_principal_id.is_some_and(|id| !id.is_nil())
+                    && self.issued_by_session_id.is_some_and(|id| !id.is_nil())
+                    && self
+                        .issued_authorization_revision
+                        .is_some_and(|revision| revision > 0)
+                    && self.installation_authority_sha256.is_none()
+                    && self.last_refreshed_at_ms.is_none()
+                    && active_lifetime.is_some_and(|lifetime| {
+                        (MIN_TOKEN_LIFETIME_MS..=MAX_TOKEN_LIFETIME_MS).contains(&lifetime)
+                    })
+            }
+            ISSUER_INSTALLATION_BOOTSTRAP => {
+                self.issued_by_principal_id.is_none()
+                    && self.issued_by_session_id.is_none()
+                    && self.issued_authorization_revision.is_none()
+                    && self
+                        .installation_authority_sha256
+                        .as_deref()
+                        .is_some_and(|digest| digest.len() == 32 && digest != [0; 32])
+                    && self
+                        .last_refreshed_at_ms
+                        .is_none_or(|refreshed| refreshed > self.issued_at_ms)
+                    && active_lifetime == Some(INSTALLATION_BOOTSTRAP_ENROLLMENT_TOKEN_LIFETIME_MS)
+            }
+            _ => false,
+        };
+        if self.id.is_nil()
+            || self.tenant_id.is_empty()
+            || self.runner_group_id.is_nil()
+            || !valid_group(&self.runner_group)
+            || self.token_sha256.len() != 32
+            || self.token_sha256.as_slice() == [0; 32]
+            || self.issued_at_ms < 0
+            || self
+                .consumed_at_ms
+                .is_some_and(|consumed_at_ms| consumed_at_ms < active_from_ms)
+            || !valid_issuer
+        {
+            return Err(ManagementRepositoryError::CorruptData);
+        }
+        Ok(())
+    }
+
+    fn record(&self) -> RunnerEnrollmentTokenRecord {
+        RunnerEnrollmentTokenRecord {
+            enrollment_id: self.id,
+            runner_group_id: self.runner_group_id,
+            runner_group: self.runner_group.clone(),
+            expires_at_ms: self.expires_at_ms,
+        }
     }
 }
 
@@ -1695,10 +2092,13 @@ async fn load_created_enrollment(
 ) -> Result<Option<CreatedEnrollmentRow>, ManagementRepositoryError> {
     sqlx::query_as::<_, CreatedEnrollmentRow>(
         r"
-        SELECT token.tenant_id,token.runner_group_id,
+        SELECT token.id,token.tenant_id,token.runner_group_id,
                groups.name AS runner_group,token.token_sha256,
-               token.issued_by_principal_id,token.issued_at_ms,
-               token.expires_at_ms
+               token.issuer_kind,token.issued_by_principal_id,
+               token.issued_by_session_id,token.issued_authorization_revision,
+               token.installation_authority_sha256,token.issued_at_ms,
+               token.last_refreshed_at_ms,token.expires_at_ms,
+               token.consumed_at_ms
         FROM runner_enrollment_tokens AS token
         JOIN runner_groups AS groups
           ON groups.tenant_id=token.tenant_id
@@ -1715,8 +2115,8 @@ async fn load_created_enrollment(
 
 async fn try_insert_enrollment(
     transaction: &mut Transaction<'_, Postgres>,
-    actor: &AuthorizedActor,
-    request: &CreateRunnerEnrollmentToken,
+    issuer: EnrollmentIssuer<'_>,
+    request: &EnrollmentTokenSpec<'_>,
 ) -> Result<Option<(Uuid, i64)>, ManagementRepositoryError> {
     sqlx::query("SAVEPOINT runner_enrollment_token_create")
         .execute(&mut **transaction)
@@ -1727,8 +2127,8 @@ async fn try_insert_enrollment(
         .map_err(map_database_error)?;
     let group_id = ensure_runner_group(
         transaction,
-        &actor.tenant_id,
-        &request.runner_group,
+        issuer.tenant_id(),
+        request.runner_group,
         issued_at_ms,
     )
     .await?;
@@ -1738,20 +2138,23 @@ async fn try_insert_enrollment(
     let inserted = sqlx::query(
         r"
         INSERT INTO runner_enrollment_tokens (
-            id,tenant_id,runner_group_id,token_sha256,
+            id,tenant_id,runner_group_id,token_sha256,issuer_kind,
             issued_by_principal_id,issued_by_session_id,
-            issued_authorization_revision,issued_at_ms,expires_at_ms
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+            issued_authorization_revision,installation_authority_sha256,
+            issued_at_ms,expires_at_ms
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
         ON CONFLICT DO NOTHING
         ",
     )
     .bind(request.enrollment_id)
-    .bind(&actor.tenant_id)
+    .bind(issuer.tenant_id())
     .bind(group_id)
     .bind(request.token_sha256.as_slice())
-    .bind(actor.principal_id)
-    .bind(actor.session_id)
-    .bind(actor.authorization_revision)
+    .bind(issuer.kind())
+    .bind(issuer.human_principal_id())
+    .bind(issuer.human_session_id())
+    .bind(issuer.human_authorization_revision())
+    .bind(issuer.installation_authority_sha256())
     .bind(issued_at_ms)
     .bind(expires_at_ms)
     .execute(&mut **transaction)
@@ -1783,6 +2186,55 @@ async fn finish_enrollment_conflict(
         ManagementMutationOutcome::AlreadyExists,
     )
     .await
+}
+
+async fn append_installation_bootstrap_audit_event(
+    transaction: &mut Transaction<'_, Postgres>,
+    installation: &ConfiguredDeploymentInstallationProof,
+    enrollment_id: Uuid,
+    outcome: &'static str,
+) -> Result<(), ManagementRepositoryError> {
+    let occurred_at_ms = database_time_milliseconds(transaction)
+        .await
+        .map_err(map_database_error)?;
+    sqlx::query(
+        r"
+        INSERT INTO security_audit_events (
+            event_id,tenant_id,occurred_at_ms,actor_kind,action,outcome,
+            resource_kind,resource_id,request_id
+        ) VALUES ($1,$2,$3,'system',$4,$5,$6,$7,$8)
+        ",
+    )
+    .bind(Uuid::new_v4())
+    .bind(installation.tenant_id.as_str())
+    .bind(occurred_at_ms)
+    .bind(ACTION_TOKEN_BOOTSTRAP)
+    .bind(outcome)
+    .bind(RESOURCE_ENROLLMENT)
+    .bind(enrollment_id.hyphenated().to_string())
+    .bind(enrollment_id.hyphenated().to_string())
+    .execute(&mut **transaction)
+    .await
+    .map_err(map_database_error)?;
+    Ok(())
+}
+
+fn map_installation_error(error: InstallationRepositoryError) -> ManagementRepositoryError {
+    match error {
+        InstallationRepositoryError::Unavailable => ManagementRepositoryError::Unavailable,
+        InstallationRepositoryError::CorruptData => ManagementRepositoryError::CorruptData,
+        InstallationRepositoryError::InvalidRequest
+        | InstallationRepositoryError::NotArmed
+        | InstallationRepositoryError::ProofRejected
+        | InstallationRepositoryError::Expired
+        | InstallationRepositoryError::AlreadyBound
+        | InstallationRepositoryError::AlreadyConfigured
+        | InstallationRepositoryError::VersionConflict
+        | InstallationRepositoryError::IdentityConflict
+        | InstallationRepositoryError::CredentialCustody => {
+            ManagementRepositoryError::InvalidRequest
+        }
+    }
 }
 
 fn enrolled_runner_external_identity(runner_id: Uuid) -> String {
@@ -1830,7 +2282,7 @@ async fn load_enrollment(
             r"
             SELECT token.id,token.tenant_id,token.runner_group_id,
                    groups.name AS runner_group,token.issued_at_ms,
-                   token.expires_at_ms,
+                   token.last_refreshed_at_ms,token.expires_at_ms,
                    token.consumed_at_ms,token.consumed_runner_id,
                    token.redeem_operation_id,token.redeem_request_sha256,
                    token.redeem_response,token.redeem_certificate_expires_at_seconds
@@ -1850,7 +2302,7 @@ async fn load_enrollment(
             r"
             SELECT token.id,token.tenant_id,token.runner_group_id,
                    groups.name AS runner_group,token.issued_at_ms,
-                   token.expires_at_ms,
+                   token.last_refreshed_at_ms,token.expires_at_ms,
                    token.consumed_at_ms,token.consumed_runner_id,
                    token.redeem_operation_id,token.redeem_request_sha256,
                    token.redeem_response,token.redeem_certificate_expires_at_seconds
@@ -1881,4 +2333,68 @@ fn valid_runner_name(value: &str) -> bool {
         && value.len() <= MAX_NAME_BYTES
         && !value.chars().any(char::is_control)
         && value.trim() == value
+}
+
+#[cfg(test)]
+mod tests {
+    use automata_ci_auth::{human::TenantId, installation::InstallationRevision};
+
+    use super::*;
+
+    fn installation_proof() -> ConfiguredDeploymentInstallationProof {
+        ConfiguredDeploymentInstallationProof {
+            installation_authority_sha256: [1; 32],
+            bootstrap_operation_id: Uuid::new_v4(),
+            tenant_id: TenantId::new("local-installation").expect("tenant"),
+            tenant_display_name: "Local installation".to_owned(),
+            bootstrap_audit_event_id: Uuid::new_v4(),
+            configured_at_ms: 1,
+            installation_revision: InstallationRevision::new(2).expect("revision"),
+        }
+    }
+
+    #[test]
+    fn installation_request_requires_exact_identity_digest_and_one_hour_lifetime() {
+        let installation = installation_proof();
+        let group = RunnerGroup::new("default").expect("group");
+        for (enrollment_id, digest, lifetime_ms) in [
+            (
+                Uuid::nil(),
+                [1_u8; 32],
+                INSTALLATION_BOOTSTRAP_ENROLLMENT_TOKEN_LIFETIME_MS,
+            ),
+            (
+                Uuid::new_v4(),
+                [0_u8; 32],
+                INSTALLATION_BOOTSTRAP_ENROLLMENT_TOKEN_LIFETIME_MS,
+            ),
+            (
+                Uuid::new_v4(),
+                [1_u8; 32],
+                INSTALLATION_BOOTSTRAP_ENROLLMENT_TOKEN_LIFETIME_MS - 1,
+            ),
+        ] {
+            assert!(
+                EnsureInstallationBootstrapRunnerEnrollmentToken::new(
+                    installation.clone(),
+                    enrollment_id,
+                    digest,
+                    group.clone(),
+                    lifetime_ms,
+                )
+                .is_err()
+            );
+        }
+        let request = EnsureInstallationBootstrapRunnerEnrollmentToken::new(
+            installation,
+            Uuid::new_v4(),
+            [7_u8; 32],
+            group,
+            INSTALLATION_BOOTSTRAP_ENROLLMENT_TOKEN_LIFETIME_MS,
+        )
+        .expect("valid request");
+        let debug = format!("{request:?}");
+        assert!(!debug.contains("token_sha256"));
+        assert!(!debug.contains("7, 7"));
+    }
 }

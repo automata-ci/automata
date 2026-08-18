@@ -35,8 +35,11 @@ use super::{
     LocalInitError, LocalInitErrorCode,
     catalog::{LiveImageEvidence, VerifiedCatalog},
     epoch::{EpochImageExpectation, ImmutableEpoch},
-    materializer::{MaterializeRequest, VolumeRole},
+    materializer::{MaterializeRequest, RESPONSE_SCHEMA, VolumeRole},
 };
+
+mod lifecycle;
+pub(in crate::init) use lifecycle::LifecycleTopology;
 
 const ENGINE_TIMEOUT: Duration = Duration::from_secs(10);
 const IMAGE_TIMEOUT: Duration = Duration::from_mins(15);
@@ -50,7 +53,6 @@ const HELPER_KIND: &str = "init-materializer";
 const HELPER_MEMORY_BYTES: i64 = 128 * 1024 * 1024;
 const HELPER_PIDS: i64 = 64;
 const HELPER_NANO_CPUS: i64 = 1_000_000_000;
-const RESPONSE_SCHEMA: &str = "automata.local/materialize-response/v1";
 const MAX_HELPER_LOG_BYTES: usize = 16 * 1024;
 const HELPER_EXPOSED_PORT: &str = "8080/tcp";
 const MAX_ENGINE_RESOURCES: usize = 4096;

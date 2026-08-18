@@ -143,6 +143,54 @@ fn canonical_document_has_a_stable_golden_vector() {
 }
 
 #[test]
+fn canonical_loader_round_trips_and_rejects_every_untrusted_boundary() {
+    let installation = installation();
+    let original = spec();
+    let bytes = original.canonical_bytes();
+    let loaded = DesiredSpec::from_canonical_bytes(&bytes, &installation)
+        .expect("canonical desired intent loads");
+    assert_eq!(loaded, original);
+    assert_eq!(loaded.canonical_bytes(), bytes);
+
+    let mut noncanonical = bytes.clone();
+    noncanonical.pop();
+    assert_eq!(
+        DesiredSpec::from_canonical_bytes(&noncanonical, &installation)
+            .expect_err("missing canonical newline must fail")
+            .code(),
+        DesiredSpecErrorCode::Document
+    );
+
+    let different_installation = Installation::verified(
+        InstallationName::new("other").expect("fixed installation name"),
+        InstallationId::parse_canonical("22222222-2222-4222-8222-222222222222")
+            .expect("fixed version-four installation ID"),
+    );
+    assert_eq!(
+        DesiredSpec::from_canonical_bytes(&bytes, &different_installation)
+            .expect_err("different installation binding must fail")
+            .code(),
+        DesiredSpecErrorCode::Document
+    );
+
+    let mut tampered = String::from_utf8(bytes).expect("desired bytes are UTF-8");
+    tampered = tampered.replace("\"max_parallel_jobs\":3", "\"max_parallel_jobs\":4");
+    assert_eq!(
+        DesiredSpec::from_canonical_bytes(tampered.as_bytes(), &installation)
+            .expect_err("plan-inconsistent desired intent must fail")
+            .code(),
+        DesiredSpecErrorCode::Document
+    );
+
+    assert_eq!(
+        DesiredSpec::from_canonical_bytes(&vec![b' '; 64 * 1024 + 1], &installation)
+            .expect_err("oversized desired intent must fail")
+            .code(),
+        DesiredSpecErrorCode::Document
+    );
+}
+
+#[test]
 fn exact_worker_bounds_are_enforced() {
     let upper = u16::try_from(MAX_JOURNALED_SLOTS).expect("journal slot limit fits u16");
     assert!(
@@ -334,6 +382,38 @@ fn results_transit_is_canonical_private_first_host_and_nonoverlapping() {
             .code(),
         DesiredSpecErrorCode::ResultsTransit
     );
+
+    let installation = installation();
+    for (kind, subnet) in [
+        ("control", super::control_subnet(&installation)),
+        ("egress", super::egress_subnet(&installation)),
+    ] {
+        let enclosing = super::Ipv4Subnet {
+            network: subnet.network & super::prefix_mask(23),
+            prefix: 23,
+        };
+        let overlapping = ResultsTransit::new(
+            enclosing.to_string(),
+            enclosing.address(1),
+            enclosing.address(2),
+        )
+        .expect("derived lifecycle subnet has a canonical enclosing transit");
+        let input = DesiredSpecInput::new(
+            NonZeroU16::new(1).expect("capacity"),
+            NonZeroU16::new(8080).expect("port"),
+            profile(EngineArchitecture::Amd64, 1),
+            images(17),
+            overlapping,
+        )
+        .expect("bounded desired input");
+        assert_eq!(
+            DesiredSpec::new(&installation, input)
+                .expect_err("derived lifecycle overlap must fail")
+                .code(),
+            DesiredSpecErrorCode::ResultsTransit,
+            "{kind} subnet"
+        );
+    }
 }
 
 #[test]

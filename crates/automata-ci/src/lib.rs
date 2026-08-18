@@ -25,18 +25,26 @@ use tracing_subscriber::EnvFilter;
 
 use crate::cli::{Cli, Command};
 
-/// Parses process arguments and runs the control plane.
+/// Parses process arguments and runs the selected service or operation.
 ///
 /// # Errors
 ///
-/// Returns an error when the selected service cannot bind or exits with an
-/// HTTP serving failure.
-pub async fn run() -> Result<()> {
+/// Returns an error when parsing, runtime construction, or the selected
+/// operation fails.
+pub fn run() -> Result<()> {
     let Some(cli) = parse_process_arguments()? else {
         return Ok(());
     };
     init_tracing();
-    Box::pin(execute(cli)).await
+    if let Command::Internal(args) = &cli.command
+        && internal::is_synchronous_engine_operation(args)
+    {
+        return internal::run_synchronous_engine_operation(args);
+    }
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(Box::pin(execute(cli)))
 }
 
 fn parse_process_arguments() -> Result<Option<Cli>> {

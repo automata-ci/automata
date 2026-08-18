@@ -646,6 +646,9 @@ fn validate_reset_host_state(
     state: &StateRoot,
     snapshot: &ResetStateSnapshot,
 ) -> Result<EstablishedState, LocalInitError> {
+    if snapshot.lifecycle_operation.present() {
+        return Err(reset_required());
+    }
     let epoch = ImmutableEpoch::from_authority_bound_bytes(
         snapshot.epoch.completed().ok_or_else(reset_required)?,
         state.authority_sha256(),
@@ -764,6 +767,9 @@ fn validate_host_state(
     state: &StateRoot,
     snapshot: &StateSnapshot,
 ) -> Result<ValidatedHostState, LocalInitError> {
+    if snapshot.lifecycle_operation.is_some() {
+        return Err(reset_required());
+    }
     let installation = snapshot
         .installation_selection
         .as_deref()
@@ -985,6 +991,9 @@ impl ValidatedResetIntent {
         &self,
         snapshot: &ResetStateSnapshot,
     ) -> Result<(), LocalInitError> {
+        if snapshot.lifecycle_operation.present() {
+            return Err(reset_required());
+        }
         validate_reset_candidate_conflicts(
             snapshot,
             self.state_authority_sha256,

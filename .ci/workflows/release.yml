@@ -1441,6 +1441,7 @@ jobs:
           for source in \
             Cargo.toml \
             LICENSE \
+            crates/automata-ci-local/src/init/catalog-v1.source.json \
             images/github-hosted-ubuntu-24.04-x64/profile-lock.json \
             images/github-hosted-ubuntu-24.04-x64/profile-manifest.json \
             images/local-installation/catalog-v1.json \
@@ -1470,6 +1471,7 @@ jobs:
             -- \
             Cargo.toml \
             LICENSE \
+            crates/automata-ci-local/src/init/catalog-v1.source.json \
             images/github-hosted-ubuntu-24.04-x64/profile-lock.json \
             images/github-hosted-ubuntu-24.04-x64/profile-manifest.json \
             images/local-installation/catalog-v1.json \
@@ -1654,6 +1656,7 @@ jobs:
           expected = {
               "Cargo.toml",
               "LICENSE",
+              "crates/automata-ci-local/src/init/catalog-v1.source.json",
               "images/github-hosted-ubuntu-24.04-x64/profile-lock.json",
               "images/github-hosted-ubuntu-24.04-x64/profile-manifest.json",
               "images/local-installation/catalog-v1.json",

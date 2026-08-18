@@ -16,7 +16,7 @@ use super::{LocalInitError, LocalInitErrorCode};
 
 const CATALOG_SCHEMA: &str = "automata.local/release-catalog/v1";
 const SOURCE_SCHEMA: &str = "automata.local/release-catalog-source/v1";
-const SOURCE_SHA256: &str = "b9961f83612fe1533c8c3565ce8822afe72ad1fbbd833d0a117744f2406dacd4";
+const SOURCE_SHA256: &str = "9f4e07ea39c6ba4231796579e11f6fb5ff0514eb0fd2eeca0047e11c3f0b4a62";
 const CANDIDATE_BASENAME: &str = "automata-service-proxy-candidate-x86_64-unknown-linux-musl.tar";
 const CANDIDATE_PATH: &str = concat!(
     "target/service-proxy-publication/",
@@ -62,9 +62,14 @@ const ALL_ROLES: [&str; 7] = [
     "service-proxy",
 ];
 
+pub(super) fn current_source_contract_sha256() -> Sha256Digest {
+    Sha256Digest::from_str(SOURCE_SHA256).expect("the compiled source-contract digest is valid")
+}
+
 #[derive(Clone, Debug)]
 pub(super) struct VerifiedCatalog {
     bytes_sha256: Sha256Digest,
+    source_contract_sha256: Sha256Digest,
     release: Release,
     profile: ProfileBinding,
     images: BTreeMap<String, VerifiedImage>,
@@ -86,7 +91,7 @@ impl VerifiedCatalog {
         }
         validate_release(&raw.release)?;
 
-        let source_bytes = include_bytes!("../../../../images/local-installation/catalog-v1.json");
+        let source_bytes = include_bytes!("catalog-v1.source.json");
         if digest_hex(source_bytes) != SOURCE_SHA256 {
             return Err(invalid_catalog());
         }
@@ -94,6 +99,7 @@ impl VerifiedCatalog {
         let source: RawSourceCatalog =
             serde_json::from_value(source_value).map_err(|_| invalid_catalog())?;
         if source.schema != SOURCE_SCHEMA
+            || raw.lifecycle_runtime != source.lifecycle_runtime
             || raw.platform != source.platform
             || raw.scope != source.scope
             || raw.services != source.services
@@ -105,6 +111,8 @@ impl VerifiedCatalog {
         {
             return Err(invalid_catalog());
         }
+        validate_lifecycle_runtime(&source.lifecycle_runtime)?;
+        validate_renderer_service_contracts(&source.images)?;
         validate_scope_and_services(&raw.scope, &raw.services)?;
         let profile = validate_profile(&raw.profile, &source.profile)?;
 
@@ -152,6 +160,7 @@ impl VerifiedCatalog {
         let ports = object(raw.services.get("ports").ok_or_else(invalid_catalog)?)?;
         Ok(Self {
             bytes_sha256: digest(bytes),
+            source_contract_sha256: current_source_contract_sha256(),
             release: raw.release,
             profile,
             images,
@@ -166,6 +175,10 @@ impl VerifiedCatalog {
 
     pub(super) const fn digest(&self) -> Sha256Digest {
         self.bytes_sha256
+    }
+
+    pub(super) const fn source_contract_sha256(&self) -> Sha256Digest {
+        self.source_contract_sha256
     }
 
     pub(super) const fn maximum_parallel_jobs(&self) -> u16 {
@@ -330,6 +343,206 @@ impl VerifiedCatalog {
     }
 }
 
+fn validate_lifecycle_runtime(value: &Value) -> Result<(), LocalInitError> {
+    let runtime = object(value)?;
+    let commands = object(
+        runtime
+            .get("automata_commands")
+            .ok_or_else(invalid_catalog)?,
+    )?;
+    let materialize = object(commands.get("materialize").ok_or_else(invalid_catalog)?)?;
+    let control_ready = object(commands.get("check_ready").ok_or_else(invalid_catalog)?)?;
+    let read_desired = object(commands.get("read_desired").ok_or_else(invalid_catalog)?)?;
+    let write_cas = object(commands.get("write_cas").ok_or_else(invalid_catalog)?)?;
+    let compose = object(runtime.get("compose").ok_or_else(invalid_catalog)?)?;
+    let runner_commands = object(runtime.get("runner_commands").ok_or_else(invalid_catalog)?)?;
+    let runner_ready = object(
+        runner_commands
+            .get("local_check_ready")
+            .ok_or_else(invalid_catalog)?,
+    )?;
+    let minimum_compose = format!(
+        "{}.{}.{}",
+        crate::MIN_COMPOSE_VERSION.0,
+        crate::MIN_COMPOSE_VERSION.1,
+        crate::MIN_COMPOSE_VERSION.2
+    );
+    let results = object(runtime.get("results_transit").ok_or_else(invalid_catalog)?)?;
+    if runtime.get("engine_relay") != Some(&crate::engine_relay::lifecycle_contract())
+        || materialize.get("request_schema").and_then(Value::as_str)
+            != Some(super::materializer::REQUEST_SCHEMA)
+        || materialize
+            .get("maximum_request_bytes")
+            .and_then(Value::as_u64)
+            != u64::try_from(super::materializer::MAX_REQUEST_BYTES).ok()
+        || materialize.get("response_schema").and_then(Value::as_str)
+            != Some(super::materializer::RESPONSE_SCHEMA)
+        || read_desired.get("response_schema").and_then(Value::as_str)
+            != Some(crate::desired_spec::DESIRED_SPEC_SCHEMA)
+        || read_desired.get("maximum_bytes").and_then(Value::as_u64)
+            != u64::try_from(crate::MAX_LOCAL_DESIRED_SPEC_BYTES).ok()
+        || write_cas.get("request_schema").and_then(Value::as_str)
+            != Some(crate::lifecycle_helper::CAS_SCHEMA)
+        || write_cas
+            .get("maximum_request_bytes")
+            .and_then(Value::as_u64)
+            != u64::try_from(crate::lifecycle_helper::MAX_CAS_REQUEST_BYTES).ok()
+        || write_cas
+            .get("maximum_content_bytes")
+            .and_then(Value::as_u64)
+            != u64::try_from(crate::lifecycle_helper::MAX_CAS_CONTENT_BYTES).ok()
+        || control_ready.get("argv") != Some(&serde_json::json!(crate::LOCAL_CONTROL_READY_COMMAND))
+        || control_ready.get("listen").and_then(Value::as_str)
+            != Some(crate::LOCAL_CONTROL_READY_LISTEN)
+        || control_ready
+            .get("maximum_response_bytes")
+            .and_then(Value::as_u64)
+            != u64::try_from(crate::LOCAL_CONTROL_READY_MAXIMUM_RESPONSE_BYTES).ok()
+        || control_ready.get("request").and_then(Value::as_str)
+            != Some(crate::LOCAL_CONTROL_READY_REQUEST)
+        || control_ready.get("response_prefix").and_then(Value::as_str)
+            != Some(crate::LOCAL_CONTROL_READY_RESPONSE_PREFIX)
+        || control_ready.get("response_suffix").and_then(Value::as_str)
+            != Some(crate::LOCAL_CONTROL_READY_RESPONSE_SUFFIX)
+        || control_ready.get("timeout_seconds").and_then(Value::as_u64)
+            != Some(crate::LOCAL_CONTROL_READY_TIMEOUT_SECONDS)
+        || compose.get("minimum_version").and_then(Value::as_str) != Some(&minimum_compose)
+        || compose.get("named_volume_nocopy").and_then(Value::as_bool) != Some(true)
+        || compose.get("project_directory").and_then(Value::as_str)
+            != Some(super::compose::COMPOSE_PROJECT_DIRECTORY)
+        || runner_ready.get("argv") != Some(&serde_json::json!([crate::LOCAL_RUNNER_READY_COMMAND]))
+        || runner_ready.get("healthcheck_argv")
+            != Some(&serde_json::json!([
+                super::renderer::RUNNER_BINARY,
+                crate::LOCAL_RUNNER_READY_COMMAND
+            ]))
+        || runner_ready.get("listen").and_then(Value::as_str)
+            != Some(crate::LOCAL_RUNNER_READY_LISTEN)
+        || runner_ready
+            .get("maximum_response_bytes")
+            .and_then(Value::as_u64)
+            != u64::try_from(crate::LOCAL_RUNNER_READY_MAXIMUM_RESPONSE_BYTES).ok()
+        || runner_ready.get("path").and_then(Value::as_str) != Some(crate::LOCAL_RUNNER_READY_PATH)
+        || runner_ready.get("protocol").and_then(Value::as_str)
+            != Some(crate::LOCAL_RUNNER_READY_PROTOCOL)
+        || runner_ready.get("required_metrics")
+            != Some(&serde_json::json!([
+                crate::LOCAL_RUNNER_READY_METRIC,
+                crate::LOCAL_RUNNER_SESSION_CONNECTED_METRIC
+            ]))
+        || runner_ready.get("timeout_seconds").and_then(Value::as_u64)
+            != Some(crate::LOCAL_RUNNER_READY_TIMEOUT_SECONDS)
+        || results.get("schema").and_then(Value::as_u64)
+            != crate::local_docker::RESULTS_TRANSPORT_SCHEMA.parse().ok()
+        || results.get("ownership").and_then(Value::as_str)
+            != Some(crate::results_transport::RESULTS_TRANSPORT_OWNERSHIP)
+    {
+        return Err(invalid_catalog());
+    }
+    Ok(())
+}
+
+fn validate_renderer_service_contracts(
+    images: &BTreeMap<String, RawImage>,
+) -> Result<(), LocalInitError> {
+    let runner = images.get("runner").ok_or_else(invalid_catalog)?;
+    let runner_runtime = object(&runner.runtime)?;
+    if runner_runtime.get("binary").and_then(Value::as_str) != Some(super::renderer::RUNNER_BINARY)
+        || runner_runtime.get("commands")
+            != Some(&serde_json::json!([
+                crate::LOCAL_RUNNER_READY_COMMAND,
+                "enroll",
+                "run"
+            ]))
+    {
+        return Err(invalid_catalog());
+    }
+    let postgres = images.get("postgres").ok_or_else(invalid_catalog)?;
+    let runtime = object(&postgres.runtime)?;
+    let config = object(&postgres.config)?;
+    let environment = object(
+        config
+            .get("required_environment")
+            .ok_or_else(invalid_catalog)?,
+    )?;
+    let command = config
+        .get("command")
+        .and_then(Value::as_array)
+        .ok_or_else(invalid_catalog)?;
+    let postgres_user = format!(
+        "{}:{}",
+        runtime
+            .get("container_uid")
+            .and_then(Value::as_u64)
+            .ok_or_else(invalid_catalog)?,
+        runtime
+            .get("container_gid")
+            .and_then(Value::as_u64)
+            .ok_or_else(invalid_catalog)?
+    );
+    if runtime.get("data_mount").and_then(Value::as_str)
+        != Some(super::renderer::POSTGRES_DATA_MOUNT)
+        || runtime.get("postgres").and_then(Value::as_str) != Some(super::renderer::POSTGRES_BINARY)
+        || command.as_slice()
+            != [Value::String(
+                super::renderer::POSTGRES_LAUNCH_COMMAND.to_owned(),
+            )]
+        || runtime.get("container_uid").and_then(Value::as_u64) != Some(999)
+        || runtime.get("container_gid").and_then(Value::as_u64) != Some(999)
+        || runtime.get("preowned_uid").and_then(Value::as_u64) != Some(999)
+        || runtime.get("preowned_gid").and_then(Value::as_u64) != Some(999)
+        || postgres_user != super::renderer::POSTGRES_USER
+        || runtime.get("read_only_root").and_then(Value::as_bool) != Some(true)
+        || runtime.get("cap_drop") != Some(&serde_json::json!(["ALL"]))
+        || runtime.get("security_opt") != Some(&serde_json::json!(["no-new-privileges:true"]))
+        || runtime.get("tmpfs") != Some(&serde_json::json!(super::renderer::POSTGRES_TMPFS))
+        || runtime.get("pg_isready").and_then(Value::as_str)
+            != Some(super::renderer::POSTGRES_READY_BINARY)
+        || runtime.get("server_certificate").and_then(Value::as_str)
+            != Some(super::renderer::POSTGRES_SERVER_CERTIFICATE)
+        || runtime.get("server_private_key").and_then(Value::as_str)
+            != Some(super::renderer::POSTGRES_SERVER_PRIVATE_KEY)
+        || runtime
+            .get("server_private_key_mode")
+            .and_then(Value::as_str)
+            != Some(format!("{:04o}", super::materializer::STATIC_FILE_MODE).as_str())
+        || environment.get("PGDATA").and_then(Value::as_str)
+            != Some(super::renderer::POSTGRES_PGDATA)
+    {
+        return Err(invalid_catalog());
+    }
+    let rustfs = images.get("rustfs").ok_or_else(invalid_catalog)?;
+    let runtime = object(&rustfs.runtime)?;
+    let rustfs_user = format!(
+        "{}:{}",
+        runtime
+            .get("uid")
+            .and_then(Value::as_u64)
+            .ok_or_else(invalid_catalog)?,
+        runtime
+            .get("gid")
+            .and_then(Value::as_u64)
+            .ok_or_else(invalid_catalog)?
+    );
+    if runtime.get("entrypoint").and_then(Value::as_str) != Some(super::renderer::RUSTFS_ENTRYPOINT)
+        || runtime.get("server").and_then(Value::as_str) != Some(super::renderer::RUSTFS_SERVER)
+        || runtime.get("health_client").and_then(Value::as_str)
+            != Some(super::renderer::RUSTFS_HEALTH_CLIENT)
+        || runtime.get("shell").and_then(Value::as_str) != Some(super::renderer::RUSTFS_SHELL)
+        || runtime.get("cat").and_then(Value::as_str) != Some(super::renderer::RUSTFS_CAT)
+        || runtime.get("uid").and_then(Value::as_u64) != Some(10_001)
+        || runtime.get("gid").and_then(Value::as_u64) != Some(10_001)
+        || rustfs_user != super::renderer::RUSTFS_USER
+        || runtime.get("read_only_root").and_then(Value::as_bool) != Some(true)
+        || runtime.get("cap_drop") != Some(&serde_json::json!(["ALL"]))
+        || runtime.get("security_opt") != Some(&serde_json::json!(["no-new-privileges:true"]))
+        || runtime.get("tmpfs") != Some(&serde_json::json!(super::renderer::RUSTFS_TMPFS))
+    {
+        return Err(invalid_catalog());
+    }
+    Ok(())
+}
+
 pub(super) struct LiveImageEvidence<'a> {
     pub(super) image_id: &'a str,
     pub(super) operating_system: &'a str,
@@ -472,6 +685,7 @@ pub(super) struct Release {
 #[serde(deny_unknown_fields)]
 struct RawCatalog {
     images: BTreeMap<String, RawImage>,
+    lifecycle_runtime: Value,
     platform: Value,
     profile: Value,
     release: Release,
@@ -485,6 +699,7 @@ struct RawCatalog {
 #[serde(deny_unknown_fields)]
 struct RawSourceCatalog {
     images: BTreeMap<String, RawImage>,
+    lifecycle_runtime: Value,
     platform: Value,
     profile: Value,
     schema: String,
@@ -2039,6 +2254,7 @@ pub(super) fn candidate_replay_test_catalog(
 ) -> VerifiedCatalog {
     VerifiedCatalog {
         bytes_sha256: Sha256Digest::from_bytes([0x71; 32]),
+        source_contract_sha256: current_source_contract_sha256(),
         release,
         profile: ProfileBinding {
             id: "fixture".to_owned(),

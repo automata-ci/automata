@@ -46,7 +46,7 @@ getrandom.workspace = true
 p256.workspace = true
 rcgen.workspace = true
 ring.workspace = true
-rustix.workspace = true
+rustix = { workspace = true, features = ["net", "thread"] }
 time.workspace = true
 x509-parser.workspace = true
 zeroize.workspace = true
