@@ -50,7 +50,9 @@ repository_root="$(git rev-parse --show-toplevel)"
 cd "$repository_root"
 # shellcheck source=scripts/ci/postgres-test-environment.sh
 source "$repository_root/scripts/ci/postgres-test-environment.sh"
-output_directory="$(realpath -m -- "$output_directory")"
+output_directory="$(
+  python3 "$repository_root/scripts/ci/resolve-path.py" "$output_directory"
+)"
 if [[ "$output_directory" != "$repository_root/"* ]]; then
   printf 'error: coverage output must be inside the repository\n' >&2
   exit 2
@@ -61,6 +63,14 @@ if ! git check-ignore --quiet --no-index -- "$output_relative/"; then
   exit 2
 fi
 policy="$repository_root/scripts/ci/rust-coverage-policy.json"
+case "$(uname -s)" in
+  Linux) runner_platform=linux ;;
+  Darwin) runner_platform=macos ;;
+  *)
+    printf 'error: Rust coverage supports only Linux and macOS runners\n' >&2
+    exit 2
+    ;;
+esac
 
 require_environment() {
   local variable
@@ -129,9 +139,13 @@ run_ignored_command() {
 }
 
 run_ordinary() {
+  local -a excluded_packages=(--exclude automata-ci-ui-renderer)
+  if [[ "$runner_platform" == macos ]]; then
+    excluded_packages+=(--exclude automata-ci-service-proxy)
+  fi
   run_command cargo test \
     --workspace \
-    --exclude automata-ci-ui-renderer \
+    "${excluded_packages[@]}" \
     --all-targets \
     --all-features \
     --locked \
@@ -238,8 +252,10 @@ coverage_lock="$repository_root/target/llvm-cov-target.lock"
 if [[ "${AUTOMATA_COVERAGE_LOCK_HELD-}" != "$coverage_lock" ]]; then
   set +e
   AUTOMATA_COVERAGE_LOCK_HELD="$coverage_lock" \
-    flock --exclusive --nonblock --close --conflict-exit-code 73 \
-    "$coverage_lock" "$0" "$output_directory" "${lanes[@]}"
+    python3 "$repository_root/scripts/ci/run-with-file-lock.py" \
+      --conflict-exit-code 73 \
+      --lock-file "$coverage_lock" \
+      -- "$0" "$output_directory" "${lanes[@]}"
   locked_status=$?
   set -e
   if (( locked_status == 73 )); then
@@ -249,6 +265,16 @@ if [[ "${AUTOMATA_COVERAGE_LOCK_HELD-}" != "$coverage_lock" ]]; then
   exit "$locked_status"
 fi
 unset AUTOMATA_COVERAGE_LOCK_HELD
+
+if [[ "$runner_platform" == macos ]]; then
+  # Apple's per-user temporary directory is private but long enough to exceed
+  # sockaddr_un limits in instrumented process tests. Keep the short override
+  # private so it is also suitable for CLI credential-lock state.
+  coverage_tmp="$repository_root/target/llvm-cov-tmp"
+  install -d -m 0700 -- "$coverage_tmp"
+  chmod 0700 "$coverage_tmp"
+  export TMPDIR="$coverage_tmp"
+fi
 
 install -d -m 0755 -- "$output_directory"
 rm -f -- \
@@ -379,6 +405,7 @@ check_coverage_report() {
     --summary "$summary_path" \
     --lcov "$lcov_path" \
     --manifest "$manifest_path" \
+    --runner-platform "$runner_platform" \
     --source-head "$source_head" \
     --source-content-digest "$source_content_digest" \
     --source-state-token "$source_state_token" \
@@ -392,6 +419,7 @@ check_coverage_report() {
   if (( last_checker_status == 1 )); then
     if ! python3 scripts/ci/validate-rust-coverage-failure.py \
       --manifest "$manifest_path" \
+      --runner-platform "$runner_platform" \
       --summary "$summary_path" \
       --lcov "$lcov_path" \
       --source-head "$source_head" \

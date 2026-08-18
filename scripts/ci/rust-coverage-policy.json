@@ -78,14 +78,26 @@
       "source_prefixes": []
     }
   },
-  "ordinary_guard": {
-    "line_percent_floor": 81.0,
-    "minimum_measured_lines": 246000,
-    "reviewed_baseline": {
-      "covered_lines": 202158,
-      "measured_lines": 246784,
-      "line_percent": 81.91698003112033,
-      "report_date": "2026-08-17"
+  "ordinary_guards": {
+    "linux": {
+      "line_percent_floor": 81.0,
+      "minimum_measured_lines": 246000,
+      "reviewed_baseline": {
+        "covered_lines": 202158,
+        "measured_lines": 246784,
+        "line_percent": 81.91698003112033,
+        "report_date": "2026-08-17"
+      }
+    },
+    "macos": {
+      "line_percent_floor": 76.25,
+      "minimum_measured_lines": 247000,
+      "reviewed_baseline": {
+        "covered_lines": 191348,
+        "measured_lines": 247854,
+        "line_percent": 77.20190111920728,
+        "report_date": "2026-08-18"
+      }
     }
   }
 }

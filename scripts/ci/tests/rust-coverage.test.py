@@ -47,14 +47,26 @@ def policy(path: Path) -> None:
                         "source_prefixes": ["crates/database/src/adapter.rs"],
                     },
                 },
-                "ordinary_guard": {
-                    "line_percent_floor": 82.0,
-                    "minimum_measured_lines": 100,
-                    "reviewed_baseline": {
-                        "covered_lines": 90,
-                        "measured_lines": 100,
-                        "line_percent": 90.0,
-                        "report_date": "2026-08-11",
+                "ordinary_guards": {
+                    "linux": {
+                        "line_percent_floor": 82.0,
+                        "minimum_measured_lines": 100,
+                        "reviewed_baseline": {
+                            "covered_lines": 90,
+                            "measured_lines": 100,
+                            "line_percent": 90.0,
+                            "report_date": "2026-08-11",
+                        },
+                    },
+                    "macos": {
+                        "line_percent_floor": 80.0,
+                        "minimum_measured_lines": 100,
+                        "reviewed_baseline": {
+                            "covered_lines": 80,
+                            "measured_lines": 100,
+                            "line_percent": 80.0,
+                            "report_date": "2026-08-18",
+                        },
                     },
                 },
             }
@@ -132,9 +144,12 @@ def synthetic_workspace_reports(
     summary_path: Path,
     lcov_path: Path,
     ordinary_covered: int,
+    runner_platform: str = "linux",
 ) -> None:
     configuration = json.loads(policy_path.read_text(encoding="utf-8"))
-    minimum_measured_lines = configuration["ordinary_guard"]["minimum_measured_lines"]
+    minimum_measured_lines = configuration["ordinary_guards"][runner_platform][
+        "minimum_measured_lines"
+    ]
     sources = [("crates/core/src/lib.rs", ordinary_covered, minimum_measured_lines)]
     for lane, lane_policy in configuration["lanes"].items():
         if lane == "ordinary":
@@ -191,6 +206,7 @@ def check(
     lcov_path: Path,
     manifest_path: Path,
     lane: str,
+    runner_platform: str = "linux",
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [
@@ -206,6 +222,8 @@ def check(
             str(manifest_path),
             "--lane",
             lane,
+            "--runner-platform",
+            runner_platform,
             "--source-head",
             "0123456789abcdef0123456789abcdef01234567",
             "--source-content-digest",
@@ -253,6 +271,7 @@ def main() -> None:
         assert manifest["report"]["ordinary_owned_source"]["line_percent"] == 90
         assert manifest["report"]["ordinary_owned_source"]["files"] == 2
         assert manifest["guard"]["status"] == "passed"
+        assert manifest["runner_platform"] == "linux"
         assert manifest["test_bundles"]["not_requested"] == ["postgres"]
         assert manifest["artifacts"]["summary_json"] == {
             "bytes": summary_path.stat().st_size,
@@ -402,6 +421,19 @@ def main() -> None:
         assert failed.returncode == 1
         assert json.loads(manifest_path.read_text(encoding="utf-8"))["guard"]["status"] == "failed"
 
+        macos_passed = check(
+            policy_path,
+            summary_path,
+            lcov_path,
+            manifest_path,
+            "ordinary",
+            runner_platform="macos",
+        )
+        assert macos_passed.returncode == 0, macos_passed.stderr
+        macos_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        assert macos_manifest["runner_platform"] == "macos"
+        assert macos_manifest["guard"]["line_percent_floor"] == 80.0
+
         report_only = check(
             policy_path, summary_path, lcov_path, manifest_path, "postgres"
         )
@@ -412,7 +444,9 @@ def main() -> None:
         )
 
         invalid_policy = json.loads(policy_path.read_text(encoding="utf-8"))
-        invalid_policy["ordinary_guard"]["reviewed_baseline"]["line_percent"] = 91.0
+        invalid_policy["ordinary_guards"]["linux"]["reviewed_baseline"][
+            "line_percent"
+        ] = 91.0
         policy_path.write_text(json.dumps(invalid_policy), encoding="utf-8")
         invalid = check(policy_path, summary_path, lcov_path, manifest_path, "ordinary")
         assert invalid.returncode == 2
@@ -533,8 +567,10 @@ def main() -> None:
             "check-rust-coverage.py",
             "fingerprint-workspace.py",
             "postgres-test-environment.sh",
+            "resolve-path.py",
             "run-postgres-tests.sh",
             "run-rust-coverage.sh",
+            "run-with-file-lock.py",
             "rust-coverage-policy.json",
             "validate-rust-coverage-failure.py",
         ]:
@@ -562,6 +598,34 @@ def main() -> None:
         subprocess.run(
             ["git", "-C", str(runner_repository), "commit", "--quiet", "-m", "runner"],
             check=True,
+        )
+        timings_directory = runner_repository / "target" / "postgres-timings"
+        timings_directory.mkdir(parents=True)
+        timing_environment = dict(os.environ)
+        timing_environment.update(
+            {
+                "AUTOMATA_TEST_DATABASE_NAMESPACE": "coverage_contract",
+                "AUTOMATA_TEST_TIMINGS_DIR": str(timings_directory),
+                "AUTOMATA_TEST_TIMING_INVOCATION": "coverage_contract",
+                "AUTOMATA_TEST_TIMING_RUN": "0",
+            }
+        )
+        timing_configuration = subprocess.run(
+            [
+                "bash",
+                "-c",
+                "source scripts/ci/postgres-test-environment.sh; "
+                "automata_configure_postgres_test_namespace",
+            ],
+            cwd=runner_repository,
+            env=timing_environment,
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+        assert timing_configuration.returncode == 0, timing_configuration.stderr
+        assert f"PostgreSQL test timings: {timings_directory}" in (
+            timing_configuration.stderr
         )
         runner_fake_bin = scratch / "runner-fake-bin"
         runner_fake_bin.mkdir()
@@ -662,10 +726,17 @@ os.execv({real_mv!r}, [{real_mv!r}, *sys.argv[1:]])
         runner_policy = json.loads(
             (runner_ci / "rust-coverage-policy.json").read_text(encoding="utf-8")
         )
-        runner_minimum_measured = runner_policy["ordinary_guard"][
+        host_runner_platform = {"Linux": "linux", "Darwin": "macos"}[
+            os.uname().sysname
+        ]
+        runner_minimum_measured = runner_policy["ordinary_guards"][
+            host_runner_platform
+        ][
             "minimum_measured_lines"
         ]
-        runner_floor = runner_policy["ordinary_guard"]["line_percent_floor"]
+        runner_floor = runner_policy["ordinary_guards"][host_runner_platform][
+            "line_percent_floor"
+        ]
         passing_covered = math.ceil(runner_minimum_measured * runner_floor / 100)
         failing_covered = passing_covered - 1
         synthetic_summary = scratch / "synthetic-summary.json"
@@ -675,6 +746,7 @@ os.execv({real_mv!r}, [{real_mv!r}, *sys.argv[1:]])
             synthetic_summary,
             synthetic_lcov,
             passing_covered,
+            runner_platform=host_runner_platform,
         )
         runner_environment = dict(os.environ)
         runner_environment["PATH"] = f"{runner_fake_bin}:{runner_environment['PATH']}"
@@ -703,6 +775,11 @@ os.execv({real_mv!r}, [{real_mv!r}, *sys.argv[1:]])
             (successful_output / "manifest.json").read_text(encoding="utf-8")
         )
         assert successful_manifest["guard"]["status"] == "passed"
+        assert successful_manifest["runner_platform"] == host_runner_platform
+        if host_runner_platform == "macos":
+            coverage_tmp = runner_repository / "target" / "llvm-cov-tmp"
+            assert coverage_tmp.is_dir()
+            assert coverage_tmp.stat().st_mode & 0o077 == 0
         for artifact_name, manifest_name in [
             ("summary.json", "summary_json"),
             ("coverage.lcov", "lcov"),
@@ -720,6 +797,7 @@ os.execv({real_mv!r}, [{real_mv!r}, *sys.argv[1:]])
             failed_summary,
             failed_lcov,
             failing_covered,
+            runner_platform=host_runner_platform,
         )
         combined_environment = dict(runner_environment)
         combined_environment["AUTOMATA_TEST_DATABASE_URL"] = (
@@ -993,6 +1071,29 @@ os.execv({real_mv!r}, [{real_mv!r}, *sys.argv[1:]])
         )
         assert reversed_plan.returncode == 2
         assert "ordinary must be the first lane" in reversed_plan.stderr
+
+        darwin_fake_bin = scratch / "darwin-fake-bin"
+        darwin_fake_bin.mkdir()
+        darwin_uname = darwin_fake_bin / "uname"
+        darwin_uname.write_text("#!/bin/sh\nprintf 'Darwin\\n'\n", encoding="utf-8")
+        darwin_uname.chmod(0o755)
+        darwin_environment = dict(os.environ)
+        darwin_environment["PATH"] = f"{darwin_fake_bin}:{darwin_environment['PATH']}"
+        darwin_plan = subprocess.run(
+            [
+                str(runner_under_test),
+                "--plan",
+                str(runner_repository / "target" / "coverage-darwin-plan"),
+                "ordinary",
+            ],
+            cwd=runner_repository,
+            env=darwin_environment,
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+        assert darwin_plan.returncode == 0, darwin_plan.stderr
+        assert "--exclude automata-ci-service-proxy" in darwin_plan.stdout
 
         mutation_output = runner_repository / "target" / "coverage-mutation"
         mutation_path = runner_repository / "source-mutation.txt"
@@ -1374,7 +1475,8 @@ exit 99
             ("--test http_compatibility",),
             ("--test cache_http",),
         ]
-        for expected_fragments, command in zip(expected_inventory, commands, strict=True):
+        assert len(expected_inventory) == len(commands)
+        for expected_fragments, command in zip(expected_inventory, commands):
             for expected in expected_fragments:
                 assert expected in command, command
         assert all("--ignored" in command for command in commands[1:])

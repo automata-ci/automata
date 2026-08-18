@@ -21,6 +21,9 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--lcov", required=True, type=Path)
     parser.add_argument("--manifest", required=True, type=Path)
     parser.add_argument("--lane", action="append", dest="lanes", required=True)
+    parser.add_argument(
+        "--runner-platform", required=True, choices=("linux", "macos")
+    )
     parser.add_argument("--source-head", required=True)
     parser.add_argument("--source-content-digest", required=True)
     parser.add_argument("--source-state-token", required=True)
@@ -405,9 +408,14 @@ def main() -> int:
 
     ordinary_files = [file for file in files if not is_external(file["source"])]
     ordinary_covered, ordinary_measured = line_counts(ordinary_files)
-    guard_policy = policy.get("ordinary_guard")
-    if not isinstance(guard_policy, dict):
-        raise ValueError("coverage policy must define the ordinary guard")
+    guard_policies = policy.get("ordinary_guards")
+    if (
+        not isinstance(guard_policies, dict)
+        or set(guard_policies) != {"linux", "macos"}
+        or any(not isinstance(value, dict) for value in guard_policies.values())
+    ):
+        raise ValueError("coverage policy must define exact Linux and macOS ordinary guards")
+    guard_policy = guard_policies[arguments.runner_platform]
     floor = guard_policy.get("line_percent_floor")
     minimum_measured = guard_policy.get("minimum_measured_lines")
     if not isinstance(floor, (int, float)) or isinstance(floor, bool) or not 0 <= floor <= 100:
@@ -449,6 +457,7 @@ def main() -> int:
     manifest = {
         "schema_version": 1,
         "cargo_llvm_cov_version": expected_tool,
+        "runner_platform": arguments.runner_platform,
         "source_snapshot": {
             "content_algorithm": "sha256-framed-git-head-and-nonignored-worktree-content-v1",
             "content_scope": "Git HEAD plus tracked and unignored working-tree paths, types, modes, and contents",

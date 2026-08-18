@@ -175,7 +175,8 @@ regression contracts.
 Coverage is a diagnostic for finding unexercised behavior; it does not replace
 the PostgreSQL, RustFS, Podman, compatibility, or security contract lanes. The
 Rust report uses the pinned toolchain's LLVM tools and a reviewed
-`cargo-llvm-cov` release:
+`cargo-llvm-cov` release. The driver supports Linux and macOS with Python 3.9
+or newer:
 
 ```console
 rustup component add llvm-tools-preview
@@ -187,9 +188,9 @@ CARGO_BUILD_JOBS=4 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 \
 The command writes `summary.json`, `coverage.lcov`, and `manifest.json`. The
 output directory must be inside the repository and ignored by Git, as the
 documented `coverage/` and `target/` locations are. The
-manifest names requested and not-requested test bundles plus each requested
-bundle's service requirements, so an ordinary report cannot be mistaken for
-service-complete workspace coverage. CI retains these files as the
+manifest names the runner platform, requested and not-requested test bundles,
+and each requested bundle's service requirements, so an ordinary report cannot
+be mistaken for service-complete workspace coverage. CI retains these files as the
 `rust-coverage-ordinary` artifact. It also binds the report to Git HEAD and a
 reproducible SHA-256 content digest of every tracked or unignored workspace
 path, and records SHA-256 hashes for both report formats. A separately named
@@ -207,27 +208,33 @@ locked, staged publication rather than being derivable from the summary JSON.
 Instrumented artifacts live under `target/llvm-cov-target`, isolated from
 ordinary Cargo fingerprints. Allow disk space for a separate all-feature
 workspace build; the runner cleans that coverage target before collection so
-stale instrumentation cannot enter a report. A nonblocking lock prevents two
-cooperating Linux/util-linux coverage runners from sharing that fixed target;
-it does not lock source files against editors. Reports are staged, the workspace
-fingerprint is checked again after collection, and the manifest is published
-last as the completion marker; a concurrent source edit leaves no final
-artifact. Checker exit status 1 is reserved for an ordinary coverage regression:
+stale instrumentation cannot enter a report. A nonblocking POSIX advisory lock
+prevents two cooperating Linux or macOS coverage runners from sharing that
+fixed target; it does not lock source files against editors. Reports are staged,
+the workspace fingerprint is checked again after collection, and the manifest
+is published last as the completion marker; a concurrent source edit leaves no
+final artifact. Checker exit status 1 is reserved for an ordinary coverage regression:
 the runner independently verifies a complete failed-guard manifest and both
 report hashes before publishing diagnostics. Checker I/O errors and partial or
 malformed manifests fail closed without a published artifact.
 
+On macOS the driver also exports a short, owner-only temporary directory under
+`target/`. This keeps instrumented Unix-domain sockets below the platform path
+limit while preserving the private-directory requirement of CLI credential
+locks; callers do not need to override `TMPDIR`.
+
 The ordinary regression guard is deliberately narrower than a raw workspace
-percentage. After the policy's renderer and generated-source exclusions, the
-reviewed report measured 64.36% of in-scope compiled production lines because
-53,999 PostgreSQL-owned adapter lines had no service profiles. The committed
-policy inventories those global exclusions and assigns the exact PostgreSQL
-paths to that service bundle; the remaining ordinary-owned source measured
-82.97%, with an 82% floor and 0.97 percentage points of headroom. The guard also
-requires at least 172,000 measured lines—more than 98% of that reviewed
-denominator—so a broad exclusion cannot make the percentage pass. S3, Podman,
-and live-client source stays in
-ordinary scope where deterministic tests cover it; their external test bundles
+percentage. The policy inventories global exclusions and assigns the exact
+PostgreSQL paths to that service bundle. Linux and macOS compile different
+conditional production paths, so each platform has a separately reviewed
+ordinary baseline while retaining the same source-ownership rules. The Linux
+baseline is 202,158 of 246,784 lines (81.92%), with an 81% floor and a 246,000
+line minimum. The macOS baseline is 191,348 of 247,854 lines (77.20%), with a
+76.25% floor and a 247,000 line minimum. The macOS ordinary command excludes
+only the explicitly Linux-only service-proxy package. Both denominator checks
+retain more than 99% of their reviewed source sets, so a broad exclusion cannot
+make the percentage pass. S3, Podman, and live-client source stays in ordinary
+scope where deterministic tests cover it; their external test bundles
 supplement that evidence.
 
 Run a service test bundle when all of that bundle's prerequisites are available:

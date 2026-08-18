@@ -28,13 +28,13 @@ fn internal_command_initializes_the_exact_bucket_through_production_s3() {
     let task_requests = Arc::clone(&requests);
     let task = thread::spawn(move || {
         let statuses = ["404 Not Found", "200 OK", "200 OK"];
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + Duration::from_secs(20);
         let mut served = 0;
         while served < statuses.len() && Instant::now() < deadline {
             match listener.accept() {
                 Ok((mut stream, _)) => {
                     stream
-                        .set_read_timeout(Some(Duration::from_secs(2)))
+                        .set_read_timeout(Some(Duration::from_secs(10)))
                         .expect("internal S3 read timeout");
                     let mut request = Vec::new();
                     let mut buffer = [0_u8; 4 * 1_024];

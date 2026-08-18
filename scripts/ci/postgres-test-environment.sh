@@ -32,7 +32,14 @@ automata_configure_postgres_test_instrumentation() {
       return 2
     fi
     local canonical_timings_dir
-    canonical_timings_dir="$(realpath -e -- "$AUTOMATA_TEST_TIMINGS_DIR")"
+    local environment_script_directory
+    environment_script_directory="$(
+      CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd
+    )"
+    canonical_timings_dir="$(
+      python3 "$environment_script_directory/resolve-path.py" \
+        --existing "$AUTOMATA_TEST_TIMINGS_DIR"
+    )"
     if [[ "$canonical_timings_dir" != "$AUTOMATA_TEST_TIMINGS_DIR" ]]; then
       printf '%s\n' \
         'error: AUTOMATA_TEST_TIMINGS_DIR must already be a canonical path with no symlink components' \
