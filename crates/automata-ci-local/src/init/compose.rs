@@ -693,6 +693,7 @@ mod tests {
     use std::{
         fs,
         path::{Path, PathBuf},
+        process::Command,
     };
 
     use uuid::Uuid;
@@ -728,7 +729,17 @@ mod tests {
     }
 
     fn copy_executable(source: &str, target: &Path) {
-        fs::copy(source, target).expect("fixture executable must copy");
+        // Keep the writable destination descriptor out of this multithreaded
+        // test process. A concurrent fork can otherwise inherit it until exec
+        // and make execution through the retained descriptor fail with
+        // ETXTBSY, even though `fs::copy` has already returned here.
+        let status = Command::new("/bin/cp")
+            .arg("--")
+            .arg(source)
+            .arg(target)
+            .status()
+            .expect("fixture copy process must spawn");
+        assert!(status.success(), "fixture executable must copy");
     }
 
     #[tokio::test]
