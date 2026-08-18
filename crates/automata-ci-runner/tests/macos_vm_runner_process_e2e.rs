@@ -13,6 +13,9 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use automata_ci_action::{
+    ActionReferenceIndex as _, ActionSubpath, ImmutableActionReference, ObjectActionReferenceIndex,
+};
 use automata_ci_auth::{
     machine::{
         AuthenticatedMachine, ExternalRunnerIdentity, MachineAuthenticationError,
@@ -20,6 +23,7 @@ use automata_ci_auth::{
     },
     time::UnixTimestamp,
 };
+use automata_ci_blob::{BlobKey, BlobPayload, ImmutableBlobStore as _, MediaType, MemoryBlobStore};
 use automata_ci_core::{
     ActionReference, AttemptId, ContextValue, EnvironmentProfile, EnvironmentProfileId,
     FencingToken, JobAuthorityProfile, JobConclusion, JobContentReference, JobExecutionContext,
@@ -45,9 +49,11 @@ use automata_ci_runner_transport::{
     ApplicationError, ApplicationErrorKind, AuthenticatedRunnerRequest, HandlerFuture,
     RunnerControlHandler, RunnerControlServer, ServerTlsConfig, TransportLimits,
 };
+use automata_ci_scm::{RepositoryId, ScmProviderId};
 #[cfg(target_os = "macos")]
 use automata_ci_workflow_actions::{GithubConditionCompiler, GithubConditionPhase};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use bytes::Bytes;
 use flate2::{Compression, write::GzEncoder};
 use rcgen::{
     BasicConstraints, CertificateParams, CertifiedIssuer, DnType, ExtendedKeyUsagePurpose, IsCa,
@@ -535,6 +541,35 @@ fn repository_action_fixture() -> RepositoryActionFixture {
         ),
         archive: S3Object::immutable(archive_key, "application/gzip", archive_bytes),
     }
+}
+
+#[tokio::test]
+async fn repository_action_fixture_matches_shared_cache_contract() {
+    let fixture = repository_action_fixture();
+    let records = Arc::new(MemoryBlobStore::default());
+    records
+        .put_if_absent(BlobPayload::from_bytes(
+            BlobKey::new(fixture.reference.key.clone()).expect("reference key"),
+            MediaType::new(fixture.reference.media_type.clone()).expect("reference media type"),
+            Bytes::from(fixture.reference.bytes),
+        ))
+        .await
+        .expect("store action reference");
+    let index = ObjectActionReferenceIndex::new(records);
+    let reference = ImmutableActionReference::new(
+        ScmProviderId::new("github").expect("GitHub provider"),
+        RepositoryId::new(ACTION_REPOSITORY).expect("action repository"),
+        automata_ci_core::GitObjectId::from_provider_hex(ACTION_REVISION)
+            .expect("exact action revision"),
+        ActionSubpath::root(),
+    );
+    let indexed = index
+        .get(&reference)
+        .await
+        .expect("decode action reference")
+        .expect("fixture reference key matches production derivation");
+    assert_eq!(indexed.reference(), &reference);
+    assert_eq!(indexed.archive().digest(), fixture.archive.digest);
 }
 
 fn repository_action_reference_key() -> String {
