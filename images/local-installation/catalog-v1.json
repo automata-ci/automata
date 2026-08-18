@@ -415,7 +415,7 @@
         "log_options": {}
       }
     },
-    "database_migration_ceiling": 52,
+    "database_migration_ceiling": 57,
     "engine_relay": {
       "architecture": "amd64",
       "binding_directory": "/run/automata-engine-binding",
@@ -483,7 +483,7 @@
         "existing_custody": {
           "current": "success-before-token-network-or-writer-lock",
           "invalid": "fail-closed",
-          "recovery_policy": "exact-expired-unrevoked-predecessor-offline-no-live-session-linux",
+          "recovery_policy": "exact-expired-unrevoked-predecessor-offline-no-live-session-no-live-leaf-linux",
           "runner_generation": "atomic-increment",
           "server_clock": "database-post-lock",
           "token": "one-use-positive-generation"

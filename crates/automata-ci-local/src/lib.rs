@@ -47,9 +47,7 @@ pub use check::{
     LocalCheckRequest, LocalCheckSource, LocalCheckedJob, LocalCheckedWorkflow, check_workflow,
 };
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-pub(crate) use desired_spec::{
-    DesiredSpec, DesiredSpecImages, DesiredSpecInput, LocalProfile, ResultsTransit,
-};
+pub(crate) use desired_spec::{DesiredSpec, DesiredSpecImages, DesiredSpecInput, LocalProfile};
 pub use engine::{DockerInstallationAdapter, LocalEngineError, LocalEngineErrorCode};
 
 /// Opaque failure from the fixed image-internal Engine relay boundary.

@@ -16,7 +16,9 @@ use super::{LocalInitError, LocalInitErrorCode};
 
 const CATALOG_SCHEMA: &str = "automata.local/release-catalog/v1";
 const SOURCE_SCHEMA: &str = "automata.local/release-catalog-source/v1";
-const SOURCE_SHA256: &str = "f47b4d9c59b314ca74b754623c5fa1408ad5144de805820c73f6c4762217e267";
+const LIFECYCLE_RUNTIME_SCHEMA: &str = "automata.local/lifecycle-runtime/v1";
+const DATABASE_MIGRATION_CEILING: u64 = 57;
+const SOURCE_SHA256: &str = "a0a0076c2c0e7a81487ab8121906a7033c0e2fa66636e26f0c58165d1c32e0eb";
 const CANDIDATE_BASENAME: &str = "automata-service-proxy-candidate-x86_64-unknown-linux-musl.tar";
 const CANDIDATE_PATH: &str = concat!(
     "target/service-proxy-publication/",
@@ -375,6 +377,28 @@ impl VerifiedCatalog {
 #[allow(clippy::too_many_lines)]
 fn validate_lifecycle_runtime(value: &Value) -> Result<(), LocalInitError> {
     let runtime = object(value)?;
+    if runtime.keys().map(String::as_str).collect::<BTreeSet<_>>()
+        != BTreeSet::from([
+            "automata_commands",
+            "compose",
+            "daemon_prerequisites",
+            "database_migration_ceiling",
+            "engine_relay",
+            "renderer_contract",
+            "results_transit",
+            "runner_commands",
+            "runner_config_schema",
+            "schema",
+        ])
+        || runtime.get("schema").and_then(Value::as_str) != Some(LIFECYCLE_RUNTIME_SCHEMA)
+        || runtime
+            .get("database_migration_ceiling")
+            .and_then(Value::as_u64)
+            != Some(DATABASE_MIGRATION_CEILING)
+        || runtime.get("runner_config_schema").and_then(Value::as_u64) != Some(7)
+    {
+        return Err(invalid_catalog());
+    }
     let commands = object(
         runtime
             .get("automata_commands")
@@ -568,7 +592,7 @@ fn validate_lifecycle_runtime(value: &Value) -> Result<(), LocalInitError> {
             != Some(&serde_json::json!({
                 "current": "success-before-token-network-or-writer-lock",
                 "invalid": "fail-closed",
-                "recovery_policy": "exact-expired-unrevoked-predecessor-offline-no-live-session-linux",
+                "recovery_policy": "exact-expired-unrevoked-predecessor-offline-no-live-session-no-live-leaf-linux",
                 "runner_generation": "atomic-increment",
                 "server_clock": "database-post-lock",
                 "token": "one-use-positive-generation"
@@ -2487,7 +2511,7 @@ pub(super) fn desired_test_catalog() -> VerifiedCatalog {
             config: Value::Null,
             runtime: Value::Null,
             source: ImageSource::Candidate(CandidateBinding {
-                reference: "automata.local/automata-ci-service-proxy:fixture".to_owned(),
+                reference: format!("{CANDIDATE_IMAGE_NAME}@{}", digest(66)),
                 candidate_provenance_sha256: "4".repeat(64),
                 config_digest: digest(65),
                 image_digest: digest(66),

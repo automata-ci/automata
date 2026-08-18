@@ -24,7 +24,7 @@ CATALOG_SCHEMA = "automata.local/release-catalog/v1"
 SOURCE_SCHEMA = "automata.local/release-catalog-source/v1"
 SOURCE_PATH = "images/local-installation/catalog-v1.json"
 PACKAGED_SOURCE_PATH = "crates/automata-ci-local/src/init/catalog-v1.source.json"
-SOURCE_SHA256 = "f47b4d9c59b314ca74b754623c5fa1408ad5144de805820c73f6c4762217e267"
+SOURCE_SHA256 = "a0a0076c2c0e7a81487ab8121906a7033c0e2fa66636e26f0c58165d1c32e0eb"
 RENDERER_CONTRACT_FIXTURE_SCHEMA = "automata.local/renderer-contract-fixture/v1"
 RENDERER_CONTRACT_FIXTURE_SHA256 = (
     "fc65872459cb7a012f78b10ac74ffd8489f591bd0cb14286d2e121304682c430"
@@ -393,7 +393,7 @@ def require_lifecycle_runtime(value: object) -> dict:
                 "log_options": {},
             },
         },
-        "database_migration_ceiling": 52,
+        "database_migration_ceiling": 57,
         "engine_relay": {
             "architecture": "amd64",
             "binding_directory": "/run/automata-engine-binding",
@@ -455,7 +455,7 @@ def require_lifecycle_runtime(value: object) -> dict:
                 "existing_custody": {
                     "current": "success-before-token-network-or-writer-lock",
                     "invalid": "fail-closed",
-                    "recovery_policy": "exact-expired-unrevoked-predecessor-offline-no-live-session-linux",
+                    "recovery_policy": "exact-expired-unrevoked-predecessor-offline-no-live-session-no-live-leaf-linux",
                     "runner_generation": "atomic-increment",
                     "server_clock": "database-post-lock",
                     "token": "one-use-positive-generation",

@@ -1922,38 +1922,39 @@ impl PostgresRunnerEnrollmentRepository {
             commit(transaction).await?;
             return Ok(InstallationRunnerRecoveryConsumeOutcome::Rejected);
         }
-        let predecessor_certificate = sqlx::query_as::<_, ConsumedRunnerCertificateRow>(
+        let runner_certificates = sqlx::query_as::<_, ConsumedRunnerCertificateRow>(
             r"
             SELECT leaf_sha256,expires_at_seconds,revoked_at_seconds
             FROM runner_machine_certificates
-            WHERE runner_id=$1 AND leaf_sha256=$2
+            WHERE runner_id=$1
             FOR UPDATE
             ",
         )
         .bind(request.runner_id)
-        .bind(predecessor.certificate_leaf_sha256.as_slice())
-        .fetch_optional(&mut *transaction)
+        .fetch_all(&mut *transaction)
         .await
         .map_err(map_database_error)?;
-        let Some(predecessor_certificate) = predecessor_certificate else {
+        if runner_certificates.iter().any(|certificate| {
+            certificate.leaf_sha256.len() != 32
+                || certificate.expires_at_seconds <= 0
+                || certificate
+                    .revoked_at_seconds
+                    .is_some_and(|revoked| revoked <= 0 || revoked > certificate.expires_at_seconds)
+        }) {
+            return Err(ManagementRepositoryError::CorruptData);
+        }
+        let Some(predecessor_certificate) = runner_certificates.iter().find(|certificate| {
+            certificate.leaf_sha256.as_slice() == predecessor.certificate_leaf_sha256.as_slice()
+        }) else {
             commit(transaction).await?;
             return Ok(InstallationRunnerRecoveryConsumeOutcome::Rejected);
         };
-        if predecessor_certificate.leaf_sha256.as_slice()
-            != predecessor.certificate_leaf_sha256.as_slice()
-            || predecessor_certificate.expires_at_seconds <= 0
-            || predecessor_certificate
-                .revoked_at_seconds
-                .is_some_and(|revoked| {
-                    revoked <= 0 || revoked > predecessor_certificate.expires_at_seconds
-                })
-        {
-            return Err(ManagementRepositoryError::CorruptData);
-        }
-        // The token, runner, live-session set, and predecessor certificate are
+        // The token, runner, live-session set, and complete certificate set are
         // now locked. Sample the authoritative database clock only after those
         // potentially blocking authority reads, then repeat every time-bound
-        // admission check. A recovery that waited across either the token or
+        // admission check. Recovery remains unavailable while any unrevoked leaf
+        // is live, so an expired historical certificate cannot rotate a newer
+        // live successor. A recovery that waited across either the token or
         // predecessor boundary must never consume stale authority.
         let now_ms = enrollment_database_time_milliseconds(&mut transaction)
             .await
@@ -1985,6 +1986,10 @@ impl PostgresRunnerEnrollmentRepository {
             || predecessor_certificate.expires_at_seconds
                 != predecessor.certificate_expires_at_seconds
             || predecessor_certificate.expires_at_seconds > now_seconds
+            || runner_certificates.iter().any(|certificate| {
+                certificate.revoked_at_seconds.is_none()
+                    && certificate.expires_at_seconds > now_seconds
+            })
         {
             commit(transaction).await?;
             return Ok(InstallationRunnerRecoveryConsumeOutcome::Rejected);

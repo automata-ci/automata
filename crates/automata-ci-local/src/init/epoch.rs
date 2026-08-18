@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, net::Ipv4Addr, num::NonZeroU16, str::FromStr as _};
+use std::{collections::BTreeMap, num::NonZeroU16, str::FromStr as _};
 
 use automata_ci_core::{EnvironmentProfile, EnvironmentProfileId, Sha256Digest};
 use automata_ci_execution::ImmutableImage;
@@ -11,7 +11,7 @@ use zeroize::Zeroizing;
 use crate::{
     DesiredSpec, DesiredSpecImages, DesiredSpecInput, EngineArchitecture, Installation,
     InstallationId, InstallationName, LocalImportedImage, LocalProfile,
-    MAXIMUM_LOCAL_DOCKER_JOB_SLOTS, ResultsTransit,
+    MAXIMUM_LOCAL_DOCKER_JOB_SLOTS,
 };
 
 use super::{
@@ -222,14 +222,8 @@ impl ImmutableEpoch {
         let service_proxy =
             LocalImportedImage::new(service_proxy.config_digest, service_proxy.manifest_digest)
                 .map_err(|_| reset_required())?;
-        let selector = installation.selector_key().digest();
-        let third_octet = selector.as_bytes()[4] & 0xfe;
-        let results = ResultsTransit::new(
-            format!("192.168.{third_octet}.0/23"),
-            Ipv4Addr::new(192, 168, third_octet, 1),
-            Ipv4Addr::new(192, 168, third_octet, 2),
-        )
-        .map_err(|_| reset_required())?;
+        let results = crate::desired_spec::results_transit_for_installation(&installation)
+            .map_err(|_| reset_required())?;
         let input = DesiredSpecInput::new(
             workers,
             NonZeroU16::new(8080).expect("the fixed human port is nonzero"),

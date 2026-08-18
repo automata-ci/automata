@@ -20,7 +20,7 @@ pub use status_reset::{
     LocalStatusRequest, inspect_local_status, reset_local,
 };
 
-use std::{fmt, future::Future, net::Ipv4Addr, num::NonZeroU16, path::PathBuf};
+use std::{fmt, future::Future, num::NonZeroU16, path::PathBuf};
 
 use automata_ci_core::{EnvironmentProfile, EnvironmentProfileId, OperationId, Sha256Digest};
 use serde::{Deserialize, Serialize};
@@ -31,7 +31,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     DesiredSpec, DesiredSpecImages, DesiredSpecInput, DockerInstallationAdapter, DoctorRequest,
     EngineArchitecture, EngineRequest, Installation, InstallationId, InstallationName,
-    LocalEngineError, LocalEngineErrorCode, LocalProfile, ResultsTransit, inspect,
+    LocalEngineError, LocalEngineErrorCode, LocalProfile, inspect,
 };
 
 const LOCAL_INIT_DOCKER_HOST: &str = "unix:///var/run/docker.sock";
@@ -748,16 +748,8 @@ fn desired_from_catalog(
         catalog.immutable_image("sandbox-guest"),
         catalog.imported_service_proxy(),
     );
-    let digest = installation.selector_key().digest();
-    let second_octet = 24 + (digest.as_bytes()[3] & 0x07);
-    let third_octet = digest.as_bytes()[4] & 0xfe;
-    let subnet = format!("172.{second_octet}.{third_octet}.0/23");
-    let results = ResultsTransit::new(
-        subnet,
-        Ipv4Addr::new(172, second_octet, third_octet, 1),
-        Ipv4Addr::new(172, second_octet, third_octet, 2),
-    )
-    .map_err(|_| LocalInitError::new(LocalInitErrorCode::InvalidCatalog))?;
+    let results = crate::desired_spec::results_transit_for_installation(installation)
+        .map_err(|_| LocalInitError::new(LocalInitErrorCode::InvalidCatalog))?;
     let input = DesiredSpecInput::new(
         workers,
         NonZeroU16::new(catalog.human_port())
@@ -830,6 +822,41 @@ mod tests {
                 .to_string()
                 .starts_with("192.168.")
         );
+    }
+
+    #[test]
+    fn catalog_desired_round_trips_through_sealed_epoch_exactly() {
+        let catalog = catalog::desired_test_catalog();
+        let installation =
+            Installation::verified(InstallationName::default(), crate::InstallationId::new());
+        let workers = NonZeroU16::new(1).unwrap();
+        let desired = desired_from_catalog(&catalog, &installation, workers)
+            .expect("the released catalog always constructs one valid Desired plan");
+        let desired_bytes = desired.canonical_bytes();
+        let state_authority_sha256 = Sha256Digest::from_bytes([0x51; 32]);
+        let material_root = [0x52; 32];
+        let epoch = epoch::ImmutableEpoch::new(
+            &catalog,
+            &installation,
+            workers.get(),
+            state_authority_sha256,
+            &material_root,
+            digest(&desired_bytes),
+            desired.plan_digest(),
+        );
+        let sealed = epoch::ImmutableEpoch::from_sealed_bytes(
+            &epoch.canonical_bytes(),
+            state_authority_sha256,
+            &material_root,
+        )
+        .expect("the freshly sealed epoch round-trips under the same authorities");
+        let reconstructed = sealed
+            .desired_spec()
+            .expect("a freshly sealed epoch reconstructs its exact Desired document");
+        assert_eq!(reconstructed, desired);
+        assert_eq!(reconstructed.canonical_bytes(), desired_bytes);
+        assert_eq!(reconstructed.plan_digest(), desired.plan_digest());
+        assert_eq!(reconstructed.results_transit(), desired.results_transit());
     }
 
     #[test]

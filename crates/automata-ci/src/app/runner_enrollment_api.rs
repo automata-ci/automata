@@ -741,7 +741,7 @@ async fn recover_enrollment(
         .capabilities
         .features()
         .contains(&RunnerFeature::OIDC_TOKENS)
-        && !state.capability_readiness.github_oidc()
+        && !state.capability_readiness.workload_oidc()
     {
         return ApiError::InvalidRequest.into_response();
     }

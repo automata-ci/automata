@@ -78,7 +78,7 @@ where
             "invalid PostgreSQL URL supplied through {DATABASE_URL_ENVIRONMENT}: {error}"
         ))
     })?;
-    let database_name = format!("automata_m52_{}", Uuid::new_v4().simple());
+    let database_name = format!("automata_m61_{}", Uuid::new_v4().simple());
     debug_assert!(
         database_name
             .bytes()
@@ -165,7 +165,7 @@ async fn require_postgres_18(connection: &mut PgConnection) -> TestResult {
             .await?;
     if version < MINIMUM_POSTGRES_VERSION {
         return Err(message_error(format!(
-            "migration 0052 live tests require PostgreSQL 18 or newer; server_version_num is {version}"
+            "migration 0061 live tests require PostgreSQL 18 or newer; server_version_num is {version}"
         )));
     }
     let can_create_database: bool = sqlx::query_scalar(
@@ -184,7 +184,7 @@ async fn require_postgres_18(connection: &mut PgConnection) -> TestResult {
     .await?;
     if !can_create_database {
         return Err(message_error(
-            "migration 0052 live tests require CREATEDB on the isolated PostgreSQL server",
+            "migration 0061 live tests require CREATEDB on the isolated PostgreSQL server",
         ));
     }
     Ok(())
@@ -224,7 +224,7 @@ impl TestClock {
         let mut transaction = pool.begin().await?;
         sqlx::query(
             r"
-            CREATE TABLE automata_test.__automata_m52_clock (
+            CREATE TABLE automata_test.__automata_m61_clock (
                 singleton BOOLEAN PRIMARY KEY CHECK (singleton),
                 now_ms BIGINT NOT NULL
             )
@@ -234,7 +234,7 @@ impl TestClock {
         .await?;
         sqlx::query(
             r"
-            INSERT INTO automata_test.__automata_m52_clock (singleton, now_ms)
+            INSERT INTO automata_test.__automata_m61_clock (singleton, now_ms)
             VALUES (TRUE, $1)
             ",
         )
@@ -247,11 +247,11 @@ impl TestClock {
             RETURNS TIMESTAMPTZ
             LANGUAGE SQL
             VOLATILE
-            AS $automata_m52_clock$
+            AS $automata_m61_clock$
                 SELECT TIMESTAMPTZ 'epoch' + now_ms * INTERVAL '1 millisecond'
-                FROM automata_test.__automata_m52_clock
+                FROM automata_test.__automata_m61_clock
                 WHERE singleton
-            $automata_m52_clock$
+            $automata_m61_clock$
             ",
         )
         .execute(&mut *transaction)
@@ -264,7 +264,7 @@ impl TestClock {
 
     async fn set(&self, now_ms: i64) -> TestResult {
         let updated =
-            sqlx::query("UPDATE automata_test.__automata_m52_clock SET now_ms=$1 WHERE singleton")
+            sqlx::query("UPDATE automata_test.__automata_m61_clock SET now_ms=$1 WHERE singleton")
                 .bind(now_ms)
                 .execute(&self.pool)
                 .await?;
@@ -513,14 +513,14 @@ fn assert_constraint(error: &sqlx::Error, expected: &str) {
     clippy::too_many_lines,
     reason = "the test keeps migration, concurrent retries, clock boundaries, Windows consumption, and corruption probes in one isolated database"
 )]
-async fn migration_0052_fresh_database_supports_exact_deployment_bootstrap() -> TestResult {
+async fn migration_0061_fresh_database_supports_exact_deployment_bootstrap() -> TestResult {
     run_with_unmigrated_database(|database| async move {
         MIGRATOR.run(database.pool()).await?;
         let applied_version: i64 =
             sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations")
                 .fetch_one(database.pool())
                 .await?;
-        assert_eq!(applied_version, 52);
+        assert_eq!(applied_version, 61);
         let clock = TestClock::freeze_at_database_now(database.pool()).await?;
 
         let corrupt_tenant = "corrupt-audit-probe";
@@ -1092,13 +1092,14 @@ async fn migration_0052_fresh_database_supports_exact_deployment_bootstrap() -> 
         assert_eq!(linux_recovery.generation, 1);
         let recovery_now_ms = clock.now().await?;
         let recovery_now_seconds = recovery_now_ms.div_euclid(1_000);
-        let ambiguous_live_leaf = [0x86_u8; 32];
+        let newer_live_leaf = [0x86_u8; 32];
+        let newer_live_expires_at_seconds = recovery_now_seconds + 1;
         sqlx::query(
             "INSERT INTO runner_machine_certificates (leaf_sha256,runner_id,expires_at_seconds) VALUES ($1,$2,$3)",
         )
-        .bind(ambiguous_live_leaf.as_slice())
+        .bind(newer_live_leaf.as_slice())
         .bind(linux_runner_id.as_uuid())
-        .bind(recovery_now_seconds + MAX_RUNNER_CERTIFICATE_LIFETIME_SECONDS)
+        .bind(newer_live_expires_at_seconds)
         .execute(database.pool())
         .await?;
         let recovery_operation_id = Uuid::new_v4();
@@ -1165,6 +1166,43 @@ async fn migration_0052_fresh_database_supports_exact_deployment_bootstrap() -> 
             InstallationRunnerRecoveryConsumeOutcome::Rejected,
             "a revoked historical leaf must not authorize installation recovery"
         );
+        assert_eq!(
+            enrollment_repository
+                .consume_installation_runner_recovery(
+                    recovery_consume(),
+                    InstallationRunnerRecoveryPredecessor {
+                        certificate_leaf_sha256: initial_leaf,
+                        certificate_expires_at_seconds: initial_expires_at_seconds,
+                    },
+                )
+                .await?,
+            InstallationRunnerRecoveryConsumeOutcome::Rejected,
+            "an expired historical leaf must not rotate a newer live successor"
+        );
+        let stale_predecessor_state: (i64, Option<i64>, bool, Option<i64>) =
+            sqlx::query_as(
+                r"
+                SELECT
+                    (SELECT generation FROM runners WHERE id=$1),
+                    (SELECT consumed_at_ms FROM runner_enrollment_tokens WHERE id=$2),
+                    EXISTS (SELECT 1 FROM runner_machine_certificates WHERE leaf_sha256=$3),
+                    (SELECT revoked_at_seconds FROM runner_machine_certificates
+                     WHERE leaf_sha256=$4)
+                ",
+            )
+            .bind(linux_runner_id.as_uuid())
+            .bind(linux_recovery.enrollment_id)
+            .bind(recovered_leaf.as_slice())
+            .bind(newer_live_leaf.as_slice())
+            .fetch_one(database.pool())
+            .await?;
+        assert_eq!(
+            stale_predecessor_state,
+            (1, None, false, None),
+            "stale-predecessor rejection must not mutate runner, token, or certificate authority"
+        );
+        let recovery_boundary_ms = newer_live_expires_at_seconds.saturating_mul(1_000);
+        clock.set(recovery_boundary_ms).await?;
         let mut runner_lock = database.pool().begin().await?;
         let locked_runner: Uuid = sqlx::query_scalar(
             "SELECT id FROM runners WHERE id=$1 FOR UPDATE",
@@ -1176,8 +1214,8 @@ async fn migration_0052_fresh_database_supports_exact_deployment_bootstrap() -> 
         let blocked_repository = enrollment_repository.clone();
         let blocked_request = recovery_consume();
         let blocked_predecessor = InstallationRunnerRecoveryPredecessor {
-            certificate_leaf_sha256: initial_leaf,
-            certificate_expires_at_seconds: initial_expires_at_seconds,
+            certificate_leaf_sha256: newer_live_leaf,
+            certificate_expires_at_seconds: newer_live_expires_at_seconds,
         };
         let blocked_consume = tokio::spawn(async move {
             blocked_repository
@@ -1235,14 +1273,14 @@ async fn migration_0052_fresh_database_supports_exact_deployment_bootstrap() -> 
             (1, None, false),
             "post-lock token expiry must leave runner, token, and certificate custody unchanged"
         );
-        clock.set(recovery_now_ms).await?;
+        clock.set(recovery_boundary_ms).await?;
         assert_eq!(
             enrollment_repository
                 .consume_installation_runner_recovery(
                     recovery_consume(),
                     InstallationRunnerRecoveryPredecessor {
-                        certificate_leaf_sha256: initial_leaf,
-                        certificate_expires_at_seconds: initial_expires_at_seconds,
+                        certificate_leaf_sha256: newer_live_leaf,
+                        certificate_expires_at_seconds: newer_live_expires_at_seconds,
                     },
                 )
                 .await?,
@@ -1272,19 +1310,19 @@ async fn migration_0052_fresh_database_supports_exact_deployment_bootstrap() -> 
         .await?;
         assert_eq!(
             stored_recovery_predecessor.0.as_slice(),
-            initial_leaf.as_slice()
+            newer_live_leaf.as_slice()
         );
         assert_eq!(
             stored_recovery_predecessor.1,
-            initial_expires_at_seconds
+            newer_live_expires_at_seconds
         );
         assert_eq!(
             enrollment_repository
                 .consume_installation_runner_recovery(
                     recovery_consume(),
                     InstallationRunnerRecoveryPredecessor {
-                        certificate_leaf_sha256: initial_leaf,
-                        certificate_expires_at_seconds: initial_expires_at_seconds,
+                        certificate_leaf_sha256: newer_live_leaf,
+                        certificate_expires_at_seconds: newer_live_expires_at_seconds,
                     },
                 )
                 .await?,
@@ -1302,11 +1340,11 @@ async fn migration_0052_fresh_database_supports_exact_deployment_bootstrap() -> 
             ",
         )
         .bind(initial_leaf.as_slice())
-        .bind(ambiguous_live_leaf.as_slice())
+        .bind(newer_live_leaf.as_slice())
         .bind(recovered_leaf.as_slice())
         .fetch_one(database.pool())
         .await?;
-        assert_eq!(certificate_state, (None, Some(recovery_now_seconds), None));
+        assert_eq!(certificate_state, (None, None, None));
         let mut certificate_lock = database.pool().begin().await?;
         sqlx::query(
             "SELECT leaf_sha256 FROM runner_machine_certificates WHERE leaf_sha256=$1 FOR UPDATE",
@@ -1361,7 +1399,7 @@ async fn migration_0052_fresh_database_supports_exact_deployment_bootstrap() -> 
         );
         // The blocked replay was read-only. Restore its pre-boundary test time
         // so the independent revoked-current-leaf gate remains isolated.
-        clock.set(recovery_now_ms).await?;
+        clock.set(recovery_boundary_ms).await?;
         let recovery_audits: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM security_audit_events WHERE action='runner.certificate.installation_recover' AND outcome='succeeded'",
         )
@@ -1391,7 +1429,7 @@ async fn migration_0052_fresh_database_supports_exact_deployment_bootstrap() -> 
             "UPDATE runner_machine_certificates SET revoked_at_seconds=$2 WHERE leaf_sha256=$1",
         )
         .bind(recovered_leaf.as_slice())
-        .bind(recovery_now_seconds)
+        .bind(newer_live_expires_at_seconds)
         .execute(database.pool())
         .await?;
         assert_eq!(
@@ -1410,8 +1448,8 @@ async fn migration_0052_fresh_database_supports_exact_deployment_bootstrap() -> 
                 .consume_installation_runner_recovery(
                     recovery_consume(),
                     InstallationRunnerRecoveryPredecessor {
-                        certificate_leaf_sha256: initial_leaf,
-                        certificate_expires_at_seconds: initial_expires_at_seconds,
+                        certificate_leaf_sha256: newer_live_leaf,
+                        certificate_expires_at_seconds: newer_live_expires_at_seconds,
                     },
                 )
                 .await?,
@@ -1495,7 +1533,7 @@ async fn migration_0052_fresh_database_supports_exact_deployment_bootstrap() -> 
     clippy::too_many_lines,
     reason = "the predecessor fixture and post-migration continuity assertions are intentionally contiguous"
 )]
-async fn migration_0052_upgrades_0051_human_installation_and_token_exactly() -> TestResult {
+async fn migration_0061_upgrades_0051_human_installation_and_token_exactly() -> TestResult {
     run_with_unmigrated_database(|database| async move {
         const TENANT_ID: &str = "upgrade-human-token";
         const TENANT_DISPLAY_NAME: &str = " Upgrade human tenant ";
@@ -1608,7 +1646,7 @@ async fn migration_0052_upgrades_0051_human_installation_and_token_exactly() -> 
         .bind(TENANT_ID)
         .bind(principal_id)
         .bind(session_id.as_bytes().repeat(2))
-        .bind(format!("migration-0052-{session_id}"))
+        .bind(format!("migration-0061-{session_id}"))
         .bind(authorization_revision)
         .bind(now_ms - 1_000)
         .bind(now_ms + 600_000)
@@ -1656,7 +1694,7 @@ async fn migration_0052_upgrades_0051_human_installation_and_token_exactly() -> 
             sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations")
                 .fetch_one(database.pool())
                 .await?;
-        assert_eq!(applied_version, 52);
+        assert_eq!(applied_version, 61);
         let relation_names: (Option<String>, Option<String>) = sqlx::query_as(
             r"
             SELECT

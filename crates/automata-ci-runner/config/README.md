@@ -141,10 +141,12 @@ capability set empty under `no_new_privileges` and built-in seccomp; it does not
 provide `chown`, identity switching, or other POSIX capabilities.
 The relay must run Docker Engine 28 or newer with API 1.48 and have no daemon
 `log-opts`, bridge `default-network-opts`, or `default-ulimits`; the bounded
-Engine facts do not fully expose those trusted relay prerequisites. The trusted
-fixed relay service uses `userns_mode: host` only for bounded socket bootstrap,
-while untrusted jobs inherit daemon-default remapping. Any daemon-injected log,
-network, or ulimit drift still fails exact post-create inspection; an injected
+Engine facts do not fully expose those trusted relay prerequisites. All eight
+trusted fixed lifecycle services and their fixed custody helpers use
+`userns_mode: host` to preserve sealed host ownership; the relay additionally
+needs it for bounded socket bootstrap. Untrusted jobs inherit daemon-default
+remapping. Any daemon-injected log, network, or ulimit drift still fails exact
+post-create inspection; an injected
 ulimit can be removed through the separate custody-only cleanup path when the
 front-network custody remains exact. Container-runtime/image or shared-transit
 damage does not by itself block that container cleanup; exact front-network

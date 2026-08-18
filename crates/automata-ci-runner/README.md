@@ -28,12 +28,13 @@ qualification exist; there is no manual or static-identity fallback.
 
 The sealed local installation additionally keeps an installation-authority-
 bound chain of one-use recovery tokens. If that single Linux runner remains
-down beyond its current leaf lifetime, `enroll` accepts only the exact expired
-config/CA/chain/key/completion-receipt tuple and the control plane replaces the
-certificate only after that exact leaf is expired in durable state and while
-the same runner is offline with no live session. A distinct still-live leaf
-left by an ambiguous renewal is revoked atomically. This does not broaden
-ordinary enrollment or mTLS renewal, and it is unavailable to Windows broker
+down beyond its locally held leaf lifetime, `enroll` accepts only the exact
+expired config/CA/chain/key/completion-receipt tuple. The control plane replaces
+the certificate only after that exact leaf is expired in durable state, every
+unrevoked runner leaf is expired, and the same runner is offline with no live
+session. A distinct still-live leaf left by an ambiguous renewal blocks
+recovery. This does not broaden ordinary enrollment or mTLS renewal, and it is
+unavailable to Windows broker
 enrollment. The hidden local readiness probe observes the same completed tuple
 through two stable no-follow snapshots without taking the runner-held TLS
 writer flock.
@@ -180,11 +181,13 @@ and peer proxies on every operation that consumes the shared route.
 The rootful relay daemon must attest daemon-default user-namespace remapping
 plus built-in seccomp and private cgroup namespaces, expose every required
 memory/CPU/PID controller, have AppArmor and SELinux disabled, and exactly match
-the architecture already advertised by the runner inventory. The trusted fixed
-relay service uses `userns_mode: host` only for bounded root-owned-socket
-bootstrap; untrusted job containers omit that override and inherit daemon
-remapping. Its trusted relay must run Docker Engine 28 or newer with API 1.48 or
-newer. Its trusted configuration must leave daemon-wide `log-opts`, bridge
+the architecture already advertised by the runner inventory. All eight trusted
+fixed lifecycle services and their fixed custody helpers use
+`userns_mode: host` to preserve sealed host ownership; the relay additionally
+needs that namespace for bounded root-owned-socket bootstrap. Untrusted job
+containers omit that override and inherit daemon remapping. The trusted relay
+must run Docker Engine 28 or newer with API 1.48 or newer. Its trusted
+configuration must leave daemon-wide `log-opts`, bridge
 `default-network-opts`, and `default-ulimits` empty because the bounded Engine
 facts do not fully expose those settings. Realized drift fails closed after
 create. Rootless Docker is not qualified, and each sandbox separately proves one

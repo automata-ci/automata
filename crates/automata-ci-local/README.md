@@ -127,9 +127,10 @@ Runner bootstrap retains its material-derived token as immutable generation
 zero and publishes a separate active token file. Each consumed generation
 authorizes exactly one deterministic successor under the sealed installation
 authority; unconsumed generations are refreshed in place. This lets an exact
-offline Linux runner recover only after its current leaf (normally, and at
-most, 30 days) is also expired by the database clock, without making the seed
-reusable, changing normal mTLS renewal, or admitting a different runner.
+offline Linux runner recover only after its locally held predecessor (normally,
+and at most, 30 days) is expired by the database clock and no unrevoked runner
+leaf remains live, without making the seed reusable, changing normal mTLS
+renewal, or admitting a different runner.
 The runner healthcheck also proves current on-volume config/CA/chain/key and
 completion-receipt custody read-only while the steady runner owns the TLS flock.
 

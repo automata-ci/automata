@@ -498,6 +498,24 @@ pub(crate) fn egress_subnet_for_spec(spec: &DesiredSpec) -> Ipv4Subnet {
     egress_subnet_from_key(spec.installation_key())
 }
 
+/// Derives the sole current Results transit from sealed installation identity.
+///
+/// The second octet is deliberately disjoint from the lifecycle control pool,
+/// while selecting from private second octets `24..=31` is disjoint from both
+/// provider front addresses and the lifecycle egress network.
+pub(crate) fn results_transit_for_installation(
+    installation: &Installation,
+) -> Result<ResultsTransit, DesiredSpecError> {
+    let digest = installation.selector_key().digest();
+    let second_octet = 24 + (digest.as_bytes()[3] & 0x07);
+    let third_octet = digest.as_bytes()[4] & 0xfe;
+    ResultsTransit::new(
+        format!("172.{second_octet}.{third_octet}.0/23"),
+        Ipv4Addr::new(172, second_octet, third_octet, 1),
+        Ipv4Addr::new(172, second_octet, third_octet, 2),
+    )
+}
+
 fn control_subnet_from_key(key: InstallationSelectorKey) -> Ipv4Subnet {
     let digest = key.digest();
     let bytes = digest.as_bytes();

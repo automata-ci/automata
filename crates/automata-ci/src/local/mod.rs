@@ -204,10 +204,17 @@ fn write_local_status_presentation(
         )?;
     }
     if report.status == automata_ci_local::LocalInstallationStatus::LifecycleRecoveryRequired {
-        writeln!(
-            writer,
-            "Lifecycle recovery: establish Engine/process quiescence, then rerun local up or local down with --recover-stopped-lock"
-        )?;
+        if report.reset_progress.is_some() {
+            writeln!(
+                writer,
+                "Lifecycle recovery: durable reset is in progress; establish Engine/process quiescence, then rerun local reset --yes against this state directory"
+            )?;
+        } else {
+            writeln!(
+                writer,
+                "Lifecycle recovery: establish Engine/process quiescence, then rerun local up or local down with --recover-stopped-lock"
+            )?;
+        }
     }
     if report.status == automata_ci_local::LocalInstallationStatus::Degraded {
         writeln!(
@@ -573,6 +580,27 @@ mod tests {
                     "Worker slots: 2\n",
                     "Epoch fingerprint: sha256:fixture\n",
                     "Lifecycle recovery: establish Engine/process quiescence, then rerun local up or local down with --recover-stopped-lock\n",
+                ),
+            ),
+            (
+                LocalStatusPresentation {
+                    status: automata_ci_local::LocalInstallationStatus::LifecycleRecoveryRequired,
+                    installation: Some("default".to_owned()),
+                    installation_id: Some("11111111-1111-4111-8111-111111111111".to_owned()),
+                    workers: Some(2),
+                    epoch_fingerprint: Some("sha256:fixture".to_owned()),
+                    image_count: 4,
+                    volume_count: 12,
+                    reset_progress: Some((7, 14)),
+                },
+                concat!(
+                    "Automata local installation: lifecycle recovery required\n",
+                    "Installation: default\n",
+                    "Installation identity: 11111111-1111-4111-8111-111111111111\n",
+                    "Worker slots: 2\n",
+                    "Epoch fingerprint: sha256:fixture\n",
+                    "Lifecycle recovery: durable reset is in progress; establish Engine/process quiescence, then rerun local reset --yes against this state directory\n",
+                    "Reset progress: 7/14 Engine resources removed\n",
                 ),
             ),
             (
