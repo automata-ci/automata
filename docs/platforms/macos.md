@@ -169,6 +169,48 @@ template=/Volumes/AutomataVM/templates/macos-15-arm64-v1
   --output-directory /absolute/path/empty-output
 ```
 
+The same provisioning UI can be driven entirely over SSH. The control mode
+keeps the `VZVirtualMachineView` inside the host user's Aqua session, writes
+framebuffer captures to an owner-controlled path, and accepts input commands
+on standard input. It does not require Screen Sharing, Remote Management,
+Screen Recording, or Accessibility access:
+
+```console
+builder="$(id -un)"
+builder_uid="$(id -u "$builder")"
+control=/absolute/path/owner-only-control
+install -d -m 0700 "$control"
+rm -f "$control/screen.png"
+sudo launchctl asuser "$builder_uid" sudo -u "$builder" \
+  "$tool" boot "$template" 4 8 \
+  --provisioning-directory /absolute/path/provisioning \
+  --output-directory /absolute/path/empty-output \
+  --control-screenshot "$control/screen.png"
+```
+
+The builder must already have an Aqua login session; `launchctl asuser` reuses
+that session and does not create one from an SSH login.
+
+The tool prints `ready`, then accepts one newline-terminated command at a
+time and replies with `ok <command>` or `error <reason>`:
+
+- `capture` atomically replaces the configured PNG.
+- `click <x> <y>` moves and clicks using screenshot coordinates with a
+  top-left origin.
+- `key <macOS-virtual-key-code>` sends an unmodified key press.
+- `type <base64-utf8>` types US-keyboard characters that do not require a
+  modifier: lowercase letters, digits, space, tab, newline, and
+  `` `-=[]\\;',./ ``. Upload a script through the provisioning directory for
+  commands containing other characters instead of putting credentials on a
+  terminal command line.
+- `shutdown` requests a graceful guest shutdown. `stop` is an immediate VM
+  stop and is only a recovery operation.
+
+EOF also stops the VM so an abandoned SSH controller cannot leave an
+unmanaged guest running. The tool exits automatically after a guest-initiated
+shutdown. The screenshot path must not exist when control mode starts; its
+parent must already be a directory.
+
 In the provisioning window, finish Setup Assistant with a temporary admin.
 Build `automata-ci-sandbox-guest` for ARM64 macOS and the release
 `automata-macos-vsock-bridge`; place them and `guest/` in the read-only
@@ -187,12 +229,34 @@ sudo shutdown -h now
 
 The script creates the disabled-password non-admin account, installs the two
 launch daemons, writes the baked guest identity, and copies that identity beside
-the guest-local provisioning assets. Remove the temporary admin and all
-guest-local provisioning material before the final shutdown. Boot once more
-without either directory option to verify that no shared directory, interactive
-login, File Sharing, Remote Login, Screen Sharing, or other remote service is
-enabled, then shut down cleanly. Use the identity copied into the dedicated host
-output directory for sealing.
+the guest-local provisioning assets. Remove all guest-local provisioning
+material before the final shutdown.
+
+Current macOS refuses to delete its last administrator or secure-token user. If
+the temporary Setup Assistant account is the last one, do not leave its known
+bootstrap credential active. Run the following cleanup script with `sudo`; it
+disables and hides the account, removes it from the admin group, assigns a
+non-login shell, and shuts down from the same already-authorized root process:
+
+```sh
+#!/bin/sh
+set -eu
+bootstrap_user=replace-with-short-account-name
+pwpolicy -u "$bootstrap_user" -disableuser
+dseditgroup -o edit -d "$bootstrap_user" -t user admin
+dscl . -create "/Users/$bootstrap_user" IsHidden 1
+dscl . -create "/Users/$bootstrap_user" UserShell /usr/bin/false
+dscl . -read /Groups/admin GroupMembership
+dscl . -read "/Users/$bootstrap_user" AuthenticationAuthority IsHidden UserShell
+shutdown -h now
+```
+
+If managed provisioning supplies a different administrator, delete the
+temporary account instead. Boot once more without either directory option to
+verify that no shared directory, usable interactive login, File Sharing,
+Remote Login, Screen Sharing, or other remote service is enabled, then shut
+down cleanly. Use the identity copied into the dedicated host output directory
+for sealing.
 
 Seal only on an offline trusted builder:
 
