@@ -1,9 +1,13 @@
 # automata-ci-provider
 
 `automata-ci-provider` owns source-hosting provider identity, capability,
-configuration, connection, factory-registry, and persistence-port contracts for
-Automata. GitHub, Forgejo, and future provider adapters implement these
-contracts without entering the workflow, scheduler, store, or runner domains.
+configuration, connection, delivery, factory-registry, and persistence-port
+contracts for Automata. Delivery adapters authenticate bounded raw requests
+before normalization into the closed trigger vocabulary. Opaque endpoints pin
+exact instance, connection, and secret revisions; the replay-safe inbox owns
+only evidence and worker lifecycle. GitHub, Forgejo, and future provider
+adapters implement these contracts without entering the workflow, scheduler,
+store, or runner domains.
 
 The crate contains no network client and no concrete provider implementation.
 

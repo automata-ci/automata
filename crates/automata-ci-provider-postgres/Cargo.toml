@@ -12,15 +12,16 @@ homepage.workspace = true
 readme = "README.md"
 
 [dependencies]
+automata-ci-blob.workspace = true
 automata-ci-core.workspace = true
 automata-ci-key-management.workspace = true
 automata-ci-provider.workspace = true
+sha2.workspace = true
 sqlx.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
 automata-ci-postgres = { workspace = true, features = ["test-support"] }
-sha2.workspace = true
 tokio.workspace = true
 
 [lints]

@@ -10,18 +10,27 @@ use automata_ci_key_management::{
     KeyPurpose, WrappedDataKey,
 };
 use automata_ci_provider::{
-    ProviderConnectionId, ProviderConnectionManifest, ProviderConnectionRevision,
-    ProviderInstanceId, ProviderInstanceRecord, ProviderManifestRepository,
-    ProviderRepositoryError, ProviderRepositoryFuture, ProviderSaveOutcome,
+    AcceptProviderDelivery, ClaimProviderDelivery, ClaimedProviderDelivery,
+    CompleteProviderDelivery, FailProviderDelivery, ProviderConnectionId,
+    ProviderConnectionManifest, ProviderConnectionRevision, ProviderDelivery,
+    ProviderDeliveryAcceptOutcome, ProviderDeliveryFuture, ProviderDeliveryId,
+    ProviderDeliveryReceipt, ProviderDeliveryRepository, ProviderInstanceId,
+    ProviderInstanceRecord, ProviderManifestRepository, ProviderRepositoryError,
+    ProviderRepositoryFuture, ProviderSaveOutcome, ProviderWebhookEndpointId,
+    ProviderWebhookEndpointManifest, ProviderWebhookEndpointRecord,
+    ProviderWebhookEndpointRepository, ProviderWebhookEndpointRevision, RetryProviderDelivery,
 };
 use sqlx::{PgPool, Postgres, Transaction};
 
 mod connection;
+mod delivery;
+mod endpoint;
 mod instance;
 
 const SECRET_PURPOSE: &str = "provider/instance-secret:v1";
 const INSTANCE_LOCK_SALT: i64 = 6_692_456_121_835_322_101;
 const CONNECTION_LOCK_SALT: i64 = 7_752_013_457_331_067_413;
+const ENDPOINT_LOCK_SALT: i64 = 6_747_890_046_912_418_703;
 
 /// Atomic `PostgreSQL` provider manifest repository with envelope-encrypted secrets.
 #[derive(Clone)]
@@ -100,6 +109,74 @@ impl ProviderManifestRepository for PostgresProviderManifestRepository {
         connection_id: ProviderConnectionId,
     ) -> ProviderRepositoryFuture<'_, Option<ProviderConnectionManifest>> {
         Box::pin(self.current_connection_inner(connection_id))
+    }
+}
+
+impl ProviderWebhookEndpointRepository for PostgresProviderManifestRepository {
+    fn save_endpoint(
+        &self,
+        endpoint: ProviderWebhookEndpointManifest,
+    ) -> ProviderDeliveryFuture<'_, ProviderSaveOutcome> {
+        Box::pin(self.save_endpoint_inner(endpoint))
+    }
+
+    fn resolve_endpoint(
+        &self,
+        endpoint_id: ProviderWebhookEndpointId,
+    ) -> ProviderDeliveryFuture<'_, Option<ProviderWebhookEndpointRecord>> {
+        Box::pin(self.resolve_endpoint_inner(endpoint_id))
+    }
+
+    fn load_endpoint(
+        &self,
+        endpoint_id: ProviderWebhookEndpointId,
+        revision: ProviderWebhookEndpointRevision,
+    ) -> ProviderDeliveryFuture<'_, Option<ProviderWebhookEndpointRecord>> {
+        Box::pin(self.load_endpoint_inner(endpoint_id, revision))
+    }
+}
+
+impl ProviderDeliveryRepository for PostgresProviderManifestRepository {
+    fn accept_delivery(
+        &self,
+        request: AcceptProviderDelivery,
+    ) -> ProviderDeliveryFuture<'_, ProviderDeliveryAcceptOutcome> {
+        Box::pin(self.accept_delivery_inner(request))
+    }
+
+    fn load_delivery(
+        &self,
+        delivery_id: ProviderDeliveryId,
+    ) -> ProviderDeliveryFuture<'_, Option<ProviderDelivery>> {
+        Box::pin(self.load_delivery_inner(delivery_id))
+    }
+
+    fn claim_delivery(
+        &self,
+        request: ClaimProviderDelivery,
+    ) -> ProviderDeliveryFuture<'_, Option<ClaimedProviderDelivery>> {
+        Box::pin(self.claim_delivery_inner(request))
+    }
+
+    fn complete_delivery(
+        &self,
+        request: CompleteProviderDelivery,
+    ) -> ProviderDeliveryFuture<'_, ProviderDeliveryReceipt> {
+        Box::pin(self.complete_delivery_inner(request))
+    }
+
+    fn retry_delivery(
+        &self,
+        request: RetryProviderDelivery,
+    ) -> ProviderDeliveryFuture<'_, ProviderDeliveryReceipt> {
+        Box::pin(self.retry_delivery_inner(request))
+    }
+
+    fn fail_delivery(
+        &self,
+        request: FailProviderDelivery,
+    ) -> ProviderDeliveryFuture<'_, ProviderDeliveryReceipt> {
+        Box::pin(self.fail_delivery_inner(request))
     }
 }
 
