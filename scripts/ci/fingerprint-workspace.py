@@ -57,7 +57,7 @@ def regular_file_digest(path: Path, initial: os.stat_result) -> bytes:
         for block in iter(lambda: source.read(1024 * 1024), b""):
             content.update(block)
         closed = os.fstat(source.fileno())
-    final = path.stat(follow_symlinks=False)
+    final = os.stat(path, follow_symlinks=False)
     if not stable_metadata(initial, closed) or not stable_metadata(initial, final):
         raise ValueError(f"workspace file changed while fingerprinting: {path}")
     return content.digest()
@@ -105,7 +105,7 @@ def main() -> int:
         for digest in (content_snapshot, state_token):
             framed(digest, raw_path)
         try:
-            metadata = path.stat(follow_symlinks=False)
+            metadata = os.stat(path, follow_symlinks=False)
         except FileNotFoundError:
             for digest in (content_snapshot, state_token):
                 framed(digest, b"missing")
@@ -125,7 +125,7 @@ def main() -> int:
             for digest in (content_snapshot, state_token):
                 framed(digest, b"symlink")
             target = os.fsencode(os.readlink(path))
-            final = path.stat(follow_symlinks=False)
+            final = os.stat(path, follow_symlinks=False)
             if not stable_metadata(metadata, final):
                 raise ValueError(f"workspace symlink changed while fingerprinting: {path}")
             for digest in (content_snapshot, state_token):

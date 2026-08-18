@@ -19,6 +19,9 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--summary", required=True, type=Path)
     parser.add_argument("--lcov", required=True, type=Path)
     parser.add_argument("--lane", action="append", dest="lanes", required=True)
+    parser.add_argument(
+        "--runner-platform", required=True, choices=("linux", "macos")
+    )
     parser.add_argument("--source-head", required=True)
     parser.add_argument("--source-content-digest", required=True)
     parser.add_argument("--source-state-token", required=True)
@@ -112,6 +115,7 @@ def main() -> int:
     required = {
         "schema_version",
         "cargo_llvm_cov_version",
+        "runner_platform",
         "source_snapshot",
         "artifacts",
         "test_bundles",
@@ -122,6 +126,8 @@ def main() -> int:
         raise ValueError("failed-guard manifest is incomplete")
     if manifest["schema_version"] != 1 or manifest["cargo_llvm_cov_version"] != "0.8.7":
         raise ValueError("failed-guard manifest has the wrong schema or coverage tool")
+    if manifest["runner_platform"] != arguments.runner_platform:
+        raise ValueError("failed-guard manifest names the wrong runner platform")
 
     source = object_field(manifest, "source_snapshot", "manifest")
     expected_source = {
