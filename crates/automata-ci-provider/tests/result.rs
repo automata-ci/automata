@@ -11,14 +11,15 @@ use automata_ci_provider::{
     ProviderConnectionRevision, ProviderDefaultBranch, ProviderLifecycleState,
     ProviderRepositoryPath, ProviderResultAnnotation, ProviderResultAnnotationLevel,
     ProviderResultAnnotationMessage, ProviderResultAnnotationTitle, ProviderResultClaimFence,
-    ProviderResultConclusion, ProviderResultDetailsUrl, ProviderResultFailureKind,
-    ProviderResultFuture, ProviderResultPhase, ProviderResultPublicationEvidence,
-    ProviderResultPublicationModel, ProviderResultRepository, ProviderResultRepositoryError,
-    ProviderResultRetryAfter, ProviderResultSaveOutcome, ProviderResultSubject,
-    ProviderResultSubjectId, ProviderResultSubjectKind, ProviderResultSummary, ProviderResultTitle,
-    ProviderResultWorkerId, ProviderRunnerPolicyBinding, ProviderSchemaVersion,
-    ProviderWorkflowSource, RenewProviderResult, RepositoryVisibility, ResultPublisherError,
-    RetryProviderResult, RichCheckCapability, SaveDesiredProviderResult, StatusHistoryModel,
+    ProviderResultConclusion, ProviderResultContinuation, ProviderResultDetailsUrl,
+    ProviderResultFailureKind, ProviderResultFuture, ProviderResultModelError, ProviderResultName,
+    ProviderResultPhase, ProviderResultPublicationEvidence, ProviderResultPublicationModel,
+    ProviderResultRepository, ProviderResultRepositoryError, ProviderResultRetryAfter,
+    ProviderResultSaveOutcome, ProviderResultSubject, ProviderResultSubjectId,
+    ProviderResultSubjectKind, ProviderResultSummary, ProviderResultTitle, ProviderResultWorkerId,
+    ProviderRunnerPolicyBinding, ProviderSchemaVersion, ProviderWorkflowSource,
+    RenewProviderResult, RepositoryVisibility, RetryProviderResult, RichCheckCapability,
+    SaveDesiredProviderResult, StatusHistoryModel,
 };
 use url::Url;
 use uuid::Uuid;
@@ -64,6 +65,8 @@ fn subject() -> ProviderResultSubject {
         ProviderResultSubjectId::from_uuid(Uuid::from_u128(4)).unwrap(),
         &connection(),
         GitObjectId::from_provider_hex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap(),
+        ProviderResultName::new("build").unwrap(),
+        ProviderResultDetailsUrl::new(Url::parse("https://ci.example/runs/5").unwrap()).unwrap(),
         ProviderResultSubjectKind::WorkflowRun {
             run_id: RunId::from_uuid(Uuid::from_u128(5)),
         },
@@ -80,7 +83,6 @@ fn desired(generation: u64, updated_at: i64) -> DesiredProviderResult {
         None,
         ProviderResultTitle::new("build").unwrap(),
         ProviderResultSummary::new("running").unwrap(),
-        ProviderResultDetailsUrl::new(Url::parse("https://ci.example/runs/5").unwrap()).unwrap(),
         Vec::new(),
         UnixMillis::new(updated_at),
     )
@@ -206,6 +208,8 @@ impl ProviderResultRepository for MemoryOutbox {
                 value.desired.clone(),
                 claim,
                 value.attempts,
+                None,
+                None,
             )
             .map(Some)
             .map_err(|_| ProviderResultRepositoryError::Corrupt)
@@ -292,107 +296,107 @@ impl ProviderResultRepository for MemoryOutbox {
     }
 }
 
-#[derive(Debug)]
-struct LossyPublisher {
-    model: ProviderResultPublicationModel,
-    state: Mutex<Vec<(String, Sha256Digest)>>,
-    lose_next_response: Mutex<bool>,
-}
-
-impl LossyPublisher {
-    fn new(model: ProviderResultPublicationModel) -> Self {
-        Self {
-            model,
-            state: Mutex::new(Vec::new()),
-            lose_next_response: Mutex::new(true),
-        }
-    }
-
-    fn publish(
-        &self,
-        claimed: &ClaimedProviderResult,
-    ) -> Result<ProviderResultPublicationEvidence, ResultPublisherError> {
-        let marker = claimed.marker().as_str().to_owned();
-        let mut state = self.state.lock().unwrap();
-        if state.iter().all(|(candidate, _)| candidate != &marker) {
-            match self.model {
-                ProviderResultPublicationModel::MutableRichCheck => {
-                    state.clear();
-                    state.push((marker.clone(), claimed.desired().digest()));
-                }
-                ProviderResultPublicationModel::AppendOnlyCommitStatus => {
-                    state.push((marker.clone(), claimed.desired().digest()));
-                }
-            }
-            if std::mem::take(&mut *self.lose_next_response.lock().unwrap()) {
-                return Err(ResultPublisherError::Unavailable);
-            }
-        }
-        ProviderResultPublicationEvidence::new(
-            claimed,
-            self.model,
-            Some(ExternalResultId::new(marker).unwrap()),
-            claimed.desired().digest(),
-            claimed.claimed_at(),
-        )
-        .map_err(|_| ResultPublisherError::InvalidResponse)
-    }
-
-    fn objects(&self) -> usize {
-        self.state.lock().unwrap().len()
-    }
-}
-
-#[tokio::test]
-async fn mutable_and_append_publishers_converge_after_lost_response_without_duplicates() {
-    for model in [
-        ProviderResultPublicationModel::MutableRichCheck,
-        ProviderResultPublicationModel::AppendOnlyCommitStatus,
-    ] {
-        let outbox = MemoryOutbox::default();
-        outbox
-            .save_desired(SaveDesiredProviderResult::new(subject(), desired(1, 2_001)).unwrap())
-            .await
-            .unwrap();
-        let claimed = outbox
-            .claim_result(
-                ClaimProviderResult::new(
-                    subject().connection_id(),
-                    ProviderResultWorkerId::from_uuid(Uuid::from_u128(9)).unwrap(),
-                    UnixMillis::new(2_002),
-                    1_000,
-                )
-                .unwrap(),
-            )
-            .await
-            .unwrap()
-            .unwrap();
-        let publisher = LossyPublisher::new(model);
-
-        assert_eq!(
-            publisher.publish(&claimed),
-            Err(ResultPublisherError::Unavailable)
-        );
-        let evidence = publisher.publish(&claimed).unwrap();
-        assert_eq!(publisher.objects(), 1);
-        outbox
-            .complete_result(CompleteProviderResult::new(claimed.claim(), evidence).unwrap())
-            .await
-            .unwrap();
-    }
-}
-
 #[test]
 fn mutable_result_marker_is_stable_across_generations() {
     let first =
-        ClaimedProviderResult::new(subject(), desired(1, 2_001), claim(1, 2_002), 1).unwrap();
+        ClaimedProviderResult::new(subject(), desired(1, 2_001), claim(1, 2_002), 1, None, None)
+            .unwrap();
     let second =
-        ClaimedProviderResult::new(subject(), desired(2, 2_003), claim(2, 2_004), 1).unwrap();
+        ClaimedProviderResult::new(subject(), desired(2, 2_003), claim(2, 2_004), 1, None, None)
+            .unwrap();
 
     assert_eq!(first.marker(), second.marker());
     assert_eq!(
         first.marker().as_str(),
         "automata-result:00000000-0000-0000-0000-000000000004"
+    );
+}
+
+#[test]
+fn continuation_is_bounded_digest_bound_and_debug_redacted() {
+    let first = ProviderResultContinuation::new(
+        ProviderSchemaVersion::new(1).unwrap(),
+        b"secret adapter cursor".to_vec(),
+    )
+    .unwrap();
+    let second = ProviderResultContinuation::new(
+        ProviderSchemaVersion::new(2).unwrap(),
+        b"secret adapter cursor".to_vec(),
+    )
+    .unwrap();
+
+    assert_ne!(first.digest(), second.digest());
+    assert!(!format!("{first:?}").contains("secret adapter cursor"));
+    assert!(
+        ProviderResultContinuation::new(ProviderSchemaVersion::new(1).unwrap(), Vec::new())
+            .is_err()
+    );
+    assert!(
+        ProviderResultContinuation::new(
+            ProviderSchemaVersion::new(1).unwrap(),
+            vec![0; automata_ci_provider::MAX_PROVIDER_RESULT_CONTINUATION_BYTES + 1],
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn mutable_publication_requires_and_preserves_one_native_binding() {
+    let external_id = ExternalResultId::new("check-1").unwrap();
+    let first =
+        ClaimedProviderResult::new(subject(), desired(1, 2_001), claim(1, 2_002), 1, None, None)
+            .unwrap();
+    assert_eq!(
+        ProviderResultPublicationEvidence::new(
+            &first,
+            ProviderResultPublicationModel::MutableRichCheck,
+            None,
+            first.desired().digest(),
+            UnixMillis::new(2_003),
+        ),
+        Err(ProviderResultModelError::InvalidPublicationBinding)
+    );
+
+    let later = ClaimedProviderResult::new(
+        subject(),
+        desired(2, 3_003),
+        claim(2, 3_004),
+        1,
+        Some(automata_ci_provider::ProviderResultBinding::new(
+            external_id.clone(),
+        )),
+        None,
+    )
+    .unwrap();
+    assert!(
+        ProviderResultPublicationEvidence::new(
+            &later,
+            ProviderResultPublicationModel::MutableRichCheck,
+            Some(external_id),
+            later.desired().digest(),
+            UnixMillis::new(3_005),
+        )
+        .is_ok()
+    );
+    assert_eq!(
+        ProviderResultPublicationEvidence::new(
+            &later,
+            ProviderResultPublicationModel::MutableRichCheck,
+            Some(ExternalResultId::new("check-2").unwrap()),
+            later.desired().digest(),
+            UnixMillis::new(3_005),
+        ),
+        Err(ProviderResultModelError::InvalidPublicationBinding)
+    );
+    assert_eq!(
+        ProviderResultPublicationEvidence::new(
+            &later,
+            ProviderResultPublicationModel::AppendOnlyCommitStatus,
+            None,
+            later.desired().digest(),
+            UnixMillis::new(3_005),
+        ),
+        Err(ProviderResultModelError::InvalidPublicationBinding)
     );
 }
 
@@ -429,7 +433,7 @@ async fn newer_generation_supersedes_and_fences_old_claim_without_a_bridge() {
     let stale_evidence = ProviderResultPublicationEvidence::new(
         &first,
         ProviderResultPublicationModel::MutableRichCheck,
-        None,
+        Some(ExternalResultId::new("check-1").unwrap()),
         first.desired().digest(),
         first.claimed_at(),
     )
@@ -482,6 +486,7 @@ async fn retries_and_terminal_failures_consume_only_the_exact_fence() {
         first.claim(),
         UnixMillis::new(2_003),
         UnixMillis::new(2_100),
+        None,
     )
     .unwrap();
     outbox.retry_result(retry).await.unwrap();
@@ -557,7 +562,6 @@ fn presentation_is_canonical_bounded_and_independent_of_provider_features() {
         Some(ProviderResultConclusion::Success),
         ProviderResultTitle::new("build").unwrap(),
         ProviderResultSummary::new("complete").unwrap(),
-        ProviderResultDetailsUrl::new(Url::parse("https://ci.example/runs/5").unwrap()).unwrap(),
         vec![annotation.clone()],
         UnixMillis::new(2_001),
     )
@@ -574,8 +578,6 @@ fn presentation_is_canonical_bounded_and_independent_of_provider_features() {
             Some(ProviderResultConclusion::Success),
             ProviderResultTitle::new("build").unwrap(),
             ProviderResultSummary::new("running").unwrap(),
-            ProviderResultDetailsUrl::new(Url::parse("https://ci.example/runs/5").unwrap())
-                .unwrap(),
             Vec::new(),
             UnixMillis::new(2_001),
         )
@@ -588,8 +590,6 @@ fn presentation_is_canonical_bounded_and_independent_of_provider_features() {
             Some(ProviderResultConclusion::Failure),
             ProviderResultTitle::new("build").unwrap(),
             ProviderResultSummary::new("failed").unwrap(),
-            ProviderResultDetailsUrl::new(Url::parse("https://ci.example/runs/5").unwrap())
-                .unwrap(),
             vec![annotation.clone(), annotation],
             UnixMillis::new(2_001),
         )
@@ -630,8 +630,6 @@ fn presentation_is_canonical_bounded_and_independent_of_provider_features() {
             None,
             ProviderResultTitle::new("build").unwrap(),
             ProviderResultSummary::new("running").unwrap(),
-            ProviderResultDetailsUrl::new(Url::parse("https://ci.example/runs/5").unwrap())
-                .unwrap(),
             annotations,
             UnixMillis::new(2_001),
         )
@@ -658,12 +656,14 @@ fn evidence_is_bound_to_the_exact_claim_fence() {
         )
         .unwrap(),
         1,
+        None,
+        None,
     )
     .unwrap();
     let evidence = ProviderResultPublicationEvidence::new(
         &claimed,
         ProviderResultPublicationModel::MutableRichCheck,
-        None,
+        Some(ExternalResultId::new("check-1").unwrap()),
         claimed.desired().digest(),
         UnixMillis::new(2_003),
     )
@@ -683,7 +683,8 @@ fn evidence_is_bound_to_the_exact_claim_fence() {
 #[test]
 fn publication_commands_reject_the_exclusive_deadline() {
     let claimed =
-        ClaimedProviderResult::new(subject(), desired(1, 2_001), claim(1, 2_002), 1).unwrap();
+        ClaimedProviderResult::new(subject(), desired(1, 2_001), claim(1, 2_002), 1, None, None)
+            .unwrap();
     let deadline = claimed.claim().expires_at();
 
     assert!(
@@ -701,6 +702,7 @@ fn publication_commands_reject_the_exclusive_deadline() {
             claimed.claim(),
             deadline,
             UnixMillis::new(deadline.get() + 1),
+            None,
         )
         .is_err()
     );

@@ -4,12 +4,13 @@ use automata_ci_provider::{
     ExternalResultId, FailProviderResult, ProviderConnectionId, ProviderConnectionRevision,
     ProviderDeliveryId, ProviderRepositoryPath, ProviderResultAnnotation,
     ProviderResultAnnotationLevel, ProviderResultAnnotationMessage, ProviderResultAnnotationTitle,
-    ProviderResultClaimFence, ProviderResultConclusion, ProviderResultDetailsUrl,
-    ProviderResultFailureKind, ProviderResultModelError, ProviderResultPhase,
+    ProviderResultBinding, ProviderResultClaimFence, ProviderResultConclusion,
+    ProviderResultContinuation, ProviderResultDetailsUrl, ProviderResultFailureKind,
+    ProviderResultModelError, ProviderResultName, ProviderResultPhase,
     ProviderResultPublicationModel, ProviderResultRepositoryError, ProviderResultSaveOutcome,
     ProviderResultSubject, ProviderResultSubjectId, ProviderResultSubjectKind,
-    ProviderResultSummary, ProviderResultTitle, ProviderResultWorkerId, RenewProviderResult,
-    RetryProviderResult, SaveDesiredProviderResult,
+    ProviderResultSummary, ProviderResultTitle, ProviderResultWorkerId, ProviderSchemaVersion,
+    RenewProviderResult, RetryProviderResult, SaveDesiredProviderResult,
 };
 use sqlx::{FromRow, Postgres, Transaction};
 
@@ -23,6 +24,8 @@ struct ResultRow {
     connection_digest: Vec<u8>,
     object_algorithm: String,
     object_bytes: Vec<u8>,
+    result_name: String,
+    result_details_url: String,
     subject_kind: String,
     delivery_id: Option<uuid::Uuid>,
     workflow_path: Option<String>,
@@ -36,7 +39,6 @@ struct ResultRow {
     conclusion: Option<String>,
     title: String,
     summary: String,
-    details_url: String,
     updated_at_ms: i64,
     desired_digest: Vec<u8>,
     attempts: i16,
@@ -44,6 +46,10 @@ struct ResultRow {
     claim_fence: Option<i64>,
     claim_started_at_ms: Option<i64>,
     claim_expires_at_ms: Option<i64>,
+    binding_external_result_id: Option<String>,
+    continuation_schema: Option<i16>,
+    continuation_bytes: Option<Vec<u8>>,
+    continuation_digest: Option<Vec<u8>>,
 }
 
 #[derive(FromRow)]
@@ -128,7 +134,9 @@ impl PostgresProviderManifestRepository {
                 claim_started_at_ms = NULL, claim_expires_at_ms = NULL,
                 publication_model = NULL, external_result_id = NULL,
                 provider_state_digest = NULL, publication_observed_at_ms = NULL,
-                publication_evidence_digest = NULL
+                publication_evidence_digest = NULL,
+                continuation_schema = NULL, continuation_bytes = NULL,
+                continuation_digest = NULL
             FROM provider_result_subjects AS subject
             WHERE subject.subject_id = outbox.subject_id
               AND subject.connection_id = $1
@@ -216,6 +224,9 @@ impl PostgresProviderManifestRepository {
                 publication_model = $7, external_result_id = $8,
                 provider_state_digest = $9, publication_observed_at_ms = $10,
                 publication_evidence_digest = $11,
+                binding_external_result_id = $12,
+                continuation_schema = NULL, continuation_bytes = NULL,
+                continuation_digest = NULL,
                 failed_at_ms = NULL, failure_kind = NULL
             WHERE subject_id = $1 AND generation = $2 AND state = 'claimed'
               AND claim_worker_id = $3 AND claim_fence = $4
@@ -233,6 +244,7 @@ impl PostgresProviderManifestRepository {
         .bind(evidence.provider_state_digest().as_bytes().as_slice())
         .bind(evidence.observed_at().get())
         .bind(evidence.digest().as_bytes().as_slice())
+        .bind(evidence.external_id().map(ExternalResultId::as_str))
         .execute(self.pool())
         .await
         .map_err(unavailable)?;
@@ -300,6 +312,8 @@ impl PostgresProviderManifestRepository {
                 publication_model = NULL, external_result_id = NULL,
                 provider_state_digest = NULL, publication_observed_at_ms = NULL,
                 publication_evidence_digest = NULL,
+                continuation_schema = $8, continuation_bytes = $9,
+                continuation_digest = $10,
                 failed_at_ms = NULL, failure_kind = NULL
             WHERE subject_id = $1 AND generation = $2 AND state = 'claimed'
               AND claim_worker_id = $3 AND claim_fence = $4
@@ -313,6 +327,23 @@ impl PostgresProviderManifestRepository {
         .bind(claim.claimed_at().get())
         .bind(claim.expires_at().get())
         .bind(request.retry_at().get())
+        .bind(
+            request
+                .continuation()
+                .map(|continuation| i16::try_from(continuation.schema_version().get()))
+                .transpose()
+                .map_err(|_| ProviderResultRepositoryError::Corrupt)?,
+        )
+        .bind(
+            request
+                .continuation()
+                .map(ProviderResultContinuation::bytes),
+        )
+        .bind(
+            request
+                .continuation()
+                .map(|continuation| continuation.digest().as_bytes().to_vec()),
+        )
         .execute(self.pool())
         .await
         .map_err(unavailable)?;
@@ -332,6 +363,8 @@ impl PostgresProviderManifestRepository {
                 publication_model = NULL, external_result_id = NULL,
                 provider_state_digest = NULL, publication_observed_at_ms = NULL,
                 publication_evidence_digest = NULL,
+                continuation_schema = NULL, continuation_bytes = NULL,
+                continuation_digest = NULL,
                 failed_at_ms = $7, failure_kind = $8
             WHERE subject_id = $1 AND generation = $2 AND state = 'claimed'
               AND claim_worker_id = $3 AND claim_fence = $4
@@ -357,6 +390,22 @@ impl PostgresProviderManifestRepository {
         row: ResultRow,
         annotations: Vec<AnnotationRow>,
     ) -> Result<ClaimedProviderResult, ProviderResultRepositoryError> {
+        let binding = row
+            .binding_external_result_id
+            .as_deref()
+            .map(|external_id| ExternalResultId::new(external_id.to_owned()))
+            .transpose()
+            .map_err(|_| ProviderResultRepositoryError::Corrupt)?
+            .map(ProviderResultBinding::new);
+        let continuation = continuation(&row)?;
+        let result_name =
+            ProviderResultName::new(row.result_name.clone()).map_err(model_corrupt)?;
+        let result_details_url = ProviderResultDetailsUrl::new(
+            row.result_details_url
+                .parse()
+                .map_err(|_| ProviderResultRepositoryError::Corrupt)?,
+        )
+        .map_err(model_corrupt)?;
         let connection_id = ProviderConnectionId::from_uuid(row.connection_id)
             .map_err(|_| ProviderResultRepositoryError::Corrupt)?;
         let connection_revision =
@@ -376,6 +425,8 @@ impl PostgresProviderManifestRepository {
             subject_id,
             &connection,
             git_object(&row.object_algorithm, &row.object_bytes)?,
+            result_name,
+            result_details_url,
             subject_kind(&row)?,
             u32::try_from(row.attempt).map_err(|_| ProviderResultRepositoryError::Corrupt)?,
             UnixMillis::new(row.created_at_ms),
@@ -390,12 +441,6 @@ impl PostgresProviderManifestRepository {
             conclusion(row.conclusion.as_deref())?,
             ProviderResultTitle::new(row.title).map_err(model_corrupt)?,
             ProviderResultSummary::new(row.summary).map_err(model_corrupt)?,
-            ProviderResultDetailsUrl::new(
-                row.details_url
-                    .parse()
-                    .map_err(|_| ProviderResultRepositoryError::Corrupt)?,
-            )
-            .map_err(model_corrupt)?,
             annotations
                 .into_iter()
                 .map(decode_annotation)
@@ -434,6 +479,8 @@ impl PostgresProviderManifestRepository {
             desired,
             claim,
             u16::try_from(row.attempts).map_err(|_| ProviderResultRepositoryError::Corrupt)?,
+            binding,
+            continuation,
         )
         .map_err(model_corrupt)
     }
@@ -491,9 +538,10 @@ async fn insert_subject(
         r"
         INSERT INTO provider_result_subjects (
             subject_id, connection_id, connection_revision, connection_digest,
-            object_algorithm, object_bytes, subject_kind, delivery_id,
-            workflow_path, run_id, job_id, attempt, created_at_ms, subject_digest
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+            object_algorithm, object_bytes, result_name, result_details_url,
+            subject_kind, delivery_id, workflow_path, run_id, job_id, attempt,
+            created_at_ms, subject_digest
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
         ",
     )
     .bind(subject.subject_id().as_uuid())
@@ -502,6 +550,8 @@ async fn insert_subject(
     .bind(subject.connection_digest().as_bytes().as_slice())
     .bind(object_algorithm_text(subject.object().algorithm()))
     .bind(subject.object().as_bytes())
+    .bind(subject.name().as_str())
+    .bind(subject.details_url().as_url().as_str())
     .bind(kind.kind)
     .bind(kind.delivery_id)
     .bind(kind.workflow_path)
@@ -564,8 +614,8 @@ async fn insert_outbox(
         r"
         INSERT INTO provider_result_outbox (
             subject_id, generation, phase, conclusion, title, summary,
-            details_url, updated_at_ms, desired_digest, state, available_at_ms
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'pending',$8)
+            updated_at_ms, desired_digest, state, available_at_ms
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'pending',$7)
         ",
     )
     .bind(subject.subject_id().as_uuid())
@@ -574,7 +624,6 @@ async fn insert_outbox(
     .bind(desired.conclusion().map(conclusion_text))
     .bind(desired.title().as_str())
     .bind(desired.summary().as_str())
-    .bind(desired.details_url().as_url().as_str())
     .bind(desired.updated_at().get())
     .bind(desired.digest().as_bytes().as_slice())
     .execute(&mut **transaction)
@@ -592,13 +641,15 @@ async fn update_outbox(
         r"
         UPDATE provider_result_outbox
         SET generation = $2, phase = $3, conclusion = $4, title = $5,
-            summary = $6, details_url = $7, updated_at_ms = $8,
-            desired_digest = $9, state = 'pending', available_at_ms = $8,
+            summary = $6, updated_at_ms = $7,
+            desired_digest = $8, state = 'pending', available_at_ms = $7,
             attempts = 0, claim_worker_id = NULL, claim_fence = NULL,
             claim_started_at_ms = NULL, claim_expires_at_ms = NULL,
             publication_model = NULL, external_result_id = NULL,
             provider_state_digest = NULL, publication_observed_at_ms = NULL,
             publication_evidence_digest = NULL,
+            continuation_schema = NULL, continuation_bytes = NULL,
+            continuation_digest = NULL,
             failed_at_ms = NULL, failure_kind = NULL
         WHERE subject_id = $1
         ",
@@ -609,7 +660,6 @@ async fn update_outbox(
     .bind(desired.conclusion().map(conclusion_text))
     .bind(desired.title().as_str())
     .bind(desired.summary().as_str())
-    .bind(desired.details_url().as_url().as_str())
     .bind(desired.updated_at().get())
     .bind(desired.digest().as_bytes().as_slice())
     .execute(&mut **transaction)
@@ -656,15 +706,19 @@ async fn load_result_row(
         r"
         SELECT subject.subject_id, subject.connection_id,
                subject.connection_revision, subject.connection_digest,
-               subject.object_algorithm, subject.object_bytes,
-               subject.subject_kind, subject.delivery_id, subject.workflow_path,
+               subject.object_algorithm, subject.object_bytes, subject.result_name,
+               subject.result_details_url, subject.subject_kind,
+               subject.delivery_id, subject.workflow_path,
                subject.run_id, subject.job_id, subject.attempt,
                subject.created_at_ms, subject.subject_digest,
                outbox.generation, outbox.phase, outbox.conclusion,
-               outbox.title, outbox.summary, outbox.details_url,
+               outbox.title, outbox.summary,
                outbox.updated_at_ms, outbox.desired_digest, outbox.attempts,
                outbox.claim_worker_id, outbox.claim_fence,
-               outbox.claim_started_at_ms, outbox.claim_expires_at_ms
+               outbox.claim_started_at_ms, outbox.claim_expires_at_ms,
+               outbox.binding_external_result_id,
+               outbox.continuation_schema, outbox.continuation_bytes,
+               outbox.continuation_digest
         FROM provider_result_subjects AS subject
         JOIN provider_result_outbox AS outbox ON outbox.subject_id = subject.subject_id
         WHERE subject.subject_id = $1 AND outbox.state = 'claimed'
@@ -867,6 +921,31 @@ fn digest(value: &[u8]) -> Result<Sha256Digest, ProviderResultRepositoryError> {
         .try_into()
         .map(Sha256Digest::from_bytes)
         .map_err(|_| ProviderResultRepositoryError::Corrupt)
+}
+
+fn continuation(
+    row: &ResultRow,
+) -> Result<Option<ProviderResultContinuation>, ProviderResultRepositoryError> {
+    match (
+        row.continuation_schema,
+        row.continuation_bytes.as_ref(),
+        row.continuation_digest.as_deref(),
+    ) {
+        (None, None, None) => Ok(None),
+        (Some(schema), Some(bytes), Some(stored_digest)) => {
+            let schema = u16::try_from(schema)
+                .ok()
+                .and_then(|schema| ProviderSchemaVersion::new(schema).ok())
+                .ok_or(ProviderResultRepositoryError::Corrupt)?;
+            let continuation =
+                ProviderResultContinuation::new(schema, bytes.clone()).map_err(model_corrupt)?;
+            if digest(stored_digest)? != continuation.digest() {
+                return Err(ProviderResultRepositoryError::Corrupt);
+            }
+            Ok(Some(continuation))
+        }
+        _ => Err(ProviderResultRepositoryError::Corrupt),
+    }
 }
 
 fn durable_u64(value: u64) -> Result<i64, ProviderResultRepositoryError> {

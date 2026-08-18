@@ -261,6 +261,10 @@ const CANONICAL_MIGRATIONS: &[(&str, &str)] = &[
         "0064_provider_result_outbox.sql",
         "1f8ae184bc2926c8a447afa7ad1ea9d466d0e064a89a69aa1c52dbd9ceabcf6af3ac7849bfa8871e911d6daae54d327f",
     ),
+    (
+        "0065_provider_result_recovery_state.sql",
+        "60e84995588ac7378c135bcae3e23e066fb9654ab7a00cb222aa2c9c9d14ed74e30ebd113bb7743eca02a8d44efdd7a0",
+    ),
 ];
 
 const BASELINE_MIGRATION_COUNT: u32 = 26;
@@ -892,6 +896,47 @@ fn provider_result_outbox_is_current_only_provider_neutral_and_fenced() {
         assert!(
             !source.contains(forbidden),
             "provider result outbox retained provider-specific or legacy surface: {forbidden}",
+        );
+    }
+}
+
+#[test]
+fn provider_result_recovery_state_is_bounded_and_provider_neutral() {
+    let source = include_str!("../migrations/0065_provider_result_recovery_state.sql");
+
+    for required in [
+        "ADD COLUMN binding_external_result_id TEXT",
+        "ADD COLUMN continuation_schema SMALLINT",
+        "ADD COLUMN continuation_bytes BYTEA",
+        "ADD COLUMN continuation_digest BYTEA",
+        "ADD COLUMN result_name TEXT NOT NULL",
+        "octet_length(result_name) BETWEEN 1 AND 255",
+        "ADD COLUMN result_details_url TEXT NOT NULL",
+        "octet_length(result_details_url) BETWEEN 1 AND 8192",
+        "DROP COLUMN details_url",
+        "state IN ('pending', 'claimed')",
+        "AND continuation_schema IS NOT NULL",
+        "AND continuation_bytes IS NOT NULL",
+        "AND continuation_digest IS NOT NULL",
+        "octet_length(continuation_bytes) BETWEEN 1 AND 65536",
+        "octet_length(continuation_digest) = 32",
+    ] {
+        assert!(
+            source.contains(required),
+            "provider result recovery state lost required contract: {required}",
+        );
+    }
+    for forbidden in [
+        "github_",
+        "forgejo_",
+        "gitlab_",
+        "IF EXISTS",
+        "IF NOT EXISTS",
+        " CASCADE",
+    ] {
+        assert!(
+            !source.contains(forbidden),
+            "provider result recovery state retained provider-specific or transitional surface: {forbidden}",
         );
     }
 }

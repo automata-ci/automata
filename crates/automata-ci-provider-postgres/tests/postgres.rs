@@ -11,23 +11,24 @@ use automata_ci_provider::{
     AcceptProviderDelivery, BindProviderProcessingSource, ClaimProviderProcessing,
     ClaimProviderResult, CompleteProviderProcessing, CompleteProviderResult, DesiredProviderResult,
     ExternalDeliveryId, ExternalDeliveryIdentity, ExternalRepositoryId, ExternalRepositoryIdentity,
-    ExternalSubjectId, ExternalSubjectIdentity, ExternalSubjectKind, NormalizedTrigger,
-    ProviderArchiveLimits, ProviderCapabilities, ProviderCapability, ProviderConfigurationDocument,
-    ProviderConfigurationRevision, ProviderConnectionConfiguration, ProviderConnectionId,
-    ProviderConnectionManifest, ProviderConnectionPolicyDocument, ProviderConnectionRevision,
-    ProviderControl, ProviderControlDocument, ProviderControlKind, ProviderDefaultBranch,
-    ProviderDelivery, ProviderDeliveryAcceptOutcome, ProviderDeliveryEvidence, ProviderDeliveryId,
-    ProviderDeliveryObservations, ProviderDeliveryRepository as _, ProviderDeliveryRepositoryError,
-    ProviderEventName, ProviderGitRef, ProviderGitRefKind, ProviderInstanceId,
-    ProviderInstanceManifest, ProviderInstanceRecord, ProviderLifecycleState,
-    ProviderManifestRepository as _, ProviderOrigins, ProviderProcessingFailure,
-    ProviderProcessingInput, ProviderProcessingRepository as _, ProviderProcessingRepositoryError,
-    ProviderProcessingState, ProviderProcessingWorkerId, ProviderRepository,
-    ProviderRepositoryError, ProviderRepositoryPath, ProviderResultDetailsUrl, ProviderResultPhase,
-    ProviderResultPublicationEvidence, ProviderResultPublicationModel,
-    ProviderResultRepository as _, ProviderResultRepositoryError, ProviderResultSaveOutcome,
-    ProviderResultSubject, ProviderResultSubjectId, ProviderResultSubjectKind,
-    ProviderResultSummary, ProviderResultTitle, ProviderResultWorkerId,
+    ExternalResultId, ExternalSubjectId, ExternalSubjectIdentity, ExternalSubjectKind,
+    NormalizedTrigger, ProviderArchiveLimits, ProviderCapabilities, ProviderCapability,
+    ProviderConfigurationDocument, ProviderConfigurationRevision, ProviderConnectionConfiguration,
+    ProviderConnectionId, ProviderConnectionManifest, ProviderConnectionPolicyDocument,
+    ProviderConnectionRevision, ProviderControl, ProviderControlDocument, ProviderControlKind,
+    ProviderDefaultBranch, ProviderDelivery, ProviderDeliveryAcceptOutcome,
+    ProviderDeliveryEvidence, ProviderDeliveryId, ProviderDeliveryObservations,
+    ProviderDeliveryRepository as _, ProviderDeliveryRepositoryError, ProviderEventName,
+    ProviderGitRef, ProviderGitRefKind, ProviderInstanceId, ProviderInstanceManifest,
+    ProviderInstanceRecord, ProviderLifecycleState, ProviderManifestRepository as _,
+    ProviderOrigins, ProviderProcessingFailure, ProviderProcessingInput,
+    ProviderProcessingRepository as _, ProviderProcessingRepositoryError, ProviderProcessingState,
+    ProviderProcessingWorkerId, ProviderRepository, ProviderRepositoryError,
+    ProviderRepositoryPath, ProviderResultContinuation, ProviderResultDetailsUrl,
+    ProviderResultName, ProviderResultPhase, ProviderResultPublicationEvidence,
+    ProviderResultPublicationModel, ProviderResultRepository as _, ProviderResultRepositoryError,
+    ProviderResultSaveOutcome, ProviderResultSubject, ProviderResultSubjectId,
+    ProviderResultSubjectKind, ProviderResultSummary, ProviderResultTitle, ProviderResultWorkerId,
     ProviderRunnerPolicyBinding, ProviderSaveOutcome, ProviderSchemaVersion, ProviderSecret,
     ProviderSecretBinding, ProviderSecretBindings, ProviderSecretGeneration, ProviderSecretName,
     ProviderSecretSet, ProviderTypeId, ProviderWebhookEndpointId, ProviderWebhookEndpointManifest,
@@ -507,6 +508,12 @@ async fn provider_results_are_contiguous_fenced_and_rehydratable() -> TestResult
             ProviderResultSubjectId::from_uuid(Uuid::from_u128(0x5902))?,
             &connection,
             GitObjectId::from_provider_hex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")?,
+            ProviderResultName::new("Automata CI")?,
+            ProviderResultDetailsUrl::new(
+                "https://ci.example/runs/5903"
+                    .parse()
+                    .expect("fixed provider result URL"),
+            )?,
             ProviderResultSubjectKind::WorkflowRun {
                 run_id: RunId::from_uuid(Uuid::from_u128(0x5903)),
             },
@@ -520,11 +527,6 @@ async fn provider_results_are_contiguous_fenced_and_rehydratable() -> TestResult
                 None,
                 ProviderResultTitle::new("Automata CI")?,
                 ProviderResultSummary::new(summary)?,
-                ProviderResultDetailsUrl::new(
-                    "https://ci.example/runs/5903"
-                        .parse()
-                        .expect("fixed provider result URL"),
-                )?,
                 Vec::new(),
                 UnixMillis::new(updated_at),
             )
@@ -600,6 +602,10 @@ async fn provider_results_are_contiguous_fenced_and_rehydratable() -> TestResult
             .expect("second result claim");
         assert_eq!(second_claim.desired(), &second_desired);
         assert!(second_claim.claim().fence() > first_claim.claim().fence());
+        let continuation = ProviderResultContinuation::new(
+            ProviderSchemaVersion::new(1)?,
+            br#"{"state":"reconcile-create"}"#.to_vec(),
+        )?;
         let stale_second_fence = second_claim.claim();
         let renewed = repository
             .renew_result(RenewProviderResult::new(
@@ -616,6 +622,7 @@ async fn provider_results_are_contiguous_fenced_and_rehydratable() -> TestResult
                     stale_second_fence,
                     UnixMillis::new(3_501),
                     UnixMillis::new(3_600),
+                    None,
                 )?)
                 .await,
             Err(ProviderResultRepositoryError::StaleClaim)
@@ -637,6 +644,7 @@ async fn provider_results_are_contiguous_fenced_and_rehydratable() -> TestResult
                 second_claim.claim(),
                 UnixMillis::new(3_502),
                 UnixMillis::new(3_600),
+                Some(continuation.clone()),
             )?)
             .await?;
         assert!(
@@ -660,10 +668,11 @@ async fn provider_results_are_contiguous_fenced_and_rehydratable() -> TestResult
             .await?
             .expect("retried result claim");
         assert_eq!(final_claim.attempts(), 2);
+        assert_eq!(final_claim.continuation(), Some(&continuation));
         let evidence = ProviderResultPublicationEvidence::new(
             &final_claim,
-            ProviderResultPublicationModel::AppendOnlyCommitStatus,
-            None,
+            ProviderResultPublicationModel::MutableRichCheck,
+            Some(ExternalResultId::new("github-check-5903")?),
             final_claim.desired().digest(),
             UnixMillis::new(3_601),
         )?;
@@ -704,6 +713,15 @@ async fn provider_results_are_contiguous_fenced_and_rehydratable() -> TestResult
             )?)
             .await?
             .expect("exhaustion fixture claim");
+        assert_eq!(
+            exhausted_claim
+                .binding()
+                .expect("mutable provider binding")
+                .external_id()
+                .as_str(),
+            "github-check-5903"
+        );
+        assert!(exhausted_claim.continuation().is_none());
         sqlx::query(
             "UPDATE provider_result_outbox SET attempts = 64, next_fence = 64, claim_fence = 64, claim_expires_at_ms = 4003 WHERE subject_id = $1",
         )

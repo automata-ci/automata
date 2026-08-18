@@ -6,10 +6,11 @@ use async_trait::async_trait;
 use automata_ci_core::{Sha256Digest, UnixMillis};
 use automata_ci_provider::{
     ClaimProviderResult, ClaimedProviderResult, CompleteProviderResult, ExternalResultId,
-    FailProviderResult, ProviderCapabilities, ProviderConnectionId, ProviderResultFailureKind,
-    ProviderResultPublicationEvidence, ProviderResultPublicationModel, ProviderResultRepository,
-    ProviderResultRepositoryError, ProviderResultWorkerId, ProviderTypeId, RenewProviderResult,
-    ResultPublisherError, RetryProviderResult, provider_capability_digest,
+    FailProviderResult, ProviderCapabilities, ProviderConnectionId, ProviderResultContinuation,
+    ProviderResultFailureKind, ProviderResultPublicationEvidence, ProviderResultPublicationModel,
+    ProviderResultRepository, ProviderResultRepositoryError, ProviderResultRetryAfter,
+    ProviderResultWorkerId, ProviderTypeId, RenewProviderResult, ResultPublisherError,
+    RetryProviderResult, provider_capability_digest,
 };
 use thiserror::Error;
 use tokio::{
@@ -43,7 +44,23 @@ pub trait ProviderResultAdapter: fmt::Debug + Send + Sync {
         context: &ProviderRuntimeContext,
         claimed: &ClaimedProviderResult,
         lease: &ProviderResultLease,
-    ) -> Result<ProviderResultObservation, ResultPublisherError>;
+    ) -> ProviderResultAdapterOutcome;
+}
+
+/// Closed result of one provider-specific publication attempt.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ProviderResultAdapterOutcome {
+    /// The claim-frozen desired generation was exactly reconciled.
+    Published(ProviderResultObservation),
+    /// Provider work is retryable with optional durable adapter recovery state.
+    Retry {
+        /// Adapter state required to resume without repeating uncertain mutations.
+        continuation: Option<ProviderResultContinuation>,
+        /// Bounded provider retry guidance, when supplied.
+        retry_after: Option<ProviderResultRetryAfter>,
+    },
+    /// Provider work failed terminally under a closed sanitized classification.
+    Failed(ResultPublisherError),
 }
 
 /// Read-only live view of the exact publication fence held by a worker.
@@ -305,7 +322,9 @@ impl ProviderResultWorker {
                     disposition => disposition,
                 }
             }
-            Err(ProviderRuntimeContextError::Unavailable) => ResultDisposition::Retry(None),
+            Err(ProviderRuntimeContextError::Unavailable) => {
+                ResultDisposition::Retry(None, claimed.continuation().cloned())
+            }
             Err(ProviderRuntimeContextError::InvalidEvidence) => {
                 ResultDisposition::Fail(ProviderResultFailureKind::Conflict)
             }
@@ -378,31 +397,29 @@ impl ProviderResultWorker {
             tokio::select! {
                 outcome = &mut publication => {
                     let disposition = match outcome {
-                        Ok(observation) => ResultDisposition::Observed {
+                        ProviderResultAdapterOutcome::Published(observation) => ResultDisposition::Observed {
                             observation,
                             model: registered.publication_model,
                         },
-                        Err(ResultPublisherError::Unavailable) => ResultDisposition::Retry(None),
-                        Err(ResultPublisherError::RateLimited { retry_after }) => {
+                        ProviderResultAdapterOutcome::Retry { continuation, retry_after } => {
                             ResultDisposition::Retry(
-                                retry_after.map(
-                                    automata_ci_provider::ProviderResultRetryAfter::millis,
-                                ),
+                                retry_after.map(ProviderResultRetryAfter::millis),
+                                continuation,
                             )
                         }
-                        Err(ResultPublisherError::Unauthorized) => {
+                        ProviderResultAdapterOutcome::Failed(ResultPublisherError::Unauthorized) => {
                             ResultDisposition::Fail(ProviderResultFailureKind::Unauthorized)
                         }
-                        Err(ResultPublisherError::Forbidden) => {
+                        ProviderResultAdapterOutcome::Failed(ResultPublisherError::Forbidden) => {
                             ResultDisposition::Fail(ProviderResultFailureKind::Forbidden)
                         }
-                        Err(ResultPublisherError::InvalidResponse) => {
+                        ProviderResultAdapterOutcome::Failed(ResultPublisherError::InvalidResponse) => {
                             ResultDisposition::Fail(ProviderResultFailureKind::InvalidResponse)
                         }
-                        Err(ResultPublisherError::Unsupported) => {
+                        ProviderResultAdapterOutcome::Failed(ResultPublisherError::Unsupported) => {
                             ResultDisposition::Fail(ProviderResultFailureKind::Unsupported)
                         }
-                        Err(ResultPublisherError::Conflict) => {
+                        ProviderResultAdapterOutcome::Failed(ResultPublisherError::Conflict) => {
                             ResultDisposition::Fail(ProviderResultFailureKind::Conflict)
                         }
                     };
@@ -446,7 +463,7 @@ impl ProviderResultWorker {
                     .map_err(repository_error)?;
                 Ok(ProviderResultWorkerOutcome::Published)
             }
-            ResultDisposition::Retry(retry_millis)
+            ResultDisposition::Retry(retry_millis, continuation)
                 if claimed.attempts()
                     < automata_ci_provider::MAX_PROVIDER_RESULT_PUBLICATION_ATTEMPTS =>
             {
@@ -458,15 +475,16 @@ impl ProviderResultWorker {
                     )
                     .map(UnixMillis::new)
                     .ok_or(ProviderResultWorkerError::Clock)?;
-                let request = RetryProviderResult::new(claimed.claim(), finished_at, retry_at)
-                    .map_err(|_| ProviderResultWorkerError::ClaimExpired)?;
+                let request =
+                    RetryProviderResult::new(claimed.claim(), finished_at, retry_at, continuation)
+                        .map_err(|_| ProviderResultWorkerError::ClaimExpired)?;
                 self.repository
                     .retry_result(request)
                     .await
                     .map_err(repository_error)?;
                 Ok(ProviderResultWorkerOutcome::Retried)
             }
-            ResultDisposition::Retry(_) => {
+            ResultDisposition::Retry(_, _) => {
                 self.fail(
                     claimed,
                     finished_at,
@@ -525,7 +543,7 @@ enum ResultDisposition {
         model: ProviderResultPublicationModel,
     },
     Complete(ProviderResultPublicationEvidence),
-    Retry(Option<u64>),
+    Retry(Option<u64>, Option<ProviderResultContinuation>),
     Fail(ProviderResultFailureKind),
 }
 
@@ -626,7 +644,7 @@ mod tests {
         ProviderLifecycleState, ProviderManifestRepository, ProviderOrigins,
         ProviderRepositoryError, ProviderRepositoryFuture, ProviderRepositoryPath,
         ProviderResultClaimFence, ProviderResultDetailsUrl, ProviderResultFuture,
-        ProviderResultPhase, ProviderResultSaveOutcome, ProviderResultSubject,
+        ProviderResultName, ProviderResultPhase, ProviderResultSaveOutcome, ProviderResultSubject,
         ProviderResultSubjectId, ProviderResultSubjectKind, ProviderResultSummary,
         ProviderResultTitle, ProviderRunnerPolicyBinding, ProviderSaveOutcome,
         ProviderSchemaVersion, ProviderSecretBindings, ProviderSecretSet, ProviderWorkflowSource,
@@ -675,13 +693,13 @@ mod tests {
             _context: &ProviderRuntimeContext,
             _claimed: &ClaimedProviderResult,
             lease: &ProviderResultLease,
-        ) -> Result<ProviderResultObservation, ResultPublisherError> {
+        ) -> ProviderResultAdapterOutcome {
             self.initial_expiry
                 .store(lease.current().expires_at().get(), Ordering::SeqCst);
             sleep(Duration::from_millis(25)).await;
             self.final_expiry
                 .store(lease.current().expires_at().get(), Ordering::SeqCst);
-            Ok(ProviderResultObservation::new(
+            ProviderResultAdapterOutcome::Published(ProviderResultObservation::new(
                 Some(ExternalResultId::new("check-42").expect("external result")),
                 Sha256Digest::from_bytes([9; 32]),
             ))
@@ -862,7 +880,7 @@ mod tests {
             _context: &ProviderRuntimeContext,
             _claimed: &ClaimedProviderResult,
             _lease: &ProviderResultLease,
-        ) -> Result<ProviderResultObservation, ResultPublisherError> {
+        ) -> ProviderResultAdapterOutcome {
             unreachable!("registry construction never publishes results")
         }
     }
@@ -966,6 +984,11 @@ mod tests {
             &connection,
             GitObjectId::from_provider_hex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
                 .expect("object"),
+            ProviderResultName::new("Automata CI").expect("name"),
+            ProviderResultDetailsUrl::new(
+                Url::parse("https://ci.example/runs/4").expect("details URL"),
+            )
+            .expect("details URL"),
             ProviderResultSubjectKind::WorkflowRun {
                 run_id: RunId::from_uuid(Uuid::from_u128(4)),
             },
@@ -979,10 +1002,6 @@ mod tests {
             None,
             ProviderResultTitle::new("build").expect("title"),
             ProviderResultSummary::new("running").expect("summary"),
-            ProviderResultDetailsUrl::new(
-                Url::parse("https://ci.example/runs/4").expect("details URL"),
-            )
-            .expect("details URL"),
             Vec::new(),
             UnixMillis::new(950),
         )
@@ -996,8 +1015,8 @@ mod tests {
             UnixMillis::new(1_030),
         )
         .expect("result claim");
-        let claimed =
-            ClaimedProviderResult::new(subject, desired, claim, 1).expect("claimed result");
+        let claimed = ClaimedProviderResult::new(subject, desired, claim, 1, None, None)
+            .expect("claimed result");
         (claimed, connection, provider_manifest, capabilities)
     }
 
