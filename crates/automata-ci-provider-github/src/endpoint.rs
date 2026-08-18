@@ -71,8 +71,9 @@ impl GithubHttpEndpoint {
     ///
     /// # Errors
     ///
-    /// Returns an error unless `archive_origin` is a credential-free HTTPS
-    /// origin URL or the client cannot be constructed.
+    /// Returns an error unless `archive_origin` is a credential-free origin
+    /// under the exact transport class already selected by `trusted`, or the
+    /// client cannot be constructed.
     pub fn new_with_archive_origin(
         trusted: GithubTrustedOrigins,
         archive_origin: Url,

@@ -11,7 +11,7 @@ use automata_ci_key_management::SecretBytes;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
-use url::Url;
+use url::{Host, Url};
 
 use crate::{ProviderCapabilities, ProviderInstanceId, ProviderTypeId};
 
@@ -180,12 +180,25 @@ fn valid_name_part(value: &str, digit_first: bool) -> bool {
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
 }
 
+/// Closed transport class admitted for provider web and API origins.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum ProviderOriginTransport {
+    /// Public or private provider endpoints protected by HTTPS.
+    Https,
+    /// Explicit development endpoints confined to the local host.
+    LoopbackHttp,
+    /// Explicit container-mapped endpoints beneath the reserved `.invalid` TLD.
+    MappedHttp,
+}
+
 /// Canonical provider web and API origins.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(try_from = "UncheckedProviderOrigins")]
 pub struct ProviderOrigins {
     web: String,
     api: String,
+    #[serde(skip)]
+    transport: ProviderOriginTransport,
 }
 
 #[derive(Deserialize)]
@@ -196,10 +209,12 @@ struct UncheckedProviderOrigins {
 }
 
 impl ProviderOrigins {
-    /// Validates canonical HTTPS web and API base URLs.
+    /// Validates canonical web and API base URLs under one transport class.
     ///
     /// The web URL must be an origin with `/`; the API URL may have a path
     /// prefix but must end in `/`. User info, query, and fragment are rejected.
+    /// HTTP is accepted only for loopback hosts or reserved `.invalid` names;
+    /// ordinary provider endpoints must use HTTPS.
     ///
     /// # Errors
     ///
@@ -210,9 +225,16 @@ impl ProviderOrigins {
     ) -> Result<Self, ProviderConfigurationError> {
         let web = web.into();
         let api = api.into();
-        validate_origin(&web, true)?;
-        validate_origin(&api, false)?;
-        Ok(Self { web, api })
+        let web_transport = validate_origin(&web, true)?;
+        let api_transport = validate_origin(&api, false)?;
+        if web_transport != api_transport {
+            return Err(ProviderConfigurationError::InvalidOrigin);
+        }
+        Ok(Self {
+            web,
+            api,
+            transport: web_transport,
+        })
     }
 
     /// Returns the canonical browser origin.
@@ -226,6 +248,12 @@ impl ProviderOrigins {
     pub fn api(&self) -> &str {
         &self.api
     }
+
+    /// Returns the closed transport class shared by both canonical origins.
+    #[must_use]
+    pub const fn transport(&self) -> ProviderOriginTransport {
+        self.transport
+    }
 }
 
 impl TryFrom<UncheckedProviderOrigins> for ProviderOrigins {
@@ -236,13 +264,16 @@ impl TryFrom<UncheckedProviderOrigins> for ProviderOrigins {
     }
 }
 
-fn validate_origin(value: &str, web: bool) -> Result<(), ProviderConfigurationError> {
+fn validate_origin(
+    value: &str,
+    web: bool,
+) -> Result<ProviderOriginTransport, ProviderConfigurationError> {
     if value.is_empty() || value.len() > MAX_PROVIDER_ORIGIN_BYTES {
         return Err(ProviderConfigurationError::InvalidOrigin);
     }
     let parsed = Url::parse(value).map_err(|_| ProviderConfigurationError::InvalidOrigin)?;
     if parsed.as_str() != value
-        || parsed.scheme() != "https"
+        || origin_transport(&parsed).is_none()
         || parsed.host_str().is_none()
         || !parsed.username().is_empty()
         || parsed.password().is_some()
@@ -253,7 +284,44 @@ fn validate_origin(value: &str, web: bool) -> Result<(), ProviderConfigurationEr
     {
         return Err(ProviderConfigurationError::InvalidOrigin);
     }
-    Ok(())
+    origin_transport(&parsed).ok_or(ProviderConfigurationError::InvalidOrigin)
+}
+
+fn origin_transport(origin: &Url) -> Option<ProviderOriginTransport> {
+    match origin.scheme() {
+        "https" => Some(ProviderOriginTransport::Https),
+        "http" => match origin.host()? {
+            Host::Domain(domain) if is_loopback_domain(domain) => {
+                Some(ProviderOriginTransport::LoopbackHttp)
+            }
+            Host::Ipv4(address) if address.is_loopback() => {
+                Some(ProviderOriginTransport::LoopbackHttp)
+            }
+            Host::Ipv6(address) if address.is_loopback() => {
+                Some(ProviderOriginTransport::LoopbackHttp)
+            }
+            Host::Domain(domain) if is_mapped_domain(domain) => {
+                Some(ProviderOriginTransport::MappedHttp)
+            }
+            Host::Domain(_) | Host::Ipv4(_) | Host::Ipv6(_) => None,
+        },
+        _ => None,
+    }
+}
+
+fn is_loopback_domain(domain: &str) -> bool {
+    domain.eq_ignore_ascii_case("localhost")
+        || domain
+            .to_ascii_lowercase()
+            .strip_suffix(".localhost")
+            .is_some_and(|prefix| !prefix.is_empty())
+}
+
+fn is_mapped_domain(domain: &str) -> bool {
+    domain
+        .to_ascii_lowercase()
+        .strip_suffix(".invalid")
+        .is_some_and(|prefix| !prefix.is_empty())
 }
 
 /// One named secret generation pinned by a configuration revision.

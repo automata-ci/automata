@@ -33,9 +33,9 @@ pub use configuration::{
     MAX_PROVIDER_CONFIGURATION_BYTES, MAX_PROVIDER_ORIGIN_BYTES, MAX_PROVIDER_SCHEMA_VERSION,
     MAX_PROVIDER_SECRET_BINDINGS, MAX_PROVIDER_SECRET_NAME_BYTES, ProviderConfigurationDocument,
     ProviderConfigurationError, ProviderConfigurationRevision, ProviderInstanceDraft,
-    ProviderInstanceManifest, ProviderLifecycleState, ProviderOrigins, ProviderSchemaVersion,
-    ProviderSecret, ProviderSecretBinding, ProviderSecretBindings, ProviderSecretGeneration,
-    ProviderSecretName, ProviderSecretSet, provider_capability_digest,
+    ProviderInstanceManifest, ProviderLifecycleState, ProviderOriginTransport, ProviderOrigins,
+    ProviderSchemaVersion, ProviderSecret, ProviderSecretBinding, ProviderSecretBindings,
+    ProviderSecretGeneration, ProviderSecretName, ProviderSecretSet, provider_capability_digest,
 };
 pub use connection::{
     MAX_PROVIDER_ARCHIVE_COMPRESSED_BYTES, MAX_PROVIDER_ARCHIVE_ENTRIES,

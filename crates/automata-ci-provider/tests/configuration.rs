@@ -11,10 +11,10 @@ use automata_ci_provider::{
     ProviderConnectionRevision, ProviderDefaultBranch, ProviderFactoryRegistry,
     ProviderFactoryRegistryError, ProviderFactoryRequest, ProviderFactoryValidationError,
     ProviderInstanceDraft, ProviderInstanceId, ProviderInstanceManifest, ProviderLifecycleState,
-    ProviderOrigins, ProviderRepositoryPath, ProviderRunnerPolicyBinding, ProviderSchemaVersion,
-    ProviderSecret, ProviderSecretBinding, ProviderSecretBindings, ProviderSecretGeneration,
-    ProviderSecretName, ProviderSecretSet, ProviderTypeId, ProviderWorkflowSource,
-    RepositoryVisibility, SourceReadCapability, provider_capability_digest,
+    ProviderOriginTransport, ProviderOrigins, ProviderRepositoryPath, ProviderRunnerPolicyBinding,
+    ProviderSchemaVersion, ProviderSecret, ProviderSecretBinding, ProviderSecretBindings,
+    ProviderSecretGeneration, ProviderSecretName, ProviderSecretSet, ProviderTypeId,
+    ProviderWorkflowSource, RepositoryVisibility, SourceReadCapability, provider_capability_digest,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -216,14 +216,35 @@ fn connection_manifest(
 }
 
 #[test]
-fn origins_require_exact_canonical_https_bases() {
+fn origins_require_exact_canonical_bases_and_one_transport_class() {
     let valid = ProviderOrigins::new("https://code.example/", "https://code.example:8443/api/v1/")
         .expect("origins");
     assert_eq!(valid.web(), "https://code.example/");
     assert_eq!(valid.api(), "https://code.example:8443/api/v1/");
+    assert_eq!(valid.transport(), ProviderOriginTransport::Https);
+
+    let loopback = ProviderOrigins::new("http://127.0.0.1:3000/", "http://localhost:3000/api/v1/")
+        .expect("loopback origins");
+    assert_eq!(loopback.transport(), ProviderOriginTransport::LoopbackHttp);
+
+    let mapped = ProviderOrigins::new("http://forgejo.invalid/", "http://forgejo.invalid/api/v1/")
+        .expect("mapped origins");
+    assert_eq!(mapped.transport(), ProviderOriginTransport::MappedHttp);
+    let encoded = serde_json::to_vec(&mapped).expect("origin encoding");
+    assert_eq!(
+        serde_json::from_slice::<ProviderOrigins>(&encoded).expect("origin decoding"),
+        mapped
+    );
+    assert!(
+        !String::from_utf8(encoded)
+            .expect("JSON text")
+            .contains("transport")
+    );
 
     for (web, api) in [
         ("http://code.example/", "https://code.example/api/v1/"),
+        ("http://localhost/", "https://localhost/api/v1/"),
+        ("http://invalid/", "http://invalid/api/v1/"),
         ("https://code.example/path", "https://code.example/api/v1/"),
         ("https://user@code.example/", "https://code.example/api/v1/"),
         ("https://code.example/", "https://code.example/api/v1"),

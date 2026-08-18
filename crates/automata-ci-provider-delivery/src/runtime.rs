@@ -34,6 +34,34 @@ pub struct ProviderRuntimeContext {
 }
 
 impl ProviderRuntimeContext {
+    /// Constructs one exact provider and connection context after validating
+    /// their immutable ownership, revision, configuration, capability, and
+    /// lifecycle bindings.
+    ///
+    /// Provider adapters may use this constructor in contract tests and in
+    /// non-delivery entry points that already hold authenticated manifest
+    /// evidence. Delivery and result workers should normally use
+    /// [`ProviderRuntimeContextResolver`] so the exact revisions are loaded
+    /// from canonical storage first.
+    ///
+    /// # Errors
+    ///
+    /// Rejects inactive, cross-provider, cross-repository, or digest-drifted
+    /// manifest pairs.
+    pub fn new(
+        provider: ProviderInstanceRecord,
+        connection: ProviderConnectionManifest,
+    ) -> Result<Self, ProviderRuntimeContextError> {
+        let repository = connection.configuration().repository();
+        if !valid_context(&provider, &connection, repository) {
+            return Err(ProviderRuntimeContextError::InvalidEvidence);
+        }
+        Ok(Self {
+            provider,
+            connection,
+        })
+    }
+
     /// Returns the exact decrypted provider revision selected at ingress.
     #[must_use]
     pub const fn provider(&self) -> &ProviderInstanceRecord {
@@ -93,19 +121,16 @@ impl ProviderRuntimeContextResolver {
             .await
             .map_err(context_repository_error)?
             .ok_or(ProviderRuntimeContextError::InvalidEvidence)?;
-        if !valid_context(&provider, &connection, repository)
-            || provider.manifest().instance_id() != evidence.instance_id()
+        if provider.manifest().instance_id() != evidence.instance_id()
             || provider.manifest().revision() != evidence.provider_revision()
             || provider.manifest().provider_type() != evidence.provider_type()
             || connection.connection_id() != evidence.connection_id()
             || connection.revision() != evidence.connection_revision()
+            || connection.configuration().repository() != repository
         {
             return Err(ProviderRuntimeContextError::InvalidEvidence);
         }
-        Ok(ProviderRuntimeContext {
-            provider,
-            connection,
-        })
+        ProviderRuntimeContext::new(provider, connection)
     }
 
     /// Resolves the exact provider configuration bound to one durable result subject.
@@ -136,14 +161,10 @@ impl ProviderRuntimeContextResolver {
             .ok_or(ProviderRuntimeContextError::InvalidEvidence)?;
         if subject.connection_digest() != connection.digest()
             || subject.repository() != configuration.repository()
-            || !valid_context(&provider, &connection, subject.repository())
         {
             return Err(ProviderRuntimeContextError::InvalidEvidence);
         }
-        Ok(ProviderRuntimeContext {
-            provider,
-            connection,
-        })
+        ProviderRuntimeContext::new(provider, connection)
     }
 }
 
