@@ -77,7 +77,9 @@ mod tests {
         assert_eq!(GithubInstallationId::new(1).expect("installation").get(), 1);
         assert_eq!(GithubRepositoryId::new(2).expect("repository").get(), 2);
         assert_eq!(
-            GithubRepositoryOwnerId::new(3).expect("repository owner").get(),
+            GithubRepositoryOwnerId::new(3)
+                .expect("repository owner")
+                .get(),
             3
         );
 

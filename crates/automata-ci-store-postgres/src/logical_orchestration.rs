@@ -994,15 +994,15 @@ async fn resolve_authenticated_dispatch_source(
         JOIN workflow_snapshots AS snapshot
           ON snapshot.id = run.snapshot_id
          AND snapshot.workflow_id = workflow.id
-        JOIN github_workflow_run_subject_evidence AS evidence
+        JOIN provider_workflow_admission_evidence AS evidence
           ON evidence.tenant_id = repository.tenant_id
          AND evidence.repository_id = repository.id
          AND evidence.workflow_id = workflow.id
-         AND evidence.snapshot_id = snapshot.id
          AND evidence.run_id = run.id
          AND evidence.workflow_path = workflow.path
-         AND evidence.source_digest = snapshot.source_digest
+         AND evidence.source_revision = run.head_sha
          AND evidence.git_ref = run.git_ref
+         AND evidence.provider_type = 'github'
         WHERE repository.tenant_id = $1
           AND repository.id = $2
           AND workflow.id = $3
@@ -1778,66 +1778,7 @@ async fn validate_manual_dispatch_source_authority(
     if resolved_manual_dispatch_source_authorized(transaction, command, claim, source_size).await? {
         return Ok(());
     }
-
-    // Retain the internal exact-source path for callers that already hold a
-    // Core-authenticated historical admission. The public HTTP contract never
-    // accepts a commit SHA and always uses the durable resolution above.
-    let exact = sqlx::query_scalar::<_, bool>(
-        r"
-        SELECT TRUE
-          FROM repositories AS repository
-          JOIN workflow_definitions AS workflow
-            ON workflow.repository_id = repository.id
-           AND workflow.id = $3
-           AND workflow.path = $4
-          JOIN workflow_runs AS run
-            ON run.repository_id = repository.id
-           AND run.workflow_id = workflow.id
-           AND run.git_ref = $5
-           AND run.head_sha = $6
-           AND run.admission_epoch = $11
-          JOIN workflow_snapshots AS snapshot
-            ON snapshot.id = run.snapshot_id
-           AND snapshot.workflow_id = workflow.id
-           AND snapshot.source_digest = $7
-           AND snapshot.source_object_key = $8
-           AND snapshot.source_size_bytes = $9
-           AND snapshot.source_media_type = $10
-          JOIN github_workflow_run_subject_evidence AS evidence
-            ON evidence.tenant_id = repository.tenant_id
-           AND evidence.repository_id = repository.id
-           AND evidence.workflow_id = workflow.id
-           AND evidence.snapshot_id = snapshot.id
-           AND evidence.run_id = run.id
-           AND evidence.workflow_path = workflow.path
-           AND evidence.source_digest = snapshot.source_digest
-           AND evidence.git_ref = run.git_ref
-         WHERE repository.tenant_id = $1
-           AND repository.id = $2
-           AND repository.scm_provider = 'github'
-         LIMIT 1
-        FOR SHARE OF repository, workflow, run, snapshot, evidence
-        ",
-    )
-    .bind(command.tenant().as_str())
-    .bind(command.repository().id().as_uuid())
-    .bind(claim.workflow_id().as_uuid())
-    .bind(claim.workflow_path())
-    .bind(claim.git_ref())
-    .bind(claim.commit_sha().as_bytes())
-    .bind(claim.source().digest().as_bytes().as_slice())
-    .bind(claim.source().object_key().as_str())
-    .bind(source_size)
-    .bind(claim.source().media_type())
-    .bind(i32::from(WORKFLOW_ADMISSION_EPOCH))
-    .fetch_optional(&mut **transaction)
-    .await
-    .map_err(operation_error)?;
-    if exact == Some(true) {
-        Ok(())
-    } else {
-        Err(LogicalWorkflowAdmissionStoreError::WorkflowDispatchAuthorityRejected)
-    }
+    Err(LogicalWorkflowAdmissionStoreError::WorkflowDispatchAuthorityRejected)
 }
 
 async fn resolved_manual_dispatch_source_authorized(

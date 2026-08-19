@@ -1003,6 +1003,160 @@ async fn github_result_credentials_revalidate_the_common_result_lease() -> TestR
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL 18 via AUTOMATA_TEST_DATABASE_URL"]
+#[allow(clippy::too_many_lines)] // One fixture proves the production trigger handoff join.
+async fn github_trigger_credentials_revalidate_the_common_processing_lease() -> TestResult {
+    run_with_database(|database| async move {
+        let provider = repository(database.pool().clone());
+        let workspace = WorkspaceId::from_uuid(Uuid::from_u128(0x5b00))?;
+        let tenant = workspace.to_string();
+        let internal_repository_id = RepositoryId::from_uuid(Uuid::from_u128(0x5b01));
+        sqlx::query(
+            "INSERT INTO tenants (id, display_name, created_at_ms, updated_at_ms) VALUES ($1, 'GitHub trigger authority', 1, 1)",
+        )
+        .bind(&tenant)
+        .execute(database.pool())
+        .await?;
+        sqlx::query(
+            r"
+            INSERT INTO repositories (
+                id, tenant_id, scm_provider, provider_repository_id,
+                owner, name, created_at_ms, updated_at_ms
+            ) VALUES ($1,$2,'github','42','owner','repository',1,1)
+            ",
+        )
+        .bind(internal_repository_id.as_uuid())
+        .bind(&tenant)
+        .execute(database.pool())
+        .await?;
+
+        let instance_id = ProviderInstanceId::from_uuid(Uuid::from_u128(0x5b02))?;
+        provider
+            .save_instance(instance_record(
+                instance_id,
+                "github",
+                1,
+                TOKEN,
+                1,
+                ProviderLifecycleState::Active,
+                Some(UnixMillis::new(1_001)),
+            ))
+            .await?;
+        let instance = provider
+            .current_instance(instance_id)
+            .await?
+            .expect("GitHub provider instance");
+        let connection = connection(workspace, instance.manifest());
+        provider.save_connection(connection.clone()).await?;
+        let endpoint = ProviderWebhookEndpointManifest::new(
+            ProviderWebhookEndpointId::from_uuid(Uuid::from_u128(0x5b03))?,
+            ProviderWebhookEndpointRevision::new(1)?,
+            ProviderWebhookEndpointState::Active,
+            ProviderTypeId::new("github")?,
+            instance_id,
+            instance.manifest().revision(),
+            1_024,
+            30 * 24 * 60 * 60 * 1_000,
+            vec![ProviderWebhookSecretReference::new(
+                instance.manifest().revision(),
+                ProviderSecretName::new("control-token")?,
+                ProviderSecretGeneration::new(1)?,
+            )],
+            UnixMillis::new(3_000),
+            None,
+        )?;
+        provider.save_endpoint(endpoint.clone()).await?;
+
+        let delivery_id = ProviderDeliveryId::from_uuid(Uuid::from_u128(0x5b04))?;
+        let delivery = ProviderDelivery::Trigger(Box::new(verified_delivery(
+            &endpoint,
+            &connection,
+            delivery_id,
+            b"github-trigger-authority",
+        )));
+        provider
+            .accept_delivery(AcceptProviderDelivery::new(
+                delivery,
+                UnixMillis::new(4_100),
+            )?)
+            .await?;
+        let claimed = provider
+            .claim_processing(ClaimProviderProcessing::new(
+                ProviderProcessingWorkerId::from_uuid(Uuid::from_u128(0x5b05))?,
+                UnixMillis::new(5_000),
+                1_000,
+            )?)
+            .await?
+            .expect("common trigger processing claim");
+        let identity = GithubServerServiceAuthorityIdentity::new(
+            TenantScope::from_authenticated_tenant_id(&tenant)?,
+            GithubServerServiceAuthorityId::from_uuid(Uuid::from_u128(0x5b06))?,
+            internal_repository_id,
+            connection.connection_id(),
+            GithubInstallationId::new(99)?,
+            GithubServerServiceAppId::new(17)?,
+            GithubRepositoryId::new(42)?,
+            GithubRepositoryName::new("owner/repository")?,
+            GithubServerServiceScope::RepositoryContentsRead,
+            GithubServerServiceAppClientId::new("Iv1.8a61f9b3a7aba766")?,
+            GithubServerServiceJwtIssuer::AppId,
+            Sha256Digest::from_bytes([23; 32]),
+            GithubServerServiceRevision::new(1)?,
+            GithubServerServiceRevision::new(1)?,
+            Sha256Digest::from_bytes([24; 32]),
+        )?;
+        let receipt = claimed.receipt();
+        let fence = claimed.fence();
+        let consumer = GithubServerServiceConsumerClaim::new(
+            GithubServerServiceConsumerId::from_uuid(receipt.invocation_id().as_uuid())?,
+            GithubServerServiceWorkerId::from_uuid(fence.worker_id().as_uuid())?,
+            GithubServerServiceClaimFence::new(fence.token())?,
+            GithubServerServiceAction::FetchRepositoryRevision,
+            GithubServerServiceRevision::new(u64::from(receipt.attempts()))?,
+        );
+
+        assert_eq!(
+            database
+                .store()
+                .revalidate_github_trigger_consumer_for_test(
+                    &identity,
+                    consumer,
+                    UnixMillis::new(5_500),
+                    false,
+                )
+                .await?,
+            fence.expires_at()
+        );
+        assert!(matches!(
+            database
+                .store()
+                .revalidate_github_trigger_consumer_for_test(
+                    &identity,
+                    consumer,
+                    UnixMillis::new(5_500),
+                    true,
+                )
+                .await,
+            Err(GithubServerServiceStoreError::HandoffRejected)
+        ));
+        assert!(matches!(
+            database
+                .store()
+                .revalidate_github_trigger_consumer_for_test(
+                    &identity,
+                    consumer,
+                    fence.expires_at(),
+                    false,
+                )
+                .await,
+            Err(GithubServerServiceStoreError::HandoffRejected)
+        ));
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL 18 via AUTOMATA_TEST_DATABASE_URL"]
 #[allow(clippy::too_many_lines)] // One sequence proves relational and ciphertext tamper rejection.
 async fn stale_missing_and_tampered_state_fail_closed() -> TestResult {
     run_with_database(|database| async move {
