@@ -8,12 +8,7 @@ use automata_ci_core::UnixMillis;
 use automata_ci_key_management::{
     EnvelopeCodec, EnvelopeError, KeyEncryptionError, PreparedEnvelope, SecretBytes,
 };
-use automata_ci_scm::credential::{
-    CredentialError, CredentialErrorKind, MinimumValidity, PermissionLevel, PermissionName,
-    PermissionSet, ProviderResourceId, RepositoryCredentialRequest, RepositoryScope,
-    WorkloadIdentity,
-};
-use automata_ci_scm::{RepositoryId as ScmRepositoryId, ScmProviderId};
+use automata_ci_provider::{ProviderPermission, ProviderPermissionSet};
 use automata_ci_store::{
     AcquireGithubServerServiceHandoff, BeginGithubServerServiceMint,
     BeginGithubServerServiceMintOutcome, ClaimNextGithubServerServiceMaintenance,
@@ -35,8 +30,9 @@ use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
 use crate::{
-    GithubAppCredentialBroker, GithubInstallationTokenIndeterminateReason,
-    GithubInstallationTokenMintOutcome, GithubInstallationTokenRevocationCandidate,
+    GithubAppCredentialBroker, GithubInstallationTokenError, GithubInstallationTokenErrorKind,
+    GithubInstallationTokenIndeterminateReason, GithubInstallationTokenMintOutcome,
+    GithubInstallationTokenRequest, GithubInstallationTokenRevocationCandidate,
     GithubInstallationTokenRevocationFailureKind, GithubInstallationTokenRevocationOutcome,
     config::whole_milliseconds,
 };
@@ -48,23 +44,6 @@ const DEFAULT_REVOKE_RETRY_MILLIS: i64 = 1_000;
 
 /// Maximum exact installation brokers admitted by one product router.
 pub const MAX_GITHUB_SERVER_SERVICE_INSTALLATION_BROKERS: usize = 256;
-
-/// Canonical non-secret workload subject for one immutable service authority.
-///
-/// # Panics
-///
-/// Panics only if a fixed ASCII prefix plus one SHA-256 digest no longer fits
-/// the provider-neutral workload identity bound.
-#[must_use]
-pub fn github_server_service_workload_identity(
-    identity: &GithubServerServiceAuthorityIdentity,
-) -> WorkloadIdentity {
-    WorkloadIdentity::new(format!(
-        "automata-ci/github-server-service/v1/{}",
-        identity.identity_digest()
-    ))
-    .expect("a fixed prefix and SHA-256 digest fit the workload identity boundary")
-}
 
 /// Builds the sole provider-neutral request authorized by an immutable scope.
 ///
@@ -78,45 +57,42 @@ pub fn github_server_service_workload_identity(
 /// cannot be represented by the provider-neutral model.
 pub fn github_server_service_credential_request(
     identity: &GithubServerServiceAuthorityIdentity,
-) -> Result<RepositoryCredentialRequest, GithubServerServiceResolutionValueError> {
-    let permission = match identity.scope() {
-        GithubServerServiceScope::ChecksWrite => ("checks", PermissionLevel::Write),
-        GithubServerServiceScope::RepositoryContentsRead => ("contents", PermissionLevel::Read),
-        GithubServerServiceScope::WorkflowPermissionsRead => {
-            ("administration", PermissionLevel::Read)
+) -> Result<GithubInstallationTokenRequest, GithubServerServiceResolutionValueError> {
+    let (name, level) = match identity.scope() {
+        GithubServerServiceScope::ChecksWrite => {
+            ("checks", automata_ci_core::PermissionLevel::Write)
         }
-        GithubServerServiceScope::PullRequestsRead => ("pull_requests", PermissionLevel::Read),
+        GithubServerServiceScope::RepositoryContentsRead => {
+            ("contents", automata_ci_core::PermissionLevel::Read)
+        }
+        GithubServerServiceScope::WorkflowPermissionsRead => {
+            ("administration", automata_ci_core::PermissionLevel::Read)
+        }
+        GithubServerServiceScope::PullRequestsRead => {
+            ("pull_requests", automata_ci_core::PermissionLevel::Read)
+        }
     };
-    let permissions = PermissionSet::new([(
-        PermissionName::new(permission.0).map_err(|_| GithubServerServiceResolutionValueError)?,
-        permission.1,
-    )])
+    let permissions = ProviderPermissionSet::new([ProviderPermission::new(name, level)
+        .map_err(|_| GithubServerServiceResolutionValueError)?])
     .map_err(|_| GithubServerServiceResolutionValueError)?;
-    let repository = RepositoryScope::new(
-        ScmProviderId::new("github").map_err(|_| GithubServerServiceResolutionValueError)?,
-        ScmRepositoryId::new(identity.github_repository_name().as_str())
-            .map_err(|_| GithubServerServiceResolutionValueError)?,
-        ProviderResourceId::new(identity.github_repository_id().get().to_string())
-            .map_err(|_| GithubServerServiceResolutionValueError)?,
-    );
-    let minimum_validity = MinimumValidity::from_seconds(
-        u64::try_from(MIN_GITHUB_SERVICE_READY_USE_MILLIS / 1_000)
+    let repository_name =
+        automata_ci_store::GithubRepositoryName::new(identity.github_repository_name().as_str())
+            .map_err(|_| GithubServerServiceResolutionValueError)?;
+    GithubInstallationTokenRequest::new(
+        identity.github_repository_id().get(),
+        repository_name,
+        permissions,
+        u64::try_from(MIN_GITHUB_SERVICE_READY_USE_MILLIS)
             .map_err(|_| GithubServerServiceResolutionValueError)?,
     )
-    .map_err(|_| GithubServerServiceResolutionValueError)?;
-    Ok(RepositoryCredentialRequest::new(
-        github_server_service_workload_identity(identity),
-        repository,
-        permissions,
-        minimum_validity,
-    ))
+    .map_err(|_| GithubServerServiceResolutionValueError)
 }
 
 /// One exact request returned after authoritative configuration revalidation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedGithubServerServiceCredentialRequest {
     identity: GithubServerServiceAuthorityIdentity,
-    request: RepositoryCredentialRequest,
+    request: GithubInstallationTokenRequest,
 }
 
 impl ResolvedGithubServerServiceCredentialRequest {
@@ -128,7 +104,7 @@ impl ResolvedGithubServerServiceCredentialRequest {
     /// or minimum validity. There is no default installation or token fallback.
     pub fn new(
         identity: GithubServerServiceAuthorityIdentity,
-        request: RepositoryCredentialRequest,
+        request: GithubInstallationTokenRequest,
     ) -> Result<Self, GithubServerServiceResolutionValueError> {
         if request != github_server_service_credential_request(&identity)? {
             return Err(GithubServerServiceResolutionValueError);
@@ -144,7 +120,7 @@ impl ResolvedGithubServerServiceCredentialRequest {
 
     /// Returns the exact provider-neutral mint request.
     #[must_use]
-    pub const fn request(&self) -> &RepositoryCredentialRequest {
+    pub const fn request(&self) -> &GithubInstallationTokenRequest {
         &self.request
     }
 }
@@ -191,7 +167,7 @@ pub trait GithubServerServiceCredentialBroker: fmt::Debug + Send + Sync {
     async fn mint_once(
         &self,
         installation_id: u64,
-        request: &RepositoryCredentialRequest,
+        request: &GithubInstallationTokenRequest,
     ) -> GithubInstallationTokenMintOutcome;
 
     /// Performs exactly one revocation attempt while retaining caller custody.
@@ -211,14 +187,14 @@ impl GithubServerServiceCredentialBroker for GithubAppCredentialBroker {
     async fn mint_once(
         &self,
         installation_id: u64,
-        request: &RepositoryCredentialRequest,
+        request: &GithubInstallationTokenRequest,
     ) -> GithubInstallationTokenMintOutcome {
         if self.mint_installation_id() != installation_id {
-            return GithubInstallationTokenMintOutcome::Rejected(CredentialError::new(
-                CredentialErrorKind::InvalidRequest,
-            ));
+            return GithubInstallationTokenMintOutcome::Rejected(
+                GithubInstallationTokenError::new(GithubInstallationTokenErrorKind::InvalidRequest),
+            );
         }
-        GithubAppCredentialBroker::mint_once(self, request).await
+        GithubAppCredentialBroker::mint_installation_once(self, request).await
     }
 
     async fn revoke(
@@ -335,12 +311,12 @@ impl GithubServerServiceCredentialBroker for GithubServerServiceInstallationRout
     async fn mint_once(
         &self,
         installation_id: u64,
-        request: &RepositoryCredentialRequest,
+        request: &GithubInstallationTokenRequest,
     ) -> GithubInstallationTokenMintOutcome {
         let Some(broker) = self.brokers.get(&installation_id) else {
-            return GithubInstallationTokenMintOutcome::Rejected(CredentialError::new(
-                CredentialErrorKind::InvalidRequest,
-            ));
+            return GithubInstallationTokenMintOutcome::Rejected(
+                GithubInstallationTokenError::new(GithubInstallationTokenErrorKind::InvalidRequest),
+            );
         };
         broker.mint_once(installation_id, request).await
     }
@@ -1434,7 +1410,7 @@ impl ServerServiceTokenFrame {
 fn map_mint_outcome(
     claimed: &ClaimedGithubServerServiceMint,
     prepared: PreparedEnvelope,
-    expected_request: &RepositoryCredentialRequest,
+    expected_request: &GithubInstallationTokenRequest,
     outcome: GithubInstallationTokenMintOutcome,
     observed_at: UnixMillis,
 ) -> Result<FinishGithubServerServiceMint, GithubServerServiceCoordinatorError> {
@@ -1442,9 +1418,7 @@ fn map_mint_outcome(
         GithubInstallationTokenMintOutcome::Ready(ready) => {
             let provider_expires_at = timestamp_millis(ready.provider_expires_at());
             let exact = ready.request() == expected_request
-                && ready.provenance().provider().as_str() == "github"
-                && ready.provenance().subject().as_str()
-                    == claimed.identity().installation_id().get().to_string()
+                && ready.installation_id() == claimed.identity().installation_id().get()
                 && timestamp_millis(ready.issued_at())
                     .is_some_and(|issued_at| issued_at <= claimed.receipt().request_deadline())
                 && observed_at < claimed.receipt().request_deadline();
@@ -1551,13 +1525,14 @@ fn protect_mint_candidate(
 
 fn map_rejected_mint(
     claimed: &ClaimedGithubServerServiceMint,
-    error: CredentialError,
+    error: GithubInstallationTokenError,
     observed_at: UnixMillis,
 ) -> Result<FinishGithubServerServiceMint, GithubServerServiceCoordinatorError> {
     let failure_kind = failure(mint_failure_kind(error.kind()))?;
     if matches!(
         error.kind(),
-        CredentialErrorKind::RateLimited | CredentialErrorKind::Unavailable
+        GithubInstallationTokenErrorKind::RateLimited
+            | GithubInstallationTokenErrorKind::Unavailable
     ) {
         let requested = error
             .retry_after_seconds()
@@ -1713,19 +1688,18 @@ fn finish_mint_disposition(request: &FinishGithubServerServiceMint) -> &'static 
     }
 }
 
-const fn mint_failure_kind(kind: CredentialErrorKind) -> &'static str {
+const fn mint_failure_kind(kind: GithubInstallationTokenErrorKind) -> &'static str {
     match kind {
-        CredentialErrorKind::UnsupportedProvider => "unsupported_provider",
-        CredentialErrorKind::InvalidRequest => "invalid_request",
-        CredentialErrorKind::Unauthorized => "provider_unauthorized",
-        CredentialErrorKind::Forbidden => "provider_forbidden",
-        CredentialErrorKind::NotFound => "provider_not_found",
-        CredentialErrorKind::RateLimited => "provider_rate_limited",
-        CredentialErrorKind::Unavailable => "provider_unavailable",
-        CredentialErrorKind::InvalidResponse => "invalid_response",
-        CredentialErrorKind::RepositoryMismatch => "repository_mismatch",
-        CredentialErrorKind::PermissionMismatch => "permission_mismatch",
-        CredentialErrorKind::Expired => "insufficient_validity",
+        GithubInstallationTokenErrorKind::InvalidRequest => "invalid_request",
+        GithubInstallationTokenErrorKind::Unauthorized => "provider_unauthorized",
+        GithubInstallationTokenErrorKind::Forbidden => "provider_forbidden",
+        GithubInstallationTokenErrorKind::NotFound => "provider_not_found",
+        GithubInstallationTokenErrorKind::RateLimited => "provider_rate_limited",
+        GithubInstallationTokenErrorKind::Unavailable => "provider_unavailable",
+        GithubInstallationTokenErrorKind::InvalidResponse => "invalid_response",
+        GithubInstallationTokenErrorKind::RepositoryMismatch => "repository_mismatch",
+        GithubInstallationTokenErrorKind::PermissionMismatch => "permission_mismatch",
+        GithubInstallationTokenErrorKind::Expired => "insufficient_validity",
     }
 }
 

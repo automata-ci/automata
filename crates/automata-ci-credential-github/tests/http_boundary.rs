@@ -3,10 +3,9 @@ mod support;
 use std::time::Duration;
 
 use automata_ci_credential_github::{
-    GithubAppHttpLimits, GithubInstallationTokenIndeterminateReason,
-    GithubInstallationTokenMintOutcome,
+    GithubAppHttpLimits, GithubInstallationTokenErrorKind,
+    GithubInstallationTokenIndeterminateReason, GithubInstallationTokenMintOutcome,
 };
-use automata_ci_scm::credential::CredentialErrorKind;
 use axum::http::StatusCode;
 use support::{FixtureServer, ResponseSpec, request, success_response};
 
@@ -51,7 +50,7 @@ async fn response_length_content_type_and_streaming_are_bounded() {
     assert!(matches!(
         broker.mint_once(&request()).await,
         GithubInstallationTokenMintOutcome::RevokePending(pending)
-            if pending.reason().kind() == CredentialErrorKind::InvalidResponse
+            if pending.reason().kind() == GithubInstallationTokenErrorKind::InvalidResponse
     ));
     assert!(matches!(
         broker.mint_once(&request()).await,
@@ -81,17 +80,17 @@ async fn statuses_are_sanitized_and_rate_limit_hints_are_bounded() {
     let cases = [
         (
             ResponseSpec::json(StatusCode::UNAUTHORIZED, r#"{"token":"body-secret"}"#),
-            CredentialErrorKind::Unauthorized,
+            GithubInstallationTokenErrorKind::Unauthorized,
             None,
         ),
         (
             ResponseSpec::json(StatusCode::FORBIDDEN, r#"{"token":"body-secret"}"#),
-            CredentialErrorKind::Forbidden,
+            GithubInstallationTokenErrorKind::Forbidden,
             None,
         ),
         (
             ResponseSpec::json(StatusCode::NOT_FOUND, r#"{"token":"body-secret"}"#),
-            CredentialErrorKind::NotFound,
+            GithubInstallationTokenErrorKind::NotFound,
             None,
         ),
         (
@@ -99,19 +98,19 @@ async fn statuses_are_sanitized_and_rate_limit_hints_are_bounded() {
                 StatusCode::UNPROCESSABLE_ENTITY,
                 r#"{"token":"body-secret"}"#,
             ),
-            CredentialErrorKind::InvalidRequest,
+            GithubInstallationTokenErrorKind::InvalidRequest,
             None,
         ),
         (
             ResponseSpec::json(StatusCode::TOO_MANY_REQUESTS, r#"{"token":"body-secret"}"#)
                 .header("retry-after", "17"),
-            CredentialErrorKind::RateLimited,
+            GithubInstallationTokenErrorKind::RateLimited,
             Some(17),
         ),
         (
             ResponseSpec::json(StatusCode::TOO_MANY_REQUESTS, r#"{"token":"body-secret"}"#)
                 .header("retry-after", "999999"),
-            CredentialErrorKind::RateLimited,
+            GithubInstallationTokenErrorKind::RateLimited,
             None,
         ),
         (
@@ -119,7 +118,7 @@ async fn statuses_are_sanitized_and_rate_limit_hints_are_bounded() {
                 StatusCode::INTERNAL_SERVER_ERROR,
                 r#"{"token":"body-secret"}"#,
             ),
-            CredentialErrorKind::Unavailable,
+            GithubInstallationTokenErrorKind::Unavailable,
             None,
         ),
     ];
@@ -128,7 +127,7 @@ async fn statuses_are_sanitized_and_rate_limit_hints_are_bounded() {
         fixture.enqueue(response);
         let outcome = broker.mint_once(&request()).await;
         let rendered = format!("{outcome:?}");
-        if expected == CredentialErrorKind::Unavailable {
+        if expected == GithubInstallationTokenErrorKind::Unavailable {
             assert!(matches!(
                 outcome,
                 GithubInstallationTokenMintOutcome::Indeterminate(indeterminate)

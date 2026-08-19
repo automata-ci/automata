@@ -608,6 +608,11 @@ impl ProviderPermissionSet {
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
+    /// Returns the number of exact grants.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
     /// Iterates in canonical permission-name order.
     pub fn iter(&self) -> impl ExactSizeIterator<Item = (&str, PermissionLevel)> {
         self.0.iter().map(|(name, level)| (name.as_str(), *level))
@@ -1385,20 +1390,20 @@ fn valid_permission_name(value: &str) -> bool {
     if !bytes.next().is_some_and(|byte| byte.is_ascii_lowercase()) {
         return false;
     }
-    let mut previous_hyphen = false;
+    let mut previous_separator = false;
     for byte in bytes {
-        if byte == b'-' {
-            if previous_hyphen {
+        if matches!(byte, b'-' | b'_') {
+            if previous_separator {
                 return false;
             }
-            previous_hyphen = true;
+            previous_separator = true;
         } else if byte.is_ascii_lowercase() || byte.is_ascii_digit() {
-            previous_hyphen = false;
+            previous_separator = false;
         } else {
             return false;
         }
     }
-    !previous_hyphen
+    !previous_separator
 }
 
 fn part(hash: &mut Sha256, value: &[u8]) {

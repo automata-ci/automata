@@ -7,11 +7,11 @@ use std::{
 };
 
 use automata_ci_auth::{secret::SecretString, time::UnixTimestamp};
+use automata_ci_core::PermissionLevel;
 use automata_ci_key_management::{
     EncryptedEnvelope, KeyId, LocalAes256GcmKeyring, LocalKeyMaterial, SecretBytes,
 };
 use automata_ci_provider::ProviderConnectionId;
-use automata_ci_scm::credential::{CredentialProvenance, ProviderResourceId};
 use automata_ci_store::{
     GITHUB_SERVICE_SAFE_ERASE_SKEW_MILLIS, GITHUB_SERVICE_TOKEN_LIFETIME_MILLIS,
     GithubInstallationId, GithubRepositoryId, GithubRepositoryName, GithubServerServiceAction,
@@ -24,6 +24,7 @@ use automata_ci_store::{
 use uuid::Uuid;
 
 use crate::{
+    GithubInstallationTokenError, GithubInstallationTokenErrorKind,
     GithubInstallationTokenRevokePending, GithubReadyInstallationToken,
     runtime_authority::GithubInstallationTokenRevocationFailure,
 };
@@ -154,20 +155,22 @@ impl GithubServerServiceCredentialBroker for FakeBroker {
     async fn mint_once(
         &self,
         installation_id: u64,
-        request: &RepositoryCredentialRequest,
+        request: &GithubInstallationTokenRequest,
     ) -> GithubInstallationTokenMintOutcome {
         assert_eq!(installation_id, self.installation_id);
         self.mint_calls.fetch_add(1, Ordering::SeqCst);
         match self.mode {
             BrokerMode::Rejected | BrokerMode::RevocationRetry => {
-                GithubInstallationTokenMintOutcome::Rejected(CredentialError::new(
-                    CredentialErrorKind::Forbidden,
+                GithubInstallationTokenMintOutcome::Rejected(GithubInstallationTokenError::new(
+                    GithubInstallationTokenErrorKind::Forbidden,
                 ))
             }
             BrokerMode::RevokeUnknown => GithubInstallationTokenMintOutcome::RevokePending(
                 GithubInstallationTokenRevokePending::new(
                     Self::candidate(),
-                    CredentialError::new(CredentialErrorKind::InvalidResponse),
+                    GithubInstallationTokenError::new(
+                        GithubInstallationTokenErrorKind::InvalidResponse,
+                    ),
                     None,
                     None,
                 ),
@@ -179,12 +182,7 @@ impl GithubServerServiceCredentialBroker for FakeBroker {
                     UnixTimestamp::from_seconds(1_002),
                     UnixTimestamp::from_seconds(4_600),
                     UnixTimestamp::from_seconds(4_540),
-                    CredentialProvenance::new(
-                        ScmProviderId::new("github").expect("provider"),
-                        ProviderResourceId::new("Iv1.server-service-test").expect("issuer"),
-                        ProviderResourceId::new(self.installation_id.to_string())
-                            .expect("installation"),
-                    ),
+                    self.installation_id,
                 ))
             }
         }
@@ -711,7 +709,7 @@ async fn installation_router_rejects_ambiguity_and_has_no_default() {
     assert!(matches!(
         router.mint_once(999, &request).await,
         GithubInstallationTokenMintOutcome::Rejected(error)
-            if error.kind() == CredentialErrorKind::InvalidRequest
+            if error.kind() == GithubInstallationTokenErrorKind::InvalidRequest
     ));
     assert_eq!(broker.mint_calls.load(Ordering::SeqCst), 0);
 }
@@ -1066,35 +1064,22 @@ fn service_core_has_only_closed_authenticated_repository_scopes() {
     ))
     .expect("private pull-request-files request");
     assert_eq!(
-        checks
-            .permissions()
-            .iter()
-            .map(|(name, level)| (name.as_str(), level))
-            .collect::<Vec<_>>(),
+        checks.permissions().iter().collect::<Vec<_>>(),
         vec![("checks", PermissionLevel::Write)]
     );
     assert_eq!(
-        private
-            .permissions()
-            .iter()
-            .map(|(name, level)| (name.as_str(), level))
-            .collect::<Vec<_>>(),
+        private.permissions().iter().collect::<Vec<_>>(),
         vec![("contents", PermissionLevel::Read)]
     );
     assert_eq!(
         workflow_permissions
             .permissions()
             .iter()
-            .map(|(name, level)| (name.as_str(), level))
             .collect::<Vec<_>>(),
         vec![("administration", PermissionLevel::Read)]
     );
     assert_eq!(
-        pull_request_files
-            .permissions()
-            .iter()
-            .map(|(name, level)| (name.as_str(), level))
-            .collect::<Vec<_>>(),
+        pull_request_files.permissions().iter().collect::<Vec<_>>(),
         vec![("pull_requests", PermissionLevel::Read)]
     );
     assert!(

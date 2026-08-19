@@ -3,19 +3,18 @@ mod support;
 use std::sync::Arc;
 
 use automata_ci_credential_github::{
-    GithubInstallationTokenIndeterminateReason, GithubInstallationTokenMintOutcome,
-    GithubWorkloadCredentialProvider,
+    GithubInstallationTokenErrorKind, GithubInstallationTokenIndeterminateReason,
+    GithubInstallationTokenMintOutcome, GithubWorkloadCredentialProvider,
 };
 use automata_ci_provider::{
     WorkloadCredentialIssueOutcome, WorkloadCredentialProvider,
     WorkloadCredentialProviderErrorKind, WorkloadCredentialRetirement,
     WorkloadCredentialRevocationOutcome,
 };
-use automata_ci_scm::credential::CredentialErrorKind;
 use axum::http::StatusCode;
 use serde_json::Value;
 use support::{
-    EXPIRATION, FixtureServer, INSTALLATION_ID, ISSUER, NOW, REPOSITORY_ID, ResponseSpec, request,
+    EXPIRATION, FixtureServer, INSTALLATION_ID, NOW, REPOSITORY_ID, ResponseSpec, request,
     request_for, success_response, workload_connection, workload_connection_for, workload_request,
     workload_request_for,
 };
@@ -97,15 +96,17 @@ async fn issues_one_exact_repository_and_permission_scope() {
         ready.secret().expose_secret(),
         "ghs_998877_variable_length_stateless_token_value"
     );
-    assert_eq!(ready.request(), &request);
+    assert_eq!(ready.request().repository_id(), REPOSITORY_ID);
+    assert_eq!(
+        ready.request().repository_name().as_str(),
+        "automata-ci/automata"
+    );
+    assert_eq!(ready.request().minimum_validity_millis(), 300_000);
+    assert_eq!(ready.request().permissions().len(), 2);
     assert_eq!(ready.issued_at().as_seconds(), NOW);
     assert_eq!(ready.provider_expires_at().as_seconds(), NOW + 3_600);
     assert_eq!(ready.conservative_expires_at().as_seconds(), NOW + 3_540);
-    assert_eq!(ready.provenance().issuer().as_str(), ISSUER);
-    assert_eq!(
-        ready.provenance().subject().as_str(),
-        INSTALLATION_ID.to_string()
-    );
+    assert_eq!(ready.installation_id(), INSTALLATION_ID);
 
     let requests = fixture.requests();
     assert_eq!(requests.len(), 1);
@@ -131,16 +132,11 @@ async fn issues_one_exact_repository_and_permission_scope() {
     assert!(!rendered.contains("ghs_998877_variable_length_stateless_token_value"));
     assert!(!rendered.contains("BEGIN PRIVATE KEY"));
 
-    let issued = ready
-        .into_issued_credential()
-        .expect("validated credential");
+    let candidate = ready.into_revocation_candidate();
     assert_eq!(
-        issued.secret().expose_secret(),
+        candidate.secret().expose_secret(),
         "ghs_998877_variable_length_stateless_token_value"
     );
-    assert_eq!(issued.repository(), request.repository());
-    assert_eq!(issued.permissions(), request.permissions());
-    assert_eq!(issued.expires_at().as_seconds(), NOW + 3_540);
 }
 
 #[tokio::test]
@@ -198,7 +194,7 @@ async fn repository_scope_drift_is_rejected() {
         };
         assert_eq!(
             pending.reason().kind(),
-            CredentialErrorKind::RepositoryMismatch
+            GithubInstallationTokenErrorKind::RepositoryMismatch
         );
         assert_eq!(pending.candidate().secret().expose_secret(), "ghs_secret");
     }
@@ -230,7 +226,8 @@ async fn permission_drift_and_duplicate_keys_are_rejected() {
         };
         assert!(matches!(
             pending.reason().kind(),
-            CredentialErrorKind::PermissionMismatch | CredentialErrorKind::InvalidResponse
+            GithubInstallationTokenErrorKind::PermissionMismatch
+                | GithubInstallationTokenErrorKind::InvalidResponse
         ));
         assert_eq!(
             pending.candidate().secret().expose_secret(),
@@ -279,7 +276,7 @@ async fn accepts_only_github_implicit_metadata_read_permission() {
         };
         assert_eq!(
             rejected.reason().kind(),
-            CredentialErrorKind::PermissionMismatch
+            GithubInstallationTokenErrorKind::PermissionMismatch
         );
         assert_eq!(
             rejected.candidate().secret().expose_secret(),
@@ -321,7 +318,10 @@ async fn expiration_and_token_format_fail_closed() {
     let GithubInstallationTokenMintOutcome::RevokePending(too_short) = too_short else {
         panic!("expected short token to require revocation: {too_short:?}");
     };
-    assert_eq!(too_short.reason().kind(), CredentialErrorKind::Expired);
+    assert_eq!(
+        too_short.reason().kind(),
+        GithubInstallationTokenErrorKind::Expired
+    );
 
     let too_long = broker.mint_once(&request()).await;
     let GithubInstallationTokenMintOutcome::RevokePending(too_long) = too_long else {
@@ -329,7 +329,7 @@ async fn expiration_and_token_format_fail_closed() {
     };
     assert_eq!(
         too_long.reason().kind(),
-        CredentialErrorKind::InvalidResponse
+        GithubInstallationTokenErrorKind::InvalidResponse
     );
 
     let malformed_token = broker.mint_once(&request()).await;
@@ -369,7 +369,7 @@ async fn malformed_or_ambiguous_response_shapes_are_rejected() {
     };
     assert_eq!(
         trailing.reason().kind(),
-        CredentialErrorKind::InvalidResponse
+        GithubInstallationTokenErrorKind::InvalidResponse
     );
     assert_eq!(trailing.candidate().secret().expose_secret(), "ghs_secret");
 }

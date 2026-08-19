@@ -1,13 +1,145 @@
 use std::fmt;
 
 use automata_ci_auth::{secret::SecretString, time::UnixTimestamp};
-use automata_ci_scm::credential::{
-    CredentialError, CredentialErrorKind, CredentialProvenance, IssuedRepositoryCredential,
-    RepositoryCredentialRequest,
-};
+use automata_ci_provider::ProviderPermissionSet;
+use automata_ci_store::GithubRepositoryName;
 use thiserror::Error;
 
 const MAX_TOKEN_BYTES: usize = 16 * 1_024;
+const MAX_TOKEN_VALIDITY_MILLIS: u64 = 3_600_000;
+
+/// Exact GitHub installation-token request used by both control and workload
+/// issuance. It contains only the provider-native audience and permissions;
+/// durable callers bind it to their own immutable authority evidence.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GithubInstallationTokenRequest {
+    repository_id: u64,
+    repository_name: GithubRepositoryName,
+    permissions: ProviderPermissionSet,
+    minimum_validity_millis: u64,
+}
+
+impl GithubInstallationTokenRequest {
+    /// Creates one bounded repository-scoped request.
+    ///
+    /// # Errors
+    ///
+    /// Rejects zero repositories, empty permissions, and invalid validity.
+    pub fn new(
+        repository_id: u64,
+        repository_name: GithubRepositoryName,
+        permissions: ProviderPermissionSet,
+        minimum_validity_millis: u64,
+    ) -> Result<Self, GithubInstallationTokenRequestError> {
+        if repository_id == 0
+            || permissions.is_empty()
+            || minimum_validity_millis == 0
+            || minimum_validity_millis > MAX_TOKEN_VALIDITY_MILLIS
+        {
+            return Err(GithubInstallationTokenRequestError);
+        }
+        Ok(Self {
+            repository_id,
+            repository_name,
+            permissions,
+            minimum_validity_millis,
+        })
+    }
+
+    /// Returns the numeric repository audience.
+    #[must_use]
+    pub const fn repository_id(&self) -> u64 {
+        self.repository_id
+    }
+    /// Returns the exact owner/repository path.
+    #[must_use]
+    pub const fn repository_name(&self) -> &GithubRepositoryName {
+        &self.repository_name
+    }
+    /// Returns the complete canonical permission set.
+    #[must_use]
+    pub const fn permissions(&self) -> &ProviderPermissionSet {
+        &self.permissions
+    }
+    /// Returns the required remaining lifetime after issuance.
+    #[must_use]
+    pub const fn minimum_validity_millis(&self) -> u64 {
+        self.minimum_validity_millis
+    }
+}
+
+/// Invalid GitHub installation-token request evidence.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+#[error("GitHub installation-token request is invalid")]
+pub struct GithubInstallationTokenRequestError;
+
+/// Closed failure classification for one GitHub installation-token attempt.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum GithubInstallationTokenErrorKind {
+    /// The request cannot be represented by GitHub.
+    #[error("GitHub installation-token request is invalid")]
+    InvalidRequest,
+    /// GitHub rejected App authentication.
+    #[error("GitHub installation-token authentication failed")]
+    Unauthorized,
+    /// GitHub rejected the requested authority.
+    #[error("GitHub installation-token authorization failed")]
+    Forbidden,
+    /// The repository does not exist for the installation.
+    #[error("GitHub installation-token repository was not found")]
+    NotFound,
+    /// GitHub requested bounded backoff.
+    #[error("GitHub installation-token mint was rate limited")]
+    RateLimited,
+    /// The provider is temporarily unavailable.
+    #[error("GitHub installation-token provider is unavailable")]
+    Unavailable,
+    /// The response violated the protocol.
+    #[error("GitHub installation-token response is invalid")]
+    InvalidResponse,
+    /// The response selected a different repository.
+    #[error("GitHub installation-token repository mismatched")]
+    RepositoryMismatch,
+    /// The response selected different permissions.
+    #[error("GitHub installation-token permissions mismatched")]
+    PermissionMismatch,
+    /// The response cannot satisfy the requested lifetime.
+    #[error("GitHub installation-token validity is insufficient")]
+    Expired,
+}
+
+/// Sanitized failure from one definitive GitHub token attempt.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+#[error("GitHub installation-token mint failed: {kind}")]
+pub struct GithubInstallationTokenError {
+    kind: GithubInstallationTokenErrorKind,
+    retry_after_seconds: Option<u64>,
+}
+
+impl GithubInstallationTokenError {
+    pub(crate) const fn new(kind: GithubInstallationTokenErrorKind) -> Self {
+        Self {
+            kind,
+            retry_after_seconds: None,
+        }
+    }
+    pub(crate) const fn rate_limited(retry_after_seconds: Option<u64>) -> Self {
+        Self {
+            kind: GithubInstallationTokenErrorKind::RateLimited,
+            retry_after_seconds,
+        }
+    }
+    /// Returns the closed failure kind.
+    #[must_use]
+    pub const fn kind(self) -> GithubInstallationTokenErrorKind {
+        self.kind
+    }
+    /// Returns the bounded provider retry hint.
+    #[must_use]
+    pub const fn retry_after_seconds(self) -> Option<u64> {
+        self.retry_after_seconds
+    }
+}
 
 /// A uniquely recovered GitHub installation token that still needs revocation.
 ///
@@ -66,26 +198,26 @@ impl fmt::Debug for GithubInstallationTokenRevocationCandidate {
 ///
 /// This value deliberately remains move-only. A durable issuer must first use
 /// the borrowed secret and metadata to prepare its protected record, then make
-/// exactly one terminal choice: consume it into an issued credential after a
-/// successful finalize CAS, or consume it into a revocation candidate when the
-/// finalize loses its fence.
+/// exactly one terminal choice: transfer custody to the protected handoff
+/// after a successful finalize CAS, or consume it into a revocation candidate
+/// when the finalize loses its fence.
 pub struct GithubReadyInstallationToken {
     candidate: GithubInstallationTokenRevocationCandidate,
-    request: RepositoryCredentialRequest,
+    request: GithubInstallationTokenRequest,
     issued_at: UnixTimestamp,
     provider_expires_at: UnixTimestamp,
     conservative_expires_at: UnixTimestamp,
-    provenance: CredentialProvenance,
+    installation_id: u64,
 }
 
 impl GithubReadyInstallationToken {
     pub(crate) const fn new(
         candidate: GithubInstallationTokenRevocationCandidate,
-        request: RepositoryCredentialRequest,
+        request: GithubInstallationTokenRequest,
         issued_at: UnixTimestamp,
         provider_expires_at: UnixTimestamp,
         conservative_expires_at: UnixTimestamp,
-        provenance: CredentialProvenance,
+        installation_id: u64,
     ) -> Self {
         Self {
             candidate,
@@ -93,7 +225,7 @@ impl GithubReadyInstallationToken {
             issued_at,
             provider_expires_at,
             conservative_expires_at,
-            provenance,
+            installation_id,
         }
     }
 
@@ -105,7 +237,7 @@ impl GithubReadyInstallationToken {
 
     #[must_use]
     /// Returns the exact repository, permission, and minimum-validity request.
-    pub const fn request(&self) -> &RepositoryCredentialRequest {
+    pub const fn request(&self) -> &GithubInstallationTokenRequest {
         &self.request
     }
 
@@ -127,27 +259,10 @@ impl GithubReadyInstallationToken {
         self.conservative_expires_at
     }
 
+    /// Returns the exact installation that minted the token.
     #[must_use]
-    /// Returns the validated App, installation, and provider provenance.
-    pub const fn provenance(&self) -> &CredentialProvenance {
-        &self.provenance
-    }
-
-    /// Consumes the token after the durable authority finalize has succeeded.
-    ///
-    /// # Errors
-    ///
-    /// Returns a sanitized invariant error if the already-validated request and
-    /// validity metadata can no longer form a provider-neutral credential.
-    pub fn into_issued_credential(self) -> Result<IssuedRepositoryCredential, CredentialError> {
-        IssuedRepositoryCredential::new(
-            self.candidate.into_secret(),
-            &self.request,
-            self.issued_at,
-            self.conservative_expires_at,
-            self.provenance,
-        )
-        .map_err(|_| CredentialError::new(CredentialErrorKind::InvalidResponse))
+    pub const fn installation_id(&self) -> u64 {
+        self.installation_id
     }
 
     /// Consumes the token for revocation after a durable finalize loses its fence.
@@ -166,7 +281,7 @@ impl fmt::Debug for GithubReadyInstallationToken {
             .field("issued_at", &self.issued_at)
             .field("provider_expires_at", &self.provider_expires_at)
             .field("conservative_expires_at", &self.conservative_expires_at)
-            .field("provenance", &self.provenance)
+            .field("installation_id", &self.installation_id)
             .finish()
     }
 }
@@ -175,7 +290,7 @@ impl fmt::Debug for GithubReadyInstallationToken {
 /// revoked before the issuance can be reconciled.
 pub struct GithubInstallationTokenRevokePending {
     candidate: GithubInstallationTokenRevocationCandidate,
-    reason: CredentialError,
+    reason: GithubInstallationTokenError,
     provider_expires_at: Option<UnixTimestamp>,
     conservative_expires_at: Option<UnixTimestamp>,
 }
@@ -183,7 +298,7 @@ pub struct GithubInstallationTokenRevokePending {
 impl GithubInstallationTokenRevokePending {
     pub(crate) const fn new(
         candidate: GithubInstallationTokenRevocationCandidate,
-        reason: CredentialError,
+        reason: GithubInstallationTokenError,
         provider_expires_at: Option<UnixTimestamp>,
         conservative_expires_at: Option<UnixTimestamp>,
     ) -> Self {
@@ -203,7 +318,7 @@ impl GithubInstallationTokenRevokePending {
 
     #[must_use]
     /// Returns the sanitized semantic reason the token was not issuable.
-    pub const fn reason(&self) -> CredentialError {
+    pub const fn reason(&self) -> GithubInstallationTokenError {
         self.reason
     }
 
@@ -300,7 +415,7 @@ pub enum GithubInstallationTokenMintOutcome {
     /// GitHub may have minted a token, but no unique candidate can be recovered.
     Indeterminate(GithubInstallationTokenIndeterminate),
     /// The request was definitively rejected before an unknown token could exist.
-    Rejected(CredentialError),
+    Rejected(GithubInstallationTokenError),
 }
 
 /// Sanitized classification of an unconfirmed token-revocation attempt.
