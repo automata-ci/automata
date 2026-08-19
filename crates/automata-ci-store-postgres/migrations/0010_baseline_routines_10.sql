@@ -1481,6 +1481,20 @@ BEGIN
               receipt.idempotency_key
           AND evidence.logical_admission_digest = receipt.request_digest
           AND evidence.admitted_at_ms = receipt.committed_at_ms;
+    ELSIF receipt.github_subject_evidence_required
+        AND receipt.idempotency_kind = 'operation'
+        AND receipt.repository_id IS NOT NULL
+        AND receipt.run_id IS NOT NULL
+        AND receipt.committed_at_ms IS NOT NULL
+    THEN
+        SELECT count(*) INTO evidence_count
+        FROM github_schedule_workflow_run_subject_evidence AS evidence
+        WHERE evidence.tenant_id = receipt.tenant_id
+          AND evidence.repository_id = receipt.repository_id
+          AND evidence.run_id = receipt.run_id
+          AND evidence.schedule_fire_id::TEXT = receipt.idempotency_key
+          AND evidence.logical_admission_digest = receipt.request_digest
+          AND evidence.admitted_at_ms = receipt.committed_at_ms;
     END IF;
 
     IF evidence_count IS DISTINCT FROM 1 THEN

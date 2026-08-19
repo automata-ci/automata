@@ -238,6 +238,24 @@ ALTER TABLE ONLY github_runtime_authority_issuances
 ALTER TABLE ONLY github_runtime_authority_issuances
     ADD CONSTRAINT github_runtime_authority_tenant_runner FOREIGN KEY (tenant_id, runner_id) REFERENCES runners(tenant_id, id) ON DELETE RESTRICT;
 
+ALTER TABLE ONLY github_schedule_check_evidence
+    ADD CONSTRAINT github_schedule_check_evidence_checks_authority FOREIGN KEY (tenant_id, checks_authority_id) REFERENCES github_server_service_authorities(tenant_id, id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY github_schedule_check_evidence
+    ADD CONSTRAINT github_schedule_check_evidence_entry FOREIGN KEY (registry_id, entry_ordinal) REFERENCES github_schedule_registry_entries(registry_id, ordinal) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY github_schedule_check_evidence
+    ADD CONSTRAINT github_schedule_check_evidence_fire FOREIGN KEY (tenant_id, repository_id, provider_connection_id, schedule_fire_id, registry_id, entry_ordinal, scheduled_at_ms) REFERENCES github_schedule_fires(tenant_id, repository_id, provider_connection_id, fire_id, registry_id, entry_ordinal, scheduled_at_ms) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY github_schedule_check_evidence
+    ADD CONSTRAINT github_schedule_check_evidence_manifest FOREIGN KEY (tenant_id, repository_id, provider_connection_id, provider_manifest_revision, provider_manifest_digest) REFERENCES github_provider_manifest_revisions(tenant_id, repository_id, provider_connection_id, manifest_revision, manifest_digest) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY github_schedule_check_evidence
+    ADD CONSTRAINT github_schedule_check_evidence_registry FOREIGN KEY (tenant_id, repository_id, provider_connection_id, registry_id, provider_manifest_revision, provider_manifest_digest, default_branch_ref, source_revision, github_repository_owner_id) REFERENCES github_schedule_registry_revisions(tenant_id, repository_id, provider_connection_id, registry_id, manifest_revision, manifest_digest, default_branch_ref, source_revision, github_repository_owner_id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY github_schedule_check_evidence
+    ADD CONSTRAINT github_schedule_check_evidence_subject FOREIGN KEY (tenant_id, repository_id, provider_connection_id, schedule_fire_id, github_check_subject_id) REFERENCES github_check_subjects(tenant_id, repository_id, provider_connection_id, schedule_fire_id, id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED;
+
 ALTER TABLE ONLY github_schedule_discovery_claims
     ADD CONSTRAINT github_schedule_discovery_claims_completed_registry FOREIGN KEY (completed_registry_id) REFERENCES github_schedule_registry_revisions(registry_id) ON DELETE RESTRICT;
 
@@ -292,29 +310,23 @@ ALTER TABLE ONLY github_schedule_runtime
 ALTER TABLE ONLY github_schedule_runtime
     ADD CONSTRAINT github_schedule_runtime_entry FOREIGN KEY (registry_id, entry_ordinal) REFERENCES github_schedule_registry_entries(registry_id, ordinal) ON DELETE RESTRICT;
 
-ALTER TABLE ONLY github_schedule_workflow_run_evidence
-    ADD CONSTRAINT github_schedule_workflow_run_evidence_entry FOREIGN KEY (registry_id, entry_ordinal) REFERENCES github_schedule_registry_entries(registry_id, ordinal) ON DELETE RESTRICT;
+ALTER TABLE ONLY github_schedule_workflow_run_subject_evidence
+    ADD CONSTRAINT github_schedule_workflow_run_subject_evidence_check FOREIGN KEY (tenant_id, github_check_subject_id) REFERENCES github_check_subjects(tenant_id, id) ON DELETE RESTRICT;
 
-ALTER TABLE ONLY github_schedule_workflow_run_evidence
-    ADD CONSTRAINT github_schedule_workflow_run_evidence_fire FOREIGN KEY (tenant_id, repository_id, provider_connection_id, schedule_fire_id, registry_id, entry_ordinal, scheduled_at_ms) REFERENCES github_schedule_fires(tenant_id, repository_id, provider_connection_id, fire_id, registry_id, entry_ordinal, scheduled_at_ms) ON DELETE RESTRICT;
+ALTER TABLE ONLY github_schedule_workflow_run_subject_evidence
+    ADD CONSTRAINT github_schedule_workflow_run_subject_evidence_fire FOREIGN KEY (tenant_id, repository_id, schedule_fire_id) REFERENCES github_schedule_fires(tenant_id, repository_id, fire_id) ON DELETE RESTRICT;
 
-ALTER TABLE ONLY github_schedule_workflow_run_evidence
-    ADD CONSTRAINT github_schedule_workflow_run_evidence_manifest FOREIGN KEY (tenant_id, repository_id, provider_connection_id, provider_manifest_revision, provider_manifest_digest) REFERENCES github_provider_manifest_revisions(tenant_id, repository_id, provider_connection_id, manifest_revision, manifest_digest) ON DELETE RESTRICT;
+ALTER TABLE ONLY github_schedule_workflow_run_subject_evidence
+    ADD CONSTRAINT github_schedule_workflow_run_subject_evidence_repository FOREIGN KEY (tenant_id, repository_id) REFERENCES repositories(tenant_id, id) ON DELETE RESTRICT;
 
-ALTER TABLE ONLY github_schedule_workflow_run_evidence
-    ADD CONSTRAINT github_schedule_workflow_run_evidence_registry FOREIGN KEY (tenant_id, repository_id, provider_connection_id, registry_id, provider_manifest_revision, provider_manifest_digest, git_ref, source_revision, github_repository_owner_id) REFERENCES github_schedule_registry_revisions(tenant_id, repository_id, provider_connection_id, registry_id, manifest_revision, manifest_digest, default_branch_ref, source_revision, github_repository_owner_id) ON DELETE RESTRICT;
+ALTER TABLE ONLY github_schedule_workflow_run_subject_evidence
+    ADD CONSTRAINT github_schedule_workflow_run_subject_evidence_run FOREIGN KEY (repository_id, run_id) REFERENCES workflow_runs(repository_id, id) ON DELETE RESTRICT;
 
-ALTER TABLE ONLY github_schedule_workflow_run_evidence
-    ADD CONSTRAINT github_schedule_workflow_run_evidence_repository FOREIGN KEY (tenant_id, repository_id) REFERENCES repositories(tenant_id, id) ON DELETE RESTRICT;
+ALTER TABLE ONLY github_schedule_workflow_run_subject_evidence
+    ADD CONSTRAINT github_schedule_workflow_run_subject_evidence_snapshot FOREIGN KEY (snapshot_id, workflow_id) REFERENCES workflow_snapshots(id, workflow_id) ON DELETE RESTRICT;
 
-ALTER TABLE ONLY github_schedule_workflow_run_evidence
-    ADD CONSTRAINT github_schedule_workflow_run_evidence_run FOREIGN KEY (repository_id, run_id) REFERENCES workflow_runs(repository_id, id) ON DELETE RESTRICT;
-
-ALTER TABLE ONLY github_schedule_workflow_run_evidence
-    ADD CONSTRAINT github_schedule_workflow_run_evidence_snapshot FOREIGN KEY (snapshot_id, workflow_id) REFERENCES workflow_snapshots(id, workflow_id) ON DELETE RESTRICT;
-
-ALTER TABLE ONLY github_schedule_workflow_run_evidence
-    ADD CONSTRAINT github_schedule_workflow_run_evidence_workflow FOREIGN KEY (repository_id, workflow_id) REFERENCES workflow_definitions(repository_id, id) ON DELETE RESTRICT;
+ALTER TABLE ONLY github_schedule_workflow_run_subject_evidence
+    ADD CONSTRAINT github_schedule_workflow_run_subject_evidence_workflow FOREIGN KEY (repository_id, workflow_id) REFERENCES workflow_definitions(repository_id, id) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY github_server_service_authorities
     ADD CONSTRAINT github_server_service_authorities_current_generation_fk FOREIGN KEY (tenant_id, id, current_issuance_generation) REFERENCES github_server_service_authority_issuances(tenant_id, authority_id, generation) DEFERRABLE INITIALLY DEFERRED;
