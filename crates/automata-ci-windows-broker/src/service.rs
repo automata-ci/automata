@@ -22,10 +22,11 @@ use automata_ci_core::{
 };
 use automata_ci_execution::{
     Cancellation, CopyFromRequest, CopyToRequest, ExecutionArgv, ExecutionCommand, ExecutionOutput,
-    ImmutableImage, NetworkPolicy, ResourceLimits, RootFilesystemPolicy, SandboxCustody,
-    SandboxEnvironment, SandboxGeneration, SandboxLaunch, SandboxPrivilegePolicy, SandboxSpec,
-    TargetPath,
+    ExecutionOutputRecord, ExecutionOutputStream, ExecutionTermination, ImmutableImage,
+    NetworkPolicy, ResourceLimits, RootFilesystemPolicy, SandboxCustody, SandboxEnvironment,
+    SandboxGeneration, SandboxLaunch, SandboxPrivilegePolicy, SandboxSpec, TargetPath,
 };
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use ring::signature;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -41,12 +42,17 @@ const RESOURCE_DOMAIN: &[u8] = b"automata.windows-hyperv-resource.v1\0";
 const TICKET_DOMAIN: &[u8] = b"automata.windows-hyperv-ticket.v2\0";
 const SPEC_DOMAIN: &[u8] = b"automata.windows-hyperv-spec.v3\0";
 const PROCESS_DOMAIN: &[u8] = b"automata.windows-hyperv-process.v1\0";
+const EXEC_REQUEST_DOMAIN: &[u8] = b"automata.windows-hyperv-exec-request.v1\0";
+const COPY_TO_REQUEST_DOMAIN: &[u8] = b"automata.windows-hyperv-copy-to-request.v1\0";
+const COPY_FROM_REQUEST_DOMAIN: &[u8] = b"automata.windows-hyperv-copy-from-request.v1\0";
 const PROFILE_ATTESTATION_DOMAIN: &[u8] = b"automata.windows-hyperv-profile-attestation.v1\0";
-const LEDGER_DOMAIN: &[u8] = b"automata.windows-hyperv-broker-ledger.v1\0";
+const LEDGER_DOMAIN: &[u8] = b"automata.windows-hyperv-broker-ledger.v2\0";
 const MAX_LEDGER_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_LEDGER_EVENTS: usize = 100_000;
 const LEDGER_TOMBSTONE_CLOCK_SKEW_MILLIS: i64 = 5 * 60 * 1_000;
 const ED25519_PUBLIC_KEY_BYTES: usize = 32;
+const MAX_COMPLETED_OPERATIONS: usize = 256;
+const MAX_COMPLETED_OPERATION_BYTES: usize = 16 * 1024 * 1024;
 
 /// Whether a failed adapter call is proven not to have changed host state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -581,6 +587,8 @@ impl HostComputeProcess {
 pub struct BrokerExecRequest<'a> {
     resource_id: &'a str,
     process: &'a HostComputeProcess,
+    guest_agent_path: &'a str,
+    process_limit: u32,
     command: &'a ExecutionCommand,
 }
 
@@ -597,6 +605,18 @@ impl BrokerExecRequest<'_> {
         self.process
     }
 
+    /// Returns the immutable in-image guest-agent executable path.
+    #[must_use]
+    pub const fn guest_agent_path(&self) -> &str {
+        self.guest_agent_path
+    }
+
+    /// Returns the whole-command-tree process ceiling enforced by the guest.
+    #[must_use]
+    pub const fn process_limit(&self) -> u32 {
+        self.process_limit
+    }
+
     /// Returns the literal, bounded guest command.
     #[must_use]
     pub const fn command(&self) -> &ExecutionCommand {
@@ -610,6 +630,8 @@ impl fmt::Debug for BrokerExecRequest<'_> {
             .debug_struct("BrokerExecRequest")
             .field("resource_id", &self.resource_id)
             .field("process", &self.process)
+            .field("guest_agent_path", &self.guest_agent_path)
+            .field("process_limit", &self.process_limit)
             .field("command", &self.command)
             .finish()
     }
@@ -619,6 +641,7 @@ impl fmt::Debug for BrokerExecRequest<'_> {
 #[derive(Debug)]
 pub struct BrokerCopyToRequest<'a> {
     resource_id: &'a str,
+    guest_agent_path: &'a str,
     request: &'a CopyToRequest,
 }
 
@@ -627,6 +650,12 @@ impl BrokerCopyToRequest<'_> {
     #[must_use]
     pub const fn resource_id(&self) -> &str {
         self.resource_id
+    }
+
+    /// Returns the immutable in-image guest-agent executable path.
+    #[must_use]
+    pub const fn guest_agent_path(&self) -> &str {
+        self.guest_agent_path
     }
 
     /// Returns the bounded copy request.
@@ -640,6 +669,7 @@ impl BrokerCopyToRequest<'_> {
 #[derive(Debug)]
 pub struct BrokerCopyFromRequest<'a> {
     resource_id: &'a str,
+    guest_agent_path: &'a str,
     request: &'a CopyFromRequest,
 }
 
@@ -648,6 +678,12 @@ impl BrokerCopyFromRequest<'_> {
     #[must_use]
     pub const fn resource_id(&self) -> &str {
         self.resource_id
+    }
+
+    /// Returns the immutable in-image guest-agent executable path.
+    #[must_use]
+    pub const fn guest_agent_path(&self) -> &str {
+        self.guest_agent_path
     }
 
     /// Returns the bounded copy request.
@@ -692,7 +728,8 @@ pub trait WindowsHostComputeAdapter: fmt::Debug + Send + Sync {
     ///
     /// Returns a typed attachment failure.
     fn attach(&self, resource_id: &str) -> Result<(), HostComputeAdapterError>;
-    /// Executes one literal argv without a host shell.
+    /// Invokes the fixed guest agent, which executes one literal argv inside a
+    /// nested Windows Job Object without a host or container-engine shell.
     ///
     /// # Errors
     ///
@@ -784,6 +821,104 @@ struct BrokerOperationIntent {
     operation_id: OperationId,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum BrokerDurableTermination {
+    Exited(i32),
+    Signalled,
+    TimedOut,
+    Cancelled,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum BrokerDurableOutputStream {
+    Stdout,
+    Stderr,
+}
+
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct BrokerDurableOutputRecord {
+    stream: BrokerDurableOutputStream,
+    content_base64: String,
+    end_of_stream: bool,
+}
+
+impl fmt::Debug for BrokerDurableOutputRecord {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("BrokerDurableOutputRecord")
+            .field("stream", &self.stream)
+            .field("encoded_bytes", &self.content_base64.len())
+            .field("content", &"[REDACTED]")
+            .field("end_of_stream", &self.end_of_stream)
+            .finish()
+    }
+}
+
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
+enum BrokerCompletedOutcome {
+    Exec {
+        termination: BrokerDurableTermination,
+        records: Vec<BrokerDurableOutputRecord>,
+        truncated: bool,
+    },
+    CopyTo,
+    CopyFrom {
+        content_base64: String,
+    },
+}
+
+impl fmt::Debug for BrokerCompletedOutcome {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Exec {
+                termination,
+                records,
+                truncated,
+            } => formatter
+                .debug_struct("BrokerCompletedOutcome::Exec")
+                .field("termination", termination)
+                .field("records", &records.len())
+                .field("output", &"[REDACTED]")
+                .field("truncated", truncated)
+                .finish(),
+            Self::CopyTo => formatter.write_str("BrokerCompletedOutcome::CopyTo"),
+            Self::CopyFrom { content_base64 } => formatter
+                .debug_struct("BrokerCompletedOutcome::CopyFrom")
+                .field("encoded_bytes", &content_base64.len())
+                .field("content", &"[REDACTED]")
+                .finish(),
+        }
+    }
+}
+
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct BrokerCompletedOperation {
+    kind: BrokerOperationKind,
+    request_fingerprint: Sha256Digest,
+    result: BrokerCompletedOutcome,
+}
+
+impl fmt::Debug for BrokerCompletedOperation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("BrokerCompletedOperation")
+            .field("kind", &self.kind)
+            .field("request_fingerprint", &self.request_fingerprint)
+            .field("result", &self.result)
+            .finish()
+    }
+}
+
+enum ReplayableOperation {
+    Begin(Box<BrokerLedgerEntry>),
+    Replay(BrokerCompletedOutcome),
+}
+
 /// Complete latest durable state for one consumed grant.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -803,12 +938,14 @@ pub struct BrokerLedgerEntry {
     memory_bytes: u64,
     cpu_millis: u32,
     pids: u32,
+    guest_agent_path: String,
     expires_at: UnixMillis,
     phase: BrokerLifecyclePhase,
     descendants: BTreeSet<String>,
     destroy_operation_id: Option<OperationId>,
     operation_epoch: u64,
     active_operation: Option<BrokerOperationIntent>,
+    completed_operations: BTreeMap<OperationId, BrokerCompletedOperation>,
 }
 
 impl BrokerLedgerEntry {
@@ -1608,25 +1745,33 @@ impl RestrictedWindowsHyperVBroker {
         }
         self.inspect_verified(&entry)?;
         let process = process_id(entry.grant_digest, command.operation_id());
-        if entry.descendants.contains(process.as_str()) {
-            return Err(BrokerError::ReplayConflict);
-        }
-        let intent = self.begin_operation(
+        let request_fingerprint = exec_request_fingerprint(command, entry.pids)?;
+        let intent = match self.begin_replayable_operation(
             &entry,
             BrokerOperationKind::Exec,
             command.operation_id(),
+            request_fingerprint,
+            command.output_limit(),
             Some(process.as_str()),
-        )?;
+        )? {
+            ReplayableOperation::Begin(intent) => *intent,
+            ReplayableOperation::Replay(result) => return replay_exec_outcome(&result),
+        };
         let request = BrokerExecRequest {
             resource_id: &intent.resource_id,
             process: &process,
+            guest_agent_path: &intent.guest_agent_path,
+            process_limit: intent.pids,
             command,
         };
         match self.adapter.exec(&request, cancellation) {
             Ok(output) => {
-                self.finish_operation(
+                let durable = completed_exec_outcome(&output);
+                self.finish_replayable_operation(
                     &intent,
                     BrokerLifecyclePhase::Attached,
+                    request_fingerprint,
+                    durable,
                     Some(process.as_str()),
                 )?;
                 Ok(output)
@@ -1663,21 +1808,34 @@ impl RestrictedWindowsHyperVBroker {
             return Err(BrokerError::InvalidTicket);
         }
         self.inspect_verified(&entry)?;
-        let intent = self.begin_operation(
+        let request_fingerprint = copy_to_request_fingerprint(request);
+        let intent = match self.begin_replayable_operation(
             &entry,
             BrokerOperationKind::CopyTo,
             request.operation_id(),
+            request_fingerprint,
+            0,
             None,
-        )?;
+        )? {
+            ReplayableOperation::Begin(intent) => *intent,
+            ReplayableOperation::Replay(result) => return replay_copy_to_outcome(&result),
+        };
         let result = self.adapter.copy_to(
             &BrokerCopyToRequest {
                 resource_id: &intent.resource_id,
+                guest_agent_path: &intent.guest_agent_path,
                 request,
             },
             cancellation,
         );
         match result {
-            Ok(()) => self.finish_operation(&intent, BrokerLifecyclePhase::Attached, None),
+            Ok(()) => self.finish_replayable_operation(
+                &intent,
+                BrokerLifecyclePhase::Attached,
+                request_fingerprint,
+                BrokerCompletedOutcome::CopyTo,
+                None,
+            ),
             Err(error) if error.effect() == BrokerAdapterEffect::KnownNoEffect => {
                 self.finish_operation(&intent, BrokerLifecyclePhase::Attached, None)?;
                 Err(error.into())
@@ -1706,15 +1864,24 @@ impl RestrictedWindowsHyperVBroker {
             return Err(BrokerError::InvalidTicket);
         }
         self.inspect_verified(&entry)?;
-        let intent = self.begin_operation(
+        let request_fingerprint = copy_from_request_fingerprint(request)?;
+        let intent = match self.begin_replayable_operation(
             &entry,
             BrokerOperationKind::CopyFrom,
             request.operation_id(),
+            request_fingerprint,
+            request.byte_limit(),
             None,
-        )?;
+        )? {
+            ReplayableOperation::Begin(intent) => *intent,
+            ReplayableOperation::Replay(result) => {
+                return replay_copy_from_outcome(&result, request.byte_limit());
+            }
+        };
         let bytes = self.adapter.copy_from(
             &BrokerCopyFromRequest {
                 resource_id: &intent.resource_id,
+                guest_agent_path: &intent.guest_agent_path,
                 request,
             },
             cancellation,
@@ -1734,7 +1901,15 @@ impl RestrictedWindowsHyperVBroker {
             self.quarantine_operation(&intent)?;
             return Err(BrokerError::EffectiveStateMismatch);
         }
-        self.finish_operation(&intent, BrokerLifecyclePhase::Attached, None)?;
+        self.finish_replayable_operation(
+            &intent,
+            BrokerLifecyclePhase::Attached,
+            request_fingerprint,
+            BrokerCompletedOutcome::CopyFrom {
+                content_base64: BASE64.encode(&bytes),
+            },
+            None,
+        )?;
         Ok(bytes)
     }
 
@@ -2043,12 +2218,14 @@ impl RestrictedWindowsHyperVBroker {
             memory_bytes: resources.memory_bytes(),
             cpu_millis: resources.cpu_millis(),
             pids: resources.pids(),
+            guest_agent_path: keepalive.program().as_str().to_owned(),
             expires_at: claims.expires_at(),
             phase: BrokerLifecyclePhase::Creating,
             descendants: BTreeSet::new(),
             destroy_operation_id: None,
             operation_epoch: 0,
             active_operation: None,
+            completed_operations: BTreeMap::new(),
         };
         Ok(PreparedCreate {
             grant_digest,
@@ -2181,6 +2358,64 @@ impl RestrictedWindowsHyperVBroker {
         Ok(intent)
     }
 
+    fn begin_replayable_operation(
+        &self,
+        expected: &BrokerLedgerEntry,
+        kind: BrokerOperationKind,
+        operation_id: OperationId,
+        request_fingerprint: Sha256Digest,
+        result_reservation_bytes: usize,
+        descendant: Option<&str>,
+    ) -> Result<ReplayableOperation, BrokerError> {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        ensure_reconciled(&state)?;
+        let current = state
+            .entries
+            .get(&expected.grant_digest)
+            .cloned()
+            .ok_or(BrokerError::OperationFenced)?;
+        if let Some(completed) = current.completed_operations.get(&operation_id) {
+            if completed.kind != kind || completed.request_fingerprint != request_fingerprint {
+                return Err(BrokerError::ReplayConflict);
+            }
+            return Ok(ReplayableOperation::Replay(completed.result.clone()));
+        }
+        if current != *expected || current.active_operation.is_some() {
+            return Err(BrokerError::OperationFenced);
+        }
+        let completed_bytes = current
+            .completed_operations
+            .values()
+            .try_fold(0_usize, |total, completed| {
+                total.checked_add(completed_outcome_bytes(&completed.result).ok()?)
+            })
+            .ok_or(BrokerLedgerError::Corrupt)?;
+        if current.completed_operations.len() >= MAX_COMPLETED_OPERATIONS
+            || completed_bytes
+                .checked_add(result_reservation_bytes)
+                .is_none_or(|bytes| bytes > MAX_COMPLETED_OPERATION_BYTES)
+        {
+            return Err(BrokerLedgerError::Capacity.into());
+        }
+        let mut intent = current;
+        intent.operation_epoch = intent
+            .operation_epoch
+            .checked_add(1)
+            .ok_or(BrokerLedgerError::Capacity)?;
+        intent.active_operation = Some(BrokerOperationIntent {
+            epoch: intent.operation_epoch,
+            kind,
+            operation_id,
+        });
+        if let Some(descendant) = descendant
+            && !intent.descendants.insert(descendant.to_owned())
+        {
+            return Err(BrokerError::ReplayConflict);
+        }
+        self.persist_locked(&mut state, intent.clone())?;
+        Ok(ReplayableOperation::Begin(Box::new(intent)))
+    }
+
     fn finish_operation(
         &self,
         expected: &BrokerLedgerEntry,
@@ -2198,6 +2433,45 @@ impl RestrictedWindowsHyperVBroker {
         {
             return Err(BrokerLedgerError::Corrupt.into());
         }
+        self.persist_if_current(expected, finished)
+    }
+
+    fn finish_replayable_operation(
+        &self,
+        expected: &BrokerLedgerEntry,
+        phase: BrokerLifecyclePhase,
+        request_fingerprint: Sha256Digest,
+        result: BrokerCompletedOutcome,
+        descendant: Option<&str>,
+    ) -> Result<(), BrokerError> {
+        let active = expected
+            .active_operation
+            .as_ref()
+            .ok_or(BrokerLedgerError::Corrupt)?;
+        if active.kind != completed_outcome_kind(&result)
+            || expected
+                .completed_operations
+                .contains_key(&active.operation_id)
+        {
+            return Err(BrokerLedgerError::Corrupt.into());
+        }
+        let mut finished = expected.clone();
+        finished.active_operation = None;
+        finished.phase = phase;
+        if let Some(descendant) = descendant
+            && !finished.descendants.remove(descendant)
+        {
+            return Err(BrokerLedgerError::Corrupt.into());
+        }
+        finished.completed_operations.insert(
+            active.operation_id,
+            BrokerCompletedOperation {
+                kind: active.kind,
+                request_fingerprint,
+                result,
+            },
+        );
+        validate_ledger_entry(&finished)?;
         self.persist_if_current(expected, finished)
     }
 
@@ -2446,6 +2720,16 @@ fn validate_ledger_entry(entry: &BrokerLedgerEntry) -> Result<(), BrokerError> {
                     entry.custody,
                 )
     });
+    let valid_guest_agent = TargetPath::windows(entry.guest_agent_path.clone()).is_ok();
+    let completed_bytes = entry.completed_operations.values().try_fold(
+        0_usize,
+        |total, operation| -> Result<usize, BrokerLedgerError> {
+            validate_completed_operation(operation)?;
+            total
+                .checked_add(completed_outcome_bytes(&operation.result)?)
+                .ok_or(BrokerLedgerError::Capacity)
+        },
+    );
     if is_zero_digest(entry.grant_digest)
         || is_zero_digest(entry.spec_digest)
         || is_zero_digest(entry.ticket_digest)
@@ -2460,7 +2744,11 @@ fn validate_ledger_entry(entry: &BrokerLedgerEntry) -> Result<(), BrokerError> {
         || entry.memory_bytes == 0
         || entry.cpu_millis == 0
         || entry.pids == 0
+        || !valid_guest_agent
         || entry.descendants.len() > 1024
+        || entry.completed_operations.len() > MAX_COMPLETED_OPERATIONS
+        || completed_bytes.is_err()
+        || completed_bytes.is_ok_and(|bytes| bytes > MAX_COMPLETED_OPERATION_BYTES)
         || entry.active_operation.as_ref().is_some_and(|operation| {
             operation.epoch == 0 || operation.epoch != entry.operation_epoch
         })
@@ -2492,7 +2780,197 @@ fn same_durable_identity(left: &BrokerLedgerEntry, right: &BrokerLedgerEntry) ->
         && left.memory_bytes == right.memory_bytes
         && left.cpu_millis == right.cpu_millis
         && left.pids == right.pids
+        && left.guest_agent_path == right.guest_agent_path
         && left.expires_at == right.expires_at
+}
+
+fn exec_request_fingerprint(
+    command: &ExecutionCommand,
+    process_limit: u32,
+) -> Result<Sha256Digest, BrokerError> {
+    let mut digest = Sha256::new();
+    digest.update(EXEC_REQUEST_DOMAIN);
+    hash_field(&mut digest, command.argv().program().as_str().as_bytes());
+    hash_field(
+        &mut digest,
+        &u64::try_from(command.argv().arguments().len())
+            .map_err(|_| BrokerError::ReplayConflict)?
+            .to_be_bytes(),
+    );
+    for argument in command.argv().arguments() {
+        hash_field(&mut digest, argument.as_bytes());
+    }
+    hash_field(
+        &mut digest,
+        &u64::try_from(command.environment().values().len())
+            .map_err(|_| BrokerError::ReplayConflict)?
+            .to_be_bytes(),
+    );
+    for variable in command.environment().values() {
+        hash_field(&mut digest, variable.name().as_str().as_bytes());
+        hash_field(&mut digest, variable.value().expose().as_bytes());
+        hash_field(&mut digest, &[u8::from(variable.is_secret())]);
+    }
+    hash_field(&mut digest, command.working_directory().as_str().as_bytes());
+    let timeout_millis =
+        u64::try_from(command.timeout().as_millis()).map_err(|_| BrokerError::ReplayConflict)?;
+    hash_field(&mut digest, &timeout_millis.to_be_bytes());
+    hash_field(
+        &mut digest,
+        &u64::try_from(command.output_limit())
+            .map_err(|_| BrokerError::ReplayConflict)?
+            .to_be_bytes(),
+    );
+    hash_field(&mut digest, &process_limit.to_be_bytes());
+    Ok(Sha256Digest::from_bytes(digest.finalize().into()))
+}
+
+fn copy_to_request_fingerprint(request: &CopyToRequest) -> Sha256Digest {
+    domain_digest(
+        COPY_TO_REQUEST_DOMAIN,
+        &[request.target().as_str().as_bytes(), request.content()],
+    )
+}
+
+fn copy_from_request_fingerprint(request: &CopyFromRequest) -> Result<Sha256Digest, BrokerError> {
+    Ok(domain_digest(
+        COPY_FROM_REQUEST_DOMAIN,
+        &[
+            request.source().as_str().as_bytes(),
+            &u64::try_from(request.byte_limit())
+                .map_err(|_| BrokerError::ReplayConflict)?
+                .to_be_bytes(),
+        ],
+    ))
+}
+
+fn completed_exec_outcome(output: &ExecutionOutput) -> BrokerCompletedOutcome {
+    let records = output
+        .records()
+        .iter()
+        .map(|record| BrokerDurableOutputRecord {
+            stream: match record.stream() {
+                ExecutionOutputStream::Stdout => BrokerDurableOutputStream::Stdout,
+                ExecutionOutputStream::Stderr => BrokerDurableOutputStream::Stderr,
+            },
+            content_base64: BASE64.encode(record.bytes()),
+            end_of_stream: record.is_end_of_stream(),
+        })
+        .collect();
+    BrokerCompletedOutcome::Exec {
+        termination: match output.termination() {
+            ExecutionTermination::Exited(code) => BrokerDurableTermination::Exited(code),
+            ExecutionTermination::Signalled => BrokerDurableTermination::Signalled,
+            ExecutionTermination::TimedOut => BrokerDurableTermination::TimedOut,
+            ExecutionTermination::Cancelled => BrokerDurableTermination::Cancelled,
+        },
+        records,
+        truncated: output.was_truncated(),
+    }
+}
+
+fn replay_exec_outcome(result: &BrokerCompletedOutcome) -> Result<ExecutionOutput, BrokerError> {
+    execution_output_from_completed(result).map_err(Into::into)
+}
+
+fn execution_output_from_completed(
+    result: &BrokerCompletedOutcome,
+) -> Result<ExecutionOutput, BrokerLedgerError> {
+    let BrokerCompletedOutcome::Exec {
+        termination,
+        records,
+        truncated,
+    } = result
+    else {
+        return Err(BrokerLedgerError::Corrupt);
+    };
+    let records = records
+        .iter()
+        .map(|record| {
+            let stream = match record.stream {
+                BrokerDurableOutputStream::Stdout => ExecutionOutputStream::Stdout,
+                BrokerDurableOutputStream::Stderr => ExecutionOutputStream::Stderr,
+            };
+            let bytes = BASE64
+                .decode(&record.content_base64)
+                .map_err(|_| BrokerLedgerError::Corrupt)?;
+            if record.end_of_stream {
+                if !bytes.is_empty() {
+                    return Err(BrokerLedgerError::Corrupt);
+                }
+                Ok(ExecutionOutputRecord::end_of_stream(stream))
+            } else {
+                ExecutionOutputRecord::data(stream, bytes).map_err(|_| BrokerLedgerError::Corrupt)
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let termination = match termination {
+        BrokerDurableTermination::Exited(code) => ExecutionTermination::Exited(*code),
+        BrokerDurableTermination::Signalled => ExecutionTermination::Signalled,
+        BrokerDurableTermination::TimedOut => ExecutionTermination::TimedOut,
+        BrokerDurableTermination::Cancelled => ExecutionTermination::Cancelled,
+    };
+    ExecutionOutput::new(termination, records, *truncated).map_err(|_| BrokerLedgerError::Corrupt)
+}
+
+fn replay_copy_to_outcome(result: &BrokerCompletedOutcome) -> Result<(), BrokerError> {
+    matches!(result, BrokerCompletedOutcome::CopyTo)
+        .then_some(())
+        .ok_or(BrokerLedgerError::Corrupt.into())
+}
+
+fn replay_copy_from_outcome(
+    result: &BrokerCompletedOutcome,
+    byte_limit: usize,
+) -> Result<Vec<u8>, BrokerError> {
+    let BrokerCompletedOutcome::CopyFrom { content_base64 } = result else {
+        return Err(BrokerLedgerError::Corrupt.into());
+    };
+    let content = BASE64
+        .decode(content_base64)
+        .map_err(|_| BrokerLedgerError::Corrupt)?;
+    if content.len() > byte_limit {
+        return Err(BrokerLedgerError::Corrupt.into());
+    }
+    Ok(content)
+}
+
+fn completed_outcome_kind(result: &BrokerCompletedOutcome) -> BrokerOperationKind {
+    match result {
+        BrokerCompletedOutcome::Exec { .. } => BrokerOperationKind::Exec,
+        BrokerCompletedOutcome::CopyTo => BrokerOperationKind::CopyTo,
+        BrokerCompletedOutcome::CopyFrom { .. } => BrokerOperationKind::CopyFrom,
+    }
+}
+
+fn completed_outcome_bytes(result: &BrokerCompletedOutcome) -> Result<usize, BrokerLedgerError> {
+    match result {
+        BrokerCompletedOutcome::Exec { .. } => {
+            let output = execution_output_from_completed(result)?;
+            output.records().iter().try_fold(0_usize, |total, record| {
+                total
+                    .checked_add(record.bytes().len())
+                    .ok_or(BrokerLedgerError::Capacity)
+            })
+        }
+        BrokerCompletedOutcome::CopyTo => Ok(0),
+        BrokerCompletedOutcome::CopyFrom { content_base64 } => BASE64
+            .decode(content_base64)
+            .map(|content| content.len())
+            .map_err(|_| BrokerLedgerError::Corrupt),
+    }
+}
+
+fn validate_completed_operation(
+    operation: &BrokerCompletedOperation,
+) -> Result<(), BrokerLedgerError> {
+    if is_zero_digest(operation.request_fingerprint)
+        || operation.kind != completed_outcome_kind(&operation.result)
+        || completed_outcome_bytes(&operation.result)? > MAX_COMPLETED_OPERATION_BYTES
+    {
+        return Err(BrokerLedgerError::Corrupt);
+    }
+    Ok(())
 }
 
 fn sandbox_spec_digest(spec: &SandboxSpec) -> Result<Sha256Digest, BrokerError> {
@@ -2638,7 +3116,7 @@ mod tests {
         fs,
         num::NonZeroU64,
         path::PathBuf,
-        sync::atomic::{AtomicUsize, Ordering},
+        sync::atomic::{AtomicU32, AtomicUsize, Ordering},
     };
 
     use automata_ci_core::{
@@ -2682,7 +3160,11 @@ mod tests {
         resources: Mutex<BTreeMap<String, HostComputeInspection>>,
         creates: AtomicUsize,
         execs: AtomicUsize,
+        copy_tos: AtomicUsize,
+        copy_froms: AtomicUsize,
         destroys: AtomicUsize,
+        last_guest_agent_path: Mutex<Option<String>>,
+        last_process_limit: AtomicU32,
         uncertain_create: Mutex<bool>,
         uncertain_destroy: Mutex<bool>,
         uncertain_exec: Mutex<bool>,
@@ -2809,10 +3291,17 @@ mod tests {
 
         fn exec(
             &self,
-            _request: &BrokerExecRequest<'_>,
+            request: &BrokerExecRequest<'_>,
             _cancellation: &dyn Cancellation,
         ) -> Result<ExecutionOutput, HostComputeAdapterError> {
             self.execs.fetch_add(1, Ordering::SeqCst);
+            *self
+                .last_guest_agent_path
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) =
+                Some(request.guest_agent_path().to_owned());
+            self.last_process_limit
+                .store(request.process_limit(), Ordering::SeqCst);
             let mut gate = self
                 .exec_gate
                 .0
@@ -2856,17 +3345,29 @@ mod tests {
 
         fn copy_to(
             &self,
-            _request: &BrokerCopyToRequest<'_>,
+            request: &BrokerCopyToRequest<'_>,
             _cancellation: &dyn Cancellation,
         ) -> Result<(), HostComputeAdapterError> {
+            self.copy_tos.fetch_add(1, Ordering::SeqCst);
+            *self
+                .last_guest_agent_path
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) =
+                Some(request.guest_agent_path().to_owned());
             Ok(())
         }
 
         fn copy_from(
             &self,
-            _request: &BrokerCopyFromRequest<'_>,
+            request: &BrokerCopyFromRequest<'_>,
             _cancellation: &dyn Cancellation,
         ) -> Result<Vec<u8>, HostComputeAdapterError> {
+            self.copy_froms.fetch_add(1, Ordering::SeqCst);
+            *self
+                .last_guest_agent_path
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) =
+                Some(request.guest_agent_path().to_owned());
             Ok(b"copy".to_vec())
         }
 
@@ -3108,6 +3609,143 @@ mod tests {
         .with_privilege(spec.privilege())
         .with_resource_allocation(spec.resource_allocation().expect("fixture allocation"))
         .with_execution_binding(spec.execution_binding().expect("fixture execution binding"))
+    }
+
+    fn fixture_command(operation_id: OperationId, marker: &str) -> ExecutionCommand {
+        ExecutionCommand::new(
+            operation_id,
+            ExecutionArgv::new(
+                TargetPath::windows(r"C:\Windows\System32\cmd.exe").expect("program"),
+                vec!["/d".to_owned(), "/c".to_owned(), marker.to_owned()],
+            )
+            .expect("argv"),
+            TargetPath::windows(r"C:\__w").expect("working directory"),
+            ExecutionEnvironment::empty(),
+            Duration::from_secs(30),
+            1024,
+        )
+        .expect("command")
+    }
+
+    fn assert_completed_operation_conflicts(
+        broker: &RestrictedWindowsHyperVBroker,
+        ticket: &BrokerSandboxTicket,
+        exec_operation: OperationId,
+        copy_operation: OperationId,
+    ) {
+        assert_eq!(
+            broker
+                .exec(
+                    ticket,
+                    &fixture_command(exec_operation, "echo changed"),
+                    UnixMillis::new(134),
+                    &NeverCancelled,
+                )
+                .expect_err("conflicting exec replay"),
+            BrokerError::ReplayConflict
+        );
+        let conflicting_copy = CopyToRequest::new(
+            copy_operation,
+            TargetPath::windows(r"C:\__w\durable.txt").expect("copy target"),
+            b"changed".to_vec(),
+        )
+        .expect("conflicting copy request");
+        assert_eq!(
+            broker
+                .copy_to(
+                    ticket,
+                    &conflicting_copy,
+                    UnixMillis::new(135),
+                    &NeverCancelled,
+                )
+                .expect_err("conflicting copy replay"),
+            BrokerError::ReplayConflict
+        );
+    }
+
+    #[test]
+    fn completed_exec_and_copy_to_replay_exactly_after_response_loss_and_restart() {
+        let directory = TemporaryLedgerDirectory::new();
+        let path = directory.path("completed-operations.jsonl");
+        let fixture = fixture();
+        let adapter = Arc::new(FakeHostCompute::default());
+        let ledger = Arc::new(FileBrokerLedger::open(&path).expect("open ledger"));
+        let first = broker(&fixture, Arc::clone(&adapter), Arc::clone(&ledger));
+        let ticket = first
+            .create(&fixture.spec, &fixture.grant, UnixMillis::new(120))
+            .expect("create");
+        first.attach(&ticket, UnixMillis::new(121)).expect("attach");
+
+        let exec_operation = OperationId::new();
+        let command = fixture_command(exec_operation, "echo once");
+        let expected_output = first
+            .exec(&ticket, &command, UnixMillis::new(130), &NeverCancelled)
+            .expect("first exec whose response is lost");
+        let copy_operation = OperationId::new();
+        let copy = CopyToRequest::new(
+            copy_operation,
+            TargetPath::windows(r"C:\__w\durable.txt").expect("copy target"),
+            b"written-once".to_vec(),
+        )
+        .expect("copy request");
+        first
+            .copy_to(&ticket, &copy, UnixMillis::new(131), &NeverCancelled)
+            .expect("first copy whose response is lost");
+        let read_operation = OperationId::new();
+        let read = CopyFromRequest::new(
+            read_operation,
+            TargetPath::windows(r"C:\__w\durable.txt").expect("copy source"),
+            1024,
+        )
+        .expect("copy-from request");
+        let expected_read = first
+            .copy_from(&ticket, &read, UnixMillis::new(131), &NeverCancelled)
+            .expect("first read whose response is lost");
+        assert_eq!(adapter.execs.load(Ordering::SeqCst), 1);
+        assert_eq!(adapter.copy_tos.load(Ordering::SeqCst), 1);
+        assert_eq!(adapter.copy_froms.load(Ordering::SeqCst), 1);
+        assert_eq!(adapter.last_process_limit.load(Ordering::SeqCst), 128);
+        assert_eq!(
+            adapter
+                .last_guest_agent_path
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_deref(),
+            Some(r"C:\automata\guest.exe")
+        );
+
+        drop(first);
+        drop(ledger);
+        let restarted_ledger =
+            Arc::new(FileBrokerLedger::open(&path).expect("reopen completed ledger"));
+        let restarted = broker(
+            &fixture,
+            Arc::clone(&adapter),
+            Arc::clone(&restarted_ledger),
+        );
+        assert_eq!(
+            restarted
+                .exec(&ticket, &command, UnixMillis::new(132), &NeverCancelled,)
+                .expect("exact exec replay"),
+            expected_output
+        );
+        restarted
+            .copy_to(&ticket, &copy, UnixMillis::new(133), &NeverCancelled)
+            .expect("exact copy replay");
+        assert_eq!(
+            restarted
+                .copy_from(&ticket, &read, UnixMillis::new(133), &NeverCancelled)
+                .expect("exact read replay"),
+            expected_read
+        );
+        assert_eq!(adapter.execs.load(Ordering::SeqCst), 1);
+        assert_eq!(adapter.copy_tos.load(Ordering::SeqCst), 1);
+        assert_eq!(adapter.copy_froms.load(Ordering::SeqCst), 1);
+
+        assert_completed_operation_conflicts(&restarted, &ticket, exec_operation, copy_operation);
+        assert_eq!(adapter.execs.load(Ordering::SeqCst), 1);
+        assert_eq!(adapter.copy_tos.load(Ordering::SeqCst), 1);
+        assert_eq!(adapter.copy_froms.load(Ordering::SeqCst), 1);
     }
 
     #[test]

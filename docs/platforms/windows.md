@@ -167,9 +167,17 @@ and the abstract durable/host-compute ports live in
 module. The fixed named-pipe HCS/container-engine implementation is isolated in
 `automata-ci-windows-broker-hcs`. The sandbox adapter does not link either
 privileged implementation crate, and neither raw engine endpoints nor HCS
-documents cross the runner boundary. Service IPC, identity/ACL composition,
-and product installation remain future gates, so this split is component code,
-not a claim that hostile Windows workloads can run.
+documents cross the runner boundary. The HCS adapter invokes only the immutable
+in-image guest executable in one-request standard-I/O mode; literal workload
+argv, environment, exec, and copy semantics stay inside the bounded guest
+protocol. On Windows the guest places the workload in a nested Job Object with
+the admitted process ceiling and terminates the whole tree on timeout.
+Successful exec and copy outcomes are atomically retained with their exact
+request fingerprint in the bounded broker ledger, so response-loss and restart
+retries replay without a second host mutation and conflicting operation-ID
+reuse is rejected. Service IPC, identity/ACL composition, and product
+installation remain future gates, so this split is component code, not a claim
+that hostile Windows workloads can run.
 
 The current source tree now also has a provider-neutral lease-authority
 extension boundary. Before scheduling, protocol 3 carries a bounded canonical

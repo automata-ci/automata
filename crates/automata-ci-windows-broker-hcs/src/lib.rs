@@ -11,19 +11,12 @@
 //! create/start transport failure is deliberately classified as uncertain.
 
 use std::{
-    collections::HashMap,
-    fmt,
-    io::{Cursor, Read as _},
-    num::NonZeroU16,
-    str::FromStr as _,
-    sync::Arc,
-    time::Duration,
+    collections::HashMap, fmt, num::NonZeroU16, str::FromStr as _, sync::Arc, time::Duration,
 };
 
 use automata_ci_core::{EnvironmentProfile, EnvironmentProfileId, RunnerId, Sha256Digest};
 use automata_ci_execution::{
-    Cancellation, ExecutionOutput, ExecutionOutputRecord, ExecutionOutputStream,
-    ExecutionTermination, ResourceLimits, SandboxCustody, SandboxGeneration,
+    Cancellation, ExecutionOutput, ResourceLimits, SandboxCustody, SandboxGeneration,
 };
 use bollard::{
     API_DEFAULT_VERSION, Docker,
@@ -35,20 +28,21 @@ use bollard::{
         HostConfig, HostConfigIsolationEnum, HostConfigLogConfig,
     },
     query_parameters::{
-        CreateContainerOptionsBuilder, DownloadFromContainerOptionsBuilder,
-        KillContainerOptionsBuilder, ListContainersOptionsBuilder, RemoveContainerOptionsBuilder,
-        UploadToContainerOptionsBuilder,
+        CreateContainerOptionsBuilder, KillContainerOptionsBuilder, ListContainersOptionsBuilder,
+        RemoveContainerOptionsBuilder,
     },
 };
 use futures::StreamExt as _;
-use tar::{Archive, Builder, EntryType, Header};
-use tokio::runtime::Runtime;
+use tokio::{io::AsyncWriteExt as _, runtime::Runtime};
 
 use automata_ci_windows_broker::{
     BrokerAdapterEffect, BrokerCopyFromRequest, BrokerCopyToRequest, BrokerExecRequest,
     HostComputeAdapterError, HostComputeCreateRequest, HostComputeInspection,
     HostComputeObservedIsolation, HostComputeObservedState, HostComputeOperation,
     HostComputeProfileObservation, HostComputeProfileRequest, WindowsHostComputeAdapter,
+    decode_broker_copy_from_guest_response, decode_broker_copy_to_guest_response,
+    decode_broker_exec_guest_response, encode_broker_copy_from_guest_request,
+    encode_broker_copy_to_guest_request, encode_broker_exec_guest_request,
 };
 
 const ENGINE_PIPE: &str = "//./pipe/docker_engine";
@@ -67,8 +61,9 @@ const LABEL_MEMORY: &str = "io.automata.windows-hyperv-broker.memory-bytes";
 const LABEL_CPU: &str = "io.automata.windows-hyperv-broker.cpu-millis";
 const LABEL_PIDS: &str = "io.automata.windows-hyperv-broker.pids";
 const CONTAINER_USER: &str = "ContainerUser";
-const OUTPUT_RECORD_BYTES: usize = 64 * 1024;
-const MAX_ARCHIVE_OVERHEAD: usize = 1024 * 1024;
+const MAX_GUEST_RESPONSE_FRAME_BYTES: usize = 32 * 1024 * 1024 + 4;
+const GUEST_FILE_OPERATION_TIMEOUT: Duration = Duration::from_mins(5);
+const GUEST_EXEC_TRANSPORT_GRACE: Duration = Duration::from_secs(30);
 
 /// Production Windows host-compute adapter over the fixed local engine pipe.
 ///
@@ -125,6 +120,100 @@ impl WindowsEngineHostComputeAdapter {
                 HostComputeOperation::Inspect,
                 BrokerAdapterEffect::KnownNoEffect,
             )),
+        }
+    }
+
+    fn invoke_guest(
+        &self,
+        resource_id: &str,
+        guest_agent_path: &str,
+        request_frame: &[u8],
+        operation: HostComputeOperation,
+        timeout: Duration,
+        cancellation: &dyn Cancellation,
+    ) -> Result<Vec<u8>, HostComputeAdapterError> {
+        if cancellation.disposition().requires_termination() {
+            return Err(failure(operation, BrokerAdapterEffect::KnownNoEffect));
+        }
+        let config = ExecConfig {
+            attach_stdin: Some(true),
+            attach_stdout: Some(true),
+            attach_stderr: Some(true),
+            tty: Some(false),
+            env: Some(Vec::new()),
+            cmd: Some(vec![guest_agent_path.to_owned(), "stdio-once".to_owned()]),
+            privileged: Some(false),
+            user: Some(CONTAINER_USER.to_owned()),
+            ..Default::default()
+        };
+        let engine = self.engine.clone();
+        let resource_id = resource_id.to_owned();
+        let future = async {
+            let created = engine
+                .create_exec(&resource_id, config)
+                .await
+                .map_err(|_| ())?;
+            let started = engine
+                .start_exec(
+                    &created.id,
+                    Some(StartExecOptions {
+                        detach: false,
+                        tty: false,
+                        output_capacity: Some(64 * 1024),
+                    }),
+                )
+                .await
+                .map_err(|_| ())?;
+            let StartExecResults::Attached {
+                mut output,
+                mut input,
+            } = started
+            else {
+                return Err(());
+            };
+            input.write_all(request_frame).await.map_err(|_| ())?;
+            input.shutdown().await.map_err(|_| ())?;
+            drop(input);
+
+            let mut response = Vec::new();
+            loop {
+                let next = tokio::select! {
+                    item = output.next() => item,
+                    () = tokio::time::sleep(Duration::from_millis(100)) => {
+                        if cancellation.disposition().requires_termination() {
+                            return Err(());
+                        }
+                        continue;
+                    }
+                };
+                let Some(item) = next else { break };
+                match item.map_err(|_| ())? {
+                    LogOutput::StdOut { message } | LogOutput::Console { message } => {
+                        if response.len().saturating_add(message.len())
+                            > MAX_GUEST_RESPONSE_FRAME_BYTES
+                        {
+                            return Err(());
+                        }
+                        response.extend_from_slice(&message);
+                    }
+                    LogOutput::StdErr { message } if message.is_empty() => {}
+                    LogOutput::StdErr { .. } | LogOutput::StdIn { .. } => return Err(()),
+                }
+            }
+            let inspected = engine.inspect_exec(&created.id).await.map_err(|_| ())?;
+            if inspected.running != Some(false) || inspected.exit_code != Some(0) {
+                return Err(());
+            }
+            Ok(response)
+        };
+        if let Ok(Ok(response)) = self.runtime.block_on(tokio::time::timeout(timeout, future)) {
+            Ok(response)
+        } else {
+            let _ = self.runtime.block_on(self.engine.kill_container(
+                &resource_id,
+                Some(KillContainerOptionsBuilder::new().signal("SIGKILL").build()),
+            ));
+            Err(failure(operation, BrokerAdapterEffect::StateMayHaveChanged))
         }
     }
 }
@@ -329,136 +418,43 @@ impl WindowsHostComputeAdapter for WindowsEngineHostComputeAdapter {
         Ok(())
     }
 
-    #[allow(clippy::too_many_lines)]
     fn exec(
         &self,
         request: &BrokerExecRequest<'_>,
         cancellation: &dyn Cancellation,
     ) -> Result<ExecutionOutput, HostComputeAdapterError> {
-        if cancellation.disposition().requires_termination() {
-            return Err(failure(
+        let frame = encode_broker_exec_guest_request(request).map_err(|_| {
+            failure(
                 HostComputeOperation::Exec,
                 BrokerAdapterEffect::KnownNoEffect,
-            ));
-        }
-        let command = request.command();
-        if command
-            .environment()
-            .values()
-            .iter()
-            .any(automata_ci_execution::EnvironmentVariable::is_secret)
-        {
-            return Err(failure(
-                HostComputeOperation::Exec,
-                BrokerAdapterEffect::KnownNoEffect,
-            ));
-        }
-        let mut argv = Vec::with_capacity(command.argv().arguments().len().saturating_add(1));
-        argv.push(command.argv().program().as_str().to_owned());
-        argv.extend(command.argv().arguments().iter().cloned());
-        let environment = command
-            .environment()
-            .values()
-            .iter()
-            .map(|variable| format!("{}={}", variable.name().as_str(), variable.value().expose()))
-            .collect::<Vec<_>>();
-        let config = ExecConfig {
-            attach_stdin: Some(false),
-            attach_stdout: Some(true),
-            attach_stderr: Some(true),
-            tty: Some(false),
-            env: Some(environment),
-            cmd: Some(argv),
-            privileged: Some(false),
-            user: Some(CONTAINER_USER.to_owned()),
-            working_dir: Some(command.working_directory().as_str().to_owned()),
-            ..Default::default()
-        };
-        let resource_id = request.resource_id().to_owned();
-        let engine = self.engine.clone();
-        let output_limit = command.output_limit();
-        let future = async {
-            let created = engine
-                .create_exec(&resource_id, config)
-                .await
-                .map_err(|_| ())?;
-            let started = engine
-                .start_exec(
-                    &created.id,
-                    Some(StartExecOptions {
-                        detach: false,
-                        tty: false,
-                        output_capacity: Some(OUTPUT_RECORD_BYTES),
-                    }),
+            )
+        })?;
+        let timeout = request
+            .command()
+            .timeout()
+            .checked_add(GUEST_EXEC_TRANSPORT_GRACE)
+            .ok_or_else(|| {
+                failure(
+                    HostComputeOperation::Exec,
+                    BrokerAdapterEffect::KnownNoEffect,
                 )
-                .await
-                .map_err(|_| ())?;
-            let StartExecResults::Attached { mut output, .. } = started else {
-                return Err(());
-            };
-            let mut records = Vec::new();
-            let mut captured = 0_usize;
-            loop {
-                let next = tokio::select! {
-                    item = output.next() => item,
-                    () = tokio::time::sleep(Duration::from_millis(100)) => {
-                        if cancellation.disposition().requires_termination() {
-                            return Err(());
-                        }
-                        continue;
-                    }
-                };
-                let Some(item) = next else { break };
-                let item = item.map_err(|_| ())?;
-                let stream = match item {
-                    LogOutput::StdErr { .. } => ExecutionOutputStream::Stderr,
-                    LogOutput::StdOut { .. } | LogOutput::Console { .. } => {
-                        ExecutionOutputStream::Stdout
-                    }
-                    LogOutput::StdIn { .. } => return Err(()),
-                };
-                let bytes = item.into_bytes();
-                for chunk in bytes.chunks(OUTPUT_RECORD_BYTES) {
-                    captured = captured.checked_add(chunk.len()).ok_or(())?;
-                    if captured > output_limit {
-                        return Err(());
-                    }
-                    if !chunk.is_empty() {
-                        records.push(
-                            ExecutionOutputRecord::data(stream, chunk.to_vec()).map_err(|_| ())?,
-                        );
-                    }
-                }
-            }
-            let inspected = engine.inspect_exec(&created.id).await.map_err(|_| ())?;
-            if inspected.running != Some(false) {
-                return Err(());
-            }
-            let exit_code = i32::try_from(inspected.exit_code.ok_or(())?).map_err(|_| ())?;
-            records.push(ExecutionOutputRecord::end_of_stream(
-                ExecutionOutputStream::Stdout,
-            ));
-            records.push(ExecutionOutputRecord::end_of_stream(
-                ExecutionOutputStream::Stderr,
-            ));
-            ExecutionOutput::new(ExecutionTermination::Exited(exit_code), records, false)
-                .map_err(|_| ())
-        };
-        if let Ok(Ok(output)) = self
-            .runtime
-            .block_on(tokio::time::timeout(command.timeout(), future))
-        {
-            Ok(output)
-        } else {
-            let _ = self.runtime.block_on(self.engine.kill_container(
-                request.resource_id(),
-                Some(KillContainerOptionsBuilder::new().signal("SIGKILL").build()),
-            ));
-            Err(failure(
-                HostComputeOperation::Exec,
-                BrokerAdapterEffect::StateMayHaveChanged,
-            ))
-        }
+            })?;
+        let response = self.invoke_guest(
+            request.resource_id(),
+            request.guest_agent_path(),
+            &frame,
+            HostComputeOperation::Exec,
+            timeout,
+            cancellation,
+        )?;
+        decode_broker_exec_guest_response(&response, request.command().output_limit()).map_err(
+            |_| {
+                failure(
+                    HostComputeOperation::Exec,
+                    BrokerAdapterEffect::StateMayHaveChanged,
+                )
+            },
+        )
     }
 
     fn copy_to(
@@ -466,42 +462,26 @@ impl WindowsHostComputeAdapter for WindowsEngineHostComputeAdapter {
         request: &BrokerCopyToRequest<'_>,
         cancellation: &dyn Cancellation,
     ) -> Result<(), HostComputeAdapterError> {
-        if cancellation.disposition().requires_termination() {
-            return Err(failure(
-                HostComputeOperation::CopyTo,
-                BrokerAdapterEffect::KnownNoEffect,
-            ));
-        }
-        let (directory, basename) = split_windows_target(request.request().target().as_str())
-            .ok_or_else(|| {
-                failure(
-                    HostComputeOperation::CopyTo,
-                    BrokerAdapterEffect::KnownNoEffect,
-                )
-            })?;
-        let archive = one_file_archive(basename, request.request().content()).map_err(|()| {
+        let frame = encode_broker_copy_to_guest_request(request).map_err(|_| {
             failure(
                 HostComputeOperation::CopyTo,
                 BrokerAdapterEffect::KnownNoEffect,
             )
         })?;
-        let options = UploadToContainerOptionsBuilder::new()
-            .path(directory)
-            .no_overwrite_dir_non_dir("true")
-            .copy_uidgid("false")
-            .build();
-        self.runtime
-            .block_on(self.engine.upload_to_container(
-                request.resource_id(),
-                Some(options),
-                bollard::body_full(archive.into()),
-            ))
-            .map_err(|_| {
-                failure(
-                    HostComputeOperation::CopyTo,
-                    BrokerAdapterEffect::StateMayHaveChanged,
-                )
-            })
+        let response = self.invoke_guest(
+            request.resource_id(),
+            request.guest_agent_path(),
+            &frame,
+            HostComputeOperation::CopyTo,
+            GUEST_FILE_OPERATION_TIMEOUT,
+            cancellation,
+        )?;
+        decode_broker_copy_to_guest_response(&response).map_err(|_| {
+            failure(
+                HostComputeOperation::CopyTo,
+                BrokerAdapterEffect::StateMayHaveChanged,
+            )
+        })
     }
 
     fn copy_from(
@@ -509,56 +489,28 @@ impl WindowsHostComputeAdapter for WindowsEngineHostComputeAdapter {
         request: &BrokerCopyFromRequest<'_>,
         cancellation: &dyn Cancellation,
     ) -> Result<Vec<u8>, HostComputeAdapterError> {
-        if cancellation.disposition().requires_termination() {
-            return Err(failure(
-                HostComputeOperation::CopyFrom,
-                BrokerAdapterEffect::KnownNoEffect,
-            ));
-        }
-        let source = request.request().source().as_str();
-        let (_, basename) = split_windows_target(source).ok_or_else(|| {
+        let frame = encode_broker_copy_from_guest_request(request).map_err(|_| {
             failure(
                 HostComputeOperation::CopyFrom,
                 BrokerAdapterEffect::KnownNoEffect,
             )
         })?;
-        let options = DownloadFromContainerOptionsBuilder::new()
-            .path(source)
-            .build();
-        let byte_limit = request.request().byte_limit();
-        let stream = self
-            .engine
-            .download_from_container(request.resource_id(), Some(options));
-        let archive = self
-            .runtime
-            .block_on(async {
-                futures::pin_mut!(stream);
-                let mut bytes = Vec::new();
-                while let Some(chunk) = stream.next().await {
-                    if cancellation.disposition().requires_termination() {
-                        return Err(());
-                    }
-                    let chunk = chunk.map_err(|_| ())?;
-                    let maximum = byte_limit.checked_add(MAX_ARCHIVE_OVERHEAD).ok_or(())?;
-                    if bytes.len().saturating_add(chunk.len()) > maximum {
-                        return Err(());
-                    }
-                    bytes.extend_from_slice(&chunk);
-                }
-                Ok::<_, ()>(bytes)
-            })
-            .map_err(|()| {
+        let response = self.invoke_guest(
+            request.resource_id(),
+            request.guest_agent_path(),
+            &frame,
+            HostComputeOperation::CopyFrom,
+            GUEST_FILE_OPERATION_TIMEOUT,
+            cancellation,
+        )?;
+        decode_broker_copy_from_guest_response(&response, request.request().byte_limit()).map_err(
+            |_| {
                 failure(
                     HostComputeOperation::CopyFrom,
-                    BrokerAdapterEffect::KnownNoEffect,
+                    BrokerAdapterEffect::StateMayHaveChanged,
                 )
-            })?;
-        extract_one_file(&archive, basename, byte_limit).map_err(|()| {
-            failure(
-                HostComputeOperation::CopyFrom,
-                BrokerAdapterEffect::KnownNoEffect,
-            )
-        })
+            },
+        )
     }
 
     fn terminate_descendants(&self, resource_id: &str) -> Result<(), HostComputeAdapterError> {
@@ -777,66 +729,6 @@ fn custody_from_labels(
             .ok_or_else(|| closed(operation)),
         _ => Err(closed(operation)),
     }
-}
-
-fn one_file_archive(name: &str, content: &[u8]) -> Result<Vec<u8>, ()> {
-    if !valid_archive_name(name) {
-        return Err(());
-    }
-    let mut bytes = Vec::new();
-    {
-        let mut archive = Builder::new(&mut bytes);
-        let mut header = Header::new_gnu();
-        header.set_entry_type(EntryType::Regular);
-        header.set_mode(0o600);
-        header.set_uid(0);
-        header.set_gid(0);
-        header.set_mtime(0);
-        header.set_size(u64::try_from(content.len()).map_err(|_| ())?);
-        header.set_cksum();
-        archive
-            .append_data(&mut header, name, content)
-            .map_err(|_| ())?;
-        archive.finish().map_err(|_| ())?;
-    }
-    Ok(bytes)
-}
-
-fn extract_one_file(archive: &[u8], name: &str, limit: usize) -> Result<Vec<u8>, ()> {
-    if !valid_archive_name(name) {
-        return Err(());
-    }
-    let mut archive_reader = Archive::new(Cursor::new(archive));
-    let mut entries = archive_reader.entries().map_err(|_| ())?;
-    let mut entry = entries.next().ok_or(())?.map_err(|_| ())?;
-    if entries.next().is_some()
-        || !entry.header().entry_type().is_file()
-        || entry.path().map_err(|_| ())?.to_str() != Some(name)
-        || usize::try_from(entry.size()).map_err(|_| ())? > limit
-    {
-        return Err(());
-    }
-    let mut bytes = Vec::with_capacity(usize::try_from(entry.size()).map_err(|_| ())?);
-    entry
-        .by_ref()
-        .take(u64::try_from(limit).map_err(|_| ())?.saturating_add(1))
-        .read_to_end(&mut bytes)
-        .map_err(|_| ())?;
-    (bytes.len() <= limit).then_some(bytes).ok_or(())
-}
-
-fn split_windows_target(path: &str) -> Option<(&str, &str)> {
-    let (directory, name) = path.rsplit_once('\\')?;
-    (!directory.is_empty() && valid_archive_name(name)).then_some((directory, name))
-}
-
-fn valid_archive_name(name: &str) -> bool {
-    !name.is_empty()
-        && name != "."
-        && name != ".."
-        && name.len() <= 255
-        && !name.contains(['/', '\\', ':', '\0'])
-        && !name.ends_with([' ', '.'])
 }
 
 fn valid_resource_id(value: &str) -> bool {

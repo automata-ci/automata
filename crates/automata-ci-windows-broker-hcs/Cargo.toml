@@ -22,5 +22,4 @@ automata-ci-windows-broker.workspace = true
 [target.'cfg(windows)'.dependencies]
 bollard.workspace = true
 futures.workspace = true
-tar.workspace = true
 tokio.workspace = true

@@ -7,6 +7,8 @@
 //! ports are service-owned; concrete host-compute and file-system adapters are
 //! kept behind those ports.
 
+mod guest;
 mod service;
 
+pub use guest::*;
 pub use service::*;

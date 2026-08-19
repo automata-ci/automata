@@ -1275,6 +1275,8 @@ version = "0.1.0"
 dependencies = [
  "automata-ci-core",
  "automata-ci-execution",
+ "automata-ci-sandbox-guest",
+ "base64 0.23.1",
  "ring",
  "serde",
  "serde_json",
@@ -1291,7 +1293,6 @@ dependencies = [
  "automata-ci-windows-broker",
  "bollard",
  "futures",
- "tar",
  "tokio",
 ]
 
