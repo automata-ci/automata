@@ -9,6 +9,13 @@ Portable callers should depend on the ports in `automata-ci-store` and
 concrete adapter directly. `automata-ci-postgres` owns only shared PostgreSQL
 test support.
 
+Provider-neutral workflow admission atomically records immutable trigger,
+provider-selection, runner-policy, request, and original processing-fence
+evidence. The selected runner-policy schema and canonical digest must resolve
+to one sealed current policy, which is pinned to the run in the same
+transaction. A replay must match that original evidence and retained pin even
+when a newer live claim has reclaimed the same delivery invocation.
+
 ## Schema migrations
 
 The crate uses SQLx's embedded migrator; another Rust migration framework would

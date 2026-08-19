@@ -236,6 +236,7 @@ dependencies = [
  "automata-ci-protocol",
  "automata-ci-protocol-protobuf",
  "automata-ci-provider",
+ "automata-ci-provider-delivery",
  "automata-ci-provider-github",
  "automata-ci-provisioning",
  "automata-ci-provisioning-grpc",
@@ -530,6 +531,7 @@ dependencies = [
  "automata-ci-blob",
  "automata-ci-core",
  "automata-ci-provider",
+ "automata-ci-provider-delivery",
  "automata-ci-provider-github",
  "automata-ci-schedule",
  "automata-ci-scm",
@@ -754,6 +756,9 @@ dependencies = [
  "sha2 0.11.0",
  "thiserror",
  "tokio",
+ "tokio-util",
+ "url",
+ "uuid",
 ]
 
 [[package]]
@@ -791,6 +796,9 @@ dependencies = [
  "automata-ci-key-management",
  "automata-ci-postgres",
  "automata-ci-provider",
+ "automata-ci-store",
+ "automata-ci-store-postgres",
+ "serde_json",
  "sha2 0.11.0",
  "sqlx",
  "tokio",

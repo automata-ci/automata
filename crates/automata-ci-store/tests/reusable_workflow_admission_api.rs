@@ -285,8 +285,7 @@ fn build_command(
             RepositoryId::from_uuid(Uuid::from_u128(400)),
             "github",
             "400",
-            "example",
-            "repository",
+            "example/repository",
         )
         .expect("valid repository"),
         WorkflowId::from_uuid(Uuid::from_u128(401)),

@@ -6,9 +6,10 @@ use automata_ci_core::GitObjectAlgorithm;
 use automata_ci_provider::{
     ChangedFileCapability, ChangedFileCompleteness, ProviderCapabilities, ProviderCapability,
     ProviderConfigurationDocument, ProviderConfigurationFactory, ProviderConnectionFactoryRequest,
-    ProviderConnectionManifest, ProviderConnectionPolicyDocument, ProviderDescriptor,
-    ProviderFactoryRequest, ProviderFactoryValidationError, ProviderSchemaVersion, ProviderTypeId,
-    RepositoryEventCapability, RepositoryEventKind, SourceReadCapability,
+    ProviderConnectionManifest, ProviderConnectionPolicyDocument, ProviderFactoryRequest,
+    ProviderFactoryValidationError, ProviderInstanceManifest, ProviderSchemaVersion,
+    ProviderTypeId, RepositoryEventCapability, RepositoryEventKind, RichCheckCapability,
+    SourceReadCapability,
 };
 use automata_ci_scm::{RepositoryId, RepositorySourceConnection};
 use serde::{Deserialize, Serialize};
@@ -17,16 +18,34 @@ use url::Url;
 
 use crate::{GITHUB_API_VERSION, GithubHttpEndpoint, GithubHttpLimits, GithubTrustedOrigins};
 
-const GITHUB_CONFIGURATION_SCHEMA: u16 = 1;
+const GITHUB_CONFIGURATION_SCHEMA: u16 = 2;
 const GITHUB_CONNECTION_SCHEMA: u16 = 1;
 const MAX_GITHUB_INSTALLATION_ID: u64 = i64::MAX as u64;
+const MAX_GITHUB_APP_PRIVATE_KEY_BYTES: usize = 32 * 1_024;
+/// Canonical provider-instance secret name for the GitHub App private key.
+pub const GITHUB_APP_PRIVATE_KEY_SECRET_NAME: &str = "app-private-key";
+/// Canonical provider-instance secret name for webhook HMAC verification.
+pub const GITHUB_WEBHOOK_SECRET_NAME: &str = "webhook-secret";
 
 /// Canonical non-secret configuration owned by one GitHub provider instance.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct GithubInstanceConfiguration {
+    app_id: NonZeroU64,
+    app_client_id: String,
+    jwt_issuer: GithubJwtIssuer,
     rest_api_version: String,
     archive_origin: String,
+}
+
+/// GitHub App identity placed in the `iss` claim of short-lived App JWTs.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GithubJwtIssuer {
+    /// Use the numeric GitHub App identity.
+    AppId,
+    /// Use the App's stable client identity.
+    AppClientId,
 }
 
 impl GithubInstanceConfiguration {
@@ -35,12 +54,50 @@ impl GithubInstanceConfiguration {
     /// # Errors
     ///
     /// Rejects a noncanonical credential-bearing or non-HTTPS origin.
-    pub fn new(archive_origin: Url) -> Result<Self, GithubFactoryError> {
+    pub fn new(
+        app_id: u64,
+        app_client_id: impl Into<String>,
+        jwt_issuer: GithubJwtIssuer,
+        archive_origin: Url,
+    ) -> Result<Self, GithubFactoryError> {
         validate_archive_origin(&archive_origin)?;
+        let app_id = NonZeroU64::new(app_id)
+            .filter(|value| value.get() <= MAX_GITHUB_INSTALLATION_ID)
+            .ok_or(GithubFactoryError::InvalidConfiguration)?;
+        let app_client_id = app_client_id.into();
+        if app_client_id.is_empty()
+            || app_client_id.len() > 255
+            || !app_client_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        {
+            return Err(GithubFactoryError::InvalidConfiguration);
+        }
         Ok(Self {
+            app_id,
+            app_client_id,
+            jwt_issuer,
             rest_api_version: GITHUB_API_VERSION.to_owned(),
             archive_origin: archive_origin.into(),
         })
+    }
+
+    /// Returns the configured GitHub App identity.
+    #[must_use]
+    pub const fn app_id(&self) -> NonZeroU64 {
+        self.app_id
+    }
+
+    /// Returns the configured GitHub App client identity.
+    #[must_use]
+    pub fn app_client_id(&self) -> &str {
+        &self.app_client_id
+    }
+
+    /// Returns the configured App JWT issuer form.
+    #[must_use]
+    pub const fn jwt_issuer(&self) -> GithubJwtIssuer {
+        self.jwt_issuer
     }
 
     /// Returns the pinned GitHub REST API version.
@@ -74,6 +131,15 @@ impl GithubInstanceConfiguration {
             bytes,
         )
         .map_err(|_| GithubFactoryError::InvalidConfiguration)
+    }
+
+    /// Decodes the current exact canonical GitHub instance schema.
+    ///
+    /// # Errors
+    ///
+    /// Rejects schema drift, unknown fields, noncanonical bytes, or invalid values.
+    pub fn decode(document: &ProviderConfigurationDocument) -> Result<Self, GithubFactoryError> {
+        decode_instance(document)
     }
 }
 
@@ -128,6 +194,15 @@ impl GithubConnectionPolicy {
         )
         .map_err(|_| GithubFactoryError::InvalidConnection)
     }
+
+    /// Decodes the current exact canonical GitHub connection policy schema.
+    ///
+    /// # Errors
+    ///
+    /// Rejects schema drift, unknown fields, noncanonical bytes, or invalid values.
+    pub fn decode(document: &ProviderConnectionPolicyDocument) -> Result<Self, GithubFactoryError> {
+        decode_connection(document)
+    }
 }
 
 /// Static GitHub adapter factory registered under the `github` provider type.
@@ -179,31 +254,35 @@ impl GithubProviderFactory {
                 )
                 .map_err(|_| GithubFactoryError::InvalidCapabilities)?,
             ),
+            ProviderCapability::RichChecks(
+                RichCheckCapability::new(true, false, true)
+                    .map_err(|_| GithubFactoryError::InvalidCapabilities)?,
+            ),
         ])
         .map_err(|_| GithubFactoryError::InvalidCapabilities)
     }
 
-    /// Constructs the hardened HTTP/source adapter for one validated descriptor.
+    /// Constructs the hardened HTTP/source adapter from non-secret manifest policy.
     ///
     /// # Errors
     ///
-    /// Rejects a descriptor for another provider type, invalid or noncanonical
-    /// configuration, ambient instance secrets, or unsafe provider origins.
+    /// Rejects a manifest for another provider type, invalid or noncanonical
+    /// configuration, or unsafe provider origins. Plaintext instance secrets
+    /// are never passed to this source-only constructor.
     pub fn repository_source(
         &self,
-        descriptor: &ProviderDescriptor,
+        manifest: &ProviderInstanceManifest,
         user_agent: &str,
         limits: GithubHttpLimits,
     ) -> Result<GithubHttpEndpoint, GithubFactoryError> {
-        if descriptor.manifest().provider_type() != &self.provider_type {
+        if manifest.provider_type() != &self.provider_type {
             return Err(GithubFactoryError::ProviderTypeMismatch);
         }
-        let configuration = decode_instance(descriptor.manifest().configuration())?;
-        validate_no_instance_secrets(descriptor.manifest().secrets().len())?;
-        let web = Url::parse(descriptor.manifest().origins().web())
-            .map_err(|_| GithubFactoryError::InvalidOrigins)?;
-        let api = Url::parse(descriptor.manifest().origins().api())
-            .map_err(|_| GithubFactoryError::InvalidOrigins)?;
+        let configuration = decode_instance(manifest.configuration())?;
+        let web =
+            Url::parse(manifest.origins().web()).map_err(|_| GithubFactoryError::InvalidOrigins)?;
+        let api =
+            Url::parse(manifest.origins().api()).map_err(|_| GithubFactoryError::InvalidOrigins)?;
         let trusted = GithubTrustedOrigins::new(web, api, user_agent, limits)
             .map_err(|_| GithubFactoryError::InvalidOrigins)?;
         GithubHttpEndpoint::new_with_archive_origin(trusted, configuration.archive_origin()?)
@@ -218,12 +297,11 @@ impl GithubProviderFactory {
     /// connection-policy drift.
     pub fn source_connection(
         &self,
-        descriptor: &ProviderDescriptor,
+        provider: &ProviderInstanceManifest,
         connection: &ProviderConnectionManifest,
     ) -> Result<RepositorySourceConnection, GithubFactoryError> {
-        let provider = descriptor.manifest();
         let configuration = connection.configuration();
-        if descriptor.manifest().provider_type() != &self.provider_type
+        if provider.provider_type() != &self.provider_type
             || configuration.repository().instance_id() != provider.instance_id()
             || configuration.provider_revision() != provider.revision()
             || configuration.provider_configuration_digest() != provider.configuration().digest()
@@ -268,11 +346,7 @@ impl ProviderConfigurationFactory for GithubProviderFactory {
         &self,
         request: ProviderFactoryRequest<'_>,
     ) -> Result<ProviderCapabilities, ProviderFactoryValidationError> {
-        validate_no_instance_secrets(request.manifest().secrets().len())
-            .map_err(map_instance_validation_error)?;
-        if request.secrets().names().next().is_some() {
-            return Err(ProviderFactoryValidationError::InvalidSecrets);
-        }
+        validate_instance_secrets(request).map_err(map_instance_validation_error)?;
         let web = Url::parse(request.manifest().origins().web())
             .map_err(|_| ProviderFactoryValidationError::InvalidOrigins)?;
         let api = Url::parse(request.manifest().origins().api())
@@ -344,12 +418,37 @@ pub(crate) fn decode_connection(
     Ok(decoded)
 }
 
-fn validate_no_instance_secrets(secret_count: usize) -> Result<(), GithubFactoryError> {
-    if secret_count == 0 {
-        Ok(())
-    } else {
-        Err(GithubFactoryError::InvalidSecrets)
+fn validate_instance_secrets(
+    request: ProviderFactoryRequest<'_>,
+) -> Result<(), GithubFactoryError> {
+    let app_key_name =
+        automata_ci_provider::ProviderSecretName::new(GITHUB_APP_PRIVATE_KEY_SECRET_NAME)
+            .map_err(|_| GithubFactoryError::InvalidSecrets)?;
+    let webhook_name = automata_ci_provider::ProviderSecretName::new(GITHUB_WEBHOOK_SECRET_NAME)
+        .map_err(|_| GithubFactoryError::InvalidSecrets)?;
+    let bindings = request.manifest().secrets();
+    if bindings.len() != 2
+        || bindings.get(&app_key_name).is_none()
+        || bindings.get(&webhook_name).is_none()
+    {
+        return Err(GithubFactoryError::InvalidSecrets);
     }
+    let app_key = request
+        .secrets()
+        .get(&app_key_name)
+        .ok_or(GithubFactoryError::InvalidSecrets)?;
+    if app_key.len() > MAX_GITHUB_APP_PRIVATE_KEY_BYTES
+        || !app_key.expose_secret().starts_with(b"-----BEGIN ")
+    {
+        return Err(GithubFactoryError::InvalidSecrets);
+    }
+    let webhook = request
+        .secrets()
+        .get(&webhook_name)
+        .ok_or(GithubFactoryError::InvalidSecrets)?;
+    crate::GithubWebhookVerifier::new(webhook.expose_secret())
+        .map(|_| ())
+        .map_err(|_| GithubFactoryError::InvalidSecrets)
 }
 
 fn validate_archive_origin(origin: &Url) -> Result<(), GithubFactoryError> {

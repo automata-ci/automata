@@ -14,6 +14,7 @@ use tokio::{
     sync::watch,
     time::{Duration, sleep},
 };
+use tokio_util::sync::CancellationToken;
 
 use crate::ProviderDeliveryClock;
 
@@ -61,6 +62,12 @@ impl ProviderProcessingLease {
     #[must_use]
     pub fn current(&self) -> automata_ci_provider::ProviderProcessingClaimFence {
         *self.fence.borrow()
+    }
+}
+
+impl automata_ci_provider::ProviderProcessingClaimSource for ProviderProcessingLease {
+    fn current_fence(&self) -> automata_ci_provider::ProviderProcessingClaimFence {
+        self.current()
     }
 }
 
@@ -171,6 +178,55 @@ impl ProviderProcessingWorker {
                 WorkerStep::Finished(outcome) => return Ok(outcome),
             }
         }
+    }
+
+    /// Polls and processes provider invocations until shutdown.
+    ///
+    /// Transient clock or repository unavailability uses the configured retry
+    /// delay. A lost claim is already fenced and immediately returns to the
+    /// queue. Invalid configuration, source binding, or durable state stops the
+    /// service instead of spinning on corruption.
+    ///
+    /// The current provider operation is allowed to reach its bounded result
+    /// after shutdown is requested; a new claim is never started afterward.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first non-retryable worker failure.
+    pub async fn run(
+        &self,
+        shutdown: CancellationToken,
+    ) -> Result<(), ProviderProcessingWorkerError> {
+        loop {
+            if shutdown.is_cancelled() {
+                return Ok(());
+            }
+            match self.run_once().await {
+                Ok(
+                    ProviderProcessingWorkerOutcome::Completed
+                    | ProviderProcessingWorkerOutcome::Retried
+                    | ProviderProcessingWorkerOutcome::Failed,
+                )
+                | Err(ProviderProcessingWorkerError::ClaimExpired) => {}
+                Ok(ProviderProcessingWorkerOutcome::Idle)
+                | Err(
+                    ProviderProcessingWorkerError::Clock
+                    | ProviderProcessingWorkerError::Unavailable,
+                ) => {
+                    if sleep_or_shutdown(self.retry_duration(), &shutdown).await {
+                        return Ok(());
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    fn retry_duration(&self) -> Duration {
+        Duration::from_millis(
+            u64::try_from(self.config.retry_millis)
+                .expect("validated positive provider retry duration fits u64"),
+        )
     }
 
     async fn apply_outcome(
@@ -288,6 +344,13 @@ impl ProviderProcessingWorker {
                 }
             }
         }
+    }
+}
+
+async fn sleep_or_shutdown(duration: Duration, shutdown: &CancellationToken) -> bool {
+    tokio::select! {
+        () = shutdown.cancelled() => true,
+        () = sleep(duration) => false,
     }
 }
 
@@ -431,20 +494,26 @@ mod tests {
         atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering},
     };
 
-    use automata_ci_core::{GitObjectId, Sha256Digest};
+    use automata_ci_core::{GitObjectId, Sha256Digest, WorkspaceId};
     use automata_ci_provider::{
         ExternalDeliveryId, ExternalDeliveryIdentity, ExternalRepositoryId,
-        ExternalRepositoryIdentity, NormalizedTrigger, ProviderConfigurationRevision,
-        ProviderConnectionId, ProviderConnectionRevision, ProviderControl, ProviderControlDocument,
-        ProviderControlKind, ProviderDeliveryId, ProviderDeliveryObservations, ProviderEventName,
-        ProviderGitRef, ProviderGitRefKind, ProviderInstanceId, ProviderProcessingClaimFence,
+        ExternalRepositoryIdentity, NormalizedTrigger, ProviderArchiveLimits,
+        ProviderConfigurationDocument, ProviderConfigurationRevision,
+        ProviderConnectionConfiguration, ProviderConnectionId, ProviderConnectionManifest,
+        ProviderConnectionPolicyDocument, ProviderConnectionRevision, ProviderControl,
+        ProviderControlDocument, ProviderControlKind, ProviderDefaultBranch, ProviderDeliveryId,
+        ProviderDeliveryObservations, ProviderEventName, ProviderGitRef, ProviderGitRefKind,
+        ProviderInstanceId, ProviderInstanceManifest, ProviderInstanceRecord,
+        ProviderLifecycleState, ProviderManifestRepository, ProviderProcessingClaimFence,
         ProviderProcessingFuture, ProviderProcessingInvocationId, ProviderProcessingReceipt,
-        ProviderProcessingState, ProviderRepository, ProviderRepositoryPath, ProviderSchemaVersion,
-        ProviderSecretGeneration, ProviderSecretName, ProviderTypeId, ProviderWebhookEndpointId,
-        ProviderWebhookEndpointRevision, ProviderWebhookSecretReference,
-        ProviderWebhookSignatureEvidence, PushCommitEvidence, PushTrigger, RepositoryVisibility,
-        RetryProviderProcessing, VerifiedProviderControlDelivery, VerifiedProviderTriggerDelivery,
-        provider_raw_webhook_descriptor,
+        ProviderProcessingState, ProviderRepository, ProviderRepositoryError,
+        ProviderRepositoryFuture, ProviderRepositoryPath, ProviderRunnerPolicyBinding,
+        ProviderSaveOutcome, ProviderSchemaVersion, ProviderSecretBindings,
+        ProviderSecretGeneration, ProviderSecretName, ProviderSecretSet, ProviderTypeId,
+        ProviderWebhookEndpointId, ProviderWebhookEndpointRevision, ProviderWebhookSecretReference,
+        ProviderWebhookSignatureEvidence, ProviderWorkflowSource, PushCommitEvidence, PushTrigger,
+        RepositoryVisibility, RetryProviderProcessing, VerifiedProviderControlDelivery,
+        VerifiedProviderTriggerDelivery, provider_raw_webhook_descriptor,
     };
 
     use super::*;
@@ -463,6 +532,20 @@ mod tests {
     struct SlowProcessor {
         initial_expiry: AtomicI64,
         final_expiry: AtomicI64,
+    }
+
+    #[derive(Debug)]
+    struct StaticProcessor(ProviderProcessingOutcome);
+
+    #[async_trait]
+    impl ProviderProcessingProcessor for StaticProcessor {
+        async fn process(
+            &self,
+            _delivery: &ClaimedProviderProcessing,
+            _lease: &ProviderProcessingLease,
+        ) -> ProviderProcessingOutcome {
+            self.0
+        }
     }
 
     #[async_trait]
@@ -506,19 +589,29 @@ mod tests {
 
         async fn process_trigger(
             &self,
+            context: &crate::ProviderRuntimeContext,
             _trigger: &VerifiedProviderTriggerDelivery,
             _invocation: &ClaimedProviderProcessing,
             _lease: &ProviderProcessingLease,
         ) -> crate::ProviderTriggerOutcome {
+            assert_eq!(
+                context.provider().manifest().provider_type(),
+                &self.provider_type
+            );
             self.trigger_calls.fetch_add(1, Ordering::SeqCst);
             crate::ProviderTriggerOutcome::Complete
         }
 
         async fn handle_control(
             &self,
+            context: &crate::ProviderRuntimeContext,
             _control: &VerifiedProviderControlDelivery,
             _lease: &ProviderProcessingLease,
         ) -> Result<Option<ProviderDeliveryId>, crate::ProviderControlHandlingError> {
+            assert_eq!(
+                context.provider().manifest().provider_type(),
+                &self.provider_type
+            );
             self.control_calls.fetch_add(1, Ordering::SeqCst);
             if !self.handled.swap(true, Ordering::SeqCst) {
                 self.effects.fetch_add(1, Ordering::SeqCst);
@@ -535,19 +628,29 @@ mod tests {
 
         async fn process_trigger(
             &self,
+            context: &crate::ProviderRuntimeContext,
             _trigger: &VerifiedProviderTriggerDelivery,
             _invocation: &ClaimedProviderProcessing,
             _lease: &ProviderProcessingLease,
         ) -> crate::ProviderTriggerOutcome {
+            assert_eq!(
+                context.provider().manifest().provider_type(),
+                &self.provider_type
+            );
             self.trigger_calls.fetch_add(1, Ordering::SeqCst);
             crate::ProviderTriggerOutcome::Complete
         }
 
         async fn handle_control(
             &self,
+            context: &crate::ProviderRuntimeContext,
             _control: &VerifiedProviderControlDelivery,
             lease: &ProviderProcessingLease,
         ) -> Result<Option<ProviderDeliveryId>, crate::ProviderControlHandlingError> {
+            assert_eq!(
+                context.provider().manifest().provider_type(),
+                &self.provider_type
+            );
             assert!(lease.current().expires_at() > lease.current().claimed_at());
             self.control_calls.fetch_add(1, Ordering::SeqCst);
             Ok(self.source_delivery_id)
@@ -558,8 +661,97 @@ mod tests {
     struct RecordingRepository {
         claim: Mutex<Option<ClaimedProviderProcessing>>,
         receipt: ProviderProcessingReceipt,
+        claims: AtomicUsize,
         renewals: AtomicUsize,
         completed: Mutex<Option<ProviderProcessingClaimFence>>,
+    }
+
+    #[derive(Debug)]
+    struct RuntimeManifestRepository {
+        manifest: ProviderInstanceManifest,
+        connection: ProviderConnectionManifest,
+        available: bool,
+    }
+
+    impl ProviderManifestRepository for RuntimeManifestRepository {
+        fn save_instance(
+            &self,
+            _record: ProviderInstanceRecord,
+        ) -> ProviderRepositoryFuture<'_, ProviderSaveOutcome> {
+            Box::pin(async { Err(ProviderRepositoryError::Unavailable) })
+        }
+
+        fn load_instance(
+            &self,
+            instance_id: ProviderInstanceId,
+            revision: ProviderConfigurationRevision,
+        ) -> ProviderRepositoryFuture<'_, Option<ProviderInstanceRecord>> {
+            Box::pin(async move {
+                if !self.available {
+                    return Err(ProviderRepositoryError::Unavailable);
+                }
+                if self.manifest.instance_id() != instance_id
+                    || self.manifest.revision() != revision
+                {
+                    return Ok(None);
+                }
+                let secrets = ProviderSecretSet::new(self.manifest.secrets(), [])
+                    .map_err(|_| ProviderRepositoryError::Corrupt)?;
+                ProviderInstanceRecord::new(self.manifest.clone(), secrets).map(Some)
+            })
+        }
+
+        fn current_instance(
+            &self,
+            instance_id: ProviderInstanceId,
+        ) -> ProviderRepositoryFuture<'_, Option<ProviderInstanceRecord>> {
+            Box::pin(async move {
+                if !self.available {
+                    return Err(ProviderRepositoryError::Unavailable);
+                }
+                if self.manifest.instance_id() != instance_id {
+                    return Ok(None);
+                }
+                let secrets = ProviderSecretSet::new(self.manifest.secrets(), [])
+                    .map_err(|_| ProviderRepositoryError::Corrupt)?;
+                ProviderInstanceRecord::new(self.manifest.clone(), secrets).map(Some)
+            })
+        }
+
+        fn save_connection(
+            &self,
+            _manifest: ProviderConnectionManifest,
+        ) -> ProviderRepositoryFuture<'_, ProviderSaveOutcome> {
+            Box::pin(async { Err(ProviderRepositoryError::Unavailable) })
+        }
+
+        fn load_connection(
+            &self,
+            connection_id: ProviderConnectionId,
+            revision: ProviderConnectionRevision,
+        ) -> ProviderRepositoryFuture<'_, Option<ProviderConnectionManifest>> {
+            Box::pin(async move {
+                if !self.available {
+                    return Err(ProviderRepositoryError::Unavailable);
+                }
+                Ok((self.connection.connection_id() == connection_id
+                    && self.connection.revision() == revision)
+                    .then(|| self.connection.clone()))
+            })
+        }
+
+        fn current_connection(
+            &self,
+            connection_id: ProviderConnectionId,
+        ) -> ProviderRepositoryFuture<'_, Option<ProviderConnectionManifest>> {
+            Box::pin(async move {
+                if !self.available {
+                    return Err(ProviderRepositoryError::Unavailable);
+                }
+                Ok((self.connection.connection_id() == connection_id)
+                    .then(|| self.connection.clone()))
+            })
+        }
     }
 
     impl ProviderProcessingRepository for RecordingRepository {
@@ -567,7 +759,10 @@ mod tests {
             &self,
             _request: ClaimProviderProcessing,
         ) -> ProviderProcessingFuture<'_, Option<ClaimedProviderProcessing>> {
-            Box::pin(async move { Ok(self.claim.lock().expect("claim lock").take()) })
+            Box::pin(async move {
+                self.claims.fetch_add(1, Ordering::SeqCst);
+                Ok(self.claim.lock().expect("claim lock").take())
+            })
         }
 
         fn bind_processing_source(
@@ -711,6 +906,7 @@ mod tests {
         let repository = Arc::new(RecordingRepository {
             receipt: claim.receipt(),
             claim: Mutex::new(Some(claim)),
+            claims: AtomicUsize::new(0),
             renewals: AtomicUsize::new(0),
             completed: Mutex::new(None),
         });
@@ -747,9 +943,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancelled_service_does_not_claim_more_work() {
+        let worker_id = ProviderProcessingWorkerId::new();
+        let fixture = claimed(worker_id);
+        let repository = Arc::new(RecordingRepository {
+            receipt: fixture.receipt(),
+            claim: Mutex::new(Some(fixture)),
+            claims: AtomicUsize::new(0),
+            renewals: AtomicUsize::new(0),
+            completed: Mutex::new(None),
+        });
+        let worker = ProviderProcessingWorker::new(
+            worker_id,
+            Arc::clone(&repository) as Arc<dyn ProviderProcessingRepository>,
+            Arc::new(StaticProcessor(ProviderProcessingOutcome::Complete)),
+            Arc::new(StepClock(AtomicI64::new(1_000))),
+            ProviderProcessingWorkerConfig::new(60, 30).expect("config"),
+        );
+        let shutdown = CancellationToken::new();
+        shutdown.cancel();
+
+        worker.run(shutdown).await.expect("clean shutdown");
+
+        assert_eq!(repository.claims.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn service_stops_on_invalid_processing_contract() {
+        let worker_id = ProviderProcessingWorkerId::new();
+        let fixture = claimed(worker_id);
+        let repository = Arc::new(RecordingRepository {
+            receipt: fixture.receipt(),
+            claim: Mutex::new(Some(fixture)),
+            claims: AtomicUsize::new(0),
+            renewals: AtomicUsize::new(0),
+            completed: Mutex::new(None),
+        });
+        let worker = ProviderProcessingWorker::new(
+            worker_id,
+            Arc::clone(&repository) as Arc<dyn ProviderProcessingRepository>,
+            Arc::new(StaticProcessor(ProviderProcessingOutcome::ResolveControl(
+                ProviderDeliveryId::new(),
+            ))),
+            Arc::new(StepClock(AtomicI64::new(1_000))),
+            ProviderProcessingWorkerConfig::new(60, 30).expect("config"),
+        );
+
+        assert_eq!(
+            worker.run(CancellationToken::new()).await,
+            Err(ProviderProcessingWorkerError::InvalidSourceBinding)
+        );
+        assert_eq!(repository.claims.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
     async fn handled_control_binds_its_source_before_completion() {
         let worker_id = ProviderProcessingWorkerId::new();
         let (control, bound, source_delivery_id) = rerun_claims(worker_id);
+        let manifests = runtime_manifests(&control);
         let repository = Arc::new(ResolvingRepository {
             claim: Mutex::new(Some(control)),
             bound,
@@ -766,7 +1017,9 @@ mod tests {
             Arc::clone(&runtime) as Arc<dyn crate::ProviderRuntimeAdapter>
         ])
         .expect("runtime registry");
-        let processor = Arc::new(crate::ProviderProcessingDispatcher::new(runtimes));
+        let processor = Arc::new(crate::ProviderProcessingDispatcher::new(
+            runtimes, manifests,
+        ));
         let worker = ProviderProcessingWorker::new(
             worker_id,
             Arc::clone(&repository) as Arc<dyn ProviderProcessingRepository>,
@@ -806,7 +1059,8 @@ mod tests {
             Arc::clone(&github) as Arc<dyn crate::ProviderRuntimeAdapter>
         ])
         .expect("runtime registry");
-        let dispatcher = crate::ProviderProcessingDispatcher::new(runtimes);
+        let manifests = runtime_manifests(&direct);
+        let dispatcher = crate::ProviderProcessingDispatcher::new(runtimes, manifests);
         let (_updates, view) = watch::channel(direct.fence());
         let lease = ProviderProcessingLease::new(view);
 
@@ -827,7 +1081,8 @@ mod tests {
             Arc::clone(&forgejo) as Arc<dyn crate::ProviderRuntimeAdapter>
         ])
         .expect("runtime registry");
-        let dispatcher = crate::ProviderProcessingDispatcher::new(runtimes);
+        let manifests = runtime_manifests(&direct);
+        let dispatcher = crate::ProviderProcessingDispatcher::new(runtimes, manifests);
 
         assert_eq!(
             dispatcher.process(&direct, &lease).await,
@@ -835,6 +1090,33 @@ mod tests {
         );
         assert_eq!(forgejo.trigger_calls.load(Ordering::SeqCst), 0);
         assert_eq!(forgejo.control_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn runtime_configuration_unavailability_uses_common_retry_policy() {
+        let worker_id = ProviderProcessingWorkerId::new();
+        let direct = claimed(worker_id);
+        let github = Arc::new(RecordingRuntimeAdapter {
+            provider_type: ProviderTypeId::new("github").expect("provider type"),
+            source_delivery_id: None,
+            control_calls: AtomicUsize::new(0),
+            trigger_calls: AtomicUsize::new(0),
+        });
+        let runtimes = crate::ProviderRuntimeAdapterRegistry::new([
+            Arc::clone(&github) as Arc<dyn crate::ProviderRuntimeAdapter>
+        ])
+        .expect("runtime registry");
+        let manifests = runtime_manifests_with_availability(&direct, false);
+        let dispatcher = crate::ProviderProcessingDispatcher::new(runtimes, manifests);
+        let (_updates, view) = watch::channel(direct.fence());
+        let lease = ProviderProcessingLease::new(view);
+
+        assert_eq!(
+            dispatcher.process(&direct, &lease).await,
+            ProviderProcessingOutcome::Retry(ProviderProcessingFailure::DependencyUnavailable)
+        );
+        assert_eq!(github.trigger_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(github.control_calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
@@ -851,7 +1133,8 @@ mod tests {
             Arc::clone(&runtime) as Arc<dyn crate::ProviderRuntimeAdapter>
         ])
         .expect("runtime registry");
-        let dispatcher = crate::ProviderProcessingDispatcher::new(runtimes);
+        let manifests = runtime_manifests(&control);
+        let dispatcher = crate::ProviderProcessingDispatcher::new(runtimes, manifests);
         let (_updates, view) = watch::channel(control.fence());
         let lease = ProviderProcessingLease::new(view);
 
@@ -878,7 +1161,8 @@ mod tests {
             Arc::clone(&runtime) as Arc<dyn crate::ProviderRuntimeAdapter>
         ])
         .expect("runtime registry");
-        let dispatcher = crate::ProviderProcessingDispatcher::new(runtimes);
+        let manifests = runtime_manifests(&control);
+        let dispatcher = crate::ProviderProcessingDispatcher::new(runtimes, manifests);
         let (_updates, view) = watch::channel(control.fence());
         let lease = ProviderProcessingLease::new(view);
 
@@ -1052,6 +1336,90 @@ mod tests {
         )
     }
 
+    fn runtime_manifests(
+        invocation: &ClaimedProviderProcessing,
+    ) -> Arc<dyn ProviderManifestRepository> {
+        runtime_manifests_with_availability(invocation, true)
+    }
+
+    fn runtime_manifests_with_availability(
+        invocation: &ClaimedProviderProcessing,
+        available: bool,
+    ) -> Arc<dyn ProviderManifestRepository> {
+        let (evidence, repository) = match invocation.input() {
+            ProviderProcessingInput::Trigger(trigger) => (
+                trigger.evidence(),
+                trigger.trigger().trigger().target_repository().identity(),
+            ),
+            ProviderProcessingInput::Control(control) => {
+                (control.evidence(), control.control().repository())
+            }
+        };
+        let capabilities = Sha256Digest::from_bytes([4; 32]);
+        let provider_configuration = ProviderConfigurationDocument::new(
+            ProviderSchemaVersion::new(1).expect("provider schema"),
+            br"{}".to_vec(),
+        )
+        .expect("provider configuration");
+        let manifest = ProviderInstanceManifest::new(
+            evidence.instance_id(),
+            evidence.provider_type().clone(),
+            evidence.provider_revision(),
+            ProviderLifecycleState::Active,
+            automata_ci_provider::ProviderOrigins::new(
+                "https://github.com/",
+                "https://api.github.com/",
+            )
+            .expect("provider origins"),
+            provider_configuration,
+            ProviderSecretBindings::empty(),
+            capabilities,
+            UnixMillis::new(100),
+            Some(UnixMillis::new(100)),
+            None,
+        )
+        .expect("provider manifest");
+        let policy = ProviderConnectionPolicyDocument::new(
+            ProviderSchemaVersion::new(1).expect("connection schema"),
+            br"{}".to_vec(),
+        )
+        .expect("connection policy");
+        let configuration = ProviderConnectionConfiguration::new(
+            WorkspaceId::parse("11111111-1111-4111-8111-111111111111").expect("workspace"),
+            repository.clone(),
+            manifest.revision(),
+            manifest.configuration().digest(),
+            manifest.capability_digest(),
+            RepositoryVisibility::Private,
+            ProviderDefaultBranch::new("main").expect("default branch"),
+            ProviderWorkflowSource::Directory(
+                ProviderRepositoryPath::new(".ci/workflows").expect("workflow source"),
+            ),
+            ProviderRunnerPolicyBinding::new(
+                ProviderSchemaVersion::new(1).expect("runner schema"),
+                Sha256Digest::from_bytes([5; 32]),
+            ),
+            ProviderArchiveLimits::new(1_024, 8_192, 100, 1_024, 10, 1_024)
+                .expect("archive limits"),
+            policy,
+        );
+        let connection = ProviderConnectionManifest::new(
+            evidence.connection_id(),
+            evidence.connection_revision(),
+            ProviderLifecycleState::Active,
+            configuration,
+            UnixMillis::new(100),
+            Some(UnixMillis::new(100)),
+            None,
+        )
+        .expect("connection manifest");
+        Arc::new(RuntimeManifestRepository {
+            manifest,
+            connection,
+            available,
+        })
+    }
+
     fn claimed(worker_id: ProviderProcessingWorkerId) -> ClaimedProviderProcessing {
         let instance_id = ProviderInstanceId::new();
         let delivery_id = ProviderDeliveryId::new();
@@ -1060,6 +1428,7 @@ mod tests {
                 instance_id,
                 ExternalRepositoryId::new("42").expect("repository"),
             ),
+            automata_ci_provider::ExternalSubjectId::new("7").expect("owner"),
             ProviderRepositoryPath::new("owner/repository").expect("path"),
             RepositoryVisibility::Private,
         );

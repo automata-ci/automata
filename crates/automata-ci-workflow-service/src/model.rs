@@ -58,8 +58,9 @@ const fn admission_event_byte_rejection(
 pub struct AdmissionRepositoryCoordinates {
     provider: String,
     provider_repository_id: String,
-    owner: String,
+    namespace: String,
     name: String,
+    path: String,
 }
 
 impl AdmissionRepositoryCoordinates {
@@ -71,26 +72,41 @@ impl AdmissionRepositoryCoordinates {
     pub fn new(
         provider: impl Into<String>,
         provider_repository_id: impl Into<String>,
-        owner: impl Into<String>,
-        name: impl Into<String>,
+        path: impl Into<String>,
     ) -> Result<Self, WorkflowAdmissionRequestError> {
         let provider = provider.into();
         let provider_repository_id = provider_repository_id.into();
-        let owner = owner.into();
-        let name = name.into();
+        let path = path.into();
+        let (namespace, name) =
+            path.rsplit_once('/')
+                .ok_or(WorkflowAdmissionRequestError::InvalidText(
+                    "repository path",
+                ))?;
+        if path
+            .split('/')
+            .any(|segment| segment.is_empty() || matches!(segment, "." | ".."))
+        {
+            return Err(WorkflowAdmissionRequestError::InvalidText(
+                "repository path",
+            ));
+        }
         for (value, field) in [
-            (&provider, "provider"),
-            (&provider_repository_id, "provider repository ID"),
-            (&owner, "owner"),
-            (&name, "repository name"),
+            (provider.as_str(), "provider"),
+            (provider_repository_id.as_str(), "provider repository ID"),
+            (path.as_str(), "repository path"),
+            (namespace, "repository namespace"),
+            (name, "repository name"),
         ] {
             validate_text(value, field)?;
         }
+        let namespace = namespace.to_owned();
+        let name = name.to_owned();
         Ok(Self {
             provider,
             provider_repository_id,
-            owner,
+            namespace,
             name,
+            path,
         })
     }
 
@@ -107,9 +123,9 @@ impl AdmissionRepositoryCoordinates {
     }
 
     #[must_use]
-    /// Returns the provider repository owner.
-    pub fn owner(&self) -> &str {
-        &self.owner
+    /// Returns the provider repository namespace, including nested groups.
+    pub fn namespace(&self) -> &str {
+        &self.namespace
     }
 
     #[must_use]
@@ -119,9 +135,9 @@ impl AdmissionRepositoryCoordinates {
     }
 
     #[must_use]
-    /// Returns the display slug in `owner/name` form.
-    pub fn slug(&self) -> String {
-        format!("{}/{}", self.owner, self.name)
+    /// Returns the complete authenticated provider repository path.
+    pub fn path(&self) -> &str {
+        &self.path
     }
 }
 
@@ -511,7 +527,7 @@ fn validate_plan_provenance(
     if plan.version() != WorkflowPlanVersion::current() {
         return Err(WorkflowAdmissionRequestError::InvalidPlan);
     }
-    let expected_repository = request.repository.slug();
+    let expected_repository = request.repository.path();
     let automata_ci_core::PlanSourceOrigin::Repository {
         repository,
         revision,
@@ -522,7 +538,7 @@ fn validate_plan_provenance(
     };
     if plan.source().provider() != request.repository.provider()
         || plan.event().provider() != request.repository.provider()
-        || repository != &expected_repository
+        || repository != expected_repository
         || *revision != request.commit_sha()
         || path != request.workflow_path()
         || plan.source().source_id() != request.workflow_path()
@@ -586,10 +602,45 @@ fn validate_text(value: &str, field: &'static str) -> Result<(), WorkflowAdmissi
 #[cfg(test)]
 mod limit_contract_tests {
     use super::{
-        MAX_EVENT_BYTES, MAX_IDENTITY_BYTES, MAX_SOURCE_BYTES, WorkflowAdmissionLimitRejection,
+        AdmissionRepositoryCoordinates, MAX_EVENT_BYTES, MAX_IDENTITY_BYTES, MAX_SOURCE_BYTES,
+        WorkflowAdmissionLimitRejection, WorkflowAdmissionRequestError,
         admission_event_byte_rejection, admission_identity_byte_rejection,
         admission_source_byte_rejection,
     };
+
+    #[test]
+    fn repository_coordinates_preserve_nested_namespaces() {
+        let repository = AdmissionRepositoryCoordinates::new(
+            "gitlab",
+            "repository-17",
+            "platform/services/automata",
+        )
+        .expect("nested repository path");
+
+        assert_eq!(repository.namespace(), "platform/services");
+        assert_eq!(repository.name(), "automata");
+        assert_eq!(repository.path(), "platform/services/automata");
+    }
+
+    #[test]
+    fn repository_coordinates_reject_noncanonical_paths() {
+        for path in [
+            "automata",
+            "/automata",
+            "platform/",
+            "platform//automata",
+            "platform/./automata",
+            "platform/../automata",
+        ] {
+            assert_eq!(
+                AdmissionRepositoryCoordinates::new("forge", "repository-17", path),
+                Err(WorkflowAdmissionRequestError::InvalidText(
+                    "repository path"
+                )),
+                "path {path:?} must be rejected"
+            );
+        }
+    }
 
     #[test]
     fn admission_identity_byte_limit_has_exact_boundaries() {

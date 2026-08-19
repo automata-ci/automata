@@ -313,17 +313,13 @@ impl RichCheckCapability {
     ///
     /// # Errors
     ///
-    /// Rejects native rerun without external actions and declarations with no
-    /// rich behavior.
+    /// Rejects declarations with no rich behavior.
     pub const fn new(
         annotations: bool,
         external_actions: bool,
         native_rerun: bool,
     ) -> Result<Self, ProviderCapabilitiesError> {
-        if native_rerun && !external_actions {
-            return Err(ProviderCapabilitiesError::NativeRerunWithoutActions);
-        }
-        if !annotations && !external_actions {
+        if !annotations && !external_actions && !native_rerun {
             return Err(ProviderCapabilitiesError::EmptyRichChecks);
         }
         Ok(Self {
@@ -659,12 +655,7 @@ fn validate_capability(capability: &ProviderCapability) -> Result<(), ProviderCa
             Err(ProviderCapabilitiesError::EmptyCommitStatusStates)
         }
         ProviderCapability::RichChecks(checks)
-            if checks.native_rerun() && !checks.external_actions() =>
-        {
-            Err(ProviderCapabilitiesError::NativeRerunWithoutActions)
-        }
-        ProviderCapability::RichChecks(checks)
-            if !checks.annotations() && !checks.external_actions() =>
+            if !checks.annotations() && !checks.external_actions() && !checks.native_rerun() =>
         {
             Err(ProviderCapabilitiesError::EmptyRichChecks)
         }
@@ -746,11 +737,8 @@ pub enum ProviderCapabilitiesError {
     /// Commit-status support contained no status state.
     #[error("commit-status capability must contain at least one state")]
     EmptyCommitStatusStates,
-    /// Rich checks advertised native rerun without external actions.
-    #[error("native rerun requires provider external actions")]
-    NativeRerunWithoutActions,
     /// Rich checks advertised no rich behavior.
-    #[error("rich-check capability must implement annotations or external actions")]
+    #[error("rich-check capability must implement annotations, external actions, or native rerun")]
     EmptyRichChecks,
     /// Workload credential support contained no permission profile.
     #[error("workload credential capability must contain at least one profile")]

@@ -9,7 +9,7 @@ use automata_ci_store::{
     LOGICAL_ORCHESTRATION_SCHEMA, LogicalWorkflowAdmissionValueError, LogicalWorkflowInvocationId,
     LogicalWorkflowJobId, LogicalWorkflowJobKind, ObjectKey, RepositoryId, TenantScope,
     WORKFLOW_ADMISSION_EPOCH, WORKFLOW_PLAN_SCHEMA, WorkflowAdmissionIdempotency,
-    WorkflowSnapshotId,
+    WorkflowAdmissionValueError, WorkflowSnapshotId,
 };
 use uuid::Uuid;
 
@@ -25,6 +25,38 @@ fn object(name: &str, digest: u8) -> AdmissionObject {
 
 fn git_object(byte: u8) -> GitObjectId {
     GitObjectId::from_bytes(GitObjectAlgorithm::Sha1, &[byte; 20]).expect("Git object ID")
+}
+
+#[test]
+fn admission_repository_preserves_nested_namespaces_and_rejects_invalid_paths() {
+    let repository = AdmissionRepository::new(
+        RepositoryId::from_uuid(Uuid::from_u128(91)),
+        "gitlab",
+        "repository-91",
+        "platform/services/automata",
+    )
+    .expect("nested repository path");
+    assert_eq!(repository.namespace(), "platform/services");
+    assert_eq!(repository.name(), "automata");
+    assert_eq!(repository.path(), "platform/services/automata");
+
+    for path in [
+        "automata",
+        "/automata",
+        "platform//automata",
+        "platform/../automata",
+    ] {
+        assert_eq!(
+            AdmissionRepository::new(
+                RepositoryId::from_uuid(Uuid::from_u128(91)),
+                "forge",
+                "repository-91",
+                path,
+            ),
+            Err(WorkflowAdmissionValueError::InvalidText("repository path")),
+            "path {path:?} must be rejected"
+        );
+    }
 }
 
 fn job(
@@ -55,8 +87,7 @@ fn command(
             RepositoryId::from_uuid(Uuid::from_u128(1)),
             "forge",
             "repository-7",
-            "sample-owner",
-            "sample-repository",
+            "sample-owner/sample-repository",
         )
         .expect("repository"),
         WorkflowId::from_uuid(Uuid::from_u128(2)),
@@ -115,8 +146,7 @@ fn trust_snapshot_must_bind_the_exact_admitted_execution_origin() {
                 RepositoryId::from_uuid(Uuid::from_u128(71)),
                 "forge",
                 "repository-7",
-                "sample-owner",
-                "sample-repository",
+                "sample-owner/sample-repository",
             )
             .expect("repository"),
             WorkflowId::from_uuid(Uuid::from_u128(72)),
@@ -249,8 +279,7 @@ fn durable_logical_identities_reject_nil_sentinels() {
             RepositoryId::from_uuid(Uuid::from_u128(21)),
             "forge",
             "repository-nil",
-            "sample-owner",
-            "sample-repository",
+            "sample-owner/sample-repository",
         )
         .expect("repository"),
         WorkflowId::from_uuid(Uuid::from_u128(22)),
@@ -292,8 +321,7 @@ fn durable_logical_identities_reject_nil_sentinels() {
             RepositoryId::from_uuid(Uuid::from_u128(26)),
             "forge",
             "repository-operation",
-            "sample-owner",
-            "sample-repository",
+            "sample-owner/sample-repository",
         )
         .expect("repository"),
         WorkflowId::from_uuid(Uuid::from_u128(27)),
@@ -442,8 +470,7 @@ fn run_shape_rejects_invalid_attempt_ref_sha_and_time() {
                 RepositoryId::from_uuid(Uuid::from_u128(51)),
                 "forge",
                 "repository-shape",
-                "sample-owner",
-                "sample-repository",
+                "sample-owner/sample-repository",
             )
             .expect("repository"),
             WorkflowId::from_uuid(Uuid::from_u128(52)),

@@ -32,20 +32,21 @@ use super::{
         authorize_workflow_dispatch_actor,
     },
 };
-use automata_ci_provider::ProviderConnectionId;
+use automata_ci_provider::{NormalizedTrigger, ProviderConnectionId, SealedNormalizedTrigger};
 use automata_ci_store::{
     AdmissionObject, AdmitLogicalWorkflowRun, AuthenticatedGithubDeliveryClaim,
-    AuthenticatedWorkflowDispatchClaim, AuthenticatedWorkflowDispatchSource,
-    BeginWorkflowDispatchSourceResolution, CompleteWorkflowDispatchSourceResolution,
-    EventControlSubject, EventControlSubjectId, EventSubjectId, EventSubjectOrigin,
-    EventSubjectProgress, EventSubjectSelection, EventSubjectStoreError, EventSubjectTerminalKind,
-    EventSubjectTerminalOutcome, GithubProviderManifestRevision, GithubScheduleFireClaim,
-    GithubServerServiceAuthorityId, GithubServerServiceAuthoritySelector,
-    GithubServerServiceClaimFence, GithubServerServiceRevision, GithubServerServiceWorkerId,
-    GithubSubjectEvidenceStoreError, JobEnvironmentRequirement, LOGICAL_ORCHESTRATION_SCHEMA,
-    LogicalWorkflowAdmissionReceipt, LogicalWorkflowAdmissionRepository,
-    LogicalWorkflowAdmissionStoreError, LogicalWorkflowInvocationId, LogicalWorkflowJobKind,
-    ObjectKey, RecordGithubWorkflowRunSubjectEvidence, RegisterEventSubject, RepositoryId,
+    AuthenticatedProviderDeliveryClaim, AuthenticatedWorkflowDispatchClaim,
+    AuthenticatedWorkflowDispatchSource, BeginWorkflowDispatchSourceResolution,
+    CompleteWorkflowDispatchSourceResolution, EventControlSubject, EventControlSubjectId,
+    EventSubjectId, EventSubjectOrigin, EventSubjectProgress, EventSubjectSelection,
+    EventSubjectStoreError, EventSubjectTerminalKind, EventSubjectTerminalOutcome,
+    GithubProviderManifestRevision, GithubScheduleFireClaim, GithubServerServiceAuthorityId,
+    GithubServerServiceAuthoritySelector, GithubServerServiceClaimFence,
+    GithubServerServiceRevision, GithubServerServiceWorkerId, GithubSubjectEvidenceStoreError,
+    JobEnvironmentRequirement, LOGICAL_ORCHESTRATION_SCHEMA, LogicalWorkflowAdmissionReceipt,
+    LogicalWorkflowAdmissionRepository, LogicalWorkflowAdmissionStoreError,
+    LogicalWorkflowInvocationId, LogicalWorkflowJobKind, ObjectKey,
+    RecordGithubWorkflowRunSubjectEvidence, RegisterEventSubject, RepositoryId,
     ResolveAuthenticatedWorkflowDispatchSource, Sha256Digest, StoreError, TenantScope,
     ValidateGithubWorkflowRunSubjectEvidenceReplay, WORKFLOW_ADMISSION_EPOCH, WORKFLOW_PLAN_SCHEMA,
     WorkflowAdmissionIdempotency, WorkflowAdmissionStoreError, WorkflowDispatchSourceClaim,
@@ -54,6 +55,10 @@ use automata_ci_store::{
 };
 
 enum SubjectEvidenceAdmission {
+    AuthenticatedProvider {
+        current_claim: AuthenticatedProviderDeliveryClaim,
+        observed_at: UnixMillis,
+    },
     AuthenticatedGithub {
         current_claim: AuthenticatedGithubDeliveryClaim,
         observed_at: UnixMillis,
@@ -73,6 +78,38 @@ const WORKFLOW_DISPATCH_AUDIT_ID_DOMAIN: &[u8] = b"automata.workflow-dispatch.au
 // SHA-256 prefix for `automata.logical-admission.idempotency-lock.v1`.
 const LOGICAL_ADMISSION_IDEMPOTENCY_LOCK_NAMESPACE: i64 = 0x2fee_1fa8_b154_7857;
 const WORKFLOW_DISPATCH_SOURCE_CLOCK_SKEW_MILLIS: i64 = 60_000;
+
+struct ProviderSelectionAuthority {
+    provider_type: String,
+    provider_instance_id: Uuid,
+    provider_revision: i64,
+    connection_id: Uuid,
+    connection_revision: i64,
+    provider_configuration_digest: Vec<u8>,
+    capability_digest: Vec<u8>,
+    runner_policy_schema: i16,
+    runner_policy_digest: Vec<u8>,
+    normalized_trigger_digest: Vec<u8>,
+    raw_event_digest: Vec<u8>,
+}
+
+#[derive(sqlx::FromRow)]
+struct ProviderSelectionAuthorityRow {
+    provider_type: String,
+    provider_instance_id: Uuid,
+    provider_revision: i64,
+    connection_id: Uuid,
+    connection_revision: i64,
+    event_type: String,
+    normalized_payload: Vec<u8>,
+    normalized_payload_digest: Vec<u8>,
+    raw_body_digest: Vec<u8>,
+    default_branch: String,
+    provider_configuration_digest: Vec<u8>,
+    capability_digest: Vec<u8>,
+    runner_policy_schema: i16,
+    runner_policy_digest: Vec<u8>,
+}
 
 #[async_trait]
 impl WorkflowDispatchSourceResolutionRepository for PostgresStore {
@@ -757,10 +794,13 @@ fn resolved_dispatch_source_from_row(
         provider,
         row.try_get::<String, _>("provider_repository_id")
             .map_err(source_operation_error)?,
-        row.try_get::<String, _>("repository_owner")
-            .map_err(source_operation_error)?,
-        row.try_get::<String, _>("repository_name")
-            .map_err(source_operation_error)?,
+        format!(
+            "{}/{}",
+            row.try_get::<String, _>("repository_owner")
+                .map_err(source_operation_error)?,
+            row.try_get::<String, _>("repository_name")
+                .map_err(source_operation_error)?
+        ),
     )
     .map_err(|_| source_corrupt("resolved repository is invalid"))?;
     let digest = source_digest(
@@ -863,6 +903,23 @@ impl LogicalWorkflowAdmissionRepository for PostgresStore {
         _command: AdmitLogicalWorkflowRun,
     ) -> Result<LogicalWorkflowAdmissionReceipt, LogicalWorkflowAdmissionStoreError> {
         Err(LogicalWorkflowAdmissionStoreError::UnsupportedAdmissionSource)
+    }
+
+    async fn admit_authenticated_provider_delivery(
+        &self,
+        command: AdmitLogicalWorkflowRun,
+        current_claim: AuthenticatedProviderDeliveryClaim,
+        observed_at: UnixMillis,
+    ) -> Result<LogicalWorkflowAdmissionReceipt, LogicalWorkflowAdmissionStoreError> {
+        admit_logical_workflow_transaction(
+            self,
+            command,
+            SubjectEvidenceAdmission::AuthenticatedProvider {
+                current_claim,
+                observed_at,
+            },
+        )
+        .await
     }
 
     async fn admit_authenticated_github_delivery(
@@ -1054,8 +1111,11 @@ fn dispatch_source_from_row(
         provider,
         row.try_get::<String, _>("provider_repository_id")
             .map_err(operation_error)?,
-        row.try_get::<String, _>("owner").map_err(operation_error)?,
-        row.try_get::<String, _>("name").map_err(operation_error)?,
+        format!(
+            "{}/{}",
+            row.try_get::<String, _>("owner").map_err(operation_error)?,
+            row.try_get::<String, _>("name").map_err(operation_error)?
+        ),
     )
     .map_err(|_| StoreError::corrupt_data("signed GitHub repository identity is invalid"))?;
     let repository_owner_id = row
@@ -1109,7 +1169,8 @@ async fn admit_logical_workflow_transaction(
     } else {
         if matches!(
             &subject_evidence,
-            SubjectEvidenceAdmission::AuthenticatedGithub { .. }
+            SubjectEvidenceAdmission::AuthenticatedProvider { .. }
+                | SubjectEvidenceAdmission::AuthenticatedGithub { .. }
                 | SubjectEvidenceAdmission::ScheduledGithub { .. }
         ) {
             resolve_repository(&mut transaction, &command).await?;
@@ -1261,6 +1322,12 @@ async fn record_admitted_event_subject(
         )
         .into());
     }
+    if matches!(
+        subject_evidence,
+        SubjectEvidenceAdmission::AuthenticatedProvider { .. }
+    ) {
+        return Ok(());
+    }
     link_github_check_event_control(
         transaction,
         command,
@@ -1282,6 +1349,12 @@ async fn record_skipped_event_subject(
     let (origin, control_id, _, _) =
         record_event_subject_terminal(transaction, command, subject_evidence, outcome, recorded_at)
             .await?;
+    if matches!(
+        subject_evidence,
+        SubjectEvidenceAdmission::AuthenticatedProvider { .. }
+    ) {
+        return Ok(());
+    }
     link_github_check_event_control(transaction, command, origin, control_id, None).await
 }
 
@@ -1322,7 +1395,12 @@ async fn replay_disabled_event_subject(
         )
         .into());
     }
-    link_github_check_event_control(transaction, command, origin, control.id(), None).await?;
+    if !matches!(
+        subject_evidence,
+        SubjectEvidenceAdmission::AuthenticatedProvider { .. }
+    ) {
+        link_github_check_event_control(transaction, command, origin, control.id(), None).await?;
+    }
     Ok(true)
 }
 
@@ -1545,6 +1623,9 @@ async fn record_event_subject_terminal(
 
 fn event_subject_origin(subject_evidence: &SubjectEvidenceAdmission) -> EventSubjectOrigin {
     match subject_evidence {
+        SubjectEvidenceAdmission::AuthenticatedProvider { current_claim, .. } => {
+            EventSubjectOrigin::ProviderDelivery(current_claim.delivery_id())
+        }
         SubjectEvidenceAdmission::AuthenticatedGithub { current_claim, .. } => {
             EventSubjectOrigin::ProviderDelivery(current_claim.claim().delivery_id())
         }
@@ -1596,6 +1677,24 @@ fn validate_subject_evidence_boundary(
     subject_evidence: &SubjectEvidenceAdmission,
 ) -> Result<(), LogicalWorkflowAdmissionStoreError> {
     match subject_evidence {
+        SubjectEvidenceAdmission::AuthenticatedProvider {
+            current_claim,
+            observed_at,
+        } => {
+            let provider_delivery = matches!(
+                command.idempotency(),
+                WorkflowAdmissionIdempotency::ProviderDelivery(_)
+            );
+            if !provider_delivery
+                || command.admitted_at() != *observed_at
+                || !current_claim.authorizes(*observed_at)
+            {
+                return Err(StoreError::corrupt_data(
+                    "authenticated provider admission has an invalid common boundary",
+                )
+                .into());
+            }
+        }
         SubjectEvidenceAdmission::AuthenticatedGithub {
             current_claim: _,
             observed_at,
@@ -1666,12 +1765,197 @@ fn validate_subject_evidence_boundary(
     Ok(())
 }
 
+async fn validate_provider_selection_authority(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: &AdmitLogicalWorkflowRun,
+    claim: AuthenticatedProviderDeliveryClaim,
+    observed_at: UnixMillis,
+) -> Result<(), LogicalWorkflowAdmissionStoreError> {
+    load_provider_selection_authority(transaction, command, claim, observed_at)
+        .await
+        .map(|_| ())
+}
+
+async fn load_provider_selection_authority(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: &AdmitLogicalWorkflowRun,
+    claim: AuthenticatedProviderDeliveryClaim,
+    observed_at: UnixMillis,
+) -> Result<ProviderSelectionAuthority, LogicalWorkflowAdmissionStoreError> {
+    let row = load_provider_selection_authority_row(transaction, command, claim, observed_at)
+        .await?
+        .ok_or_else(|| {
+            StoreError::corrupt_data(
+                "common provider processing authority does not match logical admission",
+            )
+        })?;
+    let sealed =
+        SealedNormalizedTrigger::from_canonical_bytes(row.normalized_payload).map_err(|_| {
+            StoreError::corrupt_data("common provider normalized trigger is not canonical")
+        })?;
+    if row.normalized_payload_digest.as_slice() != sealed.digest().as_bytes()
+        || !provider_trigger_matches_command(
+            sealed.trigger(),
+            command,
+            &row.event_type,
+            &row.default_branch,
+            row.provider_instance_id,
+        )
+    {
+        return Err(StoreError::corrupt_data(
+            "normalized provider trigger disagrees with logical admission coordinates",
+        )
+        .into());
+    }
+    if row.raw_body_digest.as_slice() != command.event().digest().as_bytes() {
+        return Err(StoreError::corrupt_data(
+            "authenticated provider event bytes disagree with logical admission",
+        )
+        .into());
+    }
+    Ok(ProviderSelectionAuthority {
+        provider_type: row.provider_type,
+        provider_instance_id: row.provider_instance_id,
+        provider_revision: row.provider_revision,
+        connection_id: row.connection_id,
+        connection_revision: row.connection_revision,
+        provider_configuration_digest: row.provider_configuration_digest,
+        capability_digest: row.capability_digest,
+        runner_policy_schema: row.runner_policy_schema,
+        runner_policy_digest: row.runner_policy_digest,
+        normalized_trigger_digest: row.normalized_payload_digest,
+        raw_event_digest: row.raw_body_digest,
+    })
+}
+
+async fn load_provider_selection_authority_row(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: &AdmitLogicalWorkflowRun,
+    claim: AuthenticatedProviderDeliveryClaim,
+    observed_at: UnixMillis,
+) -> Result<Option<ProviderSelectionAuthorityRow>, LogicalWorkflowAdmissionStoreError> {
+    let fence = claim.fence();
+    sqlx::query_as::<_, ProviderSelectionAuthorityRow>(
+        r"
+        SELECT delivery.provider_type, delivery.provider_instance_id,
+               delivery.provider_revision, delivery.connection_id,
+               delivery.connection_revision, delivery.event_type,
+               delivery.normalized_payload, delivery.normalized_payload_digest,
+               delivery.raw_body_digest,
+               connection.default_branch,
+               connection.provider_configuration_digest,
+               connection.capability_digest, connection.runner_policy_schema,
+               connection.runner_policy_digest
+        FROM provider_processing_invocations AS invocation
+        JOIN provider_deliveries AS delivery
+          ON delivery.delivery_id = invocation.source_delivery_id
+         AND delivery.delivery_id = invocation.cause_delivery_id
+         AND delivery.disposition = 'trigger'
+        JOIN provider_connection_revisions AS connection
+          ON connection.connection_id = delivery.connection_id
+         AND connection.revision = delivery.connection_revision
+         AND connection.provider_instance_id = delivery.provider_instance_id
+         AND connection.provider_revision = delivery.provider_revision
+         AND connection.external_repository_id = delivery.repository_external_id
+        JOIN provider_instance_revisions AS provider
+          ON provider.instance_id = delivery.provider_instance_id
+         AND provider.revision = delivery.provider_revision
+         AND provider.provider_type = delivery.provider_type
+         AND provider.configuration_digest = connection.provider_configuration_digest
+         AND provider.capability_digest = connection.capability_digest
+        WHERE invocation.invocation_id = $1
+          AND invocation.source_delivery_id = $2
+          AND invocation.state = 'claimed'
+          AND invocation.attempts = $3
+          AND invocation.claim_worker_id = $4
+          AND invocation.claim_fence = $5
+          AND invocation.claim_started_at_ms = $6
+          AND invocation.claim_expires_at_ms = $7
+          AND invocation.created_at_ms = $8
+          AND $9 >= invocation.claim_started_at_ms
+          AND $9 < invocation.claim_expires_at_ms
+          AND connection.workspace_id = $10
+          AND connection.lifecycle_state = 'active'
+          AND provider.lifecycle_state = 'active'
+          AND delivery.provider_type = $11
+          AND delivery.repository_external_id = $12
+        FOR SHARE OF invocation, delivery, connection, provider
+        ",
+    )
+    .bind(claim.invocation_id().as_uuid())
+    .bind(claim.delivery_id().as_uuid())
+    .bind(i16::try_from(claim.attempt()).expect("attempt fits SMALLINT"))
+    .bind(fence.worker_id().as_uuid())
+    .bind(i64::try_from(fence.token()).map_err(|_| {
+        StoreError::corrupt_data("common provider processing fence exceeds durable range")
+    })?)
+    .bind(fence.claimed_at().get())
+    .bind(fence.expires_at().get())
+    .bind(claim.created_at().get())
+    .bind(observed_at.get())
+    .bind(command.tenant().as_str())
+    .bind(command.repository().provider())
+    .bind(command.repository().provider_repository_id())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(operation_error)
+}
+
+fn provider_trigger_matches_command(
+    trigger: &NormalizedTrigger,
+    command: &AdmitLogicalWorkflowRun,
+    delivery_event_type: &str,
+    default_branch: &str,
+    provider_instance_id: Uuid,
+) -> bool {
+    let repository = trigger.target_repository();
+    let expected_path = format!(
+        "{}/{}",
+        command.repository().namespace(),
+        command.repository().name()
+    );
+    let expected_actor = match trigger {
+        NormalizedTrigger::Push(value) => value.actor(),
+        NormalizedTrigger::PullRequest(value) => value.actor(),
+        NormalizedTrigger::MergeQueue(value) => value.actor(),
+        NormalizedTrigger::RepositoryDispatch(value) => value.actor(),
+    }
+    .map(|actor| actor.external_id().as_str());
+    let source_matches = trigger
+        .workflow_source_revision()
+        .is_none_or(|revision| revision == command.head_sha());
+    let reference_matches = trigger.workflow_execution_ref().map_or_else(
+        || command.git_ref() == format!("refs/heads/{default_branch}"),
+        |git_ref| git_ref.full() == command.git_ref(),
+    );
+    repository.identity().instance_id().as_uuid() == provider_instance_id
+        && repository.identity().external_id().as_str()
+            == command.repository().provider_repository_id()
+        && repository.path().as_str() == expected_path
+        && delivery_event_type == command.event_name()
+        && expected_actor == command.actor()
+        && source_matches
+        && reference_matches
+}
+
 async fn validate_subject_selection_authority(
     transaction: &mut Transaction<'_, Postgres>,
     command: &AdmitLogicalWorkflowRun,
     subject_evidence: &SubjectEvidenceAdmission,
 ) -> Result<(), LogicalWorkflowAdmissionStoreError> {
     match subject_evidence {
+        SubjectEvidenceAdmission::AuthenticatedProvider {
+            current_claim,
+            observed_at,
+        } => {
+            validate_provider_selection_authority(
+                transaction,
+                command,
+                *current_claim,
+                *observed_at,
+            )
+            .await
+        }
         SubjectEvidenceAdmission::AuthenticatedGithub { current_claim, .. } => {
             let request = RecordGithubWorkflowRunSubjectEvidence::from_logical_admission(
                 *current_claim,
@@ -1872,7 +2156,7 @@ async fn require_existing_dispatch_repository(
             .try_get::<String, _>("provider_repository_id")
             .map_err(operation_error)?
             == repository.provider_repository_id()
-        && row.try_get::<String, _>("owner").map_err(operation_error)? == repository.owner()
+        && row.try_get::<String, _>("owner").map_err(operation_error)? == repository.namespace()
         && row.try_get::<String, _>("name").map_err(operation_error)? == repository.name();
     if !exact {
         return Err(LogicalWorkflowAdmissionStoreError::WorkflowDispatchAuthorityRejected);
@@ -1902,6 +2186,13 @@ async fn record_new_subject_evidence(
     dispatch_actor: Option<&AuthorizedWorkflowDispatchActor>,
 ) -> Result<(), LogicalWorkflowAdmissionStoreError> {
     match subject_evidence {
+        SubjectEvidenceAdmission::AuthenticatedProvider {
+            current_claim,
+            observed_at,
+        } => {
+            record_provider_admission_evidence(transaction, command, *current_claim, *observed_at)
+                .await
+        }
         SubjectEvidenceAdmission::AuthenticatedGithub {
             current_claim,
             observed_at: _,
@@ -1940,6 +2231,18 @@ async fn validate_replayed_subject_evidence(
     admitted_at: UnixMillis,
 ) -> Result<(), LogicalWorkflowAdmissionStoreError> {
     match subject_evidence {
+        SubjectEvidenceAdmission::AuthenticatedProvider {
+            current_claim,
+            observed_at,
+        } => {
+            validate_provider_admission_evidence_replay(
+                transaction,
+                command,
+                *current_claim,
+                *observed_at,
+            )
+            .await
+        }
         SubjectEvidenceAdmission::AuthenticatedGithub {
             current_claim,
             observed_at,
@@ -1973,6 +2276,194 @@ async fn validate_replayed_subject_evidence(
             )
             .await
         }
+    }
+}
+
+async fn record_provider_admission_evidence(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: &AdmitLogicalWorkflowRun,
+    claim: AuthenticatedProviderDeliveryClaim,
+    observed_at: UnixMillis,
+) -> Result<(), LogicalWorkflowAdmissionStoreError> {
+    let selection =
+        load_provider_selection_authority(transaction, command, claim, observed_at).await?;
+    let fence = claim.fence();
+    let inserted = sqlx::query(
+        r"
+        INSERT INTO provider_workflow_admission_evidence (
+            run_id, delivery_id, invocation_id, tenant_id, repository_id,
+            workflow_id, workflow_path, provider_type, provider_instance_id,
+            provider_revision, connection_id, connection_revision,
+            provider_configuration_digest, capability_digest,
+            runner_policy_schema, runner_policy_digest,
+            normalized_trigger_digest, raw_event_digest, request_digest,
+            source_revision, git_ref, event_name, actor, original_worker_id,
+            original_fence, original_claimed_at_ms, original_expires_at_ms,
+            admitted_at_ms
+        ) VALUES (
+            $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
+            $18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28
+        )
+        ",
+    )
+    .bind(command.run_id().as_uuid())
+    .bind(claim.delivery_id().as_uuid())
+    .bind(claim.invocation_id().as_uuid())
+    .bind(command.tenant().as_str())
+    .bind(command.repository().id().as_uuid())
+    .bind(command.workflow_id().as_uuid())
+    .bind(command.workflow_path())
+    .bind(&selection.provider_type)
+    .bind(selection.provider_instance_id)
+    .bind(selection.provider_revision)
+    .bind(selection.connection_id)
+    .bind(selection.connection_revision)
+    .bind(&selection.provider_configuration_digest)
+    .bind(&selection.capability_digest)
+    .bind(selection.runner_policy_schema)
+    .bind(&selection.runner_policy_digest)
+    .bind(&selection.normalized_trigger_digest)
+    .bind(&selection.raw_event_digest)
+    .bind(command.request_digest().as_bytes().as_slice())
+    .bind(command.head_sha().as_bytes())
+    .bind(command.git_ref())
+    .bind(command.event_name())
+    .bind(command.actor())
+    .bind(fence.worker_id().as_uuid())
+    .bind(i64::try_from(fence.token()).map_err(|_| {
+        StoreError::corrupt_data("common provider admission fence exceeds durable range")
+    })?)
+    .bind(fence.claimed_at().get())
+    .bind(fence.expires_at().get())
+    .bind(observed_at.get())
+    .execute(&mut **transaction)
+    .await
+    .map_err(operation_error)?;
+    if inserted.rows_affected() != 1 {
+        return Err(StoreError::corrupt_data(
+            "common provider admission evidence was not recorded exactly once",
+        )
+        .into());
+    }
+    pin_provider_runtime_policy(transaction, command, &selection).await
+}
+
+async fn pin_provider_runtime_policy(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: &AdmitLogicalWorkflowRun,
+    selection: &ProviderSelectionAuthority,
+) -> Result<(), LogicalWorkflowAdmissionStoreError> {
+    let inserted = sqlx::query(
+        r"
+        INSERT INTO logical_workflow_runtime_policy_pins (
+            run_id, tenant_id, repository_id, policy_revision,
+            policy_digest, pinned_at_ms
+        )
+        SELECT $1, $2, $3, policy.policy_revision,
+               policy.policy_digest, $4
+        FROM workflow_runtime_policy_current AS current
+        JOIN workflow_runtime_policy_revisions AS policy
+          ON policy.tenant_id = current.tenant_id
+         AND policy.repository_id = current.repository_id
+         AND policy.policy_revision = current.policy_revision
+         AND policy.policy_digest = current.policy_digest
+         AND policy.state = 'sealed'
+         AND policy.policy_schema = $5
+         AND pg_catalog.sha256(policy.canonical_policy) = $6
+        WHERE current.tenant_id = $2 AND current.repository_id = $3
+        ",
+    )
+    .bind(command.run_id().as_uuid())
+    .bind(command.tenant().as_str())
+    .bind(command.repository().id().as_uuid())
+    .bind(command.admitted_at().get())
+    .bind(selection.runner_policy_schema)
+    .bind(&selection.runner_policy_digest)
+    .execute(&mut **transaction)
+    .await
+    .map_err(operation_error)?;
+    if inserted.rows_affected() != 1 {
+        return Err(StoreError::corrupt_data(
+            "common provider admission lacks one exact current runtime policy",
+        )
+        .into());
+    }
+    Ok(())
+}
+
+async fn validate_provider_admission_evidence_replay(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: &AdmitLogicalWorkflowRun,
+    current_claim: AuthenticatedProviderDeliveryClaim,
+    observed_at: UnixMillis,
+) -> Result<(), LogicalWorkflowAdmissionStoreError> {
+    let selection =
+        load_provider_selection_authority(transaction, command, current_claim, observed_at).await?;
+    let exact = sqlx::query_scalar::<_, bool>(
+        r"
+        SELECT TRUE
+        FROM provider_workflow_admission_evidence AS evidence
+        JOIN logical_workflow_runtime_policy_pins AS pin
+          ON pin.run_id = evidence.run_id
+        JOIN workflow_runtime_policy_revisions AS policy
+          ON policy.tenant_id = pin.tenant_id
+         AND policy.repository_id = pin.repository_id
+         AND policy.policy_revision = pin.policy_revision
+         AND policy.policy_digest = pin.policy_digest
+         AND policy.state = 'sealed'
+         AND policy.policy_schema = evidence.runner_policy_schema
+         AND pg_catalog.sha256(policy.canonical_policy) = evidence.runner_policy_digest
+        WHERE evidence.run_id = $1 AND evidence.delivery_id = $2
+          AND evidence.invocation_id = $3 AND evidence.tenant_id = $4
+          AND evidence.repository_id = $5 AND evidence.workflow_id = $6
+          AND evidence.workflow_path = $7 AND evidence.provider_type = $8
+          AND evidence.provider_instance_id = $9 AND evidence.provider_revision = $10
+          AND evidence.connection_id = $11 AND evidence.connection_revision = $12
+          AND evidence.provider_configuration_digest = $13
+          AND evidence.capability_digest = $14
+          AND evidence.runner_policy_schema = $15
+          AND evidence.runner_policy_digest = $16
+          AND evidence.normalized_trigger_digest = $17
+          AND evidence.raw_event_digest = $18
+          AND evidence.request_digest = $19 AND evidence.source_revision = $20
+          AND evidence.git_ref = $21 AND evidence.event_name = $22
+          AND evidence.actor IS NOT DISTINCT FROM $23
+        FOR SHARE OF evidence, pin, policy
+        ",
+    )
+    .bind(command.run_id().as_uuid())
+    .bind(current_claim.delivery_id().as_uuid())
+    .bind(current_claim.invocation_id().as_uuid())
+    .bind(command.tenant().as_str())
+    .bind(command.repository().id().as_uuid())
+    .bind(command.workflow_id().as_uuid())
+    .bind(command.workflow_path())
+    .bind(&selection.provider_type)
+    .bind(selection.provider_instance_id)
+    .bind(selection.provider_revision)
+    .bind(selection.connection_id)
+    .bind(selection.connection_revision)
+    .bind(&selection.provider_configuration_digest)
+    .bind(&selection.capability_digest)
+    .bind(selection.runner_policy_schema)
+    .bind(&selection.runner_policy_digest)
+    .bind(&selection.normalized_trigger_digest)
+    .bind(&selection.raw_event_digest)
+    .bind(command.request_digest().as_bytes().as_slice())
+    .bind(command.head_sha().as_bytes())
+    .bind(command.git_ref())
+    .bind(command.event_name())
+    .bind(command.actor())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(operation_error)?;
+    if exact == Some(true) {
+        Ok(())
+    } else {
+        Err(StoreError::corrupt_data(
+            "common provider admission replay disagrees with immutable evidence",
+        )
+        .into())
     }
 }
 
@@ -2688,7 +3179,7 @@ async fn resolve_repository(
     .bind(command.tenant().as_str())
     .bind(repository.provider())
     .bind(repository.provider_repository_id())
-    .bind(repository.owner())
+    .bind(repository.namespace())
     .bind(repository.name())
     .bind(command.admitted_at().get())
     .fetch_one(&mut **transaction)

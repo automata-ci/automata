@@ -11,8 +11,10 @@ scheduler, store, or runner domains.
 
 Result adapters reconcile claim-frozen desired generations through deterministic
 markers. The common outbox contract owns supersession, exclusive fences,
-bounded retries, and terminal failure while preserving annotations even when a
-provider cannot render them.
+bounded retries, renewable publication leases, and terminal failure while
+preserving annotations even when a provider cannot render them. Publication,
+retry, and failure timestamps must remain strictly before the exclusive lease
+deadline.
 
 Credential ports separate control, workload, and human authority. Workload
 credentials are bound to an exact repository, job attempt, runner lease, trust

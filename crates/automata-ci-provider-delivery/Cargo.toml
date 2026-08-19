@@ -18,10 +18,13 @@ automata-ci-provider.workspace = true
 bytes.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 
 [dev-dependencies]
 automata-ci-key-management.workspace = true
 sha2.workspace = true
+url.workspace = true
+uuid.workspace = true
 
 [lints]
 workspace = true

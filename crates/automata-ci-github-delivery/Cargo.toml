@@ -23,6 +23,7 @@ automata-ci-blob.workspace = true
 automata-ci-core.workspace = true
 automata-ci-provider-github.workspace = true
 automata-ci-provider.workspace = true
+automata-ci-provider-delivery.workspace = true
 automata-ci-scm.workspace = true
 automata-ci-schedule.workspace = true
 automata-ci-store.workspace = true

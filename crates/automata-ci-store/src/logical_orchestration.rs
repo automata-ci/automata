@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use crate::{
     AdmissionObject, AdmissionRepository, AuthenticatedGithubDeliveryClaim,
-    GithubProviderManifestRevision, GithubServerServiceAction,
+    AuthenticatedProviderDeliveryClaim, GithubProviderManifestRevision, GithubServerServiceAction,
     GithubServerServiceAuthoritySelector, GithubServerServiceClaimFence,
     GithubServerServiceConsumerClaim, GithubServerServiceConsumerId, GithubServerServiceRevision,
     GithubServerServiceWorkerId, JobCredentialRequirements,
@@ -1386,6 +1386,22 @@ pub trait LogicalWorkflowAdmissionRepository: std::fmt::Debug + Send + Sync {
         &self,
         command: AdmitLogicalWorkflowRun,
     ) -> Result<LogicalWorkflowAdmissionReceipt, LogicalWorkflowAdmissionStoreError>;
+
+    /// Commits one provider-neutral workflow admission under an exact live
+    /// common processing fence, or validates the same immutable admission on
+    /// replay.
+    ///
+    /// Implementations must atomically bind the command to the exact trigger
+    /// delivery, processing invocation, provider/connection revisions,
+    /// workspace, repository, attempt, worker, fence, and lease horizon.
+    async fn admit_authenticated_provider_delivery(
+        &self,
+        _command: AdmitLogicalWorkflowRun,
+        _current_claim: AuthenticatedProviderDeliveryClaim,
+        _observed_at: UnixMillis,
+    ) -> Result<LogicalWorkflowAdmissionReceipt, LogicalWorkflowAdmissionStoreError> {
+        Err(LogicalWorkflowAdmissionStoreError::UnsupportedAdmissionSource)
+    }
 
     /// Commits one logical workflow whose signed GitHub delivery evidence must
     /// be bound atomically to the new run, or validates the exact immutable

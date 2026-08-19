@@ -28,6 +28,7 @@ mod managed_secret_authority;
 mod outbox;
 mod plan;
 mod protected_environment;
+mod provider_admission;
 mod provider_delivery;
 mod publication;
 mod receipt;
@@ -67,7 +68,11 @@ pub use admission::{
 };
 pub use assignment::{AttemptAssignment, AttemptAssignmentError};
 pub use automata_ci_core::Sha256Digest;
-pub use automata_ci_provider::{ProviderDeliveryId, ProviderProcessingWorkerId};
+pub use automata_ci_provider::{
+    ProviderDeliveryId, ProviderProcessingClaimFence, ProviderProcessingClaimSource,
+    ProviderProcessingInvocationId, ProviderProcessingReceipt, ProviderProcessingState,
+    ProviderProcessingWorkerId,
+};
 pub use conformance::{
     ConformanceDelivery, ConformanceDeliveryQuery, ConformanceDeliveryState,
     ConformanceReadRepository, ConformanceReadValueError, ConformanceWorkflowOutcome,
@@ -327,6 +332,9 @@ pub use protected_environment::{
     PrepareJobEnvironment, ProtectedEnvironmentRepository, ProtectedEnvironmentStoreError,
     ProtectedEnvironmentValueError, ReusableSecretPermission, ReviewJobEnvironment,
     SecretLeaseAuthority,
+};
+pub use provider_admission::{
+    AuthenticatedProviderDeliveryClaim, AuthenticatedProviderDeliveryClaimError,
 };
 pub use provider_delivery::{
     AcceptProviderDelivery, ClaimProviderDelivery, ClaimedProviderDelivery,

@@ -870,7 +870,7 @@ async fn accepted_path_replays_durable_progress_without_readmission() {
     assert_eq!(first.tenant().as_str(), "tenant-private");
     assert_eq!(first.repository().provider(), "github");
     assert_eq!(first.repository().provider_repository_id(), "9001");
-    assert_eq!(first.repository().owner(), OWNER);
+    assert_eq!(first.repository().namespace(), OWNER);
     assert_eq!(first.repository().name(), REPOSITORY);
     assert_eq!(first.workflow_path(), WORKFLOW_PATH);
     assert_eq!(first.workflow_name(), "Exact CI");

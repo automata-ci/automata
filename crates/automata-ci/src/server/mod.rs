@@ -15,6 +15,7 @@ mod managed_secret_delivery;
 pub(crate) mod metrics;
 mod protected_environment_gate;
 mod protected_environment_review;
+mod provider_webhook;
 mod provisioning_workload_auth;
 mod readiness;
 mod secret_cleanup;
@@ -99,6 +100,10 @@ pub use maintenance::{
     SystemMaintenanceClock,
 };
 pub use metrics::ControlPlaneMetrics;
+pub use provider_webhook::{
+    PROVIDER_WEBHOOK_HTTP_DEADLINE, PROVIDER_WEBHOOK_PATH_PREFIX,
+    router_with_provider_webhooks_outside_human_auth,
+};
 pub use readiness::{
     Readiness, ReadinessMonitor, ReadinessMonitorError, ReadinessProbe, ReadinessProbeError,
     ReadinessSnapshot,

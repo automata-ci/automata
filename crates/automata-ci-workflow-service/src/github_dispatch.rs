@@ -349,8 +349,11 @@ impl GithubWorkflowDispatchService {
         let repository = AdmissionRepositoryCoordinates::new(
             source.repository().provider(),
             source.repository().provider_repository_id(),
-            source.repository().owner(),
-            source.repository().name(),
+            format!(
+                "{}/{}",
+                source.repository().namespace(),
+                source.repository().name()
+            ),
         )?;
         let mut dispatch = GithubWorkflowDispatchRequest::new(
             authorization,
@@ -385,7 +388,7 @@ impl GithubWorkflowDispatchService {
         let provenance = SourceProvenance::new(
             SourceId::new(request.workflow_path.as_str()),
             SourceOrigin::Repository {
-                repository: Arc::from(request.repository.slug()),
+                repository: Arc::from(request.repository.path()),
                 revision: commit_sha,
                 path: Arc::from(request.workflow_path.as_str()),
             },
@@ -544,7 +547,7 @@ impl GithubWorkflowDispatchEvidence {
                 provider: request.repository.provider().to_owned(),
                 provider_repository_id: request.repository.provider_repository_id().to_owned(),
                 provider_owner_id: request.repository_owner_id.clone(),
-                owner: request.repository.owner().to_owned(),
+                owner: request.repository.namespace().to_owned(),
                 name: request.repository.name().to_owned(),
             },
             workflow: EvidenceWorkflow {
@@ -643,7 +646,7 @@ impl GithubWorkflowDispatchEvidence {
                         && repository.owner_id()
                             == self.document.repository.provider_owner_id.as_str()
                 })
-            && self.document.repository.owner == request.repository().owner()
+            && self.document.repository.owner == request.repository().namespace()
             && self.document.repository.name == request.repository().name()
             && self.document.workflow.path == request.workflow_path()
             && self.document.workflow.git_ref == request.git_ref()

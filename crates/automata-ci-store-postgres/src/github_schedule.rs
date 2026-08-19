@@ -958,7 +958,7 @@ fn require_scheduled_command(
         && command.repository().provider_repository_id() == source.github_repository_id.to_string()
         && format!(
             "{}/{}",
-            command.repository().owner(),
+            command.repository().namespace(),
             command.repository().name()
         ) == source.github_repository_name
         && command.workflow_path() == source.workflow_path

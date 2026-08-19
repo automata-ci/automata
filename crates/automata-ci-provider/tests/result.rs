@@ -17,9 +17,8 @@ use automata_ci_provider::{
     ProviderResultRetryAfter, ProviderResultSaveOutcome, ProviderResultSubject,
     ProviderResultSubjectId, ProviderResultSubjectKind, ProviderResultSummary, ProviderResultTitle,
     ProviderResultWorkerId, ProviderRunnerPolicyBinding, ProviderSchemaVersion,
-    ProviderWorkflowSource, RepositoryVisibility, ResultPublisher, ResultPublisherError,
-    ResultPublisherFuture, RetryProviderResult, RichCheckCapability, SaveDesiredProviderResult,
-    StatusHistoryModel,
+    ProviderWorkflowSource, RenewProviderResult, RepositoryVisibility, ResultPublisherError,
+    RetryProviderResult, RichCheckCapability, SaveDesiredProviderResult, StatusHistoryModel,
 };
 use url::Url;
 use uuid::Uuid;
@@ -84,6 +83,18 @@ fn desired(generation: u64, updated_at: i64) -> DesiredProviderResult {
         ProviderResultDetailsUrl::new(Url::parse("https://ci.example/runs/5").unwrap()).unwrap(),
         Vec::new(),
         UnixMillis::new(updated_at),
+    )
+    .unwrap()
+}
+
+fn claim(generation: u64, claimed_at: i64) -> ProviderResultClaimFence {
+    ProviderResultClaimFence::new(
+        subject().subject_id(),
+        generation,
+        ProviderResultWorkerId::from_uuid(Uuid::from_u128(9)).unwrap(),
+        generation,
+        UnixMillis::new(claimed_at),
+        UnixMillis::new(claimed_at + 1_000),
     )
     .unwrap()
 }
@@ -219,6 +230,35 @@ impl ProviderResultRepository for MemoryOutbox {
         })
     }
 
+    fn renew_result(
+        &self,
+        request: RenewProviderResult,
+    ) -> ProviderResultFuture<'_, ProviderResultClaimFence> {
+        Box::pin(async move {
+            let mut state = self.0.lock().unwrap();
+            let value = state
+                .value
+                .as_mut()
+                .ok_or(ProviderResultRepositoryError::NotFound)?;
+            if value.claim != Some(request.claim()) {
+                return Err(ProviderResultRepositoryError::StaleClaim);
+            }
+            let renewed = ProviderResultClaimFence::new(
+                request.claim().subject_id(),
+                request.claim().generation(),
+                request.claim().worker_id(),
+                request.claim().fence(),
+                request.claim().claimed_at(),
+                UnixMillis::new(
+                    request.renewed_at().get() + i64::try_from(request.lease_millis()).unwrap(),
+                ),
+            )
+            .map_err(|_| ProviderResultRepositoryError::Corrupt)?;
+            value.claim = Some(renewed);
+            Ok(renewed)
+        })
+    }
+
     fn retry_result(&self, request: RetryProviderResult) -> ProviderResultFuture<'_, ()> {
         Box::pin(async move {
             let mut state = self.0.lock().unwrap();
@@ -268,49 +308,43 @@ impl LossyPublisher {
         }
     }
 
+    fn publish(
+        &self,
+        claimed: &ClaimedProviderResult,
+    ) -> Result<ProviderResultPublicationEvidence, ResultPublisherError> {
+        let marker = claimed.marker().as_str().to_owned();
+        let mut state = self.state.lock().unwrap();
+        if state.iter().all(|(candidate, _)| candidate != &marker) {
+            match self.model {
+                ProviderResultPublicationModel::MutableRichCheck => {
+                    state.clear();
+                    state.push((marker.clone(), claimed.desired().digest()));
+                }
+                ProviderResultPublicationModel::AppendOnlyCommitStatus => {
+                    state.push((marker.clone(), claimed.desired().digest()));
+                }
+            }
+            if std::mem::take(&mut *self.lose_next_response.lock().unwrap()) {
+                return Err(ResultPublisherError::Unavailable);
+            }
+        }
+        ProviderResultPublicationEvidence::new(
+            claimed,
+            self.model,
+            Some(ExternalResultId::new(marker).unwrap()),
+            claimed.desired().digest(),
+            claimed.claimed_at(),
+        )
+        .map_err(|_| ResultPublisherError::InvalidResponse)
+    }
+
     fn objects(&self) -> usize {
         self.state.lock().unwrap().len()
     }
 }
 
-impl ResultPublisher for LossyPublisher {
-    fn model(&self) -> ProviderResultPublicationModel {
-        self.model
-    }
-
-    fn publish<'a>(&'a self, claimed: &'a ClaimedProviderResult) -> ResultPublisherFuture<'a> {
-        Box::pin(async move {
-            let marker = claimed.marker().as_str().to_owned();
-            let mut state = self.state.lock().unwrap();
-            let existing = state.iter().find(|(candidate, _)| candidate == &marker);
-            if existing.is_none() {
-                match self.model {
-                    ProviderResultPublicationModel::MutableRichCheck => {
-                        state.clear();
-                        state.push((marker.clone(), claimed.desired().digest()));
-                    }
-                    ProviderResultPublicationModel::AppendOnlyCommitStatus => {
-                        state.push((marker.clone(), claimed.desired().digest()));
-                    }
-                }
-                if std::mem::take(&mut *self.lose_next_response.lock().unwrap()) {
-                    return Err(ResultPublisherError::Unavailable);
-                }
-            }
-            ProviderResultPublicationEvidence::new(
-                claimed,
-                self.model,
-                Some(ExternalResultId::new(marker).unwrap()),
-                claimed.desired().digest(),
-                claimed.claimed_at(),
-            )
-            .map_err(|_| ResultPublisherError::InvalidResponse)
-        })
-    }
-}
-
 #[tokio::test]
-async fn mutable_and_append_publishers_reconcile_response_loss_without_duplicates() {
+async fn mutable_and_append_publishers_converge_after_lost_response_without_duplicates() {
     for model in [
         ProviderResultPublicationModel::MutableRichCheck,
         ProviderResultPublicationModel::AppendOnlyCommitStatus,
@@ -334,17 +368,32 @@ async fn mutable_and_append_publishers_reconcile_response_loss_without_duplicate
             .unwrap()
             .unwrap();
         let publisher = LossyPublisher::new(model);
+
         assert_eq!(
-            publisher.publish(&claimed).await,
+            publisher.publish(&claimed),
             Err(ResultPublisherError::Unavailable)
         );
-        let evidence = publisher.publish(&claimed).await.unwrap();
+        let evidence = publisher.publish(&claimed).unwrap();
         assert_eq!(publisher.objects(), 1);
         outbox
             .complete_result(CompleteProviderResult::new(claimed.claim(), evidence).unwrap())
             .await
             .unwrap();
     }
+}
+
+#[test]
+fn mutable_result_marker_is_stable_across_generations() {
+    let first =
+        ClaimedProviderResult::new(subject(), desired(1, 2_001), claim(1, 2_002), 1).unwrap();
+    let second =
+        ClaimedProviderResult::new(subject(), desired(2, 2_003), claim(2, 2_004), 1).unwrap();
+
+    assert_eq!(first.marker(), second.marker());
+    assert_eq!(
+        first.marker().as_str(),
+        "automata-result:00000000-0000-0000-0000-000000000004"
+    );
 }
 
 #[tokio::test]
@@ -405,7 +454,7 @@ async fn newer_generation_supersedes_and_fences_old_claim_without_a_bridge() {
         .unwrap()
         .unwrap();
     assert_eq!(second.desired().generation(), 2);
-    assert_ne!(second.marker(), first.marker());
+    assert_eq!(second.marker(), first.marker());
 }
 
 #[tokio::test]
@@ -632,6 +681,50 @@ fn evidence_is_bound_to_the_exact_claim_fence() {
 }
 
 #[test]
+fn publication_commands_reject_the_exclusive_deadline() {
+    let claimed =
+        ClaimedProviderResult::new(subject(), desired(1, 2_001), claim(1, 2_002), 1).unwrap();
+    let deadline = claimed.claim().expires_at();
+
+    assert!(
+        ProviderResultPublicationEvidence::new(
+            &claimed,
+            ProviderResultPublicationModel::MutableRichCheck,
+            None,
+            claimed.desired().digest(),
+            deadline,
+        )
+        .is_err()
+    );
+    assert!(
+        RetryProviderResult::new(
+            claimed.claim(),
+            deadline,
+            UnixMillis::new(deadline.get() + 1),
+        )
+        .is_err()
+    );
+    assert!(
+        FailProviderResult::new(
+            claimed.claim(),
+            deadline,
+            ProviderResultFailureKind::Conflict,
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn result_claim_renewal_strictly_extends_one_live_fence() {
+    let current = claim(1, 2_002);
+    let renewal = RenewProviderResult::new(current, UnixMillis::new(2_500), 1_000).unwrap();
+    assert_eq!(renewal.claim(), current);
+    assert_eq!(renewal.renewed_at(), UnixMillis::new(2_500));
+    assert!(RenewProviderResult::new(current, current.expires_at(), 1_000).is_err());
+    assert!(RenewProviderResult::new(current, UnixMillis::new(2_500), 500).is_err());
+}
+
+#[test]
 fn publication_models_require_their_exact_declared_capability() {
     let statuses = ProviderCapabilities::new([ProviderCapability::CommitStatus(
         CommitStatusCapability::new(
@@ -650,4 +743,6 @@ fn publication_models_require_their_exact_declared_capability() {
     .unwrap();
     assert!(ProviderResultPublicationModel::MutableRichCheck.is_declared_by(&rich));
     assert!(!ProviderResultPublicationModel::AppendOnlyCommitStatus.is_declared_by(&rich));
+    assert!(RichCheckCapability::new(false, false, true).is_ok());
+    assert!(RichCheckCapability::new(false, false, false).is_err());
 }

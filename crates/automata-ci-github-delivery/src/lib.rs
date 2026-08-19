@@ -30,6 +30,7 @@
 mod changed_files;
 mod checks_presentation;
 mod checks_publisher;
+mod common_runtime;
 mod processor;
 mod schedule;
 mod service;
@@ -41,6 +42,8 @@ pub use checks_publisher::{
     GithubChecksPublisherConfig, GithubChecksPublisherConfigurationError,
     GithubChecksPublisherError, GithubChecksPublisherOutcome, GithubChecksServerServiceCredential,
 };
+
+pub use common_runtime::{GithubProviderRuntimeAdapter, GithubTriggerHandler};
 
 pub use changed_files::GithubRestPushChangedFilesProvider;
 
