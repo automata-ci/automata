@@ -76,7 +76,8 @@ pub enum ProviderSaveOutcome {
 
 /// Durable repository for provider instance and connection manifests.
 pub trait ProviderManifestRepository: fmt::Debug + Send + Sync {
-    /// Atomically stores one first or contiguous instance revision.
+    /// Atomically stores one source-revisioned first instance or a contiguous
+    /// successor.
     ///
     /// A secret name newly present in the adjacent revision must use one more
     /// than its largest historical generation, or generation one if unseen.
