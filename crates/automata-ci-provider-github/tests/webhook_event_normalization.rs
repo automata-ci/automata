@@ -3,6 +3,7 @@ use crate::support::{
     signed_webhook_headers, webhook_body_digest,
 };
 
+use automata_ci_core::GitObjectAlgorithm;
 use automata_ci_provider_github::{
     GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE, GithubCheckRunAction, GithubMergeGroupAction,
     GithubPullRequestAction, GithubRepositoryVisibility, GithubStoredWebhookError,
@@ -15,6 +16,7 @@ use ring::digest;
 use serde_json::{Value, json};
 
 const SECRET: &[u8] = b"independent synthetic webhook secret";
+const SHA256_REVISION: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 #[test]
 fn check_run_controls_retain_exact_signed_identity() {
@@ -80,6 +82,20 @@ fn check_suite_rerequest_retains_suite_app_sender_and_revision() {
     assert_eq!(event.app_id().get(), 17);
     assert_eq!(event.suite_id().get(), 23);
     assert_eq!(event.head_revision().to_string(), HEAD_SHA);
+    assert_eq!(event.head_revision().algorithm(), GitObjectAlgorithm::Sha1);
+
+    let mut payload = check_suite_payload();
+    payload["check_suite"]["head_sha"] = json!(SHA256_REVISION);
+    let VerifiedGithubWebhook::CheckSuite(event) =
+        normalize_payload(&payload, "check_suite").expect("SHA-256 check suite")
+    else {
+        panic!("expected check-suite evidence");
+    };
+    assert_eq!(
+        event.head_revision().algorithm(),
+        GitObjectAlgorithm::Sha256
+    );
+    assert_eq!(event.head_revision().to_string(), SHA256_REVISION);
 }
 
 #[test]
@@ -122,6 +138,7 @@ fn pull_request_normalization_retains_exact_dispatch_evidence() {
         event.merge_revision().expect("merge revision").to_string(),
         MERGE_SHA
     );
+    assert_eq!(event.head_revision().algorithm(), GitObjectAlgorithm::Sha1);
     assert_eq!(event.head_ref(), "feature/topic");
     assert_eq!(event.base_ref(), "main");
     assert_eq!(event.git_ref(), "refs/pull/7/merge");
@@ -483,14 +500,32 @@ fn durable_event_v1_rehydrates_each_supported_kind_without_reserialization() {
             "repository_dispatch",
             "durable-custom-3",
         ),
+        (
+            check_run_payload("rerequested", None),
+            "check_run",
+            "durable-run-41",
+        ),
+        (check_suite_payload(), "check_suite", "durable-suite-23"),
     ] {
-        let body = json_body(&payload);
-        let stored = stored_event_v1(&body, event_name, delivery_id);
+        let mut invalid_identity = payload.clone();
+        invalid_identity["installation"]["id"] = json!(0);
+        assert_payload_error(
+            &invalid_identity,
+            event_name,
+            GithubWebhookError::InvalidPayload,
+        );
+
+        let body = Bytes::from(json_body(&payload));
+        let body_pointer = body.as_ptr();
+        let body_sha256 = webhook_body_digest(&body);
+        let stored = stored_event_v1(body, event_name, delivery_id);
         let event = rehydrate_stored_authenticated_github_webhook(stored)
             .expect("rehydrated authenticated event");
         assert_eq!(event.event_name(), event_name);
         assert_eq!(event.delivery_id(), delivery_id);
-        assert_eq!(event.raw_body().as_ref(), body);
+        assert_eq!(event.installation_id().get(), 71);
+        assert_eq!(event.raw_body().as_ptr(), body_pointer);
+        assert_eq!(event.body_sha256(), body_sha256);
         assert_eq!(event.repository().full_name(), "example/base-repository");
     }
 }
@@ -502,7 +537,7 @@ fn durable_event_v1_rejects_envelope_drift_and_duplicate_json() {
         "application/vnd.automata.github-authenticated-event+json"
     );
     let body = json_body(&pull_request_payload());
-    let wrong_event = stored_event_v1(&body, "merge_group", "durable-pr-7");
+    let wrong_event = stored_event_v1(Bytes::from(body.clone()), "merge_group", "durable-pr-7");
     assert_eq!(
         rehydrate_stored_authenticated_github_webhook(wrong_event)
             .expect_err("event-name drift must fail"),
@@ -517,7 +552,7 @@ fn durable_event_v1_rejects_envelope_drift_and_duplicate_json() {
             1,
         )
         .into_bytes();
-    let stored = stored_event_v1(&duplicate, "pull_request", "durable-pr-7");
+    let stored = stored_event_v1(Bytes::from(duplicate), "pull_request", "durable-pr-7");
     assert_eq!(
         rehydrate_stored_authenticated_github_webhook(stored)
             .expect_err("duplicate JSON must fail"),
@@ -670,14 +705,16 @@ fn assert_bytes_error(body: &[u8], event_name: &str, expected: GithubWebhookErro
 }
 
 fn stored_event_v1(
-    body: &[u8],
+    body: Bytes,
     event_name: &str,
     delivery_id: &str,
 ) -> StoredAuthenticatedGithubWebhook {
+    let body_sha256 = webhook_body_digest(&body);
+    let encoded_size = u64::try_from(body.len()).expect("fixture size");
     StoredAuthenticatedGithubWebhook::from_durable_coordinates(
-        Bytes::copy_from_slice(body),
-        webhook_body_digest(body),
-        u64::try_from(body.len()).expect("fixture size"),
+        body,
+        body_sha256,
+        encoded_size,
         GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE,
         event_name,
         delivery_id,
