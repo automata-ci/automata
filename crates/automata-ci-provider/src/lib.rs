@@ -32,20 +32,20 @@ pub use capability::{
 pub use configuration::{
     MAX_PROVIDER_CONFIGURATION_BYTES, MAX_PROVIDER_ORIGIN_BYTES, MAX_PROVIDER_SCHEMA_VERSION,
     MAX_PROVIDER_SECRET_BINDINGS, MAX_PROVIDER_SECRET_NAME_BYTES, ProviderConfigurationDocument,
-    ProviderConfigurationError, ProviderConfigurationRevision, ProviderInstanceManifest,
-    ProviderLifecycleState, ProviderOrigins, ProviderSchemaVersion, ProviderSecret,
-    ProviderSecretBinding, ProviderSecretBindings, ProviderSecretGeneration, ProviderSecretName,
-    ProviderSecretSet, provider_capability_digest,
+    ProviderConfigurationError, ProviderConfigurationRevision, ProviderInstanceDraft,
+    ProviderInstanceManifest, ProviderLifecycleState, ProviderOrigins, ProviderSchemaVersion,
+    ProviderSecret, ProviderSecretBinding, ProviderSecretBindings, ProviderSecretGeneration,
+    ProviderSecretName, ProviderSecretSet, provider_capability_digest,
 };
 pub use connection::{
     MAX_PROVIDER_ARCHIVE_COMPRESSED_BYTES, MAX_PROVIDER_ARCHIVE_ENTRIES,
     MAX_PROVIDER_ARCHIVE_ENTRY_PATH_BYTES, MAX_PROVIDER_ARCHIVE_EXPANDED_BYTES,
     MAX_PROVIDER_ARCHIVE_WORKFLOWS, MAX_PROVIDER_CONNECTION_POLICY_BYTES,
     MAX_PROVIDER_REPOSITORY_PATH_BYTES, MAX_PROVIDER_WORKFLOW_BYTES, ProviderArchiveLimits,
-    ProviderConnectionConfiguration, ProviderConnectionError, ProviderConnectionManifest,
-    ProviderConnectionPolicyDocument, ProviderConnectionRevision, ProviderDefaultBranch,
-    ProviderRepositoryPath, ProviderRunnerPolicyBinding, ProviderWorkflowSource,
-    RepositoryVisibility,
+    ProviderConnectionConfiguration, ProviderConnectionDraft, ProviderConnectionError,
+    ProviderConnectionManifest, ProviderConnectionPolicyDocument, ProviderConnectionRevision,
+    ProviderDefaultBranch, ProviderRepositoryPath, ProviderRunnerPolicyBinding,
+    ProviderWorkflowSource, RepositoryVisibility,
 };
 pub use control::{
     MAX_PROVIDER_CONTROL_DOCUMENT_BYTES, ProviderControl, ProviderControlDocument,

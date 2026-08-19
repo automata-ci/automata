@@ -6,15 +6,15 @@ use automata_ci_provider::{
     ExternalRepositoryId, ExternalRepositoryIdentity, MAX_PROVIDER_SCHEMA_VERSION,
     ProviderArchiveLimits, ProviderCapabilities, ProviderCapability, ProviderConfigurationDocument,
     ProviderConfigurationError, ProviderConfigurationFactory, ProviderConfigurationRevision,
-    ProviderConnectionConfiguration, ProviderConnectionFactoryRequest, ProviderConnectionId,
-    ProviderConnectionManifest, ProviderConnectionPolicyDocument, ProviderConnectionRevision,
-    ProviderDefaultBranch, ProviderFactoryRegistry, ProviderFactoryRegistryError,
-    ProviderFactoryRequest, ProviderFactoryValidationError, ProviderInstanceId,
-    ProviderInstanceManifest, ProviderLifecycleState, ProviderOrigins, ProviderRepositoryPath,
-    ProviderRunnerPolicyBinding, ProviderSchemaVersion, ProviderSecret, ProviderSecretBinding,
-    ProviderSecretBindings, ProviderSecretGeneration, ProviderSecretName, ProviderSecretSet,
-    ProviderTypeId, ProviderWorkflowSource, RepositoryVisibility, SourceReadCapability,
-    provider_capability_digest,
+    ProviderConnectionConfiguration, ProviderConnectionDraft, ProviderConnectionFactoryRequest,
+    ProviderConnectionId, ProviderConnectionManifest, ProviderConnectionPolicyDocument,
+    ProviderConnectionRevision, ProviderDefaultBranch, ProviderFactoryRegistry,
+    ProviderFactoryRegistryError, ProviderFactoryRequest, ProviderFactoryValidationError,
+    ProviderInstanceDraft, ProviderInstanceId, ProviderInstanceManifest, ProviderLifecycleState,
+    ProviderOrigins, ProviderRepositoryPath, ProviderRunnerPolicyBinding, ProviderSchemaVersion,
+    ProviderSecret, ProviderSecretBinding, ProviderSecretBindings, ProviderSecretGeneration,
+    ProviderSecretName, ProviderSecretSet, ProviderTypeId, ProviderWorkflowSource,
+    RepositoryVisibility, SourceReadCapability, provider_capability_digest,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -50,22 +50,22 @@ impl ProviderConfigurationFactory for FakeFactory {
         &self,
         request: ProviderFactoryRequest<'_>,
     ) -> Result<ProviderCapabilities, ProviderFactoryValidationError> {
-        if request.manifest().configuration().schema_version().get() != 1 {
+        if request.provider_type() != &self.provider_type {
+            return Err(ProviderFactoryValidationError::InvalidConfiguration);
+        }
+        if request.configuration().schema_version().get() != 1 {
             return Err(ProviderFactoryValidationError::UnsupportedSchema);
         }
-        let decoded =
-            serde_json::from_slice::<FakeConfiguration>(request.manifest().configuration().bytes())
-                .map_err(|_| ProviderFactoryValidationError::InvalidConfiguration)?;
+        let decoded = serde_json::from_slice::<FakeConfiguration>(request.configuration().bytes())
+            .map_err(|_| ProviderFactoryValidationError::InvalidConfiguration)?;
         let canonical = serde_json::to_vec(&decoded)
             .map_err(|_| ProviderFactoryValidationError::InvalidConfiguration)?;
-        if canonical != request.manifest().configuration().bytes()
-            || decoded.api_family != self.api_family
-        {
+        if canonical != request.configuration().bytes() || decoded.api_family != self.api_family {
             return Err(ProviderFactoryValidationError::InvalidConfiguration);
         }
 
         let token = ProviderSecretName::new("control-token").expect("secret name");
-        if request.manifest().secrets().len() != 1 || request.secrets().get(&token).is_none() {
+        if request.secret_bindings().len() != 1 || request.secrets().get(&token).is_none() {
             return Err(ProviderFactoryValidationError::InvalidSecrets);
         }
 
@@ -314,6 +314,95 @@ fn secret_sets_require_exact_names_generations_and_plaintext() {
         unexpected,
         Err(ProviderConfigurationError::UnexpectedSecret)
     ));
+}
+
+#[test]
+fn registry_materializes_capability_bound_records_without_caller_digest_authority() {
+    let configuration = ProviderConfigurationDocument::new(
+        ProviderSchemaVersion::new(1).expect("schema"),
+        serde_json::to_vec(&FakeConfiguration {
+            api_family: "forgejo".to_owned(),
+        })
+        .expect("configuration bytes"),
+    )
+    .expect("configuration");
+    let draft = ProviderInstanceDraft::new(
+        ProviderInstanceId::from_uuid(Uuid::from_u128(71)).expect("instance ID"),
+        ProviderTypeId::new("forgejo").expect("provider type"),
+        ProviderConfigurationRevision::new(1).expect("revision"),
+        ProviderLifecycleState::Active,
+        ProviderOrigins::new("https://code.example/", "https://code.example/api/v1/")
+            .expect("origins"),
+        configuration,
+        [ProviderSecret::new(
+            ProviderSecretName::new("control-token").expect("secret name"),
+            ProviderSecretGeneration::new(1).expect("secret generation"),
+            SecretBytes::new(b"plaintext-sentinel".to_vec()).expect("secret"),
+        )],
+        UnixMillis::new(1_000),
+        Some(UnixMillis::new(1_000)),
+        None,
+    )
+    .expect("draft");
+
+    let record = registry()
+        .materialize_instance(draft)
+        .expect("materialized record");
+    let capabilities = source_capabilities().expect("capabilities");
+    assert_eq!(
+        record.manifest().capability_digest(),
+        provider_capability_digest(&capabilities).expect("capability digest")
+    );
+    assert_eq!(record.manifest().provider_type().as_str(), "forgejo");
+    assert_eq!(record.secrets().names().count(), 1);
+    assert!(!format!("{record:?}").contains("plaintext-sentinel"));
+
+    let registry = registry();
+    let descriptor = registry
+        .build_descriptor(record.manifest().clone(), record.secrets())
+        .expect("descriptor");
+    let connection = registry
+        .materialize_connection(
+            &descriptor,
+            ProviderConnectionDraft::new(
+                ProviderConnectionId::from_uuid(Uuid::from_u128(72)).expect("connection ID"),
+                ProviderConnectionRevision::new(1).expect("connection revision"),
+                ProviderLifecycleState::Active,
+                WorkspaceId::parse("11111111-1111-4111-8111-111111111111").expect("workspace"),
+                ExternalRepositoryId::new("repository-42").expect("repository ID"),
+                RepositoryVisibility::Private,
+                ProviderDefaultBranch::new("main").expect("branch"),
+                ProviderWorkflowSource::Directory(
+                    ProviderRepositoryPath::new(".ci/workflows").expect("workflow source"),
+                ),
+                ProviderRunnerPolicyBinding::new(
+                    ProviderSchemaVersion::new(1).expect("runner schema"),
+                    Sha256Digest::from_bytes([7; 32]),
+                ),
+                ProviderArchiveLimits::new(1, 1, 1, 1, 1, 1).expect("archive limits"),
+                ProviderConnectionPolicyDocument::new(
+                    ProviderSchemaVersion::new(1).expect("adapter schema"),
+                    serde_json::to_vec(&FakeConfiguration {
+                        api_family: "forgejo".to_owned(),
+                    })
+                    .expect("adapter policy"),
+                )
+                .expect("adapter document"),
+                UnixMillis::new(1_000),
+                Some(UnixMillis::new(1_000)),
+                None,
+            )
+            .expect("connection draft"),
+        )
+        .expect("materialized connection");
+    assert_eq!(
+        connection.configuration().provider_configuration_digest(),
+        record.manifest().configuration().digest()
+    );
+    assert_eq!(
+        connection.configuration().capability_digest(),
+        record.manifest().capability_digest()
+    );
 }
 
 #[test]

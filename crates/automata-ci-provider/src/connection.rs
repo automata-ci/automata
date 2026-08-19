@@ -8,8 +8,9 @@ use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
 use crate::{
-    ExternalRepositoryIdentity, ProviderConfigurationRevision, ProviderConnectionId,
-    ProviderLifecycleState, ProviderSchemaVersion, configuration::validate_lifecycle,
+    ExternalRepositoryId, ExternalRepositoryIdentity, ProviderConfigurationRevision,
+    ProviderConnectionId, ProviderInstanceManifest, ProviderLifecycleState, ProviderSchemaVersion,
+    configuration::validate_lifecycle,
 };
 
 /// Maximum bytes in a repository-relative workflow path.
@@ -600,6 +601,118 @@ impl ProviderConnectionConfiguration {
         }
         part(&mut hash, self.adapter_policy.digest().as_bytes());
         Sha256Digest::from_bytes(hash.finalize().into())
+    }
+}
+
+/// Complete repository-connection revision awaiting provider binding and adapter validation.
+pub struct ProviderConnectionDraft {
+    connection_id: ProviderConnectionId,
+    revision: ProviderConnectionRevision,
+    state: ProviderLifecycleState,
+    workspace_id: WorkspaceId,
+    external_repository_id: ExternalRepositoryId,
+    visibility: RepositoryVisibility,
+    default_branch: ProviderDefaultBranch,
+    workflow_source: ProviderWorkflowSource,
+    runner_policy: ProviderRunnerPolicyBinding,
+    archive_limits: ProviderArchiveLimits,
+    adapter_policy: ProviderConnectionPolicyDocument,
+    created_at: UnixMillis,
+    activated_at: Option<UnixMillis>,
+    retired_at: Option<UnixMillis>,
+}
+
+impl ProviderConnectionDraft {
+    /// Creates a connection revision without caller-supplied provider digests.
+    ///
+    /// # Errors
+    ///
+    /// Rejects inconsistent lifecycle timestamps.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        connection_id: ProviderConnectionId,
+        revision: ProviderConnectionRevision,
+        state: ProviderLifecycleState,
+        workspace_id: WorkspaceId,
+        external_repository_id: ExternalRepositoryId,
+        visibility: RepositoryVisibility,
+        default_branch: ProviderDefaultBranch,
+        workflow_source: ProviderWorkflowSource,
+        runner_policy: ProviderRunnerPolicyBinding,
+        archive_limits: ProviderArchiveLimits,
+        adapter_policy: ProviderConnectionPolicyDocument,
+        created_at: UnixMillis,
+        activated_at: Option<UnixMillis>,
+        retired_at: Option<UnixMillis>,
+    ) -> Result<Self, ProviderConnectionError> {
+        validate_lifecycle(state, created_at, activated_at, retired_at)
+            .map_err(|_| ProviderConnectionError::InvalidLifecycle)?;
+        Ok(Self {
+            connection_id,
+            revision,
+            state,
+            workspace_id,
+            external_repository_id,
+            visibility,
+            default_branch,
+            workflow_source,
+            runner_policy,
+            archive_limits,
+            adapter_policy,
+            created_at,
+            activated_at,
+            retired_at,
+        })
+    }
+
+    pub(crate) fn into_manifest(
+        self,
+        provider: &ProviderInstanceManifest,
+    ) -> Result<ProviderConnectionManifest, ProviderConnectionError> {
+        let configuration = ProviderConnectionConfiguration::new(
+            self.workspace_id,
+            ExternalRepositoryIdentity::new(provider.instance_id(), self.external_repository_id),
+            provider.revision(),
+            provider.configuration().digest(),
+            provider.capability_digest(),
+            self.visibility,
+            self.default_branch,
+            self.workflow_source,
+            self.runner_policy,
+            self.archive_limits,
+            self.adapter_policy,
+        );
+        ProviderConnectionManifest::new(
+            self.connection_id,
+            self.revision,
+            self.state,
+            configuration,
+            self.created_at,
+            self.activated_at,
+            self.retired_at,
+        )
+    }
+}
+
+impl fmt::Debug for ProviderConnectionDraft {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProviderConnectionDraft")
+            .field("connection_id", &self.connection_id)
+            .field("revision", &self.revision)
+            .field("state", &self.state)
+            .field("workspace_id", &self.workspace_id)
+            .field("external_repository_id", &self.external_repository_id)
+            .field("visibility", &self.visibility)
+            .field("default_branch", &self.default_branch)
+            .field("workflow_source", &self.workflow_source)
+            .field("runner_policy", &self.runner_policy)
+            .field("archive_limits", &self.archive_limits)
+            .field("adapter_policy", &self.adapter_policy)
+            .field("created_at", &self.created_at)
+            .field("activated_at", &self.activated_at)
+            .field("retired_at", &self.retired_at)
+            .finish()
     }
 }
 

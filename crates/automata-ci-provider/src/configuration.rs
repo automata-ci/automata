@@ -500,6 +500,131 @@ pub struct ProviderInstanceManifest {
     digest: Sha256Digest,
 }
 
+/// Complete provider-instance revision awaiting adapter capability validation.
+pub struct ProviderInstanceDraft {
+    instance_id: ProviderInstanceId,
+    provider_type: ProviderTypeId,
+    revision: ProviderConfigurationRevision,
+    state: ProviderLifecycleState,
+    origins: ProviderOrigins,
+    configuration: ProviderConfigurationDocument,
+    secret_bindings: ProviderSecretBindings,
+    secrets: ProviderSecretSet,
+    created_at: UnixMillis,
+    activated_at: Option<UnixMillis>,
+    retired_at: Option<UnixMillis>,
+}
+
+impl ProviderInstanceDraft {
+    /// Creates one complete revision without accepting a caller-supplied capability digest.
+    ///
+    /// Secret bindings are derived from the exact supplied plaintext values. The
+    /// registered adapter validates this draft and supplies the capability set
+    /// before a durable manifest can exist.
+    ///
+    /// # Errors
+    ///
+    /// Rejects inconsistent lifecycle evidence or invalid secret cardinality.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        instance_id: ProviderInstanceId,
+        provider_type: ProviderTypeId,
+        revision: ProviderConfigurationRevision,
+        state: ProviderLifecycleState,
+        origins: ProviderOrigins,
+        configuration: ProviderConfigurationDocument,
+        secrets: impl IntoIterator<Item = ProviderSecret>,
+        created_at: UnixMillis,
+        activated_at: Option<UnixMillis>,
+        retired_at: Option<UnixMillis>,
+    ) -> Result<Self, ProviderConfigurationError> {
+        validate_lifecycle(state, created_at, activated_at, retired_at)?;
+        let (secret_bindings, secrets) = ProviderSecretSet::bind(secrets)?;
+        Ok(Self {
+            instance_id,
+            provider_type,
+            revision,
+            state,
+            origins,
+            configuration,
+            secret_bindings,
+            secrets,
+            created_at,
+            activated_at,
+            retired_at,
+        })
+    }
+
+    /// Returns the provider type selecting one registered adapter.
+    #[must_use]
+    pub const fn provider_type(&self) -> &ProviderTypeId {
+        &self.provider_type
+    }
+
+    /// Returns the canonical provider origins.
+    #[must_use]
+    pub const fn origins(&self) -> &ProviderOrigins {
+        &self.origins
+    }
+
+    /// Returns the canonical adapter-owned configuration document.
+    #[must_use]
+    pub const fn configuration(&self) -> &ProviderConfigurationDocument {
+        &self.configuration
+    }
+
+    /// Returns bindings derived from the exact plaintext values.
+    #[must_use]
+    pub const fn secret_bindings(&self) -> &ProviderSecretBindings {
+        &self.secret_bindings
+    }
+
+    /// Returns the exact plaintext secret set at the adapter validation boundary.
+    #[must_use]
+    pub const fn secrets(&self) -> &ProviderSecretSet {
+        &self.secrets
+    }
+
+    pub(crate) fn into_manifest(
+        self,
+        capability_digest: Sha256Digest,
+    ) -> Result<(ProviderInstanceManifest, ProviderSecretSet), ProviderConfigurationError> {
+        let manifest = ProviderInstanceManifest::new(
+            self.instance_id,
+            self.provider_type,
+            self.revision,
+            self.state,
+            self.origins,
+            self.configuration,
+            self.secret_bindings,
+            capability_digest,
+            self.created_at,
+            self.activated_at,
+            self.retired_at,
+        )?;
+        Ok((manifest, self.secrets))
+    }
+}
+
+impl fmt::Debug for ProviderInstanceDraft {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProviderInstanceDraft")
+            .field("instance_id", &self.instance_id)
+            .field("provider_type", &self.provider_type)
+            .field("revision", &self.revision)
+            .field("state", &self.state)
+            .field("origins", &self.origins)
+            .field("configuration", &self.configuration)
+            .field("secret_bindings", &self.secret_bindings)
+            .field("secrets", &self.secrets)
+            .field("created_at", &self.created_at)
+            .field("activated_at", &self.activated_at)
+            .field("retired_at", &self.retired_at)
+            .finish()
+    }
+}
+
 impl ProviderInstanceManifest {
     /// Constructs one complete immutable manifest revision.
     ///
@@ -743,6 +868,33 @@ impl fmt::Debug for ProviderSecret {
 pub struct ProviderSecretSet(BTreeMap<ProviderSecretName, ProviderSecret>);
 
 impl ProviderSecretSet {
+    /// Derives exact bindings from plaintext values and takes custody of them.
+    ///
+    /// # Errors
+    ///
+    /// Rejects duplicate names or more than the common secret bound.
+    pub fn bind(
+        secrets: impl IntoIterator<Item = ProviderSecret>,
+    ) -> Result<(ProviderSecretBindings, Self), ProviderConfigurationError> {
+        let mut indexed = BTreeMap::new();
+        for secret in secrets {
+            if indexed.len() == MAX_PROVIDER_SECRET_BINDINGS {
+                return Err(ProviderConfigurationError::TooManySecrets);
+            }
+            if indexed.insert(secret.name.clone(), secret).is_some() {
+                return Err(ProviderConfigurationError::DuplicateSecret);
+            }
+        }
+        let bindings = ProviderSecretBindings::new(indexed.values().map(|secret| {
+            ProviderSecretBinding::new(
+                secret.name.clone(),
+                secret.generation,
+                Sha256Digest::from_bytes(Sha256::digest(secret.value.expose_secret()).into()),
+            )
+        }))?;
+        Ok((bindings, Self(indexed)))
+    }
+
     /// Validates exact names, generations, and plaintext digests.
     ///
     /// # Errors
