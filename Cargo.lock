@@ -543,7 +543,6 @@ dependencies = [
  "bytes",
  "flate2",
  "http 1.5.0",
- "ring",
  "serde",
  "serde_json",
  "sha2 0.11.0",

@@ -1,6 +1,6 @@
 [package]
 name = "automata-ci-github-delivery"
-description = "Verified durable GitHub delivery ingress for Automata"
+description = "GitHub adapters for Automata's common provider runtime"
 autotests = false
 publish.workspace = true
 version.workspace = true
@@ -44,7 +44,6 @@ url.workspace = true
 [dev-dependencies]
 axum.workspace = true
 flate2.workspace = true
-ring.workspace = true
 tar.workspace = true
 
 [lints]

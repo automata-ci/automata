@@ -301,7 +301,6 @@ fn mixed_public_private_projection_has_one_canonical_authority_shape() {
 
     assert_eq!(plan.manifests().len(), 2);
     assert_eq!(plan.authorities().len(), 8);
-    assert_eq!(plan.connections().len(), 2);
     assert!(
         plan.manifests()
             .iter()
@@ -318,17 +317,6 @@ fn mixed_public_private_projection_has_one_canonical_authority_shape() {
         plan.manifests()[1].repository_visibility(),
         ProviderRepositoryVisibility::Public
     );
-    assert_eq!(plan.connections()[0].repository_owner(), "octo");
-    assert_eq!(
-        plan.connections()[0].repository_name(),
-        "private-repository"
-    );
-    assert_eq!(plan.connections()[1].repository_name(), "public-repository");
-    assert_eq!(
-        plan.connections()[1].default_branch_ref(),
-        Some("refs/heads/refs/release")
-    );
-
     let ordered_authorities = plan
         .authorities()
         .iter()
@@ -402,7 +390,7 @@ fn mixed_public_private_projection_has_one_canonical_authority_shape() {
 }
 
 #[test]
-fn configured_installation_generation_reaches_manifest_and_delivery_connection() {
+fn configured_installation_generation_reaches_manifest() {
     let mut document = mixed_document();
     document["repositories"][0]["installation_id"] = json!(303);
     document["repositories"][0]["installation_binding_generation"] = json!(2);
@@ -416,10 +404,6 @@ fn configured_installation_generation_reaches_manifest_and_delivery_connection()
         .find(|manifest| manifest.installation_id().get() == 303)
         .expect("rotated manifest");
     assert_eq!(manifest.installation_binding_generation().get(), 2);
-    assert!(plan.connections().iter().any(|connection| {
-        connection.installation_id().get() == 303
-            && connection.repository_id() == manifest.github_repository_id()
-    }));
 }
 
 #[tokio::test]
