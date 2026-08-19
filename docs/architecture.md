@@ -47,7 +47,7 @@ process-isolated Windows execution have been removed.
 
 That Windows path is a component foundation, not an accepted hostile-workload
 composition. It has a synchronized lifecycle journal and fail-closed startup
-reconciliation, but currently invokes a pinned local container CLI directly
+reconciliation, but invokes a pinned local container CLI directly
 and has no independent watchdog. It also does not complete authenticated trust
 routing, a restricted container-management broker, signed image production,
 managed egress, or dedicated-host engine/host fault acceptance. The blocking
@@ -215,11 +215,10 @@ boundary. See
 [Authentication and authorization](authentication.md) for the current
 interfaces and limits.
 
-Workflow variables currently have durable, value-free selection metadata but
+Workflow variables have durable, value-free selection metadata but
 no execution-local value-custody receipt. Variable-bearing attempts therefore
-remain queued: both the bounded pre-scheduling gate and PostgreSQL's direct
-queued-to-leased transition reject them until a future migration introduces an
-explicit custody proof.
+remain queued because both the bounded pre-scheduling gate and PostgreSQL's
+direct queued-to-leased transition require explicit custody proof.
 
 ## Web interface
 
@@ -237,22 +236,16 @@ same replay path. Rust retains authentication, authorization, and durable
 log-data authority. See
 [ADR 0005](architecture-decisions/0005-structured-execution-log-groups.md).
 
-## Provider maturity and future topology
+## Provider maturity
 
 Rootless Podman is the available Linux path used by this repository. The
 workspace also contains disposable macOS Virtualization.framework execution,
 the Rust Kubernetes sandbox adapter, its in-sandbox guest transport, a runner
 product-config variant that uses ambient Kubernetes client authentication,
 the fixed-relay local Docker provider, and the Windows Hyper-V-container
-component. Their remaining qualification and deployment gates are listed in
-[Compatibility](compatibility.md).
+component. [Compatibility](compatibility.md) lists their remaining
+qualification and deployment gates.
 
-Later work adds independent control-plane roles, broader multi-replica
-deployment, Kubernetes fleet reconciliation, Firecracker and KVM isolation,
-Kata, KubeVirt, managed egress, and the broker and physical-host acceptance
-layers required by the Windows route. Cluster provisioning remains a
-deployment responsibility.
-
-Those providers share the scheduler, JobIR, and sandbox contracts. They are not
+All providers share the scheduler, JobIR, and sandbox contracts. They are not
 available merely because their interfaces or roadmap entries exist. Their
 acceptance gates are listed in the [implementation plan](implementation-plan.md#provider-scope).
