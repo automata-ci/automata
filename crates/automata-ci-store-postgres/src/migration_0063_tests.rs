@@ -721,7 +721,7 @@ async fn migration_0063_fresh_database_supports_exact_deployment_bootstrap() -> 
             sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations")
                 .fetch_one(database.pool())
                 .await?;
-        assert_eq!(applied_version, 63);
+        assert_eq!(applied_version, 64);
         let clock = TestClock::freeze_at_database_now(database.pool()).await?;
 
         let corrupt_tenant = "corrupt-audit-probe";
@@ -1770,7 +1770,7 @@ async fn migration_0063_upgrades_0051_human_installation_and_token_exactly() -> 
         let applied_version: i64 = sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations")
             .fetch_one(database.pool())
             .await?;
-        assert_eq!(applied_version, 63);
+        assert_eq!(applied_version, 64);
         let relation_names: (Option<String>, Option<String>) = sqlx::query_as(
             r"
             SELECT
@@ -2091,7 +2091,7 @@ async fn migration_0063_upgrades_configured_human_and_consumed_token_exactly() -
         let applied_version: i64 = sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations")
             .fetch_one(database.pool())
             .await?;
-        assert_eq!(applied_version, 63);
+        assert_eq!(applied_version, 64);
 
         let upgraded_installation: StoredLegacyHumanInstallation = sqlx::query_as(
             r"

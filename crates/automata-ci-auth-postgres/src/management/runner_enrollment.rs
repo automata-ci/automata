@@ -8,7 +8,10 @@ use automata_ci_core::{
     IsolationLevel, MAX_REGISTERED_RUNNERS, OperatingSystem, RunnerCapabilities, RunnerFeature,
     RunnerGroup, SandboxFeature, Sha256Digest,
 };
-use automata_ci_protocol::VerifiedWindowsRunnerAdmission;
+use automata_ci_protocol::{
+    VerifiedWindowsRunnerAdmission, WINDOWS_RUNNER_ADMISSION_PROVIDER_ID,
+    WINDOWS_RUNNER_ADMISSION_SCHEMA_VERSION,
+};
 use sha2::{Digest as _, Sha256};
 use sqlx::{FromRow, PgPool, Postgres, Transaction};
 use uuid::Uuid;
@@ -44,8 +47,6 @@ const MAX_WINDOWS_ADMISSION_PAYLOAD_BYTES: usize = 64 * 1_024;
 const MAX_WINDOWS_ADMISSION_ID_BYTES: usize = 128;
 const MAX_WINDOWS_ADMISSION_ORIGIN_BYTES: usize = 2_048;
 const MAX_WINDOWS_IMAGE_REFERENCE_BYTES: usize = 2_048;
-const WINDOWS_ADMISSION_SCHEMA_VERSION: u16 = 1;
-const WINDOWS_ADMISSION_SANDBOX_PROVIDER_ID: &str = "windows-hyperv";
 
 /// A runner may request renewal only inside this fixed interval before its
 /// currently presented certificate expires.
@@ -703,7 +704,7 @@ impl WindowsRunnerAdmissionRecord {
         self.envelope_sha256 == self.verified.envelope_sha256()
             && self.signed_payload.as_slice() == self.verified.envelope().signed_payload()
             && self.authenticator.as_slice() == self.verified.envelope().authenticator()
-            && self.schema_version == WINDOWS_ADMISSION_SCHEMA_VERSION
+            && self.schema_version == WINDOWS_RUNNER_ADMISSION_SCHEMA_VERSION
             && self.runner_id == request.runner_id
             && self.operation_id == request.operation_id
             && request.capabilities.environment_profiles().len() == 1
@@ -724,7 +725,7 @@ impl WindowsRunnerAdmissionRecord {
             && self.signed_payload.len() <= MAX_WINDOWS_ADMISSION_PAYLOAD_BYTES
             && self.authenticator.len() == 64
             && is_lower_hex_64(&self.broker_host_id)
-            && self.sandbox_provider_id == WINDOWS_ADMISSION_SANDBOX_PROVIDER_ID
+            && self.sandbox_provider_id == WINDOWS_RUNNER_ADMISSION_PROVIDER_ID
             && valid_origin_text(&self.control_origin)
             && valid_origin_text(&self.enrollment_origin)
             && self.runner_name_sha256 == runner_name_sha256
