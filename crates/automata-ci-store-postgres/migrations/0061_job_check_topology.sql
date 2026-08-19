@@ -50,8 +50,6 @@ BEGIN
               AND parent.origin_kind = NEW.origin_kind
               AND parent.provider_delivery_id IS NOT DISTINCT FROM
                   NEW.provider_delivery_id
-              AND parent.schedule_fire_id IS NOT DISTINCT FROM
-                  NEW.schedule_fire_id
               AND parent.workflow_rerun_run_id IS NOT DISTINCT FROM
                   NEW.workflow_rerun_run_id
               AND parent.provider_connection_id = NEW.provider_connection_id
@@ -87,7 +85,7 @@ BEGIN
         RETURN NEW;
     END IF;
 
-    IF NEW.origin_kind IN ('scheduled_fire', 'workflow_rerun') THEN
+    IF NEW.origin_kind = 'workflow_rerun' THEN
         RETURN NEW;
     END IF;
     SELECT evidence_source.repository_id,

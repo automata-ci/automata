@@ -850,7 +850,6 @@ BEGIN
       AND target.repository_id = source.repository_id
       AND target.origin_kind = 'workflow_rerun'
       AND target.provider_delivery_id IS NULL
-      AND target.schedule_fire_id IS NULL
       AND target.workflow_rerun_run_id = attempt.run_id
       AND target.subject_key = source.subject_key
       AND target.provider_connection_id = source.provider_connection_id

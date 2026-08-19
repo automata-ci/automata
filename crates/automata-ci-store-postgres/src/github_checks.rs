@@ -17,7 +17,7 @@ use automata_ci_store::{
     GithubCheckRunBindingFence, GithubCheckRunCreateFence, GithubCheckRunId, GithubCheckStoreError,
     GithubCheckSubjectIdentity, GithubCheckSubjectKey, GithubCheckSubjectOrigin,
     GithubCheckSubjectReceipt, GithubCheckSuiteId, GithubCheckTerminalCause, GithubRepositoryName,
-    GithubScheduleFireId, GithubServerServiceAuthorityId, GithubServerServiceAuthoritySelector,
+    GithubServerServiceAuthorityId, GithubServerServiceAuthoritySelector,
     GithubServerServiceRevision, HUMAN_JOB_RESULT_MEDIA_TYPE, InitializeGithubCheckPresentation,
     MAX_GITHUB_CHECK_PROJECTION_ATTEMPTS, MAX_TERMINAL_RESULT_BYTES, ProviderDeliveryId,
     ProviderInstallationId, ProviderRepositoryId, ReleaseUnissuedGithubCheckAnnotationBatch,
@@ -51,8 +51,7 @@ pub(super) const fn github_check_conclusion_name(value: GithubCheckConclusion) -
 
 pub(super) const SUBJECT_COLUMNS: &str = r"
     subject.id, subject.tenant_id, subject.repository_id,
-    subject.origin_kind, subject.provider_delivery_id, subject.schedule_fire_id,
-    subject.workflow_rerun_run_id,
+    subject.origin_kind, subject.provider_delivery_id, subject.workflow_rerun_run_id,
     subject.subject_key, subject.subject_kind, subject.parent_subject_id,
     subject.job_id, subject.job_attempt_id,
     subject.provider_connection_id, subject.provider_installation_id,
@@ -172,8 +171,7 @@ macro_rules! claim_locked_projection_sql {
         outbox.claim_action, outbox.external_suite_id, outbox.external_run_id,
         outbox.claimed_at_ms, outbox.claim_expires_at_ms,
         subject.id, subject.tenant_id, subject.repository_id,
-        subject.origin_kind, subject.provider_delivery_id,
-        subject.schedule_fire_id, subject.workflow_rerun_run_id,
+        subject.origin_kind, subject.provider_delivery_id, subject.workflow_rerun_run_id,
         subject.subject_key, subject.subject_kind, subject.parent_subject_id,
         subject.job_id, subject.job_attempt_id,
         subject.provider_connection_id, subject.provider_installation_id,
@@ -263,7 +261,6 @@ const CLAIM_LOCKED_DELIVERY_PROJECTION_SQL: &str = claim_locked_projection_sql!(
     WHERE outbox.subject_id = $1
       AND subject.id = outbox.subject_id
       AND subject.origin_kind = 'provider_delivery'
-      AND subject.schedule_fire_id IS NULL
       AND subject.provider_connection_id = $2
       AND evidence.provider_delivery_id = subject.provider_delivery_id
       AND evidence.tenant_id = subject.tenant_id
@@ -304,7 +301,6 @@ const CLAIM_LOCKED_RERUN_PROJECTION_SQL: &str = claim_locked_projection_sql!(
       AND subject.id = outbox.subject_id
       AND subject.origin_kind = 'workflow_rerun'
       AND subject.provider_delivery_id IS NULL
-      AND subject.schedule_fire_id IS NULL
       AND subject.provider_connection_id = $2
       AND evidence.github_check_subject_id = COALESCE(subject.parent_subject_id, subject.id)
       AND evidence.run_id = subject.workflow_rerun_run_id
@@ -1311,11 +1307,9 @@ pub(super) fn decode_subject(
     ) {
         // The required delivery aggregate is externally claimable before
         // logical admission and therefore retains its repository target.
-        // Schedule and rerun roots are internal lifecycle authority; their
-        // target is decoded only for durable receipts because no outbox row
-        // projects them to GitHub.
+        // Rerun roots are internal lifecycle authority; their target is decoded
+        // only for durable receipts because no outbox row projects them.
         ("workflow", None, None, None, workflow_run_id) => match identity.origin() {
-            GithubCheckSubjectOrigin::ScheduledFire(_) => GithubCheckDetailsTarget::Repository,
             GithubCheckSubjectOrigin::ProviderDelivery(_)
                 if identity.subject_key().as_str()
                     == automata_ci_store::GITHUB_PROVIDER_ALL_DIRECT_WORKFLOWS_KEY =>
@@ -1372,10 +1366,6 @@ fn decode_subject_identity(
         .map(ProviderDeliveryId::from_uuid)
         .transpose()
         .map_err(|_| GithubCheckStoreError::CorruptData)?;
-    let schedule_fire_id = optional_uuid_column(row, "schedule_fire_id")?
-        .map(GithubScheduleFireId::from_uuid)
-        .transpose()
-        .map_err(|_| GithubCheckStoreError::CorruptData)?;
     let rerun_run_id = optional_uuid_column(row, "workflow_rerun_run_id")?.map(RunId::from_uuid);
     let subject_key = GithubCheckSubjectKey::new(string_column(row, "subject_key")?)
         .map_err(|_| GithubCheckStoreError::CorruptData)?;
@@ -1397,13 +1387,8 @@ fn decode_subject_identity(
         .map_err(|_| GithubCheckStoreError::CorruptData)?;
     let name = GithubCheckName::new(string_column(row, "check_name")?)
         .map_err(|_| GithubCheckStoreError::CorruptData)?;
-    match (
-        origin_kind.as_str(),
-        delivery_id,
-        schedule_fire_id,
-        rerun_run_id,
-    ) {
-        ("provider_delivery", Some(delivery_id), None, None) => GithubCheckSubjectIdentity::new(
+    match (origin_kind.as_str(), delivery_id, rerun_run_id) {
+        ("provider_delivery", Some(delivery_id), None) => GithubCheckSubjectIdentity::new(
             tenant,
             RepositoryId::from_uuid(repository_uuid),
             delivery_id,
@@ -1416,10 +1401,10 @@ fn decode_subject_identity(
             head_sha,
             name,
         ),
-        ("scheduled_fire", None, Some(fire_id), None) => GithubCheckSubjectIdentity::new_scheduled(
+        ("workflow_rerun", None, Some(rerun_run_id)) => GithubCheckSubjectIdentity::new_rerun(
             tenant,
             RepositoryId::from_uuid(repository_uuid),
-            fire_id,
+            rerun_run_id,
             subject_key,
             connection_id,
             installation_id,
@@ -1429,21 +1414,6 @@ fn decode_subject_identity(
             head_sha,
             name,
         ),
-        ("workflow_rerun", None, None, Some(rerun_run_id)) => {
-            GithubCheckSubjectIdentity::new_rerun(
-                tenant,
-                RepositoryId::from_uuid(repository_uuid),
-                rerun_run_id,
-                subject_key,
-                connection_id,
-                installation_id,
-                github_repository_id,
-                github_repository_name,
-                app_id,
-                head_sha,
-                name,
-            )
-        }
         _ => return Err(GithubCheckStoreError::CorruptData),
     }
     .map_err(|_| GithubCheckStoreError::CorruptData)
@@ -2166,8 +2136,8 @@ mod tests {
     #[rustfmt::skip]
     const FINGERPRINTS: [(usize, &str, usize, &str); 5] = [
         (3559, "6dfa071d3b8d57082c0cbc428754fd9aca68f710adbb6f9c0d237222183c6667", 2534, "8973709b7f81d9f9ada99972ecacefa165186bd6c063ff637c7f006ce0b8d015"),
-        (6285, "bace26ab71eddd1fd8a26bfae37e7254e5fd20d468abf4d4f8930d0eb2596a38", 5118, "6b2fecb3ad8d196f5539467fc0fdda38e2265568351272fe1099729ec8dde866"),
-        (5278, "c3d9e042cca7c7183d7398087cd873aa7a353e1d1deff98f9b529cb3337d62c3", 4415, "743b5543234e7e8c898976c9a7ad8dc1a359afe3041b8deb67495f8811040fad"),
+        (6208, "6aadcced3ea47507a0cf347a0e94612b1ec196f3fe6f49003f58e3e7a60a1281", 5055, "854903f81367649121a9fc1d890fc6b19da8cf9d430f11da3187d5f38bffd6ee"),
+        (5201, "533c0f6d650d36e7aeb4bdd8213ac7f3aabc17aa391fcb0d43add4e99d46444a", 4352, "14e4b34523600a545d704f53068733654e97008dbffd42a6b22537369eb4a957"),
         (3554, "d9f75908d7a9b84099ae92cff4584ee55fd73f68c309ff4545d59a70c1e80b95", 2135, "d52fdcff7f313aba4a10802c37f4066fe43163990e065cafc7bcbf5813c4a4e6"),
         (3756, "7304327d51592eef6ea2190542907a6e456d7431b8b4cf1731e060f00637826e", 2481, "824e34c302cc4eb906b8fbb828aaca9b9c097ecd5fdcfd12d7af6160ccfe02a2"),
     ];
@@ -2175,9 +2145,9 @@ mod tests {
     #[test]
     fn projection_sql_fingerprints_are_stable() {
         for (index, sql) in PROJECTION_SQL.into_iter().enumerate() {
+            let canonical = canonical_sql(sql);
             let (raw_len, raw_sha, canonical_len, canonical_sha) = FINGERPRINTS[index];
             assert_eq!((sql.len(), sha256(sql)), (raw_len, raw_sha.to_owned()));
-            let canonical = canonical_sql(sql);
             assert_eq!(
                 (canonical.len(), sha256(&canonical)),
                 (canonical_len, canonical_sha.to_owned())
@@ -2215,15 +2185,15 @@ mod tests {
                 .1
         });
         assert!(returning.windows(2).all(|pair| pair[0] == pair[1]));
-        assert_eq!(returning[0].split(',').count(), 50);
+        assert_eq!(returning[0].split(',').count(), 49);
     }
 
     #[test]
     fn claims_keep_closed_origin_evidence_and_null_guards() {
         #[rustfmt::skip]
         let cases = [
-            (CLAIM_LOCKED_DELIVERY_PROJECTION_SQL, "provider_delivery", "github_provider_delivery_evidence", &["schedule_fire_id"][..], &["provider_delivery_id", "workflow_rerun_run_id"][..]),
-            (CLAIM_LOCKED_RERUN_PROJECTION_SQL, "workflow_rerun", "workflow_rerun_check_evidence", &["provider_delivery_id", "schedule_fire_id"][..], &["workflow_rerun_run_id"][..]),
+            (CLAIM_LOCKED_DELIVERY_PROJECTION_SQL, "provider_delivery", "github_provider_delivery_evidence", &[][..], &["provider_delivery_id", "workflow_rerun_run_id"][..]),
+            (CLAIM_LOCKED_RERUN_PROJECTION_SQL, "workflow_rerun", "workflow_rerun_check_evidence", &["provider_delivery_id"][..], &["workflow_rerun_run_id"][..]),
         ];
         for (sql, origin, evidence, required_nulls, forbidden_nulls) in cases {
             assert!(sql.contains(&format!("subject.origin_kind = '{origin}'")));

@@ -635,43 +635,6 @@ BEGIN
                       CONSTRAINT = 'github_check_subjects_canonical_name_exact';
         END IF;
         NEW.github_repository_name := delivery.repository_identity;
-    ELSIF NEW.origin_kind = 'scheduled_fire' THEN
-        SELECT manifest.github_repository_name INTO canonical_name
-        FROM github_schedule_fires AS fire
-        JOIN github_schedule_registry_revisions AS registry
-          ON registry.tenant_id = fire.tenant_id
-         AND registry.repository_id = fire.repository_id
-         AND registry.provider_connection_id = fire.provider_connection_id
-         AND registry.registry_id = fire.registry_id
-        JOIN github_provider_manifest_revisions AS manifest
-          ON manifest.tenant_id = registry.tenant_id
-         AND manifest.repository_id = registry.repository_id
-         AND manifest.provider_connection_id = registry.provider_connection_id
-         AND manifest.manifest_revision = registry.manifest_revision
-         AND manifest.manifest_digest = registry.manifest_digest
-        JOIN github_provider_manifest_current AS manifest_current
-          ON manifest_current.tenant_id = manifest.tenant_id
-         AND manifest_current.repository_id = manifest.repository_id
-         AND manifest_current.provider_connection_id = manifest.provider_connection_id
-         AND manifest_current.manifest_revision = manifest.manifest_revision
-         AND manifest_current.manifest_digest = manifest.manifest_digest
-        WHERE fire.fire_id = NEW.schedule_fire_id
-          AND fire.tenant_id = NEW.tenant_id
-          AND fire.repository_id = NEW.repository_id
-          AND fire.provider_connection_id = NEW.provider_connection_id
-        FOR SHARE OF fire, registry, manifest, manifest_current;
-        IF canonical_name IS NULL
-            OR repository.id IS NULL
-            OR repository.scm_provider <> 'github'
-            OR repository.provider_repository_id <>
-                NEW.github_repository_id::TEXT
-            OR canonical_name <> repository.owner || '/' || repository.name
-        THEN
-            RAISE EXCEPTION 'GitHub Check canonical repository identity is not exact'
-                USING ERRCODE = 'integrity_constraint_violation',
-                      CONSTRAINT = 'github_check_subjects_canonical_name_exact';
-        END IF;
-        NEW.github_repository_name := canonical_name;
     ELSIF NEW.origin_kind = 'workflow_rerun' THEN
         SELECT source.github_repository_name INTO canonical_name
         FROM workflow_rerun_attempts AS attempt
@@ -741,8 +704,6 @@ BEGIN
               AND parent.origin_kind = NEW.origin_kind
               AND parent.provider_delivery_id IS NOT DISTINCT FROM
                   NEW.provider_delivery_id
-              AND parent.schedule_fire_id IS NOT DISTINCT FROM
-                  NEW.schedule_fire_id
               AND parent.workflow_rerun_run_id IS NOT DISTINCT FROM
                   NEW.workflow_rerun_run_id
               AND parent.provider_connection_id = NEW.provider_connection_id
@@ -760,7 +721,7 @@ BEGIN
         RETURN NEW;
     END IF;
 
-    IF NEW.origin_kind IN ('scheduled_fire', 'workflow_rerun') THEN
+    IF NEW.origin_kind = 'workflow_rerun' THEN
         RETURN NEW;
     END IF;
     SELECT evidence_source.repository_id,
@@ -857,10 +818,8 @@ CREATE FUNCTION automata_github_check_subject_insert_guard() RETURNS trigger
 DECLARE
     delivery provider_delivery_inbox%ROWTYPE;
     repository repositories%ROWTYPE;
-    schedule RECORD;
     rerun RECORD;
     job_check RECORD;
-    now_ms BIGINT;
 BEGIN
     IF NEW.desired_state <> 'queued'
         OR NEW.desired_revision <> 1
@@ -950,84 +909,6 @@ BEGIN
                 USING ERRCODE = 'integrity_constraint_violation',
                       CONSTRAINT = 'github_check_subjects_authority_exact';
         END IF;
-    ELSIF NEW.origin_kind = 'scheduled_fire' THEN
-        now_ms := floor(extract(epoch FROM clock_timestamp()) * 1000)::BIGINT;
-        SELECT fire.fire_id,
-               fire.state AS fire_state,
-               fire.claimed_at_ms,
-               fire.claim_expires_at_ms,
-               registry.source_revision,
-               registry.default_branch_ref,
-               entry.workflow_path,
-               seal.registry_id AS sealed_registry_id,
-               current.registry_id AS current_registry_id,
-               manifest.provider_installation_id,
-               manifest.github_repository_id,
-               manifest.github_repository_name,
-               manifest.github_app_id,
-               manifest.check_name,
-               manifest.git_ref
-          INTO schedule
-        FROM github_schedule_fires AS fire
-        JOIN github_schedule_registry_revisions AS registry
-          ON registry.tenant_id = fire.tenant_id
-         AND registry.repository_id = fire.repository_id
-         AND registry.provider_connection_id = fire.provider_connection_id
-         AND registry.registry_id = fire.registry_id
-        JOIN github_schedule_registry_entries AS entry
-          ON entry.registry_id = fire.registry_id
-         AND entry.ordinal = fire.entry_ordinal
-        JOIN github_schedule_registry_seals AS seal
-          ON seal.registry_id = registry.registry_id
-         AND seal.inventory_digest = registry.inventory_digest
-         AND seal.schedule_count = registry.schedule_count
-        JOIN github_schedule_registry_current AS current
-          ON current.tenant_id = registry.tenant_id
-         AND current.repository_id = registry.repository_id
-         AND current.provider_connection_id = registry.provider_connection_id
-         AND current.registry_id = registry.registry_id
-        JOIN github_provider_manifest_revisions AS manifest
-          ON manifest.tenant_id = registry.tenant_id
-         AND manifest.repository_id = registry.repository_id
-         AND manifest.provider_connection_id = registry.provider_connection_id
-         AND manifest.manifest_revision = registry.manifest_revision
-         AND manifest.manifest_digest = registry.manifest_digest
-        JOIN github_provider_manifest_current AS manifest_current
-          ON manifest_current.tenant_id = manifest.tenant_id
-         AND manifest_current.repository_id = manifest.repository_id
-         AND manifest_current.provider_connection_id = manifest.provider_connection_id
-         AND manifest_current.manifest_revision = manifest.manifest_revision
-         AND manifest_current.manifest_digest = manifest.manifest_digest
-        WHERE fire.fire_id = NEW.schedule_fire_id
-          AND fire.tenant_id = NEW.tenant_id
-          AND fire.repository_id = NEW.repository_id
-          AND fire.provider_connection_id = NEW.provider_connection_id
-        FOR SHARE OF fire, registry, entry, seal, current, manifest,
-                     manifest_current;
-        IF NOT FOUND THEN
-            RAISE EXCEPTION 'GitHub scheduled Check has no exact sealed fire'
-                USING ERRCODE = 'integrity_constraint_violation',
-                      CONSTRAINT = 'github_check_subjects_schedule_authority_exact';
-        END IF;
-        IF schedule.fire_state <> 'claimed'
-            OR schedule.claimed_at_ms > now_ms
-            OR schedule.claim_expires_at_ms <= now_ms
-            OR NEW.created_at_ms < schedule.claimed_at_ms
-            OR NEW.created_at_ms >= schedule.claim_expires_at_ms
-            OR schedule.default_branch_ref <> schedule.git_ref
-            OR NEW.subject_key <> schedule.workflow_path
-            OR NEW.provider_installation_id <>
-                schedule.provider_installation_id
-            OR NEW.github_repository_id <> schedule.github_repository_id
-            OR NEW.github_repository_name <> schedule.github_repository_name
-            OR NEW.github_app_id <> schedule.github_app_id
-            OR NEW.head_sha <> decode(schedule.source_revision, 'hex')
-            OR NEW.check_name <> schedule.check_name
-        THEN
-            RAISE EXCEPTION 'GitHub scheduled Check authority is not exact and live'
-                USING ERRCODE = 'integrity_constraint_violation',
-                      CONSTRAINT = 'github_check_subjects_schedule_authority_exact';
-        END IF;
     ELSIF NEW.origin_kind = 'workflow_rerun' THEN
         SELECT attempt.run_id,
                attempt.source_run_id,
@@ -1108,7 +989,6 @@ CREATE FUNCTION automata_github_check_subject_origin_immutable() RETURNS trigger
 BEGIN
     IF NEW.origin_kind IS DISTINCT FROM OLD.origin_kind
         OR NEW.provider_delivery_id IS DISTINCT FROM OLD.provider_delivery_id
-        OR NEW.schedule_fire_id IS DISTINCT FROM OLD.schedule_fire_id
         OR NEW.workflow_rerun_run_id IS DISTINCT FROM OLD.workflow_rerun_run_id
     THEN
         RAISE EXCEPTION 'GitHub Check subject origin is immutable'

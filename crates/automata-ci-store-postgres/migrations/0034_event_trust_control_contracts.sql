@@ -1013,9 +1013,6 @@ BEGIN
                (NEW.origin_kind = 'provider_delivery'
                 AND selection.origin_kind_name = 'provider_delivery'
                 AND selection.origin_id = NEW.provider_delivery_id)
-            OR (NEW.origin_kind = 'scheduled_fire'
-                AND selection.origin_kind_name = 'schedule_fire'
-                AND selection.origin_id = NEW.schedule_fire_id)
             OR (NEW.origin_kind = 'workflow_rerun'
                 AND selection.origin_kind_name = 'workflow_run'
                 AND selection.origin_id = NEW.workflow_rerun_run_id)

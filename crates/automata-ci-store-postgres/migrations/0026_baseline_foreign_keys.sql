@@ -71,9 +71,6 @@ ALTER TABLE ONLY github_check_subjects
     ADD CONSTRAINT github_check_subjects_job_attempt FOREIGN KEY (job_attempt_id) REFERENCES job_attempts(id) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY github_check_subjects
-    ADD CONSTRAINT github_check_subjects_schedule_fire FOREIGN KEY (tenant_id, repository_id, provider_connection_id, schedule_fire_id) REFERENCES github_schedule_fires(tenant_id, repository_id, provider_connection_id, fire_id) ON DELETE RESTRICT;
-
-ALTER TABLE ONLY github_check_subjects
     ADD CONSTRAINT github_check_subjects_tenant_delivery FOREIGN KEY (provider_delivery_id, tenant_id) REFERENCES provider_delivery_inbox(id, tenant_id) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY github_check_subjects

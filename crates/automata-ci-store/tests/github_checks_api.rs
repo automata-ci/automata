@@ -120,7 +120,6 @@ fn rerun_subject_identity_has_one_closed_physical_origin() {
 
     assert_eq!(identity.rerun_run_id(), Some(rerun_run_id));
     assert_eq!(identity.delivery_id(), None);
-    assert_eq!(identity.schedule_fire_id(), None);
 }
 
 #[test]

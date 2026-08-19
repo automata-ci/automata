@@ -77,12 +77,6 @@ ALTER TABLE ONLY github_check_subjects
     ADD CONSTRAINT github_check_subjects_pkey PRIMARY KEY (id);
 
 ALTER TABLE ONLY github_check_subjects
-    ADD CONSTRAINT github_check_subjects_schedule_fire_key_unique UNIQUE (schedule_fire_id, subject_key);
-
-ALTER TABLE ONLY github_check_subjects
-    ADD CONSTRAINT github_check_subjects_schedule_identity_unique UNIQUE (tenant_id, repository_id, provider_connection_id, schedule_fire_id, id);
-
-ALTER TABLE ONLY github_check_subjects
     ADD CONSTRAINT github_check_subjects_tenant_id_unique UNIQUE (tenant_id, id);
 
 ALTER TABLE ONLY github_check_subjects

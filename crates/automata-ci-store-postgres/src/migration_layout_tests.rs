@@ -15,7 +15,7 @@ const CANONICAL_MIGRATIONS: &[(&str, &str)] = &[
     ),
     (
         "0003_baseline_routines_03.sql",
-        "f324de1a77ec95f6b3f0969e668a55b2bceb4818e8be4dac41a3784ceaad9aadbd8845668fc49d3a265fe79b4227a8a4",
+        "4a7bb66d988122ea3eff52b26c5035dbd1b8b4aee92b3794728444e1778e426271e39672349989caa2a7607f6859941e",
     ),
     (
         "0004_baseline_routines_04.sql",
@@ -63,7 +63,7 @@ const CANONICAL_MIGRATIONS: &[(&str, &str)] = &[
     ),
     (
         "0015_baseline_routines_15.sql",
-        "7230a0afb4557f610128b2c8f905f6ceb49766c2ba003eb6062e82a51ea00788094db51b9490319d2cb1c2f7582ae48f",
+        "a69203251c409e0ee0c150ce23209ea0b02cb82d58f410f54d93fb18550ecc9d22712dccbb6b87c2302b78ae19b15c5c",
     ),
     (
         "0016_baseline_routines_16.sql",
@@ -71,7 +71,7 @@ const CANONICAL_MIGRATIONS: &[(&str, &str)] = &[
     ),
     (
         "0017_baseline_relations_execution.sql",
-        "872f3fd107da56e48a8c3e6f88f8e3828cc5ef760ff1deb0b9e17b2bc74cc195e9132f29a89b3f7f360181d3be03417b",
+        "4ff9cdfd3773acc06f9f6cc89963566666bdeb1eed30c18836235fad22a66a271db0bb9907e8157cef63deb8ab689b76",
     ),
     (
         "0018_baseline_relations_auth_and_delivery.sql",
@@ -91,7 +91,7 @@ const CANONICAL_MIGRATIONS: &[(&str, &str)] = &[
     ),
     (
         "0022_baseline_keys_and_constraints.sql",
-        "cac46dcb4418a4964b39249197917cc2eb4b8566cc03e0c24922fe3387f04b9d13cf0ecc08226323fb01079c7829cc1c",
+        "dfef22062160c709943d6e02af9bca076f5dbb0cdf6e083e66f1096a3cf2f150e85623ee80d6786d4befa3fdcc64feb1",
     ),
     (
         "0023_baseline_indexes.sql",
@@ -107,7 +107,7 @@ const CANONICAL_MIGRATIONS: &[(&str, &str)] = &[
     ),
     (
         "0026_baseline_foreign_keys.sql",
-        "174602ffba17af3a00ddc2ad25a1e53c3b8830fb9558c51a8a638bd5c6c6068827c8b964638eca0f45c98e2aac88a7f3",
+        "a4e836d627a1f249303ab3a6cdc96619932e2ca2d59a990c54cda458f6f528f93ddfdd6fdfaff4e261a24fe41f57744a",
     ),
     (
         "0027_workspace_usage_feed.sql",
@@ -139,7 +139,7 @@ const CANONICAL_MIGRATIONS: &[(&str, &str)] = &[
     ),
     (
         "0034_event_trust_control_contracts.sql",
-        "dcab5d4aaf66e00528388c84782384156a6817e90de281591072c283c0feeb9282a77b8177c2d9808a92b6100eba2bc5",
+        "91deb96541be3cbb346bcdb6c2b297d826ef0afbe9c6a76d4a5072fc5deb04c5d57f068bfdbf53d4dae02ae9e5d85847",
     ),
     (
         "0035_workflow_run_trust_snapshots.sql",
@@ -235,7 +235,7 @@ const CANONICAL_MIGRATIONS: &[(&str, &str)] = &[
     ),
     (
         "0058_required_check_event_isolation.sql",
-        "ea67c5ce5f63d1fedffc66d92d7cf871cb0c0ec363f9312d3aebf12a015cd76a7c24c03c269558db395abbcc94390365",
+        "3711625bfd9313ca6885288c4bc44161180aa0b420584a162f93a7367eb8314b120fbf1f59a8e537268c111a59f1eeac",
     ),
     (
         "0059_provider_runner_policy_revision.sql",
@@ -247,7 +247,7 @@ const CANONICAL_MIGRATIONS: &[(&str, &str)] = &[
     ),
     (
         "0061_job_check_topology.sql",
-        "befdac4d4754eb1b39e6954c95b012b67797fccb7baa248a53c0559162d295b38069f41e78f0e724ded395df965c5e58",
+        "e1536a7788df07af7e2f8efcd728545dc8eff9c9648e3ebd1c79e7ba60270c4ecdcf866f76b40d8624d653be0851370a",
     ),
     (
         "0062_runner_protocol_v3.sql",

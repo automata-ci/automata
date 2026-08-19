@@ -7,9 +7,9 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
-    GithubRepositoryName, GithubScheduleFireId, GithubServerServiceAuthoritySelector,
-    ProviderDeliveryId, ProviderInstallationId, ProviderRepositoryId, RepositoryId,
-    RepositoryOperationError, TenantScope,
+    GithubRepositoryName, GithubServerServiceAuthoritySelector, ProviderDeliveryId,
+    ProviderInstallationId, ProviderRepositoryId, RepositoryId, RepositoryOperationError,
+    TenantScope,
 };
 use automata_ci_provider::ProviderConnectionId;
 
@@ -198,8 +198,6 @@ impl std::fmt::Debug for GithubCheckSubjectKey {
 pub enum GithubCheckSubjectOrigin {
     /// An authenticated webhook delivery and its signed evidence.
     ProviderDelivery(ProviderDeliveryId),
-    /// A fenced invocation from an immutable schedule registry revision.
-    ScheduledFire(GithubScheduleFireId),
     /// A fresh physical attempt derived from one exact terminal workflow run.
     WorkflowRerun(RunId),
 }
@@ -247,43 +245,6 @@ impl GithubCheckSubjectIdentity {
             tenant,
             repository_id,
             origin: GithubCheckSubjectOrigin::ProviderDelivery(delivery_id),
-            subject_key,
-            connection_id,
-            installation_id,
-            github_repository_id,
-            github_repository_name,
-            app_id,
-            head_sha,
-            name,
-        })
-    }
-
-    /// Constructs the complete identity of a fenced scheduled invocation.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a nil Automata repository UUID.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new_scheduled(
-        tenant: TenantScope,
-        repository_id: RepositoryId,
-        fire_id: GithubScheduleFireId,
-        subject_key: GithubCheckSubjectKey,
-        connection_id: ProviderConnectionId,
-        installation_id: ProviderInstallationId,
-        github_repository_id: ProviderRepositoryId,
-        github_repository_name: GithubRepositoryName,
-        app_id: GithubCheckAppId,
-        head_sha: GitObjectId,
-        name: GithubCheckName,
-    ) -> Result<Self, GithubCheckValueError> {
-        if repository_id.as_uuid().is_nil() {
-            return Err(GithubCheckValueError::NilUuid("GitHub Check repository ID"));
-        }
-        Ok(Self {
-            tenant,
-            repository_id,
-            origin: GithubCheckSubjectOrigin::ScheduledFire(fire_id),
             subject_key,
             connection_id,
             installation_id,
@@ -355,25 +316,14 @@ impl GithubCheckSubjectIdentity {
     pub const fn delivery_id(&self) -> Option<ProviderDeliveryId> {
         match self.origin {
             GithubCheckSubjectOrigin::ProviderDelivery(delivery_id) => Some(delivery_id),
-            GithubCheckSubjectOrigin::ScheduledFire(_)
-            | GithubCheckSubjectOrigin::WorkflowRerun(_) => None,
-        }
-    }
-    /// Returns the scheduled fire identity, when schedule-originated.
-    #[must_use]
-    pub const fn schedule_fire_id(&self) -> Option<GithubScheduleFireId> {
-        match self.origin {
-            GithubCheckSubjectOrigin::ProviderDelivery(_)
-            | GithubCheckSubjectOrigin::WorkflowRerun(_) => None,
-            GithubCheckSubjectOrigin::ScheduledFire(fire_id) => Some(fire_id),
+            GithubCheckSubjectOrigin::WorkflowRerun(_) => None,
         }
     }
     /// Returns the physical rerun identity, when rerun-originated.
     #[must_use]
     pub const fn rerun_run_id(&self) -> Option<RunId> {
         match self.origin {
-            GithubCheckSubjectOrigin::ProviderDelivery(_)
-            | GithubCheckSubjectOrigin::ScheduledFire(_) => None,
+            GithubCheckSubjectOrigin::ProviderDelivery(_) => None,
             GithubCheckSubjectOrigin::WorkflowRerun(run_id) => Some(run_id),
         }
     }
