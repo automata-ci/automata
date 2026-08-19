@@ -215,7 +215,7 @@ const CANONICAL_MIGRATIONS: &[(&str, &str)] = &[
     ),
     (
         "0053_provider_delivery_foundation.sql",
-        "52a3ab7e1e78fedee448882f0f400f3b4ae9ef0accf02b2f990543fdacb261a3f280774ba7787f4a9a1c4cd99c0d93f1",
+        "4fd137b340fda9709a9920703599e708568e44b1df69cd4ffb4b57435ec791603e2ac50798c0f1359d528c3921671843",
     ),
     (
         "0054_provider_neutral_workload_oidc.sql",
@@ -227,7 +227,7 @@ const CANONICAL_MIGRATIONS: &[(&str, &str)] = &[
     ),
     (
         "0056_provider_processing_invocations.sql",
-        "47302f91ed241062d1d9366a326d48d804bd6bbf7daba589501f6c2b92dbf6ef23707fea7999f27398bc1ef7b54203f5",
+        "0e75bfa116e5e182be1d3f4a86ca8baed1bbb3301a64a295757e6ee8f4c185021953b9482b7c55ab3a5f7395ba20f50a",
     ),
     (
         "0057_merge_queue_check_aggregation.sql",

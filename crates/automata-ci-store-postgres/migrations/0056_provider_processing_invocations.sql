@@ -43,12 +43,16 @@ CREATE TABLE provider_deliveries (
     UNIQUE (delivery_id, disposition),
     FOREIGN KEY (
         endpoint_id, endpoint_revision, provider_type,
-        provider_instance_id, provider_revision,
-        connection_id, connection_revision
+        provider_instance_id, provider_revision
     ) REFERENCES provider_webhook_endpoint_revisions (
         endpoint_id, revision, provider_type,
-        provider_instance_id, provider_revision,
-        connection_id, connection_revision
+        provider_instance_id, provider_revision
+    ) ON DELETE RESTRICT,
+    FOREIGN KEY (
+        connection_id, connection_revision,
+        provider_instance_id, provider_revision
+    ) REFERENCES provider_connection_revisions (
+        connection_id, revision, provider_instance_id, provider_revision
     ) ON DELETE RESTRICT,
     FOREIGN KEY (
         provider_instance_id, signature_configuration_revision,

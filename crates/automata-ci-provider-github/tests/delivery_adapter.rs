@@ -32,11 +32,49 @@ const CURRENT_SECRET: &[u8] = b"current GitHub webhook secret";
 struct Fixture {
     endpoint: ProviderWebhookEndpointManifest,
     connection: ProviderConnectionManifest,
+    unrelated_connection: ProviderConnectionManifest,
 }
 
 impl Fixture {
     fn new(instance_id: ProviderInstanceId, repository_id: &str) -> Self {
-        let connection_id = ProviderConnectionId::new();
+        let connection = Self::connection(instance_id, repository_id);
+        let unrelated_connection = Self::connection(instance_id, "40");
+        let endpoint = ProviderWebhookEndpointManifest::new(
+            ProviderWebhookEndpointId::new(),
+            ProviderWebhookEndpointRevision::new(1).expect("endpoint revision"),
+            ProviderWebhookEndpointState::Active,
+            "github".parse().expect("provider type"),
+            instance_id,
+            ProviderConfigurationRevision::new(1).expect("provider revision"),
+            1_048_576,
+            30 * 24 * 60 * 60 * 1_000,
+            vec![
+                ProviderWebhookSecretReference::new(
+                    ProviderConfigurationRevision::new(1).expect("provider revision"),
+                    ProviderSecretName::new("webhook-secret").expect("secret name"),
+                    ProviderSecretGeneration::new(1).expect("old generation"),
+                ),
+                ProviderWebhookSecretReference::new(
+                    ProviderConfigurationRevision::new(1).expect("provider revision"),
+                    ProviderSecretName::new("webhook-secret").expect("secret name"),
+                    ProviderSecretGeneration::new(2).expect("current generation"),
+                ),
+            ],
+            UnixMillis::new(1_000),
+            None,
+        )
+        .expect("endpoint");
+        Self {
+            endpoint,
+            connection,
+            unrelated_connection,
+        }
+    }
+
+    fn connection(
+        instance_id: ProviderInstanceId,
+        repository_id: &str,
+    ) -> ProviderConnectionManifest {
         let policy = GithubConnectionPolicy::new(
             71,
             RepositoryId::new("example/base-repository").expect("repository route"),
@@ -66,8 +104,8 @@ impl Fixture {
                 .expect("archive limits"),
             policy,
         );
-        let connection = ProviderConnectionManifest::new(
-            connection_id,
+        ProviderConnectionManifest::new(
+            ProviderConnectionId::new(),
             ProviderConnectionRevision::new(1).expect("connection revision"),
             ProviderLifecycleState::Active,
             configuration,
@@ -75,38 +113,7 @@ impl Fixture {
             Some(UnixMillis::new(1_000)),
             None,
         )
-        .expect("connection");
-        let endpoint = ProviderWebhookEndpointManifest::new(
-            ProviderWebhookEndpointId::new(),
-            ProviderWebhookEndpointRevision::new(1).expect("endpoint revision"),
-            ProviderWebhookEndpointState::Active,
-            "github".parse().expect("provider type"),
-            instance_id,
-            ProviderConfigurationRevision::new(1).expect("provider revision"),
-            connection_id,
-            connection.revision(),
-            1_048_576,
-            30 * 24 * 60 * 60 * 1_000,
-            vec![
-                ProviderWebhookSecretReference::new(
-                    ProviderConfigurationRevision::new(1).expect("provider revision"),
-                    ProviderSecretName::new("webhook-secret").expect("secret name"),
-                    ProviderSecretGeneration::new(1).expect("old generation"),
-                ),
-                ProviderWebhookSecretReference::new(
-                    ProviderConfigurationRevision::new(1).expect("provider revision"),
-                    ProviderSecretName::new("webhook-secret").expect("secret name"),
-                    ProviderSecretGeneration::new(2).expect("current generation"),
-                ),
-            ],
-            UnixMillis::new(1_000),
-            None,
-        )
-        .expect("endpoint");
-        Self {
-            endpoint,
-            connection,
-        }
+        .expect("connection")
     }
 
     fn candidates(&self) -> ProviderWebhookSecretCandidates {
@@ -154,7 +161,7 @@ impl Fixture {
         .expect("selected headers");
         let request = ProviderWebhookRequest::new(
             self.endpoint.clone(),
-            self.connection.clone(),
+            vec![self.unrelated_connection.clone(), self.connection.clone()],
             ProviderWebhookMethod::Post,
             headers,
             body,
@@ -213,7 +220,7 @@ fn all_admission_events_normalize_through_the_common_contract() {
                 CURRENT_SECRET,
             ))
             .expect("signature");
-        let normalized = adapter.normalize(authenticated);
+        let normalized = adapter.normalize(authenticated).expect("normalization");
         let descriptor = normalized.raw_descriptor().expect("raw descriptor");
         let ProviderDelivery::Trigger(delivery) = normalized.seal(descriptor).expect("seal") else {
             panic!("{event} was rejected");
@@ -275,15 +282,13 @@ fn endpoint_repository_identity_is_enforced_after_authentication() {
             CURRENT_SECRET,
         ))
         .expect("signature remains valid");
-    let normalized = adapter.normalize(authenticated);
-    let descriptor = normalized.raw_descriptor().expect("raw descriptor");
-    let ProviderDelivery::Rejected(delivery) = normalized.seal(descriptor).expect("seal") else {
-        panic!("identity mismatch entered admission");
-    };
-    assert_eq!(
-        delivery.reason(),
-        ProviderDeliveryRejection::PayloadIdentityMismatch
-    );
+    let error = adapter
+        .normalize(authenticated)
+        .expect_err("unregistered repository must not select a connection");
+    assert!(matches!(
+        error,
+        automata_ci_provider::ProviderWebhookError::PayloadIdentityMismatch
+    ));
 }
 
 #[test]
@@ -298,7 +303,7 @@ fn rerequested_check_run_becomes_an_authenticated_control() {
             CURRENT_SECRET,
         ))
         .expect("signature");
-    let normalized = adapter.normalize(authenticated);
+    let normalized = adapter.normalize(authenticated).expect("normalization");
     let descriptor = normalized.raw_descriptor().expect("raw descriptor");
     let ProviderDelivery::Control(delivery) = normalized.seal(descriptor).expect("seal") else {
         panic!("rerequested Check Run was not admitted as a control");
@@ -349,7 +354,7 @@ fn requested_action_controls_are_rejected_until_selection_is_common() {
             CURRENT_SECRET,
         ))
         .expect("signature");
-    let normalized = adapter.normalize(authenticated);
+    let normalized = adapter.normalize(authenticated).expect("normalization");
     let descriptor = normalized.raw_descriptor().expect("raw descriptor");
     let ProviderDelivery::Rejected(delivery) = normalized.seal(descriptor).expect("seal") else {
         panic!("requested action unexpectedly entered control processing");
@@ -372,7 +377,7 @@ fn rerequested_check_suite_becomes_an_authenticated_control() {
             CURRENT_SECRET,
         ))
         .expect("signature");
-    let normalized = adapter.normalize(authenticated);
+    let normalized = adapter.normalize(authenticated).expect("normalization");
     let descriptor = normalized.raw_descriptor().expect("raw descriptor");
     let ProviderDelivery::Control(delivery) = normalized.seal(descriptor).expect("seal") else {
         panic!("rerequested Check Suite was not admitted as a control");
@@ -417,7 +422,7 @@ fn provider_limit_is_not_downgraded_to_a_partial_commit_set() {
             CURRENT_SECRET,
         ))
         .expect("signature");
-    let normalized = adapter.normalize(authenticated);
+    let normalized = adapter.normalize(authenticated).expect("normalization");
     let descriptor = normalized.raw_descriptor().expect("raw descriptor");
     let ProviderDelivery::Trigger(delivery) = normalized.seal(descriptor).expect("seal") else {
         panic!("large push rejected");

@@ -15,17 +15,18 @@ use automata_ci_provider::{
     ProviderConfigurationRevision, ProviderConnectionConfiguration, ProviderConnectionId,
     ProviderConnectionManifest, ProviderConnectionPolicyDocument, ProviderConnectionRevision,
     ProviderDefaultBranch, ProviderDeliveryId, ProviderDeliveryNormalization,
-    ProviderDeliveryObservations, ProviderDeliveryRejection, ProviderEventName, ProviderGitRef,
-    ProviderGitRefKind, ProviderInstanceId, ProviderLifecycleState, ProviderProcessingClaimFence,
+    ProviderDeliveryObservations, ProviderEventName, ProviderGitRef, ProviderGitRefKind,
+    ProviderInstanceId, ProviderLifecycleState, ProviderProcessingClaimFence,
     ProviderProcessingInvocationId, ProviderProcessingWorkerId, ProviderRepository,
     ProviderRepositoryPath, ProviderRunnerPolicyBinding, ProviderSchemaVersion, ProviderSecret,
     ProviderSecretGeneration, ProviderSecretName, ProviderTriggerDeliveryDraft, ProviderTypeId,
     ProviderWebhookAuthenticationError, ProviderWebhookAuthenticationRequest,
     ProviderWebhookEndpointId, ProviderWebhookEndpointManifest, ProviderWebhookEndpointRevision,
-    ProviderWebhookEndpointState, ProviderWebhookHeaderName, ProviderWebhookHeaders,
-    ProviderWebhookMethod, ProviderWebhookRequest, ProviderWebhookSecretCandidates,
-    ProviderWebhookSecretReference, ProviderWebhookSignatureEvidence, ProviderWorkflowSource,
-    PushCommitEvidence, PushTrigger, RenewProviderProcessing, RepositoryVisibility,
+    ProviderWebhookEndpointState, ProviderWebhookError, ProviderWebhookHeaderName,
+    ProviderWebhookHeaders, ProviderWebhookMethod, ProviderWebhookRequest,
+    ProviderWebhookSecretCandidates, ProviderWebhookSecretReference,
+    ProviderWebhookSignatureEvidence, ProviderWorkflowSource, PushCommitEvidence, PushTrigger,
+    RenewProviderProcessing, RepositoryVisibility,
 };
 use sha2::{Digest as _, Sha256};
 
@@ -88,17 +89,12 @@ impl DeliveryAdapter for FakeAdapter {
     fn normalize(
         &self,
         authenticated: AuthenticatedProviderWebhook,
-    ) -> ProviderDeliveryNormalization {
+    ) -> Result<ProviderDeliveryNormalization, ProviderWebhookError> {
         self.parsed.store(true, Ordering::SeqCst);
-        let parsed: serde_json::Value = match serde_json::from_slice(authenticated.request().body())
-        {
-            Ok(value) => value,
-            Err(_) => {
-                return rejected(authenticated, ProviderDeliveryRejection::InvalidPayload);
-            }
-        };
+        let parsed: serde_json::Value = serde_json::from_slice(authenticated.request().body())
+            .map_err(|_| ProviderWebhookError::PayloadIdentityMismatch)?;
         if parsed.get("kind").and_then(serde_json::Value::as_str) != Some("push") {
-            return rejected(authenticated, ProviderDeliveryRejection::UnknownEvent);
+            return Err(ProviderWebhookError::PayloadIdentityMismatch);
         }
         let instance_id = authenticated.request().endpoint().instance_id();
         let repository = ProviderRepository::new(
@@ -110,6 +106,11 @@ impl DeliveryAdapter for FakeAdapter {
             ProviderRepositoryPath::new("owner/repository").expect("repository path"),
             RepositoryVisibility::Private,
         );
+        let connection = authenticated
+            .request()
+            .connection_for_repository(repository.identity())
+            .cloned()
+            .ok_or(ProviderWebhookError::PayloadIdentityMismatch)?;
         let trigger = PushTrigger::new(
             repository,
             ProviderGitRef::new("refs/heads/main", ProviderGitRefKind::Branch).expect("branch"),
@@ -120,7 +121,7 @@ impl DeliveryAdapter for FakeAdapter {
             None,
         )
         .expect("push");
-        ProviderDeliveryNormalization::Trigger(Box::new(
+        Ok(ProviderDeliveryNormalization::Trigger(Box::new(
             ProviderTriggerDeliveryDraft::new(
                 ProviderDeliveryId::new(),
                 ExternalDeliveryIdentity::new(
@@ -129,35 +130,14 @@ impl DeliveryAdapter for FakeAdapter {
                 ),
                 ProviderEventName::new("push").expect("event type"),
                 authenticated,
+                connection,
                 &NormalizedTrigger::Push(trigger),
                 ProviderDeliveryObservations::new(br#"{"fixture":"fake"}"#.to_vec())
                     .expect("observations"),
             )
             .expect("delivery draft"),
-        ))
+        )))
     }
-}
-
-fn rejected(
-    authenticated: AuthenticatedProviderWebhook,
-    reason: ProviderDeliveryRejection,
-) -> ProviderDeliveryNormalization {
-    let instance_id = authenticated.request().endpoint().instance_id();
-    ProviderDeliveryNormalization::Rejected(Box::new(
-        automata_ci_provider::RejectedProviderDeliveryDraft::new(
-            ProviderDeliveryId::new(),
-            ExternalDeliveryIdentity::new(
-                instance_id,
-                ExternalDeliveryId::new("delivery-1").expect("delivery ID"),
-            ),
-            ProviderEventName::new("fake").expect("event type"),
-            authenticated,
-            None,
-            reason,
-            ProviderDeliveryObservations::new(Vec::new()).expect("observations"),
-        )
-        .expect("rejected draft"),
-    ))
 }
 
 fn endpoint(
@@ -171,8 +151,6 @@ fn endpoint(
         ProviderTypeId::new(provider_type).expect("provider type"),
         instance_id,
         ProviderConfigurationRevision::new(2).expect("provider revision"),
-        ProviderConnectionId::new(),
-        ProviderConnectionRevision::new(1).expect("connection revision"),
         1_024,
         30 * 24 * 60 * 60 * 1_000,
         vec![
@@ -228,9 +206,10 @@ fn request(
     hash.update(body);
     let signature = hex_digest(&hash.finalize()).into_bytes();
     let connection = connection(&endpoint);
+    let unrelated = connection_for(&endpoint, "repository-41");
     ProviderWebhookRequest::new(
         endpoint,
-        connection,
+        vec![unrelated, connection],
         ProviderWebhookMethod::Post,
         ProviderWebhookHeaders::new([(
             ProviderWebhookHeaderName::new("x-fake-signature").expect("header name"),
@@ -244,11 +223,18 @@ fn request(
 }
 
 fn connection(endpoint: &ProviderWebhookEndpointManifest) -> ProviderConnectionManifest {
+    connection_for(endpoint, "repository-42")
+}
+
+fn connection_for(
+    endpoint: &ProviderWebhookEndpointManifest,
+    external_repository_id: &str,
+) -> ProviderConnectionManifest {
     let configuration = ProviderConnectionConfiguration::new(
         WorkspaceId::parse("11111111-1111-4111-8111-111111111111").expect("workspace"),
         ExternalRepositoryIdentity::new(
             endpoint.instance_id(),
-            ExternalRepositoryId::new("repository-42").expect("repository ID"),
+            ExternalRepositoryId::new(external_repository_id).expect("repository ID"),
         ),
         endpoint.provider_revision(),
         Sha256Digest::from_bytes([3; 32]),
@@ -270,8 +256,8 @@ fn connection(endpoint: &ProviderWebhookEndpointManifest) -> ProviderConnectionM
         .expect("adapter policy"),
     );
     ProviderConnectionManifest::new(
-        endpoint.connection_id(),
-        endpoint.connection_revision(),
+        ProviderConnectionId::new(),
+        ProviderConnectionRevision::new(1).expect("connection revision"),
         ProviderLifecycleState::Active,
         configuration,
         UnixMillis::new(1_000),
@@ -364,7 +350,7 @@ fn registry_is_exact_and_instances_do_not_share_secret_candidates() {
 }
 
 #[test]
-fn authenticated_invalid_json_is_recorded_without_admission() {
+fn authenticated_invalid_json_is_rejected_before_connection_selection() {
     let parsed = Arc::new(AtomicBool::new(false));
     let adapter = FakeAdapter::new("forgejo", Arc::clone(&parsed));
     let endpoint = endpoint("forgejo", ProviderInstanceId::new());
@@ -381,9 +367,39 @@ fn authenticated_invalid_json_is_recorded_without_admission() {
 
     assert!(matches!(
         adapter.normalize(authenticated),
-        ProviderDeliveryNormalization::Rejected(_)
+        Err(ProviderWebhookError::PayloadIdentityMismatch)
     ));
     assert!(parsed.load(Ordering::SeqCst));
+}
+
+#[test]
+fn authenticated_payload_selects_its_exact_repository_connection() {
+    let adapter = FakeAdapter::new("forgejo", Arc::new(AtomicBool::new(false)));
+    let endpoint = endpoint("forgejo", ProviderInstanceId::new());
+    let candidates = candidates(&endpoint);
+    let request = request(endpoint, br#"{"kind":"push"}"#, NEW_SECRET);
+    let repository = ExternalRepositoryIdentity::new(
+        request.endpoint().instance_id(),
+        ExternalRepositoryId::new("repository-42").expect("repository ID"),
+    );
+    let expected_connection = request
+        .connection_for_repository(&repository)
+        .expect("target connection")
+        .connection_id();
+    let authenticated = adapter
+        .authenticate(
+            ProviderWebhookAuthenticationRequest::new(request, candidates)
+                .expect("authentication request"),
+        )
+        .expect("signature");
+    let normalized = adapter.normalize(authenticated).expect("normalization");
+    let descriptor = normalized.raw_descriptor().expect("raw descriptor");
+    let automata_ci_provider::ProviderDelivery::Trigger(delivery) =
+        normalized.seal(descriptor).expect("sealed delivery")
+    else {
+        panic!("push was not admitted");
+    };
+    assert_eq!(delivery.evidence().connection_id(), expected_connection);
 }
 
 #[test]

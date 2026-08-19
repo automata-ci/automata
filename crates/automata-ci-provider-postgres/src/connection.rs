@@ -149,6 +149,32 @@ impl PostgresProviderManifestRepository {
             None => Ok(None),
         }
     }
+
+    pub(crate) async fn active_connections_inner(
+        &self,
+        instance_id: ProviderInstanceId,
+        provider_revision: ProviderConfigurationRevision,
+    ) -> Result<Vec<ProviderConnectionManifest>, ProviderRepositoryError> {
+        let rows = sqlx::query_as::<_, ConnectionRow>(
+            r"
+            SELECT revisions.*
+            FROM provider_connection_current AS current
+            JOIN provider_connection_revisions AS revisions
+              ON revisions.connection_id = current.connection_id
+             AND revisions.revision = current.revision
+            WHERE revisions.provider_instance_id = $1
+              AND revisions.provider_revision = $2
+              AND revisions.lifecycle_state = 'active'
+            ORDER BY revisions.connection_id
+            ",
+        )
+        .bind(instance_id.as_uuid())
+        .bind(i64::try_from(provider_revision.get()).map_err(|_| ProviderRepositoryError::Corrupt)?)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(unavailable)?;
+        rows.into_iter().map(decode_connection).collect()
+    }
 }
 
 async fn ensure_connection_references(

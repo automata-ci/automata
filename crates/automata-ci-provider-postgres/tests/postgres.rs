@@ -138,11 +138,20 @@ fn connection(
     workspace_id: WorkspaceId,
     instance: &ProviderInstanceManifest,
 ) -> ProviderConnectionManifest {
+    connection_for(workspace_id, instance, 99, "42")
+}
+
+fn connection_for(
+    workspace_id: WorkspaceId,
+    instance: &ProviderInstanceManifest,
+    connection_id: u128,
+    external_repository_id: &str,
+) -> ProviderConnectionManifest {
     let configuration = ProviderConnectionConfiguration::new(
         workspace_id,
         ExternalRepositoryIdentity::new(
             instance.instance_id(),
-            ExternalRepositoryId::new("42").expect("repository"),
+            ExternalRepositoryId::new(external_repository_id).expect("repository"),
         ),
         instance.revision(),
         instance.configuration().digest(),
@@ -172,7 +181,7 @@ fn connection(
         .expect("adapter policy"),
     );
     ProviderConnectionManifest::new(
-        ProviderConnectionId::from_uuid(Uuid::from_u128(99)).expect("connection"),
+        ProviderConnectionId::from_uuid(Uuid::from_u128(connection_id)).expect("connection"),
         ProviderConnectionRevision::new(1).expect("revision"),
         ProviderLifecycleState::Active,
         configuration,
@@ -869,6 +878,7 @@ async fn stale_missing_and_tampered_state_fail_closed() -> TestResult {
 
 fn verified_delivery(
     endpoint: &ProviderWebhookEndpointManifest,
+    connection: &ProviderConnectionManifest,
     delivery_id: ProviderDeliveryId,
     raw_body: &[u8],
 ) -> VerifiedProviderTriggerDelivery {
@@ -909,8 +919,8 @@ fn verified_delivery(
         endpoint.provider_type().clone(),
         endpoint.instance_id(),
         endpoint.provider_revision(),
-        endpoint.connection_id(),
-        endpoint.connection_revision(),
+        connection.connection_id(),
+        connection.revision(),
         ExternalDeliveryIdentity::new(
             endpoint.instance_id(),
             ExternalDeliveryId::new("delivery-100").expect("external delivery"),
@@ -1021,6 +1031,7 @@ fn provider_admission_command(
 
 fn verified_control(
     endpoint: &ProviderWebhookEndpointManifest,
+    connection: &ProviderConnectionManifest,
     delivery_id: ProviderDeliveryId,
     external_delivery_id: &str,
     raw_body: &[u8],
@@ -1034,8 +1045,8 @@ fn verified_control(
         endpoint.provider_type().clone(),
         endpoint.instance_id(),
         endpoint.provider_revision(),
-        endpoint.connection_id(),
-        endpoint.connection_revision(),
+        connection.connection_id(),
+        connection.revision(),
         ExternalDeliveryIdentity::new(
             endpoint.instance_id(),
             ExternalDeliveryId::new(external_delivery_id).expect("external delivery"),
@@ -1133,8 +1144,6 @@ async fn provider_admission_binds_normalized_trigger_and_replays_after_claim_rot
             ProviderTypeId::new("forgejo")?,
             instance_id,
             instance.manifest().revision(),
-            connection.connection_id(),
-            connection.revision(),
             1_024,
             30 * 24 * 60 * 60 * 1_000,
             vec![ProviderWebhookSecretReference::new(
@@ -1152,6 +1161,7 @@ async fn provider_admission_binds_normalized_trigger_and_replays_after_claim_rot
         let event_digest = secret_digest(raw_body);
         let delivery = ProviderDelivery::Trigger(Box::new(verified_delivery(
             &endpoint,
+            &connection,
             delivery_id,
             raw_body,
         )));
@@ -1425,6 +1435,10 @@ async fn endpoint_secrets_replay_conflicts_and_worker_fences_are_exact() -> Test
         .await?;
         let connection = connection(workspace, instance.manifest());
         repository.save_connection(connection.clone()).await?;
+        let second_connection = connection_for(workspace, instance.manifest(), 100, "43");
+        repository
+            .save_connection(second_connection.clone())
+            .await?;
 
         let endpoint = ProviderWebhookEndpointManifest::new(
             ProviderWebhookEndpointId::from_uuid(Uuid::from_u128(102))?,
@@ -1433,8 +1447,6 @@ async fn endpoint_secrets_replay_conflicts_and_worker_fences_are_exact() -> Test
             ProviderTypeId::new("forgejo")?,
             instance_id,
             instance.manifest().revision(),
-            connection.connection_id(),
-            connection.revision(),
             1_024,
             30 * 24 * 60 * 60 * 1_000,
             vec![ProviderWebhookSecretReference::new(
@@ -1453,7 +1465,10 @@ async fn endpoint_secrets_replay_conflicts_and_worker_fences_are_exact() -> Test
             .resolve_endpoint(endpoint.endpoint_id())
             .await?
             .expect("resolved endpoint");
-        assert_eq!(resolved.connection(), &connection);
+        assert_eq!(
+            resolved.connections(),
+            &[connection.clone(), second_connection.clone()]
+        );
         assert_eq!(
             resolved
                 .secrets()
@@ -1467,6 +1482,7 @@ async fn endpoint_secrets_replay_conflicts_and_worker_fences_are_exact() -> Test
         let first_id = ProviderDeliveryId::from_uuid(Uuid::from_u128(103))?;
         let first = ProviderDelivery::Trigger(Box::new(verified_delivery(
             &endpoint,
+            &connection,
             first_id,
             b"body-one",
         )));
@@ -1487,6 +1503,7 @@ async fn endpoint_secrets_replay_conflicts_and_worker_fences_are_exact() -> Test
 
         let duplicate = ProviderDelivery::Trigger(Box::new(verified_delivery(
             &endpoint,
+            &connection,
             ProviderDeliveryId::from_uuid(Uuid::from_u128(104))?,
             b"body-one",
         )));
@@ -1503,6 +1520,7 @@ async fn endpoint_secrets_replay_conflicts_and_worker_fences_are_exact() -> Test
 
         let conflict = ProviderDelivery::Trigger(Box::new(verified_delivery(
             &endpoint,
+            &connection,
             ProviderDeliveryId::from_uuid(Uuid::from_u128(105))?,
             b"different-body",
         )));
@@ -1564,6 +1582,7 @@ async fn endpoint_secrets_replay_conflicts_and_worker_fences_are_exact() -> Test
         let control_id = ProviderDeliveryId::from_uuid(Uuid::from_u128(107))?;
         let control = ProviderDelivery::Control(Box::new(verified_control(
             &endpoint,
+            &connection,
             control_id,
             "control-100",
             b"control-body",
@@ -1581,6 +1600,7 @@ async fn endpoint_secrets_replay_conflicts_and_worker_fences_are_exact() -> Test
         assert!(control_receipt.invocation_id().is_some());
         let replay = ProviderDelivery::Control(Box::new(verified_control(
             &endpoint,
+            &connection,
             ProviderDeliveryId::from_uuid(Uuid::from_u128(108))?,
             "control-100",
             b"control-body",
@@ -1643,6 +1663,7 @@ async fn endpoint_secrets_replay_conflicts_and_worker_fences_are_exact() -> Test
         let unbound_control_id = ProviderDeliveryId::from_uuid(Uuid::from_u128(109))?;
         let unbound_control = ProviderDelivery::Control(Box::new(verified_control(
             &endpoint,
+            &connection,
             unbound_control_id,
             "control-without-trigger-source",
             b"schedule-control-body",
@@ -1681,12 +1702,27 @@ async fn endpoint_secrets_replay_conflicts_and_worker_fences_are_exact() -> Test
             None,
         )?;
         repository.save_connection(disabled_connection).await?;
+        let resolved = repository
+            .resolve_endpoint(endpoint.endpoint_id())
+            .await?
+            .expect("another active repository keeps the endpoint open");
+        assert_eq!(resolved.connections(), std::slice::from_ref(&second_connection));
+
+        let disabled_second_connection = ProviderConnectionManifest::new(
+            second_connection.connection_id(),
+            ProviderConnectionRevision::new(2)?,
+            ProviderLifecycleState::Disabled,
+            second_connection.configuration().clone(),
+            second_connection.created_at(),
+            second_connection.activated_at(),
+            None,
+        )?;
+        repository
+            .save_connection(disabled_second_connection)
+            .await?;
         assert!(
-            repository
-                .resolve_endpoint(endpoint.endpoint_id())
-                .await?
-                .is_none(),
-            "connection disablement closes ingress without a fallback revision"
+            repository.resolve_endpoint(endpoint.endpoint_id()).await?.is_none(),
+            "ingress closes after the provider instance has no active connections"
         );
         Ok(())
     })

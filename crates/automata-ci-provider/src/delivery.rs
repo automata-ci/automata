@@ -1,18 +1,18 @@
 //! Replay-safe provider delivery evidence and processing-invocation ports.
 
-use std::{fmt, future::Future, num::NonZeroU64, pin::Pin};
+use std::{collections::BTreeSet, fmt, future::Future, num::NonZeroU64, pin::Pin};
 
 use automata_ci_core::{Sha256Digest, UnixMillis};
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
 use crate::{
-    ExternalDeliveryIdentity, ProviderConnectionManifest, ProviderDeliveryId,
-    ProviderDeliveryRejection, ProviderLifecycleState, ProviderProcessingInvocationId,
-    ProviderProcessingWorkerId, ProviderSaveOutcome, ProviderWebhookEndpointId,
-    ProviderWebhookEndpointManifest, ProviderWebhookEndpointRevision, ProviderWebhookError,
-    ProviderWebhookSecretCandidates, RejectedProviderDelivery, VerifiedProviderControlDelivery,
-    VerifiedProviderTriggerDelivery,
+    ExternalDeliveryIdentity, MAX_PROVIDER_WEBHOOK_CONNECTIONS, ProviderConnectionManifest,
+    ProviderDeliveryId, ProviderDeliveryRejection, ProviderLifecycleState,
+    ProviderProcessingInvocationId, ProviderProcessingWorkerId, ProviderSaveOutcome,
+    ProviderWebhookEndpointId, ProviderWebhookEndpointManifest, ProviderWebhookEndpointRevision,
+    ProviderWebhookError, ProviderWebhookSecretCandidates, RejectedProviderDelivery,
+    VerifiedProviderControlDelivery, VerifiedProviderTriggerDelivery,
 };
 
 /// Maximum processing attempts for one admitted provider delivery.
@@ -23,39 +23,45 @@ pub const MAX_PROVIDER_PROCESSING_LEASE_MILLIS: i64 = 15 * 60 * 1_000;
 pub const MAX_PROVIDER_PROCESSING_TOTAL_CLAIM_MILLIS: i64 = 60 * 60 * 1_000;
 /// Maximum delay before a transiently failed invocation becomes eligible again.
 pub const MAX_PROVIDER_PROCESSING_RETRY_MILLIS: i64 = 24 * 60 * 60 * 1_000;
-
 const DELIVERY_FINGERPRINT_DOMAIN: &[u8] = b"automata.provider.delivery-fingerprint.v1\0";
 
 /// Decrypted endpoint record returned only at trusted delivery ingress.
 pub struct ProviderWebhookEndpointRecord {
     manifest: ProviderWebhookEndpointManifest,
-    connection: ProviderConnectionManifest,
+    connections: Vec<ProviderConnectionManifest>,
     secrets: ProviderWebhookSecretCandidates,
 }
 
 impl ProviderWebhookEndpointRecord {
-    /// Binds an endpoint to its exact active connection and move-only candidates.
+    /// Binds an endpoint to its exact active repository registry and move-only candidates.
     ///
     /// # Errors
     ///
-    /// Rejects a connection from another identity or revision.
+    /// Rejects an empty, excessive, duplicate, inactive, or cross-instance registry.
     pub fn new(
         manifest: ProviderWebhookEndpointManifest,
-        connection: ProviderConnectionManifest,
+        mut connections: Vec<ProviderConnectionManifest>,
         secrets: ProviderWebhookSecretCandidates,
     ) -> Result<Self, ProviderWebhookError> {
-        let configuration = connection.configuration();
-        if connection.connection_id() != manifest.connection_id()
-            || connection.revision() != manifest.connection_revision()
-            || connection.state() != ProviderLifecycleState::Active
-            || configuration.repository().instance_id() != manifest.instance_id()
-            || configuration.provider_revision() != manifest.provider_revision()
+        connections.sort_by_key(ProviderConnectionManifest::connection_id);
+        let mut connection_ids = BTreeSet::new();
+        let mut repositories = BTreeSet::new();
+        if connections.is_empty()
+            || connections.len() > MAX_PROVIDER_WEBHOOK_CONNECTIONS
+            || connections.iter().any(|connection| {
+                let configuration = connection.configuration();
+                connection.state() != ProviderLifecycleState::Active
+                    || configuration.repository().instance_id() != manifest.instance_id()
+                    || configuration.provider_revision() != manifest.provider_revision()
+                    || !connection_ids.insert(connection.connection_id())
+                    || !repositories.insert(configuration.repository().clone())
+            })
         {
-            return Err(ProviderWebhookError::EndpointConnectionMismatch);
+            return Err(ProviderWebhookError::InvalidEndpointConnections);
         }
         Ok(Self {
             manifest,
-            connection,
+            connections,
             secrets,
         })
     }
@@ -66,10 +72,10 @@ impl ProviderWebhookEndpointRecord {
         &self.manifest
     }
 
-    /// Returns the exact repository connection and adapter policy.
+    /// Returns active repository connections in canonical identity order.
     #[must_use]
-    pub const fn connection(&self) -> &ProviderConnectionManifest {
-        &self.connection
+    pub fn connections(&self) -> &[ProviderConnectionManifest] {
+        &self.connections
     }
 
     /// Returns exact plaintext candidates at the authentication boundary.
@@ -84,10 +90,10 @@ impl ProviderWebhookEndpointRecord {
         self,
     ) -> (
         ProviderWebhookEndpointManifest,
-        ProviderConnectionManifest,
+        Vec<ProviderConnectionManifest>,
         ProviderWebhookSecretCandidates,
     ) {
-        (self.manifest, self.connection, self.secrets)
+        (self.manifest, self.connections, self.secrets)
     }
 }
 
@@ -96,7 +102,7 @@ impl fmt::Debug for ProviderWebhookEndpointRecord {
         formatter
             .debug_struct("ProviderWebhookEndpointRecord")
             .field("manifest", &self.manifest)
-            .field("connection", &self.connection)
+            .field("connection_count", &self.connections.len())
             .field("secrets", &self.secrets)
             .finish()
     }
