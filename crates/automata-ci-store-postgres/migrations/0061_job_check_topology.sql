@@ -1,10 +1,17 @@
 -- Publish one revision gate plus concrete jobs, never workflow bookkeeping.
+-- The evidence rows are immutable outside this exact transactional cutover.
 
 ALTER TABLE github_provider_delivery_evidence
     DROP CONSTRAINT github_provider_delivery_evidence_aggregate_check_kind;
+DROP TRIGGER github_provider_delivery_evidence_no_update_delete
+    ON github_provider_delivery_evidence;
 UPDATE github_provider_delivery_evidence
 SET aggregate_check_kind = 'jobs_only'
 WHERE aggregate_check_kind = 'auxiliary';
+CREATE TRIGGER github_provider_delivery_evidence_no_update_delete
+    BEFORE DELETE OR UPDATE ON github_provider_delivery_evidence
+    FOR EACH ROW
+    EXECUTE FUNCTION automata_github_provider_delivery_evidence_immutable();
 ALTER TABLE github_provider_delivery_evidence
     ADD CONSTRAINT github_provider_delivery_evidence_aggregate_check_kind
     CHECK (aggregate_check_kind IN ('required', 'jobs_only'));

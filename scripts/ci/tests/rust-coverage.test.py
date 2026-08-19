@@ -1451,7 +1451,7 @@ exit 99
             capture_output=True,
         )
         commands = planned.stdout.splitlines()
-        assert len(commands) == 14, planned.stdout
+        assert len(commands) == 15, planned.stdout
         expected_inventory = [
             ("cargo test --workspace",),
             (
@@ -1461,6 +1461,10 @@ exit 99
                 "--test postgres",
                 "--test postgres_artifacts",
                 "--test postgres_cache",
+            ),
+            (
+                "-p automata-ci-store-postgres --lib",
+                "migration_0061_tests::",
             ),
             ("-p automata-ci-postgres --lib",),
             ("--test blob_s3",),
@@ -1482,8 +1486,10 @@ exit 99
         assert all("--ignored" in command for command in commands[1:])
         assert "--test-threads=4" in commands[1]
         assert "--test-threads=1" in commands[2]
-        assert "test_support::tests::" in commands[2]
+        assert "migration_0061_tests::" in commands[2]
         assert "--test-threads=1" in commands[3]
+        assert "test_support::tests::" in commands[3]
+        assert "--test-threads=1" in commands[4]
         assert "--tests" not in commands[1]
         assert sum(
             command.count("-p automata-ci-postgres-test-support")
@@ -1501,7 +1507,7 @@ exit 99
             "crates/automata-ci-store-postgres/src/",
         }.issubset(postgres_prefixes)
         assert "crates/automata-ci-postgres-test-support/src/" not in postgres_prefixes
-        assert all("-p automata-ci-store" not in command for command in commands)
+        assert all("-p automata-ci-store " not in command for command in commands)
         unknown_plan = subprocess.run(
             [str(RUN), "--plan", str(scratch / "unknown-plan"), "ordinary", "policy-only"],
             cwd=ROOT.parent,

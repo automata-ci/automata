@@ -116,6 +116,17 @@ run_bounded_tests cargo test \
   --ignored \
   --test-threads=4
 
+printf 'PostgreSQL tests: production migration upgrades\n' >&2
+run_bounded_tests cargo test \
+  -p automata-ci-store-postgres \
+  --lib \
+  --all-features \
+  --locked \
+  -- \
+  migration_0061_tests:: \
+  --ignored \
+  --test-threads=1
+
 printf 'PostgreSQL tests: database harness\n' >&2
 run_bounded_tests cargo test \
   -p automata-ci-postgres \

@@ -215,7 +215,7 @@ const CANONICAL_MIGRATIONS: &[(&str, &str)] = &[
     ),
     (
         "0053_provider_delivery_foundation.sql",
-        "4fd137b340fda9709a9920703599e708568e44b1df69cd4ffb4b57435ec791603e2ac50798c0f1359d528c3921671843",
+        "52a3ab7e1e78fedee448882f0f400f3b4ae9ef0accf02b2f990543fdacb261a3f280774ba7787f4a9a1c4cd99c0d93f1",
     ),
     (
         "0054_provider_neutral_workload_oidc.sql",
@@ -227,7 +227,7 @@ const CANONICAL_MIGRATIONS: &[(&str, &str)] = &[
     ),
     (
         "0056_provider_processing_invocations.sql",
-        "0e75bfa116e5e182be1d3f4a86ca8baed1bbb3301a64a295757e6ee8f4c185021953b9482b7c55ab3a5f7395ba20f50a",
+        "47302f91ed241062d1d9366a326d48d804bd6bbf7daba589501f6c2b92dbf6ef23707fea7999f27398bc1ef7b54203f5",
     ),
     (
         "0057_merge_queue_check_aggregation.sql",
@@ -247,7 +247,7 @@ const CANONICAL_MIGRATIONS: &[(&str, &str)] = &[
     ),
     (
         "0061_job_check_topology.sql",
-        "befdac4d4754eb1b39e6954c95b012b67797fccb7baa248a53c0559162d295b38069f41e78f0e724ded395df965c5e58",
+        "60f02eab0525229de39a16af82419217916c39989b1837f80e6bf11082bf12ae2c1245e67966993deb9782ea67a802a6",
     ),
     (
         "0062_runner_protocol_v3.sql",
@@ -276,6 +276,10 @@ const CANONICAL_MIGRATIONS: &[(&str, &str)] = &[
     (
         "0068_provider_credential_envelope_revisions.sql",
         "6f8805e0a386ac29de076173d29d1cd62dc7f68c8b318edc014bd206200126d8748ec93a607b18b703216932c4d760db",
+    ),
+    (
+        "0069_provider_instance_webhook_endpoints.sql",
+        "b47bdc4fd116ceca54490f5ed7ab4ecb07122dd62ea50cf893749218b2066f654d58b6ff6c3da081ac6f2da860e4ac4a",
     ),
 ];
 
@@ -500,6 +504,8 @@ fn github_check_projection_is_one_gate_plus_jobs() {
     let source = include_str!("../migrations/0061_job_check_topology.sql");
 
     for required in [
+        "DROP TRIGGER github_provider_delivery_evidence_no_update_delete",
+        "CREATE TRIGGER github_provider_delivery_evidence_no_update_delete",
         "CHECK (aggregate_check_kind IN ('required', 'jobs_only'))",
         "CREATE OR REPLACE FUNCTION automata_create_github_check_projection_outbox()",
         "NEW.subject_kind = 'job'",
@@ -525,6 +531,24 @@ fn github_check_projection_is_one_gate_plus_jobs() {
         assert!(
             !source.contains(forbidden),
             "job-only Check topology retained a workflow projection: {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn provider_webhook_endpoints_are_instance_owned_with_direct_delivery_connections() {
+    let source = include_str!("../migrations/0069_provider_instance_webhook_endpoints.sql");
+
+    for required in [
+        "DROP CONSTRAINT provider_deliveries_endpoint_id_endpoint_revision_provider_fkey",
+        "DROP CONSTRAINT provider_webhook_endpoint_rev_connection_id_connection_rev_fkey",
+        "REFERENCES provider_connection_revisions (",
+        "DROP COLUMN connection_id",
+        "DROP COLUMN connection_revision",
+    ] {
+        assert!(
+            source.contains(required),
+            "provider-instance endpoint migration lost contract: {required}"
         );
     }
 }

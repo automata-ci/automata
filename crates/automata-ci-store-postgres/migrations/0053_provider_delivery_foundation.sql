@@ -23,6 +23,8 @@ CREATE TABLE provider_webhook_endpoint_revisions (
     provider_type TEXT NOT NULL,
     provider_instance_id UUID NOT NULL,
     provider_revision BIGINT NOT NULL,
+    connection_id UUID NOT NULL,
+    connection_revision BIGINT NOT NULL,
     body_limit BIGINT NOT NULL,
     raw_retention_millis BIGINT NOT NULL,
     candidate_count SMALLINT NOT NULL,
@@ -31,12 +33,18 @@ CREATE TABLE provider_webhook_endpoint_revisions (
     PRIMARY KEY (endpoint_id, revision),
     UNIQUE (
         endpoint_id, revision, provider_type, provider_instance_id,
-        provider_revision
+        provider_revision, connection_id, connection_revision
     ),
     FOREIGN KEY (provider_instance_id, provider_revision, provider_type)
         REFERENCES provider_instance_revisions (
             instance_id, revision, provider_type
         ) ON DELETE RESTRICT,
+    FOREIGN KEY (
+        connection_id, connection_revision,
+        provider_instance_id, provider_revision
+    ) REFERENCES provider_connection_revisions (
+        connection_id, revision, provider_instance_id, provider_revision
+    ) ON DELETE RESTRICT,
     CHECK (revision > 0),
     CHECK (lifecycle_state IN ('active', 'disabled', 'retired')),
     CHECK (octet_length(provider_type) BETWEEN 1 AND 64),
@@ -125,16 +133,12 @@ CREATE TABLE provider_delivery_records (
     UNIQUE (provider_instance_id, external_delivery_id),
     FOREIGN KEY (
         endpoint_id, endpoint_revision, provider_type,
-        provider_instance_id, provider_revision
+        provider_instance_id, provider_revision,
+        connection_id, connection_revision
     ) REFERENCES provider_webhook_endpoint_revisions (
         endpoint_id, revision, provider_type,
-        provider_instance_id, provider_revision
-    ) ON DELETE RESTRICT,
-    FOREIGN KEY (
-        connection_id, connection_revision,
-        provider_instance_id, provider_revision
-    ) REFERENCES provider_connection_revisions (
-        connection_id, revision, provider_instance_id, provider_revision
+        provider_instance_id, provider_revision,
+        connection_id, connection_revision
     ) ON DELETE RESTRICT,
     FOREIGN KEY (
         provider_instance_id, signature_configuration_revision,
