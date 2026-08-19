@@ -7,13 +7,8 @@ ALTER TABLE github_check_subjects
 ALTER TABLE github_provider_delivery_evidence
     DROP CONSTRAINT github_provider_delivery_evidence_authenticated_event,
     DROP CONSTRAINT github_provider_delivery_evidence_digest_shape;
-ALTER TABLE github_schedule_check_evidence
-    DROP CONSTRAINT github_schedule_check_evidence_shape,
-    DROP CONSTRAINT github_schedule_check_evidence_registry;
 ALTER TABLE github_schedule_registry_revisions
     DROP CONSTRAINT github_schedule_registry_revisions_source_shape;
-ALTER TABLE github_schedule_workflow_run_subject_evidence
-    DROP CONSTRAINT github_schedule_workflow_run_subject_evidence_shape;
 ALTER TABLE github_workflow_rerun_subject_evidence
     DROP CONSTRAINT github_workflow_rerun_subject_evidence_shape;
 ALTER TABLE github_workflow_run_subject_evidence
@@ -44,12 +39,6 @@ DROP FUNCTION automata_event_subject_selection_digest(
     text, text, text, bytea, bytea, bigint
 );
 
-ALTER TABLE github_schedule_check_evidence
-    ALTER COLUMN source_revision TYPE bytea
-    USING pg_catalog.decode(source_revision, 'hex');
-ALTER TABLE github_schedule_registry_revisions
-    ALTER COLUMN source_revision TYPE bytea
-    USING pg_catalog.decode(source_revision, 'hex');
 ALTER TABLE provider_delivery_workflow_inventories
     ALTER COLUMN source_revision TYPE bytea
     USING pg_catalog.decode(source_revision, 'hex');
@@ -67,10 +56,8 @@ AS $function$
 DECLARE
     delivery provider_delivery_inbox%ROWTYPE;
     repository repositories%ROWTYPE;
-    schedule RECORD;
     rerun RECORD;
     job_check RECORD;
-    now_ms BIGINT;
 BEGIN
     IF NEW.desired_state <> 'queued'
         OR NEW.desired_revision <> 1
@@ -160,84 +147,6 @@ BEGIN
                 USING ERRCODE = 'integrity_constraint_violation',
                       CONSTRAINT = 'github_check_subjects_authority_exact';
         END IF;
-    ELSIF NEW.origin_kind = 'scheduled_fire' THEN
-        now_ms := floor(extract(epoch FROM clock_timestamp()) * 1000)::BIGINT;
-        SELECT fire.fire_id,
-               fire.state AS fire_state,
-               fire.claimed_at_ms,
-               fire.claim_expires_at_ms,
-               registry.source_revision,
-               registry.default_branch_ref,
-               entry.workflow_path,
-               seal.registry_id AS sealed_registry_id,
-               current.registry_id AS current_registry_id,
-               manifest.provider_installation_id,
-               manifest.github_repository_id,
-               manifest.github_repository_name,
-               manifest.github_app_id,
-               manifest.check_name,
-               manifest.git_ref
-          INTO schedule
-        FROM github_schedule_fires AS fire
-        JOIN github_schedule_registry_revisions AS registry
-          ON registry.tenant_id = fire.tenant_id
-         AND registry.repository_id = fire.repository_id
-         AND registry.provider_connection_id = fire.provider_connection_id
-         AND registry.registry_id = fire.registry_id
-        JOIN github_schedule_registry_entries AS entry
-          ON entry.registry_id = fire.registry_id
-         AND entry.ordinal = fire.entry_ordinal
-        JOIN github_schedule_registry_seals AS seal
-          ON seal.registry_id = registry.registry_id
-         AND seal.inventory_digest = registry.inventory_digest
-         AND seal.schedule_count = registry.schedule_count
-        JOIN github_schedule_registry_current AS current
-          ON current.tenant_id = registry.tenant_id
-         AND current.repository_id = registry.repository_id
-         AND current.provider_connection_id = registry.provider_connection_id
-         AND current.registry_id = registry.registry_id
-        JOIN github_provider_manifest_revisions AS manifest
-          ON manifest.tenant_id = registry.tenant_id
-         AND manifest.repository_id = registry.repository_id
-         AND manifest.provider_connection_id = registry.provider_connection_id
-         AND manifest.manifest_revision = registry.manifest_revision
-         AND manifest.manifest_digest = registry.manifest_digest
-        JOIN github_provider_manifest_current AS manifest_current
-          ON manifest_current.tenant_id = manifest.tenant_id
-         AND manifest_current.repository_id = manifest.repository_id
-         AND manifest_current.provider_connection_id = manifest.provider_connection_id
-         AND manifest_current.manifest_revision = manifest.manifest_revision
-         AND manifest_current.manifest_digest = manifest.manifest_digest
-        WHERE fire.fire_id = NEW.schedule_fire_id
-          AND fire.tenant_id = NEW.tenant_id
-          AND fire.repository_id = NEW.repository_id
-          AND fire.provider_connection_id = NEW.provider_connection_id
-        FOR SHARE OF fire, registry, entry, seal, current, manifest,
-                     manifest_current;
-        IF NOT FOUND THEN
-            RAISE EXCEPTION 'GitHub scheduled Check has no exact sealed fire'
-                USING ERRCODE = 'integrity_constraint_violation',
-                      CONSTRAINT = 'github_check_subjects_schedule_authority_exact';
-        END IF;
-        IF schedule.fire_state <> 'claimed'
-            OR schedule.claimed_at_ms > now_ms
-            OR schedule.claim_expires_at_ms <= now_ms
-            OR NEW.created_at_ms < schedule.claimed_at_ms
-            OR NEW.created_at_ms >= schedule.claim_expires_at_ms
-            OR schedule.default_branch_ref <> schedule.git_ref
-            OR NEW.subject_key <> schedule.workflow_path
-            OR NEW.provider_installation_id <>
-                schedule.provider_installation_id
-            OR NEW.github_repository_id <> schedule.github_repository_id
-            OR NEW.github_repository_name <> schedule.github_repository_name
-            OR NEW.github_app_id <> schedule.github_app_id
-            OR NEW.head_sha <> schedule.source_revision
-            OR NEW.check_name <> schedule.check_name
-        THEN
-            RAISE EXCEPTION 'GitHub scheduled Check authority is not exact and live'
-                USING ERRCODE = 'integrity_constraint_violation',
-                      CONSTRAINT = 'github_check_subjects_schedule_authority_exact';
-        END IF;
     ELSIF NEW.origin_kind = 'workflow_rerun' THEN
         SELECT attempt.run_id,
                attempt.source_run_id,
@@ -307,113 +216,6 @@ BEGIN
         RAISE EXCEPTION 'GitHub Check subject origin is invalid'
             USING ERRCODE = 'integrity_constraint_violation',
                   CONSTRAINT = 'github_check_subjects_origin_exact';
-    END IF;
-    RETURN NEW;
-END;
-$function$;
-
-CREATE OR REPLACE FUNCTION automata_github_schedule_check_evidence_insert_guard()
- RETURNS trigger
- LANGUAGE plpgsql
-AS $function$
-DECLARE
-    exact BOOLEAN;
-    now_ms BIGINT;
-BEGIN
-    now_ms := floor(extract(epoch FROM clock_timestamp()) * 1000)::BIGINT;
-    SELECT TRUE INTO exact
-    FROM github_schedule_fires AS fire
-    JOIN github_schedule_registry_revisions AS registry
-      ON registry.tenant_id = fire.tenant_id
-     AND registry.repository_id = fire.repository_id
-     AND registry.provider_connection_id = fire.provider_connection_id
-     AND registry.registry_id = fire.registry_id
-    JOIN github_schedule_registry_entries AS entry
-      ON entry.registry_id = fire.registry_id
-     AND entry.ordinal = fire.entry_ordinal
-    JOIN github_schedule_registry_seals AS seal
-      ON seal.registry_id = registry.registry_id
-     AND seal.inventory_digest = registry.inventory_digest
-     AND seal.schedule_count = registry.schedule_count
-    JOIN github_schedule_registry_current AS current
-      ON current.tenant_id = registry.tenant_id
-     AND current.repository_id = registry.repository_id
-     AND current.provider_connection_id = registry.provider_connection_id
-     AND current.registry_id = registry.registry_id
-    JOIN github_provider_manifest_revisions AS manifest
-      ON manifest.tenant_id = registry.tenant_id
-     AND manifest.repository_id = registry.repository_id
-     AND manifest.provider_connection_id = registry.provider_connection_id
-     AND manifest.manifest_revision = registry.manifest_revision
-     AND manifest.manifest_digest = registry.manifest_digest
-    JOIN github_provider_manifest_current AS manifest_current
-      ON manifest_current.tenant_id = manifest.tenant_id
-     AND manifest_current.repository_id = manifest.repository_id
-     AND manifest_current.provider_connection_id = manifest.provider_connection_id
-     AND manifest_current.manifest_revision = manifest.manifest_revision
-     AND manifest_current.manifest_digest = manifest.manifest_digest
-    JOIN github_server_service_authorities AS authority
-      ON authority.tenant_id = registry.tenant_id
-     AND authority.id = NEW.checks_authority_id
-    JOIN github_check_subjects AS subject
-      ON subject.tenant_id = fire.tenant_id
-     AND subject.repository_id = fire.repository_id
-     AND subject.provider_connection_id = fire.provider_connection_id
-     AND subject.schedule_fire_id = fire.fire_id
-     AND subject.id = NEW.github_check_subject_id
-    WHERE fire.fire_id = NEW.schedule_fire_id
-      AND fire.tenant_id = NEW.tenant_id
-      AND fire.repository_id = NEW.repository_id
-      AND fire.provider_connection_id = NEW.provider_connection_id
-      AND fire.registry_id = NEW.registry_id
-      AND fire.entry_ordinal = NEW.entry_ordinal
-      AND fire.scheduled_at_ms = NEW.scheduled_at_ms
-      AND fire.state = 'claimed'
-      AND fire.claimed_at_ms <= now_ms
-      AND fire.claim_expires_at_ms > now_ms
-      AND NEW.recorded_at_ms >= fire.claimed_at_ms
-      AND NEW.recorded_at_ms < fire.claim_expires_at_ms
-      AND registry.manifest_revision = NEW.provider_manifest_revision
-      AND registry.manifest_digest = NEW.provider_manifest_digest
-      AND registry.default_branch_ref = NEW.default_branch_ref
-      AND registry.source_revision = NEW.source_revision
-      AND registry.github_repository_owner_id = NEW.github_repository_owner_id
-      AND registry.default_branch_ref = manifest.git_ref
-      AND NEW.github_check_head_sha = registry.source_revision
-      AND subject.origin_kind = 'scheduled_fire'
-      AND subject.provider_delivery_id IS NULL
-      AND subject.subject_key = entry.workflow_path
-      AND subject.provider_installation_id = manifest.provider_installation_id
-      AND subject.github_repository_id = manifest.github_repository_id
-      AND subject.github_repository_name = manifest.github_repository_name
-      AND subject.github_app_id = manifest.github_app_id
-      AND subject.head_sha = NEW.github_check_head_sha
-      AND subject.check_name = manifest.check_name
-      AND subject.created_at_ms = NEW.recorded_at_ms
-      AND authority.repository_id = registry.repository_id
-      AND authority.provider_connection_id = registry.provider_connection_id
-      AND authority.provider_installation_id = manifest.provider_installation_id
-      AND authority.github_app_id = manifest.github_app_id
-      AND authority.github_repository_id = manifest.github_repository_id
-      AND authority.github_repository_name = manifest.github_repository_name
-      AND authority.service_scope = 'checks_write'
-      AND authority.github_app_client_id = manifest.github_app_client_id
-      AND authority.github_app_jwt_issuer_kind = manifest.github_app_jwt_issuer_kind
-      AND authority.app_key_spki_sha256 = manifest.app_key_spki_sha256
-      AND authority.app_configuration_revision =
-          NEW.checks_authority_app_configuration_revision
-      AND authority.app_configuration_revision = manifest.app_configuration_revision
-      AND authority.policy_revision = NEW.checks_authority_policy_revision
-      AND authority.policy_revision = manifest.policy_revision
-      AND authority.identity_digest = NEW.checks_authority_identity_digest
-      AND authority.state = 'active'
-      AND authority.created_at_ms <= NEW.recorded_at_ms
-    FOR SHARE OF fire, registry, entry, seal, current, manifest, manifest_current,
-                 authority, subject;
-    IF exact IS DISTINCT FROM TRUE THEN
-        RAISE EXCEPTION 'GitHub schedule Check evidence is not exact and live'
-            USING ERRCODE = 'integrity_constraint_violation',
-                  CONSTRAINT = 'github_schedule_check_evidence_authority_exact';
     END IF;
     RETURN NEW;
 END;
@@ -944,16 +746,13 @@ ALTER TABLE event_subject_selections ADD CONSTRAINT event_subject_selections_sha
 ALTER TABLE github_check_subjects ADD CONSTRAINT github_check_subjects_sha CHECK (((octet_length(head_sha) = ANY (ARRAY[20, 32])) AND (head_sha <> decode(repeat('00'::text, octet_length(head_sha)), 'hex'::text))));
 ALTER TABLE github_provider_delivery_evidence ADD CONSTRAINT github_provider_delivery_evidence_authenticated_event CHECK ((((authenticated_event_envelope_version = 1) AND (authenticated_event_name = ANY (ARRAY['push'::text, 'pull_request'::text, 'merge_group'::text])) AND ((octet_length(authenticated_event_git_ref) >= 6) AND (octet_length(authenticated_event_git_ref) <= 1024)) AND (authenticated_event_git_ref ~~ 'refs/%'::text) AND (authenticated_event_git_ref !~ '[[:cntrl:]]'::text) AND (authenticated_event_source_revision IS NULL) AND (authenticated_event_source_authority IS NULL)) OR ((authenticated_event_envelope_version = 1) AND (authenticated_event_name = 'repository_dispatch'::text) AND ((octet_length(authenticated_event_git_ref) >= 12) AND (octet_length(authenticated_event_git_ref) <= 1024)) AND (authenticated_event_git_ref ~~ 'refs/heads/%'::text) AND (authenticated_event_git_ref !~ '[[:cntrl:]]'::text) AND (octet_length(authenticated_event_source_revision) = ANY (ARRAY[20, 32])) AND (authenticated_event_source_revision <> decode(repeat('00'::text, octet_length(authenticated_event_source_revision)), 'hex'::text)) AND (authenticated_event_source_authority = 'repository_contents_read'::text))));
 ALTER TABLE github_provider_delivery_evidence ADD CONSTRAINT github_provider_delivery_evidence_digest_shape CHECK (((octet_length(provider_manifest_digest) = 32) AND (octet_length(authenticated_webhook_verifier_fingerprint_sha256) = 32) AND (authenticated_webhook_verifier_fingerprint_sha256 <> decode(repeat('00'::text, 32), 'hex'::text)) AND (octet_length(checks_authority_identity_digest) = 32) AND (octet_length(repository_contents_authority_identity_digest) = 32) AND (octet_length(github_check_head_sha) = ANY (ARRAY[20, 32])) AND (github_check_head_sha <> decode(repeat('00'::text, octet_length(github_check_head_sha)), 'hex'::text))));
-ALTER TABLE github_schedule_check_evidence ADD CONSTRAINT github_schedule_check_evidence_shape CHECK (((entry_ordinal >= 0) AND (entry_ordinal <= 255) AND (scheduled_at_ms >= 0) AND (provider_manifest_revision > 0) AND (github_repository_owner_id > 0) AND (octet_length(provider_manifest_digest) = 32) AND (octet_length(checks_authority_identity_digest) = 32) AND (checks_authority_app_configuration_revision > 0) AND (checks_authority_policy_revision > 0) AND (octet_length(source_revision) = ANY (ARRAY[20, 32])) AND automata_github_provider_git_ref_canonical(default_branch_ref) AND (github_check_head_sha = source_revision) AND (recorded_at_ms >= 0)));
 ALTER TABLE github_schedule_registry_revisions ADD CONSTRAINT github_schedule_registry_revisions_source_shape CHECK (((default_branch_ref ~ '^refs/heads/[^[:cntrl:][:space:]]+$'::text) AND ((octet_length(default_branch_ref) >= 12) AND (octet_length(default_branch_ref) <= 1024)) AND (octet_length(source_revision) = ANY (ARRAY[20, 32])) AND (source_revision <> decode(repeat('00'::text, octet_length(source_revision)), 'hex'::text))));
-ALTER TABLE github_schedule_workflow_run_subject_evidence ADD CONSTRAINT github_schedule_workflow_run_subject_evidence_shape CHECK (((admission_claim_attempt >= 1) AND (admission_claim_attempt <= 20) AND (github_repository_owner_id > 0) AND (admission_claim_fence > 0) AND (admission_claimed_at_ms >= 0) AND (admission_claim_expires_at_ms > admission_claimed_at_ms) AND (admitted_at_ms >= admission_claimed_at_ms) AND (admitted_at_ms < admission_claim_expires_at_ms) AND (octet_length(github_check_head_sha) = ANY (ARRAY[20, 32])) AND (octet_length(source_digest) = 32) AND (event_name = 'schedule'::text) AND (octet_length(event_digest) = 32) AND automata_github_provider_git_ref_canonical(git_ref) AND (workflow_plan_schema = 1) AND (octet_length(plan_digest) = 32) AND (octet_length(logical_admission_digest) = 32) AND (octet_length(subject_evidence_sha256) = 32) AND (workflow_path ~ '^\.ci/workflows/[^/]+\.ya?ml$'::text) AND (workflow_path !~ '[[:cntrl:]\\]'::text)));
 ALTER TABLE github_workflow_rerun_subject_evidence ADD CONSTRAINT github_workflow_rerun_subject_evidence_shape CHECK (((github_repository_owner_id > 0) AND (octet_length(github_check_head_sha) = ANY (ARRAY[20, 32])) AND (github_check_head_sha <> decode(repeat('00'::text, octet_length(github_check_head_sha)), 'hex'::text)) AND (octet_length(source_digest) = 32) AND ((octet_length(event_name) >= 1) AND (octet_length(event_name) <= 1024)) AND (event_name !~ '[[:cntrl:]]'::text) AND (octet_length(event_digest) = 32) AND automata_github_provider_git_ref_canonical(git_ref) AND (workflow_plan_schema = 1) AND (octet_length(plan_digest) = 32) AND (octet_length(logical_admission_digest) = 32) AND (admitted_at_ms >= 0) AND (octet_length(subject_evidence_sha256) = 32) AND (workflow_path ~ '^\.ci/workflows/[^/]+\.ya?ml$'::text) AND (workflow_path !~ '[[:cntrl:]\\]'::text)));
 ALTER TABLE github_workflow_run_subject_evidence ADD CONSTRAINT github_workflow_run_subject_evidence_digest_shape CHECK (((octet_length(github_check_head_sha) = ANY (ARRAY[20, 32])) AND (github_check_head_sha <> decode(repeat('00'::text, octet_length(github_check_head_sha)), 'hex'::text)) AND (octet_length(source_digest) = 32) AND (octet_length(event_digest) = 32) AND (octet_length(plan_digest) = 32) AND (octet_length(logical_admission_digest) = 32) AND (octet_length(subject_evidence_sha256) = 32)));
 ALTER TABLE logical_workflow_reusable_workflow_catalog ADD CONSTRAINT logical_workflow_reusable_catalog_revision_shape CHECK (((octet_length(source_revision) = ANY (ARRAY[20, 32])) AND (source_revision <> decode(repeat('00'::text, octet_length(source_revision)), 'hex'::text))));
 ALTER TABLE provider_delivery_workflow_inventories ADD CONSTRAINT provider_delivery_workflow_inventories_shape CHECK (((octet_length(manifest_digest) = 32) AND (octet_length(repository_source_digest) = 32) AND (octet_length(inventory_digest) = 32) AND (octet_length(source_revision) = ANY (ARRAY[20, 32])) AND (source_revision <> decode(repeat('00'::text, octet_length(source_revision)), 'hex'::text)) AND ((workflow_count >= 0) AND (workflow_count <= 256)) AND (registered_at_ms >= 0)));
 ALTER TABLE workflow_rerun_check_evidence ADD CONSTRAINT workflow_rerun_check_evidence_shape CHECK (((provider_manifest_revision > 0) AND (octet_length(provider_manifest_digest) = 32) AND (octet_length(github_check_head_sha) = ANY (ARRAY[20, 32])) AND (github_check_head_sha <> decode(repeat('00'::text, octet_length(github_check_head_sha)), 'hex'::text)) AND (octet_length(checks_authority_identity_digest) = 32) AND (checks_authority_app_configuration_revision > 0) AND (checks_authority_policy_revision > 0) AND (octet_length(repository_contents_authority_identity_digest) = 32) AND (repository_contents_authority_app_configuration_revision > 0) AND (repository_contents_authority_policy_revision > 0) AND (recorded_at_ms >= 0)));
 ALTER TABLE event_subject_selections ADD CONSTRAINT event_subject_selections_digest_canonical CHECK ((selection_digest = automata_event_subject_selection_digest(selection_schema, origin_registry_version, origin_registry_digest, subject_id, tenant_id, repository_id, origin_kind_code, origin_id, event_name, workflow_path, source_revision, source_digest, authority_digest, selected_at_ms)));
-ALTER TABLE github_schedule_check_evidence ADD CONSTRAINT github_schedule_check_evidence_registry FOREIGN KEY (tenant_id, repository_id, provider_connection_id, registry_id, provider_manifest_revision, provider_manifest_digest, default_branch_ref, source_revision, github_repository_owner_id) REFERENCES github_schedule_registry_revisions(tenant_id, repository_id, provider_connection_id, registry_id, manifest_revision, manifest_digest, default_branch_ref, source_revision, github_repository_owner_id) ON DELETE RESTRICT;
 CREATE VIEW github_workflow_run_base_manifest_origins AS
  SELECT delivery_run.tenant_id,
     delivery_run.repository_id,
@@ -1008,8 +807,8 @@ UNION ALL
     schedule_run.schedule_fire_id AS origin_id,
     'operation'::text AS admission_idempotency_kind,
     schedule_run.schedule_fire_id::text AS admission_idempotency_key,
-    schedule_run.github_check_subject_id,
-    schedule_run.github_check_head_sha,
+    NULL::uuid AS github_check_subject_id,
+    schedule_run.source_revision AS github_check_head_sha,
     schedule_run.workflow_path,
     schedule_run.source_digest,
     schedule_run.event_name,
@@ -1019,29 +818,28 @@ UNION ALL
     schedule_run.plan_digest,
     schedule_run.logical_admission_digest,
     schedule_run.admitted_at_ms,
-    schedule_run.subject_evidence_sha256,
-    schedule_check.provider_connection_id,
+    schedule_run.evidence_digest AS subject_evidence_sha256,
+    schedule_run.provider_connection_id,
     manifest.provider_installation_id,
     manifest.github_repository_id,
     schedule_run.github_repository_owner_id,
     manifest.github_repository_name,
     manifest.repository_visibility,
-    schedule_check.provider_manifest_revision,
-    schedule_check.provider_manifest_digest,
+    schedule_run.provider_manifest_revision,
+    schedule_run.provider_manifest_digest,
     manifest.webhook_verifier_fingerprint_sha256 AS authenticated_webhook_verifier_fingerprint_sha256,
     manifest.webhook_verifier_revision AS authenticated_webhook_verifier_revision,
-    schedule_check.checks_authority_id,
-    schedule_check.checks_authority_identity_digest,
-    schedule_check.checks_authority_app_configuration_revision,
-    schedule_check.checks_authority_policy_revision,
+    NULL::uuid AS checks_authority_id,
+    NULL::bytea AS checks_authority_identity_digest,
+    NULL::bigint AS checks_authority_app_configuration_revision,
+    NULL::bigint AS checks_authority_policy_revision,
     registry.repository_contents_authority_id,
     registry.repository_contents_authority_identity_digest,
     registry.repository_contents_authority_app_configuration_revision,
     registry.repository_contents_authority_policy_revision
-   FROM github_schedule_workflow_run_subject_evidence schedule_run
-     JOIN github_schedule_check_evidence schedule_check ON schedule_check.schedule_fire_id = schedule_run.schedule_fire_id AND schedule_check.tenant_id = schedule_run.tenant_id AND schedule_check.repository_id = schedule_run.repository_id AND schedule_check.github_check_subject_id = schedule_run.github_check_subject_id
-     JOIN github_schedule_registry_revisions registry ON registry.tenant_id = schedule_check.tenant_id AND registry.repository_id = schedule_check.repository_id AND registry.provider_connection_id = schedule_check.provider_connection_id AND registry.registry_id = schedule_check.registry_id AND registry.manifest_revision = schedule_check.provider_manifest_revision AND registry.manifest_digest = schedule_check.provider_manifest_digest AND registry.default_branch_ref = schedule_check.default_branch_ref AND registry.source_revision = schedule_check.source_revision
-     JOIN github_provider_manifest_revisions manifest ON manifest.tenant_id = schedule_check.tenant_id AND manifest.repository_id = schedule_check.repository_id AND manifest.provider_connection_id = schedule_check.provider_connection_id AND manifest.manifest_revision = schedule_check.provider_manifest_revision AND manifest.manifest_digest = schedule_check.provider_manifest_digest;;
+   FROM github_schedule_workflow_run_evidence schedule_run
+     JOIN github_schedule_registry_revisions registry ON registry.tenant_id = schedule_run.tenant_id AND registry.repository_id = schedule_run.repository_id AND registry.provider_connection_id = schedule_run.provider_connection_id AND registry.registry_id = schedule_run.registry_id AND registry.manifest_revision = schedule_run.provider_manifest_revision AND registry.manifest_digest = schedule_run.provider_manifest_digest AND registry.default_branch_ref = schedule_run.git_ref AND registry.source_revision = schedule_run.source_revision
+     JOIN github_provider_manifest_revisions manifest ON manifest.tenant_id = schedule_run.tenant_id AND manifest.repository_id = schedule_run.repository_id AND manifest.provider_connection_id = schedule_run.provider_connection_id AND manifest.manifest_revision = schedule_run.provider_manifest_revision AND manifest.manifest_digest = schedule_run.provider_manifest_digest;;
 CREATE VIEW github_workflow_run_manifest_origins AS
  SELECT github_workflow_run_base_manifest_origins.tenant_id,
     github_workflow_run_base_manifest_origins.repository_id,
