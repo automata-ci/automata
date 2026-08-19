@@ -90,7 +90,7 @@ an Automata-only extension. See
   classification.
 - [ ] Add a test that fails when a compatibility-table entry has no associated
   acceptance fixture.
-- [x] Expose a private, bounded `schemaVersion: 1` conformance snapshot for
+- [x] Expose a private, bounded `schemaVersion: 2` provider-neutral conformance snapshot for
   deliveries, runs, expanded JobIR, matrix/strategy context, terminal attempt
   evidence, and artifact metadata.
 - [ ] Add versioned per-step outputs to that conformance schema; do not invent

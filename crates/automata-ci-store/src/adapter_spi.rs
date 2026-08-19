@@ -18,9 +18,9 @@ use automata_ci_workload_oidc::{
 #[must_use]
 pub fn conformance_workflow_result(
     workflow_path: String,
-    outcome: crate::ConformanceWorkflowOutcome,
+    run_id: RunId,
 ) -> crate::ConformanceWorkflowResult {
-    crate::ConformanceWorkflowResult::new(workflow_path, outcome)
+    crate::ConformanceWorkflowResult::new(workflow_path, run_id)
 }
 
 /// Rehydrates one exact workflow enable-state transition receipt.

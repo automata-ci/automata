@@ -5,16 +5,83 @@ use thiserror::Error;
 use crate::{ProviderDeliveryId, RepositoryId, StoreError, TenantScope};
 
 /// Maximum provider delivery identifier accepted by the conformance lookup.
-pub const MAX_CONFORMANCE_DELIVERY_ID_BYTES: usize = 255;
+pub const MAX_CONFORMANCE_DELIVERY_ID_BYTES: usize = 512;
+/// Maximum external repository identifier accepted by conformance lookup.
+pub const MAX_CONFORMANCE_EXTERNAL_REPOSITORY_ID_BYTES: usize = 512;
 
-const MAX_PROVIDER_NAME_BYTES: usize = 128;
+const MAX_PROVIDER_NAME_BYTES: usize = 64;
+
+/// Exact tenant/provider repository coordinate used by conformance reads.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConformanceRepositoryQuery {
+    tenant: TenantScope,
+    provider: String,
+    external_repository_id: String,
+}
+
+impl ConformanceRepositoryQuery {
+    /// Creates a bounded provider-neutral repository lookup.
+    ///
+    /// # Errors
+    ///
+    /// Rejects noncanonical provider names and invalid external repository IDs.
+    pub fn new(
+        tenant: TenantScope,
+        provider: impl Into<String>,
+        external_repository_id: impl Into<String>,
+    ) -> Result<Self, ConformanceReadValueError> {
+        let provider = provider.into();
+        let external_repository_id = external_repository_id.into();
+        if provider.is_empty()
+            || provider.len() > MAX_PROVIDER_NAME_BYTES
+            || !provider.bytes().enumerate().all(|(index, character)| {
+                character.is_ascii_lowercase()
+                    || character.is_ascii_digit()
+                    || (index > 0 && character == b'-')
+            })
+            || !provider
+                .as_bytes()
+                .last()
+                .is_some_and(u8::is_ascii_alphanumeric)
+        {
+            return Err(ConformanceReadValueError::InvalidProvider);
+        }
+        validate_external_id(
+            &external_repository_id,
+            MAX_CONFORMANCE_EXTERNAL_REPOSITORY_ID_BYTES,
+        )
+        .map_err(|()| ConformanceReadValueError::InvalidRepositoryId)?;
+        Ok(Self {
+            tenant,
+            provider,
+            external_repository_id,
+        })
+    }
+
+    /// Returns the authenticated tenant that bounds the lookup.
+    #[must_use]
+    pub const fn tenant(&self) -> &TenantScope {
+        &self.tenant
+    }
+
+    /// Returns the canonical provider type.
+    #[must_use]
+    pub fn provider(&self) -> &str {
+        &self.provider
+    }
+
+    /// Returns the provider-native repository identity.
+    #[must_use]
+    pub fn external_repository_id(&self) -> &str {
+        &self.external_repository_id
+    }
+}
 
 /// Exact tenant/repository/provider delivery coordinate used by conformance reads.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConformanceDeliveryQuery {
-    tenant: TenantScope,
+    repository: ConformanceRepositoryQuery,
     repository_id: RepositoryId,
-    provider: String,
     delivery_id: String,
 }
 
@@ -26,32 +93,16 @@ impl ConformanceDeliveryQuery {
     /// Rejects provider names outside the portable provider alphabet and empty,
     /// untrimmed, control-bearing, or oversized external delivery identifiers.
     pub fn new(
-        tenant: TenantScope,
+        repository: ConformanceRepositoryQuery,
         repository_id: RepositoryId,
-        provider: impl Into<String>,
         delivery_id: impl Into<String>,
     ) -> Result<Self, ConformanceReadValueError> {
-        let provider = provider.into();
         let delivery_id = delivery_id.into();
-        if provider.is_empty()
-            || provider.len() > MAX_PROVIDER_NAME_BYTES
-            || !provider.bytes().all(|character| {
-                character.is_ascii_alphanumeric() || matches!(character, b'-' | b'_' | b':' | b'.')
-            })
-        {
-            return Err(ConformanceReadValueError::InvalidProvider);
-        }
-        if delivery_id.is_empty()
-            || delivery_id.len() > MAX_CONFORMANCE_DELIVERY_ID_BYTES
-            || delivery_id.trim() != delivery_id
-            || delivery_id.chars().any(char::is_control)
-        {
-            return Err(ConformanceReadValueError::InvalidDeliveryId);
-        }
+        validate_external_id(&delivery_id, MAX_CONFORMANCE_DELIVERY_ID_BYTES)
+            .map_err(|()| ConformanceReadValueError::InvalidDeliveryId)?;
         Ok(Self {
-            tenant,
+            repository,
             repository_id,
-            provider,
             delivery_id,
         })
     }
@@ -59,7 +110,7 @@ impl ConformanceDeliveryQuery {
     /// Returns the authenticated tenant that bounds the lookup.
     #[must_use]
     pub const fn tenant(&self) -> &TenantScope {
-        &self.tenant
+        self.repository.tenant()
     }
 
     /// Returns the exact Automata repository beneath the tenant.
@@ -71,7 +122,13 @@ impl ConformanceDeliveryQuery {
     /// Returns the canonical provider name.
     #[must_use]
     pub fn provider(&self) -> &str {
-        &self.provider
+        self.repository.provider()
+    }
+
+    /// Returns the provider-native repository identity.
+    #[must_use]
+    pub fn external_repository_id(&self) -> &str {
+        self.repository.external_repository_id()
     }
 
     /// Returns the provider-assigned external delivery identifier.
@@ -92,44 +149,26 @@ pub enum ConformanceDeliveryState {
     RetryPending,
     /// Terminal with a complete ordered workflow outcome set.
     Completed,
-    /// Terminally rejected before workflow outcomes could be committed.
+    /// Terminal processing failure.
+    Failed,
+    /// Rejected during provider normalization before processing began.
     Rejected,
 }
 
-/// One independently observable workflow outcome beneath a delivery.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ConformanceWorkflowOutcome {
-    /// The workflow was admitted as one exact durable run.
-    Admitted {
-        /// Exact admitted workflow-run identity.
-        run_id: RunId,
-    },
-    /// Selection deliberately omitted the workflow.
-    Skipped {
-        /// Stable machine reason for the selection decision.
-        reason: String,
-    },
-    /// Selection or admission failed terminally.
-    Failed {
-        /// Stable machine class of the failure.
-        failure_kind: String,
-    },
-}
-
-/// Path-keyed result for one candidate workflow.
+/// Path-keyed admitted workflow beneath one provider delivery.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConformanceWorkflowResult {
     workflow_path: String,
-    outcome: ConformanceWorkflowOutcome,
+    run_id: RunId,
 }
 
 impl ConformanceWorkflowResult {
     #[cfg(feature = "adapter-spi")]
     #[must_use]
-    pub(crate) fn new(workflow_path: String, outcome: ConformanceWorkflowOutcome) -> Self {
+    pub(crate) fn new(workflow_path: String, run_id: RunId) -> Self {
         Self {
             workflow_path,
-            outcome,
+            run_id,
         }
     }
 
@@ -139,10 +178,10 @@ impl ConformanceWorkflowResult {
         &self.workflow_path
     }
 
-    /// Returns the terminal selection or admission outcome.
+    /// Returns the admitted workflow-run identity.
     #[must_use]
-    pub const fn outcome(&self) -> &ConformanceWorkflowOutcome {
-        &self.outcome
+    pub const fn run_id(&self) -> RunId {
+        self.run_id
     }
 }
 
@@ -231,6 +270,9 @@ pub enum ConformanceReadValueError {
     /// The provider did not use the portable provider-name grammar.
     #[error("provider name is invalid")]
     InvalidProvider,
+    /// The provider-native repository identity was invalid.
+    #[error("external provider repository ID is invalid")]
+    InvalidRepositoryId,
     /// The external delivery identity was empty, unsafe, or oversized.
     #[error("external provider delivery ID is invalid")]
     InvalidDeliveryId,
@@ -239,12 +281,29 @@ pub enum ConformanceReadValueError {
 /// Backend-neutral supported reads for conformance tooling.
 #[async_trait]
 pub trait ConformanceReadRepository: std::fmt::Debug + Send + Sync {
+    /// Resolves one internal repository beneath an exact tenant/provider coordinate.
+    async fn resolve_conformance_repository(
+        &self,
+        query: &ConformanceRepositoryQuery,
+    ) -> Result<Option<RepositoryId>, StoreError>;
+
     /// Resolves one external provider delivery beneath its exact tenant and
     /// repository. Missing and cross-scope coordinates return `Ok(None)`.
     async fn get_conformance_delivery(
         &self,
         query: &ConformanceDeliveryQuery,
     ) -> Result<Option<ConformanceDelivery>, StoreError>;
+}
+
+fn validate_external_id(value: &str, max_bytes: usize) -> Result<(), ()> {
+    if value.is_empty()
+        || value.len() > max_bytes
+        || value.trim() != value
+        || value.chars().any(char::is_control)
+    {
+        return Err(());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -255,9 +314,12 @@ mod tests {
 
     fn query(delivery_id: &str) -> Result<ConformanceDeliveryQuery, ConformanceReadValueError> {
         ConformanceDeliveryQuery::new(
-            TenantScope::from_authenticated_tenant_id("tenant-a").expect("tenant"),
+            ConformanceRepositoryQuery::new(
+                TenantScope::from_authenticated_tenant_id("tenant-a").expect("tenant"),
+                "github",
+                "42",
+            )?,
             RepositoryId::from_uuid(Uuid::from_u128(1)),
-            "github",
             delivery_id,
         )
     }
@@ -276,6 +338,16 @@ mod tests {
         assert_eq!(
             query(&"a".repeat(MAX_CONFORMANCE_DELIVERY_ID_BYTES + 1)),
             Err(ConformanceReadValueError::InvalidDeliveryId)
+        );
+        let tenant = TenantScope::from_authenticated_tenant_id("tenant-a").expect("tenant");
+        assert!(ConformanceRepositoryQuery::new(tenant.clone(), "forgejo", "42").is_ok());
+        assert_eq!(
+            ConformanceRepositoryQuery::new(tenant.clone(), "Forgejo", "42"),
+            Err(ConformanceReadValueError::InvalidProvider)
+        );
+        assert_eq!(
+            ConformanceRepositoryQuery::new(tenant, "forgejo", " 42"),
+            Err(ConformanceReadValueError::InvalidRepositoryId)
         );
     }
 }

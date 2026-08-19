@@ -21,11 +21,11 @@ use automata_ci_core::{
 use automata_ci_protocol::ProtocolLimits;
 use automata_ci_store::{
     ConformanceDelivery, ConformanceDeliveryQuery, ConformanceDeliveryState,
-    ConformanceReadRepository, ConformanceWorkflowOutcome, GithubRepositoryId,
-    HumanAuthorizationTarget, HumanJobAttempt, HumanRunConclusion, HumanRunDetail, HumanRunScope,
+    ConformanceReadRepository, ConformanceRepositoryQuery, HumanAuthorizationTarget,
+    HumanJobAttempt, HumanRunConclusion, HumanRunDetail, HumanRunScope,
     HumanWorkflowReadRepository, JobIrMetadata, LOGICAL_ACTIVATION_JOB_IR_MEDIA_TYPE,
     LOGICAL_ACTIVATION_RUNTIME_CONTEXT_MEDIA_TYPE, RepositoryId, StoreError, TenantScope,
-    WorkflowRunStatus, github_provider_repository_id,
+    WorkflowRunStatus,
 };
 use axum::{
     Router,
@@ -43,8 +43,7 @@ use subtle::ConstantTimeEq as _;
 const CONFORMANCE_READ_PERMISSION: &str = "conformance:read";
 const MAX_CONFORMANCE_EXPORT_BLOB_BYTES: u64 = 128 * 1_048_576;
 
-pub(crate) const GITHUB_DELIVERY_EXPORT_PATH: &str =
-    "/api/v1/conformance/github/repositories/{provider_repository_id}/deliveries/{delivery_id}";
+pub(crate) const PROVIDER_DELIVERY_EXPORT_PATH: &str = "/api/v1/conformance/providers/{provider}/repositories/{external_repository_id}/deliveries/{delivery_id}";
 
 #[derive(Clone)]
 struct ConformanceApiState {
@@ -112,7 +111,7 @@ fn conformance_router(
     authorization: ConformanceAuthorization,
 ) -> Router {
     Router::new()
-        .route(GITHUB_DELIVERY_EXPORT_PATH, get(export_github_delivery))
+        .route(PROVIDER_DELIVERY_EXPORT_PATH, get(export_provider_delivery))
         .with_state(ConformanceApiState {
             reads,
             deliveries,
@@ -122,12 +121,12 @@ fn conformance_router(
         .layer(middleware::from_fn(super::api_security::no_store))
 }
 
-async fn export_github_delivery(
+async fn export_provider_delivery(
     State(state): State<ConformanceApiState>,
-    path: Result<Path<(String, String)>, PathRejection>,
+    path: Result<Path<(String, String, String)>, PathRejection>,
     request: Request,
 ) -> Response {
-    let (provider_repository_id, delivery_id) = match delivery_target(path) {
+    let (provider, external_repository_id, delivery_id) = match delivery_target(path) {
         Ok(target) => target,
         Err(error) => return error.into_response(),
     };
@@ -138,13 +137,33 @@ async fn export_github_delivery(
         Ok(presented) => presented,
         Err(error) => return error.into_response(),
     };
-    let (tenant, repository_id) =
-        match authorized_scope(&state, presented, provider_repository_id).await {
-            Ok(scope) => scope,
+    let (tenant, human_session) = match authorized_tenant(&state, presented) {
+        Ok(scope) => scope,
+        Err(error) => return error.into_response(),
+    };
+    let Ok(repository_query) =
+        ConformanceRepositoryQuery::new(tenant.clone(), provider, external_repository_id)
+    else {
+        return ApiError::InvalidRequest.into_response();
+    };
+    let repository_id = match state
+        .deliveries
+        .resolve_conformance_repository(&repository_query)
+        .await
+    {
+        Ok(Some(repository_id)) => repository_id,
+        Ok(None) => return ApiError::NotFound.into_response(),
+        Err(error) => return store_error(&error).into_response(),
+    };
+    if let Some(snapshot) = human_session
+        && match authorize(&state, &snapshot, &tenant, repository_id).await {
+            Ok(allowed) => !allowed,
             Err(error) => return error.into_response(),
-        };
-    let Ok(query) =
-        ConformanceDeliveryQuery::new(tenant.clone(), repository_id, "github", delivery_id)
+        }
+    {
+        return ApiError::Forbidden.into_response();
+    }
+    let Ok(query) = ConformanceDeliveryQuery::new(repository_query, repository_id, delivery_id)
     else {
         return ApiError::InvalidRequest.into_response();
     };
@@ -160,11 +179,10 @@ async fn export_github_delivery(
     }
 }
 
-async fn authorized_scope(
+fn authorized_tenant(
     state: &ConformanceApiState,
     presented: PresentedAuthorization,
-    provider_repository_id: GithubRepositoryId,
-) -> Result<(TenantScope, RepositoryId), ApiError> {
+) -> Result<(TenantScope, Option<Box<AuthenticatedRequestSnapshot>>), ApiError> {
     match (&state.authorization, presented) {
         (
             ConformanceAuthorization::HumanSession,
@@ -174,11 +192,7 @@ async fn authorized_scope(
                 snapshot.session().identity().tenant_id().as_str(),
             )
             .map_err(|_| ApiError::Internal)?;
-            let repository_id = github_provider_repository_id(&tenant, provider_repository_id);
-            if !authorize(state, &snapshot, &tenant, repository_id).await? {
-                return Err(ApiError::Forbidden);
-            }
-            Ok((tenant, repository_id))
+            Ok((tenant, Some(snapshot)))
         }
         (
             ConformanceAuthorization::DeploymentToken {
@@ -191,8 +205,7 @@ async fn authorized_scope(
             if !bool::from(token_sha256.ct_eq(&candidate)) {
                 return Err(ApiError::Unauthorized);
             }
-            let repository_id = github_provider_repository_id(tenant, provider_repository_id);
-            Ok((tenant.clone(), repository_id))
+            Ok((tenant.clone(), None))
         }
         _ => Err(ApiError::Unauthorized),
     }
@@ -264,10 +277,9 @@ async fn export_document(
 ) -> Result<ConformanceExportDocument, ApiError> {
     let mut run_ids = Vec::new();
     for workflow in delivery.workflows() {
-        if let ConformanceWorkflowOutcome::Admitted { run_id } = workflow.outcome()
-            && !run_ids.contains(run_id)
-        {
-            run_ids.push(*run_id);
+        let run_id = workflow.run_id();
+        if !run_ids.contains(&run_id) {
+            run_ids.push(run_id);
         }
     }
     let mut runs = Vec::with_capacity(run_ids.len());
@@ -282,7 +294,7 @@ async fn export_document(
         runs.push(export_run(state, detail).await?);
     }
     Ok(ConformanceExportDocument {
-        schema_version: 1,
+        schema_version: 2,
         delivery: DeliveryDocument::from_delivery(&delivery),
         runs,
     })
@@ -483,20 +495,14 @@ async fn load_attempt(
 }
 
 fn delivery_target(
-    path: Result<Path<(String, String)>, PathRejection>,
-) -> Result<(GithubRepositoryId, String), ApiError> {
-    let Path((provider_repository_id, delivery_id)) = path.map_err(|_| ApiError::InvalidRequest)?;
-    let parsed = provider_repository_id
-        .parse::<u64>()
-        .map_err(|_| ApiError::InvalidRequest)?;
-    if parsed.to_string() != provider_repository_id {
+    path: Result<Path<(String, String, String)>, PathRejection>,
+) -> Result<(String, String, String), ApiError> {
+    let Path((provider, external_repository_id, delivery_id)) =
+        path.map_err(|_| ApiError::InvalidRequest)?;
+    if provider.is_empty() || external_repository_id.is_empty() || delivery_id.is_empty() {
         return Err(ApiError::InvalidRequest);
     }
-    let repository_id = GithubRepositoryId::new(parsed).map_err(|_| ApiError::InvalidRequest)?;
-    if delivery_id.is_empty() {
-        return Err(ApiError::InvalidRequest);
-    }
-    Ok((repository_id, delivery_id))
+    Ok((provider, external_repository_id, delivery_id))
 }
 
 fn cli_snapshot(request: &Request) -> Result<AuthenticatedRequestSnapshot, ApiError> {
@@ -624,45 +630,16 @@ impl DeliveryDocument {
 #[serde(rename_all = "camelCase")]
 struct WorkflowDeliveryDocument {
     path: String,
-    outcome: WorkflowDeliveryOutcomeDocument,
+    run_id: String,
 }
 
 impl WorkflowDeliveryDocument {
     fn from_result(result: &automata_ci_store::ConformanceWorkflowResult) -> Self {
-        let outcome = match result.outcome() {
-            ConformanceWorkflowOutcome::Admitted { run_id } => {
-                WorkflowDeliveryOutcomeDocument::Admitted {
-                    run_id: run_id.as_uuid().to_string(),
-                }
-            }
-            ConformanceWorkflowOutcome::Skipped { reason } => {
-                WorkflowDeliveryOutcomeDocument::Skipped {
-                    reason: reason.clone(),
-                }
-            }
-            ConformanceWorkflowOutcome::Failed { failure_kind } => {
-                WorkflowDeliveryOutcomeDocument::Failed {
-                    failure_kind: failure_kind.clone(),
-                }
-            }
-        };
         Self {
             path: result.workflow_path().to_owned(),
-            outcome,
+            run_id: result.run_id().as_uuid().to_string(),
         }
     }
-}
-
-#[derive(Serialize)]
-#[serde(
-    tag = "kind",
-    rename_all = "snake_case",
-    rename_all_fields = "camelCase"
-)]
-enum WorkflowDeliveryOutcomeDocument {
-    Admitted { run_id: String },
-    Skipped { reason: String },
-    Failed { failure_kind: String },
 }
 
 #[derive(Serialize)]
@@ -743,6 +720,7 @@ const fn delivery_state(state: ConformanceDeliveryState) -> &'static str {
         ConformanceDeliveryState::Claimed => "claimed",
         ConformanceDeliveryState::RetryPending => "retry_pending",
         ConformanceDeliveryState::Completed => "completed",
+        ConformanceDeliveryState::Failed => "failed",
         ConformanceDeliveryState::Rejected => "rejected",
     }
 }
@@ -798,17 +776,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn provider_repository_ids_are_canonical_and_positive() {
+    fn provider_delivery_path_retains_all_provider_neutral_coordinates() {
         assert_eq!(
-            delivery_target(Ok(Path(("42".to_owned(), "delivery".to_owned()))))
-                .expect("target")
-                .0
-                .get(),
-            42
+            delivery_target(Ok(Path((
+                "forgejo".to_owned(),
+                "42".to_owned(),
+                "delivery".to_owned(),
+            ))))
+            .expect("target"),
+            ("forgejo".to_owned(), "42".to_owned(), "delivery".to_owned())
         );
-        for invalid in ["0", "01", "+1", "-1", "not-a-number"] {
+        for invalid in [
+            ("", "42", "delivery"),
+            ("forgejo", "", "delivery"),
+            ("forgejo", "42", ""),
+        ] {
             assert!(
-                delivery_target(Ok(Path((invalid.to_owned(), "delivery".to_owned())))).is_err()
+                delivery_target(Ok(Path((
+                    invalid.0.to_owned(),
+                    invalid.1.to_owned(),
+                    invalid.2.to_owned(),
+                ))))
+                .is_err()
             );
         }
     }

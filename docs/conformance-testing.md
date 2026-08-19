@@ -1,8 +1,9 @@
 # Conformance testing
 
-Automata exposes a private, versioned read surface for differential GitHub
-Actions compatibility tests. It is a supported control-plane interface; test
-harnesses must not query Automata's PostgreSQL tables or object store directly.
+Automata exposes a private, versioned provider-neutral read surface for
+differential CI compatibility tests. It is a supported control-plane
+interface; test harnesses must not query Automata's PostgreSQL tables or object
+store directly.
 
 ## Repository workflow selection
 
@@ -20,7 +21,7 @@ its own Check Run and links to the exact Automata dashboard job.
 ## Delivery export
 
 ```text
-GET /api/v1/conformance/github/repositories/{github_repository_id}/deliveries/{delivery_id}
+GET /api/v1/conformance/providers/{provider}/repositories/{external_repository_id}/deliveries/{delivery_id}
 Authorization: Bearer {bearer_token}
 Accept: application/json
 ```
@@ -34,15 +35,15 @@ and new installation bootstrap.
 An isolated loopback deployment with human authentication disabled may instead
 configure `--conformance-export-token-source`. This deployment-scoped bearer
 grants only this read surface for the configured fallback tenant. It is rejected
-on a non-loopback listener or alongside human authentication. The server derives
-the tenant-scoped internal repository identity from the positive numeric GitHub
-repository ID in the URL; clients never manufacture or discover an internal
-repository UUID.
+on a non-loopback listener or alongside human authentication. The server
+resolves the tenant-scoped internal repository from the provider type and its
+opaque external repository ID; clients never manufacture or discover an
+internal repository UUID.
 
-The `schemaVersion: 1` document contains:
+The `schemaVersion: 2` document contains:
 
-- the external and internal delivery identities, lifecycle, attempts, and all
-  path-keyed workflow outcomes;
+- the external and internal delivery identities, common processing lifecycle,
+  attempt count, and path-keyed admitted workflow runs;
 - every admitted run's workflow identity, trigger, ref, commit, lifecycle, and
   conclusion;
 - expanded jobs and their verified, decoded JobIR;
@@ -51,10 +52,10 @@ The `schemaVersion: 1` document contains:
 - finalized artifact names, media types, sizes, and content SHA-256 digests.
 
 Pending deliveries and non-terminal runs are valid snapshots. Clients should
-poll until the delivery is completed or rejected and every admitted run is
-terminal. The API bounds the aggregate immutable blobs decoded by one run to
-128 MiB and fails closed on missing, malformed, or identity-inconsistent blob
-data.
+poll until the delivery is completed, failed, or rejected and every admitted
+run is terminal. The API bounds the aggregate immutable blobs decoded by one
+run to 128 MiB and fails closed on missing, malformed, or
+identity-inconsistent blob data.
 
 Runtime inputs, variables, prerequisite outputs, secret bindings, raw logs,
 and artifact bytes are not returned. The runtime-context export includes only

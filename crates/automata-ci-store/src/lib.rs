@@ -73,8 +73,9 @@ pub use automata_ci_provider::{
 };
 pub use conformance::{
     ConformanceDelivery, ConformanceDeliveryQuery, ConformanceDeliveryState,
-    ConformanceReadRepository, ConformanceReadValueError, ConformanceWorkflowOutcome,
+    ConformanceReadRepository, ConformanceReadValueError, ConformanceRepositoryQuery,
     ConformanceWorkflowResult, MAX_CONFORMANCE_DELIVERY_ID_BYTES,
+    MAX_CONFORMANCE_EXTERNAL_REPOSITORY_ID_BYTES,
 };
 pub use error::{
     AttemptCommandError, AttemptSnapshotError, AttemptStoreError, RepositoryOperationError,

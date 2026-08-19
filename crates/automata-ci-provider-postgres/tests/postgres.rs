@@ -42,15 +42,17 @@ use automata_ci_provider::{
 use automata_ci_provider_postgres::PostgresProviderManifestRepository;
 use automata_ci_store::{
     AdmissionObject, AdmissionRepository, AdmitLogicalWorkflowRun, AdmittedLogicalWorkflowJob,
-    AuthenticatedProviderDeliveryClaim, GithubInstallationId, GithubRepositoryId,
-    GithubRepositoryName, GithubServerServiceAction, GithubServerServiceAppClientId,
-    GithubServerServiceAppId, GithubServerServiceAuthorityId, GithubServerServiceAuthorityIdentity,
-    GithubServerServiceClaimFence, GithubServerServiceConsumerClaim, GithubServerServiceConsumerId,
-    GithubServerServiceJwtIssuer, GithubServerServiceRevision, GithubServerServiceScope,
-    GithubServerServiceStoreError, GithubServerServiceWorkerId,
-    LogicalWorkflowAdmissionRepository as _, LogicalWorkflowInvocationId, LogicalWorkflowJobId,
-    LogicalWorkflowJobKind, ObjectKey, RepositoryId, TenantScope, WorkflowAdmissionIdempotency,
-    WorkflowRuntimePolicy, WorkflowSnapshotId,
+    AuthenticatedProviderDeliveryClaim, ConformanceDeliveryQuery, ConformanceDeliveryState,
+    ConformanceReadRepository as _, ConformanceRepositoryQuery, GithubInstallationId,
+    GithubRepositoryId, GithubRepositoryName, GithubServerServiceAction,
+    GithubServerServiceAppClientId, GithubServerServiceAppId, GithubServerServiceAuthorityId,
+    GithubServerServiceAuthorityIdentity, GithubServerServiceClaimFence,
+    GithubServerServiceConsumerClaim, GithubServerServiceConsumerId, GithubServerServiceJwtIssuer,
+    GithubServerServiceRevision, GithubServerServiceScope, GithubServerServiceStoreError,
+    GithubServerServiceWorkerId, LogicalWorkflowAdmissionRepository as _,
+    LogicalWorkflowInvocationId, LogicalWorkflowJobId, LogicalWorkflowJobKind, ObjectKey,
+    RepositoryId, TenantScope, WorkflowAdmissionIdempotency, WorkflowRuntimePolicy,
+    WorkflowSnapshotId,
 };
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
@@ -1106,6 +1108,31 @@ async fn github_trigger_credentials_revalidate_the_common_processing_lease() -> 
         )?;
         let receipt = claimed.receipt();
         let fence = claimed.fence();
+        let conformance_repository = ConformanceRepositoryQuery::new(
+            TenantScope::from_authenticated_tenant_id(&tenant)?,
+            "github",
+            "42",
+        )?;
+        assert_eq!(
+            database
+                .store()
+                .resolve_conformance_repository(&conformance_repository)
+                .await?,
+            Some(internal_repository_id)
+        );
+        let conformance = database
+            .store()
+            .get_conformance_delivery(&ConformanceDeliveryQuery::new(
+                conformance_repository,
+                internal_repository_id,
+                "delivery-100",
+            )?)
+            .await?
+            .expect("common conformance delivery");
+        assert_eq!(conformance.id(), delivery_id);
+        assert_eq!(conformance.state(), ConformanceDeliveryState::Claimed);
+        assert_eq!(conformance.attempts(), 1);
+        assert!(conformance.workflows().is_empty());
         let consumer = GithubServerServiceConsumerClaim::new(
             GithubServerServiceConsumerId::from_uuid(receipt.invocation_id().as_uuid())?,
             GithubServerServiceWorkerId::from_uuid(fence.worker_id().as_uuid())?,
