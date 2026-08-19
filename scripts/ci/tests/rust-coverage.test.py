@@ -1465,7 +1465,7 @@ exit 99
             ("-p automata-ci-postgres --lib",),
             (
                 "-p automata-ci-store-postgres --lib",
-                "migration_0064_tests::",
+                "migration_0068_tests::",
             ),
             ("--test blob_s3",),
             ("--test live_github_rustfs",),
