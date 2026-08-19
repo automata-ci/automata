@@ -13,6 +13,7 @@ private enum ToolFailure: Error, CustomStringConvertible {
   case invalidArtifact
   case unsupportedRestoreImage
   case installationFailed
+  case compactionFailed
 
   var description: String {
     switch self {
@@ -24,6 +25,8 @@ private enum ToolFailure: Error, CustomStringConvertible {
       return "restore image is not supported by this host or the requested VM resources"
     case .installationFailed:
       return "macOS installation did not return a result"
+    case .compactionFailed:
+      return "APFS image compaction failed"
     }
   }
 }
@@ -431,6 +434,17 @@ private func createDisk(at url: URL, bytes: UInt64) throws {
   try handle.close()
 }
 
+private func run(_ executable: String, arguments: [String]) throws {
+  let process = Process()
+  process.executableURL = URL(fileURLWithPath: executable)
+  process.arguments = arguments
+  process.standardOutput = FileHandle.standardOutput
+  process.standardError = FileHandle.standardError
+  try process.run()
+  process.waitUntilExit()
+  guard process.terminationStatus == 0 else { throw ToolFailure.compactionFailed }
+}
+
 private func prepareInstallDirectory(_ url: URL) throws {
   let manager = FileManager.default
   var isDirectory = ObjCBool(false)
@@ -573,6 +587,33 @@ private func install(arguments: ArraySlice<String>) throws {
   try wait { completion in
     queue.async { installer.install(completionHandler: completion) }
   } as Void
+}
+
+private func compact(arguments: ArraySlice<String>) throws {
+  guard arguments.count == 2,
+    let templateURL = normalizedAbsolute(arguments[arguments.startIndex]),
+    let containerGiB = UInt64(arguments[arguments.index(arguments.startIndex, offsetBy: 1)]),
+    (24...1024).contains(containerGiB)
+  else {
+    throw ToolFailure.invalidArguments
+  }
+  let manager = FileManager.default
+  let diskURL = templateURL.appendingPathComponent("Disk.img")
+  let manifestURL = templateURL.appendingPathComponent("manifest.json")
+  var isDirectory = ObjCBool(false)
+  guard manager.fileExists(atPath: templateURL.path, isDirectory: &isDirectory),
+    isDirectory.boolValue,
+    manager.fileExists(atPath: diskURL.path),
+    !manager.fileExists(atPath: manifestURL.path),
+    let attributes = try? manager.attributesOfItem(atPath: diskURL.path),
+    attributes[.type] as? FileAttributeType == .typeRegular
+  else {
+    throw ToolFailure.invalidArtifact
+  }
+  try run(
+    "/usr/bin/hdiutil",
+    arguments: ["resize", "-size", "\(containerGiB)g", diskURL.path]
+  )
 }
 
 private func sha256(_ url: URL) throws -> String {
@@ -748,6 +789,8 @@ private func main() -> Int32 {
     switch CommandLine.arguments[1] {
     case "install":
       try install(arguments: CommandLine.arguments.dropFirst(2))
+    case "compact":
+      try compact(arguments: CommandLine.arguments.dropFirst(2))
     case "boot":
       try boot(arguments: CommandLine.arguments.dropFirst(2))
     case "seal":
