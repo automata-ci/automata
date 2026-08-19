@@ -133,6 +133,6 @@ run_bounded_tests cargo test \
   --all-features \
   --locked \
   -- \
-  migration_0068_tests:: \
+  migration_0069_tests:: \
   --ignored \
   --test-threads=1

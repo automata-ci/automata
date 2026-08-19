@@ -714,7 +714,7 @@ async fn seed_0051_human_upgrade_fixture(
     clippy::too_many_lines,
     reason = "the test keeps migration, concurrent retries, clock boundaries, Windows consumption, and corruption probes in one isolated database"
 )]
-async fn migration_0068_fresh_database_supports_exact_deployment_bootstrap() -> TestResult {
+async fn migration_0069_fresh_database_supports_exact_deployment_bootstrap() -> TestResult {
     run_with_unmigrated_database(|database| async move {
         MIGRATOR.run(database.pool()).await?;
         let applied_version: i64 =
@@ -1734,7 +1734,7 @@ async fn migration_0068_fresh_database_supports_exact_deployment_bootstrap() -> 
     clippy::too_many_lines,
     reason = "the predecessor fixture and post-migration continuity assertions are intentionally contiguous"
 )]
-async fn migration_0068_upgrades_0051_human_installation_and_token_exactly() -> TestResult {
+async fn migration_0069_upgrades_0051_human_installation_and_token_exactly() -> TestResult {
     run_with_unmigrated_database(|database| async move {
         let fixture = seed_0051_human_upgrade_fixture(&database).await?;
         let LegacyHumanUpgradeFixture {
@@ -1887,7 +1887,7 @@ async fn migration_0068_upgrades_0051_human_installation_and_token_exactly() -> 
     clippy::too_many_lines,
     reason = "the configured singleton and consumed token must cross the migration together as one legacy authority witness"
 )]
-async fn migration_0068_upgrades_configured_human_and_consumed_token_exactly() -> TestResult {
+async fn migration_0069_upgrades_configured_human_and_consumed_token_exactly() -> TestResult {
     run_with_unmigrated_database(|database| async move {
         let fixture = seed_0051_human_upgrade_fixture(&database).await?;
         let LegacyHumanUpgradeFixture {
