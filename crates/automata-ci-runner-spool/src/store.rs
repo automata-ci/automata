@@ -230,6 +230,12 @@ impl fmt::Debug for DurableContentPublication<'_> {
 }
 
 impl<'a> DurableContentPublication<'a> {
+    /// Returns the immutable protected-content receipt awaiting journal adoption.
+    #[must_use]
+    pub const fn reference(&self) -> &DurableContentRef {
+        &self.reference
+    }
+
     /// Executes one journal adoption attempt while reconciliation is fenced.
     ///
     /// Success resolves the publication. Failure returns both the exact caller

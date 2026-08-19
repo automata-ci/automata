@@ -23,20 +23,24 @@ use automata_ci_core::{
 use automata_ci_execution::{
     Cancellation, CopyFromRequest, CopyToRequest, ExecutionArgv, ExecutionCommand, ExecutionOutput,
     ExecutionOutputRecord, ExecutionOutputStream, ExecutionTermination, ImmutableImage,
-    NetworkPolicy, ResourceLimits, RootFilesystemPolicy, SandboxCustody, SandboxEnvironment,
-    SandboxGeneration, SandboxLaunch, SandboxPrivilegePolicy, SandboxSpec, TargetPath,
+    MAX_COPY_BYTES, MAX_ENDPOINT_OPERATIONS_PER_JOB, MAX_EXECUTION_OUTPUT_BYTES,
+    MAX_EXECUTION_OUTPUT_RECORDS, NetworkPolicy, ResourceLimits, RootFilesystemPolicy,
+    SandboxCustody, SandboxEnvironment, SandboxGeneration, SandboxLaunch, SandboxPrivilegePolicy,
+    SandboxSpec, TargetPath,
 };
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use automata_ci_runner_spool::{ContentKind, DurableContentRef};
 use ring::signature;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
 mod file_ledger;
+mod result_store;
 
 pub use file_ledger::FileBrokerLedger;
 #[cfg(test)]
 use file_ledger::ledger_sidecar_paths;
+pub use result_store::ProtectedBrokerResultStore;
 
 const RESOURCE_DOMAIN: &[u8] = b"automata.windows-hyperv-resource.v1\0";
 const TICKET_DOMAIN: &[u8] = b"automata.windows-hyperv-ticket.v2\0";
@@ -46,13 +50,14 @@ const EXEC_REQUEST_DOMAIN: &[u8] = b"automata.windows-hyperv-exec-request.v1\0";
 const COPY_TO_REQUEST_DOMAIN: &[u8] = b"automata.windows-hyperv-copy-to-request.v1\0";
 const COPY_FROM_REQUEST_DOMAIN: &[u8] = b"automata.windows-hyperv-copy-from-request.v1\0";
 const PROFILE_ATTESTATION_DOMAIN: &[u8] = b"automata.windows-hyperv-profile-attestation.v1\0";
-const LEDGER_DOMAIN: &[u8] = b"automata.windows-hyperv-broker-ledger.v2\0";
+const LEDGER_DOMAIN: &[u8] = b"automata.windows-hyperv-broker-ledger.v3\0";
+const RESULT_HEADER: &[u8] = b"automata.windows-hyperv-broker-result\0";
+const RESULT_SCHEMA_VERSION: u16 = 1;
+const RESULT_RECORD_METADATA_BYTES: usize = 6;
 const MAX_LEDGER_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_LEDGER_EVENTS: usize = 100_000;
 const LEDGER_TOMBSTONE_CLOCK_SKEW_MILLIS: i64 = 5 * 60 * 1_000;
 const ED25519_PUBLIC_KEY_BYTES: usize = 32;
-const MAX_COMPLETED_OPERATIONS: usize = 256;
-const MAX_COMPLETED_OPERATION_BYTES: usize = 16 * 1024 * 1024;
 
 /// Whether a failed adapter call is proven not to have changed host state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -830,18 +835,16 @@ enum BrokerDurableTermination {
     Cancelled,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum BrokerDurableOutputStream {
     Stdout,
     Stderr,
 }
 
-#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Eq, PartialEq)]
 struct BrokerDurableOutputRecord {
     stream: BrokerDurableOutputStream,
-    content_base64: String,
+    content: Vec<u8>,
     end_of_stream: bool,
 }
 
@@ -850,15 +853,14 @@ impl fmt::Debug for BrokerDurableOutputRecord {
         formatter
             .debug_struct("BrokerDurableOutputRecord")
             .field("stream", &self.stream)
-            .field("encoded_bytes", &self.content_base64.len())
+            .field("bytes", &self.content.len())
             .field("content", &"[REDACTED]")
             .field("end_of_stream", &self.end_of_stream)
             .finish()
     }
 }
 
-#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
+#[derive(Clone, Eq, PartialEq)]
 enum BrokerCompletedOutcome {
     Exec {
         termination: BrokerDurableTermination,
@@ -867,7 +869,7 @@ enum BrokerCompletedOutcome {
     },
     CopyTo,
     CopyFrom {
-        content_base64: String,
+        content: Vec<u8>,
     },
 }
 
@@ -886,9 +888,9 @@ impl fmt::Debug for BrokerCompletedOutcome {
                 .field("truncated", truncated)
                 .finish(),
             Self::CopyTo => formatter.write_str("BrokerCompletedOutcome::CopyTo"),
-            Self::CopyFrom { content_base64 } => formatter
+            Self::CopyFrom { content } => formatter
                 .debug_struct("BrokerCompletedOutcome::CopyFrom")
-                .field("encoded_bytes", &content_base64.len())
+                .field("bytes", &content.len())
                 .field("content", &"[REDACTED]")
                 .finish(),
         }
@@ -900,7 +902,7 @@ impl fmt::Debug for BrokerCompletedOutcome {
 struct BrokerCompletedOperation {
     kind: BrokerOperationKind,
     request_fingerprint: Sha256Digest,
-    result: BrokerCompletedOutcome,
+    result: BrokerCompletedResult,
 }
 
 impl fmt::Debug for BrokerCompletedOperation {
@@ -912,6 +914,14 @@ impl fmt::Debug for BrokerCompletedOperation {
             .field("result", &self.result)
             .finish()
     }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+enum BrokerCompletedResult {
+    Pending { reference: DurableContentRef },
+    GarbageCollecting { reference: DurableContentRef },
+    Acknowledged,
 }
 
 enum ReplayableOperation {
@@ -1014,6 +1024,88 @@ pub enum BrokerLedgerError {
     /// The configured journal exceeded its bounded size or event count.
     #[error("Windows broker ledger capacity was exceeded")]
     Capacity,
+}
+
+/// Payload-first publication awaiting adoption by the lifecycle ledger.
+///
+/// Dropping a publication before [`Self::adopt`] leaves an unreferenced object
+/// for the next result-store reconciliation; it never removes content that an
+/// uncertain ledger append may already reference.
+pub trait BrokerResultPublication: fmt::Debug + Send {
+    /// Returns the immutable protected-content receipt to persist in the ledger.
+    fn reference(&self) -> &DurableContentRef;
+
+    /// Confirms that the synchronized lifecycle ledger adopted this reference.
+    fn adopt(self: Box<Self>);
+}
+
+/// Capacity held before one host mutation that may return replayable content.
+pub trait BrokerResultCapacityReservation<'store>: fmt::Debug + Send {
+    /// Protects and synchronizes the exact bounded result payload.
+    ///
+    /// # Errors
+    ///
+    /// Fails without returning plaintext or key material when protection or
+    /// durable publication cannot complete.
+    fn persist(
+        self: Box<Self>,
+        plaintext: &[u8],
+    ) -> Result<Box<dyn BrokerResultPublication + 'store>, BrokerResultStoreError>;
+}
+
+/// Protected, bounded store for exact broker-operation replay payloads.
+///
+/// Implementations must authenticate and encrypt content before durable write,
+/// reserve aggregate capacity before the corresponding host mutation, and
+/// fence reconciliation while a payload awaits ledger adoption.
+pub trait BrokerResultStore: fmt::Debug + Send + Sync {
+    /// Reserves one result object and its maximum protected allocation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed capacity or availability failure before host mutation.
+    fn reserve(
+        &self,
+        maximum_plaintext_bytes: u64,
+    ) -> Result<Box<dyn BrokerResultCapacityReservation<'_> + '_>, BrokerResultStoreError>;
+
+    /// Authenticates, decrypts, and loads one exact durable result.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed when content is absent, altered, or unavailable.
+    fn load(&self, reference: &DurableContentRef) -> Result<Vec<u8>, BrokerResultStoreError>;
+
+    /// Durably removes one acknowledged result when no pending operation shares it.
+    ///
+    /// Returns `false` only when the validated reference is already absent.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed when existing content cannot be authenticated or deletion
+    /// cannot be synchronized.
+    fn remove(&self, reference: &DurableContentRef) -> Result<bool, BrokerResultStoreError>;
+
+    /// Verifies every retained reference and removes payload-first crash leftovers.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed on any missing, altered, unsupported, or unavailable object.
+    fn reconcile(&self, retained: &[DurableContentRef]) -> Result<(), BrokerResultStoreError>;
+}
+
+/// Secret-free protected result-store failure.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum BrokerResultStoreError {
+    /// A per-object, aggregate-byte, or object-count limit was exhausted.
+    #[error("Windows broker protected result-store capacity was exceeded")]
+    Capacity,
+    /// A durable reference or its protected bytes were absent, malformed, or altered.
+    #[error("Windows broker protected result-store content is corrupt")]
+    Corrupt,
+    /// Protection authority or durable storage was unavailable.
+    #[error("Windows broker protected result store is unavailable")]
+    Unavailable,
 }
 
 /// In-memory ledger intended for deterministic cross-platform conformance tests.
@@ -1331,6 +1423,12 @@ pub enum BrokerError {
     /// A newer durable per-resource operation or cleanup fence won the race.
     #[error("Windows broker operation was superseded by a durable resource fence")]
     OperationFenced,
+    /// The caller repeated an operation after durably acknowledging its result.
+    #[error("Windows broker operation result was already acknowledged")]
+    OperationAcknowledged,
+    /// The caller acknowledged an operation which has no durable completed result.
+    #[error("Windows broker operation result is not durably complete")]
+    OperationNotCompleted,
     /// The resource's effective state or ownership labels did not match.
     #[error("Windows host-compute effective state failed closed verification")]
     EffectiveStateMismatch,
@@ -1343,6 +1441,9 @@ pub enum BrokerError {
     /// Durable grant-consumption or lifecycle state could not be synchronized.
     #[error("Windows broker durable ledger failed")]
     Ledger(#[source] BrokerLedgerError),
+    /// Protected replay content could not be reserved, authenticated, or synchronized.
+    #[error("Windows broker protected result store failed")]
+    ResultStore(#[source] BrokerResultStoreError),
 }
 
 impl From<BrokerLedgerError> for BrokerError {
@@ -1354,6 +1455,12 @@ impl From<BrokerLedgerError> for BrokerError {
 impl From<HostComputeAdapterError> for BrokerError {
     fn from(value: HostComputeAdapterError) -> Self {
         Self::Adapter(value)
+    }
+}
+
+impl From<BrokerResultStoreError> for BrokerError {
+    fn from(value: BrokerResultStoreError) -> Self {
+        Self::ResultStore(value)
     }
 }
 
@@ -1381,22 +1488,29 @@ pub struct RestrictedWindowsHyperVBroker {
     keys: BrokerGrantKeyring,
     adapter: Arc<dyn WindowsHostComputeAdapter>,
     ledger: Arc<dyn BrokerLedger>,
+    results: Arc<dyn BrokerResultStore>,
     profile_contracts: Arc<dyn BrokerProfileContractResolver>,
     state: Mutex<BrokerState>,
 }
 
 impl RestrictedWindowsHyperVBroker {
-    /// Loads durable consumption state without invoking HCS.
+    /// Loads value-free lifecycle state without invoking HCS.
+    ///
+    /// Protected replay content is supplied through a separate result-store
+    /// port and is authenticated by [`Self::reconcile_startup`] before calls
+    /// are accepted.
     ///
     /// # Errors
     ///
     /// Rejects a zero host identity, a corrupt ledger, or conflicting durable
-    /// identities for one grant.
+    /// identities for one grant. Result-store availability is checked during
+    /// startup reconciliation rather than construction.
     pub fn open(
         host_id: Sha256Digest,
         keys: BrokerGrantKeyring,
         adapter: Arc<dyn WindowsHostComputeAdapter>,
         ledger: Arc<dyn BrokerLedger>,
+        results: Arc<dyn BrokerResultStore>,
         profile_contracts: Arc<dyn BrokerProfileContractResolver>,
     ) -> Result<Self, BrokerError> {
         if is_zero_digest(host_id) {
@@ -1417,6 +1531,7 @@ impl RestrictedWindowsHyperVBroker {
             keys,
             adapter,
             ledger,
+            results,
             profile_contracts,
             state: Mutex::new(BrokerState {
                 entries,
@@ -1437,6 +1552,8 @@ impl RestrictedWindowsHyperVBroker {
     /// Returns a typed adapter or durable-ledger failure. Calls remain closed
     /// until a complete pass succeeds.
     pub fn reconcile_startup(&self, now: UnixMillis) -> Result<BrokerReconcileReport, BrokerError> {
+        self.reconcile_results()?;
+
         let observed = self.adapter.list_owned()?;
         let mut observed_by_id = BTreeMap::new();
         for inspection in observed {
@@ -1448,9 +1565,7 @@ impl RestrictedWindowsHyperVBroker {
             }
         }
         let entries = {
-            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-            state.reconciled = false;
-            state.live_creates.clear();
+            let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
             state.entries.values().cloned().collect::<Vec<_>>()
         };
         let mut report = BrokerReconcileReport::default();
@@ -1746,12 +1861,26 @@ impl RestrictedWindowsHyperVBroker {
         self.inspect_verified(&entry)?;
         let process = process_id(entry.grant_digest, command.operation_id());
         let request_fingerprint = exec_request_fingerprint(command, entry.pids)?;
+        if let Some(result) = self.completed_outcome(
+            &entry,
+            BrokerOperationKind::Exec,
+            command.operation_id(),
+            request_fingerprint,
+        )? {
+            return replay_exec_outcome(&result);
+        }
+        let reservation = self.results.reserve(
+            u64::try_from(maximum_completed_outcome_bytes(
+                BrokerOperationKind::Exec,
+                command.output_limit(),
+            )?)
+            .map_err(|_| BrokerResultStoreError::Capacity)?,
+        )?;
         let intent = match self.begin_replayable_operation(
             &entry,
             BrokerOperationKind::Exec,
             command.operation_id(),
             request_fingerprint,
-            command.output_limit(),
             Some(process.as_str()),
         )? {
             ReplayableOperation::Begin(intent) => *intent,
@@ -1767,12 +1896,13 @@ impl RestrictedWindowsHyperVBroker {
         match self.adapter.exec(&request, cancellation) {
             Ok(output) => {
                 let durable = completed_exec_outcome(&output);
-                self.finish_replayable_operation(
+                self.commit_replayable_operation(
                     &intent,
                     BrokerLifecyclePhase::Attached,
                     request_fingerprint,
-                    durable,
+                    &durable,
                     Some(process.as_str()),
+                    reservation,
                 )?;
                 Ok(output)
             }
@@ -1809,12 +1939,26 @@ impl RestrictedWindowsHyperVBroker {
         }
         self.inspect_verified(&entry)?;
         let request_fingerprint = copy_to_request_fingerprint(request);
+        if let Some(result) = self.completed_outcome(
+            &entry,
+            BrokerOperationKind::CopyTo,
+            request.operation_id(),
+            request_fingerprint,
+        )? {
+            return replay_copy_to_outcome(&result);
+        }
+        let reservation = self.results.reserve(
+            u64::try_from(maximum_completed_outcome_bytes(
+                BrokerOperationKind::CopyTo,
+                0,
+            )?)
+            .map_err(|_| BrokerResultStoreError::Capacity)?,
+        )?;
         let intent = match self.begin_replayable_operation(
             &entry,
             BrokerOperationKind::CopyTo,
             request.operation_id(),
             request_fingerprint,
-            0,
             None,
         )? {
             ReplayableOperation::Begin(intent) => *intent,
@@ -1829,12 +1973,13 @@ impl RestrictedWindowsHyperVBroker {
             cancellation,
         );
         match result {
-            Ok(()) => self.finish_replayable_operation(
+            Ok(()) => self.commit_replayable_operation(
                 &intent,
                 BrokerLifecyclePhase::Attached,
                 request_fingerprint,
-                BrokerCompletedOutcome::CopyTo,
+                &BrokerCompletedOutcome::CopyTo,
                 None,
+                reservation,
             ),
             Err(error) if error.effect() == BrokerAdapterEffect::KnownNoEffect => {
                 self.finish_operation(&intent, BrokerLifecyclePhase::Attached, None)?;
@@ -1865,12 +2010,26 @@ impl RestrictedWindowsHyperVBroker {
         }
         self.inspect_verified(&entry)?;
         let request_fingerprint = copy_from_request_fingerprint(request)?;
+        if let Some(result) = self.completed_outcome(
+            &entry,
+            BrokerOperationKind::CopyFrom,
+            request.operation_id(),
+            request_fingerprint,
+        )? {
+            return replay_copy_from_outcome(&result, request.byte_limit());
+        }
+        let reservation = self.results.reserve(
+            u64::try_from(maximum_completed_outcome_bytes(
+                BrokerOperationKind::CopyFrom,
+                request.byte_limit(),
+            )?)
+            .map_err(|_| BrokerResultStoreError::Capacity)?,
+        )?;
         let intent = match self.begin_replayable_operation(
             &entry,
             BrokerOperationKind::CopyFrom,
             request.operation_id(),
             request_fingerprint,
-            request.byte_limit(),
             None,
         )? {
             ReplayableOperation::Begin(intent) => *intent,
@@ -1901,16 +2060,63 @@ impl RestrictedWindowsHyperVBroker {
             self.quarantine_operation(&intent)?;
             return Err(BrokerError::EffectiveStateMismatch);
         }
-        self.finish_replayable_operation(
+        self.commit_replayable_operation(
             &intent,
             BrokerLifecyclePhase::Attached,
             request_fingerprint,
-            BrokerCompletedOutcome::CopyFrom {
-                content_base64: BASE64.encode(&bytes),
+            &BrokerCompletedOutcome::CopyFrom {
+                content: bytes.clone(),
             },
             None,
+            reservation,
         )?;
         Ok(bytes)
+    }
+
+    /// Durably acknowledges one exact replay result and reclaims its protected payload.
+    ///
+    /// The operation identity remains as a value-free tombstone, so a delayed
+    /// duplicate cannot repeat the host mutation after garbage collection.
+    /// Exact repeated acknowledgements are idempotent.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an invalid ticket, an unknown operation, or protected content
+    /// that cannot be authenticated or durably removed.
+    pub fn acknowledge_operation(
+        &self,
+        ticket: &BrokerSandboxTicket,
+        operation_id: OperationId,
+    ) -> Result<(), BrokerError> {
+        let (grant_digest, reference, already_collecting) = {
+            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            ensure_reconciled(&state)?;
+            let current = ticket_entry(&state, ticket)?;
+            let completed = current
+                .completed_operations
+                .get(&operation_id)
+                .ok_or(BrokerError::OperationNotCompleted)?;
+            match &completed.result {
+                BrokerCompletedResult::Acknowledged => return Ok(()),
+                BrokerCompletedResult::GarbageCollecting { reference } => {
+                    (current.grant_digest, reference.clone(), true)
+                }
+                BrokerCompletedResult::Pending { reference } => {
+                    load_completed_outcome(self.results.as_ref(), completed.kind, reference)?;
+                    let mut collecting = current.clone();
+                    collecting
+                        .completed_operations
+                        .get_mut(&operation_id)
+                        .ok_or(BrokerLedgerError::Corrupt)?
+                        .result = BrokerCompletedResult::GarbageCollecting {
+                        reference: reference.clone(),
+                    };
+                    self.persist_locked(&mut state, collecting)?;
+                    (current.grant_digest, reference.clone(), false)
+                }
+            }
+        };
+        self.finish_result_gc(grant_digest, operation_id, &reference, already_collecting)
     }
 
     /// Durably begins exact descendant cleanup and compute-system destruction.
@@ -2364,7 +2570,6 @@ impl RestrictedWindowsHyperVBroker {
         kind: BrokerOperationKind,
         operation_id: OperationId,
         request_fingerprint: Sha256Digest,
-        result_reservation_bytes: usize,
         descendant: Option<&str>,
     ) -> Result<ReplayableOperation, BrokerError> {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
@@ -2378,23 +2583,18 @@ impl RestrictedWindowsHyperVBroker {
             if completed.kind != kind || completed.request_fingerprint != request_fingerprint {
                 return Err(BrokerError::ReplayConflict);
             }
-            return Ok(ReplayableOperation::Replay(completed.result.clone()));
+            return match &completed.result {
+                BrokerCompletedResult::Pending { reference } => Ok(ReplayableOperation::Replay(
+                    load_completed_outcome(self.results.as_ref(), kind, reference)?,
+                )),
+                BrokerCompletedResult::GarbageCollecting { .. }
+                | BrokerCompletedResult::Acknowledged => Err(BrokerError::OperationAcknowledged),
+            };
         }
         if current != *expected || current.active_operation.is_some() {
             return Err(BrokerError::OperationFenced);
         }
-        let completed_bytes = current
-            .completed_operations
-            .values()
-            .try_fold(0_usize, |total, completed| {
-                total.checked_add(completed_outcome_bytes(&completed.result).ok()?)
-            })
-            .ok_or(BrokerLedgerError::Corrupt)?;
-        if current.completed_operations.len() >= MAX_COMPLETED_OPERATIONS
-            || completed_bytes
-                .checked_add(result_reservation_bytes)
-                .is_none_or(|bytes| bytes > MAX_COMPLETED_OPERATION_BYTES)
-        {
+        if current.completed_operations.len() >= MAX_ENDPOINT_OPERATIONS_PER_JOB {
             return Err(BrokerLedgerError::Capacity.into());
         }
         let mut intent = current;
@@ -2414,6 +2614,37 @@ impl RestrictedWindowsHyperVBroker {
         }
         self.persist_locked(&mut state, intent.clone())?;
         Ok(ReplayableOperation::Begin(Box::new(intent)))
+    }
+
+    fn completed_outcome(
+        &self,
+        expected: &BrokerLedgerEntry,
+        kind: BrokerOperationKind,
+        operation_id: OperationId,
+        request_fingerprint: Sha256Digest,
+    ) -> Result<Option<BrokerCompletedOutcome>, BrokerError> {
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        ensure_reconciled(&state)?;
+        let current = state
+            .entries
+            .get(&expected.grant_digest)
+            .ok_or(BrokerError::OperationFenced)?;
+        if current != expected {
+            return Err(BrokerError::OperationFenced);
+        }
+        let Some(completed) = current.completed_operations.get(&operation_id) else {
+            return Ok(None);
+        };
+        if completed.kind != kind || completed.request_fingerprint != request_fingerprint {
+            return Err(BrokerError::ReplayConflict);
+        }
+        match &completed.result {
+            BrokerCompletedResult::Pending { reference } => {
+                load_completed_outcome(self.results.as_ref(), kind, reference).map(Some)
+            }
+            BrokerCompletedResult::GarbageCollecting { .. }
+            | BrokerCompletedResult::Acknowledged => Err(BrokerError::OperationAcknowledged),
+        }
     }
 
     fn finish_operation(
@@ -2441,14 +2672,14 @@ impl RestrictedWindowsHyperVBroker {
         expected: &BrokerLedgerEntry,
         phase: BrokerLifecyclePhase,
         request_fingerprint: Sha256Digest,
-        result: BrokerCompletedOutcome,
+        result: DurableContentRef,
         descendant: Option<&str>,
     ) -> Result<(), BrokerError> {
         let active = expected
             .active_operation
             .as_ref()
             .ok_or(BrokerLedgerError::Corrupt)?;
-        if active.kind != completed_outcome_kind(&result)
+        if result.kind() != ContentKind::EndpointResult
             || expected
                 .completed_operations
                 .contains_key(&active.operation_id)
@@ -2468,11 +2699,156 @@ impl RestrictedWindowsHyperVBroker {
             BrokerCompletedOperation {
                 kind: active.kind,
                 request_fingerprint,
-                result,
+                result: BrokerCompletedResult::Pending { reference: result },
             },
         );
         validate_ledger_entry(&finished)?;
         self.persist_if_current(expected, finished)
+    }
+
+    fn commit_replayable_operation(
+        &self,
+        expected: &BrokerLedgerEntry,
+        phase: BrokerLifecyclePhase,
+        request_fingerprint: Sha256Digest,
+        result: &BrokerCompletedOutcome,
+        descendant: Option<&str>,
+        reservation: Box<dyn BrokerResultCapacityReservation<'_> + '_>,
+    ) -> Result<(), BrokerError> {
+        let encoded = encode_completed_outcome(result)?;
+        let publication = match reservation.persist(&encoded) {
+            Ok(publication) => publication,
+            Err(error) => {
+                self.quarantine_operation(expected)?;
+                return Err(error.into());
+            }
+        };
+        let reference = publication.reference().clone();
+        self.finish_replayable_operation(
+            expected,
+            phase,
+            request_fingerprint,
+            reference,
+            descendant,
+        )?;
+        publication.adopt();
+        Ok(())
+    }
+
+    fn finish_result_gc(
+        &self,
+        grant_digest: Sha256Digest,
+        operation_id: OperationId,
+        reference: &DurableContentRef,
+        missing_is_recovered: bool,
+    ) -> Result<(), BrokerError> {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        ensure_reconciled(&state)?;
+        let current = state
+            .entries
+            .get(&grant_digest)
+            .cloned()
+            .ok_or(BrokerError::OperationFenced)?;
+        let completed = current
+            .completed_operations
+            .get(&operation_id)
+            .ok_or(BrokerError::OperationNotCompleted)?;
+        match &completed.result {
+            BrokerCompletedResult::Acknowledged => return Ok(()),
+            BrokerCompletedResult::Pending { .. } => return Err(BrokerError::OperationFenced),
+            BrokerCompletedResult::GarbageCollecting {
+                reference: current_reference,
+            } if current_reference == reference => {}
+            BrokerCompletedResult::GarbageCollecting { .. } => {
+                return Err(BrokerLedgerError::Corrupt.into());
+            }
+        }
+        let shared = state.entries.values().any(|entry| {
+            entry
+                .completed_operations
+                .iter()
+                .any(|(candidate_id, candidate)| {
+                    !(entry.grant_digest == grant_digest && *candidate_id == operation_id)
+                        && matches!(
+                            &candidate.result,
+                            BrokerCompletedResult::Pending {
+                                reference: candidate_reference
+                            } if candidate_reference == reference
+                        )
+                })
+        });
+        if !shared {
+            let removed = self.results.remove(reference)?;
+            if !removed && !missing_is_recovered {
+                return Err(BrokerResultStoreError::Corrupt.into());
+            }
+        }
+        let mut acknowledged = current;
+        acknowledged
+            .completed_operations
+            .get_mut(&operation_id)
+            .ok_or(BrokerLedgerError::Corrupt)?
+            .result = BrokerCompletedResult::Acknowledged;
+        self.persist_locked(&mut state, acknowledged)
+    }
+
+    fn finish_reconciled_result_gc(
+        &self,
+        grant_digest: Sha256Digest,
+        operation_id: OperationId,
+    ) -> Result<(), BrokerError> {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let current = state
+            .entries
+            .get(&grant_digest)
+            .cloned()
+            .ok_or(BrokerLedgerError::Corrupt)?;
+        let completed = current
+            .completed_operations
+            .get(&operation_id)
+            .ok_or(BrokerLedgerError::Corrupt)?;
+        if !matches!(
+            completed.result,
+            BrokerCompletedResult::GarbageCollecting { .. }
+        ) {
+            return Err(BrokerLedgerError::Corrupt.into());
+        }
+        let mut acknowledged = current;
+        acknowledged
+            .completed_operations
+            .get_mut(&operation_id)
+            .ok_or(BrokerLedgerError::Corrupt)?
+            .result = BrokerCompletedResult::Acknowledged;
+        self.persist_locked(&mut state, acknowledged)
+    }
+
+    fn reconcile_results(&self) -> Result<(), BrokerError> {
+        let (retained_results, pending_garbage) = {
+            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            state.reconciled = false;
+            state.live_creates.clear();
+            let mut retained = Vec::new();
+            let mut garbage = Vec::new();
+            for entry in state.entries.values() {
+                for (operation_id, operation) in &entry.completed_operations {
+                    match &operation.result {
+                        BrokerCompletedResult::Pending { reference } => {
+                            retained.push(reference.clone());
+                        }
+                        BrokerCompletedResult::GarbageCollecting { .. } => {
+                            garbage.push((entry.grant_digest, *operation_id));
+                        }
+                        BrokerCompletedResult::Acknowledged => {}
+                    }
+                }
+            }
+            (retained, garbage)
+        };
+        self.results.reconcile(&retained_results)?;
+        for (grant_digest, operation_id) in pending_garbage {
+            self.finish_reconciled_result_gc(grant_digest, operation_id)?;
+        }
+        Ok(())
     }
 
     fn quarantine_operation(&self, expected: &BrokerLedgerEntry) -> Result<(), BrokerError> {
@@ -2721,15 +3097,10 @@ fn validate_ledger_entry(entry: &BrokerLedgerEntry) -> Result<(), BrokerError> {
                 )
     });
     let valid_guest_agent = TargetPath::windows(entry.guest_agent_path.clone()).is_ok();
-    let completed_bytes = entry.completed_operations.values().try_fold(
-        0_usize,
-        |total, operation| -> Result<usize, BrokerLedgerError> {
-            validate_completed_operation(operation)?;
-            total
-                .checked_add(completed_outcome_bytes(&operation.result)?)
-                .ok_or(BrokerLedgerError::Capacity)
-        },
-    );
+    let completed_valid = entry
+        .completed_operations
+        .values()
+        .all(|operation| validate_completed_operation(operation).is_ok());
     if is_zero_digest(entry.grant_digest)
         || is_zero_digest(entry.spec_digest)
         || is_zero_digest(entry.ticket_digest)
@@ -2746,9 +3117,8 @@ fn validate_ledger_entry(entry: &BrokerLedgerEntry) -> Result<(), BrokerError> {
         || entry.pids == 0
         || !valid_guest_agent
         || entry.descendants.len() > 1024
-        || entry.completed_operations.len() > MAX_COMPLETED_OPERATIONS
-        || completed_bytes.is_err()
-        || completed_bytes.is_ok_and(|bytes| bytes > MAX_COMPLETED_OPERATION_BYTES)
+        || entry.completed_operations.len() > MAX_ENDPOINT_OPERATIONS_PER_JOB
+        || !completed_valid
         || entry.active_operation.as_ref().is_some_and(|operation| {
             operation.epoch == 0 || operation.epoch != entry.operation_epoch
         })
@@ -2853,7 +3223,7 @@ fn completed_exec_outcome(output: &ExecutionOutput) -> BrokerCompletedOutcome {
                 ExecutionOutputStream::Stdout => BrokerDurableOutputStream::Stdout,
                 ExecutionOutputStream::Stderr => BrokerDurableOutputStream::Stderr,
             },
-            content_base64: BASE64.encode(record.bytes()),
+            content: record.bytes().to_vec(),
             end_of_stream: record.is_end_of_stream(),
         })
         .collect();
@@ -2875,14 +3245,14 @@ fn replay_exec_outcome(result: &BrokerCompletedOutcome) -> Result<ExecutionOutpu
 
 fn execution_output_from_completed(
     result: &BrokerCompletedOutcome,
-) -> Result<ExecutionOutput, BrokerLedgerError> {
+) -> Result<ExecutionOutput, BrokerResultStoreError> {
     let BrokerCompletedOutcome::Exec {
         termination,
         records,
         truncated,
     } = result
     else {
-        return Err(BrokerLedgerError::Corrupt);
+        return Err(BrokerResultStoreError::Corrupt);
     };
     let records = records
         .iter()
@@ -2891,16 +3261,14 @@ fn execution_output_from_completed(
                 BrokerDurableOutputStream::Stdout => ExecutionOutputStream::Stdout,
                 BrokerDurableOutputStream::Stderr => ExecutionOutputStream::Stderr,
             };
-            let bytes = BASE64
-                .decode(&record.content_base64)
-                .map_err(|_| BrokerLedgerError::Corrupt)?;
             if record.end_of_stream {
-                if !bytes.is_empty() {
-                    return Err(BrokerLedgerError::Corrupt);
+                if !record.content.is_empty() {
+                    return Err(BrokerResultStoreError::Corrupt);
                 }
                 Ok(ExecutionOutputRecord::end_of_stream(stream))
             } else {
-                ExecutionOutputRecord::data(stream, bytes).map_err(|_| BrokerLedgerError::Corrupt)
+                ExecutionOutputRecord::data(stream, record.content.clone())
+                    .map_err(|_| BrokerResultStoreError::Corrupt)
             }
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -2910,29 +3278,27 @@ fn execution_output_from_completed(
         BrokerDurableTermination::TimedOut => ExecutionTermination::TimedOut,
         BrokerDurableTermination::Cancelled => ExecutionTermination::Cancelled,
     };
-    ExecutionOutput::new(termination, records, *truncated).map_err(|_| BrokerLedgerError::Corrupt)
+    ExecutionOutput::new(termination, records, *truncated)
+        .map_err(|_| BrokerResultStoreError::Corrupt)
 }
 
 fn replay_copy_to_outcome(result: &BrokerCompletedOutcome) -> Result<(), BrokerError> {
     matches!(result, BrokerCompletedOutcome::CopyTo)
         .then_some(())
-        .ok_or(BrokerLedgerError::Corrupt.into())
+        .ok_or(BrokerResultStoreError::Corrupt.into())
 }
 
 fn replay_copy_from_outcome(
     result: &BrokerCompletedOutcome,
     byte_limit: usize,
 ) -> Result<Vec<u8>, BrokerError> {
-    let BrokerCompletedOutcome::CopyFrom { content_base64 } = result else {
-        return Err(BrokerLedgerError::Corrupt.into());
+    let BrokerCompletedOutcome::CopyFrom { content } = result else {
+        return Err(BrokerResultStoreError::Corrupt.into());
     };
-    let content = BASE64
-        .decode(content_base64)
-        .map_err(|_| BrokerLedgerError::Corrupt)?;
     if content.len() > byte_limit {
-        return Err(BrokerLedgerError::Corrupt.into());
+        return Err(BrokerResultStoreError::Corrupt.into());
     }
-    Ok(content)
+    Ok(content.clone())
 }
 
 fn completed_outcome_kind(result: &BrokerCompletedOutcome) -> BrokerOperationKind {
@@ -2943,34 +3309,312 @@ fn completed_outcome_kind(result: &BrokerCompletedOutcome) -> BrokerOperationKin
     }
 }
 
-fn completed_outcome_bytes(result: &BrokerCompletedOutcome) -> Result<usize, BrokerLedgerError> {
-    match result {
-        BrokerCompletedOutcome::Exec { .. } => {
-            let output = execution_output_from_completed(result)?;
-            output.records().iter().try_fold(0_usize, |total, record| {
-                total
-                    .checked_add(record.bytes().len())
-                    .ok_or(BrokerLedgerError::Capacity)
-            })
-        }
-        BrokerCompletedOutcome::CopyTo => Ok(0),
-        BrokerCompletedOutcome::CopyFrom { content_base64 } => BASE64
-            .decode(content_base64)
-            .map(|content| content.len())
-            .map_err(|_| BrokerLedgerError::Corrupt),
-    }
-}
-
 fn validate_completed_operation(
     operation: &BrokerCompletedOperation,
 ) -> Result<(), BrokerLedgerError> {
-    if is_zero_digest(operation.request_fingerprint)
-        || operation.kind != completed_outcome_kind(&operation.result)
-        || completed_outcome_bytes(&operation.result)? > MAX_COMPLETED_OPERATION_BYTES
-    {
+    let valid_reference = match &operation.result {
+        BrokerCompletedResult::Pending { reference }
+        | BrokerCompletedResult::GarbageCollecting { reference } => {
+            reference.kind() == ContentKind::EndpointResult
+        }
+        BrokerCompletedResult::Acknowledged => true,
+    };
+    if is_zero_digest(operation.request_fingerprint) || !valid_reference {
         return Err(BrokerLedgerError::Corrupt);
     }
     Ok(())
+}
+
+fn maximum_completed_outcome_bytes(
+    kind: BrokerOperationKind,
+    payload_limit: usize,
+) -> Result<usize, BrokerResultStoreError> {
+    let prefix = RESULT_HEADER
+        .len()
+        .checked_add(3)
+        .ok_or(BrokerResultStoreError::Capacity)?;
+    match kind {
+        BrokerOperationKind::Exec => {
+            if payload_limit > MAX_EXECUTION_OUTPUT_BYTES {
+                return Err(BrokerResultStoreError::Capacity);
+            }
+            prefix
+                .checked_add(10)
+                .and_then(|bytes| {
+                    bytes.checked_add(MAX_EXECUTION_OUTPUT_RECORDS * RESULT_RECORD_METADATA_BYTES)
+                })
+                .and_then(|bytes| bytes.checked_add(payload_limit))
+                .ok_or(BrokerResultStoreError::Capacity)
+        }
+        BrokerOperationKind::CopyTo => Ok(prefix),
+        BrokerOperationKind::CopyFrom => {
+            if payload_limit > MAX_COPY_BYTES {
+                return Err(BrokerResultStoreError::Capacity);
+            }
+            prefix
+                .checked_add(4)
+                .and_then(|bytes| bytes.checked_add(payload_limit))
+                .ok_or(BrokerResultStoreError::Capacity)
+        }
+        BrokerOperationKind::Attach => Err(BrokerResultStoreError::Corrupt),
+    }
+}
+
+fn encode_completed_outcome(
+    outcome: &BrokerCompletedOutcome,
+) -> Result<Vec<u8>, BrokerResultStoreError> {
+    let kind = completed_outcome_kind(outcome);
+    let payload_bytes = match outcome {
+        BrokerCompletedOutcome::Exec { records, .. } => {
+            execution_output_from_completed(outcome)?;
+            records.iter().try_fold(0_usize, |total, record| {
+                total.checked_add(record.content.len())
+            })
+        }
+        BrokerCompletedOutcome::CopyTo => Some(0),
+        BrokerCompletedOutcome::CopyFrom { content } => Some(content.len()),
+    }
+    .ok_or(BrokerResultStoreError::Capacity)?;
+    let maximum = maximum_completed_outcome_bytes(kind, payload_bytes)?;
+    let record_bytes = match outcome {
+        BrokerCompletedOutcome::Exec { records, .. } => records
+            .len()
+            .checked_mul(RESULT_RECORD_METADATA_BYTES)
+            .and_then(|bytes| bytes.checked_add(10)),
+        BrokerCompletedOutcome::CopyTo => Some(0),
+        BrokerCompletedOutcome::CopyFrom { .. } => Some(4),
+    };
+    let capacity = RESULT_HEADER
+        .len()
+        .checked_add(3)
+        .and_then(|bytes| bytes.checked_add(record_bytes?))
+        .and_then(|bytes| bytes.checked_add(payload_bytes))
+        .ok_or(BrokerResultStoreError::Capacity)?;
+    if capacity > maximum {
+        return Err(BrokerResultStoreError::Capacity);
+    }
+    let mut encoded = Vec::with_capacity(capacity);
+    encoded.extend_from_slice(RESULT_HEADER);
+    encoded.extend_from_slice(&RESULT_SCHEMA_VERSION.to_be_bytes());
+    encoded.push(match kind {
+        BrokerOperationKind::Exec => 1,
+        BrokerOperationKind::CopyTo => 2,
+        BrokerOperationKind::CopyFrom => 3,
+        BrokerOperationKind::Attach => return Err(BrokerResultStoreError::Corrupt),
+    });
+    match outcome {
+        BrokerCompletedOutcome::Exec {
+            termination,
+            records,
+            truncated,
+        } => {
+            let (termination_tag, exit_code) = match termination {
+                BrokerDurableTermination::Exited(code) => (0, *code),
+                BrokerDurableTermination::Signalled => (1, 0),
+                BrokerDurableTermination::TimedOut => (2, 0),
+                BrokerDurableTermination::Cancelled => (3, 0),
+            };
+            encoded.push(termination_tag);
+            encoded.extend_from_slice(&exit_code.to_be_bytes());
+            encoded.push(u8::from(*truncated));
+            encoded.extend_from_slice(
+                &u32::try_from(records.len())
+                    .map_err(|_| BrokerResultStoreError::Capacity)?
+                    .to_be_bytes(),
+            );
+            for record in records {
+                encoded.push(match record.stream {
+                    BrokerDurableOutputStream::Stdout => 0,
+                    BrokerDurableOutputStream::Stderr => 1,
+                });
+                encoded.push(u8::from(record.end_of_stream));
+                encoded.extend_from_slice(
+                    &u32::try_from(record.content.len())
+                        .map_err(|_| BrokerResultStoreError::Capacity)?
+                        .to_be_bytes(),
+                );
+                encoded.extend_from_slice(&record.content);
+            }
+        }
+        BrokerCompletedOutcome::CopyTo => {}
+        BrokerCompletedOutcome::CopyFrom { content } => {
+            encoded.extend_from_slice(
+                &u32::try_from(content.len())
+                    .map_err(|_| BrokerResultStoreError::Capacity)?
+                    .to_be_bytes(),
+            );
+            encoded.extend_from_slice(content);
+        }
+    }
+    if encoded.len() != capacity {
+        return Err(BrokerResultStoreError::Corrupt);
+    }
+    Ok(encoded)
+}
+
+fn decode_completed_outcome(
+    encoded: &[u8],
+) -> Result<BrokerCompletedOutcome, BrokerResultStoreError> {
+    let mut decoder = CompletedOutcomeDecoder::new(encoded)?;
+    let outcome = match decoder.byte()? {
+        1 => {
+            let termination_tag = decoder.byte()?;
+            let exit_code = decoder.i32()?;
+            let termination = match (termination_tag, exit_code) {
+                (0, code) => BrokerDurableTermination::Exited(code),
+                (1, 0) => BrokerDurableTermination::Signalled,
+                (2, 0) => BrokerDurableTermination::TimedOut,
+                (3, 0) => BrokerDurableTermination::Cancelled,
+                _ => return Err(BrokerResultStoreError::Corrupt),
+            };
+            let truncated = match decoder.byte()? {
+                0 => false,
+                1 => true,
+                _ => return Err(BrokerResultStoreError::Corrupt),
+            };
+            let record_count =
+                usize::try_from(decoder.u32()?).map_err(|_| BrokerResultStoreError::Corrupt)?;
+            if record_count > MAX_EXECUTION_OUTPUT_RECORDS {
+                return Err(BrokerResultStoreError::Corrupt);
+            }
+            let mut records = Vec::with_capacity(record_count);
+            let mut output_bytes = 0_usize;
+            for _ in 0..record_count {
+                let stream = match decoder.byte()? {
+                    0 => BrokerDurableOutputStream::Stdout,
+                    1 => BrokerDurableOutputStream::Stderr,
+                    _ => return Err(BrokerResultStoreError::Corrupt),
+                };
+                let end_of_stream = match decoder.byte()? {
+                    0 => false,
+                    1 => true,
+                    _ => return Err(BrokerResultStoreError::Corrupt),
+                };
+                let length =
+                    usize::try_from(decoder.u32()?).map_err(|_| BrokerResultStoreError::Corrupt)?;
+                output_bytes = output_bytes
+                    .checked_add(length)
+                    .filter(|bytes| *bytes <= MAX_EXECUTION_OUTPUT_BYTES)
+                    .ok_or(BrokerResultStoreError::Corrupt)?;
+                records.push(BrokerDurableOutputRecord {
+                    stream,
+                    content: decoder.bytes(length)?.to_vec(),
+                    end_of_stream,
+                });
+            }
+            let outcome = BrokerCompletedOutcome::Exec {
+                termination,
+                records,
+                truncated,
+            };
+            execution_output_from_completed(&outcome)?;
+            outcome
+        }
+        2 => BrokerCompletedOutcome::CopyTo,
+        3 => {
+            let length =
+                usize::try_from(decoder.u32()?).map_err(|_| BrokerResultStoreError::Corrupt)?;
+            if length > MAX_COPY_BYTES {
+                return Err(BrokerResultStoreError::Corrupt);
+            }
+            BrokerCompletedOutcome::CopyFrom {
+                content: decoder.bytes(length)?.to_vec(),
+            }
+        }
+        _ => return Err(BrokerResultStoreError::Corrupt),
+    };
+    decoder.finish()?;
+    Ok(outcome)
+}
+
+fn load_completed_outcome(
+    results: &dyn BrokerResultStore,
+    expected_kind: BrokerOperationKind,
+    reference: &DurableContentRef,
+) -> Result<BrokerCompletedOutcome, BrokerError> {
+    if reference.kind() != ContentKind::EndpointResult {
+        return Err(BrokerResultStoreError::Corrupt.into());
+    }
+    let encoded = results.load(reference)?;
+    let outcome = decode_completed_outcome(&encoded)?;
+    if completed_outcome_kind(&outcome) != expected_kind
+        || encode_completed_outcome(&outcome)? != encoded
+    {
+        return Err(BrokerResultStoreError::Corrupt.into());
+    }
+    Ok(outcome)
+}
+
+struct CompletedOutcomeDecoder<'a> {
+    encoded: &'a [u8],
+    cursor: usize,
+}
+
+impl<'a> CompletedOutcomeDecoder<'a> {
+    fn new(encoded: &'a [u8]) -> Result<Self, BrokerResultStoreError> {
+        let prefix = RESULT_HEADER
+            .len()
+            .checked_add(2)
+            .ok_or(BrokerResultStoreError::Corrupt)?;
+        if encoded.len() < prefix
+            || &encoded[..RESULT_HEADER.len()] != RESULT_HEADER
+            || u16::from_be_bytes(
+                encoded[RESULT_HEADER.len()..prefix]
+                    .try_into()
+                    .map_err(|_| BrokerResultStoreError::Corrupt)?,
+            ) != RESULT_SCHEMA_VERSION
+        {
+            return Err(BrokerResultStoreError::Corrupt);
+        }
+        Ok(Self {
+            encoded,
+            cursor: prefix,
+        })
+    }
+
+    fn byte(&mut self) -> Result<u8, BrokerResultStoreError> {
+        let byte = *self
+            .encoded
+            .get(self.cursor)
+            .ok_or(BrokerResultStoreError::Corrupt)?;
+        self.cursor += 1;
+        Ok(byte)
+    }
+
+    fn u32(&mut self) -> Result<u32, BrokerResultStoreError> {
+        let bytes: [u8; 4] = self
+            .bytes(4)?
+            .try_into()
+            .map_err(|_| BrokerResultStoreError::Corrupt)?;
+        Ok(u32::from_be_bytes(bytes))
+    }
+
+    fn i32(&mut self) -> Result<i32, BrokerResultStoreError> {
+        let bytes: [u8; 4] = self
+            .bytes(4)?
+            .try_into()
+            .map_err(|_| BrokerResultStoreError::Corrupt)?;
+        Ok(i32::from_be_bytes(bytes))
+    }
+
+    fn bytes(&mut self, length: usize) -> Result<&'a [u8], BrokerResultStoreError> {
+        let end = self
+            .cursor
+            .checked_add(length)
+            .filter(|end| *end <= self.encoded.len())
+            .ok_or(BrokerResultStoreError::Corrupt)?;
+        let bytes = &self.encoded[self.cursor..end];
+        self.cursor = end;
+        Ok(bytes)
+    }
+
+    fn finish(self) -> Result<(), BrokerResultStoreError> {
+        if self.cursor == self.encoded.len() {
+            Ok(())
+        } else {
+            Err(BrokerResultStoreError::Corrupt)
+        }
+    }
 }
 
 fn sandbox_spec_digest(spec: &SandboxSpec) -> Result<Sha256Digest, BrokerError> {
@@ -3128,6 +3772,10 @@ mod tests {
         ExecutionEnvironment, ExecutionOutputRecord, ExecutionOutputStream, ExecutionTermination,
         NeverCancelled, SandboxEnvironment, SandboxExecutionBinding,
     };
+    use automata_ci_runner_spool::{
+        MAX_CONTENT_OBJECT_BYTES, MAX_CONTENT_SPOOL_BYTES, OpaqueContentIdentity, ProtectionId,
+        endpoint_result_allocation,
+    };
     use ring::signature::{Ed25519KeyPair, KeyPair as _};
 
     use super::*;
@@ -3155,6 +3803,259 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct InMemoryBrokerResultStore {
+        state: Mutex<InMemoryResultState>,
+        max_bytes: u64,
+        max_objects: usize,
+    }
+
+    #[derive(Debug, Default)]
+    struct InMemoryResultState {
+        objects: BTreeMap<DurableContentRef, Vec<u8>>,
+        reserved_bytes: u64,
+        reserved_objects: usize,
+        publications: usize,
+    }
+
+    impl InMemoryBrokerResultStore {
+        fn new() -> Self {
+            Self::with_limits(MAX_CONTENT_SPOOL_BYTES, MAX_ENDPOINT_OPERATIONS_PER_JOB)
+        }
+
+        fn with_limits(max_bytes: u64, max_objects: usize) -> Self {
+            Self {
+                state: Mutex::new(InMemoryResultState::default()),
+                max_bytes,
+                max_objects,
+            }
+        }
+
+        fn used_bytes(state: &InMemoryResultState) -> u64 {
+            state
+                .objects
+                .keys()
+                .map(DurableContentRef::accounted_bytes)
+                .sum()
+        }
+
+        fn reference(plaintext: &[u8]) -> Result<DurableContentRef, BrokerResultStoreError> {
+            let bytes =
+                u64::try_from(plaintext.len()).map_err(|_| BrokerResultStoreError::Capacity)?;
+            let allocation =
+                endpoint_result_allocation(bytes).map_err(|_| BrokerResultStoreError::Capacity)?;
+            let digest = Sha256Digest::from_bytes(Sha256::digest(plaintext).into());
+            DurableContentRef::after_endpoint_result_commit(
+                allocation,
+                OpaqueContentIdentity::from_bytes(*digest.as_bytes()),
+                ProtectionId::new("test-key-v1").expect("fixed protection ID"),
+            )
+            .map_err(|_| BrokerResultStoreError::Corrupt)
+        }
+
+        fn verify(reference: &DurableContentRef, plaintext: &[u8]) -> bool {
+            Self::reference(plaintext).is_ok_and(|observed| observed == *reference)
+        }
+
+        fn tamper(&self, reference: &DurableContentRef) {
+            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            state
+                .objects
+                .get_mut(reference)
+                .expect("referenced test result")
+                .push(0xff);
+        }
+
+        fn retained_objects(&self) -> usize {
+            self.state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .objects
+                .len()
+        }
+    }
+
+    impl Default for InMemoryBrokerResultStore {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    #[derive(Debug)]
+    struct InMemoryResultReservation<'store> {
+        store: &'store InMemoryBrokerResultStore,
+        maximum_plaintext_bytes: u64,
+        reserved_bytes: u64,
+        active: bool,
+    }
+
+    impl Drop for InMemoryResultReservation<'_> {
+        fn drop(&mut self) {
+            if !self.active {
+                return;
+            }
+            let mut state = self
+                .store
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            state.reserved_bytes -= self.reserved_bytes;
+            state.reserved_objects -= 1;
+        }
+    }
+
+    #[derive(Debug)]
+    struct InMemoryResultPublication<'store> {
+        store: &'store InMemoryBrokerResultStore,
+        reference: DurableContentRef,
+        active: bool,
+    }
+
+    impl InMemoryResultPublication<'_> {
+        fn finish(&mut self) {
+            if !self.active {
+                return;
+            }
+            let mut state = self
+                .store
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            state.publications -= 1;
+            self.active = false;
+        }
+    }
+
+    impl Drop for InMemoryResultPublication<'_> {
+        fn drop(&mut self) {
+            self.finish();
+        }
+    }
+
+    impl BrokerResultPublication for InMemoryResultPublication<'_> {
+        fn reference(&self) -> &DurableContentRef {
+            &self.reference
+        }
+
+        fn adopt(mut self: Box<Self>) {
+            self.finish();
+        }
+    }
+
+    impl<'store> BrokerResultCapacityReservation<'store> for InMemoryResultReservation<'store> {
+        fn persist(
+            mut self: Box<Self>,
+            plaintext: &[u8],
+        ) -> Result<Box<dyn BrokerResultPublication + 'store>, BrokerResultStoreError> {
+            if u64::try_from(plaintext.len()).map_err(|_| BrokerResultStoreError::Capacity)?
+                > self.maximum_plaintext_bytes
+            {
+                return Err(BrokerResultStoreError::Capacity);
+            }
+            let reference = InMemoryBrokerResultStore::reference(plaintext)?;
+            let mut state = self
+                .store
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            state.reserved_bytes -= self.reserved_bytes;
+            state.reserved_objects -= 1;
+            self.active = false;
+            if let Some(existing) = state.objects.get(&reference) {
+                if existing != plaintext {
+                    return Err(BrokerResultStoreError::Corrupt);
+                }
+            } else {
+                state.objects.insert(reference.clone(), plaintext.to_vec());
+            }
+            state.publications += 1;
+            drop(state);
+            Ok(Box::new(InMemoryResultPublication {
+                store: self.store,
+                reference,
+                active: true,
+            }))
+        }
+    }
+
+    impl BrokerResultStore for InMemoryBrokerResultStore {
+        fn reserve(
+            &self,
+            maximum_plaintext_bytes: u64,
+        ) -> Result<Box<dyn BrokerResultCapacityReservation<'_> + '_>, BrokerResultStoreError>
+        {
+            if maximum_plaintext_bytes > MAX_CONTENT_OBJECT_BYTES {
+                return Err(BrokerResultStoreError::Capacity);
+            }
+            let reserved_bytes = endpoint_result_allocation(maximum_plaintext_bytes)
+                .map_err(|_| BrokerResultStoreError::Capacity)?;
+            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            let objects = state
+                .objects
+                .len()
+                .checked_add(state.reserved_objects)
+                .and_then(|objects| objects.checked_add(1))
+                .ok_or(BrokerResultStoreError::Capacity)?;
+            let bytes = Self::used_bytes(&state)
+                .checked_add(state.reserved_bytes)
+                .and_then(|bytes| bytes.checked_add(reserved_bytes))
+                .ok_or(BrokerResultStoreError::Capacity)?;
+            if objects > self.max_objects || bytes > self.max_bytes {
+                return Err(BrokerResultStoreError::Capacity);
+            }
+            state.reserved_objects += 1;
+            state.reserved_bytes += reserved_bytes;
+            Ok(Box::new(InMemoryResultReservation {
+                store: self,
+                maximum_plaintext_bytes,
+                reserved_bytes,
+                active: true,
+            }))
+        }
+
+        fn load(&self, reference: &DurableContentRef) -> Result<Vec<u8>, BrokerResultStoreError> {
+            let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            let plaintext = state
+                .objects
+                .get(reference)
+                .ok_or(BrokerResultStoreError::Corrupt)?;
+            if !Self::verify(reference, plaintext) {
+                return Err(BrokerResultStoreError::Corrupt);
+            }
+            Ok(plaintext.clone())
+        }
+
+        fn remove(&self, reference: &DurableContentRef) -> Result<bool, BrokerResultStoreError> {
+            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some(plaintext) = state.objects.get(reference)
+                && !Self::verify(reference, plaintext)
+            {
+                return Err(BrokerResultStoreError::Corrupt);
+            }
+            Ok(state.objects.remove(reference).is_some())
+        }
+
+        fn reconcile(&self, retained: &[DurableContentRef]) -> Result<(), BrokerResultStoreError> {
+            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            if state.publications != 0 {
+                return Err(BrokerResultStoreError::Unavailable);
+            }
+            for reference in retained {
+                let plaintext = state
+                    .objects
+                    .get(reference)
+                    .ok_or(BrokerResultStoreError::Corrupt)?;
+                if !Self::verify(reference, plaintext) {
+                    return Err(BrokerResultStoreError::Corrupt);
+                }
+            }
+            state
+                .objects
+                .retain(|reference, _| retained.contains(reference));
+            Ok(())
+        }
+    }
+
     #[derive(Debug, Default)]
     struct FakeHostCompute {
         resources: Mutex<BTreeMap<String, HostComputeInspection>>,
@@ -3168,6 +4069,7 @@ mod tests {
         uncertain_create: Mutex<bool>,
         uncertain_destroy: Mutex<bool>,
         uncertain_exec: Mutex<bool>,
+        copy_from_output: Mutex<Option<Vec<u8>>>,
         exec_gate: (Mutex<ExecGate>, Condvar),
     }
 
@@ -3199,6 +4101,13 @@ mod tests {
             gate.blocked = true;
             gate.entered = false;
             gate.released = false;
+        }
+
+        fn set_copy_from_output(&self, output: Vec<u8>) {
+            *self
+                .copy_from_output
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = Some(output);
         }
 
         fn wait_for_blocked_exec(&self) {
@@ -3330,6 +4239,16 @@ mod tests {
             ExecutionOutput::new(
                 ExecutionTermination::Exited(0),
                 vec![
+                    ExecutionOutputRecord::data(
+                        ExecutionOutputStream::Stdout,
+                        b"broker-output".to_vec(),
+                    )
+                    .map_err(|_| {
+                        HostComputeAdapterError::new(
+                            HostComputeOperation::Exec,
+                            BrokerAdapterEffect::KnownNoEffect,
+                        )
+                    })?,
                     ExecutionOutputRecord::end_of_stream(ExecutionOutputStream::Stdout),
                     ExecutionOutputRecord::end_of_stream(ExecutionOutputStream::Stderr),
                 ],
@@ -3368,7 +4287,12 @@ mod tests {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner) =
                 Some(request.guest_agent_path().to_owned());
-            Ok(b"copy".to_vec())
+            Ok(self
+                .copy_from_output
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone()
+                .unwrap_or_else(|| b"copy".to_vec()))
         }
 
         fn terminate_descendants(&self, _resource_id: &str) -> Result<(), HostComputeAdapterError> {
@@ -3579,11 +4503,30 @@ mod tests {
     where
         L: BrokerLedger + 'static,
     {
+        broker_with_results(
+            fixture,
+            adapter,
+            ledger,
+            Arc::new(InMemoryBrokerResultStore::new()),
+        )
+    }
+
+    fn broker_with_results<L, R>(
+        fixture: &Fixture,
+        adapter: Arc<FakeHostCompute>,
+        ledger: Arc<L>,
+        results: Arc<R>,
+    ) -> RestrictedWindowsHyperVBroker
+    where
+        L: BrokerLedger + 'static,
+        R: BrokerResultStore + 'static,
+    {
         let broker = RestrictedWindowsHyperVBroker::open(
             fixture.host_id,
             fixture.keyring.clone(),
             adapter,
             ledger,
+            results,
             Arc::new(FixedProfileContractResolver(
                 fixture.profile_contract.clone(),
             )),
@@ -3663,6 +4606,55 @@ mod tests {
         );
     }
 
+    fn completed_reference(
+        ledger: &dyn BrokerLedger,
+        operation_id: OperationId,
+    ) -> DurableContentRef {
+        let entry = ledger
+            .load()
+            .expect("load completed operation")
+            .into_iter()
+            .rev()
+            .find(|entry| entry.completed_operations.contains_key(&operation_id))
+            .expect("completed operation entry");
+        match &entry
+            .completed_operations
+            .get(&operation_id)
+            .expect("completed operation")
+            .result
+        {
+            BrokerCompletedResult::Pending { reference } => reference.clone(),
+            BrokerCompletedResult::GarbageCollecting { .. }
+            | BrokerCompletedResult::Acknowledged => {
+                panic!("result must still await acknowledgement")
+            }
+        }
+    }
+
+    fn acknowledge_replayed_operations(
+        broker: &RestrictedWindowsHyperVBroker,
+        ticket: &BrokerSandboxTicket,
+        results: &InMemoryBrokerResultStore,
+        command: &ExecutionCommand,
+        operation_ids: [OperationId; 3],
+    ) {
+        for operation_id in operation_ids {
+            broker
+                .acknowledge_operation(ticket, operation_id)
+                .expect("acknowledge replay result");
+        }
+        broker
+            .acknowledge_operation(ticket, operation_ids[0])
+            .expect("repeated acknowledgement is idempotent");
+        assert_eq!(results.retained_objects(), 0);
+        assert_eq!(
+            broker
+                .exec(ticket, command, UnixMillis::new(136), &NeverCancelled)
+                .expect_err("acknowledged result cannot repeat host mutation"),
+            BrokerError::OperationAcknowledged
+        );
+    }
+
     #[test]
     fn completed_exec_and_copy_to_replay_exactly_after_response_loss_and_restart() {
         let directory = TemporaryLedgerDirectory::new();
@@ -3670,7 +4662,13 @@ mod tests {
         let fixture = fixture();
         let adapter = Arc::new(FakeHostCompute::default());
         let ledger = Arc::new(FileBrokerLedger::open(&path).expect("open ledger"));
-        let first = broker(&fixture, Arc::clone(&adapter), Arc::clone(&ledger));
+        let results = Arc::new(InMemoryBrokerResultStore::new());
+        let first = broker_with_results(
+            &fixture,
+            Arc::clone(&adapter),
+            Arc::clone(&ledger),
+            Arc::clone(&results),
+        );
         let ticket = first
             .create(&fixture.spec, &fixture.grant, UnixMillis::new(120))
             .expect("create");
@@ -3704,6 +4702,10 @@ mod tests {
         assert_eq!(adapter.execs.load(Ordering::SeqCst), 1);
         assert_eq!(adapter.copy_tos.load(Ordering::SeqCst), 1);
         assert_eq!(adapter.copy_froms.load(Ordering::SeqCst), 1);
+        let ledger_text = fs::read_to_string(&path).expect("read lifecycle ledger");
+        assert!(!ledger_text.contains("broker-output"));
+        assert!(!ledger_text.contains("YnJva2VyLW91dHB1dA=="));
+        assert!(!ledger_text.contains("Y29weQ=="));
         assert_eq!(adapter.last_process_limit.load(Ordering::SeqCst), 128);
         assert_eq!(
             adapter
@@ -3718,10 +4720,11 @@ mod tests {
         drop(ledger);
         let restarted_ledger =
             Arc::new(FileBrokerLedger::open(&path).expect("reopen completed ledger"));
-        let restarted = broker(
+        let restarted = broker_with_results(
             &fixture,
             Arc::clone(&adapter),
             Arc::clone(&restarted_ledger),
+            Arc::clone(&results),
         );
         assert_eq!(
             restarted
@@ -3743,9 +4746,314 @@ mod tests {
         assert_eq!(adapter.copy_froms.load(Ordering::SeqCst), 1);
 
         assert_completed_operation_conflicts(&restarted, &ticket, exec_operation, copy_operation);
+        acknowledge_replayed_operations(
+            &restarted,
+            &ticket,
+            results.as_ref(),
+            &command,
+            [exec_operation, copy_operation, read_operation],
+        );
         assert_eq!(adapter.execs.load(Ordering::SeqCst), 1);
         assert_eq!(adapter.copy_tos.load(Ordering::SeqCst), 1);
         assert_eq!(adapter.copy_froms.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn startup_fails_closed_when_a_retained_result_is_missing_or_altered() {
+        for alter in [false, true] {
+            let fixture = fixture();
+            let adapter = Arc::new(FakeHostCompute::default());
+            let ledger = Arc::new(InMemoryBrokerLedger::new());
+            let results = Arc::new(InMemoryBrokerResultStore::new());
+            let first = broker_with_results(
+                &fixture,
+                Arc::clone(&adapter),
+                Arc::clone(&ledger),
+                Arc::clone(&results),
+            );
+            let ticket = first
+                .create(&fixture.spec, &fixture.grant, UnixMillis::new(120))
+                .expect("create");
+            first.attach(&ticket, UnixMillis::new(121)).expect("attach");
+            let operation_id = OperationId::new();
+            first
+                .exec(
+                    &ticket,
+                    &fixture_command(operation_id, "echo protected"),
+                    UnixMillis::new(130),
+                    &NeverCancelled,
+                )
+                .expect("persist protected result");
+            let reference = completed_reference(ledger.as_ref(), operation_id);
+            if alter {
+                results.tamper(&reference);
+            } else {
+                assert!(results.remove(&reference).expect("remove retained result"));
+            }
+            drop(first);
+
+            let restarted = RestrictedWindowsHyperVBroker::open(
+                fixture.host_id,
+                fixture.keyring.clone(),
+                adapter,
+                ledger,
+                results,
+                Arc::new(FixedProfileContractResolver(
+                    fixture.profile_contract.clone(),
+                )),
+            )
+            .expect("open reads value-free ledger metadata");
+            assert_eq!(
+                restarted
+                    .reconcile_startup(UnixMillis::new(131))
+                    .expect_err("missing or altered protected content must fail recovery"),
+                BrokerError::ResultStore(BrokerResultStoreError::Corrupt)
+            );
+            assert_eq!(
+                restarted
+                    .inspect_ticket(&ticket, UnixMillis::new(132))
+                    .expect_err("broker remains closed after failed result recovery"),
+                BrokerError::ReconciliationRequired
+            );
+        }
+    }
+
+    #[test]
+    fn maximum_shared_copy_result_is_durable_replayable_and_reclaimable() {
+        let fixture = fixture();
+        let adapter = Arc::new(FakeHostCompute::default());
+        adapter.set_copy_from_output(vec![0x5a; MAX_COPY_BYTES]);
+        let ledger = Arc::new(InMemoryBrokerLedger::new());
+        let results = Arc::new(InMemoryBrokerResultStore::new());
+        let broker =
+            broker_with_results(&fixture, Arc::clone(&adapter), ledger, Arc::clone(&results));
+        let ticket = broker
+            .create(&fixture.spec, &fixture.grant, UnixMillis::new(120))
+            .expect("create");
+        broker
+            .attach(&ticket, UnixMillis::new(121))
+            .expect("attach");
+        let operation_id = OperationId::new();
+        let request = CopyFromRequest::new(
+            operation_id,
+            TargetPath::windows(r"C:\__w\maximum.bin").expect("maximum path"),
+            MAX_COPY_BYTES,
+        )
+        .expect("maximum shared copy request");
+
+        let first = broker
+            .copy_from(&ticket, &request, UnixMillis::new(130), &NeverCancelled)
+            .expect("maximum shared copy result");
+        assert_eq!(first.len(), MAX_COPY_BYTES);
+        assert!(first.iter().all(|byte| *byte == 0x5a));
+        assert_eq!(
+            broker
+                .copy_from(&ticket, &request, UnixMillis::new(131), &NeverCancelled)
+                .expect("maximum result replay"),
+            first
+        );
+        assert_eq!(adapter.copy_froms.load(Ordering::SeqCst), 1);
+
+        broker
+            .acknowledge_operation(&ticket, operation_id)
+            .expect("acknowledge maximum result");
+        assert_eq!(results.retained_objects(), 0);
+    }
+
+    #[test]
+    fn acknowledged_result_gc_releases_the_exact_cumulative_capacity() {
+        let fixture = fixture();
+        let adapter = Arc::new(FakeHostCompute::default());
+        let ledger = Arc::new(InMemoryBrokerLedger::new());
+        let maximum_result = maximum_completed_outcome_bytes(BrokerOperationKind::CopyFrom, 1024)
+            .expect("copy-from result bound");
+        let exact_capacity = endpoint_result_allocation(
+            u64::try_from(maximum_result).expect("bounded result length"),
+        )
+        .expect("protected result allocation");
+        let results = Arc::new(InMemoryBrokerResultStore::with_limits(exact_capacity, 2));
+        let broker =
+            broker_with_results(&fixture, Arc::clone(&adapter), ledger, Arc::clone(&results));
+        let ticket = broker
+            .create(&fixture.spec, &fixture.grant, UnixMillis::new(120))
+            .expect("create");
+        broker
+            .attach(&ticket, UnixMillis::new(121))
+            .expect("attach");
+        let first_id = OperationId::new();
+        let first = CopyFromRequest::new(
+            first_id,
+            TargetPath::windows(r"C:\__w\first.bin").expect("first path"),
+            1024,
+        )
+        .expect("first request");
+        broker
+            .copy_from(&ticket, &first, UnixMillis::new(130), &NeverCancelled)
+            .expect("result fits the exact cumulative capacity");
+        let second = CopyFromRequest::new(
+            OperationId::new(),
+            TargetPath::windows(r"C:\__w\second.bin").expect("second path"),
+            1024,
+        )
+        .expect("second request");
+        assert_eq!(
+            broker
+                .copy_from(&ticket, &second, UnixMillis::new(131), &NeverCancelled)
+                .expect_err("another maximum reservation exceeds cumulative capacity"),
+            BrokerError::ResultStore(BrokerResultStoreError::Capacity)
+        );
+        assert_eq!(adapter.copy_froms.load(Ordering::SeqCst), 1);
+
+        broker
+            .acknowledge_operation(&ticket, first_id)
+            .expect("durable acknowledgement reclaims the first payload");
+        assert_eq!(results.retained_objects(), 0);
+        broker
+            .copy_from(&ticket, &second, UnixMillis::new(132), &NeverCancelled)
+            .expect("reclaimed capacity admits the next result");
+        assert_eq!(adapter.copy_froms.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn startup_finishes_acknowledgement_after_result_removal_crash() {
+        let fixture = fixture();
+        let adapter = Arc::new(FakeHostCompute::default());
+        let ledger = Arc::new(InMemoryBrokerLedger::new());
+        let results = Arc::new(InMemoryBrokerResultStore::new());
+        let first = broker_with_results(
+            &fixture,
+            Arc::clone(&adapter),
+            Arc::clone(&ledger),
+            Arc::clone(&results),
+        );
+        let ticket = first
+            .create(&fixture.spec, &fixture.grant, UnixMillis::new(120))
+            .expect("create");
+        first.attach(&ticket, UnixMillis::new(121)).expect("attach");
+        let operation_id = OperationId::new();
+        let command = fixture_command(operation_id, "echo once");
+        first
+            .exec(&ticket, &command, UnixMillis::new(130), &NeverCancelled)
+            .expect("persist replay result");
+        let reference = completed_reference(ledger.as_ref(), operation_id);
+        let mut collecting = ledger
+            .load()
+            .expect("load pending result")
+            .into_iter()
+            .last()
+            .expect("latest ledger entry");
+        collecting
+            .completed_operations
+            .get_mut(&operation_id)
+            .expect("completed operation")
+            .result = BrokerCompletedResult::GarbageCollecting {
+            reference: reference.clone(),
+        };
+        ledger
+            .append(&collecting)
+            .expect("durably record acknowledgement before deletion");
+        assert!(
+            results
+                .remove(&reference)
+                .expect("remove result before simulated crash")
+        );
+        drop(first);
+
+        let restarted = broker_with_results(
+            &fixture,
+            Arc::clone(&adapter),
+            Arc::clone(&ledger),
+            Arc::clone(&results),
+        );
+        restarted
+            .acknowledge_operation(&ticket, operation_id)
+            .expect("recovered acknowledgement is idempotent");
+        assert_eq!(
+            restarted
+                .exec(&ticket, &command, UnixMillis::new(131), &NeverCancelled)
+                .expect_err("acknowledged mutation cannot execute again"),
+            BrokerError::OperationAcknowledged
+        );
+        let final_entry = ledger
+            .load()
+            .expect("load recovered acknowledgement")
+            .into_iter()
+            .last()
+            .expect("recovered ledger entry");
+        assert!(matches!(
+            final_entry
+                .completed_operations
+                .get(&operation_id)
+                .expect("operation tombstone")
+                .result,
+            BrokerCompletedResult::Acknowledged
+        ));
+        assert_eq!(results.retained_objects(), 0);
+        assert_eq!(adapter.execs.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn completed_operation_metadata_uses_the_shared_endpoint_budget_boundary() {
+        let fixture = fixture();
+        let adapter = Arc::new(FakeHostCompute::default());
+        let seed_ledger = Arc::new(InMemoryBrokerLedger::new());
+        let seed = broker(&fixture, Arc::clone(&adapter), Arc::clone(&seed_ledger));
+        let ticket = seed
+            .create(&fixture.spec, &fixture.grant, UnixMillis::new(120))
+            .expect("create");
+        seed.attach(&ticket, UnixMillis::new(121)).expect("attach");
+        let mut entry = seed_ledger
+            .load()
+            .expect("seed ledger")
+            .into_iter()
+            .last()
+            .expect("seed entry");
+        drop(seed);
+        entry.completed_operations.clear();
+        for _ in 0..MAX_ENDPOINT_OPERATIONS_PER_JOB {
+            entry.completed_operations.insert(
+                OperationId::new(),
+                BrokerCompletedOperation {
+                    kind: BrokerOperationKind::CopyTo,
+                    request_fingerprint: Sha256Digest::from_bytes([9; 32]),
+                    result: BrokerCompletedResult::Acknowledged,
+                },
+            );
+        }
+        validate_ledger_entry(&entry).expect("shared endpoint budget is valid");
+
+        let full_ledger = Arc::new(InMemoryBrokerLedger {
+            entries: Mutex::new(vec![entry.clone()]),
+        });
+        let full = broker(&fixture, Arc::clone(&adapter), full_ledger);
+        let rejected = CopyToRequest::new(
+            OperationId::new(),
+            TargetPath::windows(r"C:\__w\over-budget.bin").expect("target"),
+            Vec::new(),
+        )
+        .expect("copy request");
+        assert_eq!(
+            full.copy_to(&ticket, &rejected, UnixMillis::new(130), &NeverCancelled)
+                .expect_err("operation above shared endpoint budget"),
+            BrokerError::Ledger(BrokerLedgerError::Capacity)
+        );
+        assert_eq!(adapter.copy_tos.load(Ordering::SeqCst), 0);
+        drop(full);
+
+        let removed = *entry
+            .completed_operations
+            .keys()
+            .next()
+            .expect("one completed operation");
+        entry.completed_operations.remove(&removed);
+        let boundary_ledger = Arc::new(InMemoryBrokerLedger {
+            entries: Mutex::new(vec![entry]),
+        });
+        let boundary = broker(&fixture, Arc::clone(&adapter), boundary_ledger);
+        boundary
+            .copy_to(&ticket, &rejected, UnixMillis::new(131), &NeverCancelled)
+            .expect("last shared endpoint operation is admitted");
+        assert_eq!(adapter.copy_tos.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -3912,6 +5220,7 @@ mod tests {
             overlap,
             adapter.clone(),
             Arc::new(InMemoryBrokerLedger::new()),
+            Arc::new(InMemoryBrokerResultStore::new()),
             Arc::new(FixedProfileContractResolver(
                 fixture.profile_contract.clone(),
             )),
@@ -3931,6 +5240,7 @@ mod tests {
             BrokerGrantKeyring::new([(rotated_id, rotated_public)]).expect("rotated-only keyring"),
             unknown_adapter.clone(),
             Arc::new(InMemoryBrokerLedger::new()),
+            Arc::new(InMemoryBrokerResultStore::new()),
             Arc::new(FixedProfileContractResolver(
                 fixture.profile_contract.clone(),
             )),

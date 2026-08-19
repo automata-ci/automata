@@ -17,6 +17,7 @@ workspace = true
 [dependencies]
 automata-ci-core.workspace = true
 automata-ci-execution.workspace = true
+automata-ci-runner-spool.workspace = true
 automata-ci-sandbox-guest.workspace = true
 base64.workspace = true
 ring.workspace = true

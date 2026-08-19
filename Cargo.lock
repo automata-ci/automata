@@ -1275,6 +1275,7 @@ version = "0.1.0"
 dependencies = [
  "automata-ci-core",
  "automata-ci-execution",
+ "automata-ci-runner-spool",
  "automata-ci-sandbox-guest",
  "base64 0.23.1",
  "ring",
