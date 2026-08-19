@@ -9,6 +9,7 @@ mod expression;
 mod frontend;
 mod local_archive;
 mod model;
+mod provider_event_document;
 mod repository_archive;
 mod repository_path;
 mod runner_profile;
@@ -53,6 +54,10 @@ pub use model::{
     ReusableWorkflowSecretMap, ReusableWorkflowSecrets, RunDefaults, RunStep, RunnerSelection,
     ScalarValue, Step, StepExecution, StepId, StrategyMatrix, TriggerConfiguration, TriggerSet,
     ValueMap, ValueMapEntry, WorkflowJob, WorkflowTriggers,
+};
+pub use provider_event_document::{
+    ActionsProviderEventDocument, ActionsProviderEventDocumentError,
+    MAX_ACTIONS_PROVIDER_EVENT_BYTES,
 };
 pub use repository_archive::{
     MAX_REPOSITORY_WORKFLOW_PATH_BYTES, RepositoryWorkflowDiscoveryError,

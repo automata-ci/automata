@@ -151,6 +151,12 @@ impl ProviderProcessingWorker {
         }
     }
 
+    /// Returns this process-lifetime worker identity.
+    #[must_use]
+    pub const fn worker_id(&self) -> ProviderProcessingWorkerId {
+        self.worker_id
+    }
+
     /// Claims and processes at most one provider invocation.
     ///
     /// # Errors

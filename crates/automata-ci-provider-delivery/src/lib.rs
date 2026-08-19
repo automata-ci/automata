@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+mod background;
 mod clock;
 mod configuration;
 mod ingress;
@@ -11,6 +12,7 @@ mod runtime;
 mod trust;
 mod worker;
 
+pub use background::{ProviderBackgroundRuntime, ProviderBackgroundRuntimeError};
 pub use clock::{ProviderDeliveryClock, ProviderDeliveryClockError, SystemProviderDeliveryClock};
 pub use configuration::{ProviderConfigurationService, ProviderConfigurationServiceError};
 pub use ingress::{PreparedProviderWebhook, ProviderDeliveryIngress, ProviderDeliveryIngressError};

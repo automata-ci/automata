@@ -76,7 +76,7 @@ impl GithubResultCredentialRequest<'_> {
         self.context
     }
 
-    /// Returns the exact durable result claim.
+    /// Returns the claim-frozen desired result and publication payload.
     #[must_use]
     pub const fn claimed(&self) -> &ClaimedProviderResult {
         self.claimed

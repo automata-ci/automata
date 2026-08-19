@@ -49,6 +49,58 @@ use tokio_util::sync::CancellationToken;
 
 use super::*;
 
+#[test]
+fn common_result_operations_reuse_exact_checks_write_actions() {
+    assert_eq!(
+        common_result_action(GithubResultOperation::EnsureSuite),
+        GithubServerServiceAction::EnsureCheckSuite
+    );
+    assert_eq!(
+        common_result_action(GithubResultOperation::CreateRun),
+        GithubServerServiceAction::CreateCheckRun
+    );
+    assert_eq!(
+        common_result_action(GithubResultOperation::ReconcileRun),
+        GithubServerServiceAction::ReconcileCheckRun
+    );
+    for operation in [
+        GithubResultOperation::ReadRun,
+        GithubResultOperation::StartRun,
+        GithubResultOperation::CompleteRun,
+        GithubResultOperation::ReadAnnotations,
+        GithubResultOperation::AppendAnnotations,
+    ] {
+        assert_eq!(
+            common_result_action(operation),
+            GithubServerServiceAction::PublishCheckRun
+        );
+    }
+}
+
+#[test]
+fn common_trigger_operations_use_least_authority_repository_actions() {
+    for (operation, action, scope) in [
+        (
+            GithubTriggerCredentialOperation::ReadSource,
+            GithubServerServiceAction::FetchRepositoryRevision,
+            GithubServerServiceScope::RepositoryContentsRead,
+        ),
+        (
+            GithubTriggerCredentialOperation::ReadPushChangedFiles,
+            GithubServerServiceAction::FetchRepositoryChangedFiles,
+            GithubServerServiceScope::RepositoryContentsRead,
+        ),
+        (
+            GithubTriggerCredentialOperation::ReadPullRequestChangedFiles,
+            GithubServerServiceAction::FetchPullRequestFiles,
+            GithubServerServiceScope::PullRequestsRead,
+        ),
+    ] {
+        assert_eq!(common_trigger_action(operation), action);
+        assert_eq!(action.required_scope(), scope);
+    }
+}
+
 const OBSERVED_AT: i64 = 1_000;
 const REQUIRED_THROUGH: i64 = 2_000;
 

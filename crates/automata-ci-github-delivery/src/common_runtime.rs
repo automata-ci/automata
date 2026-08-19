@@ -21,22 +21,7 @@ use automata_ci_store::{
     StoreError, TenantScope,
 };
 
-/// GitHub trigger processing port composed behind the common runtime adapter.
-///
-/// The implementation owns GitHub credential acquisition and provider I/O;
-/// provider-independent source discovery, compilation, and admission remain
-/// reusable application services called by that implementation.
-#[async_trait]
-pub trait GithubTriggerHandler: fmt::Debug + Send + Sync {
-    /// Processes one authenticated GitHub trigger under its exact configuration and live lease.
-    async fn process_trigger(
-        &self,
-        context: &ProviderRuntimeContext,
-        trigger: &VerifiedProviderTriggerDelivery,
-        invocation: &ClaimedProviderProcessing,
-        lease: &ProviderProcessingLease,
-    ) -> ProviderTriggerOutcome;
-}
+use crate::GithubTriggerHandler;
 
 /// GitHub adapter for common trigger dispatch and native Check rerun controls.
 pub struct GithubProviderRuntimeAdapter {
