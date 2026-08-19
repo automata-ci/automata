@@ -741,24 +741,19 @@ impl GithubRuntimeAuthorityRepository for PostgresStore {
         if !lock_exact_mint_claim(&mut transaction, request.claim()).await? {
             return Err(GithubRuntimeAuthorityStoreError::MintClaimRejected);
         }
-        match operation_receipt_matches(
+        if let Some(receipt) = load_exact_operation_receipt(
             &mut transaction,
             key,
             MINT_COMMIT_OPERATION,
             pg_bigint(fence.get()),
             operation_digest,
             Some(owner.as_uuid()),
+            GithubRuntimeAuthorityStoreError::IdentityConflict,
         )
         .await?
         {
-            Some(OperationReceiptMatch::Exact(receipt)) => {
-                transaction.commit().await.map_err(operation_error)?;
-                return Ok(receipt);
-            }
-            Some(OperationReceiptMatch::Conflict) => {
-                return Err(GithubRuntimeAuthorityStoreError::IdentityConflict);
-            }
-            None => {}
+            transaction.commit().await.map_err(operation_error)?;
+            return Ok(receipt);
         }
         let durable = load_row_for_update(&mut transaction, key)
             .await?
@@ -766,24 +761,19 @@ impl GithubRuntimeAuthorityRepository for PostgresStore {
         if decode_identity(&durable)? != *identity {
             return Err(GithubRuntimeAuthorityStoreError::MintClaimRejected);
         }
-        match operation_receipt_matches(
+        if let Some(receipt) = load_exact_operation_receipt(
             &mut transaction,
             key,
             MINT_COMMIT_OPERATION,
             pg_bigint(fence.get()),
             operation_digest,
             Some(owner.as_uuid()),
+            GithubRuntimeAuthorityStoreError::IdentityConflict,
         )
         .await?
         {
-            Some(OperationReceiptMatch::Exact(receipt)) => {
-                transaction.commit().await.map_err(operation_error)?;
-                return Ok(receipt);
-            }
-            Some(OperationReceiptMatch::Conflict) => {
-                return Err(GithubRuntimeAuthorityStoreError::IdentityConflict);
-            }
-            None => {}
+            transaction.commit().await.map_err(operation_error)?;
+            return Ok(receipt);
         }
         if worker_column(&durable, "mint_claim_owner_id")? != owner
             || claim_fence_column(&durable, "mint_claim_fence")? != fence
@@ -1128,46 +1118,36 @@ impl GithubRuntimeAuthorityRepository for PostgresStore {
         {
             return Err(GithubRuntimeAuthorityStoreError::QuarantineRejected);
         }
-        match operation_receipt_matches(
+        if let Some(receipt) = load_exact_operation_receipt(
             &mut transaction,
             key,
             QUARANTINE_OPERATION,
             0,
             operation_digest,
             None,
+            GithubRuntimeAuthorityStoreError::QuarantineRejected,
         )
         .await?
         {
-            Some(OperationReceiptMatch::Exact(receipt)) => {
-                transaction.commit().await.map_err(operation_error)?;
-                return Ok(receipt);
-            }
-            Some(OperationReceiptMatch::Conflict) => {
-                return Err(GithubRuntimeAuthorityStoreError::QuarantineRejected);
-            }
-            None => {}
+            transaction.commit().await.map_err(operation_error)?;
+            return Ok(receipt);
         }
         let durable = load_row_for_update(&mut transaction, key)
             .await?
             .ok_or(GithubRuntimeAuthorityStoreError::QuarantineRejected)?;
-        match operation_receipt_matches(
+        if let Some(receipt) = load_exact_operation_receipt(
             &mut transaction,
             key,
             QUARANTINE_OPERATION,
             0,
             operation_digest,
             None,
+            GithubRuntimeAuthorityStoreError::QuarantineRejected,
         )
         .await?
         {
-            Some(OperationReceiptMatch::Exact(receipt)) => {
-                transaction.commit().await.map_err(operation_error)?;
-                return Ok(receipt);
-            }
-            Some(OperationReceiptMatch::Conflict) => {
-                return Err(GithubRuntimeAuthorityStoreError::QuarantineRejected);
-            }
-            None => {}
+            transaction.commit().await.map_err(operation_error)?;
+            return Ok(receipt);
         }
         let state = decode_state(&durable)?;
         if state == GithubRuntimeAuthorityState::Revoked
@@ -1664,46 +1644,36 @@ impl GithubRuntimeAuthorityRepository for PostgresStore {
         {
             return Err(GithubRuntimeAuthorityStoreError::RevocationClaimRejected);
         }
-        match operation_receipt_matches(
+        if let Some(receipt) = load_exact_operation_receipt(
             &mut transaction,
             key,
             REVOCATION_OUTCOME_OPERATION,
             pg_bigint(request.fence().get()),
             operation_digest,
             Some(request.owner().as_uuid()),
+            GithubRuntimeAuthorityStoreError::RevocationClaimRejected,
         )
         .await?
         {
-            Some(OperationReceiptMatch::Exact(receipt)) => {
-                transaction.commit().await.map_err(operation_error)?;
-                return Ok(receipt);
-            }
-            Some(OperationReceiptMatch::Conflict) => {
-                return Err(GithubRuntimeAuthorityStoreError::RevocationClaimRejected);
-            }
-            None => {}
+            transaction.commit().await.map_err(operation_error)?;
+            return Ok(receipt);
         }
         let durable = load_row_for_update(&mut transaction, key)
             .await?
             .ok_or(GithubRuntimeAuthorityStoreError::RevocationClaimRejected)?;
-        match operation_receipt_matches(
+        if let Some(receipt) = load_exact_operation_receipt(
             &mut transaction,
             key,
             REVOCATION_OUTCOME_OPERATION,
             pg_bigint(request.fence().get()),
             operation_digest,
             Some(request.owner().as_uuid()),
+            GithubRuntimeAuthorityStoreError::RevocationClaimRejected,
         )
         .await?
         {
-            Some(OperationReceiptMatch::Exact(receipt)) => {
-                transaction.commit().await.map_err(operation_error)?;
-                return Ok(receipt);
-            }
-            Some(OperationReceiptMatch::Conflict) => {
-                return Err(GithubRuntimeAuthorityStoreError::RevocationClaimRejected);
-            }
-            None => {}
+            transaction.commit().await.map_err(operation_error)?;
+            return Ok(receipt);
         }
         let claimed_at = request.claimed_at();
         let expires_at = request.expires_at();
@@ -1868,46 +1838,36 @@ impl GithubRuntimeAuthorityRepository for PostgresStore {
         {
             return Err(GithubRuntimeAuthorityStoreError::RevocationClaimRejected);
         }
-        match operation_receipt_matches(
+        if let Some(receipt) = load_exact_operation_receipt(
             &mut transaction,
             key,
             REVOCATION_OUTCOME_OPERATION,
             pg_bigint(request.fence().get()),
             operation_digest,
             Some(request.owner().as_uuid()),
+            GithubRuntimeAuthorityStoreError::RevocationClaimRejected,
         )
         .await?
         {
-            Some(OperationReceiptMatch::Exact(receipt)) => {
-                transaction.commit().await.map_err(operation_error)?;
-                return Ok(receipt);
-            }
-            Some(OperationReceiptMatch::Conflict) => {
-                return Err(GithubRuntimeAuthorityStoreError::RevocationClaimRejected);
-            }
-            None => {}
+            transaction.commit().await.map_err(operation_error)?;
+            return Ok(receipt);
         }
         let durable = load_row_for_update(&mut transaction, key)
             .await?
             .ok_or(GithubRuntimeAuthorityStoreError::RevocationClaimRejected)?;
-        match operation_receipt_matches(
+        if let Some(receipt) = load_exact_operation_receipt(
             &mut transaction,
             key,
             REVOCATION_OUTCOME_OPERATION,
             pg_bigint(request.fence().get()),
             operation_digest,
             Some(request.owner().as_uuid()),
+            GithubRuntimeAuthorityStoreError::RevocationClaimRejected,
         )
         .await?
         {
-            Some(OperationReceiptMatch::Exact(receipt)) => {
-                transaction.commit().await.map_err(operation_error)?;
-                return Ok(receipt);
-            }
-            Some(OperationReceiptMatch::Conflict) => {
-                return Err(GithubRuntimeAuthorityStoreError::RevocationClaimRejected);
-            }
-            None => {}
+            transaction.commit().await.map_err(operation_error)?;
+            return Ok(receipt);
         }
         let claimed_at = request.claimed_at();
         let expires_at = request.expires_at();
@@ -2035,46 +1995,36 @@ impl GithubRuntimeAuthorityRepository for PostgresStore {
         {
             return Err(GithubRuntimeAuthorityStoreError::RevocationClaimRejected);
         }
-        match operation_receipt_matches(
+        if let Some(receipt) = load_exact_operation_receipt(
             &mut transaction,
             key,
             REVOCATION_OUTCOME_OPERATION,
             pg_bigint(request.fence().get()),
             operation_digest,
             Some(request.owner().as_uuid()),
+            GithubRuntimeAuthorityStoreError::RevocationClaimRejected,
         )
         .await?
         {
-            Some(OperationReceiptMatch::Exact(receipt)) => {
-                transaction.commit().await.map_err(operation_error)?;
-                return Ok(receipt);
-            }
-            Some(OperationReceiptMatch::Conflict) => {
-                return Err(GithubRuntimeAuthorityStoreError::RevocationClaimRejected);
-            }
-            None => {}
+            transaction.commit().await.map_err(operation_error)?;
+            return Ok(receipt);
         }
         let durable = load_row_for_update(&mut transaction, key)
             .await?
             .ok_or(GithubRuntimeAuthorityStoreError::RevocationClaimRejected)?;
-        match operation_receipt_matches(
+        if let Some(receipt) = load_exact_operation_receipt(
             &mut transaction,
             key,
             REVOCATION_OUTCOME_OPERATION,
             pg_bigint(request.fence().get()),
             operation_digest,
             Some(request.owner().as_uuid()),
+            GithubRuntimeAuthorityStoreError::RevocationClaimRejected,
         )
         .await?
         {
-            Some(OperationReceiptMatch::Exact(receipt)) => {
-                transaction.commit().await.map_err(operation_error)?;
-                return Ok(receipt);
-            }
-            Some(OperationReceiptMatch::Conflict) => {
-                return Err(GithubRuntimeAuthorityStoreError::RevocationClaimRejected);
-            }
-            None => {}
+            transaction.commit().await.map_err(operation_error)?;
+            return Ok(receipt);
         }
         let claimed_at = request.claimed_at();
         let expires_at = request.expires_at();
@@ -2596,6 +2546,31 @@ async fn operation_receipt_matches(
     )
     .map_err(|_| GithubRuntimeAuthorityStoreError::CorruptData)?;
     Ok(Some(OperationReceiptMatch::Exact(receipt)))
+}
+
+async fn load_exact_operation_receipt(
+    transaction: &mut Transaction<'_, Postgres>,
+    key: GithubRuntimeAuthorityKey,
+    operation_kind: &str,
+    claim_fence: i64,
+    operation_digest: Sha256Digest,
+    expected_owner: Option<Uuid>,
+    conflict_error: GithubRuntimeAuthorityStoreError,
+) -> Result<Option<GithubRuntimeAuthorityReceipt>, GithubRuntimeAuthorityStoreError> {
+    match operation_receipt_matches(
+        transaction,
+        key,
+        operation_kind,
+        claim_fence,
+        operation_digest,
+        expected_owner,
+    )
+    .await?
+    {
+        Some(OperationReceiptMatch::Exact(receipt)) => Ok(Some(receipt)),
+        Some(OperationReceiptMatch::Conflict) => Err(conflict_error),
+        None => Ok(None),
+    }
 }
 
 async fn record_current_mint_claim(
