@@ -341,7 +341,14 @@ impl GithubWorkflowTriggerHandler {
             .await
         {
             Ok(source) => source,
-            Err(outcome) => return outcome,
+            Err(outcome) => {
+                tracing::warn!(
+                    trigger_kind = normalized_trigger_kind(normalized),
+                    outcome = ?outcome,
+                    "GitHub trigger source resolution failed"
+                );
+                return outcome;
+            }
         };
         let recursion = match normalized {
             NormalizedTrigger::RepositoryDispatch(_) => TrustTokenRecursion::Unknown,
@@ -425,14 +432,28 @@ impl GithubWorkflowTriggerHandler {
         );
         let first = match first {
             Ok(request) => self.application.apply(request).await,
-            Err(_) => return fail_invalid(),
+            Err(error) => {
+                tracing::warn!(
+                    trigger_kind = normalized_trigger_kind(normalized),
+                    ?error,
+                    "GitHub trigger application request rejected"
+                );
+                return fail_invalid();
+            }
         };
         match first {
             Ok(ProviderWorkflowApplicationOutcome::Applied(_)) => {
                 return ProviderTriggerOutcome::Complete;
             }
             Ok(ProviderWorkflowApplicationOutcome::RequiresChangedFiles) => {}
-            Err(error) => return application_outcome(&error),
+            Err(error) => {
+                tracing::warn!(
+                    trigger_kind = normalized_trigger_kind(normalized),
+                    ?error,
+                    "GitHub trigger workflow application failed"
+                );
+                return application_outcome(&error);
+            }
         }
         let metadata = match self
             .changed_files_metadata(context, trigger, invocation, lease, repository)
@@ -457,9 +478,23 @@ impl GithubWorkflowTriggerHandler {
                     ProviderTriggerOutcome::Complete
                 }
                 Ok(ProviderWorkflowApplicationOutcome::RequiresChangedFiles) => fail_invalid(),
-                Err(error) => application_outcome(&error),
+                Err(error) => {
+                    tracing::warn!(
+                        trigger_kind = normalized_trigger_kind(normalized),
+                        ?error,
+                        "GitHub trigger workflow application failed after changed-file replay"
+                    );
+                    application_outcome(&error)
+                }
             },
-            Err(_) => fail_invalid(),
+            Err(error) => {
+                tracing::warn!(
+                    trigger_kind = normalized_trigger_kind(normalized),
+                    ?error,
+                    "GitHub trigger changed-file application request rejected"
+                );
+                fail_invalid()
+            }
         }
     }
 
@@ -829,4 +864,13 @@ const fn retry_unavailable() -> ProviderTriggerOutcome {
 
 const fn fail_invalid() -> ProviderTriggerOutcome {
     ProviderTriggerOutcome::Fail(ProviderProcessingFailure::InvalidEvidence)
+}
+
+fn normalized_trigger_kind(trigger: &NormalizedTrigger) -> &'static str {
+    match trigger {
+        NormalizedTrigger::Push(_) => "push",
+        NormalizedTrigger::PullRequest(_) => "pull_request",
+        NormalizedTrigger::MergeQueue(_) => "merge_queue",
+        NormalizedTrigger::RepositoryDispatch(_) => "repository_dispatch",
+    }
 }
