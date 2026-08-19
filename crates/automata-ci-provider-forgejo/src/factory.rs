@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use url::Url;
 
+use crate::ForgejoWebhookVerifier;
+
 const FORGEJO_CONFIGURATION_SCHEMA: u16 = 1;
 const FORGEJO_CONNECTION_SCHEMA: u16 = 1;
 const MAX_ORIGIN_BYTES: usize = 2_048;
@@ -230,14 +232,28 @@ impl automata_ci_provider::ProviderConfigurationFactory for ForgejoProviderFacto
             .map_err(|_| ProviderFactoryValidationError::InvalidSecrets)?;
         let webhook = ProviderSecretName::new(FORGEJO_WEBHOOK_SECRET_NAME)
             .map_err(|_| ProviderFactoryValidationError::InvalidSecrets)?;
+        let access_secret = request.secrets().get(&access);
+        let webhook_secret = request.secrets().get(&webhook);
         if request.secret_bindings().len() != 2
             || request.secret_bindings().get(&access).is_none()
             || request.secret_bindings().get(&webhook).is_none()
-            || request.secrets().get(&access).is_none()
-            || request.secrets().get(&webhook).is_none()
+            || access_secret.is_none()
+            || webhook_secret.is_none()
         {
             return Err(ProviderFactoryValidationError::InvalidSecrets);
         }
+        let access_secret = access_secret.expect("checked access secret");
+        if access_secret.is_empty()
+            || access_secret
+                .expose_secret()
+                .iter()
+                .any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
+        {
+            return Err(ProviderFactoryValidationError::InvalidSecrets);
+        }
+        let webhook_secret = webhook_secret.expect("checked webhook secret");
+        ForgejoWebhookVerifier::new(webhook_secret.expose_secret())
+            .map_err(|_| ProviderFactoryValidationError::InvalidSecrets)?;
         ForgejoInstanceConfiguration::decode(request.configuration()).map_err(
             |error| match error {
                 ForgejoFactoryError::UnsupportedSchema => {
