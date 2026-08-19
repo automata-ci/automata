@@ -80,7 +80,7 @@ use crate::{
 };
 
 use super::{
-    github_webhook::GITHUB_WEBHOOK_PATH,
+    provider_webhook::PROVIDER_WEBHOOK_ROUTE,
     state_metrics::{ControlPlaneStateMetrics, ControlPlaneStateSampler},
 };
 
@@ -134,7 +134,7 @@ const HTTP_ROUTE_LABELS: [&str; 53] = [
     REPOSITORY_SECRET_BROWSER_MUTATION_ROUTE,
     RBAC_SETTINGS_ROUTE,
     "/assets/{*asset_path}",
-    GITHUB_WEBHOOK_PATH,
+    PROVIDER_WEBHOOK_ROUTE,
     GITHUB_WEB_BEGIN_PATH,
     GITHUB_WEB_CALLBACK_PATH,
     GITHUB_WEB_LOGOUT_PATH,
@@ -1102,7 +1102,7 @@ impl ControlPlaneMetrics {
             "logical_run_finalization",
             "logical_result_projection",
             "autonomous_workflow",
-            "github_provider",
+            "provider_runtime",
         ] {
             for outcome in ["graceful", "failure", "unexpected_stop"] {
                 let _ = self
@@ -1861,7 +1861,7 @@ fn http_route(matched_path: Option<&str>) -> &'static str {
         Some(GITHUB_WEB_CALLBACK_PATH) => GITHUB_WEB_CALLBACK_PATH,
         Some(GITHUB_WEB_LOGOUT_PATH) => GITHUB_WEB_LOGOUT_PATH,
         Some(GITHUB_DEVICE_BEGIN_PATH | GITHUB_DEVICE_POLL_PATH) => GITHUB_DEVICE_ROUTE,
-        Some(GITHUB_WEBHOOK_PATH) => GITHUB_WEBHOOK_PATH,
+        Some(PROVIDER_WEBHOOK_ROUTE) => PROVIDER_WEBHOOK_ROUTE,
         Some(CLI_SESSION_PATH) => CLI_SESSION_PATH,
         Some(GITHUB_SETUP_WEB_BEGIN_PATH) => GITHUB_SETUP_WEB_BEGIN_PATH,
         Some(GITHUB_SETUP_DEVICE_BEGIN_PATH) => GITHUB_SETUP_DEVICE_BEGIN_PATH,
@@ -2541,7 +2541,7 @@ mod tests {
             GITHUB_WEB_BEGIN_PATH,
             GITHUB_WEB_CALLBACK_PATH,
             GITHUB_WEB_LOGOUT_PATH,
-            GITHUB_WEBHOOK_PATH,
+            PROVIDER_WEBHOOK_ROUTE,
             CLI_SESSION_PATH,
             GITHUB_SETUP_WEB_BEGIN_PATH,
             GITHUB_SETUP_DEVICE_BEGIN_PATH,

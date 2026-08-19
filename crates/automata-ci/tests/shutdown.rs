@@ -246,7 +246,7 @@ async fn configured_provider_is_a_tenth_gracefully_drained_service() {
         .expect("graceful shutdown succeeds");
     assert_eq!(drained.load(Ordering::Acquire), 10);
     assert!(metrics.exporter().encode_openmetrics().expect("metrics").as_str().contains(
-        "automata_ci_control_plane_supervised_service_exits_total{service=\"github_provider\",outcome=\"graceful\"} 1"
+        "automata_ci_control_plane_supervised_service_exits_total{service=\"provider_runtime\",outcome=\"graceful\"} 1"
     ));
 }
 
@@ -282,13 +282,13 @@ async fn an_unexpected_provider_stop_is_fatal_and_cancels_every_sibling() {
     assert_eq!(
         result,
         Err(ServiceSupervisorError::UnexpectedStop(
-            ManagedService::GithubProvider
+            ManagedService::ProviderRuntime
         ))
     );
     assert_eq!(entered.load(Ordering::Acquire), 9);
     assert_eq!(drained.load(Ordering::Acquire), 9);
     assert!(metrics.exporter().encode_openmetrics().expect("metrics").as_str().contains(
-        "automata_ci_control_plane_supervised_service_exits_total{service=\"github_provider\",outcome=\"unexpected_stop\"} 1"
+        "automata_ci_control_plane_supervised_service_exits_total{service=\"provider_runtime\",outcome=\"unexpected_stop\"} 1"
     ));
 }
 
@@ -326,7 +326,7 @@ async fn provider_fatal_signal_cancels_then_awaits_drain_and_wins_classification
             async move {
                 provider_entered_task.fetch_add(1, Ordering::AcqRel);
                 let _ = provider_release_rx.await;
-                Err(ManagedServiceError::GithubProvider)
+                Err(ManagedServiceError::ProviderRuntime)
             },
         ),
         async move {
@@ -366,7 +366,7 @@ async fn provider_fatal_signal_cancels_then_awaits_drain_and_wins_classification
     assert_eq!(
         task.await.expect("supervisor task joins"),
         Err(ServiceSupervisorError::Service(
-            ManagedServiceError::GithubProvider
+            ManagedServiceError::ProviderRuntime
         )),
         "the provider signal must outrank a sibling failure during drain"
     );
@@ -378,7 +378,7 @@ async fn provider_fatal_signal_cancels_then_awaits_drain_and_wins_classification
     let exposition = exposition.as_str();
     for (outcome, value) in [("failure", 1), ("graceful", 0), ("unexpected_stop", 0)] {
         assert!(exposition.contains(&format!(
-            "automata_ci_control_plane_supervised_service_exits_total{{service=\"github_provider\",outcome=\"{outcome}\"}} {value}"
+            "automata_ci_control_plane_supervised_service_exits_total{{service=\"provider_runtime\",outcome=\"{outcome}\"}} {value}"
         )));
     }
 }

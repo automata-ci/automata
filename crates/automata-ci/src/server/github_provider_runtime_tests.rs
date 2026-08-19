@@ -1818,7 +1818,7 @@ fn stopped_loop(
     name: &'static str,
     stop: CancellationToken,
     log: Arc<Mutex<Vec<String>>>,
-    exit: fn(Result<(), GithubDeliveryServiceError>) -> RuntimeLoopExit,
+    exit: fn(Result<(), GithubScheduleServiceError>) -> RuntimeLoopExit,
 ) -> RuntimeLoopFuture<'static> {
     runtime_loop(async move {
         stop.cancelled().await;
@@ -1835,20 +1835,11 @@ async fn shutdown_stops_all_consumers_before_release_drain() {
     let log = Arc::new(Mutex::new(Vec::new()));
     let loops = FuturesUnordered::new();
     loops.push(stopped_loop(
-        "delivery-stop",
+        "schedule-stop",
         stop.clone(),
         log.clone(),
-        RuntimeLoopExit::Delivery,
+        RuntimeLoopExit::Schedules,
     ));
-    loops.push(runtime_loop({
-        let stop = stop.clone();
-        let log = log.clone();
-        async move {
-            stop.cancelled().await;
-            log.lock().expect("log lock").push("checks-stop".to_owned());
-            RuntimeLoopExit::Checks(Ok(()))
-        }
-    }));
     loops.push(runtime_loop({
         let stop = stop.clone();
         let log = log.clone();
@@ -1863,8 +1854,6 @@ async fn shutdown_stops_all_consumers_before_release_drain() {
     let job_authority_drain: Arc<dyn JobRuntimeAuthorityDrainPort> =
         Arc::new(FakeJobRuntimeAuthorityDrain { log: log.clone() });
     let release_drain: Arc<dyn ReleaseDrainPort> = Arc::new(FakeReleaseDrain { log: log.clone() });
-    let (fatal_notification, fatal_signal) = oneshot::channel();
-
     supervise_runtime_loops(
         loops,
         shutdown,
@@ -1872,15 +1861,10 @@ async fn shutdown_stops_all_consumers_before_release_drain() {
         job_authority_drain,
         release_drain,
         Duration::from_secs(1),
-        Some(fatal_notification),
+        None,
     )
     .await
     .expect("ordered shutdown");
-    assert!(
-        fatal_signal.await.is_err(),
-        "operator shutdown must not send a provider-fatal notification"
-    );
-
     let log = log.lock().expect("log lock");
     assert_eq!(log.last().map(String::as_str), Some("release-drain"));
     let job_drain = log
@@ -1893,8 +1877,7 @@ async fn shutdown_stops_all_consumers_before_release_drain() {
         .expect("release drain");
     assert!(job_drain < release_drain);
     let stopped = &log[..job_drain];
-    assert!(stopped.iter().any(|entry| entry == "delivery-stop"));
-    assert!(stopped.iter().any(|entry| entry == "checks-stop"));
+    assert!(stopped.iter().any(|entry| entry == "schedule-stop"));
     assert!(stopped.iter().any(|entry| entry == "maintenance-stop"));
 }
 
@@ -1906,10 +1889,10 @@ async fn job_authority_drain_timeout_is_visible_and_blocks_release_drain() {
     let log = Arc::new(Mutex::new(Vec::new()));
     let loops = FuturesUnordered::new();
     loops.push(stopped_loop(
-        "delivery-stop",
+        "schedule-stop",
         stop.clone(),
         log.clone(),
-        RuntimeLoopExit::Delivery,
+        RuntimeLoopExit::Schedules,
     ));
     let release_drain: Arc<dyn ReleaseDrainPort> = Arc::new(FakeReleaseDrain { log: log.clone() });
 
@@ -1946,7 +1929,7 @@ async fn loop_timeout_closes_custody_and_never_starts_release_drain() {
     let loops = FuturesUnordered::new();
     loops.push(runtime_loop(async move {
         std::future::pending::<()>().await;
-        RuntimeLoopExit::Checks(Ok(()))
+        RuntimeLoopExit::PermissionDefaults(Ok(()))
     }));
     let job_authority_drain: Arc<dyn JobRuntimeAuthorityDrainPort> =
         Arc::new(FakeJobRuntimeAuthorityDrain { log: log.clone() });
@@ -1981,10 +1964,10 @@ async fn service_credential_release_drain_timeout_is_visible() {
     let log = Arc::new(Mutex::new(Vec::new()));
     let loops = FuturesUnordered::new();
     loops.push(stopped_loop(
-        "delivery-stop",
+        "schedule-stop",
         stop.clone(),
         log.clone(),
-        RuntimeLoopExit::Delivery,
+        RuntimeLoopExit::Schedules,
     ));
     let job_authority_drain: Arc<dyn JobRuntimeAuthorityDrainPort> =
         Arc::new(FakeJobRuntimeAuthorityDrain { log });
@@ -2013,7 +1996,7 @@ async fn service_credential_release_drain_timeout_is_visible() {
 }
 
 #[tokio::test]
-async fn first_fatal_exit_notifies_before_pending_commit_and_release_drain_finish() {
+async fn first_fatal_exit_owns_pending_commit_and_release_drain_until_completion() {
     let shutdown = CancellationToken::new();
     let stop = CancellationToken::new();
     let pending_started = CancellationToken::new();
@@ -2040,9 +2023,10 @@ async fn first_fatal_exit_notifies_before_pending_commit_and_release_drain_finis
             )
         }
     }));
+    let sibling_pending_started = pending_started.clone();
     loops.push(runtime_loop(async move {
-        pending_started.cancelled().await;
-        RuntimeLoopExit::Checks(Ok(()))
+        sibling_pending_started.cancelled().await;
+        RuntimeLoopExit::PermissionDefaults(Ok(()))
     }));
     let log = Arc::new(Mutex::new(Vec::new()));
     let job_authority_drain: Arc<dyn JobRuntimeAuthorityDrainPort> =
@@ -2056,7 +2040,6 @@ async fn first_fatal_exit_notifies_before_pending_commit_and_release_drain_finis
         entered: release_entered.clone(),
         release: release.clone(),
     });
-    let (fatal_notification, fatal_signal) = oneshot::channel();
     let runtime = tokio::spawn(supervise_runtime_loops(
         loops,
         shutdown,
@@ -2064,17 +2047,13 @@ async fn first_fatal_exit_notifies_before_pending_commit_and_release_drain_finis
         job_authority_drain,
         release_drain,
         Duration::from_secs(1),
-        Some(fatal_notification),
+        None,
     ));
 
-    tokio::time::timeout(Duration::from_secs(1), fatal_signal)
+    tokio::time::timeout(Duration::from_secs(1), pending_started.cancelled())
         .await
-        .expect("first fatal exit must notify before drain")
-        .expect("fatal notifier must remain owned");
-    assert!(
-        !runtime.is_finished(),
-        "fatal notification must not detach the pending commit"
-    );
+        .expect("first fatal exit must enter commit drain");
+    assert!(!runtime.is_finished(), "the pending commit remains owned");
     assert!(
         !release_entered.is_cancelled(),
         "credential release waits behind the pending commit"

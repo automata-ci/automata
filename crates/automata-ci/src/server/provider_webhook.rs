@@ -25,6 +25,8 @@ const MAX_CONCURRENT_PROVIDER_WEBHOOK_REQUESTS: usize = 4;
 
 /// Public prefix for opaque provider webhook endpoints.
 pub const PROVIDER_WEBHOOK_PATH_PREFIX: &str = "/webhooks/providers";
+/// Cardinality-safe matched route for every opaque provider webhook endpoint.
+pub const PROVIDER_WEBHOOK_ROUTE: &str = "/webhooks/providers/{endpoint_id}";
 /// Absolute product HTTP deadline for one provider webhook request.
 pub const PROVIDER_WEBHOOK_HTTP_DEADLINE: Duration = Duration::from_secs(7);
 
@@ -245,7 +247,70 @@ impl ProviderWebhookHttpOutcome {
 
 #[cfg(test)]
 mod tests {
+    use automata_ci_blob::MemoryBlobStore;
+    use automata_ci_provider::{
+        AcceptProviderDelivery, DeliveryAdapter, DeliveryAdapterRegistry, ProviderDelivery,
+        ProviderDeliveryAcceptOutcome, ProviderDeliveryFuture, ProviderDeliveryId,
+        ProviderDeliveryRepository, ProviderSaveOutcome, ProviderWebhookEndpointId,
+        ProviderWebhookEndpointManifest, ProviderWebhookEndpointRecord,
+        ProviderWebhookEndpointRepository, ProviderWebhookEndpointRevision,
+    };
+    use automata_ci_provider_delivery::SystemProviderDeliveryClock;
+    use automata_ci_provider_github::GithubDeliveryAdapter;
+    use axum::{body::Body, http::Request, routing::get};
+    use tower::ServiceExt as _;
+
     use super::*;
+
+    #[derive(Debug)]
+    struct MissingProviderRepository;
+
+    impl ProviderWebhookEndpointRepository for MissingProviderRepository {
+        fn save_endpoint(
+            &self,
+            _endpoint: ProviderWebhookEndpointManifest,
+        ) -> ProviderDeliveryFuture<'_, ProviderSaveOutcome> {
+            Box::pin(async { panic!("save is unused") })
+        }
+
+        fn current_endpoint_manifest(
+            &self,
+            _endpoint_id: ProviderWebhookEndpointId,
+        ) -> ProviderDeliveryFuture<'_, Option<ProviderWebhookEndpointManifest>> {
+            Box::pin(async { Ok(None) })
+        }
+
+        fn resolve_endpoint(
+            &self,
+            _endpoint_id: ProviderWebhookEndpointId,
+        ) -> ProviderDeliveryFuture<'_, Option<ProviderWebhookEndpointRecord>> {
+            Box::pin(async { Ok(None) })
+        }
+
+        fn load_endpoint(
+            &self,
+            _endpoint_id: ProviderWebhookEndpointId,
+            _revision: ProviderWebhookEndpointRevision,
+        ) -> ProviderDeliveryFuture<'_, Option<ProviderWebhookEndpointRecord>> {
+            Box::pin(async { Ok(None) })
+        }
+    }
+
+    impl ProviderDeliveryRepository for MissingProviderRepository {
+        fn accept_delivery(
+            &self,
+            _request: AcceptProviderDelivery,
+        ) -> ProviderDeliveryFuture<'_, ProviderDeliveryAcceptOutcome> {
+            Box::pin(async { panic!("accept is unused") })
+        }
+
+        fn load_delivery(
+            &self,
+            _delivery_id: ProviderDeliveryId,
+        ) -> ProviderDeliveryFuture<'_, Option<ProviderDelivery>> {
+            Box::pin(async { Ok(None) })
+        }
+    }
 
     #[test]
     fn ingress_failures_have_closed_http_statuses() {
@@ -269,5 +334,52 @@ mod tests {
             map_ingress_error(ProviderDeliveryIngressError::Unavailable).status(),
             StatusCode::SERVICE_UNAVAILABLE
         );
+    }
+
+    #[tokio::test]
+    async fn opaque_provider_route_is_merged_outside_human_authentication() {
+        let repository = Arc::new(MissingProviderRepository);
+        let endpoints: Arc<dyn ProviderWebhookEndpointRepository> = repository.clone();
+        let deliveries: Arc<dyn ProviderDeliveryRepository> = repository;
+        let adapter: Arc<dyn DeliveryAdapter> = Arc::new(GithubDeliveryAdapter::new());
+        let ingress = Arc::new(ProviderDeliveryIngress::new(
+            endpoints,
+            deliveries,
+            Arc::new(MemoryBlobStore::default()),
+            DeliveryAdapterRegistry::new([adapter]).expect("delivery adapters"),
+            Arc::new(SystemProviderDeliveryClock),
+        ));
+        let human = Router::new()
+            .route("/human", get(|| async { StatusCode::NO_CONTENT }))
+            .layer(axum::middleware::from_fn(
+                |_request: Request<Body>, _next: axum::middleware::Next| async {
+                    StatusCode::UNAUTHORIZED
+                },
+            ));
+        let router = router_with_provider_webhooks_outside_human_auth(human, ingress);
+
+        let provider = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/webhooks/providers/00000000-0000-0000-0000-000000000001")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from("{}"))
+                    .expect("provider request"),
+            )
+            .await
+            .expect("provider response");
+        assert_eq!(provider.status(), StatusCode::NOT_FOUND);
+        let human = router
+            .oneshot(
+                Request::builder()
+                    .uri("/human")
+                    .body(Body::empty())
+                    .expect("human request"),
+            )
+            .await
+            .expect("human response");
+        assert_eq!(human.status(), StatusCode::UNAUTHORIZED);
     }
 }

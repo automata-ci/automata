@@ -42,10 +42,15 @@ use automata_ci_provider::{
 use automata_ci_provider_postgres::PostgresProviderManifestRepository;
 use automata_ci_store::{
     AdmissionObject, AdmissionRepository, AdmitLogicalWorkflowRun, AdmittedLogicalWorkflowJob,
-    AuthenticatedProviderDeliveryClaim, LogicalWorkflowAdmissionRepository as _,
+    AuthenticatedProviderDeliveryClaim, GithubRepositoryName, GithubServerServiceAction,
+    GithubServerServiceAppClientId, GithubServerServiceAppId, GithubServerServiceAuthorityId,
+    GithubServerServiceAuthorityIdentity, GithubServerServiceClaimFence,
+    GithubServerServiceConsumerClaim, GithubServerServiceConsumerId, GithubServerServiceJwtIssuer,
+    GithubServerServiceRevision, GithubServerServiceScope, GithubServerServiceStoreError,
+    GithubServerServiceWorkerId, LogicalWorkflowAdmissionRepository as _,
     LogicalWorkflowInvocationId, LogicalWorkflowJobId, LogicalWorkflowJobKind, ObjectKey,
-    RepositoryId, TenantScope, WorkflowAdmissionIdempotency, WorkflowRuntimePolicy,
-    WorkflowSnapshotId,
+    ProviderInstallationId, ProviderRepositoryId, RepositoryId, TenantScope,
+    WorkflowAdmissionIdempotency, WorkflowRuntimePolicy, WorkflowSnapshotId,
 };
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
@@ -841,6 +846,156 @@ async fn provider_results_are_contiguous_fenced_and_rehydratable() -> TestResult
         .fetch_one(database.pool())
         .await?;
         assert_eq!(exhausted, ("failed".to_owned(), Some("attempt-limit".to_owned())));
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL 18 via AUTOMATA_TEST_DATABASE_URL"]
+#[allow(clippy::too_many_lines)] // One fixture proves the production join and fail-closed cases.
+async fn github_result_credentials_revalidate_the_common_result_lease() -> TestResult {
+    run_with_database(|database| async move {
+        let manifests = repository(database.pool().clone());
+        let workspace = WorkspaceId::from_uuid(Uuid::from_u128(0x5a00))?;
+        let tenant = workspace.to_string();
+        let internal_repository_id = RepositoryId::from_uuid(Uuid::from_u128(0x5a01));
+        sqlx::query(
+            "INSERT INTO tenants (id, display_name, created_at_ms, updated_at_ms) VALUES ($1, 'GitHub result authority', 1, 1)",
+        )
+        .bind(&tenant)
+        .execute(database.pool())
+        .await?;
+        sqlx::query(
+            r"
+            INSERT INTO repositories (
+                id, tenant_id, scm_provider, provider_repository_id,
+                owner, name, created_at_ms, updated_at_ms
+            ) VALUES ($1,$2,'github','42','automata-ci','automata',1,1)
+            ",
+        )
+        .bind(internal_repository_id.as_uuid())
+        .bind(&tenant)
+        .execute(database.pool())
+        .await?;
+
+        let instance_id = ProviderInstanceId::from_uuid(Uuid::from_u128(0x5a02))?;
+        manifests
+            .save_instance(instance_record(
+                instance_id,
+                "github",
+                1,
+                TOKEN,
+                1,
+                ProviderLifecycleState::Active,
+                Some(UnixMillis::new(1_001)),
+            ))
+            .await?;
+        let instance = manifests
+            .current_instance(instance_id)
+            .await?
+            .expect("GitHub provider instance");
+        let connection = connection(workspace, instance.manifest());
+        manifests.save_connection(connection.clone()).await?;
+
+        let subject = ProviderResultSubject::new(
+            ProviderResultSubjectId::from_uuid(Uuid::from_u128(0x5a03))?,
+            &connection,
+            GitObjectId::from_provider_hex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")?,
+            ProviderResultName::new("Automata CI")?,
+            ProviderResultDetailsUrl::new("https://ci.example/runs/5a03".parse()?)?,
+            ProviderResultSubjectKind::WorkflowRun {
+                run_id: RunId::from_uuid(Uuid::from_u128(0x5a04)),
+            },
+            1,
+            UnixMillis::new(3_000),
+        )?;
+        let projection = ProviderResultProjection::new(
+            ProviderResultPhase::Running,
+            None,
+            ProviderResultTitle::new("Automata CI")?,
+            ProviderResultSummary::new("running")?,
+            Vec::new(),
+            UnixMillis::new(3_001),
+        )?;
+        manifests
+            .save_desired(SaveDesiredProviderResult::new(subject.clone(), projection)?)
+            .await?;
+        let worker = ProviderResultWorkerId::from_uuid(Uuid::from_u128(0x5a05))?;
+        let claimed = manifests
+            .claim_result(ClaimProviderResult::new(
+                connection.connection_id(),
+                worker,
+                UnixMillis::new(3_002),
+                1_000,
+            )?)
+            .await?
+            .expect("common result claim");
+        let claim = claimed.claim();
+        let identity = GithubServerServiceAuthorityIdentity::new(
+            TenantScope::from_authenticated_tenant_id(&tenant)?,
+            GithubServerServiceAuthorityId::from_uuid(Uuid::from_u128(0x5a06))?,
+            internal_repository_id,
+            connection.connection_id(),
+            ProviderInstallationId::new(99)?,
+            GithubServerServiceAppId::new(17)?,
+            ProviderRepositoryId::new(42)?,
+            GithubRepositoryName::new("automata-ci/automata")?,
+            GithubServerServiceScope::ChecksWrite,
+            GithubServerServiceAppClientId::new("Iv1.8a61f9b3a7aba766")?,
+            GithubServerServiceJwtIssuer::AppId,
+            Sha256Digest::from_bytes([21; 32]),
+            GithubServerServiceRevision::new(1)?,
+            GithubServerServiceRevision::new(1)?,
+            Sha256Digest::from_bytes([22; 32]),
+        )?;
+        let consumer = GithubServerServiceConsumerClaim::new(
+            GithubServerServiceConsumerId::from_uuid(claim.subject_id().as_uuid())?,
+            GithubServerServiceWorkerId::from_uuid(claim.worker_id().as_uuid())?,
+            GithubServerServiceClaimFence::new(claim.fence())?,
+            GithubServerServiceAction::PublishCheckRun,
+            GithubServerServiceRevision::new(claim.generation())?,
+        );
+
+        assert_eq!(
+            database
+                .store()
+                .revalidate_github_result_consumer_for_test(
+                    &identity,
+                    consumer,
+                    UnixMillis::new(3_500),
+                )
+                .await?,
+            claim.expires_at()
+        );
+        assert!(matches!(
+            database
+                .store()
+                .revalidate_github_result_consumer_for_test(
+                    &identity,
+                    GithubServerServiceConsumerClaim::new(
+                        consumer.consumer_id(),
+                        consumer.owner(),
+                        consumer.fence(),
+                        GithubServerServiceAction::FetchRepositoryRevision,
+                        consumer.revision(),
+                    ),
+                    UnixMillis::new(3_500),
+                )
+                .await,
+            Err(GithubServerServiceStoreError::HandoffRejected)
+        ));
+        assert!(matches!(
+            database
+                .store()
+                .revalidate_github_result_consumer_for_test(
+                    &identity,
+                    consumer,
+                    claim.expires_at(),
+                )
+                .await,
+            Err(GithubServerServiceStoreError::HandoffRejected)
+        ));
         Ok(())
     })
     .await

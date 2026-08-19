@@ -54,11 +54,21 @@ use automata_ci_job_executor_actions::{
 use automata_ci_key_management::KeyEncryptionProvider;
 use automata_ci_protocol::ProtocolLimits;
 use automata_ci_provider::{
-    ProviderConfigurationFactory, ProviderFactoryRegistry, ProviderManifestRepository,
-    ProviderWebhookEndpointRepository,
+    DeliveryAdapter, DeliveryAdapterRegistry, ProviderConfigurationFactory,
+    ProviderDeliveryRepository, ProviderFactoryRegistry, ProviderManifestRepository,
+    ProviderProcessingRepository, ProviderProcessingWorkerId, ProviderResultRepository,
+    ProviderResultWorkerId, ProviderWebhookEndpointRepository, ProviderWorkflowResultSource,
 };
-use automata_ci_provider_delivery::{ProviderReconciliationError, ProviderReconciliationService};
-use automata_ci_provider_github::{GithubProviderFactory, MAX_GITHUB_WEBHOOK_SECRET_BYTES};
+use automata_ci_provider_delivery::{
+    ProviderBackgroundRuntime, ProviderDeliveryClock, ProviderDeliveryIngress,
+    ProviderProcessingDispatcher, ProviderProcessingProcessor, ProviderProcessingWorker,
+    ProviderProcessingWorkerConfig, ProviderReconciliationError, ProviderReconciliationService,
+    ProviderResultAdapterRegistry, ProviderResultWorker, ProviderResultWorkerConfig,
+    ProviderRuntimeAdapterRegistry, ProviderRuntimeContextResolver, SystemProviderDeliveryClock,
+};
+use automata_ci_provider_github::{
+    GithubDeliveryAdapter, GithubProviderFactory, MAX_GITHUB_WEBHOOK_SECRET_BYTES,
+};
 use automata_ci_provider_postgres::PostgresProviderManifestRepository;
 use automata_ci_provisioning::{
     GithubProviderConfigurationApplier, GithubProviderDesiredStateReader,
@@ -110,8 +120,8 @@ use automata_ci_workflow_service::{
     AdmissionClock, AutonomousWorkflowPhaseExecutor, AutonomousWorkflowService,
     GithubAutonomousWorkflowPhaseExecutor, GithubWorkflowDispatchService,
     GithubWorkflowPlanVerifier, LogicalResultProjectionService, LogicalRunFinalizationService,
-    ReusableWorkflowRuntimeService, SystemAdmissionClock, WorkflowAdmissionObserver,
-    WorkflowAdmissionService, WorkflowRerunService,
+    ProviderWorkflowResultProjectionService, ReusableWorkflowRuntimeService, SystemAdmissionClock,
+    WorkflowAdmissionObserver, WorkflowAdmissionService, WorkflowRerunService,
 };
 use axum::Router;
 use bytes::Bytes;
@@ -133,9 +143,10 @@ use super::workload_oidc::{
 use super::{
     ControlPlaneMaintenanceLoop, ControlPlaneMetrics, DatabaseGithubProviderConfig,
     GithubProviderRuntime, GithubProviderRuntimeBuildError, GithubProviderRuntimeBuilder,
-    MaintenanceClock, MaintenanceLoopConfigError, Readiness, ReadinessMonitor,
-    ReadinessMonitorError, ReadinessProbe, ReadinessProbeError, SecretEncryptionLoadError,
-    SecretLoadError, ServerConfig, SystemMaintenanceClock,
+    MaintenanceClock, MaintenanceLoopConfigError, ProviderAuxiliaryRuntime, ProviderRuntime,
+    ProviderRuntimeBuildError, Readiness, ReadinessMonitor, ReadinessMonitorError, ReadinessProbe,
+    ReadinessProbeError, SecretEncryptionLoadError, SecretLoadError, ServerConfig,
+    SystemMaintenanceClock,
 };
 use crate::app::{
     conformance_api::{conformance_api_router, deployment_conformance_api_router},
@@ -226,7 +237,7 @@ pub(crate) struct ProductionComponents {
     pub(crate) human_request_authentication: Option<HumanRequestAuthentication>,
     pub(crate) rbac_web_data: Option<Arc<dyn RbacWebData>>,
     pub(crate) setup_page_availability: Option<Arc<dyn SetupPageAvailability>>,
-    pub(crate) github_provider: Option<GithubProviderRuntime>,
+    pub(crate) provider_runtime: Option<ProviderRuntime>,
     pub(crate) results_api: Router,
     pub(crate) web_data: Arc<dyn WebData>,
     pub(crate) web_fallback_context: RequestContext,
@@ -265,13 +276,7 @@ impl fmt::Debug for ProductionComponents {
             )
             .field("rbac_web_data", &self.rbac_web_data)
             .field("setup_page_availability", &self.setup_page_availability)
-            .field(
-                "github_provider",
-                &self
-                    .github_provider
-                    .as_ref()
-                    .map(GithubProviderRuntime::shape),
-            )
+            .field("provider_runtime", &self.provider_runtime)
             .field("results_api", &self.results_api)
             .field("web_data", &self.web_data)
             .field("web_fallback_context", &self.web_fallback_context)
@@ -566,7 +571,7 @@ impl ProductionComponents {
             github_provider_config,
             Arc::clone(&store),
             Arc::clone(&blob_store),
-            control_plane_key_provider,
+            Arc::clone(&control_plane_key_provider),
             metrics,
         )
         .await?;
@@ -711,7 +716,7 @@ impl ProductionComponents {
         );
         let job_ir_objects: Arc<dyn JobIrObjectReader> =
             Arc::new(ImmutableBlobJobIrReader::new(blob_store.clone()));
-        let ingress_objects: Arc<dyn ImmutableBlobStore> = blob_store;
+        let ingress_objects: Arc<dyn ImmutableBlobStore> = Arc::clone(&blob_store);
         let transactions: Arc<dyn RunnerControlTransactionRepository> = store.clone();
         let receipts: Arc<dyn RunnerOperationReceiptRepository> = store.clone();
         let lease_requests: Arc<dyn RunnerLeaseRequestRepository> = store.clone();
@@ -799,6 +804,12 @@ impl ProductionComponents {
             .map_or((None, None), |runtime| {
                 (Some(runtime.cleanup_loop), Some(runtime.recovery_loop))
             });
+        let provider_runtime = build_provider_runtime(
+            github_provider,
+            store.as_ref(),
+            Arc::clone(&blob_store),
+            control_plane_key_provider,
+        )?;
         Ok(Self {
             runner_server,
             management_server,
@@ -820,7 +831,7 @@ impl ProductionComponents {
             human_request_authentication: human.request_authentication,
             rbac_web_data: human.rbac_web_data,
             setup_page_availability: human.setup_page_availability,
-            github_provider,
+            provider_runtime,
             results_api,
             web_data,
             web_fallback_context,
@@ -995,6 +1006,80 @@ async fn build_github_provider_runtime(
     .build()
     .await?;
     Ok(Some(runtime))
+}
+
+fn build_provider_runtime(
+    github: Option<GithubProviderRuntime>,
+    store: &PostgresStore,
+    blobs: Arc<dyn ImmutableBlobStore>,
+    key_provider: Arc<dyn KeyEncryptionProvider>,
+) -> Result<Option<ProviderRuntime>, ServerCompositionError> {
+    let Some(github) = github else {
+        return Ok(None);
+    };
+    let repository = Arc::new(PostgresProviderManifestRepository::new(
+        store.postgres_pool().clone(),
+        key_provider,
+    ));
+    let endpoints: Arc<dyn ProviderWebhookEndpointRepository> = repository.clone();
+    let deliveries: Arc<dyn ProviderDeliveryRepository> = repository.clone();
+    let manifests: Arc<dyn ProviderManifestRepository> = repository.clone();
+    let processing: Arc<dyn ProviderProcessingRepository> = repository.clone();
+    let results: Arc<dyn ProviderResultRepository> = repository.clone();
+    let workflow_results: Arc<dyn ProviderWorkflowResultSource> = repository;
+    let clock: Arc<dyn ProviderDeliveryClock> = Arc::new(SystemProviderDeliveryClock);
+    let delivery_adapter: Arc<dyn DeliveryAdapter> = Arc::new(GithubDeliveryAdapter::new());
+    let delivery_adapters = DeliveryAdapterRegistry::new([delivery_adapter])
+        .map_err(|_| ServerCompositionError::InvalidGithubProviderConfiguration)?;
+    let ingress = Arc::new(ProviderDeliveryIngress::new(
+        endpoints,
+        deliveries,
+        blobs,
+        delivery_adapters,
+        Arc::clone(&clock),
+    ));
+    let runtime_adapters = ProviderRuntimeAdapterRegistry::new([github.runtime_adapter()])
+        .map_err(|_| ServerCompositionError::InvalidGithubProviderConfiguration)?;
+    let dispatcher: Arc<dyn ProviderProcessingProcessor> = Arc::new(
+        ProviderProcessingDispatcher::new(runtime_adapters, Arc::clone(&manifests)),
+    );
+    let processing_worker = ProviderProcessingWorker::new(
+        ProviderProcessingWorkerId::new(),
+        processing,
+        dispatcher,
+        Arc::clone(&clock),
+        ProviderProcessingWorkerConfig::new(60_000, 1_000)
+            .map_err(|_| ServerCompositionError::InvalidGithubProviderConfiguration)?,
+    );
+    let result_adapters = ProviderResultAdapterRegistry::new([github.result_adapter()])
+        .map_err(|_| ServerCompositionError::InvalidGithubProviderConfiguration)?;
+    let contexts = ProviderRuntimeContextResolver::new(manifests);
+    let result_config = ProviderResultWorkerConfig::new(60_000, 1_000)
+        .map_err(|_| ServerCompositionError::InvalidGithubProviderConfiguration)?;
+    let result_workers = github
+        .connection_ids()
+        .iter()
+        .copied()
+        .map(|connection_id| {
+            ProviderResultWorker::new(
+                connection_id,
+                ProviderResultWorkerId::new(),
+                Arc::clone(&results),
+                contexts.clone(),
+                result_adapters.clone(),
+                Arc::clone(&clock),
+                result_config,
+            )
+        })
+        .collect::<Vec<_>>();
+    let background = ProviderBackgroundRuntime::new([processing_worker], result_workers)
+        .map_err(|_| ServerCompositionError::InvalidGithubProviderConfiguration)?;
+    let projection =
+        ProviderWorkflowResultProjectionService::new(workflow_results, github.workflow_results());
+    let auxiliary: Box<dyn ProviderAuxiliaryRuntime> = Box::new(github);
+    ProviderRuntime::new(ingress, background, projection, [auxiliary])
+        .map(Some)
+        .map_err(ServerCompositionError::from)
 }
 
 async fn reconcile_github_common_provider(
@@ -2159,6 +2244,9 @@ pub enum ServerCompositionError {
     /// The exact GitHub provider runtime could not be built or converged.
     #[error(transparent)]
     GithubProvider(#[from] GithubProviderRuntimeBuildError),
+    /// The provider-neutral runtime topology was inconsistent.
+    #[error(transparent)]
+    ProviderRuntime(#[from] ProviderRuntimeBuildError),
     /// At least one mandatory dependency failed its startup probe.
     #[error(
         "mandatory dependency probe failed (database_ready={database}, object_store_ready={object_store})"

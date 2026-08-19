@@ -1097,62 +1097,7 @@ async fn revalidate_handoff_consumer(
 ) -> Result<UnixMillis, GithubServerServiceStoreError> {
     let claim_expires_at = match identity.scope() {
         GithubServerServiceScope::ChecksWrite => {
-            let claim_action = match consumer.action() {
-                GithubServerServiceAction::EnsureCheckSuite => "ensure_suite",
-                GithubServerServiceAction::CreateCheckRun => "prepare_run_create",
-                GithubServerServiceAction::ReconcileCheckRun => "reconcile_run_create",
-                GithubServerServiceAction::PublishCheckRun => "publish",
-                GithubServerServiceAction::FetchRepositoryRevision
-                | GithubServerServiceAction::FetchRepositoryChangedFiles
-                | GithubServerServiceAction::FetchPullRequestFiles
-                | GithubServerServiceAction::DiscoverRepositorySchedules
-                | GithubServerServiceAction::ResolveWorkflowDispatchSource
-                | GithubServerServiceAction::ObserveWorkflowPermissionDefaults => {
-                    return Err(GithubServerServiceStoreError::HandoffRejected);
-                }
-            };
-            sqlx::query_scalar::<_, i64>(
-                r"
-                SELECT outbox.claim_expires_at_ms
-                FROM github_check_projection_outbox AS outbox
-                JOIN github_check_subjects AS subject
-                  ON subject.id = outbox.subject_id
-                WHERE outbox.subject_id = $1
-                  AND outbox.state = 'claimed'
-                  AND outbox.claim_owner_id = $2
-                  AND outbox.claim_fence = $3
-                  AND outbox.claim_action = $4
-                  AND outbox.claimed_desired_revision = $5
-                  AND outbox.claimed_at_ms <= $6
-                  AND outbox.state_updated_at_ms <= $6
-                  AND outbox.claim_expires_at_ms > $6
-                  AND subject.tenant_id = $7
-                  AND subject.repository_id = $8
-                  AND subject.provider_connection_id = $9
-                  AND subject.provider_installation_id = $10
-                  AND subject.github_app_id = $11
-                  AND subject.github_repository_id = $12
-                  AND subject.github_repository_name = $13
-                FOR SHARE OF outbox, subject
-                ",
-            )
-            .bind(consumer.consumer_id().as_uuid())
-            .bind(consumer.owner().as_uuid())
-            .bind(pg_bigint(consumer.fence().get()))
-            .bind(claim_action)
-            .bind(pg_bigint(consumer.revision().get()))
-            .bind(observed_at.get())
-            .bind(identity.tenant().as_str())
-            .bind(identity.repository_id().as_uuid())
-            .bind(identity.connection_id().as_uuid())
-            .bind(pg_bigint(identity.installation_id().get()))
-            .bind(pg_bigint(identity.github_app_id().get()))
-            .bind(pg_bigint(identity.github_repository_id().get()))
-            .bind(identity.github_repository_name().as_str())
-            .fetch_optional(&mut *connection)
-            .await
-            .map_err(operation_error)?
-            .map(UnixMillis::new)
+            revalidate_provider_result_consumer(connection, identity, consumer, observed_at).await?
         }
         GithubServerServiceScope::RepositoryContentsRead => {
             if consumer.action() == GithubServerServiceAction::ResolveWorkflowDispatchSource {
@@ -1247,6 +1192,94 @@ async fn revalidate_handoff_consumer(
         }
     };
     claim_expires_at.ok_or(GithubServerServiceStoreError::HandoffRejected)
+}
+
+async fn revalidate_provider_result_consumer(
+    connection: &mut PgConnection,
+    identity: &GithubServerServiceAuthorityIdentity,
+    consumer: GithubServerServiceConsumerClaim,
+    observed_at: UnixMillis,
+) -> Result<Option<UnixMillis>, GithubServerServiceStoreError> {
+    if !matches!(
+        consumer.action(),
+        GithubServerServiceAction::EnsureCheckSuite
+            | GithubServerServiceAction::CreateCheckRun
+            | GithubServerServiceAction::ReconcileCheckRun
+            | GithubServerServiceAction::PublishCheckRun
+    ) {
+        return Err(GithubServerServiceStoreError::HandoffRejected);
+    }
+    sqlx::query_scalar::<_, i64>(
+        r"
+        SELECT outbox.claim_expires_at_ms
+        FROM provider_result_outbox AS outbox
+        JOIN provider_result_subjects AS subject
+          ON subject.subject_id = outbox.subject_id
+        JOIN provider_connection_revisions AS provider_connection
+          ON provider_connection.connection_id = subject.connection_id
+         AND provider_connection.revision = subject.connection_revision
+         AND provider_connection.manifest_digest = subject.connection_digest
+        JOIN provider_instance_revisions AS provider_instance
+          ON provider_instance.instance_id = provider_connection.provider_instance_id
+         AND provider_instance.revision = provider_connection.provider_revision
+         AND provider_instance.configuration_digest =
+             provider_connection.provider_configuration_digest
+         AND provider_instance.capability_digest = provider_connection.capability_digest
+        JOIN repositories AS repository
+          ON repository.id = $7
+         AND repository.tenant_id = provider_connection.workspace_id
+         AND repository.scm_provider = provider_instance.provider_type
+         AND repository.provider_repository_id = provider_connection.external_repository_id
+        WHERE outbox.subject_id = $1
+          AND outbox.generation = $5
+          AND outbox.state = 'claimed'
+          AND outbox.claim_worker_id = $2
+          AND outbox.claim_fence = $3
+          AND outbox.claim_started_at_ms <= $4
+          AND outbox.claim_expires_at_ms > $4
+          AND subject.connection_id = $6
+          AND provider_connection.workspace_id = $8
+          AND provider_instance.provider_type = 'github'
+          AND provider_connection.external_repository_id = $9
+        FOR SHARE OF outbox, subject, provider_connection, provider_instance, repository
+        ",
+    )
+    .bind(consumer.consumer_id().as_uuid())
+    .bind(consumer.owner().as_uuid())
+    .bind(pg_bigint(consumer.fence().get()))
+    .bind(observed_at.get())
+    .bind(pg_bigint(consumer.revision().get()))
+    .bind(identity.connection_id().as_uuid())
+    .bind(identity.repository_id().as_uuid())
+    .bind(identity.tenant().as_str())
+    .bind(identity.github_repository_id().get().to_string())
+    .fetch_optional(&mut *connection)
+    .await
+    .map_err(operation_error)
+    .map(|expires_at| expires_at.map(UnixMillis::new))
+}
+
+#[cfg(feature = "test-support")]
+impl PostgresStore {
+    /// Revalidates a common result lease through the production credential-handoff query.
+    ///
+    /// This test-support seam deliberately bypasses issuance custody so integration tests can
+    /// prove the provider-neutral lease binding independently of encrypted token fixtures.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same fail-closed storage and handoff errors as the production revalidation.
+    pub async fn revalidate_github_result_consumer_for_test(
+        &self,
+        identity: &GithubServerServiceAuthorityIdentity,
+        consumer: GithubServerServiceConsumerClaim,
+        observed_at: UnixMillis,
+    ) -> Result<UnixMillis, GithubServerServiceStoreError> {
+        let mut connection = self.pool.acquire().await.map_err(operation_error)?;
+        revalidate_provider_result_consumer(&mut connection, identity, consumer, observed_at)
+            .await?
+            .ok_or(GithubServerServiceStoreError::HandoffRejected)
+    }
 }
 
 async fn revalidate_delivery_consumer(

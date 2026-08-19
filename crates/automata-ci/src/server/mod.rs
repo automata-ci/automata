@@ -8,7 +8,6 @@ mod github_provider_config;
 mod github_provider_credentials;
 mod github_provider_reconciliation;
 mod github_provider_runtime;
-mod github_webhook;
 pub(crate) mod human_auth;
 pub(crate) mod installation_setup;
 mod maintenance;
@@ -16,6 +15,7 @@ mod managed_secret_delivery;
 pub(crate) mod metrics;
 mod protected_environment_gate;
 mod protected_environment_review;
+mod provider_runtime;
 mod provider_webhook;
 mod provisioning_workload_auth;
 mod readiness;
@@ -86,23 +86,22 @@ pub use github_provider_credentials::{
     GithubProviderCredentialReleaseSupervisor, GithubWorkflowPermissionObservationError,
     MAX_GITHUB_PROVIDER_SUPERVISED_RELEASES,
 };
-use github_provider_runtime::GithubProviderFatalNotification;
 pub use github_provider_runtime::{
     GithubProviderRuntime, GithubProviderRuntimeBuildError, GithubProviderRuntimeBuilder,
     GithubProviderRuntimeError, GithubProviderRuntimePolicy, GithubProviderRuntimePolicyError,
     GithubProviderRuntimeShape,
-};
-pub use github_webhook::{
-    GITHUB_WEBHOOK_HTTP_DEADLINE, GITHUB_WEBHOOK_PATH, MAX_GITHUB_WEBHOOK_HTTP_BODY_BYTES,
-    router_with_github_webhook_outside_human_auth,
 };
 pub use maintenance::{
     ControlPlaneMaintenanceLoop, MaintenanceClock, MaintenanceLoopConfigError,
     SystemMaintenanceClock,
 };
 pub use metrics::ControlPlaneMetrics;
+use provider_runtime::ProviderFatalNotification;
+pub use provider_runtime::{
+    ProviderAuxiliaryRuntime, ProviderRuntime, ProviderRuntimeBuildError, ProviderRuntimeError,
+};
 pub use provider_webhook::{
-    PROVIDER_WEBHOOK_HTTP_DEADLINE, PROVIDER_WEBHOOK_PATH_PREFIX,
+    PROVIDER_WEBHOOK_HTTP_DEADLINE, PROVIDER_WEBHOOK_PATH_PREFIX, PROVIDER_WEBHOOK_ROUTE,
     router_with_provider_webhooks_outside_human_auth,
 };
 pub use readiness::{
@@ -213,10 +212,10 @@ pub async fn serve(args: &ServerArgs) -> Result<()> {
         let _ = signal_task.await;
         return Err(ServiceSupervisorError::UnexpectedStop(ManagedService::MetricsHttp).into());
     }
-    let github_provider_ingress = components
-        .github_provider
+    let provider_ingress = components
+        .provider_runtime
         .as_ref()
-        .map(GithubProviderRuntime::ingress);
+        .map(ProviderRuntime::ingress);
     let router = match http::router_with_readiness_web_data(
         readiness.clone(),
         components.web_data.clone(),
@@ -251,7 +250,7 @@ pub async fn serve(args: &ServerArgs) -> Result<()> {
                 }
                 None => router,
             };
-            let router = router_with_optional_github_webhook(router, github_provider_ingress);
+            let router = router_with_optional_provider_webhooks(router, provider_ingress);
             http::finalize_combined_router(router, metrics.clone())
         }
         Err(error) => {
@@ -294,12 +293,12 @@ pub async fn serve(args: &ServerArgs) -> Result<()> {
     result
 }
 
-fn router_with_optional_github_webhook(
+fn router_with_optional_provider_webhooks(
     human_router: axum::Router,
-    ingress: Option<std::sync::Arc<automata_ci_github_delivery::GithubDeliveryIngress>>,
+    ingress: Option<Arc<automata_ci_provider_delivery::ProviderDeliveryIngress>>,
 ) -> axum::Router {
     match ingress {
-        Some(ingress) => router_with_github_webhook_outside_human_auth(human_router, ingress),
+        Some(ingress) => router_with_provider_webhooks_outside_human_auth(human_router, ingress),
         None => human_router,
     }
 }
@@ -487,7 +486,7 @@ where
         metrics,
     } = services;
     let mut components = components;
-    let github_provider = components.github_provider.take();
+    let provider_runtime = components.provider_runtime.take();
     let management_server = components.management_server.take();
     let mut log_commit_listener = components
         .log_commit_listener
@@ -505,7 +504,7 @@ where
     let autonomous_workflow_cancellation = cancellation.child_token();
     let secret_cleanup_cancellation = cancellation.child_token();
     let secret_recovery_cancellation = cancellation.child_token();
-    let github_provider_cancellation = cancellation.child_token();
+    let provider_cancellation = cancellation.child_token();
 
     let http = async move {
         let server_cancellation = http_cancellation.clone();
@@ -596,7 +595,7 @@ where
         metrics.clone(),
         autonomous_workflow_cancellation,
     );
-    let result = supervise_optional_github_provider(
+    let result = supervise_optional_provider_runtime(
         (
             http,
             runner,
@@ -608,8 +607,8 @@ where
             logical_result_projection,
             autonomous_workflow,
         ),
-        github_provider,
-        github_provider_cancellation,
+        provider_runtime,
+        provider_cancellation,
         shutdown_signal,
         cancellation,
         metrics,
@@ -948,9 +947,9 @@ fn logical_job_result_store_error_is_retryable(error: &LogicalJobResultStoreErro
     )
 }
 
-async fn supervise_optional_github_provider<H, R, A, O, M, C, F, P, W, S>(
+async fn supervise_optional_provider_runtime<H, R, A, O, M, C, F, P, W, S>(
     services: (H, R, A, O, M, C, F, P, W),
-    github_provider: Option<GithubProviderRuntime>,
+    provider_runtime: Option<ProviderRuntime>,
     provider_cancellation: CancellationToken,
     shutdown_signal: S,
     cancellation: CancellationToken,
@@ -979,7 +978,7 @@ where
         logical_result_projection,
         autonomous_workflow,
     ) = services;
-    let Some(provider) = github_provider else {
+    let Some(provider) = provider_runtime else {
         return supervise_nine_services(
             (
                 http,
@@ -1004,8 +1003,8 @@ where
             .run_with_fatal_notification(provider_cancellation, fatal_notification)
             .await
             .map_err(|error| {
-                tracing::error!(%error, "GitHub provider runtime failed");
-                ManagedServiceError::GithubProvider
+                tracing::error!(%error, "provider runtime failed");
+                ManagedServiceError::ProviderRuntime
             })
     };
     supervise_services_with_metrics_and_provider(
@@ -1021,7 +1020,7 @@ where
             autonomous_workflow,
             provider,
         ),
-        wait_for_github_provider_fatal_signal(fatal_signal),
+        wait_for_provider_fatal_signal(fatal_signal),
         shutdown_signal,
         cancellation,
         metrics,
@@ -1029,11 +1028,9 @@ where
     .await
 }
 
-async fn wait_for_github_provider_fatal_signal(
-    signal: oneshot::Receiver<GithubProviderFatalNotification>,
-) {
+async fn wait_for_provider_fatal_signal(signal: oneshot::Receiver<ProviderFatalNotification>) {
     match signal.await {
-        Ok(GithubProviderFatalNotification) => {}
+        Ok(ProviderFatalNotification) => {}
         Err(_) => std::future::pending().await,
     }
 }
@@ -1085,8 +1082,8 @@ pub enum ManagedService {
     LogicalResultProjection,
     /// Autonomous logical workflow preparation, activation, and materialization worker.
     AutonomousWorkflow,
-    /// Exact mixed Public/Private GitHub provider runtime.
-    GithubProvider,
+    /// Provider-neutral ingress, processing, results, and auxiliary runtime.
+    ProviderRuntime,
 }
 
 /// Sanitized fatal failure returned by one managed service.
@@ -1122,9 +1119,9 @@ pub enum ManagedServiceError {
     /// The autonomous logical workflow worker failed.
     #[error("autonomous workflow service failed")]
     AutonomousWorkflow,
-    /// The configured GitHub provider runtime failed.
-    #[error("GitHub provider service failed")]
-    GithubProvider,
+    /// The configured provider runtime failed.
+    #[error("provider runtime service failed")]
+    ProviderRuntime,
 }
 
 /// Fatal result from shared service supervision.
@@ -1393,7 +1390,7 @@ where
         logical_run_finalization,
         logical_result_projection,
         autonomous_workflow,
-        github_provider,
+        provider_runtime,
     ) = services;
     let running = FuturesUnordered::new();
     for service in [
@@ -1452,8 +1449,8 @@ where
             cancellation.clone(),
         ),
         managed_service_future(
-            github_provider,
-            ManagedService::GithubProvider,
+            provider_runtime,
+            ManagedService::ProviderRuntime,
             metrics,
             cancellation.clone(),
         ),
@@ -1464,7 +1461,7 @@ where
         running,
         async move {
             provider_fatal_signal.await;
-            ManagedServiceError::GithubProvider
+            ManagedServiceError::ProviderRuntime
         },
         shutdown_signal,
         cancellation,
@@ -1551,7 +1548,7 @@ const fn managed_service_label(service: ManagedService) -> &'static str {
         ManagedService::LogicalRunFinalization => "logical_run_finalization",
         ManagedService::LogicalResultProjection => "logical_result_projection",
         ManagedService::AutonomousWorkflow => "autonomous_workflow",
-        ManagedService::GithubProvider => "github_provider",
+        ManagedService::ProviderRuntime => "provider_runtime",
     }
 }
 
@@ -1588,8 +1585,8 @@ mod tests {
     struct SyntheticInitializationError;
 
     #[tokio::test]
-    async fn absent_github_provider_omits_the_public_webhook_route() {
-        let router = router_with_optional_github_webhook(
+    async fn absent_provider_runtime_omits_public_webhook_routes() {
+        let router = router_with_optional_provider_webhooks(
             axum::Router::new().route("/human", get(|| async { StatusCode::NO_CONTENT })),
             None,
         );
@@ -1609,7 +1606,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method(axum::http::Method::POST)
-                    .uri(GITHUB_WEBHOOK_PATH)
+                    .uri("/webhooks/providers/00000000-0000-0000-0000-000000000001")
                     .body(Body::empty())
                     .expect("webhook request"),
             )

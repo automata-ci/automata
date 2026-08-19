@@ -668,7 +668,10 @@ mod tests {
         let metrics =
             ControlPlaneMetrics::new(BuildInfo::current()).expect("control-plane metrics");
         let router = instrument_combined_router(
-            Router::new().route("/webhooks/github", post(|| async { StatusCode::ACCEPTED })),
+            Router::new().route(
+                "/webhooks/providers/{endpoint_id}",
+                post(|| async { StatusCode::ACCEPTED }),
+            ),
             metrics.clone(),
         );
 
@@ -676,7 +679,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/webhooks/github")
+                    .uri("/webhooks/providers/00000000-0000-0000-0000-000000000001")
                     .body(Body::empty())
                     .expect("provider webhook request"),
             )
@@ -689,7 +692,7 @@ mod tests {
             .encode_openmetrics()
             .expect("bounded exposition");
         assert!(exposition.as_str().contains(
-            "automata_ci_control_plane_http_requests_total{method=\"post\",route=\"/webhooks/github\",status_class=\"2xx\"} 1"
+            "automata_ci_control_plane_http_requests_total{method=\"post\",route=\"/webhooks/providers/{endpoint_id}\",status_class=\"2xx\"} 1"
         ));
     }
 
