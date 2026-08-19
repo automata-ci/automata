@@ -5,9 +5,6 @@ use automata_ci_core::{
 };
 use sqlx::{PgPool, Postgres, Row as _, Transaction, postgres::PgRow};
 
-use super::github_check_aggregation::{
-    GithubCheckAggregationError, lock_all_direct_check_for_run, reconcile_all_direct_check,
-};
 use super::{PostgresStore, durable_schema::current_durable_schemas, pg_bigint};
 use automata_ci_store::{
     ClaimLogicalRunFinalization, ClaimedLogicalRunFinalization, CommitLogicalRunFinalization,
@@ -269,18 +266,6 @@ impl LogicalRunFinalizationRepository for PostgresStore {
         transition_invocation(&mut transaction, &request).await?;
         transition_marker(&mut transaction, &request).await?;
         transition_workflow_run(&mut transaction, &request).await?;
-        let all_direct_delivery = lock_all_direct_check_for_run(
-            &mut transaction,
-            request.claim().target().run_id().as_uuid(),
-        )
-        .await
-        .map_err(logical_finalization_aggregation_error)?;
-        transition_linked_github_check(&mut transaction, &request).await?;
-        if let Some(delivery_id) = all_direct_delivery {
-            reconcile_all_direct_check(&mut transaction, delivery_id, request.finalized_at().get())
-                .await
-                .map_err(logical_finalization_aggregation_error)?;
-        }
         super::admission::reconcile_terminal_concurrency(
             &mut transaction,
             repository_id,
@@ -847,55 +832,6 @@ async fn transition_workflow_run(
     require_one_transition(rows, "workflow run")
 }
 
-async fn transition_linked_github_check(
-    transaction: &mut Transaction<'_, Postgres>,
-    request: &CommitLogicalRunFinalization,
-) -> Result<(), LogicalRunFinalizationStoreError> {
-    let (linked, updated): (i64, i64) = sqlx::query_as(
-        r"
-        WITH linked AS MATERIALIZED (
-            SELECT id
-            FROM github_check_subjects
-            WHERE workflow_run_id = $1
-              AND subject_kind = 'workflow'
-            FOR UPDATE
-        ), updated AS (
-            UPDATE github_check_subjects AS subject
-            SET desired_state = 'completed',
-                desired_conclusion = $2,
-                terminal_cause = $3,
-                desired_revision = desired_revision + 1,
-                desired_updated_at_ms = $4
-            FROM linked
-            WHERE subject.id = linked.id
-              AND subject.desired_state = 'in_progress'
-              AND subject.desired_conclusion IS NULL
-              AND subject.terminal_cause IS NULL
-              AND subject.desired_revision = 2
-              AND subject.desired_updated_at_ms <= $4
-            RETURNING subject.id
-        )
-        SELECT (SELECT count(*) FROM linked),
-               (SELECT count(*) FROM updated)
-        ",
-    )
-    .bind(request.claim().target().run_id().as_uuid())
-    .bind(conclusion_name(request.conclusion()))
-    .bind(check_terminal_cause(request.conclusion()))
-    .bind(request.finalized_at().get())
-    .fetch_one(&mut **transaction)
-    .await
-    .map_err(operation_error)?;
-    if (linked, updated) == (0, 0) || (linked, updated) == (1, 1) {
-        Ok(())
-    } else {
-        Err(StoreError::corrupt_data(
-            "linked GitHub Check did not match the exact run-finalization transition",
-        )
-        .into())
-    }
-}
-
 fn require_one_transition(
     rows: u64,
     target: &'static str,
@@ -989,47 +925,10 @@ async fn verify_exact_finalized_commit(
             .try_get::<i64, _>("workflow_updated_at_ms")
             .map_err(operation_error)?
             == request.finalized_at().get();
-    if !exact
-        || !stored_job_evidence_matches(transaction, descriptor).await?
-        || !linked_github_check_matches(transaction, request).await?
-    {
+    if !exact || !stored_job_evidence_matches(transaction, descriptor).await? {
         return Err(LogicalRunFinalizationStoreError::CommitConflict);
     }
     Ok(())
-}
-
-async fn linked_github_check_matches(
-    transaction: &mut Transaction<'_, Postgres>,
-    request: &CommitLogicalRunFinalization,
-) -> Result<bool, LogicalRunFinalizationStoreError> {
-    let (linked, exact): (i64, i64) = sqlx::query_as(
-        r"
-        WITH linked AS MATERIALIZED (
-            SELECT desired_state, desired_conclusion, terminal_cause,
-                   desired_revision, desired_updated_at_ms
-            FROM github_check_subjects
-            WHERE workflow_run_id = $1
-              AND subject_kind = 'workflow'
-            FOR SHARE
-        )
-        SELECT count(*), count(*) FILTER (
-            WHERE desired_state = 'completed'
-              AND desired_conclusion = $2
-              AND terminal_cause = $3
-              AND desired_revision = 3
-              AND desired_updated_at_ms = $4
-        )
-        FROM linked
-        ",
-    )
-    .bind(request.claim().target().run_id().as_uuid())
-    .bind(conclusion_name(request.conclusion()))
-    .bind(check_terminal_cause(request.conclusion()))
-    .bind(request.finalized_at().get())
-    .fetch_one(&mut **transaction)
-    .await
-    .map_err(operation_error)?;
-    Ok((linked, exact) == (0, 0) || (linked, exact) == (1, 1))
 }
 
 async fn stored_job_evidence_matches(
@@ -1213,16 +1112,6 @@ const fn conclusion_name(value: JobConclusion) -> &'static str {
     }
 }
 
-const fn check_terminal_cause(value: JobConclusion) -> &'static str {
-    match value {
-        JobConclusion::Success => "workflow_success",
-        JobConclusion::Failure => "workflow_failure",
-        JobConclusion::Cancelled => "workflow_cancelled",
-        JobConclusion::TimedOut => "workflow_timed_out",
-        JobConclusion::Skipped => "workflow_skipped",
-    }
-}
-
 const fn orchestration_terminal_state(value: JobConclusion) -> &'static str {
     match value {
         JobConclusion::Success | JobConclusion::Skipped => "completed",
@@ -1247,16 +1136,4 @@ fn corrupt_value(error: impl std::fmt::Display) -> LogicalRunFinalizationStoreEr
 
 fn operation_error(error: sqlx::Error) -> LogicalRunFinalizationStoreError {
     StoreError::operation(error).into()
-}
-
-fn logical_finalization_aggregation_error(
-    error: GithubCheckAggregationError,
-) -> LogicalRunFinalizationStoreError {
-    match error {
-        GithubCheckAggregationError::Operation(error) => operation_error(error),
-        GithubCheckAggregationError::CorruptData => StoreError::corrupt_data(
-            "all-direct GitHub Check aggregate contradicts its workflow outcomes",
-        )
-        .into(),
-    }
 }

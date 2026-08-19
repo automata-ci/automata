@@ -40,7 +40,6 @@ mod connection;
 mod durable_schema;
 mod event_subject;
 mod g1;
-mod github_check_aggregation;
 mod github_checks;
 mod github_job_runtime_authority;
 mod github_provider_manifest;
