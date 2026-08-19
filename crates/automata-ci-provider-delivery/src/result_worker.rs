@@ -78,6 +78,13 @@ impl ProviderResultLease {
         Self { fence }
     }
 
+    /// Creates an immutable lease view for direct adapter conformance tests.
+    #[must_use]
+    pub fn fixed(fence: automata_ci_provider::ProviderResultClaimFence) -> Self {
+        let (_updates, view) = watch::channel(fence);
+        Self { fence: view }
+    }
+
     /// Returns the most recently committed publication fence.
     #[must_use]
     pub fn current(&self) -> automata_ci_provider::ProviderResultClaimFence {

@@ -1301,7 +1301,7 @@ mod tests {
     use automata_ci_provider::{
         ProviderResultBinding, ProviderResultModelError, ProviderResultName,
     };
-    use automata_ci_provider_delivery::ProviderRuntimeContext;
+    use automata_ci_provider_delivery::{ProviderResultLease, ProviderRuntimeContext};
     use automata_ci_provider_github::{
         GithubConnectionPolicy, GithubInstanceConfiguration, GithubJwtIssuer, GithubProviderFactory,
     };
@@ -1353,7 +1353,7 @@ mod tests {
                     .repository()
                     .external_id()
                     .clone(),
-                request.claimed().claim(),
+                request.claim(),
                 request.operation(),
                 request.app_id(),
                 request.installation_id(),
@@ -1365,6 +1365,15 @@ mod tests {
             )
             .map_err(|_| GithubResultCredentialProviderError::InvariantViolation)
         }
+    }
+
+    async fn publish(
+        adapter: &GithubResultProviderAdapter,
+        context: &ProviderRuntimeContext,
+        claimed: &ClaimedProviderResult,
+    ) -> ProviderResultAdapterOutcome {
+        let lease = ProviderResultLease::fixed(claimed.claim());
+        adapter.publish_result(context, claimed, &lease).await
     }
 
     #[derive(Debug)]
@@ -1417,7 +1426,7 @@ mod tests {
             let ProviderResultAdapterOutcome::Retry {
                 continuation: Some(next),
                 retry_after: None,
-            } = adapter.publish_result(&context, &claimed).await
+            } = publish(&adapter, &context, &claimed).await
             else {
                 panic!("{expected:?} must advance durable adapter state");
             };
@@ -1427,7 +1436,7 @@ mod tests {
         let claimed = ClaimedProviderResult::new(subject, desired, claim, 1, None, continuation)
             .expect("bound result");
         let ProviderResultAdapterOutcome::Published(observation) =
-            adapter.publish_result(&context, &claimed).await
+            publish(&adapter, &context, &claimed).await
         else {
             panic!("queued native result must converge");
         };
@@ -1539,7 +1548,7 @@ mod tests {
         let ProviderResultAdapterOutcome::Retry {
             continuation: Some(continuation),
             retry_after: None,
-        } = adapter.publish_result(&context, &first).await
+        } = publish(&adapter, &context, &first).await
         else {
             panic!("nonterminal native run must advance to completion");
         };
@@ -1553,7 +1562,7 @@ mod tests {
         )
         .expect("continued result");
         assert!(matches!(
-            adapter.publish_result(&context, &second).await,
+            publish(&adapter, &context, &second).await,
             ProviderResultAdapterOutcome::Published(_)
         ));
 
