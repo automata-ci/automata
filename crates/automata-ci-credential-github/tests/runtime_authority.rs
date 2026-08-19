@@ -4,12 +4,12 @@ use std::time::Duration;
 
 use automata_ci_auth::secret::SecretString;
 use automata_ci_credential_github::{
-    GithubAppCredentialBroker, GithubAppHttpLimits, GithubInstallationTokenIndeterminateReason,
-    GithubInstallationTokenMintOutcome, GithubInstallationTokenRevocationCandidate,
-    GithubInstallationTokenRevocationFailureKind, GithubInstallationTokenRevocationOutcome,
-    GithubInstallationTokenRevokePending, GithubReadyInstallationToken,
+    GithubAppCredentialBroker, GithubAppHttpLimits, GithubInstallationTokenErrorKind,
+    GithubInstallationTokenIndeterminateReason, GithubInstallationTokenMintOutcome,
+    GithubInstallationTokenRevocationCandidate, GithubInstallationTokenRevocationFailureKind,
+    GithubInstallationTokenRevocationOutcome, GithubInstallationTokenRevokePending,
+    GithubReadyInstallationToken,
 };
-use automata_ci_scm::credential::CredentialErrorKind;
 use axum::http::StatusCode;
 use static_assertions::assert_not_impl_any;
 use support::{
@@ -46,7 +46,7 @@ async fn semantic_or_malformed_201_with_a_unique_token_retains_a_candidate() {
     };
     assert_eq!(
         semantic.reason().kind(),
-        CredentialErrorKind::RepositoryMismatch
+        GithubInstallationTokenErrorKind::RepositoryMismatch
     );
     assert_eq!(semantic.candidate().secret().expose_secret(), SENTINEL);
     assert_eq!(
@@ -71,7 +71,7 @@ async fn semantic_or_malformed_201_with_a_unique_token_retains_a_candidate() {
     };
     assert_eq!(
         malformed.reason().kind(),
-        CredentialErrorKind::InvalidResponse
+        GithubInstallationTokenErrorKind::InvalidResponse
     );
     assert_eq!(malformed.candidate().secret().expose_secret(), SENTINEL);
     assert_sanitized(&malformed);

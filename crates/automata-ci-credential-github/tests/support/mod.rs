@@ -17,22 +17,20 @@ use automata_ci_core::{
     RunnerId, Sha256Digest, TrustSourceClass, UnixMillis, WorkspaceId,
 };
 use automata_ci_credential_github::{
-    GithubAppCredentialBroker, GithubAppCredentialConfig, GithubAppHttpLimits, GithubInstallationId,
+    GithubAppCredentialBroker, GithubAppCredentialConfig, GithubAppHttpLimits,
+    GithubInstallationId, GithubInstallationTokenRequest,
 };
 use automata_ci_provider::{
     ExternalRepositoryId, ExternalRepositoryIdentity, ProviderArchiveLimits,
     ProviderConfigurationRevision, ProviderConnectionConfiguration, ProviderConnectionId,
     ProviderConnectionManifest, ProviderConnectionPolicyDocument, ProviderConnectionRevision,
-    ProviderDefaultBranch, ProviderInstanceId, ProviderLifecycleState, ProviderRepositoryPath,
-    ProviderRunnerPolicyBinding, ProviderSchemaVersion, ProviderWorkflowSource,
-    RepositoryVisibility, WorkloadCredentialPermission, WorkloadCredentialPermissionSet,
-    WorkloadCredentialProfile, WorkloadCredentialRequest,
+    ProviderDefaultBranch, ProviderInstanceId, ProviderLifecycleState, ProviderPermission,
+    ProviderPermissionSet, ProviderRepositoryPath, ProviderRunnerPolicyBinding,
+    ProviderSchemaVersion, ProviderWorkflowSource, RepositoryVisibility, WorkloadCredentialProfile,
+    WorkloadCredentialRequest,
 };
-use automata_ci_scm::credential::{
-    MinimumValidity, PermissionLevel, PermissionName, PermissionSet, ProviderResourceId,
-    RepositoryCredentialRequest, RepositoryScope, WorkloadIdentity,
-};
-use automata_ci_scm::{RepositoryId, ScmProviderId};
+use automata_ci_scm::credential::ProviderResourceId;
+use automata_ci_store::GithubRepositoryName;
 use axum::{
     Router,
     body::{Body, Bytes, to_bytes},
@@ -284,8 +282,18 @@ fn published_test_key_pem(label: &str, der: &[u8]) -> SecretString {
     SecretString::new(pem).expect("published RSA test fixture must be non-empty")
 }
 
-pub fn request() -> RepositoryCredentialRequest {
-    request_for("github", REPOSITORY_ID.to_string(), "automata-ci/automata")
+pub fn request() -> GithubInstallationTokenRequest {
+    GithubInstallationTokenRequest::new(
+        REPOSITORY_ID,
+        GithubRepositoryName::new("automata-ci/automata").unwrap(),
+        ProviderPermissionSet::new([
+            ProviderPermission::new("contents", CommonPermissionLevel::Read).unwrap(),
+            ProviderPermission::new("statuses", CommonPermissionLevel::Write).unwrap(),
+        ])
+        .unwrap(),
+        300_000,
+    )
+    .unwrap()
 }
 
 pub fn workload_request() -> WorkloadCredentialRequest {
@@ -308,9 +316,9 @@ pub fn workload_request_for(connection: &ProviderConnectionManifest) -> Workload
         .unwrap(),
         TrustSourceClass::SameRepository,
         WorkloadCredentialProfile::RepositoryAccess,
-        WorkloadCredentialPermissionSet::new([
-            WorkloadCredentialPermission::new("contents", CommonPermissionLevel::Read).unwrap(),
-            WorkloadCredentialPermission::new("statuses", CommonPermissionLevel::Write).unwrap(),
+        ProviderPermissionSet::new([
+            ProviderPermission::new("contents", CommonPermissionLevel::Read).unwrap(),
+            ProviderPermission::new("statuses", CommonPermissionLevel::Write).unwrap(),
         ])
         .unwrap(),
         requested_at,
@@ -365,33 +373,6 @@ pub fn workload_connection_for_repository(
         None,
     )
     .unwrap()
-}
-
-pub fn request_for(
-    provider: &str,
-    stable_id: impl Into<String>,
-    repository: &str,
-) -> RepositoryCredentialRequest {
-    RepositoryCredentialRequest::new(
-        WorkloadIdentity::new("tenant/run-42/verify/attempt-1").unwrap(),
-        RepositoryScope::new(
-            ScmProviderId::new(provider).unwrap(),
-            RepositoryId::new(repository).unwrap(),
-            ProviderResourceId::new(stable_id).unwrap(),
-        ),
-        PermissionSet::new([
-            (
-                PermissionName::new("contents").unwrap(),
-                PermissionLevel::Read,
-            ),
-            (
-                PermissionName::new("statuses").unwrap(),
-                PermissionLevel::Write,
-            ),
-        ])
-        .unwrap(),
-        MinimumValidity::from_seconds(300).unwrap(),
-    )
 }
 
 pub fn success_response() -> ResponseSpec {

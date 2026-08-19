@@ -8,18 +8,17 @@ use automata_ci_core::{PermissionLevel as CommonPermissionLevel, UnixMillis};
 use automata_ci_provider::{
     ExternalRepositoryIdentity, IndeterminateWorkloadCredential,
     PendingWorkloadCredentialRevocation, ProviderConnectionId, ProviderConnectionManifest,
-    ProviderConnectionRevision, ProviderLifecycleState, WorkloadCredentialIndeterminateReason,
-    WorkloadCredentialIssuance, WorkloadCredentialIssueFuture, WorkloadCredentialIssueOutcome,
-    WorkloadCredentialProfile, WorkloadCredentialProvider, WorkloadCredentialProviderError,
+    ProviderConnectionRevision, ProviderLifecycleState, ProviderPermissionSet,
+    WorkloadCredentialIndeterminateReason, WorkloadCredentialIssuance,
+    WorkloadCredentialIssueFuture, WorkloadCredentialIssueOutcome, WorkloadCredentialProfile,
+    WorkloadCredentialProvider, WorkloadCredentialProviderError,
     WorkloadCredentialProviderErrorKind, WorkloadCredentialRequest, WorkloadCredentialRetryAfter,
     WorkloadCredentialRevocation, WorkloadCredentialRevocationCandidate,
     WorkloadCredentialRevocationFailure, WorkloadCredentialRevocationFailureKind,
     WorkloadCredentialRevocationFuture, WorkloadCredentialRevocationOutcome,
 };
-use automata_ci_scm::ScmProviderId;
 use automata_ci_scm::credential::{
-    CredentialError, CredentialErrorKind, CredentialProvenance, PermissionLevel, PermissionSet,
-    ProviderResourceId, RepositoryCredentialRequest,
+    CredentialError, CredentialErrorKind, PermissionLevel, PermissionSet,
 };
 use automata_ci_secret::SecretValue;
 use reqwest::{
@@ -48,11 +47,12 @@ use crate::{
         recover_installation_token, retry_after_seconds,
     },
     runtime_authority::{
+        GithubInstallationTokenError, GithubInstallationTokenErrorKind,
         GithubInstallationTokenIndeterminate, GithubInstallationTokenIndeterminateReason,
-        GithubInstallationTokenMintOutcome, GithubInstallationTokenRevocationCandidate,
-        GithubInstallationTokenRevocationFailure, GithubInstallationTokenRevocationFailureKind,
-        GithubInstallationTokenRevocationOutcome, GithubInstallationTokenRevokePending,
-        GithubReadyInstallationToken,
+        GithubInstallationTokenMintOutcome, GithubInstallationTokenRequest,
+        GithubInstallationTokenRevocationCandidate, GithubInstallationTokenRevocationFailure,
+        GithubInstallationTokenRevocationFailureKind, GithubInstallationTokenRevocationOutcome,
+        GithubInstallationTokenRevokePending, GithubReadyInstallationToken,
     },
     signer::{GithubAppJwtSigner, GithubAppKeyError},
 };
@@ -68,7 +68,6 @@ const BROKER_POLICY_FINGERPRINT_DOMAIN: &[u8] = b"automata-ci/github-app-broker-
 struct ValidatedResponseMetadata {
     provider_expires_at: UnixTimestamp,
     conservative_expires_at: UnixTimestamp,
-    provenance: CredentialProvenance,
 }
 
 struct ResponseValidationFailure {
@@ -97,7 +96,6 @@ pub struct GithubAppCredentialBroker {
     client: Client,
     signer: GithubAppJwtSigner,
     clock: Arc<dyn Clock>,
-    provider_id: ScmProviderId,
 }
 
 /// GitHub workload adapter pinned to one exact common provider connection.
@@ -298,14 +296,11 @@ impl GithubAppCredentialBroker {
         let client = github_http_client_builder(&config)
             .build()
             .map_err(|_| GithubAppConfigurationError::ClientConstructionFailed)?;
-        let provider_id = ScmProviderId::new("github")
-            .map_err(|_| GithubAppConfigurationError::ClientConstructionFailed)?;
         Ok(Self {
             config,
             client,
             signer,
             clock,
-            provider_id,
         })
     }
 
@@ -378,27 +373,6 @@ impl GithubAppCredentialBroker {
         .await
     }
 
-    fn validate_request(
-        &self,
-        request: &RepositoryCredentialRequest,
-    ) -> Result<u64, CredentialError> {
-        if request.repository().provider() != &self.provider_id {
-            return Err(CredentialError::new(
-                CredentialErrorKind::UnsupportedProvider,
-            ));
-        }
-        let repository_id = request
-            .repository()
-            .stable_id()
-            .as_str()
-            .parse::<u64>()
-            .ok()
-            .filter(|value| *value != 0)
-            .ok_or_else(|| CredentialError::new(CredentialErrorKind::InvalidRequest))?;
-        github_repository_components(request.repository().repository().as_str())?;
-        Ok(repository_id)
-    }
-
     /// Performs exactly one provider-side installation-token mint attempt.
     ///
     /// The result forces callers to account for every side-effectful outcome.
@@ -406,11 +380,13 @@ impl GithubAppCredentialBroker {
     /// `Ready` or `RevokePending`; it is never discarded behind an error.
     pub async fn mint_once(
         &self,
-        request: &RepositoryCredentialRequest,
+        request: &GithubInstallationTokenRequest,
     ) -> GithubInstallationTokenMintOutcome {
         let prepared = match self.prepare_mint(request) {
             Ok(prepared) => prepared,
-            Err(error) => return GithubInstallationTokenMintOutcome::Rejected(error),
+            Err(error) => {
+                return GithubInstallationTokenMintOutcome::Rejected(error);
+            }
         };
         let Ok(response) = self
             .client
@@ -614,21 +590,30 @@ impl GithubAppCredentialBroker {
 
     fn prepare_mint(
         &self,
-        request: &RepositoryCredentialRequest,
-    ) -> Result<PreparedMintRequest, CredentialError> {
-        let repository_id = self.validate_request(request)?;
+        request: &GithubInstallationTokenRequest,
+    ) -> Result<PreparedMintRequest, GithubInstallationTokenError> {
+        let repository_id = request.repository_id();
         let start = self.clock.now();
-        let assertion = self.signer.sign(start).map_err(map_signing_error)?;
-        let authorization = bearer_header(assertion.expose_secret())?;
+        let assertion = self.signer.sign(start).map_err(|_| {
+            GithubInstallationTokenError::new(GithubInstallationTokenErrorKind::Unavailable)
+        })?;
+        let authorization = bearer_header(assertion.expose_secret()).map_err(|_| {
+            GithubInstallationTokenError::new(GithubInstallationTokenErrorKind::InvalidResponse)
+        })?;
         let wire_request = InstallationTokenRequest::new(repository_id, request.permissions());
-        let body = serde_json::to_vec(&wire_request)
-            .map_err(|_| CredentialError::new(CredentialErrorKind::InvalidRequest))?;
+        let body = serde_json::to_vec(&wire_request).map_err(|_| {
+            GithubInstallationTokenError::new(GithubInstallationTokenErrorKind::InvalidRequest)
+        })?;
         if body.len() > MAX_REQUEST_BODY_BYTES {
-            return Err(CredentialError::new(CredentialErrorKind::InvalidRequest));
+            return Err(GithubInstallationTokenError::new(
+                GithubInstallationTokenErrorKind::InvalidRequest,
+            ));
         }
         Ok(PreparedMintRequest {
             repository_id,
-            endpoint: self.access_token_url()?,
+            endpoint: self.access_token_url().map_err(|_| {
+                GithubInstallationTokenError::new(GithubInstallationTokenErrorKind::InvalidRequest)
+            })?,
             authorization,
             body,
         })
@@ -636,7 +621,7 @@ impl GithubAppCredentialBroker {
 
     fn created_response_outcome(
         &self,
-        request: &RepositoryCredentialRequest,
+        request: &GithubInstallationTokenRequest,
         repository_id: u64,
         response: &crate::response::CreatedResponseBody,
     ) -> GithubInstallationTokenMintOutcome {
@@ -664,7 +649,7 @@ impl GithubAppCredentialBroker {
 
     fn unique_token_outcome(
         &self,
-        request: &RepositoryCredentialRequest,
+        request: &GithubInstallationTokenRequest,
         repository_id: u64,
         response: &crate::response::CreatedResponseBody,
         candidate: GithubInstallationTokenRevocationCandidate,
@@ -681,7 +666,7 @@ impl GithubAppCredentialBroker {
             );
         };
         let validation =
-            self.validate_response_metadata(request, repository_id, issued_at, decoded);
+            Self::validate_response_metadata(request, repository_id, issued_at, decoded);
         let metadata_invalid =
             response.completion != CreatedBodyCompletion::Complete || !response.metadata_valid;
         match validation {
@@ -692,7 +677,7 @@ impl GithubAppCredentialBroker {
                     issued_at,
                     validated.provider_expires_at,
                     validated.conservative_expires_at,
-                    validated.provenance,
+                    self.config.installation_id.get(),
                 ))
             }
             Ok(validated) => revoke_pending(
@@ -704,7 +689,7 @@ impl GithubAppCredentialBroker {
             Err(failure) => GithubInstallationTokenMintOutcome::RevokePending(
                 GithubInstallationTokenRevokePending::new(
                     candidate,
-                    failure.error,
+                    map_internal_error(failure.error),
                     failure.provider_expires_at,
                     failure.conservative_expires_at,
                 ),
@@ -713,8 +698,7 @@ impl GithubAppCredentialBroker {
     }
 
     fn validate_response_metadata(
-        &self,
-        request: &RepositoryCredentialRequest,
+        request: &GithubInstallationTokenRequest,
         repository_id: u64,
         issued_at: UnixTimestamp,
         response: crate::response::InstallationTokenResponse,
@@ -744,7 +728,7 @@ impl GithubAppCredentialBroker {
         if repository.id != repository_id
             || !repository
                 .full_name
-                .eq_ignore_ascii_case(request.repository().repository().as_str())
+                .eq_ignore_ascii_case(request.repository_name().as_str())
             || github_repository_components(&repository.full_name).is_err()
         {
             return Err(failure(CredentialError::new(
@@ -762,21 +746,14 @@ impl GithubAppCredentialBroker {
         let conservative_expires_at = conservative_expires_at
             .ok_or_else(|| failure(CredentialError::new(CredentialErrorKind::InvalidResponse)))?;
         let required_expiry = issued_at
-            .checked_add(request.minimum_validity().as_seconds())
+            .checked_add(request.minimum_validity_millis() / 1_000)
             .map_err(|_| failure(CredentialError::new(CredentialErrorKind::InvalidResponse)))?;
         if conservative_expires_at < required_expiry {
             return Err(failure(CredentialError::new(CredentialErrorKind::Expired)));
         }
-        let provenance = CredentialProvenance::new(
-            self.provider_id.clone(),
-            self.config.issuer.clone(),
-            ProviderResourceId::new(self.config.installation_id.get().to_string())
-                .map_err(|_| failure(CredentialError::new(CredentialErrorKind::InvalidResponse)))?,
-        );
         Ok(ValidatedResponseMetadata {
             provider_expires_at,
             conservative_expires_at,
-            provenance,
         })
     }
 
@@ -899,9 +876,17 @@ impl GithubAppCredentialBroker {
     }
 }
 
-fn permissions_match_github_response(requested: &PermissionSet, returned: &PermissionSet) -> bool {
-    if returned == requested {
-        return true;
+fn permissions_match_github_response(
+    requested: &ProviderPermissionSet,
+    returned: &PermissionSet,
+) -> bool {
+    if returned.len() == requested.len() {
+        return returned.iter().all(|(returned_name, returned_level)| {
+            requested.iter().any(|(requested_name, requested_level)| {
+                requested_name == returned_name.as_str()
+                    && common_permission_matches_old(requested_level, returned_level)
+            })
+        });
     }
     if returned.len() != requested.len().saturating_add(1) {
         return false;
@@ -912,7 +897,8 @@ fn permissions_match_github_response(requested: &PermissionSet, returned: &Permi
             return returned_level == PermissionLevel::Read;
         }
         requested.iter().any(|(requested_name, requested_level)| {
-            requested_name == returned_name && requested_level == returned_level
+            requested_name == returned_name.as_str()
+                && common_permission_matches_old(requested_level, returned_level)
         })
     })
 }
@@ -1093,7 +1079,7 @@ fn mint_status_outcome(
     headers: &HeaderMap,
 ) -> GithubInstallationTokenMintOutcome {
     if let Some(error) = definitive_mint_rejection(status, headers) {
-        return GithubInstallationTokenMintOutcome::Rejected(error);
+        return GithubInstallationTokenMintOutcome::Rejected(map_internal_error(error));
     }
     let reason = if status.is_server_error() {
         GithubInstallationTokenIndeterminateReason::ProviderUnavailable
@@ -1134,10 +1120,36 @@ fn revoke_pending(
 ) -> GithubInstallationTokenMintOutcome {
     GithubInstallationTokenMintOutcome::RevokePending(GithubInstallationTokenRevokePending::new(
         candidate,
-        CredentialError::new(reason),
+        map_internal_error(CredentialError::new(reason)),
         provider_expires_at,
         conservative_expires_at,
     ))
+}
+
+fn map_internal_error(error: CredentialError) -> GithubInstallationTokenError {
+    let kind = match error.kind() {
+        CredentialErrorKind::UnsupportedProvider | CredentialErrorKind::InvalidRequest => {
+            GithubInstallationTokenErrorKind::InvalidRequest
+        }
+        CredentialErrorKind::Unauthorized => GithubInstallationTokenErrorKind::Unauthorized,
+        CredentialErrorKind::Forbidden => GithubInstallationTokenErrorKind::Forbidden,
+        CredentialErrorKind::NotFound => GithubInstallationTokenErrorKind::NotFound,
+        CredentialErrorKind::RateLimited => GithubInstallationTokenErrorKind::RateLimited,
+        CredentialErrorKind::Unavailable => GithubInstallationTokenErrorKind::Unavailable,
+        CredentialErrorKind::InvalidResponse => GithubInstallationTokenErrorKind::InvalidResponse,
+        CredentialErrorKind::RepositoryMismatch => {
+            GithubInstallationTokenErrorKind::RepositoryMismatch
+        }
+        CredentialErrorKind::PermissionMismatch => {
+            GithubInstallationTokenErrorKind::PermissionMismatch
+        }
+        CredentialErrorKind::Expired => GithubInstallationTokenErrorKind::Expired,
+    };
+    if kind == GithubInstallationTokenErrorKind::RateLimited {
+        GithubInstallationTokenError::rate_limited(error.retry_after_seconds())
+    } else {
+        GithubInstallationTokenError::new(kind)
+    }
 }
 
 const fn unconfirmed_revocation(
@@ -1155,7 +1167,6 @@ impl fmt::Debug for GithubAppCredentialBroker {
             .field("config", &self.config)
             .field("signer", &self.signer)
             .field("clock", &self.clock)
-            .field("provider_id", &self.provider_id)
             .finish_non_exhaustive()
     }
 }
@@ -1192,12 +1203,19 @@ struct InstallationTokenRequest {
 }
 
 impl InstallationTokenRequest {
-    fn new(repository_id: u64, permissions: &PermissionSet) -> Self {
+    fn new(repository_id: u64, permissions: &ProviderPermissionSet) -> Self {
         Self {
             repository_ids: [repository_id],
             permissions: permissions
                 .iter()
-                .map(|(name, level)| (name.as_str().to_owned(), level.as_str()))
+                .map(|(name, level)| {
+                    let level = match level {
+                        automata_ci_core::PermissionLevel::Read => "read",
+                        automata_ci_core::PermissionLevel::Write => "write",
+                        automata_ci_core::PermissionLevel::None => "none",
+                    };
+                    (name.to_owned(), level)
+                })
                 .collect(),
         }
     }
@@ -1290,16 +1308,6 @@ fn valid_repository_component(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
-}
-
-fn map_signing_error(error: GithubAppKeyError) -> CredentialError {
-    let kind = match error {
-        GithubAppKeyError::ClockOutOfRange => CredentialErrorKind::Unavailable,
-        GithubAppKeyError::InvalidPrivateKey | GithubAppKeyError::SigningFailed => {
-            CredentialErrorKind::Unavailable
-        }
-    };
-    CredentialError::new(kind)
 }
 
 #[derive(Debug, thiserror::Error)]

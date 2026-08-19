@@ -547,12 +547,12 @@ pub enum ControlCredentialProviderError {
 
 /// Canonical provider permission and effective level for a workload credential.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct WorkloadCredentialPermission {
+pub struct ProviderPermission {
     name: String,
     level: PermissionLevel,
 }
 
-impl WorkloadCredentialPermission {
+impl ProviderPermission {
     /// Creates one canonical non-denied provider permission.
     ///
     /// # Errors
@@ -582,16 +582,16 @@ impl WorkloadCredentialPermission {
 
 /// Complete canonical effective permission set for one workload credential.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct WorkloadCredentialPermissionSet(BTreeMap<String, PermissionLevel>);
+pub struct ProviderPermissionSet(BTreeMap<String, PermissionLevel>);
 
-impl WorkloadCredentialPermissionSet {
+impl ProviderPermissionSet {
     /// Creates a bounded duplicate-free permission set.
     ///
     /// # Errors
     ///
     /// Rejects duplicates or excessive grants. Empty is valid for checkout-only credentials.
     pub fn new(
-        permissions: impl IntoIterator<Item = WorkloadCredentialPermission>,
+        permissions: impl IntoIterator<Item = ProviderPermission>,
     ) -> Result<Self, ProviderCredentialModelError> {
         let mut values = BTreeMap::new();
         for permission in permissions {
@@ -607,6 +607,11 @@ impl WorkloadCredentialPermissionSet {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
+    }
+    /// Returns the number of exact grants.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.0.len()
     }
     /// Iterates in canonical permission-name order.
     pub fn iter(&self) -> impl ExactSizeIterator<Item = (&str, PermissionLevel)> {
@@ -654,7 +659,7 @@ pub struct WorkloadCredentialRequest {
     lease: Lease,
     trust_class: TrustSourceClass,
     profile: WorkloadCredentialProfile,
-    permissions: WorkloadCredentialPermissionSet,
+    permissions: ProviderPermissionSet,
     requested_at: UnixMillis,
     expires_at: UnixMillis,
     digest: Sha256Digest,
@@ -674,7 +679,7 @@ impl WorkloadCredentialRequest {
         lease: Lease,
         trust_class: TrustSourceClass,
         profile: WorkloadCredentialProfile,
-        permissions: WorkloadCredentialPermissionSet,
+        permissions: ProviderPermissionSet,
         requested_at: UnixMillis,
         expires_at: UnixMillis,
     ) -> Result<Self, ProviderCredentialModelError> {
@@ -807,7 +812,7 @@ impl WorkloadCredentialRequest {
     }
     /// Returns the complete effective permission set.
     #[must_use]
-    pub const fn permissions(&self) -> &WorkloadCredentialPermissionSet {
+    pub const fn permissions(&self) -> &ProviderPermissionSet {
         &self.permissions
     }
     /// Returns the issuance request time.
@@ -1385,20 +1390,20 @@ fn valid_permission_name(value: &str) -> bool {
     if !bytes.next().is_some_and(|byte| byte.is_ascii_lowercase()) {
         return false;
     }
-    let mut previous_hyphen = false;
+    let mut previous_separator = false;
     for byte in bytes {
-        if byte == b'-' {
-            if previous_hyphen {
+        if matches!(byte, b'-' | b'_') {
+            if previous_separator {
                 return false;
             }
-            previous_hyphen = true;
+            previous_separator = true;
         } else if byte.is_ascii_lowercase() || byte.is_ascii_digit() {
-            previous_hyphen = false;
+            previous_separator = false;
         } else {
             return false;
         }
     }
-    !previous_hyphen
+    !previous_separator
 }
 
 fn part(hash: &mut Sha256, value: &[u8]) {

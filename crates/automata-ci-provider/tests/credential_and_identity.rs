@@ -13,11 +13,12 @@ use automata_ci_provider::{
     ProviderControlCredentialId, ProviderControlCredentialWorkerId, ProviderControlOperation,
     ProviderControlOperationSet, ProviderCredentialGeneration, ProviderCredentialModelError,
     ProviderDefaultBranch, ProviderHumanCredential, ProviderHumanIdentity, ProviderInstanceId,
-    ProviderLifecycleState, ProviderMembership, ProviderMembershipSnapshot, ProviderPkceVerifier,
-    ProviderRepositoryPath, ProviderRunnerPolicyBinding, ProviderSchemaVersion,
-    ProviderWorkflowSource, RepositoryVisibility, SourceReadCapability, WorkloadCredentialIssuance,
-    WorkloadCredentialPermission, WorkloadCredentialPermissionSet, WorkloadCredentialProfile,
-    WorkloadCredentialRequest, WorkloadCredentialRetirement, WorkloadCredentialRevocation,
+    ProviderLifecycleState, ProviderMembership, ProviderMembershipSnapshot, ProviderPermission,
+    ProviderPermissionSet, ProviderPkceVerifier, ProviderRepositoryPath,
+    ProviderRunnerPolicyBinding, ProviderSchemaVersion, ProviderWorkflowSource,
+    RepositoryVisibility, SourceReadCapability, WorkloadCredentialIssuance,
+    WorkloadCredentialProfile, WorkloadCredentialRequest, WorkloadCredentialRetirement,
+    WorkloadCredentialRevocation,
 };
 use automata_ci_secret::SecretValue;
 use static_assertions::assert_not_impl_any;
@@ -303,12 +304,11 @@ async fn control_credentials_are_exact_operation_scoped_secret_safe_and_releasab
 
 #[test]
 fn workload_authority_is_lease_bound_and_write_requires_same_repository_trust() {
-    let write = WorkloadCredentialPermissionSet::new([WorkloadCredentialPermission::new(
-        "contents",
-        PermissionLevel::Write,
-    )
-    .unwrap()])
-    .unwrap();
+    let write =
+        ProviderPermissionSet::new([
+            ProviderPermission::new("contents", PermissionLevel::Write).unwrap()
+        ])
+        .unwrap();
     let build = |trust_class| {
         WorkloadCredentialRequest::new(
             &connection(),
@@ -352,7 +352,7 @@ fn explicit_workload_retirement_preserves_the_secret_bearing_cleanup_obligation(
         lease(),
         TrustSourceClass::SameRepository,
         WorkloadCredentialProfile::CheckoutRead,
-        WorkloadCredentialPermissionSet::default(),
+        ProviderPermissionSet::default(),
         UnixMillis::new(2_001),
         UnixMillis::new(4_000),
     )

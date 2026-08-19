@@ -39,8 +39,8 @@ use automata_ci_key_management::{
 use automata_ci_protocol::{ProtocolLimits, RuntimeAuthorityEndpoint};
 use automata_ci_protocol_protobuf::encode_job_ir;
 use automata_ci_provider::{
-    ProviderConnectionId, WorkloadCredentialIssueOutcome, WorkloadCredentialPermission,
-    WorkloadCredentialPermissionSet, WorkloadCredentialProfile, WorkloadCredentialProviderError,
+    ProviderConnectionId, ProviderPermission, ProviderPermissionSet,
+    WorkloadCredentialIssueOutcome, WorkloadCredentialProfile, WorkloadCredentialProviderError,
     WorkloadCredentialProviderErrorKind, WorkloadCredentialRequest,
 };
 use automata_ci_store::{
@@ -636,7 +636,7 @@ fn credential_request(identity: &GithubRuntimeAuthorityIdentity) -> WorkloadCred
         .expect("lease"),
         automata_ci_core::TrustSourceClass::SameRepository,
         WorkloadCredentialProfile::RepositoryAccess,
-        WorkloadCredentialPermissionSet::new([WorkloadCredentialPermission::new(
+        ProviderPermissionSet::new([ProviderPermission::new(
             "contents",
             automata_ci_core::PermissionLevel::Read,
         )

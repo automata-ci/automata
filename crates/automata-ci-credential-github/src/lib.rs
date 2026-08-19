@@ -66,11 +66,13 @@ pub use installation_contract::{
     GithubAppInstallationPermission,
 };
 pub use runtime_authority::{
-    GithubInstallationTokenCandidateError, GithubInstallationTokenIndeterminate,
+    GithubInstallationTokenCandidateError, GithubInstallationTokenError,
+    GithubInstallationTokenErrorKind, GithubInstallationTokenIndeterminate,
     GithubInstallationTokenIndeterminateReason, GithubInstallationTokenMintOutcome,
-    GithubInstallationTokenRevocationCandidate, GithubInstallationTokenRevocationFailure,
-    GithubInstallationTokenRevocationFailureKind, GithubInstallationTokenRevocationOutcome,
-    GithubInstallationTokenRevokePending, GithubReadyInstallationToken,
+    GithubInstallationTokenRequest, GithubInstallationTokenRevocationCandidate,
+    GithubInstallationTokenRevocationFailure, GithubInstallationTokenRevocationFailureKind,
+    GithubInstallationTokenRevocationOutcome, GithubInstallationTokenRevokePending,
+    GithubReadyInstallationToken,
 };
 pub use runtime_authority_lifecycle::{
     GithubRuntimeAuthorityLifecycleBroker, GithubRuntimeAuthorityLifecycleBrokerRouter,
@@ -93,6 +95,6 @@ pub use server_service_authority::{
     MAX_GITHUB_SERVER_SERVICE_INSTALLATION_BROKERS, PendingGithubServerServiceCorruptionCleanup,
     PendingGithubServerServiceHandoffRelease, PendingGithubServerServiceMintCommit,
     PendingGithubServerServiceRevocationCommit, ResolvedGithubServerServiceCredentialRequest,
-    github_server_service_credential_request, github_server_service_workload_identity,
+    github_server_service_credential_request,
 };
 pub use signer::GithubAppKeyError;
