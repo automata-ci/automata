@@ -32,6 +32,7 @@ mod checks_presentation;
 mod checks_publisher;
 mod common_runtime;
 mod processor;
+mod result_adapter;
 mod schedule;
 mod service;
 mod worker;
@@ -44,6 +45,12 @@ pub use checks_publisher::{
 };
 
 pub use common_runtime::{GithubProviderRuntimeAdapter, GithubTriggerHandler};
+
+pub use result_adapter::{
+    GithubResultCredential, GithubResultCredentialProvider, GithubResultCredentialProviderError,
+    GithubResultCredentialRelease, GithubResultCredentialRequest, GithubResultCredentialValueError,
+    GithubResultOperation, GithubResultProviderAdapter, GithubResultProviderAdapterError,
+};
 
 pub use changed_files::GithubRestPushChangedFilesProvider;
 

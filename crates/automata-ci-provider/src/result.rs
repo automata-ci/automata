@@ -16,11 +16,13 @@ use crate::{
     ExternalRepositoryIdentity, ExternalResultId, ProviderCapabilities, ProviderCapability,
     ProviderCapabilityKind, ProviderConnectionId, ProviderConnectionManifest,
     ProviderConnectionRevision, ProviderDeliveryId, ProviderLifecycleState, ProviderRepositoryPath,
-    ProviderResultSubjectId, ProviderResultWorkerId, StatusHistoryModel,
+    ProviderResultSubjectId, ProviderResultWorkerId, ProviderSchemaVersion, StatusHistoryModel,
 };
 
 /// Maximum desired-result title bytes.
 pub const MAX_PROVIDER_RESULT_TITLE_BYTES: usize = 255;
+/// Maximum immutable result-name bytes.
+pub const MAX_PROVIDER_RESULT_NAME_BYTES: usize = 255;
 /// Maximum desired-result summary bytes.
 pub const MAX_PROVIDER_RESULT_SUMMARY_BYTES: usize = 64 * 1_024;
 /// Maximum annotation records retained for one desired generation.
@@ -39,10 +41,13 @@ pub const MAX_PROVIDER_RESULT_LEASE_MILLIS: u64 = 15 * 60 * 1_000;
 pub const MAX_PROVIDER_RESULT_TOTAL_CLAIM_MILLIS: u64 = 60 * 60 * 1_000;
 /// Maximum requested publication retry delay.
 pub const MAX_PROVIDER_RESULT_RETRY_MILLIS: u64 = 24 * 60 * 60 * 1_000;
+/// Maximum adapter-owned durable continuation bytes for one desired generation.
+pub const MAX_PROVIDER_RESULT_CONTINUATION_BYTES: usize = 64 * 1_024;
 
 const RESULT_SUBJECT_DOMAIN: &[u8] = b"automata.provider.result-subject.v1\0";
 const RESULT_PROJECTION_DOMAIN: &[u8] = b"automata.provider.result-projection.v1\0";
 const RESULT_EVIDENCE_DOMAIN: &[u8] = b"automata.provider.result-evidence.v1\0";
+const RESULT_CONTINUATION_DOMAIN: &[u8] = b"automata.provider.result-continuation.v1\0";
 
 /// Exact Automata subject represented by one provider result.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -101,6 +106,8 @@ pub struct ProviderResultSubject {
     connection_digest: Sha256Digest,
     repository: ExternalRepositoryIdentity,
     object: GitObjectId,
+    name: ProviderResultName,
+    details_url: ProviderResultDetailsUrl,
     subject: ProviderResultSubjectKind,
     attempt: NonZeroU32,
     created_at: UnixMillis,
@@ -113,10 +120,13 @@ impl ProviderResultSubject {
     /// # Errors
     ///
     /// Rejects inactive connections, zero attempts, or pre-epoch timestamps.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         subject_id: ProviderResultSubjectId,
         connection: &ProviderConnectionManifest,
         object: GitObjectId,
+        name: ProviderResultName,
+        details_url: ProviderResultDetailsUrl,
         subject: ProviderResultSubjectKind,
         attempt: u32,
         created_at: UnixMillis,
@@ -135,6 +145,8 @@ impl ProviderResultSubject {
             connection_digest: connection.digest(),
             repository: connection.configuration().repository().clone(),
             object,
+            name,
+            details_url,
             subject,
             attempt,
             created_at,
@@ -158,6 +170,8 @@ impl ProviderResultSubject {
             GitObjectAlgorithm::Sha256 => 2,
         }]);
         hash.update(self.object.as_bytes());
+        part(&mut hash, self.name.as_str().as_bytes());
+        part(&mut hash, self.details_url.as_url().as_str().as_bytes());
         self.subject.hash_into(&mut hash);
         hash.update(self.attempt.get().to_be_bytes());
         hash.update(self.created_at.get().to_be_bytes());
@@ -193,6 +207,16 @@ impl ProviderResultSubject {
     #[must_use]
     pub const fn object(&self) -> GitObjectId {
         self.object
+    }
+    /// Returns the immutable provider-facing result name.
+    #[must_use]
+    pub const fn name(&self) -> &ProviderResultName {
+        &self.name
+    }
+    /// Returns the immutable provider-facing details URL.
+    #[must_use]
+    pub const fn details_url(&self) -> &ProviderResultDetailsUrl {
+        &self.details_url
     }
     /// Returns the exact Automata subject.
     #[must_use]
@@ -254,6 +278,12 @@ macro_rules! bounded_text {
     };
 }
 
+bounded_text!(
+    ProviderResultName,
+    MAX_PROVIDER_RESULT_NAME_BYTES,
+    InvalidName,
+    "Immutable provider-facing result name."
+);
 bounded_text!(
     ProviderResultTitle,
     MAX_PROVIDER_RESULT_TITLE_BYTES,
@@ -497,7 +527,6 @@ pub struct DesiredProviderResult {
     conclusion: Option<ProviderResultConclusion>,
     title: ProviderResultTitle,
     summary: ProviderResultSummary,
-    details_url: ProviderResultDetailsUrl,
     annotations: Vec<ProviderResultAnnotation>,
     updated_at: UnixMillis,
     digest: Sha256Digest,
@@ -510,14 +539,12 @@ impl DesiredProviderResult {
     ///
     /// Rejects zero generations, invalid timestamps, excessive annotations, or
     /// a conclusion outside the completed phase.
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         generation: u64,
         phase: ProviderResultPhase,
         conclusion: Option<ProviderResultConclusion>,
         title: ProviderResultTitle,
         summary: ProviderResultSummary,
-        details_url: ProviderResultDetailsUrl,
         mut annotations: Vec<ProviderResultAnnotation>,
         updated_at: UnixMillis,
     ) -> Result<Self, ProviderResultModelError> {
@@ -558,7 +585,6 @@ impl DesiredProviderResult {
             conclusion,
             title,
             summary,
-            details_url,
             annotations,
             updated_at,
             digest: Sha256Digest::from_bytes([0; 32]),
@@ -577,7 +603,6 @@ impl DesiredProviderResult {
         ]);
         part(&mut hash, self.title.as_str().as_bytes());
         part(&mut hash, self.summary.as_str().as_bytes());
-        part(&mut hash, self.details_url.as_url().as_str().as_bytes());
         hash.update(
             u64::try_from(self.annotations.len())
                 .expect("annotation bound fits u64")
@@ -618,11 +643,6 @@ impl DesiredProviderResult {
     #[must_use]
     pub const fn summary(&self) -> &ProviderResultSummary {
         &self.summary
-    }
-    /// Returns the details URL.
-    #[must_use]
-    pub const fn details_url(&self) -> &ProviderResultDetailsUrl {
-        &self.details_url
     }
     /// Returns canonical annotations retained regardless of adapter support.
     #[must_use]
@@ -677,6 +697,89 @@ impl ProviderResultMarker {
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+/// Bounded adapter-owned recovery state persisted across publication retries.
+#[derive(Clone, Eq, PartialEq)]
+pub struct ProviderResultContinuation {
+    schema_version: ProviderSchemaVersion,
+    bytes: Vec<u8>,
+    digest: Sha256Digest,
+}
+
+impl ProviderResultContinuation {
+    /// Creates nonempty bounded continuation bytes under an explicit adapter schema.
+    ///
+    /// # Errors
+    ///
+    /// Rejects empty or oversized state.
+    pub fn new(
+        schema_version: ProviderSchemaVersion,
+        bytes: Vec<u8>,
+    ) -> Result<Self, ProviderResultModelError> {
+        if bytes.is_empty() || bytes.len() > MAX_PROVIDER_RESULT_CONTINUATION_BYTES {
+            return Err(ProviderResultModelError::InvalidContinuation);
+        }
+        let mut hash = Sha256::new();
+        hash.update(RESULT_CONTINUATION_DOMAIN);
+        hash.update(schema_version.get().to_be_bytes());
+        part(&mut hash, &bytes);
+        Ok(Self {
+            schema_version,
+            bytes,
+            digest: Sha256Digest::from_bytes(hash.finalize().into()),
+        })
+    }
+
+    /// Returns the adapter continuation schema.
+    #[must_use]
+    pub const fn schema_version(&self) -> ProviderSchemaVersion {
+        self.schema_version
+    }
+
+    /// Returns the exact adapter-owned continuation bytes.
+    #[must_use]
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// Returns the canonical continuation digest.
+    #[must_use]
+    pub const fn digest(&self) -> Sha256Digest {
+        self.digest
+    }
+}
+
+impl fmt::Debug for ProviderResultContinuation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProviderResultContinuation")
+            .field("schema_version", &self.schema_version)
+            .field("bytes", &"[ADAPTER STATE]")
+            .field("byte_length", &self.bytes.len())
+            .field("digest", &self.digest)
+            .finish()
+    }
+}
+
+/// Stable native identity retained across mutable desired-result generations.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProviderResultBinding {
+    external_id: ExternalResultId,
+}
+
+impl ProviderResultBinding {
+    /// Binds a mutable provider result subject to its one native object.
+    #[must_use]
+    pub const fn new(external_id: ExternalResultId) -> Self {
+        Self { external_id }
+    }
+
+    /// Returns the stable provider-native result identity.
+    #[must_use]
+    pub const fn external_id(&self) -> &ExternalResultId {
+        &self.external_id
     }
 }
 
@@ -765,6 +868,8 @@ pub struct ClaimedProviderResult {
     marker: ProviderResultMarker,
     claim: ProviderResultClaimFence,
     attempts: NonZeroU16,
+    binding: Option<ProviderResultBinding>,
+    continuation: Option<ProviderResultContinuation>,
 }
 
 impl ClaimedProviderResult {
@@ -778,6 +883,8 @@ impl ClaimedProviderResult {
         desired: DesiredProviderResult,
         claim: ProviderResultClaimFence,
         attempts: u16,
+        binding: Option<ProviderResultBinding>,
+        continuation: Option<ProviderResultContinuation>,
     ) -> Result<Self, ProviderResultModelError> {
         let attempts = NonZeroU16::new(attempts)
             .filter(|value| value.get() <= MAX_PROVIDER_RESULT_PUBLICATION_ATTEMPTS)
@@ -795,6 +902,8 @@ impl ClaimedProviderResult {
             marker,
             claim,
             attempts,
+            binding,
+            continuation,
         })
     }
     /// Returns the immutable result subject.
@@ -821,6 +930,16 @@ impl ClaimedProviderResult {
     #[must_use]
     pub const fn attempts(&self) -> u16 {
         self.attempts.get()
+    }
+    /// Returns the stable mutable native identity, when already established.
+    #[must_use]
+    pub const fn binding(&self) -> Option<&ProviderResultBinding> {
+        self.binding.as_ref()
+    }
+    /// Returns adapter-owned recovery state from the preceding retry.
+    #[must_use]
+    pub const fn continuation(&self) -> Option<&ProviderResultContinuation> {
+        self.continuation.as_ref()
     }
     /// Returns the lease start time.
     #[must_use]
@@ -878,6 +997,14 @@ impl ProviderResultPublicationEvidence {
     ) -> Result<Self, ProviderResultModelError> {
         if observed_at < claimed.claim.claimed_at || observed_at >= claimed.claim.expires_at {
             return Err(ProviderResultModelError::InvalidTimestamp);
+        }
+        if (model == ProviderResultPublicationModel::MutableRichCheck && external_id.is_none())
+            || claimed.binding.as_ref().is_some_and(|binding| {
+                model != ProviderResultPublicationModel::MutableRichCheck
+                    || external_id.as_ref() != Some(binding.external_id())
+            })
+        {
+            return Err(ProviderResultModelError::InvalidPublicationBinding);
         }
         let claim = claimed.claim;
         let mut hash = Sha256::new();
@@ -1151,11 +1278,12 @@ impl CompleteProviderResult {
 }
 
 /// Releases one exact claim for a bounded retry.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RetryProviderResult {
     claim: ProviderResultClaimFence,
     failed_at: UnixMillis,
     retry_at: UnixMillis,
+    continuation: Option<ProviderResultContinuation>,
 }
 impl RetryProviderResult {
     /// Creates a bounded positive retry schedule under one claim.
@@ -1167,6 +1295,7 @@ impl RetryProviderResult {
         claim: ProviderResultClaimFence,
         failed_at: UnixMillis,
         retry_at: UnixMillis,
+        continuation: Option<ProviderResultContinuation>,
     ) -> Result<Self, ProviderResultModelError> {
         let delay = retry_at
             .get()
@@ -1181,22 +1310,28 @@ impl RetryProviderResult {
             claim,
             failed_at,
             retry_at,
+            continuation,
         })
     }
     /// Returns the consumed claim.
     #[must_use]
-    pub const fn claim(self) -> ProviderResultClaimFence {
+    pub const fn claim(&self) -> ProviderResultClaimFence {
         self.claim
     }
     /// Returns the failure observation time.
     #[must_use]
-    pub const fn failed_at(self) -> UnixMillis {
+    pub const fn failed_at(&self) -> UnixMillis {
         self.failed_at
     }
     /// Returns the next eligible claim time.
     #[must_use]
-    pub const fn retry_at(self) -> UnixMillis {
+    pub const fn retry_at(&self) -> UnixMillis {
         self.retry_at
+    }
+    /// Returns adapter-owned recovery state for the next claim.
+    #[must_use]
+    pub const fn continuation(&self) -> Option<&ProviderResultContinuation> {
+        self.continuation.as_ref()
     }
 }
 
@@ -1304,15 +1439,6 @@ pub trait ProviderResultRepository: fmt::Debug + Send + Sync {
 /// Sanitized adapter publication failure.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum ResultPublisherError {
-    /// Transport or provider service is temporarily unavailable.
-    #[error("result publisher is temporarily unavailable")]
-    Unavailable,
-    /// Provider quota is temporarily exhausted.
-    #[error("result publisher is rate limited")]
-    RateLimited {
-        /// Bounded provider retry guidance, when present.
-        retry_after: Option<ProviderResultRetryAfter>,
-    },
     /// Authentication is missing or invalid.
     #[error("result publisher authentication failed")]
     Unauthorized,
@@ -1354,14 +1480,6 @@ impl ProviderResultRetryAfter {
     }
 }
 
-impl ResultPublisherError {
-    /// Returns whether the durable outbox may schedule a bounded retry.
-    #[must_use]
-    pub const fn is_retryable(self) -> bool {
-        matches!(self, Self::Unavailable | Self::RateLimited { .. })
-    }
-}
-
 /// Invalid common result model.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum ProviderResultModelError {
@@ -1395,6 +1513,9 @@ pub enum ProviderResultModelError {
     /// Title violates its text bound.
     #[error("result title is invalid")]
     InvalidTitle,
+    /// Immutable name violates its text bound.
+    #[error("result name is invalid")]
+    InvalidName,
     /// Summary violates its text bound.
     #[error("result summary is invalid")]
     InvalidSummary,
@@ -1416,6 +1537,12 @@ pub enum ProviderResultModelError {
     /// Exact duplicate annotations are ambiguous provider work.
     #[error("result annotation is duplicated")]
     DuplicateAnnotation,
+    /// Adapter recovery state was empty or exceeded its hard bound.
+    #[error("result continuation is invalid")]
+    InvalidContinuation,
+    /// Mutable publication identity was absent or changed across generations.
+    #[error("result publication binding is invalid")]
+    InvalidPublicationBinding,
     /// Only completed desired state may have a conclusion.
     #[error("result phase and conclusion are inconsistent")]
     InvalidPhaseConclusion,

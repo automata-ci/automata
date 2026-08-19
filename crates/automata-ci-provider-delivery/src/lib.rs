@@ -15,9 +15,10 @@ pub use clock::{ProviderDeliveryClock, ProviderDeliveryClockError, SystemProvide
 pub use configuration::{ProviderConfigurationService, ProviderConfigurationServiceError};
 pub use ingress::{PreparedProviderWebhook, ProviderDeliveryIngress, ProviderDeliveryIngressError};
 pub use result_worker::{
-    ProviderResultAdapter, ProviderResultAdapterRegistry, ProviderResultAdapterRegistryError,
-    ProviderResultLease, ProviderResultObservation, ProviderResultWorker,
-    ProviderResultWorkerConfig, ProviderResultWorkerError, ProviderResultWorkerOutcome,
+    ProviderResultAdapter, ProviderResultAdapterOutcome, ProviderResultAdapterRegistry,
+    ProviderResultAdapterRegistryError, ProviderResultLease, ProviderResultObservation,
+    ProviderResultWorker, ProviderResultWorkerConfig, ProviderResultWorkerError,
+    ProviderResultWorkerOutcome,
 };
 pub use runtime::{
     ProviderControlHandlingError, ProviderProcessingDispatcher, ProviderRuntimeAdapter,
