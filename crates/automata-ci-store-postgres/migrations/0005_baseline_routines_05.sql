@@ -547,7 +547,7 @@ CREATE FUNCTION automata_github_runtime_authority_base_is_current(authority gith
     )
 $$;
 
-CREATE FUNCTION automata_github_schedule_run_evidence_insert_guard() RETURNS trigger
+CREATE FUNCTION automata_github_schedule_check_evidence_insert_guard() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 DECLARE
@@ -565,12 +565,167 @@ BEGIN
     JOIN github_schedule_registry_entries AS entry
       ON entry.registry_id = fire.registry_id
      AND entry.ordinal = fire.entry_ordinal
+    JOIN github_schedule_registry_seals AS seal
+      ON seal.registry_id = registry.registry_id
+     AND seal.inventory_digest = registry.inventory_digest
+     AND seal.schedule_count = registry.schedule_count
+    JOIN github_schedule_registry_current AS current
+      ON current.tenant_id = registry.tenant_id
+     AND current.repository_id = registry.repository_id
+     AND current.provider_connection_id = registry.provider_connection_id
+     AND current.registry_id = registry.registry_id
+    JOIN github_provider_manifest_revisions AS manifest
+      ON manifest.tenant_id = registry.tenant_id
+     AND manifest.repository_id = registry.repository_id
+     AND manifest.provider_connection_id = registry.provider_connection_id
+     AND manifest.manifest_revision = registry.manifest_revision
+     AND manifest.manifest_digest = registry.manifest_digest
+    JOIN github_provider_manifest_current AS manifest_current
+      ON manifest_current.tenant_id = manifest.tenant_id
+     AND manifest_current.repository_id = manifest.repository_id
+     AND manifest_current.provider_connection_id = manifest.provider_connection_id
+     AND manifest_current.manifest_revision = manifest.manifest_revision
+     AND manifest_current.manifest_digest = manifest.manifest_digest
+    JOIN github_server_service_authorities AS authority
+      ON authority.tenant_id = registry.tenant_id
+     AND authority.id = NEW.checks_authority_id
+    JOIN github_check_subjects AS subject
+      ON subject.tenant_id = fire.tenant_id
+     AND subject.repository_id = fire.repository_id
+     AND subject.provider_connection_id = fire.provider_connection_id
+     AND subject.schedule_fire_id = fire.fire_id
+     AND subject.id = NEW.github_check_subject_id
+    WHERE fire.fire_id = NEW.schedule_fire_id
+      AND fire.tenant_id = NEW.tenant_id
+      AND fire.repository_id = NEW.repository_id
+      AND fire.provider_connection_id = NEW.provider_connection_id
+      AND fire.registry_id = NEW.registry_id
+      AND fire.entry_ordinal = NEW.entry_ordinal
+      AND fire.scheduled_at_ms = NEW.scheduled_at_ms
+      AND fire.state = 'claimed'
+      AND fire.claimed_at_ms <= now_ms
+      AND fire.claim_expires_at_ms > now_ms
+      AND NEW.recorded_at_ms >= fire.claimed_at_ms
+      AND NEW.recorded_at_ms < fire.claim_expires_at_ms
+      AND registry.manifest_revision = NEW.provider_manifest_revision
+      AND registry.manifest_digest = NEW.provider_manifest_digest
+      AND registry.default_branch_ref = NEW.default_branch_ref
+      AND registry.source_revision = NEW.source_revision
+      AND registry.github_repository_owner_id = NEW.github_repository_owner_id
+      AND registry.default_branch_ref = manifest.git_ref
+      AND NEW.github_check_head_sha = decode(registry.source_revision, 'hex')
+      AND subject.origin_kind = 'scheduled_fire'
+      AND subject.provider_delivery_id IS NULL
+      AND subject.subject_key = entry.workflow_path
+      AND subject.provider_installation_id = manifest.provider_installation_id
+      AND subject.github_repository_id = manifest.github_repository_id
+      AND subject.github_repository_name = manifest.github_repository_name
+      AND subject.github_app_id = manifest.github_app_id
+      AND subject.head_sha = NEW.github_check_head_sha
+      AND subject.check_name = manifest.check_name
+      AND subject.created_at_ms = NEW.recorded_at_ms
+      AND authority.repository_id = registry.repository_id
+      AND authority.provider_connection_id = registry.provider_connection_id
+      AND authority.provider_installation_id = manifest.provider_installation_id
+      AND authority.github_app_id = manifest.github_app_id
+      AND authority.github_repository_id = manifest.github_repository_id
+      AND authority.github_repository_name = manifest.github_repository_name
+      AND authority.service_scope = 'checks_write'
+      AND authority.github_app_client_id = manifest.github_app_client_id
+      AND authority.github_app_jwt_issuer_kind = manifest.github_app_jwt_issuer_kind
+      AND authority.app_key_spki_sha256 = manifest.app_key_spki_sha256
+      AND authority.app_configuration_revision =
+          NEW.checks_authority_app_configuration_revision
+      AND authority.app_configuration_revision = manifest.app_configuration_revision
+      AND authority.policy_revision = NEW.checks_authority_policy_revision
+      AND authority.policy_revision = manifest.policy_revision
+      AND authority.identity_digest = NEW.checks_authority_identity_digest
+      AND authority.state = 'active'
+      AND authority.created_at_ms <= NEW.recorded_at_ms
+    FOR SHARE OF fire, registry, entry, seal, current, manifest, manifest_current,
+                 authority, subject;
+    IF exact IS DISTINCT FROM TRUE THEN
+        RAISE EXCEPTION 'GitHub schedule Check evidence is not exact and live'
+            USING ERRCODE = 'integrity_constraint_violation',
+                  CONSTRAINT = 'github_schedule_check_evidence_authority_exact';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION automata_github_schedule_check_requires_atomic_evidence() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    evidence github_schedule_check_evidence%ROWTYPE;
+    outbox github_check_projection_outbox%ROWTYPE;
+BEGIN
+    IF NEW.origin_kind <> 'scheduled_fire' OR NEW.subject_kind = 'job' THEN
+        RETURN NULL;
+    END IF;
+    SELECT * INTO evidence
+    FROM github_schedule_check_evidence
+    WHERE schedule_fire_id = NEW.schedule_fire_id
+      AND tenant_id = NEW.tenant_id
+      AND repository_id = NEW.repository_id
+      AND provider_connection_id = NEW.provider_connection_id
+      AND github_check_subject_id = NEW.id;
+    SELECT * INTO outbox
+    FROM github_check_projection_outbox
+    WHERE subject_id = NEW.id;
+    IF evidence.schedule_fire_id IS NULL
+        OR evidence.github_check_head_sha <> NEW.head_sha
+        OR evidence.recorded_at_ms <> NEW.created_at_ms
+        OR outbox.subject_id IS NULL
+        OR outbox.state <> 'pending'
+        OR outbox.attempted_revision IS NOT NULL
+        OR outbox.attempt_count <> 0
+        OR outbox.claim_fence <> 0
+        OR outbox.projected_revision <> 0
+        OR outbox.state_updated_at_ms <> NEW.created_at_ms
+    THEN
+        RAISE EXCEPTION 'GitHub scheduled Check requires atomic sealed evidence and outbox'
+            USING ERRCODE = 'integrity_constraint_violation',
+                  CONSTRAINT = 'github_schedule_check_atomic_evidence_required';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE FUNCTION automata_github_schedule_run_evidence_insert_guard() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    exact BOOLEAN;
+    now_ms BIGINT;
+BEGIN
+    now_ms := floor(extract(epoch FROM clock_timestamp()) * 1000)::BIGINT;
+    SELECT TRUE INTO exact
+    FROM github_schedule_fires AS fire
+    JOIN github_schedule_registry_revisions AS registry
+      ON registry.tenant_id = fire.tenant_id
+     AND registry.repository_id = fire.repository_id
+     AND registry.provider_connection_id = fire.provider_connection_id
+     AND registry.registry_id = fire.registry_id
+    JOIN github_schedule_registry_entries AS entry
+     ON entry.registry_id = fire.registry_id
+     AND entry.ordinal = fire.entry_ordinal
     JOIN github_provider_manifest_current AS manifest_current
       ON manifest_current.tenant_id = registry.tenant_id
      AND manifest_current.repository_id = registry.repository_id
      AND manifest_current.provider_connection_id = registry.provider_connection_id
      AND manifest_current.manifest_revision = registry.manifest_revision
      AND manifest_current.manifest_digest = registry.manifest_digest
+    JOIN github_schedule_check_evidence AS schedule_check
+      ON schedule_check.schedule_fire_id = fire.fire_id
+     AND schedule_check.tenant_id = fire.tenant_id
+     AND schedule_check.repository_id = fire.repository_id
+     AND schedule_check.provider_connection_id = fire.provider_connection_id
+     AND schedule_check.registry_id = fire.registry_id
+     AND schedule_check.entry_ordinal = fire.entry_ordinal
+    JOIN github_check_subjects AS check_subject
+      ON check_subject.id = schedule_check.github_check_subject_id
+     AND check_subject.tenant_id = schedule_check.tenant_id
     JOIN workflow_runs AS run
       ON run.repository_id = fire.repository_id
      AND run.id = NEW.run_id
@@ -591,10 +746,6 @@ BEGIN
     WHERE fire.fire_id = NEW.schedule_fire_id
       AND fire.tenant_id = NEW.tenant_id
       AND fire.repository_id = NEW.repository_id
-      AND fire.provider_connection_id = NEW.provider_connection_id
-      AND fire.registry_id = NEW.registry_id
-      AND fire.entry_ordinal = NEW.entry_ordinal
-      AND fire.scheduled_at_ms = NEW.scheduled_at_ms
       AND fire.state = 'claimed'
       AND fire.claim_owner_id = NEW.admission_claim_owner_id
       AND fire.attempt_count = NEW.admission_claim_attempt
@@ -603,16 +754,25 @@ BEGIN
       AND fire.claim_expires_at_ms = NEW.admission_claim_expires_at_ms
       AND fire.claimed_at_ms <= now_ms
       AND fire.claim_expires_at_ms > now_ms
-      AND registry.manifest_revision = NEW.provider_manifest_revision
-      AND registry.manifest_digest = NEW.provider_manifest_digest
+      AND registry.default_branch_ref = schedule_check.default_branch_ref
+      AND registry.source_revision = schedule_check.source_revision
       AND registry.github_repository_owner_id = NEW.github_repository_owner_id
-      AND registry.default_branch_ref = NEW.git_ref
-      AND registry.source_revision = NEW.source_revision
+      AND schedule_check.github_repository_owner_id = NEW.github_repository_owner_id
       AND entry.workflow_path = NEW.workflow_path
       AND entry.workflow_source_digest = NEW.source_digest
+      AND check_subject.origin_kind = 'scheduled_fire'
+      AND check_subject.schedule_fire_id = fire.fire_id
+      AND check_subject.provider_delivery_id IS NULL
+      AND check_subject.workflow_run_id = run.id
+      AND check_subject.linked_at_ms = NEW.admitted_at_ms
+      AND check_subject.desired_state = 'in_progress'
+      AND check_subject.head_sha = NEW.github_check_head_sha
+      AND schedule_check.github_check_subject_id = NEW.github_check_subject_id
+      AND schedule_check.github_check_head_sha = NEW.github_check_head_sha
       AND run.workflow_id = NEW.workflow_id
       AND run.snapshot_id = NEW.snapshot_id
-      AND run.head_sha = NEW.source_revision
+      AND run.head_sha = NEW.github_check_head_sha
+      AND run.git_ref = registry.default_branch_ref
       AND run.git_ref = NEW.git_ref
       AND run.event_name = 'schedule'
       AND run.event_name = NEW.event_name
@@ -627,9 +787,9 @@ BEGIN
       AND marker.admitted_at_ms = NEW.admitted_at_ms
       AND admission.request_digest = NEW.logical_admission_digest
       AND admission.committed_at_ms = NEW.admitted_at_ms
-      AND NOT admission.github_subject_evidence_required
-    FOR SHARE OF fire, registry, entry, manifest_current, run, workflow,
-                 snapshot, marker, admission;
+      AND admission.github_subject_evidence_required
+    FOR SHARE OF fire, registry, entry, manifest_current, schedule_check, check_subject,
+                 run, workflow, snapshot, marker, admission;
     IF exact IS DISTINCT FROM TRUE THEN
         RAISE EXCEPTION 'GitHub scheduled run evidence is not exact and live'
             USING ERRCODE = 'integrity_constraint_violation',
@@ -639,40 +799,51 @@ BEGIN
 END;
 $$;
 
-CREATE FUNCTION automata_github_schedule_run_evidence_digest(schedule_fire_id uuid, tenant_id text, repository_id uuid, provider_connection_id uuid, registry_id uuid, entry_ordinal smallint, scheduled_at_ms bigint, provider_manifest_revision bigint, provider_manifest_digest bytea, github_repository_owner_id bigint, workflow_id uuid, snapshot_id uuid, run_id uuid, root_invocation_id uuid, admission_claim_owner_id uuid, admission_claim_attempt smallint, admission_claim_fence bigint, admission_claimed_at_ms bigint, admission_claim_expires_at_ms bigint, source_revision bytea, workflow_path text, source_digest bytea, event_name text, event_digest bytea, git_ref text, workflow_plan_schema smallint, plan_digest bytea, logical_admission_digest bytea, admitted_at_ms bigint) RETURNS bytea
+CREATE FUNCTION automata_github_schedule_run_subject_evidence_digest(schedule_fire_id uuid, tenant_id text, repository_id uuid, workflow_id uuid, snapshot_id uuid, run_id uuid, root_invocation_id uuid, github_repository_owner_id bigint, admission_claim_owner_id uuid, admission_claim_attempt smallint, admission_claim_fence bigint, admission_claimed_at_ms bigint, admission_claim_expires_at_ms bigint, github_check_subject_id uuid, github_check_head_sha bytea, workflow_path text, source_digest bytea, event_name text, event_digest bytea, git_ref text, workflow_plan_schema smallint, plan_digest bytea, logical_admission_digest bytea, admitted_at_ms bigint) RETURNS bytea
     LANGUAGE sql IMMUTABLE PARALLEL SAFE
     AS $$
 SELECT pg_catalog.sha256(
     pg_catalog.convert_to(
-        'automata.store.github-schedule-run-evidence.v1', 'UTF8'
+        'automata.store.github-schedule-run-subject-evidence.v1', 'UTF8'
     )
     || pg_catalog.decode('00', 'hex')
     || automata_digest_part(pg_catalog.uuid_send(schedule_fire_id))
     || automata_digest_part(pg_catalog.convert_to(tenant_id, 'UTF8'))
     || automata_digest_part(pg_catalog.uuid_send(repository_id))
-    || automata_digest_part(pg_catalog.uuid_send(provider_connection_id))
-    || automata_digest_part(pg_catalog.uuid_send(registry_id))
-    || automata_digest_part(pg_catalog.int8send(entry_ordinal::BIGINT))
-    || automata_digest_part(pg_catalog.int8send(scheduled_at_ms))
-    || automata_digest_part(pg_catalog.int8send(provider_manifest_revision))
-    || automata_digest_part(provider_manifest_digest)
-    || automata_digest_part(pg_catalog.int8send(github_repository_owner_id))
     || automata_digest_part(pg_catalog.uuid_send(workflow_id))
     || automata_digest_part(pg_catalog.uuid_send(snapshot_id))
     || automata_digest_part(pg_catalog.uuid_send(run_id))
     || automata_digest_part(pg_catalog.uuid_send(root_invocation_id))
-    || automata_digest_part(pg_catalog.uuid_send(admission_claim_owner_id))
-    || automata_digest_part(pg_catalog.int8send(admission_claim_attempt::BIGINT))
+    || automata_digest_part(
+        pg_catalog.int8send(github_repository_owner_id)
+    )
+    || automata_digest_part(
+        pg_catalog.uuid_send(admission_claim_owner_id)
+    )
+    || automata_digest_part(
+        pg_catalog.int8send(admission_claim_attempt::BIGINT)
+    )
     || automata_digest_part(pg_catalog.int8send(admission_claim_fence))
     || automata_digest_part(pg_catalog.int8send(admission_claimed_at_ms))
-    || automata_digest_part(pg_catalog.int8send(admission_claim_expires_at_ms))
-    || automata_digest_part(source_revision)
-    || automata_digest_part(pg_catalog.convert_to(workflow_path, 'UTF8'))
+    || automata_digest_part(
+        pg_catalog.int8send(admission_claim_expires_at_ms)
+    )
+    || automata_digest_part(
+        pg_catalog.uuid_send(github_check_subject_id)
+    )
+    || automata_digest_part(github_check_head_sha)
+    || automata_digest_part(
+        pg_catalog.convert_to(workflow_path, 'UTF8')
+    )
     || automata_digest_part(source_digest)
-    || automata_digest_part(pg_catalog.convert_to(event_name, 'UTF8'))
+    || automata_digest_part(
+        pg_catalog.convert_to(event_name, 'UTF8')
+    )
     || automata_digest_part(event_digest)
     || automata_digest_part(pg_catalog.convert_to(git_ref, 'UTF8'))
-    || automata_digest_part(pg_catalog.int8send(workflow_plan_schema::BIGINT))
+    || automata_digest_part(
+        pg_catalog.int8send(workflow_plan_schema::BIGINT)
+    )
     || automata_digest_part(plan_digest)
     || automata_digest_part(logical_admission_digest)
     || automata_digest_part(pg_catalog.int8send(admitted_at_ms))

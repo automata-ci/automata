@@ -178,6 +178,12 @@ ALTER TABLE ONLY github_runtime_authority_issuances
 ALTER TABLE ONLY github_runtime_authority_revocation_claims
     ADD CONSTRAINT github_runtime_authority_revocation_claims_pk PRIMARY KEY (attempt_id, fencing_token, claim_fence);
 
+ALTER TABLE ONLY github_schedule_check_evidence
+    ADD CONSTRAINT github_schedule_check_evidence_pkey PRIMARY KEY (schedule_fire_id);
+
+ALTER TABLE ONLY github_schedule_check_evidence
+    ADD CONSTRAINT github_schedule_check_evidence_subject_unique UNIQUE (github_check_subject_id);
+
 ALTER TABLE ONLY github_schedule_discovery_claims
     ADD CONSTRAINT github_schedule_discovery_claims_pkey PRIMARY KEY (discovery_id);
 
@@ -238,11 +244,14 @@ ALTER TABLE ONLY github_schedule_registry_seals
 ALTER TABLE ONLY github_schedule_runtime
     ADD CONSTRAINT github_schedule_runtime_primary_key PRIMARY KEY (tenant_id, repository_id, provider_connection_id, entry_ordinal);
 
-ALTER TABLE ONLY github_schedule_workflow_run_evidence
-    ADD CONSTRAINT github_schedule_workflow_run_evidence_pkey PRIMARY KEY (schedule_fire_id);
+ALTER TABLE ONLY github_schedule_workflow_run_subject_evidence
+    ADD CONSTRAINT github_schedule_workflow_run_subject_evidence_pkey PRIMARY KEY (schedule_fire_id);
 
-ALTER TABLE ONLY github_schedule_workflow_run_evidence
-    ADD CONSTRAINT github_schedule_workflow_run_evidence_run_unique UNIQUE (repository_id, run_id);
+ALTER TABLE ONLY github_schedule_workflow_run_subject_evidence
+    ADD CONSTRAINT github_schedule_workflow_run_subject_evidence_run_unique UNIQUE (repository_id, run_id);
+
+ALTER TABLE ONLY github_schedule_workflow_run_subject_evidence
+    ADD CONSTRAINT github_schedule_workflow_run_subject_evidence_subject_unique UNIQUE (github_check_subject_id);
 
 ALTER TABLE ONLY github_server_service_authorities
     ADD CONSTRAINT github_server_service_authorities_exact_config_unique UNIQUE (tenant_id, repository_id, provider_connection_id, provider_installation_id, service_scope, app_configuration_revision, policy_revision, configuration_fingerprint);

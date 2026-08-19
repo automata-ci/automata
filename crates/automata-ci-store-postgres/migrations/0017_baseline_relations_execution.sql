@@ -600,6 +600,30 @@ CREATE TABLE github_runtime_authority_revocation_claims (
     CONSTRAINT github_runtime_authority_revocation_claims_shape CHECK (((attempt_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (fencing_token > 0) AND ((claim_fence >= 1) AND (claim_fence <= 64)) AND (claim_owner_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (claimed_at_ms >= 0) AND (expires_at_ms > claimed_at_ms) AND (safe_erase_after_ms > expires_at_ms) AND (octet_length(aad_digest) = 32)))
 );
 
+CREATE TABLE github_schedule_check_evidence (
+    schedule_fire_id uuid NOT NULL,
+    tenant_id text NOT NULL,
+    repository_id uuid NOT NULL,
+    provider_connection_id uuid NOT NULL,
+    registry_id uuid NOT NULL,
+    entry_ordinal smallint NOT NULL,
+    scheduled_at_ms bigint NOT NULL,
+    provider_manifest_revision bigint CONSTRAINT github_schedule_check_evide_provider_manifest_revision_not_null NOT NULL,
+    provider_manifest_digest bytea CONSTRAINT github_schedule_check_evidenc_provider_manifest_digest_not_null NOT NULL,
+    default_branch_ref text NOT NULL COLLATE pg_catalog."C",
+    source_revision text NOT NULL COLLATE pg_catalog."C",
+    github_repository_owner_id bigint CONSTRAINT github_schedule_check_evide_github_repository_owner_id_not_null NOT NULL,
+    checks_authority_id uuid NOT NULL,
+    checks_authority_identity_digest bytea CONSTRAINT github_schedule_check_evide_checks_authority_identity__not_null NOT NULL,
+    checks_authority_app_configuration_revision bigint CONSTRAINT github_schedule_check_evide_checks_authority_app_confi_not_null NOT NULL,
+    checks_authority_policy_revision bigint CONSTRAINT github_schedule_check_evide_checks_authority_policy_re_not_null NOT NULL,
+    github_check_subject_id uuid NOT NULL,
+    github_check_head_sha bytea NOT NULL,
+    recorded_at_ms bigint NOT NULL,
+    CONSTRAINT github_schedule_check_evidence_non_nil CHECK (((schedule_fire_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (repository_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (provider_connection_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (registry_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (checks_authority_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (github_check_subject_id <> '00000000-0000-0000-0000-000000000000'::uuid))),
+    CONSTRAINT github_schedule_check_evidence_shape CHECK ((((entry_ordinal >= 0) AND (entry_ordinal <= 255)) AND (scheduled_at_ms >= 0) AND (provider_manifest_revision > 0) AND (github_repository_owner_id > 0) AND (octet_length(provider_manifest_digest) = 32) AND (octet_length(checks_authority_identity_digest) = 32) AND (checks_authority_app_configuration_revision > 0) AND (checks_authority_policy_revision > 0) AND (source_revision ~ '^[0-9a-f]{40}$'::text) AND automata_github_provider_git_ref_canonical(default_branch_ref) AND (octet_length(github_check_head_sha) = 20) AND (github_check_head_sha = decode(source_revision, 'hex'::text)) AND (recorded_at_ms >= 0)))
+);
+
 CREATE TABLE github_schedule_discovery_claims (
     discovery_id uuid NOT NULL,
     tenant_id text NOT NULL,
@@ -694,7 +718,7 @@ CREATE TABLE github_schedule_registry_revisions (
     manifest_digest bytea NOT NULL,
     github_repository_owner_id bigint CONSTRAINT github_schedule_registry_re_github_repository_owner_id_not_null NOT NULL,
     default_branch_ref text NOT NULL COLLATE pg_catalog."C",
-    source_revision bytea NOT NULL,
+    source_revision text NOT NULL COLLATE pg_catalog."C",
     source_authority_kind text CONSTRAINT github_schedule_registry_revisio_source_authority_kind_not_null NOT NULL COLLATE pg_catalog."C",
     repository_contents_authority_id uuid NOT NULL,
     repository_contents_authority_identity_digest bytea NOT NULL,
@@ -712,7 +736,7 @@ CREATE TABLE github_schedule_registry_revisions (
     CONSTRAINT github_schedule_registry_revisions_digest_shape CHECK (((octet_length(manifest_digest) = 32) AND (octet_length(archive_digest) = 32) AND (octet_length(inventory_digest) = 32) AND (octet_length(repository_contents_authority_identity_digest) = 32))),
     CONSTRAINT github_schedule_registry_revisions_non_nil CHECK (((registry_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (discovery_id = registry_id))),
     CONSTRAINT github_schedule_registry_revisions_source_authority_shape CHECK ((source_authority_kind = 'repository_contents_read'::text) AND (repository_contents_authority_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (repository_contents_authority_app_configuration_revision > 0) AND (repository_contents_authority_policy_revision > 0)),
-    CONSTRAINT github_schedule_registry_revisions_source_shape CHECK (((default_branch_ref ~ '^refs/heads/[^[:cntrl:][:space:]]+$'::text) AND ((octet_length(default_branch_ref) >= 12) AND (octet_length(default_branch_ref) <= 1024)) AND (octet_length(source_revision) = ANY (ARRAY[20, 32])) AND (source_revision <> decode(repeat('00'::text, octet_length(source_revision)), 'hex'::text))))
+    CONSTRAINT github_schedule_registry_revisions_source_shape CHECK (((default_branch_ref ~ '^refs/heads/[^[:cntrl:][:space:]]+$'::text) AND ((octet_length(default_branch_ref) >= 12) AND (octet_length(default_branch_ref) <= 1024)) AND (source_revision ~ '^[0-9a-f]{40}$'::text)))
 );
 
 CREATE TABLE github_schedule_registry_seals (
@@ -734,39 +758,34 @@ CREATE TABLE github_schedule_runtime (
     CONSTRAINT github_schedule_runtime_time CHECK (((next_fire_at_ms >= 0) AND (updated_at_ms >= 0)))
 );
 
-CREATE TABLE github_schedule_workflow_run_evidence (
-    schedule_fire_id uuid NOT NULL,
-    tenant_id text NOT NULL,
-    repository_id uuid NOT NULL,
-    provider_connection_id uuid NOT NULL,
-    registry_id uuid NOT NULL,
-    entry_ordinal smallint NOT NULL,
-    scheduled_at_ms bigint NOT NULL,
-    provider_manifest_revision bigint NOT NULL,
-    provider_manifest_digest bytea NOT NULL,
-    github_repository_owner_id bigint NOT NULL,
-    workflow_id uuid NOT NULL,
-    snapshot_id uuid NOT NULL,
+CREATE TABLE github_schedule_workflow_run_subject_evidence (
+    schedule_fire_id uuid CONSTRAINT github_schedule_workflow_run_subject__schedule_fire_id_not_null NOT NULL,
+    tenant_id text CONSTRAINT github_schedule_workflow_run_subject_evidenc_tenant_id_not_null NOT NULL,
+    repository_id uuid CONSTRAINT github_schedule_workflow_run_subject_evi_repository_id_not_null NOT NULL,
+    workflow_id uuid CONSTRAINT github_schedule_workflow_run_subject_evide_workflow_id_not_null NOT NULL,
+    snapshot_id uuid CONSTRAINT github_schedule_workflow_run_subject_evide_snapshot_id_not_null NOT NULL,
     run_id uuid NOT NULL,
-    root_invocation_id uuid NOT NULL,
-    admission_claim_owner_id uuid NOT NULL,
-    admission_claim_attempt smallint NOT NULL,
-    admission_claim_fence bigint NOT NULL,
-    admission_claimed_at_ms bigint NOT NULL,
-    admission_claim_expires_at_ms bigint NOT NULL,
-    source_revision bytea NOT NULL,
-    workflow_path text NOT NULL COLLATE pg_catalog."C",
-    source_digest bytea NOT NULL,
-    event_name text NOT NULL COLLATE pg_catalog."C",
-    event_digest bytea NOT NULL,
+    root_invocation_id uuid CONSTRAINT github_schedule_workflow_run_subjec_root_invocation_id_not_null NOT NULL,
+    github_repository_owner_id bigint CONSTRAINT github_schedule_workflow_ru_github_repository_owner_id_not_null NOT NULL,
+    admission_claim_owner_id uuid CONSTRAINT github_schedule_workflow_run__admission_claim_owner_id_not_null NOT NULL,
+    admission_claim_attempt smallint CONSTRAINT github_schedule_workflow_run_s_admission_claim_attempt_not_null NOT NULL,
+    admission_claim_fence bigint CONSTRAINT github_schedule_workflow_run_sub_admission_claim_fence_not_null NOT NULL,
+    admission_claimed_at_ms bigint CONSTRAINT github_schedule_workflow_run_s_admission_claimed_at_ms_not_null NOT NULL,
+    admission_claim_expires_at_ms bigint CONSTRAINT github_schedule_workflow_ru_admission_claim_expires_at_not_null NOT NULL,
+    github_check_subject_id uuid CONSTRAINT github_schedule_workflow_run_s_github_check_subject_id_not_null NOT NULL,
+    github_check_head_sha bytea CONSTRAINT github_schedule_workflow_run_sub_github_check_head_sha_not_null NOT NULL,
+    workflow_path text CONSTRAINT github_schedule_workflow_run_subject_evi_workflow_path_not_null NOT NULL COLLATE pg_catalog."C",
+    source_digest bytea CONSTRAINT github_schedule_workflow_run_subject_evi_source_digest_not_null NOT NULL,
+    event_name text CONSTRAINT github_schedule_workflow_run_subject_eviden_event_name_not_null NOT NULL COLLATE pg_catalog."C",
+    event_digest bytea CONSTRAINT github_schedule_workflow_run_subject_evid_event_digest_not_null NOT NULL,
     git_ref text NOT NULL COLLATE pg_catalog."C",
-    workflow_plan_schema smallint NOT NULL,
-    plan_digest bytea NOT NULL,
-    logical_admission_digest bytea NOT NULL,
-    evidence_digest bytea GENERATED ALWAYS AS (automata_github_schedule_run_evidence_digest(schedule_fire_id, tenant_id, repository_id, provider_connection_id, registry_id, entry_ordinal, scheduled_at_ms, provider_manifest_revision, provider_manifest_digest, github_repository_owner_id, workflow_id, snapshot_id, run_id, root_invocation_id, admission_claim_owner_id, admission_claim_attempt, admission_claim_fence, admission_claimed_at_ms, admission_claim_expires_at_ms, source_revision, workflow_path, source_digest, event_name, event_digest, git_ref, workflow_plan_schema, plan_digest, logical_admission_digest, admitted_at_ms)) STORED,
-    admitted_at_ms bigint NOT NULL,
-    CONSTRAINT github_schedule_workflow_run_evidence_non_nil CHECK (schedule_fire_id <> '00000000-0000-0000-0000-000000000000'::uuid AND repository_id <> '00000000-0000-0000-0000-000000000000'::uuid AND provider_connection_id <> '00000000-0000-0000-0000-000000000000'::uuid AND registry_id <> '00000000-0000-0000-0000-000000000000'::uuid AND workflow_id <> '00000000-0000-0000-0000-000000000000'::uuid AND snapshot_id <> '00000000-0000-0000-0000-000000000000'::uuid AND run_id <> '00000000-0000-0000-0000-000000000000'::uuid AND root_invocation_id <> '00000000-0000-0000-0000-000000000000'::uuid AND admission_claim_owner_id <> '00000000-0000-0000-0000-000000000000'::uuid),
-    CONSTRAINT github_schedule_workflow_run_evidence_shape CHECK (entry_ordinal >= 0 AND entry_ordinal <= 255 AND scheduled_at_ms >= 0 AND provider_manifest_revision > 0 AND octet_length(provider_manifest_digest) = 32 AND github_repository_owner_id > 0 AND admission_claim_attempt >= 1 AND admission_claim_attempt <= 20 AND admission_claim_fence > 0 AND admission_claimed_at_ms >= 0 AND admission_claim_expires_at_ms > admission_claimed_at_ms AND admitted_at_ms >= admission_claimed_at_ms AND admitted_at_ms < admission_claim_expires_at_ms AND octet_length(source_revision) IN (20, 32) AND source_revision <> decode(repeat('00', octet_length(source_revision)), 'hex') AND octet_length(source_digest) = 32 AND event_name = 'schedule' AND octet_length(event_digest) = 32 AND automata_github_provider_git_ref_canonical(git_ref) AND workflow_plan_schema = 1 AND octet_length(plan_digest) = 32 AND octet_length(logical_admission_digest) = 32 AND octet_length(evidence_digest) = 32 AND workflow_path ~ '^\.ci/workflows/[^/]+\.ya?ml$' AND workflow_path !~ '[[:cntrl:]\\]')
+    workflow_plan_schema smallint CONSTRAINT github_schedule_workflow_run_subj_workflow_plan_schema_not_null NOT NULL,
+    plan_digest bytea CONSTRAINT github_schedule_workflow_run_subject_evide_plan_digest_not_null NOT NULL,
+    logical_admission_digest bytea CONSTRAINT github_schedule_workflow_run__logical_admission_digest_not_null NOT NULL,
+    subject_evidence_sha256 bytea GENERATED ALWAYS AS (automata_github_schedule_run_subject_evidence_digest(schedule_fire_id, tenant_id, repository_id, workflow_id, snapshot_id, run_id, root_invocation_id, github_repository_owner_id, admission_claim_owner_id, admission_claim_attempt, admission_claim_fence, admission_claimed_at_ms, admission_claim_expires_at_ms, github_check_subject_id, github_check_head_sha, workflow_path, source_digest, event_name, event_digest, git_ref, workflow_plan_schema, plan_digest, logical_admission_digest, admitted_at_ms)) STORED,
+    admitted_at_ms bigint CONSTRAINT github_schedule_workflow_run_subject_ev_admitted_at_ms_not_null NOT NULL,
+    CONSTRAINT github_schedule_workflow_run_subject_evidence_non_nil CHECK (((schedule_fire_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (repository_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (workflow_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (snapshot_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (run_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (root_invocation_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (admission_claim_owner_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (github_check_subject_id <> '00000000-0000-0000-0000-000000000000'::uuid))),
+    CONSTRAINT github_schedule_workflow_run_subject_evidence_shape CHECK ((((admission_claim_attempt >= 1) AND (admission_claim_attempt <= 20)) AND (github_repository_owner_id > 0) AND (admission_claim_fence > 0) AND (admission_claimed_at_ms >= 0) AND (admission_claim_expires_at_ms > admission_claimed_at_ms) AND (admitted_at_ms >= admission_claimed_at_ms) AND (admitted_at_ms < admission_claim_expires_at_ms) AND (octet_length(github_check_head_sha) = 20) AND (octet_length(source_digest) = 32) AND (event_name = 'schedule'::text) AND (octet_length(event_digest) = 32) AND automata_github_provider_git_ref_canonical(git_ref) AND (workflow_plan_schema = 1) AND (octet_length(plan_digest) = 32) AND (octet_length(logical_admission_digest) = 32) AND (octet_length(subject_evidence_sha256) = 32) AND (workflow_path ~ '^\.ci/workflows/[^/]+\.ya?ml$'::text) AND (workflow_path !~ '[[:cntrl:]\\]'::text)))
 );
 
 CREATE TABLE github_server_service_authority_handoffs (
@@ -977,8 +996,8 @@ UNION ALL
     schedule_run.schedule_fire_id AS origin_id,
     'operation'::text AS admission_idempotency_kind,
     (schedule_run.schedule_fire_id)::text AS admission_idempotency_key,
-    NULL::uuid AS github_check_subject_id,
-    schedule_run.source_revision AS github_check_head_sha,
+    schedule_run.github_check_subject_id,
+    schedule_run.github_check_head_sha,
     schedule_run.workflow_path,
     schedule_run.source_digest,
     schedule_run.event_name,
@@ -988,28 +1007,29 @@ UNION ALL
     schedule_run.plan_digest,
     schedule_run.logical_admission_digest,
     schedule_run.admitted_at_ms,
-    schedule_run.evidence_digest AS subject_evidence_sha256,
-    schedule_run.provider_connection_id,
+    schedule_run.subject_evidence_sha256,
+    schedule_check.provider_connection_id,
     manifest.provider_installation_id,
     manifest.github_repository_id,
     schedule_run.github_repository_owner_id,
     manifest.github_repository_name,
     manifest.repository_visibility,
-    schedule_run.provider_manifest_revision,
-    schedule_run.provider_manifest_digest,
+    schedule_check.provider_manifest_revision,
+    schedule_check.provider_manifest_digest,
     manifest.webhook_verifier_fingerprint_sha256 AS authenticated_webhook_verifier_fingerprint_sha256,
     manifest.webhook_verifier_revision AS authenticated_webhook_verifier_revision,
-    NULL::uuid AS checks_authority_id,
-    NULL::bytea AS checks_authority_identity_digest,
-    NULL::bigint AS checks_authority_app_configuration_revision,
-    NULL::bigint AS checks_authority_policy_revision,
+    schedule_check.checks_authority_id,
+    schedule_check.checks_authority_identity_digest,
+    schedule_check.checks_authority_app_configuration_revision,
+    schedule_check.checks_authority_policy_revision,
     registry.repository_contents_authority_id,
     registry.repository_contents_authority_identity_digest,
     registry.repository_contents_authority_app_configuration_revision,
     registry.repository_contents_authority_policy_revision
-   FROM ((github_schedule_workflow_run_evidence schedule_run
-     JOIN github_schedule_registry_revisions registry ON (((registry.tenant_id = schedule_run.tenant_id) AND (registry.repository_id = schedule_run.repository_id) AND (registry.provider_connection_id = schedule_run.provider_connection_id) AND (registry.registry_id = schedule_run.registry_id) AND (registry.manifest_revision = schedule_run.provider_manifest_revision) AND (registry.manifest_digest = schedule_run.provider_manifest_digest) AND (registry.default_branch_ref = schedule_run.git_ref) AND (registry.source_revision = schedule_run.source_revision))))
-     JOIN github_provider_manifest_revisions manifest ON (((manifest.tenant_id = schedule_run.tenant_id) AND (manifest.repository_id = schedule_run.repository_id) AND (manifest.provider_connection_id = schedule_run.provider_connection_id) AND (manifest.manifest_revision = schedule_run.provider_manifest_revision) AND (manifest.manifest_digest = schedule_run.provider_manifest_digest))));
+   FROM (((github_schedule_workflow_run_subject_evidence schedule_run
+     JOIN github_schedule_check_evidence schedule_check ON (((schedule_check.schedule_fire_id = schedule_run.schedule_fire_id) AND (schedule_check.tenant_id = schedule_run.tenant_id) AND (schedule_check.repository_id = schedule_run.repository_id) AND (schedule_check.github_check_subject_id = schedule_run.github_check_subject_id))))
+     JOIN github_schedule_registry_revisions registry ON (((registry.tenant_id = schedule_check.tenant_id) AND (registry.repository_id = schedule_check.repository_id) AND (registry.provider_connection_id = schedule_check.provider_connection_id) AND (registry.registry_id = schedule_check.registry_id) AND (registry.manifest_revision = schedule_check.provider_manifest_revision) AND (registry.manifest_digest = schedule_check.provider_manifest_digest) AND (registry.default_branch_ref = schedule_check.default_branch_ref) AND (registry.source_revision = schedule_check.source_revision))))
+     JOIN github_provider_manifest_revisions manifest ON (((manifest.tenant_id = schedule_check.tenant_id) AND (manifest.repository_id = schedule_check.repository_id) AND (manifest.provider_connection_id = schedule_check.provider_connection_id) AND (manifest.manifest_revision = schedule_check.provider_manifest_revision) AND (manifest.manifest_digest = schedule_check.provider_manifest_digest))));
 
 CREATE TABLE logical_workflow_runs (
     run_id uuid NOT NULL,
