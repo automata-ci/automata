@@ -7,12 +7,11 @@ use uuid::Uuid;
 use automata_ci_provider::ProviderConnectionId;
 use automata_ci_store::{
     AcceptProviderDelivery, AdmissionObject, ClaimProviderDelivery, ClaimedProviderDelivery,
-    CompleteProviderDelivery, GithubCheckTerminalCause, MAX_PROVIDER_DELIVERY_ATTEMPTS,
-    MAX_PROVIDER_DELIVERY_CLAIM_MILLIS, MAX_PROVIDER_DELIVERY_TOTAL_CLAIM_MILLIS, ObjectKey,
-    ProviderDeliveryClaimFence, ProviderDeliveryClaimRenewalRepository,
-    ProviderDeliveryEventEnvelope, ProviderDeliveryId, ProviderDeliveryIdentity,
-    ProviderDeliveryReceipt, ProviderDeliveryRepository, ProviderDeliveryState,
-    ProviderDeliveryStoreError, ProviderDeliveryWorkflowConclusion,
+    CompleteProviderDelivery, MAX_PROVIDER_DELIVERY_ATTEMPTS, MAX_PROVIDER_DELIVERY_CLAIM_MILLIS,
+    MAX_PROVIDER_DELIVERY_TOTAL_CLAIM_MILLIS, ObjectKey, ProviderDeliveryClaimFence,
+    ProviderDeliveryClaimRenewalRepository, ProviderDeliveryEventEnvelope, ProviderDeliveryId,
+    ProviderDeliveryIdentity, ProviderDeliveryReceipt, ProviderDeliveryRepository,
+    ProviderDeliveryState, ProviderDeliveryStoreError, ProviderDeliveryWorkflowConclusion,
     ProviderDeliveryWorkflowInventory, ProviderDeliveryWorkflowInventoryEntry,
     ProviderDeliveryWorkflowInventoryReceipt, ProviderDeliveryWorkflowOutcome,
     ProviderDeliveryWorkflowSourceState, ProviderInstallationId, ProviderProcessingWorkerId,
@@ -22,12 +21,7 @@ use automata_ci_store::{
     RetryProviderDelivery, Sha256Digest, TenantScope,
 };
 
-use super::{
-    PostgresStore,
-    github_check_aggregation::{GithubCheckAggregationError, reconcile_all_direct_check},
-    github_checks::{github_check_conclusion_name, github_check_terminal_cause_name},
-    pg_bigint,
-};
+use super::{PostgresStore, pg_bigint};
 
 const MAX_CALLER_DATABASE_SKEW_MILLIS: u64 = 60_000;
 
@@ -329,28 +323,6 @@ impl ProviderDeliveryRepository for PostgresStore {
         } else {
             verify_exact_completion(&mut transaction, &request).await?
         };
-        let all_direct = delivery_uses_all_direct_workflow_selection(
-            &mut transaction,
-            request.claim().delivery_id(),
-        )
-        .await?;
-        if all_direct {
-            reconcile_all_direct_check(
-                &mut transaction,
-                request.claim().delivery_id().as_uuid(),
-                request.completed_at().get(),
-            )
-            .await
-            .map_err(provider_delivery_aggregation_error)?;
-        } else if let Some(cause) = completion_check_terminal_cause(request.outcomes()) {
-            terminalize_pre_admission_check(
-                &mut transaction,
-                request.claim().delivery_id(),
-                cause,
-                request.completed_at(),
-            )
-            .await?;
-        }
         transaction.commit().await.map_err(operation_error)?;
         Ok(receipt)
     }
@@ -528,176 +500,9 @@ impl ProviderDeliveryRepository for PostgresStore {
             .map(decode_receipt)
             .transpose()?
             .ok_or(ProviderDeliveryStoreError::ClaimRejected)?;
-        terminalize_pre_admission_check(
-            &mut transaction,
-            request.claim().delivery_id(),
-            GithubCheckTerminalCause::SystemUnknown,
-            request.rejected_at(),
-        )
-        .await?;
         transaction.commit().await.map_err(operation_error)?;
         Ok(receipt)
     }
-}
-
-fn completion_check_terminal_cause(
-    outcomes: &[ProviderDeliveryWorkflowOutcome],
-) -> Option<GithubCheckTerminalCause> {
-    if outcomes.iter().any(|outcome| {
-        matches!(
-            outcome.conclusion(),
-            ProviderDeliveryWorkflowConclusion::Admitted { .. }
-        )
-    }) {
-        None
-    } else if outcomes.iter().any(|outcome| {
-        matches!(
-            outcome.conclusion(),
-            ProviderDeliveryWorkflowConclusion::Failed { .. }
-        )
-    }) {
-        Some(GithubCheckTerminalCause::WorkflowFailure)
-    } else {
-        Some(GithubCheckTerminalCause::WorkflowSkipped)
-    }
-}
-
-async fn delivery_uses_all_direct_workflow_selection(
-    transaction: &mut Transaction<'_, Postgres>,
-    delivery_id: ProviderDeliveryId,
-) -> Result<bool, ProviderDeliveryStoreError> {
-    sqlx::query_scalar::<_, bool>(
-        r"
-        SELECT manifest.workflow_selection_kind = 'all_direct'
-        FROM github_provider_delivery_evidence AS evidence
-        JOIN github_provider_manifest_revisions AS manifest
-          ON manifest.tenant_id = evidence.tenant_id
-         AND manifest.repository_id = evidence.repository_id
-         AND manifest.provider_connection_id = evidence.provider_connection_id
-         AND manifest.manifest_revision = evidence.provider_manifest_revision
-         AND manifest.manifest_digest = evidence.provider_manifest_digest
-        WHERE evidence.provider_delivery_id = $1
-        FOR SHARE OF evidence, manifest
-        ",
-    )
-    .bind(delivery_id.as_uuid())
-    .fetch_optional(&mut **transaction)
-    .await
-    .map_err(operation_error)
-    .map(Option::unwrap_or_default)
-}
-
-async fn terminalize_pre_admission_check(
-    transaction: &mut Transaction<'_, Postgres>,
-    delivery_id: ProviderDeliveryId,
-    cause: GithubCheckTerminalCause,
-    terminal_at: UnixMillis,
-) -> Result<(), ProviderDeliveryStoreError> {
-    let row = sqlx::query(
-        r"
-        SELECT id, workflow_run_id, desired_state, desired_conclusion,
-               terminal_cause, desired_revision, desired_updated_at_ms
-        FROM github_check_subjects AS subject
-        JOIN github_provider_delivery_evidence AS evidence
-          ON evidence.github_check_subject_id = subject.id
-         AND evidence.provider_delivery_id = subject.provider_delivery_id
-         AND evidence.tenant_id = subject.tenant_id
-        WHERE evidence.provider_delivery_id = $1
-        FOR UPDATE OF subject
-        ",
-    )
-    .bind(delivery_id.as_uuid())
-    .fetch_optional(&mut **transaction)
-    .await
-    .map_err(operation_error)?;
-    let Some(row) = row else {
-        return if provider_delivery_evidence_exists(transaction, delivery_id).await? {
-            Err(ProviderDeliveryStoreError::CorruptData)
-        } else {
-            Ok(())
-        };
-    };
-    let subject_id: Uuid = row.try_get("id").map_err(operation_error)?;
-    let workflow_run_id: Option<Uuid> = row.try_get("workflow_run_id").map_err(operation_error)?;
-    let desired_state: String = row.try_get("desired_state").map_err(operation_error)?;
-    let desired_conclusion: Option<String> =
-        row.try_get("desired_conclusion").map_err(operation_error)?;
-    let terminal_cause: Option<String> = row.try_get("terminal_cause").map_err(operation_error)?;
-    let desired_revision: i64 = row.try_get("desired_revision").map_err(operation_error)?;
-    let desired_updated_at: i64 = row
-        .try_get("desired_updated_at_ms")
-        .map_err(operation_error)?;
-    if desired_updated_at < 0 {
-        return Err(ProviderDeliveryStoreError::CorruptData);
-    }
-    if workflow_run_id.is_some() {
-        return Ok(());
-    }
-    let expected_conclusion = github_check_conclusion_name(cause.conclusion());
-    let expected_cause = github_check_terminal_cause_name(cause);
-    if desired_state == "completed" {
-        return if desired_conclusion.as_deref() == Some(expected_conclusion)
-            && terminal_cause.as_deref() == Some(expected_cause)
-            && desired_revision == 2
-            && desired_updated_at == terminal_at.get()
-        {
-            Ok(())
-        } else {
-            Err(ProviderDeliveryStoreError::CorruptData)
-        };
-    }
-    if desired_state != "queued"
-        || desired_conclusion.is_some()
-        || terminal_cause.is_some()
-        || desired_revision != 1
-        || desired_updated_at > terminal_at.get()
-    {
-        return Err(ProviderDeliveryStoreError::CorruptData);
-    }
-    let updated = sqlx::query_scalar::<_, Uuid>(
-        r"
-        UPDATE github_check_subjects
-        SET desired_state = 'completed',
-            desired_conclusion = $2,
-            terminal_cause = $3,
-            desired_revision = desired_revision + 1,
-            desired_updated_at_ms = $4
-        WHERE id = $1
-          AND workflow_run_id IS NULL
-          AND desired_state = 'queued'
-          AND desired_conclusion IS NULL
-          AND terminal_cause IS NULL
-          AND desired_revision = 1
-          AND desired_updated_at_ms <= $4
-        RETURNING id
-        ",
-    )
-    .bind(subject_id)
-    .bind(expected_conclusion)
-    .bind(expected_cause)
-    .bind(terminal_at.get())
-    .fetch_optional(&mut **transaction)
-    .await
-    .map_err(operation_error)?;
-    if updated == Some(subject_id) {
-        Ok(())
-    } else {
-        Err(ProviderDeliveryStoreError::CorruptData)
-    }
-}
-
-async fn provider_delivery_evidence_exists(
-    transaction: &mut Transaction<'_, Postgres>,
-    delivery_id: ProviderDeliveryId,
-) -> Result<bool, ProviderDeliveryStoreError> {
-    sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM github_provider_delivery_evidence \
-         WHERE provider_delivery_id = $1)",
-    )
-    .bind(delivery_id.as_uuid())
-    .fetch_one(&mut **transaction)
-    .await
-    .map_err(operation_error)
 }
 
 async fn database_time(
@@ -1850,13 +1655,4 @@ fn outcome_count_i16(
 
 fn operation_error(error: sqlx::Error) -> ProviderDeliveryStoreError {
     ProviderDeliveryStoreError::operation(error)
-}
-
-fn provider_delivery_aggregation_error(
-    error: GithubCheckAggregationError,
-) -> ProviderDeliveryStoreError {
-    match error {
-        GithubCheckAggregationError::Operation(error) => operation_error(error),
-        GithubCheckAggregationError::CorruptData => ProviderDeliveryStoreError::CorruptData,
-    }
 }

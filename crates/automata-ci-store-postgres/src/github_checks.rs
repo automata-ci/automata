@@ -51,20 +51,6 @@ pub(super) const fn github_check_conclusion_name(value: GithubCheckConclusion) -
     }
 }
 
-pub(super) const fn github_check_terminal_cause_name(
-    value: GithubCheckTerminalCause,
-) -> &'static str {
-    match value {
-        GithubCheckTerminalCause::WorkflowSuccess => "workflow_success",
-        GithubCheckTerminalCause::WorkflowSkipped => "workflow_skipped",
-        GithubCheckTerminalCause::WorkflowFailure => "workflow_failure",
-        GithubCheckTerminalCause::WorkflowCancelled => "workflow_cancelled",
-        GithubCheckTerminalCause::WorkflowTimedOut => "workflow_timed_out",
-        GithubCheckTerminalCause::ProviderUnknown => "provider_unknown",
-        GithubCheckTerminalCause::SystemUnknown => "system_unknown",
-    }
-}
-
 pub(super) enum GithubJobCheckInsertError {
     Operation(sqlx::Error),
     CorruptData(&'static str),
