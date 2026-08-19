@@ -172,6 +172,7 @@ plutil -lint "$temporary_plist" >/dev/null || {
 launchctl bootout "system/$label" >/dev/null 2>&1 || true
 install -o root -g wheel -m 0600 "$temporary_plist" "$plist"
 rm -f "$temporary_plist"
-install -o "$service_user" -g "$service_group" -m 0600 /dev/null "$log_file" "$error_file"
+install -o "$service_user" -g "$service_group" -m 0600 /dev/null "$log_file"
+install -o "$service_user" -g "$service_group" -m 0600 /dev/null "$error_file"
 launchctl bootstrap system "$plist"
 printf 'installed and started %s as %s\n' "$label" "$service_user"
