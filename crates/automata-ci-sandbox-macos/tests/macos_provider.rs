@@ -10,9 +10,11 @@ use std::{
 };
 
 use automata_ci_execution::{
-    EnvironmentProfile, EnvironmentProfileId, ExecutionEnvironment, NetworkPolicy, NeverCancelled,
+    DestroySandbox, EnvironmentProfile, EnvironmentProfileId, ExecutionArgv, ExecutionCommand,
+    ExecutionEnvironment, ExecutionErrorKind, ExecutionTermination, NetworkPolicy, NeverCancelled,
     OperationId, ProviderErrorKind, ResourceLimits, RootFilesystemPolicy, RunnerId, SandboxCustody,
-    SandboxEnvironment, SandboxGeneration, SandboxProvider, SandboxSpec, Sha256Digest, TargetPath,
+    SandboxEnvironment, SandboxGeneration, SandboxHandle, SandboxProvider, SandboxSpec,
+    Sha256Digest, TargetPath, discard_execution_output,
 };
 use automata_ci_sandbox_guest::GUEST_PROTOCOL_VERSION;
 use automata_ci_sandbox_macos::{MacosVirtualizationProvider, MacosVirtualizationProviderOptions};
@@ -185,10 +187,134 @@ fn provider_reconciles_a_live_orphan_after_owner_process_loss() {
     drop(recovered);
 }
 
-fn create_physical_orphan() {
+#[test]
+#[ignore = "requires a sealed VM template on a physical Apple Silicon runner"]
+fn provider_cleans_up_and_reuses_slot_after_live_helper_loss() {
     let root = required_path(VM_STORAGE_ROOT_ENV);
-    let provider = MacosVirtualizationProvider::open(physical_options(root))
+    assert_attempts_empty(&root);
+    let provider = MacosVirtualizationProvider::open(physical_options(root.clone()))
         .expect("open physical macOS provider");
+
+    let first_spec = physical_spec("helper-loss");
+    let first = provider
+        .create(&first_spec, &NeverCancelled)
+        .expect("create helper-loss VM");
+    let mut first_cleanup = PhysicalSandboxCleanup::new(
+        provider.clone(),
+        first.handle().clone(),
+        first_spec.generation(),
+        first_spec.custody(),
+    );
+    let endpoint = provider
+        .attach(first.handle(), &NeverCancelled)
+        .expect("attach helper-loss VM");
+    kill_attempt_helper(&root, first.handle());
+    let error = endpoint
+        .exec(
+            &probe_command(first_spec.workspace()),
+            &NeverCancelled,
+            discard_execution_output(),
+        )
+        .expect_err("a killed helper must close the guest endpoint");
+    assert_eq!(error.kind(), ExecutionErrorKind::BackendRejected);
+    drop(endpoint);
+    provider
+        .destroy(
+            &DestroySandbox::new(
+                OperationId::new(),
+                first.handle().clone(),
+                first_spec.generation(),
+                first_spec.custody(),
+            ),
+            &NeverCancelled,
+        )
+        .expect("destroy VM after helper loss");
+    first_cleanup.disarm();
+    assert_attempts_empty(&root);
+
+    let second_spec = physical_spec("helper-loss-reuse");
+    let second = provider
+        .create(&second_spec, &NeverCancelled)
+        .expect("reuse provider slot after helper loss");
+    let mut second_cleanup = PhysicalSandboxCleanup::new(
+        provider.clone(),
+        second.handle().clone(),
+        second_spec.generation(),
+        second_spec.custody(),
+    );
+    let endpoint = provider
+        .attach(second.handle(), &NeverCancelled)
+        .expect("attach replacement VM");
+    let output = endpoint
+        .exec(
+            &probe_command(second_spec.workspace()),
+            &NeverCancelled,
+            discard_execution_output(),
+        )
+        .expect("execute in replacement VM");
+    assert_eq!(output.termination(), ExecutionTermination::Exited(0));
+    drop(endpoint);
+    provider
+        .destroy(
+            &DestroySandbox::new(
+                OperationId::new(),
+                second.handle().clone(),
+                second_spec.generation(),
+                second_spec.custody(),
+            ),
+            &NeverCancelled,
+        )
+        .expect("destroy replacement VM");
+    second_cleanup.disarm();
+    assert_attempts_empty(&root);
+}
+
+struct PhysicalSandboxCleanup {
+    provider: MacosVirtualizationProvider,
+    handle: SandboxHandle,
+    generation: SandboxGeneration,
+    custody: SandboxCustody,
+    armed: bool,
+}
+
+impl PhysicalSandboxCleanup {
+    fn new(
+        provider: MacosVirtualizationProvider,
+        handle: SandboxHandle,
+        generation: SandboxGeneration,
+        custody: SandboxCustody,
+    ) -> Self {
+        Self {
+            provider,
+            handle,
+            generation,
+            custody,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PhysicalSandboxCleanup {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = self.provider.destroy(
+                &DestroySandbox::new(
+                    OperationId::new(),
+                    self.handle.clone(),
+                    self.generation,
+                    self.custody,
+                ),
+                &NeverCancelled,
+            );
+        }
+    }
+}
+
+fn physical_spec(name: &str) -> SandboxSpec {
     let manifest = required_digest(VM_TEMPLATE_SHA256_ENV);
     let profile = SandboxEnvironment::virtual_machine(
         EnvironmentProfile::new(
@@ -201,21 +327,75 @@ fn create_physical_orphan() {
         ExecutionEnvironment::empty(),
     )
     .expect("physical VM environment");
-    let spec = SandboxSpec::new(
+    SandboxSpec::new(
         OperationId::new(),
         SandboxGeneration::new(1).expect("sandbox generation"),
         SandboxCustody::ProfileAdmission {
             runner_id: RunnerId::new(),
         },
         profile,
-        TargetPath::posix("/Users/automata-job/workspaces/orphan-recovery").expect("job workspace"),
+        TargetPath::posix(format!("/Users/automata-job/workspaces/{name}")).expect("job workspace"),
         NetworkPolicy::Disabled,
         RootFilesystemPolicy::Writable,
         ResourceLimits::new(8 * 1024 * 1024 * 1024, 4_000, 512).expect("physical resources"),
     )
     .with_scratch(
-        TargetPath::posix("/Users/automata-job/runner/orphan-recovery").expect("job scratch"),
+        TargetPath::posix(format!("/Users/automata-job/runner/{name}")).expect("job scratch"),
+    )
+}
+
+fn probe_command(working_directory: &TargetPath) -> ExecutionCommand {
+    ExecutionCommand::new(
+        OperationId::new(),
+        ExecutionArgv::new(
+            TargetPath::posix("/usr/bin/true").expect("true path"),
+            Vec::new(),
+        )
+        .expect("probe argv"),
+        working_directory.clone(),
+        ExecutionEnvironment::empty(),
+        Duration::from_secs(5),
+        16 * 1024,
+    )
+    .expect("probe command")
+}
+
+fn kill_attempt_helper(root: &Path, handle: &SandboxHandle) {
+    let helper = required_path(VM_HELPER_ENV);
+    let lock = root.join("attempts").join(handle.opaque()).join(".vm.lock");
+    let expected = format!("{} run --lock {}", helper.display(), lock.display());
+    let output = Command::new("/bin/ps")
+        .args(["-axo", "pid=,command="])
+        .output()
+        .expect("list physical host processes");
+    assert!(output.status.success(), "physical host ps failed");
+    let pids: Vec<u32> = String::from_utf8(output.stdout)
+        .expect("physical host process list must be UTF-8")
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.trim_start().splitn(2, char::is_whitespace);
+            let pid = fields.next()?.parse().ok()?;
+            let command = fields.next()?.trim_start();
+            (command == expected).then_some(pid)
+        })
+        .collect();
+    assert_eq!(
+        pids.len(),
+        1,
+        "expected exactly one helper for the owned VM attempt"
     );
+    let status = Command::new("/bin/kill")
+        .args(["-KILL", &pids[0].to_string()])
+        .status()
+        .expect("kill physical VM helper");
+    assert!(status.success(), "physical VM helper kill failed");
+}
+
+fn create_physical_orphan() {
+    let root = required_path(VM_STORAGE_ROOT_ENV);
+    let provider = MacosVirtualizationProvider::open(physical_options(root))
+        .expect("open physical macOS provider");
+    let spec = physical_spec("orphan-recovery");
     provider
         .create(&spec, &NeverCancelled)
         .expect("create physical VM orphan fixture");
