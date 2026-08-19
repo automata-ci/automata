@@ -812,7 +812,7 @@ async fn assert_common_control_handoff(
     };
     assert_eq!(handoff.selector().authority_id(), authority.authority_id());
     assert_eq!(handoff.observed_at(), UnixMillis::new(1_200));
-    assert_eq!(handoff.required_through(), UnixMillis::new(2_200));
+    assert_eq!(handoff.required_through(), UnixMillis::new(2_000));
     assert_eq!(
         handoff.consumer(),
         GithubServerServiceConsumerClaim::new(
@@ -827,17 +827,20 @@ async fn assert_common_control_handoff(
     credential.release().await;
     assert_eq!(handoffs.releases.load(Ordering::SeqCst), 1);
 }
-
 #[test]
-fn workflow_permission_observation_is_manifest_and_authority_bound() {
+fn workflow_permission_control_operation_is_exact_and_candidate_scope_is_enforced() {
+    assert_eq!(
+        common_control_action(ProviderControlOperation::WorkflowPermissionRead),
+        Some(GithubServerServiceAction::ObserveWorkflowPermissionDefaults)
+    );
+    assert_eq!(
+        GithubServerServiceAction::ObserveWorkflowPermissionDefaults.required_scope(),
+        GithubServerServiceScope::WorkflowPermissionsRead
+    );
+
     let workflow_permissions = authority(GithubServerServiceScope::WorkflowPermissionsRead, 0x69);
     let bootstrap = observation_bootstrap(GithubRepositoryVisibility::Public);
     let manifest = bootstrap.manifest().manifest();
-    assert!(workflow_permission_identity_matches(
-        &workflow_permissions,
-        manifest
-    ));
-
     let owner =
         GithubServerServiceWorkerId::from_uuid(Uuid::from_u128(0x6b)).expect("observation owner");
     let candidate = automata_ci_store::GithubWorkflowPermissionObservationCandidate::new(
@@ -848,74 +851,21 @@ fn workflow_permission_observation_is_manifest_and_authority_bound() {
         UnixMillis::new(OBSERVED_AT),
     )
     .expect("manifest-bound candidate");
-    let consumer = candidate.consumer();
-    assert_eq!(consumer.consumer_id(), candidate.observation_id());
-    assert_eq!(consumer.owner(), owner);
-    assert_eq!(consumer.fence().get(), manifest.revision().get());
+    assert_eq!(candidate.consumer().owner(), owner);
     assert_eq!(
-        consumer.action(),
+        candidate.consumer().fence().get(),
+        manifest.revision().get()
+    );
+    assert_eq!(
+        candidate.consumer().action(),
         GithubServerServiceAction::ObserveWorkflowPermissionDefaults
     );
     assert_eq!(
-        consumer.revision().get(),
+        candidate.consumer().revision().get(),
         manifest.runtime_policy_revision().get()
     );
 
-    let release = ReleaseGithubServerServiceHandoff::new(
-        candidate.authority_selector().clone(),
-        GithubServerServiceHandoffId::from_uuid(Uuid::from_u128(0x6d)).expect("handoff ID"),
-        candidate.consumer(),
-        UnixMillis::new(OBSERVED_AT + 20),
-    )
-    .expect("release");
-    let read = automata_ci_store::GithubWorkflowPermissionDefaultsObservation::new(
-        &bootstrap,
-        candidate.clone(),
-        &release,
-        GithubServerServiceGeneration::new(1).expect("generation"),
-        automata_ci_provider_github::ActionsDefaultWorkflowPermission::Read,
-        false,
-        UnixMillis::new(OBSERVED_AT + 10),
-    )
-    .expect("exact observation");
-    let review_enabled = automata_ci_store::GithubWorkflowPermissionDefaultsObservation::new(
-        &bootstrap,
-        candidate.clone(),
-        &release,
-        GithubServerServiceGeneration::new(1).expect("generation"),
-        automata_ci_provider_github::ActionsDefaultWorkflowPermission::Read,
-        true,
-        UnixMillis::new(OBSERVED_AT + 10),
-    )
-    .expect("changed effective setting");
-    assert_eq!(read.candidate().manifest_digest(), manifest.digest());
-    assert_eq!(
-        read.candidate().runtime_policy_revision(),
-        manifest.runtime_policy_revision()
-    );
-    assert_eq!(
-        read.candidate().authority_selector().authority_id(),
-        workflow_permissions.authority_id()
-    );
-    assert_ne!(read.digest(), review_enabled.digest());
-
-    let second_candidate = automata_ci_store::GithubWorkflowPermissionObservationCandidate::new(
-        &bootstrap,
-        &workflow_permissions,
-        GithubServerServiceConsumerId::from_uuid(Uuid::from_u128(0x6e))
-            .expect("second observation ID"),
-        owner,
-        UnixMillis::new(OBSERVED_AT),
-    )
-    .expect("second candidate");
-    assert_ne!(
-        candidate.observation_id(),
-        second_candidate.observation_id()
-    );
-    assert_ne!(candidate.digest(), second_candidate.digest());
-
     let checks = authority(GithubServerServiceScope::ChecksWrite, 0x6a);
-    assert!(!workflow_permission_identity_matches(&checks, manifest));
     assert!(
         automata_ci_store::GithubWorkflowPermissionObservationCandidate::new(
             &bootstrap,

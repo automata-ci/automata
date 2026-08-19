@@ -135,7 +135,7 @@ const CANONICAL_MIGRATIONS: &[(&str, &str)] = &[
     ),
     (
         "0033_github_workflow_permission_defaults.sql",
-        "e2766c2f259a407a31e10e6b2589b65473b6a48c043fd1841b41f43172dc14eb1ec34ffe113769b2b87747d31f7ff336",
+        "8ac33c0c69c6c807fd53f53bdc527423097a1380801fb3fe0ff4f9b076c2754e80733ba937ee0fabea45a174893916b4",
     ),
     (
         "0034_event_trust_control_contracts.sql",
@@ -159,7 +159,7 @@ const CANONICAL_MIGRATIONS: &[(&str, &str)] = &[
     ),
     (
         "0039_qualify_workflow_permission_guard.sql",
-        "2dc845db52210db4a44a41232845bb7e5ddff10663b8977ce087f6699b80376e5643f7b09b880446abc6a4beced44d80",
+        "aa0209b820f8d6558d4140ebe6512b8b9be517954e7209f7ef75ca66b20d730d7119c5f12222bf1af85983b1a3770300",
     ),
     (
         "0040_provider_delivery_event_envelope.sql",

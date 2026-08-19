@@ -83,8 +83,7 @@ pub use github_provider_config::{
 };
 pub use github_provider_credentials::{
     GithubProviderCredentialAdapterConfigurationError, GithubProviderCredentialAdapters,
-    GithubProviderCredentialReleaseSupervisor, GithubWorkflowPermissionObservationError,
-    MAX_GITHUB_PROVIDER_SUPERVISED_RELEASES,
+    GithubProviderCredentialReleaseSupervisor, MAX_GITHUB_PROVIDER_SUPERVISED_RELEASES,
 };
 pub use github_provider_runtime::{
     GithubProviderRuntime, GithubProviderRuntimeBuildError, GithubProviderRuntimeBuilder,

@@ -1,14 +1,14 @@
 use std::{fmt, time::Instant};
 
 pub use automata_ci_actions_permissions::ActionsDefaultWorkflowPermission;
-use automata_ci_auth::{github::GithubEndpointError, secret::SecretString};
+use automata_ci_auth::{github::GithubEndpointError, secret::SecretStringRef};
 use automata_ci_scm::RepositoryId;
 use reqwest::header::{ACCEPT, AUTHORIZATION};
 use serde::Deserialize;
 use url::Url;
 
 use crate::{
-    endpoint::{GithubHttpEndpoint, authorization_header},
+    endpoint::{GithubHttpEndpoint, authorization_header_value},
     repository_path,
     response::{decode_json, read_json_response},
 };
@@ -40,7 +40,7 @@ impl GithubWorkflowPermissionDefaults {
 /// One least-authority request for the effective repository workflow defaults.
 pub struct GithubWorkflowPermissionDefaultsRequest<'request> {
     repository: &'request RepositoryId,
-    credential: &'request SecretString,
+    credential: SecretStringRef<'request>,
     deadline: Instant,
 }
 
@@ -49,7 +49,7 @@ impl<'request> GithubWorkflowPermissionDefaultsRequest<'request> {
     #[must_use]
     pub const fn new(
         repository: &'request RepositoryId,
-        credential: &'request SecretString,
+        credential: SecretStringRef<'request>,
         deadline: Instant,
     ) -> Self {
         Self {
@@ -94,7 +94,7 @@ impl GithubHttpEndpoint {
             .filter(|duration| !duration.is_zero())
             .ok_or(GithubEndpointError::Unavailable)?;
         let endpoint = self.workflow_permission_defaults_url(request.repository)?;
-        let authorization = authorization_header(request.credential)?;
+        let authorization = authorization_header_value(request.credential.expose_secret())?;
         let response = self
             .client
             .get(endpoint)

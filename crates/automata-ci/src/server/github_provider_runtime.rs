@@ -18,7 +18,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use automata_ci_auth::secret::SecretString;
+use automata_ci_auth::secret::{SecretString, SecretStringRef};
 use automata_ci_blob::ImmutableBlobStore;
 use automata_ci_control::runner_control::{
     ImmutableBlobJobIrReader, JobIrObjectReader, OptionalRuntimeAuthorityIssuer,
@@ -48,14 +48,19 @@ use automata_ci_github_delivery::{
 use automata_ci_key_management::{EnvelopeCodec, KeyEncryptionProvider};
 use automata_ci_protocol::RuntimeAuthorityEndpoint;
 use automata_ci_provider::{
-    ControlCredentialProvider, ProviderConnectionId, ProviderManifestRepository,
-    ProviderResultRepository,
+    ControlCredentialClaim, ControlCredentialProvider, ControlCredentialRequest,
+    ProviderConnectionId, ProviderControlCredentialId, ProviderControlCredentialWorkerId,
+    ProviderControlOperation, ProviderControlOperationSet, ProviderLifecycleState,
+    ProviderManifestRepository, ProviderResultRepository,
 };
 use automata_ci_provider_delivery::{
     ProviderDeliveryClock, ProviderDeliveryClockError, ProviderResultAdapter,
     ProviderRuntimeAdapter,
 };
-use automata_ci_provider_github::{GithubHttpEndpoint, GithubHttpLimits, GithubWebhookVerifier};
+use automata_ci_provider_github::{
+    GithubConnectionPolicy, GithubHttpEndpoint, GithubHttpLimits, GithubWebhookVerifier,
+    GithubWorkflowPermissionDefaults, GithubWorkflowPermissionDefaultsRequest,
+};
 use automata_ci_provider_postgres::PostgresProviderManifestRepository;
 use automata_ci_scm::ScmProvider;
 use automata_ci_store::{
@@ -88,8 +93,7 @@ use super::{
     GithubProviderBootstrapError, GithubProviderBootstrapPlan, GithubProviderConfig,
     GithubProviderCredentialAdapterConfigurationError, GithubProviderCredentialAdapters,
     GithubProviderCredentialReleaseSupervisor, GithubProviderRepositoryConfig,
-    GithubProviderTransport, GithubWorkflowPermissionObservationError,
-    MAX_GITHUB_PROVIDER_SUPERVISED_RELEASES,
+    GithubProviderTransport, MAX_GITHUB_PROVIDER_SUPERVISED_RELEASES,
     github_job_runtime_authority::{
         GithubJobRuntimeAuthorityIssuer, GithubJobRuntimeAuthorityResolver,
     },
@@ -279,7 +283,8 @@ struct WorkflowPermissionObservationTarget {
 
 struct WorkflowPermissionDefaultsRefresher {
     store: Arc<PostgresStore>,
-    adapters: Arc<GithubProviderCredentialAdapters>,
+    credentials: Arc<dyn ControlCredentialProvider>,
+    connections: Arc<dyn ProviderManifestRepository>,
     endpoint: GithubHttpEndpoint,
     clock: Arc<dyn GithubServerServiceCoordinatorClock>,
     owner: GithubServerServiceWorkerId,
@@ -292,12 +297,20 @@ enum WorkflowPermissionRefreshOutcome {
     PolicyMismatch,
 }
 
+struct WorkflowPermissionObservation {
+    request: ControlCredentialRequest,
+    credential_generation: automata_ci_provider::ProviderCredentialGeneration,
+    defaults: GithubWorkflowPermissionDefaults,
+    provider_observed_at: UnixMillis,
+}
+
 impl fmt::Debug for WorkflowPermissionDefaultsRefresher {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("WorkflowPermissionDefaultsRefresher")
             .field("store", &"[OBSERVATION STORE]")
-            .field("adapters", &"[CREDENTIAL ADAPTERS]")
+            .field("credentials", &"[CONTROL CREDENTIAL PROVIDER]")
+            .field("connections", &"[PROVIDER MANIFEST REPOSITORY]")
             .field("endpoint", &"[GITHUB ENDPOINT]")
             .field("clock", &"[COORDINATOR CLOCK]")
             .field("owner", &self.owner)
@@ -307,6 +320,67 @@ impl fmt::Debug for WorkflowPermissionDefaultsRefresher {
 }
 
 impl WorkflowPermissionDefaultsRefresher {
+    async fn observe_workflow_permission_defaults(
+        &self,
+        manifest: &GithubProviderManifest,
+        candidate: &automata_ci_store::GithubWorkflowPermissionObservationCandidate,
+        deadline: Instant,
+    ) -> Result<WorkflowPermissionObservation, ()> {
+        let connection = self
+            .connections
+            .current_connection(candidate.connection_id())
+            .await
+            .map_err(|_| ())?
+            .ok_or(())?;
+        let policy = GithubConnectionPolicy::decode(connection.configuration().adapter_policy())
+            .map_err(|_| ())?;
+        if connection.state() != ProviderLifecycleState::Active
+            || connection.configuration().workspace_id().to_string() != candidate.tenant().as_str()
+            || connection
+                .configuration()
+                .repository()
+                .external_id()
+                .as_str()
+                != manifest.github_repository_id().get().to_string()
+            || policy.installation_id().get() != manifest.installation_id().get()
+            || policy.repository().as_str() != manifest.github_repository_name().as_str()
+        {
+            return Err(());
+        }
+        let request = workflow_permission_credential_request(candidate, &connection)?;
+        let operation = ProviderControlOperation::WorkflowPermissionRead;
+        let credential = self.credentials.acquire(&request).await.map_err(|_| ())?;
+        if credential.request_digest() != request.digest() || !credential.permits(operation) {
+            credential.release().await;
+            return Err(());
+        }
+        let token = SecretStringRef::new(credential.expose_secret()).map_err(|_| ())?;
+        let repository =
+            automata_ci_scm::RepositoryId::new(manifest.github_repository_name().as_str())
+                .map_err(|_| ())?;
+        let result = self
+            .endpoint
+            .workflow_permission_defaults(GithubWorkflowPermissionDefaultsRequest::new(
+                &repository,
+                token,
+                deadline,
+            ))
+            .await;
+        let provider_observed_at = self.clock.now().max(candidate.claimed_at());
+        let credential_generation = credential.generation();
+        credential.release().await;
+        let defaults = result.map_err(|_| ())?;
+        if provider_observed_at >= request.claim().expires_at() {
+            return Err(());
+        }
+        Ok(WorkflowPermissionObservation {
+            request,
+            credential_generation,
+            defaults,
+            provider_observed_at,
+        })
+    }
+
     async fn refresh_all(
         &self,
     ) -> Result<WorkflowPermissionRefreshOutcome, GithubProviderRuntimeBuildError> {
@@ -404,37 +478,26 @@ impl WorkflowPermissionDefaultsRefresher {
         .map_err(|_| GithubProviderRuntimeBuildError::WorkflowPermissionObservation)?
         .map_err(|_| GithubProviderRuntimeBuildError::WorkflowPermissionObservation)?;
         let observed = self
-            .adapters
-            .observe_workflow_permission_defaults(
-                &self.endpoint,
-                &target.manifest,
-                &candidate,
-                deadline,
-            )
+            .observe_workflow_permission_defaults(&target.manifest, &candidate, deadline)
             .await
-            .map_err(GithubProviderRuntimeBuildError::WorkflowPermissions)?;
-        let defaults = observed.defaults();
-        let release = observed.release_request().clone();
+            .map_err(|()| GithubProviderRuntimeBuildError::WorkflowPermissionObservation)?;
         let observation = GithubWorkflowPermissionDefaultsObservation::new(
             &target.bootstrap,
             candidate,
-            &release,
-            observed.handoff_generation(),
-            defaults.default_workflow_permissions(),
-            defaults.can_approve_pull_request_reviews(),
-            observed.provider_observed_at(),
+            &observed.request,
+            observed.credential_generation,
+            observed.defaults.default_workflow_permissions(),
+            observed.defaults.can_approve_pull_request_reviews(),
+            observed.provider_observed_at,
         );
         let Ok(observation) = observation else {
-            self.adapters.retain_workflow_permission_attempt(observed);
             return Err(GithubProviderRuntimeBuildError::WorkflowPermissionObservation);
         };
         let finalization = automata_ci_store::FinalizeGithubWorkflowPermissionObservation::new(
             target.bootstrap.clone(),
-            release,
             observation,
         );
         let Ok(finalization) = finalization else {
-            self.adapters.retain_workflow_permission_attempt(observed);
             return Err(GithubProviderRuntimeBuildError::WorkflowPermissionObservation);
         };
         match tokio::time::timeout_at(
@@ -444,20 +507,58 @@ impl WorkflowPermissionDefaultsRefresher {
         )
         .await
         {
-            Ok(Ok(true)) => {
-                observed.confirm_finalized();
-                Ok(WorkflowPermissionRefreshOutcome::Ready)
-            }
-            Ok(Ok(false)) => {
-                observed.confirm_finalized();
-                Ok(WorkflowPermissionRefreshOutcome::PolicyMismatch)
-            }
+            Ok(Ok(true)) => Ok(WorkflowPermissionRefreshOutcome::Ready),
+            Ok(Ok(false)) => Ok(WorkflowPermissionRefreshOutcome::PolicyMismatch),
             Ok(Err(_)) | Err(_) => {
-                self.adapters.retain_workflow_permission_attempt(observed);
                 Err(GithubProviderRuntimeBuildError::WorkflowPermissionObservation)
             }
         }
     }
+}
+
+fn workflow_permission_credential_request(
+    candidate: &automata_ci_store::GithubWorkflowPermissionObservationCandidate,
+    connection: &automata_ci_provider::ProviderConnectionManifest,
+) -> Result<ControlCredentialRequest, ()> {
+    let validity_millis = candidate
+        .consumer()
+        .action()
+        .provider_tail_millis()
+        .cast_unsigned();
+    let expires_at = candidate
+        .claimed_at()
+        .get()
+        .checked_add(validity_millis.cast_signed())
+        .map(UnixMillis::new)
+        .ok_or(())?;
+    if expires_at >= candidate.expires_at() {
+        return Err(());
+    }
+    let credential_id =
+        ProviderControlCredentialId::from_uuid(candidate.observation_id().as_uuid())
+            .map_err(|_| ())?;
+    let worker_id =
+        ProviderControlCredentialWorkerId::from_uuid(candidate.consumer().owner().as_uuid())
+            .map_err(|_| ())?;
+    let claim = ControlCredentialClaim::new(
+        credential_id,
+        worker_id,
+        candidate.consumer().fence().get(),
+        candidate.consumer().revision().get(),
+        expires_at,
+    )
+    .map_err(|_| ())?;
+    let operations =
+        ProviderControlOperationSet::new([ProviderControlOperation::WorkflowPermissionRead])
+            .map_err(|_| ())?;
+    ControlCredentialRequest::new(
+        claim,
+        connection,
+        operations,
+        candidate.claimed_at(),
+        validity_millis,
+    )
+    .map_err(|_| ())
 }
 
 /// Builder that owns already-loaded provider secrets only until construction finishes.
@@ -845,11 +946,10 @@ impl GithubProviderRuntimeBuilder {
             policy.release_retry_interval,
         )?);
         let adapters = Arc::new(GithubProviderCredentialAdapters::new(
-            credential_issuer,
-            credential_repository.clone(),
+            &credential_issuer,
+            &credential_repository,
             credential_authority_repository.clone(),
-            store.clone(),
-            releases.clone(),
+            &releases,
             plan.authorities(),
             credential_adapter_routes,
             credential_clock.clone(),
@@ -880,7 +980,8 @@ impl GithubProviderRuntimeBuilder {
             .map_err(|_| GithubProviderRuntimeBuildError::InvalidWorkerIdentity)?;
         let permission_defaults = Arc::new(WorkflowPermissionDefaultsRefresher {
             store: store.clone(),
-            adapters: adapters.clone(),
+            credentials: adapters.clone(),
+            connections: provider_repository.clone(),
             endpoint: endpoint.clone(),
             clock: observation_clock,
             owner: observation_owner,
@@ -1333,9 +1434,6 @@ pub enum GithubProviderRuntimeBuildError {
     /// Credential adapter or release supervision configuration failed.
     #[error(transparent)]
     Credentials(#[from] GithubProviderCredentialAdapterConfigurationError),
-    /// Effective repository defaults could not be observed with least authority.
-    #[error(transparent)]
-    WorkflowPermissions(GithubWorkflowPermissionObservationError),
     /// Observed workflow-permission provenance did not match immutable configuration.
     #[error("the GitHub workflow-permission observation is invalid")]
     WorkflowPermissionObservation,

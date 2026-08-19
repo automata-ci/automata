@@ -673,6 +673,7 @@ dependencies = [
  "automata-ci-core",
  "automata-ci-key-management",
  "automata-ci-protocol",
+ "automata-ci-provider",
  "automata-ci-provisioning",
  "automata-ci-provisioning-postgres",
  "automata-ci-runner-auth-postgres",

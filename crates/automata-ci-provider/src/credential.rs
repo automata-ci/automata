@@ -61,6 +61,8 @@ pub enum ProviderControlOperation {
     ScheduleRead,
     /// Emit an authenticated provider-native dispatch.
     DispatchWrite,
+    /// Read effective repository workflow-token permission defaults.
+    WorkflowPermissionRead,
     /// Read human organization or team membership evidence.
     MembershipRead,
     /// Create, reconcile, or revoke workload credentials.
@@ -1100,8 +1102,9 @@ const fn control_operation_code(value: ProviderControlOperation) -> u8 {
         ProviderControlOperation::WebhookManage => 9,
         ProviderControlOperation::ScheduleRead => 10,
         ProviderControlOperation::DispatchWrite => 11,
-        ProviderControlOperation::MembershipRead => 12,
-        ProviderControlOperation::WorkloadCredentialManage => 13,
+        ProviderControlOperation::WorkflowPermissionRead => 12,
+        ProviderControlOperation::MembershipRead => 13,
+        ProviderControlOperation::WorkloadCredentialManage => 14,
     }
 }
 const fn trust_class_code(value: TrustSourceClass) -> u8 {

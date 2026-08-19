@@ -1,7 +1,17 @@
 use std::time::Duration;
 
-use automata_ci_core::{Sha256Digest, UnixMillis};
+use automata_ci_core::{Sha256Digest, UnixMillis, WorkspaceId};
 use automata_ci_key_management::{EncryptedEnvelope, KeyId, WrappedDataKey};
+use automata_ci_provider::{
+    ControlCredentialClaim, ControlCredentialRequest, ExternalRepositoryId,
+    ExternalRepositoryIdentity, ProviderArchiveLimits, ProviderConfigurationRevision,
+    ProviderConnectionConfiguration, ProviderConnectionManifest, ProviderConnectionPolicyDocument,
+    ProviderConnectionRevision, ProviderControlCredentialId, ProviderControlCredentialWorkerId,
+    ProviderControlOperation, ProviderControlOperationSet, ProviderCredentialGeneration,
+    ProviderDefaultBranch, ProviderInstanceId, ProviderLifecycleState, ProviderRepositoryPath,
+    ProviderRunnerPolicyBinding, ProviderSchemaVersion, ProviderWorkflowSource,
+    RepositoryVisibility,
+};
 use automata_ci_store::{
     AcquireGithubServerServiceHandoff, BeginGithubServerServiceMint,
     BootstrapGithubProviderRepository, ClaimNextGithubServerServiceMaintenance,
@@ -87,11 +97,17 @@ pub async fn activate_github_workflow_permission_defaults(
         candidate.consumer(),
         observed_at,
     )?;
+    database
+        .store()
+        .release_github_server_service_handoff(release)
+        .await?;
+    let request = workflow_permission_credential_request(&candidate)?;
+    let generation = ProviderCredentialGeneration::new(handoff.receipt().key().generation().get())?;
     let observation = GithubWorkflowPermissionDefaultsObservation::new(
         bootstrap,
         candidate.clone(),
-        &release,
-        handoff.receipt().key().generation(),
+        &request,
+        generation,
         candidate.expected_default(),
         false,
         observed_at,
@@ -99,17 +115,68 @@ pub async fn activate_github_workflow_permission_defaults(
     if !database
         .store()
         .finalize_github_workflow_permission_observation(
-            FinalizeGithubWorkflowPermissionObservation::new(
-                bootstrap.clone(),
-                release,
-                observation,
-            )?,
+            FinalizeGithubWorkflowPermissionObservation::new(bootstrap.clone(), observation)?,
         )
         .await?
     {
         return Err("workflow-permission observation did not activate".into());
     }
     Ok(())
+}
+
+fn workflow_permission_credential_request(
+    candidate: &automata_ci_store::GithubWorkflowPermissionObservationCandidate,
+) -> TestResult<ControlCredentialRequest> {
+    let validity_millis = MAX_GITHUB_SERVICE_CONSUMER_REQUEST_MILLIS.cast_unsigned();
+    let expires_at = UnixMillis::new(
+        candidate
+            .claimed_at()
+            .get()
+            .checked_add(MAX_GITHUB_SERVICE_CONSUMER_REQUEST_MILLIS)
+            .ok_or("workflow-permission claim horizon overflow")?,
+    );
+    let claim = ControlCredentialClaim::new(
+        ProviderControlCredentialId::from_uuid(candidate.observation_id().as_uuid())?,
+        ProviderControlCredentialWorkerId::from_uuid(candidate.consumer().owner().as_uuid())?,
+        candidate.consumer().fence().get(),
+        candidate.consumer().revision().get(),
+        expires_at,
+    )?;
+    let configuration = ProviderConnectionConfiguration::new(
+        WorkspaceId::parse("11111111-1111-4111-8111-111111111111")?,
+        ExternalRepositoryIdentity::new(
+            ProviderInstanceId::from_uuid(Uuid::new_v4())?,
+            ExternalRepositoryId::new(candidate.github_repository_id().get().to_string())?,
+        ),
+        ProviderConfigurationRevision::new(1)?,
+        Sha256Digest::from_bytes([0x71; 32]),
+        Sha256Digest::from_bytes([0x72; 32]),
+        RepositoryVisibility::Private,
+        ProviderDefaultBranch::new("main")?,
+        ProviderWorkflowSource::Directory(ProviderRepositoryPath::new(".github/workflows")?),
+        ProviderRunnerPolicyBinding::new(
+            ProviderSchemaVersion::new(1)?,
+            Sha256Digest::from_bytes([0x73; 32]),
+        ),
+        ProviderArchiveLimits::new(1_024, 8_192, 100, 1_024, 10, 1_024)?,
+        ProviderConnectionPolicyDocument::new(ProviderSchemaVersion::new(1)?, b"{}".to_vec())?,
+    );
+    let connection = ProviderConnectionManifest::new(
+        candidate.connection_id(),
+        ProviderConnectionRevision::new(1)?,
+        ProviderLifecycleState::Active,
+        configuration,
+        UnixMillis::new(1),
+        Some(UnixMillis::new(1)),
+        None,
+    )?;
+    Ok(ControlCredentialRequest::new(
+        claim,
+        &connection,
+        ProviderControlOperationSet::new([ProviderControlOperation::WorkflowPermissionRead])?,
+        candidate.claimed_at(),
+        validity_millis,
+    )?)
 }
 
 async fn ensure_workflow_permission_credential(

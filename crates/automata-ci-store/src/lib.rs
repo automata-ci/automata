@@ -177,8 +177,7 @@ pub use github_workflow_permissions::{
     GITHUB_WORKFLOW_PERMISSION_DEFAULT_FRESHNESS_MILLIS,
     GithubWorkflowPermissionDefaultsObservation, GithubWorkflowPermissionDefaultsObservationError,
     GithubWorkflowPermissionDefaultsObservationRepository,
-    GithubWorkflowPermissionHandoffReconciliation, GithubWorkflowPermissionObservationCandidate,
-    ReconcileGithubWorkflowPermissionHandoff,
+    GithubWorkflowPermissionObservationCandidate,
 };
 pub use live_log_ticket::{
     HUMAN_LIVE_LOG_PROTOCOL_VERSION, HumanLiveLogBrowserOrigin, HumanLiveLogScope,

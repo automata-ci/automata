@@ -1,17 +1,26 @@
 use crate::{github_manifest_fixture, github_provider_manifest_api};
 
 use automata_ci_actions_permissions::ActionsDefaultWorkflowPermission;
-use automata_ci_core::{Sha256Digest, UnixMillis};
+use automata_ci_core::{Sha256Digest, UnixMillis, WorkspaceId};
+use automata_ci_provider::{
+    ControlCredentialClaim, ControlCredentialRequest, ExternalRepositoryId,
+    ExternalRepositoryIdentity, ProviderArchiveLimits, ProviderConfigurationRevision,
+    ProviderConnectionConfiguration, ProviderConnectionManifest, ProviderConnectionPolicyDocument,
+    ProviderConnectionRevision, ProviderControlCredentialId, ProviderControlCredentialWorkerId,
+    ProviderControlOperation, ProviderControlOperationSet, ProviderCredentialGeneration,
+    ProviderDefaultBranch, ProviderInstanceId, ProviderLifecycleState, ProviderRepositoryPath,
+    ProviderRunnerPolicyBinding, ProviderSchemaVersion, ProviderWorkflowSource,
+    RepositoryVisibility,
+};
 use automata_ci_store::{
     FinalizeGithubWorkflowPermissionObservation, GithubProviderManifest,
     GithubServerServiceAppClientId, GithubServerServiceAuthorityId,
     GithubServerServiceAuthorityIdentity, GithubServerServiceConsumerId,
-    GithubServerServiceGeneration, GithubServerServiceHandoffId, GithubServerServiceJwtIssuer,
-    GithubServerServiceRevision, GithubServerServiceScope, GithubServerServiceWorkerId,
-    GithubWorkflowPermissionDefaultsObservation, GithubWorkflowPermissionDefaultsObservationError,
+    GithubServerServiceJwtIssuer, GithubServerServiceRevision, GithubServerServiceScope,
+    GithubServerServiceWorkerId, GithubWorkflowPermissionDefaultsObservation,
+    GithubWorkflowPermissionDefaultsObservationError,
     GithubWorkflowPermissionDefaultsObservationRepository,
-    GithubWorkflowPermissionHandoffReconciliation, GithubWorkflowPermissionObservationCandidate,
-    ReconcileGithubWorkflowPermissionHandoff, ReleaseGithubServerServiceHandoff,
+    GithubWorkflowPermissionObservationCandidate,
 };
 use uuid::Uuid;
 
@@ -64,23 +73,22 @@ fn candidate_is_fresh_exact_and_rejects_every_authority_identity_disagreement() 
 }
 
 #[test]
-#[allow(clippy::too_many_lines)] // One end-to-end lifecycle contract is clearer as a single test.
-fn observation_and_finalization_bind_release_generation_time_outcome_and_bootstrap() {
+fn observation_and_finalization_bind_common_credential_generation_time_and_outcome() {
     let bootstrap = bootstrap();
     let authority = authority(bootstrap.manifest().manifest(), AuthorityMutation::Exact);
-    let observation_candidate = candidate(
+    let candidate = candidate(
         &bootstrap,
         &authority,
         0x901,
         0x902,
         UnixMillis::new(20_000),
     );
-    let generation = GithubServerServiceGeneration::new(3).expect("generation");
-    let exact_release = release(&observation_candidate, 0xa01, UnixMillis::new(20_200));
+    let request = credential_request(&candidate, ProviderControlOperation::WorkflowPermissionRead);
+    let generation = ProviderCredentialGeneration::new(3).expect("generation");
     let exact = GithubWorkflowPermissionDefaultsObservation::new(
         &bootstrap,
-        observation_candidate.clone(),
-        &exact_release,
+        candidate.clone(),
+        &request,
         generation,
         ActionsDefaultWorkflowPermission::Read,
         false,
@@ -89,8 +97,8 @@ fn observation_and_finalization_bind_release_generation_time_outcome_and_bootstr
     .expect("observation");
     let can_approve = GithubWorkflowPermissionDefaultsObservation::new(
         &bootstrap,
-        observation_candidate.clone(),
-        &exact_release,
+        candidate.clone(),
+        &request,
         generation,
         ActionsDefaultWorkflowPermission::Read,
         true,
@@ -99,8 +107,8 @@ fn observation_and_finalization_bind_release_generation_time_outcome_and_bootstr
     .expect("approval observation");
     let write = GithubWorkflowPermissionDefaultsObservation::new(
         &bootstrap,
-        observation_candidate.clone(),
-        &exact_release,
+        candidate.clone(),
+        &request,
         generation,
         ActionsDefaultWorkflowPermission::Write,
         false,
@@ -109,8 +117,8 @@ fn observation_and_finalization_bind_release_generation_time_outcome_and_bootstr
     .expect("write observation");
     let later_provider = GithubWorkflowPermissionDefaultsObservation::new(
         &bootstrap,
-        observation_candidate.clone(),
-        &exact_release,
+        candidate.clone(),
+        &request,
         generation,
         ActionsDefaultWorkflowPermission::Read,
         false,
@@ -119,62 +127,31 @@ fn observation_and_finalization_bind_release_generation_time_outcome_and_bootstr
     .expect("later observation");
     let other_generation = GithubWorkflowPermissionDefaultsObservation::new(
         &bootstrap,
-        observation_candidate.clone(),
-        &exact_release,
-        GithubServerServiceGeneration::new(4).expect("generation"),
+        candidate.clone(),
+        &request,
+        ProviderCredentialGeneration::new(4).expect("generation"),
         ActionsDefaultWorkflowPermission::Read,
         false,
         UnixMillis::new(20_100),
     )
     .expect("other generation");
-    let later_release = release(&observation_candidate, 0xa02, UnixMillis::new(20_201));
-    let other_handoff = GithubWorkflowPermissionDefaultsObservation::new(
-        &bootstrap,
-        observation_candidate.clone(),
-        &later_release,
-        generation,
-        ActionsDefaultWorkflowPermission::Read,
-        false,
-        UnixMillis::new(20_100),
-    )
-    .expect("other handoff");
 
-    for mutated in [
-        &can_approve,
-        &write,
-        &later_provider,
-        &other_generation,
-        &other_handoff,
-    ] {
+    for mutated in [&can_approve, &write, &later_provider, &other_generation] {
         assert_ne!(exact.digest(), mutated.digest());
     }
+    assert_eq!(exact.credential_request_digest(), request.digest());
+    assert_eq!(exact.credential_generation(), generation);
     assert!(exact.matches_expected_default());
-    assert!(!observation_candidate.expected_can_approve_pull_request_reviews());
     assert!(!can_approve.matches_expected_default());
     assert!(!write.matches_expected_default());
-    assert!(
-        FinalizeGithubWorkflowPermissionObservation::new(
-            bootstrap.clone(),
-            exact_release.clone(),
-            exact.clone(),
-        )
-        .is_ok()
-    );
-    assert_eq!(
-        FinalizeGithubWorkflowPermissionObservation::new(
-            bootstrap.clone(),
-            later_release,
-            exact.clone(),
-        ),
-        Err(GithubWorkflowPermissionDefaultsObservationError::InvalidBinding)
-    );
+    assert!(FinalizeGithubWorkflowPermissionObservation::new(bootstrap.clone(), exact).is_ok());
 
-    let early_release = release(&observation_candidate, 0xa03, UnixMillis::new(20_050));
+    let wrong_operation = credential_request(&candidate, ProviderControlOperation::RepositoryRead);
     assert_eq!(
         GithubWorkflowPermissionDefaultsObservation::new(
             &bootstrap,
-            observation_candidate.clone(),
-            &early_release,
+            candidate.clone(),
+            &wrong_operation,
             generation,
             ActionsDefaultWorkflowPermission::Read,
             false,
@@ -182,78 +159,23 @@ fn observation_and_finalization_bind_release_generation_time_outcome_and_bootstr
         ),
         Err(GithubWorkflowPermissionDefaultsObservationError::InvalidBinding)
     );
-    let foreign_release = ReleaseGithubServerServiceHandoff::new(
-        observation_candidate.authority_selector().clone(),
-        GithubServerServiceHandoffId::from_uuid(Uuid::from_u128(0xa04)).expect("handoff"),
-        candidate(
-            &bootstrap,
-            &authority,
-            0x905,
-            0x906,
-            UnixMillis::new(20_000),
-        )
-        .consumer(),
-        UnixMillis::new(20_200),
-    )
-    .expect("foreign release");
     assert_eq!(
         GithubWorkflowPermissionDefaultsObservation::new(
             &bootstrap,
-            observation_candidate,
-            &foreign_release,
+            candidate,
+            &request,
             generation,
             ActionsDefaultWorkflowPermission::Read,
             false,
-            UnixMillis::new(20_100),
+            UnixMillis::new(320_000),
         ),
         Err(GithubWorkflowPermissionDefaultsObservationError::InvalidBinding)
     );
 }
-
 #[test]
 fn repository_port_remains_backend_neutral_and_object_safe() {
     fn accepts_dyn(_: &dyn GithubWorkflowPermissionDefaultsObservationRepository) {}
     let _ = accepts_dyn;
-}
-
-#[test]
-fn ambiguous_handoff_reconciliation_is_value_free_and_candidate_bound() {
-    let bootstrap = bootstrap();
-    let authority = authority(bootstrap.manifest().manifest(), AuthorityMutation::Exact);
-    let observation_candidate = candidate(
-        &bootstrap,
-        &authority,
-        0xb01,
-        0xb02,
-        UnixMillis::new(30_000),
-    );
-    let request = ReconcileGithubWorkflowPermissionHandoff::new(observation_candidate.clone())
-        .expect("reconciliation request");
-    assert_eq!(request.candidate(), &observation_candidate);
-    assert_eq!(request.required_through(), UnixMillis::new(330_000));
-    assert!(request.required_through() < observation_candidate.expires_at());
-
-    let handoff_id =
-        GithubServerServiceHandoffId::from_uuid(Uuid::from_u128(0xb03)).expect("handoff");
-    let generation = GithubServerServiceGeneration::new(7).expect("generation");
-    let released_at = UnixMillis::new(30_100);
-    let outcomes = [
-        GithubWorkflowPermissionHandoffReconciliation::AbsentClosed {
-            closed_at: released_at,
-        },
-        GithubWorkflowPermissionHandoffReconciliation::Released {
-            handoff_id,
-            generation,
-            released_at,
-        },
-        GithubWorkflowPermissionHandoffReconciliation::AlreadyReleased {
-            handoff_id,
-            generation,
-            released_at,
-        },
-    ];
-    assert_ne!(outcomes[0], outcomes[1]);
-    assert_ne!(outcomes[1], outcomes[2]);
 }
 
 fn bootstrap() -> automata_ci_store::BootstrapGithubProviderRepository {
@@ -280,18 +202,70 @@ fn candidate(
     .expect("candidate")
 }
 
-fn release(
+fn credential_request(
     candidate: &GithubWorkflowPermissionObservationCandidate,
-    handoff: u128,
-    released_at: UnixMillis,
-) -> ReleaseGithubServerServiceHandoff {
-    ReleaseGithubServerServiceHandoff::new(
-        candidate.authority_selector().clone(),
-        GithubServerServiceHandoffId::from_uuid(Uuid::from_u128(handoff)).expect("handoff"),
-        candidate.consumer(),
-        released_at,
+    operation: ProviderControlOperation,
+) -> ControlCredentialRequest {
+    let expires_at = UnixMillis::new(candidate.claimed_at().get() + 300_000);
+    let claim = ControlCredentialClaim::new(
+        ProviderControlCredentialId::from_uuid(candidate.observation_id().as_uuid())
+            .expect("credential ID"),
+        ProviderControlCredentialWorkerId::from_uuid(candidate.consumer().owner().as_uuid())
+            .expect("worker ID"),
+        candidate.consumer().fence().get(),
+        candidate.consumer().revision().get(),
+        expires_at,
     )
-    .expect("release")
+    .expect("control claim");
+    ControlCredentialRequest::new(
+        claim,
+        &connection(candidate),
+        ProviderControlOperationSet::new([operation]).expect("operations"),
+        candidate.claimed_at(),
+        300_000,
+    )
+    .expect("credential request")
+}
+
+fn connection(
+    candidate: &GithubWorkflowPermissionObservationCandidate,
+) -> ProviderConnectionManifest {
+    let configuration = ProviderConnectionConfiguration::new(
+        WorkspaceId::parse("11111111-1111-4111-8111-111111111111").expect("workspace"),
+        ExternalRepositoryIdentity::new(
+            ProviderInstanceId::from_uuid(Uuid::from_u128(0x1000)).expect("instance"),
+            ExternalRepositoryId::new(candidate.github_repository_id().get().to_string())
+                .expect("external repository"),
+        ),
+        ProviderConfigurationRevision::new(1).expect("provider revision"),
+        Sha256Digest::from_bytes([0x11; 32]),
+        Sha256Digest::from_bytes([0x12; 32]),
+        RepositoryVisibility::Public,
+        ProviderDefaultBranch::new("main").expect("default branch"),
+        ProviderWorkflowSource::Directory(
+            ProviderRepositoryPath::new(".github/workflows").expect("workflow root"),
+        ),
+        ProviderRunnerPolicyBinding::new(
+            ProviderSchemaVersion::new(1).expect("runner schema"),
+            Sha256Digest::from_bytes([0x13; 32]),
+        ),
+        ProviderArchiveLimits::new(1_024, 8_192, 100, 1_024, 10, 1_024).expect("archive limits"),
+        ProviderConnectionPolicyDocument::new(
+            ProviderSchemaVersion::new(1).expect("policy schema"),
+            b"{}".to_vec(),
+        )
+        .expect("connection policy"),
+    );
+    ProviderConnectionManifest::new(
+        candidate.connection_id(),
+        ProviderConnectionRevision::new(1).expect("connection revision"),
+        ProviderLifecycleState::Active,
+        configuration,
+        UnixMillis::new(1),
+        Some(UnixMillis::new(1)),
+        None,
+    )
+    .expect("connection")
 }
 
 #[derive(Clone, Copy, Debug)]

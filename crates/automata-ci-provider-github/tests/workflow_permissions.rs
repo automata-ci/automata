@@ -2,7 +2,10 @@ use crate::support;
 
 use std::time::{Duration, Instant};
 
-use automata_ci_auth::{github::GithubEndpointError, secret::SecretString};
+use automata_ci_auth::{
+    github::GithubEndpointError,
+    secret::{SecretString, SecretStringRef},
+};
 use automata_ci_provider_github::{
     ActionsDefaultWorkflowPermission, GithubHttpLimits, GithubWorkflowPermissionDefaultsRequest,
 };
@@ -36,7 +39,7 @@ async fn effective_defaults_are_exact_versioned_and_repository_scoped() {
     let read = endpoint
         .workflow_permission_defaults(GithubWorkflowPermissionDefaultsRequest::new(
             &repository,
-            &token,
+            SecretStringRef::from_secret(&token),
             Instant::now() + Duration::from_secs(1),
         ))
         .await
@@ -50,7 +53,7 @@ async fn effective_defaults_are_exact_versioned_and_repository_scoped() {
     let write = endpoint
         .workflow_permission_defaults(GithubWorkflowPermissionDefaultsRequest::new(
             &repository,
-            &token,
+            SecretStringRef::from_secret(&token),
             Instant::now() + Duration::from_secs(1),
         ))
         .await
@@ -100,7 +103,7 @@ async fn schema_drift_redirects_and_expired_deadlines_fail_closed() {
         let error = endpoint
             .workflow_permission_defaults(GithubWorkflowPermissionDefaultsRequest::new(
                 &repository,
-                &token,
+                SecretStringRef::from_secret(&token),
                 Instant::now() + Duration::from_secs(1),
             ))
             .await
@@ -115,7 +118,7 @@ async fn schema_drift_redirects_and_expired_deadlines_fail_closed() {
     let error = endpoint
         .workflow_permission_defaults(GithubWorkflowPermissionDefaultsRequest::new(
             &repository,
-            &token,
+            SecretStringRef::from_secret(&token),
             expired_deadline,
         ))
         .await
@@ -145,7 +148,7 @@ async fn response_and_status_failures_are_bounded_and_redacted() {
     let request = || {
         GithubWorkflowPermissionDefaultsRequest::new(
             &repository,
-            &token,
+            SecretStringRef::from_secret(&token),
             Instant::now() + Duration::from_secs(1),
         )
     };

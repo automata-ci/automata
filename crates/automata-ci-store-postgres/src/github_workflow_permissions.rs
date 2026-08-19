@@ -1,14 +1,12 @@
 use async_trait::async_trait;
-use automata_ci_core::UnixMillis;
 use automata_ci_store::{
     FinalizeGithubWorkflowPermissionObservation, GITHUB_PROVIDER_REST_API_VERSION,
     GITHUB_WORKFLOW_PERMISSION_DEFAULT_FRESHNESS_MILLIS,
     GithubWorkflowPermissionDefaultsObservationError,
     GithubWorkflowPermissionDefaultsObservationRepository,
-    GithubWorkflowPermissionHandoffReconciliation, GithubWorkflowPermissionObservationCandidate,
-    ReconcileGithubWorkflowPermissionHandoff,
+    GithubWorkflowPermissionObservationCandidate,
 };
-use sqlx::{Postgres, Row as _, Transaction};
+use sqlx::{Postgres, Transaction};
 
 use super::{
     PostgresStore,
@@ -126,255 +124,6 @@ impl GithubWorkflowPermissionDefaultsObservationRepository for PostgresStore {
     }
 
     #[allow(clippy::too_many_lines)]
-    async fn reconcile_github_workflow_permission_handoff(
-        &self,
-        request: ReconcileGithubWorkflowPermissionHandoff,
-    ) -> Result<
-        GithubWorkflowPermissionHandoffReconciliation,
-        GithubWorkflowPermissionDefaultsObservationError,
-    > {
-        let candidate = request.candidate();
-        let consumer = candidate.consumer();
-        let mut transaction = self.pool.begin().await.map_err(operation_error)?;
-        pin_read_committed(&mut transaction).await?;
-
-        // The authority lock is first and exclusive. The workflow handoff
-        // INSERT guard takes a shared lock on this same row, so an absence
-        // closure and a late natural-key INSERT cannot both commit.
-        let authority_exact: Option<bool> = sqlx::query_scalar(
-            r"
-            SELECT service_scope = 'workflow_permissions_read'
-               AND identity_digest = $3
-            FROM github_server_service_authorities
-            WHERE tenant_id = $1 AND id = $2
-            FOR UPDATE
-            ",
-        )
-        .bind(candidate.tenant().as_str())
-        .bind(candidate.authority_selector().authority_id().as_uuid())
-        .bind(candidate.authority_identity_digest().as_bytes().as_slice())
-        .fetch_optional(&mut *transaction)
-        .await
-        .map_err(operation_error)?;
-        if authority_exact != Some(true) {
-            return Err(GithubWorkflowPermissionDefaultsObservationError::Conflict);
-        }
-
-        let candidate_exact: Option<bool> = sqlx::query_scalar(
-            r"
-            SELECT candidate_digest = $3
-              AND authority_id = $4
-              AND authority_identity_digest = $5
-              AND consumer_owner_id = $6
-              AND consumer_claim_fence = $7
-              AND consumer_action = $8
-              AND consumer_revision = $9
-              AND claimed_at_ms = $10
-              AND expires_at_ms = $11
-            FROM github_workflow_permission_observation_candidates
-            WHERE tenant_id = $1 AND observation_id = $2
-            FOR UPDATE
-            ",
-        )
-        .bind(candidate.tenant().as_str())
-        .bind(candidate.observation_id().as_uuid())
-        .bind(candidate.digest().as_bytes().as_slice())
-        .bind(candidate.authority_selector().authority_id().as_uuid())
-        .bind(candidate.authority_identity_digest().as_bytes().as_slice())
-        .bind(consumer.owner().as_uuid())
-        .bind(pg_bigint(consumer.fence().get()))
-        .bind(consumer.action().as_str())
-        .bind(pg_bigint(consumer.revision().get()))
-        .bind(candidate.claimed_at().get())
-        .bind(candidate.expires_at().get())
-        .fetch_optional(&mut *transaction)
-        .await
-        .map_err(operation_error)?;
-        if candidate_exact != Some(true) {
-            return Err(GithubWorkflowPermissionDefaultsObservationError::Conflict);
-        }
-
-        // A completed observation already owns the candidate and its handoff.
-        // Return that durable release instead of trying to create a competing
-        // ambiguity closure.
-        let finalized = sqlx::query(
-            r"
-            SELECT observation.handoff_id,
-                   observation.handoff_generation,
-                   observation.released_at_ms,
-                   observation.candidate_digest = $3
-                       AND handoff.tenant_id = $1
-                       AND handoff.authority_id = $4
-                       AND handoff.consumer_id = $2
-                       AND handoff.consumer_owner_id = $5
-                       AND handoff.consumer_claim_fence = $6
-                       AND handoff.consumer_action = $7
-                       AND handoff.consumer_revision = $8
-                       AND handoff.generation = observation.handoff_generation
-                       AND handoff.required_through_ms = $9
-                       AND handoff.released_at_ms = observation.released_at_ms
-                       AS exact
-            FROM github_workflow_permission_default_observations AS observation
-            JOIN github_server_service_authority_handoffs AS handoff
-              ON handoff.id = observation.handoff_id
-            WHERE observation.tenant_id = $1
-              AND observation.observation_id = $2
-            FOR SHARE OF observation, handoff
-            ",
-        )
-        .bind(candidate.tenant().as_str())
-        .bind(candidate.observation_id().as_uuid())
-        .bind(candidate.digest().as_bytes().as_slice())
-        .bind(candidate.authority_selector().authority_id().as_uuid())
-        .bind(consumer.owner().as_uuid())
-        .bind(pg_bigint(consumer.fence().get()))
-        .bind(consumer.action().as_str())
-        .bind(pg_bigint(consumer.revision().get()))
-        .bind(request.required_through().get())
-        .fetch_optional(&mut *transaction)
-        .await
-        .map_err(operation_error)?;
-        if let Some(finalized) = finalized {
-            if !finalized
-                .try_get::<bool, _>("exact")
-                .map_err(operation_error)?
-            {
-                return Err(GithubWorkflowPermissionDefaultsObservationError::CorruptData);
-            }
-            let handoff_id = automata_ci_store::GithubServerServiceHandoffId::from_uuid(
-                finalized.try_get("handoff_id").map_err(operation_error)?,
-            )
-            .map_err(|_| GithubWorkflowPermissionDefaultsObservationError::CorruptData)?;
-            let generation = automata_ci_store::GithubServerServiceGeneration::new(
-                u64::try_from(
-                    finalized
-                        .try_get::<i64, _>("handoff_generation")
-                        .map_err(operation_error)?,
-                )
-                .map_err(|_| GithubWorkflowPermissionDefaultsObservationError::CorruptData)?,
-            )
-            .map_err(|_| GithubWorkflowPermissionDefaultsObservationError::CorruptData)?;
-            let released_at = UnixMillis::new(
-                finalized
-                    .try_get("released_at_ms")
-                    .map_err(operation_error)?,
-            );
-            transaction.commit().await.map_err(operation_error)?;
-            return Ok(
-                GithubWorkflowPermissionHandoffReconciliation::AlreadyReleased {
-                    handoff_id,
-                    generation,
-                    released_at,
-                },
-            );
-        }
-
-        if let Some(existing) = load_handoff_closure(&mut transaction, &request).await? {
-            transaction.commit().await.map_err(operation_error)?;
-            return Ok(existing);
-        }
-
-        let handoff = sqlx::query(
-            r"
-            SELECT id, generation, required_through_ms, granted_at_ms, released_at_ms
-            FROM github_server_service_authority_handoffs
-            WHERE tenant_id = $1
-              AND authority_id = $2
-              AND consumer_id = $3
-              AND consumer_owner_id = $4
-              AND consumer_claim_fence = $5
-              AND consumer_action = $6
-              AND consumer_revision = $7
-            FOR UPDATE
-            ",
-        )
-        .bind(candidate.tenant().as_str())
-        .bind(candidate.authority_selector().authority_id().as_uuid())
-        .bind(candidate.observation_id().as_uuid())
-        .bind(consumer.owner().as_uuid())
-        .bind(pg_bigint(consumer.fence().get()))
-        .bind(consumer.action().as_str())
-        .bind(pg_bigint(consumer.revision().get()))
-        .fetch_optional(&mut *transaction)
-        .await
-        .map_err(operation_error)?;
-        let database_now = database_now(&mut transaction)
-            .await
-            .map_err(|_| GithubWorkflowPermissionDefaultsObservationError::Operation)?;
-
-        let proposed = if let Some(handoff) = handoff {
-            let handoff_id = automata_ci_store::GithubServerServiceHandoffId::from_uuid(
-                handoff.try_get("id").map_err(operation_error)?,
-            )
-            .map_err(|_| GithubWorkflowPermissionDefaultsObservationError::CorruptData)?;
-            let generation = automata_ci_store::GithubServerServiceGeneration::new(
-                u64::try_from(
-                    handoff
-                        .try_get::<i64, _>("generation")
-                        .map_err(operation_error)?,
-                )
-                .map_err(|_| GithubWorkflowPermissionDefaultsObservationError::CorruptData)?,
-            )
-            .map_err(|_| GithubWorkflowPermissionDefaultsObservationError::CorruptData)?;
-            let required_through = UnixMillis::new(
-                handoff
-                    .try_get("required_through_ms")
-                    .map_err(operation_error)?,
-            );
-            let granted_at =
-                UnixMillis::new(handoff.try_get("granted_at_ms").map_err(operation_error)?);
-            if required_through != request.required_through() || database_now < granted_at {
-                return Err(GithubWorkflowPermissionDefaultsObservationError::CorruptData);
-            }
-            if let Some(released_at) = handoff
-                .try_get::<Option<i64>, _>("released_at_ms")
-                .map_err(operation_error)?
-            {
-                GithubWorkflowPermissionHandoffReconciliation::AlreadyReleased {
-                    handoff_id,
-                    generation,
-                    released_at: UnixMillis::new(released_at),
-                }
-            } else {
-                let changed = sqlx::query(
-                    r"
-                    UPDATE github_server_service_authority_handoffs
-                    SET released_at_ms = $2
-                    WHERE id = $1 AND released_at_ms IS NULL
-                    ",
-                )
-                .bind(handoff_id.as_uuid())
-                .bind(database_now.get())
-                .execute(&mut *transaction)
-                .await
-                .map_err(operation_error)?;
-                if changed.rows_affected() != 1 {
-                    return Err(GithubWorkflowPermissionDefaultsObservationError::Conflict);
-                }
-                GithubWorkflowPermissionHandoffReconciliation::Released {
-                    handoff_id,
-                    generation,
-                    released_at: database_now,
-                }
-            }
-        } else {
-            GithubWorkflowPermissionHandoffReconciliation::AbsentClosed {
-                closed_at: database_now,
-            }
-        };
-
-        insert_handoff_closure(&mut transaction, &request, proposed, database_now).await?;
-        let durable = load_handoff_closure(&mut transaction, &request)
-            .await?
-            .ok_or(GithubWorkflowPermissionDefaultsObservationError::CorruptData)?;
-        if durable != proposed {
-            return Err(GithubWorkflowPermissionDefaultsObservationError::Conflict);
-        }
-        transaction.commit().await.map_err(operation_error)?;
-        Ok(durable)
-    }
-
-    #[allow(clippy::too_many_lines)]
     async fn finalize_github_workflow_permission_observation(
         &self,
         request: FinalizeGithubWorkflowPermissionObservation,
@@ -386,8 +135,8 @@ impl GithubWorkflowPermissionDefaultsObservationRepository for PostgresStore {
         let mut transaction = self.pool.begin().await.map_err(operation_error)?;
         pin_read_committed(&mut transaction).await?;
 
-        // Every finalizer takes locks in the same tenant/repository -> authority
-        // -> current policy -> current manifest -> candidate -> handoff order.
+        // Every finalizer takes locks in tenant/repository -> authority ->
+        // current policy -> current manifest -> candidate order.
         lock_or_create_tenant(&mut transaction, desired.tenant().as_str())
             .await
             .map_err(|_| GithubWorkflowPermissionDefaultsObservationError::Operation)?;
@@ -473,24 +222,6 @@ impl GithubWorkflowPermissionDefaultsObservationRepository for PostgresStore {
         if !candidate_exact {
             return Err(GithubWorkflowPermissionDefaultsObservationError::Conflict);
         }
-        let closed: bool = sqlx::query_scalar(
-            r"
-            SELECT EXISTS (
-                SELECT 1
-                FROM github_workflow_permission_candidate_closures
-                WHERE tenant_id = $1 AND observation_id = $2
-            )
-            ",
-        )
-        .bind(candidate.tenant().as_str())
-        .bind(candidate.observation_id().as_uuid())
-        .fetch_one(&mut *transaction)
-        .await
-        .map_err(operation_error)?;
-        if closed {
-            return Err(GithubWorkflowPermissionDefaultsObservationError::Conflict);
-        }
-
         let candidate_is_current: bool = sqlx::query_scalar(
             r"
             SELECT EXISTS (
@@ -520,14 +251,12 @@ impl GithubWorkflowPermissionDefaultsObservationRepository for PostgresStore {
         .await
         .map_err(operation_error)?;
 
-        let release = request.release();
-        release_exact_handoff(&mut transaction, release).await?;
         let existing: Option<bool> = sqlx::query_scalar(
             r"
             SELECT observation_digest = $2
                AND matches_expected_default = $3
-               AND handoff_id = $4
-               AND handoff_generation = $5
+               AND credential_request_digest = $4
+               AND credential_generation = $5
             FROM github_workflow_permission_default_observations
             WHERE observation_id = $1
             FOR SHARE
@@ -536,8 +265,13 @@ impl GithubWorkflowPermissionDefaultsObservationRepository for PostgresStore {
         .bind(candidate.observation_id().as_uuid())
         .bind(observation.digest().as_bytes().as_slice())
         .bind(matches)
-        .bind(observation.handoff_id().as_uuid())
-        .bind(pg_bigint(observation.handoff_generation().get()))
+        .bind(
+            observation
+                .credential_request_digest()
+                .as_bytes()
+                .as_slice(),
+        )
+        .bind(pg_bigint(observation.credential_generation().get()))
         .fetch_optional(&mut *transaction)
         .await
         .map_err(operation_error)?;
@@ -556,7 +290,7 @@ impl GithubWorkflowPermissionDefaultsObservationRepository for PostgresStore {
         let recorded_at = database_now(&mut transaction)
             .await
             .map_err(|_| GithubWorkflowPermissionDefaultsObservationError::Operation)?;
-        if recorded_at < observation.released_at() {
+        if recorded_at < observation.provider_observed_at() {
             return Err(GithubWorkflowPermissionDefaultsObservationError::CorruptData);
         }
         if matches && recorded_at > candidate.expires_at() {
@@ -596,184 +330,6 @@ impl GithubWorkflowPermissionDefaultsObservationRepository for PostgresStore {
     }
 }
 
-async fn load_handoff_closure(
-    transaction: &mut Transaction<'_, Postgres>,
-    request: &ReconcileGithubWorkflowPermissionHandoff,
-) -> Result<
-    Option<GithubWorkflowPermissionHandoffReconciliation>,
-    GithubWorkflowPermissionDefaultsObservationError,
-> {
-    let candidate = request.candidate();
-    let row = sqlx::query(
-        r"
-        SELECT disposition, handoff_id, handoff_generation,
-               released_at_ms, closed_at_ms
-        FROM github_workflow_permission_candidate_closures
-        WHERE tenant_id = $1 AND observation_id = $2 AND candidate_digest = $3
-        FOR SHARE
-        ",
-    )
-    .bind(candidate.tenant().as_str())
-    .bind(candidate.observation_id().as_uuid())
-    .bind(candidate.digest().as_bytes().as_slice())
-    .fetch_optional(&mut **transaction)
-    .await
-    .map_err(operation_error)?;
-    let Some(row) = row else {
-        return Ok(None);
-    };
-    let disposition: String = row.try_get("disposition").map_err(operation_error)?;
-    let closed_at = UnixMillis::new(row.try_get("closed_at_ms").map_err(operation_error)?);
-    if disposition == "absent" {
-        return Ok(Some(
-            GithubWorkflowPermissionHandoffReconciliation::AbsentClosed { closed_at },
-        ));
-    }
-    let handoff_id = automata_ci_store::GithubServerServiceHandoffId::from_uuid(
-        row.try_get("handoff_id").map_err(operation_error)?,
-    )
-    .map_err(|_| GithubWorkflowPermissionDefaultsObservationError::CorruptData)?;
-    let generation = automata_ci_store::GithubServerServiceGeneration::new(
-        u64::try_from(
-            row.try_get::<i64, _>("handoff_generation")
-                .map_err(operation_error)?,
-        )
-        .map_err(|_| GithubWorkflowPermissionDefaultsObservationError::CorruptData)?,
-    )
-    .map_err(|_| GithubWorkflowPermissionDefaultsObservationError::CorruptData)?;
-    let released_at = UnixMillis::new(row.try_get("released_at_ms").map_err(operation_error)?);
-    let outcome = match disposition.as_str() {
-        "released" => GithubWorkflowPermissionHandoffReconciliation::Released {
-            handoff_id,
-            generation,
-            released_at,
-        },
-        "already_released" => GithubWorkflowPermissionHandoffReconciliation::AlreadyReleased {
-            handoff_id,
-            generation,
-            released_at,
-        },
-        _ => return Err(GithubWorkflowPermissionDefaultsObservationError::CorruptData),
-    };
-    Ok(Some(outcome))
-}
-
-async fn insert_handoff_closure(
-    transaction: &mut Transaction<'_, Postgres>,
-    request: &ReconcileGithubWorkflowPermissionHandoff,
-    outcome: GithubWorkflowPermissionHandoffReconciliation,
-    closed_at: UnixMillis,
-) -> Result<(), GithubWorkflowPermissionDefaultsObservationError> {
-    let candidate = request.candidate();
-    let (disposition, handoff_id, generation, released_at) = match outcome {
-        GithubWorkflowPermissionHandoffReconciliation::AbsentClosed { .. } => {
-            ("absent", None, None, None)
-        }
-        GithubWorkflowPermissionHandoffReconciliation::Released {
-            handoff_id,
-            generation,
-            released_at,
-        } => (
-            "released",
-            Some(handoff_id.as_uuid()),
-            Some(pg_bigint(generation.get())),
-            Some(released_at.get()),
-        ),
-        GithubWorkflowPermissionHandoffReconciliation::AlreadyReleased {
-            handoff_id,
-            generation,
-            released_at,
-        } => (
-            "already_released",
-            Some(handoff_id.as_uuid()),
-            Some(pg_bigint(generation.get())),
-            Some(released_at.get()),
-        ),
-    };
-    sqlx::query(
-        r"
-        INSERT INTO github_workflow_permission_candidate_closures (
-            observation_id, tenant_id, candidate_digest, disposition,
-            handoff_id, handoff_generation, released_at_ms, closed_at_ms
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-        ON CONFLICT (observation_id) DO NOTHING
-        ",
-    )
-    .bind(candidate.observation_id().as_uuid())
-    .bind(candidate.tenant().as_str())
-    .bind(candidate.digest().as_bytes().as_slice())
-    .bind(disposition)
-    .bind(handoff_id)
-    .bind(generation)
-    .bind(released_at)
-    .bind(closed_at.get())
-    .execute(&mut **transaction)
-    .await
-    .map_err(operation_error)?;
-    Ok(())
-}
-
-async fn release_exact_handoff(
-    transaction: &mut Transaction<'_, Postgres>,
-    request: &automata_ci_store::ReleaseGithubServerServiceHandoff,
-) -> Result<(), GithubWorkflowPermissionDefaultsObservationError> {
-    let consumer = request.consumer();
-    let changed = sqlx::query(
-        r"
-        UPDATE github_server_service_authority_handoffs
-        SET released_at_ms = $7
-        WHERE id = $1 AND consumer_id = $2 AND consumer_owner_id = $3
-          AND consumer_claim_fence = $4 AND consumer_action = $5
-          AND consumer_revision = $6 AND released_at_ms IS NULL
-          AND granted_at_ms <= $7
-          AND authority_id = $8 AND tenant_id = $9
-        ",
-    )
-    .bind(request.handoff_id().as_uuid())
-    .bind(consumer.consumer_id().as_uuid())
-    .bind(consumer.owner().as_uuid())
-    .bind(pg_bigint(consumer.fence().get()))
-    .bind(consumer.action().as_str())
-    .bind(pg_bigint(consumer.revision().get()))
-    .bind(request.released_at().get())
-    .bind(request.selector().authority_id().as_uuid())
-    .bind(request.selector().tenant().as_str())
-    .execute(&mut **transaction)
-    .await
-    .map_err(operation_error)?;
-    if changed.rows_affected() == 1 {
-        return Ok(());
-    }
-    let exact: bool = sqlx::query_scalar(
-        r"
-        SELECT EXISTS (
-            SELECT 1 FROM github_server_service_authority_handoffs
-            WHERE id = $1 AND consumer_id = $2 AND consumer_owner_id = $3
-              AND consumer_claim_fence = $4 AND consumer_action = $5
-              AND consumer_revision = $6 AND released_at_ms = $7
-              AND authority_id = $8 AND tenant_id = $9
-        )
-        ",
-    )
-    .bind(request.handoff_id().as_uuid())
-    .bind(consumer.consumer_id().as_uuid())
-    .bind(consumer.owner().as_uuid())
-    .bind(pg_bigint(consumer.fence().get()))
-    .bind(consumer.action().as_str())
-    .bind(pg_bigint(consumer.revision().get()))
-    .bind(request.released_at().get())
-    .bind(request.selector().authority_id().as_uuid())
-    .bind(request.selector().tenant().as_str())
-    .fetch_one(&mut **transaction)
-    .await
-    .map_err(operation_error)?;
-    if exact {
-        Ok(())
-    } else {
-        Err(GithubWorkflowPermissionDefaultsObservationError::Conflict)
-    }
-}
-
 async fn insert_observation(
     transaction: &mut Transaction<'_, Postgres>,
     observation: &automata_ci_store::GithubWorkflowPermissionDefaultsObservation,
@@ -785,17 +341,17 @@ async fn insert_observation(
         INSERT INTO github_workflow_permission_default_observations (
             observation_id, tenant_id, repository_id, provider_connection_id,
             candidate_digest,
-            handoff_id, handoff_generation,
+            credential_request_digest, credential_generation,
             default_workflow_permissions, can_approve_pull_request_reviews,
             matches_expected_default, api_version,
             request_started_at_ms, provider_observed_at_ms,
-            released_at_ms, recorded_at_ms,
+            recorded_at_ms,
             activated_manifest_revision, activated_manifest_digest,
             activated_runtime_policy_revision, activated_runtime_policy_digest,
             observation_digest
         ) VALUES (
             $1, $2, $3, $4, $5, $6, $7, $8,
-            $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20
+            $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19
         )
         ON CONFLICT (observation_id) DO NOTHING
         ",
@@ -805,15 +361,19 @@ async fn insert_observation(
     .bind(candidate.repository_id().as_uuid())
     .bind(candidate.connection_id().as_uuid())
     .bind(candidate.digest().as_bytes().as_slice())
-    .bind(observation.handoff_id().as_uuid())
-    .bind(pg_bigint(observation.handoff_generation().get()))
+    .bind(
+        observation
+            .credential_request_digest()
+            .as_bytes()
+            .as_slice(),
+    )
+    .bind(pg_bigint(observation.credential_generation().get()))
     .bind(observation.default_workflow_permissions().as_str())
     .bind(observation.can_approve_pull_request_reviews())
     .bind(observation.matches_expected_default())
     .bind(GITHUB_PROVIDER_REST_API_VERSION)
     .bind(candidate.claimed_at().get())
     .bind(observation.provider_observed_at().get())
-    .bind(observation.released_at().get())
     .bind(recorded_at.get())
     .bind(
         observation

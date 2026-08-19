@@ -12,7 +12,6 @@ AS $$
 DECLARE
     candidate github_workflow_permission_observation_candidates%ROWTYPE;
     authority github_server_service_authorities%ROWTYPE;
-    handoff github_server_service_authority_handoffs%ROWTYPE;
     candidate_authority_id uuid;
     current_manifest github_provider_manifest_current%ROWTYPE;
     current_policy workflow_runtime_policy_current%ROWTYPE;
@@ -36,10 +35,6 @@ BEGIN
     WHERE observation_candidate.observation_id = NEW.observation_id
       AND observation_candidate.tenant_id = NEW.tenant_id
     FOR SHARE;
-    SELECT authority_handoff.* INTO handoff
-    FROM github_server_service_authority_handoffs AS authority_handoff
-    WHERE authority_handoff.id = NEW.handoff_id
-    FOR SHARE;
     database_now_ms := floor(
         extract(epoch FROM clock_timestamp()) * 1000
     )::BIGINT;
@@ -48,30 +43,11 @@ BEGIN
         OR authority.state <> 'active'
         OR authority.service_scope <> 'workflow_permissions_read'
         OR authority.identity_digest <> candidate.authority_identity_digest
-        OR handoff.id IS NULL
         OR NEW.candidate_digest <> candidate.candidate_digest
-        OR EXISTS (
-            SELECT 1
-            FROM github_workflow_permission_candidate_closures AS closure
-            WHERE closure.tenant_id = candidate.tenant_id
-              AND closure.observation_id = candidate.observation_id
-        )
         OR NEW.repository_id <> candidate.repository_id
         OR NEW.provider_connection_id <> candidate.provider_connection_id
-        OR handoff.tenant_id <> candidate.tenant_id
-        OR handoff.authority_id <> candidate.authority_id
-        OR handoff.generation <> NEW.handoff_generation
-        OR handoff.consumer_id <> candidate.observation_id
-        OR handoff.consumer_owner_id <> candidate.consumer_owner_id
-        OR handoff.consumer_claim_fence <> candidate.consumer_claim_fence
-        OR handoff.consumer_action <> candidate.consumer_action
-        OR handoff.consumer_revision <> candidate.consumer_revision
-        OR handoff.granted_at_ms > NEW.provider_observed_at_ms
         OR NEW.request_started_at_ms <> candidate.claimed_at_ms
-        OR NEW.provider_observed_at_ms > handoff.required_through_ms
-        OR handoff.released_at_ms IS NULL
-        OR handoff.released_at_ms <> NEW.released_at_ms
-        OR NEW.released_at_ms > candidate.expires_at_ms
+        OR NEW.provider_observed_at_ms >= candidate.claimed_at_ms + 300000
         OR NEW.matches_expected_default <> (
             NEW.default_workflow_permissions = candidate.expected_default
             AND NEW.can_approve_pull_request_reviews =

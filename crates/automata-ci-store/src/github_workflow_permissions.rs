@@ -12,13 +12,15 @@ use crate::{
     GithubRepositoryName, GithubServerServiceAction, GithubServerServiceAppClientId,
     GithubServerServiceAppId, GithubServerServiceAuthorityIdentity,
     GithubServerServiceAuthoritySelector, GithubServerServiceClaimFence,
-    GithubServerServiceConsumerClaim, GithubServerServiceConsumerId, GithubServerServiceGeneration,
-    GithubServerServiceHandoffId, GithubServerServiceJwtIssuer, GithubServerServiceRevision,
-    GithubServerServiceScope, GithubServerServiceWorkerId,
-    MAX_GITHUB_SERVICE_CONSUMER_REQUEST_MILLIS, ReleaseGithubServerServiceHandoff, RepositoryId,
-    TenantScope, WorkflowRuntimePolicyRevision,
+    GithubServerServiceConsumerClaim, GithubServerServiceConsumerId, GithubServerServiceJwtIssuer,
+    GithubServerServiceRevision, GithubServerServiceScope, GithubServerServiceWorkerId,
+    MAX_GITHUB_SERVICE_CONSUMER_REQUEST_MILLIS, RepositoryId, TenantScope,
+    WorkflowRuntimePolicyRevision,
 };
-use automata_ci_provider::ProviderConnectionId;
+use automata_ci_provider::{
+    ControlCredentialRequest, ProviderConnectionId, ProviderControlOperation,
+    ProviderCredentialGeneration,
+};
 
 const CANDIDATE_SCHEMA: u16 = 2;
 const OBSERVATION_SCHEMA: u16 = 2;
@@ -303,49 +305,68 @@ impl GithubWorkflowPermissionObservationCandidate {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GithubWorkflowPermissionDefaultsObservation {
     candidate: GithubWorkflowPermissionObservationCandidate,
-    handoff_id: GithubServerServiceHandoffId,
-    handoff_generation: GithubServerServiceGeneration,
+    credential_request_digest: Sha256Digest,
+    credential_generation: ProviderCredentialGeneration,
     default_workflow_permissions: ActionsDefaultWorkflowPermission,
     can_approve_pull_request_reviews: bool,
     provider_observed_at: UnixMillis,
-    released_at: UnixMillis,
     digest: Sha256Digest,
 }
 
 impl GithubWorkflowPermissionDefaultsObservation {
-    /// Constructs evidence bound to the exact candidate, handoff, and release.
+    /// Constructs evidence bound to the exact common control-credential request.
     ///
     /// # Errors
     ///
-    /// Rejects a release from any other authority/consumer or a completion
-    /// outside the candidate's bounded provider-I/O window.
+    /// Rejects a credential request from any other claim, connection, or
+    /// operation, or a completion outside the bounded provider-I/O window.
     pub fn new(
         bootstrap: &BootstrapGithubProviderRepository,
         candidate: GithubWorkflowPermissionObservationCandidate,
-        release: &ReleaseGithubServerServiceHandoff,
-        handoff_generation: GithubServerServiceGeneration,
+        credential_request: &ControlCredentialRequest,
+        credential_generation: ProviderCredentialGeneration,
         default_workflow_permissions: ActionsDefaultWorkflowPermission,
         can_approve_pull_request_reviews: bool,
         provider_observed_at: UnixMillis,
     ) -> Result<Self, GithubWorkflowPermissionDefaultsObservationError> {
+        let claim = credential_request.claim();
+        let mut operations = credential_request.operations().iter();
+        let required_through = candidate
+            .claimed_at()
+            .get()
+            .checked_add(candidate.consumer().action().provider_tail_millis())
+            .map(UnixMillis::new)
+            .ok_or(GithubWorkflowPermissionDefaultsObservationError::InvalidBinding)?;
         if !candidate.matches_bootstrap(bootstrap)
-            || release.selector() != candidate.authority_selector()
-            || release.handoff_id().as_uuid().is_nil()
-            || release.consumer() != candidate.consumer()
+            || credential_request.connection_id() != candidate.connection_id()
+            || credential_request.repository().external_id().as_str()
+                != candidate.github_repository_id().get().to_string()
+            || claim.credential_id().as_uuid() != candidate.observation_id().as_uuid()
+            || claim.worker_id().as_uuid() != candidate.consumer().owner().as_uuid()
+            || claim.fence() != candidate.consumer().fence().get()
+            || claim.revision() != candidate.consumer().revision().get()
+            || claim.expires_at() != required_through
+            || credential_request.requested_at() != candidate.claimed_at()
+            || credential_request.minimum_validity_millis()
+                != candidate
+                    .consumer()
+                    .action()
+                    .provider_tail_millis()
+                    .cast_unsigned()
+            || operations.next() != Some(ProviderControlOperation::WorkflowPermissionRead)
+            || operations.next().is_some()
             || provider_observed_at < candidate.claimed_at()
-            || provider_observed_at > release.released_at()
-            || release.released_at() > candidate.expires_at()
+            || provider_observed_at >= required_through
         {
             return Err(GithubWorkflowPermissionDefaultsObservationError::InvalidBinding);
         }
         let mut observation = Self {
             candidate,
-            handoff_id: release.handoff_id(),
-            handoff_generation,
+            credential_request_digest: credential_request.digest(),
+            credential_generation,
             default_workflow_permissions,
             can_approve_pull_request_reviews,
             provider_observed_at,
-            released_at: release.released_at(),
             digest: Sha256Digest::from_bytes([0; 32]),
         };
         observation.digest = observation.compute_digest();
@@ -357,12 +378,12 @@ impl GithubWorkflowPermissionDefaultsObservation {
         &self.candidate
     }
     #[must_use]
-    pub const fn handoff_id(&self) -> GithubServerServiceHandoffId {
-        self.handoff_id
+    pub const fn credential_request_digest(&self) -> Sha256Digest {
+        self.credential_request_digest
     }
     #[must_use]
-    pub const fn handoff_generation(&self) -> GithubServerServiceGeneration {
-        self.handoff_generation
+    pub const fn credential_generation(&self) -> ProviderCredentialGeneration {
+        self.credential_generation
     }
     #[must_use]
     pub const fn default_workflow_permissions(&self) -> ActionsDefaultWorkflowPermission {
@@ -375,10 +396,6 @@ impl GithubWorkflowPermissionDefaultsObservation {
     #[must_use]
     pub const fn provider_observed_at(&self) -> UnixMillis {
         self.provider_observed_at
-    }
-    #[must_use]
-    pub const fn released_at(&self) -> UnixMillis {
-        self.released_at
     }
     #[must_use]
     pub fn matches_expected_default(&self) -> bool {
@@ -397,101 +414,22 @@ impl GithubWorkflowPermissionDefaultsObservation {
         digest.update(OBSERVATION_SCHEMA.to_be_bytes());
         digest.update(self.candidate.observation_id.as_uuid().as_bytes());
         digest.update(self.candidate.digest.as_bytes());
-        digest.update(self.handoff_id.as_uuid().as_bytes());
-        digest.update(self.handoff_generation.get().to_be_bytes());
+        digest.update(self.credential_request_digest.as_bytes());
+        digest.update(self.credential_generation.get().to_be_bytes());
         update_text(&mut digest, GITHUB_PROVIDER_REST_API_VERSION);
         update_text(&mut digest, self.default_workflow_permissions.as_str());
         digest.update([u8::from(self.can_approve_pull_request_reviews)]);
         digest.update([u8::from(self.matches_expected_default())]);
         digest.update(self.provider_observed_at.get().to_be_bytes());
-        digest.update(self.released_at.get().to_be_bytes());
         Sha256Digest::from_bytes(digest.finalize().into())
     }
 }
 
-/// Atomic release/evidence/activation request for one observation candidate.
+/// Atomic evidence/activation request for one observation candidate.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FinalizeGithubWorkflowPermissionObservation {
     bootstrap: BootstrapGithubProviderRepository,
-    release: ReleaseGithubServerServiceHandoff,
     observation: GithubWorkflowPermissionDefaultsObservation,
-}
-
-/// Exact value-free request that closes an ambiguous observation handoff.
-///
-/// The complete immutable candidate is retained so storage can prove the
-/// authority, consumer, digest, and provider-use horizon without retrying an
-/// expired credential acquire or decrypting bearer material.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ReconcileGithubWorkflowPermissionHandoff {
-    candidate: GithubWorkflowPermissionObservationCandidate,
-    required_through: UnixMillis,
-}
-
-impl ReconcileGithubWorkflowPermissionHandoff {
-    /// Constructs the sole handoff horizon authorized by a candidate.
-    ///
-    /// # Errors
-    ///
-    /// Rejects timestamp overflow or a horizon outside the candidate lease.
-    pub fn new(
-        candidate: GithubWorkflowPermissionObservationCandidate,
-    ) -> Result<Self, GithubWorkflowPermissionDefaultsObservationError> {
-        let required_through = candidate
-            .claimed_at()
-            .get()
-            .checked_add(candidate.consumer().action().provider_tail_millis())
-            .map(UnixMillis::new)
-            .ok_or(GithubWorkflowPermissionDefaultsObservationError::InvalidBinding)?;
-        if required_through >= candidate.expires_at() {
-            return Err(GithubWorkflowPermissionDefaultsObservationError::InvalidBinding);
-        }
-        Ok(Self {
-            candidate,
-            required_through,
-        })
-    }
-
-    /// Returns the exact immutable candidate.
-    #[must_use]
-    pub const fn candidate(&self) -> &GithubWorkflowPermissionObservationCandidate {
-        &self.candidate
-    }
-
-    /// Returns the original exclusive provider-use horizon.
-    #[must_use]
-    pub const fn required_through(&self) -> UnixMillis {
-        self.required_through
-    }
-}
-
-/// Durable result of closing one ambiguous observation handoff.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum GithubWorkflowPermissionHandoffReconciliation {
-    /// Storage proved that no natural-key handoff was ever committed and sealed
-    /// the candidate against any later insert.
-    AbsentClosed {
-        /// Database-authoritative closure time.
-        closed_at: UnixMillis,
-    },
-    /// Storage found a live handoff and atomically released it.
-    Released {
-        /// Durable natural-key winner.
-        handoff_id: GithubServerServiceHandoffId,
-        /// Borrowed protected issuance generation.
-        generation: GithubServerServiceGeneration,
-        /// Database-authoritative release time.
-        released_at: UnixMillis,
-    },
-    /// Storage proved that the exact handoff had already been released.
-    AlreadyReleased {
-        /// Durable natural-key winner.
-        handoff_id: GithubServerServiceHandoffId,
-        /// Borrowed protected issuance generation.
-        generation: GithubServerServiceGeneration,
-        /// Existing immutable release time.
-        released_at: UnixMillis,
-    },
 }
 
 impl FinalizeGithubWorkflowPermissionObservation {
@@ -499,23 +437,16 @@ impl FinalizeGithubWorkflowPermissionObservation {
     ///
     /// # Errors
     ///
-    /// Rejects any disagreement between bootstrap, observation, and release.
+    /// Rejects any disagreement between bootstrap and observation.
     pub fn new(
         bootstrap: BootstrapGithubProviderRepository,
-        release: ReleaseGithubServerServiceHandoff,
         observation: GithubWorkflowPermissionDefaultsObservation,
     ) -> Result<Self, GithubWorkflowPermissionDefaultsObservationError> {
-        if !observation.candidate.matches_bootstrap(&bootstrap)
-            || release.selector() != observation.candidate.authority_selector()
-            || release.handoff_id() != observation.handoff_id
-            || release.consumer() != observation.candidate.consumer
-            || release.released_at() != observation.released_at
-        {
+        if !observation.candidate.matches_bootstrap(&bootstrap) {
             return Err(GithubWorkflowPermissionDefaultsObservationError::InvalidBinding);
         }
         Ok(Self {
             bootstrap,
-            release,
             observation,
         })
     }
@@ -523,10 +454,6 @@ impl FinalizeGithubWorkflowPermissionObservation {
     #[must_use]
     pub const fn bootstrap(&self) -> &BootstrapGithubProviderRepository {
         &self.bootstrap
-    }
-    #[must_use]
-    pub const fn release(&self) -> &ReleaseGithubServerServiceHandoff {
-        &self.release
     }
     #[must_use]
     pub const fn observation(&self) -> &GithubWorkflowPermissionDefaultsObservation {
@@ -591,18 +518,9 @@ pub trait GithubWorkflowPermissionDefaultsObservationRepository: Send + Sync {
         candidate: GithubWorkflowPermissionObservationCandidate,
     ) -> Result<(), GithubWorkflowPermissionDefaultsObservationError>;
 
-    /// Closes a possibly committed handoff without loading credential material.
-    async fn reconcile_github_workflow_permission_handoff(
-        &self,
-        request: ReconcileGithubWorkflowPermissionHandoff,
-    ) -> Result<
-        GithubWorkflowPermissionHandoffReconciliation,
-        GithubWorkflowPermissionDefaultsObservationError,
-    >;
-
-    /// Atomically releases the handoff, records evidence, and activates a
-    /// matching canonical policy/manifest pair. A mismatch records evidence but
-    /// leaves both canonical current pointers unchanged.
+    /// Atomically records evidence and activates a matching canonical
+    /// policy/manifest pair. A mismatch records evidence but leaves both
+    /// canonical current pointers unchanged.
     async fn finalize_github_workflow_permission_observation(
         &self,
         request: FinalizeGithubWorkflowPermissionObservation,

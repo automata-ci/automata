@@ -49,7 +49,7 @@ ALTER TABLE github_server_service_authority_handoffs
     ),
     ADD CONSTRAINT github_server_service_handoffs_observation_time_shape CHECK (
         consumer_action <> 'observe_workflow_permission_defaults'
-        OR required_through_ms::NUMERIC = granted_at_ms::NUMERIC + 300000
+        OR required_through_ms > granted_at_ms
     );
 
 CREATE TABLE github_workflow_permission_observation_candidates (
@@ -123,15 +123,14 @@ CREATE TABLE github_workflow_permission_default_observations (
     repository_id uuid NOT NULL,
     provider_connection_id uuid NOT NULL,
     candidate_digest bytea NOT NULL,
-    handoff_id uuid NOT NULL UNIQUE,
-    handoff_generation bigint NOT NULL,
+    credential_request_digest bytea NOT NULL,
+    credential_generation bigint NOT NULL,
     default_workflow_permissions text NOT NULL COLLATE pg_catalog."C",
     can_approve_pull_request_reviews boolean NOT NULL,
     matches_expected_default boolean NOT NULL,
     api_version text NOT NULL COLLATE pg_catalog."C",
     request_started_at_ms bigint NOT NULL,
     provider_observed_at_ms bigint NOT NULL,
-    released_at_ms bigint NOT NULL,
     recorded_at_ms bigint NOT NULL,
     activated_manifest_revision bigint,
     activated_manifest_digest bytea,
@@ -167,17 +166,15 @@ CREATE TABLE github_workflow_permission_default_observations (
         policy_revision,
         policy_digest
     ) ON DELETE RESTRICT,
-    CONSTRAINT github_workflow_permission_observations_handoff FOREIGN KEY (handoff_id)
-        REFERENCES github_server_service_authority_handoffs (id) ON DELETE RESTRICT,
     CONSTRAINT github_workflow_permission_observations_positive CHECK (
-        handoff_generation > 0
+        credential_generation > 0
         AND request_started_at_ms >= 0
         AND request_started_at_ms <= provider_observed_at_ms
-        AND provider_observed_at_ms <= released_at_ms
-        AND released_at_ms <= recorded_at_ms
+        AND provider_observed_at_ms <= recorded_at_ms
     ),
     CONSTRAINT github_workflow_permission_observations_shape CHECK (
         octet_length(candidate_digest) = 32
+        AND octet_length(credential_request_digest) = 32
         AND octet_length(observation_digest) = 32
         AND default_workflow_permissions = ANY (ARRAY['read'::text, 'write'::text])
         AND api_version = '2026-03-10'
@@ -199,43 +196,6 @@ CREATE TABLE github_workflow_permission_default_observations (
                 AND activated_manifest_digest IS NULL
                 AND activated_runtime_policy_revision IS NULL
                 AND activated_runtime_policy_digest IS NULL
-            )
-        )
-    )
-);
-
-CREATE TABLE github_workflow_permission_candidate_closures (
-    observation_id uuid PRIMARY KEY,
-    tenant_id text NOT NULL,
-    candidate_digest bytea NOT NULL,
-    disposition text NOT NULL COLLATE pg_catalog."C",
-    handoff_id uuid,
-    handoff_generation bigint,
-    released_at_ms bigint,
-    closed_at_ms bigint NOT NULL,
-    CONSTRAINT github_workflow_permission_closures_candidate FOREIGN KEY (
-        tenant_id, observation_id
-    ) REFERENCES github_workflow_permission_observation_candidates (
-        tenant_id, observation_id
-    ) ON DELETE RESTRICT,
-    CONSTRAINT github_workflow_permission_closures_handoff FOREIGN KEY (handoff_id)
-        REFERENCES github_server_service_authority_handoffs (id) ON DELETE RESTRICT,
-    CONSTRAINT github_workflow_permission_closures_shape CHECK (
-        octet_length(candidate_digest) = 32
-        AND closed_at_ms >= 0
-        AND (
-            (
-                disposition = 'absent'
-                AND handoff_id IS NULL
-                AND handoff_generation IS NULL
-                AND released_at_ms IS NULL
-            )
-            OR (
-                disposition = ANY (ARRAY['released'::text, 'already_released'::text])
-                AND handoff_id IS NOT NULL
-                AND handoff_generation > 0
-                AND released_at_ms >= 0
-                AND released_at_ms <= closed_at_ms
             )
         )
     )
@@ -392,8 +352,8 @@ SELECT pg_catalog.sha256(
     || pg_catalog.int2send(2::SMALLINT)
     || pg_catalog.uuid_send((observation).observation_id)
     || (observation).candidate_digest
-    || pg_catalog.uuid_send((observation).handoff_id)
-    || pg_catalog.int8send((observation).handoff_generation)
+    || (observation).credential_request_digest
+    || pg_catalog.int8send((observation).credential_generation)
     || automata_digest_part(pg_catalog.convert_to((observation).api_version, 'UTF8'))
     || automata_digest_part(
         pg_catalog.convert_to((observation).default_workflow_permissions, 'UTF8')
@@ -407,7 +367,6 @@ SELECT pg_catalog.sha256(
         ELSE pg_catalog.decode('00', 'hex')
     END
     || pg_catalog.int8send((observation).provider_observed_at_ms)
-    || pg_catalog.int8send((observation).released_at_ms)
 )
 $_$;
 
@@ -475,7 +434,6 @@ AS $$
 DECLARE
     candidate github_workflow_permission_observation_candidates%ROWTYPE;
     authority github_server_service_authorities%ROWTYPE;
-    handoff github_server_service_authority_handoffs%ROWTYPE;
     candidate_authority_id uuid;
     current_manifest github_provider_manifest_current%ROWTYPE;
     current_policy workflow_runtime_policy_current%ROWTYPE;
@@ -499,10 +457,6 @@ BEGIN
     WHERE observation_id = NEW.observation_id
       AND tenant_id = NEW.tenant_id
     FOR SHARE;
-    SELECT * INTO handoff
-    FROM github_server_service_authority_handoffs
-    WHERE id = NEW.handoff_id
-    FOR SHARE;
     database_now_ms := floor(
         extract(epoch FROM clock_timestamp()) * 1000
     )::BIGINT;
@@ -511,30 +465,11 @@ BEGIN
         OR authority.state <> 'active'
         OR authority.service_scope <> 'workflow_permissions_read'
         OR authority.identity_digest <> candidate.authority_identity_digest
-        OR handoff.id IS NULL
         OR NEW.candidate_digest <> candidate.candidate_digest
-        OR EXISTS (
-            SELECT 1
-            FROM github_workflow_permission_candidate_closures AS closure
-            WHERE closure.tenant_id = candidate.tenant_id
-              AND closure.observation_id = candidate.observation_id
-        )
         OR NEW.repository_id <> candidate.repository_id
         OR NEW.provider_connection_id <> candidate.provider_connection_id
-        OR handoff.tenant_id <> candidate.tenant_id
-        OR handoff.authority_id <> candidate.authority_id
-        OR handoff.generation <> NEW.handoff_generation
-        OR handoff.consumer_id <> candidate.observation_id
-        OR handoff.consumer_owner_id <> candidate.consumer_owner_id
-        OR handoff.consumer_claim_fence <> candidate.consumer_claim_fence
-        OR handoff.consumer_action <> candidate.consumer_action
-        OR handoff.consumer_revision <> candidate.consumer_revision
-        OR handoff.granted_at_ms > NEW.provider_observed_at_ms
         OR NEW.request_started_at_ms <> candidate.claimed_at_ms
-        OR NEW.provider_observed_at_ms > handoff.required_through_ms
-        OR handoff.released_at_ms IS NULL
-        OR handoff.released_at_ms <> NEW.released_at_ms
-        OR NEW.released_at_ms > candidate.expires_at_ms
+        OR NEW.provider_observed_at_ms >= candidate.claimed_at_ms + 300000
         OR NEW.matches_expected_default <> (
             NEW.default_workflow_permissions = candidate.expected_default
             AND NEW.can_approve_pull_request_reviews =
@@ -659,113 +594,6 @@ AS $$
 BEGIN
     RAISE EXCEPTION 'GitHub workflow-permission evidence is immutable'
         USING ERRCODE = 'integrity_constraint_violation';
-END;
-$$;
-
-CREATE FUNCTION automata_github_workflow_permission_closure_insert_guard()
-RETURNS trigger
-LANGUAGE plpgsql
-AS $$
-DECLARE
-    candidate github_workflow_permission_observation_candidates%ROWTYPE;
-    authority github_server_service_authorities%ROWTYPE;
-    handoff github_server_service_authority_handoffs%ROWTYPE;
-    candidate_authority_id uuid;
-    database_now_ms BIGINT;
-BEGIN
-    -- Discover the authority without taking the candidate lock, then take the
-    -- same authority-first lock used by handoff acquisition and observation
-    -- finalization. This serializes an absence closure against a late handoff.
-    SELECT authority_id INTO candidate_authority_id
-    FROM github_workflow_permission_observation_candidates
-    WHERE observation_id = NEW.observation_id
-      AND tenant_id = NEW.tenant_id;
-    IF candidate_authority_id IS NOT NULL THEN
-        SELECT * INTO authority
-        FROM github_server_service_authorities
-        WHERE tenant_id = NEW.tenant_id
-          AND id = candidate_authority_id
-        FOR UPDATE;
-    END IF;
-    SELECT * INTO candidate
-    FROM github_workflow_permission_observation_candidates
-    WHERE observation_id = NEW.observation_id
-      AND tenant_id = NEW.tenant_id
-    FOR SHARE;
-    IF NEW.handoff_id IS NOT NULL THEN
-        SELECT * INTO handoff
-        FROM github_server_service_authority_handoffs
-        WHERE id = NEW.handoff_id
-        FOR SHARE;
-    END IF;
-    database_now_ms := floor(
-        extract(epoch FROM clock_timestamp()) * 1000
-    )::BIGINT;
-    IF candidate.observation_id IS NULL
-        OR authority.id IS NULL
-        OR authority.service_scope <> 'workflow_permissions_read'
-        OR authority.repository_id <> candidate.repository_id
-        OR authority.provider_connection_id <> candidate.provider_connection_id
-        OR authority.provider_installation_id <> candidate.provider_installation_id
-        OR authority.github_app_id <> candidate.github_app_id
-        OR authority.github_app_client_id <> candidate.github_app_client_id
-        OR authority.github_app_jwt_issuer_kind <>
-            candidate.github_app_jwt_issuer_kind
-        OR authority.github_repository_id <> candidate.github_repository_id
-        OR authority.github_repository_name <> candidate.github_repository_name
-        OR authority.app_key_spki_sha256 <> candidate.app_key_spki_sha256
-        OR authority.app_configuration_revision <>
-            candidate.app_configuration_revision
-        OR authority.policy_revision <> candidate.policy_revision
-        OR authority.identity_digest <> candidate.authority_identity_digest
-        OR NEW.candidate_digest <> candidate.candidate_digest
-        OR NEW.closed_at_ms > database_now_ms
-        OR NEW.closed_at_ms < database_now_ms - 60000
-        OR EXISTS (
-            SELECT 1
-            FROM github_workflow_permission_default_observations AS observation
-            WHERE observation.tenant_id = candidate.tenant_id
-              AND observation.observation_id = candidate.observation_id
-        )
-        OR (
-            NEW.disposition = 'absent'
-            AND EXISTS (
-                SELECT 1
-                FROM github_server_service_authority_handoffs AS existing
-                WHERE existing.tenant_id = candidate.tenant_id
-                  AND existing.authority_id = candidate.authority_id
-                  AND existing.consumer_id = candidate.observation_id
-                  AND existing.consumer_owner_id = candidate.consumer_owner_id
-                  AND existing.consumer_claim_fence = candidate.consumer_claim_fence
-                  AND existing.consumer_action = candidate.consumer_action
-                  AND existing.consumer_revision = candidate.consumer_revision
-            )
-        )
-        OR (
-            NEW.disposition <> 'absent'
-            AND (
-                handoff.id IS NULL
-                OR handoff.tenant_id <> candidate.tenant_id
-                OR handoff.authority_id <> candidate.authority_id
-                OR handoff.consumer_id <> candidate.observation_id
-                OR handoff.consumer_owner_id <> candidate.consumer_owner_id
-                OR handoff.consumer_claim_fence <> candidate.consumer_claim_fence
-                OR handoff.consumer_action <> candidate.consumer_action
-                OR handoff.consumer_revision <> candidate.consumer_revision
-                OR handoff.generation <> NEW.handoff_generation
-                OR handoff.granted_at_ms <> candidate.claimed_at_ms
-                OR handoff.required_through_ms <>
-                    candidate.claimed_at_ms + 300000
-                OR handoff.released_at_ms IS NULL
-                OR handoff.released_at_ms <> NEW.released_at_ms
-            )
-        )
-    THEN
-        RAISE EXCEPTION 'GitHub workflow-permission candidate closure is not exact'
-            USING ERRCODE = 'integrity_constraint_violation',
-                  CONSTRAINT = 'github_workflow_permission_closure_exact';
-    END IF;
-    RETURN NEW;
 END;
 $$;
 
@@ -1008,18 +836,6 @@ CREATE TRIGGER github_workflow_permission_observations_reject_truncate
     BEFORE TRUNCATE ON github_workflow_permission_default_observations
     FOR EACH STATEMENT
     EXECUTE FUNCTION automata_reject_github_workflow_permission_evidence_mutation();
-CREATE TRIGGER github_workflow_permission_closures_insert_guard
-    BEFORE INSERT ON github_workflow_permission_candidate_closures
-    FOR EACH ROW
-    EXECUTE FUNCTION automata_github_workflow_permission_closure_insert_guard();
-CREATE TRIGGER github_workflow_permission_closures_immutable
-    BEFORE UPDATE OR DELETE ON github_workflow_permission_candidate_closures
-    FOR EACH ROW
-    EXECUTE FUNCTION automata_reject_github_workflow_permission_evidence_mutation();
-CREATE TRIGGER github_workflow_permission_closures_reject_truncate
-    BEFORE TRUNCATE ON github_workflow_permission_candidate_closures
-    FOR EACH STATEMENT
-    EXECUTE FUNCTION automata_reject_github_workflow_permission_evidence_mutation();
 CREATE TRIGGER github_workflow_permission_default_heads_write_guard
     BEFORE INSERT OR UPDATE ON github_workflow_permission_default_heads
     FOR EACH ROW
@@ -1051,7 +867,6 @@ DECLARE
     issuance github_server_service_authority_issuances%ROWTYPE;
     authority github_server_service_authorities%ROWTYPE;
     candidate github_workflow_permission_observation_candidates%ROWTYPE;
-    candidate_closed boolean;
     database_now_ms BIGINT;
 BEGIN
     -- Authority first matches retirement/reconciliation lock order. Taking an
@@ -1073,19 +888,12 @@ BEGIN
     WHERE observation_id = NEW.consumer_id
       AND tenant_id = NEW.tenant_id
     FOR SHARE;
-    SELECT EXISTS (
-        SELECT 1
-        FROM github_workflow_permission_candidate_closures
-        WHERE observation_id = NEW.consumer_id
-          AND tenant_id = NEW.tenant_id
-    ) INTO candidate_closed;
     database_now_ms := floor(
         extract(epoch FROM clock_timestamp()) * 1000
     )::BIGINT;
     IF issuance.authority_id IS NULL
         OR authority.id IS NULL
         OR candidate.observation_id IS NULL
-        OR candidate_closed
         OR authority.state <> 'active'
         OR authority.service_scope <> 'workflow_permissions_read'
         OR authority.current_issuance_generation IS DISTINCT FROM NEW.generation
@@ -1110,7 +918,7 @@ BEGIN
         OR NEW.consumer_claim_fence <> candidate.consumer_claim_fence
         OR NEW.consumer_action <> candidate.consumer_action
         OR NEW.consumer_revision <> candidate.consumer_revision
-        OR candidate.claimed_at_ms <> NEW.granted_at_ms
+        OR NEW.granted_at_ms < candidate.claimed_at_ms
         OR candidate.expires_at_ms <= NEW.granted_at_ms
         OR candidate.expires_at_ms <= database_now_ms
         OR database_now_ms >= NEW.required_through_ms
