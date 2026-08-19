@@ -51,6 +51,8 @@ script live in [`guest/`](guest/). See
 physical-host validation.
 
 The provider has component and product-process coverage. Its physical-host test
-is opt-in and requires a sealed template on Apple Silicon, so production
-qualification remains open. See the platform guide for the exact evidence and
-deployment gates.
+is opt-in and requires a sealed template on Apple Silicon. A three-repetition
+physical soak of the shipped runner, recovery paths, and runtime proxy passed
+on the dedicated test Mac mini on 2026-08-19; the platform guide records the
+exact evidence. A continuously scheduled, protected physical lane is still a
+deployment follow-up.

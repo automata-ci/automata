@@ -7,7 +7,7 @@ no migration from a noncurrent schema, and no host-shared resource mode.
 
 | Field | Value |
 | --- | --- |
-| Status | Component complete for the advertised VM/action slice; a continuous physical-host gate remains |
+| Status | Component complete for the advertised VM/action slice; repeated physical acceptance is complete and a continuous protected lane remains |
 | Execution boundary | One cold-booted disposable VM per job |
 | Network | Disabled |
 | Available steps | Bash and `sh`; composite, repository, and admitted local actions on configured Node generations; optional Python and PowerShell Core |
@@ -449,7 +449,15 @@ launch and clean a replacement VM. The destroy-transition test holds a real
 guest operation, observes its cancellation checkpoint and the exact durable
 destroy intent, kills that attempt's helper, and requires the endpoint to close,
 destruction to complete, and the slot to run and clean a replacement VM. A
-continuous protected physical lane and a retained repeated-clean soak remain
+A retained repeated-clean soak was completed on 2026-08-19 on the dedicated
+Apple Silicon Mac mini. The run used a sealed 28 GiB actions template and
+`AUTOMATA_MACOS_PHYSICAL_REPETITIONS=3` from a clean checkout of `main`. All
+11 ignored physical tests passed: the shipped-runner success/timeout and
+cancellation matrix passed 6/6 across the three repetitions, and interrupted
+launch recovery, live helper-loss recovery, destroy-time helper-loss recovery,
+live-orphan recovery, and the allowlisted runtime proxy each passed 1/1. The
+run ended with no helper or runner processes and no residual attempt
+directories. A continuously scheduled, protected physical lane remains
 deployment work.
 
 Create `/Volumes/AutomataVM/e2e-state` as an empty `0700` directory owned by
