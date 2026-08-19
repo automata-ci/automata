@@ -246,6 +246,46 @@ fn one_factory_builds_two_isolated_github_instances_and_connections() {
 }
 
 #[test]
+fn factory_builds_only_explicit_isolated_http_transports() {
+    let factory = GithubProviderFactory::new();
+    let loopback = instance(
+        "10000000-0000-4000-8000-000000000001",
+        "http://127.0.0.1:3000/",
+        "http://127.0.0.1:3000/api/v3/",
+        "http://127.0.0.1:3000/",
+    );
+    let loopback_source = factory
+        .repository_source(&loopback, "automata-test/1", GithubHttpLimits::default())
+        .expect("loopback source");
+    assert_eq!(
+        loopback_source.trusted_origins().oauth_origin().as_str(),
+        "http://127.0.0.1:3000/"
+    );
+    assert_eq!(
+        loopback_source.trusted_origins().api_base().as_str(),
+        "http://127.0.0.1:3000/api/v3/"
+    );
+
+    let mapped = instance(
+        "10000000-0000-4000-8000-000000000002",
+        "http://github.invalid/",
+        "http://github.invalid/api/v3/",
+        "http://github.invalid/",
+    );
+    let mapped_source = factory
+        .repository_source(&mapped, "automata-test/1", GithubHttpLimits::default())
+        .expect("mapped source");
+    assert_eq!(
+        mapped_source.trusted_origins().oauth_origin().as_str(),
+        "http://github.invalid/"
+    );
+    assert_eq!(
+        mapped_source.trusted_origins().api_base().as_str(),
+        "http://github.invalid/api/v3/"
+    );
+}
+
+#[test]
 fn registry_rejects_noncanonical_github_documents_and_cross_instance_connections() {
     let valid = instance(
         "22222222-2222-4222-8222-222222222221",

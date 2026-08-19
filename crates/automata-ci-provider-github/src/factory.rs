@@ -7,9 +7,9 @@ use automata_ci_provider::{
     ChangedFileCapability, ChangedFileCompleteness, ProviderCapabilities, ProviderCapability,
     ProviderConfigurationDocument, ProviderConfigurationFactory, ProviderConnectionFactoryRequest,
     ProviderConnectionManifest, ProviderConnectionPolicyDocument, ProviderFactoryRequest,
-    ProviderFactoryValidationError, ProviderInstanceManifest, ProviderSchemaVersion,
-    ProviderTypeId, RepositoryEventCapability, RepositoryEventKind, RichCheckCapability,
-    SourceReadCapability,
+    ProviderFactoryValidationError, ProviderInstanceManifest, ProviderOriginTransport,
+    ProviderOrigins, ProviderSchemaVersion, ProviderTypeId, RepositoryEventCapability,
+    RepositoryEventKind, RichCheckCapability, SourceReadCapability,
 };
 use automata_ci_scm::{RepositoryId, RepositorySourceConnection};
 use serde::{Deserialize, Serialize};
@@ -53,7 +53,8 @@ impl GithubInstanceConfiguration {
     ///
     /// # Errors
     ///
-    /// Rejects a noncanonical credential-bearing or non-HTTPS origin.
+    /// Rejects a noncanonical credential-bearing origin or any HTTP origin
+    /// outside the explicit loopback and reserved `.invalid` transports.
     pub fn new(
         app_id: u64,
         app_client_id: impl Into<String>,
@@ -279,12 +280,7 @@ impl GithubProviderFactory {
             return Err(GithubFactoryError::ProviderTypeMismatch);
         }
         let configuration = decode_instance(manifest.configuration())?;
-        let web =
-            Url::parse(manifest.origins().web()).map_err(|_| GithubFactoryError::InvalidOrigins)?;
-        let api =
-            Url::parse(manifest.origins().api()).map_err(|_| GithubFactoryError::InvalidOrigins)?;
-        let trusted = GithubTrustedOrigins::new(web, api, user_agent, limits)
-            .map_err(|_| GithubFactoryError::InvalidOrigins)?;
+        let trusted = trusted_origins(manifest.origins(), user_agent, limits)?;
         GithubHttpEndpoint::new_with_archive_origin(trusted, configuration.archive_origin()?)
             .map_err(|_| GithubFactoryError::InvalidOrigins)
     }
@@ -350,19 +346,14 @@ impl ProviderConfigurationFactory for GithubProviderFactory {
         if request.provider_type() != &self.provider_type {
             return Err(ProviderFactoryValidationError::InvalidConfiguration);
         }
-        let web = Url::parse(request.origins().web())
-            .map_err(|_| ProviderFactoryValidationError::InvalidOrigins)?;
-        let api = Url::parse(request.origins().api())
-            .map_err(|_| ProviderFactoryValidationError::InvalidOrigins)?;
         let configuration =
             decode_instance(request.configuration()).map_err(map_instance_validation_error)?;
-        let trusted = GithubTrustedOrigins::new(
-            web,
-            api,
+        let trusted = trusted_origins(
+            request.origins(),
             "automata-provider-validation/1",
             GithubHttpLimits::default(),
         )
-        .map_err(|_| ProviderFactoryValidationError::InvalidOrigins)?;
+        .map_err(map_instance_validation_error)?;
         trusted
             .validate_archive_origin(
                 &configuration
@@ -455,17 +446,28 @@ fn validate_instance_secrets(
 }
 
 fn validate_archive_origin(origin: &Url) -> Result<(), GithubFactoryError> {
-    if origin.scheme() != "https"
-        || origin.host_str().is_none()
-        || !origin.username().is_empty()
-        || origin.password().is_some()
-        || origin.path() != "/"
-        || origin.query().is_some()
-        || origin.fragment().is_some()
-    {
-        return Err(GithubFactoryError::InvalidOrigins);
+    ProviderOrigins::new(origin.as_str(), origin.as_str())
+        .map(|_| ())
+        .map_err(|_| GithubFactoryError::InvalidOrigins)
+}
+
+fn trusted_origins(
+    origins: &ProviderOrigins,
+    user_agent: &str,
+    limits: GithubHttpLimits,
+) -> Result<GithubTrustedOrigins, GithubFactoryError> {
+    let web = Url::parse(origins.web()).map_err(|_| GithubFactoryError::InvalidOrigins)?;
+    let api = Url::parse(origins.api()).map_err(|_| GithubFactoryError::InvalidOrigins)?;
+    match origins.transport() {
+        ProviderOriginTransport::Https => GithubTrustedOrigins::new(web, api, user_agent, limits),
+        ProviderOriginTransport::LoopbackHttp => {
+            GithubTrustedOrigins::loopback_emulator(web, api, user_agent, limits)
+        }
+        ProviderOriginTransport::MappedHttp => {
+            GithubTrustedOrigins::mapped_emulator(web, api, user_agent, limits)
+        }
     }
-    Ok(())
+    .map_err(|_| GithubFactoryError::InvalidOrigins)
 }
 
 fn map_instance_validation_error(error: GithubFactoryError) -> ProviderFactoryValidationError {
