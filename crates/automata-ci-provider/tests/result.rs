@@ -13,13 +13,13 @@ use automata_ci_provider::{
     ProviderResultAnnotationMessage, ProviderResultAnnotationTitle, ProviderResultClaimFence,
     ProviderResultConclusion, ProviderResultContinuation, ProviderResultDetailsUrl,
     ProviderResultFailureKind, ProviderResultFuture, ProviderResultModelError, ProviderResultName,
-    ProviderResultPhase, ProviderResultPublicationEvidence, ProviderResultPublicationModel,
-    ProviderResultRepository, ProviderResultRepositoryError, ProviderResultRetryAfter,
-    ProviderResultSaveOutcome, ProviderResultSubject, ProviderResultSubjectId,
-    ProviderResultSubjectKind, ProviderResultSummary, ProviderResultTitle, ProviderResultWorkerId,
-    ProviderRunnerPolicyBinding, ProviderSchemaVersion, ProviderWorkflowSource,
-    RenewProviderResult, RepositoryVisibility, RetryProviderResult, RichCheckCapability,
-    SaveDesiredProviderResult, StatusHistoryModel,
+    ProviderResultPhase, ProviderResultProjection, ProviderResultPublicationEvidence,
+    ProviderResultPublicationModel, ProviderResultRepository, ProviderResultRepositoryError,
+    ProviderResultRetryAfter, ProviderResultSaveOutcome, ProviderResultSubject,
+    ProviderResultSubjectId, ProviderResultSubjectKind, ProviderResultSummary, ProviderResultTitle,
+    ProviderResultWorkerId, ProviderRunnerPolicyBinding, ProviderSchemaVersion,
+    ProviderWorkflowSource, RenewProviderResult, RepositoryVisibility, RetryProviderResult,
+    RichCheckCapability, SaveDesiredProviderResult, StatusHistoryModel,
 };
 use url::Url;
 use uuid::Uuid;
@@ -76,9 +76,8 @@ fn subject() -> ProviderResultSubject {
     .unwrap()
 }
 
-fn desired(generation: u64, updated_at: i64) -> DesiredProviderResult {
-    DesiredProviderResult::new(
-        generation,
+fn projection(updated_at: i64) -> ProviderResultProjection {
+    ProviderResultProjection::new(
         ProviderResultPhase::Running,
         None,
         ProviderResultTitle::new("build").unwrap(),
@@ -87,6 +86,10 @@ fn desired(generation: u64, updated_at: i64) -> DesiredProviderResult {
         UnixMillis::new(updated_at),
     )
     .unwrap()
+}
+
+fn desired(generation: u64, updated_at: i64) -> DesiredProviderResult {
+    DesiredProviderResult::new(generation, projection(updated_at)).unwrap()
 }
 
 fn claim(generation: u64, claimed_at: i64) -> ProviderResultClaimFence {
@@ -128,31 +131,50 @@ impl Default for MemoryOutbox {
 }
 
 impl ProviderResultRepository for MemoryOutbox {
+    fn load_workflow_subject(
+        &self,
+        run_id: RunId,
+    ) -> ProviderResultFuture<'_, Option<ProviderResultSubject>> {
+        Box::pin(async move {
+            Ok(self
+                .0
+                .lock()
+                .unwrap()
+                .value
+                .as_ref()
+                .filter(|value| {
+                    value.subject.subject() == &ProviderResultSubjectKind::WorkflowRun { run_id }
+                })
+                .map(|value| value.subject.clone()))
+        })
+    }
+
     fn save_desired(
         &self,
         request: SaveDesiredProviderResult,
     ) -> ProviderResultFuture<'_, ProviderResultSaveOutcome> {
         Box::pin(async move {
-            let (subject, desired) = request.into_parts();
+            let (subject, projection) = request.into_parts();
             let mut state = self.0.lock().unwrap();
             let outcome = match &state.value {
-                None if desired.generation() == 1 => ProviderResultSaveOutcome::Inserted,
-                None => return Err(ProviderResultRepositoryError::Conflict),
-                Some(current)
-                    if current.subject != subject
-                        || desired.generation() < current.desired.generation()
-                        || desired.generation() > current.desired.generation() + 1 =>
-                {
+                None => ProviderResultSaveOutcome::Inserted,
+                Some(current) if current.subject != subject => {
                     return Err(ProviderResultRepositoryError::Conflict);
                 }
-                Some(current) if desired.generation() == current.desired.generation() => {
-                    if current.desired == desired {
-                        return Ok(ProviderResultSaveOutcome::Unchanged);
-                    }
+                Some(current) if current.desired.projection() == &projection => {
+                    return Ok(ProviderResultSaveOutcome::Unchanged);
+                }
+                Some(current) if current.desired.updated_at() >= projection.updated_at() => {
                     return Err(ProviderResultRepositoryError::Conflict);
                 }
                 Some(_) => ProviderResultSaveOutcome::Superseded,
             };
+            let generation = state
+                .value
+                .as_ref()
+                .map_or(1, |current| current.desired.generation() + 1);
+            let desired = DesiredProviderResult::new(generation, projection)
+                .map_err(|_| ProviderResultRepositoryError::Corrupt)?;
             let available_at = desired.updated_at();
             state.value = Some(MemoryValue {
                 subject,
@@ -405,10 +427,24 @@ async fn newer_generation_supersedes_and_fences_old_claim_without_a_bridge() {
     let outbox = MemoryOutbox::default();
     assert_eq!(
         outbox
-            .save_desired(SaveDesiredProviderResult::new(subject(), desired(1, 2_001)).unwrap())
+            .save_desired(SaveDesiredProviderResult::new(subject(), projection(2_001)).unwrap())
             .await
             .unwrap(),
         ProviderResultSaveOutcome::Inserted
+    );
+    assert_eq!(
+        outbox
+            .load_workflow_subject(RunId::from_uuid(Uuid::from_u128(5)))
+            .await
+            .unwrap(),
+        Some(subject())
+    );
+    assert!(
+        outbox
+            .load_workflow_subject(RunId::from_uuid(Uuid::from_u128(6)))
+            .await
+            .unwrap()
+            .is_none()
     );
     let first = outbox
         .claim_result(
@@ -425,7 +461,7 @@ async fn newer_generation_supersedes_and_fences_old_claim_without_a_bridge() {
         .unwrap();
     assert_eq!(
         outbox
-            .save_desired(SaveDesiredProviderResult::new(subject(), desired(2, 2_003)).unwrap())
+            .save_desired(SaveDesiredProviderResult::new(subject(), projection(2_003)).unwrap())
             .await
             .unwrap(),
         ProviderResultSaveOutcome::Superseded
@@ -462,10 +498,40 @@ async fn newer_generation_supersedes_and_fences_old_claim_without_a_bridge() {
 }
 
 #[tokio::test]
+async fn changed_projections_must_advance_durable_time() {
+    let outbox = MemoryOutbox::default();
+    outbox
+        .save_desired(SaveDesiredProviderResult::new(subject(), projection(2_001)).unwrap())
+        .await
+        .unwrap();
+    let changed_at_same_time = ProviderResultProjection::new(
+        ProviderResultPhase::Running,
+        None,
+        ProviderResultTitle::new("build").unwrap(),
+        ProviderResultSummary::new("different").unwrap(),
+        Vec::new(),
+        UnixMillis::new(2_001),
+    )
+    .unwrap();
+    assert_eq!(
+        outbox
+            .save_desired(SaveDesiredProviderResult::new(subject(), changed_at_same_time).unwrap())
+            .await,
+        Err(ProviderResultRepositoryError::Conflict)
+    );
+    assert_eq!(
+        outbox
+            .save_desired(SaveDesiredProviderResult::new(subject(), projection(2_000)).unwrap())
+            .await,
+        Err(ProviderResultRepositoryError::Conflict)
+    );
+}
+
+#[tokio::test]
 async fn retries_and_terminal_failures_consume_only_the_exact_fence() {
     let outbox = MemoryOutbox::default();
     outbox
-        .save_desired(SaveDesiredProviderResult::new(subject(), desired(1, 2_001)).unwrap())
+        .save_desired(SaveDesiredProviderResult::new(subject(), projection(2_001)).unwrap())
         .await
         .unwrap();
     let worker = ProviderResultWorkerId::from_uuid(Uuid::from_u128(9)).unwrap();
@@ -558,12 +624,15 @@ fn presentation_is_canonical_bounded_and_independent_of_provider_features() {
     .unwrap();
     let completed = DesiredProviderResult::new(
         1,
-        ProviderResultPhase::Completed,
-        Some(ProviderResultConclusion::Success),
-        ProviderResultTitle::new("build").unwrap(),
-        ProviderResultSummary::new("complete").unwrap(),
-        vec![annotation.clone()],
-        UnixMillis::new(2_001),
+        ProviderResultProjection::new(
+            ProviderResultPhase::Completed,
+            Some(ProviderResultConclusion::Success),
+            ProviderResultTitle::new("build").unwrap(),
+            ProviderResultSummary::new("complete").unwrap(),
+            vec![annotation.clone()],
+            UnixMillis::new(2_001),
+        )
+        .unwrap(),
     )
     .unwrap();
     assert_eq!(completed.annotations(), std::slice::from_ref(&annotation));
@@ -572,8 +641,7 @@ fn presentation_is_canonical_bounded_and_independent_of_provider_features() {
         Some(ProviderResultConclusion::Success)
     );
     assert!(
-        DesiredProviderResult::new(
-            1,
+        ProviderResultProjection::new(
             ProviderResultPhase::Running,
             Some(ProviderResultConclusion::Success),
             ProviderResultTitle::new("build").unwrap(),
@@ -584,8 +652,7 @@ fn presentation_is_canonical_bounded_and_independent_of_provider_features() {
         .is_err()
     );
     assert!(
-        DesiredProviderResult::new(
-            1,
+        ProviderResultProjection::new(
             ProviderResultPhase::Completed,
             Some(ProviderResultConclusion::Failure),
             ProviderResultTitle::new("build").unwrap(),
@@ -626,18 +693,87 @@ fn presentation_is_canonical_bounded_and_independent_of_provider_features() {
     let projection = |annotations| {
         DesiredProviderResult::new(
             1,
-            ProviderResultPhase::Running,
-            None,
-            ProviderResultTitle::new("build").unwrap(),
-            ProviderResultSummary::new("running").unwrap(),
-            annotations,
-            UnixMillis::new(2_001),
+            ProviderResultProjection::new(
+                ProviderResultPhase::Running,
+                None,
+                ProviderResultTitle::new("build").unwrap(),
+                ProviderResultSummary::new("running").unwrap(),
+                annotations,
+                UnixMillis::new(2_001),
+            )
+            .unwrap(),
         )
         .unwrap()
     };
     assert_eq!(
         projection(vec![first.clone(), second.clone()]).digest(),
         projection(vec![second, first]).digest()
+    );
+}
+
+#[test]
+fn result_subject_ids_are_deterministic_connection_scoped_version_eight() {
+    let kind = ProviderResultSubjectKind::WorkflowRun {
+        run_id: RunId::from_uuid(Uuid::from_u128(42)),
+    };
+    let first = ProviderResultSubjectId::derive(connection().connection_id(), &kind);
+    assert_eq!(
+        first,
+        ProviderResultSubjectId::derive(connection().connection_id(), &kind)
+    );
+    assert_eq!(first.as_uuid().get_version_num(), 8);
+    assert_ne!(
+        first,
+        ProviderResultSubjectId::derive(
+            ProviderConnectionId::from_uuid(Uuid::from_u128(99)).unwrap(),
+            &kind,
+        )
+    );
+    assert_ne!(
+        first,
+        ProviderResultSubjectId::derive(
+            connection().connection_id(),
+            &ProviderResultSubjectKind::WorkflowRun {
+                run_id: RunId::from_uuid(Uuid::from_u128(43)),
+            },
+        )
+    );
+}
+
+#[test]
+fn workflow_result_observations_are_exact_and_non_nil() {
+    let run_id = RunId::from_uuid(Uuid::from_u128(42));
+    let observation = automata_ci_provider::ProviderWorkflowResultObservation::new(
+        run_id,
+        automata_ci_provider::ProviderWorkflowRunState::Completed(
+            ProviderResultConclusion::Success,
+        ),
+        UnixMillis::new(2_000),
+    )
+    .unwrap();
+    assert_eq!(observation.run_id(), run_id);
+    assert_eq!(
+        observation.state(),
+        automata_ci_provider::ProviderWorkflowRunState::Completed(
+            ProviderResultConclusion::Success
+        )
+    );
+    assert_eq!(observation.updated_at(), UnixMillis::new(2_000));
+    assert_eq!(
+        automata_ci_provider::ProviderWorkflowResultObservation::new(
+            RunId::from_uuid(Uuid::nil()),
+            automata_ci_provider::ProviderWorkflowRunState::Queued,
+            UnixMillis::new(2_000),
+        ),
+        Err(ProviderResultModelError::InvalidRun)
+    );
+    assert_eq!(
+        automata_ci_provider::ProviderWorkflowResultObservation::new(
+            run_id,
+            automata_ci_provider::ProviderWorkflowRunState::Running,
+            UnixMillis::new(-1),
+        ),
+        Err(ProviderResultModelError::InvalidTimestamp)
     );
 }
 

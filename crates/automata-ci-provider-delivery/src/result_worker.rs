@@ -656,11 +656,12 @@ mod tests {
         ProviderLifecycleState, ProviderManifestRepository, ProviderOrigins,
         ProviderRepositoryError, ProviderRepositoryFuture, ProviderRepositoryPath,
         ProviderResultClaimFence, ProviderResultDetailsUrl, ProviderResultFuture,
-        ProviderResultName, ProviderResultPhase, ProviderResultSaveOutcome, ProviderResultSubject,
-        ProviderResultSubjectId, ProviderResultSubjectKind, ProviderResultSummary,
-        ProviderResultTitle, ProviderRunnerPolicyBinding, ProviderSaveOutcome,
-        ProviderSchemaVersion, ProviderSecretBindings, ProviderSecretSet, ProviderWorkflowSource,
-        RepositoryVisibility, RetryProviderResult, RichCheckCapability, SaveDesiredProviderResult,
+        ProviderResultName, ProviderResultPhase, ProviderResultProjection,
+        ProviderResultSaveOutcome, ProviderResultSubject, ProviderResultSubjectId,
+        ProviderResultSubjectKind, ProviderResultSummary, ProviderResultTitle,
+        ProviderRunnerPolicyBinding, ProviderSaveOutcome, ProviderSchemaVersion,
+        ProviderSecretBindings, ProviderSecretSet, ProviderWorkflowSource, RepositoryVisibility,
+        RetryProviderResult, RichCheckCapability, SaveDesiredProviderResult,
         provider_capability_digest,
     };
     use url::Url;
@@ -726,6 +727,13 @@ mod tests {
     }
 
     impl ProviderResultRepository for ResultRepository {
+        fn load_workflow_subject(
+            &self,
+            _run_id: RunId,
+        ) -> ProviderResultFuture<'_, Option<ProviderResultSubject>> {
+            Box::pin(async { Ok(None) })
+        }
+
         fn save_desired(
             &self,
             _request: SaveDesiredProviderResult,
@@ -1008,8 +1016,7 @@ mod tests {
             UnixMillis::new(900),
         )
         .expect("result subject");
-        let desired = DesiredProviderResult::new(
-            1,
+        let projection = ProviderResultProjection::new(
             ProviderResultPhase::Running,
             None,
             ProviderResultTitle::new("build").expect("title"),
@@ -1017,7 +1024,8 @@ mod tests {
             Vec::new(),
             UnixMillis::new(950),
         )
-        .expect("desired result");
+        .expect("result projection");
+        let desired = DesiredProviderResult::new(1, projection).expect("desired result");
         let claim = ProviderResultClaimFence::new(
             subject.subject_id(),
             1,

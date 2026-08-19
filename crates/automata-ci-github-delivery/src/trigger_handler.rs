@@ -358,7 +358,7 @@ impl GithubWorkflowTriggerHandler {
         let Ok(trust) = derive_provider_trust_snapshot(normalized, &trust_context) else {
             return fail_invalid();
         };
-        self.apply_source(
+        Box::pin(self.apply_source(
             context,
             trigger,
             invocation,
@@ -366,7 +366,7 @@ impl GithubWorkflowTriggerHandler {
             &repository,
             source,
             trust,
-        )
+        ))
         .await
     }
 

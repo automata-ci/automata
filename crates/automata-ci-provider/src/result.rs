@@ -11,6 +11,7 @@ use automata_ci_core::{GitObjectAlgorithm, GitObjectId, JobId, RunId, Sha256Dige
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 use url::Url;
+use uuid::Uuid;
 
 use crate::{
     ExternalRepositoryIdentity, ExternalResultId, ProviderCapabilities, ProviderCapability,
@@ -48,6 +49,7 @@ const RESULT_SUBJECT_DOMAIN: &[u8] = b"automata.provider.result-subject.v1\0";
 const RESULT_PROJECTION_DOMAIN: &[u8] = b"automata.provider.result-projection.v1\0";
 const RESULT_EVIDENCE_DOMAIN: &[u8] = b"automata.provider.result-evidence.v1\0";
 const RESULT_CONTINUATION_DOMAIN: &[u8] = b"automata.provider.result-continuation.v1\0";
+const RESULT_SUBJECT_ID_DOMAIN: &[u8] = b"automata.provider.result-subject-id.v1\0";
 
 /// Exact Automata subject represented by one provider result.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -94,6 +96,33 @@ impl ProviderResultSubjectKind {
                 hash.update(job_id.as_uuid().as_bytes());
             }
         }
+    }
+}
+
+impl ProviderResultSubjectId {
+    /// Derives the stable RFC 9562 version-8 identity for one connection-local
+    /// result subject.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if a UUID carrying mandatory version and variant bits is
+    /// classified as nil, which would indicate a UUID library invariant break.
+    #[must_use]
+    pub fn derive(
+        connection_id: ProviderConnectionId,
+        subject: &ProviderResultSubjectKind,
+    ) -> Self {
+        let mut hash = Sha256::new();
+        hash.update(RESULT_SUBJECT_ID_DOMAIN);
+        hash.update(connection_id.as_uuid().as_bytes());
+        subject.hash_into(&mut hash);
+        let digest = hash.finalize();
+        let mut bytes = [0_u8; 16];
+        bytes.copy_from_slice(&digest[..16]);
+        bytes[6] = (bytes[6] & 0x0f) | 0x80;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        Self::from_uuid(Uuid::from_bytes(bytes))
+            .expect("a domain-separated version-8 result subject ID is non-nil")
     }
 }
 
@@ -519,10 +548,68 @@ pub enum ProviderResultConclusion {
     ActionRequired,
 }
 
-/// One immutable desired provider projection generation.
+/// Provider-independent aggregate workflow lifecycle observed from durable CI state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProviderWorkflowRunState {
+    /// The workflow is admitted but has not started executing.
+    Queued,
+    /// At least one part of the workflow has started executing.
+    Running,
+    /// The workflow reached one exact aggregate conclusion.
+    Completed(ProviderResultConclusion),
+}
+
+/// One durable workflow lifecycle newer than its current desired provider result.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProviderWorkflowResultObservation {
+    run_id: RunId,
+    state: ProviderWorkflowRunState,
+    updated_at: UnixMillis,
+}
+
+impl ProviderWorkflowResultObservation {
+    /// Creates one exact provider-result reconciliation observation.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a nil run identity or a timestamp before the Unix epoch.
+    pub fn new(
+        run_id: RunId,
+        state: ProviderWorkflowRunState,
+        updated_at: UnixMillis,
+    ) -> Result<Self, ProviderResultModelError> {
+        if run_id.as_uuid().is_nil() {
+            return Err(ProviderResultModelError::InvalidRun);
+        }
+        if updated_at.get() < 0 {
+            return Err(ProviderResultModelError::InvalidTimestamp);
+        }
+        Ok(Self {
+            run_id,
+            state,
+            updated_at,
+        })
+    }
+    /// Returns the exact workflow run.
+    #[must_use]
+    pub const fn run_id(self) -> RunId {
+        self.run_id
+    }
+    /// Returns the aggregate lifecycle.
+    #[must_use]
+    pub const fn state(self) -> ProviderWorkflowRunState {
+        self.state
+    }
+    /// Returns the durable lifecycle update time.
+    #[must_use]
+    pub const fn updated_at(self) -> UnixMillis {
+        self.updated_at
+    }
+}
+
+/// Provider-independent state to reconcile at a native provider.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DesiredProviderResult {
-    generation: NonZeroU64,
+pub struct ProviderResultProjection {
     phase: ProviderResultPhase,
     conclusion: Option<ProviderResultConclusion>,
     title: ProviderResultTitle,
@@ -532,15 +619,14 @@ pub struct DesiredProviderResult {
     digest: Sha256Digest,
 }
 
-impl DesiredProviderResult {
-    /// Creates a complete desired generation with strict phase/conclusion binding.
+impl ProviderResultProjection {
+    /// Creates a complete provider-independent projection.
     ///
     /// # Errors
     ///
-    /// Rejects zero generations, invalid timestamps, excessive annotations, or
-    /// a conclusion outside the completed phase.
+    /// Rejects invalid timestamps, excessive annotations, or a conclusion
+    /// outside the completed phase.
     pub fn new(
-        generation: u64,
         phase: ProviderResultPhase,
         conclusion: Option<ProviderResultConclusion>,
         title: ProviderResultTitle,
@@ -548,7 +634,6 @@ impl DesiredProviderResult {
         mut annotations: Vec<ProviderResultAnnotation>,
         updated_at: UnixMillis,
     ) -> Result<Self, ProviderResultModelError> {
-        let generation = result_generation(generation)?;
         if updated_at.get() < 0 {
             return Err(ProviderResultModelError::InvalidTimestamp);
         }
@@ -580,7 +665,6 @@ impl DesiredProviderResult {
             return Err(ProviderResultModelError::DuplicateAnnotation);
         }
         let mut value = Self {
-            generation,
             phase,
             conclusion,
             title,
@@ -596,7 +680,6 @@ impl DesiredProviderResult {
     fn calculate_digest(&self) -> Sha256Digest {
         let mut hash = Sha256::new();
         hash.update(RESULT_PROJECTION_DOMAIN);
-        hash.update(self.generation.get().to_be_bytes());
         hash.update([
             phase_code(self.phase),
             self.conclusion.map_or(0, conclusion_code),
@@ -618,11 +701,6 @@ impl DesiredProviderResult {
         }
         hash.update(self.updated_at.get().to_be_bytes());
         Sha256Digest::from_bytes(hash.finalize().into())
-    }
-    /// Returns the positive projection generation.
-    #[must_use]
-    pub const fn generation(&self) -> u64 {
-        self.generation.get()
     }
     /// Returns the lifecycle phase.
     #[must_use]
@@ -654,6 +732,91 @@ impl DesiredProviderResult {
     pub const fn updated_at(&self) -> UnixMillis {
         self.updated_at
     }
+    /// Returns the canonical desired-generation digest.
+    #[must_use]
+    pub const fn digest(&self) -> Sha256Digest {
+        self.digest
+    }
+}
+
+/// One store-assigned immutable desired provider projection generation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DesiredProviderResult {
+    generation: NonZeroU64,
+    projection: ProviderResultProjection,
+    digest: Sha256Digest,
+}
+
+impl DesiredProviderResult {
+    /// Assigns a positive durable generation to one validated projection.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a zero or non-durable generation.
+    pub fn new(
+        generation: u64,
+        projection: ProviderResultProjection,
+    ) -> Result<Self, ProviderResultModelError> {
+        let generation = result_generation(generation)?;
+        let mut hash = Sha256::new();
+        hash.update(RESULT_PROJECTION_DOMAIN);
+        hash.update(generation.get().to_be_bytes());
+        hash.update(projection.digest().as_bytes());
+        Ok(Self {
+            generation,
+            projection,
+            digest: Sha256Digest::from_bytes(hash.finalize().into()),
+        })
+    }
+
+    /// Returns the positive projection generation.
+    #[must_use]
+    pub const fn generation(&self) -> u64 {
+        self.generation.get()
+    }
+
+    /// Returns the generation-independent desired state.
+    #[must_use]
+    pub const fn projection(&self) -> &ProviderResultProjection {
+        &self.projection
+    }
+
+    /// Returns the lifecycle phase.
+    #[must_use]
+    pub const fn phase(&self) -> ProviderResultPhase {
+        self.projection.phase()
+    }
+
+    /// Returns the terminal conclusion, if completed.
+    #[must_use]
+    pub const fn conclusion(&self) -> Option<ProviderResultConclusion> {
+        self.projection.conclusion()
+    }
+
+    /// Returns the title.
+    #[must_use]
+    pub const fn title(&self) -> &ProviderResultTitle {
+        self.projection.title()
+    }
+
+    /// Returns the summary.
+    #[must_use]
+    pub const fn summary(&self) -> &ProviderResultSummary {
+        self.projection.summary()
+    }
+
+    /// Returns canonical annotations retained regardless of adapter support.
+    #[must_use]
+    pub fn annotations(&self) -> &[ProviderResultAnnotation] {
+        self.projection.annotations()
+    }
+
+    /// Returns the desired update time.
+    #[must_use]
+    pub const fn updated_at(&self) -> UnixMillis {
+        self.projection.updated_at()
+    }
+
     /// Returns the canonical desired-generation digest.
     #[must_use]
     pub const fn digest(&self) -> Sha256Digest {
@@ -891,7 +1054,7 @@ impl ClaimedProviderResult {
             .ok_or(ProviderResultModelError::InvalidPublicationAttempt)?;
         if claim.subject_id != subject.subject_id
             || claim.generation.get() != desired.generation.get()
-            || desired.updated_at < subject.created_at
+            || desired.updated_at() < subject.created_at
         {
             return Err(ProviderResultModelError::InvalidClaimBinding);
         }
@@ -1077,42 +1240,45 @@ impl ProviderResultPublicationEvidence {
     }
 }
 
-/// Saves one first or contiguous desired generation.
+/// Reconciles one provider-independent projection under an immutable subject.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SaveDesiredProviderResult {
     subject: ProviderResultSubject,
-    desired: DesiredProviderResult,
+    projection: ProviderResultProjection,
 }
 
 impl SaveDesiredProviderResult {
-    /// Binds an immutable subject to one desired generation.
+    /// Binds an immutable subject to one desired projection.
     ///
     /// # Errors
     ///
     /// Rejects desired state predating the subject.
     pub fn new(
         subject: ProviderResultSubject,
-        desired: DesiredProviderResult,
+        projection: ProviderResultProjection,
     ) -> Result<Self, ProviderResultModelError> {
-        if desired.updated_at < subject.created_at {
+        if projection.updated_at() < subject.created_at {
             return Err(ProviderResultModelError::InvalidTimestamp);
         }
-        Ok(Self { subject, desired })
+        Ok(Self {
+            subject,
+            projection,
+        })
     }
     /// Returns the immutable subject.
     #[must_use]
     pub const fn subject(&self) -> &ProviderResultSubject {
         &self.subject
     }
-    /// Returns the desired generation.
+    /// Returns the provider-independent desired projection.
     #[must_use]
-    pub const fn desired(&self) -> &DesiredProviderResult {
-        &self.desired
+    pub const fn projection(&self) -> &ProviderResultProjection {
+        &self.projection
     }
     /// Consumes the command into its durable parts.
     #[must_use]
-    pub fn into_parts(self) -> (ProviderResultSubject, DesiredProviderResult) {
-        (self.subject, self.desired)
+    pub fn into_parts(self) -> (ProviderResultSubject, ProviderResultProjection) {
+        (self.subject, self.projection)
     }
 }
 
@@ -1411,9 +1577,31 @@ pub enum ProviderResultSaveOutcome {
 pub type ProviderResultFuture<'a, T> =
     Pin<Box<dyn Future<Output = Result<T, ProviderResultRepositoryError>> + Send + 'a>>;
 
+/// Read-side source of workflow lifecycles newer than desired provider results.
+pub trait ProviderWorkflowResultSource: fmt::Debug + Send + Sync {
+    /// Selects at most one stale aggregate without taking exclusive custody.
+    ///
+    /// Concurrent readers are safe because desired-result reconciliation is
+    /// atomic, monotonic, and idempotent.
+    fn next_workflow_result(
+        &self,
+    ) -> ProviderResultFuture<'_, Option<ProviderWorkflowResultObservation>>;
+}
+
 /// Durable current-only desired result and fenced publication outbox.
 pub trait ProviderResultRepository: fmt::Debug + Send + Sync {
-    /// Stores a first or contiguous desired generation and invalidates older claims.
+    /// Loads the immutable provider result subject for one workflow run.
+    ///
+    /// A workflow run has at most one provider-visible aggregate result even
+    /// when its desired projection has advanced through multiple generations.
+    fn load_workflow_subject(
+        &self,
+        run_id: RunId,
+    ) -> ProviderResultFuture<'_, Option<ProviderResultSubject>>;
+    /// Reconciles desired state, assigning its next generation atomically and
+    /// invalidating older claims only when the projection changed. A changed
+    /// projection must advance durable update time; stale or contradictory
+    /// equal-time observations are rejected.
     fn save_desired(
         &self,
         request: SaveDesiredProviderResult,
@@ -1486,6 +1674,9 @@ pub enum ProviderResultModelError {
     /// New results require an active connection.
     #[error("result connection is not active")]
     InactiveConnection,
+    /// Workflow run identity is invalid.
+    #[error("result workflow run is invalid")]
+    InvalidRun,
     /// A durable timestamp is invalid.
     #[error("result timestamp is invalid")]
     InvalidTimestamp,

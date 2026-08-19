@@ -210,6 +210,7 @@ pub trait ProviderRuntimeAdapter: fmt::Debug + Send + Sync {
         &self,
         context: &ProviderRuntimeContext,
         control: &VerifiedProviderControlDelivery,
+        invocation: &ClaimedProviderProcessing,
         lease: &ProviderProcessingLease,
     ) -> Result<Option<ProviderDeliveryId>, ProviderControlHandlingError>;
 }
@@ -357,7 +358,10 @@ impl ProviderProcessingProcessor for ProviderProcessingDispatcher {
                     Ok(context) => context,
                     Err(error) => return context_processing_outcome(error),
                 };
-                match runtime.handle_control(&context, control, lease).await {
+                match runtime
+                    .handle_control(&context, control, invocation, lease)
+                    .await
+                {
                     Ok(Some(source_delivery_id)) => {
                         ProviderProcessingOutcome::ResolveControl(source_delivery_id)
                     }
@@ -476,6 +480,7 @@ mod tests {
             &self,
             _context: &ProviderRuntimeContext,
             _control: &VerifiedProviderControlDelivery,
+            _invocation: &ClaimedProviderProcessing,
             _lease: &ProviderProcessingLease,
         ) -> Result<Option<ProviderDeliveryId>, ProviderControlHandlingError> {
             unreachable!("registry construction never dispatches controls")
