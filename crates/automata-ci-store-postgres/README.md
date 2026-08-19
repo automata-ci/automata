@@ -10,9 +10,11 @@ concrete adapter directly. `automata-ci-postgres` owns only shared PostgreSQL
 test support.
 
 Provider-neutral workflow admission atomically records immutable trigger,
-provider-selection, request, and original processing-fence evidence. A replay
-must match that original evidence even when a newer live claim has reclaimed
-the same delivery invocation.
+provider-selection, runner-policy, request, and original processing-fence
+evidence. The selected runner-policy schema and canonical digest must resolve
+to one sealed current policy, which is pinned to the run in the same
+transaction. A replay must match that original evidence and retained pin even
+when a newer live claim has reclaimed the same delivery invocation.
 
 ## Schema migrations
 
