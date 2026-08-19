@@ -35,6 +35,8 @@ pub const MAX_PROVIDER_RESULT_DETAILS_URL_BYTES: usize = 8 * 1_024;
 pub const MAX_PROVIDER_RESULT_PUBLICATION_ATTEMPTS: u16 = 64;
 /// Maximum exclusive publication lease duration.
 pub const MAX_PROVIDER_RESULT_LEASE_MILLIS: u64 = 15 * 60 * 1_000;
+/// Maximum total lifetime of one publication claim across renewals.
+pub const MAX_PROVIDER_RESULT_TOTAL_CLAIM_MILLIS: u64 = 60 * 60 * 1_000;
 /// Maximum requested publication retry delay.
 pub const MAX_PROVIDER_RESULT_RETRY_MILLIS: u64 = 24 * 60 * 60 * 1_000;
 
@@ -825,6 +827,29 @@ impl ClaimedProviderResult {
     pub const fn claimed_at(&self) -> UnixMillis {
         self.claim.claimed_at
     }
+
+    /// Replaces the lease horizon after one exact durable renewal.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a different subject, generation, worker, fence, start time, or
+    /// a deadline that does not strictly extend the current claim.
+    pub fn renew_claim(
+        &mut self,
+        renewed: ProviderResultClaimFence,
+    ) -> Result<(), ProviderResultModelError> {
+        if renewed.subject_id != self.claim.subject_id
+            || renewed.generation != self.claim.generation
+            || renewed.worker_id != self.claim.worker_id
+            || renewed.fence != self.claim.fence
+            || renewed.claimed_at != self.claim.claimed_at
+            || renewed.expires_at <= self.claim.expires_at
+        {
+            return Err(ProviderResultModelError::InvalidClaimBinding);
+        }
+        self.claim = renewed;
+        Ok(())
+    }
 }
 
 /// Exact provider observation proving one desired generation was reconciled.
@@ -851,7 +876,7 @@ impl ProviderResultPublicationEvidence {
         provider_state_digest: Sha256Digest,
         observed_at: UnixMillis,
     ) -> Result<Self, ProviderResultModelError> {
-        if observed_at < claimed.claim.claimed_at || observed_at > claimed.claim.expires_at {
+        if observed_at < claimed.claim.claimed_at || observed_at >= claimed.claim.expires_at {
             return Err(ProviderResultModelError::InvalidTimestamp);
         }
         let claim = claimed.claim;
@@ -973,6 +998,74 @@ pub struct ClaimProviderResult {
     lease_millis: u64,
 }
 
+/// Command that strictly extends one exact live publication claim.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RenewProviderResult {
+    claim: ProviderResultClaimFence,
+    renewed_at: UnixMillis,
+    lease_millis: NonZeroU64,
+}
+
+impl RenewProviderResult {
+    /// Constructs a bounded live-lease renewal.
+    ///
+    /// # Errors
+    ///
+    /// Rejects renewal outside the current exclusive lease, a zero or
+    /// excessive extension, overflow, a non-extending deadline, or a total
+    /// claim lifetime beyond the common ceiling.
+    pub fn new(
+        claim: ProviderResultClaimFence,
+        renewed_at: UnixMillis,
+        lease_millis: u64,
+    ) -> Result<Self, ProviderResultModelError> {
+        if renewed_at < claim.claimed_at || renewed_at >= claim.expires_at {
+            return Err(ProviderResultModelError::InvalidLease);
+        }
+        let lease_millis = NonZeroU64::new(lease_millis)
+            .filter(|value| value.get() <= MAX_PROVIDER_RESULT_LEASE_MILLIS)
+            .ok_or(ProviderResultModelError::InvalidLease)?;
+        let extension = i64::try_from(lease_millis.get())
+            .map_err(|_| ProviderResultModelError::InvalidLease)?;
+        let expires_at = renewed_at
+            .get()
+            .checked_add(extension)
+            .ok_or(ProviderResultModelError::InvalidLease)?;
+        let total_lifetime = expires_at
+            .checked_sub(claim.claimed_at.get())
+            .and_then(|value| u64::try_from(value).ok())
+            .ok_or(ProviderResultModelError::InvalidLease)?;
+        if expires_at <= claim.expires_at.get()
+            || total_lifetime > MAX_PROVIDER_RESULT_TOTAL_CLAIM_MILLIS
+        {
+            return Err(ProviderResultModelError::InvalidLease);
+        }
+        Ok(Self {
+            claim,
+            renewed_at,
+            lease_millis,
+        })
+    }
+
+    /// Returns exact current claim ownership.
+    #[must_use]
+    pub const fn claim(self) -> ProviderResultClaimFence {
+        self.claim
+    }
+
+    /// Returns trusted renewal time inside the current lease.
+    #[must_use]
+    pub const fn renewed_at(self) -> UnixMillis {
+        self.renewed_at
+    }
+
+    /// Returns the replacement lease duration from renewal time.
+    #[must_use]
+    pub const fn lease_millis(self) -> u64 {
+        self.lease_millis.get()
+    }
+}
+
 impl ClaimProviderResult {
     /// Creates a bounded connection-specific claim request.
     ///
@@ -1081,7 +1174,7 @@ impl RetryProviderResult {
             .filter(|value| *value > 0)
             .and_then(|value| u64::try_from(value).ok())
             .filter(|value| *value <= MAX_PROVIDER_RESULT_RETRY_MILLIS);
-        if failed_at < claim.claimed_at || failed_at > claim.expires_at || delay.is_none() {
+        if failed_at < claim.claimed_at || failed_at >= claim.expires_at || delay.is_none() {
             return Err(ProviderResultModelError::InvalidRetry);
         }
         Ok(Self {
@@ -1125,7 +1218,7 @@ impl FailProviderResult {
         failed_at: UnixMillis,
         kind: ProviderResultFailureKind,
     ) -> Result<Self, ProviderResultModelError> {
-        if failed_at < claim.claimed_at || failed_at > claim.expires_at {
+        if failed_at < claim.claimed_at || failed_at >= claim.expires_at {
             return Err(ProviderResultModelError::InvalidTimestamp);
         }
         Ok(Self {
@@ -1195,6 +1288,11 @@ pub trait ProviderResultRepository: fmt::Debug + Send + Sync {
         &self,
         request: ClaimProviderResult,
     ) -> ProviderResultFuture<'_, Option<ClaimedProviderResult>>;
+    /// Extends one exact live claim without changing its fencing token.
+    fn renew_result(
+        &self,
+        request: RenewProviderResult,
+    ) -> ProviderResultFuture<'_, ProviderResultClaimFence>;
     /// Completes one claim with exact provider evidence.
     fn complete_result(&self, request: CompleteProviderResult) -> ProviderResultFuture<'_, ()>;
     /// Releases one claim for a bounded retry.

@@ -20,7 +20,7 @@ use automata_ci_provider::{
     ProviderResultFuture, ProviderResultRepository, ProviderResultSaveOutcome, ProviderSaveOutcome,
     ProviderWebhookEndpointId, ProviderWebhookEndpointManifest, ProviderWebhookEndpointRecord,
     ProviderWebhookEndpointRepository, ProviderWebhookEndpointRevision, RenewProviderProcessing,
-    RetryProviderProcessing,
+    RenewProviderResult, RetryProviderProcessing,
 };
 use sqlx::{PgPool, Postgres, Transaction};
 
@@ -220,6 +220,13 @@ impl ProviderResultRepository for PostgresProviderManifestRepository {
         request: automata_ci_provider::CompleteProviderResult,
     ) -> ProviderResultFuture<'_, ()> {
         Box::pin(self.complete_result_inner(request))
+    }
+
+    fn renew_result(
+        &self,
+        request: RenewProviderResult,
+    ) -> ProviderResultFuture<'_, automata_ci_provider::ProviderResultClaimFence> {
+        Box::pin(self.renew_result_inner(request))
     }
 
     fn retry_result(

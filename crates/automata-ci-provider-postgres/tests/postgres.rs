@@ -31,10 +31,10 @@ use automata_ci_provider::{
     ProviderSecretSet, ProviderTypeId, ProviderWebhookEndpointId, ProviderWebhookEndpointManifest,
     ProviderWebhookEndpointRepository as _, ProviderWebhookEndpointRevision,
     ProviderWebhookEndpointState, ProviderWebhookSecretReference, ProviderWebhookSignatureEvidence,
-    ProviderWorkflowSource, PushCommitEvidence, PushTrigger, RepositoryVisibility,
-    RetryProviderProcessing, RetryProviderResult, SaveDesiredProviderResult, SourceReadCapability,
-    VerifiedProviderControlDelivery, VerifiedProviderTriggerDelivery, provider_capability_digest,
-    provider_raw_webhook_descriptor,
+    ProviderWorkflowSource, PushCommitEvidence, PushTrigger, RenewProviderResult,
+    RepositoryVisibility, RetryProviderProcessing, RetryProviderResult, SaveDesiredProviderResult,
+    SourceReadCapability, VerifiedProviderControlDelivery, VerifiedProviderTriggerDelivery,
+    provider_capability_digest, provider_raw_webhook_descriptor,
 };
 use automata_ci_provider_postgres::PostgresProviderManifestRepository;
 use sha2::{Digest as _, Sha256};
@@ -431,7 +431,7 @@ async fn provider_results_are_contiguous_fenced_and_rehydratable() -> TestResult
             Err(ProviderResultRepositoryError::StaleClaim)
         );
 
-        let second_claim = repository
+        let mut second_claim = repository
             .claim_result(ClaimProviderResult::new(
                 connection.connection_id(),
                 worker,
@@ -442,11 +442,43 @@ async fn provider_results_are_contiguous_fenced_and_rehydratable() -> TestResult
             .expect("second result claim");
         assert_eq!(second_claim.desired(), &second_desired);
         assert!(second_claim.claim().fence() > first_claim.claim().fence());
+        let stale_second_fence = second_claim.claim();
+        let renewed = repository
+            .renew_result(RenewProviderResult::new(
+                stale_second_fence,
+                UnixMillis::new(3_500),
+                1_000,
+            )?)
+            .await?;
+        second_claim.renew_claim(renewed)?;
+        assert_eq!(renewed.expires_at(), UnixMillis::new(4_500));
+        assert_eq!(
+            repository
+                .retry_result(RetryProviderResult::new(
+                    stale_second_fence,
+                    UnixMillis::new(3_501),
+                    UnixMillis::new(3_600),
+                )?)
+                .await,
+            Err(ProviderResultRepositoryError::StaleClaim)
+        );
+        assert!(
+            repository
+                .claim_result(ClaimProviderResult::new(
+                    connection.connection_id(),
+                    worker,
+                    UnixMillis::new(4_004),
+                    1_000,
+                )?)
+                .await?
+                .is_none(),
+            "the renewed claim must exclude a concurrent reclaim"
+        );
         repository
             .retry_result(RetryProviderResult::new(
                 second_claim.claim(),
-                UnixMillis::new(3_005),
-                UnixMillis::new(3_100),
+                UnixMillis::new(3_502),
+                UnixMillis::new(3_600),
             )?)
             .await?;
         assert!(
@@ -454,7 +486,7 @@ async fn provider_results_are_contiguous_fenced_and_rehydratable() -> TestResult
                 .claim_result(ClaimProviderResult::new(
                     connection.connection_id(),
                     worker,
-                    UnixMillis::new(3_099),
+                    UnixMillis::new(3_599),
                     1_000,
                 )?)
                 .await?
@@ -464,7 +496,7 @@ async fn provider_results_are_contiguous_fenced_and_rehydratable() -> TestResult
             .claim_result(ClaimProviderResult::new(
                 connection.connection_id(),
                 worker,
-                UnixMillis::new(3_100),
+                UnixMillis::new(3_600),
                 1_000,
             )?)
             .await?
@@ -475,7 +507,7 @@ async fn provider_results_are_contiguous_fenced_and_rehydratable() -> TestResult
             ProviderResultPublicationModel::AppendOnlyCommitStatus,
             None,
             final_claim.desired().digest(),
-            UnixMillis::new(3_101),
+            UnixMillis::new(3_601),
         )?;
         repository
             .complete_result(CompleteProviderResult::new(final_claim.claim(), evidence)?)

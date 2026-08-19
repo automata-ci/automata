@@ -1,3 +1,90 @@
+-- Immutable common-provider selection evidence recorded atomically with one
+-- logical workflow admission. A later processing reclaim may authorize exact
+-- replay, but can never replace the original normalized selection.
+CREATE TABLE provider_workflow_admission_evidence (
+    run_id UUID PRIMARY KEY REFERENCES workflow_runs (id) ON DELETE RESTRICT,
+    delivery_id UUID NOT NULL REFERENCES provider_deliveries (delivery_id)
+        ON DELETE RESTRICT,
+    invocation_id UUID NOT NULL REFERENCES provider_processing_invocations (invocation_id)
+        ON DELETE RESTRICT,
+    tenant_id TEXT NOT NULL,
+    repository_id UUID NOT NULL,
+    workflow_id UUID NOT NULL,
+    workflow_path TEXT NOT NULL,
+    provider_type TEXT NOT NULL,
+    provider_instance_id UUID NOT NULL,
+    provider_revision BIGINT NOT NULL,
+    connection_id UUID NOT NULL,
+    connection_revision BIGINT NOT NULL,
+    provider_configuration_digest BYTEA NOT NULL,
+    capability_digest BYTEA NOT NULL,
+    normalized_trigger_digest BYTEA NOT NULL,
+    raw_event_digest BYTEA NOT NULL,
+    request_digest BYTEA NOT NULL,
+    source_revision BYTEA NOT NULL,
+    git_ref TEXT NOT NULL,
+    event_name TEXT NOT NULL,
+    actor TEXT,
+    original_worker_id UUID NOT NULL,
+    original_fence BIGINT NOT NULL,
+    original_claimed_at_ms BIGINT NOT NULL,
+    original_expires_at_ms BIGINT NOT NULL,
+    admitted_at_ms BIGINT NOT NULL,
+    FOREIGN KEY (connection_id, connection_revision)
+        REFERENCES provider_connection_revisions (connection_id, revision)
+        ON DELETE RESTRICT,
+    CHECK (octet_length(tenant_id) BETWEEN 1 AND 255),
+    CHECK (repository_id <> '00000000-0000-0000-0000-000000000000'::UUID),
+    CHECK (workflow_id <> '00000000-0000-0000-0000-000000000000'::UUID),
+    CHECK (
+        octet_length(workflow_path) BETWEEN 1 AND 1024
+        AND btrim(workflow_path) = workflow_path
+        AND workflow_path !~ '[[:cntrl:]\\]'
+        AND left(workflow_path, 1) <> '/'
+        AND workflow_path !~ '(^|/)(\.|\.\.)(/|$)'
+        AND workflow_path !~ '//'
+    ),
+    CHECK (octet_length(provider_type) BETWEEN 1 AND 64),
+    CHECK (provider_revision > 0 AND connection_revision > 0),
+    CHECK (octet_length(provider_configuration_digest) = 32),
+    CHECK (octet_length(capability_digest) = 32),
+    CHECK (octet_length(normalized_trigger_digest) = 32),
+    CHECK (octet_length(raw_event_digest) = 32),
+    CHECK (octet_length(request_digest) = 32),
+    CHECK (octet_length(source_revision) IN (20, 32)),
+    CHECK (
+        octet_length(git_ref) BETWEEN 6 AND 1024
+        AND git_ref LIKE 'refs/%' AND git_ref !~ '[[:cntrl:]]'
+    ),
+    CHECK (
+        octet_length(event_name) BETWEEN 1 AND 128
+        AND event_name !~ '[[:cntrl:]]'
+    ),
+    CHECK (actor IS NULL OR (
+        octet_length(actor) BETWEEN 1 AND 1024 AND actor !~ '[[:cntrl:]]'
+    )),
+    CHECK (original_fence > 0),
+    CHECK (original_claimed_at_ms >= 0),
+    CHECK (original_expires_at_ms > original_claimed_at_ms),
+    CHECK (admitted_at_ms >= original_claimed_at_ms),
+    CHECK (admitted_at_ms < original_expires_at_ms)
+);
+
+CREATE FUNCTION automata_provider_workflow_admission_evidence_immutable()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'provider workflow admission evidence is immutable';
+END;
+$$;
+
+CREATE TRIGGER provider_workflow_admission_evidence_no_update_delete
+    BEFORE UPDATE OR DELETE ON provider_workflow_admission_evidence
+    FOR EACH ROW EXECUTE FUNCTION automata_provider_workflow_admission_evidence_immutable();
+
+CREATE TRIGGER provider_workflow_admission_evidence_no_truncate
+    BEFORE TRUNCATE ON provider_workflow_admission_evidence
+    FOR EACH STATEMENT EXECUTE FUNCTION automata_provider_workflow_admission_evidence_immutable();
+
 CREATE TABLE provider_result_subjects (
     subject_id UUID PRIMARY KEY,
     connection_id UUID NOT NULL,
@@ -98,7 +185,7 @@ CREATE TABLE provider_result_outbox (
             AND claim_started_at_ms IS NOT NULL AND claim_expires_at_ms IS NOT NULL
             AND claim_fence > 0 AND claim_started_at_ms >= 0
             AND claim_expires_at_ms > claim_started_at_ms
-            AND claim_expires_at_ms - claim_started_at_ms <= 900000)
+            AND claim_expires_at_ms - claim_started_at_ms <= 3600000)
         OR (state <> 'claimed'
             AND claim_worker_id IS NULL AND claim_fence IS NULL
             AND claim_started_at_ms IS NULL AND claim_expires_at_ms IS NULL)

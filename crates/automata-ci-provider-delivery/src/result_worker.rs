@@ -8,11 +8,14 @@ use automata_ci_provider::{
     ClaimProviderResult, ClaimedProviderResult, CompleteProviderResult, ExternalResultId,
     FailProviderResult, ProviderCapabilities, ProviderConnectionId, ProviderResultFailureKind,
     ProviderResultPublicationEvidence, ProviderResultPublicationModel, ProviderResultRepository,
-    ProviderResultRepositoryError, ProviderResultWorkerId, ProviderTypeId, ResultPublisherError,
-    RetryProviderResult, provider_capability_digest,
+    ProviderResultRepositoryError, ProviderResultWorkerId, ProviderTypeId, RenewProviderResult,
+    ResultPublisherError, RetryProviderResult, provider_capability_digest,
 };
 use thiserror::Error;
-use tokio::time::{Duration, sleep};
+use tokio::{
+    sync::watch,
+    time::{Duration, sleep},
+};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -39,7 +42,39 @@ pub trait ProviderResultAdapter: fmt::Debug + Send + Sync {
         &self,
         context: &ProviderRuntimeContext,
         claimed: &ClaimedProviderResult,
+        lease: &ProviderResultLease,
     ) -> Result<ProviderResultObservation, ResultPublisherError>;
+}
+
+/// Read-only live view of the exact publication fence held by a worker.
+///
+/// The worker updates this handle after every durable renewal. Adapters must
+/// take a fresh snapshot immediately before each provider mutation so a slow
+/// publication cannot continue under an obsolete lease horizon.
+#[derive(Clone)]
+pub struct ProviderResultLease {
+    fence: watch::Receiver<automata_ci_provider::ProviderResultClaimFence>,
+}
+
+impl ProviderResultLease {
+    fn new(fence: watch::Receiver<automata_ci_provider::ProviderResultClaimFence>) -> Self {
+        Self { fence }
+    }
+
+    /// Returns the most recently committed publication fence.
+    #[must_use]
+    pub fn current(&self) -> automata_ci_provider::ProviderResultClaimFence {
+        *self.fence.borrow()
+    }
+}
+
+impl fmt::Debug for ProviderResultLease {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProviderResultLease")
+            .field("fence", &self.current())
+            .finish()
+    }
 }
 
 /// Sanitized provider-native observation returned to the common worker.
@@ -232,7 +267,7 @@ impl ProviderResultWorker {
             self.config.lease_millis,
         )
         .map_err(|_| ProviderResultWorkerError::InvalidConfiguration)?;
-        let Some(claimed) = self
+        let Some(mut claimed) = self
             .repository
             .claim_result(request)
             .await
@@ -248,7 +283,28 @@ impl ProviderResultWorker {
             return Err(ProviderResultWorkerError::Repository);
         }
         let disposition = match self.contexts.resolve_result(claimed.subject()).await {
-            Ok(context) => self.publish(&context, &claimed).await?,
+            Ok(context) => {
+                let (disposition, renewed) = self.publish(&context, &claimed).await?;
+                if renewed != claimed.claim() {
+                    claimed
+                        .renew_claim(renewed)
+                        .map_err(|_| ProviderResultWorkerError::Repository)?;
+                }
+                match disposition {
+                    ResultDisposition::Observed { observation, model } => {
+                        let evidence = ProviderResultPublicationEvidence::new(
+                            &claimed,
+                            model,
+                            observation.external_id().cloned(),
+                            observation.provider_state_digest(),
+                            self.now()?,
+                        )
+                        .map_err(|_| ProviderResultWorkerError::ClaimExpired)?;
+                        ResultDisposition::Complete(evidence)
+                    }
+                    disposition => disposition,
+                }
+            }
             Err(ProviderRuntimeContextError::Unavailable) => ResultDisposition::Retry(None),
             Err(ProviderRuntimeContextError::InvalidEvidence) => {
                 ResultDisposition::Fail(ProviderResultFailureKind::Conflict)
@@ -292,51 +348,85 @@ impl ProviderResultWorker {
         &self,
         context: &ProviderRuntimeContext,
         claimed: &ClaimedProviderResult,
-    ) -> Result<ResultDisposition, ProviderResultWorkerError> {
+    ) -> Result<
+        (
+            ResultDisposition,
+            automata_ci_provider::ProviderResultClaimFence,
+        ),
+        ProviderResultWorkerError,
+    > {
         let provider_type = context.provider().manifest().provider_type();
         let Some(registered) = self.adapters.adapter(provider_type) else {
-            return Ok(ResultDisposition::Fail(
-                ProviderResultFailureKind::Unsupported,
+            return Ok((
+                ResultDisposition::Fail(ProviderResultFailureKind::Unsupported),
+                claimed.claim(),
             ));
         };
         if registered.capability_digest != context.provider().manifest().capability_digest() {
-            return Ok(ResultDisposition::Fail(ProviderResultFailureKind::Conflict));
+            return Ok((
+                ResultDisposition::Fail(ProviderResultFailureKind::Conflict),
+                claimed.claim(),
+            ));
         }
-        Ok(
-            match registered.adapter.publish_result(context, claimed).await {
-                Ok(observation) => {
-                    let observed_at = self.now()?;
-                    let evidence = ProviderResultPublicationEvidence::new(
-                        claimed,
-                        registered.publication_model,
-                        observation.external_id().cloned(),
-                        observation.provider_state_digest(),
-                        observed_at,
+        let mut fence = claimed.claim();
+        let (lease_updates, lease_view) = watch::channel(fence);
+        let lease = ProviderResultLease::new(lease_view);
+        let publication = registered.adapter.publish_result(context, claimed, &lease);
+        tokio::pin!(publication);
+        let heartbeat = Duration::from_millis((self.config.lease_millis / 3).max(1));
+        loop {
+            tokio::select! {
+                outcome = &mut publication => {
+                    let disposition = match outcome {
+                        Ok(observation) => ResultDisposition::Observed {
+                            observation,
+                            model: registered.publication_model,
+                        },
+                        Err(ResultPublisherError::Unavailable) => ResultDisposition::Retry(None),
+                        Err(ResultPublisherError::RateLimited { retry_after }) => {
+                            ResultDisposition::Retry(
+                                retry_after.map(
+                                    automata_ci_provider::ProviderResultRetryAfter::millis,
+                                ),
+                            )
+                        }
+                        Err(ResultPublisherError::Unauthorized) => {
+                            ResultDisposition::Fail(ProviderResultFailureKind::Unauthorized)
+                        }
+                        Err(ResultPublisherError::Forbidden) => {
+                            ResultDisposition::Fail(ProviderResultFailureKind::Forbidden)
+                        }
+                        Err(ResultPublisherError::InvalidResponse) => {
+                            ResultDisposition::Fail(ProviderResultFailureKind::InvalidResponse)
+                        }
+                        Err(ResultPublisherError::Unsupported) => {
+                            ResultDisposition::Fail(ProviderResultFailureKind::Unsupported)
+                        }
+                        Err(ResultPublisherError::Conflict) => {
+                            ResultDisposition::Fail(ProviderResultFailureKind::Conflict)
+                        }
+                    };
+                    return Ok((disposition, fence));
+                }
+                () = sleep(heartbeat) => {
+                    let renewal = RenewProviderResult::new(
+                        fence,
+                        self.now()?,
+                        self.config.lease_millis,
                     )
                     .map_err(|_| ProviderResultWorkerError::ClaimExpired)?;
-                    ResultDisposition::Complete(evidence)
+                    let renewed = self.repository
+                        .renew_result(renewal)
+                        .await
+                        .map_err(repository_error)?;
+                    if !valid_result_renewal(fence, renewed) {
+                        return Err(ProviderResultWorkerError::Repository);
+                    }
+                    fence = renewed;
+                    lease_updates.send_replace(fence);
                 }
-                Err(ResultPublisherError::Unavailable) => ResultDisposition::Retry(None),
-                Err(ResultPublisherError::RateLimited { retry_after }) => ResultDisposition::Retry(
-                    retry_after.map(automata_ci_provider::ProviderResultRetryAfter::millis),
-                ),
-                Err(ResultPublisherError::Unauthorized) => {
-                    ResultDisposition::Fail(ProviderResultFailureKind::Unauthorized)
-                }
-                Err(ResultPublisherError::Forbidden) => {
-                    ResultDisposition::Fail(ProviderResultFailureKind::Forbidden)
-                }
-                Err(ResultPublisherError::InvalidResponse) => {
-                    ResultDisposition::Fail(ProviderResultFailureKind::InvalidResponse)
-                }
-                Err(ResultPublisherError::Unsupported) => {
-                    ResultDisposition::Fail(ProviderResultFailureKind::Unsupported)
-                }
-                Err(ResultPublisherError::Conflict) => {
-                    ResultDisposition::Fail(ProviderResultFailureKind::Conflict)
-                }
-            },
-        )
+            }
+        }
     }
 
     async fn apply_disposition(
@@ -346,6 +436,7 @@ impl ProviderResultWorker {
     ) -> Result<ProviderResultWorkerOutcome, ProviderResultWorkerError> {
         let finished_at = self.now()?;
         match disposition {
+            ResultDisposition::Observed { .. } => Err(ProviderResultWorkerError::Repository),
             ResultDisposition::Complete(evidence) => {
                 let request = CompleteProviderResult::new(claimed.claim(), evidence)
                     .map_err(|_| ProviderResultWorkerError::Repository)?;
@@ -429,9 +520,25 @@ impl fmt::Debug for ProviderResultWorker {
 }
 
 enum ResultDisposition {
+    Observed {
+        observation: ProviderResultObservation,
+        model: ProviderResultPublicationModel,
+    },
     Complete(ProviderResultPublicationEvidence),
     Retry(Option<u64>),
     Fail(ProviderResultFailureKind),
+}
+
+fn valid_result_renewal(
+    prior: automata_ci_provider::ProviderResultClaimFence,
+    renewed: automata_ci_provider::ProviderResultClaimFence,
+) -> bool {
+    renewed.subject_id() == prior.subject_id()
+        && renewed.generation() == prior.generation()
+        && renewed.worker_id() == prior.worker_id()
+        && renewed.fence() == prior.fence()
+        && renewed.claimed_at() == prior.claimed_at()
+        && renewed.expires_at() > prior.expires_at()
 }
 
 async fn sleep_or_shutdown(duration: Duration, shutdown: &CancellationToken) -> bool {
@@ -539,6 +646,7 @@ mod tests {
             &self,
             _context: &ProviderRuntimeContext,
             _claimed: &ClaimedProviderResult,
+            _lease: &ProviderResultLease,
         ) -> Result<ProviderResultObservation, ResultPublisherError> {
             unreachable!("registry construction never publishes results")
         }

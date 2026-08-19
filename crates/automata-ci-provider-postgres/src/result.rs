@@ -8,8 +8,8 @@ use automata_ci_provider::{
     ProviderResultFailureKind, ProviderResultModelError, ProviderResultPhase,
     ProviderResultPublicationModel, ProviderResultRepositoryError, ProviderResultSaveOutcome,
     ProviderResultSubject, ProviderResultSubjectId, ProviderResultSubjectKind,
-    ProviderResultSummary, ProviderResultTitle, ProviderResultWorkerId, RetryProviderResult,
-    SaveDesiredProviderResult,
+    ProviderResultSummary, ProviderResultTitle, ProviderResultWorkerId, RenewProviderResult,
+    RetryProviderResult, SaveDesiredProviderResult,
 };
 use sqlx::{FromRow, Postgres, Transaction};
 
@@ -237,6 +237,53 @@ impl PostgresProviderManifestRepository {
         .await
         .map_err(unavailable)?;
         exact_claim_result(self.pool(), claim.subject_id(), updated.rows_affected()).await
+    }
+
+    pub(crate) async fn renew_result_inner(
+        &self,
+        request: RenewProviderResult,
+    ) -> Result<ProviderResultClaimFence, ProviderResultRepositoryError> {
+        let claim = request.claim();
+        let extension = i64::try_from(request.lease_millis())
+            .map_err(|_| ProviderResultRepositoryError::Corrupt)?;
+        let expires_at = request
+            .renewed_at()
+            .get()
+            .checked_add(extension)
+            .ok_or(ProviderResultRepositoryError::Corrupt)?;
+        let renewed = sqlx::query_scalar::<_, i64>(
+            r"
+            UPDATE provider_result_outbox
+            SET claim_expires_at_ms = $8
+            WHERE subject_id = $1 AND generation = $2 AND state = 'claimed'
+              AND claim_worker_id = $3 AND claim_fence = $4
+              AND claim_started_at_ms = $5 AND claim_expires_at_ms = $6
+              AND claim_started_at_ms <= $7 AND claim_expires_at_ms > $7
+              AND claim_expires_at_ms < $8
+            RETURNING claim_expires_at_ms
+            ",
+        )
+        .bind(claim.subject_id().as_uuid())
+        .bind(durable_u64(claim.generation())?)
+        .bind(claim.worker_id().as_uuid())
+        .bind(durable_u64(claim.fence())?)
+        .bind(claim.claimed_at().get())
+        .bind(claim.expires_at().get())
+        .bind(request.renewed_at().get())
+        .bind(expires_at)
+        .fetch_optional(self.pool())
+        .await
+        .map_err(unavailable)?
+        .ok_or(ProviderResultRepositoryError::StaleClaim)?;
+        ProviderResultClaimFence::new(
+            claim.subject_id(),
+            claim.generation(),
+            claim.worker_id(),
+            claim.fence(),
+            claim.claimed_at(),
+            UnixMillis::new(renewed),
+        )
+        .map_err(model_corrupt)
     }
 
     pub(crate) async fn retry_result_inner(
