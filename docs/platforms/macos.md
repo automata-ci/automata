@@ -439,9 +439,11 @@ clone cleanup. The companion cancellation test waits for two live `Running`
 heartbeats, delivers and acknowledges a durable cancellation command, and
 requires a bounded `Cancelled` result and slot release. The provider recovery
 test kills the process owning a live VM, reopens the journal, and requires
-startup reconciliation to remove the exact orphan. A continuous protected
-physical lane, an independent helper-crash-at-transition matrix, and a retained
-repeated-clean soak remain deployment work.
+startup reconciliation to remove the exact orphan. The helper-loss test kills
+the exact helper bound to a running VM, requires a typed endpoint failure,
+destroys the clone, and proves the same provider slot can run and clean a fresh
+VM. A continuous protected physical lane, launch/destroy helper-crash
+transitions, and a retained repeated-clean soak remain deployment work.
 
 Create `/Volumes/AutomataVM/e2e-state` as an empty `0700` directory owned by
 the physical runner service account before running the command below.
@@ -459,7 +461,8 @@ export AUTOMATA_MACOS_VM_STORAGE_QUOTA_BYTES=<exact-volume-quota-bytes>
 ```
 
 The entrypoint runs the shipped-runner success/timeout and cancellation matrix,
-live-orphan recovery, and the allowlisted runtime-proxy probe serially. Set
+live-helper-loss cleanup and slot reuse, live-orphan recovery, and the
+allowlisted runtime-proxy probe serially. Set
 `AUTOMATA_MACOS_PHYSICAL_REPETITIONS` from 1 through 10 for a bounded repeated
 runner soak. It refuses a `CARGO_TARGET_DIR` on the VM storage filesystem so
 build artifacts cannot consume the clone-capacity safety margin.
