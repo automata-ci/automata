@@ -106,6 +106,8 @@ binary_xml=$(xml_path "$binary")
 wrapper_xml=$(xml_path "$wrapper")
 log_xml=$(xml_path "$log_directory/$label.log")
 error_xml=$(xml_path "$log_directory/$label.error.log")
+log_file=$log_directory/$label.log
+error_file=$log_directory/$label.error.log
 
 if [ "$role" = control-plane ]; then
     env_xml=$input_xml
@@ -170,5 +172,6 @@ plutil -lint "$temporary_plist" >/dev/null || {
 launchctl bootout "system/$label" >/dev/null 2>&1 || true
 install -o root -g wheel -m 0600 "$temporary_plist" "$plist"
 rm -f "$temporary_plist"
+install -o "$service_user" -g "$service_group" -m 0600 /dev/null "$log_file" "$error_file"
 launchctl bootstrap system "$plist"
 printf 'installed and started %s as %s\n' "$label" "$service_user"
