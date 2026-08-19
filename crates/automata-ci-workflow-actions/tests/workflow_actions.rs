@@ -13,6 +13,7 @@ mod local_authority;
 mod logical_compiler;
 mod permissions;
 mod port_contract;
+mod release_workflow;
 mod repository_archive;
 mod reusable_workflow_jobs;
 mod schedule_contract;

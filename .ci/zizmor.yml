@@ -1,0 +1,9 @@
+rules:
+  secrets-outside-env:
+    config:
+      # Automata rejects GitHub deployment-environment syntax. Release secrets
+      # are admitted only for the protected same-repository tag event.
+      allow:
+        - CARGO_REGISTRY_TOKEN
+        - CRATES_IO_EXPECTED_OWNER_LOGINS
+        - CRATES_IO_INITIAL_BURST_OVERRIDE_APPROVED
