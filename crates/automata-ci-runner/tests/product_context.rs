@@ -630,13 +630,8 @@ fn deny_all_trust_rejects_stale_authorities_and_secret_runtime_context() {
         PortErrorKind::InvalidData
     );
 
-    fixture.runtime_authorities = JobRuntimeAuthorities::new(
-        Vec::new(),
-        automata_ci_core::SandboxAuthorizations::empty(),
-        &fixture.job,
-        &fixture.lease,
-    )
-    .expect("deny-all authority bundle");
+    fixture.runtime_authorities =
+        fixture_runtime_authorities(Vec::new(), &fixture.job, &fixture.lease);
     let snapshot = fixture
         .snapshot()
         .expect("coherent deny-all context remains executable without credentials");
@@ -845,13 +840,8 @@ fn missing_or_cross_fence_results_authority_fails_closed() {
         missing.lease.expires_at(),
     )
     .expect("authority");
-    missing.runtime_authorities = JobRuntimeAuthorities::new(
-        vec![unrelated],
-        automata_ci_core::SandboxAuthorizations::empty(),
-        &missing.job,
-        &missing.lease,
-    )
-    .expect("authority bundle");
+    missing.runtime_authorities =
+        fixture_runtime_authorities(vec![unrelated], &missing.job, &missing.lease);
     assert_eq!(
         missing
             .snapshot()
@@ -936,6 +926,20 @@ fn fixture_runner_config_with_github(
     }
     let encoded = serde_json::to_vec(&document).expect("runner config encoding");
     RunnerProductConfig::from_json(&encoded).expect("valid runner config fixture")
+}
+
+fn fixture_runtime_authorities(
+    authorities: Vec<JobRuntimeAuthority>,
+    job: &JobIrEnvelope,
+    lease: &Lease,
+) -> JobRuntimeAuthorities {
+    JobRuntimeAuthorities::new(
+        authorities,
+        automata_ci_core::SandboxAuthorizations::empty(),
+        job,
+        lease,
+    )
+    .expect("valid fixture authority bundle")
 }
 
 impl ContextFixture {
@@ -1032,13 +1036,7 @@ impl ContextFixture {
             UnixMillis::new(4_000_000_000_000),
         )
         .expect("valid fixture authority");
-        let runtime_authorities = JobRuntimeAuthorities::new(
-            vec![authority],
-            automata_ci_core::SandboxAuthorizations::empty(),
-            &job,
-            &lease,
-        )
-        .expect("valid fixture authority bundle");
+        let runtime_authorities = fixture_runtime_authorities(vec![authority], &job, &lease);
         Self {
             context,
             job,
@@ -1071,13 +1069,8 @@ impl ContextFixture {
             BTreeMap::new(),
         )
         .expect("credential-free runtime context");
-        fixture.runtime_authorities = JobRuntimeAuthorities::new(
-            Vec::new(),
-            automata_ci_core::SandboxAuthorizations::empty(),
-            &fixture.job,
-            &fixture.lease,
-        )
-        .expect("credential-free authority bundle");
+        fixture.runtime_authorities =
+            fixture_runtime_authorities(Vec::new(), &fixture.job, &fixture.lease);
         fixture
     }
 
@@ -1108,13 +1101,7 @@ impl ContextFixture {
         let mut authorities = self.runtime_authorities.as_slice().to_vec();
         authorities.push(repository);
         authorities.sort_by(|left, right| left.name().cmp(right.name()));
-        self.runtime_authorities = JobRuntimeAuthorities::new(
-            authorities,
-            automata_ci_core::SandboxAuthorizations::empty(),
-            &self.job,
-            &self.lease,
-        )
-        .expect("authority bundle");
+        self.runtime_authorities = fixture_runtime_authorities(authorities, &self.job, &self.lease);
     }
 
     fn replace_permission_request(&mut self, permission_request: JobPermissionRequest) {
@@ -1147,13 +1134,7 @@ impl ContextFixture {
         let mut authorities = self.runtime_authorities.as_slice().to_vec();
         authorities.push(oidc);
         authorities.sort_by(|left, right| left.name().cmp(right.name()));
-        self.runtime_authorities = JobRuntimeAuthorities::new(
-            authorities,
-            automata_ci_core::SandboxAuthorizations::empty(),
-            &self.job,
-            &self.lease,
-        )
-        .expect("authority bundle");
+        self.runtime_authorities = fixture_runtime_authorities(authorities, &self.job, &self.lease);
     }
 
     fn snapshot(
