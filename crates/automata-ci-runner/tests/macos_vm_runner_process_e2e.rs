@@ -27,17 +27,17 @@ use automata_ci_blob::{BlobKey, BlobPayload, ImmutableBlobStore as _, MediaType,
 use automata_ci_core::{
     ActionReference, AttemptId, ContextValue, EnvironmentProfile, EnvironmentProfileId,
     FencingToken, JobAuthorityProfile, JobConclusion, JobContentReference, JobExecutionContext,
-    JobId, JobInstanceIdentity, JobIr, JobIrEnvelope, JobPermissionRequest, JobResourceAllocation,
-    JobRuntimeContext, JobSource, Lease, LeaseId, LogAck, OperatingSystem, OperationId,
-    ResourceCapacity, RunId, RunValueTemplates, RunnerFeature, RunnerId, RunnerRequirements,
-    RunnerSessionId, RuntimeBoolean, RuntimePositiveInteger, RuntimeTimeoutTemplate, SemanticStep,
-    Sha256Digest, ShellTemplate, StepId, StepIr, StrategyContext, UnixMillis, ValueTemplate,
-    WorkflowId,
+    JobId, JobInstanceIdentity, JobIr, JobIrEnvelope, JobLifecycle, JobPermissionRequest,
+    JobResourceAllocation, JobRuntimeContext, JobSource, Lease, LeaseId, LogAck, OperatingSystem,
+    OperationId, ResourceCapacity, RunId, RunValueTemplates, RunnerFeature, RunnerId,
+    RunnerRequirements, RunnerSessionId, RuntimeBoolean, RuntimePositiveInteger,
+    RuntimeTimeoutTemplate, SemanticStep, Sha256Digest, ShellTemplate, StepId, StepIr,
+    StrategyContext, UnixMillis, ValueTemplate, WorkflowId,
 };
 #[cfg(target_os = "macos")]
 use automata_ci_core::{ExpressionProgram, ValueSource};
 use automata_ci_protocol::{
-    CommandAck, CommandCursor, CommandSequence, JobResultMessage, JobRuntimeAuthorities,
+    CancelJob, CommandAck, CommandCursor, CommandSequence, JobResultMessage, JobRuntimeAuthorities,
     LeaseDisposition, LeaseOffer, LeasePollResponse, LeaseRenewal, LeaseRequest, LogAckMessage,
     LogBatch, MessageHeader, NegotiatedSession, OperationAck, ProtocolLimits, RunnerSlotOrdinal,
     RunnerToServer, RuntimeAuthorityAck, RuntimeAuthorityGrant, RuntimeAuthorityRequest,
@@ -265,6 +265,141 @@ async fn shipped_runner_process_executes_a_claimed_isolated_job_with_action_runt
     assert_s3_requests(&s3_requests, &expected_s3_paths);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "requires a sealed VM template on a physical Apple Silicon runner"
+)]
+#[allow(clippy::too_many_lines)]
+async fn shipped_runner_process_cancels_a_running_isolated_job() {
+    let root = TemporaryRoot::new();
+    let runner_id = RunnerId::new();
+    let session_id = RunnerSessionId::new();
+    let pki = TestPki::new(runner_id);
+    let (job, event, runtime_context) = cancellation_job();
+    let expected_s3_paths = [
+        event.fixture_path(),
+        runtime_context.fixture_path(),
+        runtime_context.fixture_path(),
+    ];
+    let lease = Lease::new(
+        LeaseId::new(),
+        AttemptId::new(),
+        runner_id,
+        FencingToken::new(1).expect("fencing token"),
+        UnixMillis::new(unix_millis().saturating_sub(1_000)),
+        UnixMillis::new(unix_millis().saturating_add(i64::from(process_control_timeout_millis()))),
+    )
+    .expect("cancellation test lease");
+    let authorities = JobRuntimeAuthorities::new(
+        Vec::new(),
+        automata_ci_core::SandboxAuthorizations::empty(),
+        &job,
+        &lease,
+    )
+    .expect("credential-free authorities");
+    let handler = Arc::new(ProcessFlowHandler::new_cancelling(
+        runner_id,
+        session_id,
+        lease,
+        job,
+        authorities,
+    ));
+
+    let s3 = S3Fixture::spawn([event, runtime_context]).await;
+    let control = RunningControlServer::spawn(&pki, handler.clone()).await;
+    let config_path =
+        write_runner_config(root.path(), runner_id, &pki, control.address, s3.address);
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_automata-runner"))
+        .arg("run")
+        .arg("--config")
+        .arg(&config_path)
+        .env("AUTOMATA_PROCESS_E2E_SPOOL_KEY_HEX", "11".repeat(32))
+        .env("AUTOMATA_PROCESS_E2E_S3_ACCESS_KEY", "process-access")
+        .env("AUTOMATA_PROCESS_E2E_S3_SECRET_KEY", "process-secret")
+        .env_remove("RUST_LOG")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("launch shipped automata-runner binary");
+    let mut stdout_task = Some(tokio::spawn(drain_output(
+        child.stdout.take().expect("runner stdout pipe"),
+    )));
+    let mut stderr_task = Some(tokio::spawn(drain_output(
+        child.stderr.take().expect("runner stderr pipe"),
+    )));
+
+    tokio::time::timeout(process_result_timeout(), handler.wait_for_cancellation())
+        .await
+        .expect("control plane cancels the running physical VM job");
+    wait_for_terminal_result(
+        &handler,
+        &mut child,
+        &mut stdout_task,
+        &mut stderr_task,
+        Duration::from_secs(30),
+    )
+    .await;
+    tokio::time::timeout(Duration::from_secs(10), handler.wait_for_completed_poll())
+        .await
+        .expect("runner finalizes the cancelled job and polls its released slot");
+    assert!(
+        fs::read_dir(
+            PathBuf::from(required_macos_vm_environment(VM_STORAGE_ROOT_ENV)).join("attempts")
+        )
+        .map_or(true, |mut entries| entries.next().is_none()),
+        "virtualization provider left a cancelled VM clone behind"
+    );
+
+    stop_runner(&mut child).await;
+    let stdout = collect_output(stdout_task.take().expect("stdout task"), "stdout").await;
+    let stderr = collect_output(stderr_task.take().expect("stderr task"), "stderr").await;
+    let s3_requests = s3.requests();
+    control.stop().await;
+    s3.stop().await;
+
+    let observation = handler.observation();
+    assert_eq!(observation.hello_runner_id, Some(runner_id));
+    assert_eq!(
+        observation.hello_operating_system,
+        Some(platform_operating_system())
+    );
+    assert!(observation.accepted, "runner did not accept the lease");
+    assert_eq!(
+        observation.runtime_authority_progress,
+        RuntimeAuthorityProgress::Acknowledged,
+        "runner did not adopt runtime authorities before execution"
+    );
+    assert!(
+        observation.running_heartbeats >= 2,
+        "control plane cancelled before a guest command had a full heartbeat interval to start"
+    );
+    assert!(
+        observation.cancellation_sent,
+        "control plane did not send the durable cancellation command"
+    );
+    assert_eq!(
+        observation.command_cursor,
+        handler.cancellation_cursor(),
+        "runner did not durably acknowledge the cancellation command"
+    );
+    assert_eq!(
+        observation.conclusion,
+        Some(JobConclusion::Cancelled),
+        "runner did not report cancellation; logs={:?}; stdout={:?}; stderr={:?}",
+        String::from_utf8_lossy(&observation.logs),
+        String::from_utf8_lossy(&stdout),
+        String::from_utf8_lossy(&stderr),
+    );
+    assert!(
+        observation.completed_poll,
+        "runner did not release the cancelled slot and poll again"
+    );
+    assert_s3_requests(&s3_requests, &expected_s3_paths);
+}
+
 async fn drain_output<R>(mut reader: R) -> io::Result<Vec<u8>>
 where
     R: AsyncRead + Unpin,
@@ -328,9 +463,30 @@ async fn wait_for_terminal_result(
 }
 
 fn process_job() -> (JobIrEnvelope, S3Object, S3Object) {
+    process_job_fixture("process-e2e", macos_steps())
+}
+
+fn cancellation_job() -> (JobIrEnvelope, S3Object, S3Object) {
+    let step = StepIr::new(
+        StepId::new("macos-cancellation-process").expect("cancellation step ID"),
+        ValueTemplate::literal("Run until the control plane cancels the job")
+            .expect("cancellation step name"),
+        RuntimeBoolean::literal(false),
+        SemanticStep::run(RunValueTemplates::new(
+            ValueTemplate::literal("exec /bin/sleep 300").expect("cancellation command"),
+            ShellTemplate::named(ValueTemplate::literal("sh").expect("cancellation shell")),
+        )),
+    );
+    process_job_fixture("process-cancellation-e2e", vec![step])
+}
+
+fn process_job_fixture(name: &str, steps: Vec<StepIr>) -> (JobIrEnvelope, S3Object, S3Object) {
     let event_bytes = b"{}".to_vec();
-    let event_reference =
-        content_reference("events/process-e2e.json", "application/json", &event_bytes);
+    let event_reference = content_reference(
+        &format!("events/{name}.json"),
+        "application/json",
+        &event_bytes,
+    );
     let runtime_context = JobRuntimeContext::new(
         ContextValue::empty_object(),
         ContextValue::empty_object(),
@@ -343,7 +499,7 @@ fn process_job() -> (JobIrEnvelope, S3Object, S3Object) {
     let runtime_bytes = encode_job_runtime_context(&runtime_context, &ProtocolLimits::default())
         .expect("encode runtime context");
     let runtime_reference = content_reference(
-        "contexts/process-e2e.pb",
+        &format!("contexts/{name}.pb"),
         JOB_RUNTIME_CONTEXT_MEDIA_TYPE,
         &runtime_bytes,
     );
@@ -357,13 +513,12 @@ fn process_job() -> (JobIrEnvelope, S3Object, S3Object) {
     let requirements = RunnerRequirements::default()
         .with_environment_profile(profile)
         .with_resource_allocation(allocation);
-    let steps = macos_steps();
     let job = JobIr::new(
         JobId::new(),
         RunId::new(),
-        "process-e2e",
+        name,
         requirements,
-        JobInstanceIdentity::new("process-e2e", 0, 1, Sha256Digest::from_bytes([0x44; 32]))
+        JobInstanceIdentity::new(name, 0, 1, Sha256Digest::from_bytes([0x44; 32]))
             .expect("job instance"),
         false,
         steps,
@@ -379,12 +534,12 @@ fn process_job() -> (JobIrEnvelope, S3Object, S3Object) {
                 "0123456789abcdef0123456789abcdef01234567",
             )
             .expect("revision"),
-            ".ci/workflows/macos-vm-process-e2e.yml",
+            format!(".ci/workflows/macos-vm-{name}.yml"),
             "workflow_dispatch",
         ),
         JobExecutionContext::new(
             "CI",
-            "refs/heads/macos-vm-process-e2e",
+            format!("refs/heads/macos-vm-{name}"),
             "/__w/automata/automata",
             event_reference.clone(),
             runtime_reference.clone(),
@@ -839,6 +994,8 @@ struct ProcessObservation {
     accepted: bool,
     command_cursor: Option<CommandCursor>,
     runtime_authority_progress: RuntimeAuthorityProgress,
+    running_heartbeats: u32,
+    cancellation_sent: bool,
     logs: Vec<u8>,
     conclusion: Option<JobConclusion>,
     completed_poll: bool,
@@ -858,9 +1015,11 @@ struct ProcessFlowHandler {
     session_id: RunnerSessionId,
     lease: Lease,
     offer: LeaseOffer,
+    cancellation: Option<CancelJob>,
     authorities: JobRuntimeAuthorities,
     state: Mutex<ProcessFlowState>,
     result_ready: tokio::sync::Notify,
+    cancellation_ready: tokio::sync::Notify,
     completed_poll: tokio::sync::Notify,
 }
 
@@ -879,6 +1038,46 @@ impl ProcessFlowHandler {
         job: JobIrEnvelope,
         authorities: JobRuntimeAuthorities,
     ) -> Self {
+        Self::build(runner_id, session_id, lease, job, authorities, None)
+    }
+
+    fn new_cancelling(
+        runner_id: RunnerId,
+        session_id: RunnerSessionId,
+        lease: Lease,
+        job: JobIrEnvelope,
+        authorities: JobRuntimeAuthorities,
+    ) -> Self {
+        let cancellation = CancelJob::new(
+            ServerCommandHeader::new(
+                SUPPORTED_PROTOCOL_RANGE.max(),
+                session_id,
+                OperationId::new(),
+                CommandSequence::new(2).expect("cancellation command sequence"),
+            ),
+            lease.attempt_id(),
+            lease.guard(),
+            "physical macOS cancellation acceptance",
+            UnixMillis::new(unix_millis()),
+        );
+        Self::build(
+            runner_id,
+            session_id,
+            lease,
+            job,
+            authorities,
+            Some(cancellation),
+        )
+    }
+
+    fn build(
+        runner_id: RunnerId,
+        session_id: RunnerSessionId,
+        lease: Lease,
+        job: JobIrEnvelope,
+        authorities: JobRuntimeAuthorities,
+        cancellation: Option<CancelJob>,
+    ) -> Self {
         let offer = LeaseOffer::new(
             ServerCommandHeader::new(
                 SUPPORTED_PROTOCOL_RANGE.max(),
@@ -895,9 +1094,11 @@ impl ProcessFlowHandler {
             session_id,
             lease,
             offer,
+            cancellation,
             authorities,
             state: Mutex::new(ProcessFlowState::default()),
             result_ready: tokio::sync::Notify::new(),
+            cancellation_ready: tokio::sync::Notify::new(),
             completed_poll: tokio::sync::Notify::new(),
         }
     }
@@ -914,8 +1115,20 @@ impl ProcessFlowHandler {
         CommandCursor::through(self.offer.header().sequence())
     }
 
+    fn cancellation_cursor(&self) -> Option<CommandCursor> {
+        self.cancellation
+            .as_ref()
+            .map(|cancel| CommandCursor::through(cancel.header().sequence()))
+    }
+
     async fn wait_for_result(&self) {
         self.result_ready.notified().await;
+    }
+
+    async fn wait_for_cancellation(&self) {
+        if !self.observation().cancellation_sent {
+            self.cancellation_ready.notified().await;
+        }
     }
 
     async fn wait_for_completed_poll(&self) {
@@ -986,19 +1199,7 @@ impl ProcessFlowHandler {
                 self.handle_runtime_authority_request(request)
             }
             RunnerToServer::RuntimeAuthorityAck(ack) => self.handle_runtime_authority_ack(*ack),
-            RunnerToServer::Heartbeat(heartbeat) => {
-                if heartbeat.attempt_id() != self.lease.attempt_id()
-                    || heartbeat.guard() != self.lease.guard()
-                {
-                    return Err(internal_application_error());
-                }
-                Ok(ServerToRunner::LeaseRenewal(LeaseRenewal::new(
-                    reply_header(heartbeat.header()),
-                    self.lease.attempt_id(),
-                    self.lease.guard(),
-                    self.lease.expires_at(),
-                )))
-            }
+            RunnerToServer::Heartbeat(heartbeat) => self.handle_heartbeat(heartbeat),
             RunnerToServer::JobState(state) => {
                 if state.attempt_id() != self.lease.attempt_id()
                     || state.guard() != self.lease.guard()
@@ -1013,6 +1214,44 @@ impl ProcessFlowHandler {
             RunnerToServer::JobResult(result) => self.handle_job_result(result),
             RunnerToServer::CommandAck(ack) => self.handle_command_ack(*ack),
         }
+    }
+
+    fn handle_heartbeat(
+        &self,
+        heartbeat: &automata_ci_protocol::LeaseHeartbeat,
+    ) -> Result<ServerToRunner, ApplicationError> {
+        if heartbeat.attempt_id() != self.lease.attempt_id()
+            || heartbeat.guard() != self.lease.guard()
+        {
+            return Err(internal_application_error());
+        }
+        if let Some(cancellation) = &self.cancellation {
+            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            if heartbeat.lifecycle() == JobLifecycle::Running {
+                state.observation.running_heartbeats =
+                    state.observation.running_heartbeats.saturating_add(1);
+            }
+            let cancellation_unacknowledged = state.observation.command_cursor
+                != Some(CommandCursor::through(cancellation.header().sequence()));
+            if matches!(
+                heartbeat.lifecycle(),
+                JobLifecycle::Running | JobLifecycle::Cancelling
+            ) && state.observation.running_heartbeats >= 2
+                && cancellation_unacknowledged
+            {
+                if !state.observation.cancellation_sent {
+                    state.observation.cancellation_sent = true;
+                    self.cancellation_ready.notify_one();
+                }
+                return Ok(ServerToRunner::CancelJob(cancellation.clone()));
+            }
+        }
+        Ok(ServerToRunner::LeaseRenewal(LeaseRenewal::new(
+            reply_header(heartbeat.header()),
+            self.lease.attempt_id(),
+            self.lease.guard(),
+            self.lease.expires_at(),
+        )))
     }
 
     fn runtime_authority_bundle_digest(&self) -> Result<Sha256Digest, ApplicationError> {
@@ -1144,15 +1383,16 @@ impl ProcessFlowHandler {
     }
 
     fn handle_command_ack(&self, ack: CommandAck) -> Result<ServerToRunner, ApplicationError> {
-        let expected = self.offer_cursor();
-        if ack.command_cursor() != expected {
+        let offer_cursor = self.offer_cursor();
+        let cancellation_cursor = self.cancellation_cursor();
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if ack.command_cursor() != offer_cursor
+            && (cancellation_cursor != Some(ack.command_cursor())
+                || !state.observation.cancellation_sent)
+        {
             return Err(internal_application_error());
         }
-        self.state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .observation
-            .command_cursor = Some(ack.command_cursor());
+        state.observation.command_cursor = Some(ack.command_cursor());
         Ok(ServerToRunner::OperationAck(OperationAck::new(
             reply_header(ack.header()),
         )))
