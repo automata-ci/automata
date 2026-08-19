@@ -767,6 +767,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "automata-ci-provider-forgejo"
+version = "0.1.0"
+dependencies = [
+ "automata-ci-core",
+ "automata-ci-provider",
+ "automata-ci-scm",
+ "bytes",
+ "reqwest",
+ "ring",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "url",
+]
+
+[[package]]
 name = "automata-ci-provider-github"
 version = "0.1.0"
 dependencies = [

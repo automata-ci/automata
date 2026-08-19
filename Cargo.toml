@@ -15,6 +15,7 @@ members = [
     "crates/automata-ci-execution",
     "crates/automata-ci-expression-actions",
     "crates/automata-ci-provider-github",
+    "crates/automata-ci-provider-forgejo",
     "crates/automata-ci-actions-permissions",
     "crates/automata-ci-github-delivery",
     "crates/automata-ci-actions-runtime",
@@ -93,6 +94,7 @@ automata-ci-credential-github = { path = "crates/automata-ci-credential-github",
 automata-ci-execution = { path = "crates/automata-ci-execution", version = "0.1.0" }
 automata-ci-expression-actions = { path = "crates/automata-ci-expression-actions", version = "0.1.0" }
 automata-ci-provider-github = { path = "crates/automata-ci-provider-github", version = "0.1.0" }
+automata-ci-provider-forgejo = { path = "crates/automata-ci-provider-forgejo", version = "0.1.0" }
 automata-ci-actions-permissions = { path = "crates/automata-ci-actions-permissions", version = "0.1.0" }
 automata-ci-github-delivery = { path = "crates/automata-ci-github-delivery", version = "0.1.0" }
 automata-ci-actions-runtime = { path = "crates/automata-ci-actions-runtime", version = "0.1.0" }
