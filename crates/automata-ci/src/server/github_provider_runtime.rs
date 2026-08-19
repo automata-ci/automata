@@ -49,9 +49,9 @@ use automata_ci_key_management::{EnvelopeCodec, KeyEncryptionProvider};
 use automata_ci_protocol::RuntimeAuthorityEndpoint;
 use automata_ci_provider::{
     ControlCredentialClaim, ControlCredentialProvider, ControlCredentialRequest,
-    ProviderConnectionId, ProviderControlCredentialId, ProviderControlCredentialWorkerId,
-    ProviderControlOperation, ProviderControlOperationSet, ProviderLifecycleState,
-    ProviderManifestRepository, ProviderResultRepository,
+    ProviderConnectionId, ProviderConnectionManifest, ProviderControlCredentialId,
+    ProviderControlCredentialWorkerId, ProviderControlOperation, ProviderControlOperationSet,
+    ProviderLifecycleState, ProviderManifestRepository, ProviderResultRepository,
 };
 use automata_ci_provider_delivery::{
     ProviderDeliveryClock, ProviderDeliveryClockError, ProviderResultAdapter,
@@ -691,6 +691,36 @@ impl GithubProviderRuntimeBuilder {
             .map(GithubProviderManifest::connection_id)
             .collect::<Vec<_>>()
             .into();
+        let mut workload_connections = BTreeMap::<u64, Vec<ProviderConnectionManifest>>::new();
+        for manifest in plan.manifests() {
+            let connection = provider_repository
+                .current_connection(manifest.connection_id())
+                .await
+                .map_err(|_| GithubProviderRuntimeBuildError::InvalidJobRuntimeAuthority)?
+                .ok_or(GithubProviderRuntimeBuildError::InvalidJobRuntimeAuthority)?;
+            let connection_policy =
+                GithubConnectionPolicy::decode(connection.configuration().adapter_policy())
+                    .map_err(|_| GithubProviderRuntimeBuildError::InvalidJobRuntimeAuthority)?;
+            if connection.state() != ProviderLifecycleState::Active
+                || connection.configuration().workspace_id().to_string()
+                    != manifest.tenant().as_str()
+                || connection
+                    .configuration()
+                    .repository()
+                    .external_id()
+                    .as_str()
+                    != manifest.github_repository_id().get().to_string()
+                || connection_policy.installation_id().get() != manifest.installation_id().get()
+                || connection_policy.repository().as_str()
+                    != manifest.github_repository_name().as_str()
+            {
+                return Err(GithubProviderRuntimeBuildError::InvalidJobRuntimeAuthority);
+            }
+            workload_connections
+                .entry(manifest.installation_id().get())
+                .or_default()
+                .push(connection);
+        }
         let tenants: Arc<[TenantScope]> = plan
             .manifests()
             .iter()
@@ -787,6 +817,7 @@ impl GithubProviderRuntimeBuilder {
             Arc::new(ImmutableBlobJobIrReader::new(blobs.clone()));
         let job_authority_resolver = Arc::new(GithubJobRuntimeAuthorityResolver::new(
             job_authority_evidence,
+            provider_repository.clone(),
             job_ir_objects,
         ));
         let identity_resolver: Arc<
@@ -820,6 +851,10 @@ impl GithubProviderRuntimeBuilder {
                     pin.github_app_client_id,
                     pin.github_app_jwt_issuer_kind,
                     pin.configuration_fingerprint,
+                    workload_connections
+                        .get(installation_id)
+                        .cloned()
+                        .ok_or(GithubProviderRuntimeBuildError::InvalidJobRuntimeAuthority)?,
                 )
                 .map_err(|_| GithubProviderRuntimeBuildError::InvalidJobRuntimeAuthority)?,
             );
@@ -893,6 +928,10 @@ impl GithubProviderRuntimeBuilder {
                     pin.github_app_client_id,
                     pin.github_app_jwt_issuer_kind,
                     pin.configuration_fingerprint,
+                    workload_connections
+                        .get(installation_id)
+                        .cloned()
+                        .ok_or(GithubProviderRuntimeBuildError::InvalidJobRuntimeAuthority)?,
                 ))
             })
             .collect::<Result<Vec<_>, _>>()?;

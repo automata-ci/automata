@@ -16,7 +16,7 @@ use automata_ci_core::{
     RunnerSessionId, RuntimeBoolean, SemanticStep, Sha256Digest, ShellTemplate, StepId, StepIr,
     TrustActorEvidence, TrustActorKind, TrustAutomationKind, TrustEventKind, TrustEvidence,
     TrustOriginKind, TrustPolicy, TrustRepositoryEvidence, TrustSnapshot, TrustTokenRecursion,
-    UnixMillis, ValueTemplate, WorkflowId,
+    UnixMillis, ValueTemplate, WorkflowId, WorkspaceId,
 };
 use automata_ci_credential_github::{
     GITHUB_REPOSITORY_AUTHORITY_NAMESPACE, GithubRuntimeAuthorityIdentityResolver as _,
@@ -24,7 +24,15 @@ use automata_ci_credential_github::{
 };
 use automata_ci_protocol::ProtocolLimits;
 use automata_ci_protocol_protobuf::encode_job_ir;
-use automata_ci_provider::ProviderConnectionId;
+use automata_ci_provider::{
+    ExternalRepositoryId, ExternalRepositoryIdentity, ProviderArchiveLimits,
+    ProviderConfigurationRevision, ProviderConnectionConfiguration, ProviderConnectionId,
+    ProviderConnectionManifest, ProviderConnectionPolicyDocument, ProviderConnectionRevision,
+    ProviderDefaultBranch, ProviderInstanceId, ProviderLifecycleState, ProviderManifestRepository,
+    ProviderRepositoryError, ProviderRepositoryFuture, ProviderRepositoryPath,
+    ProviderRunnerPolicyBinding, ProviderSaveOutcome, ProviderSchemaVersion,
+    ProviderSecretGeneration, ProviderSecretName, ProviderWorkflowSource, RepositoryVisibility,
+};
 use automata_ci_store::{
     GithubInstallationId, GithubJobRuntimeAuthorityEvidence, GithubJobRuntimeAuthorityExecution,
     GithubJobRuntimeAuthorityRepository, GithubJobRuntimeAuthorityResolution,
@@ -298,7 +306,8 @@ async fn exact_standard_identity_and_request_are_resolved_twice_without_guessing
         [fixture.evidence.clone(), fixture.evidence.clone()],
     ));
     let reader = Arc::new(Objects::ready(fixture.encoded.clone()));
-    let resolver = GithubJobRuntimeAuthorityResolver::new(repository.clone(), reader);
+    let connections = Arc::new(ConnectionRepository::new(fixture.evidence.identity()));
+    let resolver = GithubJobRuntimeAuthorityResolver::new(repository.clone(), connections, reader);
 
     let identity = resolver
         .resolve_github_runtime_authority_identity(fixture.request())
@@ -314,7 +323,7 @@ async fn exact_standard_identity_and_request_are_resolved_twice_without_guessing
         .expect("exact request");
     assert_eq!(request.identity(), fixture.evidence.identity());
     assert_eq!(
-        request.request().repository().stable_id().as_str(),
+        request.request().repository().external_id().as_str(),
         fixture
             .evidence
             .identity()
@@ -338,6 +347,7 @@ async fn changed_historical_workflow_or_repository_is_inconsistent() {
             GithubJobRuntimeAuthorityResolution::Standard(Box::new(wrong_workflow)),
             [],
         )),
+        Arc::new(ConnectionRepository::new(fixture.evidence.identity())),
         Arc::new(Objects::ready(fixture.encoded.clone())),
     );
     assert_eq!(
@@ -395,6 +405,7 @@ async fn changed_historical_workflow_or_repository_is_inconsistent() {
             GithubJobRuntimeAuthorityResolution::Standard(Box::new(wrong_repository)),
             [],
         )),
+        Arc::new(ConnectionRepository::new(fixture.evidence.identity())),
         Arc::new(Objects::ready(fixture.encoded.clone())),
     );
     assert_eq!(
@@ -415,6 +426,7 @@ async fn corrupt_object_or_changed_second_revalidation_fails_closed() {
     ));
     let resolver = GithubJobRuntimeAuthorityResolver::new(
         repository,
+        Arc::new(ConnectionRepository::new(fixture.evidence.identity())),
         Arc::new(Objects::ready(vec![0_u8; fixture.encoded.len()])),
     );
     assert_eq!(
@@ -435,6 +447,7 @@ async fn corrupt_object_or_changed_second_revalidation_fails_closed() {
             GithubJobRuntimeAuthorityResolution::Standard(Box::new(fixture.evidence.clone())),
             [fixture.evidence.clone(), changed],
         )),
+        Arc::new(ConnectionRepository::new(fixture.evidence.identity())),
         Arc::new(Objects::ready(fixture.encoded)),
     );
     assert_eq!(
@@ -568,6 +581,129 @@ struct Objects {
 impl Objects {
     fn ready(bytes: Vec<u8>) -> Self {
         Self { result: Ok(bytes) }
+    }
+}
+
+#[derive(Debug)]
+struct ConnectionRepository {
+    connection: ProviderConnectionManifest,
+}
+
+impl ConnectionRepository {
+    fn new(identity: &GithubRuntimeAuthorityIdentity) -> Self {
+        let configuration = ProviderConnectionConfiguration::new(
+            WorkspaceId::parse("11111111-1111-4111-8111-111111111111").expect("workspace"),
+            ExternalRepositoryIdentity::new(
+                ProviderInstanceId::from_uuid(Uuid::from_u128(45)).expect("instance"),
+                ExternalRepositoryId::new(identity.github_repository_id().get().to_string())
+                    .expect("repository"),
+            ),
+            ProviderConfigurationRevision::new(1).expect("configuration revision"),
+            Sha256Digest::from_bytes([1; 32]),
+            Sha256Digest::from_bytes([2; 32]),
+            RepositoryVisibility::Private,
+            ProviderDefaultBranch::new("main").expect("branch"),
+            ProviderWorkflowSource::Directory(
+                ProviderRepositoryPath::new(".ci/workflows").expect("workflow path"),
+            ),
+            ProviderRunnerPolicyBinding::new(
+                ProviderSchemaVersion::new(1).expect("schema"),
+                Sha256Digest::from_bytes([3; 32]),
+            ),
+            ProviderArchiveLimits::new(1_024, 8_192, 100, 1_024, 10, 1_024)
+                .expect("archive limits"),
+            ProviderConnectionPolicyDocument::new(
+                ProviderSchemaVersion::new(1).expect("schema"),
+                b"{}".to_vec(),
+            )
+            .expect("connection policy"),
+        );
+        Self {
+            connection: ProviderConnectionManifest::new(
+                identity.provider_connection_id(),
+                ProviderConnectionRevision::new(1).expect("connection revision"),
+                ProviderLifecycleState::Active,
+                configuration,
+                UnixMillis::new(1),
+                Some(UnixMillis::new(2)),
+                None,
+            )
+            .expect("connection"),
+        }
+    }
+}
+
+impl ProviderManifestRepository for ConnectionRepository {
+    fn save_instance(
+        &self,
+        _record: automata_ci_provider::ProviderInstanceRecord,
+    ) -> ProviderRepositoryFuture<'_, ProviderSaveOutcome> {
+        Box::pin(async { Err(ProviderRepositoryError::Unavailable) })
+    }
+
+    fn load_instance(
+        &self,
+        _instance_id: ProviderInstanceId,
+        _revision: ProviderConfigurationRevision,
+    ) -> ProviderRepositoryFuture<'_, Option<automata_ci_provider::ProviderInstanceRecord>> {
+        Box::pin(async { Ok(None) })
+    }
+
+    fn current_instance(
+        &self,
+        _instance_id: ProviderInstanceId,
+    ) -> ProviderRepositoryFuture<'_, Option<automata_ci_provider::ProviderInstanceRecord>> {
+        Box::pin(async { Ok(None) })
+    }
+
+    fn latest_secret_generation(
+        &self,
+        _instance_id: ProviderInstanceId,
+        _name: ProviderSecretName,
+    ) -> ProviderRepositoryFuture<'_, Option<ProviderSecretGeneration>> {
+        Box::pin(async { Ok(None) })
+    }
+
+    fn save_connection(
+        &self,
+        _manifest: ProviderConnectionManifest,
+    ) -> ProviderRepositoryFuture<'_, ProviderSaveOutcome> {
+        Box::pin(async { Err(ProviderRepositoryError::Unavailable) })
+    }
+
+    fn load_connection(
+        &self,
+        connection_id: ProviderConnectionId,
+        revision: ProviderConnectionRevision,
+    ) -> ProviderRepositoryFuture<'_, Option<ProviderConnectionManifest>> {
+        Box::pin(async move {
+            Ok((self.connection.connection_id() == connection_id
+                && self.connection.revision() == revision)
+                .then(|| self.connection.clone()))
+        })
+    }
+
+    fn current_connection(
+        &self,
+        connection_id: ProviderConnectionId,
+    ) -> ProviderRepositoryFuture<'_, Option<ProviderConnectionManifest>> {
+        Box::pin(async move {
+            Ok((self.connection.connection_id() == connection_id).then(|| self.connection.clone()))
+        })
+    }
+
+    fn current_connections(
+        &self,
+        instance_id: ProviderInstanceId,
+    ) -> ProviderRepositoryFuture<'_, Vec<ProviderConnectionManifest>> {
+        Box::pin(async move {
+            Ok(
+                (self.connection.configuration().repository().instance_id() == instance_id)
+                    .then(|| self.connection.clone())
+                    .into_iter()
+                    .collect(),
+            )
+        })
     }
 }
 

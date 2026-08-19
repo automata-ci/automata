@@ -315,6 +315,7 @@ fn protected_with(
 ) -> ProtectedGithubRuntimeAuthority {
     let metadata = GithubRuntimeAuthorityEnvelopeMetadata::new(
         identity,
+        Sha256Digest::from_bytes([0; 32]),
         Some(UnixMillis::new(provider_expires_at)),
         plaintext_size_bytes,
         Sha256Digest::from_bytes([plaintext_digest_byte; 32]),
@@ -429,6 +430,7 @@ fn missing_provider_expiry_is_authenticated_and_uses_the_conservative_horizon() 
     let identity = IdentityInputs::base().build();
     let unknown_expiry = GithubRuntimeAuthorityEnvelopeMetadata::new(
         identity.clone(),
+        Sha256Digest::from_bytes([0; 32]),
         None,
         32,
         Sha256Digest::from_bytes([16; 32]),
@@ -436,6 +438,7 @@ fn missing_provider_expiry_is_authenticated_and_uses_the_conservative_horizon() 
     .expect("unknown-expiry metadata");
     let known_expiry = GithubRuntimeAuthorityEnvelopeMetadata::new(
         identity.clone(),
+        Sha256Digest::from_bytes([0; 32]),
         Some(UnixMillis::new(3_500_000)),
         32,
         Sha256Digest::from_bytes([16; 32]),
@@ -470,6 +473,7 @@ fn missing_provider_expiry_is_authenticated_and_uses_the_conservative_horizon() 
 
     let maximum_known_expiry = GithubRuntimeAuthorityEnvelopeMetadata::new(
         identity.clone(),
+        Sha256Digest::from_bytes([0; 32]),
         Some(UnixMillis::new(3_663_000)),
         32,
         Sha256Digest::from_bytes([16; 32]),
@@ -482,6 +486,7 @@ fn missing_provider_expiry_is_authenticated_and_uses_the_conservative_horizon() 
     assert!(matches!(
         GithubRuntimeAuthorityEnvelopeMetadata::new(
             identity,
+            Sha256Digest::from_bytes([0; 32]),
             Some(UnixMillis::new(3_663_001)),
             32,
             Sha256Digest::from_bytes([16; 32]),
@@ -682,6 +687,7 @@ fn protected_envelope_and_claim_intervals_are_strictly_bounded() {
     let identity = identity_with(14, 15, 1, JobIrVersion::current()).expect("identity");
     let metadata = GithubRuntimeAuthorityEnvelopeMetadata::new(
         identity.clone(),
+        Sha256Digest::from_bytes([0; 32]),
         Some(UnixMillis::new(3_500_000)),
         32,
         Sha256Digest::from_bytes([16; 32]),

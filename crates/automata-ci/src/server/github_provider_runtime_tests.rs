@@ -11,12 +11,17 @@ use std::{
 use automata_ci_core::{
     AttemptId, FencingToken, JobId, JobIrVersion, LeaseId, RunId, RunnerId, RunnerSessionId,
 };
-use automata_ci_credential_github::{
-    GithubInstallationId as CredentialGithubInstallationId,
-    GithubInstallationTokenRevocationCandidate, GithubInstallationTokenRevocationFailureKind,
-    GithubInstallationTokenRevocationOutcome,
+use automata_ci_credential_github::GithubInstallationId as CredentialGithubInstallationId;
+use automata_ci_provider::{
+    ExternalRepositoryId, ExternalRepositoryIdentity, ProviderArchiveLimits,
+    ProviderConfigurationRevision, ProviderConnectionConfiguration, ProviderConnectionId,
+    ProviderConnectionManifest, ProviderConnectionPolicyDocument, ProviderConnectionRevision,
+    ProviderDefaultBranch, ProviderInstanceId, ProviderLifecycleState, ProviderRepositoryPath,
+    ProviderRunnerPolicyBinding, ProviderSchemaVersion, ProviderWorkflowSource,
+    RepositoryVisibility, WorkloadCredentialRevocationCandidate,
+    WorkloadCredentialRevocationFailureKind, WorkloadCredentialRevocationOutcome,
 };
-use automata_ci_provider::ProviderConnectionId;
+use automata_ci_secret::SecretValue;
 use automata_ci_store::{
     GithubInstallationId, GithubRepositoryId, GithubRepositoryName,
     GithubRuntimeAuthorityActivationSelectionTail, GithubRuntimeAuthorityIdentity,
@@ -369,6 +374,48 @@ fn runtime_identity(
     .expect("runtime identity")
 }
 
+fn workload_connection(
+    connection_id: ProviderConnectionId,
+    repository_id: u64,
+) -> ProviderConnectionManifest {
+    let configuration = ProviderConnectionConfiguration::new(
+        automata_ci_core::WorkspaceId::parse("11111111-1111-4111-8111-111111111111")
+            .expect("workspace"),
+        ExternalRepositoryIdentity::new(
+            ProviderInstanceId::from_uuid(Uuid::from_u128(45)).expect("instance"),
+            ExternalRepositoryId::new(repository_id.to_string()).expect("repository"),
+        ),
+        ProviderConfigurationRevision::new(1).expect("configuration revision"),
+        Sha256Digest::from_bytes([1; 32]),
+        Sha256Digest::from_bytes([2; 32]),
+        RepositoryVisibility::Private,
+        ProviderDefaultBranch::new("main").expect("branch"),
+        ProviderWorkflowSource::Directory(
+            ProviderRepositoryPath::new(".ci/workflows").expect("workflow path"),
+        ),
+        ProviderRunnerPolicyBinding::new(
+            ProviderSchemaVersion::new(1).expect("schema"),
+            Sha256Digest::from_bytes([3; 32]),
+        ),
+        ProviderArchiveLimits::new(1_024, 8_192, 100, 1_024, 10, 1_024).expect("archive limits"),
+        ProviderConnectionPolicyDocument::new(
+            ProviderSchemaVersion::new(1).expect("schema"),
+            b"{}".to_vec(),
+        )
+        .expect("connection policy"),
+    );
+    ProviderConnectionManifest::new(
+        connection_id,
+        ProviderConnectionRevision::new(1).expect("connection revision"),
+        ProviderLifecycleState::Active,
+        configuration,
+        automata_ci_core::UnixMillis::new(1),
+        Some(automata_ci_core::UnixMillis::new(2)),
+        None,
+    )
+    .expect("connection")
+}
+
 fn changed_digest(digest: Sha256Digest) -> Sha256Digest {
     let mut bytes = *digest.as_bytes();
     bytes[0] ^= 0xff;
@@ -546,6 +593,10 @@ async fn current_identity_uses_the_exact_live_route_and_mismatches_close() {
         fixture.pin.github_app_client_id.clone(),
         fixture.pin.github_app_jwt_issuer_kind,
         fixture.pin.configuration_fingerprint,
+        [workload_connection(
+            current.provider_connection_id(),
+            current.github_repository_id().get(),
+        )],
     )
     .expect("the live mint route consumes the converged pin");
     let lifecycle_route = GithubRuntimeAuthorityLifecycleBrokerRouter::new([(
@@ -554,6 +605,10 @@ async fn current_identity_uses_the_exact_live_route_and_mismatches_close() {
         fixture.pin.github_app_client_id,
         fixture.pin.github_app_jwt_issuer_kind,
         fixture.pin.configuration_fingerprint,
+        vec![workload_connection(
+            current.provider_connection_id(),
+            current.github_repository_id().get(),
+        )],
     )])
     .expect("the live lifecycle route consumes the same converged pin");
     assert_eq!(
@@ -596,11 +651,6 @@ async fn current_identity_uses_the_exact_live_route_and_mismatches_close() {
     let mut wrong_fingerprint = current_route;
     wrong_fingerprint.configuration_fingerprint =
         changed_digest(wrong_fingerprint.configuration_fingerprint);
-    let candidate = GithubInstallationTokenRevocationCandidate::from_protected_secret(
-        SecretString::new("routing-mismatch-token").expect("candidate"),
-    )
-    .expect("bounded protected candidate");
-
     for (label, route) in [
         ("App key", wrong_key),
         ("JWT issuer", wrong_issuer),
@@ -608,18 +658,23 @@ async fn current_identity_uses_the_exact_live_route_and_mismatches_close() {
     ] {
         let mismatch = runtime_identity(&fixture.current, &route, 0x3_000, 0x81);
         assert_eq!(lifecycle_route.maximum_request_duration(&mismatch), None);
+        let candidate = WorkloadCredentialRevocationCandidate::new(
+            Sha256Digest::from_bytes([0; 32]),
+            None,
+            SecretValue::from_utf8("routing-mismatch-token".to_owned()).expect("candidate"),
+            None,
+        );
         let outcome = tokio::time::timeout(
             Duration::from_millis(50),
-            lifecycle_route.revoke(&mismatch, &candidate),
+            lifecycle_route.revoke(&mismatch, candidate),
         )
         .await
         .unwrap_or_else(|_| panic!("{label} mismatch reached the live provider"));
         assert!(
             matches!(
                 outcome,
-                GithubInstallationTokenRevocationOutcome::Unconfirmed(failure)
-                    if failure.kind()
-                        == GithubInstallationTokenRevocationFailureKind::InvalidResponse
+                WorkloadCredentialRevocationOutcome::Unconfirmed { failure, .. }
+                    if failure.kind() == WorkloadCredentialRevocationFailureKind::InvalidResponse
             ),
             "{label} mismatch must fail at the exact route"
         );

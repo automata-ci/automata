@@ -324,12 +324,19 @@ pub fn workload_connection() -> ProviderConnectionManifest {
 }
 
 pub fn workload_connection_for(connection_id: u128) -> ProviderConnectionManifest {
+    workload_connection_for_repository(connection_id, REPOSITORY_ID)
+}
+
+pub fn workload_connection_for_repository(
+    connection_id: u128,
+    repository_id: u64,
+) -> ProviderConnectionManifest {
     let instance_id = ProviderInstanceId::from_uuid(Uuid::from_u128(45)).unwrap();
     let configuration = ProviderConnectionConfiguration::new(
         WorkspaceId::parse("11111111-1111-4111-8111-111111111111").unwrap(),
         ExternalRepositoryIdentity::new(
             instance_id,
-            ExternalRepositoryId::new(REPOSITORY_ID.to_string()).unwrap(),
+            ExternalRepositoryId::new(repository_id.to_string()).unwrap(),
         ),
         ProviderConfigurationRevision::new(1).unwrap(),
         Sha256Digest::from_bytes([1; 32]),

@@ -7,6 +7,9 @@ use std::{
     time::Duration,
 };
 
+#[path = "support/mod.rs"]
+mod support;
+
 use async_trait::async_trait;
 use automata_ci_control::runner_control::{
     ControlPortError, RuntimeAuthorityIssueRequest, RuntimeAuthorityIssuer as _,
@@ -21,13 +24,12 @@ use automata_ci_core::{
 };
 use automata_ci_credential_github::{
     GITHUB_REPOSITORY_AUTHORITY_NAMESPACE, GITHUB_REPOSITORY_RUNTIME_AUTHORITY,
-    GithubInstallationTokenMintOutcome, GithubRepositoryRuntimeAuthorityIssuer,
-    GithubRuntimeAuthorityCommitSupervisor, GithubRuntimeAuthorityCoordinatorClock,
-    GithubRuntimeAuthorityIdentityResolutionError, GithubRuntimeAuthorityIdentityResolver,
-    GithubRuntimeAuthorityIssuerConfigurationError, GithubRuntimeAuthorityMintBroker,
-    GithubRuntimeAuthorityMintCoordinator, GithubRuntimeAuthorityRequestResolver,
-    GithubRuntimeAuthorityResolutionError, ResolvedGithubRuntimeAuthorityIdentity,
-    ResolvedGithubRuntimeAuthorityRequest, github_runtime_authority_workload_identity,
+    GithubRepositoryRuntimeAuthorityIssuer, GithubRuntimeAuthorityCommitSupervisor,
+    GithubRuntimeAuthorityCoordinatorClock, GithubRuntimeAuthorityIdentityResolutionError,
+    GithubRuntimeAuthorityIdentityResolver, GithubRuntimeAuthorityIssuerConfigurationError,
+    GithubRuntimeAuthorityMintBroker, GithubRuntimeAuthorityMintCoordinator,
+    GithubRuntimeAuthorityRequestResolver, GithubRuntimeAuthorityResolutionError,
+    ResolvedGithubRuntimeAuthorityIdentity, ResolvedGithubRuntimeAuthorityRequest,
 };
 use automata_ci_key_management::{
     ENVELOPE_SCHEMA_V1, EncryptedEnvelope, EnvelopeCodec, KeyEncryptionContext, KeyEncryptionError,
@@ -36,12 +38,11 @@ use automata_ci_key_management::{
 };
 use automata_ci_protocol::{ProtocolLimits, RuntimeAuthorityEndpoint};
 use automata_ci_protocol_protobuf::encode_job_ir;
-use automata_ci_provider::ProviderConnectionId;
-use automata_ci_scm::credential::{
-    CredentialError, CredentialErrorKind, MinimumValidity, PermissionLevel, PermissionName,
-    PermissionSet, ProviderResourceId, RepositoryCredentialRequest, RepositoryScope,
+use automata_ci_provider::{
+    ProviderConnectionId, WorkloadCredentialIssueOutcome, WorkloadCredentialPermission,
+    WorkloadCredentialPermissionSet, WorkloadCredentialProfile, WorkloadCredentialProviderError,
+    WorkloadCredentialProviderErrorKind, WorkloadCredentialRequest,
 };
-use automata_ci_scm::{RepositoryId as ScmRepositoryId, ScmProviderId};
 use automata_ci_store::{
     AuthenticateGithubRuntimeAuthorityUnprotectedErasure, BeginGithubRuntimeAuthorityMint,
     BeginGithubRuntimeAuthorityMintOutcome, ClaimGithubRuntimeAuthorityMint,
@@ -620,22 +621,31 @@ fn selection_tails(
     )
 }
 
-fn credential_request(identity: &GithubRuntimeAuthorityIdentity) -> RepositoryCredentialRequest {
-    RepositoryCredentialRequest::new(
-        github_runtime_authority_workload_identity(identity),
-        RepositoryScope::new(
-            ScmProviderId::new("github").expect("provider"),
-            ScmRepositoryId::new(identity.github_repository_name().as_str()).expect("repository"),
-            ProviderResourceId::new(identity.github_repository_id().get().to_string())
-                .expect("repository ID"),
-        ),
-        PermissionSet::new([(
-            PermissionName::new("contents").expect("permission"),
-            PermissionLevel::Read,
-        )])
+fn credential_request(identity: &GithubRuntimeAuthorityIdentity) -> WorkloadCredentialRequest {
+    WorkloadCredentialRequest::new(
+        &support::workload_connection_for_repository(12, identity.github_repository_id().get()),
+        identity.job_id(),
+        Lease::new(
+            identity.lease_id(),
+            identity.key().attempt_id(),
+            identity.runner_id(),
+            identity.key().fencing_token(),
+            identity.lease_issued_at(),
+            identity.lease_expires_at(),
+        )
+        .expect("lease"),
+        automata_ci_core::TrustSourceClass::SameRepository,
+        WorkloadCredentialProfile::RepositoryAccess,
+        WorkloadCredentialPermissionSet::new([WorkloadCredentialPermission::new(
+            "contents",
+            automata_ci_core::PermissionLevel::Read,
+        )
+        .expect("permission")])
         .expect("permissions"),
-        MinimumValidity::default(),
+        identity.requested_at(),
+        identity.lease_expires_at(),
     )
+    .expect("workload request")
 }
 
 #[derive(Debug)]
@@ -660,7 +670,7 @@ impl GithubRuntimeAuthorityIdentityResolver for ExactIdentityResolver {
 
 struct ExactRequestResolver {
     identity: GithubRuntimeAuthorityIdentity,
-    request: RepositoryCredentialRequest,
+    request: WorkloadCredentialRequest,
 }
 
 #[async_trait]
@@ -730,11 +740,11 @@ impl GithubRuntimeAuthorityMintBroker for RejectingBroker {
 
     async fn mint_once(
         &self,
-        _request: &RepositoryCredentialRequest,
-    ) -> GithubInstallationTokenMintOutcome {
+        _request: &WorkloadCredentialRequest,
+    ) -> WorkloadCredentialIssueOutcome {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        GithubInstallationTokenMintOutcome::Rejected(CredentialError::new(
-            CredentialErrorKind::InvalidRequest,
+        WorkloadCredentialIssueOutcome::Rejected(WorkloadCredentialProviderError::new(
+            WorkloadCredentialProviderErrorKind::Conflict,
         ))
     }
 }
@@ -787,6 +797,7 @@ async fn ready_snapshot(
     frame.extend_from_slice(token.as_bytes());
     let metadata = GithubRuntimeAuthorityEnvelopeMetadata::new(
         identity.clone(),
+        credential_request(identity).digest(),
         Some(UnixMillis::new(ISSUED_AT + 3_600_000)),
         u64::try_from(frame.len()).expect("frame length"),
         Sha256Digest::from_bytes(Sha256::digest(&frame).into()),

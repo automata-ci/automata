@@ -66,7 +66,7 @@ const MAX_GITHUB_REPOSITORY_NAME_BYTES: usize =
 const MAX_GITHUB_AUTHORITY_NAMESPACE_BYTES: usize = 128;
 const MAX_FAILURE_KIND_BYTES: usize = 128;
 const PROTECTED_PAYLOAD_SCHEMA: u16 = 1;
-const AAD_DOMAIN: &[u8] = b"automata.store.github-runtime-authority-aad.v3\0";
+const AAD_DOMAIN: &[u8] = b"automata.store.github-runtime-authority-aad.v4\0";
 const WRAPPING_AAD_DOMAIN: &[u8] = b"automata.store.github-runtime-authority-wrapping-aad.v3\0";
 const ENCRYPTION_PURPOSE: &str = "control-plane/github-runtime-authority:v3";
 const WRAPPING_ENCRYPTION_PURPOSE: &str = "control-plane/github-runtime-authority-wrapping:v3";
@@ -836,6 +836,7 @@ impl GithubRuntimeAuthorityIdentity {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GithubRuntimeAuthorityEnvelopeMetadata {
     identity: GithubRuntimeAuthorityIdentity,
+    request_digest: Sha256Digest,
     provider_expires_at: Option<UnixMillis>,
     safe_erase_after: UnixMillis,
     plaintext_schema: NonZeroU16,
@@ -852,6 +853,7 @@ impl GithubRuntimeAuthorityEnvelopeMetadata {
     /// Rejects an invalid provider expiry or protected plaintext shape.
     pub fn new(
         identity: GithubRuntimeAuthorityIdentity,
+        request_digest: Sha256Digest,
         provider_expires_at: Option<UnixMillis>,
         plaintext_size_bytes: u64,
         plaintext_digest: Sha256Digest,
@@ -892,6 +894,7 @@ impl GithubRuntimeAuthorityEnvelopeMetadata {
             .ok_or(GithubRuntimeAuthorityValueError::InvalidProtectedEnvelope)?;
         let aad_digest = compute_aad_digest(
             &identity,
+            request_digest,
             provider_expires_at,
             safe_erase_after,
             plaintext_schema.get(),
@@ -900,6 +903,7 @@ impl GithubRuntimeAuthorityEnvelopeMetadata {
         );
         Ok(Self {
             identity,
+            request_digest,
             provider_expires_at,
             safe_erase_after,
             plaintext_schema,
@@ -913,6 +917,11 @@ impl GithubRuntimeAuthorityEnvelopeMetadata {
     #[must_use]
     pub const fn identity(&self) -> &GithubRuntimeAuthorityIdentity {
         &self.identity
+    }
+    /// Returns the exact common workload-credential request digest.
+    #[must_use]
+    pub const fn request_digest(&self) -> Sha256Digest {
+        self.request_digest
     }
     /// Returns the provider-reported expiry, or `None` when it was unavailable.
     #[must_use]
@@ -2928,6 +2937,7 @@ fn validate_claim_interval(
 #[allow(clippy::too_many_arguments)]
 fn compute_aad_digest(
     identity: &GithubRuntimeAuthorityIdentity,
+    request_digest: Sha256Digest,
     provider_expires_at: Option<UnixMillis>,
     safe_erase_after: UnixMillis,
     plaintext_schema: u16,
@@ -2937,6 +2947,7 @@ fn compute_aad_digest(
     let mut hasher = Sha256::new();
     append_aad(&mut hasher, AAD_DOMAIN);
     append_identity_aad(&mut hasher, identity);
+    append_aad(&mut hasher, request_digest.as_bytes());
     match provider_expires_at {
         Some(provider_expires_at) => {
             append_u64(&mut hasher, 1);

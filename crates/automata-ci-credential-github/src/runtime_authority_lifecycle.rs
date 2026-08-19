@@ -2,11 +2,16 @@
 
 use std::{collections::BTreeMap, fmt, sync::Arc, time::Duration};
 
-use automata_ci_auth::secret::SecretString;
 use automata_ci_core::UnixMillis;
 use automata_ci_key_management::{
     EnvelopeCodec, EnvelopeError, KeyEncryptionContext, KeyEncryptionError, SecretBytes,
 };
+use automata_ci_provider::{
+    ProviderConnectionId, ProviderConnectionManifest, WorkloadCredentialProvider,
+    WorkloadCredentialRevocationCandidate, WorkloadCredentialRevocationFailureKind,
+    WorkloadCredentialRevocationOutcome,
+};
+use automata_ci_secret::SecretValue;
 use automata_ci_store::{
     ClaimGithubRuntimeAuthorityRevocation, ClaimedGithubRuntimeAuthorityRevocation,
     ConfirmGithubRuntimeAuthorityRevocation, DeferGithubRuntimeAuthorityRevocation,
@@ -26,9 +31,8 @@ use tokio::{runtime::Handle, sync::oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    GithubAppCredentialBroker, GithubInstallationTokenRevocationCandidate,
-    GithubInstallationTokenRevocationFailureKind, GithubInstallationTokenRevocationOutcome,
-    GithubRuntimeAuthorityCoordinatorClock,
+    GithubAppCredentialBroker, GithubRuntimeAuthorityCoordinatorClock,
+    GithubWorkloadCredentialProvider,
     config::whole_milliseconds,
     supervised_custody::{Entry, Reservation, SupervisedCustody},
 };
@@ -60,8 +64,8 @@ pub trait GithubRuntimeAuthorityLifecycleBroker: fmt::Debug + Send + Sync {
     async fn revoke(
         &self,
         identity: &GithubRuntimeAuthorityIdentity,
-        candidate: &GithubInstallationTokenRevocationCandidate,
-    ) -> GithubInstallationTokenRevocationOutcome;
+        candidate: WorkloadCredentialRevocationCandidate,
+    ) -> WorkloadCredentialRevocationOutcome;
 }
 
 /// Invalid pinned lifecycle-broker configuration.
@@ -87,6 +91,7 @@ struct GithubRuntimeAuthorityLifecycleBrokerRoute {
     github_app_client_id: GithubServerServiceAppClientId,
     github_app_jwt_issuer_kind: GithubServerServiceJwtIssuer,
     configuration_fingerprint: Sha256Digest,
+    workloads: BTreeMap<ProviderConnectionId, GithubWorkloadCredentialProvider>,
 }
 
 /// Bounded no-default router for exactly pinned job-authority revocation.
@@ -113,6 +118,7 @@ impl GithubRuntimeAuthorityLifecycleBrokerRouter {
                 GithubServerServiceAppClientId,
                 GithubServerServiceJwtIssuer,
                 Sha256Digest,
+                Vec<ProviderConnectionManifest>,
             ),
         >,
     ) -> Result<Self, GithubRuntimeAuthorityLifecycleBrokerRouterError> {
@@ -123,6 +129,7 @@ impl GithubRuntimeAuthorityLifecycleBrokerRouter {
             github_app_client_id,
             github_app_jwt_issuer_kind,
             configuration_fingerprint,
+            connections,
         ) in entries
         {
             if routes.len() >= MAX_ACTIONS_RUNTIME_AUTHORITY_LIFECYCLE_BROKERS {
@@ -138,12 +145,29 @@ impl GithubRuntimeAuthorityLifecycleBrokerRouter {
                 return Err(GithubRuntimeAuthorityLifecycleBrokerRouterError::InconsistentIssuer);
             }
             let installation_id = broker.mint_installation_id();
+            let mut workloads = BTreeMap::new();
+            for connection in connections {
+                let connection_id = connection.connection_id();
+                let provider = GithubWorkloadCredentialProvider::new(broker.clone(), &connection)
+                    .map_err(|_| {
+                    GithubRuntimeAuthorityLifecycleBrokerRouterError::InconsistentIssuer
+                })?;
+                if workloads.insert(connection_id, provider).is_some() {
+                    return Err(
+                        GithubRuntimeAuthorityLifecycleBrokerRouterError::DuplicateInstallation,
+                    );
+                }
+            }
+            if workloads.is_empty() {
+                return Err(GithubRuntimeAuthorityLifecycleBrokerRouterError::InconsistentIssuer);
+            }
             let route = GithubRuntimeAuthorityLifecycleBrokerRoute {
                 broker,
                 github_app_id,
                 github_app_client_id,
                 github_app_jwt_issuer_kind,
                 configuration_fingerprint,
+                workloads,
             };
             if routes.insert(installation_id, route).is_some() {
                 return Err(
@@ -197,16 +221,20 @@ impl GithubRuntimeAuthorityLifecycleBroker for GithubRuntimeAuthorityLifecycleBr
     async fn revoke(
         &self,
         identity: &GithubRuntimeAuthorityIdentity,
-        candidate: &GithubInstallationTokenRevocationCandidate,
-    ) -> GithubInstallationTokenRevocationOutcome {
-        let Some(route) = self.exact_route(identity) else {
-            return GithubInstallationTokenRevocationOutcome::Unconfirmed(
-                crate::GithubInstallationTokenRevocationFailure::new(
-                    GithubInstallationTokenRevocationFailureKind::InvalidResponse,
+        candidate: WorkloadCredentialRevocationCandidate,
+    ) -> WorkloadCredentialRevocationOutcome {
+        let Some(provider) = self
+            .exact_route(identity)
+            .and_then(|route| route.workloads.get(&identity.provider_connection_id()))
+        else {
+            return WorkloadCredentialRevocationOutcome::Unconfirmed {
+                candidate,
+                failure: automata_ci_provider::WorkloadCredentialRevocationFailure::new(
+                    WorkloadCredentialRevocationFailureKind::InvalidResponse,
                 ),
-            );
+            };
         };
-        route.broker.revoke(candidate).await
+        provider.revoke(candidate).await
     }
 }
 
@@ -701,31 +729,8 @@ impl GithubRuntimeAuthorityLifecycleCoordinator {
             drop(candidate);
             return defer_mutation(claimed, "shutdown_before_provider", observed_at);
         }
-        let outcome = self.broker.revoke(identity, &candidate).await;
-        drop(candidate);
-        match outcome {
-            GithubInstallationTokenRevocationOutcome::Confirmed => {
-                ConfirmGithubRuntimeAuthorityRevocation::provider_no_content(claimed, observed_at)
-                    .map(LifecycleMutation::Confirm)
-                    .map_err(|_| GithubRuntimeAuthorityLifecycleError::Inconsistent)
-            }
-            GithubInstallationTokenRevocationOutcome::Unconfirmed(failure) => {
-                if failure.is_retryable() {
-                    retry_mutation(
-                        claimed,
-                        revocation_failure_kind(failure.kind()),
-                        observed_at,
-                        failure.retry_after_seconds(),
-                    )
-                } else {
-                    defer_mutation(
-                        claimed,
-                        revocation_failure_kind(failure.kind()),
-                        observed_at,
-                    )
-                }
-            }
-        }
+        let outcome = self.broker.revoke(identity, candidate).await;
+        revocation_outcome_mutation(claimed, outcome, observed_at)
     }
 }
 
@@ -740,6 +745,43 @@ impl fmt::Debug for GithubRuntimeAuthorityLifecycleCoordinator {
             .field("worker", &self.worker)
             .field("supervisor", &self.supervisor)
             .finish()
+    }
+}
+
+fn revocation_outcome_mutation(
+    claimed: &ClaimedGithubRuntimeAuthorityRevocation,
+    outcome: WorkloadCredentialRevocationOutcome,
+    observed_at: UnixMillis,
+) -> Result<LifecycleMutation, GithubRuntimeAuthorityLifecycleError> {
+    match outcome {
+        WorkloadCredentialRevocationOutcome::Confirmed => {
+            ConfirmGithubRuntimeAuthorityRevocation::provider_no_content(claimed, observed_at)
+                .map(LifecycleMutation::Confirm)
+                .map_err(|_| GithubRuntimeAuthorityLifecycleError::Inconsistent)
+        }
+        WorkloadCredentialRevocationOutcome::Unconfirmed { candidate, failure } => {
+            drop(candidate);
+            if matches!(
+                failure.kind(),
+                WorkloadCredentialRevocationFailureKind::RateLimited
+                    | WorkloadCredentialRevocationFailureKind::Unavailable
+            ) {
+                retry_mutation(
+                    claimed,
+                    revocation_failure_kind(failure.kind()),
+                    observed_at,
+                    failure
+                        .retry_after()
+                        .map(automata_ci_provider::WorkloadCredentialRetryAfter::millis),
+                )
+            } else {
+                defer_mutation(
+                    claimed,
+                    revocation_failure_kind(failure.kind()),
+                    observed_at,
+                )
+            }
+        }
     }
 }
 
@@ -769,11 +811,10 @@ fn retry_mutation(
     claimed: &ClaimedGithubRuntimeAuthorityRevocation,
     kind: &'static str,
     observed_at: UnixMillis,
-    retry_after_seconds: Option<u64>,
+    retry_after_millis: Option<u64>,
 ) -> Result<LifecycleMutation, GithubRuntimeAuthorityLifecycleError> {
-    let requested_delay = retry_after_seconds
-        .and_then(|seconds| seconds.checked_mul(1_000))
-        .and_then(|milliseconds| i64::try_from(milliseconds).ok())
+    let requested_delay = retry_after_millis
+        .and_then(|millis| i64::try_from(millis).ok())
         .unwrap_or(DEFAULT_REVOKE_RETRY_MILLIS)
         .clamp(1, MAX_GITHUB_AUTHORITY_REVOKE_BACKOFF_MILLIS);
     let Some(retry_at) = bounded_retry_at(
@@ -805,7 +846,7 @@ fn defer_mutation(
 fn decode_installation_token_frame(
     plaintext: &SecretBytes,
     metadata: &automata_ci_store::GithubRuntimeAuthorityEnvelopeMetadata,
-) -> Result<GithubInstallationTokenRevocationCandidate, ()> {
+) -> Result<WorkloadCredentialRevocationCandidate, ()> {
     let bytes = plaintext.expose_secret();
     if u64::try_from(bytes.len()).ok() != Some(metadata.plaintext_size_bytes())
         || Sha256Digest::from_bytes(Sha256::digest(bytes).into()) != metadata.plaintext_digest()
@@ -825,9 +866,13 @@ fn decode_installation_token_frame(
     if token.len() != token_length || token.is_empty() || !token.iter().all(u8::is_ascii_graphic) {
         return Err(());
     }
-    let secret =
-        SecretString::new(String::from_utf8(token.to_vec()).map_err(|_| ())?).map_err(|_| ())?;
-    GithubInstallationTokenRevocationCandidate::from_protected_secret(secret).map_err(|_| ())
+    let secret = SecretValue::new(token.to_vec()).map_err(|_| ())?;
+    Ok(WorkloadCredentialRevocationCandidate::new(
+        metadata.request_digest(),
+        None,
+        secret,
+        metadata.provider_expires_at(),
+    ))
 }
 
 fn bounded_retry_at(
@@ -841,16 +886,12 @@ fn bounded_retry_at(
     (retry_at > observed_at.get()).then(|| UnixMillis::new(retry_at))
 }
 
-const fn revocation_failure_kind(
-    kind: GithubInstallationTokenRevocationFailureKind,
-) -> &'static str {
+const fn revocation_failure_kind(kind: WorkloadCredentialRevocationFailureKind) -> &'static str {
     match kind {
-        GithubInstallationTokenRevocationFailureKind::Unauthorized => "revocation_unauthorized",
-        GithubInstallationTokenRevocationFailureKind::RateLimited => "revocation_rate_limited",
-        GithubInstallationTokenRevocationFailureKind::Retryable => "revocation_unavailable",
-        GithubInstallationTokenRevocationFailureKind::InvalidResponse => {
-            "revocation_invalid_response"
-        }
+        WorkloadCredentialRevocationFailureKind::Unauthorized => "revocation_unauthorized",
+        WorkloadCredentialRevocationFailureKind::RateLimited => "revocation_rate_limited",
+        WorkloadCredentialRevocationFailureKind::Unavailable => "revocation_unavailable",
+        WorkloadCredentialRevocationFailureKind::InvalidResponse => "revocation_invalid_response",
     }
 }
 
@@ -926,7 +967,6 @@ mod tests {
     };
 
     use super::*;
-    use crate::GithubInstallationTokenRevocationOutcome;
 
     #[tokio::test]
     async fn idle_pass_reconciles_once_and_never_calls_a_provider_route() {
@@ -1526,6 +1566,7 @@ mod tests {
         frame.extend_from_slice(token);
         let metadata = GithubRuntimeAuthorityEnvelopeMetadata::new(
             identity.clone(),
+            Sha256Digest::from_bytes([0; 32]),
             None,
             u64::try_from(frame.len()).expect("frame length"),
             Sha256Digest::from_bytes(Sha256::digest(&frame).into()),
@@ -1892,8 +1933,8 @@ mod tests {
         async fn revoke(
             &self,
             _identity: &GithubRuntimeAuthorityIdentity,
-            _candidate: &GithubInstallationTokenRevocationCandidate,
-        ) -> GithubInstallationTokenRevocationOutcome {
+            _candidate: WorkloadCredentialRevocationCandidate,
+        ) -> WorkloadCredentialRevocationOutcome {
             self.calls.fetch_add(1, Ordering::SeqCst);
             unreachable!("idle maintenance has no revocation claim")
         }
@@ -1929,10 +1970,10 @@ mod tests {
         async fn revoke(
             &self,
             _identity: &GithubRuntimeAuthorityIdentity,
-            _candidate: &GithubInstallationTokenRevocationCandidate,
-        ) -> GithubInstallationTokenRevocationOutcome {
+            _candidate: WorkloadCredentialRevocationCandidate,
+        ) -> WorkloadCredentialRevocationOutcome {
             self.revocations.fetch_add(1, Ordering::SeqCst);
-            GithubInstallationTokenRevocationOutcome::Confirmed
+            WorkloadCredentialRevocationOutcome::Confirmed
         }
     }
 

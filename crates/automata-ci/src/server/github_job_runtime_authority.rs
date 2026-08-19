@@ -23,6 +23,7 @@ use automata_ci_credential_github::{
     ResolvedGithubRuntimeAuthorityRequest, github_job_runtime_authority_request,
 };
 use automata_ci_protocol::{JobRuntimeAuthorities, MAX_CONFIGURABLE_FRAME_BYTES, ProtocolLimits};
+use automata_ci_provider::ProviderManifestRepository;
 use automata_ci_store::{
     GithubJobRuntimeAuthorityExecution, GithubJobRuntimeAuthorityRepository,
     GithubJobRuntimeAuthorityResolution, GithubJobRuntimeAuthorityStoreError, GithubRepositoryName,
@@ -35,6 +36,7 @@ use automata_ci_credential_github::MAX_GITHUB_SERVER_SERVICE_INSTALLATION_BROKER
 /// Durable product resolver shared by identity issuance and least-authority minting.
 pub(crate) struct GithubJobRuntimeAuthorityResolver {
     repository: Arc<dyn GithubJobRuntimeAuthorityRepository>,
+    connections: Arc<dyn ProviderManifestRepository>,
     job_ir_objects: Arc<dyn JobIrObjectReader>,
     protocol_limits: ProtocolLimits,
 }
@@ -44,6 +46,7 @@ impl GithubJobRuntimeAuthorityResolver {
     #[must_use]
     pub(crate) fn new(
         repository: Arc<dyn GithubJobRuntimeAuthorityRepository>,
+        connections: Arc<dyn ProviderManifestRepository>,
         job_ir_objects: Arc<dyn JobIrObjectReader>,
     ) -> Self {
         let protocol_limits = ProtocolLimits::new(
@@ -56,6 +59,7 @@ impl GithubJobRuntimeAuthorityResolver {
         .expect("the protocol absolute ceilings form coherent JobIR limits");
         Self {
             repository,
+            connections,
             job_ir_objects,
             protocol_limits,
         }
@@ -80,6 +84,7 @@ impl fmt::Debug for GithubJobRuntimeAuthorityResolver {
         formatter
             .debug_struct("GithubJobRuntimeAuthorityResolver")
             .field("repository", &"[GITHUB JOB AUTHORITY REPOSITORY]")
+            .field("connections", &"[PROVIDER MANIFEST REPOSITORY]")
             .field("job_ir_objects", &self.job_ir_objects)
             .field("protocol_limits", &self.protocol_limits)
             .finish()
@@ -148,6 +153,12 @@ impl GithubRuntimeAuthorityRequestResolver for GithubJobRuntimeAuthorityResolver
         {
             return Err(GithubRuntimeAuthorityResolutionError::Inconsistent);
         }
+        let connection_before = self
+            .connections
+            .current_connection(identity.provider_connection_id())
+            .await
+            .map_err(|_| GithubRuntimeAuthorityResolutionError::Unavailable)?
+            .ok_or(GithubRuntimeAuthorityResolutionError::Inconsistent)?;
         let bytes = self
             .job_ir_objects
             .read_job_ir(before.job_ir(), before.job_ir().encoded_size())
@@ -166,14 +177,21 @@ impl GithubRuntimeAuthorityRequestResolver for GithubJobRuntimeAuthorityResolver
         {
             return Err(GithubRuntimeAuthorityResolutionError::Inconsistent);
         }
-        let credential_request = github_job_runtime_authority_request(identity, &job)
-            .map_err(|_| GithubRuntimeAuthorityResolutionError::Inconsistent)?;
+        let credential_request =
+            github_job_runtime_authority_request(identity, &job, &connection_before)
+                .map_err(|_| GithubRuntimeAuthorityResolutionError::Inconsistent)?;
 
         // Revalidate after the immutable object read as well. Although the
         // historical evidence is immutable, the live lease/session/attempt
         // coordinates may have changed while bytes were loaded.
         let after = self.revalidate(identity).await?;
-        if after != before {
+        let connection_after = self
+            .connections
+            .current_connection(identity.provider_connection_id())
+            .await
+            .map_err(|_| GithubRuntimeAuthorityResolutionError::Unavailable)?
+            .ok_or(GithubRuntimeAuthorityResolutionError::Inconsistent)?;
+        if after != before || connection_after != connection_before {
             return Err(GithubRuntimeAuthorityResolutionError::Inconsistent);
         }
         ResolvedGithubRuntimeAuthorityRequest::new(identity.clone(), credential_request)

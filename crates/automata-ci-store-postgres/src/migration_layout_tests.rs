@@ -273,6 +273,10 @@ const CANONICAL_MIGRATIONS: &[(&str, &str)] = &[
         "0067_provider_workflow_result_identity.sql",
         "ba5857f778d00011c25d93402772430a99a05a0724081e3bfe1906883e707726e5694b8d942bf6c732f6a966d7733814",
     ),
+    (
+        "0068_runtime_authority_request_binding.sql",
+        "3ad285517427ba0dbbbb103ecb510410ecafc82872945d914e879c9cef3b397ef5f49407e15259960f381cf215522262",
+    ),
 ];
 
 const BASELINE_MIGRATION_COUNT: u32 = 26;

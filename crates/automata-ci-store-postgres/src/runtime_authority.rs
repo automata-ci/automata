@@ -794,6 +794,7 @@ impl GithubRuntimeAuthorityRepository for PostgresStore {
                     operation_request_failure_kind = NULL,
                     operation_request_commit_disposition = $6,
                     operation_request_provider_expires_at_ms = $7,
+                    operation_request_request_digest = $15,
                     operation_request_safe_erase_after_ms = $8,
                     operation_request_plaintext_schema = $9,
                     operation_request_plaintext_size_bytes = $10,
@@ -824,6 +825,7 @@ impl GithubRuntimeAuthorityRepository for PostgresStore {
             .bind(metadata.aad_digest().as_bytes().as_slice())
             .bind(mint_envelope_digest(envelope).as_bytes().as_slice())
             .bind(request.claim().claimed_at().get())
+            .bind(metadata.request_digest().as_bytes().as_slice())
             .fetch_optional(&mut *transaction)
             .await
             .map_err(operation_error)?
@@ -858,6 +860,7 @@ impl GithubRuntimeAuthorityRepository for PostgresStore {
                 UPDATE github_runtime_authority_issuances AS authority
                 SET state = 'revoked',
                     provider_expires_at_ms = $6,
+                    request_digest = $15,
                     safe_erase_after_ms = $7,
                     commit_disposition = $8,
                     plaintext_schema = $9,
@@ -872,6 +875,7 @@ impl GithubRuntimeAuthorityRepository for PostgresStore {
                     operation_request_failure_kind = NULL,
                     operation_request_commit_disposition = $8,
                     operation_request_provider_expires_at_ms = $6,
+                    operation_request_request_digest = $15,
                     operation_request_safe_erase_after_ms = $7,
                     operation_request_plaintext_schema = $9,
                     operation_request_plaintext_size_bytes = $10,
@@ -913,6 +917,7 @@ impl GithubRuntimeAuthorityRepository for PostgresStore {
             .bind(metadata.aad_digest().as_bytes().as_slice())
             .bind(request.committed_at().get())
             .bind(mint_envelope_digest(envelope).as_bytes().as_slice())
+            .bind(metadata.request_digest().as_bytes().as_slice())
             .fetch_optional(&mut *transaction)
             .await
             .map_err(operation_error)?
@@ -946,6 +951,7 @@ impl GithubRuntimeAuthorityRepository for PostgresStore {
                     ELSE 'revoke_pending'
                 END,
                 provider_expires_at_ms = $6,
+                request_digest = $20,
                 safe_erase_after_ms = $7,
                 commit_disposition = $17,
                 plaintext_schema = $8,
@@ -965,6 +971,7 @@ impl GithubRuntimeAuthorityRepository for PostgresStore {
                 operation_request_failure_kind = NULL,
                 operation_request_commit_disposition = $17,
                 operation_request_provider_expires_at_ms = $6,
+                operation_request_request_digest = $20,
                 operation_request_safe_erase_after_ms = $7,
                 operation_request_plaintext_schema = $8,
                 operation_request_plaintext_size_bytes = $9,
@@ -1025,6 +1032,7 @@ impl GithubRuntimeAuthorityRepository for PostgresStore {
         .bind(commit_disposition_str(disposition))
         .bind(request.committed_at().get())
         .bind(mint_envelope_digest(envelope).as_bytes().as_slice())
+        .bind(metadata.request_digest().as_bytes().as_slice())
         .fetch_optional(&mut *transaction)
         .await
         .map_err(operation_error)?
@@ -1163,6 +1171,7 @@ impl GithubRuntimeAuthorityRepository for PostgresStore {
                     operation_request_failure_kind = $5,
                     operation_request_commit_disposition = NULL,
                     operation_request_provider_expires_at_ms = NULL,
+                    operation_request_request_digest = NULL,
                     operation_request_safe_erase_after_ms = NULL,
                     operation_request_plaintext_schema = NULL,
                     operation_request_plaintext_size_bytes = NULL,
@@ -1233,6 +1242,7 @@ impl GithubRuntimeAuthorityRepository for PostgresStore {
                     operation_request_failure_kind = $5,
                     operation_request_commit_disposition = NULL,
                     operation_request_provider_expires_at_ms = NULL,
+                    operation_request_request_digest = NULL,
                     operation_request_safe_erase_after_ms = NULL,
                     operation_request_plaintext_schema = NULL,
                     operation_request_plaintext_size_bytes = NULL,
@@ -1293,6 +1303,7 @@ impl GithubRuntimeAuthorityRepository for PostgresStore {
                 operation_request_failure_kind = $5,
                 operation_request_commit_disposition = NULL,
                 operation_request_provider_expires_at_ms = NULL,
+                operation_request_request_digest = NULL,
                 operation_request_safe_erase_after_ms = NULL,
                 operation_request_plaintext_schema = NULL,
                 operation_request_plaintext_size_bytes = NULL,
@@ -1772,6 +1783,7 @@ impl GithubRuntimeAuthorityRepository for PostgresStore {
                 operation_request_failure_kind = $6,
                 operation_request_commit_disposition = NULL,
                 operation_request_provider_expires_at_ms = NULL,
+                operation_request_request_digest = NULL,
                 operation_request_safe_erase_after_ms = NULL,
                 operation_request_plaintext_schema = NULL,
                 operation_request_plaintext_size_bytes = NULL,
@@ -1931,6 +1943,7 @@ impl GithubRuntimeAuthorityRepository for PostgresStore {
                 operation_request_failure_kind = $5,
                 operation_request_commit_disposition = NULL,
                 operation_request_provider_expires_at_ms = NULL,
+                operation_request_request_digest = NULL,
                 operation_request_safe_erase_after_ms = NULL,
                 operation_request_plaintext_schema = NULL,
                 operation_request_plaintext_size_bytes = NULL,
@@ -2093,6 +2106,7 @@ impl GithubRuntimeAuthorityRepository for PostgresStore {
                 operation_request_failure_kind = NULL,
                 operation_request_commit_disposition = NULL,
                 operation_request_provider_expires_at_ms = NULL,
+                operation_request_request_digest = NULL,
                 operation_request_safe_erase_after_ms = NULL,
                 operation_request_plaintext_schema = NULL,
                 operation_request_plaintext_size_bytes = NULL,
@@ -2798,6 +2812,7 @@ async fn observe_terminal_revocation_outcome(
             operation_request_failure_kind = $8,
             operation_request_commit_disposition = NULL,
             operation_request_provider_expires_at_ms = NULL,
+            operation_request_request_digest = NULL,
             operation_request_safe_erase_after_ms = NULL,
             operation_request_plaintext_schema = NULL,
             operation_request_plaintext_size_bytes = NULL,
@@ -3003,6 +3018,7 @@ fn mint_commit_operation_digest(request: &CommitGithubRuntimeAuthority) -> Sha25
     );
     digest.update(request.committed_at().get().to_be_bytes());
     hash_optional_timestamp(&mut digest, metadata.provider_expires_at());
+    digest.update(metadata.request_digest().as_bytes());
     digest.update(metadata.safe_erase_after().get().to_be_bytes());
     digest.update(metadata.plaintext_schema().to_be_bytes());
     digest.update(metadata.plaintext_size_bytes().to_be_bytes());
@@ -4080,6 +4096,7 @@ fn decode_metadata(
     let provider_expires_at: Option<i64> = row
         .try_get("provider_expires_at_ms")
         .map_err(operation_error)?;
+    let request_digest: Option<Vec<u8>> = row.try_get("request_digest").map_err(operation_error)?;
     let safe_erase_after: Option<i64> = row
         .try_get("safe_erase_after_ms")
         .map_err(operation_error)?;
@@ -4092,6 +4109,7 @@ fn decode_metadata(
     let aad_digest: Option<Vec<u8>> = row.try_get("aad_digest").map_err(operation_error)?;
     let presence = [
         safe_erase_after.is_some(),
+        request_digest.is_some(),
         plaintext_size.is_some(),
         plaintext_schema.is_some(),
         plaintext_digest.is_some(),
@@ -4109,6 +4127,7 @@ fn decode_metadata(
     let plaintext_size_bytes = positive_u64_column(row, "plaintext_size_bytes")?;
     let metadata = GithubRuntimeAuthorityEnvelopeMetadata::new(
         identity,
+        digest_column(row, "request_digest")?,
         provider_expires_at.map(UnixMillis::new),
         plaintext_size_bytes,
         digest_column(row, "plaintext_digest")?,

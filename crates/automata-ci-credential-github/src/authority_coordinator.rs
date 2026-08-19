@@ -1,17 +1,18 @@
-use std::{fmt, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, fmt, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use automata_ci_core::{
-    JobAuthorityProfile, JobIrEnvelope, JobPermissionRequest,
+    JobAuthorityProfile, JobIrEnvelope, JobPermissionRequest, Lease,
     PermissionLevel as JobPermissionLevel, UnixMillis,
 };
 use automata_ci_key_management::{EnvelopeCodec, SecretBytes};
-use automata_ci_scm::credential::{
-    CredentialError, CredentialErrorKind, MinimumValidity, PermissionLevel, PermissionName,
-    PermissionSet, ProviderResourceId, RepositoryCredentialRequest, RepositoryScope,
-    WorkloadIdentity,
+use automata_ci_provider::{
+    ProviderConnectionId, ProviderConnectionManifest, WorkloadCredentialIssueOutcome,
+    WorkloadCredentialPermission, WorkloadCredentialPermissionSet, WorkloadCredentialProfile,
+    WorkloadCredentialProvider, WorkloadCredentialProviderError,
+    WorkloadCredentialProviderErrorKind, WorkloadCredentialRequest,
+    WorkloadCredentialRevocationCandidate,
 };
-use automata_ci_scm::{RepositoryId as ScmRepositoryId, ScmProviderId};
 use automata_ci_store::{
     AuthenticateGithubRuntimeAuthorityUnprotectedErasure, BeginGithubRuntimeAuthorityMint,
     BeginGithubRuntimeAuthorityMintOutcome, ClaimGithubRuntimeAuthorityMint,
@@ -31,8 +32,7 @@ use thiserror::Error;
 use tokio::{runtime::Handle, sync::oneshot};
 
 use crate::{
-    GithubAppCredentialBroker, GithubInstallationTokenMintOutcome,
-    GithubInstallationTokenRevocationCandidate,
+    GithubAppCredentialBroker, GithubWorkloadCredentialProvider,
     config::whole_milliseconds,
     supervised_custody::{Entry, Reservation, SupervisedCustody},
 };
@@ -42,32 +42,11 @@ const DEFAULT_MINT_RETRY_BACKOFF_MILLIS: i64 = 1_000;
 const MAX_SUPERVISED_PENDING_COMMITS: usize = 1_024;
 const MAX_PENDING_COMMIT_RETRY_DELAY: Duration = Duration::from_mins(1);
 
-/// Canonical workload identity bound to every immutable authority field.
-///
-/// The compact digest includes tenant, provider connection and installation,
-/// numeric and named repository, run/job/attempt/fence, namespace, policy,
-/// issuer, configuration, lease, runner, and `JobIR` evidence.
-///
-/// # Panics
-///
-/// Panics only if a fixed ASCII prefix plus one SHA-256 digest no longer fits
-/// the provider-neutral workload-identity bound.
-#[must_use]
-pub fn github_runtime_authority_workload_identity(
-    identity: &automata_ci_store::GithubRuntimeAuthorityIdentity,
-) -> WorkloadIdentity {
-    WorkloadIdentity::new(format!(
-        "automata-ci/github-runtime-authority/v3/{}",
-        identity.identity_digest()
-    ))
-    .expect("a fixed prefix and SHA-256 digest fit the workload identity boundary")
-}
-
 /// Derives the exact GitHub App repository request from verified Standard `JobIR`.
 ///
 /// Explicit permission mappings are total: `none` entries and the separately
 /// served `id-token` capability are omitted, while every remaining GitHub name
-/// is converted from workflow kebab-case to the provider's snake-case API.
+/// remains in common kebab-case for translation inside the GitHub adapter.
 /// Provider defaults and wildcard modes are deliberately not expanded from a
 /// guessed permission universe.
 ///
@@ -79,12 +58,20 @@ pub fn github_runtime_authority_workload_identity(
 pub fn github_job_runtime_authority_request(
     identity: &automata_ci_store::GithubRuntimeAuthorityIdentity,
     job: &JobIrEnvelope,
-) -> Result<RepositoryCredentialRequest, GithubJobRuntimeAuthorityRequestValueError> {
+    connection: &ProviderConnectionManifest,
+) -> Result<WorkloadCredentialRequest, GithubJobRuntimeAuthorityRequestValueError> {
     if job.source().provider() != "github"
         || job.source().repository() != identity.github_repository_name().as_str()
         || job.job().run_id() != identity.run_id()
         || job.job().job_id() != identity.job_id()
         || job.job().authority_profile() != JobAuthorityProfile::Standard
+        || connection.connection_id() != identity.provider_connection_id()
+        || connection
+            .configuration()
+            .repository()
+            .external_id()
+            .as_str()
+            != identity.github_repository_id().get().to_string()
     {
         return Err(GithubJobRuntimeAuthorityRequestValueError);
     }
@@ -95,31 +82,37 @@ pub fn github_job_runtime_authority_request(
         .iter()
         .filter(|grant| grant.name() != "id-token" && grant.level() != JobPermissionLevel::None)
         .map(|grant| {
-            let name = PermissionName::new(grant.name().replace('-', "_"))
-                .map_err(|_| GithubJobRuntimeAuthorityRequestValueError)?;
             let level = match grant.level() {
-                JobPermissionLevel::Read => PermissionLevel::Read,
-                JobPermissionLevel::Write => PermissionLevel::Write,
+                JobPermissionLevel::Read => automata_ci_core::PermissionLevel::Read,
+                JobPermissionLevel::Write => automata_ci_core::PermissionLevel::Write,
                 JobPermissionLevel::None => return Err(GithubJobRuntimeAuthorityRequestValueError),
             };
-            Ok((name, level))
+            WorkloadCredentialPermission::new(grant.name(), level)
+                .map_err(|_| GithubJobRuntimeAuthorityRequestValueError)
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let permissions =
-        PermissionSet::new(permissions).map_err(|_| GithubJobRuntimeAuthorityRequestValueError)?;
-    let repository = RepositoryScope::new(
-        ScmProviderId::new("github").map_err(|_| GithubJobRuntimeAuthorityRequestValueError)?,
-        ScmRepositoryId::new(identity.github_repository_name().as_str())
-            .map_err(|_| GithubJobRuntimeAuthorityRequestValueError)?,
-        ProviderResourceId::new(identity.github_repository_id().get().to_string())
-            .map_err(|_| GithubJobRuntimeAuthorityRequestValueError)?,
-    );
-    Ok(RepositoryCredentialRequest::new(
-        github_runtime_authority_workload_identity(identity),
-        repository,
+    let permissions = WorkloadCredentialPermissionSet::new(permissions)
+        .map_err(|_| GithubJobRuntimeAuthorityRequestValueError)?;
+    let lease = Lease::new(
+        identity.lease_id(),
+        identity.key().attempt_id(),
+        identity.runner_id(),
+        identity.key().fencing_token(),
+        identity.lease_issued_at(),
+        identity.lease_expires_at(),
+    )
+    .map_err(|_| GithubJobRuntimeAuthorityRequestValueError)?;
+    WorkloadCredentialRequest::new(
+        connection,
+        identity.job_id(),
+        lease,
+        job.job().trust_snapshot().source_class(),
+        WorkloadCredentialProfile::RepositoryAccess,
         permissions,
-        MinimumValidity::default(),
-    ))
+        identity.requested_at(),
+        identity.lease_expires_at(),
+    )
+    .map_err(|_| GithubJobRuntimeAuthorityRequestValueError)
 }
 
 /// Verified `JobIR` could not form one exact GitHub App request.
@@ -137,7 +130,7 @@ pub struct GithubJobRuntimeAuthorityRequestValueError;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedGithubRuntimeAuthorityRequest {
     identity: automata_ci_store::GithubRuntimeAuthorityIdentity,
-    request: RepositoryCredentialRequest,
+    request: WorkloadCredentialRequest,
 }
 
 impl ResolvedGithubRuntimeAuthorityRequest {
@@ -145,25 +138,22 @@ impl ResolvedGithubRuntimeAuthorityRequest {
     ///
     /// # Errors
     ///
-    /// Rejects any provider, numeric repository ID, repository name, or
-    /// workload mismatch. There is no default or global credential fallback.
-    ///
-    /// # Panics
-    ///
-    /// Panics only if the static `github` provider identifier or the fixed
-    /// workload-identity representation violates its compile-time-known bound.
+    /// Rejects any connection, numeric repository, job, lease, or fence
+    /// mismatch. There is no default or global credential fallback.
     pub fn new(
         identity: automata_ci_store::GithubRuntimeAuthorityIdentity,
-        request: RepositoryCredentialRequest,
+        request: WorkloadCredentialRequest,
     ) -> Result<Self, GithubRuntimeAuthorityResolutionValueError> {
-        let repository = request.repository();
-        let expected_provider =
-            ScmProviderId::new("github").expect("static GitHub provider ID is valid");
-        let expected_repository_id = identity.github_repository_id().get().to_string();
-        let exact = repository.provider() == &expected_provider
-            && repository.stable_id().as_str() == expected_repository_id
-            && repository.repository().as_str() == identity.github_repository_name().as_str()
-            && request.workload() == &github_runtime_authority_workload_identity(&identity);
+        let exact = request.connection_id() == identity.provider_connection_id()
+            && request.repository().external_id().as_str()
+                == identity.github_repository_id().get().to_string()
+            && request.job_id() == identity.job_id()
+            && request.lease().attempt_id() == identity.key().attempt_id()
+            && request.lease().lease_id() == identity.lease_id()
+            && request.lease().runner_id() == identity.runner_id()
+            && request.lease().fencing_token() == identity.key().fencing_token()
+            && request.requested_at() == identity.requested_at()
+            && request.expires_at() == identity.lease_expires_at();
         if !exact {
             return Err(GithubRuntimeAuthorityResolutionValueError);
         }
@@ -178,7 +168,7 @@ impl ResolvedGithubRuntimeAuthorityRequest {
 
     /// Returns the exact provider-neutral credential request.
     #[must_use]
-    pub const fn request(&self) -> &RepositoryCredentialRequest {
+    pub const fn request(&self) -> &WorkloadCredentialRequest {
         &self.request
     }
 }
@@ -252,8 +242,8 @@ pub trait GithubRuntimeAuthorityMintBroker: fmt::Debug + Send + Sync {
     /// Performs exactly one provider mint attempt.
     async fn mint_once(
         &self,
-        request: &RepositoryCredentialRequest,
-    ) -> GithubInstallationTokenMintOutcome;
+        request: &WorkloadCredentialRequest,
+    ) -> WorkloadCredentialIssueOutcome;
 }
 
 /// Live App broker pinned to one exact scope-specific authority configuration.
@@ -268,6 +258,7 @@ pub struct PinnedGithubRuntimeAuthorityMintBroker {
     github_app_client_id: GithubServerServiceAppClientId,
     github_app_jwt_issuer_kind: GithubServerServiceJwtIssuer,
     configuration_fingerprint: Sha256Digest,
+    workloads: BTreeMap<ProviderConnectionId, GithubWorkloadCredentialProvider>,
 }
 
 impl PinnedGithubRuntimeAuthorityMintBroker {
@@ -283,6 +274,7 @@ impl PinnedGithubRuntimeAuthorityMintBroker {
         github_app_client_id: GithubServerServiceAppClientId,
         github_app_jwt_issuer_kind: GithubServerServiceJwtIssuer,
         configuration_fingerprint: Sha256Digest,
+        connections: impl IntoIterator<Item = ProviderConnectionManifest>,
     ) -> Result<Self, PinnedGithubRuntimeAuthorityMintBrokerError> {
         let expected_issuer = match github_app_jwt_issuer_kind {
             GithubServerServiceJwtIssuer::AppClientId => github_app_client_id.as_str().to_owned(),
@@ -291,12 +283,25 @@ impl PinnedGithubRuntimeAuthorityMintBroker {
         if broker.app_jwt_issuer_value() != expected_issuer {
             return Err(PinnedGithubRuntimeAuthorityMintBrokerError);
         }
+        let mut workloads = BTreeMap::new();
+        for connection in connections {
+            let connection_id = connection.connection_id();
+            let provider = GithubWorkloadCredentialProvider::new(broker.clone(), &connection)
+                .map_err(|_| PinnedGithubRuntimeAuthorityMintBrokerError)?;
+            if workloads.insert(connection_id, provider).is_some() {
+                return Err(PinnedGithubRuntimeAuthorityMintBrokerError);
+            }
+        }
+        if workloads.is_empty() {
+            return Err(PinnedGithubRuntimeAuthorityMintBrokerError);
+        }
         Ok(Self {
             broker,
             github_app_id,
             github_app_client_id,
             github_app_jwt_issuer_kind,
             configuration_fingerprint,
+            workloads,
         })
     }
 }
@@ -318,6 +323,7 @@ impl fmt::Debug for PinnedGithubRuntimeAuthorityMintBroker {
             )
             .field("app_key_spki_sha256", &self.broker.app_key_spki_sha256())
             .field("configuration_fingerprint", &self.configuration_fingerprint)
+            .field("connection_ids", &self.workloads.keys().collect::<Vec<_>>())
             .finish_non_exhaustive()
     }
 }
@@ -358,9 +364,14 @@ impl GithubRuntimeAuthorityMintBroker for PinnedGithubRuntimeAuthorityMintBroker
 
     async fn mint_once(
         &self,
-        request: &RepositoryCredentialRequest,
-    ) -> GithubInstallationTokenMintOutcome {
-        self.broker.mint_once(request).await
+        request: &WorkloadCredentialRequest,
+    ) -> WorkloadCredentialIssueOutcome {
+        let Some(provider) = self.workloads.get(&request.connection_id()) else {
+            return WorkloadCredentialIssueOutcome::Rejected(WorkloadCredentialProviderError::new(
+                WorkloadCredentialProviderErrorKind::Conflict,
+            ));
+        };
+        provider.issue_once(request).await
     }
 }
 
@@ -878,53 +889,48 @@ impl GithubRuntimeAuthorityMintCoordinator {
         &self,
         claim: ClaimedGithubRuntimeAuthorityMint,
         prepared: automata_ci_key_management::PreparedEnvelope,
-        expected_request: &RepositoryCredentialRequest,
-        outcome: GithubInstallationTokenMintOutcome,
+        expected_request: &WorkloadCredentialRequest,
+        outcome: WorkloadCredentialIssueOutcome,
         observed_at: UnixMillis,
         reservation: GithubRuntimeAuthorityCommitReservation,
     ) -> Result<GithubRuntimeAuthorityCoordinationOutcome, GithubRuntimeAuthorityCoordinatorError>
     {
         match outcome {
-            GithubInstallationTokenMintOutcome::Ready(ready) => {
-                let provider_expires_at = provider_expiry_millis(ready.provider_expires_at());
-                let provenance = ready.provenance();
-                let deliverable = ready.request() == expected_request
-                    && provenance.provider().as_str() == "github"
-                    && provenance.subject().as_str()
-                        == claim
-                            .identity()
-                            .provider_installation_id()
-                            .get()
-                            .to_string()
-                    && provider_expiry_millis(ready.issued_at())
-                        <= claim.identity().request_deadline()
+            WorkloadCredentialIssueOutcome::Ready(ready) => {
+                let provider_expires_at = ready.provider_expires_at();
+                let deliverable = ready.request_digest() == expected_request.digest()
+                    && ready.issued_at() <= claim.identity().request_deadline()
                     && observed_at < claim.identity().request_deadline();
+                let automata_ci_provider::WorkloadCredentialRetirement::Revoke(candidate) =
+                    ready.retire()
+                else {
+                    drop(prepared);
+                    return Err(GithubRuntimeAuthorityCoordinatorError::CandidateProtection);
+                };
                 let commit = protect_candidate(
                     &claim,
                     prepared,
-                    ready.into_revocation_candidate(),
-                    Some(provider_expires_at),
+                    candidate,
+                    provider_expires_at,
                     deliverable,
                     observed_at,
                 );
                 self.commit_or_retain_candidate(commit, reservation).await
             }
-            GithubInstallationTokenMintOutcome::RevokePending(revoke) => {
-                let provider_expires_at = revoke.provider_expires_at().and_then(|expires_at| {
-                    let expires_at = provider_expiry_millis(expires_at);
-                    (expires_at > claim.identity().requested_at()).then_some(expires_at)
-                });
+            WorkloadCredentialIssueOutcome::RevokePending(revoke) => {
+                let candidate = revoke.into_candidate();
+                let provider_expires_at = candidate.provider_expires_at();
                 let commit = protect_candidate(
                     &claim,
                     prepared,
-                    revoke.into_candidate(),
+                    candidate,
                     provider_expires_at,
                     false,
                     observed_at,
                 );
                 self.commit_or_retain_candidate(commit, reservation).await
             }
-            GithubInstallationTokenMintOutcome::Indeterminate(_) => {
+            WorkloadCredentialIssueOutcome::Indeterminate(_) => {
                 drop(prepared);
                 let request = MarkGithubRuntimeAuthorityIndeterminate::new(&claim, observed_at)
                     .map_err(|_| GithubRuntimeAuthorityCoordinatorError::InvalidTime)?;
@@ -937,7 +943,7 @@ impl GithubRuntimeAuthorityMintCoordinator {
                     receipt,
                 ))
             }
-            GithubInstallationTokenMintOutcome::Rejected(error) => {
+            WorkloadCredentialIssueOutcome::Rejected(error) => {
                 drop(prepared);
                 self.persist_definitive_rejection(&claim, error, observed_at)
                     .await
@@ -948,7 +954,7 @@ impl GithubRuntimeAuthorityMintCoordinator {
     async fn persist_definitive_rejection(
         &self,
         claim: &ClaimedGithubRuntimeAuthorityMint,
-        error: CredentialError,
+        error: WorkloadCredentialProviderError,
         observed_at: UnixMillis,
     ) -> Result<GithubRuntimeAuthorityCoordinationOutcome, GithubRuntimeAuthorityCoordinatorError>
     {
@@ -956,7 +962,8 @@ impl GithubRuntimeAuthorityMintCoordinator {
             .map_err(|_| GithubRuntimeAuthorityCoordinatorError::Repository)?;
         let receipt = if matches!(
             error.kind(),
-            CredentialErrorKind::RateLimited | CredentialErrorKind::Unavailable
+            WorkloadCredentialProviderErrorKind::RateLimited
+                | WorkloadCredentialProviderErrorKind::Unavailable
         ) {
             let retry_at = retry_at(claim, error, observed_at)?;
             let request =
@@ -1037,8 +1044,8 @@ struct InstallationTokenFrame {
 }
 
 impl InstallationTokenFrame {
-    fn new(candidate: &GithubInstallationTokenRevocationCandidate) -> Option<Self> {
-        let token = candidate.secret().expose_secret().as_bytes();
+    fn new(candidate: &WorkloadCredentialRevocationCandidate) -> Option<Self> {
+        let token = candidate.expose_secret();
         let token_length = u32::try_from(token.len()).ok()?;
         let mut encoded = Vec::with_capacity(
             INSTALLATION_TOKEN_FRAME_DOMAIN.len() + size_of::<u32>() + token.len(),
@@ -1059,14 +1066,14 @@ impl InstallationTokenFrame {
 
 struct UnprotectedGithubRuntimeAuthorityCandidate {
     claim: Box<ClaimedGithubRuntimeAuthorityMint>,
-    _candidate: GithubInstallationTokenRevocationCandidate,
+    _candidate: Box<WorkloadCredentialRevocationCandidate>,
     _prepared: Option<automata_ci_key_management::PreparedEnvelope>,
 }
 
 fn protect_candidate(
     claim: &ClaimedGithubRuntimeAuthorityMint,
     prepared: automata_ci_key_management::PreparedEnvelope,
-    candidate: GithubInstallationTokenRevocationCandidate,
+    candidate: WorkloadCredentialRevocationCandidate,
     provider_expires_at: Option<UnixMillis>,
     deliverable: bool,
     committed_at: UnixMillis,
@@ -1074,12 +1081,13 @@ fn protect_candidate(
     let Some(frame) = InstallationTokenFrame::new(&candidate) else {
         return Err(UnprotectedGithubRuntimeAuthorityCandidate {
             claim: Box::new(claim.clone()),
-            _candidate: candidate,
+            _candidate: Box::new(candidate),
             _prepared: Some(prepared),
         });
     };
     let (metadata, deliverable) = match GithubRuntimeAuthorityEnvelopeMetadata::new(
         claim.identity().clone(),
+        candidate.request_digest(),
         provider_expires_at,
         frame.size_bytes,
         frame.digest,
@@ -1087,6 +1095,7 @@ fn protect_candidate(
         Ok(metadata) => (metadata, deliverable),
         Err(_) => match GithubRuntimeAuthorityEnvelopeMetadata::new(
             claim.identity().clone(),
+            candidate.request_digest(),
             None,
             frame.size_bytes,
             frame.digest,
@@ -1095,7 +1104,7 @@ fn protect_candidate(
             Err(_) => {
                 return Err(UnprotectedGithubRuntimeAuthorityCandidate {
                     claim: Box::new(claim.clone()),
-                    _candidate: candidate,
+                    _candidate: Box::new(candidate),
                     _prepared: Some(prepared),
                 });
             }
@@ -1104,7 +1113,7 @@ fn protect_candidate(
     let Ok(payload_context) = metadata.encryption_context() else {
         return Err(UnprotectedGithubRuntimeAuthorityCandidate {
             claim: Box::new(claim.clone()),
-            _candidate: candidate,
+            _candidate: Box::new(candidate),
             _prepared: Some(prepared),
         });
     };
@@ -1112,7 +1121,7 @@ fn protect_candidate(
     let Ok(protected) = ProtectedGithubRuntimeAuthority::new(metadata, envelope) else {
         return Err(UnprotectedGithubRuntimeAuthorityCandidate {
             claim: Box::new(claim.clone()),
-            _candidate: candidate,
+            _candidate: Box::new(candidate),
             _prepared: None,
         });
     };
@@ -1128,7 +1137,7 @@ fn protect_candidate(
         }
         Err(_) => Err(UnprotectedGithubRuntimeAuthorityCandidate {
             claim: Box::new(claim.clone()),
-            _candidate: candidate,
+            _candidate: Box::new(candidate),
             _prepared: None,
         }),
     }
@@ -1182,23 +1191,14 @@ fn ensure_mint_window(
     Ok(duration)
 }
 
-fn provider_expiry_millis(expiry: automata_ci_auth::time::UnixTimestamp) -> UnixMillis {
-    let milliseconds = expiry
-        .as_seconds()
-        .checked_mul(1_000)
-        .and_then(|value| i64::try_from(value).ok())
-        .expect("validated GitHub RFC3339 expiration fits Unix milliseconds");
-    UnixMillis::new(milliseconds)
-}
-
 fn retry_at(
     claim: &ClaimedGithubRuntimeAuthorityMint,
-    error: CredentialError,
+    error: WorkloadCredentialProviderError,
     observed_at: UnixMillis,
 ) -> Result<UnixMillis, GithubRuntimeAuthorityCoordinatorError> {
     let requested_backoff = error
-        .retry_after_seconds()
-        .and_then(|seconds| seconds.checked_mul(1_000))
+        .retry_after()
+        .map(automata_ci_provider::WorkloadCredentialRetryAfter::millis)
         .and_then(|milliseconds| i64::try_from(milliseconds).ok())
         .unwrap_or(DEFAULT_MINT_RETRY_BACKOFF_MILLIS)
         .clamp(1, MAX_GITHUB_AUTHORITY_MINT_RETRY_BACKOFF_MILLIS);
@@ -1219,19 +1219,16 @@ fn retry_at(
     Ok(UnixMillis::new(retry_at))
 }
 
-const fn mint_failure_kind(kind: CredentialErrorKind) -> &'static str {
+const fn mint_failure_kind(kind: WorkloadCredentialProviderErrorKind) -> &'static str {
     match kind {
-        CredentialErrorKind::UnsupportedProvider => "unsupported_provider",
-        CredentialErrorKind::InvalidRequest => "invalid_request",
-        CredentialErrorKind::Unauthorized => "provider_unauthorized",
-        CredentialErrorKind::Forbidden => "provider_forbidden",
-        CredentialErrorKind::NotFound => "provider_not_found",
-        CredentialErrorKind::RateLimited => "provider_rate_limited",
-        CredentialErrorKind::Unavailable => "provider_unavailable",
-        CredentialErrorKind::InvalidResponse => "invalid_response",
-        CredentialErrorKind::RepositoryMismatch => "repository_mismatch",
-        CredentialErrorKind::PermissionMismatch => "permission_mismatch",
-        CredentialErrorKind::Expired => "insufficient_validity",
+        WorkloadCredentialProviderErrorKind::Unsupported => "unsupported",
+        WorkloadCredentialProviderErrorKind::Unauthorized => "provider_unauthorized",
+        WorkloadCredentialProviderErrorKind::Forbidden => "provider_forbidden",
+        WorkloadCredentialProviderErrorKind::NotFound => "provider_not_found",
+        WorkloadCredentialProviderErrorKind::RateLimited => "provider_rate_limited",
+        WorkloadCredentialProviderErrorKind::Unavailable => "provider_unavailable",
+        WorkloadCredentialProviderErrorKind::Conflict => "provider_conflict",
+        WorkloadCredentialProviderErrorKind::InvalidResponse => "invalid_response",
     }
 }
 
@@ -1242,20 +1239,28 @@ mod tests {
         atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering},
     };
 
-    use automata_ci_auth::{secret::SecretString, time::UnixTimestamp};
     use automata_ci_core::{
-        AttemptId, FencingToken, JobId, JobIrVersion, LeaseId, RunId, RunnerId, RunnerSessionId,
+        AttemptId, FencingToken, JobId, JobIrVersion, Lease, LeaseId, RunId, RunnerId,
+        RunnerSessionId,
     };
     use automata_ci_key_management::{
         EncryptedEnvelope, KeyEncryptionContext, KeyEncryptionError, KeyEncryptionProvider, KeyId,
         KeyPurpose, WrappedDataKey,
     };
-    use automata_ci_provider::ProviderConnectionId;
-    use automata_ci_scm::RepositoryId as ScmRepositoryId;
-    use automata_ci_scm::credential::{
-        CredentialProvenance, MinimumValidity, PermissionLevel, PermissionName, PermissionSet,
-        ProviderResourceId, RepositoryScope,
+    use automata_ci_provider::{
+        ExternalRepositoryId, ExternalRepositoryIdentity, IndeterminateWorkloadCredential,
+        PendingWorkloadCredentialRevocation, ProviderArchiveLimits, ProviderConfigurationRevision,
+        ProviderConnectionConfiguration, ProviderConnectionManifest,
+        ProviderConnectionPolicyDocument, ProviderConnectionRevision, ProviderDefaultBranch,
+        ProviderInstanceId, ProviderLifecycleState, ProviderRepositoryPath,
+        ProviderRunnerPolicyBinding, ProviderSchemaVersion, ProviderWorkflowSource,
+        RepositoryVisibility, WorkloadCredentialIndeterminateReason, WorkloadCredentialIssuance,
+        WorkloadCredentialIssueOutcome, WorkloadCredentialPermission,
+        WorkloadCredentialPermissionSet, WorkloadCredentialProfile,
+        WorkloadCredentialProviderError, WorkloadCredentialProviderErrorKind,
+        WorkloadCredentialRequest, WorkloadCredentialRevocationCandidate,
     };
+    use automata_ci_secret::SecretValue;
     use automata_ci_store::{
         ClaimGithubRuntimeAuthorityRevocation, ClaimedGithubRuntimeAuthorityRevocation,
         ConfirmGithubRuntimeAuthorityRevocation, DeferGithubRuntimeAuthorityRevocation,
@@ -1275,17 +1280,12 @@ mod tests {
     };
     use uuid::Uuid;
 
-    use crate::{
-        GithubInstallationTokenIndeterminate, GithubInstallationTokenIndeterminateReason,
-        GithubInstallationTokenRevokePending, GithubReadyInstallationToken,
-    };
-
     use super::*;
 
     const TOKEN: &str = "ghs_exact-test-token_123";
     const REQUESTED_AT: i64 = 1_010_000;
     const REQUEST_DEADLINE: i64 = 1_120_000;
-    const PROVIDER_EXPIRES_AT_SECONDS: u64 = 4_620;
+    const PROVIDER_EXPIRES_AT: i64 = 4_620_000;
 
     fn selection_tails() -> (
         GithubRuntimeAuthorityPreparationSelectionTail,
@@ -1370,25 +1370,127 @@ mod tests {
         .expect("runtime authority identity")
     }
 
-    fn credential_request(
+    fn workload_connection(
         identity: &GithubRuntimeAuthorityIdentity,
-    ) -> RepositoryCredentialRequest {
-        RepositoryCredentialRequest::new(
-            github_runtime_authority_workload_identity(identity),
-            RepositoryScope::new(
-                ScmProviderId::new("github").expect("provider"),
-                ScmRepositoryId::new(identity.github_repository_name().as_str())
-                    .expect("repository"),
-                ProviderResourceId::new(identity.github_repository_id().get().to_string())
-                    .expect("provider repository ID"),
+    ) -> ProviderConnectionManifest {
+        let instance = ProviderInstanceId::from_uuid(Uuid::from_u128(45)).expect("instance");
+        let configuration = ProviderConnectionConfiguration::new(
+            automata_ci_core::WorkspaceId::parse("11111111-1111-4111-8111-111111111111")
+                .expect("workspace"),
+            ExternalRepositoryIdentity::new(
+                instance,
+                ExternalRepositoryId::new(identity.github_repository_id().get().to_string())
+                    .expect("repository ID"),
             ),
-            PermissionSet::new([(
-                PermissionName::new("contents").expect("permission"),
-                PermissionLevel::Read,
-            )])
-            .expect("permissions"),
-            MinimumValidity::default(),
+            ProviderConfigurationRevision::new(1).expect("configuration revision"),
+            Sha256Digest::from_bytes([1; 32]),
+            Sha256Digest::from_bytes([2; 32]),
+            RepositoryVisibility::Private,
+            ProviderDefaultBranch::new("main").expect("branch"),
+            ProviderWorkflowSource::Directory(
+                ProviderRepositoryPath::new(".ci/workflows").expect("workflow path"),
+            ),
+            ProviderRunnerPolicyBinding::new(
+                ProviderSchemaVersion::new(1).expect("schema"),
+                Sha256Digest::from_bytes([3; 32]),
+            ),
+            ProviderArchiveLimits::new(1_024, 8_192, 100, 1_024, 10, 1_024)
+                .expect("archive limits"),
+            ProviderConnectionPolicyDocument::new(
+                ProviderSchemaVersion::new(1).expect("schema"),
+                b"{}".to_vec(),
+            )
+            .expect("connection policy"),
+        );
+        ProviderConnectionManifest::new(
+            identity.provider_connection_id(),
+            ProviderConnectionRevision::new(1).expect("connection revision"),
+            ProviderLifecycleState::Active,
+            configuration,
+            UnixMillis::new(1),
+            Some(UnixMillis::new(2)),
+            None,
         )
+        .expect("connection")
+    }
+
+    fn credential_request(identity: &GithubRuntimeAuthorityIdentity) -> WorkloadCredentialRequest {
+        WorkloadCredentialRequest::new(
+            &workload_connection(identity),
+            identity.job_id(),
+            Lease::new(
+                identity.lease_id(),
+                identity.key().attempt_id(),
+                identity.runner_id(),
+                identity.key().fencing_token(),
+                identity.lease_issued_at(),
+                identity.lease_expires_at(),
+            )
+            .expect("lease"),
+            automata_ci_core::TrustSourceClass::SameRepository,
+            WorkloadCredentialProfile::RepositoryAccess,
+            WorkloadCredentialPermissionSet::new([WorkloadCredentialPermission::new(
+                "contents",
+                automata_ci_core::PermissionLevel::Read,
+            )
+            .expect("permission")])
+            .expect("permissions"),
+            identity.requested_at(),
+            identity.lease_expires_at(),
+        )
+        .expect("workload request")
+    }
+
+    fn mismatched_request(request: &WorkloadCredentialRequest) -> WorkloadCredentialRequest {
+        let configuration = ProviderConnectionConfiguration::new(
+            automata_ci_core::WorkspaceId::parse("11111111-1111-4111-8111-111111111111")
+                .expect("workspace"),
+            request.repository().clone(),
+            ProviderConfigurationRevision::new(1).expect("configuration revision"),
+            Sha256Digest::from_bytes([9; 32]),
+            Sha256Digest::from_bytes([8; 32]),
+            RepositoryVisibility::Private,
+            ProviderDefaultBranch::new("main").expect("branch"),
+            ProviderWorkflowSource::Directory(
+                ProviderRepositoryPath::new(".ci/workflows").expect("workflow path"),
+            ),
+            ProviderRunnerPolicyBinding::new(
+                ProviderSchemaVersion::new(1).expect("schema"),
+                Sha256Digest::from_bytes([7; 32]),
+            ),
+            ProviderArchiveLimits::new(1_024, 8_192, 100, 1_024, 10, 1_024)
+                .expect("archive limits"),
+            ProviderConnectionPolicyDocument::new(
+                ProviderSchemaVersion::new(1).expect("schema"),
+                b"{}".to_vec(),
+            )
+            .expect("connection policy"),
+        );
+        let connection = ProviderConnectionManifest::new(
+            request.connection_id(),
+            request.connection_revision(),
+            ProviderLifecycleState::Active,
+            configuration,
+            UnixMillis::new(1),
+            Some(UnixMillis::new(2)),
+            None,
+        )
+        .expect("connection");
+        let permissions = WorkloadCredentialPermissionSet::new(request.permissions().iter().map(
+            |(name, level)| WorkloadCredentialPermission::new(name, level).expect("permission"),
+        ))
+        .expect("permissions");
+        WorkloadCredentialRequest::new(
+            &connection,
+            request.job_id(),
+            request.lease().clone(),
+            request.trust_class(),
+            request.profile(),
+            permissions,
+            UnixMillis::new(request.requested_at().get() + 1),
+            request.expires_at(),
+        )
+        .expect("mismatched request")
     }
 
     #[derive(Debug)]
@@ -1417,7 +1519,7 @@ mod tests {
 
     struct FakeResolver {
         calls: AtomicUsize,
-        request: RepositoryCredentialRequest,
+        request: WorkloadCredentialRequest,
         identity_override: Mutex<Option<GithubRuntimeAuthorityIdentity>>,
         missing: bool,
     }
@@ -1468,7 +1570,7 @@ mod tests {
         RevokePendingUnknown,
         RevokePendingExpired,
         Indeterminate,
-        Rejected(CredentialErrorKind),
+        Rejected(WorkloadCredentialProviderErrorKind),
     }
 
     struct FakeBroker {
@@ -1509,9 +1611,12 @@ mod tests {
                 .expect("post-mint clock lock") = Some(clock);
         }
 
-        fn candidate() -> GithubInstallationTokenRevocationCandidate {
-            GithubInstallationTokenRevocationCandidate::new(
-                SecretString::new(TOKEN).expect("token"),
+        fn candidate() -> WorkloadCredentialRevocationCandidate {
+            WorkloadCredentialRevocationCandidate::new(
+                Sha256Digest::from_bytes([0; 32]),
+                None,
+                SecretValue::from_utf8(TOKEN.to_owned()).expect("token"),
+                Some(UnixMillis::new(PROVIDER_EXPIRES_AT)),
             )
         }
     }
@@ -1584,83 +1689,85 @@ mod tests {
 
         async fn mint_once(
             &self,
-            request: &RepositoryCredentialRequest,
-        ) -> GithubInstallationTokenMintOutcome {
+            request: &WorkloadCredentialRequest,
+        ) -> WorkloadCredentialIssueOutcome {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            let expires_at = UnixTimestamp::from_seconds(PROVIDER_EXPIRES_AT_SECONDS);
-            let conservative_expires_at =
-                UnixTimestamp::from_seconds(PROVIDER_EXPIRES_AT_SECONDS - 60);
             let outcome = match self.mode {
                 FakeBrokerMode::Ready
                 | FakeBrokerMode::ReadyWrongRequest
                 | FakeBrokerMode::ReadyLate => {
                     let returned_request = if matches!(self.mode, FakeBrokerMode::ReadyWrongRequest)
                     {
-                        RepositoryCredentialRequest::new(
-                            WorkloadIdentity::new("wrong-workload").expect("wrong workload"),
-                            request.repository().clone(),
-                            request.permissions().clone(),
-                            request.minimum_validity(),
-                        )
+                        mismatched_request(request)
                     } else {
                         request.clone()
                     };
                     let issued_at = if matches!(self.mode, FakeBrokerMode::ReadyLate) {
-                        UnixTimestamp::from_seconds(1_200)
+                        UnixMillis::new(1_199_000)
                     } else {
-                        UnixTimestamp::from_seconds(1_020)
+                        UnixMillis::new(1_020_000)
                     };
-                    GithubInstallationTokenMintOutcome::Ready(GithubReadyInstallationToken::new(
-                        Self::candidate(),
-                        returned_request,
+                    let evidence = WorkloadCredentialIssuance::new(
+                        &returned_request,
+                        None,
                         issued_at,
-                        expires_at,
-                        conservative_expires_at,
-                        CredentialProvenance::new(
-                            ScmProviderId::new("github").expect("provider"),
-                            ProviderResourceId::new("app-issuer").expect("issuer"),
-                            ProviderResourceId::new("17").expect("installation"),
-                        ),
-                    ))
+                        Some(UnixMillis::new(PROVIDER_EXPIRES_AT)),
+                        automata_ci_provider::WorkloadCredentialRevocation::Explicit,
+                    )
+                    .expect("issuance evidence");
+                    WorkloadCredentialIssueOutcome::Ready(
+                        evidence
+                            .bind_secret(SecretValue::from_utf8(TOKEN.to_owned()).expect("token")),
+                    )
                 }
                 FakeBrokerMode::RevokePendingKnown => {
-                    GithubInstallationTokenMintOutcome::RevokePending(
-                        GithubInstallationTokenRevokePending::new(
+                    WorkloadCredentialIssueOutcome::RevokePending(
+                        PendingWorkloadCredentialRevocation::new(
                             Self::candidate(),
-                            CredentialError::new(CredentialErrorKind::PermissionMismatch),
-                            Some(expires_at),
-                            Some(conservative_expires_at),
+                            WorkloadCredentialProviderError::new(
+                                WorkloadCredentialProviderErrorKind::Forbidden,
+                            ),
                         ),
                     )
                 }
                 FakeBrokerMode::RevokePendingUnknown => {
-                    GithubInstallationTokenMintOutcome::RevokePending(
-                        GithubInstallationTokenRevokePending::new(
-                            Self::candidate(),
-                            CredentialError::new(CredentialErrorKind::InvalidResponse),
-                            None,
-                            None,
+                    WorkloadCredentialIssueOutcome::RevokePending(
+                        PendingWorkloadCredentialRevocation::new(
+                            WorkloadCredentialRevocationCandidate::new(
+                                request.digest(),
+                                None,
+                                SecretValue::from_utf8(TOKEN.to_owned()).expect("token"),
+                                None,
+                            ),
+                            WorkloadCredentialProviderError::new(
+                                WorkloadCredentialProviderErrorKind::InvalidResponse,
+                            ),
                         ),
                     )
                 }
                 FakeBrokerMode::RevokePendingExpired => {
-                    GithubInstallationTokenMintOutcome::RevokePending(
-                        GithubInstallationTokenRevokePending::new(
-                            Self::candidate(),
-                            CredentialError::new(CredentialErrorKind::Expired),
-                            Some(UnixTimestamp::from_seconds(1)),
-                            None,
+                    WorkloadCredentialIssueOutcome::RevokePending(
+                        PendingWorkloadCredentialRevocation::new(
+                            WorkloadCredentialRevocationCandidate::new(
+                                request.digest(),
+                                None,
+                                SecretValue::from_utf8(TOKEN.to_owned()).expect("token"),
+                                Some(UnixMillis::new(1)),
+                            ),
+                            WorkloadCredentialProviderError::new(
+                                WorkloadCredentialProviderErrorKind::Conflict,
+                            ),
                         ),
                     )
                 }
-                FakeBrokerMode::Indeterminate => GithubInstallationTokenMintOutcome::Indeterminate(
-                    GithubInstallationTokenIndeterminate::new(
-                        GithubInstallationTokenIndeterminateReason::Transport,
+                FakeBrokerMode::Indeterminate => WorkloadCredentialIssueOutcome::Indeterminate(
+                    IndeterminateWorkloadCredential::new(
+                        WorkloadCredentialIndeterminateReason::Transport,
                     ),
                 ),
-                FakeBrokerMode::Rejected(kind) => {
-                    GithubInstallationTokenMintOutcome::Rejected(CredentialError::new(kind))
-                }
+                FakeBrokerMode::Rejected(kind) => WorkloadCredentialIssueOutcome::Rejected(
+                    WorkloadCredentialProviderError::new(kind),
+                ),
             };
             if let Some(clock) = self
                 .post_mint_clock_jump
@@ -2590,7 +2697,7 @@ mod tests {
     #[tokio::test]
     async fn rejected_outcomes_retry_only_the_transient_no_token_classes() {
         let transient = Harness::new(
-            FakeBrokerMode::Rejected(CredentialErrorKind::RateLimited),
+            FakeBrokerMode::Rejected(WorkloadCredentialProviderErrorKind::RateLimited),
             FakeStore::default(),
             false,
         );
@@ -2604,7 +2711,7 @@ mod tests {
         );
 
         let terminal = Harness::new(
-            FakeBrokerMode::Rejected(CredentialErrorKind::InvalidRequest),
+            FakeBrokerMode::Rejected(WorkloadCredentialProviderErrorKind::Conflict),
             FakeStore::default(),
             false,
         );
@@ -2852,7 +2959,7 @@ mod tests {
             reservation,
             UnprotectedGithubRuntimeAuthorityCandidate {
                 claim: Box::new(claim),
-                _candidate: FakeBroker::candidate(),
+                _candidate: Box::new(FakeBroker::candidate()),
                 _prepared: None,
             },
         );
@@ -2889,7 +2996,7 @@ mod tests {
             reservation,
             UnprotectedGithubRuntimeAuthorityCandidate {
                 claim: Box::new(claim),
-                _candidate: FakeBroker::candidate(),
+                _candidate: Box::new(FakeBroker::candidate()),
                 _prepared: None,
             },
         );
@@ -2956,7 +3063,7 @@ mod tests {
             reservation,
             UnprotectedGithubRuntimeAuthorityCandidate {
                 claim: Box::new(claim),
-                _candidate: FakeBroker::candidate(),
+                _candidate: Box::new(FakeBroker::candidate()),
                 _prepared: None,
             },
         );
@@ -3059,7 +3166,7 @@ mod tests {
     #[test]
     fn resolution_and_all_diagnostics_are_exact_and_redacted() {
         let identity = identity();
-        let mut wrong_request = credential_request(&identity);
+        let wrong_request = credential_request(&identity);
         let wrong_identity = GithubRuntimeAuthorityIdentity::new(
             identity.tenant().clone(),
             identity.key().attempt_id(),
@@ -3098,21 +3205,6 @@ mod tests {
         .expect("wrong identity");
         assert_eq!(
             ResolvedGithubRuntimeAuthorityRequest::new(wrong_identity, wrong_request.clone()),
-            Err(GithubRuntimeAuthorityResolutionValueError)
-        );
-
-        wrong_request = RepositoryCredentialRequest::new(
-            github_runtime_authority_workload_identity(&identity),
-            RepositoryScope::new(
-                ScmProviderId::new("gitlab").expect("other provider"),
-                ScmRepositoryId::new("automata-ci/automata").expect("repository"),
-                ProviderResourceId::new("12").expect("ID"),
-            ),
-            wrong_request.permissions().clone(),
-            wrong_request.minimum_validity(),
-        );
-        assert_eq!(
-            ResolvedGithubRuntimeAuthorityRequest::new(identity, wrong_request),
             Err(GithubRuntimeAuthorityResolutionValueError)
         );
 
