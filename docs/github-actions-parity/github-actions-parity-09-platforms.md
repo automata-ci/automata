@@ -284,11 +284,11 @@ Remaining tasks:
 
 Acceptance:
 
-- [ ] The shipped VM runner on Apple Silicon macOS 15 reports
+- [x] The shipped VM runner on Apple Silicon macOS 15 reports
   `runner.os=macOS` and `runner.arch=ARM64`, completes zero-resource Bash and
   `sh` jobs plus pinned Node 20/24 repository actions, and rejects services and
   containers before launch.
-- [ ] Self-hosted macOS 15 differential fixtures cover stable environment,
+- [x] Self-hosted macOS 15 differential fixtures cover stable environment,
   working-directory, command-file, output, timeout, cancellation, and
   conclusion behavior.
 - [ ] Physical Apple Silicon acceptance proves VM template identity,

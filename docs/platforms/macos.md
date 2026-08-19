@@ -7,12 +7,12 @@ no migration from a noncurrent schema, and no host-shared resource mode.
 
 | Field | Value |
 | --- | --- |
-| Status | Component complete; physical-host production qualification remains |
+| Status | Component complete for the advertised VM/action slice; a continuous physical-host gate remains |
 | Execution boundary | One cold-booted disposable VM per job |
 | Network | Disabled |
-| Available steps | Bash and `sh`; optional configured Python and PowerShell Core |
-| Unavailable | Actions, containers, services, GPUs, and ephemeral-disk claims |
-| Required acceptance | Sealed template, signed helper, dedicated APFS storage, and the opt-in physical-host suite |
+| Available steps | Bash and `sh`; composite, repository, and admitted local actions on configured Node generations; optional Python and PowerShell Core |
+| Unavailable | Docker actions, job/service containers, Intel, GPUs, ephemeral-disk claims, signing jobs, and broader Xcode profiles |
+| Required acceptance | Sealed template, signed helper, dedicated APFS storage, and the opt-in physical-host success, timeout, cancellation, proxy, and recovery suite |
 
 ## Why Virtualization.framework
 
@@ -432,28 +432,37 @@ runner must also execute the ignored
 `macos_vm_runner_process_e2e::shipped_runner_process_executes_a_claimed_isolated_job_with_action_runtimes`
 test with the eight `AUTOMATA_MACOS_VM_*` artifact and storage
 variables. That test verifies no Ethernet device, no host helper path,
-memory/vCPU sizing, the sealed process ceiling, configured Node 20 and Node 24
-admission and execution, shell/output behavior, and clone cleanup. Deployment
-qualification must additionally inject
-process-ceiling exhaustion, pipe loss, and helper crashes, reopen the journal,
-and run repeated clean jobs.
+memory/vCPU sizing, process-ceiling exhaustion, configured Node 20 and Node 24
+admission and execution, immutable repository-action materialization,
+shell/command-file/output behavior, timeout process-group termination, and
+clone cleanup. The companion cancellation test waits for two live `Running`
+heartbeats, delivers and acknowledges a durable cancellation command, and
+requires a bounded `Cancelled` result and slot release. The provider recovery
+test kills the process owning a live VM, reopens the journal, and requires
+startup reconciliation to remove the exact orphan. A continuous protected
+physical lane, an independent helper-crash-at-transition matrix, and a retained
+repeated-clean soak remain deployment work.
 
 Create `/Volumes/AutomataVM/e2e-state` as an empty `0700` directory owned by
 the physical runner service account before running the command below.
 
 ```console
-AUTOMATA_MACOS_VM_HELPER=/Library/Automata/bin/automata-macos-vm-helper \
-AUTOMATA_MACOS_VM_HELPER_SHA256=<helper-sha256> \
-AUTOMATA_MACOS_VM_HELPER_REQUIREMENT='<strict-designated-requirement>' \
-AUTOMATA_MACOS_VM_TEMPLATE_MANIFEST=/Volumes/AutomataVM/templates/macos-15-arm64-v1/manifest.json \
-AUTOMATA_MACOS_VM_TEMPLATE_SHA256=<manifest-sha256> \
-AUTOMATA_MACOS_VM_STORAGE_ROOT=/Volumes/AutomataVM/e2e-state \
-AUTOMATA_MACOS_VM_STORAGE_VOLUME_UUID=<uppercase-volume-uuid> \
-AUTOMATA_MACOS_VM_STORAGE_QUOTA_BYTES=<exact-volume-quota-bytes> \
-cargo test --locked -p automata-ci-runner --test runner -- \
-  macos_vm_runner_process_e2e::shipped_runner_process_executes_a_claimed_isolated_job_with_action_runtimes \
-  --ignored --nocapture --test-threads=1
+export AUTOMATA_MACOS_VM_HELPER=/Library/Automata/bin/automata-macos-vm-helper
+export AUTOMATA_MACOS_VM_HELPER_SHA256=<helper-sha256>
+export AUTOMATA_MACOS_VM_HELPER_REQUIREMENT='<strict-designated-requirement>'
+export AUTOMATA_MACOS_VM_TEMPLATE_MANIFEST=/Volumes/AutomataVM/templates/macos-15-arm64-v1/manifest.json
+export AUTOMATA_MACOS_VM_TEMPLATE_SHA256=<manifest-sha256>
+export AUTOMATA_MACOS_VM_STORAGE_ROOT=/Volumes/AutomataVM/e2e-state
+export AUTOMATA_MACOS_VM_STORAGE_VOLUME_UUID=<uppercase-volume-uuid>
+export AUTOMATA_MACOS_VM_STORAGE_QUOTA_BYTES=<exact-volume-quota-bytes>
+./scripts/ci/run-macos-physical-checks.sh
 ```
+
+The entrypoint runs the shipped-runner success/timeout and cancellation matrix,
+live-orphan recovery, and the allowlisted runtime-proxy probe serially. Set
+`AUTOMATA_MACOS_PHYSICAL_REPETITIONS` from 1 through 10 for a bounded repeated
+runner soak. It refuses a `CARGO_TARGET_DIR` on the VM storage filesystem so
+build artifacts cannot consume the clone-capacity safety margin.
 
 The runtime proxy has a separate physical contract test. It starts a temporary
 loopback HTTP origin on the host, boots the sealed NIC-less guest through the
