@@ -8,7 +8,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicU8, Ordering},
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
 use automata_ci_blob::MemoryBlobStore;
@@ -17,9 +17,8 @@ use automata_ci_core::{
     WorkflowEventProvenance,
 };
 use automata_ci_store::{
-    AdmitLogicalWorkflowRun, AuthenticatedGithubDeliveryClaim, LogicalWorkflowAdmissionReceipt,
+    AdmitLogicalWorkflowRun, AuthenticatedProviderDeliveryClaim, LogicalWorkflowAdmissionReceipt,
     LogicalWorkflowAdmissionRepository, LogicalWorkflowAdmissionStoreError,
-    ProviderDeliveryClaimFence, ProviderDeliveryId, ProviderProcessingWorkerId,
     WorkflowAdmissionIdempotency, WorkflowAdmissionValueError,
 };
 use automata_ci_workflow_actions::{
@@ -33,7 +32,6 @@ use automata_ci_workflow_service::{
     WorkflowAdmissionStageOutcome,
 };
 use bytes::Bytes;
-use uuid::Uuid;
 
 #[tokio::test]
 async fn run_name_is_evaluated_once_and_is_identical_on_replay() {
@@ -202,7 +200,6 @@ async fn human_projection_is_bound_into_the_logical_admission() {
     assert_eq!(concurrency.normalized_key(), "ci-ci-refs/heads/main");
     assert!(concurrency.cancel_in_progress());
     assert_eq!(concurrency.queue_policy(), QueuePolicy::Single);
-    assert_eq!(repository.take_delivery_id(), None);
 }
 
 #[tokio::test]
@@ -263,29 +260,6 @@ async fn admission_rejects_late_bound_concurrency_before_store_commit() {
         WorkflowAdmissionError::ConcurrencyEvaluation
     ));
     assert!(repository.command.lock().expect("command lock").is_none());
-}
-
-#[tokio::test]
-async fn authenticated_delivery_uses_the_distinct_store_path_and_digest() {
-    let request = support::push_request("logical-provider-evidence");
-    let local_repository = Arc::new(ControllableRepository::default());
-    service(local_repository.clone())
-        .admit(request.clone())
-        .await
-        .expect("ordinary admission");
-    let local_digest = local_repository.take_command().request_digest();
-    assert_eq!(local_repository.take_delivery_id(), None);
-
-    let delivery_id = ProviderDeliveryId::from_uuid(Uuid::from_u128(42)).expect("delivery ID");
-    let current_claim = authenticated_claim(delivery_id);
-    let provider_repository = Arc::new(ControllableRepository::default());
-    service(provider_repository.clone())
-        .admit_authenticated_github_delivery(request, current_claim)
-        .await
-        .expect("authenticated delivery admission");
-    let provider_digest = provider_repository.take_command().request_digest();
-    assert_eq!(provider_repository.take_delivery_id(), Some(delivery_id));
-    assert_ne!(provider_digest, local_digest);
 }
 
 #[tokio::test]
@@ -370,31 +344,6 @@ fn admission_rejects_instance_context_as_a_base_context() {
         try_rebuild_with_base(&original, instance_context),
         Err(WorkflowAdmissionRequestError::InvalidBaseContext)
     ));
-}
-
-#[tokio::test]
-async fn provider_only_entrypoint_rejects_operation_admission_before_the_store() {
-    let delivery_id = ProviderDeliveryId::from_uuid(Uuid::from_u128(43)).expect("delivery ID");
-    let current_claim = authenticated_claim(delivery_id);
-    let repository = Arc::new(ControllableRepository::default());
-    assert!(matches!(
-        service(repository.clone())
-            .admit_authenticated_github_delivery(
-                support::operation_request("logical-local-absence"),
-                current_claim,
-            )
-            .await
-            .expect_err("operation admission cannot claim provider evidence"),
-        WorkflowAdmissionError::Internal
-    ));
-    assert!(repository.command.lock().expect("command lock").is_none());
-    assert!(
-        repository
-            .delivery_ids
-            .lock()
-            .expect("delivery capture lock")
-            .is_empty()
-    );
 }
 
 #[tokio::test]
@@ -678,7 +627,6 @@ fn try_rebuild_with_base(
 #[derive(Debug, Default)]
 struct ControllableRepository {
     command: Mutex<Option<AdmitLogicalWorkflowRun>>,
-    delivery_ids: Mutex<Vec<Option<ProviderDeliveryId>>>,
     mode: AtomicU8,
 }
 
@@ -691,18 +639,9 @@ impl ControllableRepository {
             .expect("captured command")
     }
 
-    fn take_delivery_id(&self) -> Option<ProviderDeliveryId> {
-        self.delivery_ids
-            .lock()
-            .expect("delivery capture lock")
-            .pop()
-            .expect("captured admission path")
-    }
-
     fn record(
         &self,
         command: AdmitLogicalWorkflowRun,
-        delivery_id: Option<ProviderDeliveryId>,
     ) -> Result<LogicalWorkflowAdmissionReceipt, LogicalWorkflowAdmissionStoreError> {
         if self.mode.load(Ordering::SeqCst) == 2 {
             return Err(LogicalWorkflowAdmissionStoreError::IdempotencyConflict);
@@ -717,10 +656,6 @@ impl ControllableRepository {
             self.mode.load(Ordering::SeqCst) == 1,
         );
         *self.command.lock().expect("capture lock") = Some(command);
-        self.delivery_ids
-            .lock()
-            .expect("delivery capture lock")
-            .push(delivery_id);
         Ok(receipt)
     }
 }
@@ -744,14 +679,14 @@ impl LogicalWorkflowAdmissionRepository for ControllableRepository {
         'life0: 'async_trait,
         Self: 'async_trait,
     {
-        Box::pin(async move { self.record(command, None) })
+        Box::pin(async move { self.record(command) })
     }
 
-    fn admit_authenticated_github_delivery<'life0, 'async_trait>(
+    fn admit_authenticated_provider_delivery<'life0, 'async_trait>(
         &'life0 self,
-        command: AdmitLogicalWorkflowRun,
-        current_claim: AuthenticatedGithubDeliveryClaim,
-        observed_at: UnixMillis,
+        _command: AdmitLogicalWorkflowRun,
+        _current_claim: AuthenticatedProviderDeliveryClaim,
+        _observed_at: UnixMillis,
     ) -> Pin<
         Box<
             dyn Future<
@@ -767,31 +702,8 @@ impl LogicalWorkflowAdmissionRepository for ControllableRepository {
         'life0: 'async_trait,
         Self: 'async_trait,
     {
-        Box::pin(async move {
-            assert_eq!(command.admitted_at(), observed_at);
-            self.record(command, Some(current_claim.claim().delivery_id()))
-        })
+        Box::pin(async { Err(LogicalWorkflowAdmissionStoreError::UnsupportedAdmissionSource) })
     }
-}
-
-fn authenticated_claim(delivery_id: ProviderDeliveryId) -> AuthenticatedGithubDeliveryClaim {
-    let now = i64::try_from(
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system time after epoch")
-            .as_millis(),
-    )
-    .expect("current time fits i64");
-    let owner = ProviderProcessingWorkerId::from_uuid(Uuid::from_u128(900)).expect("claim owner");
-    let claim =
-        ProviderDeliveryClaimFence::from_durable_parts(delivery_id, owner, 1).expect("claim fence");
-    AuthenticatedGithubDeliveryClaim::new(
-        claim,
-        1,
-        UnixMillis::new(now - 60_000),
-        UnixMillis::new(now + 60_000),
-    )
-    .expect("authenticated claim")
 }
 
 #[derive(Debug, Default)]

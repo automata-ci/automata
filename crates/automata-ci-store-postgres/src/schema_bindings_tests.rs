@@ -26,14 +26,13 @@ fn admission_epoch_and_workflow_plan_use_independent_sql_parameters() {
     }
 
     assert!(
-        inspected_queries >= 20,
+        inspected_queries >= 19,
         "expected the PostgreSQL Store adapter's independently versioned run-schema queries"
     );
 
     for (file, minimum_binds) in [
         ("github_job_runtime_authority.rs", 1),
         ("workload_oidc.rs", 1),
-        ("github_subject_evidence.rs", 1),
         ("logical_activation.rs", 4),
         ("logical_activation_preparation.rs", 1),
         ("logical_graph.rs", 1),

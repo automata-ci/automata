@@ -31,9 +31,9 @@ use automata_ci_scm::{
     ArchiveFormat, RepositoryId, RepositorySourceArchive, RepositorySourceConnection,
 };
 use automata_ci_store::{
-    AdmitLogicalWorkflowRun, AuthenticatedGithubDeliveryClaim, AuthenticatedProviderDeliveryClaim,
-    LogicalWorkflowAdmissionReceipt, LogicalWorkflowAdmissionRepository,
-    LogicalWorkflowAdmissionStoreError, WorkflowAdmissionIdempotency,
+    AdmitLogicalWorkflowRun, AuthenticatedProviderDeliveryClaim, LogicalWorkflowAdmissionReceipt,
+    LogicalWorkflowAdmissionRepository, LogicalWorkflowAdmissionStoreError,
+    WorkflowAdmissionIdempotency,
 };
 use automata_ci_workflow_actions::{ProviderChangedFiles, ProviderEventMetadata};
 use automata_ci_workflow_service::{
@@ -127,15 +127,6 @@ impl LogicalWorkflowAdmissionRepository for Admissions {
         );
         self.commands.lock().expect("command lock").push(command);
         Ok(receipt)
-    }
-
-    async fn admit_authenticated_github_delivery(
-        &self,
-        _command: AdmitLogicalWorkflowRun,
-        _current_claim: AuthenticatedGithubDeliveryClaim,
-        _observed_at: UnixMillis,
-    ) -> Result<LogicalWorkflowAdmissionReceipt, LogicalWorkflowAdmissionStoreError> {
-        Err(LogicalWorkflowAdmissionStoreError::UnsupportedAdmissionSource)
     }
 }
 

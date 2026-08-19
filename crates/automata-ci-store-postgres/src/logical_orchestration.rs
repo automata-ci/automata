@@ -22,11 +22,6 @@ use super::{
         validate_github_schedule_selection_in_transaction,
         validate_github_scheduled_run_evidence_in_transaction,
     },
-    github_subject_evidence::{
-        record_github_workflow_run_subject_evidence_in_transaction,
-        validate_github_workflow_run_subject_evidence_in_transaction,
-        validate_github_workflow_selection_in_transaction,
-    },
     secret_management::{
         AuthorizedWorkflowDispatchActor, AuthorizedWorkflowDispatchActorSource,
         authorize_workflow_dispatch_actor,
@@ -34,22 +29,20 @@ use super::{
 };
 use automata_ci_provider::{NormalizedTrigger, ProviderConnectionId, SealedNormalizedTrigger};
 use automata_ci_store::{
-    AdmissionObject, AdmitLogicalWorkflowRun, AuthenticatedGithubDeliveryClaim,
-    AuthenticatedProviderDeliveryClaim, AuthenticatedWorkflowDispatchClaim,
-    AuthenticatedWorkflowDispatchSource, BeginWorkflowDispatchSourceResolution,
-    CompleteWorkflowDispatchSourceResolution, EventControlSubject, EventControlSubjectId,
-    EventSubjectId, EventSubjectOrigin, EventSubjectProgress, EventSubjectSelection,
-    EventSubjectStoreError, EventSubjectTerminalKind, EventSubjectTerminalOutcome,
-    GithubProviderManifestRevision, GithubScheduleFireClaim, GithubServerServiceAuthorityId,
-    GithubServerServiceAuthoritySelector, GithubServerServiceClaimFence,
-    GithubServerServiceRevision, GithubServerServiceWorkerId, GithubSubjectEvidenceStoreError,
+    AdmissionObject, AdmitLogicalWorkflowRun, AuthenticatedProviderDeliveryClaim,
+    AuthenticatedWorkflowDispatchClaim, AuthenticatedWorkflowDispatchSource,
+    BeginWorkflowDispatchSourceResolution, CompleteWorkflowDispatchSourceResolution,
+    EventControlSubject, EventControlSubjectId, EventSubjectId, EventSubjectOrigin,
+    EventSubjectProgress, EventSubjectSelection, EventSubjectStoreError, EventSubjectTerminalKind,
+    EventSubjectTerminalOutcome, GithubProviderManifestRevision, GithubScheduleFireClaim,
+    GithubServerServiceAuthorityId, GithubServerServiceAuthoritySelector,
+    GithubServerServiceClaimFence, GithubServerServiceRevision, GithubServerServiceWorkerId,
     JobEnvironmentRequirement, LOGICAL_ORCHESTRATION_SCHEMA, LogicalWorkflowAdmissionReceipt,
     LogicalWorkflowAdmissionRepository, LogicalWorkflowAdmissionStoreError,
-    LogicalWorkflowInvocationId, LogicalWorkflowJobKind, ObjectKey,
-    RecordGithubWorkflowRunSubjectEvidence, RegisterEventSubject, RepositoryId,
-    ResolveAuthenticatedWorkflowDispatchSource, Sha256Digest, StoreError, TenantScope,
-    ValidateGithubWorkflowRunSubjectEvidenceReplay, WORKFLOW_ADMISSION_EPOCH, WORKFLOW_PLAN_SCHEMA,
-    WorkflowAdmissionIdempotency, WorkflowAdmissionStoreError, WorkflowDispatchSourceClaim,
+    LogicalWorkflowInvocationId, LogicalWorkflowJobKind, ObjectKey, RegisterEventSubject,
+    RepositoryId, ResolveAuthenticatedWorkflowDispatchSource, Sha256Digest, StoreError,
+    TenantScope, WORKFLOW_ADMISSION_EPOCH, WORKFLOW_PLAN_SCHEMA, WorkflowAdmissionIdempotency,
+    WorkflowAdmissionStoreError, WorkflowDispatchSourceClaim,
     WorkflowDispatchSourceResolutionOutcome, WorkflowDispatchSourceResolutionRepository,
     WorkflowDispatchSourceResolutionStoreError, WorkflowSnapshotId,
 };
@@ -57,10 +50,6 @@ use automata_ci_store::{
 enum SubjectEvidenceAdmission {
     AuthenticatedProvider {
         current_claim: AuthenticatedProviderDeliveryClaim,
-        observed_at: UnixMillis,
-    },
-    AuthenticatedGithub {
-        current_claim: AuthenticatedGithubDeliveryClaim,
         observed_at: UnixMillis,
     },
     AuthenticatedWorkflowDispatch {
@@ -922,23 +911,6 @@ impl LogicalWorkflowAdmissionRepository for PostgresStore {
         .await
     }
 
-    async fn admit_authenticated_github_delivery(
-        &self,
-        command: AdmitLogicalWorkflowRun,
-        current_claim: AuthenticatedGithubDeliveryClaim,
-        observed_at: UnixMillis,
-    ) -> Result<LogicalWorkflowAdmissionReceipt, LogicalWorkflowAdmissionStoreError> {
-        admit_logical_workflow_transaction(
-            self,
-            command,
-            SubjectEvidenceAdmission::AuthenticatedGithub {
-                current_claim,
-                observed_at,
-            },
-        )
-        .await
-    }
-
     async fn admit_scheduled_github_workflow(
         &self,
         command: AdmitLogicalWorkflowRun,
@@ -1159,8 +1131,7 @@ async fn admit_logical_workflow_transaction(
         authorize_dispatch_subject(&mut transaction, &command, &subject_evidence).await?;
     let github_subject_evidence_required = matches!(
         &subject_evidence,
-        SubjectEvidenceAdmission::AuthenticatedGithub { .. }
-            | SubjectEvidenceAdmission::ScheduledGithub { .. }
+        SubjectEvidenceAdmission::ScheduledGithub { .. }
     );
 
     let existing_receipt = admission_receipt_exists(&mut transaction, &command).await?;
@@ -1170,7 +1141,6 @@ async fn admit_logical_workflow_transaction(
         if matches!(
             &subject_evidence,
             SubjectEvidenceAdmission::AuthenticatedProvider { .. }
-                | SubjectEvidenceAdmission::AuthenticatedGithub { .. }
                 | SubjectEvidenceAdmission::ScheduledGithub { .. }
         ) {
             resolve_repository(&mut transaction, &command).await?;
@@ -1482,9 +1452,6 @@ fn event_subject_origin(subject_evidence: &SubjectEvidenceAdmission) -> EventSub
         SubjectEvidenceAdmission::AuthenticatedProvider { current_claim, .. } => {
             EventSubjectOrigin::ProviderDelivery(current_claim.delivery_id())
         }
-        SubjectEvidenceAdmission::AuthenticatedGithub { current_claim, .. } => {
-            EventSubjectOrigin::ProviderDelivery(current_claim.claim().delivery_id())
-        }
         SubjectEvidenceAdmission::AuthenticatedWorkflowDispatch { claim } => {
             EventSubjectOrigin::ManualOperation(claim.operation_id())
         }
@@ -1547,24 +1514,6 @@ fn validate_subject_evidence_boundary(
             {
                 return Err(StoreError::corrupt_data(
                     "authenticated provider admission has an invalid common boundary",
-                )
-                .into());
-            }
-        }
-        SubjectEvidenceAdmission::AuthenticatedGithub {
-            current_claim: _,
-            observed_at,
-        } => {
-            let provider_delivery = matches!(
-                command.idempotency(),
-                WorkflowAdmissionIdempotency::ProviderDelivery(_)
-            );
-            if command.repository().provider() != "github"
-                || !provider_delivery
-                || command.admitted_at() != *observed_at
-            {
-                return Err(StoreError::corrupt_data(
-                    "authenticated GitHub admission has an invalid provider boundary",
                 )
                 .into());
             }
@@ -1812,18 +1761,6 @@ async fn validate_subject_selection_authority(
             )
             .await
         }
-        SubjectEvidenceAdmission::AuthenticatedGithub { current_claim, .. } => {
-            let request = RecordGithubWorkflowRunSubjectEvidence::from_logical_admission(
-                *current_claim,
-                command,
-            )
-            .map_err(|_| {
-                StoreError::corrupt_data("invalid signed GitHub event selection evidence")
-            })?;
-            validate_github_workflow_selection_in_transaction(transaction, &request)
-                .await
-                .map_err(subject_evidence_error)
-        }
         SubjectEvidenceAdmission::ScheduledGithub { claim } => {
             validate_github_schedule_selection_in_transaction(transaction, command, *claim).await
         }
@@ -2049,22 +1986,6 @@ async fn record_new_subject_evidence(
             record_provider_admission_evidence(transaction, command, *current_claim, *observed_at)
                 .await
         }
-        SubjectEvidenceAdmission::AuthenticatedGithub {
-            current_claim,
-            observed_at: _,
-        } => {
-            let request = RecordGithubWorkflowRunSubjectEvidence::from_logical_admission(
-                *current_claim,
-                command,
-            )
-            .map_err(|_| {
-                StoreError::corrupt_data("invalid signed GitHub logical-admission evidence")
-            })?;
-            record_github_workflow_run_subject_evidence_in_transaction(transaction, &request)
-                .await
-                .map_err(subject_evidence_error)?;
-            Ok(())
-        }
         SubjectEvidenceAdmission::AuthenticatedWorkflowDispatch { claim } => {
             let actor = dispatch_actor.ok_or_else(|| {
                 StoreError::corrupt_data(
@@ -2098,24 +2019,6 @@ async fn validate_replayed_subject_evidence(
                 *observed_at,
             )
             .await
-        }
-        SubjectEvidenceAdmission::AuthenticatedGithub {
-            current_claim,
-            observed_at,
-        } => {
-            let request = ValidateGithubWorkflowRunSubjectEvidenceReplay::from_logical_admission(
-                *current_claim,
-                *observed_at,
-                admitted_at,
-                command,
-            )
-            .map_err(|_| {
-                StoreError::corrupt_data("invalid signed GitHub logical-admission replay")
-            })?;
-            validate_github_workflow_run_subject_evidence_in_transaction(transaction, &request)
-                .await
-                .map_err(subject_evidence_error)?;
-            Ok(())
         }
         SubjectEvidenceAdmission::AuthenticatedWorkflowDispatch { claim } => {
             let actor = dispatch_actor.ok_or_else(|| {
@@ -2675,22 +2578,6 @@ fn workflow_dispatch_audit_event_id(request_digest: Sha256Digest) -> Uuid {
     bytes[6] = (bytes[6] & 0x0f) | 0x80;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
     Uuid::from_bytes(bytes)
-}
-
-fn subject_evidence_error(
-    error: GithubSubjectEvidenceStoreError,
-) -> LogicalWorkflowAdmissionStoreError {
-    match error {
-        GithubSubjectEvidenceStoreError::Operation(error) => StoreError::Operation(error).into(),
-        GithubSubjectEvidenceStoreError::CorruptData => {
-            StoreError::corrupt_data("durable signed GitHub subject evidence is corrupt").into()
-        }
-        GithubSubjectEvidenceStoreError::AuthorityRejected
-        | GithubSubjectEvidenceStoreError::ReplayConflict
-        | GithubSubjectEvidenceStoreError::NotFound => {
-            StoreError::corrupt_data("signed GitHub subject evidence rejected admission").into()
-        }
-    }
 }
 
 async fn lock_logical_admission_idempotency(

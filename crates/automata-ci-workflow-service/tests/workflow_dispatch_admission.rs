@@ -17,7 +17,7 @@ use automata_ci_core::{GitObjectId, OperationId, WorkflowId};
 use automata_ci_protocol::ProtocolLimits;
 use automata_ci_store::{
     AdmissionObject, AdmissionRepository, AdmitLogicalWorkflowRun,
-    AuthenticatedGithubDeliveryClaim, AuthenticatedWorkflowDispatchClaim,
+    AuthenticatedProviderDeliveryClaim, AuthenticatedWorkflowDispatchClaim,
     AuthenticatedWorkflowDispatchSource, LogicalWorkflowAdmissionReceipt,
     LogicalWorkflowAdmissionRepository, LogicalWorkflowAdmissionStoreError, ObjectKey,
     ResolveAuthenticatedWorkflowDispatchSource, TenantScope, WorkflowAdmissionIdempotency,
@@ -521,7 +521,7 @@ fn dispatch_request(
 struct DispatchRepository {
     state: Mutex<DispatchState>,
     generic_calls: AtomicUsize,
-    github_calls: AtomicUsize,
+    provider_calls: AtomicUsize,
     dispatch_calls: AtomicUsize,
     source_calls: AtomicUsize,
 }
@@ -547,7 +547,7 @@ impl DispatchRepository {
 
     fn assert_only_dispatch_path(&self, expected_dispatch_calls: usize) {
         assert_eq!(self.generic_calls.load(Ordering::SeqCst), 0);
-        assert_eq!(self.github_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(self.provider_calls.load(Ordering::SeqCst), 0);
         assert_eq!(
             self.dispatch_calls.load(Ordering::SeqCst),
             expected_dispatch_calls
@@ -581,13 +581,13 @@ impl LogicalWorkflowAdmissionRepository for DispatchRepository {
         Err(LogicalWorkflowAdmissionStoreError::UnsupportedAdmissionSource)
     }
 
-    async fn admit_authenticated_github_delivery(
+    async fn admit_authenticated_provider_delivery(
         &self,
         _command: AdmitLogicalWorkflowRun,
-        _current_claim: AuthenticatedGithubDeliveryClaim,
+        _current_claim: AuthenticatedProviderDeliveryClaim,
         _observed_at: automata_ci_core::UnixMillis,
     ) -> Result<LogicalWorkflowAdmissionReceipt, LogicalWorkflowAdmissionStoreError> {
-        self.github_calls.fetch_add(1, Ordering::SeqCst);
+        self.provider_calls.fetch_add(1, Ordering::SeqCst);
         Err(LogicalWorkflowAdmissionStoreError::UnsupportedAdmissionSource)
     }
 

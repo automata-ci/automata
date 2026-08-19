@@ -10,10 +10,8 @@ mod github_check_rerun;
 mod github_checks;
 mod github_job_runtime_authority;
 mod github_provider_manifest;
-mod github_repository_dispatch;
 mod github_schedule;
 mod github_service_authority;
-mod github_subject_evidence;
 mod github_workflow_permissions;
 mod live_log_ticket;
 mod logical_activation;
@@ -141,11 +139,6 @@ pub use github_provider_manifest::{
     GithubProviderWebhookVerifierFingerprint, GithubProviderWorkflowSelection,
     github_provider_repository_id,
 };
-pub use github_repository_dispatch::{
-    AcceptManifestPinnedGithubRepositoryDispatch, GithubRepositoryDispatchEvidenceRepository,
-    GithubRepositoryDispatchValueError, PendingGithubRepositoryDispatchEvidence,
-    PendingGithubRepositoryDispatchReceipt, ResolveGithubRepositoryDispatch,
-};
 pub use github_schedule::{
     ClaimDueGithubScheduleFire, ClaimGithubScheduleDiscovery, ClaimedGithubScheduleFire,
     CompleteGithubScheduleFire, GITHUB_SCHEDULE_ARCHIVE_MEDIA_TYPE,
@@ -187,14 +180,6 @@ pub use github_service_authority::{
     MAX_GITHUB_SERVICE_REVOKE_RETRY_MILLIS, MIN_GITHUB_SERVICE_READY_USE_MILLIS,
     ProtectedGithubServerServiceCredential, QuarantineGithubServerServiceCredential,
     ReleaseGithubServerServiceHandoff, RetireGithubServerServiceAuthority,
-};
-pub use github_subject_evidence::{
-    AcceptManifestPinnedGithubDelivery, AuthenticatedGithubDeliveryClaim, GithubAuthenticatedEvent,
-    GithubAuthenticatedEventKind, GithubDeliveryCheckKind, GithubRepositoryDispatchResolution,
-    GithubSubjectEvidenceRepository, GithubSubjectEvidenceStoreError,
-    GithubSubjectEvidenceValueError, GithubWorkflowRunSubjectEvidence,
-    ManifestPinnedGithubDeliveryEvidence, ManifestPinnedGithubDeliveryReceipt,
-    RecordGithubWorkflowRunSubjectEvidence, ValidateGithubWorkflowRunSubjectEvidenceReplay,
 };
 pub use github_workflow_permissions::{
     FinalizeGithubWorkflowPermissionObservation,

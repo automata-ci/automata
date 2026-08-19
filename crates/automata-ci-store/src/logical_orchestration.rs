@@ -13,8 +13,8 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
-    AdmissionObject, AdmissionRepository, AuthenticatedGithubDeliveryClaim,
-    AuthenticatedProviderDeliveryClaim, GithubProviderManifestRevision, GithubServerServiceAction,
+    AdmissionObject, AdmissionRepository, AuthenticatedProviderDeliveryClaim,
+    GithubProviderManifestRevision, GithubServerServiceAction,
     GithubServerServiceAuthoritySelector, GithubServerServiceClaimFence,
     GithubServerServiceConsumerClaim, GithubServerServiceConsumerId, GithubServerServiceRevision,
     GithubServerServiceWorkerId, JobCredentialRequirements,
@@ -1396,28 +1396,8 @@ pub trait LogicalWorkflowAdmissionRepository: std::fmt::Debug + Send + Sync {
     /// workspace, repository, attempt, worker, fence, and lease horizon.
     async fn admit_authenticated_provider_delivery(
         &self,
-        _command: AdmitLogicalWorkflowRun,
-        _current_claim: AuthenticatedProviderDeliveryClaim,
-        _observed_at: UnixMillis,
-    ) -> Result<LogicalWorkflowAdmissionReceipt, LogicalWorkflowAdmissionStoreError> {
-        Err(LogicalWorkflowAdmissionStoreError::UnsupportedAdmissionSource)
-    }
-
-    /// Commits one logical workflow whose signed GitHub delivery evidence must
-    /// be bound atomically to the new run, or validates the exact immutable
-    /// evidence receipt on replay.
-    ///
-    /// The current claim is only authority to attempt this operation.
-    /// Implementations must record-lock and reject it unless the exact current
-    /// inbox owner, attempt, fence, and lease horizon are live at
-    /// `observed_at`, and durable signed-ingress, manifest, queued-Check,
-    /// repository, source, plan, and run evidence all agree with `command`.
-    /// Exact replay may use a newer live reclaim, but must never replace the
-    /// immutable claim that authorized initial run creation.
-    async fn admit_authenticated_github_delivery(
-        &self,
         command: AdmitLogicalWorkflowRun,
-        current_claim: AuthenticatedGithubDeliveryClaim,
+        current_claim: AuthenticatedProviderDeliveryClaim,
         observed_at: UnixMillis,
     ) -> Result<LogicalWorkflowAdmissionReceipt, LogicalWorkflowAdmissionStoreError>;
 
