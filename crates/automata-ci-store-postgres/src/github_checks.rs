@@ -1,29 +1,28 @@
 use async_trait::async_trait;
 use automata_ci_blob::{BlobDescriptor, BlobKey, MediaType};
-use automata_ci_core::{AttemptId, GitObjectId, JobId, RunId, Sha256Digest, UnixMillis};
+use automata_ci_core::{GitObjectId, JobId, RunId, Sha256Digest, UnixMillis};
 use sqlx::{AssertSqlSafe, PgConnection, Postgres, Row as _, Transaction};
 use uuid::Uuid;
 
 use automata_ci_provider::ProviderConnectionId;
 use automata_ci_store::{
-    AdvanceGithubCheckAnnotations, AttemptStoreError, BeginGithubCheckAnnotationBatch,
-    BeginGithubCheckRunCreate, BindGithubCheckRun, BindGithubCheckSuite,
-    BlockGithubCheckAnnotationMismatch, BlockGithubCheckProjectionForCredentialRejection,
-    ClaimGithubCheckProjection, ClaimedGithubCheckProjection,
-    ClearGithubCheckAnnotationUncertainty, CompleteGithubCheckProjection,
-    GithubCheckAnnotationProgress, GithubCheckAppId, GithubCheckConclusion,
-    GithubCheckCreateReconciliation, GithubCheckDesiredProjection, GithubCheckDetailsTarget,
-    GithubCheckName, GithubCheckProjectionAction, GithubCheckProjectionClaimFence,
-    GithubCheckProjectionOutbox, GithubCheckProjectionWorkerId, GithubCheckRunBindingFence,
-    GithubCheckRunCreateFence, GithubCheckRunId, GithubCheckStoreError, GithubCheckSubjectIdentity,
-    GithubCheckSubjectKey, GithubCheckSubjectOrigin, GithubCheckSubjectReceipt, GithubCheckSuiteId,
-    GithubCheckTerminalCause, GithubRepositoryName, GithubScheduleFireId,
-    GithubServerServiceAuthorityId, GithubServerServiceAuthoritySelector,
+    AdvanceGithubCheckAnnotations, BeginGithubCheckAnnotationBatch, BeginGithubCheckRunCreate,
+    BindGithubCheckRun, BindGithubCheckSuite, BlockGithubCheckAnnotationMismatch,
+    BlockGithubCheckProjectionForCredentialRejection, ClaimGithubCheckProjection,
+    ClaimedGithubCheckProjection, ClearGithubCheckAnnotationUncertainty,
+    CompleteGithubCheckProjection, GithubCheckAnnotationProgress, GithubCheckAppId,
+    GithubCheckConclusion, GithubCheckCreateReconciliation, GithubCheckDesiredProjection,
+    GithubCheckDetailsTarget, GithubCheckName, GithubCheckProjectionAction,
+    GithubCheckProjectionClaimFence, GithubCheckProjectionOutbox, GithubCheckProjectionWorkerId,
+    GithubCheckRunBindingFence, GithubCheckRunCreateFence, GithubCheckRunId, GithubCheckStoreError,
+    GithubCheckSubjectIdentity, GithubCheckSubjectKey, GithubCheckSubjectOrigin,
+    GithubCheckSubjectReceipt, GithubCheckSuiteId, GithubCheckTerminalCause, GithubRepositoryName,
+    GithubScheduleFireId, GithubServerServiceAuthorityId, GithubServerServiceAuthoritySelector,
     GithubServerServiceRevision, HUMAN_JOB_RESULT_MEDIA_TYPE, InitializeGithubCheckPresentation,
     MAX_GITHUB_CHECK_PROJECTION_ATTEMPTS, MAX_TERMINAL_RESULT_BYTES, ProviderDeliveryId,
     ProviderInstallationId, ProviderRepositoryId, ReleaseUnissuedGithubCheckAnnotationBatch,
     ReleaseUnissuedGithubCheckRunCreate, RepositoryId, ResolveGithubCheckRunCreate,
-    RetryGithubCheckProjection, RetryUncertainGithubCheckAnnotations, StoreError, TenantScope,
+    RetryGithubCheckProjection, RetryUncertainGithubCheckAnnotations, TenantScope,
 };
 
 use super::{PostgresStore, pg_bigint};
@@ -49,128 +48,6 @@ pub(super) const fn github_check_conclusion_name(value: GithubCheckConclusion) -
         GithubCheckConclusion::Skipped => "skipped",
         GithubCheckConclusion::TimedOut => "timed_out",
     }
-}
-
-pub(super) enum GithubJobCheckInsertError {
-    Operation(sqlx::Error),
-    CorruptData(&'static str),
-}
-
-impl GithubJobCheckInsertError {
-    pub(super) fn into_store_error(self) -> StoreError {
-        match self {
-            Self::Operation(error) => StoreError::operation(error),
-            Self::CorruptData(message) => StoreError::corrupt_data(message),
-        }
-    }
-
-    pub(super) fn into_attempt_error(self) -> AttemptStoreError {
-        match self {
-            Self::Operation(error) => AttemptStoreError::operation(error),
-            Self::CorruptData(message) => AttemptStoreError::corrupt_data(message),
-        }
-    }
-}
-
-pub(super) async fn insert_github_job_check_subject(
-    transaction: &mut Transaction<'_, Postgres>,
-    job_id: JobId,
-    attempt_id: AttemptId,
-    queued_at: UnixMillis,
-) -> Result<(), GithubJobCheckInsertError> {
-    let job = sqlx::query_as::<_, (Uuid, String, Option<Uuid>, Option<String>)>(
-        r"
-        SELECT job.run_id, job.display_name,
-               authority.github_check_subject_id, authority.aggregate_check_name
-        FROM jobs AS job
-        LEFT JOIN LATERAL (
-            SELECT origin.github_check_subject_id,
-                   manifest.check_name AS aggregate_check_name
-            FROM github_workflow_run_manifest_origins AS origin
-            JOIN github_provider_manifest_revisions AS manifest
-              ON manifest.tenant_id = origin.tenant_id
-             AND manifest.repository_id = origin.repository_id
-             AND manifest.provider_connection_id = origin.provider_connection_id
-             AND manifest.manifest_revision = origin.provider_manifest_revision
-             AND manifest.manifest_digest = origin.provider_manifest_digest
-            WHERE origin.run_id = job.run_id
-        ) AS authority ON TRUE
-        WHERE job.id = $1
-        FOR KEY SHARE OF job
-        ",
-    )
-    .bind(job_id.as_uuid())
-    .fetch_optional(&mut **transaction)
-    .await
-    .map_err(GithubJobCheckInsertError::Operation)?
-    .ok_or(GithubJobCheckInsertError::CorruptData(
-        "GitHub job Check has no durable job",
-    ))?;
-    let Some(parent_id) = job.2 else {
-        return Ok(());
-    };
-    let check_name = GithubCheckName::from_job_display_name(&job.1).map_err(|_| {
-        GithubJobCheckInsertError::CorruptData("job display name is not Check-safe")
-    })?;
-    let Some(aggregate_check_name) = job.3.as_deref() else {
-        return Err(GithubJobCheckInsertError::CorruptData(
-            "GitHub job Check has no aggregate-name authority",
-        ));
-    };
-    if aggregate_check_name == check_name.as_str() {
-        return Err(GithubJobCheckInsertError::CorruptData(
-            "job display name collides with the reserved aggregate Check name",
-        ));
-    }
-    let subject_id = Uuid::new_v4();
-    let subject_key = format!("job/{}/attempt/{}", job_id.as_uuid(), attempt_id.as_uuid());
-    let external_id = format!("automata-check:{subject_id}");
-    let inserted = sqlx::query_scalar::<_, Uuid>(
-        r"
-        INSERT INTO github_check_subjects (
-            id, tenant_id, repository_id, provider_delivery_id, subject_key,
-            provider_connection_id, provider_installation_id,
-            github_repository_id, github_repository_name, github_app_id,
-            head_sha, check_name, external_id, created_at_ms,
-            desired_updated_at_ms, origin_kind, schedule_fire_id,
-            workflow_rerun_run_id, subject_kind, parent_subject_id,
-            job_id, job_attempt_id, workflow_run_id, linked_at_ms
-        )
-        SELECT $1, parent.tenant_id, parent.repository_id,
-               parent.provider_delivery_id, $2,
-               parent.provider_connection_id, parent.provider_installation_id,
-               parent.github_repository_id, parent.github_repository_name,
-               parent.github_app_id, parent.head_sha, $3, $4, $5, $5,
-               parent.origin_kind, parent.schedule_fire_id,
-               parent.workflow_rerun_run_id, 'job', parent.id, $6, $7, $9, $5
-        FROM github_check_subjects AS parent
-        WHERE parent.id = $8
-          AND parent.subject_kind = 'workflow'
-        RETURNING id
-        ",
-    )
-    .bind(subject_id)
-    .bind(subject_key)
-    .bind(check_name.as_str())
-    .bind(external_id)
-    .bind(queued_at.get())
-    .bind(job_id.as_uuid())
-    .bind(attempt_id.as_uuid())
-    .bind(parent_id)
-    .bind(job.0)
-    .fetch_optional(&mut **transaction)
-    .await
-    .map_err(GithubJobCheckInsertError::Operation)?;
-
-    let Some(inserted) = inserted else {
-        return Ok(());
-    };
-    if inserted != subject_id {
-        return Err(GithubJobCheckInsertError::CorruptData(
-            "GitHub job Check identity changed on insert",
-        ));
-    }
-    Ok(())
 }
 
 pub(super) const SUBJECT_COLUMNS: &str = r"

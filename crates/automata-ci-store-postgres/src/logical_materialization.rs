@@ -11,11 +11,8 @@ use sqlx::{PgPool, Postgres, Row as _, Transaction, postgres::PgRow};
 use uuid::Uuid;
 
 use super::{
-    CurrentAttemptOutputSafety, PostgresStore,
-    durable_schema::current_durable_schemas,
-    github_checks::{GithubJobCheckInsertError, insert_github_job_check_subject},
-    logical_activation::decode_scheduling_policy,
-    pg_bigint,
+    CurrentAttemptOutputSafety, PostgresStore, durable_schema::current_durable_schemas,
+    logical_activation::decode_scheduling_policy, pg_bigint,
 };
 use automata_ci_store::{
     ActivatedLogicalInstanceDescriptor, AdmissionObject, ClaimLogicalInstanceMaterialization,
@@ -247,14 +244,6 @@ impl LogicalMaterializationRepository for PostgresStore {
         insert_job(&mut transaction, &request, &descriptor).await?;
         insert_initial_attempt(&mut transaction, &request, attempt_safety).await?;
         insert_materialization_receipt(&mut transaction, &request, &descriptor).await?;
-        insert_github_job_check_subject(
-            &mut transaction,
-            request.claim().expected_job_id(),
-            request.claim().expected_attempt_id(),
-            request.committed_at(),
-        )
-        .await
-        .map_err(GithubJobCheckInsertError::into_store_error)?;
         let rows = sqlx::query(
             r"
             UPDATE logical_workflow_materialization_claims
