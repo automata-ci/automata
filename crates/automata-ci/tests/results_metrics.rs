@@ -84,7 +84,7 @@ fn results_and_storage_schema_is_exact_bounded_and_identifier_free() {
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
         .count();
     assert_eq!(
-        all_series, 5_894,
+        all_series, 5_958,
         "the preinitialized series set must match the reviewed cardinality manifest"
     );
     assert_eq!(
