@@ -113,6 +113,9 @@ structure of [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
 
 ### Changed
 
+- PostgreSQL upgrades now preserve the checksums of deployed migrations 0053
+  and 0056, move the provider-instance webhook cutover into forward migration
+  0069, and safely convert historical Check evidence in migration 0061.
 - GitHub Actions cache eviction now durably reclaims unreachable S3 blocks with
   crash-safe, replica-safe exact-object garbage collection.
 
