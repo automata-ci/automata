@@ -47,7 +47,7 @@ use tokio::time::{Instant, timeout_at};
 use url::Url;
 
 use crate::checks_presentation;
-use crate::{GithubDeliveryClock, service::GithubServerServiceCredentialRelease};
+use crate::{GithubDeliveryClock, GithubServerServiceCredentialRelease};
 
 const DEFAULT_CLAIM_MILLIS: i64 = 5 * 60 * 1_000;
 const DEFAULT_VISIBILITY_MARGIN_MILLIS: i64 = 30 * 1_000;

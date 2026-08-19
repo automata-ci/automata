@@ -37,8 +37,7 @@ use automata_ci_store::{
     GithubServerServiceJwtIssuer, GithubServerServiceMaintenanceOutcome,
     GithubServerServiceRevision, GithubServerServiceScope, GithubServerServiceStoreError,
     GithubServerServiceWorkerId, ObjectKey, ProtectedGithubServerServiceCredential,
-    ProviderDeliveryId, ProviderDeliveryIdentity, ProviderInstallationId,
-    ProviderRepositoryCoordinates, ProviderRepositoryId, ProviderRepositoryOwnerId,
+    ProviderDeliveryId, ProviderInstallationId, ProviderRepositoryId, ProviderRepositoryOwnerId,
     ProviderRepositoryVisibility, QuarantineGithubServerServiceCredential,
     RegisterWorkflowRuntimePolicy, ReleaseGithubServerServiceHandoff, RepositoryId, Sha256Digest,
     TenantScope, WorkflowPermissionPolicy, WorkflowRunnerFeaturePolicy, WorkflowRuntimePolicy,
@@ -855,68 +854,6 @@ fn checks_identity(drift: ChecksIdentityDrift) -> GithubCheckSubjectIdentity {
     .expect("Checks identity")
 }
 
-#[derive(Clone, Copy)]
-enum SourceIdentityVariant {
-    Exact,
-    Public,
-    Provider,
-    Tenant,
-    Connection,
-    Installation,
-    ProviderRepository,
-    RepositoryName,
-}
-
-fn source_identity(drift: SourceIdentityVariant) -> ProviderDeliveryIdentity {
-    let coordinates = ProviderRepositoryCoordinates::new(
-        ProviderRepositoryId::new(
-            if matches!(drift, SourceIdentityVariant::ProviderRepository) {
-                14
-            } else {
-                13
-            },
-        )
-        .expect("provider repository ID"),
-        if matches!(drift, SourceIdentityVariant::Public) {
-            ProviderRepositoryVisibility::Public
-        } else {
-            ProviderRepositoryVisibility::Private
-        },
-        if matches!(drift, SourceIdentityVariant::RepositoryName) {
-            "automata-ci/other"
-        } else {
-            "automata-ci/automata"
-        },
-    )
-    .expect("repository coordinates");
-    ProviderDeliveryIdentity::new(
-        if matches!(drift, SourceIdentityVariant::Tenant) {
-            TenantScope::from_authenticated_tenant_id("other-tenant").expect("other tenant")
-        } else {
-            tenant()
-        },
-        if matches!(drift, SourceIdentityVariant::Provider) {
-            "gitlab"
-        } else {
-            "github"
-        },
-        if matches!(drift, SourceIdentityVariant::Connection) {
-            ProviderConnectionId::from_uuid(Uuid::from_u128(0x21)).expect("other connection")
-        } else {
-            connection_id()
-        },
-        ProviderInstallationId::new(if matches!(drift, SourceIdentityVariant::Installation) {
-            12
-        } else {
-            11
-        })
-        .expect("installation ID"),
-        coordinates,
-        "delivery-1",
-    )
-    .expect("delivery identity")
-}
-
 fn consumer(action: GithubServerServiceAction) -> GithubServerServiceConsumerClaim {
     GithubServerServiceConsumerClaim::new(
         GithubServerServiceConsumerId::from_uuid(Uuid::from_u128(0x50)).expect("consumer ID"),
@@ -932,22 +869,6 @@ fn checks_context(authority: &GithubServerServiceAuthorityIdentity) -> ChecksCre
         identity: checks_identity(ChecksIdentityDrift::Exact),
         selector: GithubServerServiceAuthoritySelector::from_identity(authority),
         consumer: consumer(GithubServerServiceAction::CreateCheckRun),
-        observed_at: UnixMillis::new(OBSERVED_AT),
-        required_through: UnixMillis::new(REQUIRED_THROUGH),
-    }
-}
-
-fn source_context(
-    authority: &GithubServerServiceAuthorityIdentity,
-    drift: SourceIdentityVariant,
-    action: GithubDeliveryRepositoryAction,
-) -> SourceCredentialContext {
-    SourceCredentialContext {
-        identity: source_identity(drift),
-        repository_owner_id: ProviderRepositoryOwnerId::new(19).expect("repository owner ID"),
-        selector: GithubServerServiceAuthoritySelector::from_identity(authority),
-        action,
-        consumer: consumer(repository_action(action)),
         observed_at: UnixMillis::new(OBSERVED_AT),
         required_through: UnixMillis::new(REQUIRED_THROUGH),
     }
@@ -973,13 +894,8 @@ fn durable_adapters(
 }
 
 #[test]
-fn registry_is_bounded_unique_and_implements_both_delivery_ports() {
-    fn assert_ports<
-        T: GithubChecksCredentialProvider
-            + GithubDeliverySourceCredentialProvider
-            + GithubScheduleSourceCredentialProvider,
-    >() {
-    }
+fn registry_is_bounded_unique_and_implements_live_provider_ports() {
+    fn assert_ports<T: GithubChecksCredentialProvider + GithubScheduleSourceCredentialProvider>() {}
     assert_ports::<GithubProviderCredentialAdapters>();
 
     let checks = authority(GithubServerServiceScope::ChecksWrite, 0x60);
@@ -1212,178 +1128,6 @@ async fn retired_unknown_and_route_drifted_authorities_never_enter_handoff_io() 
     }
     assert_eq!(lookup.calls.load(Ordering::SeqCst), 4);
     assert_eq!(handoffs.calls.load(Ordering::SeqCst), 0);
-}
-
-#[tokio::test]
-async fn invalid_source_coordinates_and_wrong_scope_never_enter_handoff_io() {
-    let private = authority(GithubServerServiceScope::RepositoryContentsRead, 0x61);
-    let fake = Arc::new(FakeHandoffs::new(FakeHandoffMode::Exact));
-    let adapters = adapters(Arc::clone(&fake), std::slice::from_ref(&private));
-    for drift in [
-        SourceIdentityVariant::Provider,
-        SourceIdentityVariant::Tenant,
-        SourceIdentityVariant::Connection,
-        SourceIdentityVariant::Installation,
-        SourceIdentityVariant::ProviderRepository,
-        SourceIdentityVariant::RepositoryName,
-    ] {
-        assert_eq!(
-            adapters
-                .acquire_source(source_context(
-                    &private,
-                    drift,
-                    GithubDeliveryRepositoryAction::FetchRepositoryRevision,
-                ))
-                .await
-                .expect_err("source coordinate drift"),
-            GithubDeliverySourceCredentialProviderError::Rejected
-        );
-    }
-
-    let mut wrong_action = source_context(
-        &private,
-        SourceIdentityVariant::Exact,
-        GithubDeliveryRepositoryAction::FetchRepositoryRevision,
-    );
-    wrong_action.consumer = consumer(GithubServerServiceAction::CreateCheckRun);
-    assert_eq!(
-        adapters
-            .acquire_source(wrong_action)
-            .await
-            .expect_err("Checks action cannot authorize source"),
-        GithubDeliverySourceCredentialProviderError::Rejected
-    );
-    let mut changed_selector = source_context(
-        &private,
-        SourceIdentityVariant::Exact,
-        GithubDeliveryRepositoryAction::FetchRepositoryRevision,
-    );
-    changed_selector.selector = GithubServerServiceAuthoritySelector::from_durable_parts(
-        tenant(),
-        private.authority_id(),
-        Sha256Digest::from_bytes([0x7f; 32]),
-        private.app_configuration_revision(),
-        private.policy_revision(),
-    );
-    assert_eq!(
-        adapters
-            .acquire_source(changed_selector)
-            .await
-            .expect_err("App-bound selector drift"),
-        GithubDeliverySourceCredentialProviderError::Rejected
-    );
-    assert_eq!(fake.calls.load(Ordering::SeqCst), 0);
-}
-
-#[tokio::test]
-async fn public_source_uses_the_installation_handoff() {
-    let contents = authority(GithubServerServiceScope::RepositoryContentsRead, 0x610);
-    let fake = Arc::new(FakeHandoffs::new(FakeHandoffMode::Rejected));
-    let adapters = adapters(Arc::clone(&fake), std::slice::from_ref(&contents));
-    assert_eq!(
-        adapters
-            .acquire_source(source_context(
-                &contents,
-                SourceIdentityVariant::Public,
-                GithubDeliveryRepositoryAction::FetchRepositoryChangedFiles,
-            ))
-            .await
-            .expect_err("fake rejects after recording the public installation handoff"),
-        GithubDeliverySourceCredentialProviderError::Rejected
-    );
-    assert_eq!(fake.calls.load(Ordering::SeqCst), 1);
-}
-
-#[tokio::test]
-async fn revision_and_changed_files_use_distinct_exact_consumers() {
-    let private = authority(GithubServerServiceScope::RepositoryContentsRead, 0x61);
-    let fake = Arc::new(FakeHandoffs::new(FakeHandoffMode::Rejected));
-    let adapters = adapters(Arc::clone(&fake), std::slice::from_ref(&private));
-    for action in [
-        GithubDeliveryRepositoryAction::FetchRepositoryRevision,
-        GithubDeliveryRepositoryAction::FetchRepositoryChangedFiles,
-    ] {
-        let error = adapters
-            .acquire_source(source_context(
-                &private,
-                SourceIdentityVariant::Exact,
-                action,
-            ))
-            .await
-            .expect_err("fake rejects after recording exact request");
-        assert_eq!(error, GithubDeliverySourceCredentialProviderError::Rejected);
-    }
-    let requests = fake.requests();
-    assert_eq!(requests.len(), 2);
-    assert_eq!(
-        requests[0].consumer().action(),
-        GithubServerServiceAction::FetchRepositoryRevision
-    );
-    assert_eq!(
-        requests[1].consumer().action(),
-        GithubServerServiceAction::FetchRepositoryChangedFiles
-    );
-    assert_ne!(requests[0].consumer(), requests[1].consumer());
-    assert_eq!(requests[0].observed_at(), UnixMillis::new(OBSERVED_AT));
-    assert_eq!(
-        requests[0].required_through(),
-        UnixMillis::new(REQUIRED_THROUGH)
-    );
-}
-
-#[tokio::test]
-async fn pull_request_files_uses_only_its_pull_requests_read_selector() {
-    let source = authority(GithubServerServiceScope::RepositoryContentsRead, 0x621);
-    let pull_request_files = authority(GithubServerServiceScope::PullRequestsRead, 0x622);
-    let fake = Arc::new(FakeHandoffs::new(FakeHandoffMode::Rejected));
-    let adapters = adapters(
-        Arc::clone(&fake),
-        &[source.clone(), pull_request_files.clone()],
-    );
-
-    let error = adapters
-        .acquire_source(source_context(
-            &pull_request_files,
-            SourceIdentityVariant::Exact,
-            GithubDeliveryRepositoryAction::FetchPullRequestFiles,
-        ))
-        .await
-        .expect_err("fake rejects after recording exact PR-files request");
-    assert_eq!(error, GithubDeliverySourceCredentialProviderError::Rejected);
-    let requests = fake.requests();
-    assert_eq!(requests.len(), 1);
-    assert_eq!(
-        requests[0].selector().authority_id(),
-        pull_request_files.authority_id()
-    );
-    assert_eq!(
-        requests[0].consumer().action(),
-        GithubServerServiceAction::FetchPullRequestFiles
-    );
-
-    assert_eq!(
-        adapters
-            .acquire_source(source_context(
-                &source,
-                SourceIdentityVariant::Exact,
-                GithubDeliveryRepositoryAction::FetchPullRequestFiles,
-            ))
-            .await
-            .expect_err("contents selector cannot authorize pull-request files"),
-        GithubDeliverySourceCredentialProviderError::Rejected
-    );
-    assert_eq!(
-        adapters
-            .acquire_source(source_context(
-                &pull_request_files,
-                SourceIdentityVariant::Exact,
-                GithubDeliveryRepositoryAction::FetchRepositoryChangedFiles,
-            ))
-            .await
-            .expect_err("pull-requests selector cannot authorize Compare"),
-        GithubDeliverySourceCredentialProviderError::Rejected
-    );
-    assert_eq!(fake.requests().len(), 1);
 }
 
 #[tokio::test]

@@ -27,16 +27,13 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-mod changed_files;
 mod checks_presentation;
 mod checks_publisher;
 mod common_runtime;
-mod processor;
 mod result_adapter;
 mod schedule;
-mod service;
+mod server_credential;
 mod trigger_handler;
-mod worker;
 
 pub use checks_publisher::{
     GithubChecksCredentialProvider, GithubChecksCredentialProviderError,
@@ -53,23 +50,7 @@ pub use result_adapter::{
     GithubResultOperation, GithubResultProviderAdapter, GithubResultProviderAdapterError,
 };
 
-pub use changed_files::GithubRestPushChangedFilesProvider;
-
-pub use processor::{
-    GithubChangedFileSelection, GithubChangedFilesDisposition,
-    GithubDeliveryWorkflowAdmissionProcessor, GithubPullRequestChangedFilesAuthority,
-    GithubPullRequestChangedFilesRequest, GithubPushChangedFilesAuthority,
-    GithubPushChangedFilesProvider, GithubPushChangedFilesRequest,
-};
-
-pub use service::{
-    GithubDeliveryRepositoryAction, GithubDeliveryService, GithubDeliveryServiceConfig,
-    GithubDeliveryServiceConfigurationError, GithubDeliveryServiceError,
-    GithubDeliveryServiceOutcome, GithubDeliverySourceCredential,
-    GithubDeliverySourceCredentialBinding, GithubDeliverySourceCredentialProvider,
-    GithubDeliverySourceCredentialProviderError, GithubDeliverySourceCredentialRequest,
-    GithubDeliverySourceCredentialValueError, GithubServerServiceCredentialRelease,
-};
+pub use server_credential::GithubServerServiceCredentialRelease;
 
 pub use trigger_handler::{
     GithubTriggerCredential, GithubTriggerCredentialOperation, GithubTriggerCredentialProvider,
@@ -86,14 +67,6 @@ pub use schedule::{
     GithubScheduleSourceCredentialRequest, GithubScheduleSourceCredentialValueError,
 };
 
-pub use worker::{
-    GithubDeliveryClaimSnapshot, GithubDeliverySourceAuthority, GithubDeliveryWorker,
-    GithubDeliveryWorkerConfig, GithubDeliveryWorkerConfigurationError, GithubDeliveryWorkerError,
-    GithubDeliveryWorkerOutcome, GithubDeliveryWorkerPrerequisite, GithubDeliveryWorkflowProcessor,
-    GithubDeliveryWorkflowProcessorCompletion, GithubDeliveryWorkflowProcessorError,
-    GithubDeliveryWorkflowRequest,
-};
-
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
@@ -104,8 +77,6 @@ use automata_ci_blob::{BlobKey, BlobPayload, BlobStoreErrorKind, ImmutableBlobSt
 use automata_ci_core::GitObjectId;
 use automata_ci_core::{Sha256Digest, UnixMillis};
 use automata_ci_provider::ProviderConnectionId;
-#[cfg(test)]
-use automata_ci_provider_github::VerifiedGithubPush;
 use automata_ci_provider_github::{
     GITHUB_EVENT_ENVELOPE_V1_MEDIA_TYPE, GITHUB_RAW_EVENT_OBJECT_KEY_PREFIX, GithubCheckRunAction,
     GithubMergeGroupAction, GithubPullRequestAction, GithubRepositoryVisibility,
@@ -1174,16 +1145,6 @@ fn delivery_check_kind(
         ),
         _ => Err(GithubDeliveryIngressError::InvariantViolation),
     }
-}
-
-#[cfg(test)]
-fn check_head_sha(push: &VerifiedGithubPush) -> Result<GitObjectId, GithubDeliveryIngressError> {
-    let value = if push.deleted() {
-        push.before_commit_sha()
-    } else {
-        push.after_commit_sha()
-    };
-    github_check_head_sha(value)
 }
 
 const fn provider_visibility(
