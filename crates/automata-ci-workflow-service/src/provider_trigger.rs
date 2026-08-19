@@ -560,11 +560,7 @@ fn admission_request(
     )
     .map_err(|_| ProviderWorkflowApplicationError::InvalidEvidence)?;
     let tenant = TenantScope::from_authenticated_tenant_id(
-        request
-            .connection
-            .configuration()
-            .workspace_id()
-            .to_string(),
+        request.connection.configuration().tenant_id().to_string(),
     )
     .map_err(|_| ProviderWorkflowApplicationError::InvalidEvidence)?;
     let idempotency = WorkflowAdmissionIdempotency::provider_delivery(

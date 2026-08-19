@@ -180,6 +180,63 @@ async fn seed_immutable_auxiliary_evidence(pool: &PgPool) -> TestResult {
     Ok(())
 }
 
+async fn seed_managed_workspace_owner(pool: &PgPool) -> TestResult {
+    let principal_id = Uuid::new_v4();
+    let role_id = Uuid::new_v4();
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        r"
+        INSERT INTO human_principals (
+            id, status, display_name, revision, created_at_ms, updated_at_ms
+        ) VALUES ($1, 'active', 'Migration owner', 1, 1, 1)
+        ",
+    )
+    .bind(principal_id)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        r"
+        INSERT INTO tenants (
+            id, display_name, created_at_ms, updated_at_ms
+        ) VALUES ('00000000-0000-4000-8000-000000000070', 'Migration tenant', 1, 1)
+        ",
+    )
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        r"
+        INSERT INTO tenant_human_memberships (
+            tenant_id, principal_id, status, authorization_revision,
+            revision, created_at_ms, updated_at_ms
+        ) VALUES (
+            '00000000-0000-4000-8000-000000000070', $1,
+            'active', 1, 1, 1, 1
+        )
+        ",
+    )
+    .bind(principal_id)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        r"
+        INSERT INTO rbac_roles (
+            tenant_id, id, name, display_name, role_kind, immutable,
+            revision, created_by_principal_id, created_at_ms, updated_at_ms
+        ) VALUES (
+            '00000000-0000-4000-8000-000000000070', $2,
+            'workspace-owner', 'Workspace owner', 'built_in', TRUE,
+            1, $1, 1, 1
+        )
+        ",
+    )
+    .bind(principal_id)
+    .bind(role_id)
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    Ok(())
+}
+
 async fn assert_migrated_contract(pool: &PgPool) -> TestResult {
     let aggregate_check_kind: String =
         sqlx::query_scalar("SELECT aggregate_check_kind FROM github_provider_delivery_evidence")
@@ -230,6 +287,89 @@ async fn assert_migrated_contract(pool: &PgPool) -> TestResult {
     Ok(())
 }
 
+async fn assert_managed_tenant_contract(pool: &PgPool) -> TestResult {
+    let managed_tenant_relations: i64 = sqlx::query_scalar(
+        r"
+        SELECT count(*)
+        FROM pg_catalog.pg_class AS relation
+        JOIN pg_catalog.pg_namespace AS namespace
+          ON namespace.oid = relation.relnamespace
+        WHERE namespace.nspname = 'automata_test'
+          AND relation.relname IN (
+              'tenant_provisioning_operations',
+              'tenant_management_bindings',
+              'tenant_entitlement_operations',
+              'tenant_execution_entitlements',
+              'tenant_usage_events',
+              'tenant_github_repository_operations',
+              'tenant_github_repository_current',
+              'tenant_github_repository_selections',
+              'tenant_github_repository_installation_bindings'
+          )
+        ",
+    )
+    .fetch_one(pool)
+    .await?;
+    assert_eq!(managed_tenant_relations, 9);
+
+    let legacy_managed_workspace_objects: i64 = sqlx::query_scalar(
+        r"
+        SELECT (
+            SELECT count(*)
+            FROM pg_catalog.pg_class AS relation
+            JOIN pg_catalog.pg_namespace AS namespace
+              ON namespace.oid = relation.relnamespace
+            WHERE namespace.nspname = 'automata_test'
+              AND relation.relname LIKE 'workspace\_%' ESCAPE '\'
+        ) + (
+            SELECT count(*)
+            FROM information_schema.columns
+            WHERE table_schema = 'automata_test'
+              AND column_name = 'workspace_id'
+        ) + (
+            SELECT count(*)
+            FROM pg_catalog.pg_constraint AS constraint_catalog
+            JOIN pg_catalog.pg_class AS relation
+              ON relation.oid = constraint_catalog.conrelid
+            JOIN pg_catalog.pg_namespace AS namespace
+              ON namespace.oid = relation.relnamespace
+            WHERE namespace.nspname = 'automata_test'
+              AND constraint_catalog.conname LIKE '%workspace%'
+              AND relation.relname IN (
+                  'tenant_provisioning_operations',
+                  'tenant_management_bindings',
+                  'tenant_entitlement_operations',
+                  'tenant_execution_entitlements',
+                  'tenant_usage_events',
+                  'tenant_github_repository_operations',
+                  'tenant_github_repository_current',
+                  'tenant_github_repository_selections',
+                  'tenant_github_repository_installation_bindings',
+                  'provider_connection_revisions'
+              )
+        )
+        ",
+    )
+    .fetch_one(pool)
+    .await?;
+    assert_eq!(legacy_managed_workspace_objects, 0);
+
+    let owner_role: (String, String, i64) = sqlx::query_as(
+        r"
+        SELECT name, display_name, revision
+        FROM rbac_roles
+        WHERE role_kind = 'built_in'
+          AND immutable
+        ",
+    )
+    .fetch_one(pool)
+    .await?;
+    assert_eq!(owner_role.0, "tenant-owner");
+    assert_eq!(owner_role.1, "Tenant owner");
+    assert_eq!(owner_role.2, 2);
+    Ok(())
+}
+
 #[tokio::test]
 #[ignore = "requires PostgreSQL 18 via AUTOMATA_TEST_DATABASE_URL"]
 async fn production_migrations_upgrade_deployed_schema_and_immutable_evidence() -> TestResult {
@@ -247,15 +387,17 @@ async fn production_migrations_upgrade_deployed_schema_and_immutable_evidence() 
             .await?;
         assert_eq!(deployed_version, 60);
 
+        seed_managed_workspace_owner(&database.pool).await?;
         seed_immutable_auxiliary_evidence(&database.pool).await?;
 
         MIGRATOR.run(&database.pool).await?;
         let applied_version: i64 = sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations")
             .fetch_one(&database.pool)
             .await?;
-        assert_eq!(applied_version, 69);
+        assert_eq!(applied_version, 70);
 
         assert_migrated_contract(&database.pool).await?;
+        assert_managed_tenant_contract(&database.pool).await?;
         Ok(())
     })
     .await

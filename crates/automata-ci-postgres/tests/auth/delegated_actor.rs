@@ -10,14 +10,14 @@ use automata_ci_auth::{
     time::UnixTimestamp,
 };
 use automata_ci_auth_postgres::PostgresDelegatedActorResolver;
-use automata_ci_core::WorkspaceId;
+use automata_ci_core::ManagedTenantId;
 use automata_ci_postgres::test_support::run_with_unmigrated_database;
 use automata_ci_provisioning::{
-    AuthorizedProvisionWorkspace, DelegatedActorIssuer, DisplayName, ExternalAccountSubject,
-    OperationId, ProvisionWorkspaceCommand, ProvisioningAuthority, ProvisioningAuthorityId,
-    ShardId, WorkspaceProvisioner as _,
+    AuthorizedProvisionTenant, DelegatedActorIssuer, DisplayName, ExternalAccountSubject,
+    OperationId, ProvisionTenantCommand, ProvisioningAuthority, ProvisioningAuthorityId, ShardId,
+    TenantProvisioner as _,
 };
-use automata_ci_provisioning_postgres::PostgresWorkspaceProvisioner;
+use automata_ci_provisioning_postgres::PostgresTenantProvisioner;
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -37,18 +37,18 @@ fn authority() -> ProvisioningAuthority {
     )
 }
 
-fn provision_request(workspace_id: WorkspaceId, subject: Uuid) -> AuthorizedProvisionWorkspace {
+fn provision_request(tenant_id: ManagedTenantId, subject: Uuid) -> AuthorizedProvisionTenant {
     let authority = authority();
-    let command = ProvisionWorkspaceCommand::new(
+    let command = ProvisionTenantCommand::new(
         OperationId::from_uuid(Uuid::new_v4()).expect("operation ID"),
         authority.shard_id().clone(),
-        workspace_id,
-        DisplayName::new("Billing authorization test").expect("workspace display name"),
+        tenant_id,
+        DisplayName::new("Billing authorization test").expect("tenant display name"),
         authority.delegated_actor_issuer().clone(),
         ExternalAccountSubject::from_uuid(subject).expect("external subject"),
         DisplayName::new("Test Owner").expect("owner display name"),
     );
-    AuthorizedProvisionWorkspace::authorize(authority, command).expect("authorized request")
+    AuthorizedProvisionTenant::authorize(authority, command).expect("authorized request")
 }
 
 async fn wait_for_pending_lock(pool: &PgPool, query: &'static str) -> TestResult {
@@ -64,7 +64,7 @@ async fn wait_for_pending_lock(pool: &PgPool, query: &'static str) -> TestResult
     Ok(())
 }
 
-async fn billing_permissions(pool: &PgPool, workspace_id: WorkspaceId) -> TestResult<Vec<String>> {
+async fn billing_permissions(pool: &PgPool, tenant_id: ManagedTenantId) -> TestResult<Vec<String>> {
     Ok(sqlx::query_scalar(
         r"
         SELECT permission.permission_name
@@ -73,20 +73,20 @@ async fn billing_permissions(pool: &PgPool, workspace_id: WorkspaceId) -> TestRe
           ON permission.tenant_id = role.tenant_id
          AND permission.role_id = role.id
         WHERE role.tenant_id = $1
-          AND role.name = 'workspace-owner'
+          AND role.name = 'tenant-owner'
           AND permission.permission_name = ANY(ARRAY['billing:manage', 'billing:read'])
         ORDER BY permission.permission_name
         ",
     )
-    .bind(workspace_id.to_string())
+    .bind(tenant_id.to_string())
     .fetch_all(pool)
     .await?)
 }
 
-async fn install_workspace_owner_pause(pool: &PgPool) -> TestResult {
+async fn install_tenant_owner_pause(pool: &PgPool) -> TestResult {
     sqlx::raw_sql(
         r"
-        CREATE FUNCTION automata_test.pause_workspace_owner_insert()
+        CREATE FUNCTION automata_test.pause_tenant_owner_insert()
         RETURNS TRIGGER
         LANGUAGE plpgsql
         AS $$
@@ -96,11 +96,11 @@ async fn install_workspace_owner_pause(pool: &PgPool) -> TestResult {
         END;
         $$;
 
-        CREATE TRIGGER pause_workspace_owner_insert
+        CREATE TRIGGER pause_tenant_owner_insert
         AFTER INSERT ON rbac_roles
         FOR EACH ROW
-        WHEN (NEW.name = 'workspace-owner')
-        EXECUTE FUNCTION automata_test.pause_workspace_owner_insert();
+        WHEN (NEW.name = 'tenant-owner')
+        EXECUTE FUNCTION automata_test.pause_tenant_owner_insert();
         ",
     )
     .execute(pool)
@@ -117,7 +117,7 @@ async fn billing_migration_serializes_concurrent_owner_provisioning() -> TestRes
             MIGRATOR
                 .run_to(PRE_BILLING_MIGRATION_VERSION, database.pool())
                 .await?;
-            install_workspace_owner_pause(database.pool()).await?;
+            install_tenant_owner_pause(database.pool()).await?;
 
             let mut pause_guard = database.pool().acquire().await?;
             sqlx::query("SELECT pg_advisory_lock($1)")
@@ -125,12 +125,12 @@ async fn billing_migration_serializes_concurrent_owner_provisioning() -> TestRes
                 .execute(&mut *pause_guard)
                 .await?;
 
-            let workspace_id = WorkspaceId::from_uuid(Uuid::new_v4())?;
+            let tenant_id = ManagedTenantId::from_uuid(Uuid::new_v4())?;
             let subject = Uuid::new_v4();
-            let adapter = PostgresWorkspaceProvisioner::new(database.pool().clone());
+            let adapter = PostgresTenantProvisioner::new(database.pool().clone());
             let provisioning = tokio::spawn(async move {
                 adapter
-                    .provision(provision_request(workspace_id, subject))
+                    .provision(provision_request(tenant_id, subject))
                     .await
             });
 
@@ -183,7 +183,7 @@ async fn billing_migration_serializes_concurrent_owner_provisioning() -> TestRes
             tokio::time::timeout(Duration::from_secs(10), migration).await???;
 
             assert_eq!(
-                billing_permissions(database.pool(), workspace_id).await?,
+                billing_permissions(database.pool(), tenant_id).await?,
                 ["billing:manage".to_owned(), "billing:read".to_owned()]
             );
             let authorization_revision: i64 = sqlx::query_scalar(
@@ -193,7 +193,7 @@ async fn billing_migration_serializes_concurrent_owner_provisioning() -> TestRes
                 WHERE tenant_id = $1 AND principal_id = $2
                 ",
             )
-            .bind(workspace_id.to_string())
+            .bind(tenant_id.to_string())
             .bind(result.initial_owner_principal_id().as_uuid())
             .fetch_one(database.pool())
             .await?;
@@ -208,13 +208,13 @@ async fn billing_migration_serializes_concurrent_owner_provisioning() -> TestRes
 #[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
 async fn delegated_actor_resolver_loads_exact_requested_billing_permissions() -> TestResult {
     run_with_database(|database| async move {
-        let workspace_id = WorkspaceId::from_uuid(Uuid::new_v4())?;
+        let tenant_id = ManagedTenantId::from_uuid(Uuid::new_v4())?;
         let subject = Uuid::new_v4();
-        let provisioned = PostgresWorkspaceProvisioner::new(database.pool().clone())
-            .provision(provision_request(workspace_id, subject))
+        let provisioned = PostgresTenantProvisioner::new(database.pool().clone())
+            .provision(provision_request(tenant_id, subject))
             .await?;
 
-        let tenant_id = TenantId::new(workspace_id.to_string())?;
+        let tenant_id = TenantId::new(tenant_id.to_string())?;
         let assertion = DelegatedActorAssertion::new(
             "https://cloud.automata.example",
             subject,

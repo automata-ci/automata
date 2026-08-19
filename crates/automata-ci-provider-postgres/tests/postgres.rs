@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use automata_ci_core::{
-    GitObjectAlgorithm, GitObjectId, RunId, Sha256Digest, TrustEventKind, TrustEvidence,
-    TrustOriginKind, TrustPolicy, TrustRepositoryEvidence, TrustTokenRecursion, UnixMillis,
-    WorkflowId, WorkflowJobKey, WorkspaceId,
+    GitObjectAlgorithm, GitObjectId, ManagedTenantId, RunId, Sha256Digest, TrustEventKind,
+    TrustEvidence, TrustOriginKind, TrustPolicy, TrustRepositoryEvidence, TrustTokenRecursion,
+    UnixMillis, WorkflowId, WorkflowJobKey,
 };
 use automata_ci_key_management::{KeyId, LocalAes256GcmKeyring, LocalKeyMaterial, SecretBytes};
 use automata_ci_postgres::test_support::{TestResult, run_with_database};
@@ -140,20 +140,20 @@ fn instance_record(
 }
 
 fn connection(
-    workspace_id: WorkspaceId,
+    tenant_id: ManagedTenantId,
     instance: &ProviderInstanceManifest,
 ) -> ProviderConnectionManifest {
-    connection_for(workspace_id, instance, 99, "42")
+    connection_for(tenant_id, instance, 99, "42")
 }
 
 fn connection_for(
-    workspace_id: WorkspaceId,
+    tenant_id: ManagedTenantId,
     instance: &ProviderInstanceManifest,
     connection_id: u128,
     external_repository_id: &str,
 ) -> ProviderConnectionManifest {
     let configuration = ProviderConnectionConfiguration::new(
-        workspace_id,
+        tenant_id,
         ExternalRepositoryIdentity::new(
             instance.instance_id(),
             ExternalRepositoryId::new(external_repository_id).expect("repository"),
@@ -198,13 +198,13 @@ fn connection_for(
 }
 
 fn connection_with_runner_policy(
-    workspace_id: WorkspaceId,
+    tenant_id: ManagedTenantId,
     instance: &ProviderInstanceManifest,
     runner_policy: ProviderRunnerPolicyBinding,
 ) -> ProviderConnectionManifest {
-    let mut connection = connection(workspace_id, instance);
+    let mut connection = connection(tenant_id, instance);
     let configuration = ProviderConnectionConfiguration::new(
-        workspace_id,
+        tenant_id,
         connection.configuration().repository().clone(),
         instance.revision(),
         instance.configuration().digest(),
@@ -441,27 +441,27 @@ async fn instance_and_connection_revisions_are_atomic_encrypted_and_exact() -> T
             TOKEN
         );
 
-        let workspace = WorkspaceId::parse("11111111-1111-4111-8111-111111111111")?;
+        let tenant = ManagedTenantId::parse("11111111-1111-4111-8111-111111111111")?;
         assert_eq!(
             repository
-                .save_connection(connection(workspace, current.manifest()))
+                .save_connection(connection(tenant, current.manifest()))
                 .await,
             Err(ProviderRepositoryError::NotFound)
         );
         sqlx::query(
             "INSERT INTO tenants (id, display_name, created_at_ms, updated_at_ms) VALUES ($1, 'Provider test', 1, 1)",
         )
-        .bind(workspace.to_string())
+        .bind(tenant.to_string())
         .execute(database.pool())
         .await?;
-        let first_connection = connection(workspace, current.manifest());
+        let first_connection = connection(tenant, current.manifest());
         assert_eq!(
             repository.save_connection(first_connection).await?,
             ProviderSaveOutcome::Inserted
         );
         assert_eq!(
             repository
-                .save_connection(connection(workspace, current.manifest()))
+                .save_connection(connection(tenant, current.manifest()))
                 .await?,
             ProviderSaveOutcome::Unchanged
         );
@@ -471,7 +471,7 @@ async fn instance_and_connection_revisions_are_atomic_encrypted_and_exact() -> T
             )
             .await?
             .expect("current connection");
-        assert_eq!(loaded_connection.configuration().workspace_id(), workspace);
+        assert_eq!(loaded_connection.configuration().tenant_id(), tenant);
         assert_eq!(
             loaded_connection
                 .configuration()
@@ -548,11 +548,11 @@ async fn disabled_endpoint_does_not_require_an_active_connection() -> TestResult
 async fn provider_results_are_contiguous_fenced_and_rehydratable() -> TestResult {
     run_with_database(|database| async move {
         let repository = repository(database.pool().clone());
-        let workspace = WorkspaceId::from_uuid(Uuid::from_u128(0x5900))?;
+        let tenant = ManagedTenantId::from_uuid(Uuid::from_u128(0x5900))?;
         sqlx::query(
             "INSERT INTO tenants (id, display_name, created_at_ms, updated_at_ms) VALUES ($1, 'Provider results', 1, 1)",
         )
-        .bind(workspace.to_string())
+        .bind(tenant.to_string())
         .execute(database.pool())
         .await?;
         let instance_id = ProviderInstanceId::from_uuid(Uuid::from_u128(0x5901))?;
@@ -571,7 +571,7 @@ async fn provider_results_are_contiguous_fenced_and_rehydratable() -> TestResult
             .current_instance(instance_id)
             .await?
             .expect("provider instance");
-        let connection = connection(workspace, instance.manifest());
+        let connection = connection(tenant, instance.manifest());
         repository.save_connection(connection.clone()).await?;
 
         let subject = ProviderResultSubject::new(
@@ -857,8 +857,8 @@ async fn provider_results_are_contiguous_fenced_and_rehydratable() -> TestResult
 async fn github_result_credentials_revalidate_the_common_result_lease() -> TestResult {
     run_with_database(|database| async move {
         let manifests = repository(database.pool().clone());
-        let workspace = WorkspaceId::from_uuid(Uuid::from_u128(0x5a00))?;
-        let tenant = workspace.to_string();
+        let managed_tenant = ManagedTenantId::from_uuid(Uuid::from_u128(0x5a00))?;
+        let tenant = managed_tenant.to_string();
         let internal_repository_id = RepositoryId::from_uuid(Uuid::from_u128(0x5a01));
         sqlx::query(
             "INSERT INTO tenants (id, display_name, created_at_ms, updated_at_ms) VALUES ($1, 'GitHub result authority', 1, 1)",
@@ -895,7 +895,7 @@ async fn github_result_credentials_revalidate_the_common_result_lease() -> TestR
             .current_instance(instance_id)
             .await?
             .expect("GitHub provider instance");
-        let connection = connection(workspace, instance.manifest());
+        let connection = connection(managed_tenant, instance.manifest());
         manifests.save_connection(connection.clone()).await?;
 
         let subject = ProviderResultSubject::new(
@@ -1325,13 +1325,13 @@ async fn provider_admission_binds_normalized_trigger_and_replays_after_claim_rot
             .current_instance(instance_id)
             .await?
             .expect("provider instance");
-        let workspace = WorkspaceId::parse("00000000-0000-4000-8000-000000005142")?;
-        let tenant = workspace.to_string();
+        let managed_tenant = ManagedTenantId::parse("00000000-0000-4000-8000-000000005142")?;
+        let tenant = managed_tenant.to_string();
         let repository_id = RepositoryId::from_uuid(Uuid::from_u128(0x5149));
         sqlx::query(
             "INSERT INTO tenants (id, display_name, created_at_ms, updated_at_ms) VALUES ($1, 'Provider admission test', 1, 1)",
         )
-        .bind(workspace.to_string())
+        .bind(managed_tenant.to_string())
         .execute(database.pool())
         .await?;
         let runtime_policy = WorkflowRuntimePolicy::decode_configuration(RUNTIME_POLICY)?;
@@ -1339,7 +1339,8 @@ async fn provider_admission_binds_normalized_trigger_and_replays_after_claim_rot
             ProviderSchemaVersion::new(runtime_policy.schema())?,
             runtime_policy.canonical_digest(),
         );
-        let connection = connection_with_runner_policy(workspace, instance.manifest(), runner_policy);
+        let connection =
+            connection_with_runner_policy(managed_tenant, instance.manifest(), runner_policy);
         repository.save_connection(connection.clone()).await?;
         seed_provider_runtime_policy(
             database.pool(),
@@ -1637,16 +1638,16 @@ async fn endpoint_secrets_replay_conflicts_and_worker_fences_are_exact() -> Test
             .current_instance(instance_id)
             .await?
             .expect("instance");
-        let workspace = WorkspaceId::parse("22222222-2222-4222-8222-222222222222")?;
+        let tenant = ManagedTenantId::parse("22222222-2222-4222-8222-222222222222")?;
         sqlx::query(
             "INSERT INTO tenants (id, display_name, created_at_ms, updated_at_ms) VALUES ($1, 'Delivery test', 1, 1)",
         )
-        .bind(workspace.to_string())
+        .bind(tenant.to_string())
         .execute(database.pool())
         .await?;
-        let connection = connection(workspace, instance.manifest());
+        let connection = connection(tenant, instance.manifest());
         repository.save_connection(connection.clone()).await?;
-        let second_connection = connection_for(workspace, instance.manifest(), 100, "43");
+        let second_connection = connection_for(tenant, instance.manifest(), 100, "43");
         repository
             .save_connection(second_connection.clone())
             .await?;

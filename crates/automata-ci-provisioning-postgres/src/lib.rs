@@ -5,9 +5,8 @@
 use std::fmt;
 
 use automata_ci_provisioning::{
-    AuthorizedProvisionWorkspace, InitialOwnerPrincipalId, ProvisionWorkspaceResult, ProvisionedAt,
-    ProvisioningFailure, ProvisioningFailureKind, WorkspaceProvisioner,
-    WorkspaceProvisioningFuture,
+    AuthorizedProvisionTenant, InitialOwnerPrincipalId, ProvisionTenantResult, ProvisionedAt,
+    ProvisioningFailure, ProvisioningFailureKind, TenantProvisioner, TenantProvisioningFuture,
 };
 use sqlx::{FromRow, PgPool, Postgres, Transaction};
 use uuid::Uuid;
@@ -16,30 +15,30 @@ mod entitlement;
 mod github_provider;
 mod usage;
 
-pub use entitlement::PostgresWorkspaceEntitlementApplier;
+pub use entitlement::PostgresTenantEntitlementApplier;
 pub use github_provider::{
     PostgresGithubProviderConfigurationApplier, PostgresGithubProviderDesiredStateReader,
-    PostgresGithubProviderRunnerPolicyApplier, PostgresWorkspaceGithubRepositoriesApplier,
+    PostgresGithubProviderRunnerPolicyApplier, PostgresTenantGithubRepositoriesApplier,
 };
-pub use usage::PostgresWorkspaceUsageExporter;
+pub use usage::PostgresTenantUsageExporter;
 
-const WORKSPACE_OWNER_ROLE_NAME: &str = "workspace-owner";
-const WORKSPACE_OWNER_ROLE_DISPLAY_NAME: &str = "Workspace owner";
-const WORKSPACE_PROVISIONED_AUDIT_ACTION: &str = "workspace.provisioned";
+const TENANT_OWNER_ROLE_NAME: &str = "tenant-owner";
+const TENANT_OWNER_ROLE_DISPLAY_NAME: &str = "Tenant owner";
+const TENANT_PROVISIONED_AUDIT_ACTION: &str = "tenant.provisioned";
 
-/// Replica-safe `PostgreSQL` implementation of the workspace provisioning port.
+/// Replica-safe `PostgreSQL` implementation of the tenant provisioning port.
 ///
-/// The adapter stores the idempotency receipt and every workspace, identity,
+/// The adapter stores the idempotency receipt and every tenant, identity,
 /// membership, authorization, and audit effect in one transaction. An exact
-/// retry returns the original stable result; a reused operation or workspace
+/// retry returns the original stable result; a reused operation or tenant
 /// identity fails without changing durable state.
 #[derive(Clone)]
-pub struct PostgresWorkspaceProvisioner {
+pub struct PostgresTenantProvisioner {
     pool: PgPool,
 }
 
-impl PostgresWorkspaceProvisioner {
-    /// Binds workspace provisioning to `pool`.
+impl PostgresTenantProvisioner {
+    /// Binds tenant provisioning to `pool`.
     #[must_use]
     pub const fn new(pool: PgPool) -> Self {
         Self { pool }
@@ -48,15 +47,15 @@ impl PostgresWorkspaceProvisioner {
     #[allow(clippy::too_many_lines)] // The ordered statements intentionally form one transaction.
     async fn provision_inner(
         &self,
-        request: AuthorizedProvisionWorkspace,
-    ) -> Result<ProvisionWorkspaceResult, ProvisioningFailure> {
+        request: AuthorizedProvisionTenant,
+    ) -> Result<ProvisionTenantResult, ProvisioningFailure> {
         let (authority, command) = request.into_parts();
         let authority_id = authority.id().as_str();
         let operation_id = command.operation_id();
         let shard_id = command.shard_id();
-        let workspace_id = command.workspace_id();
-        let workspace_text = workspace_id.to_string();
-        let workspace_display_name = command.workspace_display_name().as_str();
+        let tenant_id = command.tenant_id();
+        let tenant_text = tenant_id.to_string();
+        let tenant_display_name = command.tenant_display_name().as_str();
         let owner_issuer = command.initial_owner_issuer().as_str();
         let owner_subject = command.initial_owner_subject();
         let owner_display_name = command.initial_owner_display_name().as_str();
@@ -65,9 +64,9 @@ impl PostgresWorkspaceProvisioner {
         let created_at_ms = database_time_milliseconds(&mut transaction).await?;
         let inserted = sqlx::query(
             r"
-            INSERT INTO workspace_provisioning_operations (
-                authority_id, operation_id, shard_id, workspace_id,
-                workspace_display_name, initial_owner_issuer,
+            INSERT INTO tenant_provisioning_operations (
+                authority_id, operation_id, shard_id, tenant_id,
+                tenant_display_name, initial_owner_issuer,
                 initial_owner_subject, initial_owner_display_name, state,
                 created_at_ms
             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'pending',$9)
@@ -77,8 +76,8 @@ impl PostgresWorkspaceProvisioner {
         .bind(authority_id)
         .bind(operation_id.as_uuid())
         .bind(shard_id.as_str())
-        .bind(&workspace_text)
-        .bind(workspace_display_name)
+        .bind(&tenant_text)
+        .bind(tenant_display_name)
         .bind(owner_issuer)
         .bind(owner_subject.as_uuid())
         .bind(owner_display_name)
@@ -92,15 +91,15 @@ impl PostgresWorkspaceProvisioner {
                 load_operation(&mut transaction, authority_id, operation_id.as_uuid()).await?;
             if !stored.matches(
                 shard_id.as_str(),
-                &workspace_text,
-                workspace_display_name,
+                &tenant_text,
+                tenant_display_name,
                 owner_issuer,
                 owner_subject.as_uuid(),
                 owner_display_name,
             ) {
                 return Err(failure(ProvisioningFailureKind::OperationConflict));
             }
-            return stored.result(operation_id, shard_id.clone(), workspace_id);
+            return stored.result(operation_id, shard_id.clone(), tenant_id);
         }
 
         let tenant_inserted = sqlx::query(
@@ -109,23 +108,23 @@ impl PostgresWorkspaceProvisioner {
             VALUES ($1,$2,$3,$3) ON CONFLICT (id) DO NOTHING
             ",
         )
-        .bind(&workspace_text)
-        .bind(workspace_display_name)
+        .bind(&tenant_text)
+        .bind(tenant_display_name)
         .bind(created_at_ms)
         .execute(&mut *transaction)
         .await
         .map_err(database_failure)?;
         if tenant_inserted.rows_affected() != 1 {
-            return Err(failure(ProvisioningFailureKind::WorkspaceConflict));
+            return Err(failure(ProvisioningFailureKind::TenantConflict));
         }
         sqlx::query(
             r"
-            INSERT INTO workspace_management_bindings (
-                workspace_id, authority_id, shard_id, created_at_ms
+            INSERT INTO tenant_management_bindings (
+                tenant_id, authority_id, shard_id, created_at_ms
             ) VALUES ($1,$2,$3,$4)
             ",
         )
-        .bind(&workspace_text)
+        .bind(&tenant_text)
         .bind(authority_id)
         .bind(shard_id.as_str())
         .bind(created_at_ms)
@@ -152,7 +151,7 @@ impl PostgresWorkspaceProvisioner {
             ) VALUES ($1,$2,'active',1,1,$3,$3)
             ",
         )
-        .bind(&workspace_text)
+        .bind(&tenant_text)
         .bind(principal_id)
         .bind(created_at_ms)
         .execute(&mut *transaction)
@@ -166,10 +165,10 @@ impl PostgresWorkspaceProvisioner {
             ) VALUES ($1,$2,$3,$4,'built_in',TRUE,1,$5,$6,$6)
             ",
         )
-        .bind(&workspace_text)
+        .bind(&tenant_text)
         .bind(role_id)
-        .bind(WORKSPACE_OWNER_ROLE_NAME)
-        .bind(WORKSPACE_OWNER_ROLE_DISPLAY_NAME)
+        .bind(TENANT_OWNER_ROLE_NAME)
+        .bind(TENANT_OWNER_ROLE_DISPLAY_NAME)
         .bind(principal_id)
         .bind(created_at_ms)
         .execute(&mut *transaction)
@@ -188,7 +187,7 @@ impl PostgresWorkspaceProvisioner {
             SELECT count(*) FROM granted
             ",
         )
-        .bind(&workspace_text)
+        .bind(&tenant_text)
         .bind(role_id)
         .bind(principal_id)
         .bind(created_at_ms)
@@ -207,7 +206,7 @@ impl PostgresWorkspaceProvisioner {
             ) VALUES ($1,$2,$3,$4,'tenant','bootstrap','active',$3,$5,1)
             ",
         )
-        .bind(&workspace_text)
+        .bind(&tenant_text)
         .bind(binding_id)
         .bind(principal_id)
         .bind(role_id)
@@ -222,19 +221,19 @@ impl PostgresWorkspaceProvisioner {
             INSERT INTO security_audit_events (
                 event_id, tenant_id, occurred_at_ms, actor_kind, action,
                 outcome, resource_kind, resource_id
-            ) VALUES ($1,$2,$3,'system',$4,'succeeded','workspace',$2)
+            ) VALUES ($1,$2,$3,'system',$4,'succeeded','tenant',$2)
             ",
         )
         .bind(Uuid::new_v4())
-        .bind(&workspace_text)
+        .bind(&tenant_text)
         .bind(provisioned_at_ms)
-        .bind(WORKSPACE_PROVISIONED_AUDIT_ACTION)
+        .bind(TENANT_PROVISIONED_AUDIT_ACTION)
         .execute(&mut *transaction)
         .await
         .map_err(database_failure)?;
         let completed = sqlx::query(
             r"
-            UPDATE workspace_provisioning_operations
+            UPDATE tenant_provisioning_operations
             SET state='completed', initial_owner_principal_id=$3,
                 provisioned_at_ms=$4
             WHERE authority_id=$1 AND operation_id=$2 AND state='pending'
@@ -254,26 +253,26 @@ impl PostgresWorkspaceProvisioner {
 
         let initial_owner_principal_id = InitialOwnerPrincipalId::from_uuid(principal_id)
             .map_err(|_| failure(ProvisioningFailureKind::Internal))?;
-        Ok(ProvisionWorkspaceResult::new(
+        Ok(ProvisionTenantResult::new(
             operation_id,
             shard_id.clone(),
-            workspace_id,
+            tenant_id,
             initial_owner_principal_id,
             provisioned_at(provisioned_at_ms)?,
         ))
     }
 }
 
-impl fmt::Debug for PostgresWorkspaceProvisioner {
+impl fmt::Debug for PostgresTenantProvisioner {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("PostgresWorkspaceProvisioner")
+            .debug_struct("PostgresTenantProvisioner")
             .finish_non_exhaustive()
     }
 }
 
-impl WorkspaceProvisioner for PostgresWorkspaceProvisioner {
-    fn provision(&self, request: AuthorizedProvisionWorkspace) -> WorkspaceProvisioningFuture<'_> {
+impl TenantProvisioner for PostgresTenantProvisioner {
+    fn provision(&self, request: AuthorizedProvisionTenant) -> TenantProvisioningFuture<'_> {
         Box::pin(self.provision_inner(request))
     }
 }
@@ -281,8 +280,8 @@ impl WorkspaceProvisioner for PostgresWorkspaceProvisioner {
 #[derive(FromRow)]
 struct StoredOperation {
     shard_id: String,
-    workspace_id: String,
-    workspace_display_name: String,
+    tenant_id: String,
+    tenant_display_name: String,
     initial_owner_issuer: String,
     initial_owner_subject: Uuid,
     initial_owner_display_name: String,
@@ -296,15 +295,15 @@ impl StoredOperation {
     fn matches(
         &self,
         shard_id: &str,
-        workspace_id: &str,
-        workspace_display_name: &str,
+        tenant_id: &str,
+        tenant_display_name: &str,
         owner_issuer: &str,
         owner_subject: Uuid,
         owner_display_name: &str,
     ) -> bool {
         self.shard_id == shard_id
-            && self.workspace_id == workspace_id
-            && self.workspace_display_name == workspace_display_name
+            && self.tenant_id == tenant_id
+            && self.tenant_display_name == tenant_display_name
             && self.initial_owner_issuer == owner_issuer
             && self.initial_owner_subject == owner_subject
             && self.initial_owner_display_name == owner_display_name
@@ -314,8 +313,8 @@ impl StoredOperation {
         self,
         operation_id: automata_ci_provisioning::OperationId,
         shard_id: automata_ci_provisioning::ShardId,
-        workspace_id: automata_ci_core::WorkspaceId,
-    ) -> Result<ProvisionWorkspaceResult, ProvisioningFailure> {
+        tenant_id: automata_ci_core::ManagedTenantId,
+    ) -> Result<ProvisionTenantResult, ProvisioningFailure> {
         if self.state != "completed" {
             return Err(failure(ProvisioningFailureKind::Internal));
         }
@@ -325,10 +324,10 @@ impl StoredOperation {
         let provisioned_at_ms = self
             .provisioned_at_ms
             .ok_or_else(|| failure(ProvisioningFailureKind::Internal))?;
-        Ok(ProvisionWorkspaceResult::new(
+        Ok(ProvisionTenantResult::new(
             operation_id,
             shard_id,
-            workspace_id,
+            tenant_id,
             InitialOwnerPrincipalId::from_uuid(principal_id)
                 .map_err(|_| failure(ProvisioningFailureKind::Internal))?,
             provisioned_at(provisioned_at_ms)?,
@@ -349,11 +348,11 @@ async fn load_operation(
 ) -> Result<StoredOperation, ProvisioningFailure> {
     sqlx::query_as::<_, StoredOperation>(
         r"
-        SELECT shard_id, workspace_id, workspace_display_name,
+        SELECT shard_id, tenant_id, tenant_display_name,
                initial_owner_issuer, initial_owner_subject,
                initial_owner_display_name, state,
                initial_owner_principal_id, provisioned_at_ms
-        FROM workspace_provisioning_operations
+        FROM tenant_provisioning_operations
         WHERE authority_id=$1 AND operation_id=$2
         FOR UPDATE
         ",

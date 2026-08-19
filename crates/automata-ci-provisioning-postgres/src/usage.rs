@@ -1,28 +1,28 @@
 use std::fmt;
 
-use automata_ci_core::WorkspaceId;
+use automata_ci_core::ManagedTenantId;
 use automata_ci_provisioning::{
-    AuthorizedListWorkspaceUsage, ConsumedComputeMilliseconds, EntitlementRevision, ShardId,
-    UsageAttemptId, UsageEventId, UsageExportCursor, UsageExportFailure, UsageExportFailureKind,
-    UsageExportFuture, UsageTimestamp, WorkspaceUsageEvent, WorkspaceUsageExporter,
-    WorkspaceUsagePage,
+    AuthorizedListTenantUsage, ConsumedComputeMilliseconds, EntitlementRevision, ShardId,
+    TenantUsageEvent, TenantUsageExporter, TenantUsagePage, UsageAttemptId, UsageEventId,
+    UsageExportCursor, UsageExportFailure, UsageExportFailureKind, UsageExportFuture,
+    UsageTimestamp,
 };
 use sqlx::{FromRow, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 const CURSOR_BYTES: usize = 16;
 
-/// Replica-safe `PostgreSQL` reader for an authority-scoped workspace usage feed.
+/// Replica-safe `PostgreSQL` reader for an authority-scoped tenant usage feed.
 ///
 /// The cursor is the raw UUID of the last event in a returned page. Resolving it
 /// through the authority and shard columns makes a cursor from another export
 /// namespace invalid without exposing the internal append sequence.
 #[derive(Clone)]
-pub struct PostgresWorkspaceUsageExporter {
+pub struct PostgresTenantUsageExporter {
     pool: PgPool,
 }
 
-impl PostgresWorkspaceUsageExporter {
+impl PostgresTenantUsageExporter {
     /// Binds usage export to `pool`.
     #[must_use]
     pub const fn new(pool: PgPool) -> Self {
@@ -31,8 +31,8 @@ impl PostgresWorkspaceUsageExporter {
 
     async fn list_inner(
         &self,
-        request: AuthorizedListWorkspaceUsage,
-    ) -> Result<WorkspaceUsagePage, UsageExportFailure> {
+        request: AuthorizedListTenantUsage,
+    ) -> Result<TenantUsagePage, UsageExportFailure> {
         let (authority, command) = request.into_parts();
         let authority_id = authority.id().as_str();
         let shard_id = command.shard_id();
@@ -43,10 +43,10 @@ impl PostgresWorkspaceUsageExporter {
             resolve_cursor(&mut transaction, authority_id, shard_id.as_str(), &cursor).await?;
         let rows = sqlx::query_as::<_, StoredUsageEvent>(
             r"
-            SELECT event_id, shard_id, workspace_id, attempt_id,
+            SELECT event_id, shard_id, tenant_id, attempt_id,
                    entitlement_revision, interval_start_ms, interval_end_ms,
                    consumed_compute_ms
-            FROM workspace_usage_events
+            FROM tenant_usage_events
             WHERE authority_id=$1 AND shard_id=$2 AND sequence > $3
             ORDER BY sequence
             LIMIT $4
@@ -71,21 +71,21 @@ impl PostgresWorkspaceUsageExporter {
             .map(StoredUsageEvent::decode)
             .collect::<Result<Vec<_>, _>>()?;
         transaction.commit().await.map_err(database_failure)?;
-        WorkspaceUsagePage::new(events, next_cursor)
+        TenantUsagePage::new(events, next_cursor)
             .map_err(|_| failure(UsageExportFailureKind::Internal))
     }
 }
 
-impl fmt::Debug for PostgresWorkspaceUsageExporter {
+impl fmt::Debug for PostgresTenantUsageExporter {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("PostgresWorkspaceUsageExporter")
+            .debug_struct("PostgresTenantUsageExporter")
             .finish_non_exhaustive()
     }
 }
 
-impl WorkspaceUsageExporter for PostgresWorkspaceUsageExporter {
-    fn list(&self, request: AuthorizedListWorkspaceUsage) -> UsageExportFuture<'_> {
+impl TenantUsageExporter for PostgresTenantUsageExporter {
+    fn list(&self, request: AuthorizedListTenantUsage) -> UsageExportFuture<'_> {
         Box::pin(self.list_inner(request))
     }
 }
@@ -94,7 +94,7 @@ impl WorkspaceUsageExporter for PostgresWorkspaceUsageExporter {
 struct StoredUsageEvent {
     event_id: Uuid,
     shard_id: String,
-    workspace_id: String,
+    tenant_id: String,
     attempt_id: Uuid,
     entitlement_revision: i64,
     interval_start_ms: i64,
@@ -103,11 +103,11 @@ struct StoredUsageEvent {
 }
 
 impl StoredUsageEvent {
-    fn decode(self) -> Result<WorkspaceUsageEvent, UsageExportFailure> {
-        WorkspaceUsageEvent::new(
+    fn decode(self) -> Result<TenantUsageEvent, UsageExportFailure> {
+        TenantUsageEvent::new(
             UsageEventId::from_uuid(self.event_id).map_err(corrupt)?,
             ShardId::new(self.shard_id).map_err(corrupt)?,
-            WorkspaceId::parse(&self.workspace_id).map_err(corrupt)?,
+            ManagedTenantId::parse(&self.tenant_id).map_err(corrupt)?,
             UsageAttemptId::from_uuid(self.attempt_id).map_err(corrupt)?,
             EntitlementRevision::new(u64::try_from(self.entitlement_revision).map_err(corrupt)?)
                 .map_err(corrupt)?,
@@ -138,7 +138,7 @@ async fn resolve_cursor(
         .map_err(|_| failure(UsageExportFailureKind::InvalidCursor))?;
     sqlx::query_scalar(
         r"
-        SELECT sequence FROM workspace_usage_events
+        SELECT sequence FROM tenant_usage_events
         WHERE event_id=$1 AND authority_id=$2 AND shard_id=$3
         ",
     )

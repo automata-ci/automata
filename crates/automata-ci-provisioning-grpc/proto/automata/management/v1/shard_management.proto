@@ -9,17 +9,17 @@ import "google/protobuf/duration.proto";
 // control plane. This service is not exposed to browsers, runners, or human
 // sessions.
 service ShardManagementService {
-  // Atomically creates one workspace and its initial external owner mapping.
+  // Atomically creates one tenant and its initial external owner mapping.
   // Replaying the same operation and semantic request returns the original
   // stable response without repeating effects.
-  rpc ProvisionWorkspace(ProvisionWorkspaceRequest) returns (ProvisionWorkspaceResponse) {
+  rpc ProvisionTenant(ProvisionTenantRequest) returns (ProvisionTenantResponse) {
     option idempotency_level = IDEMPOTENT;
   }
 
   // Applies a complete, monotonically revisioned execution-entitlement
-  // snapshot to a workspace managed by this external authority. This is a
-  // workspace aggregate, not a per-job rolling execution lease.
-  rpc ApplyWorkspaceEntitlement(ApplyWorkspaceEntitlementRequest) returns (ApplyWorkspaceEntitlementResponse) {
+  // snapshot to a tenant managed by this external authority. This is a
+  // tenant aggregate, not a per-job rolling execution lease.
+  rpc ApplyTenantEntitlement(ApplyTenantEntitlementRequest) returns (ApplyTenantEntitlementResponse) {
     option idempotency_level = IDEMPOTENT;
   }
 
@@ -36,25 +36,25 @@ service ShardManagementService {
     option idempotency_level = IDEMPOTENT;
   }
 
-  // Replaces one workspace's complete selected GitHub repository set. Omitted
+  // Replaces one tenant's complete selected GitHub repository set. Omitted
   // repositories are disconnected by this revision.
-  rpc ApplyWorkspaceGithubRepositories(ApplyWorkspaceGithubRepositoriesRequest) returns (ApplyWorkspaceGithubRepositoriesResponse) {
+  rpc ApplyTenantGithubRepositories(ApplyTenantGithubRepositoriesRequest) returns (ApplyTenantGithubRepositoriesResponse) {
     option idempotency_level = IDEMPOTENT;
   }
 }
 
-// Identifies the workspace that Core must create.
-message WorkspaceProvisioningTarget {
+// Identifies the tenant that Core must create.
+message TenantProvisioningTarget {
   // External-control-plane-generated, non-nil canonical lower-case UUID. Core
   // persists this exact value as the tenant identity.
-  string workspace_id = 1;
+  string tenant_id = 1;
 
   // Non-authoritative, trimmed display label.
   string display_name = 2;
 }
 
 // Identifies the external human who receives the initial owner membership.
-message InitialWorkspaceOwner {
+message InitialTenantOwner {
   // Exact configured HTTPS issuer origin for delegated actor assertions.
   string issuer = 1;
 
@@ -65,8 +65,8 @@ message InitialWorkspaceOwner {
   string display_name = 3;
 }
 
-// Durable, idempotent request to provision one workspace.
-message ProvisionWorkspaceRequest {
+// Durable, idempotent request to provision one tenant.
+message ProvisionTenantRequest {
   // Stable non-nil canonical lower-case UUID generated before the first
   // network attempt and reused across every retry.
   string operation_id = 1;
@@ -75,23 +75,23 @@ message ProvisionWorkspaceRequest {
   // discovery.
   string shard_id = 2;
 
-  // Workspace identity and initial label.
-  WorkspaceProvisioningTarget workspace = 3;
+  // Tenant identity and initial label.
+  TenantProvisioningTarget tenant = 3;
 
   // External identity that receives Core's fixed initial-owner role.
-  InitialWorkspaceOwner initial_owner = 4;
+  InitialTenantOwner initial_owner = 4;
 }
 
 // Stable result stored by Core in the provisioning transaction.
-message ProvisionWorkspaceResponse {
+message ProvisionTenantResponse {
   // Operation identity from the request.
   string operation_id = 1;
 
   // Immutable identity of the shard that committed the operation.
   string shard_id = 2;
 
-  // Workspace identity from the request and resulting Core tenant.
-  string workspace_id = 3;
+  // Tenant identity from the request and resulting Core tenant.
+  string tenant_id = 3;
 
   // Core-owned, shard-local principal created or reused for the initial owner.
   string initial_owner_principal_id = 4;
@@ -101,24 +101,24 @@ message ProvisionWorkspaceResponse {
 }
 
 // Stable machine-readable reason attached to a failed provisioning RPC.
-enum ProvisionWorkspaceFailureReason {
-  PROVISION_WORKSPACE_FAILURE_REASON_UNSPECIFIED = 0;
-  PROVISION_WORKSPACE_FAILURE_REASON_INVALID_REQUEST = 1;
-  PROVISION_WORKSPACE_FAILURE_REASON_UNAUTHENTICATED = 2;
-  PROVISION_WORKSPACE_FAILURE_REASON_FORBIDDEN = 3;
-  PROVISION_WORKSPACE_FAILURE_REASON_OPERATION_CONFLICT = 4;
-  PROVISION_WORKSPACE_FAILURE_REASON_WORKSPACE_CONFLICT = 5;
-  PROVISION_WORKSPACE_FAILURE_REASON_PRINCIPAL_UNAVAILABLE = 6;
-  PROVISION_WORKSPACE_FAILURE_REASON_RATE_LIMITED = 7;
-  PROVISION_WORKSPACE_FAILURE_REASON_INTERNAL_ERROR = 8;
-  PROVISION_WORKSPACE_FAILURE_REASON_TEMPORARILY_UNAVAILABLE = 9;
+enum ProvisionTenantFailureReason {
+  PROVISION_TENANT_FAILURE_REASON_UNSPECIFIED = 0;
+  PROVISION_TENANT_FAILURE_REASON_INVALID_REQUEST = 1;
+  PROVISION_TENANT_FAILURE_REASON_UNAUTHENTICATED = 2;
+  PROVISION_TENANT_FAILURE_REASON_FORBIDDEN = 3;
+  PROVISION_TENANT_FAILURE_REASON_OPERATION_CONFLICT = 4;
+  PROVISION_TENANT_FAILURE_REASON_TENANT_CONFLICT = 5;
+  PROVISION_TENANT_FAILURE_REASON_PRINCIPAL_UNAVAILABLE = 6;
+  PROVISION_TENANT_FAILURE_REASON_RATE_LIMITED = 7;
+  PROVISION_TENANT_FAILURE_REASON_INTERNAL_ERROR = 8;
+  PROVISION_TENANT_FAILURE_REASON_TEMPORARILY_UNAVAILABLE = 9;
 }
 
 // Typed detail carried in google.rpc.Status.details when the failure occurs
 // after Core can safely construct contract-specific details. Authentication
 // and transport failures may contain only the ordinary gRPC status.
-message ProvisionWorkspaceFailure {
-  ProvisionWorkspaceFailureReason reason = 1;
+message ProvisionTenantFailure {
+  ProvisionTenantFailureReason reason = 1;
 
   // Opaque request correlation identifier safe to expose to the caller.
   string request_id = 2;
@@ -128,7 +128,7 @@ message ProvisionWorkspaceFailure {
 // may exceed the allowance by a small bounded amount while it observes the
 // threshold and delivers cancellation. That enforcement tolerance does not
 // increase the configured allowance.
-message CappedWorkspaceExecution {
+message CappedTenantExecution {
   // Positive aggregate compute allowance at whole-second API granularity.
   uint64 compute_seconds = 1;
 
@@ -138,23 +138,23 @@ message CappedWorkspaceExecution {
 }
 
 // Metered execution with no Core-enforced aggregate compute ceiling.
-message UncappedWorkspaceExecution {}
+message UncappedTenantExecution {}
 
 // Execution is disabled. Core rejects new work and cancels active work when
 // enforcement observes this policy.
-message PausedWorkspaceExecution {}
+message PausedTenantExecution {}
 
-// Complete execution policy for one workspace entitlement revision.
-message WorkspaceExecutionEntitlement {
+// Complete execution policy for one tenant entitlement revision.
+message TenantExecutionEntitlement {
   oneof policy {
-    CappedWorkspaceExecution capped = 1;
-    UncappedWorkspaceExecution uncapped = 2;
-    PausedWorkspaceExecution paused = 3;
+    CappedTenantExecution capped = 1;
+    UncappedTenantExecution uncapped = 2;
+    PausedTenantExecution paused = 3;
   }
 }
 
-// Durable, idempotent request to replace one workspace's entitlement snapshot.
-message ApplyWorkspaceEntitlementRequest {
+// Durable, idempotent request to replace one tenant's entitlement snapshot.
+message ApplyTenantEntitlementRequest {
   // Stable non-nil canonical lower-case UUID generated before the first
   // network attempt and reused across every retry.
   string operation_id = 1;
@@ -163,22 +163,22 @@ message ApplyWorkspaceEntitlementRequest {
   // discovery.
   string shard_id = 2;
 
-  // Externally managed workspace as a non-nil canonical lower-case UUID.
-  string workspace_id = 3;
+  // Externally managed tenant as a non-nil canonical lower-case UUID.
+  string tenant_id = 3;
 
-  // Positive, monotonically increasing workspace revision. Gaps are allowed;
+  // Positive, monotonically increasing tenant revision. Gaps are allowed;
   // a revision at or below the current value is stale.
   uint64 revision = 4;
 
   // Complete execution policy replacing the prior policy.
-  WorkspaceExecutionEntitlement execution = 5;
+  TenantExecutionEntitlement execution = 5;
 }
 
 // Stable result stored by Core in the entitlement transaction.
-message ApplyWorkspaceEntitlementResponse {
+message ApplyTenantEntitlementResponse {
   string operation_id = 1;
   string shard_id = 2;
-  string workspace_id = 3;
+  string tenant_id = 3;
   uint64 revision = 4;
 
   // Canonical Core database time. This value remains stable on replay.
@@ -189,23 +189,23 @@ message ApplyWorkspaceEntitlementResponse {
 }
 
 // Stable machine-readable reason attached to a failed entitlement RPC.
-enum ApplyWorkspaceEntitlementFailureReason {
-  APPLY_WORKSPACE_ENTITLEMENT_FAILURE_REASON_UNSPECIFIED = 0;
-  APPLY_WORKSPACE_ENTITLEMENT_FAILURE_REASON_INVALID_REQUEST = 1;
-  APPLY_WORKSPACE_ENTITLEMENT_FAILURE_REASON_UNAUTHENTICATED = 2;
-  APPLY_WORKSPACE_ENTITLEMENT_FAILURE_REASON_FORBIDDEN = 3;
-  APPLY_WORKSPACE_ENTITLEMENT_FAILURE_REASON_OPERATION_CONFLICT = 4;
-  APPLY_WORKSPACE_ENTITLEMENT_FAILURE_REASON_STALE_REVISION = 5;
-  APPLY_WORKSPACE_ENTITLEMENT_FAILURE_REASON_WORKSPACE_UNAVAILABLE = 6;
-  APPLY_WORKSPACE_ENTITLEMENT_FAILURE_REASON_RATE_LIMITED = 7;
-  APPLY_WORKSPACE_ENTITLEMENT_FAILURE_REASON_INTERNAL_ERROR = 8;
-  APPLY_WORKSPACE_ENTITLEMENT_FAILURE_REASON_TEMPORARILY_UNAVAILABLE = 9;
+enum ApplyTenantEntitlementFailureReason {
+  APPLY_TENANT_ENTITLEMENT_FAILURE_REASON_UNSPECIFIED = 0;
+  APPLY_TENANT_ENTITLEMENT_FAILURE_REASON_INVALID_REQUEST = 1;
+  APPLY_TENANT_ENTITLEMENT_FAILURE_REASON_UNAUTHENTICATED = 2;
+  APPLY_TENANT_ENTITLEMENT_FAILURE_REASON_FORBIDDEN = 3;
+  APPLY_TENANT_ENTITLEMENT_FAILURE_REASON_OPERATION_CONFLICT = 4;
+  APPLY_TENANT_ENTITLEMENT_FAILURE_REASON_STALE_REVISION = 5;
+  APPLY_TENANT_ENTITLEMENT_FAILURE_REASON_TENANT_UNAVAILABLE = 6;
+  APPLY_TENANT_ENTITLEMENT_FAILURE_REASON_RATE_LIMITED = 7;
+  APPLY_TENANT_ENTITLEMENT_FAILURE_REASON_INTERNAL_ERROR = 8;
+  APPLY_TENANT_ENTITLEMENT_FAILURE_REASON_TEMPORARILY_UNAVAILABLE = 9;
 }
 
 // Typed detail carried in google.rpc.Status.details after Core can safely
 // construct contract-specific details.
-message ApplyWorkspaceEntitlementFailure {
-  ApplyWorkspaceEntitlementFailureReason reason = 1;
+message ApplyTenantEntitlementFailure {
+  ApplyTenantEntitlementFailureReason reason = 1;
 }
 
 enum GithubAppJwtIssuer {
@@ -321,35 +321,35 @@ message GithubRepositorySelection {
   GithubJobAuthorityProfile authority_profile = 7;
 }
 
-message ApplyWorkspaceGithubRepositoriesRequest {
+message ApplyTenantGithubRepositoriesRequest {
   string operation_id = 1;
   string shard_id = 2;
-  string workspace_id = 3;
+  string tenant_id = 3;
   uint64 revision = 4;
   repeated GithubRepositorySelection repositories = 5;
 }
 
-message ApplyWorkspaceGithubRepositoriesResponse {
+message ApplyTenantGithubRepositoriesResponse {
   string operation_id = 1;
   string shard_id = 2;
-  string workspace_id = 3;
+  string tenant_id = 3;
   uint64 revision = 4;
   google.protobuf.Timestamp applied_at = 5;
 }
 
-enum ApplyWorkspaceGithubRepositoriesFailureReason {
-  APPLY_WORKSPACE_GITHUB_REPOSITORIES_FAILURE_REASON_UNSPECIFIED = 0;
-  APPLY_WORKSPACE_GITHUB_REPOSITORIES_FAILURE_REASON_INVALID_REQUEST = 1;
-  APPLY_WORKSPACE_GITHUB_REPOSITORIES_FAILURE_REASON_UNAUTHENTICATED = 2;
-  APPLY_WORKSPACE_GITHUB_REPOSITORIES_FAILURE_REASON_FORBIDDEN = 3;
-  APPLY_WORKSPACE_GITHUB_REPOSITORIES_FAILURE_REASON_OPERATION_CONFLICT = 4;
-  APPLY_WORKSPACE_GITHUB_REPOSITORIES_FAILURE_REASON_STALE_REVISION = 5;
-  APPLY_WORKSPACE_GITHUB_REPOSITORIES_FAILURE_REASON_WORKSPACE_UNAVAILABLE = 6;
-  APPLY_WORKSPACE_GITHUB_REPOSITORIES_FAILURE_REASON_INTERNAL_ERROR = 7;
-  APPLY_WORKSPACE_GITHUB_REPOSITORIES_FAILURE_REASON_TEMPORARILY_UNAVAILABLE = 8;
-  APPLY_WORKSPACE_GITHUB_REPOSITORIES_FAILURE_REASON_SHARD_REGISTRY_CONFLICT = 9;
+enum ApplyTenantGithubRepositoriesFailureReason {
+  APPLY_TENANT_GITHUB_REPOSITORIES_FAILURE_REASON_UNSPECIFIED = 0;
+  APPLY_TENANT_GITHUB_REPOSITORIES_FAILURE_REASON_INVALID_REQUEST = 1;
+  APPLY_TENANT_GITHUB_REPOSITORIES_FAILURE_REASON_UNAUTHENTICATED = 2;
+  APPLY_TENANT_GITHUB_REPOSITORIES_FAILURE_REASON_FORBIDDEN = 3;
+  APPLY_TENANT_GITHUB_REPOSITORIES_FAILURE_REASON_OPERATION_CONFLICT = 4;
+  APPLY_TENANT_GITHUB_REPOSITORIES_FAILURE_REASON_STALE_REVISION = 5;
+  APPLY_TENANT_GITHUB_REPOSITORIES_FAILURE_REASON_TENANT_UNAVAILABLE = 6;
+  APPLY_TENANT_GITHUB_REPOSITORIES_FAILURE_REASON_INTERNAL_ERROR = 7;
+  APPLY_TENANT_GITHUB_REPOSITORIES_FAILURE_REASON_TEMPORARILY_UNAVAILABLE = 8;
+  APPLY_TENANT_GITHUB_REPOSITORIES_FAILURE_REASON_SHARD_REGISTRY_CONFLICT = 9;
 }
 
-message ApplyWorkspaceGithubRepositoriesFailure {
-  ApplyWorkspaceGithubRepositoriesFailureReason reason = 1;
+message ApplyTenantGithubRepositoriesFailure {
+  ApplyTenantGithubRepositoriesFailureReason reason = 1;
 }

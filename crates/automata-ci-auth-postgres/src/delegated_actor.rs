@@ -23,7 +23,7 @@ const MAX_DELEGATED_ACTOR_ROLE_GRANTS: usize = 10_000;
 /// `PostgreSQL` resolver for externally delegated actor identities.
 ///
 /// The external assertion is only identity evidence. This adapter always reloads
-/// the Core-owned principal, current workspace membership, authorization
+/// the Core-owned principal, current tenant membership, authorization
 /// revision, and direct scoped role grants in one transaction.
 #[derive(Clone)]
 pub struct PostgresDelegatedActorResolver {

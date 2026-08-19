@@ -264,7 +264,7 @@ combination. Unknown fields and schema versions fail closed. Adapter documents
 are canonical serialized values, not unvalidated `serde_json::Value` passed
 through application services.
 
-Repository connections contain common policy such as workspace, provider
+Repository connections contain common policy such as tenant, provider
 instance, external repository ID, visibility, default branch, workflow source
 selection, runner policy, and archive limits. A bounded adapter-owned policy
 document holds only behavior that cannot be expressed commonly. GitHub App
@@ -280,7 +280,7 @@ POST /api/v1/provider-webhooks/{opaque_endpoint_id}
 
 The endpoint record resolves the provider instance, connection, active secret
 generation, body limit, and adapter type before parsing the payload. The public
-path does not contain a provider name, repository name, or workspace ID.
+path does not contain a provider name, repository name, or tenant ID.
 
 `DeliveryAdapter` receives an exact raw method, selected headers, bounded body,
 endpoint binding, and candidate secret generations. It returns either a
@@ -479,7 +479,7 @@ ProviderConnectionDesiredState
 
 Provider factories validate desired state before the transaction commits.
 Provisioning returns typed capability and configuration errors without secret
-values. A workspace may select connections from multiple instances and types.
+values. A tenant may select connections from multiple instances and types.
 
 This is a destructive schema and protobuf replacement. The cutover procedure
 is: stop all services, delete the unreleased database and durable test state,

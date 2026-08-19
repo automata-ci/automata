@@ -1,4 +1,4 @@
-# ADR 0003: Pull immutable workspace usage by cursor
+# ADR 0003: Pull immutable tenant usage by cursor
 
 - Status: Accepted
 - Date: 2026-08-14
@@ -25,7 +25,7 @@ exclusive cursor. An empty cursor means the beginning of the retained feed.
 The cursor is meaningful only for the exact authenticated authority and shard
 that issued it.
 
-Each immutable event has a globally stable event ID, workspace and attempt
+Each immutable event has a globally stable event ID, tenant and attempt
 identity, entitlement revision, positive accounting interval, and actual
 consumed compute in milliseconds. Events are raw provider-neutral accounting
 facts. They contain no plan, price, currency, invoice, Stripe identifier, or
@@ -39,7 +39,7 @@ created by the consumer transaction rather than promised by the network.
 
 Core derives the authority from verified workload identity on every request.
 The durable feed filters by that exact authority even if multiple authorities
-can manage workspaces on one shard. Cursors and page sizes are bounded. A stale
+can manage tenants on one shard. Cursors and page sizes are bounded. A stale
 or unknown cursor fails explicitly; a consumer must alert and reconcile rather
 than skip silently.
 

@@ -149,7 +149,7 @@ fn check_rerun_request(
     let sender_id = parse_provider_id(actor.external_id().as_str())?;
     let repository_id = parse_provider_id(control.repository().external_id().as_str())?;
     let tenant = TenantScope::from_authenticated_tenant_id(
-        connection.configuration().workspace_id().to_string(),
+        connection.configuration().tenant_id().to_string(),
     )
     .map_err(|_| ProviderControlHandlingError::InvalidEvidence)?;
     let target = match native.target() {
@@ -233,7 +233,7 @@ const fn result_error(error: ProviderWorkflowResultServiceError) -> ProviderCont
 
 #[cfg(test)]
 mod tests {
-    use automata_ci_core::{GitObjectId, Sha256Digest, UnixMillis, WorkspaceId};
+    use automata_ci_core::{GitObjectId, ManagedTenantId, Sha256Digest, UnixMillis};
     use automata_ci_provider::{
         ExternalDeliveryId, ExternalDeliveryIdentity, ExternalRepositoryId,
         ExternalRepositoryIdentity, ExternalSubjectId, ExternalSubjectIdentity,
@@ -421,7 +421,7 @@ mod tests {
         .document()
         .expect("GitHub policy document");
         let configuration = ProviderConnectionConfiguration::new(
-            WorkspaceId::parse("11111111-1111-4111-8111-111111111111").expect("workspace"),
+            ManagedTenantId::parse("11111111-1111-4111-8111-111111111111").expect("tenant"),
             repository.clone(),
             revision,
             provider.configuration().digest(),

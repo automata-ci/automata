@@ -4,13 +4,13 @@
 //!
 //! The external control plane authenticates independently of the human it is
 //! installing. A transport maps verified workload evidence to a stable
-//! [`ProvisioningAuthority`], validates a [`ProvisionWorkspaceCommand`], and
-//! constructs an [`AuthorizedProvisionWorkspace`] before calling the durable
-//! [`WorkspaceProvisioner`] port.
+//! [`ProvisioningAuthority`], validates a [`ProvisionTenantCommand`], and
+//! constructs an [`AuthorizedProvisionTenant`] before calling the durable
+//! [`TenantProvisioner`] port.
 //!
 //! Certificate rotations do not alter the authority ID. Durable adapters must
 //! namespace idempotency by that stable authority and the operation ID, never by
-//! a certificate, connection, pod, or replica. Workspace entitlement snapshots
+//! a certificate, connection, pod, or replica. Tenant entitlement snapshots
 //! and usage-export cursors use the same authority and remain independent of
 //! Cloud billing concepts.
 
@@ -21,17 +21,17 @@ mod port;
 mod usage;
 
 pub use entitlement::{
-    ApplyWorkspaceEntitlementCommand, ApplyWorkspaceEntitlementResult,
-    AuthorizedApplyWorkspaceEntitlement, ComputeSeconds, EntitlementAuthorizationError,
-    EntitlementDurationSeconds, EntitlementFailure, EntitlementFailureKind, EntitlementRevision,
-    EntitlementTimestamp, EntitlementValueError, WorkspaceExecutionEntitlement,
+    ApplyTenantEntitlementCommand, ApplyTenantEntitlementResult, AuthorizedApplyTenantEntitlement,
+    ComputeSeconds, EntitlementAuthorizationError, EntitlementDurationSeconds, EntitlementFailure,
+    EntitlementFailureKind, EntitlementRevision, EntitlementTimestamp, EntitlementValueError,
+    TenantExecutionEntitlement,
 };
 pub use github_provider::{
     ApplyGithubProviderConfigurationCommand, ApplyGithubProviderConfigurationResult,
     ApplyGithubProviderRunnerPolicyCommand, ApplyGithubProviderRunnerPolicyResult,
-    ApplyWorkspaceGithubRepositoriesCommand, ApplyWorkspaceGithubRepositoriesResult,
+    ApplyTenantGithubRepositoriesCommand, ApplyTenantGithubRepositoriesResult,
     AuthorizedApplyGithubProviderConfiguration, AuthorizedApplyGithubProviderRunnerPolicy,
-    AuthorizedApplyWorkspaceGithubRepositories, GithubProviderConfiguration,
+    AuthorizedApplyTenantGithubRepositories, GithubProviderConfiguration,
     GithubProviderConfigurationFailure, GithubProviderConfigurationFailureKind,
     GithubProviderConfigurationRevision, GithubProviderDesiredState,
     GithubProviderDesiredStateFailure, GithubProviderDesiredStateFailureKind,
@@ -39,12 +39,12 @@ pub use github_provider::{
     GithubProviderRunnerPolicyFailure, GithubProviderRunnerPolicyFailureKind,
     GithubProviderSchedulePolicy, GithubProviderSecret, GithubProviderTimestamp,
     GithubProviderValueError, MAX_GITHUB_PROVIDER_REPOSITORIES,
-    WorkspaceGithubRepositoriesDesiredState, WorkspaceGithubRepositoriesFailure,
-    WorkspaceGithubRepositoriesFailureKind, WorkspaceGithubRepositoriesRevision,
+    TenantGithubRepositoriesDesiredState, TenantGithubRepositoriesFailure,
+    TenantGithubRepositoriesFailureKind, TenantGithubRepositoriesRevision,
 };
 pub use model::{
-    AuthorizedProvisionWorkspace, DelegatedActorIssuer, DisplayName, ExternalAccountSubject,
-    InitialOwnerPrincipalId, OperationId, ProvisionWorkspaceCommand, ProvisionWorkspaceResult,
+    AuthorizedProvisionTenant, DelegatedActorIssuer, DisplayName, ExternalAccountSubject,
+    InitialOwnerPrincipalId, OperationId, ProvisionTenantCommand, ProvisionTenantResult,
     ProvisionedAt, ProvisioningAuthority, ProvisioningAuthorityId, ProvisioningAuthorizationError,
     ProvisioningFailure, ProvisioningFailureKind, ProvisioningRequestId, ProvisioningValueError,
     ShardId,
@@ -55,14 +55,14 @@ pub use port::{
     GithubProviderConfigurationApplier, GithubProviderDesiredStateLoadFuture,
     GithubProviderDesiredStateReader, GithubProviderRunnerPolicyApplicationFuture,
     GithubProviderRunnerPolicyApplier, ProvisioningAuthenticationError,
-    ProvisioningAuthenticationFuture, ProvisioningWorkloadAuthenticator, UsageExportFuture,
-    WorkloadAuthenticationEvidence, WorkspaceEntitlementApplier,
-    WorkspaceGithubRepositoriesApplicationFuture, WorkspaceGithubRepositoriesApplier,
-    WorkspaceProvisioner, WorkspaceProvisioningFuture, WorkspaceUsageExporter,
+    ProvisioningAuthenticationFuture, ProvisioningWorkloadAuthenticator, TenantEntitlementApplier,
+    TenantGithubRepositoriesApplicationFuture, TenantGithubRepositoriesApplier, TenantProvisioner,
+    TenantProvisioningFuture, TenantUsageExporter, UsageExportFuture,
+    WorkloadAuthenticationEvidence,
 };
 pub use usage::{
-    AuthorizedListWorkspaceUsage, ConsumedComputeMilliseconds, ListWorkspaceUsageCommand,
-    UsageAttemptId, UsageAuthorizationError, UsageEventId, UsageExportCursor, UsageExportFailure,
-    UsageExportFailureKind, UsageExportPageSize, UsageTimestamp, UsageValueError,
-    WorkspaceUsageEvent, WorkspaceUsagePage,
+    AuthorizedListTenantUsage, ConsumedComputeMilliseconds, ListTenantUsageCommand,
+    TenantUsageEvent, TenantUsagePage, UsageAttemptId, UsageAuthorizationError, UsageEventId,
+    UsageExportCursor, UsageExportFailure, UsageExportFailureKind, UsageExportPageSize,
+    UsageTimestamp, UsageValueError,
 };

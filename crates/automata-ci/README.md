@@ -20,7 +20,7 @@ This page is the configuration reference for the complete server.
 ## Deployment boundary
 
 The server can run as a standalone process, but the repository does not yet
-ship a standalone client that installs the GitHub App and per-workspace
+ship a standalone client that installs the GitHub App and per-tenant
 repository desired state. That state enters through the private,
 mutually-authenticated shard-management API described below. Do not seed or
 edit the provider tables directly: their revisions, authorization evidence,
@@ -55,29 +55,29 @@ and one or more SHA-256 pins for allowed leaf client certificates. mTLS first
 validates the client chain; the leaf pin then maps that verified connection to
 the configured provisioning authority. Supply both old and new pins during a
 bounded certificate-rotation overlap. This listener connects the public
-workspace-provisioning gRPC contract directly to the same PostgreSQL database
+tenant-provisioning gRPC contract directly to the same PostgreSQL database
 used by the other replicas in the shard, reusing this replica's existing pool.
 
 The management authority also enables a versioned delegated-actor HTTP surface
 on the human listener. A hosted control plane signs a short-lived ES256 actor
 assertion; Core verifies the configured issuer and audience, resolves current
-workspace membership and RBAC from PostgreSQL, and performs every read through
+tenant membership and RBAC from PostgreSQL, and performs every read through
 the same authorization-enforcing data boundary as self-hosted SSR. Version 2
 provides:
 
 | Method | Path | Result |
 | --- | --- | --- |
- | `GET` | `/internal/v2/workspaces/{workspace_id}/viewer` | Current Core principal and authorization revision |
- | `POST` | `/internal/v2/workspaces/{workspace_id}/authorization-checks` | Current allow/deny decisions for up to 16 tenant-scoped permissions |
- | `GET` | `/internal/v2/workspaces/{workspace_id}/repositories` | Authorized repository directory |
- | `GET` | `/internal/v2/workspaces/{workspace_id}/repositories/{owner}/{repository}/runs` | Filtered workflow and run page |
- | `GET` | `/internal/v2/workspaces/{workspace_id}/repositories/{owner}/{repository}/runs/{run_id}` | Run, job, and artifact snapshot |
- | `GET` | `/internal/v2/workspaces/{workspace_id}/repositories/{owner}/{repository}/runs/{run_id}/jobs/{job_id}` | Job metadata and structured-stream availability |
- | `POST` | `/internal/v2/workspaces/{workspace_id}/repositories/{owner}/{repository}/runs/{run_id}/jobs/{job_id}/live-ticket` | One-time, origin-bound direct log capability |
- | `POST` | `/internal/v2/workspaces/{workspace_id}/repositories/{repository_id}/workflows/{workflow_id}/dispatches` | Authorized, idempotent workflow dispatch with Core-owned source resolution |
+ | `GET` | `/internal/v2/tenants/{tenant_id}/viewer` | Current Core principal and authorization revision |
+ | `POST` | `/internal/v2/tenants/{tenant_id}/authorization-checks` | Current allow/deny decisions for up to 16 tenant-scoped permissions |
+ | `GET` | `/internal/v2/tenants/{tenant_id}/repositories` | Authorized repository directory |
+ | `GET` | `/internal/v2/tenants/{tenant_id}/repositories/{owner}/{repository}/runs` | Filtered workflow and run page |
+ | `GET` | `/internal/v2/tenants/{tenant_id}/repositories/{owner}/{repository}/runs/{run_id}` | Run, job, and artifact snapshot |
+ | `GET` | `/internal/v2/tenants/{tenant_id}/repositories/{owner}/{repository}/runs/{run_id}/jobs/{job_id}` | Job metadata and structured-stream availability |
+ | `POST` | `/internal/v2/tenants/{tenant_id}/repositories/{owner}/{repository}/runs/{run_id}/jobs/{job_id}/live-ticket` | One-time, origin-bound direct log capability |
+ | `POST` | `/internal/v2/tenants/{tenant_id}/repositories/{repository_id}/workflows/{workflow_id}/dispatches` | Authorized, idempotent workflow dispatch with Core-owned source resolution |
 
 Responses are `no-store` JSON and carry `protocol_version: 2` plus the exact
-workspace ID. Opaque pagination cursors must be returned unchanged. Run
+tenant ID. Opaque pagination cursors must be returned unchanged. Run
 numbers and artifact IDs and sizes are decimal strings
 so JavaScript clients cannot silently lose integer precision. Missing and
 unauthorized repository resources remain indistinguishable as `404`; a valid
@@ -416,8 +416,8 @@ independent, monotonically versioned resources:
 - one shard-wide GitHub App configuration containing the dashboard origin,
   App identity and credentials, webhook secret, Check name, runner policy, and
   scheduler policy;
-- one complete repository desired set per workspace. Omission from a newer set
-  is authoritative, including an empty set used to disconnect a workspace.
+- one complete repository desired set per tenant. Omission from a newer set
+  is authoritative, including an empty set used to disconnect a tenant.
 
 App private keys and webhook secrets are envelope-encrypted before their
 transaction commits, using the mandatory control-plane key provider. PostgreSQL

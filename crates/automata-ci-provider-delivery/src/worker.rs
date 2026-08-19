@@ -500,7 +500,7 @@ mod tests {
         atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering},
     };
 
-    use automata_ci_core::{GitObjectId, Sha256Digest, WorkspaceId};
+    use automata_ci_core::{GitObjectId, ManagedTenantId, Sha256Digest};
     use automata_ci_provider::{
         ExternalDeliveryId, ExternalDeliveryIdentity, ExternalRepositoryId,
         ExternalRepositoryIdentity, NormalizedTrigger, ProviderArchiveLimits,
@@ -1419,7 +1419,7 @@ mod tests {
         )
         .expect("connection policy");
         let configuration = ProviderConnectionConfiguration::new(
-            WorkspaceId::parse("11111111-1111-4111-8111-111111111111").expect("workspace"),
+            ManagedTenantId::parse("11111111-1111-4111-8111-111111111111").expect("tenant"),
             repository.clone(),
             manifest.revision(),
             manifest.configuration().digest(),

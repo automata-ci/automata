@@ -1,7 +1,7 @@
 # automata-ci-provisioning
 
 This crate owns the transport-neutral application boundary for an authorized
-external control plane to provision workspaces, apply execution-entitlement
+external control plane to provision tenants, apply execution-entitlement
 snapshots, apply database-backed GitHub provider desired state, and pull
 immutable usage events from one Automata Core shard. It
 validates the public contract's domain values and keeps workload authority,
@@ -17,7 +17,7 @@ prices, invoices, or Stripe objects. A consumer deduplicates stable event IDs
 and commits its continuation cursor with the accepted events.
 
 Provider desired state separates the encrypted shard-wide GitHub App
-configuration from each workspace's complete repository set. It contains no
+configuration from each tenant's complete repository set. It contains no
 Cloud billing or GitHub OAuth installation ownership policy.
 
 After the initial complete provider configuration exists, the same shard
