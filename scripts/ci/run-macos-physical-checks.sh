@@ -60,6 +60,47 @@ assert_directory_empty() {
   fi
 }
 
+manifest_artifact_path() {
+  local artifact=$1
+  local path
+  if ! path=$(/usr/bin/plutil -extract "$artifact.path" raw -o - \
+    "$AUTOMATA_MACOS_VM_TEMPLATE_MANIFEST" 2>/dev/null) || [[ -z "$path" ]]; then
+    printf 'error: template manifest must contain a non-empty %s.path\n' "$artifact" >&2
+    exit 2
+  fi
+  printf '%s\n' "$path"
+}
+
+assert_clone_capacity() {
+  local disk_image auxiliary_storage disk_bytes auxiliary_bytes available_kib
+  local available_bytes required_bytes shortfall_bytes
+  disk_image=$(manifest_artifact_path disk_image)
+  auxiliary_storage=$(manifest_artifact_path auxiliary_storage)
+  for artifact in "$disk_image" "$auxiliary_storage"; do
+    if [[ ! -f "$artifact" ]]; then
+      printf 'error: template artifact is not a regular file: %s\n' "$artifact" >&2
+      exit 2
+    fi
+  done
+  disk_bytes=$(stat -f %z "$disk_image")
+  auxiliary_bytes=$(stat -f %z "$auxiliary_storage")
+  available_kib=$(df -Pk "$AUTOMATA_MACOS_VM_STORAGE_ROOT" | awk 'END {print $4}')
+  if [[ ! "$disk_bytes" =~ ^[0-9]+$ || ! "$auxiliary_bytes" =~ ^[0-9]+$ || \
+    ! "$available_kib" =~ ^[0-9]+$ ]]; then
+    printf '%s\n' 'error: could not determine macOS VM storage capacity' >&2
+    exit 2
+  fi
+  available_bytes=$((available_kib * 1024))
+  required_bytes=$((disk_bytes + auxiliary_bytes + 32 * 1024 * 1024 * 1024))
+  if (( available_bytes < required_bytes )); then
+    shortfall_bytes=$((required_bytes - available_bytes))
+    printf '%s\n' \
+      "error: macOS VM storage requires at least $required_bytes bytes available for the template clone and 32 GiB headroom; found $available_bytes bytes (short by $shortfall_bytes bytes)" \
+      >&2
+    exit 2
+  fi
+}
+
 if [[ "$plan" != true ]]; then
   if [[ "$(uname -s)" != Darwin || "$(uname -m)" != arm64 ]]; then
     printf '%s\n' 'error: physical macOS checks require an Apple Silicon macOS host' >&2
@@ -106,6 +147,7 @@ if [[ "$plan" != true ]]; then
   install -d -m 0700 "$AUTOMATA_MACOS_PHYSICAL_ATTEMPT_ROOT"
   assert_directory_empty 'provider attempts' "$AUTOMATA_MACOS_VM_STORAGE_ROOT/attempts"
   assert_directory_empty 'runtime proxy attempts' "$AUTOMATA_MACOS_PHYSICAL_ATTEMPT_ROOT"
+  assert_clone_capacity
 fi
 
 for ((iteration = 1; iteration <= repetitions; iteration++)); do
