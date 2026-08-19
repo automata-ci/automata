@@ -9,6 +9,11 @@ Portable callers should depend on the ports in `automata-ci-store` and
 concrete adapter directly. `automata-ci-postgres` owns only shared PostgreSQL
 test support.
 
+Provider-neutral workflow admission atomically records immutable trigger,
+provider-selection, request, and original processing-fence evidence. A replay
+must match that original evidence even when a newer live claim has reclaimed
+the same delivery invocation.
+
 ## Schema migrations
 
 The crate uses SQLx's embedded migrator; another Rust migration framework would

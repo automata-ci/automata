@@ -757,6 +757,8 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-util",
+ "url",
+ "uuid",
 ]
 
 [[package]]
@@ -794,6 +796,8 @@ dependencies = [
  "automata-ci-key-management",
  "automata-ci-postgres",
  "automata-ci-provider",
+ "automata-ci-store",
+ "automata-ci-store-postgres",
  "sha2 0.11.0",
  "sqlx",
  "tokio",

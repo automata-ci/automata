@@ -610,11 +610,226 @@ pub enum ProviderResultAdapterRegistryError {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicI64, AtomicUsize, Ordering},
+    };
 
-    use automata_ci_provider::{ProviderCapability, RichCheckCapability};
+    use automata_ci_core::{GitObjectId, RunId, WorkspaceId};
+    use automata_ci_provider::{
+        CompleteProviderResult, DesiredProviderResult, ExternalRepositoryId,
+        ExternalRepositoryIdentity, FailProviderResult, ProviderArchiveLimits, ProviderCapability,
+        ProviderConfigurationDocument, ProviderConfigurationRevision,
+        ProviderConnectionConfiguration, ProviderConnectionManifest,
+        ProviderConnectionPolicyDocument, ProviderConnectionRevision, ProviderDefaultBranch,
+        ProviderInstanceId, ProviderInstanceManifest, ProviderInstanceRecord,
+        ProviderLifecycleState, ProviderManifestRepository, ProviderOrigins,
+        ProviderRepositoryError, ProviderRepositoryFuture, ProviderRepositoryPath,
+        ProviderResultClaimFence, ProviderResultDetailsUrl, ProviderResultFuture,
+        ProviderResultPhase, ProviderResultSaveOutcome, ProviderResultSubject,
+        ProviderResultSubjectId, ProviderResultSubjectKind, ProviderResultSummary,
+        ProviderResultTitle, ProviderRunnerPolicyBinding, ProviderSaveOutcome,
+        ProviderSchemaVersion, ProviderSecretBindings, ProviderSecretSet, ProviderWorkflowSource,
+        RepositoryVisibility, RetryProviderResult, RichCheckCapability, SaveDesiredProviderResult,
+        provider_capability_digest,
+    };
+    use url::Url;
+    use uuid::Uuid;
 
     use super::*;
+    use crate::ProviderDeliveryClockError;
+
+    #[derive(Debug)]
+    struct StepClock(AtomicI64);
+
+    impl ProviderDeliveryClock for StepClock {
+        fn now(&self) -> Result<UnixMillis, ProviderDeliveryClockError> {
+            Ok(UnixMillis::new(self.0.fetch_add(5, Ordering::SeqCst)))
+        }
+    }
+
+    #[derive(Debug)]
+    struct SlowAdapter {
+        provider_type: ProviderTypeId,
+        capabilities: ProviderCapabilities,
+        initial_expiry: AtomicI64,
+        final_expiry: AtomicI64,
+    }
+
+    #[async_trait]
+    impl ProviderResultAdapter for SlowAdapter {
+        fn provider_type(&self) -> &ProviderTypeId {
+            &self.provider_type
+        }
+
+        fn capabilities(&self) -> &ProviderCapabilities {
+            &self.capabilities
+        }
+
+        fn publication_model(&self) -> ProviderResultPublicationModel {
+            ProviderResultPublicationModel::MutableRichCheck
+        }
+
+        async fn publish_result(
+            &self,
+            _context: &ProviderRuntimeContext,
+            _claimed: &ClaimedProviderResult,
+            lease: &ProviderResultLease,
+        ) -> Result<ProviderResultObservation, ResultPublisherError> {
+            self.initial_expiry
+                .store(lease.current().expires_at().get(), Ordering::SeqCst);
+            sleep(Duration::from_millis(25)).await;
+            self.final_expiry
+                .store(lease.current().expires_at().get(), Ordering::SeqCst);
+            Ok(ProviderResultObservation::new(
+                Some(ExternalResultId::new("check-42").expect("external result")),
+                Sha256Digest::from_bytes([9; 32]),
+            ))
+        }
+    }
+
+    #[derive(Debug)]
+    struct ResultRepository {
+        claim: Mutex<Option<ClaimedProviderResult>>,
+        renewals: AtomicUsize,
+        completed: Mutex<Option<ProviderResultClaimFence>>,
+    }
+
+    impl ProviderResultRepository for ResultRepository {
+        fn save_desired(
+            &self,
+            _request: SaveDesiredProviderResult,
+        ) -> ProviderResultFuture<'_, ProviderResultSaveOutcome> {
+            Box::pin(async { Err(ProviderResultRepositoryError::Corrupt) })
+        }
+
+        fn claim_result(
+            &self,
+            _request: ClaimProviderResult,
+        ) -> ProviderResultFuture<'_, Option<ClaimedProviderResult>> {
+            Box::pin(async move { Ok(self.claim.lock().expect("claim lock").take()) })
+        }
+
+        fn renew_result(
+            &self,
+            request: RenewProviderResult,
+        ) -> ProviderResultFuture<'_, ProviderResultClaimFence> {
+            Box::pin(async move {
+                self.renewals.fetch_add(1, Ordering::SeqCst);
+                let claim = request.claim();
+                ProviderResultClaimFence::new(
+                    claim.subject_id(),
+                    claim.generation(),
+                    claim.worker_id(),
+                    claim.fence(),
+                    claim.claimed_at(),
+                    UnixMillis::new(
+                        request.renewed_at().get()
+                            + i64::try_from(request.lease_millis()).expect("lease"),
+                    ),
+                )
+                .map_err(|_| ProviderResultRepositoryError::Corrupt)
+            })
+        }
+
+        fn complete_result(&self, request: CompleteProviderResult) -> ProviderResultFuture<'_, ()> {
+            Box::pin(async move {
+                *self.completed.lock().expect("completion lock") = Some(request.claim());
+                Ok(())
+            })
+        }
+
+        fn retry_result(&self, _request: RetryProviderResult) -> ProviderResultFuture<'_, ()> {
+            Box::pin(async { Err(ProviderResultRepositoryError::Corrupt) })
+        }
+
+        fn fail_result(&self, _request: FailProviderResult) -> ProviderResultFuture<'_, ()> {
+            Box::pin(async { Err(ProviderResultRepositoryError::Corrupt) })
+        }
+    }
+
+    #[derive(Debug)]
+    struct ManifestRepository {
+        provider: ProviderInstanceManifest,
+        connection: ProviderConnectionManifest,
+    }
+
+    impl ProviderManifestRepository for ManifestRepository {
+        fn save_instance(
+            &self,
+            _record: ProviderInstanceRecord,
+        ) -> ProviderRepositoryFuture<'_, ProviderSaveOutcome> {
+            Box::pin(async { Err(ProviderRepositoryError::Unavailable) })
+        }
+
+        fn load_instance(
+            &self,
+            instance_id: ProviderInstanceId,
+            revision: ProviderConfigurationRevision,
+        ) -> ProviderRepositoryFuture<'_, Option<ProviderInstanceRecord>> {
+            Box::pin(async move {
+                if self.provider.instance_id() != instance_id
+                    || self.provider.revision() != revision
+                {
+                    return Ok(None);
+                }
+                ProviderInstanceRecord::new(
+                    self.provider.clone(),
+                    ProviderSecretSet::new(self.provider.secrets(), [])
+                        .map_err(|_| ProviderRepositoryError::Corrupt)?,
+                )
+                .map(Some)
+                .map_err(|_| ProviderRepositoryError::Corrupt)
+            })
+        }
+
+        fn current_instance(
+            &self,
+            instance_id: ProviderInstanceId,
+        ) -> ProviderRepositoryFuture<'_, Option<ProviderInstanceRecord>> {
+            Box::pin(async move {
+                if self.provider.instance_id() != instance_id {
+                    return Ok(None);
+                }
+                ProviderInstanceRecord::new(
+                    self.provider.clone(),
+                    ProviderSecretSet::new(self.provider.secrets(), [])
+                        .map_err(|_| ProviderRepositoryError::Corrupt)?,
+                )
+                .map(Some)
+                .map_err(|_| ProviderRepositoryError::Corrupt)
+            })
+        }
+
+        fn save_connection(
+            &self,
+            _manifest: ProviderConnectionManifest,
+        ) -> ProviderRepositoryFuture<'_, ProviderSaveOutcome> {
+            Box::pin(async { Err(ProviderRepositoryError::Unavailable) })
+        }
+
+        fn load_connection(
+            &self,
+            connection_id: ProviderConnectionId,
+            revision: ProviderConnectionRevision,
+        ) -> ProviderRepositoryFuture<'_, Option<ProviderConnectionManifest>> {
+            Box::pin(async move {
+                Ok((self.connection.connection_id() == connection_id
+                    && self.connection.revision() == revision)
+                    .then(|| self.connection.clone()))
+            })
+        }
+
+        fn current_connection(
+            &self,
+            connection_id: ProviderConnectionId,
+        ) -> ProviderRepositoryFuture<'_, Option<ProviderConnectionManifest>> {
+            Box::pin(async move {
+                Ok((self.connection.connection_id() == connection_id)
+                    .then(|| self.connection.clone()))
+            })
+        }
+    }
 
     #[derive(Debug)]
     struct Adapter {
@@ -672,6 +887,172 @@ mod tests {
                 .expect("capabilities"),
             calls: AtomicUsize::new(0),
         })
+    }
+
+    #[allow(clippy::too_many_lines)] // One fixture preserves one exact provider/result binding.
+    fn result_fixture(
+        worker_id: ProviderResultWorkerId,
+    ) -> (
+        ClaimedProviderResult,
+        ProviderConnectionManifest,
+        ProviderInstanceManifest,
+        ProviderCapabilities,
+    ) {
+        let capabilities = ProviderCapabilities::new([ProviderCapability::RichChecks(
+            RichCheckCapability::new(true, false, false).expect("rich checks"),
+        )])
+        .expect("capabilities");
+        let capability_digest =
+            provider_capability_digest(&capabilities).expect("capability digest");
+        let provider_configuration = ProviderConfigurationDocument::new(
+            ProviderSchemaVersion::new(1).expect("provider schema"),
+            br"{}".to_vec(),
+        )
+        .expect("provider configuration");
+        let instance_id = ProviderInstanceId::from_uuid(Uuid::from_u128(1)).expect("instance");
+        let provider_manifest = ProviderInstanceManifest::new(
+            instance_id,
+            ProviderTypeId::new("github").expect("provider type"),
+            ProviderConfigurationRevision::new(1).expect("provider revision"),
+            ProviderLifecycleState::Active,
+            ProviderOrigins::new("https://github.com/", "https://api.github.com/")
+                .expect("provider origins"),
+            provider_configuration,
+            ProviderSecretBindings::empty(),
+            capability_digest,
+            UnixMillis::new(100),
+            Some(UnixMillis::new(100)),
+            None,
+        )
+        .expect("provider manifest");
+        let connection_configuration = ProviderConnectionConfiguration::new(
+            WorkspaceId::parse("11111111-1111-4111-8111-111111111111").expect("workspace"),
+            ExternalRepositoryIdentity::new(
+                instance_id,
+                ExternalRepositoryId::new("42").expect("repository"),
+            ),
+            provider_manifest.revision(),
+            provider_manifest.configuration().digest(),
+            provider_manifest.capability_digest(),
+            RepositoryVisibility::Private,
+            ProviderDefaultBranch::new("main").expect("default branch"),
+            ProviderWorkflowSource::Directory(
+                ProviderRepositoryPath::new(".ci/workflows").expect("workflow source"),
+            ),
+            ProviderRunnerPolicyBinding::new(
+                ProviderSchemaVersion::new(1).expect("runner schema"),
+                Sha256Digest::from_bytes([5; 32]),
+            ),
+            ProviderArchiveLimits::new(1_024, 8_192, 100, 1_024, 10, 1_024)
+                .expect("archive limits"),
+            ProviderConnectionPolicyDocument::new(
+                ProviderSchemaVersion::new(1).expect("connection schema"),
+                br"{}".to_vec(),
+            )
+            .expect("connection policy"),
+        );
+        let connection = ProviderConnectionManifest::new(
+            ProviderConnectionId::from_uuid(Uuid::from_u128(2)).expect("connection"),
+            ProviderConnectionRevision::new(1).expect("connection revision"),
+            ProviderLifecycleState::Active,
+            connection_configuration,
+            UnixMillis::new(100),
+            Some(UnixMillis::new(100)),
+            None,
+        )
+        .expect("connection manifest");
+        let subject = ProviderResultSubject::new(
+            ProviderResultSubjectId::from_uuid(Uuid::from_u128(3)).expect("subject"),
+            &connection,
+            GitObjectId::from_provider_hex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                .expect("object"),
+            ProviderResultSubjectKind::WorkflowRun {
+                run_id: RunId::from_uuid(Uuid::from_u128(4)),
+            },
+            1,
+            UnixMillis::new(900),
+        )
+        .expect("result subject");
+        let desired = DesiredProviderResult::new(
+            1,
+            ProviderResultPhase::Running,
+            None,
+            ProviderResultTitle::new("build").expect("title"),
+            ProviderResultSummary::new("running").expect("summary"),
+            ProviderResultDetailsUrl::new(
+                Url::parse("https://ci.example/runs/4").expect("details URL"),
+            )
+            .expect("details URL"),
+            Vec::new(),
+            UnixMillis::new(950),
+        )
+        .expect("desired result");
+        let claim = ProviderResultClaimFence::new(
+            subject.subject_id(),
+            1,
+            worker_id,
+            1,
+            UnixMillis::new(1_000),
+            UnixMillis::new(1_030),
+        )
+        .expect("result claim");
+        let claimed =
+            ClaimedProviderResult::new(subject, desired, claim, 1).expect("claimed result");
+        (claimed, connection, provider_manifest, capabilities)
+    }
+
+    #[tokio::test]
+    async fn slow_publication_renews_and_completes_with_the_latest_fence() {
+        let worker_id = ProviderResultWorkerId::from_uuid(Uuid::from_u128(5)).expect("worker");
+        let (claimed, connection, provider, capabilities) = result_fixture(worker_id);
+        let initial_expiry = claimed.claim().expires_at();
+        let repository = Arc::new(ResultRepository {
+            claim: Mutex::new(Some(claimed)),
+            renewals: AtomicUsize::new(0),
+            completed: Mutex::new(None),
+        });
+        let adapter = Arc::new(SlowAdapter {
+            provider_type: ProviderTypeId::new("github").expect("provider type"),
+            capabilities,
+            initial_expiry: AtomicI64::new(0),
+            final_expiry: AtomicI64::new(0),
+        });
+        let manifests = Arc::new(ManifestRepository {
+            provider,
+            connection: connection.clone(),
+        });
+        let worker = ProviderResultWorker::new(
+            connection.connection_id(),
+            worker_id,
+            Arc::clone(&repository) as Arc<dyn ProviderResultRepository>,
+            ProviderRuntimeContextResolver::new(manifests),
+            ProviderResultAdapterRegistry::new([
+                Arc::clone(&adapter) as Arc<dyn ProviderResultAdapter>
+            ])
+            .expect("adapter registry"),
+            Arc::new(StepClock(AtomicI64::new(1_000))),
+            ProviderResultWorkerConfig::new(30, 30).expect("worker config"),
+        );
+
+        assert_eq!(
+            worker.run_once().await.expect("worker pass"),
+            ProviderResultWorkerOutcome::Published
+        );
+        assert!(repository.renewals.load(Ordering::SeqCst) >= 1);
+        assert_eq!(adapter.initial_expiry.load(Ordering::SeqCst), 1_030);
+        assert!(
+            adapter.final_expiry.load(Ordering::SeqCst)
+                > adapter.initial_expiry.load(Ordering::SeqCst)
+        );
+        assert!(
+            repository
+                .completed
+                .lock()
+                .expect("completion lock")
+                .expect("completed fence")
+                .expires_at()
+                > initial_expiry
+        );
     }
 
     #[test]

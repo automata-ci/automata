@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 use automata_ci_core::{
-    GitObjectAlgorithm, GitObjectId, RunId, Sha256Digest, UnixMillis, WorkspaceId,
+    GitObjectAlgorithm, GitObjectId, RunId, Sha256Digest, TrustEventKind, TrustEvidence,
+    TrustOriginKind, TrustPolicy, TrustRepositoryEvidence, TrustTokenRecursion, UnixMillis,
+    WorkflowId, WorkflowJobKey, WorkspaceId,
 };
 use automata_ci_key_management::{KeyId, LocalAes256GcmKeyring, LocalKeyMaterial, SecretBytes};
 use automata_ci_postgres::test_support::{TestResult, run_with_database};
@@ -37,6 +39,12 @@ use automata_ci_provider::{
     provider_capability_digest, provider_raw_webhook_descriptor,
 };
 use automata_ci_provider_postgres::PostgresProviderManifestRepository;
+use automata_ci_store::{
+    AdmissionObject, AdmissionRepository, AdmitLogicalWorkflowRun, AdmittedLogicalWorkflowJob,
+    AuthenticatedProviderDeliveryClaim, LogicalWorkflowAdmissionRepository as _,
+    LogicalWorkflowInvocationId, LogicalWorkflowJobId, LogicalWorkflowJobKind, ObjectKey,
+    RepositoryId, TenantScope, WorkflowAdmissionIdempotency, WorkflowSnapshotId,
+};
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
@@ -729,6 +737,90 @@ fn verified_delivery(
     VerifiedProviderTriggerDelivery::rehydrate(evidence, trigger).expect("verified delivery")
 }
 
+fn admission_object(name: &str, digest: Sha256Digest, media_type: &str) -> AdmissionObject {
+    AdmissionObject::new(
+        digest,
+        ObjectKey::new(format!("provider-admission/{name}")).expect("object key"),
+        128,
+        media_type,
+    )
+    .expect("admission object")
+}
+
+#[allow(clippy::too_many_arguments)]
+fn provider_admission_command(
+    tenant: &str,
+    delivery_id: ProviderDeliveryId,
+    repository_id: RepositoryId,
+    workflow_id: WorkflowId,
+    workflow_path: &str,
+    git_ref: &str,
+    event_name: &str,
+    head_sha: GitObjectId,
+    actor: Option<&str>,
+    event_digest: Sha256Digest,
+    request_digest: Sha256Digest,
+    admitted_at: UnixMillis,
+) -> AdmitLogicalWorkflowRun {
+    let trust_repository =
+        TrustRepositoryEvidence::new("42", "7").expect("trust repository evidence");
+    let revision = head_sha.to_string();
+    let trust = TrustPolicy::current()
+        .evaluate(
+            TrustEvidence::new(TrustOriginKind::ProviderWebhook, TrustEventKind::Push)
+                .with_repositories(trust_repository.clone(), trust_repository)
+                .with_refs(git_ref, git_ref, git_ref)
+                .with_revisions(revision.clone(), revision.clone(), revision)
+                .with_fork(false)
+                .with_token_recursion(TrustTokenRecursion::Suppressed),
+        )
+        .expect("trust snapshot");
+    let job = AdmittedLogicalWorkflowJob::new(
+        LogicalWorkflowJobId::from_uuid(Uuid::from_u128(0x5147)).expect("job ID"),
+        WorkflowJobKey::new("verify").expect("job key"),
+        0,
+        LogicalWorkflowJobKind::Steps,
+        Vec::new(),
+    )
+    .expect("logical job");
+    let mut builder = AdmitLogicalWorkflowRun::builder(
+        TenantScope::from_authenticated_tenant_id(tenant).expect("tenant"),
+        WorkflowAdmissionIdempotency::provider_delivery(delivery_id.to_string())
+            .expect("provider delivery idempotency"),
+        request_digest,
+        AdmissionRepository::new(repository_id, "forgejo", "42", "owner/repository")
+            .expect("admission repository"),
+        workflow_id,
+        workflow_path,
+        "Provider admission",
+        git_ref,
+        WorkflowSnapshotId::from_uuid(Uuid::from_u128(0x5144)),
+        admission_object(
+            "source",
+            Sha256Digest::from_bytes([0x51; 32]),
+            "application/yaml",
+        ),
+        admission_object(
+            "plan",
+            Sha256Digest::from_bytes([0x52; 32]),
+            "application/vnd.automata.workflow-plan.protobuf",
+        ),
+        RunId::from_uuid(Uuid::from_u128(0x5145)),
+        1,
+        LogicalWorkflowInvocationId::from_uuid(Uuid::from_u128(0x5146)).expect("root invocation"),
+        event_name,
+        admission_object("event", event_digest, "application/json"),
+        head_sha,
+        vec![job],
+        admitted_at,
+    )
+    .trust_snapshot(trust);
+    if let Some(actor) = actor {
+        builder = builder.actor(actor);
+    }
+    builder.build().expect("provider admission command")
+}
+
 fn verified_control(
     endpoint: &ProviderWebhookEndpointManifest,
     delivery_id: ProviderDeliveryId,
@@ -788,6 +880,287 @@ fn verified_control(
     )
     .expect("control");
     VerifiedProviderControlDelivery::rehydrate(evidence, control).expect("verified control")
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL 18 via AUTOMATA_TEST_DATABASE_URL"]
+#[allow(clippy::too_many_lines)]
+async fn provider_admission_binds_normalized_trigger_and_replays_after_claim_rotation() -> TestResult
+{
+    run_with_database(|database| async move {
+        let repository = repository(database.pool().clone());
+        let instance_id = ProviderInstanceId::from_uuid(Uuid::from_u128(0x5141))?;
+        repository
+            .save_instance(instance_record(
+                instance_id,
+                "forgejo",
+                1,
+                TOKEN,
+                1,
+                ProviderLifecycleState::Active,
+                Some(UnixMillis::new(1_000)),
+            ))
+            .await?;
+        let instance = repository
+            .current_instance(instance_id)
+            .await?
+            .expect("provider instance");
+        let workspace = WorkspaceId::parse("00000000-0000-4000-8000-000000005142")?;
+        let tenant = workspace.to_string();
+        sqlx::query(
+            "INSERT INTO tenants (id, display_name, created_at_ms, updated_at_ms) VALUES ($1, 'Provider admission test', 1, 1)",
+        )
+        .bind(workspace.to_string())
+        .execute(database.pool())
+        .await?;
+        let connection = connection(workspace, instance.manifest());
+        repository.save_connection(connection.clone()).await?;
+        let endpoint = ProviderWebhookEndpointManifest::new(
+            ProviderWebhookEndpointId::from_uuid(Uuid::from_u128(0x5142))?,
+            ProviderWebhookEndpointRevision::new(1)?,
+            ProviderWebhookEndpointState::Active,
+            ProviderTypeId::new("forgejo")?,
+            instance_id,
+            instance.manifest().revision(),
+            connection.connection_id(),
+            connection.revision(),
+            1_024,
+            30 * 24 * 60 * 60 * 1_000,
+            vec![ProviderWebhookSecretReference::new(
+                instance.manifest().revision(),
+                ProviderSecretName::new("control-token")?,
+                ProviderSecretGeneration::new(1)?,
+            )],
+            UnixMillis::new(3_000),
+            None,
+        )?;
+        repository.save_endpoint(endpoint.clone()).await?;
+
+        let delivery_id = ProviderDeliveryId::from_uuid(Uuid::from_u128(0x5143))?;
+        let raw_body = b"provider-admission-body";
+        let event_digest = secret_digest(raw_body);
+        let delivery = ProviderDelivery::Trigger(Box::new(verified_delivery(
+            &endpoint,
+            delivery_id,
+            raw_body,
+        )));
+        let ProviderDeliveryAcceptOutcome::Inserted(delivery_receipt) = repository
+            .accept_delivery(AcceptProviderDelivery::new(
+                delivery,
+                UnixMillis::new(4_100),
+            )?)
+            .await?
+        else {
+            panic!("provider delivery was not inserted");
+        };
+        let worker = ProviderProcessingWorkerId::from_uuid(Uuid::from_u128(0x5148))?;
+        let first_claim = repository
+            .claim_processing(ClaimProviderProcessing::new(
+                worker,
+                UnixMillis::new(5_000),
+                1_000,
+            )?)
+            .await?
+            .expect("first processing claim");
+        assert_eq!(
+            delivery_receipt.invocation_id(),
+            Some(first_claim.receipt().invocation_id())
+        );
+        let first_authority = AuthenticatedProviderDeliveryClaim::new(
+            delivery_id,
+            first_claim.receipt(),
+            first_claim.fence(),
+        )?;
+        let repository_id = RepositoryId::from_uuid(Uuid::from_u128(0x5149));
+        let workflow_id = WorkflowId::from_uuid(Uuid::from_u128(0x514a));
+        let expected_head = GitObjectId::from_hex(GitObjectAlgorithm::Sha1, &"b".repeat(40))?;
+        let request_digest = Sha256Digest::from_bytes([0x53; 32]);
+        let command = |workflow_path: &str,
+                       git_ref: &str,
+                       event_name: &str,
+                       head_sha: GitObjectId,
+                       actor: Option<&str>,
+                       digest: Sha256Digest,
+                       admitted_at: UnixMillis| {
+            provider_admission_command(
+                &tenant,
+                delivery_id,
+                repository_id,
+                workflow_id,
+                workflow_path,
+                git_ref,
+                event_name,
+                head_sha,
+                actor,
+                event_digest,
+                digest,
+                admitted_at,
+            )
+        };
+
+        for invalid in [
+            command(
+                ".forgejo/workflows/ci.yml",
+                "refs/heads/main",
+                "push",
+                GitObjectId::from_hex(GitObjectAlgorithm::Sha1, &"c".repeat(40))?,
+                None,
+                request_digest,
+                UnixMillis::new(5_500),
+            ),
+            command(
+                ".forgejo/workflows/ci.yml",
+                "refs/heads/other",
+                "push",
+                expected_head,
+                None,
+                request_digest,
+                UnixMillis::new(5_500),
+            ),
+            command(
+                ".forgejo/workflows/ci.yml",
+                "refs/heads/main",
+                "pull_request",
+                expected_head,
+                None,
+                request_digest,
+                UnixMillis::new(5_500),
+            ),
+            command(
+                ".forgejo/workflows/ci.yml",
+                "refs/heads/main",
+                "push",
+                expected_head,
+                Some("different-actor"),
+                request_digest,
+                UnixMillis::new(5_500),
+            ),
+        ] {
+            database
+                .store()
+                .admit_authenticated_provider_delivery(
+                    invalid,
+                    first_authority,
+                    UnixMillis::new(5_500),
+                )
+                .await
+                .expect_err("changed normalized trigger coordinate must be rejected");
+        }
+
+        let initial = command(
+            ".forgejo/workflows/ci.yml",
+            "refs/heads/main",
+            "push",
+            expected_head,
+            None,
+            request_digest,
+            UnixMillis::new(5_500),
+        );
+        let receipt = database
+            .store()
+            .admit_authenticated_provider_delivery(
+                initial,
+                first_authority,
+                UnixMillis::new(5_500),
+            )
+            .await?;
+        assert!(!receipt.is_replay());
+
+        repository
+            .retry_processing(RetryProviderProcessing::new(
+                first_claim.fence(),
+                UnixMillis::new(5_600),
+                UnixMillis::new(7_000),
+                ProviderProcessingFailure::DependencyUnavailable,
+            )?)
+            .await?;
+        let second_claim = repository
+            .claim_processing(ClaimProviderProcessing::new(
+                worker,
+                UnixMillis::new(7_000),
+                1_000,
+            )?)
+            .await?
+            .expect("reclaimed processing invocation");
+        assert!(second_claim.fence().token() > first_claim.fence().token());
+        let second_authority = AuthenticatedProviderDeliveryClaim::new(
+            delivery_id,
+            second_claim.receipt(),
+            second_claim.fence(),
+        )?;
+        let replay = command(
+            ".forgejo/workflows/ci.yml",
+            "refs/heads/main",
+            "push",
+            expected_head,
+            None,
+            request_digest,
+            UnixMillis::new(7_500),
+        );
+        assert!(
+            database
+                .store()
+                .admit_authenticated_provider_delivery(
+                    replay,
+                    second_authority,
+                    UnixMillis::new(7_500),
+                )
+                .await?
+                .is_replay()
+        );
+
+        for changed in [
+            command(
+                ".forgejo/workflows/other.yml",
+                "refs/heads/main",
+                "push",
+                expected_head,
+                None,
+                request_digest,
+                UnixMillis::new(7_600),
+            ),
+            command(
+                ".forgejo/workflows/ci.yml",
+                "refs/heads/main",
+                "push",
+                expected_head,
+                None,
+                Sha256Digest::from_bytes([0x54; 32]),
+                UnixMillis::new(7_600),
+            ),
+        ] {
+            database
+                .store()
+                .admit_authenticated_provider_delivery(
+                    changed,
+                    second_authority,
+                    UnixMillis::new(7_600),
+                )
+                .await
+                .expect_err("replay must retain the original workflow evidence");
+        }
+
+        let (count, original_fence): (i64, i64) = sqlx::query_as(
+            "SELECT count(*), min(original_fence) FROM provider_workflow_admission_evidence WHERE delivery_id = $1",
+        )
+        .bind(delivery_id.as_uuid())
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(count, 1);
+        assert_eq!(original_fence, i64::try_from(first_claim.fence().token())?);
+        assert!(
+            sqlx::query(
+                "UPDATE provider_workflow_admission_evidence SET workflow_path = '.forgejo/workflows/tampered.yml' WHERE delivery_id = $1",
+            )
+            .bind(delivery_id.as_uuid())
+            .execute(database.pool())
+            .await
+            .is_err(),
+            "provider admission evidence must be immutable",
+        );
+        Ok(())
+    })
+    .await
 }
 
 #[tokio::test]

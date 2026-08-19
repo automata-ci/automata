@@ -22,6 +22,8 @@ uuid.workspace = true
 
 [dev-dependencies]
 automata-ci-postgres = { workspace = true, features = ["test-support"] }
+automata-ci-store.workspace = true
+automata-ci-store-postgres.workspace = true
 tokio.workspace = true
 
 [lints]
