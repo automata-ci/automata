@@ -23,10 +23,10 @@ use automata_ci_provider::{
     ExternalRepositoryId, ExternalRepositoryIdentity, ProviderArchiveLimits,
     ProviderConfigurationRevision, ProviderConnectionConfiguration, ProviderConnectionId,
     ProviderConnectionManifest, ProviderConnectionPolicyDocument, ProviderConnectionRevision,
-    ProviderDefaultBranch, ProviderInstanceId, ProviderLifecycleState, ProviderRepositoryPath,
-    ProviderRunnerPolicyBinding, ProviderSchemaVersion, ProviderWorkflowSource,
-    RepositoryVisibility, WorkloadCredentialPermission, WorkloadCredentialPermissionSet,
-    WorkloadCredentialProfile, WorkloadCredentialRequest,
+    ProviderDefaultBranch, ProviderInstanceId, ProviderLifecycleState, ProviderPermission,
+    ProviderPermissionSet, ProviderRepositoryPath, ProviderRunnerPolicyBinding,
+    ProviderSchemaVersion, ProviderWorkflowSource, RepositoryVisibility, WorkloadCredentialProfile,
+    WorkloadCredentialRequest,
 };
 use automata_ci_scm::credential::{
     MinimumValidity, PermissionLevel, PermissionName, PermissionSet, ProviderResourceId,
@@ -308,9 +308,9 @@ pub fn workload_request_for(connection: &ProviderConnectionManifest) -> Workload
         .unwrap(),
         TrustSourceClass::SameRepository,
         WorkloadCredentialProfile::RepositoryAccess,
-        WorkloadCredentialPermissionSet::new([
-            WorkloadCredentialPermission::new("contents", CommonPermissionLevel::Read).unwrap(),
-            WorkloadCredentialPermission::new("statuses", CommonPermissionLevel::Write).unwrap(),
+        ProviderPermissionSet::new([
+            ProviderPermission::new("contents", CommonPermissionLevel::Read).unwrap(),
+            ProviderPermission::new("statuses", CommonPermissionLevel::Write).unwrap(),
         ])
         .unwrap(),
         requested_at,

@@ -547,12 +547,12 @@ pub enum ControlCredentialProviderError {
 
 /// Canonical provider permission and effective level for a workload credential.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct WorkloadCredentialPermission {
+pub struct ProviderPermission {
     name: String,
     level: PermissionLevel,
 }
 
-impl WorkloadCredentialPermission {
+impl ProviderPermission {
     /// Creates one canonical non-denied provider permission.
     ///
     /// # Errors
@@ -582,16 +582,16 @@ impl WorkloadCredentialPermission {
 
 /// Complete canonical effective permission set for one workload credential.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct WorkloadCredentialPermissionSet(BTreeMap<String, PermissionLevel>);
+pub struct ProviderPermissionSet(BTreeMap<String, PermissionLevel>);
 
-impl WorkloadCredentialPermissionSet {
+impl ProviderPermissionSet {
     /// Creates a bounded duplicate-free permission set.
     ///
     /// # Errors
     ///
     /// Rejects duplicates or excessive grants. Empty is valid for checkout-only credentials.
     pub fn new(
-        permissions: impl IntoIterator<Item = WorkloadCredentialPermission>,
+        permissions: impl IntoIterator<Item = ProviderPermission>,
     ) -> Result<Self, ProviderCredentialModelError> {
         let mut values = BTreeMap::new();
         for permission in permissions {
@@ -654,7 +654,7 @@ pub struct WorkloadCredentialRequest {
     lease: Lease,
     trust_class: TrustSourceClass,
     profile: WorkloadCredentialProfile,
-    permissions: WorkloadCredentialPermissionSet,
+    permissions: ProviderPermissionSet,
     requested_at: UnixMillis,
     expires_at: UnixMillis,
     digest: Sha256Digest,
@@ -674,7 +674,7 @@ impl WorkloadCredentialRequest {
         lease: Lease,
         trust_class: TrustSourceClass,
         profile: WorkloadCredentialProfile,
-        permissions: WorkloadCredentialPermissionSet,
+        permissions: ProviderPermissionSet,
         requested_at: UnixMillis,
         expires_at: UnixMillis,
     ) -> Result<Self, ProviderCredentialModelError> {
@@ -807,7 +807,7 @@ impl WorkloadCredentialRequest {
     }
     /// Returns the complete effective permission set.
     #[must_use]
-    pub const fn permissions(&self) -> &WorkloadCredentialPermissionSet {
+    pub const fn permissions(&self) -> &ProviderPermissionSet {
         &self.permissions
     }
     /// Returns the issuance request time.

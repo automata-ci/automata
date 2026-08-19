@@ -7,11 +7,10 @@ use automata_ci_core::{
 };
 use automata_ci_key_management::{EnvelopeCodec, SecretBytes};
 use automata_ci_provider::{
-    ProviderConnectionId, ProviderConnectionManifest, WorkloadCredentialIssueOutcome,
-    WorkloadCredentialPermission, WorkloadCredentialPermissionSet, WorkloadCredentialProfile,
-    WorkloadCredentialProvider, WorkloadCredentialProviderError,
-    WorkloadCredentialProviderErrorKind, WorkloadCredentialRequest,
-    WorkloadCredentialRevocationCandidate,
+    ProviderConnectionId, ProviderConnectionManifest, ProviderPermission, ProviderPermissionSet,
+    WorkloadCredentialIssueOutcome, WorkloadCredentialProfile, WorkloadCredentialProvider,
+    WorkloadCredentialProviderError, WorkloadCredentialProviderErrorKind,
+    WorkloadCredentialRequest, WorkloadCredentialRevocationCandidate,
 };
 use automata_ci_store::{
     AuthenticateGithubRuntimeAuthorityUnprotectedErasure, BeginGithubRuntimeAuthorityMint,
@@ -87,11 +86,11 @@ pub fn github_job_runtime_authority_request(
                 JobPermissionLevel::Write => automata_ci_core::PermissionLevel::Write,
                 JobPermissionLevel::None => return Err(GithubJobRuntimeAuthorityRequestValueError),
             };
-            WorkloadCredentialPermission::new(grant.name(), level)
+            ProviderPermission::new(grant.name(), level)
                 .map_err(|_| GithubJobRuntimeAuthorityRequestValueError)
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let permissions = WorkloadCredentialPermissionSet::new(permissions)
+    let permissions = ProviderPermissionSet::new(permissions)
         .map_err(|_| GithubJobRuntimeAuthorityRequestValueError)?;
     let lease = Lease::new(
         identity.lease_id(),
@@ -1252,11 +1251,10 @@ mod tests {
         PendingWorkloadCredentialRevocation, ProviderArchiveLimits, ProviderConfigurationRevision,
         ProviderConnectionConfiguration, ProviderConnectionManifest,
         ProviderConnectionPolicyDocument, ProviderConnectionRevision, ProviderDefaultBranch,
-        ProviderInstanceId, ProviderLifecycleState, ProviderRepositoryPath,
-        ProviderRunnerPolicyBinding, ProviderSchemaVersion, ProviderWorkflowSource,
-        RepositoryVisibility, WorkloadCredentialIndeterminateReason, WorkloadCredentialIssuance,
-        WorkloadCredentialIssueOutcome, WorkloadCredentialPermission,
-        WorkloadCredentialPermissionSet, WorkloadCredentialProfile,
+        ProviderInstanceId, ProviderLifecycleState, ProviderPermission, ProviderPermissionSet,
+        ProviderRepositoryPath, ProviderRunnerPolicyBinding, ProviderSchemaVersion,
+        ProviderWorkflowSource, RepositoryVisibility, WorkloadCredentialIndeterminateReason,
+        WorkloadCredentialIssuance, WorkloadCredentialIssueOutcome, WorkloadCredentialProfile,
         WorkloadCredentialProviderError, WorkloadCredentialProviderErrorKind,
         WorkloadCredentialRequest, WorkloadCredentialRevocationCandidate,
     };
@@ -1429,7 +1427,7 @@ mod tests {
             .expect("lease"),
             automata_ci_core::TrustSourceClass::SameRepository,
             WorkloadCredentialProfile::RepositoryAccess,
-            WorkloadCredentialPermissionSet::new([WorkloadCredentialPermission::new(
+            ProviderPermissionSet::new([ProviderPermission::new(
                 "contents",
                 automata_ci_core::PermissionLevel::Read,
             )
@@ -1476,9 +1474,12 @@ mod tests {
             None,
         )
         .expect("connection");
-        let permissions = WorkloadCredentialPermissionSet::new(request.permissions().iter().map(
-            |(name, level)| WorkloadCredentialPermission::new(name, level).expect("permission"),
-        ))
+        let permissions = ProviderPermissionSet::new(
+            request
+                .permissions()
+                .iter()
+                .map(|(name, level)| ProviderPermission::new(name, level).expect("permission")),
+        )
         .expect("permissions");
         WorkloadCredentialRequest::new(
             &connection,
