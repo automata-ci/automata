@@ -1203,14 +1203,6 @@ impl ActivatedLogicalInstanceDescriptor {
         })
     }
 
-    /// Replaces the value-free evidence while constructing a divergent test or
-    /// retry candidate. A descriptor can never transition back to no evidence.
-    #[must_use]
-    pub fn with_environment_gate(mut self, evidence: JobEnvironmentActivationEvidence) -> Self {
-        self.environment_gate = Some(evidence);
-        self
-    }
-
     /// Decodes either a current instance or retained pre-evidence history.
     ///
     /// `None` is accepted only on this internal durable path so terminal records

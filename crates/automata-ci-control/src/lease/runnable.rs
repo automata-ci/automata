@@ -451,12 +451,6 @@ impl RunnableScanPage {
         &self.candidates
     }
 
-    /// Returns the cursor version expected by the page.
-    #[must_use]
-    pub const fn expected_cursor_version(&self) -> u64 {
-        self.cursor.expected_version
-    }
-
     /// Produces a compact proof that advances through one selected candidate.
     ///
     /// # Errors
