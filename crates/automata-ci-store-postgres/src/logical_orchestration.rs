@@ -87,6 +87,8 @@ struct ProviderSelectionAuthority {
     connection_revision: i64,
     provider_configuration_digest: Vec<u8>,
     capability_digest: Vec<u8>,
+    runner_policy_schema: i16,
+    runner_policy_digest: Vec<u8>,
     normalized_trigger_digest: Vec<u8>,
     raw_event_digest: Vec<u8>,
 }
@@ -105,6 +107,8 @@ struct ProviderSelectionAuthorityRow {
     default_branch: String,
     provider_configuration_digest: Vec<u8>,
     capability_digest: Vec<u8>,
+    runner_policy_schema: i16,
+    runner_policy_digest: Vec<u8>,
 }
 
 #[async_trait]
@@ -1817,6 +1821,8 @@ async fn load_provider_selection_authority(
         connection_revision: row.connection_revision,
         provider_configuration_digest: row.provider_configuration_digest,
         capability_digest: row.capability_digest,
+        runner_policy_schema: row.runner_policy_schema,
+        runner_policy_digest: row.runner_policy_digest,
         normalized_trigger_digest: row.normalized_payload_digest,
         raw_event_digest: row.raw_body_digest,
     })
@@ -1838,7 +1844,8 @@ async fn load_provider_selection_authority_row(
                delivery.raw_body_digest,
                connection.default_branch,
                connection.provider_configuration_digest,
-               connection.capability_digest
+               connection.capability_digest, connection.runner_policy_schema,
+               connection.runner_policy_digest
         FROM provider_processing_invocations AS invocation
         JOIN provider_deliveries AS delivery
           ON delivery.delivery_id = invocation.source_delivery_id
@@ -2288,13 +2295,14 @@ async fn record_provider_admission_evidence(
             workflow_id, workflow_path, provider_type, provider_instance_id,
             provider_revision, connection_id, connection_revision,
             provider_configuration_digest, capability_digest,
+            runner_policy_schema, runner_policy_digest,
             normalized_trigger_digest, raw_event_digest, request_digest,
             source_revision, git_ref, event_name, actor, original_worker_id,
             original_fence, original_claimed_at_ms, original_expires_at_ms,
             admitted_at_ms
         ) VALUES (
             $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
-            $18,$19,$20,$21,$22,$23,$24,$25,$26
+            $18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28
         )
         ",
     )
@@ -2312,6 +2320,8 @@ async fn record_provider_admission_evidence(
     .bind(selection.connection_revision)
     .bind(&selection.provider_configuration_digest)
     .bind(&selection.capability_digest)
+    .bind(selection.runner_policy_schema)
+    .bind(&selection.runner_policy_digest)
     .bind(&selection.normalized_trigger_digest)
     .bind(&selection.raw_event_digest)
     .bind(command.request_digest().as_bytes().as_slice())
@@ -2335,6 +2345,49 @@ async fn record_provider_admission_evidence(
         )
         .into());
     }
+    pin_provider_runtime_policy(transaction, command, &selection).await
+}
+
+async fn pin_provider_runtime_policy(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: &AdmitLogicalWorkflowRun,
+    selection: &ProviderSelectionAuthority,
+) -> Result<(), LogicalWorkflowAdmissionStoreError> {
+    let inserted = sqlx::query(
+        r"
+        INSERT INTO logical_workflow_runtime_policy_pins (
+            run_id, tenant_id, repository_id, policy_revision,
+            policy_digest, pinned_at_ms
+        )
+        SELECT $1, $2, $3, policy.policy_revision,
+               policy.policy_digest, $4
+        FROM workflow_runtime_policy_current AS current
+        JOIN workflow_runtime_policy_revisions AS policy
+          ON policy.tenant_id = current.tenant_id
+         AND policy.repository_id = current.repository_id
+         AND policy.policy_revision = current.policy_revision
+         AND policy.policy_digest = current.policy_digest
+         AND policy.state = 'sealed'
+         AND policy.policy_schema = $5
+         AND pg_catalog.sha256(policy.canonical_policy) = $6
+        WHERE current.tenant_id = $2 AND current.repository_id = $3
+        ",
+    )
+    .bind(command.run_id().as_uuid())
+    .bind(command.tenant().as_str())
+    .bind(command.repository().id().as_uuid())
+    .bind(command.admitted_at().get())
+    .bind(selection.runner_policy_schema)
+    .bind(&selection.runner_policy_digest)
+    .execute(&mut **transaction)
+    .await
+    .map_err(operation_error)?;
+    if inserted.rows_affected() != 1 {
+        return Err(StoreError::corrupt_data(
+            "common provider admission lacks one exact current runtime policy",
+        )
+        .into());
+    }
     Ok(())
 }
 
@@ -2349,18 +2402,33 @@ async fn validate_provider_admission_evidence_replay(
     let exact = sqlx::query_scalar::<_, bool>(
         r"
         SELECT TRUE
-        FROM provider_workflow_admission_evidence
-        WHERE run_id = $1 AND delivery_id = $2 AND invocation_id = $3
-          AND tenant_id = $4 AND repository_id = $5 AND workflow_id = $6
-          AND workflow_path = $7 AND provider_type = $8
-          AND provider_instance_id = $9 AND provider_revision = $10
-          AND connection_id = $11 AND connection_revision = $12
-          AND provider_configuration_digest = $13 AND capability_digest = $14
-          AND normalized_trigger_digest = $15 AND raw_event_digest = $16
-          AND request_digest = $17 AND source_revision = $18
-          AND git_ref = $19 AND event_name = $20
-          AND actor IS NOT DISTINCT FROM $21
-        FOR SHARE
+        FROM provider_workflow_admission_evidence AS evidence
+        JOIN logical_workflow_runtime_policy_pins AS pin
+          ON pin.run_id = evidence.run_id
+        JOIN workflow_runtime_policy_revisions AS policy
+          ON policy.tenant_id = pin.tenant_id
+         AND policy.repository_id = pin.repository_id
+         AND policy.policy_revision = pin.policy_revision
+         AND policy.policy_digest = pin.policy_digest
+         AND policy.state = 'sealed'
+         AND policy.policy_schema = evidence.runner_policy_schema
+         AND pg_catalog.sha256(policy.canonical_policy) = evidence.runner_policy_digest
+        WHERE evidence.run_id = $1 AND evidence.delivery_id = $2
+          AND evidence.invocation_id = $3 AND evidence.tenant_id = $4
+          AND evidence.repository_id = $5 AND evidence.workflow_id = $6
+          AND evidence.workflow_path = $7 AND evidence.provider_type = $8
+          AND evidence.provider_instance_id = $9 AND evidence.provider_revision = $10
+          AND evidence.connection_id = $11 AND evidence.connection_revision = $12
+          AND evidence.provider_configuration_digest = $13
+          AND evidence.capability_digest = $14
+          AND evidence.runner_policy_schema = $15
+          AND evidence.runner_policy_digest = $16
+          AND evidence.normalized_trigger_digest = $17
+          AND evidence.raw_event_digest = $18
+          AND evidence.request_digest = $19 AND evidence.source_revision = $20
+          AND evidence.git_ref = $21 AND evidence.event_name = $22
+          AND evidence.actor IS NOT DISTINCT FROM $23
+        FOR SHARE OF evidence, pin, policy
         ",
     )
     .bind(command.run_id().as_uuid())
@@ -2377,6 +2445,8 @@ async fn validate_provider_admission_evidence_replay(
     .bind(selection.connection_revision)
     .bind(&selection.provider_configuration_digest)
     .bind(&selection.capability_digest)
+    .bind(selection.runner_policy_schema)
+    .bind(&selection.runner_policy_digest)
     .bind(&selection.normalized_trigger_digest)
     .bind(&selection.raw_event_digest)
     .bind(command.request_digest().as_bytes().as_slice())

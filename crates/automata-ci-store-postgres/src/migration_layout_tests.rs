@@ -259,7 +259,7 @@ const CANONICAL_MIGRATIONS: &[(&str, &str)] = &[
     ),
     (
         "0064_provider_result_outbox.sql",
-        "889ef6a010cc4cbca08cb5aad5dd626b8efa34907b5537739aa6fd189f2aa89739be2024803cdfd9175062369eec71f5",
+        "1f8ae184bc2926c8a447afa7ad1ea9d466d0e064a89a69aa1c52dbd9ceabcf6af3ac7849bfa8871e911d6daae54d327f",
     ),
 ];
 
@@ -867,6 +867,13 @@ fn provider_result_outbox_is_current_only_provider_neutral_and_fenced() {
         "WHERE state IN ('pending', 'claimed')",
         "CREATE TRIGGER provider_workflow_admission_evidence_no_update_delete",
         "CREATE TRIGGER provider_workflow_admission_evidence_no_truncate",
+        "runner_policy_schema SMALLINT NOT NULL",
+        "runner_policy_digest BYTEA NOT NULL",
+        "CREATE OR REPLACE FUNCTION automata_require_current_manifest_runtime_policy_pair()",
+        "CONSTRAINT = 'provider_current_runtime_policy_pair'",
+        "CREATE OR REPLACE FUNCTION automata_require_workflow_runtime_policy_pin_provenance()",
+        "FROM provider_workflow_admission_evidence AS evidence",
+        "CREATE OR REPLACE FUNCTION automata_require_open_workflow_admission_graph()",
     ] {
         assert!(
             source.contains(required),

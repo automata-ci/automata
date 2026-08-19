@@ -43,12 +43,25 @@ use automata_ci_store::{
     AdmissionObject, AdmissionRepository, AdmitLogicalWorkflowRun, AdmittedLogicalWorkflowJob,
     AuthenticatedProviderDeliveryClaim, LogicalWorkflowAdmissionRepository as _,
     LogicalWorkflowInvocationId, LogicalWorkflowJobId, LogicalWorkflowJobKind, ObjectKey,
-    RepositoryId, TenantScope, WorkflowAdmissionIdempotency, WorkflowSnapshotId,
+    RepositoryId, TenantScope, WorkflowAdmissionIdempotency, WorkflowRuntimePolicy,
+    WorkflowSnapshotId,
 };
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
 const TOKEN: &[u8] = b"forgejo-control-token-that-must-stay-encrypted";
+const RUNTIME_POLICY: &[u8] = br#"{
+  "workspace":{"derivation":1,"root":"/__w","schema":1},
+  "mappings":[{
+    "runner_features":{"schema":1,"supported":["automata.core/bash-shell@v1","automata.core/default-posix-shell@v1","automata.core/shell-steps@v1"]},
+    "container_features":[],"architecture":"x86_64","operating_system":"linux",
+    "environment_profile":{"manifest_sha256":"1111111111111111111111111111111111111111111111111111111111111111","id":"automata.example/ubuntu-24-04"},
+    "selector":"Ubuntu-24.04"
+  }],
+  "permissions":{"provider_default":{"contents":"read","packages":"read"},"read_all":{"actions":"read","artifact-metadata":"read","attestations":"read","checks":"read","code-quality":"read","contents":"read","deployments":"read","discussions":"read","issues":"read","models":"read","packages":"read","pages":"read","pull-requests":"read","security-events":"read","statuses":"read","vulnerability-alerts":"read"},"write_all":{"actions":"write","artifact-metadata":"write","attestations":"write","checks":"write","code-quality":"write","contents":"write","deployments":"write","discussions":"write","id-token":"write","issues":"write","models":"read","packages":"write","pages":"write","pull-requests":"write","security-events":"write","statuses":"write","vulnerability-alerts":"read"}},
+  "resources":{"defaults":{"requests":{"cpu_millis":100,"memory_bytes":268435456,"ephemeral_disk_bytes":0,"gpu_count":0},"limits":{"cpu_millis":1000,"memory_bytes":1073741824,"ephemeral_disk_bytes":0,"gpu_count":0}},"minimum_requests":{"cpu_millis":100,"memory_bytes":268435456,"ephemeral_disk_bytes":0,"gpu_count":0},"maximum_limits":{"cpu_millis":4000,"memory_bytes":8589934592,"ephemeral_disk_bytes":0,"gpu_count":0}},
+  "schema":2
+}"#;
 
 fn repository(pool: sqlx::PgPool) -> PostgresProviderManifestRepository {
     let material = LocalKeyMaterial::new(
@@ -167,6 +180,143 @@ fn connection(
         None,
     )
     .expect("connection manifest")
+}
+
+fn connection_with_runner_policy(
+    workspace_id: WorkspaceId,
+    instance: &ProviderInstanceManifest,
+    runner_policy: ProviderRunnerPolicyBinding,
+) -> ProviderConnectionManifest {
+    let mut connection = connection(workspace_id, instance);
+    let configuration = ProviderConnectionConfiguration::new(
+        workspace_id,
+        connection.configuration().repository().clone(),
+        instance.revision(),
+        instance.configuration().digest(),
+        instance.capability_digest(),
+        RepositoryVisibility::Private,
+        ProviderDefaultBranch::new("main").expect("branch"),
+        ProviderWorkflowSource::Directory(
+            ProviderRepositoryPath::new(".forgejo/workflows").expect("workflow path"),
+        ),
+        runner_policy,
+        connection.configuration().archive_limits(),
+        connection.configuration().adapter_policy().clone(),
+    );
+    connection = ProviderConnectionManifest::new(
+        connection.connection_id(),
+        connection.revision(),
+        ProviderLifecycleState::Active,
+        configuration,
+        UnixMillis::new(2_000),
+        Some(UnixMillis::new(2_000)),
+        None,
+    )
+    .expect("connection manifest");
+    connection
+}
+
+async fn seed_provider_runtime_policy(
+    pool: &sqlx::PgPool,
+    tenant: &str,
+    repository_id: RepositoryId,
+    policy: &WorkflowRuntimePolicy,
+) -> TestResult {
+    let canonical = policy.canonical_bytes()?;
+    let mapping = &policy.mappings()[0];
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        r"
+        INSERT INTO repositories (
+            id, tenant_id, scm_provider, provider_repository_id,
+            owner, name, created_at_ms, updated_at_ms
+        ) VALUES ($1,$2,'forgejo','42','owner','repository',1,1)
+        ",
+    )
+    .bind(repository_id.as_uuid())
+    .bind(tenant)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        r"
+        INSERT INTO workflow_runtime_policy_revisions (
+            tenant_id, repository_id, policy_revision, policy_digest,
+            canonical_policy, permission_policy_canonical,
+            resource_policy_canonical, policy_schema, workspace_root,
+            workspace_derivation_version, mapping_count, state,
+            registered_at_ms, sealed_at_ms
+        ) VALUES ($1,$2,1,$3,$4,$5,$6,$7,'/__w',1,1,'staging',2,NULL)
+        ",
+    )
+    .bind(tenant)
+    .bind(repository_id.as_uuid())
+    .bind(policy.digest().as_bytes().as_slice())
+    .bind(&canonical)
+    .bind(policy.permission_policy().canonical_bytes()?)
+    .bind(serde_json::to_vec(&policy.resource_policy())?)
+    .bind(i16::try_from(policy.schema())?)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        r"
+        INSERT INTO workflow_runtime_policy_mappings (
+            tenant_id, repository_id, policy_revision, selector,
+            environment_profile_id, environment_profile_digest,
+            operating_system, architecture, feature_count,
+            runner_feature_schema, runner_feature_count
+        ) VALUES ($1,$2,1,$3,$4,$5,'linux','x86_64',0,1,$6)
+        ",
+    )
+    .bind(tenant)
+    .bind(repository_id.as_uuid())
+    .bind(mapping.selector().as_str())
+    .bind(mapping.environment().id().as_str())
+    .bind(mapping.environment().digest().as_bytes().as_slice())
+    .bind(i32::try_from(
+        mapping
+            .runner_feature_policy()
+            .expect("current policy runner features")
+            .supported()
+            .len(),
+    )?)
+    .execute(&mut *transaction)
+    .await?;
+    for feature in mapping
+        .runner_feature_policy()
+        .expect("current policy runner features")
+        .supported()
+    {
+        sqlx::query(
+            r"
+            INSERT INTO workflow_runtime_policy_runner_features (
+                tenant_id, repository_id, policy_revision, selector, feature
+            ) VALUES ($1,$2,1,$3,$4)
+            ",
+        )
+        .bind(tenant)
+        .bind(repository_id.as_uuid())
+        .bind(mapping.selector().as_str())
+        .bind(feature.as_str())
+        .execute(&mut *transaction)
+        .await?;
+    }
+    sqlx::query(
+        "UPDATE workflow_runtime_policy_revisions SET state='sealed', sealed_at_ms=registered_at_ms WHERE tenant_id=$1 AND repository_id=$2 AND policy_revision=1",
+    )
+    .bind(tenant)
+    .bind(repository_id.as_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO workflow_runtime_policy_current (tenant_id, repository_id, policy_revision, policy_digest, activated_at_ms) VALUES ($1,$2,1,$3,2)",
+    )
+    .bind(tenant)
+    .bind(repository_id.as_uuid())
+    .bind(policy.digest().as_bytes().as_slice())
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    Ok(())
 }
 
 #[tokio::test]
@@ -907,14 +1057,27 @@ async fn provider_admission_binds_normalized_trigger_and_replays_after_claim_rot
             .expect("provider instance");
         let workspace = WorkspaceId::parse("00000000-0000-4000-8000-000000005142")?;
         let tenant = workspace.to_string();
+        let repository_id = RepositoryId::from_uuid(Uuid::from_u128(0x5149));
         sqlx::query(
             "INSERT INTO tenants (id, display_name, created_at_ms, updated_at_ms) VALUES ($1, 'Provider admission test', 1, 1)",
         )
         .bind(workspace.to_string())
         .execute(database.pool())
         .await?;
-        let connection = connection(workspace, instance.manifest());
+        let runtime_policy = WorkflowRuntimePolicy::decode_configuration(RUNTIME_POLICY)?;
+        let runner_policy = ProviderRunnerPolicyBinding::new(
+            ProviderSchemaVersion::new(runtime_policy.schema())?,
+            runtime_policy.canonical_digest(),
+        );
+        let connection = connection_with_runner_policy(workspace, instance.manifest(), runner_policy);
         repository.save_connection(connection.clone()).await?;
+        seed_provider_runtime_policy(
+            database.pool(),
+            &tenant,
+            repository_id,
+            &runtime_policy,
+        )
+        .await?;
         let endpoint = ProviderWebhookEndpointManifest::new(
             ProviderWebhookEndpointId::from_uuid(Uuid::from_u128(0x5142))?,
             ProviderWebhookEndpointRevision::new(1)?,
@@ -971,7 +1134,6 @@ async fn provider_admission_binds_normalized_trigger_and_replays_after_claim_rot
             first_claim.receipt(),
             first_claim.fence(),
         )?;
-        let repository_id = RepositoryId::from_uuid(Uuid::from_u128(0x5149));
         let workflow_id = WorkflowId::from_uuid(Uuid::from_u128(0x514a));
         let expected_head = GitObjectId::from_hex(GitObjectAlgorithm::Sha1, &"b".repeat(40))?;
         let request_digest = Sha256Digest::from_bytes([0x53; 32]);
@@ -1065,6 +1227,27 @@ async fn provider_admission_binds_normalized_trigger_and_replays_after_claim_rot
             )
             .await?;
         assert!(!receipt.is_replay());
+        let (evidence_schema, evidence_digest, pin_revision, pin_digest):
+            (i16, Vec<u8>, i64, Vec<u8>) = sqlx::query_as(
+                r"
+                SELECT evidence.runner_policy_schema, evidence.runner_policy_digest,
+                       pin.policy_revision, pin.policy_digest
+                FROM provider_workflow_admission_evidence AS evidence
+                JOIN logical_workflow_runtime_policy_pins AS pin
+                  ON pin.run_id = evidence.run_id
+                WHERE evidence.delivery_id = $1
+                ",
+            )
+            .bind(delivery_id.as_uuid())
+            .fetch_one(database.pool())
+            .await?;
+        assert_eq!(evidence_schema, i16::try_from(runtime_policy.schema())?);
+        assert_eq!(
+            evidence_digest.as_slice(),
+            runtime_policy.canonical_digest().as_bytes()
+        );
+        assert_eq!(pin_revision, 1);
+        assert_eq!(pin_digest.as_slice(), runtime_policy.digest().as_bytes());
 
         repository
             .retry_processing(RetryProviderProcessing::new(

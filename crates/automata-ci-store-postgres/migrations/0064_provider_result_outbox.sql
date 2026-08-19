@@ -1,3 +1,265 @@
+-- Runtime policy selection is no longer GitHub-manifest-exclusive. A common
+-- provider connection may bind the same exact current policy by schema and
+-- canonical digest, while the existing GitHub manifest pair remains valid.
+CREATE OR REPLACE FUNCTION automata_require_current_manifest_runtime_policy_pair()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+DECLARE
+    pair_exists BOOLEAN;
+BEGIN
+    SELECT EXISTS (
+        SELECT 1
+        FROM workflow_runtime_policy_current AS current_policy
+        JOIN github_provider_manifest_current AS current_manifest
+          ON current_manifest.tenant_id = current_policy.tenant_id
+         AND current_manifest.repository_id = current_policy.repository_id
+        JOIN github_provider_manifest_revisions AS manifest
+          ON manifest.tenant_id = current_manifest.tenant_id
+         AND manifest.repository_id = current_manifest.repository_id
+         AND manifest.provider_connection_id = current_manifest.provider_connection_id
+         AND manifest.manifest_revision = current_manifest.manifest_revision
+         AND manifest.manifest_digest = current_manifest.manifest_digest
+        WHERE current_policy.tenant_id = NEW.tenant_id
+          AND current_policy.repository_id = NEW.repository_id
+          AND manifest.runtime_policy_revision = current_policy.policy_revision
+          AND manifest.runtime_policy_digest = current_policy.policy_digest
+    ) OR EXISTS (
+        SELECT 1
+        FROM workflow_runtime_policy_current AS current_policy
+        JOIN workflow_runtime_policy_revisions AS policy
+          ON policy.tenant_id = current_policy.tenant_id
+         AND policy.repository_id = current_policy.repository_id
+         AND policy.policy_revision = current_policy.policy_revision
+         AND policy.policy_digest = current_policy.policy_digest
+         AND policy.state = 'sealed'
+        JOIN repositories AS repository
+          ON repository.tenant_id = current_policy.tenant_id
+         AND repository.id = current_policy.repository_id
+        JOIN provider_connection_revisions AS connection
+          ON connection.workspace_id = repository.tenant_id
+         AND connection.external_repository_id = repository.provider_repository_id
+         AND connection.lifecycle_state = 'active'
+         AND connection.runner_policy_schema = policy.policy_schema
+         AND connection.runner_policy_digest = pg_catalog.sha256(policy.canonical_policy)
+        JOIN provider_instance_revisions AS provider
+          ON provider.instance_id = connection.provider_instance_id
+         AND provider.revision = connection.provider_revision
+         AND provider.provider_type = repository.scm_provider
+         AND provider.configuration_digest = connection.provider_configuration_digest
+         AND provider.capability_digest = connection.capability_digest
+         AND provider.lifecycle_state = 'active'
+        WHERE current_policy.tenant_id = NEW.tenant_id
+          AND current_policy.repository_id = NEW.repository_id
+    ) INTO pair_exists;
+    IF pair_exists IS NOT TRUE THEN
+        RAISE EXCEPTION 'current provider manifest and runtime policy are not an exact pair'
+            USING ERRCODE = 'check_violation',
+                  CONSTRAINT = 'provider_current_runtime_policy_pair';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION automata_require_workflow_runtime_policy_pin_provenance()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+    PERFORM 1
+    FROM provider_workflow_admission_evidence AS evidence
+    JOIN workflow_runtime_policy_revisions AS policy
+      ON policy.tenant_id = evidence.tenant_id
+     AND policy.repository_id = evidence.repository_id
+     AND policy.policy_revision = NEW.policy_revision
+     AND policy.policy_digest = NEW.policy_digest
+     AND policy.policy_schema = evidence.runner_policy_schema
+     AND pg_catalog.sha256(policy.canonical_policy) = evidence.runner_policy_digest
+     AND policy.state = 'sealed'
+    JOIN workflow_runs AS run
+      ON run.id = evidence.run_id AND run.repository_id = evidence.repository_id
+    JOIN logical_workflow_runs AS marker ON marker.run_id = evidence.run_id
+    WHERE evidence.run_id = NEW.run_id
+      AND evidence.tenant_id = NEW.tenant_id
+      AND evidence.repository_id = NEW.repository_id
+      AND evidence.admitted_at_ms = NEW.pinned_at_ms
+    FOR SHARE OF evidence, policy, run, marker;
+    IF FOUND THEN
+        RETURN NEW;
+    END IF;
+
+    PERFORM 1
+    FROM github_workflow_run_manifest_origins AS origin
+    JOIN github_provider_manifest_revisions AS manifest
+      ON manifest.tenant_id = origin.tenant_id
+     AND manifest.repository_id = origin.repository_id
+     AND manifest.provider_connection_id = origin.provider_connection_id
+     AND manifest.manifest_revision = origin.provider_manifest_revision
+     AND manifest.manifest_digest = origin.provider_manifest_digest
+    JOIN workflow_runtime_policy_revisions AS policy
+      ON policy.tenant_id = manifest.tenant_id
+     AND policy.repository_id = manifest.repository_id
+     AND policy.policy_revision = manifest.runtime_policy_revision
+     AND policy.policy_digest = manifest.runtime_policy_digest
+     AND policy.state = 'sealed'
+    JOIN workflow_runs AS run
+      ON run.id = origin.run_id AND run.repository_id = origin.repository_id
+    JOIN logical_workflow_runs AS marker ON marker.run_id = origin.run_id
+    WHERE origin.run_id = NEW.run_id
+      AND origin.tenant_id = NEW.tenant_id
+      AND origin.repository_id = NEW.repository_id
+      AND origin.admitted_at_ms = NEW.pinned_at_ms
+      AND manifest.runtime_policy_revision = NEW.policy_revision
+      AND manifest.runtime_policy_digest = NEW.policy_digest
+    FOR SHARE OF manifest, policy, run, marker;
+    IF FOUND THEN
+        RETURN NEW;
+    END IF;
+
+    PERFORM 1
+    FROM workflow_runs AS run
+    JOIN logical_workflow_runs AS marker ON marker.run_id = run.id
+    JOIN security_audit_events AS audit
+      ON audit.tenant_id = NEW.tenant_id
+     AND audit.action = 'workflow.dispatch'
+     AND audit.outcome = 'succeeded'
+     AND audit.resource_kind = 'workflow_run'
+     AND audit.resource_id = NEW.run_id::TEXT
+     AND audit.occurred_at_ms = NEW.pinned_at_ms
+     AND audit.actor_kind = 'human'
+     AND audit.actor_principal_id IS NOT NULL
+     AND (
+          audit.actor_session_id IS NOT NULL
+          OR EXISTS (
+              SELECT 1 FROM delegated_actor_audit_evidence AS delegated
+              WHERE delegated.event_id = audit.event_id
+                AND delegated.tenant_id = audit.tenant_id
+                AND delegated.principal_id = audit.actor_principal_id
+                AND delegated.issued_at_ms <= audit.occurred_at_ms
+                AND delegated.expires_at_ms > audit.occurred_at_ms
+          )
+     )
+     AND audit.authorization_revision IS NOT NULL
+    JOIN github_provider_manifest_current AS current_manifest
+      ON current_manifest.tenant_id = NEW.tenant_id
+     AND current_manifest.repository_id = NEW.repository_id
+    JOIN github_provider_manifest_revisions AS manifest
+      ON manifest.tenant_id = current_manifest.tenant_id
+     AND manifest.repository_id = current_manifest.repository_id
+     AND manifest.provider_connection_id = current_manifest.provider_connection_id
+     AND manifest.manifest_revision = current_manifest.manifest_revision
+     AND manifest.manifest_digest = current_manifest.manifest_digest
+    JOIN workflow_runtime_policy_revisions AS policy
+      ON policy.tenant_id = manifest.tenant_id
+     AND policy.repository_id = manifest.repository_id
+     AND policy.policy_revision = manifest.runtime_policy_revision
+     AND policy.policy_digest = manifest.runtime_policy_digest
+     AND policy.state = 'sealed'
+    WHERE run.id = NEW.run_id
+      AND run.repository_id = NEW.repository_id
+      AND manifest.runtime_policy_revision = NEW.policy_revision
+      AND manifest.runtime_policy_digest = NEW.policy_digest
+    FOR SHARE OF run, marker, audit, current_manifest, manifest, policy;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'workflow runtime policy pin lacks authenticated provider provenance'
+            USING ERRCODE = 'check_violation',
+                  CONSTRAINT = 'logical_workflow_runtime_policy_pin_provenance';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION automata_require_open_workflow_admission_graph()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+    PERFORM 1
+    FROM logical_workflow_runs AS marker
+    JOIN workflow_admission_receipts AS receipt ON receipt.run_id = marker.run_id
+    JOIN provider_workflow_admission_evidence AS evidence
+      ON evidence.run_id = marker.run_id
+     AND evidence.request_digest = marker.admission_digest
+    JOIN logical_workflow_runtime_policy_pins AS pin ON pin.run_id = marker.run_id
+    WHERE marker.run_id = NEW.run_id
+      AND marker.root_invocation_id = NEW.invocation_id
+      AND marker.admission_graph_sealed_at_ms IS NULL
+      AND receipt.committed_at_ms IS NOT NULL
+      AND receipt.idempotency_kind = 'provider_delivery'
+      AND receipt.idempotency_key = evidence.delivery_id::TEXT
+      AND receipt.request_digest = marker.admission_digest
+      AND evidence.admitted_at_ms = receipt.committed_at_ms
+      AND pin.pinned_at_ms = evidence.admitted_at_ms
+    FOR KEY SHARE OF marker, receipt, evidence, pin;
+    IF FOUND THEN
+        RETURN NEW;
+    END IF;
+
+    PERFORM 1
+    FROM logical_workflow_runs AS marker
+    JOIN workflow_admission_receipts AS receipt ON receipt.run_id = marker.run_id
+    JOIN github_workflow_run_manifest_origins AS origin
+      ON origin.run_id = marker.run_id
+     AND origin.root_invocation_id = marker.root_invocation_id
+    JOIN logical_workflow_runtime_policy_pins AS pin ON pin.run_id = marker.run_id
+    WHERE marker.run_id = NEW.run_id
+      AND marker.root_invocation_id = NEW.invocation_id
+      AND marker.admission_graph_sealed_at_ms IS NULL
+      AND receipt.committed_at_ms IS NOT NULL
+      AND receipt.idempotency_kind = origin.admission_idempotency_kind
+      AND receipt.idempotency_key = origin.admission_idempotency_key
+      AND receipt.request_digest = marker.admission_digest
+      AND origin.logical_admission_digest = marker.admission_digest
+      AND origin.admitted_at_ms = receipt.committed_at_ms
+      AND pin.pinned_at_ms = origin.admitted_at_ms
+    FOR KEY SHARE OF marker, receipt, pin;
+    IF FOUND THEN
+        RETURN NEW;
+    END IF;
+
+    PERFORM 1
+    FROM logical_workflow_runs AS marker
+    JOIN workflow_admission_receipts AS receipt ON receipt.run_id = marker.run_id
+    JOIN logical_workflow_runtime_policy_pins AS pin ON pin.run_id = marker.run_id
+    JOIN security_audit_events AS audit
+      ON audit.tenant_id = pin.tenant_id
+     AND audit.action = 'workflow.dispatch'
+     AND audit.outcome = 'succeeded'
+     AND audit.resource_kind = 'workflow_run'
+     AND audit.resource_id = marker.run_id::TEXT
+     AND audit.occurred_at_ms = pin.pinned_at_ms
+     AND audit.actor_kind = 'human'
+     AND audit.actor_principal_id IS NOT NULL
+     AND audit.actor_session_id IS NOT NULL
+     AND audit.authorization_revision IS NOT NULL
+    WHERE marker.run_id = NEW.run_id
+      AND marker.root_invocation_id = NEW.invocation_id
+      AND marker.admission_graph_sealed_at_ms IS NULL
+      AND receipt.committed_at_ms IS NOT NULL
+      AND receipt.github_subject_evidence_required = FALSE
+      AND receipt.request_digest = marker.admission_digest
+      AND pin.pinned_at_ms = receipt.committed_at_ms
+    FOR KEY SHARE OF marker, receipt, pin, audit;
+    IF FOUND THEN
+        RETURN NEW;
+    END IF;
+
+    PERFORM 1
+    FROM logical_workflow_reusable_call_publications AS publication
+    JOIN logical_workflow_runs AS marker ON marker.run_id = publication.run_id
+    WHERE publication.run_id = NEW.run_id
+      AND publication.child_invocation_id = NEW.invocation_id
+      AND publication.child_graph_sealed_at_ms IS NULL
+      AND marker.admission_graph_sealed_at_ms IS NOT NULL
+      AND marker.state IN ('pending', 'active')
+      AND NOT EXISTS (
+          SELECT 1 FROM logical_workflow_run_result_claims AS claim
+          WHERE claim.run_id = marker.run_id
+      )
+    FOR KEY SHARE OF publication, marker;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'workflow graph insertion is outside an authenticated publication window'
+            USING ERRCODE = 'check_violation',
+                  CONSTRAINT = 'workflow_admission_graph_construction_window';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
 -- Immutable common-provider selection evidence recorded atomically with one
 -- logical workflow admission. A later processing reclaim may authorize exact
 -- replay, but can never replace the original normalized selection.
@@ -18,6 +280,8 @@ CREATE TABLE provider_workflow_admission_evidence (
     connection_revision BIGINT NOT NULL,
     provider_configuration_digest BYTEA NOT NULL,
     capability_digest BYTEA NOT NULL,
+    runner_policy_schema SMALLINT NOT NULL,
+    runner_policy_digest BYTEA NOT NULL,
     normalized_trigger_digest BYTEA NOT NULL,
     raw_event_digest BYTEA NOT NULL,
     request_digest BYTEA NOT NULL,
@@ -48,6 +312,8 @@ CREATE TABLE provider_workflow_admission_evidence (
     CHECK (provider_revision > 0 AND connection_revision > 0),
     CHECK (octet_length(provider_configuration_digest) = 32),
     CHECK (octet_length(capability_digest) = 32),
+    CHECK (runner_policy_schema > 0),
+    CHECK (octet_length(runner_policy_digest) = 32),
     CHECK (octet_length(normalized_trigger_digest) = 32),
     CHECK (octet_length(raw_event_digest) = 32),
     CHECK (octet_length(request_digest) = 32),

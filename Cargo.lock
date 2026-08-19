@@ -798,6 +798,7 @@ dependencies = [
  "automata-ci-provider",
  "automata-ci-store",
  "automata-ci-store-postgres",
+ "serde_json",
  "sha2 0.11.0",
  "sqlx",
  "tokio",
