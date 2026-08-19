@@ -39,7 +39,7 @@ const STATE_AUTHORITY_DOMAIN: &[u8] = b"automata/local/state-authority/v1\0";
 
 pub(super) struct StateRoot {
     directory: OwnedFd,
-    _operation_lock: OwnedFd,
+    operation_lock: OwnedFd,
     authority_sha256: Sha256Digest,
 }
 
@@ -167,7 +167,7 @@ impl StateRoot {
         let authority_sha256 = state_authority_digest(&root_metadata, &lock_metadata);
         let state = Self {
             directory,
-            _operation_lock: operation_lock,
+            operation_lock,
             authority_sha256,
         };
         state.validate_replay_layout()?;
@@ -199,7 +199,7 @@ impl StateRoot {
             revalidate_root_and_lock(&parent, &name, &directory, &operation_lock, &initial_root)?;
         Ok(Self {
             directory,
-            _operation_lock: operation_lock,
+            operation_lock,
             authority_sha256: state_authority_digest(&root_metadata, &lock_metadata),
         })
     }
@@ -268,6 +268,27 @@ impl StateRoot {
                 .observe_record_for_reset(StateRecord::InstallationSelection)?,
             materialization: self.observe_record_for_reset(StateRecord::Materialization)?,
             reset_intent: self.observe_record_for_reset(StateRecord::ResetIntent)?,
+        };
+        if self.exact_entry_names(true)? != names {
+            return Err(reset_required());
+        }
+        Ok(snapshot)
+    }
+
+    /// Observes final and fixed-stage records without mutation while retaining
+    /// status' exact owner/mode/link/size boundary. A stage may contain any
+    /// bounded partial bytes after a writer crash; callers classify it without
+    /// repairing or publishing it.
+    pub(super) fn snapshot_for_status(&self) -> Result<ResetStateSnapshot, LocalInitError> {
+        let names = self.exact_entry_names(true)?;
+        let snapshot = ResetStateSnapshot {
+            material_root: self.observe_record_for_status(StateRecord::MaterialRoot)?,
+            epoch: self.observe_record_for_status(StateRecord::Epoch)?,
+            certificates: self.observe_record_for_status(StateRecord::Certificates)?,
+            installation_selection: self
+                .observe_record_for_status(StateRecord::InstallationSelection)?,
+            materialization: self.observe_record_for_status(StateRecord::Materialization)?,
+            reset_intent: self.observe_record_for_status(StateRecord::ResetIntent)?,
         };
         if self.exact_entry_names(true)? != names {
             return Err(reset_required());
@@ -450,6 +471,22 @@ impl StateRoot {
         })
     }
 
+    fn observe_record_for_status(
+        &self,
+        record: StateRecord,
+    ) -> Result<ResetRecordObservation, LocalInitError> {
+        let completed = self.read_private_for_status(record.name(), record.maximum(), false)?;
+        let staged =
+            self.read_private_for_status(&temporary_name(record.name()), record.maximum(), true)?;
+        Ok(ResetRecordObservation {
+            present: completed.is_some() || staged.is_some(),
+            completed_present: completed.is_some(),
+            staged_present: staged.is_some(),
+            completed,
+            staged,
+        })
+    }
+
     pub(super) fn load_material_root(&self) -> Result<Option<[u8; 32]>, LocalInitError> {
         let bytes = self.load_private_record(MATERIAL_ROOT, 32)?;
         if let Some(bytes) = bytes {
@@ -608,6 +645,40 @@ impl StateRoot {
         let before = verify_private_regular(&descriptor, None)?;
         let size = usize::try_from(before.st_size).map_err(|_| reset_required())?;
         if size == 0 || size > maximum {
+            return Err(reset_required());
+        }
+        let mut file = File::from(descriptor);
+        let mut bytes = Vec::with_capacity(size);
+        std::io::Read::by_ref(&mut file)
+            .take(u64::try_from(maximum + 1).expect("bounded state file size fits u64"))
+            .read_to_end(&mut bytes)
+            .map_err(|_| reset_required())?;
+        let after = fstat(&file).map_err(|_| reset_required())?;
+        if bytes.len() != size || !same_file(&before, &after) {
+            return Err(reset_required());
+        }
+        Ok(Some(bytes))
+    }
+
+    fn read_private_for_status(
+        &self,
+        name: &str,
+        maximum: usize,
+        allow_empty: bool,
+    ) -> Result<Option<Vec<u8>>, LocalInitError> {
+        let descriptor = match openat(
+            &self.directory,
+            name,
+            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+            Mode::empty(),
+        ) {
+            Ok(descriptor) => descriptor,
+            Err(rustix::io::Errno::NOENT) => return Ok(None),
+            Err(_) => return Err(reset_required()),
+        };
+        let before = verify_private_regular(&descriptor, None)?;
+        let size = usize::try_from(before.st_size).map_err(|_| reset_required())?;
+        if size > maximum || (!allow_empty && size == 0) {
             return Err(reset_required());
         }
         let mut file = File::from(descriptor);
@@ -787,6 +858,15 @@ impl StateRoot {
             return Err(reset_required());
         }
         Ok(())
+    }
+}
+
+impl Drop for StateRoot {
+    fn drop(&mut self) {
+        // A fork inherits this open file description before `CLOEXEC` can
+        // close its descriptor. Unlock explicitly so teardown does not wait
+        // for every inherited duplicate to close.
+        let _ = fs::flock(&self.operation_lock, FlockOperation::Unlock);
     }
 }
 

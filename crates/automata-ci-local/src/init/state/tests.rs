@@ -305,6 +305,19 @@ fn state_root_exact_replay_locking_and_tamper_are_fail_closed() {
 }
 
 #[test]
+fn dropping_state_root_unlocks_a_fork_inherited_descriptor() {
+    let parent = TestDirectory::new();
+    let path = parent.join("state");
+    let state = StateRoot::acquire(&path).unwrap();
+    // `fork` duplicates this same open file description into the child.
+    let inherited = rustix::io::dup(&state.operation_lock).unwrap();
+
+    drop(state);
+    drop(StateRoot::acquire(&path).unwrap());
+    drop(inherited);
+}
+
+#[test]
 fn interrupted_private_file_publication_is_recovered_exactly_once() {
     let parent = TestDirectory::new();
     let path = parent.join("state");

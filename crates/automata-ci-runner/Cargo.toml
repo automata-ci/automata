@@ -90,6 +90,7 @@ automata-ci-build-support.workspace = true
 
 [dev-dependencies]
 automata-ci-auth.workspace = true
+automata-ci-local = { workspace = true, features = ["test-support"] }
 automata-ci-protocol-protobuf.workspace = true
 flate2.workspace = true
 rcgen.workspace = true

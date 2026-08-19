@@ -1,30 +1,33 @@
-use std::{collections::BTreeMap, str::FromStr as _};
+use std::{collections::BTreeMap, num::NonZeroU16, str::FromStr as _};
 
-use automata_ci_core::Sha256Digest;
+use automata_ci_core::{EnvironmentProfile, EnvironmentProfileId, Sha256Digest};
+use automata_ci_execution::ImmutableImage;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ring::hkdf;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use zeroize::Zeroizing;
 
-use crate::{Installation, InstallationId, InstallationName, MAXIMUM_LOCAL_DOCKER_JOB_SLOTS};
+use crate::{
+    DesiredSpec, DesiredSpecImages, DesiredSpecInput, EngineArchitecture, Installation,
+    InstallationId, InstallationName, LocalImportedImage, LocalProfile,
+    MAXIMUM_LOCAL_DOCKER_JOB_SLOTS,
+};
 
 use super::{
     LocalInitError, LocalInitErrorCode,
-    catalog::{ImageSource, VerifiedCatalog},
+    catalog::{ImageSource, VerifiedCatalog, validate_current_source_contract},
 };
 
-const EPOCH_SCHEMA: &str = "automata.local/immutable-epoch/v1";
+const EPOCH_SCHEMA_V2: &str = "automata.local/immutable-epoch/v2";
 const MATERIAL_SCHEMA: &str = "automata.local/material/v1";
-const EPOCH_FINGERPRINT_DOMAIN: &[u8] = b"automata/local/immutable-epoch-fingerprint/v1\0";
+const EPOCH_FINGERPRINT_DOMAIN_V2: &[u8] = b"automata/local/immutable-epoch-fingerprint/v2\0";
 const MATERIAL_KDF_DOMAIN: &[u8] = b"automata/local/material-kdf/v1\0";
 const GENERATION: u32 = 1;
 const MAX_EPOCH_BYTES: usize = 64 * 1024;
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct ImmutableEpoch {
-    schema: &'static str,
-    material_schema: &'static str,
     generation: u32,
     installation: EpochInstallation,
     catalog: EpochCatalog,
@@ -36,6 +39,7 @@ pub(super) struct ImmutableEpoch {
     material_root_sha256: Sha256Digest,
     epoch_fingerprint: Sha256Digest,
     initial_desired_sha256: Sha256Digest,
+    desired_plan_sha256: Sha256Digest,
 }
 
 impl ImmutableEpoch {
@@ -46,19 +50,19 @@ impl ImmutableEpoch {
         state_authority_sha256: Sha256Digest,
         material_root: &[u8; 32],
         desired_sha256: Sha256Digest,
+        desired_plan_sha256: Sha256Digest,
     ) -> Self {
-        let descriptor = EpochDescriptor::new(
+        let descriptor = EpochDescriptorV2::new(
             catalog,
             installation,
             workers,
             state_authority_sha256,
             material_root,
             desired_sha256,
+            desired_plan_sha256,
         );
         let epoch_fingerprint = descriptor.fingerprint();
         Self {
-            schema: EPOCH_SCHEMA,
-            material_schema: MATERIAL_SCHEMA,
             generation: GENERATION,
             installation: descriptor.installation,
             catalog: descriptor.catalog,
@@ -70,6 +74,7 @@ impl ImmutableEpoch {
             material_root_sha256: descriptor.material_root_sha256,
             epoch_fingerprint,
             initial_desired_sha256: desired_sha256,
+            desired_plan_sha256: descriptor.desired_plan_sha256,
         }
     }
 
@@ -77,49 +82,8 @@ impl ImmutableEpoch {
         bytes: &[u8],
         expected: &Self,
     ) -> Result<Self, LocalInitError> {
-        if bytes.is_empty() || bytes.len() > MAX_EPOCH_BYTES {
-            return Err(reset_required());
-        }
-        let raw: RawEpoch = serde_json::from_slice(bytes).map_err(|_| reset_required())?;
-        if raw.schema != EPOCH_SCHEMA
-            || raw.material_schema != MATERIAL_SCHEMA
-            || raw.generation != GENERATION
-        {
-            return Err(reset_required());
-        }
-        let canonical = canonical_bytes(&raw)?;
-        if canonical != bytes {
-            return Err(reset_required());
-        }
-        let actual = Self {
-            schema: EPOCH_SCHEMA,
-            material_schema: MATERIAL_SCHEMA,
-            generation: raw.generation,
-            installation: raw.installation,
-            catalog: raw.catalog,
-            platform: raw.platform,
-            capacity: raw.capacity,
-            profile: raw.profile,
-            images: raw.images,
-            state_authority_sha256: raw.state_authority_sha256,
-            material_root_sha256: raw.material_root_sha256,
-            epoch_fingerprint: raw.epoch_fingerprint,
-            initial_desired_sha256: raw.initial_desired_sha256,
-        };
-        if actual.schema != expected.schema
-            || actual.material_schema != expected.material_schema
-            || actual.generation != expected.generation
-            || actual.installation != expected.installation
-            || actual.catalog != expected.catalog
-            || actual.platform != expected.platform
-            || actual.capacity != expected.capacity
-            || actual.profile != expected.profile
-            || actual.images != expected.images
-            || actual.state_authority_sha256 != expected.state_authority_sha256
-            || actual.material_root_sha256 != expected.material_root_sha256
-            || actual.initial_desired_sha256 != expected.initial_desired_sha256
-            || actual.recompute_fingerprint() != actual.epoch_fingerprint
-        {
+        let actual = Self::decode_canonical(bytes)?;
+        if actual != *expected || actual.recompute_fingerprint() != actual.epoch_fingerprint {
             return Err(reset_required());
         }
         Ok(actual)
@@ -141,32 +105,7 @@ impl ImmutableEpoch {
         bytes: &[u8],
         state_authority_sha256: Sha256Digest,
     ) -> Result<Self, LocalInitError> {
-        if bytes.is_empty() || bytes.len() > MAX_EPOCH_BYTES {
-            return Err(reset_required());
-        }
-        let raw: RawEpoch = serde_json::from_slice(bytes).map_err(|_| reset_required())?;
-        if raw.schema != EPOCH_SCHEMA
-            || raw.material_schema != MATERIAL_SCHEMA
-            || raw.generation != GENERATION
-            || canonical_bytes(&raw)? != bytes
-        {
-            return Err(reset_required());
-        }
-        let actual = Self {
-            schema: EPOCH_SCHEMA,
-            material_schema: MATERIAL_SCHEMA,
-            generation: raw.generation,
-            installation: raw.installation,
-            catalog: raw.catalog,
-            platform: raw.platform,
-            capacity: raw.capacity,
-            profile: raw.profile,
-            images: raw.images,
-            state_authority_sha256: raw.state_authority_sha256,
-            material_root_sha256: raw.material_root_sha256,
-            epoch_fingerprint: raw.epoch_fingerprint,
-            initial_desired_sha256: raw.initial_desired_sha256,
-        };
+        let actual = Self::decode_canonical(bytes)?;
         if actual.state_authority_sha256 != state_authority_sha256
             || actual.recompute_fingerprint() != actual.epoch_fingerprint
             || actual.platform.host != "linux/x86_64"
@@ -184,7 +123,7 @@ impl ImmutableEpoch {
     }
 
     pub(super) fn canonical_bytes(&self) -> Vec<u8> {
-        canonical_bytes(self).expect("closed epoch document is serializable")
+        canonical_bytes(&RawEpochV2::from(self)).expect("closed epoch document is serializable")
     }
 
     pub(super) const fn fingerprint(&self) -> Sha256Digest {
@@ -199,8 +138,24 @@ impl ImmutableEpoch {
         self.initial_desired_sha256
     }
 
+    pub(super) const fn material_root_sha256(&self) -> Sha256Digest {
+        self.material_root_sha256
+    }
+
+    pub(super) const fn desired_plan_sha256(&self) -> Sha256Digest {
+        self.desired_plan_sha256
+    }
+
     pub(super) const fn workers(&self) -> u16 {
         self.capacity.workers
+    }
+
+    pub(super) fn require_current_lifecycle_contract(&self) -> Result<(), LocalInitError> {
+        let current_source_contract = validate_current_source_contract()?;
+        if self.catalog.source_contract_sha256 != current_source_contract {
+            return Err(reset_required());
+        }
+        Ok(())
     }
 
     pub(super) fn installation(&self) -> Result<Installation, LocalInitError> {
@@ -214,6 +169,64 @@ impl ImmutableEpoch {
             return Err(reset_required());
         }
         Ok(installation)
+    }
+
+    /// Reconstructs the sole current Desired v1 document from immutable epoch
+    /// evidence without reading or mutating a named volume.
+    ///
+    /// Desired v1 is entirely determined by the current source contract, the
+    /// installation identity, and the worker count. Both the canonical-byte
+    /// digest and plan digest are checked against the epoch before the result
+    /// is usable for read-only live topology inspection.
+    pub(super) fn desired_spec(&self) -> Result<DesiredSpec, LocalInitError> {
+        self.require_current_lifecycle_contract()?;
+        let installation = self.installation()?;
+        let workers = NonZeroU16::new(self.capacity.workers).ok_or_else(reset_required)?;
+        let image = |role: &str| {
+            self.image_expectations()
+                .find(|image| image.role == role)
+                .ok_or_else(reset_required)
+        };
+        let immutable = |role: &str| -> Result<ImmutableImage, LocalInitError> {
+            ImmutableImage::new(image(role)?.inspection_reference()?).map_err(|_| reset_required())
+        };
+        let profile = LocalProfile::new(
+            EngineArchitecture::Amd64,
+            EnvironmentProfile::new(
+                EnvironmentProfileId::new(self.profile.id.clone()).map_err(|_| reset_required())?,
+                self.profile.manifest_sha256,
+            ),
+            immutable("profile")?,
+        )
+        .map_err(|_| reset_required())?;
+        let service_proxy = image("service-proxy")?;
+        let service_proxy =
+            LocalImportedImage::new(service_proxy.config_digest, service_proxy.manifest_digest)
+                .map_err(|_| reset_required())?;
+        let results = crate::desired_spec::results_transit_for_installation(&installation)
+            .map_err(|_| reset_required())?;
+        let input = DesiredSpecInput::new(
+            workers,
+            NonZeroU16::new(8080).expect("the fixed human port is nonzero"),
+            profile,
+            DesiredSpecImages::new(
+                immutable("automata")?,
+                immutable("runner")?,
+                immutable("postgres")?,
+                immutable("rustfs")?,
+                immutable("sandbox-guest")?,
+                service_proxy,
+            ),
+            results,
+        )
+        .map_err(|_| reset_required())?;
+        let desired = DesiredSpec::new(&installation, input).map_err(|_| reset_required())?;
+        if digest(&desired.canonical_bytes()) != self.initial_desired_sha256
+            || desired.plan_digest() != self.desired_plan_sha256
+        {
+            return Err(reset_required());
+        }
+        Ok(desired)
     }
 
     pub(super) fn image_expectations(&self) -> impl Iterator<Item = EpochImageExpectation<'_>> {
@@ -231,21 +244,23 @@ impl ImmutableEpoch {
     }
 
     fn recompute_fingerprint(&self) -> Sha256Digest {
-        EpochDescriptor {
-            schema: self.schema,
-            material_schema: self.material_schema,
-            generation: self.generation,
-            installation: self.installation.clone(),
-            catalog: self.catalog.clone(),
-            platform: self.platform.clone(),
-            capacity: self.capacity.clone(),
-            profile: self.profile.clone(),
-            images: self.images.clone(),
-            state_authority_sha256: self.state_authority_sha256,
-            material_root_sha256: self.material_root_sha256,
-            initial_desired_sha256: self.initial_desired_sha256,
+        EpochDescriptorV2::from(self).fingerprint()
+    }
+
+    fn decode_canonical(bytes: &[u8]) -> Result<Self, LocalInitError> {
+        validate_current_source_contract()?;
+        if bytes.is_empty() || bytes.len() > MAX_EPOCH_BYTES {
+            return Err(reset_required());
         }
-        .fingerprint()
+        let raw: RawEpochV2 = serde_json::from_slice(bytes).map_err(|_| reset_required())?;
+        if raw.schema != EPOCH_SCHEMA_V2
+            || raw.material_schema != MATERIAL_SCHEMA
+            || raw.generation != GENERATION
+            || canonical_bytes(&raw)? != bytes
+        {
+            return Err(reset_required());
+        }
+        Ok(raw.into())
     }
 }
 
@@ -279,7 +294,7 @@ impl EpochImageExpectation<'_> {
 }
 
 #[derive(Serialize)]
-struct EpochDescriptor {
+struct EpochDescriptorV2 {
     schema: &'static str,
     material_schema: &'static str,
     generation: u32,
@@ -292,9 +307,10 @@ struct EpochDescriptor {
     state_authority_sha256: Sha256Digest,
     material_root_sha256: Sha256Digest,
     initial_desired_sha256: Sha256Digest,
+    desired_plan_sha256: Sha256Digest,
 }
 
-impl EpochDescriptor {
+impl EpochDescriptorV2 {
     fn new(
         catalog: &VerifiedCatalog,
         installation: &Installation,
@@ -302,6 +318,7 @@ impl EpochDescriptor {
         state_authority_sha256: Sha256Digest,
         material_root: &[u8; 32],
         initial_desired_sha256: Sha256Digest,
+        desired_plan_sha256: Sha256Digest,
     ) -> Self {
         let images = [
             "automata",
@@ -348,7 +365,7 @@ impl EpochDescriptor {
         })
         .collect();
         Self {
-            schema: EPOCH_SCHEMA,
+            schema: EPOCH_SCHEMA_V2,
             material_schema: MATERIAL_SCHEMA,
             generation: GENERATION,
             installation: EpochInstallation {
@@ -362,6 +379,7 @@ impl EpochDescriptor {
                 commit: catalog.release().commit.clone(),
                 tag: catalog.release().tag.clone(),
                 version: catalog.release().version.clone(),
+                source_contract_sha256: catalog.source_contract_sha256(),
             },
             platform: EpochPlatform {
                 host: "linux/x86_64".to_owned(),
@@ -377,20 +395,32 @@ impl EpochDescriptor {
             state_authority_sha256,
             material_root_sha256: digest(material_root),
             initial_desired_sha256,
+            desired_plan_sha256,
         }
     }
 
     fn fingerprint(&self) -> Sha256Digest {
-        let bytes = canonical_bytes(self).expect("closed epoch descriptor is serializable");
-        let mut hasher = Sha256::new();
-        hasher.update(EPOCH_FINGERPRINT_DOMAIN);
-        hasher.update(
-            u32::try_from(bytes.len())
-                .expect("bounded epoch descriptor fits u32")
-                .to_be_bytes(),
-        );
-        hasher.update(bytes);
-        Sha256Digest::from_bytes(hasher.finalize().into())
+        fingerprint(EPOCH_FINGERPRINT_DOMAIN_V2, self)
+    }
+}
+
+impl From<&ImmutableEpoch> for EpochDescriptorV2 {
+    fn from(epoch: &ImmutableEpoch) -> Self {
+        Self {
+            schema: EPOCH_SCHEMA_V2,
+            material_schema: MATERIAL_SCHEMA,
+            generation: epoch.generation,
+            installation: epoch.installation.clone(),
+            catalog: epoch.catalog.clone(),
+            platform: epoch.platform.clone(),
+            capacity: epoch.capacity.clone(),
+            profile: epoch.profile.clone(),
+            images: epoch.images.clone(),
+            state_authority_sha256: epoch.state_authority_sha256,
+            material_root_sha256: epoch.material_root_sha256,
+            initial_desired_sha256: epoch.initial_desired_sha256,
+            desired_plan_sha256: epoch.desired_plan_sha256,
+        }
     }
 }
 
@@ -514,6 +544,15 @@ impl MaterialDeriver {
     pub(super) fn text(&self, purpose: &'static [u8], length: usize) -> Zeroizing<String> {
         Zeroizing::new(URL_SAFE_NO_PAD.encode(self.bytes(purpose, length).as_slice()))
     }
+
+    pub(super) fn uuid(&self, purpose: &'static [u8]) -> uuid::Uuid {
+        let material = self.bytes(purpose, 16);
+        let mut bytes = <[u8; 16]>::try_from(material.as_slice())
+            .expect("the closed UUID derivation length is exact");
+        bytes[6] = (bytes[6] & 0x0f) | 0x40;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        uuid::Uuid::from_bytes(bytes)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -540,6 +579,19 @@ fn canonical_bytes(value: &impl Serialize) -> Result<Vec<u8>, LocalInitError> {
     Ok(bytes)
 }
 
+fn fingerprint(domain: &[u8], descriptor: &impl Serialize) -> Sha256Digest {
+    let bytes = canonical_bytes(descriptor).expect("closed epoch descriptor is serializable");
+    let mut hasher = Sha256::new();
+    hasher.update(domain);
+    hasher.update(
+        u32::try_from(bytes.len())
+            .expect("bounded epoch descriptor fits u32")
+            .to_be_bytes(),
+    );
+    hasher.update(bytes);
+    Sha256Digest::from_bytes(hasher.finalize().into())
+}
+
 fn digest(bytes: &[u8]) -> Sha256Digest {
     Sha256Digest::from_bytes(Sha256::digest(bytes).into())
 }
@@ -553,9 +605,7 @@ pub(super) fn certificate_test_epoch(
     installation: &Installation,
     material_root: &[u8; 32],
 ) -> ImmutableEpoch {
-    let descriptor = EpochDescriptor {
-        schema: EPOCH_SCHEMA,
-        material_schema: MATERIAL_SCHEMA,
+    let mut epoch = ImmutableEpoch {
         generation: GENERATION,
         installation: EpochInstallation {
             name: installation.name().as_str().to_owned(),
@@ -568,6 +618,7 @@ pub(super) fn certificate_test_epoch(
             commit: "1111111111111111111111111111111111111111".to_owned(),
             tag: "v1.0.0".to_owned(),
             version: "1.0.0".to_owned(),
+            source_contract_sha256: super::catalog::current_source_contract_sha256(),
         },
         platform: EpochPlatform {
             host: "linux/x86_64".to_owned(),
@@ -582,24 +633,12 @@ pub(super) fn certificate_test_epoch(
         images: BTreeMap::new(),
         state_authority_sha256: Sha256Digest::from_bytes([5; 32]),
         material_root_sha256: digest(material_root),
+        epoch_fingerprint: Sha256Digest::from_bytes([0; 32]),
         initial_desired_sha256: Sha256Digest::from_bytes([4; 32]),
+        desired_plan_sha256: Sha256Digest::from_bytes([6; 32]),
     };
-    let fingerprint = descriptor.fingerprint();
-    ImmutableEpoch {
-        schema: EPOCH_SCHEMA,
-        material_schema: MATERIAL_SCHEMA,
-        generation: GENERATION,
-        installation: descriptor.installation,
-        catalog: descriptor.catalog,
-        platform: descriptor.platform,
-        capacity: descriptor.capacity,
-        profile: descriptor.profile,
-        images: descriptor.images,
-        state_authority_sha256: descriptor.state_authority_sha256,
-        material_root_sha256: descriptor.material_root_sha256,
-        epoch_fingerprint: fingerprint,
-        initial_desired_sha256: descriptor.initial_desired_sha256,
-    }
+    epoch.epoch_fingerprint = epoch.recompute_fingerprint();
+    epoch
 }
 
 #[cfg(test)]
@@ -652,7 +691,7 @@ pub(super) fn authority_test_epoch(
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-struct RawEpoch {
+struct RawEpochV2 {
     schema: String,
     material_schema: String,
     generation: u32,
@@ -666,6 +705,47 @@ struct RawEpoch {
     material_root_sha256: Sha256Digest,
     epoch_fingerprint: Sha256Digest,
     initial_desired_sha256: Sha256Digest,
+    desired_plan_sha256: Sha256Digest,
+}
+
+impl From<&ImmutableEpoch> for RawEpochV2 {
+    fn from(epoch: &ImmutableEpoch) -> Self {
+        Self {
+            schema: EPOCH_SCHEMA_V2.to_owned(),
+            material_schema: MATERIAL_SCHEMA.to_owned(),
+            generation: epoch.generation,
+            installation: epoch.installation.clone(),
+            catalog: epoch.catalog.clone(),
+            platform: epoch.platform.clone(),
+            capacity: epoch.capacity.clone(),
+            profile: epoch.profile.clone(),
+            images: epoch.images.clone(),
+            state_authority_sha256: epoch.state_authority_sha256,
+            material_root_sha256: epoch.material_root_sha256,
+            epoch_fingerprint: epoch.epoch_fingerprint,
+            initial_desired_sha256: epoch.initial_desired_sha256,
+            desired_plan_sha256: epoch.desired_plan_sha256,
+        }
+    }
+}
+
+impl From<RawEpochV2> for ImmutableEpoch {
+    fn from(raw: RawEpochV2) -> Self {
+        Self {
+            generation: raw.generation,
+            installation: raw.installation,
+            catalog: raw.catalog,
+            platform: raw.platform,
+            capacity: raw.capacity,
+            profile: raw.profile,
+            images: raw.images,
+            state_authority_sha256: raw.state_authority_sha256,
+            material_root_sha256: raw.material_root_sha256,
+            epoch_fingerprint: raw.epoch_fingerprint,
+            initial_desired_sha256: raw.initial_desired_sha256,
+            desired_plan_sha256: raw.desired_plan_sha256,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -684,6 +764,7 @@ struct EpochCatalog {
     commit: String,
     tag: String,
     version: String,
+    source_contract_sha256: Sha256Digest,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

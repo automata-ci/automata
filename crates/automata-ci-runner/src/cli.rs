@@ -77,6 +77,10 @@ pub(crate) enum Command {
     /// Internal one-shot readiness server used by the isolated network probe.
     #[command(name = "__probe-http-ready", hide = true)]
     InternalProbeHttp(InternalProbeHttpArgs),
+    /// Internal fixed local-lifecycle readiness check.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[command(name = automata_ci_local::LOCAL_RUNNER_READY_COMMAND, hide = true)]
+    InternalLocalCheckReady(InternalLocalCheckReadyArgs),
 }
 
 #[derive(Debug, Args)]
@@ -188,6 +192,14 @@ pub(crate) struct InternalProbeHttpArgs {
     pub(crate) token: String,
 }
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[derive(Debug, Args)]
+pub(crate) struct InternalLocalCheckReadyArgs {
+    /// Exact runner product configuration whose completed TLS custody is observed.
+    #[arg(long, value_name = "PATH", hide = true)]
+    pub(crate) config: PathBuf,
+}
+
 #[cfg(test)]
 mod tests {
     use clap::{CommandFactory as _, Parser as _, error::ErrorKind};
@@ -227,6 +239,33 @@ mod tests {
             .expect_err("secret-bearing arguments must not exist");
             assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
         }
+    }
+
+    #[test]
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    fn local_readiness_is_hidden_and_requires_the_fixed_config_path_argument() {
+        let cli = Cli::try_parse_from([
+            "automata-runner",
+            "__local-check-ready",
+            "--config",
+            "/run/automata-runner-config/runner.json",
+        ])
+        .expect("fixed local readiness command must parse");
+        let Command::InternalLocalCheckReady(args) = cli.command else {
+            panic!("local readiness command expected");
+        };
+        assert_eq!(
+            args.config,
+            std::path::PathBuf::from("/run/automata-runner-config/runner.json")
+        );
+        assert_eq!(
+            Cli::try_parse_from(["automata-runner", "__local-check-ready"])
+                .unwrap_err()
+                .kind(),
+            ErrorKind::MissingRequiredArgument
+        );
+        let help = Cli::command().render_help().to_string();
+        assert!(!help.contains("__local-check-ready"));
     }
 
     #[test]

@@ -140,19 +140,25 @@ administrator identity is UID 0 only inside that boundary with every Linux
 capability set empty under `no_new_privileges` and built-in seccomp; it does not
 provide `chown`, identity switching, or other POSIX capabilities.
 The relay must run Docker Engine 28 or newer with API 1.48 and have no daemon
-`default-ulimits`; that setting is a trusted relay prerequisite. Any
-daemon-injected ulimit still fails exact post-create inspection and can be
-removed through the separate custody-only cleanup path when the front-network
-custody remains exact. Container-runtime/image or shared-transit damage does not
-by itself block that container cleanup; exact front-network drift blocks destroy,
-and a foreign endpoint can leave the emptied front network for operator recovery.
+`log-opts`, bridge `default-network-opts`, or `default-ulimits`; the bounded
+Engine facts do not fully expose those trusted relay prerequisites. All eight
+trusted fixed lifecycle services and their fixed custody helpers use
+`userns_mode: host` to preserve sealed host ownership; the relay additionally
+needs it for bounded socket bootstrap. Untrusted jobs inherit daemon-default
+remapping. Any daemon-injected log, network, or ulimit drift still fails exact
+post-create inspection; an injected
+ulimit can be removed through the separate custody-only cleanup path when the
+front-network custody remains exact. Container-runtime/image or shared-transit
+damage does not by itself block that container cleanup; exact front-network
+drift blocks destroy, and a foreign endpoint can leave the emptied front network
+for operator recovery.
 Guest, job, and Results-proxy images must not declare volumes, exposed ports, or
 a healthcheck. The externally provisioned transit must be an internal isolated
 private IPv4 bridge with a first-host gateway and a `/23`-or-wider prefix. Its
 exact Results-transport-schema-2 labels bind the installation ID, selector key,
-Compose project, resource kind, and configured desired-plan digest. A future
-lifecycle may create that network and declare it external to Compose; the
-runner neither creates nor deletes it.
+Compose project, resource kind, and configured desired-plan digest. The current
+local lifecycle creates that network and declares it external to Compose; the
+runner itself neither creates nor deletes it.
 
 A Kubernetes selection has this provider-specific shape:
 

@@ -2,8 +2,8 @@ use super::*;
 
 #[test]
 fn epoch_domains_are_versioned_and_distinct() {
-    assert_ne!(EPOCH_FINGERPRINT_DOMAIN, MATERIAL_KDF_DOMAIN);
-    assert!(EPOCH_FINGERPRINT_DOMAIN.ends_with(&[0]));
+    assert_ne!(EPOCH_FINGERPRINT_DOMAIN_V2, MATERIAL_KDF_DOMAIN);
+    assert!(EPOCH_FINGERPRINT_DOMAIN_V2.ends_with(&[0]));
     assert!(MATERIAL_KDF_DOMAIN.ends_with(&[0]));
 }
 
@@ -118,6 +118,63 @@ fn standalone_epoch_decode_recomputes_authority_material_and_identity() {
         )
         .unwrap_err()
         .code(),
+        LocalInitErrorCode::ResetRequired
+    );
+}
+
+#[test]
+fn non_current_epoch_schema_is_not_reset_authority() {
+    let (epoch, _) = standalone_epoch();
+    let bytes = String::from_utf8(epoch.canonical_bytes())
+        .expect("current epoch is UTF-8")
+        .replacen(
+            "automata.local/immutable-epoch/v2",
+            "automata.local/immutable-epoch/v1",
+            1,
+        )
+        .into_bytes();
+    assert_eq!(
+        ImmutableEpoch::from_authority_bound_bytes(&bytes, Sha256Digest::from_bytes([5; 32]))
+            .unwrap_err()
+            .code(),
+        LocalInitErrorCode::ResetRequired
+    );
+}
+
+#[test]
+fn v2_binds_current_source_and_desired_plan_across_replay() {
+    let (epoch, _) = standalone_epoch();
+    epoch
+        .require_current_lifecycle_contract()
+        .expect("exact v2 contract is current");
+
+    let mut wrong_source = epoch.clone();
+    wrong_source.catalog.source_contract_sha256 = Sha256Digest::from_bytes([0x91; 32]);
+    wrong_source.epoch_fingerprint = wrong_source.recompute_fingerprint();
+    assert_eq!(
+        wrong_source
+            .require_current_lifecycle_contract()
+            .unwrap_err()
+            .code(),
+        LocalInitErrorCode::ResetRequired
+    );
+
+    let mut changed_plan = epoch.clone();
+    changed_plan.desired_plan_sha256 = Sha256Digest::from_bytes([0x92; 32]);
+    assert_eq!(
+        ImmutableEpoch::from_authority_bound_bytes(
+            &changed_plan.canonical_bytes(),
+            Sha256Digest::from_bytes([5; 32]),
+        )
+        .unwrap_err()
+        .code(),
+        LocalInitErrorCode::ResetRequired
+    );
+    changed_plan.epoch_fingerprint = changed_plan.recompute_fingerprint();
+    assert_eq!(
+        ImmutableEpoch::from_canonical_bytes(&changed_plan.canonical_bytes(), &epoch)
+            .unwrap_err()
+            .code(),
         LocalInitErrorCode::ResetRequired
     );
 }

@@ -29,18 +29,40 @@ use crate::product::{RunnerProductConfig, SecretSource};
 const MAX_STAGE_BYTES: usize = 1024 * 1_024;
 const STAGE_SCHEMA: u8 = 1;
 
-pub(super) struct CredentialDestinations {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CompletedEnrollmentState {
+    Current,
+    Expired,
+}
+
+struct CompletedEnrollmentSnapshot {
+    receipt: Zeroizing<Vec<u8>>,
+    server_roots: Zeroizing<Vec<u8>>,
+    certificate_chain: Zeroizing<Vec<u8>>,
+    private_key: Zeroizing<Vec<u8>>,
+}
+
+impl CompletedEnrollmentSnapshot {
+    fn exact_match(&self, other: &Self) -> bool {
+        self.receipt == other.receipt
+            && self.server_roots == other.server_roots
+            && self.certificate_chain == other.certificate_chain
+            && self.private_key == other.private_key
+    }
+}
+
+struct CredentialPaths {
     server_roots: PathBuf,
     certificate_chain: PathBuf,
     private_key: PathBuf,
     request_stage: PathBuf,
     response_stage: PathBuf,
-    #[cfg(unix)]
-    _lock: rustix::fd::OwnedFd,
+    recovery_response_stage: PathBuf,
+    lock: PathBuf,
 }
 
-impl CredentialDestinations {
-    pub(super) fn from_config(config: &RunnerProductConfig) -> Result<Self> {
+impl CredentialPaths {
+    fn from_config(config: &RunnerProductConfig) -> Result<Self> {
         fn file(source: &SecretSource) -> Result<PathBuf> {
             let SecretSource::File { path } = source else {
                 bail!("runner enrollment requires file-backed TLS credential destinations");
@@ -48,32 +70,113 @@ impl CredentialDestinations {
             Ok(path.clone())
         }
         let private_key = file(config.tls().private_key())?;
-        let request_stage = enrollment_sibling(&private_key, ".automata-enrollment-request")?;
-        let response_stage = enrollment_sibling(&private_key, ".automata-enrollment-response")?;
-        let lock_path = enrollment_sibling(&private_key, ".automata-tls-lock")?;
-        let server_roots = file(config.tls().server_roots())?;
-        let certificate_chain = file(config.tls().certificate_chain())?;
-        let final_paths = [
-            server_roots.clone(),
-            certificate_chain.clone(),
-            private_key.clone(),
-            request_stage.clone(),
-            response_stage.clone(),
-        ];
-        let mut paths = final_paths.to_vec();
-        paths.push(lock_path.clone());
-        for path in &final_paths {
+        Ok(Self {
+            server_roots: file(config.tls().server_roots())?,
+            certificate_chain: file(config.tls().certificate_chain())?,
+            request_stage: enrollment_sibling(&private_key, ".automata-enrollment-request")?,
+            response_stage: enrollment_sibling(&private_key, ".automata-enrollment-response")?,
+            recovery_response_stage: enrollment_sibling(
+                &private_key,
+                ".automata-enrollment-recovery-response",
+            )?,
+            lock: enrollment_sibling(&private_key, ".automata-tls-lock")?,
+            private_key,
+        })
+    }
+
+    fn final_paths(&self) -> [&Path; 6] {
+        [
+            &self.server_roots,
+            &self.certificate_chain,
+            &self.private_key,
+            &self.request_stage,
+            &self.response_stage,
+            &self.recovery_response_stage,
+        ]
+    }
+
+    fn all_paths(&self) -> Result<Vec<PathBuf>> {
+        let final_paths = self.final_paths();
+        let mut paths = final_paths
+            .iter()
+            .map(|path| (*path).to_owned())
+            .collect::<Vec<_>>();
+        paths.push(self.lock.clone());
+        for path in final_paths {
             paths.push(temporary_path(path)?);
         }
-        validate_destination_set(&paths)?;
+        Ok(paths)
+    }
+}
+
+pub(super) struct CredentialDestinations {
+    server_roots: PathBuf,
+    certificate_chain: PathBuf,
+    private_key: PathBuf,
+    request_stage: PathBuf,
+    response_stage: PathBuf,
+    recovery_response_stage: PathBuf,
+    #[cfg(unix)]
+    _lock: rustix::fd::OwnedFd,
+}
+
+impl CredentialDestinations {
+    /// Observes one exact completed identity without opening or creating the
+    /// writer flock, synchronizing directories, reading a token, or repairing
+    /// custody. Two identical no-follow snapshots close the multi-file read
+    /// against an atomic renewal/recovery rotation in progress.
+    pub(crate) fn observe_completed(
+        config: &RunnerProductConfig,
+        validation_time_seconds: i64,
+    ) -> Result<Option<CompletedEnrollmentState>> {
+        let paths = CredentialPaths::from_config(config)?;
+        validate_lexical_destination_set(&paths.all_paths()?)?;
+        let Some(first) = read_completed_snapshot(&paths)? else {
+            return Ok(None);
+        };
+        validate_existing_destination_set(&paths.all_paths()?)?;
+        let second = read_completed_snapshot(&paths)?
+            .context("runner enrollment custody changed during observation")?;
+        if !first.exact_match(&second) {
+            bail!("runner enrollment custody changed during observation");
+        }
+        let response: RedeemResponse = serde_json::from_slice(&second.receipt)
+            .context("runner enrollment completion receipt is invalid")?;
+        let expires_at_seconds = certificate_expiration(&second.certificate_chain)?;
+        let (state, profile_validation_time) = if expires_at_seconds > validation_time_seconds {
+            (CompletedEnrollmentState::Current, validation_time_seconds)
+        } else {
+            (
+                CompletedEnrollmentState::Expired,
+                expires_at_seconds
+                    .checked_sub(1)
+                    .context("runner enrollment certificate expiry is invalid")?,
+            )
+        };
+        validate_completed_material(
+            config,
+            &response,
+            &second.receipt,
+            &second.server_roots,
+            &second.certificate_chain,
+            &second.private_key,
+            profile_validation_time,
+        )?;
+        Ok(Some(state))
+    }
+
+    pub(super) fn from_config(config: &RunnerProductConfig) -> Result<Self> {
+        let paths = CredentialPaths::from_config(config)?;
+        validate_destination_set(&paths.all_paths()?)?;
         #[cfg(unix)]
-        let lock = acquire_enrollment_lock(&lock_path)?;
+        let lock = acquire_enrollment_lock(&paths.lock)?;
         Ok(Self {
-            server_roots,
-            certificate_chain,
-            private_key,
-            request_stage,
-            response_stage,
+            server_roots: paths.server_roots,
+            certificate_chain: paths.certificate_chain,
+            private_key: paths.private_key,
+            request_stage: paths.request_stage,
+            response_stage: paths.response_stage,
+            recovery_response_stage: paths.recovery_response_stage,
             #[cfg(unix)]
             _lock: lock,
         })
@@ -83,6 +186,9 @@ impl CredentialDestinations {
         if read_bounded_file(&self.server_roots, MAX_STAGE_BYTES, false)?.is_some()
             || read_bounded_file(&self.certificate_chain, MAX_STAGE_BYTES, false)?.is_some()
             || read_bounded_file(&self.private_key, MAX_STAGE_BYTES, true)?.is_some()
+            || read_bounded_temporary(&self.server_roots, MAX_STAGE_BYTES, false)?.is_some()
+            || read_bounded_temporary(&self.certificate_chain, MAX_STAGE_BYTES, false)?.is_some()
+            || read_bounded_temporary(&self.private_key, MAX_STAGE_BYTES, true)?.is_some()
         {
             bail!("runner TLS credential destination already exists");
         }
@@ -111,10 +217,108 @@ impl CredentialDestinations {
             publish_temporary(&self.request_stage)?;
             return Ok(Some(stage));
         }
-        if read_bounded_file(&self.response_stage, MAX_RESPONSE_BYTES, true)?.is_some() {
-            bail!("runner enrollment response stage has no matching request stage");
-        }
         Ok(None)
+    }
+
+    /// Recognizes only a fully published, currently usable enrollment identity.
+    ///
+    /// This path deliberately does not repair, replace, or remove anything. It
+    /// is used after the secret-bearing request stage has been durably retired
+    /// and the exact non-secret server response retained as the completion
+    /// receipt. Partial credentials, dangling writes, receipt drift, malformed
+    /// roots, an expired leaf, or a key/profile mismatch all fail closed.
+    pub(super) fn attest_completed(
+        &self,
+        config: &RunnerProductConfig,
+        response: &RedeemResponse,
+        receipt: &[u8],
+        validation_time_seconds: i64,
+    ) -> Result<()> {
+        let server_roots = read_bounded_file(&self.server_roots, MAX_STAGE_BYTES, false)?;
+        let certificate_chain = read_bounded_file(&self.certificate_chain, MAX_STAGE_BYTES, false)?;
+        let private_key = read_bounded_file(&self.private_key, MAX_STAGE_BYTES, true)?;
+        for (path, private) in [
+            (&self.server_roots, false),
+            (&self.certificate_chain, false),
+            (&self.private_key, true),
+        ] {
+            if read_bounded_temporary(path, MAX_STAGE_BYTES, private)?.is_some() {
+                bail!("runner TLS credential custody has a dangling staging write");
+            }
+        }
+        match (&server_roots, &certificate_chain, &private_key) {
+            (Some(_), Some(_), Some(_)) => {}
+            _ => bail!("runner TLS credential custody is not completely published"),
+        }
+        let (Some(server_roots), Some(certificate_chain), Some(private_key)) =
+            (server_roots, certificate_chain, private_key)
+        else {
+            unreachable!("complete credential tuple was established above");
+        };
+        let stored_receipt = read_bounded_file(&self.response_stage, MAX_RESPONSE_BYTES, true)?
+            .context("runner enrollment completion receipt is missing")?;
+        if read_bounded_temporary(&self.response_stage, MAX_RESPONSE_BYTES, true)?.is_some()
+            || stored_receipt.as_slice() != receipt
+        {
+            bail!("runner TLS credential custody does not match its completion receipt");
+        }
+        validate_completed_material(
+            config,
+            response,
+            receipt,
+            &server_roots,
+            &certificate_chain,
+            &private_key,
+            validation_time_seconds,
+        )
+    }
+
+    pub(super) fn attest_expired_completed(
+        &self,
+        config: &RunnerProductConfig,
+        response: &RedeemResponse,
+        receipt: &[u8],
+        validation_time_seconds: i64,
+    ) -> Result<RecoveryPredecessor> {
+        let chain = read_bounded_file(&self.certificate_chain, MAX_STAGE_BYTES, false)?
+            .context("runner enrollment certificate chain is missing")?;
+        let certificates = rustls::pki_types::CertificateDer::pem_slice_iter(chain.as_slice())
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .context("runner enrollment predecessor chain is invalid")?;
+        let [leaf, issuer] = certificates.as_slice() else {
+            bail!("runner enrollment predecessor chain is invalid");
+        };
+        let (remainder, parsed_leaf) = parse_x509_certificate(leaf.as_ref())
+            .context("runner enrollment predecessor chain is invalid")?;
+        let predecessor_expires_at_seconds = parsed_leaf.validity().not_after.timestamp();
+        if !remainder.is_empty()
+            || predecessor_expires_at_seconds <= 0
+            || predecessor_expires_at_seconds > validation_time_seconds
+        {
+            bail!("runner enrollment identity is not an exact expired predecessor");
+        }
+        let historical_validation_time = predecessor_expires_at_seconds
+            .checked_sub(1)
+            .context("runner enrollment predecessor expiry is invalid")?;
+        self.attest_completed(config, response, receipt, historical_validation_time)?;
+        let verified_chain = read_bounded_file(&self.certificate_chain, MAX_STAGE_BYTES, false)?
+            .context("runner enrollment certificate chain is missing")?;
+        if verified_chain.as_slice() != chain.as_slice() {
+            bail!("runner enrollment predecessor changed during attestation");
+        }
+        let roots = read_bounded_file(&self.server_roots, MAX_STAGE_BYTES, false)?
+            .context("runner enrollment server roots are missing")?;
+        let key = read_bounded_file(&self.private_key, MAX_STAGE_BYTES, true)?
+            .context("runner enrollment private key is missing")?;
+        Ok(RecoveryPredecessor {
+            presented_leaf_sha256: Sha256::digest(leaf.as_ref()).into(),
+            issuer_sha256: Sha256::digest(issuer.as_ref()).into(),
+            presented_expires_at_seconds: predecessor_expires_at_seconds,
+            server_roots_sha256: Sha256::digest(roots.as_slice()).into(),
+            certificate_chain_sha256: Sha256::digest(chain.as_slice()).into(),
+            private_key_sha256: Sha256::digest(key.as_slice()).into(),
+            completion_receipt_sha256: Sha256::digest(receipt).into(),
+        })
     }
 
     pub(super) fn create_stage(
@@ -133,12 +337,57 @@ impl CredentialDestinations {
         Ok(stage)
     }
 
+    pub(super) fn create_recovery_stage(
+        &self,
+        config: &RunnerProductConfig,
+        origin: &Url,
+        runner_name: &str,
+        token: RunnerEnrollmentToken,
+        predecessor: RecoveryPredecessor,
+    ) -> Result<EnrollmentStage> {
+        if self.load_recovery_response()?.is_some() {
+            bail!("runner enrollment recovery response lacks its request stage");
+        }
+        let stage = EnrollmentStage::new_recovery(config, origin, runner_name, token, predecessor)?;
+        let bytes = Zeroizing::new(
+            serde_json::to_vec(&stage)
+                .context("runner enrollment recovery request could not be staged")?,
+        );
+        persist_new(&self.request_stage, &bytes, true)?;
+        Ok(stage)
+    }
+
+    /// Re-proves the exact expired tuple before a recovery token is sent. A
+    /// staged server response is sufficient authority for crash replay, but
+    /// until one exists no drift in the predecessor custody is tolerated.
+    pub(super) fn attest_recovery_request(
+        &self,
+        config: &RunnerProductConfig,
+        stage: &EnrollmentStage,
+        validation_time_seconds: i64,
+    ) -> Result<()> {
+        let predecessor = stage
+            .recovery
+            .as_ref()
+            .context("runner enrollment request is not a recovery")?;
+        predecessor.validate()?;
+        let receipt = read_bounded_file(&self.response_stage, MAX_RESPONSE_BYTES, true)?
+            .context("runner enrollment recovery predecessor is missing")?;
+        let response: RedeemResponse = serde_json::from_slice(&receipt)
+            .context("runner enrollment recovery predecessor receipt is invalid")?;
+        let observed =
+            self.attest_expired_completed(config, &response, &receipt, validation_time_seconds)?;
+        if &observed != predecessor {
+            bail!("runner enrollment recovery predecessor does not match its request");
+        }
+        Ok(())
+    }
+
     pub(super) fn load_response(&self) -> Result<Option<Zeroizing<Vec<u8>>>> {
         if let Some(response) = read_bounded_file(&self.response_stage, MAX_RESPONSE_BYTES, true)? {
             sync_parent(&self.response_stage)?;
             if serde_json::from_slice::<RedeemResponse>(&response).is_err() {
-                remove_durable(&self.response_stage)?;
-                return Ok(None);
+                bail!("runner enrollment completion receipt is invalid");
             }
             return Ok(Some(response));
         }
@@ -148,8 +397,7 @@ impl CredentialDestinations {
             return Ok(None);
         };
         if serde_json::from_slice::<RedeemResponse>(&response).is_err() {
-            remove_temporary_durable(&self.response_stage)?;
-            return Ok(None);
+            bail!("runner enrollment completion receipt is invalid");
         }
         publish_temporary(&self.response_stage)?;
         Ok(Some(response))
@@ -160,6 +408,89 @@ impl CredentialDestinations {
             .context("runner enrollment response could not be staged")
     }
 
+    pub(super) fn load_recovery_response(&self) -> Result<Option<Zeroizing<Vec<u8>>>> {
+        if let Some(response) =
+            read_bounded_file(&self.recovery_response_stage, MAX_RESPONSE_BYTES, true)?
+        {
+            sync_parent(&self.recovery_response_stage)?;
+            if serde_json::from_slice::<RedeemResponse>(&response).is_err() {
+                bail!("runner enrollment recovery response is invalid");
+            }
+            return Ok(Some(response));
+        }
+        let Some(response) =
+            read_bounded_temporary(&self.recovery_response_stage, MAX_RESPONSE_BYTES, true)?
+        else {
+            return Ok(None);
+        };
+        if serde_json::from_slice::<RedeemResponse>(&response).is_err() {
+            bail!("runner enrollment recovery response is invalid");
+        }
+        publish_temporary(&self.recovery_response_stage)?;
+        Ok(Some(response))
+    }
+
+    pub(super) fn persist_recovery_response(&self, response: &[u8]) -> Result<()> {
+        persist_exact_file(&self.recovery_response_stage, response, true)
+            .context("runner enrollment recovery response could not be staged")
+    }
+
+    pub(super) fn finish_recovery(
+        &self,
+        config: &RunnerProductConfig,
+        stage: &EnrollmentStage,
+        response_bytes: &[u8],
+        validation_time_seconds: i64,
+    ) -> Result<()> {
+        let predecessor = stage
+            .recovery
+            .as_ref()
+            .context("runner enrollment request is not a recovery")?;
+        let response: RedeemResponse = serde_json::from_slice(response_bytes)
+            .context("runner enrollment recovery response is invalid")?;
+        super::validate_response(config, &response, validation_time_seconds)?;
+        let validated = validate_issued_runner_certificate(
+            config.runner_id().as_uuid(),
+            &response.certificate_chain_pem,
+            response.certificate_expires_at_seconds,
+            stage.private_key_pem.as_str(),
+            validation_time_seconds,
+            Some(predecessor.issuer_sha256),
+        )?;
+        if validated.leaf == predecessor.presented_leaf_sha256
+            || response.certificate_expires_at_seconds <= predecessor.presented_expires_at_seconds
+            || Sha256::digest(response.server_ca_pem.as_bytes()).as_slice()
+                != predecessor.server_roots_sha256
+        {
+            bail!("runner enrollment recovery response does not replace its predecessor");
+        }
+        replace_exact_file(
+            &self.server_roots,
+            &predecessor.server_roots_sha256,
+            response.server_ca_pem.as_bytes(),
+            false,
+        )?;
+        replace_exact_file(
+            &self.certificate_chain,
+            &predecessor.certificate_chain_sha256,
+            response.certificate_chain_pem.as_bytes(),
+            false,
+        )?;
+        replace_exact_file(
+            &self.private_key,
+            &predecessor.private_key_sha256,
+            stage.private_key_pem.as_bytes(),
+            true,
+        )?;
+        replace_exact_file(
+            &self.response_stage,
+            &predecessor.completion_receipt_sha256,
+            response_bytes,
+            true,
+        )?;
+        Ok(())
+    }
+
     pub(super) fn persist_exact(&self, roots: &[u8], chain: &[u8], key: &[u8]) -> Result<()> {
         persist_exact_file(&self.server_roots, roots, false)?;
         persist_exact_file(&self.certificate_chain, chain, false)?;
@@ -168,8 +499,157 @@ impl CredentialDestinations {
     }
 
     pub(super) fn complete(&self) -> Result<()> {
-        remove_durable(&self.response_stage)?;
         remove_durable(&self.request_stage)
+    }
+
+    pub(super) fn complete_recovery(&self) -> Result<()> {
+        // All final files are durable before cleanup begins. Retire the
+        // secret-bearing request first; if cleanup is interrupted, the
+        // response is an exact duplicate of the canonical completion receipt
+        // and the next invocation can reconcile it without token or network.
+        remove_durable(&self.request_stage)?;
+        self.remove_recovery_response()
+    }
+
+    pub(super) fn remove_recovery_response(&self) -> Result<()> {
+        remove_durable(&self.recovery_response_stage)
+    }
+}
+
+fn read_completed_snapshot(paths: &CredentialPaths) -> Result<Option<CompletedEnrollmentSnapshot>> {
+    for path in [&paths.request_stage, &paths.recovery_response_stage] {
+        if read_bounded_observed_file(path, MAX_STAGE_BYTES, true)?.is_some()
+            || read_bounded_observed_temporary(path, MAX_STAGE_BYTES, true)?.is_some()
+        {
+            return Ok(None);
+        }
+    }
+    let Some(receipt) =
+        read_bounded_observed_file(&paths.response_stage, MAX_RESPONSE_BYTES, true)?
+    else {
+        return Ok(None);
+    };
+    if read_bounded_observed_temporary(&paths.response_stage, MAX_RESPONSE_BYTES, true)?.is_some() {
+        bail!("runner enrollment completion receipt has a dangling staging write");
+    }
+    let load = |path: &Path, private| -> Result<Zeroizing<Vec<u8>>> {
+        if read_bounded_observed_temporary(path, MAX_STAGE_BYTES, private)?.is_some() {
+            bail!("runner TLS credential custody has a dangling staging write");
+        }
+        read_bounded_observed_file(path, MAX_STAGE_BYTES, private)?
+            .context("runner TLS credential custody is not completely published")
+    };
+    Ok(Some(CompletedEnrollmentSnapshot {
+        receipt,
+        server_roots: load(&paths.server_roots, false)?,
+        certificate_chain: load(&paths.certificate_chain, false)?,
+        private_key: load(&paths.private_key, true)?,
+    }))
+}
+
+fn certificate_expiration(certificate_chain: &[u8]) -> Result<i64> {
+    let certificates = rustls::pki_types::CertificateDer::pem_slice_iter(certificate_chain)
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .context("runner enrollment certificate chain is invalid")?;
+    let [leaf, _issuer] = certificates.as_slice() else {
+        bail!("runner enrollment certificate chain is invalid");
+    };
+    let (remainder, leaf) = parse_x509_certificate(leaf.as_ref())
+        .context("runner enrollment certificate chain is invalid")?;
+    if !remainder.is_empty() || leaf.validity().not_after.timestamp() <= 0 {
+        bail!("runner enrollment certificate chain is invalid");
+    }
+    Ok(leaf.validity().not_after.timestamp())
+}
+
+fn validate_completed_material(
+    config: &RunnerProductConfig,
+    response: &RedeemResponse,
+    receipt: &[u8],
+    server_roots: &[u8],
+    certificate_chain: &[u8],
+    private_key: &[u8],
+    validation_time_seconds: i64,
+) -> Result<()> {
+    let expected_group = automata_ci_core::RunnerGroup::new(&response.runner_group)
+        .context("runner enrollment completion receipt has an invalid group")?;
+    if response.runner_id != config.runner_id().as_uuid()
+        || response.control_endpoint != config.control_endpoint().to_string()
+        || config.inventory().groups() != &std::collections::BTreeSet::from([expected_group])
+        || response.certificate_chain_pem.is_empty()
+        || response.server_ca_pem.is_empty()
+        || response.certificate_expires_at_seconds <= 0
+    {
+        bail!("runner enrollment completion receipt does not match the local configuration");
+    }
+    let roots_text =
+        std::str::from_utf8(server_roots).context("runner enrollment server roots are invalid")?;
+    let chain_text = std::str::from_utf8(certificate_chain)
+        .context("runner enrollment certificate chain is invalid")?;
+    let key_text =
+        std::str::from_utf8(private_key).context("runner enrollment private key is invalid")?;
+    let canonical_receipt =
+        serde_json::to_vec(response).context("runner enrollment completion receipt is invalid")?;
+    if receipt != canonical_receipt || server_roots != response.server_ca_pem.as_bytes() {
+        bail!("runner TLS credential custody does not match its completion receipt");
+    }
+    let receipt_certificates = rustls::pki_types::CertificateDer::pem_slice_iter(
+        response.certificate_chain_pem.as_bytes(),
+    )
+    .collect::<std::result::Result<Vec<_>, _>>()
+    .context("runner enrollment completion receipt is invalid")?;
+    let [receipt_leaf, receipt_issuer] = receipt_certificates.as_slice() else {
+        bail!("runner enrollment completion receipt is invalid");
+    };
+    let (receipt_remainder, receipt_leaf) = parse_x509_certificate(receipt_leaf.as_ref())
+        .context("runner enrollment completion receipt is invalid")?;
+    if !receipt_remainder.is_empty()
+        || receipt_leaf.validity().not_after.timestamp() != response.certificate_expires_at_seconds
+    {
+        bail!("runner enrollment completion receipt is invalid");
+    }
+    let receipt_issuer_sha256: [u8; 32] = Sha256::digest(receipt_issuer.as_ref()).into();
+    let expires_at_seconds = certificate_expiration(certificate_chain)?;
+    validate_issued_runner_certificate(
+        config.runner_id().as_uuid(),
+        chain_text,
+        expires_at_seconds,
+        key_text,
+        validation_time_seconds,
+        Some(receipt_issuer_sha256),
+    )?;
+    validate_server_roots(roots_text, validation_time_seconds)
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct RecoveryPredecessor {
+    presented_leaf_sha256: [u8; 32],
+    issuer_sha256: [u8; 32],
+    presented_expires_at_seconds: i64,
+    server_roots_sha256: [u8; 32],
+    certificate_chain_sha256: [u8; 32],
+    private_key_sha256: [u8; 32],
+    completion_receipt_sha256: [u8; 32],
+}
+
+impl RecoveryPredecessor {
+    fn validate(&self) -> Result<()> {
+        if self.presented_expires_at_seconds <= 0
+            || [
+                self.presented_leaf_sha256,
+                self.issuer_sha256,
+                self.server_roots_sha256,
+                self.certificate_chain_sha256,
+                self.private_key_sha256,
+                self.completion_receipt_sha256,
+            ]
+            .iter()
+            .any(|digest| digest.iter().all(|byte| *byte == 0))
+        {
+            bail!("runner enrollment recovery predecessor is invalid");
+        }
+        Ok(())
     }
 }
 
@@ -189,6 +669,8 @@ pub(super) struct EnrollmentStage {
         serialize_with = "serialize_zeroizing"
     )]
     pub(super) private_key_pem: Zeroizing<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    recovery: Option<RecoveryPredecessor>,
 }
 
 impl EnrollmentStage {
@@ -225,6 +707,33 @@ impl EnrollmentStage {
             csr_pem,
             token,
             private_key_pem: Zeroizing::new(key.serialize_pem()),
+            recovery: None,
+        })
+    }
+
+    fn new_recovery(
+        config: &RunnerProductConfig,
+        origin: &Url,
+        runner_name: &str,
+        token: RunnerEnrollmentToken,
+        predecessor: RecoveryPredecessor,
+    ) -> Result<Self> {
+        predecessor.validate()?;
+        let mut stage = Self::new(config, origin, runner_name, token)?;
+        stage.recovery = Some(predecessor);
+        Ok(stage)
+    }
+
+    pub(super) fn is_recovery(&self) -> bool {
+        self.recovery.is_some()
+    }
+
+    pub(super) fn recovery_predecessor(&self) -> Option<([u8; 32], i64)> {
+        self.recovery.as_ref().map(|predecessor| {
+            (
+                predecessor.presented_leaf_sha256,
+                predecessor.presented_expires_at_seconds,
+            )
         })
     }
 
@@ -241,6 +750,9 @@ impl EnrollmentStage {
             || self.capabilities != *config.inventory()
         {
             bail!("runner enrollment request stage does not match this invocation");
+        }
+        if let Some(recovery) = &self.recovery {
+            recovery.validate()?;
         }
         let key = KeyPair::from_pem(self.private_key_pem.as_str())
             .context("runner enrollment request stage has an invalid private key")?;
@@ -350,6 +862,7 @@ pub(crate) fn validate_issued_runner_certificate(
     let issuer_sha256: [u8; 32] = Sha256::digest(issuer_der.as_ref()).into();
     if !leaf_remainder.is_empty()
         || !issuer_remainder.is_empty()
+        || key.algorithm() != &PKCS_ECDSA_P256_SHA256
         || leaf_constraints.is_some_and(|constraints| constraints.value.ca)
         || leaf_usage.value.flags != 1
         || leaf_extended_usage.value.any
@@ -470,17 +983,46 @@ pub(crate) fn temporary_path(path: &Path) -> Result<PathBuf> {
 }
 
 pub(crate) fn validate_destination_set(paths: &[PathBuf]) -> Result<()> {
-    for (index, path) in paths.iter().enumerate() {
-        if !path.is_absolute() || paths[..index].contains(path) {
-            bail!("runner enrollment credential and staging paths must be distinct absolute paths");
-        }
-    }
+    validate_lexical_destination_set(paths)?;
 
     #[cfg(unix)]
     {
         let mut prepared = Vec::with_capacity(paths.len());
         for path in paths {
             let destination = prepare_destination(path)?;
+            for earlier in &prepared {
+                if same_destination(earlier, &destination)? {
+                    bail!(
+                        "runner enrollment credential and staging paths resolve to the same destination"
+                    );
+                }
+            }
+            prepared.push(destination);
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        bail!("durable runner enrollment is supported only on Unix hosts")
+    }
+}
+
+fn validate_lexical_destination_set(paths: &[PathBuf]) -> Result<()> {
+    for (index, path) in paths.iter().enumerate() {
+        if !path.is_absolute() || paths[..index].contains(path) {
+            bail!("runner enrollment credential and staging paths must be distinct absolute paths");
+        }
+    }
+    Ok(())
+}
+
+fn validate_existing_destination_set(paths: &[PathBuf]) -> Result<()> {
+    #[cfg(unix)]
+    {
+        let mut prepared = Vec::with_capacity(paths.len());
+        for path in paths {
+            let destination = prepare_existing_destination(path)?
+                .context("runner enrollment custody parent is missing")?;
             for earlier in &prepared {
                 if same_destination(earlier, &destination)? {
                     bail!(
@@ -584,6 +1126,47 @@ fn prepare_destination(path: &Path) -> Result<PreparedDestination> {
 }
 
 #[cfg(unix)]
+fn prepare_existing_destination(path: &Path) -> Result<Option<PreparedDestination>> {
+    use std::path::Component;
+
+    use rustix::fs::{Mode, OFlags, openat};
+
+    if !path.is_absolute() {
+        bail!("runner enrollment path must be absolute");
+    }
+    let components = path
+        .components()
+        .filter_map(|component| match component {
+            Component::RootDir => None,
+            Component::Normal(value) => Some(Ok(value.to_os_string())),
+            _ => Some(Err(())),
+        })
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|()| anyhow::anyhow!("runner enrollment path is invalid"))?;
+    let (name, parents) = components
+        .split_last()
+        .context("runner enrollment path has no file name")?;
+    let directory_flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW;
+    let mut parent = rustix::fs::open("/", directory_flags, Mode::empty())
+        .context("runner enrollment filesystem root could not be opened")?;
+    require_trusted_directory(&parent)?;
+    for component in parents {
+        parent = match openat(&parent, component, directory_flags, Mode::empty()) {
+            Ok(directory) => directory,
+            Err(rustix::io::Errno::NOENT) => return Ok(None),
+            Err(error) => {
+                return Err(error).context("runner enrollment directory is unavailable");
+            }
+        };
+        require_trusted_directory(&parent)?;
+    }
+    Ok(Some(PreparedDestination {
+        parent,
+        name: name.clone(),
+    }))
+}
+
+#[cfg(unix)]
 fn require_trusted_directory(directory: &rustix::fd::OwnedFd) -> Result<()> {
     use rustix::fs::{FileType, fstat};
 
@@ -634,6 +1217,50 @@ pub(crate) fn read_bounded_file(
 }
 
 #[cfg(unix)]
+fn read_bounded_observed_file(
+    path: &Path,
+    limit: usize,
+    private: bool,
+) -> Result<Option<Zeroizing<Vec<u8>>>> {
+    use rustix::fs::{Mode, OFlags, openat};
+
+    let Some(destination) = prepare_existing_destination(path)? else {
+        return Ok(None);
+    };
+    let descriptor = match openat(
+        &destination.parent,
+        &destination.name,
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+        Mode::empty(),
+    ) {
+        Ok(file) => file,
+        Err(rustix::io::Errno::NOENT) => return Ok(None),
+        Err(error) => {
+            return Err(error).context("runner enrollment state could not be observed");
+        }
+    };
+    let mut file = File::from(descriptor);
+    validate_file_metadata(&file, private)?;
+    let mut bytes = Zeroizing::new(Vec::with_capacity(limit.min(8 * 1_024)));
+    std::io::Read::by_ref(&mut file)
+        .take(u64::try_from(limit).unwrap_or(u64::MAX).saturating_add(1))
+        .read_to_end(&mut bytes)
+        .context("runner enrollment state could not be observed")?;
+    if bytes.len() > limit {
+        bail!("runner enrollment state exceeded its size limit");
+    }
+    Ok(Some(bytes))
+}
+
+fn read_bounded_observed_temporary(
+    path: &Path,
+    limit: usize,
+    private: bool,
+) -> Result<Option<Zeroizing<Vec<u8>>>> {
+    read_bounded_observed_file(&temporary_path(path)?, limit, private)
+}
+
+#[cfg(unix)]
 pub(crate) fn read_bounded_temporary(
     path: &Path,
     limit: usize,
@@ -677,6 +1304,15 @@ pub(crate) fn read_bounded_file(
     _private: bool,
 ) -> Result<Option<Zeroizing<Vec<u8>>>> {
     bail!("durable runner enrollment is supported only on Unix hosts")
+}
+
+#[cfg(not(unix))]
+fn read_bounded_observed_file(
+    _path: &Path,
+    _limit: usize,
+    _private: bool,
+) -> Result<Option<Zeroizing<Vec<u8>>>> {
+    bail!("durable runner enrollment observation is supported only on Unix hosts")
 }
 
 #[cfg(not(unix))]
@@ -953,15 +1589,18 @@ mod tests {
         BasicConstraints, CertificateParams, CertifiedIssuer, DnType, ExtendedKeyUsagePurpose,
         IsCa, KeyPair, KeyUsagePurpose, PKCS_ECDSA_P256_SHA256, SanType,
     };
+    use reqwest::Url;
+    use rustls::pki_types::pem::PemObject as _;
+    use sha2::{Digest as _, Sha256};
     use uuid::Uuid;
 
-    #[cfg(target_os = "linux")]
-    use super::remove_durable;
     #[cfg(windows)]
     use super::validate_destination_set;
+    use super::{
+        CompletedEnrollmentState, EnrollmentStage, STAGE_SCHEMA, validate_certificate_response,
+    };
     #[cfg(unix)]
     use super::{CredentialDestinations, persist_exact_file};
-    use super::{EnrollmentStage, STAGE_SCHEMA, validate_certificate_response};
     #[cfg(unix)]
     use super::{
         acquire_enrollment_lock, persist_new, prepare_destination, same_destination,
@@ -1033,6 +1672,7 @@ mod tests {
             private_key: root.join("runner-key.pem"),
             request_stage: root.join("runner-key.pem.request"),
             response_stage: root.join("runner-key.pem.response"),
+            recovery_response_stage: root.join("runner-key.pem.recovery-response"),
             #[cfg(unix)]
             _lock: acquire_enrollment_lock(&root.join("runner-key.pem.lock"))
                 .expect("enrollment lock"),
@@ -1059,7 +1699,7 @@ mod tests {
 
     #[test]
     #[cfg(target_os = "linux")]
-    fn completion_keeps_replay_authority_until_the_response_receipt_is_gone() {
+    fn completion_retires_the_secret_request_and_preserves_the_response_receipt() {
         let root = std::env::current_dir()
             .expect("current directory")
             .join(format!(
@@ -1073,14 +1713,12 @@ mod tests {
         fs::write(&destinations.request_stage, b"request authority").expect("request stage");
         fs::write(&destinations.response_stage, b"response receipt").expect("response stage");
 
-        remove_durable(&destinations.response_stage).expect("remove response first");
-        assert!(
-            destinations.request_stage.exists(),
-            "a crash after response cleanup must retain database replay authority"
-        );
         destinations.complete().expect("finish completion cleanup");
-        assert!(!destinations.response_stage.exists());
         assert!(!destinations.request_stage.exists());
+        assert_eq!(
+            fs::read(&destinations.response_stage).expect("preserved completion receipt"),
+            b"response receipt"
+        );
         fs::remove_dir_all(&root).expect("remove completion test root");
     }
 
@@ -1196,6 +1834,7 @@ mod tests {
             csr_pem: csr_pem.clone(),
             token: RunnerEnrollmentToken::generate(&FixedRandom).expect("runner token"),
             private_key_pem: zeroize::Zeroizing::new(private_key_pem.clone()),
+            recovery: None,
         };
         let encoded = serde_json::to_vec(&stage).expect("stage JSON");
         let document: serde_json::Value = serde_json::from_slice(&encoded).expect("stage value");
@@ -1238,6 +1877,236 @@ mod tests {
         stage
             .validate_schema()
             .expect_err("forward stage schema must be rejected");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the security regression constructs and mutates one complete CA, chain, key, receipt, metadata, renewal, and recovery custody fixture"
+    )]
+    fn completed_identity_is_accepted_only_when_the_full_tls_custody_is_exact() {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let root = std::env::current_dir()
+            .expect("current directory")
+            .join(format!(
+                ".automata-enroll-completed-test-{}",
+                Uuid::new_v4()
+            ));
+        fs::create_dir(&root).expect("test root");
+        let runner_id = Uuid::new_v4();
+        let config = product_config(&root, runner_id);
+        let destinations =
+            CredentialDestinations::from_config(&config).expect("credential destinations");
+
+        let ca_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).expect("CA key");
+        let mut ca_params = CertificateParams::default();
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        let issuer = CertifiedIssuer::self_signed(ca_params, ca_key).expect("CA");
+        let runner_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).expect("runner key");
+        let expires_at = 1_900_000_000;
+        let mut leaf_params = CertificateParams::default();
+        leaf_params
+            .distinguished_name
+            .push(DnType::CommonName, runner_id.to_string());
+        leaf_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+        leaf_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+        leaf_params.not_after =
+            time::OffsetDateTime::from_unix_timestamp(expires_at).expect("expiry");
+        let leaf = leaf_params
+            .signed_by(&runner_key, &issuer)
+            .expect("runner leaf");
+        let roots = issuer.pem();
+        let chain = format!("{}{roots}", leaf.pem());
+        let key = runner_key.serialize_pem();
+        let response = RedeemResponse {
+            runner_id,
+            runner_group: "default".to_owned(),
+            control_endpoint: config.control_endpoint().to_string(),
+            certificate_chain_pem: chain.clone(),
+            server_ca_pem: roots.clone(),
+            certificate_expires_at_seconds: expires_at,
+        };
+        let receipt = serde_json::to_vec(&response).expect("canonical completion receipt");
+        destinations
+            .persist_response(&receipt)
+            .expect("persist completion receipt");
+        destinations
+            .persist_exact(roots.as_bytes(), chain.as_bytes(), key.as_bytes())
+            .expect("complete credentials");
+
+        let observed_paths = [
+            &destinations.server_roots,
+            &destinations.certificate_chain,
+            &destinations.private_key,
+            &destinations.response_stage,
+        ];
+        let before = observed_paths
+            .iter()
+            .map(|path| {
+                let metadata = fs::metadata(path).expect("observed metadata");
+                (
+                    fs::read(path).expect("observed bytes"),
+                    metadata.mode(),
+                    metadata.uid(),
+                    metadata.gid(),
+                    metadata.nlink(),
+                    metadata.size(),
+                    metadata.mtime(),
+                    metadata.mtime_nsec(),
+                    metadata.ctime(),
+                    metadata.ctime_nsec(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            CredentialDestinations::observe_completed(&config, expires_at - 1)
+                .expect("read-only completed observation"),
+            Some(CompletedEnrollmentState::Current),
+            "the observer must not contend with the exclusive writer flock held here"
+        );
+        let after = observed_paths
+            .iter()
+            .map(|path| {
+                let metadata = fs::metadata(path).expect("observed metadata");
+                (
+                    fs::read(path).expect("observed bytes"),
+                    metadata.mode(),
+                    metadata.uid(),
+                    metadata.gid(),
+                    metadata.nlink(),
+                    metadata.size(),
+                    metadata.mtime(),
+                    metadata.mtime_nsec(),
+                    metadata.ctime(),
+                    metadata.ctime_nsec(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(after, before, "observation must not mutate custody");
+
+        destinations
+            .persist_recovery_response(&receipt)
+            .expect("simulate response left after request retirement");
+        assert_eq!(
+            CredentialDestinations::observe_completed(&config, expires_at - 1)
+                .expect("orphaned response observation"),
+            None,
+            "an unreconciled recovery response must keep lock-free readiness closed"
+        );
+        let orphaned_response = destinations
+            .load_recovery_response()
+            .expect("load orphaned recovery response")
+            .expect("orphaned recovery response");
+        assert_eq!(orphaned_response.as_slice(), receipt.as_slice());
+        destinations
+            .remove_recovery_response()
+            .expect("reconcile orphaned recovery response");
+        assert_eq!(
+            CredentialDestinations::observe_completed(&config, expires_at - 1)
+                .expect("reconciled completed observation"),
+            Some(CompletedEnrollmentState::Current)
+        );
+
+        destinations
+            .attest_completed(&config, &response, &receipt, expires_at - 1)
+            .expect("exact completed identity");
+
+        let renewed_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).expect("renewed key");
+        let renewed_expires_at = expires_at + 10_000;
+        let mut renewed_params = CertificateParams::default();
+        renewed_params
+            .distinguished_name
+            .push(DnType::CommonName, runner_id.to_string());
+        renewed_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+        renewed_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+        renewed_params.not_after =
+            time::OffsetDateTime::from_unix_timestamp(renewed_expires_at).expect("renewed expiry");
+        let renewed_leaf = renewed_params
+            .signed_by(&renewed_key, &issuer)
+            .expect("renewed runner leaf");
+        let renewed_chain = format!("{}{roots}", renewed_leaf.pem());
+        let renewed_key = renewed_key.serialize_pem();
+        fs::write(&destinations.certificate_chain, renewed_chain.as_bytes())
+            .expect("publish simulated renewal chain");
+        fs::write(&destinations.private_key, renewed_key.as_bytes())
+            .expect("publish simulated renewal key");
+        destinations
+            .attest_completed(&config, &response, &receipt, expires_at - 1)
+            .expect("current same-issuer renewal remains enrolled");
+        destinations
+            .attest_completed(&config, &response, &receipt, renewed_expires_at)
+            .expect_err("an expired renewed leaf must not remain enrolled");
+        assert_eq!(
+            CredentialDestinations::observe_completed(&config, renewed_expires_at)
+                .expect("expired completed observation"),
+            Some(CompletedEnrollmentState::Expired)
+        );
+        let predecessor = destinations
+            .attest_expired_completed(&config, &response, &receipt, renewed_expires_at)
+            .expect("the exact expired renewed leaf is recovery authority");
+        assert_eq!(
+            predecessor.presented_expires_at_seconds, renewed_expires_at,
+            "recovery must bind the current renewed leaf, not the original receipt leaf"
+        );
+        let renewed_certificates =
+            rustls::pki_types::CertificateDer::pem_slice_iter(renewed_chain.as_bytes())
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .expect("renewed chain");
+        let renewed_leaf_sha256: [u8; 32] = Sha256::digest(renewed_certificates[0].as_ref()).into();
+        assert_eq!(predecessor.presented_leaf_sha256, renewed_leaf_sha256);
+        let origin = Url::parse("https://ci.example.test/").expect("origin");
+        let mut recovery_stage = EnrollmentStage::new_recovery(
+            &config,
+            &origin,
+            "local-runner",
+            RunnerEnrollmentToken::generate(&FixedRandom).expect("recovery token"),
+            predecessor,
+        )
+        .expect("recovery stage");
+        assert!(recovery_stage.is_recovery());
+        recovery_stage
+            .validate(&config, &origin, "local-runner")
+            .expect("recovery stage validation");
+        destinations
+            .attest_recovery_request(&config, &recovery_stage, renewed_expires_at)
+            .expect("recovery request must re-prove its exact expired predecessor");
+        let recovery = recovery_stage
+            .recovery
+            .as_mut()
+            .expect("recovery predecessor");
+        recovery.presented_leaf_sha256[0] ^= 1;
+        destinations
+            .attest_recovery_request(&config, &recovery_stage, renewed_expires_at)
+            .expect_err("a drifted predecessor leaf digest must fail closed");
+        recovery_stage
+            .recovery
+            .as_mut()
+            .expect("recovery predecessor")
+            .presented_leaf_sha256[0] ^= 1;
+        let recovery_json = serde_json::to_value(&recovery_stage).expect("recovery stage JSON");
+        assert!(recovery_json.get("recovery").is_some());
+
+        let original_chain = fs::read(&destinations.certificate_chain).expect("chain");
+        fs::write(&destinations.private_key, b"not a private key")
+            .expect("simulate private-key drift");
+        destinations
+            .attest_completed(&config, &response, &receipt, expires_at - 1)
+            .expect_err("a drifted private key must fail closed");
+        assert_eq!(
+            fs::read(&destinations.certificate_chain).expect("preserved chain"),
+            original_chain
+        );
+
+        fs::write(&destinations.private_key, renewed_key.as_bytes()).expect("restore test key");
+        fs::remove_file(&destinations.certificate_chain).expect("simulate partial custody");
+        destinations
+            .attest_completed(&config, &response, &receipt, expires_at - 1)
+            .expect_err("partial TLS custody must fail closed");
+        drop(destinations);
+        fs::remove_dir_all(&root).expect("remove completed identity test root");
     }
 
     #[test]

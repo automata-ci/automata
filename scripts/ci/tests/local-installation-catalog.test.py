@@ -6,7 +6,6 @@ from __future__ import annotations
 import importlib.util
 import json
 import pathlib
-import re
 import shutil
 import sys
 import tempfile
@@ -22,47 +21,6 @@ if SPEC is None or SPEC.loader is None:
 catalog = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = catalog
 SPEC.loader.exec_module(catalog)
-
-
-def rust_integer_constant(relative_path: str, name: str) -> int:
-    source = (REPOSITORY_ROOT / relative_path).read_text(encoding="utf-8")
-    match = re.search(
-        rf"^pub const {re.escape(name)}: [A-Za-z0-9_:]+ = "
-        r"([0-9][0-9_]*(?: \* [0-9][0-9_]*)*);$",
-        source,
-        flags=re.MULTILINE,
-    )
-    if match is None:
-        raise AssertionError(f"could not resolve Rust constant {name}")
-    factors = (int(value.replace("_", "")) for value in match.group(1).split(" * "))
-    result = 1
-    for factor in factors:
-        result *= factor
-    return result
-
-
-def rust_string_constant(relative_path: str, name: str) -> str:
-    source = (REPOSITORY_ROOT / relative_path).read_text(encoding="utf-8")
-    match = re.search(
-        rf'^(?:pub(?:\(crate\))? )?const {re.escape(name)}: &str = "([^"\\]*)";$',
-        source,
-        flags=re.MULTILINE,
-    )
-    if match is None:
-        raise AssertionError(f"could not resolve Rust constant {name}")
-    return match.group(1)
-
-
-def swift_integer_constant(relative_path: str, name: str) -> int:
-    source = (REPOSITORY_ROOT / relative_path).read_text(encoding="utf-8")
-    match = re.search(
-        rf"^private let {re.escape(name)}: UInt16 = ([0-9][0-9_]*)$",
-        source,
-        flags=re.MULTILINE,
-    )
-    if match is None:
-        raise AssertionError(f"could not resolve Swift constant {name}")
-    return int(match.group(1).replace("_", ""))
 
 
 class LocalInstallationCatalogContract(unittest.TestCase):
@@ -157,6 +115,10 @@ class LocalInstallationCatalogContract(unittest.TestCase):
 
     def test_source_contract_and_profile_bind_exact_reviewed_bytes(self) -> None:
         source = catalog.load_source(REPOSITORY_ROOT)
+        self.assertEqual(
+            (REPOSITORY_ROOT / catalog.PACKAGED_SOURCE_PATH).read_bytes(),
+            (REPOSITORY_ROOT / catalog.SOURCE_PATH).read_bytes(),
+        )
         self.assertEqual(set(source["images"]), catalog.ROLES)
         self.assertEqual(source["scope"], {"engine": "linux/amd64", "host": "unix"})
         _, candidate_module = catalog.service_proxy_module()
@@ -185,6 +147,7 @@ class LocalInstallationCatalogContract(unittest.TestCase):
                 "privilege": "administrator",
                 "root_filesystem": "writable",
                 "runner_root": "/__automata",
+                "user_namespace": "daemon-default-remapped",
                 "workspace": "/__w",
             },
         )
@@ -192,124 +155,50 @@ class LocalInstallationCatalogContract(unittest.TestCase):
             source["services"]["runner"]["maximum_parallel_jobs"], 256
         )
 
-    def test_runtime_literals_track_the_production_contracts(self) -> None:
-        source = self.source
-        runner = source["services"]["runner"]
-        executor = runner["executor_contract"]
-        for role, containerfile_path in (
-            ("automata", "images/automata.Containerfile"),
-            ("runner", "images/automata-runner.Containerfile"),
-            ("sandbox-guest", "images/automata-sandbox-guest.Containerfile"),
-        ):
-            self.assertEqual(
-                source["images"][role]["config"]["working_directory"], "/"
-            )
-            containerfile = (REPOSITORY_ROOT / containerfile_path).read_text(
-                encoding="utf-8"
-            )
-            self.assertRegex(containerfile, r"(?m)^WORKDIR /$")
-        self.assertEqual(
-            source["images"]["runner"]["runtime"]["product_config_schema"],
-            rust_integer_constant(
-                "crates/automata-ci-runner/src/product/config.rs",
-                "RUNNER_PRODUCT_CONFIG_SCHEMA_VERSION",
-            ),
+    def test_database_migration_ceiling_matches_the_canonical_inventory(self) -> None:
+        migration_directory = (
+            REPOSITORY_ROOT
+            / "crates"
+            / "automata-ci-store-postgres"
+            / "migrations"
         )
-        self.assertEqual(
-            source["images"]["sandbox-guest"]["runtime"]["guest_protocol"],
-            rust_integer_constant(
-                "crates/automata-ci-sandbox-guest/src/lib.rs",
-                "GUEST_PROTOCOL_VERSION",
-            ),
+        versions = sorted(
+            int(path.name[:4])
+            for path in migration_directory.glob("[0-9][0-9][0-9][0-9]_*.sql")
         )
-        for swift_source in (
-            "crates/automata-ci-sandbox-macos/swift/Sources/"
-            "AutomataMacOSTemplateTool/main.swift",
-            "crates/automata-ci-sandbox-macos/swift/Sources/"
-            "AutomataMacOSVsockBridge/main.swift",
-        ):
-            self.assertEqual(
-                source["images"]["sandbox-guest"]["runtime"]["guest_protocol"],
-                swift_integer_constant(swift_source, "guestProtocol"),
-            )
-        self.assertEqual(
-            runner["maximum_parallel_jobs"],
-            rust_integer_constant(
-                "crates/automata-ci-local/src/lib.rs",
-                "MAXIMUM_LOCAL_DOCKER_JOB_SLOTS",
-            ),
+        self.assertTrue(versions)
+        self.assertEqual(versions, list(range(1, versions[-1] + 1)))
+        lifecycle = catalog.require_lifecycle_runtime(
+            self.source["lifecycle_runtime"]
         )
-        for field, constant in (
-            ("minimum_cpu_millis", "MINIMUM_LOCAL_DOCKER_SANDBOX_CPU_MILLIS"),
-            ("minimum_memory_bytes", "MINIMUM_LOCAL_DOCKER_SANDBOX_MEMORY_BYTES"),
-            ("minimum_pids", "MINIMUM_LOCAL_DOCKER_SANDBOX_PIDS"),
-        ):
-            self.assertEqual(
-                executor[field],
-                rust_integer_constant("crates/automata-ci-local/src/lib.rs", constant),
-            )
-        self.assertEqual(
-            runner["provider_control_directory"],
-            rust_string_constant(
-                "crates/automata-ci-local/src/lib.rs",
-                "LOCAL_DOCKER_CONTROL_DIRECTORY",
-            ),
-        )
-        self.assertEqual(
-            runner["provider_control_directory"],
-            rust_string_constant(
-                "crates/automata-ci-sandbox-guest/src/lib.rs",
-                "LOCAL_CONTROL_DIRECTORY",
-            ),
-        )
+        self.assertEqual(lifecycle["database_migration_ceiling"], versions[-1])
 
-        guest_protocol = str(
-            source["images"]["sandbox-guest"]["runtime"]["guest_protocol"]
-        )
-        guest_containerfile = (
-            REPOSITORY_ROOT / "images/automata-sandbox-guest.Containerfile"
-        ).read_text(encoding="utf-8")
-        self.assertIn(
-            f'io.automata.sandbox-guest.protocol-version="{guest_protocol}"',
-            guest_containerfile,
-        )
-        self.assertEqual(
-            source["images"]["sandbox-guest"]["config"]["required_labels"][
-                "io.automata.sandbox-guest.protocol-version"
-            ],
-            guest_protocol,
-        )
+    def test_source_contract_rejects_duplicate_local_repository_aliases(self) -> None:
+        source = json.loads(json.dumps(self.source))
+        source["images"]["runner"]["canonical_repository"] = source["images"][
+            "automata"
+        ]["canonical_repository"]
+        contents = catalog.canonical_json(source)
 
-        proxy_protocol = str(
-            source["images"]["service-proxy"]["runtime"]["protocol"]
-        )
-        proxy_containerfile = (
-            REPOSITORY_ROOT / "images/service-proxy/Containerfile"
-        ).read_text(encoding="utf-8")
-        self.assertIn(
-            f'io.automata.service-proxy.protocol-version="{proxy_protocol}"',
-            proxy_containerfile,
-        )
-        self.assertEqual(
-            source["images"]["service-proxy"]["config"]["required_labels"][
-                "io.automata.service-proxy.protocol-version"
-            ],
-            proxy_protocol,
-        )
-        self.assertEqual(
-            proxy_protocol,
-            rust_string_constant(
-                "crates/automata-ci-local/src/local_docker/mod.rs",
-                "RESULTS_PROXY_IMAGE_PROTOCOL_VERSION",
-            ),
-        )
-        self.assertEqual(
-            proxy_protocol,
-            rust_string_constant(
-                "crates/automata-ci-sandbox-podman/src/provider.rs",
-                "SERVICE_PROXY_IMAGE_PROTOCOL_VERSION",
-            ),
-        )
+        with tempfile.TemporaryDirectory(prefix="catalog-aliases.") as temporary:
+            repository_root = pathlib.Path(temporary)
+            for relative in (catalog.SOURCE_PATH, catalog.PACKAGED_SOURCE_PATH):
+                path = repository_root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(contents)
+            with (
+                mock.patch.object(
+                    catalog, "SOURCE_SHA256", catalog.sha256_bytes(contents)
+                ),
+                self.assertRaisesRegex(SystemExit, "aliases must be unique"),
+            ):
+                catalog.load_source(repository_root)
+
+    def test_lifecycle_runtime_rejects_renderer_digest_drift(self) -> None:
+        lifecycle = json.loads(json.dumps(self.source["lifecycle_runtime"]))
+        lifecycle["renderer_contract"]["fixture_sha256"] = "f" * 64
+        with self.assertRaisesRegex(SystemExit, "lifecycle runtime contract differs"):
+            catalog.require_lifecycle_runtime(lifecycle)
 
     def test_catalog_round_trips_the_closed_role_and_payload_set(self) -> None:
         document = self.build()
@@ -407,6 +296,7 @@ class LocalInstallationCatalogContract(unittest.TestCase):
                     "scripts/ci/service-proxy-candidate.py",
                     "scripts/ci/service-proxy-publication.py",
                     "images/local-installation/catalog-v1.json",
+                    catalog.PACKAGED_SOURCE_PATH,
                     catalog.PROFILE_MANIFEST_PATH,
                     catalog.PROFILE_LOCK_PATH,
                 )

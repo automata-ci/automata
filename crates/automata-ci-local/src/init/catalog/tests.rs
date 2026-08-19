@@ -1,4 +1,10 @@
 use super::*;
+
+#[test]
+fn outer_candidate_bound_includes_inner_archive_overhead() {
+    assert_eq!(MAX_CANDIDATE_BYTES, 160 * 1024 * 1024);
+    assert_eq!(MAX_CANDIDATE_MEMBER_BYTES, 128 * 1024 * 1024);
+}
 use std::io::Write as _;
 
 #[test]
@@ -11,11 +17,45 @@ fn closed_role_set_remains_exact() {
 }
 
 #[test]
+fn packaged_source_contract_is_the_exact_release_source() {
+    assert_eq!(
+        digest_hex(include_bytes!("../catalog-v1.source.json")),
+        SOURCE_SHA256
+    );
+    assert_eq!(
+        validate_current_source_contract().unwrap(),
+        current_source_contract_sha256()
+    );
+}
+
+#[test]
+fn packaged_renderer_contract_is_the_production_fixture_digest() {
+    let source: Value =
+        serde_json::from_slice(include_bytes!("../catalog-v1.source.json")).unwrap();
+    let runtime = source.get("lifecycle_runtime").unwrap();
+    let renderer = runtime.get("renderer_contract").unwrap();
+    assert_eq!(
+        renderer.get("schema").and_then(Value::as_str),
+        Some(super::super::renderer::RENDERER_CONTRACT_FIXTURE_SCHEMA)
+    );
+    let expected_digest = super::super::renderer::renderer_contract_fixture_sha256()
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        renderer.get("fixture_sha256").and_then(Value::as_str),
+        Some(expected_digest.as_str())
+    );
+    validate_lifecycle_runtime(runtime).unwrap();
+
+    let mut mutated = runtime.clone();
+    mutated["renderer_contract"]["fixture_sha256"] = Value::String("f".repeat(64));
+    assert!(validate_lifecycle_runtime(&mutated).is_err());
+}
+
+#[test]
 fn generated_five_field_registry_binding_is_consumed_exactly() {
-    let source: RawSourceCatalog = serde_json::from_slice(include_bytes!(
-        "../../../../../images/local-installation/catalog-v1.json"
-    ))
-    .unwrap();
+    let source: RawSourceCatalog =
+        serde_json::from_slice(include_bytes!("../catalog-v1.source.json")).unwrap();
     let postgres_source = &source.images.get("postgres").unwrap().source;
     let binding = serde_json::json!({
         "config_digest": "sha256:526573c93ea530a230b553cc513075ab9d70b63bfd2300ef5eb5ad1cafbbc595",
@@ -37,10 +77,8 @@ fn generated_five_field_registry_binding_is_consumed_exactly() {
 #[test]
 #[allow(clippy::too_many_lines)]
 fn generated_catalog_keeps_release_provenance_distinct_from_the_local_import_name() {
-    let source: Value = serde_json::from_slice(include_bytes!(
-        "../../../../../images/local-installation/catalog-v1.json"
-    ))
-    .unwrap();
+    let source: Value =
+        serde_json::from_slice(include_bytes!("../catalog-v1.source.json")).unwrap();
     let source_images = source.get("images").and_then(Value::as_object).unwrap();
     let top_digest = format!("sha256:{}", "11".repeat(32));
     let platform_digest = format!("sha256:{}", "22".repeat(32));
@@ -103,6 +141,7 @@ fn generated_catalog_keeps_release_provenance_distinct_from_the_local_import_nam
     let source_profile = source.get("profile").and_then(Value::as_object).unwrap();
     let catalog = serde_json::json!({
         "images": images,
+        "lifecycle_runtime": source.get("lifecycle_runtime").unwrap(),
         "platform": source.get("platform").unwrap(),
         "profile": {
             "compatibility_label": source_profile.get("compatibility_label").unwrap(),
@@ -516,6 +555,7 @@ fn live_portable_docker_load_archive_qualifies_the_daemon_representation() {
     });
     let catalog = VerifiedCatalog {
         bytes_sha256: Sha256Digest::from_bytes([0x77; 32]),
+        source_contract_sha256: current_source_contract_sha256(),
         release,
         profile: ProfileBinding {
             id: "fixture".to_owned(),

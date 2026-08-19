@@ -126,3 +126,13 @@ run_bounded_tests cargo test \
   test_support::tests:: \
   --ignored \
   --test-threads=1
+printf 'PostgreSQL tests: local installation migration 0068\n' >&2
+run_bounded_tests cargo test \
+  -p automata-ci-store-postgres \
+  --lib \
+  --all-features \
+  --locked \
+  -- \
+  migration_0069_tests:: \
+  --ignored \
+  --test-threads=1

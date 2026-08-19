@@ -126,7 +126,16 @@ struct Inner {
     root: ActionArchiveCacheRoot,
     limits: ActionArchiveCacheLimits,
     gate: Mutex<()>,
-    _lock: File,
+    lock: File,
+}
+
+impl Drop for Inner {
+    fn drop(&mut self) {
+        // A fork inherits this open file description before `CLOEXEC` can
+        // close its descriptor. Unlock explicitly so teardown does not wait
+        // for every inherited duplicate to close.
+        let _ = flock(&self.lock, FlockOperation::Unlock);
+    }
 }
 
 /// Process-exclusive, bounded, content-verified local action archive cache.
@@ -164,9 +173,17 @@ impl FileActionArchiveCache {
                 root,
                 limits,
                 gate: Mutex::new(()),
-                _lock: lock,
+                lock,
             }),
         })
+    }
+
+    #[cfg(test)]
+    pub(super) fn duplicate_lock_for_test(&self) -> File {
+        self.inner
+            .lock
+            .try_clone()
+            .expect("duplicate action-archive cache lock")
     }
 
     fn get_sync(

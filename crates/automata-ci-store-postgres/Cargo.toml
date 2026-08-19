@@ -44,4 +44,7 @@ zeroize.workspace = true
 workspace = true
 
 [dev-dependencies]
+automata-ci-auth-postgres.workspace = true
+automata-ci-protocol.workspace = true
 rcgen.workspace = true
+ring.workspace = true

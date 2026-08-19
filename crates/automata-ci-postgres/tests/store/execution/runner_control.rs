@@ -50,7 +50,7 @@ use automata_ci_store::{
     EnqueueRunnerCommand, HumanLogCommitHint, HumanLogCommitNotificationSource as _, JobIrMetadata,
     LeaseOfferCommandIdentity, ObjectKey, OpenRunnerSession, RunnerCommandPayload,
     RunnerGeneration, RunnerOperationKind, RunnerOperationRequest, RunnerOperationResponse,
-    RunnerProtocolVersion, StableRunnerSlot, StoreError,
+    RunnerProtocolVersion, RunnerSessionFence, StableRunnerSlot, StoreError,
 };
 use automata_ci_store_postgres::PostgresLogCommitListener;
 
@@ -358,46 +358,114 @@ async fn lease_request_begin_rejects_slots_outside_registered_capacity_without_m
     .await
 }
 
+struct LeaseRequestRetryFixture {
+    fence: RunnerSessionFence,
+    first_key: LeaseRequestKey,
+    first_begin: BeginLeaseRequest,
+    no_work: NoWorkLeaseRequest,
+}
+
+async fn install_first_no_work_semantic_receipt(
+    database: &TestDatabase,
+) -> TestResult<LeaseRequestRetryFixture> {
+    let seed = seed_control_plane(database.pool(), 1).await?;
+    let fence = seed.session_fences[0];
+    let slot = StableRunnerSlot::new(1)?;
+    let first_key = LeaseRequestKey::first(fence, OperationId::new(), slot);
+    let first_begin = BeginLeaseRequest::new(first_key, Sha256Digest::from_bytes([41; 32]));
+    assert!(
+        database
+            .store()
+            .begin_lease_request(first_begin)
+            .await?
+            .completed_response()
+            .is_none()
+    );
+    let page = database
+        .store()
+        .scan_runnable(RunnableScanRequest::new(
+            fence,
+            slot,
+            RunnableScanLimit::new(10)?,
+            UnixMillis::new(10),
+        ))
+        .await?;
+    let no_work = NoWorkLeaseRequest::new(
+        first_key,
+        UnixMillis::new(10),
+        page.no_work_advance(),
+        LeaseAuthorityPollContributions::empty(),
+    )?;
+    database.store().record_no_work(no_work.clone()).await?;
+    Ok(LeaseRequestRetryFixture {
+        fence,
+        first_key,
+        first_begin,
+        no_work,
+    })
+}
+
+async fn assert_late_first_request_handlers_are_fenced(
+    database: &TestDatabase,
+    fixture: LeaseRequestRetryFixture,
+) -> TestResult {
+    let successor_key = LeaseRequestKey::successor(
+        fixture.fence,
+        OperationId::new(),
+        fixture.first_key.slot(),
+        fixture.first_key.operation_id(),
+    )?;
+    let successor = BeginLeaseRequest::new(successor_key, Sha256Digest::from_bytes([43; 32]));
+    database.store().begin_lease_request(successor).await?;
+    assert!(matches!(
+        database.store().record_no_work(fixture.no_work).await,
+        Err(StoreError::OperationConflict { .. })
+    ));
+    assert!(matches!(
+        database
+            .store()
+            .complete_lease_request(CompleteLeaseRequest::without_lease_offer(
+                fixture.first_begin,
+                test_lease_response(2)?,
+                UnixMillis::new(12),
+            ))
+            .await,
+        Err(StoreError::OperationConflict { .. })
+    ));
+    assert!(matches!(
+        database
+            .store()
+            .record_operation(
+                RunnerOperationRequest::new(
+                    fixture.fence,
+                    fixture.first_key.operation_id(),
+                    RunnerOperationKind::new(LEASE_REQUEST_KIND)?,
+                    fixture.first_begin.request_digest(),
+                ),
+                test_lease_response(2)?,
+                UnixMillis::new(12),
+            )
+            .await,
+        Err(StoreError::OperationConflict { .. })
+    ));
+    Ok(())
+}
+
 #[tokio::test]
 #[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
 async fn lease_request_drop_retry_predecessor_and_late_handler_are_fenced() -> TestResult {
     run_with_database(|database| async move {
-        let seed = seed_control_plane(database.pool(), 1).await?;
-        let fence = seed.session_fences[0];
-        let slot = StableRunnerSlot::new(1)?;
-        let first_key = LeaseRequestKey::first(fence, OperationId::new(), slot);
-        let first_begin = BeginLeaseRequest::new(first_key, Sha256Digest::from_bytes([41; 32]));
-        assert!(
-            database
-                .store()
-                .begin_lease_request(first_begin)
-                .await?
-                .completed_response()
-                .is_none()
-        );
-        let page = database
-            .store()
-            .scan_runnable(RunnableScanRequest::new(
-                fence,
-                slot,
-                RunnableScanLimit::new(10)?,
-                UnixMillis::new(10),
-            ))
-            .await?;
-        let no_work = NoWorkLeaseRequest::new(
-            first_key,
-            UnixMillis::new(10),
-            page.no_work_advance(),
-            LeaseAuthorityPollContributions::empty(),
-        )?;
-        database.store().record_no_work(no_work.clone()).await?;
+        let fixture = install_first_no_work_semantic_receipt(&database).await?;
 
-        let dropped_retry = database.store().begin_lease_request(first_begin).await?;
+        let dropped_retry = database
+            .store()
+            .begin_lease_request(fixture.first_begin)
+            .await?;
         assert!(dropped_retry.completed_response().is_none());
         assert!(
             database
                 .store()
-                .lookup_lease_request(first_key, &LeaseAuthorityPollContributions::empty())
+                .lookup_lease_request(fixture.first_key, &LeaseAuthorityPollContributions::empty(),)
                 .await?
                 .expect("semantic receipt")
                 .was_replayed()
@@ -405,7 +473,7 @@ async fn lease_request_drop_retry_predecessor_and_late_handler_are_fenced() -> T
         let first_response = database
             .store()
             .complete_lease_request(CompleteLeaseRequest::without_lease_offer(
-                first_begin,
+                fixture.first_begin,
                 test_lease_response(1)?,
                 UnixMillis::new(11),
             ))
@@ -413,15 +481,20 @@ async fn lease_request_drop_retry_predecessor_and_late_handler_are_fenced() -> T
         assert_eq!(
             database
                 .store()
-                .begin_lease_request(first_begin)
+                .begin_lease_request(fixture.first_begin)
                 .await?
                 .completed_response(),
             first_response.response()
         );
 
         for invalid in [
-            LeaseRequestKey::first(fence, OperationId::new(), slot),
-            LeaseRequestKey::successor(fence, OperationId::new(), slot, OperationId::new())?,
+            LeaseRequestKey::first(fixture.fence, OperationId::new(), fixture.first_key.slot()),
+            LeaseRequestKey::successor(
+                fixture.fence,
+                OperationId::new(),
+                fixture.first_key.slot(),
+                OperationId::new(),
+            )?,
         ] {
             let begin = BeginLeaseRequest::new(invalid, Sha256Digest::from_bytes([42; 32]));
             assert!(matches!(
@@ -429,42 +502,7 @@ async fn lease_request_drop_retry_predecessor_and_late_handler_are_fenced() -> T
                 Err(StoreError::OperationConflict { .. })
             ));
         }
-
-        let successor_key =
-            LeaseRequestKey::successor(fence, OperationId::new(), slot, first_key.operation_id())?;
-        let successor = BeginLeaseRequest::new(successor_key, Sha256Digest::from_bytes([43; 32]));
-        database.store().begin_lease_request(successor).await?;
-        assert!(matches!(
-            database.store().record_no_work(no_work).await,
-            Err(StoreError::OperationConflict { .. })
-        ));
-        assert!(matches!(
-            database
-                .store()
-                .complete_lease_request(CompleteLeaseRequest::without_lease_offer(
-                    first_begin,
-                    test_lease_response(2)?,
-                    UnixMillis::new(12),
-                ))
-                .await,
-            Err(StoreError::OperationConflict { .. })
-        ));
-        assert!(matches!(
-            database
-                .store()
-                .record_operation(
-                    RunnerOperationRequest::new(
-                        fence,
-                        first_key.operation_id(),
-                        RunnerOperationKind::new(LEASE_REQUEST_KIND)?,
-                        first_begin.request_digest(),
-                    ),
-                    test_lease_response(2)?,
-                    UnixMillis::new(12),
-                )
-                .await,
-            Err(StoreError::OperationConflict { .. })
-        ));
+        assert_late_first_request_handlers_are_fenced(&database, fixture).await?;
         Ok(())
     })
     .await

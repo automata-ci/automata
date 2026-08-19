@@ -6,16 +6,15 @@ use automata_ci_runner_journal::MAX_JOURNALED_SLOTS;
 
 use super::{
     DesiredSpec, DesiredSpecErrorCode, DesiredSpecImages, DesiredSpecInput, LocalImportedImage,
-    LocalProfile, ResultsTransit,
+    LocalProfile, RENDERER_CONTRACT_FIXTURE_DESIRED_SPEC,
+    RENDERER_CONTRACT_FIXTURE_INSTALLATION_ID, ResultsTransit,
 };
 use crate::{EngineArchitecture, Installation, InstallationId, InstallationName};
-
-const FIXED_INSTALLATION_ID: &str = "11111111-1111-4111-8111-111111111111";
 
 pub(crate) fn installation() -> Installation {
     Installation::verified(
         InstallationName::default(),
-        InstallationId::parse_canonical(FIXED_INSTALLATION_ID)
+        InstallationId::parse_canonical(RENDERER_CONTRACT_FIXTURE_INSTALLATION_ID)
             .expect("fixed version-four installation ID"),
     )
 }
@@ -117,28 +116,55 @@ fn canonical_document_has_a_stable_golden_vector() {
     assert_eq!(bytes.last(), Some(&b'\n'));
     assert_eq!(
         String::from_utf8(bytes).expect("canonical JSON is UTF-8"),
-        concat!(
-            "{\"schema\":\"automata.local/desired-spec/v1\",",
-            "\"installation\":{\"id\":\"11111111-1111-4111-8111-111111111111\",",
-            "\"selector_key\":\"df06ebed0fcba9b2d00b0476426924f354f73d0d7c6cd4ed2844b52787ccd120\",",
-            "\"compose_project\":\"automata-local-df06ebed0fcba9b2d00b0476426924f3\"},",
-            "\"platform\":{\"architecture\":\"linux/amd64\"},",
-            "\"capacity\":{\"max_parallel_jobs\":3},\"human\":{\"host_port\":8080},",
-            "\"profile\":{\"id\":\"automata.dev/github-hosted-ubuntu-24-04-x64-v1\",",
-            "\"manifest_sha256\":\"0101010101010101010101010101010101010101010101010101010101010101\",",
-            "\"image\":\"registry.example/automata/job@sha256:0101010101010101010101010101010101010101010101010101010101010101\"},",
-            "\"images\":{\"automata\":\"registry.example/automata/automata@sha256:1111111111111111111111111111111111111111111111111111111111111111\",",
-            "\"runner\":\"registry.example/automata/runner@sha256:1212121212121212121212121212121212121212121212121212121212121212\",",
-            "\"postgres\":\"registry.example/automata/postgres@sha256:1313131313131313131313131313131313131313131313131313131313131313\",",
-            "\"rustfs\":\"registry.example/automata/rustfs@sha256:1414141414141414141414141414141414141414141414141414141414141414\",",
-            "\"sandbox_guest\":\"registry.example/automata/sandbox-guest@sha256:1515151515151515151515151515151515151515151515151515151515151515\",",
-            "\"service_proxy\":{\"reference\":\"automata.local/automata-ci-service-proxy:manifest-1717171717171717171717171717171717171717171717171717171717171717\",",
-            "\"config_image_id\":\"sha256:1616161616161616161616161616161616161616161616161616161616161616\",",
-            "\"manifest_image_id\":\"sha256:1717171717171717171717171717171717171717171717171717171717171717\"}},",
-            "\"results_transit\":{\"subnet\":\"172.20.0.0/23\",\"gateway\":\"172.20.0.1\",",
-            "\"results_address\":\"172.20.0.2\"},",
-            "\"plan_sha256\":\"8ee06ca78bc85e89ac5c38d8ba8cc28c999937648937a69190e7bb5b1355645e\"}\n"
-        )
+        RENDERER_CONTRACT_FIXTURE_DESIRED_SPEC
+    );
+}
+
+#[test]
+fn canonical_loader_round_trips_and_rejects_every_untrusted_boundary() {
+    let installation = installation();
+    let original = spec();
+    let bytes = original.canonical_bytes();
+    let loaded = DesiredSpec::from_canonical_bytes(&bytes, &installation)
+        .expect("canonical desired intent loads");
+    assert_eq!(loaded, original);
+    assert_eq!(loaded.canonical_bytes(), bytes);
+
+    let mut noncanonical = bytes.clone();
+    noncanonical.pop();
+    assert_eq!(
+        DesiredSpec::from_canonical_bytes(&noncanonical, &installation)
+            .expect_err("missing canonical newline must fail")
+            .code(),
+        DesiredSpecErrorCode::Document
+    );
+
+    let different_installation = Installation::verified(
+        InstallationName::new("other").expect("fixed installation name"),
+        InstallationId::parse_canonical("22222222-2222-4222-8222-222222222222")
+            .expect("fixed version-four installation ID"),
+    );
+    assert_eq!(
+        DesiredSpec::from_canonical_bytes(&bytes, &different_installation)
+            .expect_err("different installation binding must fail")
+            .code(),
+        DesiredSpecErrorCode::Document
+    );
+
+    let mut tampered = String::from_utf8(bytes).expect("desired bytes are UTF-8");
+    tampered = tampered.replace("\"max_parallel_jobs\":3", "\"max_parallel_jobs\":4");
+    assert_eq!(
+        DesiredSpec::from_canonical_bytes(tampered.as_bytes(), &installation)
+            .expect_err("plan-inconsistent desired intent must fail")
+            .code(),
+        DesiredSpecErrorCode::Document
+    );
+
+    assert_eq!(
+        DesiredSpec::from_canonical_bytes(&vec![b' '; 64 * 1024 + 1], &installation)
+            .expect_err("oversized desired intent must fail")
+            .code(),
+        DesiredSpecErrorCode::Document
     );
 }
 
@@ -334,6 +360,38 @@ fn results_transit_is_canonical_private_first_host_and_nonoverlapping() {
             .code(),
         DesiredSpecErrorCode::ResultsTransit
     );
+
+    let installation = installation();
+    for (kind, subnet) in [
+        ("control", super::control_subnet(&installation)),
+        ("egress", super::egress_subnet(&installation)),
+    ] {
+        let enclosing = super::Ipv4Subnet {
+            network: subnet.network & super::prefix_mask(23),
+            prefix: 23,
+        };
+        let overlapping = ResultsTransit::new(
+            enclosing.to_string(),
+            enclosing.address(1),
+            enclosing.address(2),
+        )
+        .expect("derived lifecycle subnet has a canonical enclosing transit");
+        let input = DesiredSpecInput::new(
+            NonZeroU16::new(1).expect("capacity"),
+            NonZeroU16::new(8080).expect("port"),
+            profile(EngineArchitecture::Amd64, 1),
+            images(17),
+            overlapping,
+        )
+        .expect("bounded desired input");
+        assert_eq!(
+            DesiredSpec::new(&installation, input)
+                .expect_err("derived lifecycle overlap must fail")
+                .code(),
+            DesiredSpecErrorCode::ResultsTransit,
+            "{kind} subnet"
+        );
+    }
 }
 
 #[test]

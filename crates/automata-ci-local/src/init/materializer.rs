@@ -23,14 +23,14 @@ use super::{
     epoch::{ImmutableEpoch, MaterialDeriver},
 };
 
-const REQUEST_SCHEMA: &str = "automata.local/materialize-request/v1";
+pub(super) const REQUEST_SCHEMA: &str = "automata.local/materialize-request/v1";
 const MANIFEST_SCHEMA: &str = "automata.local/static-material-manifest/v1";
-const RESPONSE_SCHEMA: &str = "automata.local/materialize-response/v1";
+pub(super) const RESPONSE_SCHEMA: &str = "automata.local/materialize-response/v1";
 const MANIFEST_FILE: &str = ".automata-static-manifest.json";
-const MAX_REQUEST_BYTES: usize = 512 * 1024;
+pub(super) const MAX_REQUEST_BYTES: usize = 512 * 1024;
 const MAX_FILE_BYTES: usize = 128 * 1024;
 const MAX_MANIFEST_BYTES: usize = 16 * 1024;
-const STATIC_FILE_MODE: u32 = 0o400;
+pub(super) const STATIC_FILE_MODE: u32 = 0o400;
 const STATIC_DIRECTORY_MODE: u32 = 0o700;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -401,7 +401,7 @@ fn derived_key_plan(id: FileId, deriver: &MaterialDeriver, purpose: &'static [u8
     plan(id, material.as_slice())
 }
 
-fn s3_access_key(deriver: &MaterialDeriver) -> String {
+pub(super) fn s3_access_key(deriver: &MaterialDeriver) -> String {
     const UPPERCASE_HEX: &[u8; 16] = b"0123456789ABCDEF";
     let material = deriver.bytes(b"s3/access-key", 10);
     let mut encoded = String::with_capacity(20);
@@ -412,7 +412,7 @@ fn s3_access_key(deriver: &MaterialDeriver) -> String {
     encoded
 }
 
-fn s3_secret_key(deriver: &MaterialDeriver) -> Zeroizing<String> {
+pub(super) fn s3_secret_key(deriver: &MaterialDeriver) -> Zeroizing<String> {
     deriver.text(b"s3/secret-key", 30)
 }
 
@@ -480,10 +480,7 @@ fn materialize(request: &MaterializeRequest) -> Result<(), LocalInitError> {
     validate_cross_file_material(&plans)?;
     for role in VolumeRole::ALL {
         let directory = open_volume(role)?;
-        if request.fresh_dynamic_roots && !role.is_static() {
-            verify_empty_directory(&directory)?;
-        }
-        initialize_root(&directory, role)?;
+        prepare_volume_root(&directory, role, request.fresh_dynamic_roots)?;
         if role.is_static() {
             seal_static_volume(
                 &directory,
@@ -493,8 +490,92 @@ fn materialize(request: &MaterializeRequest) -> Result<(), LocalInitError> {
                 &plans,
                 request.fresh_dynamic_roots,
             )?;
+        } else if !request.fresh_dynamic_roots {
+            verify_dynamic_root_shape(&directory, role)?;
         }
         verify_root(&directory, role)?;
+    }
+    Ok(())
+}
+
+fn prepare_volume_root(
+    directory: &OwnedFd,
+    role: VolumeRole,
+    fresh_dynamic_roots: bool,
+) -> Result<(), LocalInitError> {
+    if fresh_dynamic_roots {
+        if !role.is_static() {
+            verify_empty_directory(directory)?;
+        }
+        initialize_root(directory, role)
+    } else {
+        // Completed materialization is an attestation boundary, never a
+        // repair boundary. In particular, do not normalize root ownership or
+        // mode after the durable host record says materialization completed.
+        verify_root(directory, role)
+    }
+}
+
+fn verify_dynamic_root_shape(directory: &OwnedFd, role: VolumeRole) -> Result<(), LocalInitError> {
+    debug_assert!(!role.is_static());
+    for entry in Dir::read_from(directory).map_err(|_| materialization_failed())? {
+        let entry = entry.map_err(|_| materialization_failed())?;
+        let name = entry
+            .file_name()
+            .to_str()
+            .map_err(|_| materialization_failed())?;
+        if matches!(name, "." | "..") {
+            continue;
+        }
+        let allowed = match role {
+            VolumeRole::BootstrapState => {
+                matches!(
+                    name,
+                    "request.json"
+                        | ".request.json.automata-write"
+                        | "runner-enrollment-token"
+                        | ".runner-enrollment-token.automata-write"
+                        | "active-runner-enrollment-token"
+                        | ".active-runner-enrollment-token.automata-write"
+                        | "receipt.json"
+                ) || name
+                    .strip_prefix(".automata-bootstrap-receipt-")
+                    .and_then(|suffix| suffix.strip_suffix(".tmp"))
+                    .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok())
+            }
+            VolumeRole::RelayBinding => {
+                matches!(name, "binding.json" | ".binding.json.automata-write")
+            }
+            VolumeRole::RunnerConfig => {
+                matches!(name, "runner.json" | ".runner.json.automata-write")
+            }
+            VolumeRole::RunnerSecrets => matches!(
+                name,
+                "s3-access-key"
+                    | ".s3-access-key.automata-write"
+                    | "s3-ca.pem"
+                    | ".s3-ca.pem.automata-write"
+                    | "s3-secret-key"
+                    | ".s3-secret-key.automata-write"
+                    | "spool-key-v1.hex"
+                    | ".spool-key-v1.hex.automata-write"
+            ),
+            // These are service-owned data roots. Their internal schemas are
+            // attested by the owning production service; this boundary still
+            // rejects the static-material namespace and fixed writer staging
+            // namespace, which can never be legitimate in these roots.
+            VolumeRole::EngineRelay
+            | VolumeRole::ObjectData
+            | VolumeRole::PostgresData
+            | VolumeRole::RunnerData => name != MANIFEST_FILE && !name.ends_with(".automata-write"),
+            VolumeRole::ControlMaterial
+            | VolumeRole::Desired
+            | VolumeRole::PostgresConfig
+            | VolumeRole::RustfsConfig => false,
+        };
+        if !allowed {
+            return Err(materialization_failed());
+        }
     }
     Ok(())
 }

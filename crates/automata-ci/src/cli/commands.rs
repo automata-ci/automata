@@ -1,6 +1,12 @@
 use std::{fmt, net::SocketAddr, path::PathBuf, str::FromStr};
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+use std::{
+    convert::Infallible,
+    path::{Component, Path},
+};
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use automata_ci_local::InstallationName;
 use clap::{Args, Subcommand, ValueEnum};
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -64,11 +70,33 @@ pub struct InternalArgs {
 #[derive(Debug, Subcommand)]
 /// Closed image-internal service initialization boundaries.
 pub enum InternalCommand {
+    /// Run one fixed local Engine relay operation.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    Engine(InternalEngineArgs),
     /// Initialize the configured object-store boundary.
     ObjectStore(Box<InternalObjectStoreArgs>),
     /// Materialize one fixed local-installation epoch inside its helper.
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     Local(InternalLocalArgs),
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[derive(Debug, Args)]
+/// Fixed image-internal local Engine operations.
+pub struct InternalEngineArgs {
+    /// Exact fixed relay operation.
+    #[command(subcommand)]
+    pub command: InternalEngineCommand,
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[derive(Debug, Subcommand)]
+/// Closed local Engine relay operations.
+pub enum InternalEngineCommand {
+    /// Relay the fixed host Engine socket after dropping privileges.
+    Relay,
+    /// Attest the fixed downstream relay socket and binding.
+    Check,
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -84,8 +112,100 @@ pub struct InternalLocalArgs {
 #[derive(Debug, Subcommand)]
 /// Closed one-shot local-installation helper boundary.
 pub enum InternalLocalCommand {
+    /// Bind the deployment installation and ensure its runner enrollment token.
+    BootstrapRunner(InternalBootstrapRunnerArgs),
     /// Materialize and seal the fixed mounted epoch volumes.
     Materialize,
+    /// Emit the exact mounted sealed Desired document.
+    ReadDesired,
+    /// Emit the exact expected-old SHA-256 digest for one fixed CAS target.
+    ReadCasDigest,
+    /// Commit one fixed generated file by expected-old-digest CAS.
+    WriteCas,
+    /// Hold the exact lifecycle Engine lock until the manager closes stdin.
+    HoldLock,
+    /// Check the fixed in-container control-plane readiness endpoint.
+    CheckReady,
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[derive(Debug, Args)]
+/// Exact file-backed local runner-bootstrap inputs.
+pub struct InternalBootstrapRunnerArgs {
+    /// Owner-only file containing the bounded `PostgreSQL` URL scalar.
+    #[arg(long, value_name = "file:/ABSOLUTE/PATH")]
+    pub database_url_source: InternalBootstrapFileSource,
+    /// Owner-only file containing the bounded `PostgreSQL` private CA.
+    #[arg(long, value_name = "file:/ABSOLUTE/PATH")]
+    pub database_private_ca_source: InternalBootstrapFileSource,
+    /// Owner-only file containing one canonical current request document.
+    #[arg(long, value_name = "file:/ABSOLUTE/PATH")]
+    pub request_source: InternalBootstrapFileSource,
+    /// Owner-only immutable seed that is also the generation-zero token.
+    #[arg(long, value_name = "file:/ABSOLUTE/PATH")]
+    pub runner_enrollment_token_source: InternalBootstrapFileSource,
+    /// Owner-only active one-use token file reconciled by this operation.
+    #[arg(long, value_name = "file:/ABSOLUTE/PATH")]
+    pub runner_enrollment_token_target: InternalBootstrapFileSource,
+    /// Owner-only canonical receipt file replaced durably by this operation.
+    #[arg(long, value_name = "file:/ABSOLUTE/PATH")]
+    pub receipt_target: InternalBootstrapFileSource,
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+const MAX_INTERNAL_BOOTSTRAP_FILE_REFERENCE_BYTES: usize = 4 * 1_024;
+
+/// A redacted canonical absolute file reference accepted only by local bootstrap.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[derive(Clone)]
+pub struct InternalBootstrapFileSource(Option<PathBuf>);
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+impl InternalBootstrapFileSource {
+    pub(crate) fn path(&self) -> Option<&Path> {
+        self.0.as_deref()
+    }
+
+    pub(crate) const fn is_valid(&self) -> bool {
+        self.0.is_some()
+    }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+impl FromStr for InternalBootstrapFileSource {
+    type Err = Infallible;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let path = value
+            .strip_prefix("file:")
+            .filter(|path| {
+                !path.is_empty()
+                    && value.len() <= MAX_INTERNAL_BOOTSTRAP_FILE_REFERENCE_BYTES
+                    && !path.contains('\0')
+                    && !path.contains("//")
+            })
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+            .filter(|path| {
+                path.components()
+                    .any(|component| matches!(component, Component::Normal(_)))
+                    && path.components().all(|component| {
+                        matches!(component, Component::RootDir | Component::Normal(_))
+                    })
+            });
+        Ok(Self(path))
+    }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+impl fmt::Debug for InternalBootstrapFileSource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("InternalBootstrapFileSource")
+            .field("kind", &self.0.as_ref().map_or("invalid", |_| "file"))
+            .field("reference", &"[redacted]")
+            .finish()
+    }
 }
 
 #[derive(Debug, Args)]
@@ -129,7 +249,13 @@ pub enum LocalCommand {
     /// Seal or replay one x86-64 Linux epoch without starting services.
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     Init(LocalInitArgs),
-    /// Inspect recorded custody or reset progress without changing host or Engine state.
+    /// Converge one sealed installation to its exact running topology.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    Up(LocalUpArgs),
+    /// Stop and remove replaceable topology while retaining sealed custody and data.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    Down(LocalDownArgs),
+    /// Inspect sealed, running, recovery, or reset state without mutating custody.
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     Status(LocalStatusArgs),
     /// Remove exact sealed Engine custody while retaining images and the state root.
@@ -153,6 +279,43 @@ pub struct LocalInitArgs {
     /// Operator-selected canonical release evidence; init verifies structure and digests, not OIDC authenticity.
     #[arg(long, value_name = "file:ABS", value_parser = parse_catalog_source)]
     pub catalog_source: String,
+    /// Explicitly authorize recovery of one exact stopped initialization lock.
+    ///
+    /// Stopped evidence is refused by default, and unavailable proof fails
+    /// closed. When set, recovery requires an Engine restart and positive
+    /// Engine/process quiescence before exact-ID removal and initialization replay.
+    #[arg(long)]
+    pub recover_stopped_lock: bool,
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[derive(Debug, Args)]
+/// Running local-installation convergence inputs.
+pub struct LocalUpArgs {
+    /// Explicit absolute host directory containing sealed installation custody.
+    #[arg(long, value_name = "ABS", value_parser = parse_absolute_state_directory)]
+    pub state_directory: PathBuf,
+    /// Explicitly authorize recovery of one exact stopped lifecycle lock.
+    ///
+    /// Stopped evidence is refused by default. When set, positive Engine/process
+    /// quiescence is verified before exact-ID removal and normal convergence.
+    #[arg(long)]
+    pub recover_stopped_lock: bool,
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[derive(Debug, Args)]
+/// Stopped local-installation convergence inputs.
+pub struct LocalDownArgs {
+    /// Explicit absolute host directory containing running or stopped installation custody.
+    #[arg(long, value_name = "ABS", value_parser = parse_absolute_state_directory)]
+    pub state_directory: PathBuf,
+    /// Explicitly authorize recovery of one exact stopped lifecycle lock.
+    ///
+    /// Stopped evidence is refused by default. When set, positive Engine/process
+    /// quiescence is verified before exact-ID removal and normal convergence.
+    #[arg(long)]
+    pub recover_stopped_lock: bool,
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -218,7 +381,7 @@ pub enum LocalContainerEngine {
     /// Select the portable Docker Engine path.
     #[default]
     Auto,
-    /// Require Docker Engine and Compose plugin version 2.20.0 or newer.
+    /// Require Docker Engine and Compose plugin version 2.33.1 or newer.
     Docker,
 }
 

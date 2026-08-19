@@ -277,6 +277,14 @@ const CANONICAL_MIGRATIONS: &[(&str, &str)] = &[
         "0068_provider_credential_envelope_revisions.sql",
         "6f8805e0a386ac29de076173d29d1cd62dc7f68c8b318edc014bd206200126d8748ec93a607b18b703216932c4d760db",
     ),
+    (
+        "0069_installation_runner_bootstrap.sql",
+        "d8566e6c4275f513c390000c93a74c639a523fe066b96ee60fb7244888197b9c8535e6309e60bbe2576cb8839a21d27b",
+    ),
+    (
+        "0070_windows_runner_admission_v2.sql",
+        "32d26ef80363bf8a27c5ef1f63550daa21018f51de9f5109671f1f93aea31d575765ec1c98ae243a72520fb3b04c404b",
+    ),
 ];
 
 const BASELINE_MIGRATION_COUNT: u32 = 26;

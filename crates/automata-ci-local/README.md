@@ -1,19 +1,21 @@
 # Automata local installation
 
-`automata-ci-local` owns host inspection, source snapshot analysis, and sealed
-local-installation custody for `automata local`. It validates the initial
-x86-64 Linux, Apple Silicon macOS, or x86-64 Windows host tuple; a local Linux
-Docker Engine 28.0.0 or newer with API 1.48 or newer; and Compose plugin version
-2.20.0 or newer. It does not yet start or supervise a local Automata stack.
+`automata-ci-local` owns the cross-platform, disposable local-installation
+boundary used by `automata local`. It validates the initial x86-64 Linux, Apple
+Silicon macOS, or x86-64 Windows host tuple; a local Linux Docker Engine 28.0.0
+or newer with API 1.48 or newer; and Compose plugin version 2.33.1 or newer. It
+supervises the local Compose project without adding container-engine
+behavior to the control-plane crate.
 
 The available commands provide read-only host preflight and snapshot-backed
 workflow checking on the qualified platforms. On x86-64 Linux it also provides
-sealed `init`, read-only metadata `status`, and exact confirmed `reset` for a
-Docker Engine at exactly `unix:///var/run/docker.sock`. During `local doctor`, context
+sealed `init`, synchronous `up`/`down`, read-only live `status`, and exact
+confirmed `reset` for a Docker Engine at exactly
+`unix:///var/run/docker.sock`. During `local doctor`, context
 discovery is completed first, subsequent daemon probes are pinned to that exact
 local Unix-socket or Windows-named-pipe endpoint, and JSON schema 3 reports the
 bounded context name. Init accepts only the fixed Unix socket so the verified
-daemon, imported images, sealed topology, and future relay all name the same
+daemon, imported images, sealed topology, and fixed relay all name the same
 authority.
 
 The private local-snapshot foundation uses live bytes for staged additions
@@ -87,32 +89,94 @@ established materialization requires reset rather than silent repair. The
 material root is KDF root derivation input only and is never copied verbatim
 into a credential.
 
-Init seals only the canonical desired specification together with the immutable
-epoch and material. The desired record includes the local service-proxy tag and
-both acceptable OCI IDs so later convergence can reattest the same daemon
-representation. This slice has no renderer and generates no Compose document.
-Init invokes no Compose operation and starts no service, relay, bootstrap,
-database, object store, or runner. Public `local status --state-directory ABS`
-opens only existing custody with a shared, nonrepairing lock. It validates the
-canonical host records and exact Engine identity, images, volume metadata,
-attachments, and related-resource union, but deliberately does not inspect
-volume contents or manifests; `recorded_sealed` is that narrower claim. Public
-`local reset --state-directory ABS --yes` never prompts. It authorizes deletion
-from an authority-bound canonical epoch plus complete exact post-Desired Engine
-custody, rejecting copied/pre-guard, mismatched, unexpectedly managed, or
+Init itself seals only the canonical desired specification together with the
+immutable epoch and material. The desired record includes the local
+service-proxy tag and both acceptable OCI IDs so convergence can reattest the
+same daemon representation. Catalog/current-epoch authentication computes one fixed
+synthetic Compose/expected-topology fixture in memory to bind the production
+renderer, but init generates and persists no installation-specific Compose
+document, invokes no Compose operation, and starts no service, relay,
+bootstrap, database, object store, or runner.
+
+Public `local up --state-directory ABS` qualifies the exact Docker and Compose
+authority, reattests sealed custody, renders the canonical plan, and
+synchronously converges dependencies, bootstrap one-shots, control plane, fixed
+Engine relay, and runner. Public `local down --state-directory ABS` removes
+every replaceable resource in the exact running topology while retaining the
+identity anchor, twelve persistent volumes, imported images, sealed plan, and
+state custody. Both operations converge from sealed Desired bytes plus fresh
+Compose and Engine inspection under the retained exact-ID lock; no host
+lifecycle journal or detached lifecycle work exists.
+
+The lifecycle requires rootful Docker with daemon-default user-namespace
+remapping, cgroup v2, the built-in seccomp profile, private cgroup namespaces,
+the required memory/CPU/PID controllers, `runc`, and live restore disabled. All
+eight trusted fixed lifecycle services and the fixed custody helpers set
+`userns_mode: host` so they preserve access to sealed host-owned volume
+custody; the Engine relay additionally needs that namespace to open the
+root-owned socket before dropping authority. Untrusted
+`LocalDocker` job containers do not override the user namespace and therefore
+inherit the required daemon remap. Docker `/info` does not expose daemon-wide
+`log-opts` or the bridge entry in `default-network-opts`, and may omit
+`DefaultUlimits`, so all three must be configured empty as explicit trusted
+prerequisites. Exact post-create container and network inspection rejects any
+injected log option, bridge option, or ulimit. Such drift fails the lifecycle
+operation while its exact lock becomes sticky recovery evidence.
+
+Runner bootstrap retains its material-derived token as immutable generation
+zero and publishes a separate active token file. Each consumed generation
+authorizes exactly one deterministic successor under the sealed installation
+authority; unconsumed generations are refreshed in place. This lets an exact
+offline Linux runner recover only after its locally held predecessor (normally,
+and at most, 30 days) is expired by the database clock and no unrevoked runner
+leaf remains live, without making the seed reusable, changing normal mTLS
+renewal, or admitting a different runner.
+The runner healthcheck also proves current on-volume config/CA/chain/key and
+completion-receipt custody read-only while the steady runner owns the TLS flock.
+
+A stopped exact-ID holder remains sticky interruption evidence and ordinary
+acquisition refuses it. `--recover-stopped-lock` is explicit operator
+authorization to verify positive Engine/process quiescence under one continuous
+Docker event fence, remove only the reattested exact stopped ID after a Docker
+Engine restart, and continue the requested convergence. The holder exits
+successfully only after reading the complete fixed `release\n` frame; EOF, a
+partial frame, or any other frame leaves stopped sticky evidence. The accepted
+daemon generation binds host boot ID and `/proc` start time to the twice-sampled
+root `SCM_CREDENTIALS` PID that actually sent a qualified HTTP response;
+`SO_PEERCRED` is not accepted because socket activation can identify the socket
+owner rather than the response-serving daemon. Live,
+drifting, unknown, or indeterminate evidence still fails closed. The same
+authorization is available to init because a pre-seal interruption cannot
+necessarily advance to up.
+
+Public `local status --state-directory ABS` opens only existing custody with a
+shared, nonrepairing lock. It validates canonical host records and the complete
+bounded Engine union, distinguishes sealed/stopped, running, lifecycle-recovery,
+and reset states, and deliberately does not inspect persistent-volume contents
+or manifests. Public `local reset --state-directory ABS --yes` never prompts.
+It authorizes deletion from an authority-bound canonical epoch plus complete
+exact post-Desired Engine custody, rejecting copied/pre-guard, mismatched,
+unexpectedly managed, or
 foreign-attached state before mutation. Missing or safe malformed material,
 certificate, selector, and commit records are not deletion authority and do not
 strand cleanup; a canonically valid conflicting selector or commit blocks.
-Both commands use Bollard directly at the fixed Docker socket with pinned API
+The current lifecycle creates no OS credential-store entries: its exact
+credential-selector set is closed and empty until the public onboarding slice.
+No OS credential mutation or inspection is part of the current reset, and it
+does not claim to remove host-keyring entries.
+Status and reset use Bollard directly at the fixed Docker socket with pinned API
 1.48; Docker CLI availability, current context, `DOCKER_API_VERSION`, and
 Compose readiness affect neither status nor reset. Init and doctor retain the
 full CLI/context/Compose preflight.
-The self-contained topology-bound intent durably reconciles helper, eleven
-roles, Desired, anchor, and whatever safe fixed host records remain. It retains
-images, the state directory, and the verified held operation lock. Missing or
+The self-contained reset intent durably reconciles replaceable topology, twelve
+roles, the anchor, the exact lock ID last, and whatever safe fixed host records
+remain. It retains images and the state directory. Missing or
 retagged images do not block deletion because reset derives any stale-helper
-contract from the sealed epoch and never owns image removal. No public `run`,
-`up`, `down`, relay, or bootstrap lifecycle command exists.
+contract from the sealed epoch and never owns image removal. Relay, bootstrap,
+readiness, Desired-read, CAS-digest-read, generated-file CAS, and inert
+lifecycle-lock-holder operations remain fixed hidden image-internal commands
+rather than public lifecycle controls. `local up` and `local down` are the public
+lifecycle controls; no public `local run` command exists.
 The adapter exposes no generic delete, prune, or arbitrary helper API.
 
 On Linux, the runner also consumes one evaluation-only sandbox-provider
@@ -141,6 +205,12 @@ architecture and must not declare volumes, exposed ports, or a healthcheck. The
 proxy additionally has an exact credential-free runtime shape and must carry
 `io.automata.service-proxy.protocol-version=2`.
 
+All eight trusted fixed lifecycle services and the fixed custody helpers run in
+the host user namespace to preserve sealed host ownership. The Engine relay
+additionally needs that namespace for its bounded socket bootstrap. Untrusted
+job containers inherit daemon-default remapping and separately prove the
+resulting nonzero UID/GID map.
+
 The proxy representation is exact and storage-mode coupled. Classic Docker
 must expose the config ID, the sole canonical local tag, and no repository
 digest. Docker's containerd image store must expose the manifest ID, the same
@@ -149,12 +219,13 @@ digests, alternate or additional tags, and additional repository digests fail
 closed. Connect and every shared-transport operation recheck this live
 representation; cleanup-only destroy deliberately remains image-independent.
 
-The bounded Engine facts do not expose the daemon's `default-ulimits`
-configuration. An empty `default-ulimits` policy is therefore a trusted
-fixed-relay prerequisite, not a preflight attestation. The provider still
-requires the realized container ulimit list to be empty; a violation fails
-closed after create, and custody-only destroy can still remove the container
-when its immutable custody and exact front network remain valid.
+The bounded Engine facts do not fully expose daemon-wide `log-opts`, bridge
+`default-network-opts`, or `default-ulimits`. Empty settings are therefore
+trusted fixed-relay prerequisites rather than complete preflight attestations.
+The provider still requires the realized container ulimit list and exact
+network options; a violation fails closed after create, and custody-only destroy
+can still remove the container when its immutable custody and exact front
+network remain valid.
 
 A job receives no host bind, host engine socket, or per-job volume. It joins one
 deterministic internal `/29` front network shared only with a credential-free
@@ -206,18 +277,24 @@ identity only from the explicit state-directory custody.
 
 `automata local init` imports or pulls the verified image set, creates/adopts
 exact installation volumes, and seals host material plus desired topology
-without converging it. `automata local reset` is the only other product mutation
-in this slice and removes one exact established installation while retaining
-images and the custody root/lock. The runner-only provider boundary above still
-does not add a local execution command. The
+without converging it. `automata local up` and `down` converge and remove only
+the replaceable topology around that persistent plan. `automata local reset`
+removes one exact established installation while retaining images and the
+custody root/lock. The runner-only provider boundary above still does not add a
+local execution command. The
 snapshot boundary is consumed separately by `automata local check`, which
 compiles an explicit local manual-dispatch event and all reachable same-snapshot
 reusable workflows through the shared compiler and credential analysis. It
 does not admit or run work, mint GitHub evidence, request a token, or publish a
 Check Run. Status derives a bounded live Engine inventory on demand rather than
 persisting a mirrored one, and secret values never enter the desired document
-or status output. This slice does not generate a Compose document.
+or status output. Catalog/current-epoch authentication computes only a fixed
+synthetic renderer fixture; it does not persist or execute that fixture.
+Installation-specific mutation rendering occurs in explicit up/down
+convergence, while status/reset may render the expected topology read-only for
+comparison with live custody.
 
 This crate has no command-line parser. The `automata` product maps its public
-CLI into the high-level local-check and x86-64 Linux init/status/reset requests;
-filesystem, catalog, materializer, snapshot, and archive authority stay private.
+CLI into the high-level local-check and x86-64 Linux init/up/down/status/reset
+requests; filesystem, catalog, materializer, lifecycle, snapshot, and archive
+authority stay private.

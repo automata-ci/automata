@@ -198,7 +198,7 @@ impl CandidateLoadDriver for FakeCandidateDriver {
         }
     }
 
-    async fn candidate_import_untrusted(&self, _archive: &[u8]) {
+    async fn candidate_import_untrusted(&self, _archive: &[u8]) -> Result<(), LocalInitError> {
         let mut state = self.state.lock().unwrap();
         state.imports += 1;
         if state.imports == 1 {
@@ -214,6 +214,7 @@ impl CandidateLoadDriver for FakeCandidateDriver {
         if let Some(cancellation) = state.cancel_on_import.take() {
             cancellation.cancel();
         }
+        Ok(())
     }
 }
 
@@ -426,7 +427,11 @@ impl VolumeGuardDriver for FakeGuardDriver {
         Ok(self.state.lock().unwrap().attachments.clone())
     }
 
-    async fn guard_create_untrusted(&self, name: &str, labels: &BTreeMap<String, String>) {
+    async fn guard_create_untrusted(
+        &self,
+        name: &str,
+        labels: &BTreeMap<String, String>,
+    ) -> Result<(), LocalInitError> {
         let mut state = self.state.lock().unwrap();
         state.creates.push(name.to_owned());
         if state.guard.is_none() {
@@ -435,6 +440,7 @@ impl VolumeGuardDriver for FakeGuardDriver {
         if let Some(cancellation) = state.cancel_on_create.take() {
             cancellation.cancel();
         }
+        Ok(())
     }
 }
 
@@ -693,6 +699,8 @@ fn contract(installation: &Installation) -> HelperContract<'static> {
         volumes,
         labels: helper_labels(installation, fingerprint()),
         volume_labels: expected_volume_labels(installation, fingerprint()),
+        baseline_attachments: BTreeMap::new(),
+        mode: HelperMode::Mutating,
     }
 }
 
@@ -700,7 +708,12 @@ fn valid_helper_inspect(
     contract: &HelperContract<'_>,
     container_id: &str,
 ) -> bollard::models::ContainerInspectResponse {
-    let body = helper_body(contract.image, contract.volumes, &contract.labels);
+    let body = helper_body(
+        contract.image,
+        contract.volumes,
+        &contract.labels,
+        contract.mode,
+    );
     let mut config: bollard::models::ContainerConfig =
         serde_json::from_value(serde_json::to_value(&body).unwrap()).unwrap();
     config.exposed_ports = Some(vec![HELPER_EXPOSED_PORT.to_owned()]);
@@ -1345,6 +1358,31 @@ async fn helper_request_transport_is_attach_then_start_then_eof_before_wait_and_
 }
 
 #[tokio::test]
+async fn lifecycle_attestation_preserves_exact_preexisting_volume_attachments() {
+    let installation = installation();
+    let mut contract = contract(&installation);
+    let existing = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_owned();
+    contract.baseline_attachments = VolumeRole::ALL
+        .into_iter()
+        .map(|role| (role, BTreeSet::from([existing.clone()])))
+        .collect();
+    let request = request(&installation);
+    let cancellation = CancellationToken::new();
+    let driver = FakeHelperDriver::new(InjectedAction::None, cancellation.clone(), &contract);
+    driver.state.lock().unwrap().extra_attachment = true;
+
+    run_materializer_with_driver(&driver, &contract, &request, fingerprint(), &cancellation)
+        .await
+        .unwrap();
+
+    let state = driver.state.lock().unwrap();
+    assert!(state.by_id.is_none());
+    assert!(state.by_name.is_none());
+    assert!(state.extra_attachment);
+    assert_eq!(state.removed, [CONTAINER_ID]);
+}
+
+#[tokio::test]
 async fn helper_may_exit_immediately_after_request_eof_before_wait_observes_it() {
     let installation = installation();
     let contract = contract(&installation);
@@ -1499,6 +1537,7 @@ async fn live_read_only_helper_consumes_stdin_eof_and_rejects_a_truncated_prefix
         state.authority_sha256(),
         &material_root,
         desired_sha256,
+        Sha256Digest::from_bytes([0x51; 32]),
     );
     for (role, name) in &names {
         assert!(
@@ -1535,6 +1574,8 @@ async fn live_read_only_helper_consumes_stdin_eof_and_rejects_a_truncated_prefix
         volumes: &names,
         labels: helper_labels(&installation, epoch.fingerprint()),
         volume_labels: expected_volume_labels(&installation, epoch.fingerprint()),
+        baseline_attachments: BTreeMap::new(),
+        mode: HelperMode::Mutating,
     };
     let cancellation = CancellationToken::new();
 
@@ -1832,7 +1873,7 @@ fn fixed_helper_body_has_no_ambient_authority_or_extensible_inputs() {
     let names = volume_names(&installation);
     let labels = helper_labels(&installation, fingerprint());
     let image = "registry.example.invalid/automata@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    let body = helper_body(image, &names, &labels);
+    let body = helper_body(image, &names, &labels, HelperMode::Mutating);
     let request_bytes = request(&installation).canonical_bytes().unwrap();
     assert!(
         request_bytes
@@ -1959,7 +2000,7 @@ fn helper_inspect_recovery_rejects_ambient_authority_and_realized_networks() {
     let image = "registry.example.invalid/automata@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     let image_id = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     let name = helper_name(&installation);
-    let body = helper_body(image, &names, &labels);
+    let body = helper_body(image, &names, &labels, HelperMode::Mutating);
     let mut config: bollard::models::ContainerConfig =
         serde_json::from_value(serde_json::to_value(&body).unwrap()).unwrap();
     config.exposed_ports = Some(vec![HELPER_EXPOSED_PORT.to_owned()]);
@@ -2098,6 +2139,88 @@ fn helper_inspect_recovery_rejects_ambient_authority_and_realized_networks() {
         .code(),
         LocalInitErrorCode::MaterializationFailed
     );
+}
+
+#[test]
+fn writable_helper_mount_normalizes_omitted_read_only_as_false() {
+    let expected = Mount {
+        target: Some("/var/lib/automata".to_owned()),
+        source: Some("automata-volume".to_owned()),
+        typ: Some(MountType::VOLUME),
+        read_only: Some(false),
+        volume_options: Some(MountVolumeOptions {
+            no_copy: Some(true),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let mut actual = expected.clone();
+    actual.read_only = None;
+    assert!(helper_mounts_match(
+        std::slice::from_ref(&actual),
+        std::slice::from_ref(&expected)
+    ));
+
+    let mut read_only = expected.clone();
+    read_only.read_only = Some(true);
+    assert!(!helper_mounts_match(
+        std::slice::from_ref(&actual),
+        std::slice::from_ref(&read_only)
+    ));
+    actual.source = Some("ambient-volume".to_owned());
+    assert!(!helper_mounts_match(
+        std::slice::from_ref(&actual),
+        std::slice::from_ref(&expected)
+    ));
+}
+
+#[test]
+fn helper_rejects_every_closed_resource_authority_class() {
+    let installation = installation();
+    let host = helper_body(
+        "registry.example.invalid/automata@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        &volume_names(&installation),
+        &helper_labels(&installation, fingerprint()),
+        HelperMode::Mutating,
+    )
+    .host_config
+    .unwrap();
+    assert!(!helper_has_ambient_authority(&host));
+
+    let cases = [
+        ("CpuShares", serde_json::json!(1)),
+        ("CpuPeriod", serde_json::json!(1)),
+        ("CpuQuota", serde_json::json!(1)),
+        ("CpuRealtimePeriod", serde_json::json!(1)),
+        ("CpuRealtimeRuntime", serde_json::json!(1)),
+        ("CpusetCpus", serde_json::json!("0")),
+        ("CpusetMems", serde_json::json!("0")),
+        ("BlkioWeight", serde_json::json!(1)),
+        ("CpuCount", serde_json::json!(1)),
+        ("CpuPercent", serde_json::json!(1)),
+        ("IOMaximumIOps", serde_json::json!(1)),
+        ("IOMaximumBandwidth", serde_json::json!(1)),
+        ("MemoryReservation", serde_json::json!(1)),
+        ("MemorySwappiness", serde_json::json!(1)),
+        ("OomKillDisable", serde_json::json!(true)),
+        ("OomScoreAdj", serde_json::json!(1)),
+        (
+            "Ulimits",
+            serde_json::json!([{"Name":"nofile","Soft":1,"Hard":1}]),
+        ),
+        ("ConsoleSize", serde_json::json!([1, 0])),
+        ("ShmSize", serde_json::json!(1)),
+        ("Isolation", serde_json::json!("hyperv")),
+    ];
+    for (field, value) in cases {
+        let mut serialized = serde_json::to_value(&host).unwrap();
+        serialized
+            .as_object_mut()
+            .unwrap()
+            .insert(field.to_owned(), value);
+        let drift: HostConfig = serde_json::from_value(serialized).unwrap();
+        assert!(helper_has_ambient_authority(&drift), "accepted {field}");
+    }
 }
 
 #[derive(Default)]

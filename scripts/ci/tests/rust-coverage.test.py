@@ -1451,7 +1451,7 @@ exit 99
             capture_output=True,
         )
         commands = planned.stdout.splitlines()
-        assert len(commands) == 14, planned.stdout
+        assert len(commands) == 15, planned.stdout
         expected_inventory = [
             ("cargo test --workspace",),
             (
@@ -1463,6 +1463,10 @@ exit 99
                 "--test postgres_cache",
             ),
             ("-p automata-ci-postgres --lib",),
+            (
+                "-p automata-ci-store-postgres --lib",
+                "migration_0069_tests::",
+            ),
             ("--test blob_s3",),
             ("--test live_github_rustfs",),
             ("--test live_checkout_pipeline",),
@@ -1501,7 +1505,12 @@ exit 99
             "crates/automata-ci-store-postgres/src/",
         }.issubset(postgres_prefixes)
         assert "crates/automata-ci-postgres-test-support/src/" not in postgres_prefixes
-        assert all("-p automata-ci-store" not in command for command in commands)
+        assert [
+            command
+            for command in commands
+            if "-p automata-ci-store-postgres" in command
+        ] == [commands[3]]
+        assert all("-p automata-ci-store " not in command for command in commands)
         unknown_plan = subprocess.run(
             [str(RUN), "--plan", str(scratch / "unknown-plan"), "ordinary", "policy-only"],
             cwd=ROOT.parent,

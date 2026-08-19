@@ -23,7 +23,12 @@ from typing import NoReturn
 CATALOG_SCHEMA = "automata.local/release-catalog/v1"
 SOURCE_SCHEMA = "automata.local/release-catalog-source/v1"
 SOURCE_PATH = "images/local-installation/catalog-v1.json"
-SOURCE_SHA256 = "b9961f83612fe1533c8c3565ce8822afe72ad1fbbd833d0a117744f2406dacd4"
+PACKAGED_SOURCE_PATH = "crates/automata-ci-local/src/init/catalog-v1.source.json"
+SOURCE_SHA256 = "3a76a68eab2e27d50f158ea4d84add0c30cd18dd4b927cbb6a78d303004db89a"
+RENDERER_CONTRACT_FIXTURE_SCHEMA = "automata.local/renderer-contract-fixture/v1"
+RENDERER_CONTRACT_FIXTURE_SHA256 = (
+    "c700fdcc5b94f2450be767e2f7b8ca8fad4b724c65b2d5add4cb33058fc6d774"
+)
 CATALOG_PATH = "target/distribution/automata-local-installation-catalog.json"
 PROFILE_MANIFEST_PATH = (
     "images/github-hosted-ubuntu-24.04-x64/profile-manifest.json"
@@ -181,12 +186,27 @@ def load_canonical(path: pathlib.Path, label: str, maximum: int = MAX_JSON_SIZE)
 def load_source(repository_root: pathlib.Path) -> dict:
     path = repository_root / SOURCE_PATH
     contents = read_regular(path, "catalog source contract", MAX_JSON_SIZE)
+    packaged_contents = read_regular(
+        repository_root / PACKAGED_SOURCE_PATH,
+        "packaged catalog source contract",
+        MAX_JSON_SIZE,
+    )
+    if packaged_contents != contents:
+        fail("packaged catalog source differs from the release source")
     if sha256_bytes(contents) != SOURCE_SHA256:
         fail("catalog source contract differs from the reviewed v1 bytes")
     value = parse_json(contents, "catalog source contract", canonical=True)
     source = exact_object(
         value,
-        {"images", "platform", "profile", "schema", "scope", "services"},
+        {
+            "images",
+            "lifecycle_runtime",
+            "platform",
+            "profile",
+            "schema",
+            "scope",
+            "services",
+        },
         "catalog source contract",
     )
     if source["schema"] != SOURCE_SCHEMA:
@@ -195,6 +215,7 @@ def load_source(repository_root: pathlib.Path) -> dict:
         fail("catalog source platform differs")
     if source["scope"] != {"engine": "linux/amd64", "host": "unix"}:
         fail("catalog source scope differs")
+    require_lifecycle_runtime(source["lifecycle_runtime"])
     images = exact_object(source["images"], ROLES, "catalog source images")
     repositories: set[str] = set()
     for role in sorted(ROLES):
@@ -210,6 +231,7 @@ def load_source(repository_root: pathlib.Path) -> dict:
             fail(f"catalog source {role} alias is not canonical")
         if repository in repositories:
             fail("catalog source aliases must be unique")
+        repositories.add(repository)
         exact_object(
             image["config"],
             {
@@ -243,6 +265,245 @@ def load_source(repository_root: pathlib.Path) -> dict:
         if binding["kind"] != kind:
             fail(f"catalog source {role} kind differs")
     return source
+
+
+def require_lifecycle_runtime(value: object) -> dict:
+    runtime = exact_object(
+        value,
+        {
+            "automata_commands",
+            "compose",
+            "daemon_prerequisites",
+            "database_migration_ceiling",
+            "engine_relay",
+            "renderer_contract",
+            "results_transit",
+            "runner_commands",
+            "runner_config_schema",
+            "schema",
+        },
+        "catalog lifecycle runtime",
+    )
+    if runtime != {
+        "automata_commands": {
+            "bootstrap_runner": {
+                "argv": ["internal", "local", "bootstrap-runner"],
+                "enrollment_token_custody": {
+                    "active_file": "/run/automata-bootstrap/active-runner-enrollment-token",
+                    "active_file_mode": "0600",
+                    "active_staging_file": "/run/automata-bootstrap/.active-runner-enrollment-token.automata-write",
+                    "initial_generation": 0,
+                    "parent_gid": 65532,
+                    "parent_mode": "0700",
+                    "parent_uid": 65532,
+                    "receipt_file": "/run/automata-bootstrap/receipt.json",
+                    "receipt_file_mode": "0600",
+                    "receipt_staging_pattern": "/run/automata-bootstrap/.automata-bootstrap-receipt-<enrollment-id>.tmp",
+                    "seed_file": "/run/automata-bootstrap/runner-enrollment-token",
+                    "seed_file_mode": "0400",
+                    "update_policy": "exact-replay-or-one-generation-exact-predecessor-v1",
+                },
+                "maximum_request_bytes": 4096,
+                "receipt_schema": "automata.local/bootstrap-runner-receipt/v1",
+                "request_schema": "automata.local/bootstrap-runner-request/v1",
+            },
+            "check_ready": {
+                "argv": ["internal", "local", "check-ready"],
+                "listen": "127.0.0.1:8080",
+                "maximum_response_bytes": 4096,
+                "request": "GET /readyz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+                "response_prefix": "HTTP/1.1 200 ",
+                "response_suffix": "\r\n\r\nready\n",
+                "timeout_seconds": 3,
+            },
+            "engine_check": {
+                "argv": ["internal", "engine", "check"],
+            },
+            "engine_relay": {
+                "argv": ["internal", "engine", "relay"],
+            },
+            "hold_lock": {
+                "argv": ["internal", "local", "hold-lock"],
+                "release": "stdin-fixed-frame-v1",
+                "release_frame": "release\n",
+            },
+            "materialize": {
+                "argv": ["internal", "local", "materialize"],
+                "maximum_request_bytes": 524288,
+                "request_schema": "automata.local/materialize-request/v1",
+                "response_schema": "automata.local/materialize-response/v1",
+            },
+            "object_store_ensure_bucket": {
+                "argv": ["internal", "object-store", "ensure-bucket"],
+            },
+            "read_cas_digest": {
+                "argv": ["internal", "local", "read-cas-digest"],
+                "purpose": "expected-old-sha256",
+            },
+            "read_desired": {
+                "argv": ["internal", "local", "read-desired"],
+                "maximum_bytes": 65536,
+                "response_schema": "automata.local/desired-spec/v1",
+            },
+            "write_cas": {
+                "argv": ["internal", "local", "write-cas"],
+                "maximum_content_bytes": 262144,
+                "maximum_request_bytes": 524288,
+                "request_schema": "automata.local/lifecycle-cas/v1",
+            },
+        },
+        "compose": {
+            "minimum_version": "2.33.1",
+            "named_volume_nocopy": True,
+            "project_directory": "/",
+            "trusted_lifecycle_services": [
+                "automata",
+                "bootstrap-runner",
+                "engine-relay",
+                "object-store-init",
+                "postgres",
+                "runner",
+                "runner-enroll",
+                "rustfs",
+            ],
+            "trusted_user_namespace": "host",
+        },
+        "daemon_prerequisites": {
+            "cgroup_version": "2",
+            "default_runtime": "runc",
+            "default_user_namespace": "daemon-default-remapped",
+            "live_restore": False,
+            "post_create_drift": "fail-closed-sticky-lock",
+            "required_controllers": {
+                "cpu_cfs_period": True,
+                "cpu_cfs_quota": True,
+                "memory": True,
+                "pids": True,
+                "swap": True,
+            },
+            "required_security_options": [
+                "name=cgroupns",
+                "name=seccomp,profile=builtin",
+                "name=userns",
+            ],
+            "rootful": True,
+            "sole_optional_security_option": "name=no-new-privileges",
+            "trusted_administrator_defaults": {
+                "bridge_default_network_options": {},
+                "default_ulimits": {},
+                "log_options": {},
+            },
+        },
+        "database_migration_ceiling": 69,
+        "engine_relay": {
+            "architecture": "amd64",
+            "binding_directory": "/run/automata-engine-binding",
+            "binding_directory_gid": 0,
+            "binding_directory_mode": "0555",
+            "binding_directory_uid": 0,
+            "binding_file": "/run/automata-engine-binding/binding.json",
+            "binding_file_gid": 0,
+            "binding_file_maximum_bytes": 4096,
+            "binding_file_mode": "0444",
+            "binding_file_uid": 0,
+            "binding_schema": 1,
+            "downstream_directory": "/run/automata-engine",
+            "downstream_directory_gid": 65532,
+            "downstream_directory_mode": "0700",
+            "downstream_directory_uid": 65532,
+            "downstream_socket": "/run/automata-engine/docker.sock",
+            "downstream_socket_gid": 65532,
+            "downstream_socket_mode": "0600",
+            "downstream_socket_uid": 65532,
+            "engine_api": "1.48",
+            "engine_id_maximum_bytes": 256,
+            "engine_request_timeout_seconds": 5,
+            "gid": 65532,
+            "initial_capabilities": ["SETGID", "SETUID", "SETPCAP"],
+            "minimum_engine_major": 28,
+            "operating_system": "linux",
+            "protocol_limits": {
+                "connect_timeout_seconds": 5,
+                "copy_buffer_bytes": 16384,
+                "idle_timeout_seconds": 1800,
+                "maximum_connections": 32,
+                "shutdown_timeout_seconds": 5,
+                "write_timeout_seconds": 30,
+            },
+            "server_version_maximum_bytes": 128,
+            "uid": 65532,
+            "upstream_directory": "/run/automata-host-engine",
+            "upstream_directory_gid": 0,
+            "upstream_directory_mode": "0755",
+            "upstream_directory_uid": 0,
+            "upstream_socket": "/run/automata-host-engine/docker.sock",
+            "upstream_socket_gid": "adopted-host-socket-group",
+            "upstream_socket_mode": "0660",
+            "upstream_socket_uid": 0,
+        },
+        "renderer_contract": {
+            "fixture_sha256": RENDERER_CONTRACT_FIXTURE_SHA256,
+            "schema": RENDERER_CONTRACT_FIXTURE_SCHEMA,
+        },
+        "results_transit": {
+            "ownership": "lifecycle-created-compose-external",
+            "schema": 2,
+        },
+        "runner_commands": {
+            "enroll": {
+                "argv": ["enroll"],
+                "configuration_schema": 8,
+                "existing_custody": {
+                    "current": "success-before-token-network-or-writer-lock",
+                    "invalid": "fail-closed",
+                    "recovery_policy": "exact-expired-unrevoked-predecessor-offline-no-live-session-no-live-leaf-linux",
+                    "runner_generation": "atomic-increment",
+                    "server_clock": "database-post-lock",
+                    "token": "one-use-positive-generation",
+                },
+                "token_source": "file:/run/automata-bootstrap/active-runner-enrollment-token",
+            },
+            "local_check_ready": {
+                "argv": [
+                    "__local-check-ready",
+                    "--config",
+                    "/run/automata-runner-config/runner.json",
+                ],
+                "healthcheck_argv": [
+                    "/usr/local/bin/automata-runner",
+                    "__local-check-ready",
+                    "--config",
+                    "/run/automata-runner-config/runner.json",
+                ],
+                "listen": "127.0.0.1:9464",
+                "maximum_response_bytes": 262144,
+                "path": "/metrics",
+                "protocol": "http-1.1-openmetrics-text-1.0.0",
+                "required_metrics": [
+                    "automata_ci_runner_ready 1",
+                    "automata_ci_runner_session_connected 1",
+                ],
+                "tls_custody": {
+                    "completion_receipt": "exact",
+                    "config_path": "/run/automata-runner-config/runner.json",
+                    "mutation": False,
+                    "observation": "two-stable-no-follow-snapshots",
+                    "order": "custody-before-metrics",
+                    "required_state": "current-exact-completed",
+                    "writer_lock": "not-acquired",
+                },
+                "timeout_seconds": 3,
+            },
+            "run": {
+                "argv": ["run"],
+                "configuration_schema": 8,
+            },
+        },
+        "runner_config_schema": 8,
+        "schema": "automata.local/lifecycle-runtime/v1",
+    }:
+        fail("catalog lifecycle runtime contract differs")
+    return runtime
 
 
 def load_profile(repository_root: pathlib.Path, source: dict) -> dict:
@@ -756,6 +1017,7 @@ def build_catalog(
     }
     return {
         "images": images,
+        "lifecycle_runtime": source["lifecycle_runtime"],
         "platform": source["platform"],
         "profile": load_profile(repository_root, source),
         "release": release,
@@ -778,6 +1040,7 @@ def validate_catalog(
         document,
         {
             "images",
+            "lifecycle_runtime",
             "platform",
             "profile",
             "release",
@@ -800,6 +1063,7 @@ def validate_catalog(
     source = load_source(repository_root)
     if (
         catalog["platform"] != source["platform"]
+        or catalog["lifecycle_runtime"] != source["lifecycle_runtime"]
         or catalog["scope"] != source["scope"]
         or catalog["services"] != source["services"]
         or catalog["profile"] != load_profile(repository_root, source)

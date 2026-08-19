@@ -34,7 +34,7 @@ structure of [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
   sensitivity.
 - Read-only `automata local doctor` preflight for the initial x86-64 Linux,
   Apple Silicon macOS, and x86-64 Windows host tuples, a local Linux Docker
-  Engine, and Docker Compose plugin 2.20.0 or newer. Docker daemon probes are
+  Engine, and Docker Compose plugin 2.33.1 or newer. Docker daemon probes are
   pinned to the exact endpoint resolved from the context selected first;
   stable JSON schema 3 and human output report its bounded name. The internal
   adapter can strictly inspect or create-and-adopt a repository-agnostic
@@ -50,7 +50,9 @@ structure of [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
   materializer with a bounded canonical stdin request. Init seals the immutable
   epoch plus credential-free canonical desired intent and supports exact
   replay; it does not independently authenticate catalog OIDC provenance,
-  generate or invoke Compose, or start services. `ResetRequired` is detectable.
+  persist or execute installation-specific Compose, or start services. Catalog
+  and epoch authentication render one fixed synthetic in-memory fixture to bind
+  the production renderer. `ResetRequired` is detectable.
 - x86-64 Linux-only `automata local status --state-directory ABS [--json]`
   and `automata local reset --state-directory ABS --yes`. Status is an
   existing-only, shared-lock, nonrepairing inspection of canonical host custody
@@ -64,8 +66,24 @@ structure of [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
   Missing or malformed non-authority material/certificate records do not strand
   exact cleanup; canonically valid conflicting selector/commit records do.
   Imported images, the state directory, and its original operation lock are
-  retained; missing retained images do not block custody deletion. `local up`
-  and `down` remain absent.
+  retained; missing retained images do not block custody deletion.
+- x86-64 Linux-only `automata local up --state-directory ABS` and
+  `automata local down --state-directory ABS` lifecycle commands. Up reattests
+  the sealed release and Engine authority, renders the exact Compose topology,
+  and synchronously converges dependencies, bootstrap, control plane, fixed relay,
+  and runner. Down removes
+  replaceable topology while retaining sealed custody, persistent data, and
+  images. Both commands synchronously converge from sealed Desired plus fresh
+  Engine and Compose inspection under the exact sticky lock; there is no host
+  lifecycle journal. Stopped interruption evidence is refused by default;
+  `--recover-stopped-lock` explicitly authorizes positive-quiescence
+  revalidation after a Docker Engine restart and exact stopped-ID removal
+  before init/up/down convergence. Runner bootstrap advances a deterministic,
+  one-use installation-authority token generation and can recover the exact
+  offline Linux runner only after its locally held predecessor certificate has
+  expired and no unrevoked runner leaf remains live.
+  Status now distinguishes exact running topology and lifecycle recovery from
+  recorded sealed and reset states.
 - Evaluation-only fixed-relay Local Docker runner execution on Linux. Runner
   schema 8 binds the private provider to an exact existing installation anchor,
   an already-present digest-pinned guest image, the sealed desired-plan digest,

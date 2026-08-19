@@ -30,6 +30,8 @@ use automata_ci_store::{
 
 mod migration;
 #[cfg(test)]
+mod migration_0069_tests;
+#[cfg(test)]
 mod migration_layout_tests;
 #[cfg(test)]
 mod schema_bindings_tests;

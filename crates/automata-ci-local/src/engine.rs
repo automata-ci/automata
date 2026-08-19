@@ -16,7 +16,10 @@ use crate::{
     ValidatedEngineSelection, capped_adapter_api, normalize_architecture,
 };
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-use crate::{DockerConnection, Engine, EngineArchitecture, canonical_engine_major};
+use crate::{
+    DockerConnection, Engine, EngineArchitecture, valid_lifecycle_engine_id,
+    valid_lifecycle_server_version,
+};
 
 const ENGINE_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -29,7 +32,6 @@ const FIXED_LOCAL_DOCKER_API: ApiVersion = ApiVersion {
     minor: 48,
 };
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-const MINIMUM_LOCAL_DOCKER_ENGINE_MAJOR: u64 = 28;
 const MANAGED_LABEL_PREFIX: &str = "io.automata.local.";
 const LABEL_MANAGED: &str = "io.automata.local.managed";
 const LABEL_IDENTITY_SCHEMA: &str = "io.automata.local.identity-schema";
@@ -261,6 +263,46 @@ impl DockerInstallationAdapter {
             ));
         };
         if self.verify_engine().await.is_err() {
+            return Err(LocalEngineError::new(
+                LocalEngineErrorCode::MutationOutcomeUncertain,
+            ));
+        }
+        Ok(installation)
+    }
+
+    /// Creates an absent anchor for one caller-selected immutable identity, or
+    /// re-attests that exact identity after an ambiguous create response.
+    /// A concurrent creator with any other UUID is never adopted.
+    pub(crate) async fn create_or_adopt_exact_identity(
+        &self,
+        requested: &Installation,
+    ) -> Result<Installation, LocalEngineError> {
+        self.verify_engine().await?;
+        if let Some(existing) = self.inspect_verified_identity(requested.name()).await? {
+            self.verify_engine().await?;
+            return if existing == *requested {
+                Ok(existing)
+            } else {
+                Err(LocalEngineError::new(
+                    LocalEngineErrorCode::IdentityCollision,
+                ))
+            };
+        }
+
+        let _create_outcome = self
+            .engine
+            .create_volume(CreateVolume {
+                name: requested.anchor_volume_name().to_owned(),
+                labels: identity_labels(requested),
+            })
+            .await;
+        let inspected = self.inspect_verified_identity(requested.name()).await;
+        let Ok(Some(installation)) = inspected else {
+            return Err(LocalEngineError::new(
+                LocalEngineErrorCode::MutationOutcomeUncertain,
+            ));
+        };
+        if installation != *requested || self.verify_engine().await.is_err() {
             return Err(LocalEngineError::new(
                 LocalEngineErrorCode::MutationOutcomeUncertain,
             ));
@@ -522,9 +564,8 @@ fn validate_fixed_engine_facts(
     let architecture = normalize_architecture(&facts.architecture).ok_or_else(invalid)?;
     if facts.operating_system != "linux"
         || architecture != EngineArchitecture::Amd64
-        || canonical_engine_major(&facts.server_version)
-            .is_none_or(|major| major < MINIMUM_LOCAL_DOCKER_ENGINE_MAJOR)
-        || !valid_engine_id(&facts.engine_id)
+        || !valid_lifecycle_server_version(&facts.server_version)
+        || !valid_lifecycle_engine_id(&facts.engine_id)
         || minimum_api > FIXED_LOCAL_DOCKER_API
         || maximum_api < FIXED_LOCAL_DOCKER_API
     {
@@ -553,14 +594,6 @@ fn validate_fixed_engine_facts(
 fn canonical_api_version(value: &str) -> Option<ApiVersion> {
     let parsed = ApiVersion::parse(value)?;
     (format!("{}.{}", parsed.major, parsed.minor) == value).then_some(parsed)
-}
-
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-fn valid_engine_id(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 512
-        && value.trim() == value
-        && !value.chars().any(char::is_control)
 }
 
 #[cfg(unix)]

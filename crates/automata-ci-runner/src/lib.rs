@@ -24,6 +24,8 @@ mod cli;
 /// Runner host and control-plane health diagnostics.
 pub mod doctor;
 mod enrollment;
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+mod local_ready;
 /// Rootless-Podman network isolation verification.
 pub mod podman_probe;
 mod probe_http;
@@ -87,6 +89,8 @@ async fn execute(cli: Cli) -> Result<()> {
             doctor::run(args, &cancellation).await
         }
         Command::InternalProbeHttp(args) => probe_http::serve(args).await,
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        Command::InternalLocalCheckReady(args) => local_ready::check(&args.config),
     }
 }
 
