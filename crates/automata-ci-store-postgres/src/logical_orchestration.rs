@@ -1313,7 +1313,7 @@ async fn record_admitted_event_subject(
 ) -> Result<(), LogicalWorkflowAdmissionStoreError> {
     let outcome = EventSubjectTerminalOutcome::admitted(command.run_id())
         .map_err(event_subject_value_error)?;
-    let (origin, control_id, registration_replay, progress_replay) =
+    let (_, _, registration_replay, progress_replay) =
         record_event_subject_terminal(transaction, command, subject_evidence, outcome, admitted_at)
             .await?;
     if progress_replay != expected_replay || (expected_replay && !registration_replay) {
@@ -1322,20 +1322,7 @@ async fn record_admitted_event_subject(
         )
         .into());
     }
-    if matches!(
-        subject_evidence,
-        SubjectEvidenceAdmission::AuthenticatedProvider { .. }
-    ) {
-        return Ok(());
-    }
-    link_github_check_event_control(
-        transaction,
-        command,
-        origin,
-        control_id,
-        Some(command.run_id()),
-    )
-    .await
+    Ok(())
 }
 
 async fn record_skipped_event_subject(
@@ -1346,16 +1333,9 @@ async fn record_skipped_event_subject(
 ) -> Result<(), LogicalWorkflowAdmissionStoreError> {
     let outcome = EventSubjectTerminalOutcome::skipped("workflow.disabled")
         .map_err(event_subject_value_error)?;
-    let (origin, control_id, _, _) =
-        record_event_subject_terminal(transaction, command, subject_evidence, outcome, recorded_at)
-            .await?;
-    if matches!(
-        subject_evidence,
-        SubjectEvidenceAdmission::AuthenticatedProvider { .. }
-    ) {
-        return Ok(());
-    }
-    link_github_check_event_control(transaction, command, origin, control_id, None).await
+    record_event_subject_terminal(transaction, command, subject_evidence, outcome, recorded_at)
+        .await?;
+    Ok(())
 }
 
 async fn replay_disabled_event_subject(
@@ -1371,7 +1351,7 @@ async fn replay_disabled_event_subject(
         command.workflow_path(),
     )
     .map_err(event_subject_value_error)?;
-    let Some((selection, control, progress)) =
+    let Some((selection, _control, progress)) =
         load_event_subject_state_in_transaction(transaction, subject_id)
             .await
             .map_err(event_subject_store_error)?
@@ -1395,131 +1375,7 @@ async fn replay_disabled_event_subject(
         )
         .into());
     }
-    if !matches!(
-        subject_evidence,
-        SubjectEvidenceAdmission::AuthenticatedProvider { .. }
-    ) {
-        link_github_check_event_control(transaction, command, origin, control.id(), None).await?;
-    }
     Ok(true)
-}
-
-#[allow(clippy::too_many_lines)] // One exact mutation covers admitted and disabled projections.
-async fn link_github_check_event_control(
-    transaction: &mut Transaction<'_, Postgres>,
-    command: &AdmitLogicalWorkflowRun,
-    origin: EventSubjectOrigin,
-    control_id: EventControlSubjectId,
-    run_id: Option<RunId>,
-) -> Result<(), LogicalWorkflowAdmissionStoreError> {
-    if matches!(
-        origin,
-        EventSubjectOrigin::ManualOperation(_) | EventSubjectOrigin::ProviderDelivery(_)
-    ) {
-        return Ok(());
-    }
-    let linked = if let Some(run_id) = run_id {
-        sqlx::query(
-            r"
-            UPDATE github_check_subjects
-               SET event_control_subject_id = $1
-             WHERE tenant_id = $2
-               AND repository_id = $3
-               AND workflow_run_id = $4
-               AND subject_kind = 'workflow'
-               AND subject_key = $5
-               AND (
-                    (origin_kind = 'provider_delivery'
-                     AND provider_delivery_id = $6)
-                 OR (origin_kind = 'scheduled_fire'
-                     AND schedule_fire_id = $6)
-               )
-               AND (event_control_subject_id IS NULL OR event_control_subject_id = $1)
-            ",
-        )
-        .bind(control_id.as_uuid())
-        .bind(command.tenant().as_str())
-        .bind(command.repository().id().as_uuid())
-        .bind(run_id.as_uuid())
-        .bind(command.workflow_path())
-        .bind(origin.as_uuid())
-        .execute(&mut **transaction)
-        .await
-        .map_err(operation_error)?
-    } else {
-        // A disabled workflow is already terminal generalized progress. Keep
-        // the optional GitHub projection subordinate to that control by
-        // linking and terminalizing it in this same transaction. The second
-        // arm is an exact no-op replay and cannot advance the revision again.
-        sqlx::query(
-            r"
-            UPDATE github_check_subjects
-               SET event_control_subject_id = $1,
-                   desired_state = CASE
-                       WHEN desired_state = 'queued' THEN 'completed'
-                       ELSE desired_state
-                   END,
-                   desired_conclusion = CASE
-                       WHEN desired_state = 'queued' THEN 'skipped'
-                       ELSE desired_conclusion
-                   END,
-                   terminal_cause = CASE
-                       WHEN desired_state = 'queued' THEN 'workflow_skipped'
-                       ELSE terminal_cause
-                   END,
-                   desired_revision = CASE
-                       WHEN desired_state = 'queued' THEN desired_revision + 1
-                       ELSE desired_revision
-                   END,
-                   desired_updated_at_ms = CASE
-                       WHEN desired_state = 'queued' THEN $6
-                       ELSE desired_updated_at_ms
-                   END
-             WHERE tenant_id = $2
-               AND repository_id = $3
-               AND workflow_run_id IS NULL
-               AND linked_at_ms IS NULL
-               AND subject_kind = 'workflow'
-               AND subject_key = $4
-               AND (
-                    (origin_kind = 'provider_delivery'
-                     AND provider_delivery_id = $5)
-                 OR (origin_kind = 'scheduled_fire'
-                     AND schedule_fire_id = $5)
-               )
-               AND (
-                    (event_control_subject_id IS NULL
-                     AND desired_state = 'queued'
-                     AND desired_conclusion IS NULL
-                     AND terminal_cause IS NULL
-                     AND desired_revision = 1
-                     AND desired_updated_at_ms <= $6)
-                 OR (event_control_subject_id = $1
-                     AND desired_state = 'completed'
-                     AND desired_conclusion = 'skipped'
-                     AND terminal_cause = 'workflow_skipped'
-                     AND desired_revision = 2
-                     AND desired_updated_at_ms <= $6)
-               )
-            ",
-        )
-        .bind(control_id.as_uuid())
-        .bind(command.tenant().as_str())
-        .bind(command.repository().id().as_uuid())
-        .bind(command.workflow_path())
-        .bind(origin.as_uuid())
-        .bind(command.admitted_at().get())
-        .execute(&mut **transaction)
-        .await
-        .map_err(operation_error)?
-    };
-    if linked.rows_affected() != 1 {
-        return Err(StoreError::corrupt_data(
-            "generalized event control does not match one Check projection",
-        )
-        .into());
-    }
-    Ok(())
 }
 
 async fn record_event_subject_terminal(

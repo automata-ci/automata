@@ -14,7 +14,6 @@ use uuid::Uuid;
 use super::{
     CurrentAttemptOutputSafety, PostgresStore, RunnerPayloadEncryption,
     durable_schema::current_durable_schemas,
-    github_checks::{GithubJobCheckInsertError, insert_github_job_check_subject},
 };
 use automata_ci_store::{
     AdmissionObject, AdmitWorkflowRun, DocumentSchema, EnqueueRunnerCommand, RepositoryId,
@@ -772,14 +771,6 @@ async fn insert_jobs_and_dag(
         .execute(&mut **transaction)
         .await
         .map_err(operation_error)?;
-        insert_github_job_check_subject(
-            transaction,
-            job.job_id(),
-            job.attempt_id(),
-            command.admitted_at(),
-        )
-        .await
-        .map_err(GithubJobCheckInsertError::into_store_error)?;
     }
     for job in command.jobs() {
         for prerequisite in job.prerequisites() {
@@ -1305,33 +1296,6 @@ async fn lock_logical_cancellation_dependents(
                 .map_err(operation_error)?,
         );
     }
-    let check_rows = sqlx::query(
-        r"
-        SELECT desired_updated_at_ms
-        FROM github_check_subjects
-        WHERE workflow_run_id = $1
-          AND subject_kind = 'workflow'
-        ORDER BY id
-        FOR UPDATE
-        ",
-    )
-    .bind(run_id)
-    .fetch_all(&mut **transaction)
-    .await
-    .map_err(operation_error)?;
-    if check_rows.len() > 1 {
-        return Err(StoreError::corrupt_data(
-            "logical workflow run has multiple linked GitHub Checks",
-        )
-        .into());
-    }
-    for check in &check_rows {
-        updated_at = updated_at.max(
-            check
-                .try_get::<i64, _>("desired_updated_at_ms")
-                .map_err(operation_error)?,
-        );
-    }
     Ok(updated_at)
 }
 
@@ -1434,44 +1398,6 @@ async fn finalize_logical_concurrency_cancellation(
     if invocation_rows != 1 || marker_rows != 1 {
         return Err(StoreError::corrupt_data(
             "logical concurrency cancellation lost orchestration ownership",
-        )
-        .into());
-    }
-    let (linked, updated): (i64, i64) = sqlx::query_as(
-        r"
-        WITH linked AS MATERIALIZED (
-            SELECT id
-            FROM github_check_subjects
-            WHERE workflow_run_id = $1
-              AND subject_kind = 'workflow'
-            FOR UPDATE
-        ), updated AS (
-            UPDATE github_check_subjects AS subject
-            SET desired_state = 'completed',
-                desired_conclusion = 'cancelled',
-                terminal_cause = 'workflow_cancelled',
-                desired_revision = desired_revision + 1,
-                desired_updated_at_ms = $2
-            FROM linked
-            WHERE subject.id = linked.id
-              AND subject.desired_state IN ('queued', 'in_progress')
-              AND subject.desired_conclusion IS NULL
-              AND subject.terminal_cause IS NULL
-              AND subject.desired_updated_at_ms <= $2
-            RETURNING subject.id
-        )
-        SELECT (SELECT count(*) FROM linked),
-               (SELECT count(*) FROM updated)
-        ",
-    )
-    .bind(run_id)
-    .bind(cancelled_at.get())
-    .fetch_one(&mut **transaction)
-    .await
-    .map_err(operation_error)?;
-    if (linked, updated) != (0, 0) && (linked, updated) != (1, 1) {
-        return Err(StoreError::corrupt_data(
-            "logical concurrency cancellation could not terminalize its linked GitHub Check",
         )
         .into());
     }

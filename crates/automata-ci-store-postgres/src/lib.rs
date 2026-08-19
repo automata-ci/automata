@@ -632,14 +632,6 @@ impl InternalAttemptRepository for PostgresStore {
         .execute(&mut *transaction)
         .await
         .map_err(operation_error)?;
-        github_checks::insert_github_job_check_subject(
-            &mut transaction,
-            attempt.job_id(),
-            attempt.attempt_id(),
-            attempt.queued_at(),
-        )
-        .await
-        .map_err(github_checks::GithubJobCheckInsertError::into_attempt_error)?;
         transaction.commit().await.map_err(operation_error)?;
         Ok(())
     }
