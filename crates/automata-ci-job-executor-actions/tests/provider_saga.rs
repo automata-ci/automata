@@ -82,6 +82,59 @@ const PROVIDER_FAILURE_CASES: &[(ProviderErrorKind, ExecutorErrorKind, ProviderF
 ];
 
 #[tokio::test]
+async fn pre_running_provider_failure_emits_a_sanitized_preparation_stage() {
+    let fixture = Fixture::new(Vec::new(), Vec::new());
+    fixture.provider.fail_next_create(
+        ProviderErrorKind::BackendRejected,
+        OperationOutcome::KnownNoEffect,
+    );
+    let events: Arc<dyn ExecutionEvents> = fixture.events.clone();
+
+    let error = fixture
+        .executor
+        .execute(
+            fixture.request(run_job("true\n")),
+            events,
+            ExecutionCancellation::new(),
+        )
+        .await
+        .expect_err("injected provider creation failure");
+
+    assert_eq!(error.kind(), ExecutorErrorKind::Internal);
+    assert!(fixture.events.transitions().is_empty());
+    let logs = fixture.events.logs();
+    assert_eq!(logs.len(), 1);
+    assert_eq!(
+        logs[0].payload(),
+        b"Runner preparation failed (stage: sandbox).\n"
+    );
+}
+
+#[tokio::test]
+async fn preparation_diagnostic_failure_preserves_the_original_error() {
+    let fixture = Fixture::new(Vec::new(), Vec::new());
+    fixture.provider.fail_next_create(
+        ProviderErrorKind::AdapterUnavailable,
+        OperationOutcome::KnownNoEffect,
+    );
+    fixture.events.fail_next_log();
+    let events: Arc<dyn ExecutionEvents> = fixture.events.clone();
+
+    let error = fixture
+        .executor
+        .execute(
+            fixture.request(run_job("true\n")),
+            events,
+            ExecutionCancellation::new(),
+        )
+        .await
+        .expect_err("provider availability failure remains primary");
+
+    assert_eq!(error.kind(), ExecutorErrorKind::Unavailable);
+    assert!(fixture.events.logs().is_empty());
+}
+
+#[tokio::test]
 async fn provider_intent_commit_failure_prevents_every_provider_call() {
     let fixture = Fixture::new(Vec::new(), Vec::new());
     fixture.events.fail_next_begin_provider_operation();

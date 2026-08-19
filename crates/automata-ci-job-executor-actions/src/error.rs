@@ -91,15 +91,64 @@ pub enum ActionPreparationErrorKind {
 #[error("Actions job executor failed: {kind:?}")]
 pub struct ExecutorAdapterError {
     kind: ExecutorAdapterErrorKind,
+    preparation_stage: Option<ExecutorPreparationStage>,
 }
 
 impl ExecutorAdapterError {
     pub(crate) const fn new(kind: ExecutorAdapterErrorKind) -> Self {
-        Self { kind }
+        Self {
+            kind,
+            preparation_stage: None,
+        }
     }
 
     pub(crate) const fn kind(self) -> ExecutorAdapterErrorKind {
         self.kind
+    }
+
+    pub(crate) const fn at_preparation_stage(mut self, stage: ExecutorPreparationStage) -> Self {
+        if self.preparation_stage.is_none() {
+            self.preparation_stage = Some(stage);
+        }
+        self
+    }
+
+    pub(crate) const fn preparation_stage(self) -> Option<ExecutorPreparationStage> {
+        self.preparation_stage
+    }
+}
+
+/// Stable, secret-free stages of job preparation before user code can run.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ExecutorPreparationStage {
+    RuntimeContext,
+    RepositoryActions,
+    SecretCustody,
+    Workspace,
+    Event,
+    JobContext,
+    Services,
+    Sandbox,
+    AttemptDirectories,
+    EventCopy,
+    RunningTransition,
+}
+
+impl ExecutorPreparationStage {
+    pub(crate) const fn code(self) -> &'static str {
+        match self {
+            Self::RuntimeContext => "runtime_context",
+            Self::RepositoryActions => "repository_actions",
+            Self::SecretCustody => "secret_custody",
+            Self::Workspace => "workspace",
+            Self::Event => "event",
+            Self::JobContext => "job_context",
+            Self::Services => "services",
+            Self::Sandbox => "sandbox",
+            Self::AttemptDirectories => "attempt_directories",
+            Self::EventCopy => "event_copy",
+            Self::RunningTransition => "running_transition",
+        }
     }
 }
 
