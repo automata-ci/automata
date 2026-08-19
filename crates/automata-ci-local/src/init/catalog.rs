@@ -17,8 +17,8 @@ use super::{LocalInitError, LocalInitErrorCode};
 const CATALOG_SCHEMA: &str = "automata.local/release-catalog/v1";
 const SOURCE_SCHEMA: &str = "automata.local/release-catalog-source/v1";
 const LIFECYCLE_RUNTIME_SCHEMA: &str = "automata.local/lifecycle-runtime/v1";
-const DATABASE_MIGRATION_CEILING: u64 = 64;
-const SOURCE_SHA256: &str = "0f4521e667aec2e668b203574bf95520bb82d4b503742cea7435b13eaed70e3f";
+const DATABASE_MIGRATION_CEILING: u64 = 65;
+const SOURCE_SHA256: &str = "5847ea21acbcfe48904ed2c2f27bed26a3fc2304a8f91f416a77659a599c5c63";
 const CANDIDATE_BASENAME: &str = "automata-service-proxy-candidate-x86_64-unknown-linux-musl.tar";
 const CANDIDATE_PATH: &str = concat!(
     "target/service-proxy-publication/",
