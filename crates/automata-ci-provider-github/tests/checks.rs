@@ -2,13 +2,12 @@ use crate::support;
 
 use std::time::Duration;
 
-use automata_ci_auth::secret::SecretString;
 use automata_ci_core::GitObjectId;
 use automata_ci_provider_github::{
-    GithubCheckAnnotation, GithubCheckAnnotationLevel, GithubCheckAppId, GithubCheckCompletion,
-    GithubCheckConclusion, GithubCheckCreateIndeterminateKind, GithubCheckDetailsUrl,
-    GithubCheckExternalId, GithubCheckModelError, GithubCheckName, GithubCheckOutput,
-    GithubCheckRequestedAction, GithubCheckRunCreateOutcome, GithubCheckRunId,
+    GithubApiToken, GithubCheckAnnotation, GithubCheckAnnotationLevel, GithubCheckAppId,
+    GithubCheckCompletion, GithubCheckConclusion, GithubCheckCreateIndeterminateKind,
+    GithubCheckDetailsUrl, GithubCheckExternalId, GithubCheckModelError, GithubCheckName,
+    GithubCheckOutput, GithubCheckRequestedAction, GithubCheckRunCreateOutcome, GithubCheckRunId,
     GithubCheckRunIdentity, GithubCheckRunReconciliation, GithubCheckRunState,
     GithubCheckSuiteCreateOutcome, GithubCheckSuiteId, GithubCheckTimestamp, GithubChecksError,
     GithubHttpEndpoint, GithubHttpLimits, GithubObservedCheckConclusion,
@@ -38,8 +37,8 @@ fn revision() -> GitObjectId {
     GitObjectId::from_provider_hex(SHA).expect("revision")
 }
 
-fn token() -> SecretString {
-    SecretString::new(TOKEN).expect("token")
+fn token() -> GithubApiToken<'static> {
+    GithubApiToken::new(TOKEN.as_bytes()).expect("API token")
 }
 
 fn lifecycle_timestamp() -> GithubCheckTimestamp {
@@ -1330,6 +1329,15 @@ fn bounded_models_and_diagnostics_are_redacted() {
     assert!(!identity_debug.contains(EXTERNAL_ID));
     assert!(!identity_debug.contains(DETAILS_URL));
     assert!(!format!("{:?}", token()).contains(TOKEN));
+}
+
+#[test]
+fn api_token_view_rejects_non_textual_and_ambiguous_bearers() {
+    assert!(GithubApiToken::new(b"").is_err());
+    assert!(GithubApiToken::new(b"token with spaces").is_err());
+    assert!(GithubApiToken::new(b"token\nheader").is_err());
+    assert!(GithubApiToken::new(&[0xff]).is_err());
+    assert!(GithubApiToken::new(TOKEN.as_bytes()).is_ok());
 }
 
 struct RawServer {

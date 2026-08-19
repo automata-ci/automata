@@ -20,6 +20,43 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 use zeroize::Zeroizing;
 
+/// Borrowed textual bearer credential accepted by GitHub API operations.
+///
+/// The value remains owned and zeroized by its caller. This view is redacted,
+/// non-serializable, and cannot outlive that custody.
+#[derive(Clone, Copy)]
+pub struct GithubApiToken<'credential>(&'credential str);
+
+impl<'credential> GithubApiToken<'credential> {
+    /// Validates provider-neutral secret bytes as one nonempty UTF-8 API token.
+    ///
+    /// # Errors
+    ///
+    /// Rejects empty, non-UTF-8, or header-incompatible values.
+    pub fn new(value: &'credential [u8]) -> Result<Self, GithubEndpointError> {
+        let value = std::str::from_utf8(value).map_err(|_| GithubEndpointError::InvalidResponse)?;
+        if value.is_empty()
+            || value
+                .bytes()
+                .any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
+            || HeaderValue::from_str(value).is_err()
+        {
+            return Err(GithubEndpointError::InvalidResponse);
+        }
+        Ok(Self(value))
+    }
+
+    pub(crate) const fn expose_secret(self) -> &'credential str {
+        self.0
+    }
+}
+
+impl fmt::Debug for GithubApiToken<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("GithubApiToken([REDACTED])")
+    }
+}
+
 use automata_ci_scm::ScmProviderId;
 
 use crate::{
@@ -460,11 +497,13 @@ impl GithubEndpoint for GithubHttpEndpoint {
 pub(crate) fn authorization_header(
     token: &SecretString,
 ) -> Result<HeaderValue, GithubEndpointError> {
-    let mut raw = Zeroizing::new(String::with_capacity(
-        "Bearer ".len() + token.expose_secret().len(),
-    ));
+    authorization_header_value(token.expose_secret())
+}
+
+pub(crate) fn authorization_header_value(token: &str) -> Result<HeaderValue, GithubEndpointError> {
+    let mut raw = Zeroizing::new(String::with_capacity("Bearer ".len() + token.len()));
     raw.push_str("Bearer ");
-    raw.push_str(token.expose_secret());
+    raw.push_str(token);
     let mut header =
         HeaderValue::from_str(raw.as_str()).map_err(|_| GithubEndpointError::InvalidResponse)?;
     header.set_sensitive(true);

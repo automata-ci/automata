@@ -8,13 +8,24 @@ use std::{
 
 use automata_ci_core::{
     Architecture, EnvironmentProfile, EnvironmentProfileId, JobResourceAllocation,
-    JobResourcePolicy, OperatingSystem, ResourceCapacity, RunnerLabel,
+    JobResourcePolicy, OperatingSystem, ResourceCapacity, RunnerLabel, WorkspaceId,
 };
 use automata_ci_credential_github::GithubServerServiceMintCutoffOutcome;
 use automata_ci_key_management::{
     EnvelopeCodec, KeyId, LocalAes256GcmKeyring, LocalKeyMaterial, SecretBytes,
 };
-use automata_ci_provider::ProviderConnectionId;
+use automata_ci_provider::{
+    ControlCredentialClaim, ControlCredentialProvider, ControlCredentialRequest,
+    ExternalRepositoryId, ExternalRepositoryIdentity, ProviderArchiveLimits,
+    ProviderConfigurationRevision, ProviderConnectionConfiguration, ProviderConnectionId,
+    ProviderConnectionManifest, ProviderConnectionRevision, ProviderControlCredentialId,
+    ProviderControlCredentialWorkerId, ProviderControlOperation, ProviderControlOperationSet,
+    ProviderDefaultBranch, ProviderInstanceId, ProviderLifecycleState, ProviderRepositoryPath,
+    ProviderRunnerPolicyBinding, ProviderSchemaVersion, ProviderWorkflowSource,
+    RepositoryVisibility,
+};
+use automata_ci_provider_github::GithubConnectionPolicy;
+use automata_ci_scm::RepositoryId as ScmRepositoryId;
 use automata_ci_store::{
     AdmissionObject, BeginGithubServerServiceMint, BootstrapGithubProviderManifest,
     BootstrapGithubProviderRepository, ClaimNextGithubServerServiceMaintenance,
@@ -49,29 +60,30 @@ use super::*;
 #[test]
 fn common_result_operations_reuse_exact_checks_write_actions() {
     assert_eq!(
-        common_result_action(GithubResultOperation::EnsureSuite),
-        GithubServerServiceAction::EnsureCheckSuite
+        common_result_action(ProviderControlOperation::ResultResolve),
+        Some(GithubServerServiceAction::EnsureCheckSuite)
     );
     assert_eq!(
-        common_result_action(GithubResultOperation::CreateRun),
-        GithubServerServiceAction::CreateCheckRun
+        common_result_action(ProviderControlOperation::ResultCreate),
+        Some(GithubServerServiceAction::CreateCheckRun)
     );
     assert_eq!(
-        common_result_action(GithubResultOperation::ReconcileRun),
-        GithubServerServiceAction::ReconcileCheckRun
+        common_result_action(ProviderControlOperation::ResultReconcile),
+        Some(GithubServerServiceAction::ReconcileCheckRun)
     );
     for operation in [
-        GithubResultOperation::ReadRun,
-        GithubResultOperation::StartRun,
-        GithubResultOperation::CompleteRun,
-        GithubResultOperation::ReadAnnotations,
-        GithubResultOperation::AppendAnnotations,
+        ProviderControlOperation::ResultRead,
+        ProviderControlOperation::ResultWrite,
     ] {
         assert_eq!(
             common_result_action(operation),
-            GithubServerServiceAction::PublishCheckRun
+            Some(GithubServerServiceAction::PublishCheckRun)
         );
     }
+    assert_eq!(
+        common_result_action(ProviderControlOperation::RepositoryRead),
+        None
+    );
 }
 
 #[test]
@@ -427,6 +439,76 @@ fn authority(scope: GithubServerServiceScope, id: u128) -> GithubServerServiceAu
     .expect("authority")
 }
 
+fn control_connection() -> ProviderConnectionManifest {
+    let workspace =
+        WorkspaceId::parse("11111111-1111-4111-8111-111111111111").expect("control workspace");
+    let instance_id = ProviderInstanceId::from_uuid(Uuid::from_u128(0x21)).expect("instance ID");
+    let provider_revision = ProviderConfigurationRevision::new(3).expect("provider revision");
+    let policy = GithubConnectionPolicy::new(
+        11,
+        ScmRepositoryId::new("automata-ci/automata").expect("repository route"),
+    )
+    .expect("connection policy")
+    .document()
+    .expect("connection policy document");
+    let configuration = ProviderConnectionConfiguration::new(
+        workspace,
+        ExternalRepositoryIdentity::new(
+            instance_id,
+            ExternalRepositoryId::new("13").expect("external repository ID"),
+        ),
+        provider_revision,
+        Sha256Digest::from_bytes([0x41; 32]),
+        Sha256Digest::from_bytes([0x42; 32]),
+        RepositoryVisibility::Private,
+        ProviderDefaultBranch::new("main").expect("default branch"),
+        ProviderWorkflowSource::Directory(
+            ProviderRepositoryPath::new(".ci/workflows").expect("workflow root"),
+        ),
+        ProviderRunnerPolicyBinding::new(
+            ProviderSchemaVersion::new(1).expect("runner policy schema"),
+            Sha256Digest::from_bytes([0x43; 32]),
+        ),
+        ProviderArchiveLimits::new(1_024, 8_192, 100, 1_024, 10, 1_024).expect("archive limits"),
+        policy,
+    );
+    ProviderConnectionManifest::new(
+        connection_id(),
+        ProviderConnectionRevision::new(5).expect("connection revision"),
+        ProviderLifecycleState::Active,
+        configuration,
+        UnixMillis::new(100),
+        Some(UnixMillis::new(100)),
+        None,
+    )
+    .expect("control connection")
+}
+
+fn control_authority(id: u128) -> GithubServerServiceAuthorityIdentity {
+    let connection = control_connection();
+    GithubServerServiceAuthorityIdentity::new(
+        TenantScope::from_authenticated_tenant_id(
+            connection.configuration().workspace_id().to_string(),
+        )
+        .expect("control tenant"),
+        authority_id(id),
+        repository_id(),
+        connection.connection_id(),
+        GithubInstallationId::new(11).expect("installation ID"),
+        GithubServerServiceAppId::new(17).expect("App ID"),
+        GithubRepositoryId::new(13).expect("provider repository ID"),
+        GithubRepositoryName::new("automata-ci/automata").expect("repository name"),
+        GithubServerServiceScope::ChecksWrite,
+        GithubServerServiceAppClientId::new("Iv1.automata-test").expect("App client ID"),
+        GithubServerServiceJwtIssuer::AppClientId,
+        Sha256Digest::from_bytes([0x51; 32]),
+        GithubServerServiceRevision::new(3).expect("App revision"),
+        GithubServerServiceRevision::new(5).expect("policy revision"),
+        Sha256Digest::from_bytes([0x61; 32]),
+    )
+    .expect("control authority")
+}
+
 fn schedule_manifest(visibility: GithubRepositoryVisibility) -> GithubProviderManifest {
     let policy = test_runtime_policy();
     let runner_policy_digest = policy.canonical_digest();
@@ -651,7 +733,7 @@ fn adapters(
 #[test]
 fn registry_is_bounded_unique_and_implements_live_provider_ports() {
     fn assert_ports<
-        T: GithubResultCredentialProvider
+        T: ControlCredentialProvider
             + GithubTriggerCredentialProvider
             + GithubScheduleSourceCredentialProvider,
     >() {
@@ -671,6 +753,63 @@ fn registry_is_bounded_unique_and_implements_live_provider_ports() {
         GithubProviderCredentialAdapters::with_handoffs(fake, &[checks.clone(), checks]),
         Err(GithubProviderCredentialAdapterConfigurationError::InvalidAuthorityRegistry)
     ));
+}
+
+#[tokio::test]
+async fn common_result_credential_preserves_exact_github_handoff_and_release() {
+    let handoffs = Arc::new(FakeHandoffs::new(FakeHandoffMode::Exact));
+    let authority = control_authority(0x62);
+    let mut adapters = adapters(Arc::clone(&handoffs), std::slice::from_ref(&authority));
+    adapters.observation_clock = Some(Arc::new(FakeClock::new(1_200)));
+    let claim = ControlCredentialClaim::new(
+        ProviderControlCredentialId::from_uuid(Uuid::from_u128(0x70)).expect("credential ID"),
+        ProviderControlCredentialWorkerId::from_uuid(Uuid::from_u128(0x71))
+            .expect("credential worker ID"),
+        7,
+        9,
+        UnixMillis::new(1_500),
+    )
+    .expect("control claim");
+    let operations = ProviderControlOperationSet::new([ProviderControlOperation::ResultCreate])
+        .expect("result operation");
+    let request = ControlCredentialRequest::new(
+        claim,
+        &control_connection(),
+        operations,
+        UnixMillis::new(1_000),
+        1_000,
+    )
+    .expect("control request");
+
+    let credential = ControlCredentialProvider::acquire(&adapters, &request)
+        .await
+        .expect("credential");
+    assert_eq!(credential.request_digest(), request.digest());
+    assert!(credential.permits(ProviderControlOperation::ResultCreate));
+    assert_eq!(
+        credential.expose_secret(),
+        b"github-provider-adapter-test-token"
+    );
+    let requests = handoffs.requests();
+    let [handoff] = requests.as_slice() else {
+        panic!("one exact handoff must be acquired");
+    };
+    assert_eq!(handoff.selector().authority_id(), authority.authority_id());
+    assert_eq!(handoff.observed_at(), UnixMillis::new(1_200));
+    assert_eq!(handoff.required_through(), UnixMillis::new(2_200));
+    assert_eq!(
+        handoff.consumer(),
+        GithubServerServiceConsumerClaim::new(
+            GithubServerServiceConsumerId::from_uuid(claim.credential_id().as_uuid())
+                .expect("consumer ID"),
+            GithubServerServiceWorkerId::from_uuid(claim.worker_id().as_uuid()).expect("worker ID"),
+            GithubServerServiceClaimFence::new(claim.fence()).expect("claim fence"),
+            GithubServerServiceAction::CreateCheckRun,
+            GithubServerServiceRevision::new(claim.revision()).expect("consumer revision"),
+        )
+    );
+    credential.release().await;
+    assert_eq!(handoffs.releases.load(Ordering::SeqCst), 1);
 }
 
 #[test]

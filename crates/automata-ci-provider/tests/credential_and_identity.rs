@@ -3,14 +3,15 @@ use automata_ci_core::{
     PermissionLevel, RunnerId, Sha256Digest, TrustSourceClass, UnixMillis, WorkspaceId,
 };
 use automata_ci_provider::{
-    AuthorizationCodeRequest, ControlCredential, ControlCredentialRequest,
-    ControlCredentialRevocation, ControlCredentialStrategy, ExternalRepositoryId,
-    ExternalRepositoryIdentity, ExternalSubjectId, ExternalSubjectIdentity, ExternalSubjectKind,
-    IssuedWorkloadCredential, ProviderArchiveLimits, ProviderCallbackUri, ProviderCapabilities,
-    ProviderCapability, ProviderCapabilityKind, ProviderConfigurationRevision,
-    ProviderConnectionConfiguration, ProviderConnectionId, ProviderConnectionManifest,
-    ProviderConnectionPolicyDocument, ProviderConnectionRevision, ProviderControlCredentialId,
-    ProviderControlOperation, ProviderControlOperationSet, ProviderCredentialGeneration,
+    AuthorizationCodeRequest, ControlCredential, ControlCredentialClaim, ControlCredentialRelease,
+    ControlCredentialReleaseFuture, ControlCredentialRequest, ControlCredentialRevocation,
+    ControlCredentialStrategy, ExternalRepositoryId, ExternalRepositoryIdentity, ExternalSubjectId,
+    ExternalSubjectIdentity, ExternalSubjectKind, IssuedWorkloadCredential, ProviderArchiveLimits,
+    ProviderCallbackUri, ProviderCapabilities, ProviderCapability, ProviderCapabilityKind,
+    ProviderConfigurationRevision, ProviderConnectionConfiguration, ProviderConnectionId,
+    ProviderConnectionManifest, ProviderConnectionPolicyDocument, ProviderConnectionRevision,
+    ProviderControlCredentialId, ProviderControlCredentialWorkerId, ProviderControlOperation,
+    ProviderControlOperationSet, ProviderCredentialGeneration, ProviderCredentialModelError,
     ProviderDefaultBranch, ProviderHumanCredential, ProviderHumanIdentity, ProviderInstanceId,
     ProviderLifecycleState, ProviderMembership, ProviderMembershipSnapshot, ProviderPkceVerifier,
     ProviderRepositoryPath, ProviderRunnerPolicyBinding, ProviderSchemaVersion,
@@ -28,6 +29,32 @@ assert_not_impl_any!(IssuedWorkloadCredential: Clone, serde::Serialize);
 assert_not_impl_any!(ProviderHumanCredential: Clone, serde::Serialize);
 assert_not_impl_any!(ProviderPkceVerifier: Clone, serde::Serialize);
 assert_not_impl_any!(automata_ci_provider::ProviderAuthorizationUrl: Clone, serde::Serialize);
+
+#[derive(Debug)]
+struct TestControlCredentialRelease {
+    released: Arc<AtomicBool>,
+    abandoned: Arc<AtomicBool>,
+    armed: bool,
+}
+
+impl Drop for TestControlCredentialRelease {
+    fn drop(&mut self) {
+        if self.armed {
+            self.abandoned.store(true, Ordering::Release);
+        }
+    }
+}
+
+impl ControlCredentialRelease for TestControlCredentialRelease {
+    fn release(self: Box<Self>) -> ControlCredentialReleaseFuture {
+        let released = Arc::clone(&self.released);
+        let mut custody = self;
+        Box::pin(async move {
+            custody.armed = false;
+            released.store(true, Ordering::Release);
+        })
+    }
+}
 
 fn instance(value: u128) -> ProviderInstanceId {
     ProviderInstanceId::from_uuid(Uuid::from_u128(value)).unwrap()
@@ -82,36 +109,188 @@ fn lease() -> Lease {
     .unwrap()
 }
 
-#[test]
-fn control_credentials_are_exact_operation_scoped_and_secret_safe() {
-    let operations = ProviderControlOperationSet::new([
+fn control_credential(
+    request: &ControlCredentialRequest,
+    value: &str,
+    released: Arc<AtomicBool>,
+    abandoned: Arc<AtomicBool>,
+) -> ControlCredential {
+    ControlCredential::new(
+        request,
+        ProviderControlOperationSet::new([
+            ProviderControlOperation::RepositoryRead,
+            ProviderControlOperation::ResultWrite,
+        ])
+        .unwrap(),
+        ControlCredentialStrategy::Minted,
+        ProviderCredentialGeneration::new(1).unwrap(),
+        secret(value),
+        UnixMillis::new(2_001),
+        Some(UnixMillis::new(4_000)),
+        ControlCredentialRevocation::ProviderExpiry,
+        Box::new(TestControlCredentialRelease {
+            released,
+            abandoned,
+            armed: true,
+        }),
+    )
+    .unwrap()
+}
+
+fn control_operations() -> ProviderControlOperationSet {
+    ProviderControlOperationSet::new([
         ProviderControlOperation::RepositoryRead,
         ProviderControlOperation::ResultWrite,
     ])
-    .unwrap();
-    let request = ControlCredentialRequest::new(
+    .unwrap()
+}
+
+fn control_claim() -> ControlCredentialClaim {
+    ControlCredentialClaim::new(
         ProviderControlCredentialId::from_uuid(Uuid::from_u128(20)).unwrap(),
+        ProviderControlCredentialWorkerId::from_uuid(Uuid::from_u128(21)).unwrap(),
+        1,
+        1,
+        UnixMillis::new(3_000),
+    )
+    .unwrap()
+}
+
+fn control_request() -> ControlCredentialRequest {
+    ControlCredentialRequest::new(
+        control_claim(),
         &connection(),
-        operations.clone(),
+        control_operations(),
+        UnixMillis::new(2_000),
+        1_000,
+    )
+    .unwrap()
+}
+
+#[test]
+fn control_claims_are_bounded_and_digest_every_fence_field() {
+    let claim = control_claim();
+    let request = control_request();
+    assert_eq!(request.claim(), claim);
+    assert!(
+        ControlCredentialClaim::new(
+            claim.credential_id(),
+            claim.worker_id(),
+            u64::MAX,
+            claim.revision(),
+            claim.expires_at(),
+        )
+        .is_err()
+    );
+    assert!(
+        ControlCredentialRequest::new(
+            claim,
+            &connection(),
+            control_operations(),
+            UnixMillis::new(2_000),
+            999,
+        )
+        .is_err()
+    );
+    let changed_claim = ControlCredentialClaim::new(
+        claim.credential_id(),
+        ProviderControlCredentialWorkerId::from_uuid(Uuid::from_u128(22)).unwrap(),
+        claim.fence(),
+        claim.revision(),
+        claim.expires_at(),
+    )
+    .unwrap();
+    let changed_request = ControlCredentialRequest::new(
+        changed_claim,
+        &connection(),
+        control_operations(),
         UnixMillis::new(2_000),
         1_000,
     )
     .unwrap();
-    let credential = ControlCredential::new(
+    assert_ne!(changed_request.digest(), request.digest());
+}
+
+#[tokio::test]
+async fn control_credentials_are_exact_operation_scoped_secret_safe_and_releasable() {
+    let request = control_request();
+    let released = Arc::new(AtomicBool::new(false));
+    let abandoned = Arc::new(AtomicBool::new(false));
+    let credential = control_credential(
         &request,
-        operations,
-        ControlCredentialStrategy::Minted,
-        ProviderCredentialGeneration::new(1).unwrap(),
-        secret("control-secret-that-must-not-leak"),
-        UnixMillis::new(2_001),
-        Some(UnixMillis::new(4_000)),
-        ControlCredentialRevocation::ProviderExpiry,
-    )
-    .unwrap();
+        "control-secret-that-must-not-leak",
+        Arc::clone(&released),
+        Arc::clone(&abandoned),
+    );
     assert!(credential.permits(ProviderControlOperation::RepositoryRead));
     assert!(!credential.permits(ProviderControlOperation::MembershipRead));
     assert_eq!(credential.request_digest(), request.digest());
     assert!(!format!("{credential:?}").contains("must-not-leak"));
+    credential.release().await;
+    assert!(released.load(Ordering::Acquire));
+    assert!(!abandoned.load(Ordering::Acquire));
+
+    let abandoned_credential = control_credential(
+        &request,
+        "second-control-secret-that-must-not-leak",
+        Arc::new(AtomicBool::new(false)),
+        Arc::clone(&abandoned),
+    );
+    drop(abandoned_credential);
+    assert!(abandoned.load(Ordering::Acquire));
+
+    abandoned.store(false, Ordering::Release);
+    let dropped_release = control_credential(
+        &request,
+        "third-control-secret-that-must-not-leak",
+        Arc::new(AtomicBool::new(false)),
+        Arc::clone(&abandoned),
+    )
+    .release();
+    drop(dropped_release);
+    assert!(abandoned.load(Ordering::Acquire));
+
+    let rejected_cleanup = Arc::new(AtomicBool::new(false));
+    let rejected = ControlCredential::new(
+        &request,
+        ProviderControlOperationSet::new([ProviderControlOperation::ResultWrite]).unwrap(),
+        ControlCredentialStrategy::Minted,
+        ProviderCredentialGeneration::new(1).unwrap(),
+        secret("rejected-control-secret-that-must-not-leak"),
+        UnixMillis::new(2_001),
+        Some(UnixMillis::new(4_000)),
+        ControlCredentialRevocation::ProviderExpiry,
+        Box::new(TestControlCredentialRelease {
+            released: Arc::new(AtomicBool::new(false)),
+            abandoned: Arc::clone(&rejected_cleanup),
+            armed: true,
+        }),
+    );
+    assert!(matches!(
+        rejected,
+        Err(ProviderCredentialModelError::InvalidCredentialBinding)
+    ));
+    assert!(rejected_cleanup.load(Ordering::Acquire));
+
+    let cached = ControlCredential::new(
+        &request,
+        control_operations(),
+        ControlCredentialStrategy::Minted,
+        ProviderCredentialGeneration::new(1).unwrap(),
+        secret("cached-control-secret-that-must-not-leak"),
+        UnixMillis::new(1_000),
+        Some(UnixMillis::new(4_000)),
+        ControlCredentialRevocation::ProviderExpiry,
+        Box::new(TestControlCredentialRelease {
+            released: Arc::new(AtomicBool::new(false)),
+            abandoned: Arc::new(AtomicBool::new(false)),
+            armed: true,
+        }),
+    );
+    assert!(
+        cached.is_ok(),
+        "a still-valid cached token may predate acquisition"
+    );
 }
 
 #[test]
@@ -264,3 +443,7 @@ fn absent_credential_and_login_capabilities_remain_absent() {
     assert!(!capabilities.contains(ProviderCapabilityKind::DeviceAuthorizationLogin));
     assert!(!capabilities.contains(ProviderCapabilityKind::MembershipEvidence));
 }
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};

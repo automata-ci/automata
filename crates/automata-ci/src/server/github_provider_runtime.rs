@@ -41,15 +41,16 @@ use automata_ci_credential_github::{
     PinnedGithubRuntimeAuthorityMintBroker,
 };
 use automata_ci_github_delivery::{
-    GithubProviderRuntimeAdapter, GithubResultCredentialProvider, GithubResultProviderAdapter,
-    GithubScheduleClock, GithubScheduleService, GithubScheduleServiceConfigurationError,
-    GithubScheduleServiceError, GithubScheduleSourceAuthorities,
-    GithubScheduleSourceCredentialProvider, GithubTriggerCredentialProvider,
-    GithubWorkflowTriggerHandler,
+    GithubProviderRuntimeAdapter, GithubResultProviderAdapter, GithubScheduleClock,
+    GithubScheduleService, GithubScheduleServiceConfigurationError, GithubScheduleServiceError,
+    GithubScheduleSourceAuthorities, GithubScheduleSourceCredentialProvider,
+    GithubTriggerCredentialProvider, GithubWorkflowTriggerHandler,
 };
 use automata_ci_key_management::{EnvelopeCodec, KeyEncryptionProvider};
 use automata_ci_protocol::RuntimeAuthorityEndpoint;
-use automata_ci_provider::{ProviderConnectionId, ProviderResultRepository};
+use automata_ci_provider::{
+    ControlCredentialProvider, ProviderConnectionId, ProviderResultRepository,
+};
 use automata_ci_provider_delivery::{
     ProviderDeliveryClock, ProviderDeliveryClockError, ProviderResultAdapter,
     ProviderRuntimeAdapter,
@@ -953,7 +954,7 @@ impl GithubProviderRuntimeBuilder {
         let runtime_adapter: Arc<dyn ProviderRuntimeAdapter> = Arc::new(
             GithubProviderRuntimeAdapter::new(trigger_handler, check_reruns, results.clone()),
         );
-        let result_credentials: Arc<dyn GithubResultCredentialProvider> = adapters.clone();
+        let result_credentials: Arc<dyn ControlCredentialProvider> = adapters.clone();
         let result_adapter: Arc<dyn ProviderResultAdapter> = Arc::new(
             GithubResultProviderAdapter::new(
                 result_credentials,

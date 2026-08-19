@@ -43,7 +43,7 @@ pub use config::{
 };
 pub use control::{GithubCheckControl, GithubCheckControlTarget, GithubControlError};
 pub use delivery_adapter::GithubDeliveryAdapter;
-pub use endpoint::GithubHttpEndpoint;
+pub use endpoint::{GithubApiToken, GithubHttpEndpoint};
 pub use event::{
     GITHUB_EVENT_ENVELOPE_SCHEMA_V1, GITHUB_EVENT_ENVELOPE_V1_MEDIA_TYPE,
     GITHUB_EVENT_REGISTRY_SCHEMA_V1, GITHUB_RAW_EVENT_OBJECT_KEY_PREFIX, GithubEventActivityPolicy,

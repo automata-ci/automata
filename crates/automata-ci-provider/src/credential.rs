@@ -18,8 +18,8 @@ use thiserror::Error;
 use crate::{
     ExternalCredentialId, ExternalRepositoryIdentity, ProviderConnectionId,
     ProviderConnectionManifest, ProviderConnectionRevision, ProviderControlCredentialId,
-    ProviderLifecycleState, ProviderWorkloadCredentialId, WorkloadCredentialProfile,
-    WorkloadCredentialRevocation,
+    ProviderControlCredentialWorkerId, ProviderLifecycleState, ProviderWorkloadCredentialId,
+    WorkloadCredentialProfile, WorkloadCredentialRevocation,
 };
 
 /// Maximum operations in one least-privilege control credential.
@@ -45,6 +45,14 @@ pub enum ProviderControlOperation {
     ChangedFilesRead,
     /// Publish provider result state.
     ResultWrite,
+    /// Read provider result state for reconciliation.
+    ResultRead,
+    /// Resolve provider-native result container state.
+    ResultResolve,
+    /// Create one deterministically identified provider result.
+    ResultCreate,
+    /// Reconcile a result creation whose outcome is uncertain.
+    ResultReconcile,
     /// Install, rotate, or remove provider webhooks.
     WebhookManage,
     /// Read provider-native schedule state.
@@ -136,15 +144,83 @@ impl ProviderCredentialGeneration {
 /// Exact least-privilege control credential acquisition request.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ControlCredentialRequest {
-    credential_id: ProviderControlCredentialId,
-    connection_id: ProviderConnectionId,
-    connection_revision: ProviderConnectionRevision,
-    connection_digest: Sha256Digest,
-    repository: ExternalRepositoryIdentity,
+    claim: ControlCredentialClaim,
+    connection: ProviderConnectionManifest,
     operations: ProviderControlOperationSet,
     requested_at: UnixMillis,
     minimum_validity_millis: u64,
     digest: Sha256Digest,
+}
+
+/// Exact durable claim authorizing one control-credential acquisition.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ControlCredentialClaim {
+    credential_id: ProviderControlCredentialId,
+    worker_id: ProviderControlCredentialWorkerId,
+    fence: u64,
+    revision: u64,
+    expires_at: UnixMillis,
+}
+
+impl ControlCredentialClaim {
+    /// Creates a live positive-fence acquisition claim.
+    ///
+    /// # Errors
+    ///
+    /// Rejects zero fences or revisions and non-positive expiry timestamps.
+    pub fn new(
+        credential_id: ProviderControlCredentialId,
+        worker_id: ProviderControlCredentialWorkerId,
+        fence: u64,
+        revision: u64,
+        expires_at: UnixMillis,
+    ) -> Result<Self, ProviderCredentialModelError> {
+        if fence == 0
+            || revision == 0
+            || fence > i64::MAX.cast_unsigned()
+            || revision > i64::MAX.cast_unsigned()
+            || expires_at.get() <= 0
+        {
+            return Err(ProviderCredentialModelError::InvalidControlClaim);
+        }
+        Ok(Self {
+            credential_id,
+            worker_id,
+            fence,
+            revision,
+            expires_at,
+        })
+    }
+
+    /// Returns the durable acquisition identity.
+    #[must_use]
+    pub const fn credential_id(self) -> ProviderControlCredentialId {
+        self.credential_id
+    }
+
+    /// Returns the exact claiming worker.
+    #[must_use]
+    pub const fn worker_id(self) -> ProviderControlCredentialWorkerId {
+        self.worker_id
+    }
+
+    /// Returns the current claim fence.
+    #[must_use]
+    pub const fn fence(self) -> u64 {
+        self.fence
+    }
+
+    /// Returns the purpose-specific durable revision.
+    #[must_use]
+    pub const fn revision(self) -> u64 {
+        self.revision
+    }
+
+    /// Returns the exclusive claim expiry.
+    #[must_use]
+    pub const fn expires_at(self) -> UnixMillis {
+        self.expires_at
+    }
 }
 
 impl ControlCredentialRequest {
@@ -154,7 +230,7 @@ impl ControlCredentialRequest {
     ///
     /// Rejects inactive connections, invalid timestamps, or invalid validity bounds.
     pub fn new(
-        credential_id: ProviderControlCredentialId,
+        claim: ControlCredentialClaim,
         connection: &ProviderConnectionManifest,
         operations: ProviderControlOperationSet,
         requested_at: UnixMillis,
@@ -163,22 +239,22 @@ impl ControlCredentialRequest {
         if connection.state() != ProviderLifecycleState::Active {
             return Err(ProviderCredentialModelError::InactiveConnection);
         }
+        let required_until = requested_at
+            .get()
+            .checked_add(minimum_validity_millis.cast_signed());
         if requested_at.get() < 0
             || minimum_validity_millis == 0
             || minimum_validity_millis > MAX_CONTROL_CREDENTIAL_VALIDITY_MILLIS
-            || requested_at
-                .get()
-                .checked_add(minimum_validity_millis.cast_signed())
-                .is_none()
+            || required_until.is_none()
+            || requested_at >= claim.expires_at()
+            || required_until
+                .is_some_and(|required_until| required_until < claim.expires_at().get())
         {
             return Err(ProviderCredentialModelError::InvalidValidity);
         }
         let mut value = Self {
-            credential_id,
-            connection_id: connection.connection_id(),
-            connection_revision: connection.revision(),
-            connection_digest: connection.digest(),
-            repository: connection.configuration().repository().clone(),
+            claim,
+            connection: connection.clone(),
             operations,
             requested_at,
             minimum_validity_millis,
@@ -191,12 +267,31 @@ impl ControlCredentialRequest {
     fn calculate_digest(&self) -> Sha256Digest {
         let mut hash = Sha256::new();
         hash.update(CONTROL_REQUEST_DOMAIN);
-        hash.update(self.credential_id.as_uuid().as_bytes());
-        hash.update(self.connection_id.as_uuid().as_bytes());
-        hash.update(self.connection_revision.get().to_be_bytes());
-        hash.update(self.connection_digest.as_bytes());
-        hash.update(self.repository.instance_id().as_uuid().as_bytes());
-        part(&mut hash, self.repository.external_id().as_str().as_bytes());
+        hash.update(self.claim.credential_id.as_uuid().as_bytes());
+        hash.update(self.claim.worker_id.as_uuid().as_bytes());
+        hash.update(self.claim.fence.to_be_bytes());
+        hash.update(self.claim.revision.to_be_bytes());
+        hash.update(self.claim.expires_at.get().to_be_bytes());
+        hash.update(self.connection.connection_id().as_uuid().as_bytes());
+        hash.update(self.connection.revision().get().to_be_bytes());
+        hash.update(self.connection.digest().as_bytes());
+        hash.update(
+            self.connection
+                .configuration()
+                .repository()
+                .instance_id()
+                .as_uuid()
+                .as_bytes(),
+        );
+        part(
+            &mut hash,
+            self.connection
+                .configuration()
+                .repository()
+                .external_id()
+                .as_str()
+                .as_bytes(),
+        );
         for operation in self.operations.iter() {
             hash.update([control_operation_code(operation)]);
         }
@@ -208,27 +303,37 @@ impl ControlCredentialRequest {
     /// Returns the acquisition identity.
     #[must_use]
     pub const fn credential_id(&self) -> ProviderControlCredentialId {
-        self.credential_id
+        self.claim.credential_id()
+    }
+    /// Returns the exact durable acquisition claim.
+    #[must_use]
+    pub const fn claim(&self) -> ControlCredentialClaim {
+        self.claim
+    }
+    /// Returns the complete secret-free connection manifest for provider validation.
+    #[must_use]
+    pub const fn connection(&self) -> &ProviderConnectionManifest {
+        &self.connection
     }
     /// Returns the exact connection.
     #[must_use]
     pub const fn connection_id(&self) -> ProviderConnectionId {
-        self.connection_id
+        self.connection.connection_id()
     }
     /// Returns the exact connection revision.
     #[must_use]
     pub const fn connection_revision(&self) -> ProviderConnectionRevision {
-        self.connection_revision
+        self.connection.revision()
     }
     /// Returns the connection digest.
     #[must_use]
     pub const fn connection_digest(&self) -> Sha256Digest {
-        self.connection_digest
+        self.connection.digest()
     }
     /// Returns the exact repository audience.
     #[must_use]
     pub const fn repository(&self) -> &ExternalRepositoryIdentity {
-        &self.repository
+        self.connection.configuration().repository()
     }
     /// Returns the requested operation set.
     #[must_use]
@@ -262,6 +367,7 @@ pub struct ControlCredential {
     issued_at: UnixMillis,
     expires_at: Option<UnixMillis>,
     revocation: ControlCredentialRevocation,
+    release: Box<dyn ControlCredentialRelease>,
 }
 
 impl ControlCredential {
@@ -280,8 +386,11 @@ impl ControlCredential {
         issued_at: UnixMillis,
         expires_at: Option<UnixMillis>,
         revocation: ControlCredentialRevocation,
+        release: Box<dyn ControlCredentialRelease>,
     ) -> Result<Self, ProviderCredentialModelError> {
-        if operations != request.operations || issued_at < request.requested_at {
+        if operations != request.operations || issued_at.get() < 0 {
+            drop(value);
+            drop(release);
             return Err(ProviderCredentialModelError::InvalidCredentialBinding);
         }
         let required_until =
@@ -293,6 +402,8 @@ impl ControlCredential {
             || (strategy == ControlCredentialStrategy::Stored
                 && revocation == ControlCredentialRevocation::ProviderExpiry)
         {
+            drop(value);
+            drop(release);
             return Err(ProviderCredentialModelError::InvalidValidity);
         }
         Ok(Self {
@@ -304,6 +415,7 @@ impl ControlCredential {
             issued_at,
             expires_at,
             revocation,
+            release,
         })
     }
 
@@ -332,10 +444,16 @@ impl ControlCredential {
     pub fn expose_secret(&self) -> &[u8] {
         self.value.expose_secret()
     }
-    /// Consumes the issued credential into zeroizing secret custody.
-    #[must_use]
-    pub fn into_secret(self) -> SecretValue {
-        self.value
+    /// Destroys secret custody and relinquishes the exact acquisition.
+    ///
+    /// Provider implementations supervise cleanup that cannot finish before
+    /// the returned future resolves, so callers never retain provider-specific
+    /// release identities or retry policy.
+    #[must_use = "the credential release future must be awaited"]
+    pub fn release(self) -> ControlCredentialReleaseFuture {
+        let Self { value, release, .. } = self;
+        drop(value);
+        release.release()
     }
     /// Returns provider issuance time.
     #[must_use]
@@ -366,6 +484,7 @@ impl fmt::Debug for ControlCredential {
             .field("issued_at", &self.issued_at)
             .field("expires_at", &self.expires_at)
             .field("revocation", &self.revocation)
+            .field("release", &"[PROVIDER CUSTODY RELEASE]")
             .finish()
     }
 }
@@ -374,6 +493,20 @@ impl fmt::Debug for ControlCredential {
 pub type ControlCredentialFuture<'a> = Pin<
     Box<dyn Future<Output = Result<ControlCredential, ControlCredentialProviderError>> + Send + 'a>,
 >;
+
+/// Future returned after relinquishing one control credential's local custody.
+pub type ControlCredentialReleaseFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
+
+/// Provider-owned cleanup boundary retained by an acquired control credential.
+///
+/// Implementations must make release idempotent, arrange equivalent supervised
+/// cleanup from `Drop` when a caller abandons the credential, and supervise any
+/// cleanup that cannot finish before the returned future resolves. Secret
+/// material is destroyed before this boundary is invoked.
+pub trait ControlCredentialRelease: fmt::Debug + Send {
+    /// Relinquishes the exact provider credential acquisition.
+    fn release(self: Box<Self>) -> ControlCredentialReleaseFuture;
+}
 
 /// Narrow adapter port for operation-scoped provider API credentials.
 pub trait ControlCredentialProvider: fmt::Debug + Send + Sync {
@@ -900,6 +1033,9 @@ pub enum ProviderCredentialModelError {
     /// Requested or observed validity is invalid.
     #[error("provider credential validity is invalid")]
     InvalidValidity,
+    /// Durable control acquisition claim evidence is invalid.
+    #[error("provider control credential claim is invalid")]
+    InvalidControlClaim,
     /// Control operations are empty or excessive.
     #[error("provider control credential operations are invalid")]
     InvalidControlOperations,
@@ -954,11 +1090,15 @@ const fn control_operation_code(value: ProviderControlOperation) -> u8 {
         ProviderControlOperation::RepositoryRead => 1,
         ProviderControlOperation::ChangedFilesRead => 2,
         ProviderControlOperation::ResultWrite => 3,
-        ProviderControlOperation::WebhookManage => 4,
-        ProviderControlOperation::ScheduleRead => 5,
-        ProviderControlOperation::DispatchWrite => 6,
-        ProviderControlOperation::MembershipRead => 7,
-        ProviderControlOperation::WorkloadCredentialManage => 8,
+        ProviderControlOperation::ResultRead => 4,
+        ProviderControlOperation::ResultResolve => 5,
+        ProviderControlOperation::ResultCreate => 6,
+        ProviderControlOperation::ResultReconcile => 7,
+        ProviderControlOperation::WebhookManage => 8,
+        ProviderControlOperation::ScheduleRead => 9,
+        ProviderControlOperation::DispatchWrite => 10,
+        ProviderControlOperation::MembershipRead => 11,
+        ProviderControlOperation::WorkloadCredentialManage => 12,
     }
 }
 const fn trust_class_code(value: TrustSourceClass) -> u8 {

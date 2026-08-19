@@ -3,11 +3,12 @@
 use std::{fmt, sync::Arc};
 
 use async_trait::async_trait;
-use automata_ci_auth::secret::SecretString;
 use automata_ci_core::{Sha256Digest, UnixMillis};
 use automata_ci_provider::{
-    ClaimedProviderResult, ExternalRepositoryId, ExternalResultId, ProviderCapabilities,
-    ProviderConnectionId, ProviderConnectionRevision, ProviderResultAnnotationLevel,
+    ClaimedProviderResult, ControlCredential, ControlCredentialClaim, ControlCredentialProvider,
+    ControlCredentialProviderError, ControlCredentialRequest, ExternalResultId,
+    ProviderCapabilities, ProviderControlCredentialId, ProviderControlCredentialWorkerId,
+    ProviderControlOperation, ProviderControlOperationSet, ProviderResultAnnotationLevel,
     ProviderResultClaimFence, ProviderResultConclusion, ProviderResultContinuation,
     ProviderResultPhase, ProviderResultPublicationModel, ProviderResultRetryAfter,
     ProviderSchemaVersion, ProviderTypeId, ResultPublisherError,
@@ -17,10 +18,10 @@ use automata_ci_provider_delivery::{
     ProviderResultObservation, ProviderRuntimeContext,
 };
 use automata_ci_provider_github::{
-    GithubCheckAnnotation, GithubCheckAnnotationLevel, GithubCheckAppId, GithubCheckCompletion,
-    GithubCheckConclusion, GithubCheckDetailsUrl, GithubCheckExternalId, GithubCheckName,
-    GithubCheckOutput, GithubCheckRetryEvidence, GithubCheckRunCreateOutcome, GithubCheckRunId,
-    GithubCheckRunIdentity, GithubCheckRunReconciliation, GithubCheckRunState,
+    GithubApiToken, GithubCheckAnnotation, GithubCheckAnnotationLevel, GithubCheckAppId,
+    GithubCheckCompletion, GithubCheckConclusion, GithubCheckDetailsUrl, GithubCheckExternalId,
+    GithubCheckName, GithubCheckOutput, GithubCheckRetryEvidence, GithubCheckRunCreateOutcome,
+    GithubCheckRunId, GithubCheckRunIdentity, GithubCheckRunReconciliation, GithubCheckRunState,
     GithubCheckSuiteCreateOutcome, GithubCheckSuiteId, GithubCheckTimestamp, GithubChecksError,
     GithubConnectionPolicy, GithubHttpEndpoint, GithubHttpLimits, GithubInstanceConfiguration,
     GithubObservedCheckConclusion, GithubProviderFactory,
@@ -36,240 +37,12 @@ const DEFAULT_VISIBILITY_MARGIN_MILLIS: i64 = 2_000;
 const MAX_GITHUB_ANNOTATIONS_PER_REQUEST: usize = 50;
 const GITHUB_RESULT_PROVIDER_TAIL_MILLIS: i64 = 10 * 60 * 1_000;
 
-/// One exact GitHub Checks action requested from credential authority.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum GithubResultOperation {
-    /// Create or resolve the App's Check Suite.
-    EnsureSuite,
-    /// Create one deterministically identified Check Run.
-    CreateRun,
-    /// Reconcile a possibly applied Check Run creation.
-    ReconcileRun,
-    /// Read and validate one bound Check Run.
-    ReadRun,
-    /// Move one queued Check Run to in-progress.
-    StartRun,
-    /// Publish one terminal Check Run state and presentation.
-    CompleteRun,
-    /// Read and reconcile append-only Check annotations.
-    ReadAnnotations,
-    /// Append one exact bounded annotation batch.
-    AppendAnnotations,
-}
-
-/// Borrowed exact authority request for one common result claim.
-pub struct GithubResultCredentialRequest<'a> {
-    context: &'a ProviderRuntimeContext,
-    claimed: &'a ClaimedProviderResult,
-    claim: ProviderResultClaimFence,
-    operation: GithubResultOperation,
-    app_id: GithubCheckAppId,
-    installation_id: u64,
-    repository: &'a RepositoryId,
-    required_through: UnixMillis,
-}
-
-impl GithubResultCredentialRequest<'_> {
-    /// Returns the exact provider runtime context.
-    #[must_use]
-    pub const fn context(&self) -> &ProviderRuntimeContext {
-        self.context
-    }
-
-    /// Returns the claim-frozen desired result and publication payload.
-    #[must_use]
-    pub const fn claimed(&self) -> &ClaimedProviderResult {
-        self.claimed
-    }
-
-    /// Returns the latest durable publication fence observed for this operation.
-    #[must_use]
-    pub const fn claim(&self) -> ProviderResultClaimFence {
-        self.claim
-    }
-
-    /// Returns the sole provider operation being authorized.
-    #[must_use]
-    pub const fn operation(&self) -> GithubResultOperation {
-        self.operation
-    }
-
-    /// Returns the manifest-pinned GitHub App identity.
-    #[must_use]
-    pub const fn app_id(&self) -> GithubCheckAppId {
-        self.app_id
-    }
-
-    /// Returns the connection-pinned installation identity.
-    #[must_use]
-    pub const fn installation_id(&self) -> u64 {
-        self.installation_id
-    }
-
-    /// Returns the connection-pinned owner/name route.
-    #[must_use]
-    pub const fn repository(&self) -> &RepositoryId {
-        self.repository
-    }
-
-    /// Returns the conservative credential lifetime requirement.
-    #[must_use]
-    pub const fn required_through(&self) -> UnixMillis {
-        self.required_through
-    }
-}
-
-impl fmt::Debug for GithubResultCredentialRequest<'_> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("GithubResultCredentialRequest")
-            .field("context", &"[exact runtime context]")
-            .field("claim", &"[exact result claim]")
-            .field("operation", &self.operation)
-            .field("app_id", &self.app_id)
-            .field("installation_id", &self.installation_id)
-            .field("repository", &"[redacted]")
-            .field("required_through", &self.required_through)
-            .finish()
-    }
-}
-
-/// Exact release capability for one move-only result credential.
-#[async_trait]
-pub trait GithubResultCredentialRelease: fmt::Debug + Send + Sync {
-    /// Releases the credential handoff after its one provider operation.
-    async fn release(self: Box<Self>);
-}
-
-/// Move-only GitHub installation credential bound to one common result claim.
-#[must_use = "the credential must be used and released"]
-pub struct GithubResultCredential {
-    connection_id: ProviderConnectionId,
-    connection_revision: ProviderConnectionRevision,
-    external_repository_id: ExternalRepositoryId,
-    claim: automata_ci_provider::ProviderResultClaimFence,
-    operation: GithubResultOperation,
-    app_id: GithubCheckAppId,
-    installation_id: u64,
-    repository: RepositoryId,
-    token: SecretString,
-    required_through: UnixMillis,
-    conservative_expires_at: UnixMillis,
-    release: Box<dyn GithubResultCredentialRelease>,
-}
-
-impl GithubResultCredential {
-    /// Constructs one exact request-scoped credential handoff.
-    ///
-    /// # Errors
-    ///
-    /// Rejects non-positive installation identity or an unusable lifetime.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        connection_id: ProviderConnectionId,
-        connection_revision: ProviderConnectionRevision,
-        external_repository_id: ExternalRepositoryId,
-        claim: automata_ci_provider::ProviderResultClaimFence,
-        operation: GithubResultOperation,
-        app_id: GithubCheckAppId,
-        installation_id: u64,
-        repository: RepositoryId,
-        token: SecretString,
-        required_through: UnixMillis,
-        conservative_expires_at: UnixMillis,
-        release: Box<dyn GithubResultCredentialRelease>,
-    ) -> Result<Self, GithubResultCredentialValueError> {
-        if installation_id == 0
-            || required_through <= claim.expires_at()
-            || conservative_expires_at <= required_through
-        {
-            return Err(GithubResultCredentialValueError::InvalidBinding);
-        }
-        Ok(Self {
-            connection_id,
-            connection_revision,
-            external_repository_id,
-            claim,
-            operation,
-            app_id,
-            installation_id,
-            repository,
-            token,
-            required_through,
-            conservative_expires_at,
-            release,
-        })
-    }
-
-    fn token(&self) -> &SecretString {
-        &self.token
-    }
-
-    fn start_release(self) {
-        let Self { token, release, .. } = self;
-        drop(token);
-        tokio::spawn(release.release());
-    }
-}
-
-impl fmt::Debug for GithubResultCredential {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("GithubResultCredential")
-            .field("connection_id", &self.connection_id)
-            .field("connection_revision", &self.connection_revision)
-            .field("external_repository_id", &"[redacted]")
-            .field("claim", &"[exact result claim]")
-            .field("operation", &self.operation)
-            .field("app_id", &self.app_id)
-            .field("installation_id", &self.installation_id)
-            .field("repository", &"[redacted]")
-            .field("token", &"[redacted]")
-            .field("required_through", &self.required_through)
-            .field("conservative_expires_at", &self.conservative_expires_at)
-            .field("release", &"[exact release capability]")
-            .finish()
-    }
-}
-
-/// Invalid result credential handoff.
-#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
-pub enum GithubResultCredentialValueError {
-    /// A binding or conservative lifetime is invalid.
-    #[error("the GitHub result credential binding is invalid")]
-    InvalidBinding,
-}
-
-/// Sanitized result credential authority failure.
-#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
-pub enum GithubResultCredentialProviderError {
-    /// Credential authority is temporarily unavailable.
-    #[error("the GitHub result credential authority is unavailable")]
-    Unavailable,
-    /// Current policy rejected the exact operation.
-    #[error("the GitHub result credential authority rejected the operation")]
-    Rejected,
-    /// Credential authority returned inconsistent state.
-    #[error("the GitHub result credential authority is inconsistent")]
-    InvariantViolation,
-}
-
-/// Least-authority provider for one request-scoped result credential.
-#[async_trait]
-pub trait GithubResultCredentialProvider: fmt::Debug + Send + Sync {
-    /// Acquires one move-only credential for the exact claim and operation.
-    async fn acquire(
-        &self,
-        request: GithubResultCredentialRequest<'_>,
-    ) -> Result<GithubResultCredential, GithubResultCredentialProviderError>;
-}
-
 /// GitHub implementation of the common mutable rich-check result model.
 pub struct GithubResultProviderAdapter {
     provider_type: ProviderTypeId,
     capabilities: ProviderCapabilities,
     factory: GithubProviderFactory,
-    credentials: Arc<dyn GithubResultCredentialProvider>,
+    credentials: Arc<dyn ControlCredentialProvider>,
     user_agent: String,
     limits: GithubHttpLimits,
     visibility_margin_millis: i64,
@@ -282,7 +55,7 @@ impl GithubResultProviderAdapter {
     ///
     /// Rejects an empty user agent or an invalid built-in capability declaration.
     pub fn new(
-        credentials: Arc<dyn GithubResultCredentialProvider>,
+        credentials: Arc<dyn ControlCredentialProvider>,
         user_agent: impl Into<String>,
         limits: GithubHttpLimits,
     ) -> Result<Self, GithubResultProviderAdapterError> {
@@ -351,40 +124,25 @@ impl GithubResultProviderAdapter {
         else {
             return failed(ResultPublisherError::Conflict);
         };
-        let request = GithubResultCredentialRequest {
-            context,
-            claimed,
-            claim,
-            operation,
-            app_id,
-            installation_id: policy.installation_id().get(),
-            repository: policy.repository(),
-            required_through,
-        };
-        let credential = match self.credentials.acquire(request).await {
+        let credential = match self
+            .acquire_credential(context, claimed, claim, operation, required_through)
+            .await
+        {
             Ok(credential) => credential,
-            Err(GithubResultCredentialProviderError::Unavailable) => return retry(state, None),
-            Err(GithubResultCredentialProviderError::Rejected) => {
+            Err(GithubResultCredentialError::Retry) => return retry(state, None),
+            Err(GithubResultCredentialError::Forbidden) => {
                 return failed(ResultPublisherError::Forbidden);
             }
-            Err(GithubResultCredentialProviderError::InvariantViolation) => {
+            Err(GithubResultCredentialError::Invalid) => {
                 return failed(ResultPublisherError::Conflict);
             }
         };
-        if !credential_matches(
-            &credential,
-            context,
-            claim,
-            operation,
-            app_id,
-            &policy,
-            required_through,
-        ) {
-            credential.start_release();
+        let Ok(token) = GithubApiToken::new(credential.expose_secret()) else {
+            credential.release().await;
             return failed(ResultPublisherError::Conflict);
-        }
+        };
         if lease.current() != claim {
-            credential.start_release();
+            credential.release().await;
             return retry(state, None);
         }
         let outcome = self
@@ -394,11 +152,72 @@ impl GithubResultProviderAdapter {
                 app_id,
                 claimed,
                 state,
-                &credential,
+                &token,
             )
             .await;
-        credential.start_release();
+        credential.release().await;
         outcome
+    }
+
+    async fn acquire_credential(
+        &self,
+        context: &ProviderRuntimeContext,
+        claimed: &ClaimedProviderResult,
+        claim: ProviderResultClaimFence,
+        operation: ProviderControlOperation,
+        required_through: UnixMillis,
+    ) -> Result<ControlCredential, GithubResultCredentialError> {
+        let credential_id = ProviderControlCredentialId::from_uuid(claim.subject_id().as_uuid())
+            .map_err(|_| GithubResultCredentialError::Invalid)?;
+        let worker_id = ProviderControlCredentialWorkerId::from_uuid(claim.worker_id().as_uuid())
+            .map_err(|_| GithubResultCredentialError::Invalid)?;
+        let control_claim = ControlCredentialClaim::new(
+            credential_id,
+            worker_id,
+            claim.fence(),
+            claimed.desired().generation(),
+            claim.expires_at(),
+        )
+        .map_err(|_| GithubResultCredentialError::Invalid)?;
+        let operations = ProviderControlOperationSet::new([operation])
+            .map_err(|_| GithubResultCredentialError::Invalid)?;
+        let validity_millis = required_through
+            .get()
+            .checked_sub(claimed.claimed_at().get())
+            .and_then(|value| u64::try_from(value).ok())
+            .ok_or(GithubResultCredentialError::Invalid)?;
+        let request = ControlCredentialRequest::new(
+            control_claim,
+            context.connection(),
+            operations,
+            claimed.claimed_at(),
+            validity_millis,
+        )
+        .map_err(|_| GithubResultCredentialError::Invalid)?;
+        let credential = self
+            .credentials
+            .acquire(&request)
+            .await
+            .map_err(|error| match error {
+                ControlCredentialProviderError::RateLimited
+                | ControlCredentialProviderError::Unavailable
+                | ControlCredentialProviderError::Indeterminate => {
+                    GithubResultCredentialError::Retry
+                }
+                ControlCredentialProviderError::Unauthorized
+                | ControlCredentialProviderError::Forbidden => {
+                    GithubResultCredentialError::Forbidden
+                }
+                ControlCredentialProviderError::Unsupported
+                | ControlCredentialProviderError::InvalidResponse => {
+                    GithubResultCredentialError::Invalid
+                }
+            })?;
+        if credential.request_digest() != request.digest() || !credential.permits(operation) {
+            credential.release().await;
+            return Err(GithubResultCredentialError::Invalid);
+        }
+        Ok(credential)
     }
 
     #[allow(clippy::too_many_lines)]
@@ -409,16 +228,11 @@ impl GithubResultProviderAdapter {
         app_id: GithubCheckAppId,
         claimed: &ClaimedProviderResult,
         state: GithubResultState,
-        credential: &GithubResultCredential,
+        token: &GithubApiToken<'_>,
     ) -> ProviderResultAdapterOutcome {
         match state {
             GithubResultState::EnsureSuite => match endpoint
-                .create_check_suite(
-                    repository,
-                    &claimed.subject().object(),
-                    app_id,
-                    credential.token(),
-                )
+                .create_check_suite(repository, &claimed.subject().object(), app_id, token)
                 .await
             {
                 Ok(
@@ -442,7 +256,7 @@ impl GithubResultProviderAdapter {
                     Err(error) => return failed(error),
                 };
                 match endpoint
-                    .create_check_run(repository, &identity, credential.token())
+                    .create_check_run(repository, &identity, token)
                     .await
                 {
                     Ok(GithubCheckRunCreateOutcome::Created(run)) => retry(
@@ -486,7 +300,7 @@ impl GithubResultProviderAdapter {
                     Err(error) => return failed(error),
                 };
                 match endpoint
-                    .reconcile_check_run_creation(repository, &identity, credential.token())
+                    .reconcile_check_run_creation(repository, &identity, token)
                     .await
                 {
                     Ok(GithubCheckRunReconciliation::Exact(run)) => retry(
@@ -514,7 +328,7 @@ impl GithubResultProviderAdapter {
             }
             GithubResultState::RunBound { suite_id, run_id } => {
                 self.read_run(
-                    endpoint, repository, app_id, claimed, suite_id, run_id, credential,
+                    endpoint, repository, app_id, claimed, suite_id, run_id, token,
                 )
                 .await
             }
@@ -534,7 +348,7 @@ impl GithubResultProviderAdapter {
                         github_run_id(run_id),
                         &identity,
                         &timestamp,
-                        credential.token(),
+                        token,
                     )
                     .await
                 {
@@ -548,7 +362,7 @@ impl GithubResultProviderAdapter {
             }
             GithubResultState::CompleteRun { suite_id, run_id } => {
                 self.complete_run(
-                    endpoint, repository, app_id, claimed, suite_id, run_id, credential,
+                    endpoint, repository, app_id, claimed, suite_id, run_id, token,
                 )
                 .await
             }
@@ -566,7 +380,7 @@ impl GithubResultProviderAdapter {
                     run_id,
                     confirmed,
                     uncertain_end,
-                    credential,
+                    token,
                 )
                 .await
             }
@@ -577,7 +391,7 @@ impl GithubResultProviderAdapter {
                 to,
             } => {
                 self.append_annotations(
-                    endpoint, repository, app_id, claimed, suite_id, run_id, from, to, credential,
+                    endpoint, repository, app_id, claimed, suite_id, run_id, from, to, token,
                 )
                 .await
             }
@@ -593,19 +407,14 @@ impl GithubResultProviderAdapter {
         claimed: &ClaimedProviderResult,
         suite_id: u64,
         native_run_id: u64,
-        credential: &GithubResultCredential,
+        token: &GithubApiToken<'_>,
     ) -> ProviderResultAdapterOutcome {
         let identity = match identity(claimed, app_id, suite_id) {
             Ok(identity) => identity,
             Err(error) => return failed(error),
         };
         let current = match endpoint
-            .get_check_run(
-                repository,
-                github_run_id(native_run_id),
-                &identity,
-                credential.token(),
-            )
+            .get_check_run(repository, github_run_id(native_run_id), &identity, token)
             .await
         {
             Ok(current) => current,
@@ -668,7 +477,7 @@ impl GithubResultProviderAdapter {
         claimed: &ClaimedProviderResult,
         suite_id: u64,
         native_run_id: u64,
-        credential: &GithubResultCredential,
+        token: &GithubApiToken<'_>,
     ) -> ProviderResultAdapterOutcome {
         let identity = match identity(claimed, app_id, suite_id) {
             Ok(identity) => identity,
@@ -707,7 +516,7 @@ impl GithubResultProviderAdapter {
                 github_run_id(native_run_id),
                 &identity,
                 completion,
-                credential.token(),
+                token,
             )
             .await
         {
@@ -736,7 +545,7 @@ impl GithubResultProviderAdapter {
         native_run_id: u64,
         confirmed: usize,
         uncertain_end: Option<usize>,
-        credential: &GithubResultCredential,
+        token: &GithubApiToken<'_>,
     ) -> ProviderResultAdapterOutcome {
         let desired = match annotations(claimed) {
             Ok(annotations) => annotations,
@@ -748,11 +557,7 @@ impl GithubResultProviderAdapter {
             return failed(ResultPublisherError::Conflict);
         }
         let current = match endpoint
-            .list_check_run_annotations(
-                repository,
-                github_run_id(native_run_id),
-                credential.token(),
-            )
+            .list_check_run_annotations(repository, github_run_id(native_run_id), token)
             .await
         {
             Ok(current) => current,
@@ -802,7 +607,7 @@ impl GithubResultProviderAdapter {
         native_run_id: u64,
         from: usize,
         to: usize,
-        credential: &GithubResultCredential,
+        token: &GithubApiToken<'_>,
     ) -> ProviderResultAdapterOutcome {
         let desired = match annotations(claimed) {
             Ok(annotations) => annotations,
@@ -831,7 +636,7 @@ impl GithubResultProviderAdapter {
                 conclusion,
                 &output,
                 &desired[from..to],
-                credential.token(),
+                token,
             )
             .await
         {
@@ -911,6 +716,13 @@ pub enum GithubResultProviderAdapterError {
     InvalidConfiguration,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GithubResultCredentialError {
+    Retry,
+    Forbidden,
+    Invalid,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "state", rename_all = "kebab-case", deny_unknown_fields)]
 enum GithubResultState {
@@ -949,16 +761,17 @@ enum GithubResultState {
 }
 
 impl GithubResultState {
-    const fn operation(self) -> GithubResultOperation {
+    const fn operation(self) -> ProviderControlOperation {
         match self {
-            Self::EnsureSuite => GithubResultOperation::EnsureSuite,
-            Self::SuiteBound { .. } => GithubResultOperation::CreateRun,
-            Self::ReconcileRun { .. } => GithubResultOperation::ReconcileRun,
-            Self::RunBound { .. } => GithubResultOperation::ReadRun,
-            Self::StartRun { .. } => GithubResultOperation::StartRun,
-            Self::CompleteRun { .. } => GithubResultOperation::CompleteRun,
-            Self::Annotations { .. } => GithubResultOperation::ReadAnnotations,
-            Self::AppendAnnotations { .. } => GithubResultOperation::AppendAnnotations,
+            Self::EnsureSuite => ProviderControlOperation::ResultResolve,
+            Self::SuiteBound { .. } => ProviderControlOperation::ResultCreate,
+            Self::ReconcileRun { .. } => ProviderControlOperation::ResultReconcile,
+            Self::RunBound { .. } | Self::Annotations { .. } => {
+                ProviderControlOperation::ResultRead
+            }
+            Self::StartRun { .. } | Self::CompleteRun { .. } | Self::AppendAnnotations { .. } => {
+                ProviderControlOperation::ResultWrite
+            }
         }
     }
 
@@ -1206,32 +1019,6 @@ fn parse_binding(external_id: &ExternalResultId) -> Result<(u64, u64), ResultPub
     Ok((suite_id, run_id))
 }
 
-fn credential_matches(
-    credential: &GithubResultCredential,
-    context: &ProviderRuntimeContext,
-    claim: ProviderResultClaimFence,
-    operation: GithubResultOperation,
-    app_id: GithubCheckAppId,
-    policy: &GithubConnectionPolicy,
-    required_through: UnixMillis,
-) -> bool {
-    credential.connection_id == context.connection().connection_id()
-        && credential.connection_revision == context.connection().revision()
-        && credential.external_repository_id
-            == *context
-                .connection()
-                .configuration()
-                .repository()
-                .external_id()
-        && credential.claim == claim
-        && credential.operation == operation
-        && credential.app_id == app_id
-        && credential.installation_id == policy.installation_id().get()
-        && credential.repository == *policy.repository()
-        && credential.required_through == required_through
-        && credential.conservative_expires_at > required_through
-}
-
 fn http_error(
     error: GithubChecksError,
     determinate_retry: GithubResultState,
@@ -1299,12 +1086,16 @@ mod tests {
         ProviderWorkflowSource, RepositoryVisibility, provider_capability_digest,
     };
     use automata_ci_provider::{
-        ProviderResultBinding, ProviderResultModelError, ProviderResultName,
+        ControlCredential, ControlCredentialRelease, ControlCredentialReleaseFuture,
+        ControlCredentialRevocation, ControlCredentialStrategy, ExternalRepositoryId,
+        ProviderConnectionId, ProviderCredentialGeneration, ProviderResultBinding,
+        ProviderResultModelError, ProviderResultName,
     };
     use automata_ci_provider_delivery::{ProviderResultLease, ProviderRuntimeContext};
     use automata_ci_provider_github::{
         GithubConnectionPolicy, GithubInstanceConfiguration, GithubJwtIssuer, GithubProviderFactory,
     };
+    use automata_ci_secret::SecretValue;
     use tokio::{
         io::{AsyncReadExt as _, AsyncWriteExt as _},
         net::TcpListener,
@@ -1319,51 +1110,48 @@ mod tests {
 
     #[derive(Debug)]
     struct ExactCredentials {
-        operations: Mutex<Vec<GithubResultOperation>>,
+        operations: Mutex<Vec<ProviderControlOperation>>,
         releases: Arc<AtomicUsize>,
     }
 
     #[derive(Debug)]
     struct Release(Arc<AtomicUsize>);
 
-    #[async_trait]
-    impl GithubResultCredentialRelease for Release {
-        async fn release(self: Box<Self>) {
-            self.0.fetch_add(1, Ordering::SeqCst);
+    impl ControlCredentialRelease for Release {
+        fn release(self: Box<Self>) -> ControlCredentialReleaseFuture {
+            Box::pin(async move {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            })
         }
     }
 
-    #[async_trait]
-    impl GithubResultCredentialProvider for ExactCredentials {
-        async fn acquire(
-            &self,
-            request: GithubResultCredentialRequest<'_>,
-        ) -> Result<GithubResultCredential, GithubResultCredentialProviderError> {
-            self.operations
-                .lock()
-                .expect("operation lock")
-                .push(request.operation());
-            GithubResultCredential::new(
-                request.context().connection().connection_id(),
-                request.context().connection().revision(),
-                request
-                    .context()
-                    .connection()
-                    .configuration()
-                    .repository()
-                    .external_id()
-                    .clone(),
-                request.claim(),
-                request.operation(),
-                request.app_id(),
-                request.installation_id(),
-                request.repository().clone(),
-                SecretString::new("github-result-test-token".to_owned()).expect("test credential"),
-                request.required_through(),
-                UnixMillis::new(request.required_through().get() + 1),
-                Box::new(Release(Arc::clone(&self.releases))),
-            )
-            .map_err(|_| GithubResultCredentialProviderError::InvariantViolation)
+    impl ControlCredentialProvider for ExactCredentials {
+        fn acquire<'a>(
+            &'a self,
+            request: &'a ControlCredentialRequest,
+        ) -> automata_ci_provider::ControlCredentialFuture<'a> {
+            Box::pin(async move {
+                self.operations
+                    .lock()
+                    .expect("operation lock")
+                    .extend(request.operations().iter());
+                let required_through = UnixMillis::new(
+                    request.requested_at().get() + request.minimum_validity_millis().cast_signed(),
+                );
+                ControlCredential::new(
+                    request,
+                    request.operations().clone(),
+                    ControlCredentialStrategy::Minted,
+                    ProviderCredentialGeneration::new(1).expect("generation"),
+                    SecretValue::from_utf8("github-result-test-token".to_owned())
+                        .expect("test credential"),
+                    request.requested_at(),
+                    Some(UnixMillis::new(required_through.get() + 1)),
+                    ControlCredentialRevocation::ProviderExpiry,
+                    Box::new(Release(Arc::clone(&self.releases))),
+                )
+                .map_err(|_| ControlCredentialProviderError::InvalidResponse)
+            })
         }
     }
 
@@ -1411,8 +1199,8 @@ mod tests {
         let mut continuation = None;
 
         for expected in [
-            GithubResultOperation::EnsureSuite,
-            GithubResultOperation::CreateRun,
+            ProviderControlOperation::ResultResolve,
+            ProviderControlOperation::ResultCreate,
         ] {
             let claimed = ClaimedProviderResult::new(
                 subject.clone(),
@@ -1451,9 +1239,9 @@ mod tests {
                 .expect("operation lock")
                 .as_slice(),
             &[
-                GithubResultOperation::EnsureSuite,
-                GithubResultOperation::CreateRun,
-                GithubResultOperation::ReadRun,
+                ProviderControlOperation::ResultResolve,
+                ProviderControlOperation::ResultCreate,
+                ProviderControlOperation::ResultRead,
             ]
         );
 
@@ -1575,8 +1363,8 @@ mod tests {
                 .expect("operation lock")
                 .as_slice(),
             &[
-                GithubResultOperation::ReadRun,
-                GithubResultOperation::CompleteRun,
+                ProviderControlOperation::ResultRead,
+                ProviderControlOperation::ResultWrite,
             ]
         );
         let requests = requests.lock().expect("request lock");

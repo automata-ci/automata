@@ -42,6 +42,16 @@ impl SecretString {
         &self.0
     }
 
+    /// Transfers the UTF-8 allocation into another zeroizing secret owner.
+    ///
+    /// The returned bytes are still secret and must be moved immediately into
+    /// a type that zeroizes them on drop. This method avoids retaining a second
+    /// plaintext allocation while crossing between secret-custody types.
+    #[must_use = "transferred secret bytes must enter zeroizing custody"]
+    pub fn into_secret_bytes(mut self) -> Vec<u8> {
+        std::mem::take(&mut self.0).into_bytes()
+    }
+
     /// Compares this secret with a candidate without data-dependent early exit.
     pub fn constant_time_eq(&self, candidate: &str) -> bool {
         constant_time_string_eq(self.expose_secret(), candidate)

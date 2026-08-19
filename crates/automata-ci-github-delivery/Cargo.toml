@@ -43,6 +43,7 @@ url.workspace = true
 
 [dev-dependencies]
 axum.workspace = true
+automata-ci-secret.workspace = true
 flate2.workspace = true
 tar.workspace = true
 

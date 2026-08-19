@@ -52,9 +52,10 @@ pub use control::{
     ProviderControlError, ProviderControlKind,
 };
 pub use credential::{
-    ControlCredential, ControlCredentialFuture, ControlCredentialProvider,
-    ControlCredentialProviderError, ControlCredentialRequest, ControlCredentialRevocation,
-    ControlCredentialStrategy, IssuedWorkloadCredential, MAX_CONTROL_CREDENTIAL_VALIDITY_MILLIS,
+    ControlCredential, ControlCredentialClaim, ControlCredentialFuture, ControlCredentialProvider,
+    ControlCredentialProviderError, ControlCredentialRelease, ControlCredentialReleaseFuture,
+    ControlCredentialRequest, ControlCredentialRevocation, ControlCredentialStrategy,
+    IssuedWorkloadCredential, MAX_CONTROL_CREDENTIAL_VALIDITY_MILLIS,
     MAX_PROVIDER_CONTROL_OPERATIONS, MAX_WORKLOAD_CREDENTIAL_VALIDITY_MILLIS,
     MAX_WORKLOAD_PERMISSION_NAME_BYTES, MAX_WORKLOAD_PERMISSIONS, ProviderControlOperation,
     ProviderControlOperationSet, ProviderCredentialGeneration, ProviderCredentialModelError,
@@ -97,9 +98,10 @@ pub use identity::{
     ExternalMergeQueueId, ExternalRepositoryId, ExternalRepositoryIdentity, ExternalResultId,
     ExternalSubjectId, ExternalSubjectIdentity, ExternalSubjectKind, MAX_EXTERNAL_ID_BYTES,
     MAX_PROVIDER_TYPE_ID_BYTES, ProviderConnectionId, ProviderControlCredentialId,
-    ProviderDeliveryId, ProviderIdentityError, ProviderInstanceId, ProviderProcessingInvocationId,
-    ProviderProcessingWorkerId, ProviderResultSubjectId, ProviderResultWorkerId, ProviderTypeId,
-    ProviderWebhookEndpointId, ProviderWorkflowInvocationId, ProviderWorkloadCredentialId,
+    ProviderControlCredentialWorkerId, ProviderDeliveryId, ProviderIdentityError,
+    ProviderInstanceId, ProviderProcessingInvocationId, ProviderProcessingWorkerId,
+    ProviderResultSubjectId, ProviderResultWorkerId, ProviderTypeId, ProviderWebhookEndpointId,
+    ProviderWorkflowInvocationId, ProviderWorkloadCredentialId,
 };
 pub use result::{
     ClaimProviderResult, ClaimedProviderResult, CompleteProviderResult, DesiredProviderResult,

@@ -22,8 +22,6 @@ use automata_ci_credential_github::{
     PendingGithubServerServiceHandoffRelease, github_server_service_credential_request,
 };
 use automata_ci_github_delivery::{
-    GithubResultCredential, GithubResultCredentialProvider, GithubResultCredentialProviderError,
-    GithubResultCredentialRelease, GithubResultCredentialRequest, GithubResultOperation,
     GithubScheduleSourceCredential, GithubScheduleSourceCredentialProvider,
     GithubScheduleSourceCredentialProviderError, GithubScheduleSourceCredentialRequest,
     GithubServerServiceCredentialRelease, GithubTriggerCredential,
@@ -31,9 +29,17 @@ use automata_ci_github_delivery::{
     GithubTriggerCredentialProviderError, GithubTriggerCredentialRelease,
     GithubTriggerCredentialRequest,
 };
-use automata_ci_provider_github::{
-    GithubHttpEndpoint, GithubWorkflowPermissionDefaults, GithubWorkflowPermissionDefaultsRequest,
+use automata_ci_provider::{
+    ControlCredential, ControlCredentialFuture, ControlCredentialProvider,
+    ControlCredentialProviderError, ControlCredentialRelease, ControlCredentialReleaseFuture,
+    ControlCredentialRequest, ControlCredentialRevocation, ControlCredentialStrategy,
+    ProviderControlOperation, ProviderCredentialGeneration,
 };
+use automata_ci_provider_github::{
+    GithubConnectionPolicy, GithubHttpEndpoint, GithubWorkflowPermissionDefaults,
+    GithubWorkflowPermissionDefaultsRequest,
+};
+use automata_ci_secret::SecretValue;
 use automata_ci_store::{
     AcquireGithubServerServiceHandoff, GithubProviderManifest, GithubServerServiceAction,
     GithubServerServiceAuthorityId, GithubServerServiceAuthorityIdentity,
@@ -1323,74 +1329,119 @@ impl GithubProviderCredentialAdapters {
         ))
     }
 
-    async fn acquire_common_result(
+    async fn control_authority(
         &self,
-        request: GithubResultCredentialRequest<'_>,
-    ) -> Result<GithubResultCredential, GithubResultCredentialProviderError> {
-        let (selector, repository) = self
-            .operation_authority(
-                request.context(),
-                request.claimed().subject().repository().external_id(),
-                request.installation_id(),
-                request.app_id(),
-                request.repository(),
-                GithubServerServiceScope::ChecksWrite,
-            )
+        request: &ControlCredentialRequest,
+        scope: GithubServerServiceScope,
+    ) -> Result<GithubServerServiceAuthoritySelector, GithubProviderCredentialHandoffError> {
+        let connection = request.connection();
+        let policy = GithubConnectionPolicy::decode(connection.configuration().adapter_policy())
+            .map_err(|_| GithubProviderCredentialHandoffError::Rejected)?;
+        let tenant = TenantScope::from_authenticated_tenant_id(
+            connection.configuration().workspace_id().to_string(),
+        )
+        .map_err(|_| GithubProviderCredentialHandoffError::Inconsistent)?;
+        let github_repository_id = request
+            .repository()
+            .external_id()
+            .as_str()
+            .parse::<u64>()
+            .ok()
+            .filter(|value| *value != 0)
+            .ok_or(GithubProviderCredentialHandoffError::Rejected)?;
+        let mut candidates = self.authorities.values().filter(|authority| {
+            authority.scope() == scope
+                && authority.tenant() == &tenant
+                && authority.connection_id() == request.connection_id()
+                && authority.github_repository_id().get() == github_repository_id
+                && authority.installation_id().get() == policy.installation_id().get()
+        });
+        let candidate = candidates
+            .next()
+            .filter(|_| candidates.next().is_none())
+            .ok_or(GithubProviderCredentialHandoffError::Rejected)?;
+        let selector = GithubServerServiceAuthoritySelector::from_identity(candidate);
+        let authority = self.authority(&selector, scope).await?;
+        let canonical = github_server_service_credential_request(&authority)
+            .map_err(|_| GithubProviderCredentialHandoffError::Inconsistent)?;
+        if canonical.repository().repository() != policy.repository()
+            || authority.github_repository_id().get() != github_repository_id
+        {
+            return Err(GithubProviderCredentialHandoffError::Rejected);
+        }
+        Ok(selector)
+    }
+
+    async fn acquire_control(
+        &self,
+        request: &ControlCredentialRequest,
+    ) -> Result<ControlCredential, ControlCredentialProviderError> {
+        let mut operations = request.operations().iter();
+        let operation = operations
+            .next()
+            .filter(|_| operations.next().is_none())
+            .ok_or(ControlCredentialProviderError::Unsupported)?;
+        let action =
+            common_result_action(operation).ok_or(ControlCredentialProviderError::Unsupported)?;
+        let selector = self
+            .control_authority(request, GithubServerServiceScope::ChecksWrite)
             .await
-            .map_err(common_result_handoff_error)?;
-        let consumer = common_result_consumer(&request)?;
+            .map_err(common_control_handoff_error)?;
+        let consumer = common_control_consumer(request, action)?;
         let observed_at = self
             .observation_clock
             .as_ref()
-            .ok_or(GithubResultCredentialProviderError::InvariantViolation)?
-            .now();
-        let handoff_request = acquire_request(
-            selector.clone(),
-            consumer,
-            observed_at,
-            request.required_through(),
-        )
-        .map_err(common_result_handoff_error)?;
+            .ok_or(ControlCredentialProviderError::InvalidResponse)?
+            .now()
+            .max(request.requested_at());
+        let required_through = observed_at
+            .get()
+            .checked_add(request.minimum_validity_millis().cast_signed())
+            .map(UnixMillis::new)
+            .ok_or(ControlCredentialProviderError::InvalidResponse)?;
+        let handoff_request =
+            acquire_request(selector.clone(), consumer, observed_at, required_through)
+                .map_err(common_control_handoff_error)?;
         let handoff = self
             .handoffs
             .acquire(handoff_request)
             .await
-            .map_err(common_result_handoff_error)?;
+            .map_err(common_control_handoff_error)?;
         if handoff.selector != selector
             || handoff.consumer != consumer
             || handoff.key.authority_id() != selector.authority_id()
-            || handoff.required_through != request.required_through()
+            || handoff.required_through != required_through
             || handoff.acquired_at != observed_at
-            || handoff.usable_until <= request.required_through()
+            || handoff.usable_until <= required_through
         {
             release_invalid_handoff(handoff).await;
-            return Err(GithubResultCredentialProviderError::InvariantViolation);
+            return Err(ControlCredentialProviderError::InvalidResponse);
         }
         let drop_release_arm = handoff.drop_release_arm.clone();
-        let credential = GithubResultCredential::new(
-            request.context().connection().connection_id(),
-            request.context().connection().revision(),
-            request
-                .claimed()
-                .subject()
-                .repository()
-                .external_id()
-                .clone(),
-            request.claim(),
-            request.operation(),
-            request.app_id(),
-            request.installation_id(),
-            repository,
-            handoff.token,
-            request.required_through(),
-            handoff.usable_until,
-            Box::new(CommonResultCredentialRelease {
+        let Ok(generation) = ProviderCredentialGeneration::new(handoff.key.generation().get())
+        else {
+            release_invalid_handoff(handoff).await;
+            return Err(ControlCredentialProviderError::InvalidResponse);
+        };
+        let Ok(value) = SecretValue::new(handoff.token.into_secret_bytes()) else {
+            handoff.release.release().await;
+            return Err(ControlCredentialProviderError::InvalidResponse);
+        };
+        arm_drop_release(drop_release_arm);
+        ControlCredential::new(
+            request,
+            request.operations().clone(),
+            ControlCredentialStrategy::Minted,
+            generation,
+            value,
+            handoff.acquired_at,
+            Some(handoff.usable_until),
+            ControlCredentialRevocation::Explicit,
+            Box::new(CommonControlCredentialRelease {
                 inner: handoff.release,
             }),
         )
-        .map_err(|_| GithubResultCredentialProviderError::InvariantViolation)?;
-        arm_drop_release(drop_release_arm);
-        Ok(credential)
+        .map_err(|_| ControlCredentialProviderError::InvalidResponse)
     }
 
     async fn acquire_common_trigger(
@@ -1443,6 +1494,7 @@ impl GithubProviderCredentialAdapters {
             return Err(GithubTriggerCredentialProviderError::InvariantViolation);
         }
         let drop_release_arm = handoff.drop_release_arm.clone();
+        arm_drop_release(drop_release_arm);
         let credential = GithubTriggerCredential::new(
             request.context().connection().revision(),
             request
@@ -1465,7 +1517,6 @@ impl GithubProviderCredentialAdapters {
             }),
         )
         .map_err(|_| GithubTriggerCredentialProviderError::InvariantViolation)?;
-        arm_drop_release(drop_release_arm);
         Ok(credential)
     }
 
@@ -1508,21 +1559,16 @@ impl GithubProviderCredentialAdapters {
         };
         let repository = canonical_request.repository().repository().clone();
         let drop_release_arm = handoff.drop_release_arm.clone();
-        let credential = GithubScheduleSourceCredential::new(
+        arm_drop_release(drop_release_arm);
+        GithubScheduleSourceCredential::new(
             &request,
             repository,
             handoff.selector,
             handoff.consumer,
             handoff.token,
             handoff.release,
-        );
-        match credential {
-            Ok(credential) => {
-                arm_drop_release(drop_release_arm);
-                Ok(credential)
-            }
-            Err(_) => Err(GithubScheduleSourceCredentialProviderError::InvariantViolation),
-        }
+        )
+        .map_err(|_| GithubScheduleSourceCredentialProviderError::InvariantViolation)
     }
 
     /// Acquires one exact repository handoff for a live manual-dispatch claim.
@@ -1913,33 +1959,30 @@ impl fmt::Debug for GithubProviderCredentialAdapters {
     }
 }
 
-struct CommonResultCredentialRelease {
+struct CommonControlCredentialRelease {
     inner: Box<dyn GithubServerServiceCredentialRelease>,
 }
 
-#[async_trait]
-impl GithubResultCredentialRelease for CommonResultCredentialRelease {
-    async fn release(self: Box<Self>) {
-        self.inner.release().await;
+impl ControlCredentialRelease for CommonControlCredentialRelease {
+    fn release(self: Box<Self>) -> ControlCredentialReleaseFuture {
+        Box::pin(async move {
+            self.inner.release().await;
+        })
     }
 }
 
-impl fmt::Debug for CommonResultCredentialRelease {
+impl fmt::Debug for CommonControlCredentialRelease {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("CommonResultCredentialRelease")
+            .debug_struct("CommonControlCredentialRelease")
             .field("inner", &"[exact supervised release]")
             .finish()
     }
 }
 
-#[async_trait]
-impl GithubResultCredentialProvider for GithubProviderCredentialAdapters {
-    async fn acquire(
-        &self,
-        request: GithubResultCredentialRequest<'_>,
-    ) -> Result<GithubResultCredential, GithubResultCredentialProviderError> {
-        self.acquire_common_result(request).await
+impl ControlCredentialProvider for GithubProviderCredentialAdapters {
+    fn acquire<'a>(&'a self, request: &'a ControlCredentialRequest) -> ControlCredentialFuture<'a> {
+        Box::pin(self.acquire_control(request))
     }
 }
 
@@ -2043,23 +2086,24 @@ fn arm_drop_release(arm: Option<Arc<AtomicBool>>) {
     }
 }
 
-fn common_result_consumer(
-    request: &GithubResultCredentialRequest<'_>,
-) -> Result<GithubServerServiceConsumerClaim, GithubResultCredentialProviderError> {
+fn common_control_consumer(
+    request: &ControlCredentialRequest,
+    action: GithubServerServiceAction,
+) -> Result<GithubServerServiceConsumerClaim, ControlCredentialProviderError> {
     let claim = request.claim();
-    let consumer_id = GithubServerServiceConsumerId::from_uuid(claim.subject_id().as_uuid())
-        .map_err(|_| GithubResultCredentialProviderError::InvariantViolation)?;
+    let consumer_id = GithubServerServiceConsumerId::from_uuid(claim.credential_id().as_uuid())
+        .map_err(|_| ControlCredentialProviderError::InvalidResponse)?;
     let owner = GithubServerServiceWorkerId::from_uuid(claim.worker_id().as_uuid())
-        .map_err(|_| GithubResultCredentialProviderError::InvariantViolation)?;
+        .map_err(|_| ControlCredentialProviderError::InvalidResponse)?;
     let fence = GithubServerServiceClaimFence::new(claim.fence())
-        .map_err(|_| GithubResultCredentialProviderError::InvariantViolation)?;
-    let revision = GithubServerServiceRevision::new(request.claimed().desired().generation())
-        .map_err(|_| GithubResultCredentialProviderError::InvariantViolation)?;
+        .map_err(|_| ControlCredentialProviderError::InvalidResponse)?;
+    let revision = GithubServerServiceRevision::new(claim.revision())
+        .map_err(|_| ControlCredentialProviderError::InvalidResponse)?;
     Ok(GithubServerServiceConsumerClaim::new(
         consumer_id,
         owner,
         fence,
-        common_result_action(request.operation()),
+        action,
         revision,
     ))
 }
@@ -2102,31 +2146,34 @@ const fn common_trigger_action(
     }
 }
 
-const fn common_result_action(operation: GithubResultOperation) -> GithubServerServiceAction {
+const fn common_result_action(
+    operation: ProviderControlOperation,
+) -> Option<GithubServerServiceAction> {
     match operation {
-        GithubResultOperation::EnsureSuite => GithubServerServiceAction::EnsureCheckSuite,
-        GithubResultOperation::CreateRun => GithubServerServiceAction::CreateCheckRun,
-        GithubResultOperation::ReconcileRun => GithubServerServiceAction::ReconcileCheckRun,
-        GithubResultOperation::ReadRun
-        | GithubResultOperation::StartRun
-        | GithubResultOperation::CompleteRun
-        | GithubResultOperation::ReadAnnotations
-        | GithubResultOperation::AppendAnnotations => GithubServerServiceAction::PublishCheckRun,
+        ProviderControlOperation::ResultResolve => {
+            Some(GithubServerServiceAction::EnsureCheckSuite)
+        }
+        ProviderControlOperation::ResultCreate => Some(GithubServerServiceAction::CreateCheckRun),
+        ProviderControlOperation::ResultReconcile => {
+            Some(GithubServerServiceAction::ReconcileCheckRun)
+        }
+        ProviderControlOperation::ResultRead | ProviderControlOperation::ResultWrite => {
+            Some(GithubServerServiceAction::PublishCheckRun)
+        }
+        _ => None,
     }
 }
 
-const fn common_result_handoff_error(
+const fn common_control_handoff_error(
     error: GithubProviderCredentialHandoffError,
-) -> GithubResultCredentialProviderError {
+) -> ControlCredentialProviderError {
     match error {
         GithubProviderCredentialHandoffError::Unavailable => {
-            GithubResultCredentialProviderError::Unavailable
+            ControlCredentialProviderError::Unavailable
         }
-        GithubProviderCredentialHandoffError::Rejected => {
-            GithubResultCredentialProviderError::Rejected
-        }
+        GithubProviderCredentialHandoffError::Rejected => ControlCredentialProviderError::Forbidden,
         GithubProviderCredentialHandoffError::Inconsistent => {
-            GithubResultCredentialProviderError::InvariantViolation
+            ControlCredentialProviderError::InvalidResponse
         }
     }
 }

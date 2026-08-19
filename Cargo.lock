@@ -536,6 +536,7 @@ dependencies = [
  "automata-ci-provider-github",
  "automata-ci-schedule",
  "automata-ci-scm",
+ "automata-ci-secret",
  "automata-ci-store",
  "automata-ci-workflow-actions",
  "automata-ci-workflow-service",

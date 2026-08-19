@@ -15,11 +15,7 @@ mod server_credential;
 mod trigger_handler;
 
 pub use common_runtime::GithubProviderRuntimeAdapter;
-pub use result_adapter::{
-    GithubResultCredential, GithubResultCredentialProvider, GithubResultCredentialProviderError,
-    GithubResultCredentialRelease, GithubResultCredentialRequest, GithubResultCredentialValueError,
-    GithubResultOperation, GithubResultProviderAdapter, GithubResultProviderAdapterError,
-};
+pub use result_adapter::{GithubResultProviderAdapter, GithubResultProviderAdapterError};
 pub use schedule::{
     GithubScheduleClock, GithubScheduleService, GithubScheduleServiceConfig,
     GithubScheduleServiceConfigurationError, GithubScheduleServiceError, GithubScheduleServicePass,

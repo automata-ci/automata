@@ -1,6 +1,6 @@
 use std::{collections::HashSet, fmt};
 
-use automata_ci_auth::{github::GithubEndpointError, secret::SecretString};
+use automata_ci_auth::github::GithubEndpointError;
 use automata_ci_core::GitObjectId;
 use automata_ci_scm::RepositoryId;
 use reqwest::{
@@ -14,7 +14,7 @@ use url::Url;
 
 use crate::{
     config::same_origin,
-    endpoint::{GithubHttpEndpoint, authorization_header},
+    endpoint::{GithubApiToken, GithubHttpEndpoint, authorization_header_value},
     pagination,
     rate_limit::{MAX_RETRY_AFTER_SECONDS, is_rate_limited, rate_limit_headers},
     repository_path,
@@ -1167,7 +1167,7 @@ impl GithubHttpEndpoint {
         repository: &RepositoryId,
         head_sha: &GitObjectId,
         app_id: GithubCheckAppId,
-        server_service_token: &SecretString,
+        server_service_token: &GithubApiToken<'_>,
     ) -> Result<GithubCheckSuiteCreateOutcome, GithubChecksError> {
         let endpoint = self.checks_repository_url(repository, &["check-suites"])?;
         let body = CreateSuiteBody {
@@ -1216,7 +1216,7 @@ impl GithubHttpEndpoint {
         repository: &RepositoryId,
         head_sha: &GitObjectId,
         app_id: GithubCheckAppId,
-        server_service_token: &SecretString,
+        server_service_token: &GithubApiToken<'_>,
     ) -> Result<Option<GithubCheckSuite>, GithubChecksError> {
         let app_id_query = app_id.get().to_string();
         let head_sha_hex = head_sha.to_string();
@@ -1266,7 +1266,7 @@ impl GithubHttpEndpoint {
         &self,
         repository: &RepositoryId,
         identity: &GithubCheckRunIdentity,
-        server_service_token: &SecretString,
+        server_service_token: &GithubApiToken<'_>,
     ) -> Result<GithubCheckRunCreateOutcome, GithubChecksError> {
         let endpoint = self.checks_repository_url(repository, &["check-runs"])?;
         let summary = check_summary("Waiting for a runner.", identity.details_url.as_str());
@@ -1331,7 +1331,7 @@ impl GithubHttpEndpoint {
         &self,
         repository: &RepositoryId,
         identity: &GithubCheckRunIdentity,
-        server_service_token: &SecretString,
+        server_service_token: &GithubApiToken<'_>,
     ) -> Result<GithubCheckRunReconciliation, GithubChecksError> {
         let suite_id = identity.suite_id.get().to_string();
         let mut endpoint =
@@ -1435,7 +1435,7 @@ impl GithubHttpEndpoint {
         repository: &RepositoryId,
         run_id: GithubCheckRunId,
         identity: &GithubCheckRunIdentity,
-        server_service_token: &SecretString,
+        server_service_token: &GithubApiToken<'_>,
     ) -> Result<GithubCheckRun, GithubChecksError> {
         let run_id_segment = run_id.get().to_string();
         let endpoint = self.checks_repository_url(repository, &["check-runs", &run_id_segment])?;
@@ -1469,7 +1469,7 @@ impl GithubHttpEndpoint {
         run_id: GithubCheckRunId,
         identity: &GithubCheckRunIdentity,
         started_at: &GithubCheckTimestamp,
-        server_service_token: &SecretString,
+        server_service_token: &GithubApiToken<'_>,
     ) -> Result<GithubCheckRun, GithubChecksError> {
         let run_id_segment = run_id.get().to_string();
         let endpoint = self.checks_repository_url(repository, &["check-runs", &run_id_segment])?;
@@ -1517,7 +1517,7 @@ impl GithubHttpEndpoint {
         run_id: GithubCheckRunId,
         identity: &GithubCheckRunIdentity,
         completion: GithubCheckCompletion<'_>,
-        server_service_token: &SecretString,
+        server_service_token: &GithubApiToken<'_>,
     ) -> Result<GithubCheckRun, GithubChecksError> {
         let generated_output = if completion.output.is_none() {
             let summary = check_summary(
@@ -1587,7 +1587,7 @@ impl GithubHttpEndpoint {
         conclusion: GithubCheckConclusion,
         output: &GithubCheckOutput,
         annotations: &[GithubCheckAnnotation],
-        server_service_token: &SecretString,
+        server_service_token: &GithubApiToken<'_>,
     ) -> Result<GithubCheckRun, GithubChecksError> {
         if annotations.is_empty() || annotations.len() > MAX_CHECK_ANNOTATIONS_PER_REQUEST {
             return Err(GithubChecksError::InvalidRequest);
@@ -1631,7 +1631,7 @@ impl GithubHttpEndpoint {
         &self,
         repository: &RepositoryId,
         run_id: GithubCheckRunId,
-        server_service_token: &SecretString,
+        server_service_token: &GithubApiToken<'_>,
     ) -> Result<Vec<GithubCheckAnnotation>, GithubChecksError> {
         let run_id_segment = run_id.get().to_string();
         let mut endpoint = self
@@ -1878,9 +1878,10 @@ fn finish_reconciliation(
 
 fn authenticated_checks_request(
     request: reqwest::RequestBuilder,
-    token: &SecretString,
+    token: &GithubApiToken<'_>,
 ) -> Result<reqwest::RequestBuilder, GithubChecksError> {
-    let authorization = authorization_header(token).map_err(map_endpoint_error)?;
+    let authorization =
+        authorization_header_value(token.expose_secret()).map_err(map_endpoint_error)?;
     Ok(request
         .header(ACCEPT, ACCEPT_API_JSON)
         .header(AUTHORIZATION, authorization))

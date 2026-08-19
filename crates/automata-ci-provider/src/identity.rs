@@ -222,6 +222,11 @@ uuid_identity!(
     "provider control credential ID"
 );
 uuid_identity!(
+    /// Durable identity of the worker claiming one control-credential acquisition.
+    ProviderControlCredentialWorkerId,
+    "provider control credential worker ID"
+);
+uuid_identity!(
     /// Durable identity of one workload credential authority.
     ProviderWorkloadCredentialId,
     "provider workload credential ID"
