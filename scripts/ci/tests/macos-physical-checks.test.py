@@ -30,7 +30,7 @@ class MacosPhysicalChecksTest(unittest.TestCase):
         result = self.run_script("--plan")
         self.assertEqual(result.returncode, 0, result.stderr)
         commands = [line for line in result.stdout.splitlines() if line.startswith("RUN ")]
-        self.assertEqual(len(commands), 4, result.stdout)
+        self.assertEqual(len(commands), 5, result.stdout)
         for identity in (
             "automata-ci-runner --test runner",
             "automata-ci-sandbox-macos --test macos_provider",
@@ -40,9 +40,12 @@ class MacosPhysicalChecksTest(unittest.TestCase):
         for command in commands:
             self.assertIn("--test-threads=1", command)
         self.assertIn("macos_vm_runner_process_e2e::", commands[0])
-        self.assertIn("provider_cleans_up_and_reuses_slot_after_live_helper_loss", commands[1])
-        self.assertIn("provider_reconciles_a_live_orphan", commands[2])
-        self.assertIn("physical_guest_reaches_an_allowlisted_origin", commands[3])
+        self.assertIn(
+            "provider_recovers_an_interrupted_launch_and_reuses_the_slot", commands[1]
+        )
+        self.assertIn("provider_cleans_up_and_reuses_slot_after_live_helper_loss", commands[2])
+        self.assertIn("provider_reconciles_a_live_orphan", commands[3])
+        self.assertIn("physical_guest_reaches_an_allowlisted_origin", commands[4])
         self.assertNotIn("HELPER_REQUIREMENT=", result.stdout)
         self.assertNotIn("STORAGE_QUOTA_BYTES=", result.stdout)
 
@@ -52,12 +55,12 @@ class MacosPhysicalChecksTest(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         commands = [line for line in result.stdout.splitlines() if line.startswith("RUN ")]
-        self.assertEqual(len(commands), 5, result.stdout)
+        self.assertEqual(len(commands), 6, result.stdout)
         self.assertEqual(
             sum("automata-ci-runner --test runner" in command for command in commands), 2
         )
         self.assertEqual(
-            sum("--test macos_provider" in command for command in commands), 2
+            sum("--test macos_provider" in command for command in commands), 3
         )
 
     def test_invalid_repetition_count_fails_closed(self) -> None:
