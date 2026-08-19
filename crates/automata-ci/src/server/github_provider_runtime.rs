@@ -41,11 +41,11 @@ use automata_ci_credential_github::{
     PinnedGithubRuntimeAuthorityMintBroker,
 };
 use automata_ci_github_delivery::{
-    GithubDeliveryConnection, GithubProviderRuntimeAdapter, GithubResultCredentialProvider,
-    GithubResultProviderAdapter, GithubScheduleClock, GithubScheduleService,
-    GithubScheduleServiceConfigurationError, GithubScheduleServiceError,
-    GithubScheduleSourceAuthorities, GithubScheduleSourceCredentialProvider,
-    GithubTriggerCredentialProvider, GithubWorkflowTriggerHandler,
+    GithubProviderRuntimeAdapter, GithubResultCredentialProvider, GithubResultProviderAdapter,
+    GithubScheduleClock, GithubScheduleService, GithubScheduleServiceConfigurationError,
+    GithubScheduleServiceError, GithubScheduleSourceAuthorities,
+    GithubScheduleSourceCredentialProvider, GithubTriggerCredentialProvider,
+    GithubWorkflowTriggerHandler,
 };
 use automata_ci_key_management::{EnvelopeCodec, KeyEncryptionProvider};
 use automata_ci_protocol::RuntimeAuthorityEndpoint;
@@ -59,8 +59,8 @@ use automata_ci_provider_postgres::PostgresProviderManifestRepository;
 use automata_ci_scm::ScmProvider;
 use automata_ci_store::{
     GITHUB_PROVIDER_WEB_ORIGIN, GithubCheckRerunRepository, GithubJobRuntimeAuthorityRepository,
-    GithubRuntimeAuthorityRepository, GithubRuntimeAuthorityWorkerId, GithubScheduleWorkerId,
-    GithubServerServiceAppClientId, GithubServerServiceAppId,
+    GithubProviderManifest, GithubRuntimeAuthorityRepository, GithubRuntimeAuthorityWorkerId,
+    GithubScheduleWorkerId, GithubServerServiceAppClientId, GithubServerServiceAppId,
     GithubServerServiceAuthorityRepository, GithubServerServiceAuthoritySelector,
     GithubServerServiceAuthorityState, GithubServerServiceIssuanceState,
     GithubServerServiceJwtIssuer, GithubServerServiceScope, GithubServerServiceWorkerId,
@@ -591,15 +591,15 @@ impl GithubProviderRuntimeBuilder {
         let plan = GithubProviderBootstrapPlan::new(&config, bootstrap_broker, &verifier)?;
         let job_authority_broker_pins = job_authority_broker_pins(&plan)?;
         let connection_ids: Arc<[ProviderConnectionId]> = plan
-            .connections()
+            .manifests()
             .iter()
-            .map(GithubDeliveryConnection::connection_id)
+            .map(GithubProviderManifest::connection_id)
             .collect::<Vec<_>>()
             .into();
         let tenants: Arc<[TenantScope]> = plan
-            .connections()
+            .manifests()
             .iter()
-            .map(|connection| connection.tenant().clone())
+            .map(|manifest| manifest.tenant().clone())
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect::<Vec<_>>()

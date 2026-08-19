@@ -20,7 +20,6 @@ use automata_ci_credential_github::{
     GithubServerServiceResolutionError, ResolvedGithubServerServiceCredentialRequest,
     github_server_service_credential_request,
 };
-use automata_ci_github_delivery::GithubDeliveryConnection;
 use automata_ci_provider::ProviderConnectionId;
 use automata_ci_provider_github::GithubWebhookVerifier;
 use automata_ci_store::{
@@ -51,15 +50,13 @@ const AUTHORITY_CONFIGURATION_FINGERPRINT_DOMAIN: &[u8] =
 /// Deterministic bootstrap projection of one validated GitHub registry.
 ///
 /// Constructing a plan performs no durable writes and claims no readiness. The
-/// plan owns the exact delivery connections while immutable manifests and
-/// authority identities are retained in stable installation/repository/scope
-/// order.
+/// Immutable manifests and authority identities are retained in stable
+/// installation/repository/scope order.
 pub struct GithubProviderBootstrapPlan {
     manifests: Arc<[GithubProviderManifest]>,
     runner_policies: Arc<[BlobPayload]>,
     repositories: Arc<[RepositoryBootstrap]>,
     authorities: Arc<[GithubServerServiceAuthorityIdentity]>,
-    connections: Vec<GithubDeliveryConnection>,
     resolver: GithubProviderCredentialRequestResolver,
 }
 
@@ -123,7 +120,6 @@ impl GithubProviderBootstrapPlan {
         let mut repositories = Vec::with_capacity(config.repositories().len());
         let mut runner_policy_digests = BTreeSet::new();
         let mut authorities = Vec::with_capacity(config.repositories().len() * 3);
-        let mut connections = Vec::with_capacity(config.repositories().len());
         let mut connection_ids = BTreeSet::new();
         let mut repository_selectors = BTreeSet::new();
         let mut authority_ids = BTreeSet::new();
@@ -249,28 +245,6 @@ impl GithubProviderBootstrapPlan {
             }
             authorities.push(pull_requests);
 
-            let (owner, name) = repository
-                .repository_name()
-                .as_str()
-                .split_once('/')
-                .ok_or(GithubProviderBootstrapError::InvalidConfiguration)?;
-            connections.push(
-                GithubDeliveryConnection::new(
-                    repository.tenant().clone(),
-                    connection_id,
-                    repository.installation_id(),
-                    repository.repository_id(),
-                    repository.repository_owner_id(),
-                    repository.visibility(),
-                    owner,
-                    name,
-                )
-                .and_then(|connection| {
-                    connection
-                        .with_default_branch_ref(repository.cache_repository().default_branch_ref())
-                })
-                .map_err(|_| GithubProviderBootstrapError::InvalidConfiguration)?,
-            );
             manifests.push(manifest);
         }
 
@@ -280,7 +254,6 @@ impl GithubProviderBootstrapPlan {
             runner_policies: runner_policies.into(),
             repositories: repositories.into(),
             authorities: authorities.into(),
-            connections,
             resolver,
         })
     }
@@ -377,23 +350,6 @@ impl GithubProviderBootstrapPlan {
         repository_bootstrap_request(repository, applied_at)
     }
 
-    /// Returns exact webhook delivery connections in stable repository order.
-    #[must_use]
-    pub fn connections(&self) -> &[GithubDeliveryConnection] {
-        &self.connections
-    }
-
-    /// Consumes the projection and transfers its exact connection registry.
-    ///
-    /// Product composition calls this only after [`Self::bootstrap`] returned a
-    /// complete readiness value. The delivery connection type is deliberately
-    /// non-cloneable, so transfer cannot accidentally fork two mutable ingress
-    /// registries from one projected configuration.
-    #[must_use]
-    pub fn into_connections(self) -> Vec<GithubDeliveryConnection> {
-        self.connections
-    }
-
     /// Converges every manifest and authority against one Store adapter.
     ///
     /// Authority identities are inspected before the first write, so known
@@ -475,7 +431,6 @@ impl fmt::Debug for GithubProviderBootstrapPlan {
             .field("runner_policy_count", &self.runner_policies.len())
             .field("runtime_policy_count", &self.repositories.len())
             .field("authority_count", &self.authorities.len())
-            .field("connection_count", &self.connections.len())
             .field("resolver", &self.resolver)
             .finish()
     }
