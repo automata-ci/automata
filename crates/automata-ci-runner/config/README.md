@@ -315,7 +315,10 @@ host-specific path, replace every helper/template pin plus the identity and
 endpoints, provision its owner-only state roots, TLS files, and Keychain items, then start
 `automata-runner run --config /absolute/path/to/runner.macos.json`. Template
 construction, signing, isolation details, and the physical-host acceptance gate
-are documented in the [macOS guide](../../../docs/platforms/macos.md).
+are documented in the [macOS guide](../../../docs/platforms/macos.md). The
+checked-in [launchd installer](../../../scripts/macos/launchd/README.md) starts
+the runner at boot under the exact non-root service account without requiring a
+GUI session.
 
 The remainder of this guide describes the three-process rootless-Podman Linux
 host. macOS uses one runner process with one slot; Windows has no supported

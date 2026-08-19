@@ -1,0 +1,77 @@
+#!/bin/sh
+set -eu
+
+die() {
+    printf 'automata macOS launchd: %s\n' "$*" >&2
+    exit 1
+}
+
+is_absolute_safe_path() {
+    case "$1" in
+        /*) ;;
+        *) return 1 ;;
+    esac
+    case "$1" in
+        *[!A-Za-z0-9_./:-]*) return 1 ;;
+    esac
+}
+
+require_owner_only_file() {
+    path=$1
+    is_absolute_safe_path "$path" || die "path is not a canonical absolute path: $path"
+    [ -f "$path" ] || die "path is not a regular file: $path"
+    [ ! -L "$path" ] || die "path must not be a symbolic link: $path"
+    owner=$(stat -f '%Su' -- "$path") || die "could not inspect path: $path"
+    [ "$owner" = "$(id -un)" ] || die "path is not owned by the service account: $path"
+    mode=$(stat -f '%Lp' -- "$path") || die "could not inspect path mode: $path"
+    case "$mode" in
+        600|400) ;;
+        *) die "path must be owner-only (0600 or 0400): $path" ;;
+    esac
+}
+
+require_executable() {
+    path=$1
+    is_absolute_safe_path "$path" || die "executable is not a canonical absolute path: $path"
+    [ -f "$path" ] || die "executable is not a regular file: $path"
+    [ ! -L "$path" ] || die "executable must not be a symbolic link: $path"
+    [ -x "$path" ] || die "executable is not executable: $path"
+    if find "$path" -prune -perm -022 -print | grep . >/dev/null 2>&1; then
+        die "executable is group- or world-writable: $path"
+    fi
+    return 0
+}
+
+[ "$#" -ge 3 ] || die "usage: automata-launchd-run ENV_FILE EXECUTABLE COMMAND [--config CONFIG]"
+env_file=$1
+executable=$2
+command=$3
+shift 3
+
+if [ "$env_file" != - ]; then
+    require_owner_only_file "$env_file"
+fi
+require_executable "$executable"
+
+if [ "$command" = run ]; then
+    [ "$#" -eq 2 ] && [ "$1" = --config ] ||
+        die "runner service requires --config CONFIG"
+    config=$2
+    require_owner_only_file "$config"
+    set -- "$command" --config "$config"
+else
+    [ "$#" -eq 0 ] || die "unexpected service arguments"
+    set -- "$command"
+fi
+
+# The environment file contains only reviewed NAME=value assignments and
+# secret references (file:/... or env:NAME), never secret values. It is
+# owner-only and is loaded after all launchd ambient variables are present.
+if [ "$env_file" != - ]; then
+    set -a
+    # shellcheck disable=SC1090
+    . "$env_file"
+    set +a
+fi
+
+exec "$executable" "$@"
