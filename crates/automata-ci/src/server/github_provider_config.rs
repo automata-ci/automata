@@ -573,15 +573,6 @@ impl GithubProviderTransport {
         }
     }
 
-    /// Returns the isolated emulator API base, when selected.
-    #[must_use]
-    pub const fn loopback_api_base(&self) -> Option<&Url> {
-        match self {
-            Self::GithubDotCom => None,
-            Self::LoopbackEmulator { api_base, .. } => Some(api_base),
-        }
-    }
-
     /// Returns the exact container-mapped origin carried by repository job
     /// authorities for isolated emulation.
     #[must_use]

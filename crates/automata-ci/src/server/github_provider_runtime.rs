@@ -510,13 +510,6 @@ impl GithubProviderRuntimeBuilder {
         self
     }
 
-    /// Replaces the bounded idle and release policy.
-    #[must_use]
-    pub fn with_policy(mut self, policy: GithubProviderRuntimePolicy) -> Self {
-        self.policy = policy;
-        self
-    }
-
     /// Converges bootstrap state and builds the live aggregate.
     ///
     /// The App PEM and webhook bytes are consumed by this builder and dropped
