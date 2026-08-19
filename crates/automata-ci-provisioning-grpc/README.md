@@ -30,6 +30,9 @@ The management service also accepts a complete shard-wide GitHub App
 configuration and complete repository selection revisions per workspace. App
 private-key and webhook-secret bytes travel only over the authenticated mTLS
 channel and are envelope-encrypted by the PostgreSQL adapter before commit.
+Once that configuration exists, a separate idempotent RPC can replace the
+complete runner policy at a newer provider-configuration revision while Core
+retains the existing encrypted credentials.
 
 Cargo generates the private Rust wire module into `OUT_DIR` with Protox and
 Tonic. Building therefore needs no separately installed `protoc` or Buf binary,

@@ -19,3 +19,8 @@ and commits its continuation cursor with the accepted events.
 Provider desired state separates the encrypted shard-wide GitHub App
 configuration from each workspace's complete repository set. It contains no
 Cloud billing or GitHub OAuth installation ownership policy.
+
+After the initial complete provider configuration exists, the same shard
+authority may replace only its complete runner policy at a newer shared
+configuration revision. That mutation retains the encrypted App private key and
+webhook secret in Core; callers never need to read or resubmit those credentials.

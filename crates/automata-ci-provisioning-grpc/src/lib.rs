@@ -13,22 +13,24 @@ use automata_ci_core::JobAuthorityProfile;
 use automata_ci_core::WorkspaceId;
 use automata_ci_provisioning::{
     ApplyGithubProviderConfigurationCommand, ApplyGithubProviderConfigurationResult,
+    ApplyGithubProviderRunnerPolicyCommand, ApplyGithubProviderRunnerPolicyResult,
     ApplyWorkspaceEntitlementCommand, ApplyWorkspaceEntitlementResult,
     ApplyWorkspaceGithubRepositoriesCommand, ApplyWorkspaceGithubRepositoriesResult,
-    AuthorizedApplyGithubProviderConfiguration, AuthorizedApplyWorkspaceEntitlement,
-    AuthorizedApplyWorkspaceGithubRepositories, AuthorizedProvisionWorkspace, ComputeSeconds,
-    DelegatedActorIssuer, DisplayName, EntitlementDurationSeconds, EntitlementFailure,
-    EntitlementFailureKind, EntitlementRevision, ExternalAccountSubject,
-    GithubProviderConfiguration, GithubProviderConfigurationApplier,
+    AuthorizedApplyGithubProviderConfiguration, AuthorizedApplyGithubProviderRunnerPolicy,
+    AuthorizedApplyWorkspaceEntitlement, AuthorizedApplyWorkspaceGithubRepositories,
+    AuthorizedProvisionWorkspace, ComputeSeconds, DelegatedActorIssuer, DisplayName,
+    EntitlementDurationSeconds, EntitlementFailure, EntitlementFailureKind, EntitlementRevision,
+    ExternalAccountSubject, GithubProviderConfiguration, GithubProviderConfigurationApplier,
     GithubProviderConfigurationFailure, GithubProviderConfigurationFailureKind,
     GithubProviderConfigurationRevision, GithubProviderRepositorySelection,
-    GithubProviderSchedulePolicy, GithubProviderSecret, OperationId, ProvisionWorkspaceCommand,
-    ProvisionWorkspaceResult, ProvisioningAuthenticationError, ProvisioningFailure,
-    ProvisioningFailureKind, ProvisioningWorkloadAuthenticator, ShardId,
-    WorkloadAuthenticationEvidence, WorkspaceEntitlementApplier, WorkspaceExecutionEntitlement,
-    WorkspaceGithubRepositoriesApplier, WorkspaceGithubRepositoriesFailure,
-    WorkspaceGithubRepositoriesFailureKind, WorkspaceGithubRepositoriesRevision,
-    WorkspaceProvisioner,
+    GithubProviderRunnerPolicyApplier, GithubProviderRunnerPolicyFailure,
+    GithubProviderRunnerPolicyFailureKind, GithubProviderSchedulePolicy, GithubProviderSecret,
+    OperationId, ProvisionWorkspaceCommand, ProvisionWorkspaceResult,
+    ProvisioningAuthenticationError, ProvisioningFailure, ProvisioningFailureKind,
+    ProvisioningWorkloadAuthenticator, ShardId, WorkloadAuthenticationEvidence,
+    WorkspaceEntitlementApplier, WorkspaceExecutionEntitlement, WorkspaceGithubRepositoriesApplier,
+    WorkspaceGithubRepositoriesFailure, WorkspaceGithubRepositoriesFailureKind,
+    WorkspaceGithubRepositoriesRevision, WorkspaceProvisioner,
 };
 use automata_ci_store::{
     GithubCheckName, GithubRepositoryName, GithubServerServiceAppClientId,
@@ -63,6 +65,8 @@ const ENTITLEMENT_FAILURE_TYPE_URL: &str =
     "type.googleapis.com/automata.management.v1.ApplyWorkspaceEntitlementFailure";
 const PROVIDER_CONFIGURATION_FAILURE_TYPE_URL: &str =
     "type.googleapis.com/automata.management.v1.ApplyGithubProviderConfigurationFailure";
+const RUNNER_POLICY_FAILURE_TYPE_URL: &str =
+    "type.googleapis.com/automata.management.v1.ApplyGithubProviderRunnerPolicyFailure";
 const WORKSPACE_REPOSITORIES_FAILURE_TYPE_URL: &str =
     "type.googleapis.com/automata.management.v1.ApplyWorkspaceGithubRepositoriesFailure";
 
@@ -130,6 +134,54 @@ impl fmt::Debug for ManagementServerTlsConfig {
     }
 }
 
+/// Complete transport-neutral mutation ports served by the management listener.
+pub struct ManagementApplicationPorts {
+    provisioner: Arc<dyn WorkspaceProvisioner>,
+    entitlement_applier: Arc<dyn WorkspaceEntitlementApplier>,
+    provider_configuration_applier: Arc<dyn GithubProviderConfigurationApplier>,
+    runner_policy_applier: Arc<dyn GithubProviderRunnerPolicyApplier>,
+    workspace_repositories_applier: Arc<dyn WorkspaceGithubRepositoriesApplier>,
+}
+
+impl ManagementApplicationPorts {
+    /// Collects the complete application surface without opening a listener.
+    #[must_use]
+    pub fn new(
+        provisioner: Arc<dyn WorkspaceProvisioner>,
+        entitlement_applier: Arc<dyn WorkspaceEntitlementApplier>,
+        provider_configuration_applier: Arc<dyn GithubProviderConfigurationApplier>,
+        runner_policy_applier: Arc<dyn GithubProviderRunnerPolicyApplier>,
+        workspace_repositories_applier: Arc<dyn WorkspaceGithubRepositoriesApplier>,
+    ) -> Self {
+        Self {
+            provisioner,
+            entitlement_applier,
+            provider_configuration_applier,
+            runner_policy_applier,
+            workspace_repositories_applier,
+        }
+    }
+}
+
+impl fmt::Debug for ManagementApplicationPorts {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ManagementApplicationPorts")
+            .field("provisioner", &self.provisioner)
+            .field("entitlement_applier", &self.entitlement_applier)
+            .field(
+                "provider_configuration_applier",
+                &self.provider_configuration_applier,
+            )
+            .field("runner_policy_applier", &self.runner_policy_applier)
+            .field(
+                "workspace_repositories_applier",
+                &self.workspace_repositories_applier,
+            )
+            .finish()
+    }
+}
+
 /// Dedicated pre-bound gRPC server for the private management trust domain.
 pub struct ManagementGrpcServer {
     listener: TcpListener,
@@ -138,28 +190,27 @@ pub struct ManagementGrpcServer {
     provisioner: Arc<dyn WorkspaceProvisioner>,
     entitlement_applier: Arc<dyn WorkspaceEntitlementApplier>,
     provider_configuration_applier: Arc<dyn GithubProviderConfigurationApplier>,
+    runner_policy_applier: Arc<dyn GithubProviderRunnerPolicyApplier>,
     workspace_repositories_applier: Arc<dyn WorkspaceGithubRepositoriesApplier>,
 }
 
 impl ManagementGrpcServer {
     /// Creates a server without opening a socket or starting background work.
-    pub const fn new(
+    pub fn new(
         listener: TcpListener,
         tls: ManagementServerTlsConfig,
         authenticator: Arc<dyn ProvisioningWorkloadAuthenticator>,
-        provisioner: Arc<dyn WorkspaceProvisioner>,
-        entitlement_applier: Arc<dyn WorkspaceEntitlementApplier>,
-        provider_configuration_applier: Arc<dyn GithubProviderConfigurationApplier>,
-        workspace_repositories_applier: Arc<dyn WorkspaceGithubRepositoriesApplier>,
+        ports: ManagementApplicationPorts,
     ) -> Self {
         Self {
             listener,
             tls,
             authenticator,
-            provisioner,
-            entitlement_applier,
-            provider_configuration_applier,
-            workspace_repositories_applier,
+            provisioner: ports.provisioner,
+            entitlement_applier: ports.entitlement_applier,
+            provider_configuration_applier: ports.provider_configuration_applier,
+            runner_policy_applier: ports.runner_policy_applier,
+            workspace_repositories_applier: ports.workspace_repositories_applier,
         }
     }
 
@@ -178,6 +229,7 @@ impl ManagementGrpcServer {
             provisioner: self.provisioner,
             entitlement_applier: self.entitlement_applier,
             provider_configuration_applier: self.provider_configuration_applier,
+            runner_policy_applier: self.runner_policy_applier,
             workspace_repositories_applier: self.workspace_repositories_applier,
         };
         let service =
@@ -210,6 +262,7 @@ impl fmt::Debug for ManagementGrpcServer {
                 "provider_configuration_applier",
                 &self.provider_configuration_applier,
             )
+            .field("runner_policy_applier", &self.runner_policy_applier)
             .field(
                 "workspace_repositories_applier",
                 &self.workspace_repositories_applier,
@@ -224,6 +277,7 @@ struct ManagementGrpcAdapter {
     provisioner: Arc<dyn WorkspaceProvisioner>,
     entitlement_applier: Arc<dyn WorkspaceEntitlementApplier>,
     provider_configuration_applier: Arc<dyn GithubProviderConfigurationApplier>,
+    runner_policy_applier: Arc<dyn GithubProviderRunnerPolicyApplier>,
     workspace_repositories_applier: Arc<dyn WorkspaceGithubRepositoriesApplier>,
 }
 
@@ -238,6 +292,7 @@ impl fmt::Debug for ManagementGrpcAdapter {
                 "provider_configuration_applier",
                 &self.provider_configuration_applier,
             )
+            .field("runner_policy_applier", &self.runner_policy_applier)
             .field(
                 "workspace_repositories_applier",
                 &self.workspace_repositories_applier,
@@ -403,6 +458,47 @@ impl wire::shard_management_service_server::ShardManagementService for Managemen
             ));
         }
         Ok(Response::new(encode_provider_configuration_result(&result)))
+    }
+
+    async fn apply_github_provider_runner_policy(
+        &self,
+        request: Request<wire::ApplyGithubProviderRunnerPolicyRequest>,
+    ) -> Result<Response<wire::ApplyGithubProviderRunnerPolicyResponse>, Status> {
+        let authority = authenticate_management_request(&self.authenticator, &request).await?;
+        let command = decode_runner_policy_command(request.into_inner()).map_err(|()| {
+            runner_policy_contract_status(
+                Code::InvalidArgument,
+                wire::ApplyGithubProviderRunnerPolicyFailureReason::InvalidRequest,
+                "GitHub provider runner-policy request is invalid",
+            )
+        })?;
+        let authorized = AuthorizedApplyGithubProviderRunnerPolicy::authorize(authority, command)
+            .map_err(|_| {
+            runner_policy_contract_status(
+                Code::PermissionDenied,
+                wire::ApplyGithubProviderRunnerPolicyFailureReason::Forbidden,
+                "GitHub provider runner policy is outside the workload authority",
+            )
+        })?;
+        let expected_operation_id = authorized.command().operation_id();
+        let expected_shard_id = authorized.command().shard_id().clone();
+        let expected_revision = authorized.command().revision();
+        let result = self
+            .runner_policy_applier
+            .apply(authorized)
+            .await
+            .map_err(|error| runner_policy_status(&error))?;
+        if result.operation_id() != expected_operation_id
+            || result.shard_id() != &expected_shard_id
+            || result.revision() != expected_revision
+        {
+            return Err(runner_policy_contract_status(
+                Code::Internal,
+                wire::ApplyGithubProviderRunnerPolicyFailureReason::InternalError,
+                "GitHub provider runner-policy update returned an inconsistent result",
+            ));
+        }
+        Ok(Response::new(encode_runner_policy_result(&result)))
     }
 
     async fn apply_workspace_github_repositories(
@@ -596,6 +692,17 @@ fn decode_provider_configuration_command(
     ))
 }
 
+fn decode_runner_policy_command(
+    request: wire::ApplyGithubProviderRunnerPolicyRequest,
+) -> Result<ApplyGithubProviderRunnerPolicyCommand, ()> {
+    Ok(ApplyGithubProviderRunnerPolicyCommand::new(
+        OperationId::parse(&request.operation_id).map_err(|_| ())?,
+        ShardId::new(request.shard_id).map_err(|_| ())?,
+        GithubProviderConfigurationRevision::new(request.revision).map_err(|_| ())?,
+        GithubRunnerPolicy::decode_configuration(&request.runner_policy).map_err(|_| ())?,
+    ))
+}
+
 fn decode_workspace_repositories_command(
     request: wire::ApplyWorkspaceGithubRepositoriesRequest,
 ) -> Result<ApplyWorkspaceGithubRepositoriesCommand, ()> {
@@ -648,6 +755,21 @@ fn encode_provider_configuration_result(
 ) -> wire::ApplyGithubProviderConfigurationResponse {
     let applied_at = result.applied_at();
     wire::ApplyGithubProviderConfigurationResponse {
+        operation_id: result.operation_id().to_string(),
+        shard_id: result.shard_id().as_str().to_owned(),
+        revision: result.revision().get(),
+        applied_at: Some(prost_types::Timestamp {
+            seconds: applied_at.seconds(),
+            nanos: i32::try_from(applied_at.nanoseconds()).expect("validated nanoseconds fit i32"),
+        }),
+    }
+}
+
+fn encode_runner_policy_result(
+    result: &ApplyGithubProviderRunnerPolicyResult,
+) -> wire::ApplyGithubProviderRunnerPolicyResponse {
+    let applied_at = result.applied_at();
+    wire::ApplyGithubProviderRunnerPolicyResponse {
         operation_id: result.operation_id().to_string(),
         shard_id: result.shard_id().as_str().to_owned(),
         revision: result.revision().get(),
@@ -793,6 +915,42 @@ fn provider_configuration_status(error: &GithubProviderConfigurationFailure) -> 
     provider_configuration_contract_status(code, reason, message)
 }
 
+fn runner_policy_status(error: &GithubProviderRunnerPolicyFailure) -> Status {
+    let (code, reason, message) = match error.kind() {
+        GithubProviderRunnerPolicyFailureKind::OperationConflict => (
+            Code::Aborted,
+            wire::ApplyGithubProviderRunnerPolicyFailureReason::OperationConflict,
+            "runner-policy operation conflicts with its durable receipt",
+        ),
+        GithubProviderRunnerPolicyFailureKind::StaleRevision => (
+            Code::FailedPrecondition,
+            wire::ApplyGithubProviderRunnerPolicyFailureReason::StaleRevision,
+            "runner-policy revision is stale",
+        ),
+        GithubProviderRunnerPolicyFailureKind::ProviderUnavailable => (
+            Code::FailedPrecondition,
+            wire::ApplyGithubProviderRunnerPolicyFailureReason::ProviderUnavailable,
+            "provider configuration must exist before its runner policy can be updated",
+        ),
+        GithubProviderRunnerPolicyFailureKind::Forbidden => (
+            Code::PermissionDenied,
+            wire::ApplyGithubProviderRunnerPolicyFailureReason::Forbidden,
+            "runner policy is outside the workload authority",
+        ),
+        GithubProviderRunnerPolicyFailureKind::Internal => (
+            Code::Internal,
+            wire::ApplyGithubProviderRunnerPolicyFailureReason::InternalError,
+            "runner-policy update failed internally",
+        ),
+        GithubProviderRunnerPolicyFailureKind::TemporarilyUnavailable => (
+            Code::Unavailable,
+            wire::ApplyGithubProviderRunnerPolicyFailureReason::TemporarilyUnavailable,
+            "runner-policy update is temporarily unavailable",
+        ),
+    };
+    runner_policy_contract_status(code, reason, message)
+}
+
 fn workspace_repositories_status(error: &WorkspaceGithubRepositoriesFailure) -> Status {
     let (code, reason, message) = match error.kind() {
         WorkspaceGithubRepositoriesFailureKind::OperationConflict => (
@@ -882,6 +1040,25 @@ fn provider_configuration_contract_status(
         message: message.to_owned(),
         details: vec![prost_types::Any {
             type_url: PROVIDER_CONFIGURATION_FAILURE_TYPE_URL.to_owned(),
+            value: detail.encode_to_vec(),
+        }],
+    };
+    Status::with_details(code, message, Bytes::from(rich_status.encode_to_vec()))
+}
+
+fn runner_policy_contract_status(
+    code: Code,
+    reason: wire::ApplyGithubProviderRunnerPolicyFailureReason,
+    message: &'static str,
+) -> Status {
+    let detail = wire::ApplyGithubProviderRunnerPolicyFailure {
+        reason: reason as i32,
+    };
+    let rich_status = tonic_types::pb::Status {
+        code: code as i32,
+        message: message.to_owned(),
+        details: vec![prost_types::Any {
+            type_url: RUNNER_POLICY_FAILURE_TYPE_URL.to_owned(),
             value: detail.encode_to_vec(),
         }],
     };
@@ -1154,6 +1331,38 @@ mod tests {
     }
 
     #[derive(Debug)]
+    struct RecordingRunnerPolicyApplier {
+        calls: AtomicUsize,
+        result: ApplyGithubProviderRunnerPolicyResult,
+    }
+
+    impl RecordingRunnerPolicyApplier {
+        fn new() -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+                result: ApplyGithubProviderRunnerPolicyResult::new(
+                    OperationId::parse("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa").unwrap(),
+                    ShardId::new("prod-us-east-1-001").unwrap(),
+                    GithubProviderConfigurationRevision::new(4).unwrap(),
+                    automata_ci_provisioning::GithubProviderTimestamp::new(1_786_500_000, 0)
+                        .unwrap(),
+                ),
+            }
+        }
+    }
+
+    impl GithubProviderRunnerPolicyApplier for RecordingRunnerPolicyApplier {
+        fn apply(
+            &self,
+            request: AuthorizedApplyGithubProviderRunnerPolicy,
+        ) -> automata_ci_provisioning::GithubProviderRunnerPolicyApplicationFuture<'_> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(request.command().revision().get(), 4);
+            Box::pin(future::ready(Ok(self.result.clone())))
+        }
+    }
+
+    #[derive(Debug)]
     struct UnusedWorkspaceRepositoriesApplier;
 
     impl WorkspaceGithubRepositoriesApplier for UnusedWorkspaceRepositoriesApplier {
@@ -1278,6 +1487,15 @@ mod tests {
         }
     }
 
+    fn valid_runner_policy_wire_request() -> wire::ApplyGithubProviderRunnerPolicyRequest {
+        wire::ApplyGithubProviderRunnerPolicyRequest {
+            operation_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+            shard_id: "prod-us-east-1-001".to_owned(),
+            revision: 4,
+            runner_policy: valid_runner_policy(),
+        }
+    }
+
     fn valid_workspace_repositories_wire_request() -> wire::ApplyWorkspaceGithubRepositoriesRequest
     {
         wire::ApplyWorkspaceGithubRepositoriesRequest {
@@ -1364,6 +1582,11 @@ mod tests {
             b"test App key material"
         );
 
+        let policy = decode_runner_policy_command(valid_runner_policy_wire_request())
+            .expect("runner-policy update");
+        assert_eq!(policy.revision().get(), 4);
+        assert_eq!(policy.runner_policy().runtime_policy().mappings().len(), 1);
+
         let repositories =
             decode_workspace_repositories_command(valid_workspace_repositories_wire_request())
                 .expect("workspace repositories");
@@ -1381,6 +1604,10 @@ mod tests {
             .expect("configuration")
             .schedule = None;
         assert!(decode_provider_configuration_command(provider).is_err());
+
+        let mut policy = valid_runner_policy_wire_request();
+        policy.runner_policy.clear();
+        assert!(decode_runner_policy_command(policy).is_err());
 
         let mut repositories = valid_workspace_repositories_wire_request();
         repositories.repositories[0].visibility = wire::GithubRepositoryVisibility::Private as i32;
@@ -1433,6 +1660,23 @@ mod tests {
     }
 
     #[test]
+    fn missing_provider_for_runner_policy_is_a_typed_precondition() {
+        let status = runner_policy_status(&GithubProviderRunnerPolicyFailure::new(
+            GithubProviderRunnerPolicyFailureKind::ProviderUnavailable,
+        ));
+        assert_eq!(status.code(), Code::FailedPrecondition);
+        let rich = tonic_types::pb::Status::decode(status.details()).unwrap();
+        assert_eq!(rich.details[0].type_url, RUNNER_POLICY_FAILURE_TYPE_URL);
+        let detail =
+            wire::ApplyGithubProviderRunnerPolicyFailure::decode(rich.details[0].value.as_slice())
+                .unwrap();
+        assert_eq!(
+            detail.reason,
+            wire::ApplyGithubProviderRunnerPolicyFailureReason::ProviderUnavailable as i32
+        );
+    }
+
+    #[test]
     fn tls_configuration_diagnostics_are_redacted() {
         let tls = ManagementServerTlsConfig::new(
             "ca",
@@ -1456,6 +1700,7 @@ mod tests {
         let authenticator = Arc::new(RecordingAuthenticator::new());
         let provisioner = Arc::new(RecordingProvisioner::new());
         let entitlement_applier = Arc::new(RecordingEntitlementApplier::new());
+        let runner_policy_applier = Arc::new(RecordingRunnerPolicyApplier::new());
         let server = ManagementGrpcServer::new(
             listener,
             ManagementServerTlsConfig::new(
@@ -1465,10 +1710,13 @@ mod tests {
             )
             .unwrap(),
             authenticator.clone(),
-            provisioner.clone(),
-            entitlement_applier.clone(),
-            Arc::new(UnusedProviderConfigurationApplier),
-            Arc::new(UnusedWorkspaceRepositoriesApplier),
+            ManagementApplicationPorts::new(
+                provisioner.clone(),
+                entitlement_applier.clone(),
+                Arc::new(UnusedProviderConfigurationApplier),
+                runner_policy_applier.clone(),
+                Arc::new(UnusedWorkspaceRepositoriesApplier),
+            ),
         );
         let cancellation = CancellationToken::new();
         let server_cancellation = cancellation.clone();
@@ -1561,7 +1809,24 @@ mod tests {
             .expect("successful entitlement RPC");
         assert_eq!(entitlement.into_inner().revision, 1);
         assert_eq!(entitlement_applier.calls.load(Ordering::SeqCst), 1);
-        assert_eq!(authenticator.calls.load(Ordering::SeqCst), 2);
+
+        client.ready().await.expect("ready runner-policy client");
+        let policy: Response<wire::ApplyGithubProviderRunnerPolicyResponse> = client
+            .unary(
+                Request::new(valid_runner_policy_wire_request()),
+                tonic::codegen::http::uri::PathAndQuery::from_static(
+                    "/automata.management.v1.ShardManagementService/ApplyGithubProviderRunnerPolicy",
+                ),
+                tonic_prost::ProstCodec::<
+                    wire::ApplyGithubProviderRunnerPolicyRequest,
+                    wire::ApplyGithubProviderRunnerPolicyResponse,
+                >::default(),
+            )
+            .await
+            .expect("successful runner-policy RPC");
+        assert_eq!(policy.into_inner().revision, 4);
+        assert_eq!(runner_policy_applier.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(authenticator.calls.load(Ordering::SeqCst), 3);
         assert_eq!(
             *authenticator.leaf_der.lock().expect("leaf lock"),
             Some(pki.client.leaf_der)

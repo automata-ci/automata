@@ -30,6 +30,12 @@ service ShardManagementService {
     option idempotency_level = IDEMPOTENT;
   }
 
+  // Replaces only the shard-wide runner policy while retaining the current
+  // encrypted GitHub App private key and webhook secret in Core.
+  rpc ApplyGithubProviderRunnerPolicy(ApplyGithubProviderRunnerPolicyRequest) returns (ApplyGithubProviderRunnerPolicyResponse) {
+    option idempotency_level = IDEMPOTENT;
+  }
+
   // Replaces one workspace's complete selected GitHub repository set. Omitted
   // repositories are disconnected by this revision.
   rpc ApplyWorkspaceGithubRepositories(ApplyWorkspaceGithubRepositoriesRequest) returns (ApplyWorkspaceGithubRepositoriesResponse) {
@@ -259,6 +265,38 @@ enum ApplyGithubProviderConfigurationFailureReason {
 
 message ApplyGithubProviderConfigurationFailure {
   ApplyGithubProviderConfigurationFailureReason reason = 1;
+}
+
+message ApplyGithubProviderRunnerPolicyRequest {
+  string operation_id = 1;
+  string shard_id = 2;
+  // Positive revision in the shared provider-configuration revision stream.
+  uint64 revision = 3;
+  // Canonical or configuration-form JSON for the public runner-policy schema.
+  bytes runner_policy = 4;
+}
+
+message ApplyGithubProviderRunnerPolicyResponse {
+  string operation_id = 1;
+  string shard_id = 2;
+  uint64 revision = 3;
+  google.protobuf.Timestamp applied_at = 4;
+}
+
+enum ApplyGithubProviderRunnerPolicyFailureReason {
+  APPLY_GITHUB_PROVIDER_RUNNER_POLICY_FAILURE_REASON_UNSPECIFIED = 0;
+  APPLY_GITHUB_PROVIDER_RUNNER_POLICY_FAILURE_REASON_INVALID_REQUEST = 1;
+  APPLY_GITHUB_PROVIDER_RUNNER_POLICY_FAILURE_REASON_UNAUTHENTICATED = 2;
+  APPLY_GITHUB_PROVIDER_RUNNER_POLICY_FAILURE_REASON_FORBIDDEN = 3;
+  APPLY_GITHUB_PROVIDER_RUNNER_POLICY_FAILURE_REASON_OPERATION_CONFLICT = 4;
+  APPLY_GITHUB_PROVIDER_RUNNER_POLICY_FAILURE_REASON_STALE_REVISION = 5;
+  APPLY_GITHUB_PROVIDER_RUNNER_POLICY_FAILURE_REASON_PROVIDER_UNAVAILABLE = 6;
+  APPLY_GITHUB_PROVIDER_RUNNER_POLICY_FAILURE_REASON_INTERNAL_ERROR = 7;
+  APPLY_GITHUB_PROVIDER_RUNNER_POLICY_FAILURE_REASON_TEMPORARILY_UNAVAILABLE = 8;
+}
+
+message ApplyGithubProviderRunnerPolicyFailure {
+  ApplyGithubProviderRunnerPolicyFailureReason reason = 1;
 }
 
 enum GithubRepositoryVisibility {

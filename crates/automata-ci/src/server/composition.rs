@@ -72,14 +72,16 @@ use automata_ci_provider_github::{
 use automata_ci_provider_postgres::PostgresProviderManifestRepository;
 use automata_ci_provisioning::{
     GithubProviderConfigurationApplier, GithubProviderDesiredStateReader,
-    ProvisioningWorkloadAuthenticator, WorkspaceEntitlementApplier,
-    WorkspaceGithubRepositoriesApplier, WorkspaceProvisioner,
+    GithubProviderRunnerPolicyApplier, ProvisioningWorkloadAuthenticator,
+    WorkspaceEntitlementApplier, WorkspaceGithubRepositoriesApplier, WorkspaceProvisioner,
 };
-use automata_ci_provisioning_grpc::{ManagementGrpcServer, ManagementServerTlsConfig};
+use automata_ci_provisioning_grpc::{
+    ManagementApplicationPorts, ManagementGrpcServer, ManagementServerTlsConfig,
+};
 use automata_ci_provisioning_postgres::{
     PostgresGithubProviderConfigurationApplier, PostgresGithubProviderDesiredStateReader,
-    PostgresWorkspaceEntitlementApplier, PostgresWorkspaceGithubRepositoriesApplier,
-    PostgresWorkspaceProvisioner,
+    PostgresGithubProviderRunnerPolicyApplier, PostgresWorkspaceEntitlementApplier,
+    PostgresWorkspaceGithubRepositoriesApplier, PostgresWorkspaceProvisioner,
 };
 use automata_ci_runner_auth_postgres::PostgresRunnerMachineDirectory;
 use automata_ci_runner_results::{
@@ -877,6 +879,9 @@ fn build_management_server(
             store.postgres_pool().clone(),
             key_provider,
         ));
+    let runner_policy_applier: Arc<dyn GithubProviderRunnerPolicyApplier> = Arc::new(
+        PostgresGithubProviderRunnerPolicyApplier::new(store.postgres_pool().clone()),
+    );
     let workspace_repositories_applier: Arc<dyn WorkspaceGithubRepositoriesApplier> = Arc::new(
         PostgresWorkspaceGithubRepositoriesApplier::new(store.postgres_pool().clone()),
     );
@@ -884,10 +889,13 @@ fn build_management_server(
         listener,
         tls,
         authenticator,
-        provisioner,
-        entitlement_applier,
-        provider_configuration_applier,
-        workspace_repositories_applier,
+        ManagementApplicationPorts::new(
+            provisioner,
+            entitlement_applier,
+            provider_configuration_applier,
+            runner_policy_applier,
+            workspace_repositories_applier,
+        ),
     )))
 }
 

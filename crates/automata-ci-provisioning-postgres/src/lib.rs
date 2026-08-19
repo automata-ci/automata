@@ -19,7 +19,7 @@ mod usage;
 pub use entitlement::PostgresWorkspaceEntitlementApplier;
 pub use github_provider::{
     PostgresGithubProviderConfigurationApplier, PostgresGithubProviderDesiredStateReader,
-    PostgresWorkspaceGithubRepositoriesApplier,
+    PostgresGithubProviderRunnerPolicyApplier, PostgresWorkspaceGithubRepositoriesApplier,
 };
 pub use usage::PostgresWorkspaceUsageExporter;
 
