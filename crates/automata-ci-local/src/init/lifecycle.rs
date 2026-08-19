@@ -34,7 +34,10 @@ use super::{
     },
     epoch::{ImmutableEpoch, MaterialDeriver},
     materializer::{MaterializeRequest, s3_access_key, s3_secret_key},
-    renderer::{RelayEngineFacts, render_compose, render_relay_binding, render_runner_config},
+    renderer::{
+        ExpectedLifecycleTopology, RelayEngineFacts, render_compose, render_relay_binding,
+        render_runner_config,
+    },
     state::{StateRoot, StateSnapshot},
 };
 use crate::lifecycle_helper::{CasRequest, CasTarget};
@@ -203,12 +206,10 @@ struct AcquiredLifecycleSignals {
     watcher: JoinHandle<()>,
 }
 
-impl AcquiredLifecycleSignals {
-    fn new(caller: &CancellationToken, holder: &LifecycleLockHolder) -> Self {
-        Self::from_signals(caller, holder.holder_lost())
-    }
+struct GuardedLifecycleResult<T>(Result<T, LocalInitError>);
 
-    fn from_signals(caller: &CancellationToken, holder_lost: CancellationToken) -> Self {
+impl AcquiredLifecycleSignals {
+    fn new(caller: &CancellationToken, holder_lost: CancellationToken) -> Self {
         let (transaction_cancellation, watcher) =
             linked_cancellation_from_holder_loss(caller, holder_lost.clone());
         Self {
@@ -222,16 +223,32 @@ impl AcquiredLifecycleSignals {
         &self.transaction_cancellation
     }
 
-    async fn run<T>(
+    async fn run_up(
         &self,
-        operation: impl Future<Output = Result<T, LocalInitError>>,
-    ) -> Result<T, LocalInitError> {
-        run_acquired_lifecycle_operation(
-            &self.holder_lost,
-            &self.transaction_cancellation,
-            operation,
+        operation: impl Future<Output = Result<UpLifecycleOperationResult, LocalInitError>>,
+    ) -> GuardedLifecycleResult<UpLifecycleOperationResult> {
+        GuardedLifecycleResult(
+            run_acquired_lifecycle_operation(
+                &self.holder_lost,
+                &self.transaction_cancellation,
+                operation,
+            )
+            .await,
         )
-        .await
+    }
+
+    async fn run_down(
+        &self,
+        operation: impl Future<Output = Result<DownLifecycleOperationResult, LocalInitError>>,
+    ) -> GuardedLifecycleResult<DownLifecycleOperationResult> {
+        GuardedLifecycleResult(
+            run_acquired_lifecycle_operation(
+                &self.holder_lost,
+                &self.transaction_cancellation,
+                operation,
+            )
+            .await,
+        )
     }
 }
 
@@ -241,40 +258,45 @@ impl Drop for AcquiredLifecycleSignals {
     }
 }
 
-struct AcquiredLifecycleGuard {
-    holder: LifecycleLockHolder,
+trait LifecycleHolderAuthority {
+    fn holder_lost(&self) -> CancellationToken;
+}
+
+impl LifecycleHolderAuthority for LifecycleLockHolder {
+    fn holder_lost(&self) -> CancellationToken {
+        LifecycleLockHolder::holder_lost(self)
+    }
+}
+
+struct AcquiredLifecycleGuard<Holder> {
+    holder: Holder,
     signals: AcquiredLifecycleSignals,
 }
 
-impl AcquiredLifecycleGuard {
-    fn new(caller: &CancellationToken, holder: LifecycleLockHolder) -> Self {
-        let signals = AcquiredLifecycleSignals::new(caller, &holder);
+impl<Holder: LifecycleHolderAuthority> AcquiredLifecycleGuard<Holder> {
+    fn new(caller: &CancellationToken, holder: Holder) -> Self {
+        let signals = AcquiredLifecycleSignals::new(caller, holder.holder_lost());
         Self { holder, signals }
     }
 
-    const fn holder(&self) -> &LifecycleLockHolder {
-        &self.holder
-    }
-
-    const fn cancellation(&self) -> &CancellationToken {
-        self.signals.cancellation()
-    }
-
-    fn mutation_fence(&self, caller: &CancellationToken) -> LifecycleMutationFence {
-        self.holder.mutation_fence(caller)
-    }
-
-    async fn run<T>(
+    async fn run_up(
         &self,
-        operation: impl Future<Output = Result<T, LocalInitError>>,
-    ) -> Result<T, LocalInitError> {
-        self.signals.run(operation).await
+        operation: impl Future<Output = Result<UpLifecycleOperationResult, LocalInitError>>,
+    ) -> GuardedLifecycleResult<UpLifecycleOperationResult> {
+        self.signals.run_up(operation).await
+    }
+
+    async fn run_down(
+        &self,
+        operation: impl Future<Output = Result<DownLifecycleOperationResult, LocalInitError>>,
+    ) -> GuardedLifecycleResult<DownLifecycleOperationResult> {
+        self.signals.run_down(operation).await
     }
 
     fn finish<T>(
         self,
-        result: Result<T, LocalInitError>,
-    ) -> Result<(LifecycleLockHolder, T), LocalInitError> {
+        GuardedLifecycleResult(result): GuardedLifecycleResult<T>,
+    ) -> Result<(Holder, T), LocalInitError> {
         let Self { holder, signals } = self;
         drop(signals);
         match result {
@@ -287,6 +309,20 @@ impl AcquiredLifecycleGuard {
                 Err(error)
             }
         }
+    }
+}
+
+impl AcquiredLifecycleGuard<LifecycleLockHolder> {
+    const fn holder(&self) -> &LifecycleLockHolder {
+        &self.holder
+    }
+
+    const fn cancellation(&self) -> &CancellationToken {
+        self.signals.cancellation()
+    }
+
+    fn mutation_fence(&self, caller: &CancellationToken) -> LifecycleMutationFence {
+        self.holder.mutation_fence(caller)
     }
 }
 
@@ -437,85 +473,32 @@ pub async fn up_local(request: LocalUpRequest) -> Result<LocalUpOutcome, LocalIn
             )
             .await?;
         let resumed = initial != LifecycleTopology::Empty;
-        if let LifecycleTopology::Running { transit_id } = &initial {
-            // A syntactically valid dynamic root is not sufficient evidence:
-            // replay the durable ensure operations and bind every fixed CAS
-            // artifact to its exact derivation and current Engine identities.
-            let artifacts = derive_bootstrap_artifacts(&established)?;
-            let control_id = engine
-                .attest_lifecycle_service(
-                    &established.installation,
-                    &established.epoch,
-                    &desired,
-                    &rendered.expected,
-                    "automata",
-                )
-                .await?;
-            let relay_id = engine
-                .attest_lifecycle_service(
-                    &established.installation,
-                    &established.epoch,
-                    &desired,
-                    &rendered.expected,
-                    "engine-relay",
-                )
-                .await?;
-            let runner_container_id = engine
-                .attest_lifecycle_service(
-                    &established.installation,
-                    &established.epoch,
-                    &desired,
-                    &rendered.expected,
-                    "runner",
-                )
-                .await?;
-            let relay = render_relay_binding(
-                &desired,
-                &RelayEngineFacts {
-                    id: selection.engine_id(),
-                    api_version: selection.api_version(),
-                    server_version: selection.server_version(),
-                    architecture: selection.architecture(),
-                },
-            )?;
-            let runner_config = render_runner_config(
-                &desired,
-                &established.installation,
-                artifacts.runner_id,
-                transit_id,
-                &control_id,
-            )?;
-            // A running runner owns the TLS custody lock for its full
-            // lifetime. Completion replay is therefore a read-only
-            // attestation branch: it must never rerun enrollment or any other
-            // mutating one-off beside the admitted steady services.
-            let attester = EngineExactCasMaterialAttester {
-                engine: &engine,
-                established: &established,
-                mutation: &mutation_fence,
-            };
-            complete_running_replay(
-                &attester,
-                &established,
-                &artifacts,
-                &relay,
-                &runner_config,
-                &relay_id,
-                &runner_container_id,
-                &initial,
-                &transaction_cancellation,
-                || {
-                    engine.inspect_lifecycle_topology(
-                        &established.installation,
-                        &established.epoch,
-                        &desired,
-                        &rendered.expected,
-                        expected_runner_id,
-                    )
-                },
-            )
-            .await?;
-            return Ok(UpLifecycleOperationResult { desired, resumed });
+        let running_driver = ActiveRunningReplayDriver {
+            engine: &engine,
+            established: &established,
+            desired: &desired,
+            expected: &rendered.expected,
+            expected_runner_id,
+            mutation: &mutation_fence,
+        };
+        let relay_engine = RelayEngineFacts {
+            id: selection.engine_id(),
+            api_version: selection.api_version(),
+            server_version: selection.server_version(),
+            architecture: selection.architecture(),
+        };
+        if let Some(operation) = replay_running_topology_if_present(
+            &running_driver,
+            &established,
+            &desired,
+            &relay_engine,
+            &initial,
+            resumed,
+            &transaction_cancellation,
+        )
+        .await?
+        {
+            return Ok(operation);
         }
 
         if initial == LifecycleTopology::Partial {
@@ -818,7 +801,7 @@ pub async fn up_local(request: LocalUpRequest) -> Result<LocalUpOutcome, LocalIn
         cancellation_checkpoint(&transaction_cancellation)?;
         Ok(UpLifecycleOperationResult { desired, resumed })
     };
-    let operation = acquired.run(operation).await;
+    let operation = acquired.run_up(operation).await;
     let (holder, operation) = acquired.finish(operation)?;
     let UpLifecycleOperationResult { desired, resumed } = operation;
     engine
@@ -1072,7 +1055,7 @@ pub async fn down_local(request: LocalDownRequest) -> Result<LocalDownOutcome, L
         cancellation_checkpoint(&transaction_cancellation)?;
         Ok(DownLifecycleOperationResult { desired, resumed })
     };
-    let operation = acquired.run(operation).await;
+    let operation = acquired.run_down(operation).await;
     let (holder, operation) = acquired.finish(operation)?;
     let DownLifecycleOperationResult { desired, resumed } = operation;
     engine
@@ -1252,24 +1235,43 @@ async fn publish_replaceable_cas(
 }
 
 #[async_trait::async_trait]
-trait ExactCasMaterialAttester: Sync {
-    async fn attest(
+trait RunningReplayDriver: Sync {
+    async fn attest_service(&self, service: &'static str) -> Result<String, LocalInitError>;
+
+    async fn attest_cas(
         &self,
         target: CasTarget,
         expected: Sha256Digest,
         expected_attachments: BTreeSet<String>,
     ) -> Result<(), LocalInitError>;
+
+    async fn inspect_topology(&self) -> Result<LifecycleTopology, LocalInitError>;
 }
 
-struct EngineExactCasMaterialAttester<'operation, 'adapter> {
+struct ActiveRunningReplayDriver<'operation, 'adapter> {
     engine: &'operation InitEngine<'adapter>,
     established: &'operation EstablishedLifecycle,
+    desired: &'operation DesiredSpec,
+    expected: &'operation ExpectedLifecycleTopology,
+    expected_runner_id: uuid::Uuid,
     mutation: &'operation LifecycleMutationFence,
 }
 
 #[async_trait::async_trait]
-impl ExactCasMaterialAttester for EngineExactCasMaterialAttester<'_, '_> {
-    async fn attest(
+impl RunningReplayDriver for ActiveRunningReplayDriver<'_, '_> {
+    async fn attest_service(&self, service: &'static str) -> Result<String, LocalInitError> {
+        self.engine
+            .attest_lifecycle_service(
+                &self.established.installation,
+                &self.established.epoch,
+                self.desired,
+                self.expected,
+                service,
+            )
+            .await
+    }
+
+    async fn attest_cas(
         &self,
         target: CasTarget,
         expected: Sha256Digest,
@@ -1291,23 +1293,55 @@ impl ExactCasMaterialAttester for EngineExactCasMaterialAttester<'_, '_> {
         }
         Ok(())
     }
+
+    async fn inspect_topology(&self) -> Result<LifecycleTopology, LocalInitError> {
+        self.engine
+            .inspect_lifecycle_topology(
+                &self.established.installation,
+                &self.established.epoch,
+                self.desired,
+                self.expected,
+                self.expected_runner_id,
+            )
+            .await
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn attest_exact_cas_material_with(
-    attester: &impl ExactCasMaterialAttester,
+async fn replay_running_topology_if_present(
+    driver: &impl RunningReplayDriver,
     established: &EstablishedLifecycle,
-    artifacts: &BootstrapArtifacts,
-    relay: &[u8],
-    runner_config: &[u8],
-    relay_id: &str,
-    runner_id: &str,
-) -> Result<(), LocalInitError> {
+    desired: &DesiredSpec,
+    relay_engine: &RelayEngineFacts<'_>,
+    initial: &LifecycleTopology,
+    resumed: bool,
+    cancellation: &CancellationToken,
+) -> Result<Option<UpLifecycleOperationResult>, LocalInitError> {
+    let LifecycleTopology::Running { transit_id } = initial else {
+        return Ok(None);
+    };
+
+    // A syntactically valid dynamic root is not sufficient evidence. The
+    // steady-state branch is read-only and binds every fixed CAS artifact to
+    // its exact derivation and current Engine identities exactly once.
+    let artifacts = derive_bootstrap_artifacts(established)?;
+    let control_id = driver.attest_service("automata").await?;
+    let relay_id = driver.attest_service("engine-relay").await?;
+    let runner_id = driver.attest_service("runner").await?;
+    let relay = render_relay_binding(desired, relay_engine)?;
+    let runner_config = render_runner_config(
+        desired,
+        &established.installation,
+        artifacts.runner_id,
+        transit_id,
+        &control_id,
+    )?;
+
     for (target, contents) in [
         (CasTarget::BootstrapRequest, artifacts.request.as_slice()),
         (CasTarget::BootstrapToken, artifacts.token.as_bytes()),
-        (CasTarget::RelayBinding, relay),
-        (CasTarget::RunnerConfig, runner_config),
+        (CasTarget::RelayBinding, relay.as_slice()),
+        (CasTarget::RunnerConfig, runner_config.as_slice()),
         (
             CasTarget::RunnerS3AccessKey,
             artifacts.s3_access_key.as_bytes(),
@@ -1325,52 +1359,25 @@ async fn attest_exact_cas_material_with(
         let expected = Sha256Digest::from_bytes(Sha256::digest(contents).into());
         let expected_attachments = match target {
             CasTarget::BootstrapRequest | CasTarget::BootstrapToken => BTreeSet::new(),
-            CasTarget::RelayBinding => BTreeSet::from([relay_id.to_owned()]),
+            CasTarget::RelayBinding => BTreeSet::from([relay_id.clone()]),
             CasTarget::RunnerConfig
             | CasTarget::RunnerS3AccessKey
             | CasTarget::RunnerS3Ca
             | CasTarget::RunnerS3SecretKey
-            | CasTarget::RunnerSpoolKey => BTreeSet::from([runner_id.to_owned()]),
+            | CasTarget::RunnerSpoolKey => BTreeSet::from([runner_id.clone()]),
         };
-        attester
-            .attest(target, expected, expected_attachments)
+        driver
+            .attest_cas(target, expected, expected_attachments)
             .await?;
     }
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn complete_running_replay<Inspect, Inspection>(
-    attester: &impl ExactCasMaterialAttester,
-    established: &EstablishedLifecycle,
-    artifacts: &BootstrapArtifacts,
-    relay: &[u8],
-    runner_config: &[u8],
-    relay_id: &str,
-    runner_id: &str,
-    initial: &LifecycleTopology,
-    cancellation: &CancellationToken,
-    inspect_topology: Inspect,
-) -> Result<(), LocalInitError>
-where
-    Inspect: FnOnce() -> Inspection,
-    Inspection: Future<Output = Result<LifecycleTopology, LocalInitError>>,
-{
-    attest_exact_cas_material_with(
-        attester,
-        established,
-        artifacts,
-        relay,
-        runner_config,
-        relay_id,
-        runner_id,
-    )
-    .await?;
-    let repeated = inspect_topology().await?;
-    if &repeated != initial {
+    if driver.inspect_topology().await? != *initial {
         return Err(reset_required());
     }
-    cancellation_checkpoint(cancellation)
+    cancellation_checkpoint(cancellation)?;
+    Ok(Some(UpLifecycleOperationResult {
+        desired: desired.clone(),
+        resumed,
+    }))
 }
 
 #[allow(clippy::too_many_arguments)]

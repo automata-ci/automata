@@ -231,6 +231,7 @@ def load_source(repository_root: pathlib.Path) -> dict:
             fail(f"catalog source {role} alias is not canonical")
         if repository in repositories:
             fail("catalog source aliases must be unique")
+        repositories.add(repository)
         exact_object(
             image["config"],
             {

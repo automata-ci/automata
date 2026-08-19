@@ -14,21 +14,58 @@ use crate::init::{certificates::CertificateMaterial, epoch::authority_test_epoch
 
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
 
-#[derive(Default)]
-struct RecordingExactCasMaterialAttester {
-    targets: std::sync::Mutex<Vec<CasTarget>>,
+struct RecordingRunningReplayDriver {
+    services: std::sync::Mutex<Vec<&'static str>>,
+    cas: std::sync::Mutex<Vec<(CasTarget, Sha256Digest, BTreeSet<String>)>>,
+    inspections: AtomicU64,
+    topology: LifecycleTopology,
+}
+
+struct TestLifecycleHolder {
+    holder_lost: CancellationToken,
+    drops: std::sync::Arc<AtomicU64>,
+}
+
+impl LifecycleHolderAuthority for TestLifecycleHolder {
+    fn holder_lost(&self) -> CancellationToken {
+        self.holder_lost.clone()
+    }
+}
+
+impl Drop for TestLifecycleHolder {
+    fn drop(&mut self) {
+        self.drops.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 #[async_trait::async_trait]
-impl ExactCasMaterialAttester for RecordingExactCasMaterialAttester {
-    async fn attest(
+impl RunningReplayDriver for RecordingRunningReplayDriver {
+    async fn attest_service(&self, service: &'static str) -> Result<String, LocalInitError> {
+        self.services.lock().unwrap().push(service);
+        Ok(match service {
+            "automata" => "c".repeat(64),
+            "engine-relay" => "d".repeat(64),
+            "runner" => "e".repeat(64),
+            _ => panic!("unexpected running service {service}"),
+        })
+    }
+
+    async fn attest_cas(
         &self,
         target: CasTarget,
-        _expected: Sha256Digest,
-        _expected_attachments: BTreeSet<String>,
+        expected: Sha256Digest,
+        expected_attachments: BTreeSet<String>,
     ) -> Result<(), LocalInitError> {
-        self.targets.lock().unwrap().push(target);
+        self.cas
+            .lock()
+            .unwrap()
+            .push((target, expected, expected_attachments));
         Ok(())
+    }
+
+    async fn inspect_topology(&self) -> Result<LifecycleTopology, LocalInitError> {
+        self.inspections.fetch_add(1, Ordering::Relaxed);
+        Ok(self.topology.clone())
     }
 }
 
@@ -135,15 +172,25 @@ fn cancellation_checkpoint_is_fail_closed() {
 }
 
 #[tokio::test]
-async fn acquired_lifecycle_signals_preserve_holder_loss_for_both_outcomes() {
-    async fn assert_result<Output>(
+async fn acquired_up_and_down_guards_preserve_holder_loss() {
+    fn signals(
         cancel_caller: bool,
         lose_holder: bool,
-        expected: LocalInitErrorCode,
+    ) -> (
+        AcquiredLifecycleGuard<TestLifecycleHolder>,
+        impl Future<Output = ()>,
+        std::sync::Arc<AtomicU64>,
     ) {
         let holder_lost = CancellationToken::new();
         let caller = CancellationToken::new();
-        let signals = AcquiredLifecycleSignals::from_signals(&caller, holder_lost.clone());
+        let drops = std::sync::Arc::new(AtomicU64::new(0));
+        let acquired = AcquiredLifecycleGuard::new(
+            &caller,
+            TestLifecycleHolder {
+                holder_lost: holder_lost.clone(),
+                drops: std::sync::Arc::clone(&drops),
+            },
+        );
         let holder_signal = holder_lost.clone();
         let cancel_caller_signal = caller.clone();
         let operation = async move {
@@ -153,13 +200,39 @@ async fn acquired_lifecycle_signals_preserve_holder_loss_for_both_outcomes() {
             if lose_holder {
                 holder_signal.cancel();
             }
-            std::future::pending::<Result<Output, LocalInitError>>().await
+            std::future::pending::<()>().await;
         };
+        (acquired, operation, drops)
+    }
 
-        let Err(error) = signals.run(operation).await else {
+    async fn assert_up(cancel_caller: bool, lose_holder: bool, expected: LocalInitErrorCode) {
+        let (acquired, operation, drops) = signals(cancel_caller, lose_holder);
+        let guarded = acquired
+            .run_up(async move {
+                operation.await;
+                unreachable!("a cancelled lifecycle operation cannot complete")
+            })
+            .await;
+        let Err(error) = acquired.finish(guarded) else {
             panic!("a cancelled lifecycle operation cannot complete");
         };
         assert_eq!(error.code(), expected);
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+    }
+
+    async fn assert_down(cancel_caller: bool, lose_holder: bool, expected: LocalInitErrorCode) {
+        let (acquired, operation, drops) = signals(cancel_caller, lose_holder);
+        let guarded = acquired
+            .run_down(async move {
+                operation.await;
+                unreachable!("a cancelled lifecycle operation cannot complete")
+            })
+            .await;
+        let Err(error) = acquired.finish(guarded) else {
+            panic!("a cancelled lifecycle operation cannot complete");
+        };
+        assert_eq!(error.code(), expected);
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
     }
 
     for (cancel_caller, lose_holder, expected) in [
@@ -167,48 +240,106 @@ async fn acquired_lifecycle_signals_preserve_holder_loss_for_both_outcomes() {
         (false, true, LocalInitErrorCode::ResetRequired),
         (true, true, LocalInitErrorCode::ResetRequired),
     ] {
-        assert_result::<UpLifecycleOperationResult>(cancel_caller, lose_holder, expected).await;
-        assert_result::<DownLifecycleOperationResult>(cancel_caller, lose_holder, expected).await;
+        assert_up(cancel_caller, lose_holder, expected).await;
+        assert_down(cancel_caller, lose_holder, expected).await;
     }
 }
 
 #[tokio::test]
-async fn running_replay_attests_each_exact_cas_target_once() {
+async fn running_topology_branch_attests_each_exact_cas_target_once() {
     let (_directory, established) = fixture();
-    let artifacts = derive_bootstrap_artifacts(&established).unwrap();
-    let attester = RecordingExactCasMaterialAttester::default();
     let initial = LifecycleTopology::Running {
-        transit_id: "transit-id".to_owned(),
+        transit_id: "f".repeat(64),
+    };
+    let driver = RecordingRunningReplayDriver {
+        services: std::sync::Mutex::new(Vec::new()),
+        cas: std::sync::Mutex::new(Vec::new()),
+        inspections: AtomicU64::new(0),
+        topology: initial.clone(),
+    };
+    let desired = crate::init::desired_from_catalog(
+        &crate::init::catalog::desired_test_catalog(),
+        &established.installation,
+        std::num::NonZeroU16::new(1).unwrap(),
+    )
+    .unwrap();
+    let relay_engine = RelayEngineFacts {
+        id: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        api_version: "1.48",
+        server_version: "28.3.3",
+        architecture: crate::EngineArchitecture::Amd64,
     };
 
-    complete_running_replay(
-        &attester,
+    let result = replay_running_topology_if_present(
+        &driver,
         &established,
-        &artifacts,
-        b"relay binding\n",
-        b"runner config\n",
-        "relay-id",
-        "runner-id",
+        &desired,
+        &relay_engine,
         &initial,
+        true,
         &CancellationToken::new(),
-        || async { Ok(initial.clone()) },
     )
     .await
-    .unwrap();
+    .unwrap()
+    .expect("running topology replays");
 
+    assert_eq!(result.desired, desired);
+    assert!(result.resumed);
     assert_eq!(
-        *attester.targets.lock().unwrap(),
-        vec![
-            CasTarget::BootstrapRequest,
-            CasTarget::BootstrapToken,
-            CasTarget::RelayBinding,
-            CasTarget::RunnerConfig,
-            CasTarget::RunnerS3AccessKey,
-            CasTarget::RunnerS3Ca,
-            CasTarget::RunnerS3SecretKey,
-            CasTarget::RunnerSpoolKey,
-        ]
+        *driver.services.lock().unwrap(),
+        ["automata", "engine-relay", "runner"]
     );
+    assert_eq!(driver.inspections.load(Ordering::Relaxed), 1);
+    {
+        let cas = driver.cas.lock().unwrap();
+        assert!(
+            cas.iter()
+                .all(|(_, digest, _)| *digest != Sha256Digest::from_bytes([0; 32]))
+        );
+        assert_eq!(
+            cas.iter().map(|(target, _, _)| *target).collect::<Vec<_>>(),
+            vec![
+                CasTarget::BootstrapRequest,
+                CasTarget::BootstrapToken,
+                CasTarget::RelayBinding,
+                CasTarget::RunnerConfig,
+                CasTarget::RunnerS3AccessKey,
+                CasTarget::RunnerS3Ca,
+                CasTarget::RunnerS3SecretKey,
+                CasTarget::RunnerSpoolKey,
+            ]
+        );
+        assert_eq!(cas[0].2, BTreeSet::new());
+        assert_eq!(cas[1].2, BTreeSet::new());
+        assert_eq!(cas[2].2, BTreeSet::from(["d".repeat(64)]));
+        for (_, _, attachments) in &cas[3..] {
+            assert_eq!(*attachments, BTreeSet::from(["e".repeat(64)]));
+        }
+    }
+
+    let idle = RecordingRunningReplayDriver {
+        services: std::sync::Mutex::new(Vec::new()),
+        cas: std::sync::Mutex::new(Vec::new()),
+        inspections: AtomicU64::new(0),
+        topology: LifecycleTopology::Empty,
+    };
+    assert!(
+        replay_running_topology_if_present(
+            &idle,
+            &established,
+            &desired,
+            &relay_engine,
+            &LifecycleTopology::Empty,
+            false,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap()
+        .is_none()
+    );
+    assert!(idle.services.lock().unwrap().is_empty());
+    assert!(idle.cas.lock().unwrap().is_empty());
+    assert_eq!(idle.inspections.load(Ordering::Relaxed), 0);
 }
 
 #[test]

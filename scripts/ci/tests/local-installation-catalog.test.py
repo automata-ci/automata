@@ -173,6 +173,27 @@ class LocalInstallationCatalogContract(unittest.TestCase):
         )
         self.assertEqual(lifecycle["database_migration_ceiling"], versions[-1])
 
+    def test_source_contract_rejects_duplicate_local_repository_aliases(self) -> None:
+        source = json.loads(json.dumps(self.source))
+        source["images"]["runner"]["canonical_repository"] = source["images"][
+            "automata"
+        ]["canonical_repository"]
+        contents = catalog.canonical_json(source)
+
+        with tempfile.TemporaryDirectory(prefix="catalog-aliases.") as temporary:
+            repository_root = pathlib.Path(temporary)
+            for relative in (catalog.SOURCE_PATH, catalog.PACKAGED_SOURCE_PATH):
+                path = repository_root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(contents)
+            with (
+                mock.patch.object(
+                    catalog, "SOURCE_SHA256", catalog.sha256_bytes(contents)
+                ),
+                self.assertRaisesRegex(SystemExit, "aliases must be unique"),
+            ):
+                catalog.load_source(repository_root)
+
     def test_lifecycle_runtime_rejects_renderer_digest_drift(self) -> None:
         lifecycle = json.loads(json.dumps(self.source["lifecycle_runtime"]))
         lifecycle["renderer_contract"]["fixture_sha256"] = "f" * 64
