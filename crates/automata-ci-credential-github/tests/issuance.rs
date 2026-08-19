@@ -1,15 +1,86 @@
 mod support;
 
+use std::sync::Arc;
+
 use automata_ci_credential_github::{
     GithubInstallationTokenIndeterminateReason, GithubInstallationTokenMintOutcome,
+    GithubWorkloadCredentialProvider,
+};
+use automata_ci_provider::{
+    WorkloadCredentialIssueOutcome, WorkloadCredentialProvider,
+    WorkloadCredentialProviderErrorKind, WorkloadCredentialRetirement,
+    WorkloadCredentialRevocationOutcome,
 };
 use automata_ci_scm::credential::CredentialErrorKind;
 use axum::http::StatusCode;
 use serde_json::Value;
 use support::{
     EXPIRATION, FixtureServer, INSTALLATION_ID, ISSUER, NOW, REPOSITORY_ID, ResponseSpec, request,
-    request_for, success_response,
+    request_for, success_response, workload_connection, workload_connection_for, workload_request,
+    workload_request_for,
 };
+
+#[tokio::test]
+async fn common_workload_port_preserves_revocation_ownership() {
+    let fixture = FixtureServer::spawn().await;
+    fixture.enqueue(success_response());
+    fixture.enqueue(ResponseSpec::status(StatusCode::INTERNAL_SERVER_ERROR));
+    fixture.enqueue(ResponseSpec::status(StatusCode::NO_CONTENT));
+    let broker = Arc::new(fixture.broker());
+    let request = workload_request();
+    let provider = GithubWorkloadCredentialProvider::new(broker, &workload_connection()).unwrap();
+    let provider: &dyn WorkloadCredentialProvider = &provider;
+
+    let outcome = provider.issue_once(&request).await;
+    let WorkloadCredentialIssueOutcome::Ready(ready) = outcome else {
+        panic!("expected common ready token: {outcome:?}");
+    };
+    assert_eq!(ready.request_digest(), request.digest());
+    assert_eq!(
+        ready.expose_secret(),
+        b"ghs_998877_variable_length_stateless_token_value"
+    );
+    let WorkloadCredentialRetirement::Revoke(candidate) = ready.retire() else {
+        panic!("GitHub installation tokens require explicit revocation");
+    };
+    let unconfirmed = provider.revoke(candidate).await;
+    let WorkloadCredentialRevocationOutcome::Unconfirmed { candidate, .. } = unconfirmed else {
+        panic!("server failure must retain candidate: {unconfirmed:?}");
+    };
+    assert_eq!(
+        candidate.expose_secret(),
+        b"ghs_998877_variable_length_stateless_token_value"
+    );
+    assert!(matches!(
+        provider.revoke(candidate).await,
+        WorkloadCredentialRevocationOutcome::Confirmed
+    ));
+
+    let requests = fixture.requests();
+    assert_eq!(requests.len(), 3);
+    let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
+    assert_eq!(body["repository_ids"], serde_json::json!([REPOSITORY_ID]));
+    assert_eq!(
+        body["permissions"],
+        serde_json::json!({"contents":"read","statuses":"write"})
+    );
+}
+
+#[tokio::test]
+async fn common_workload_port_rejects_a_foreign_connection_before_network_access() {
+    let fixture = FixtureServer::spawn().await;
+    let provider =
+        GithubWorkloadCredentialProvider::new(Arc::new(fixture.broker()), &workload_connection())
+            .unwrap();
+    let foreign_connection = workload_connection_for(47);
+    let foreign_request = workload_request_for(&foreign_connection);
+    let outcome = provider.issue_once(&foreign_request).await;
+    let WorkloadCredentialIssueOutcome::Rejected(error) = outcome else {
+        panic!("foreign connection must be rejected: {outcome:?}");
+    };
+    assert_eq!(error.kind(), WorkloadCredentialProviderErrorKind::Conflict);
+    assert!(fixture.requests().is_empty());
+}
 
 #[tokio::test]
 async fn issues_one_exact_repository_and_permission_scope() {

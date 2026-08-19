@@ -35,7 +35,10 @@ mod server_service_authority;
 mod signer;
 mod supervised_custody;
 
-pub use adapter::{GithubAppBrokerConstructionError, GithubAppCredentialBroker};
+pub use adapter::{
+    GithubAppBrokerConstructionError, GithubAppCredentialBroker, GithubWorkloadCredentialProvider,
+    GithubWorkloadCredentialProviderConstructionError,
+};
 pub use authority_coordinator::{
     GithubJobRuntimeAuthorityRequestValueError, GithubRuntimeAuthorityCommitSupervisor,
     GithubRuntimeAuthorityCommitSupervisorError, GithubRuntimeAuthorityCoordinationOutcome,

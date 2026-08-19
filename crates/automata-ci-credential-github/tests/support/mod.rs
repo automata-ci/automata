@@ -12,8 +12,21 @@ use automata_ci_auth::{
     secret::SecretString,
     time::{Clock, UnixTimestamp},
 };
+use automata_ci_core::{
+    AttemptId, FencingToken, JobId, Lease, LeaseId, PermissionLevel as CommonPermissionLevel,
+    RunnerId, Sha256Digest, TrustSourceClass, UnixMillis, WorkspaceId,
+};
 use automata_ci_credential_github::{
     GithubAppCredentialBroker, GithubAppCredentialConfig, GithubAppHttpLimits, GithubInstallationId,
+};
+use automata_ci_provider::{
+    ExternalRepositoryId, ExternalRepositoryIdentity, ProviderArchiveLimits,
+    ProviderConfigurationRevision, ProviderConnectionConfiguration, ProviderConnectionId,
+    ProviderConnectionManifest, ProviderConnectionPolicyDocument, ProviderConnectionRevision,
+    ProviderDefaultBranch, ProviderInstanceId, ProviderLifecycleState, ProviderRepositoryPath,
+    ProviderRunnerPolicyBinding, ProviderSchemaVersion, ProviderWorkflowSource,
+    RepositoryVisibility, WorkloadCredentialPermission, WorkloadCredentialPermissionSet,
+    WorkloadCredentialProfile, WorkloadCredentialRequest,
 };
 use automata_ci_scm::credential::{
     MinimumValidity, PermissionLevel, PermissionName, PermissionSet, ProviderResourceId,
@@ -30,6 +43,7 @@ use axum::{
 use futures::stream;
 use tokio::{net::TcpListener, sync::oneshot, task::JoinHandle};
 use url::Url;
+use uuid::Uuid;
 
 pub const NOW: u64 = 1_800_000_000;
 pub const EXPIRATION: &str = "2027-01-15T09:00:00Z";
@@ -272,6 +286,78 @@ fn published_test_key_pem(label: &str, der: &[u8]) -> SecretString {
 
 pub fn request() -> RepositoryCredentialRequest {
     request_for("github", REPOSITORY_ID.to_string(), "automata-ci/automata")
+}
+
+pub fn workload_request() -> WorkloadCredentialRequest {
+    workload_request_for(&workload_connection())
+}
+
+pub fn workload_request_for(connection: &ProviderConnectionManifest) -> WorkloadCredentialRequest {
+    let requested_at = UnixMillis::new(i64::try_from(NOW * 1_000).unwrap());
+    WorkloadCredentialRequest::new(
+        connection,
+        JobId::from_uuid(Uuid::from_u128(41)),
+        Lease::new(
+            LeaseId::from_uuid(Uuid::from_u128(42)),
+            AttemptId::from_uuid(Uuid::from_u128(43)),
+            RunnerId::from_uuid(Uuid::from_u128(44)),
+            FencingToken::new(1).unwrap(),
+            requested_at,
+            UnixMillis::new(requested_at.get() + 600_000),
+        )
+        .unwrap(),
+        TrustSourceClass::SameRepository,
+        WorkloadCredentialProfile::RepositoryAccess,
+        WorkloadCredentialPermissionSet::new([
+            WorkloadCredentialPermission::new("contents", CommonPermissionLevel::Read).unwrap(),
+            WorkloadCredentialPermission::new("statuses", CommonPermissionLevel::Write).unwrap(),
+        ])
+        .unwrap(),
+        requested_at,
+        UnixMillis::new(requested_at.get() + 300_000),
+    )
+    .unwrap()
+}
+
+pub fn workload_connection() -> ProviderConnectionManifest {
+    workload_connection_for(46)
+}
+
+pub fn workload_connection_for(connection_id: u128) -> ProviderConnectionManifest {
+    let instance_id = ProviderInstanceId::from_uuid(Uuid::from_u128(45)).unwrap();
+    let configuration = ProviderConnectionConfiguration::new(
+        WorkspaceId::parse("11111111-1111-4111-8111-111111111111").unwrap(),
+        ExternalRepositoryIdentity::new(
+            instance_id,
+            ExternalRepositoryId::new(REPOSITORY_ID.to_string()).unwrap(),
+        ),
+        ProviderConfigurationRevision::new(1).unwrap(),
+        Sha256Digest::from_bytes([1; 32]),
+        Sha256Digest::from_bytes([2; 32]),
+        RepositoryVisibility::Private,
+        ProviderDefaultBranch::new("main").unwrap(),
+        ProviderWorkflowSource::Directory(ProviderRepositoryPath::new(".ci/workflows").unwrap()),
+        ProviderRunnerPolicyBinding::new(
+            ProviderSchemaVersion::new(1).unwrap(),
+            Sha256Digest::from_bytes([3; 32]),
+        ),
+        ProviderArchiveLimits::new(1_024, 8_192, 100, 1_024, 10, 1_024).unwrap(),
+        ProviderConnectionPolicyDocument::new(
+            ProviderSchemaVersion::new(1).unwrap(),
+            b"{}".to_vec(),
+        )
+        .unwrap(),
+    );
+    ProviderConnectionManifest::new(
+        ProviderConnectionId::from_uuid(Uuid::from_u128(connection_id)).unwrap(),
+        ProviderConnectionRevision::new(1).unwrap(),
+        ProviderLifecycleState::Active,
+        configuration,
+        UnixMillis::new(1),
+        Some(UnixMillis::new(2)),
+        None,
+    )
+    .unwrap()
 }
 
 pub fn request_for(

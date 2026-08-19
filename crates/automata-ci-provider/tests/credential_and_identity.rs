@@ -1,6 +1,6 @@
 use automata_ci_core::{
-    AttemptId, AttemptNumber, FencingToken, GitObjectAlgorithm, JobId, Lease, LeaseId,
-    PermissionLevel, RunnerId, Sha256Digest, TrustSourceClass, UnixMillis, WorkspaceId,
+    AttemptId, FencingToken, GitObjectAlgorithm, JobId, Lease, LeaseId, PermissionLevel, RunnerId,
+    Sha256Digest, TrustSourceClass, UnixMillis, WorkspaceId,
 };
 use automata_ci_provider::{
     AuthorizationCodeRequest, ControlCredential, ControlCredentialClaim, ControlCredentialRelease,
@@ -15,7 +15,7 @@ use automata_ci_provider::{
     ProviderDefaultBranch, ProviderHumanCredential, ProviderHumanIdentity, ProviderInstanceId,
     ProviderLifecycleState, ProviderMembership, ProviderMembershipSnapshot, ProviderPkceVerifier,
     ProviderRepositoryPath, ProviderRunnerPolicyBinding, ProviderSchemaVersion,
-    ProviderWorkflowSource, RepositoryVisibility, SourceReadCapability,
+    ProviderWorkflowSource, RepositoryVisibility, SourceReadCapability, WorkloadCredentialIssuance,
     WorkloadCredentialPermission, WorkloadCredentialPermissionSet, WorkloadCredentialProfile,
     WorkloadCredentialRequest, WorkloadCredentialRetirement, WorkloadCredentialRevocation,
 };
@@ -313,7 +313,6 @@ fn workload_authority_is_lease_bound_and_write_requires_same_repository_trust() 
         WorkloadCredentialRequest::new(
             &connection(),
             JobId::from_uuid(Uuid::from_u128(22)),
-            AttemptNumber::new(1).unwrap(),
             lease(),
             trust_class,
             WorkloadCredentialProfile::RepositoryAccess,
@@ -328,15 +327,15 @@ fn workload_authority_is_lease_bound_and_write_requires_same_repository_trust() 
         request.lease().fencing_token(),
         FencingToken::new(4).unwrap()
     );
-    let issued = IssuedWorkloadCredential::new(
+    let evidence = WorkloadCredentialIssuance::new(
         &request,
         None,
-        secret("workload-secret-that-must-not-leak"),
         UnixMillis::new(2_002),
         Some(UnixMillis::new(4_500)),
         WorkloadCredentialRevocation::ProviderExpiry,
     )
     .unwrap();
+    let issued = evidence.bind_secret(secret("workload-secret-that-must-not-leak"));
     assert_eq!(issued.request_digest(), request.digest());
     assert!(!format!("{issued:?}").contains("must-not-leak"));
     assert!(matches!(
@@ -350,7 +349,6 @@ fn explicit_workload_retirement_preserves_the_secret_bearing_cleanup_obligation(
     let request = WorkloadCredentialRequest::new(
         &connection(),
         JobId::from_uuid(Uuid::from_u128(32)),
-        AttemptNumber::new(1).unwrap(),
         lease(),
         TrustSourceClass::SameRepository,
         WorkloadCredentialProfile::CheckoutRead,
@@ -360,25 +358,24 @@ fn explicit_workload_retirement_preserves_the_secret_bearing_cleanup_obligation(
     )
     .unwrap();
     assert!(matches!(
-        IssuedWorkloadCredential::new(
+        WorkloadCredentialIssuance::new(
             &request,
             None,
-            secret("too-short-provider-expiry"),
             UnixMillis::new(2_002),
             Some(UnixMillis::new(3_999)),
             WorkloadCredentialRevocation::Explicit,
         ),
         Err(ProviderCredentialModelError::InvalidValidity)
     ));
-    let issued = IssuedWorkloadCredential::new(
+    let evidence = WorkloadCredentialIssuance::new(
         &request,
         None,
-        secret("explicit-workload-secret-that-must-not-leak"),
         UnixMillis::new(2_002),
         Some(UnixMillis::new(4_500)),
         WorkloadCredentialRevocation::Explicit,
     )
     .unwrap();
+    let issued = evidence.bind_secret(secret("explicit-workload-secret-that-must-not-leak"));
     let WorkloadCredentialRetirement::Revoke(candidate) = issued.retire() else {
         panic!("explicit credentials must retain a revocation candidate");
     };

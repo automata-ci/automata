@@ -8,9 +8,7 @@ use std::{
     pin::Pin,
 };
 
-use automata_ci_core::{
-    AttemptNumber, JobId, Lease, PermissionLevel, Sha256Digest, TrustSourceClass, UnixMillis,
-};
+use automata_ci_core::{JobId, Lease, PermissionLevel, Sha256Digest, TrustSourceClass, UnixMillis};
 use automata_ci_secret::SecretValue;
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
@@ -624,19 +622,13 @@ impl ProviderWorkloadCredentialId {
     /// Panics only if a UUID carrying mandatory version and variant bits is
     /// classified as nil, which would indicate a UUID library invariant break.
     #[must_use]
-    pub fn derive(
-        connection: &ProviderConnectionManifest,
-        job_id: JobId,
-        attempt: AttemptNumber,
-        lease: &Lease,
-    ) -> Self {
+    pub fn derive(connection: &ProviderConnectionManifest, job_id: JobId, lease: &Lease) -> Self {
         let mut hash = Sha256::new();
         hash.update(WORKLOAD_CREDENTIAL_ID_DOMAIN);
         hash.update(connection.connection_id().as_uuid().as_bytes());
         hash.update(connection.revision().get().to_be_bytes());
         hash.update(connection.digest().as_bytes());
         hash.update(job_id.as_uuid().as_bytes());
-        hash.update(attempt.get().to_be_bytes());
         hash.update(lease.attempt_id().as_uuid().as_bytes());
         hash.update(lease.lease_id().as_uuid().as_bytes());
         hash.update(lease.fencing_token().get().to_be_bytes());
@@ -659,7 +651,6 @@ pub struct WorkloadCredentialRequest {
     connection_digest: Sha256Digest,
     repository: ExternalRepositoryIdentity,
     job_id: JobId,
-    attempt: AttemptNumber,
     lease: Lease,
     trust_class: TrustSourceClass,
     profile: WorkloadCredentialProfile,
@@ -680,7 +671,6 @@ impl WorkloadCredentialRequest {
     pub fn new(
         connection: &ProviderConnectionManifest,
         job_id: JobId,
-        attempt: AttemptNumber,
         lease: Lease,
         trust_class: TrustSourceClass,
         profile: WorkloadCredentialProfile,
@@ -721,8 +711,7 @@ impl WorkloadCredentialRequest {
             WorkloadCredentialProfile::CheckoutRead
             | WorkloadCredentialProfile::RepositoryAccess => {}
         }
-        let credential_id =
-            ProviderWorkloadCredentialId::derive(connection, job_id, attempt, &lease);
+        let credential_id = ProviderWorkloadCredentialId::derive(connection, job_id, &lease);
         let mut value = Self {
             credential_id,
             connection_id: connection.connection_id(),
@@ -730,7 +719,6 @@ impl WorkloadCredentialRequest {
             connection_digest: connection.digest(),
             repository: connection.configuration().repository().clone(),
             job_id,
-            attempt,
             lease,
             trust_class,
             profile,
@@ -753,7 +741,6 @@ impl WorkloadCredentialRequest {
         hash.update(self.repository.instance_id().as_uuid().as_bytes());
         part(&mut hash, self.repository.external_id().as_str().as_bytes());
         hash.update(self.job_id.as_uuid().as_bytes());
-        hash.update(self.attempt.get().to_be_bytes());
         hash.update(self.lease.attempt_id().as_uuid().as_bytes());
         hash.update(self.lease.lease_id().as_uuid().as_bytes());
         hash.update(self.lease.runner_id().as_uuid().as_bytes());
@@ -803,11 +790,6 @@ impl WorkloadCredentialRequest {
     pub const fn job_id(&self) -> JobId {
         self.job_id
     }
-    /// Returns the one-based physical attempt.
-    #[must_use]
-    pub const fn attempt(&self) -> AttemptNumber {
-        self.attempt
-    }
     /// Returns the exclusive runner lease.
     #[must_use]
     pub const fn lease(&self) -> &Lease {
@@ -845,26 +827,25 @@ impl WorkloadCredentialRequest {
     }
 }
 
-/// Secret-bearing workload credential bound to one exact request.
-pub struct IssuedWorkloadCredential {
+/// Validated non-secret evidence for one provider issuance.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkloadCredentialIssuance {
     request_digest: Sha256Digest,
     external_id: Option<ExternalCredentialId>,
-    value: SecretValue,
     issued_at: UnixMillis,
     provider_expires_at: Option<UnixMillis>,
     revocation: WorkloadCredentialRevocation,
 }
 
-impl IssuedWorkloadCredential {
-    /// Binds one provider issuance to the exact immutable request.
+impl WorkloadCredentialIssuance {
+    /// Validates provider evidence against the exact immutable request.
     ///
     /// # Errors
     ///
-    /// Rejects issuance outside the request interval or incoherent expiry evidence.
+    /// Rejects incoherent evidence before any recovered secret changes ownership.
     pub fn new(
         request: &WorkloadCredentialRequest,
         external_id: Option<ExternalCredentialId>,
-        value: SecretValue,
         issued_at: UnixMillis,
         provider_expires_at: Option<UnixMillis>,
         revocation: WorkloadCredentialRevocation,
@@ -882,11 +863,18 @@ impl IssuedWorkloadCredential {
         Ok(Self {
             request_digest: request.digest,
             external_id,
-            value,
             issued_at,
             provider_expires_at,
             revocation,
         })
+    }
+    /// Moves a recovered secret under already-validated issuance evidence.
+    #[must_use]
+    pub fn bind_secret(self, value: SecretValue) -> IssuedWorkloadCredential {
+        IssuedWorkloadCredential {
+            evidence: self,
+            value,
+        }
     }
     /// Returns the exact issuance request digest.
     #[must_use]
@@ -897,16 +885,6 @@ impl IssuedWorkloadCredential {
     #[must_use]
     pub const fn external_id(&self) -> Option<&ExternalCredentialId> {
         self.external_id.as_ref()
-    }
-    /// Exposes secret bytes only to encrypted custody or workload injection.
-    #[must_use]
-    pub fn expose_secret(&self) -> &[u8] {
-        self.value.expose_secret()
-    }
-    /// Consumes the issued workload credential into encrypted secret custody.
-    #[must_use]
-    pub fn into_secret(self) -> SecretValue {
-        self.value
     }
     /// Returns the provider issuance time.
     #[must_use]
@@ -923,19 +901,63 @@ impl IssuedWorkloadCredential {
     pub const fn revocation(&self) -> WorkloadCredentialRevocation {
         self.revocation
     }
+}
+
+/// Secret-bearing workload credential bound to validated issuance evidence.
+pub struct IssuedWorkloadCredential {
+    evidence: WorkloadCredentialIssuance,
+    value: SecretValue,
+}
+
+impl IssuedWorkloadCredential {
+    /// Returns the exact issuance request digest.
+    #[must_use]
+    pub const fn request_digest(&self) -> Sha256Digest {
+        self.evidence.request_digest()
+    }
+    /// Returns the provider-native credential identity when available.
+    #[must_use]
+    pub const fn external_id(&self) -> Option<&ExternalCredentialId> {
+        self.evidence.external_id()
+    }
+    /// Exposes secret bytes only to encrypted custody or workload injection.
+    #[must_use]
+    pub fn expose_secret(&self) -> &[u8] {
+        self.value.expose_secret()
+    }
+    /// Consumes the issued workload credential into encrypted secret custody.
+    #[must_use]
+    pub fn into_secret(self) -> SecretValue {
+        self.value
+    }
+    /// Returns the provider issuance time.
+    #[must_use]
+    pub const fn issued_at(&self) -> UnixMillis {
+        self.evidence.issued_at()
+    }
+    /// Returns the provider-enforced expiry when available.
+    #[must_use]
+    pub const fn provider_expires_at(&self) -> Option<UnixMillis> {
+        self.evidence.provider_expires_at()
+    }
+    /// Returns the provider invalidation mechanism.
+    #[must_use]
+    pub const fn revocation(&self) -> WorkloadCredentialRevocation {
+        self.evidence.revocation()
+    }
 
     /// Ends local use and returns the provider cleanup obligation, if any.
     pub fn retire(self) -> WorkloadCredentialRetirement {
-        match self.revocation {
+        match self.evidence.revocation {
             WorkloadCredentialRevocation::ProviderExpiry => {
                 WorkloadCredentialRetirement::ProviderExpiry
             }
             WorkloadCredentialRevocation::Explicit => {
                 WorkloadCredentialRetirement::Revoke(WorkloadCredentialRevocationCandidate {
-                    request_digest: self.request_digest,
-                    external_id: self.external_id,
+                    request_digest: self.evidence.request_digest,
+                    external_id: self.evidence.external_id,
                     value: self.value,
-                    provider_expires_at: self.provider_expires_at,
+                    provider_expires_at: self.evidence.provider_expires_at,
                 })
             }
         }
@@ -946,12 +968,8 @@ impl fmt::Debug for IssuedWorkloadCredential {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("IssuedWorkloadCredential")
-            .field("request_digest", &self.request_digest)
-            .field("external_id", &self.external_id)
+            .field("evidence", &self.evidence)
             .field("value", &"[REDACTED]")
-            .field("issued_at", &self.issued_at)
-            .field("provider_expires_at", &self.provider_expires_at)
-            .field("revocation", &self.revocation)
             .finish()
     }
 }

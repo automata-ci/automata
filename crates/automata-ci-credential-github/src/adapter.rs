@@ -4,11 +4,24 @@ use automata_ci_auth::{
     secret::SecretString,
     time::{Clock, SystemClock, UnixTimestamp},
 };
+use automata_ci_core::{PermissionLevel as CommonPermissionLevel, UnixMillis};
+use automata_ci_provider::{
+    ExternalRepositoryIdentity, IndeterminateWorkloadCredential,
+    PendingWorkloadCredentialRevocation, ProviderConnectionId, ProviderConnectionManifest,
+    ProviderConnectionRevision, ProviderLifecycleState, WorkloadCredentialIndeterminateReason,
+    WorkloadCredentialIssuance, WorkloadCredentialIssueFuture, WorkloadCredentialIssueOutcome,
+    WorkloadCredentialProfile, WorkloadCredentialProvider, WorkloadCredentialProviderError,
+    WorkloadCredentialProviderErrorKind, WorkloadCredentialRequest, WorkloadCredentialRetryAfter,
+    WorkloadCredentialRevocation, WorkloadCredentialRevocationCandidate,
+    WorkloadCredentialRevocationFailure, WorkloadCredentialRevocationFailureKind,
+    WorkloadCredentialRevocationFuture, WorkloadCredentialRevocationOutcome,
+};
 use automata_ci_scm::ScmProviderId;
 use automata_ci_scm::credential::{
     CredentialError, CredentialErrorKind, CredentialProvenance, PermissionLevel, PermissionSet,
     ProviderResourceId, RepositoryCredentialRequest,
 };
+use automata_ci_secret::SecretValue;
 use reqwest::{
     Client, StatusCode,
     header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue, USER_AGENT},
@@ -86,6 +99,73 @@ pub struct GithubAppCredentialBroker {
     clock: Arc<dyn Clock>,
     provider_id: ScmProviderId,
 }
+
+/// GitHub workload adapter pinned to one exact common provider connection.
+pub struct GithubWorkloadCredentialProvider {
+    broker: Arc<GithubAppCredentialBroker>,
+    connection_id: ProviderConnectionId,
+    connection_revision: ProviderConnectionRevision,
+    connection_digest: automata_ci_core::Sha256Digest,
+    repository: ExternalRepositoryIdentity,
+}
+
+impl GithubWorkloadCredentialProvider {
+    /// Pins a live installation broker to one active connection revision.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a provider-native repository identity that is not a nonzero
+    /// numeric GitHub repository ID.
+    pub fn new(
+        broker: Arc<GithubAppCredentialBroker>,
+        connection: &ProviderConnectionManifest,
+    ) -> Result<Self, GithubWorkloadCredentialProviderConstructionError> {
+        if connection.state() != ProviderLifecycleState::Active {
+            return Err(GithubWorkloadCredentialProviderConstructionError);
+        }
+        connection
+            .configuration()
+            .repository()
+            .external_id()
+            .as_str()
+            .parse::<u64>()
+            .ok()
+            .filter(|value| *value != 0)
+            .ok_or(GithubWorkloadCredentialProviderConstructionError)?;
+        Ok(Self {
+            broker,
+            connection_id: connection.connection_id(),
+            connection_revision: connection.revision(),
+            connection_digest: connection.digest(),
+            repository: connection.configuration().repository().clone(),
+        })
+    }
+
+    fn accepts(&self, request: &WorkloadCredentialRequest) -> bool {
+        request.connection_id() == self.connection_id
+            && request.connection_revision() == self.connection_revision
+            && request.connection_digest() == self.connection_digest
+            && request.repository() == &self.repository
+    }
+}
+
+impl fmt::Debug for GithubWorkloadCredentialProvider {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GithubWorkloadCredentialProvider")
+            .field("broker", &self.broker)
+            .field("connection_id", &self.connection_id)
+            .field("connection_revision", &self.connection_revision)
+            .field("connection_digest", &self.connection_digest)
+            .field("repository", &self.repository)
+            .finish()
+    }
+}
+
+/// A common connection cannot be pinned to a GitHub workload adapter.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("GitHub workload credential connection is invalid")]
+pub struct GithubWorkloadCredentialProviderConstructionError;
 
 fn github_http_client_builder(config: &GithubAppCredentialConfig) -> reqwest::ClientBuilder {
     let mut headers = HeaderMap::new();
@@ -351,6 +431,187 @@ impl GithubAppCredentialBroker {
         self.created_response_outcome(request, prepared.repository_id, &response)
     }
 
+    /// Performs exactly one common workload-credential issue attempt.
+    ///
+    /// Every recovered token is returned either ready for protected custody or
+    /// as a move-only revocation obligation. An indeterminate result must never
+    /// be retried for the same immutable request.
+    pub async fn issue_workload_once(
+        &self,
+        request: &WorkloadCredentialRequest,
+    ) -> WorkloadCredentialIssueOutcome {
+        let prepared = match self.prepare_workload_mint(request) {
+            Ok(prepared) => prepared,
+            Err(error) => return WorkloadCredentialIssueOutcome::Rejected(error),
+        };
+        let Ok(response) = self
+            .client
+            .post(prepared.endpoint)
+            .header(ACCEPT, ACCEPT_API_JSON)
+            .header(AUTHORIZATION, prepared.authorization)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(prepared.body)
+            .send()
+            .await
+        else {
+            return common_indeterminate(WorkloadCredentialIndeterminateReason::Transport);
+        };
+        if response.status() != StatusCode::CREATED {
+            return common_mint_status_outcome(response.status(), response.headers());
+        }
+        let response = read_created_response(response, self.config.limits.max_response_bytes).await;
+        self.created_workload_response_outcome(request, prepared.repository_id, &response)
+    }
+
+    fn prepare_workload_mint(
+        &self,
+        request: &WorkloadCredentialRequest,
+    ) -> Result<PreparedMintRequest, WorkloadCredentialProviderError> {
+        let repository_id = request
+            .repository()
+            .external_id()
+            .as_str()
+            .parse::<u64>()
+            .ok()
+            .filter(|value| *value != 0)
+            .ok_or_else(|| {
+                WorkloadCredentialProviderError::new(
+                    WorkloadCredentialProviderErrorKind::Unsupported,
+                )
+            })?;
+        let start = self.clock.now();
+        let assertion = self.signer.sign(start).map_err(|_| {
+            WorkloadCredentialProviderError::new(WorkloadCredentialProviderErrorKind::Unavailable)
+        })?;
+        let authorization = bearer_header(assertion.expose_secret()).map_err(|_| {
+            WorkloadCredentialProviderError::new(
+                WorkloadCredentialProviderErrorKind::InvalidResponse,
+            )
+        })?;
+        let permissions = workload_wire_permissions(request);
+        let body = serde_json::to_vec(&InstallationTokenRequest::from_common(
+            repository_id,
+            &permissions,
+        ))
+        .map_err(|_| {
+            WorkloadCredentialProviderError::new(WorkloadCredentialProviderErrorKind::Unsupported)
+        })?;
+        if body.len() > MAX_REQUEST_BODY_BYTES {
+            return Err(WorkloadCredentialProviderError::new(
+                WorkloadCredentialProviderErrorKind::Unsupported,
+            ));
+        }
+        Ok(PreparedMintRequest {
+            repository_id,
+            endpoint: self.access_token_url().map_err(|_| {
+                WorkloadCredentialProviderError::new(
+                    WorkloadCredentialProviderErrorKind::InvalidResponse,
+                )
+            })?,
+            authorization,
+            body,
+        })
+    }
+
+    fn created_workload_response_outcome(
+        &self,
+        request: &WorkloadCredentialRequest,
+        repository_id: u64,
+        response: &crate::response::CreatedResponseBody,
+    ) -> WorkloadCredentialIssueOutcome {
+        match recover_installation_token(&response.body) {
+            RecoveredInstallationToken::Unique(secret) => {
+                self.unique_workload_token_outcome(request, repository_id, response, secret)
+            }
+            RecoveredInstallationToken::Ambiguous => {
+                common_indeterminate(WorkloadCredentialIndeterminateReason::AmbiguousCredential)
+            }
+            RecoveredInstallationToken::Missing => {
+                common_indeterminate(common_missing_token_reason(
+                    response.completion,
+                    WorkloadCredentialIndeterminateReason::MissingCredential,
+                ))
+            }
+            RecoveredInstallationToken::Unrecoverable => {
+                common_indeterminate(common_missing_token_reason(
+                    response.completion,
+                    WorkloadCredentialIndeterminateReason::MalformedResponse,
+                ))
+            }
+        }
+    }
+
+    fn unique_workload_token_outcome(
+        &self,
+        request: &WorkloadCredentialRequest,
+        repository_id: u64,
+        response: &crate::response::CreatedResponseBody,
+        secret: SecretString,
+    ) -> WorkloadCredentialIssueOutcome {
+        let issued_at = self.clock.now();
+        let (provider_expires_at, conservative_expires_at) =
+            recovered_expirations(&response.body, issued_at);
+        let candidate = common_revocation_candidate(
+            request,
+            secret,
+            provider_expires_at.and_then(timestamp_millis),
+        );
+        let Ok(decoded) = decode_token_response(&response.body) else {
+            return common_revoke_pending(
+                candidate,
+                WorkloadCredentialProviderErrorKind::InvalidResponse,
+            );
+        };
+        let metadata_valid = response.completion == CreatedBodyCompletion::Complete
+            && response.metadata_valid
+            && decoded.repository_selection == "selected"
+            && decoded.repositories.len() == 1
+            && decoded.repositories.first().is_some_and(|repository| {
+                repository.id == repository_id
+                    && github_repository_components(&repository.full_name).is_ok()
+            })
+            && common_permissions_match(request, &decoded.permissions.into_inner());
+        if !metadata_valid {
+            return common_revoke_pending(candidate, WorkloadCredentialProviderErrorKind::Conflict);
+        }
+        let Some(observed_at) = timestamp_millis(issued_at) else {
+            return common_revoke_pending(
+                candidate,
+                WorkloadCredentialProviderErrorKind::InvalidResponse,
+            );
+        };
+        let issued_at = observed_at.max(request.requested_at());
+        let Some(provider_expires_at) = provider_expires_at.and_then(timestamp_millis) else {
+            return common_revoke_pending(
+                candidate,
+                WorkloadCredentialProviderErrorKind::InvalidResponse,
+            );
+        };
+        let Some(conservative_expires_at) = conservative_expires_at.and_then(timestamp_millis)
+        else {
+            return common_revoke_pending(
+                candidate,
+                WorkloadCredentialProviderErrorKind::InvalidResponse,
+            );
+        };
+        if conservative_expires_at < request.expires_at() {
+            return common_revoke_pending(candidate, WorkloadCredentialProviderErrorKind::Conflict);
+        }
+        let Ok(evidence) = WorkloadCredentialIssuance::new(
+            request,
+            None,
+            issued_at,
+            Some(provider_expires_at),
+            WorkloadCredentialRevocation::Explicit,
+        ) else {
+            return common_revoke_pending(
+                candidate,
+                WorkloadCredentialProviderErrorKind::InvalidResponse,
+            );
+        };
+        WorkloadCredentialIssueOutcome::Ready(evidence.bind_secret(candidate.into_secret()))
+    }
+
     fn prepare_mint(
         &self,
         request: &RepositoryCredentialRequest,
@@ -579,6 +840,49 @@ impl GithubAppCredentialBroker {
         GithubInstallationTokenRevocationOutcome::Unconfirmed(failure)
     }
 
+    async fn revoke_workload(
+        &self,
+        candidate: WorkloadCredentialRevocationCandidate,
+    ) -> WorkloadCredentialRevocationOutcome {
+        let failure = match self.revocation_url() {
+            Ok(endpoint) => {
+                let authorization = std::str::from_utf8(candidate.expose_secret())
+                    .ok()
+                    .and_then(|secret| bearer_header(secret).ok());
+                let Some(authorization) = authorization else {
+                    return WorkloadCredentialRevocationOutcome::Unconfirmed {
+                        candidate,
+                        failure: WorkloadCredentialRevocationFailure::new(
+                            WorkloadCredentialRevocationFailureKind::InvalidResponse,
+                        ),
+                    };
+                };
+                match self
+                    .client
+                    .delete(endpoint)
+                    .header(ACCEPT, ACCEPT_API_JSON)
+                    .header(AUTHORIZATION, authorization)
+                    .send()
+                    .await
+                {
+                    Ok(response) if response.status() == StatusCode::NO_CONTENT => {
+                        return WorkloadCredentialRevocationOutcome::Confirmed;
+                    }
+                    Ok(response) => {
+                        common_revocation_failure(response.status(), response.headers())
+                    }
+                    Err(_) => WorkloadCredentialRevocationFailure::new(
+                        WorkloadCredentialRevocationFailureKind::Unavailable,
+                    ),
+                }
+            }
+            Err(_) => WorkloadCredentialRevocationFailure::new(
+                WorkloadCredentialRevocationFailureKind::InvalidResponse,
+            ),
+        };
+        WorkloadCredentialRevocationOutcome::Unconfirmed { candidate, failure }
+    }
+
     fn revocation_url(&self) -> Result<Url, CredentialError> {
         let mut endpoint = self.config.api_base.clone();
         let mut segments = endpoint
@@ -611,6 +915,172 @@ fn permissions_match_github_response(requested: &PermissionSet, returned: &Permi
             requested_name == returned_name && requested_level == returned_level
         })
     })
+}
+
+fn workload_wire_permissions(
+    request: &WorkloadCredentialRequest,
+) -> BTreeMap<String, CommonPermissionLevel> {
+    match request.profile() {
+        WorkloadCredentialProfile::CheckoutRead => {
+            BTreeMap::from([("contents".to_owned(), CommonPermissionLevel::Read)])
+        }
+        WorkloadCredentialProfile::RepositoryAccess => request
+            .permissions()
+            .iter()
+            .map(|(name, level)| (name.replace('-', "_"), level))
+            .collect(),
+    }
+}
+
+fn common_permissions_match(request: &WorkloadCredentialRequest, returned: &PermissionSet) -> bool {
+    let requested = workload_wire_permissions(request);
+    let expected_returned = requested.len() + usize::from(!requested.contains_key("metadata"));
+    if returned.len() != requested.len() && returned.len() != expected_returned {
+        return false;
+    }
+    returned.iter().all(|(name, level)| {
+        let expected = requested
+            .get(name.as_str())
+            .copied()
+            .or_else(|| (name.as_str() == "metadata").then_some(CommonPermissionLevel::Read));
+        expected.is_some_and(|expected| common_permission_matches_old(expected, level))
+    })
+}
+
+const fn common_permission_matches_old(
+    common: CommonPermissionLevel,
+    old: PermissionLevel,
+) -> bool {
+    matches!(
+        (common, old),
+        (CommonPermissionLevel::Read, PermissionLevel::Read)
+            | (CommonPermissionLevel::Write, PermissionLevel::Write)
+    )
+}
+
+fn timestamp_millis(timestamp: UnixTimestamp) -> Option<UnixMillis> {
+    timestamp
+        .as_seconds()
+        .checked_mul(1_000)
+        .and_then(|millis| i64::try_from(millis).ok())
+        .map(UnixMillis::new)
+}
+
+fn common_revocation_candidate(
+    request: &WorkloadCredentialRequest,
+    secret: SecretString,
+    provider_expires_at: Option<UnixMillis>,
+) -> WorkloadCredentialRevocationCandidate {
+    let value = SecretValue::new(secret.into_secret_bytes())
+        .expect("a syntactically recovered bounded GitHub token fits common secret custody");
+    WorkloadCredentialRevocationCandidate::new(request.digest(), None, value, provider_expires_at)
+}
+
+fn common_revoke_pending(
+    candidate: WorkloadCredentialRevocationCandidate,
+    reason: WorkloadCredentialProviderErrorKind,
+) -> WorkloadCredentialIssueOutcome {
+    WorkloadCredentialIssueOutcome::RevokePending(PendingWorkloadCredentialRevocation::new(
+        candidate,
+        WorkloadCredentialProviderError::new(reason),
+    ))
+}
+
+fn common_indeterminate(
+    reason: WorkloadCredentialIndeterminateReason,
+) -> WorkloadCredentialIssueOutcome {
+    WorkloadCredentialIssueOutcome::Indeterminate(IndeterminateWorkloadCredential::new(reason))
+}
+
+fn common_mint_status_outcome(
+    status: StatusCode,
+    headers: &HeaderMap,
+) -> WorkloadCredentialIssueOutcome {
+    let rejected = match status {
+        StatusCode::UNAUTHORIZED => Some(WorkloadCredentialProviderError::new(
+            WorkloadCredentialProviderErrorKind::Unauthorized,
+        )),
+        StatusCode::FORBIDDEN if is_rate_limited(headers) => {
+            Some(common_rate_limited_error(headers))
+        }
+        StatusCode::FORBIDDEN => Some(WorkloadCredentialProviderError::new(
+            WorkloadCredentialProviderErrorKind::Forbidden,
+        )),
+        StatusCode::NOT_FOUND => Some(WorkloadCredentialProviderError::new(
+            WorkloadCredentialProviderErrorKind::NotFound,
+        )),
+        StatusCode::TOO_MANY_REQUESTS => Some(common_rate_limited_error(headers)),
+        StatusCode::UNPROCESSABLE_ENTITY | StatusCode::BAD_REQUEST => Some(
+            WorkloadCredentialProviderError::new(WorkloadCredentialProviderErrorKind::Unsupported),
+        ),
+        StatusCode::REQUEST_TIMEOUT | StatusCode::TOO_EARLY => None,
+        status if status.is_client_error() => Some(WorkloadCredentialProviderError::new(
+            WorkloadCredentialProviderErrorKind::InvalidResponse,
+        )),
+        _ => None,
+    };
+    rejected.map_or_else(
+        || {
+            let reason = if status.is_server_error() {
+                WorkloadCredentialIndeterminateReason::ProviderUnavailable
+            } else {
+                WorkloadCredentialIndeterminateReason::UnexpectedStatus
+            };
+            common_indeterminate(reason)
+        },
+        WorkloadCredentialIssueOutcome::Rejected,
+    )
+}
+
+fn common_rate_limited_error(headers: &HeaderMap) -> WorkloadCredentialProviderError {
+    WorkloadCredentialProviderError::rate_limited(common_retry_after(headers))
+}
+
+fn common_retry_after(headers: &HeaderMap) -> Option<WorkloadCredentialRetryAfter> {
+    retry_after_seconds(headers)
+        .and_then(|seconds| seconds.checked_mul(1_000))
+        .and_then(|millis| WorkloadCredentialRetryAfter::new(millis).ok())
+}
+
+fn common_revocation_failure(
+    status: StatusCode,
+    headers: &HeaderMap,
+) -> WorkloadCredentialRevocationFailure {
+    match status {
+        StatusCode::UNAUTHORIZED => WorkloadCredentialRevocationFailure::new(
+            WorkloadCredentialRevocationFailureKind::Unauthorized,
+        ),
+        StatusCode::TOO_MANY_REQUESTS => {
+            WorkloadCredentialRevocationFailure::rate_limited(common_retry_after(headers))
+        }
+        StatusCode::FORBIDDEN if is_rate_limited(headers) => {
+            WorkloadCredentialRevocationFailure::rate_limited(common_retry_after(headers))
+        }
+        StatusCode::REQUEST_TIMEOUT | StatusCode::TOO_EARLY => {
+            WorkloadCredentialRevocationFailure::new(
+                WorkloadCredentialRevocationFailureKind::Unavailable,
+            )
+        }
+        status if status.is_server_error() => WorkloadCredentialRevocationFailure::new(
+            WorkloadCredentialRevocationFailureKind::Unavailable,
+        ),
+        _ => WorkloadCredentialRevocationFailure::new(
+            WorkloadCredentialRevocationFailureKind::InvalidResponse,
+        ),
+    }
+}
+
+const fn common_missing_token_reason(
+    completion: CreatedBodyCompletion,
+    complete_reason: WorkloadCredentialIndeterminateReason,
+) -> WorkloadCredentialIndeterminateReason {
+    match completion {
+        CreatedBodyCompletion::Complete => complete_reason,
+        CreatedBodyCompletion::Truncated => {
+            WorkloadCredentialIndeterminateReason::TruncatedResponse
+        }
+        CreatedBodyCompletion::TooLarge => WorkloadCredentialIndeterminateReason::ResponseTooLarge,
+    }
 }
 
 fn update_fingerprint_part(digest: &mut Sha256, value: &[u8]) {
@@ -690,19 +1160,64 @@ impl fmt::Debug for GithubAppCredentialBroker {
     }
 }
 
-#[derive(Serialize)]
-struct InstallationTokenRequest<'a> {
-    repository_ids: [u64; 1],
-    permissions: BTreeMap<&'a str, &'static str>,
+impl WorkloadCredentialProvider for GithubWorkloadCredentialProvider {
+    fn issue_once<'a>(
+        &'a self,
+        request: &'a WorkloadCredentialRequest,
+    ) -> WorkloadCredentialIssueFuture<'a> {
+        Box::pin(async move {
+            if !self.accepts(request) {
+                return WorkloadCredentialIssueOutcome::Rejected(
+                    WorkloadCredentialProviderError::new(
+                        WorkloadCredentialProviderErrorKind::Conflict,
+                    ),
+                );
+            }
+            self.broker.issue_workload_once(request).await
+        })
+    }
+
+    fn revoke(
+        &self,
+        candidate: WorkloadCredentialRevocationCandidate,
+    ) -> WorkloadCredentialRevocationFuture<'_> {
+        Box::pin(self.broker.revoke_workload(candidate))
+    }
 }
 
-impl<'a> InstallationTokenRequest<'a> {
-    fn new(repository_id: u64, permissions: &'a PermissionSet) -> Self {
+#[derive(Serialize)]
+struct InstallationTokenRequest {
+    repository_ids: [u64; 1],
+    permissions: BTreeMap<String, &'static str>,
+}
+
+impl InstallationTokenRequest {
+    fn new(repository_id: u64, permissions: &PermissionSet) -> Self {
         Self {
             repository_ids: [repository_id],
             permissions: permissions
                 .iter()
-                .map(|(name, level)| (name.as_str(), level.as_str()))
+                .map(|(name, level)| (name.as_str().to_owned(), level.as_str()))
+                .collect(),
+        }
+    }
+
+    fn from_common(
+        repository_id: u64,
+        permissions: &BTreeMap<String, CommonPermissionLevel>,
+    ) -> Self {
+        Self {
+            repository_ids: [repository_id],
+            permissions: permissions
+                .iter()
+                .map(|(name, level)| {
+                    let level = match level {
+                        CommonPermissionLevel::Read => "read",
+                        CommonPermissionLevel::Write => "write",
+                        CommonPermissionLevel::None => "none",
+                    };
+                    (name.clone(), level)
+                })
                 .collect(),
         }
     }

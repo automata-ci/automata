@@ -479,6 +479,7 @@ dependencies = [
  "automata-ci-protocol-protobuf",
  "automata-ci-provider",
  "automata-ci-scm",
+ "automata-ci-secret",
  "automata-ci-store",
  "axum",
  "base64 0.23.1",
