@@ -49,6 +49,9 @@ uuid.workspace = true
 [dev-dependencies]
 async-trait.workspace = true
 automata-ci-blob-s3.workspace = true
+automata-ci-provider-delivery.workspace = true
+flate2.workspace = true
+tar.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 
 [lints]

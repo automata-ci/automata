@@ -530,7 +530,12 @@ fn admission_request(
     )
     .map_err(|_| ProviderWorkflowApplicationError::InvalidEvidence)?;
     let idempotency = WorkflowAdmissionIdempotency::provider_delivery(
-        request.delivery.evidence().delivery_id().to_string(),
+        request
+            .delivery
+            .evidence()
+            .external_delivery()
+            .external_id()
+            .as_str(),
     )
     .map_err(|_| ProviderWorkflowApplicationError::InvalidEvidence)?;
     let event = ActionsProviderEventDocument::from_normalized_trigger(trigger)

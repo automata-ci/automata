@@ -10,6 +10,7 @@ mod github_autonomous_workflow;
 mod logical_projection;
 mod matrix_differential;
 mod projection;
+mod provider_application;
 mod result_projection;
 mod reusable_runtime;
 mod reusable_workflow;
