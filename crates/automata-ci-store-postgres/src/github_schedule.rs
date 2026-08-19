@@ -1,23 +1,22 @@
 use async_trait::async_trait;
 use automata_ci_core::{GitObjectId, Sha256Digest, UnixMillis};
 use automata_ci_schedule::CronExpression;
-use sqlx::{AssertSqlSafe, PgPool, Postgres, Row as _, Transaction};
+use sqlx::{PgPool, Postgres, Row as _, Transaction};
 use uuid::Uuid;
 
 use super::{PostgresStore, durable_schema::current_durable_schemas};
-use automata_ci_provider::ProviderConnectionId;
+use automata_ci_provider::{ProviderConnectionId, ProviderRepositoryPath};
 use automata_ci_store::{
     AdmitLogicalWorkflowRun, ClaimDueGithubScheduleFire, ClaimGithubScheduleDiscovery,
     ClaimedGithubScheduleFire, CompleteGithubScheduleFire, GITHUB_SCHEDULE_ARCHIVE_MEDIA_TYPE,
     GITHUB_SCHEDULE_ATTEMPTS_EXHAUSTED_FAILURE, GITHUB_SCHEDULE_INVALID_REGISTRY_FAILURE,
-    GithubCheckSubjectKey, GithubCheckSubjectReceipt, GithubProviderManifestRevision,
-    GithubScheduleArchive, GithubScheduleClaimFence, GithubScheduleDiscoveryClaim,
-    GithubScheduleFireClaim, GithubScheduleFireConclusion, GithubScheduleFireId,
-    GithubScheduleFireReceipt, GithubScheduleRegistryEntry, GithubScheduleRegistryId,
-    GithubScheduleRegistryReceipt, GithubScheduleRepository, GithubScheduleSourceAuthority,
-    GithubScheduleStoreError, GithubScheduleWorkerId, LogicalWorkflowAdmissionStoreError,
-    MAX_GITHUB_SCHEDULE_CLAIM_MILLIS, MAX_GITHUB_SCHEDULE_FIRE_ATTEMPTS, ObjectKey,
-    RegisterGithubScheduleRegistry, RegisterGithubScheduledCheckSubject, RepositoryId,
+    GithubProviderManifestRevision, GithubScheduleArchive, GithubScheduleClaimFence,
+    GithubScheduleDiscoveryClaim, GithubScheduleFireClaim, GithubScheduleFireConclusion,
+    GithubScheduleFireId, GithubScheduleFireReceipt, GithubScheduleRegistryEntry,
+    GithubScheduleRegistryId, GithubScheduleRegistryReceipt, GithubScheduleRepository,
+    GithubScheduleSourceAuthority, GithubScheduleStoreError, GithubScheduleWorkerId,
+    LogicalWorkflowAdmissionStoreError, MAX_GITHUB_SCHEDULE_CLAIM_MILLIS,
+    MAX_GITHUB_SCHEDULE_FIRE_ATTEMPTS, ObjectKey, RegisterGithubScheduleRegistry, RepositoryId,
     RetryGithubScheduleFire, StoreError, TenantScope,
 };
 
@@ -50,13 +49,6 @@ impl GithubScheduleRepository for PostgresStore {
         lease_millis: i64,
     ) -> Result<GithubScheduleFireClaim, GithubScheduleStoreError> {
         renew_schedule_fire(&self.pool, claim, lease_millis).await
-    }
-
-    async fn register_github_scheduled_check_subject(
-        &self,
-        request: RegisterGithubScheduledCheckSubject,
-    ) -> Result<GithubCheckSubjectReceipt, GithubScheduleStoreError> {
-        register_scheduled_check_subject(&self.pool, request).await
     }
 
     async fn retry_github_schedule_fire(
@@ -482,27 +474,6 @@ async fn renew_schedule_fire(
     .map_err(|_| GithubScheduleStoreError::CorruptData)
 }
 
-async fn register_scheduled_check_subject(
-    pool: &PgPool,
-    request: RegisterGithubScheduledCheckSubject,
-) -> Result<GithubCheckSubjectReceipt, GithubScheduleStoreError> {
-    let mut transaction = pool.begin().await.map_err(operation_error)?;
-    let source = lock_scheduled_check_source(&mut transaction, request.claim()).await?;
-    let now = database_now(&mut transaction).await?;
-    if now < request.claim().claimed_at() || now >= request.claim().expires_at() {
-        return Err(GithubScheduleStoreError::ClaimRejected);
-    }
-    if let Some(receipt) =
-        load_exact_scheduled_check(&mut transaction, request.claim().fire_id(), &source).await?
-    {
-        transaction.commit().await.map_err(operation_error)?;
-        return Ok(receipt);
-    }
-    let receipt = insert_scheduled_check(&mut transaction, request.claim(), &source, now).await?;
-    transaction.commit().await.map_err(configuration_error)?;
-    Ok(receipt)
-}
-
 async fn retry_schedule_fire(
     pool: &PgPool,
     request: RetryGithubScheduleFire,
@@ -563,7 +534,6 @@ struct ScheduleFireOutcome<'a> {
     state: &'static str,
     run_id: Option<Uuid>,
     failure_kind: Option<&'a str>,
-    check_terminal: Option<(&'static str, &'static str)>,
 }
 
 impl<'a> ScheduleFireOutcome<'a> {
@@ -573,19 +543,16 @@ impl<'a> ScheduleFireOutcome<'a> {
                 state: "admitted",
                 run_id: Some(run_id.as_uuid()),
                 failure_kind: None,
-                check_terminal: None,
             },
             GithubScheduleFireConclusion::Skipped(kind) => Self {
                 state: "skipped",
                 run_id: None,
                 failure_kind: Some(kind),
-                check_terminal: Some(("skipped", "workflow_skipped")),
             },
             GithubScheduleFireConclusion::Failed(kind) => Self {
                 state: "failed",
                 run_id: None,
                 failure_kind: Some(kind),
-                check_terminal: Some(("failure", "workflow_failure")),
             },
         }
     }
@@ -617,10 +584,6 @@ async fn complete_schedule_fire(
         now,
     )
     .await?;
-    if let Some((conclusion, cause)) = outcome.check_terminal {
-        terminalize_scheduled_check(&mut transaction, claim.fire_id(), now, conclusion, cause)
-            .await?;
-    }
     insert_attempt(
         &mut transaction,
         claim,
@@ -735,89 +698,19 @@ async fn update_schedule_runtime(
     }
 }
 
-async fn terminalize_scheduled_check(
-    transaction: &mut Transaction<'_, Postgres>,
-    fire_id: GithubScheduleFireId,
-    terminal_at: UnixMillis,
-    conclusion: &str,
-    cause: &str,
-) -> Result<(), GithubScheduleStoreError> {
-    let changed = sqlx::query(
-        r"
-        UPDATE github_check_subjects
-           SET desired_state = 'completed',
-               desired_conclusion = $2,
-               terminal_cause = $3,
-               desired_revision = desired_revision + 1,
-               desired_updated_at_ms = $4
-        WHERE origin_kind = 'scheduled_fire'
-           AND provider_delivery_id IS NULL
-           AND schedule_fire_id = $1
-           AND subject_kind = 'workflow'
-           AND parent_subject_id IS NULL
-           AND job_id IS NULL
-           AND job_attempt_id IS NULL
-           AND workflow_run_id IS NULL
-           AND linked_at_ms IS NULL
-           AND NOT EXISTS (
-               SELECT 1
-                 FROM github_schedule_workflow_run_subject_evidence AS run_evidence
-                WHERE run_evidence.schedule_fire_id = $1
-                  AND run_evidence.github_check_subject_id = github_check_subjects.id
-           )
-           AND desired_state IN ('queued', 'in_progress')
-           AND desired_updated_at_ms <= $4
-           AND desired_revision < 9223372036854775807
-        ",
-    )
-    .bind(fire_id.as_uuid())
-    .bind(conclusion)
-    .bind(cause)
-    .bind(terminal_at.get())
-    .execute(&mut **transaction)
-    .await
-    .map_err(operation_error)?
-    .rows_affected();
-    if changed > 1 {
-        return Err(GithubScheduleStoreError::CorruptData);
-    }
-    if changed == 0 {
-        let occupied: bool = sqlx::query_scalar(
-            r"
-            SELECT EXISTS (
-                SELECT 1
-                  FROM github_check_subjects
-                 WHERE schedule_fire_id = $1
-                   AND subject_kind = 'workflow'
-                   AND parent_subject_id IS NULL
-            )
-            ",
-        )
-        .bind(fire_id.as_uuid())
-        .fetch_one(&mut **transaction)
-        .await
-        .map_err(operation_error)?;
-        if occupied {
-            return Err(GithubScheduleStoreError::Conflict);
-        }
-    }
-    Ok(())
-}
-
 pub(crate) async fn record_github_scheduled_run_evidence_in_transaction(
     transaction: &mut Transaction<'_, Postgres>,
     command: &AdmitLogicalWorkflowRun,
     claim: GithubScheduleFireClaim,
 ) -> Result<(), LogicalWorkflowAdmissionStoreError> {
-    let source = lock_scheduled_check_source(transaction, claim)
+    let source = lock_scheduled_fire_source(transaction, claim)
         .await
         .map_err(schedule_admission_error)?;
     let now = database_now(transaction)
         .await
         .map_err(schedule_admission_error)?;
     require_scheduled_command(command, claim, &source, now)?;
-    let subject_id = link_scheduled_check_to_run(transaction, command, &source).await?;
-    insert_scheduled_run_evidence(transaction, command, claim, subject_id, &source).await
+    insert_scheduled_run_evidence(transaction, command, claim, &source).await
 }
 
 pub(crate) async fn validate_github_schedule_selection_in_transaction(
@@ -825,33 +718,13 @@ pub(crate) async fn validate_github_schedule_selection_in_transaction(
     command: &AdmitLogicalWorkflowRun,
     claim: GithubScheduleFireClaim,
 ) -> Result<(), LogicalWorkflowAdmissionStoreError> {
-    let source = lock_scheduled_check_source(transaction, claim)
+    let source = lock_scheduled_fire_source(transaction, claim)
         .await
         .map_err(schedule_admission_error)?;
     let now = database_now(transaction)
         .await
         .map_err(schedule_admission_error)?;
     require_scheduled_command(command, claim, &source, now)?;
-    let check = load_exact_scheduled_check(transaction, claim.fire_id(), &source)
-        .await
-        .map_err(schedule_admission_error)?
-        .ok_or_else(|| StoreError::corrupt_data("scheduled GitHub Check evidence is absent"))?;
-    let exact_projection = matches!(
-        (check.desired(), check.desired_revision()),
-        (automata_ci_store::GithubCheckDesiredProjection::Queued, 1)
-            | (
-                automata_ci_store::GithubCheckDesiredProjection::Terminal(
-                    automata_ci_store::GithubCheckTerminalCause::WorkflowSkipped
-                ),
-                2
-            )
-    );
-    if check.workflow_run_id().is_some() || !exact_projection {
-        return Err(StoreError::corrupt_data(
-            "scheduled GitHub Check is not an exact queued or disabled selection",
-        )
-        .into());
-    }
     Ok(())
 }
 
@@ -862,7 +735,7 @@ pub(crate) async fn validate_github_scheduled_run_evidence_in_transaction(
     admitted_at: UnixMillis,
 ) -> Result<(), LogicalWorkflowAdmissionStoreError> {
     let schemas = current_durable_schemas();
-    let source = lock_scheduled_check_source(transaction, claim)
+    let source = lock_scheduled_fire_source(transaction, claim)
         .await
         .map_err(schedule_admission_error)?;
     let now = database_now(transaction)
@@ -873,13 +746,7 @@ pub(crate) async fn validate_github_scheduled_run_evidence_in_transaction(
         r"
         SELECT EXISTS (
             SELECT 1
-              FROM github_schedule_workflow_run_subject_evidence AS evidence
-              JOIN github_check_subjects AS subject
-                ON subject.tenant_id = evidence.tenant_id
-               AND subject.id = evidence.github_check_subject_id
-              JOIN github_schedule_check_evidence AS schedule_check
-                ON schedule_check.schedule_fire_id = evidence.schedule_fire_id
-               AND schedule_check.github_check_subject_id = evidence.github_check_subject_id
+              FROM github_schedule_workflow_run_evidence AS evidence
               JOIN workflow_admission_receipts AS receipt
                 ON receipt.tenant_id = evidence.tenant_id
                AND receipt.idempotency_kind = 'operation'
@@ -891,28 +758,24 @@ pub(crate) async fn validate_github_scheduled_run_evidence_in_transaction(
                AND evidence.snapshot_id = $5
                AND evidence.run_id = $6
                AND evidence.root_invocation_id = $7
-               AND evidence.github_repository_owner_id = $17
-               AND evidence.github_check_head_sha = $8
+               AND evidence.provider_connection_id = $16
+               AND evidence.registry_id = $17
+               AND evidence.github_repository_owner_id = $18
+               AND evidence.source_revision = $8
                AND evidence.workflow_path = $9
                AND evidence.source_digest = $10
                AND evidence.event_name = 'schedule'
                AND evidence.event_digest = $11
                AND evidence.git_ref = $12
-               AND evidence.workflow_plan_schema = $18
+               AND evidence.workflow_plan_schema = $19
                AND evidence.plan_digest = $13
                AND evidence.logical_admission_digest = $14
                AND evidence.admitted_at_ms = $15
-               AND subject.origin_kind = 'scheduled_fire'
-               AND subject.schedule_fire_id = evidence.schedule_fire_id
-               AND subject.workflow_run_id = evidence.run_id
-               AND subject.linked_at_ms = evidence.admitted_at_ms
-               AND schedule_check.registry_id = $16
-               AND schedule_check.github_repository_owner_id = $17
                AND receipt.request_digest = evidence.logical_admission_digest
                AND receipt.repository_id = evidence.repository_id
                AND receipt.run_id = evidence.run_id
                AND receipt.committed_at_ms = evidence.admitted_at_ms
-               AND receipt.github_subject_evidence_required
+               AND NOT receipt.github_subject_evidence_required
         )
         ",
     )
@@ -931,6 +794,7 @@ pub(crate) async fn validate_github_scheduled_run_evidence_in_transaction(
     .bind(command.plan().digest().as_bytes().as_slice())
     .bind(command.request_digest().as_bytes().as_slice())
     .bind(admitted_at.get())
+    .bind(source.connection_id)
     .bind(source.registry_id)
     .bind(source.github_repository_owner_id)
     .bind(schemas.workflow_plan_i16)
@@ -947,7 +811,7 @@ pub(crate) async fn validate_github_scheduled_run_evidence_in_transaction(
 fn require_scheduled_command(
     command: &AdmitLogicalWorkflowRun,
     claim: GithubScheduleFireClaim,
-    source: &ScheduledCheckSource,
+    source: &ScheduledFireSource,
     now: UnixMillis,
 ) -> Result<(), LogicalWorkflowAdmissionStoreError> {
     let exact = now >= claim.claimed_at()
@@ -976,88 +840,47 @@ fn require_scheduled_command(
     }
 }
 
-async fn link_scheduled_check_to_run(
-    transaction: &mut Transaction<'_, Postgres>,
-    command: &AdmitLogicalWorkflowRun,
-    source: &ScheduledCheckSource,
-) -> Result<Uuid, LogicalWorkflowAdmissionStoreError> {
-    sqlx::query_scalar(
-        r"
-        UPDATE github_check_subjects AS subject
-           SET workflow_run_id = $2,
-               linked_at_ms = $3,
-               desired_state = 'in_progress',
-               desired_revision = subject.desired_revision + 1,
-               desired_updated_at_ms = $3
-          FROM github_schedule_check_evidence AS evidence
-         WHERE subject.schedule_fire_id = $1
-           AND subject.origin_kind = 'scheduled_fire'
-           AND subject.provider_delivery_id IS NULL
-           AND subject.workflow_run_id IS NULL
-           AND subject.linked_at_ms IS NULL
-           AND subject.desired_state = 'queued'
-           AND subject.desired_revision = 1
-           AND subject.tenant_id = $4
-           AND subject.repository_id = $5
-           AND subject.provider_connection_id = $6
-           AND subject.subject_key = $7
-           AND subject.head_sha = $8
-           AND evidence.schedule_fire_id = subject.schedule_fire_id
-           AND evidence.github_check_subject_id = subject.id
-           AND evidence.registry_id = $9
-        RETURNING subject.id
-        ",
-    )
-    .bind(source.fire_id)
-    .bind(command.run_id().as_uuid())
-    .bind(command.admitted_at().get())
-    .bind(&source.tenant_id)
-    .bind(source.repository_id)
-    .bind(source.connection_id)
-    .bind(&source.workflow_path)
-    .bind(command.head_sha().as_bytes())
-    .bind(source.registry_id)
-    .fetch_optional(&mut **transaction)
-    .await
-    .map_err(logical_operation_error)?
-    .ok_or_else(|| {
-        StoreError::corrupt_data("scheduled Check could not link to admitted run").into()
-    })
-}
-
 async fn insert_scheduled_run_evidence(
     transaction: &mut Transaction<'_, Postgres>,
     command: &AdmitLogicalWorkflowRun,
     claim: GithubScheduleFireClaim,
-    subject_id: Uuid,
-    source: &ScheduledCheckSource,
+    source: &ScheduledFireSource,
 ) -> Result<(), LogicalWorkflowAdmissionStoreError> {
     let schemas = current_durable_schemas();
     sqlx::query(
         r"
-        INSERT INTO github_schedule_workflow_run_subject_evidence (
-            schedule_fire_id, tenant_id, repository_id, workflow_id,
-            snapshot_id, run_id, root_invocation_id, github_repository_owner_id,
+        INSERT INTO github_schedule_workflow_run_evidence (
+            schedule_fire_id, tenant_id, repository_id, provider_connection_id,
+            registry_id, entry_ordinal, scheduled_at_ms,
+            provider_manifest_revision, provider_manifest_digest,
+            github_repository_owner_id, workflow_id,
+            snapshot_id, run_id, root_invocation_id,
             admission_claim_owner_id, admission_claim_attempt,
             admission_claim_fence, admission_claimed_at_ms,
-            admission_claim_expires_at_ms, github_check_subject_id,
-            github_check_head_sha, workflow_path, source_digest,
+            admission_claim_expires_at_ms, source_revision,
+            workflow_path, source_digest,
             event_name, event_digest, git_ref, workflow_plan_schema,
             plan_digest, logical_admission_digest, admitted_at_ms
         ) VALUES (
             $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
-            'schedule',$18,$19,$23,$20,$21,$22
+            $18,$19,$20,$21,$22,'schedule',$23,$24,$25,$26,$27,$28
         )
         ",
     )
     .bind(claim.fire_id().as_uuid())
     .bind(command.tenant().as_str())
     .bind(command.repository().id().as_uuid())
+    .bind(source.connection_id)
+    .bind(source.registry_id)
+    .bind(source.entry_ordinal)
+    .bind(source.scheduled_at_ms)
+    .bind(source.manifest_revision)
+    .bind(&source.manifest_digest)
+    .bind(source.github_repository_owner_id)
     .bind(command.workflow_id().as_uuid())
     .bind(command.snapshot_id().as_uuid())
     .bind(command.run_id().as_uuid())
     .bind(command.root_invocation_id().as_uuid())
-    .bind(source.github_repository_owner_id)
     .bind(claim.worker_id().as_uuid())
     .bind(i16::try_from(claim.attempt()).map_err(|_| {
         StoreError::corrupt_data("scheduled admission claim attempt is out of range")
@@ -1065,7 +888,6 @@ async fn insert_scheduled_run_evidence(
     .bind(i64_from_u64(claim.fence().get()).map_err(schedule_admission_error)?)
     .bind(claim.claimed_at().get())
     .bind(claim.expires_at().get())
-    .bind(subject_id)
     .bind(command.head_sha().as_bytes())
     .bind(command.workflow_path())
     .bind(command.source().digest().as_bytes().as_slice())
@@ -1082,11 +904,10 @@ async fn insert_scheduled_run_evidence(
 }
 
 #[derive(Debug)]
-struct ScheduledCheckSource {
+struct ScheduledFireSource {
     tenant_id: String,
     repository_id: Uuid,
     connection_id: Uuid,
-    fire_id: Uuid,
     registry_id: Uuid,
     entry_ordinal: i16,
     scheduled_at_ms: i64,
@@ -1096,23 +917,15 @@ struct ScheduledCheckSource {
     source_revision: GitObjectId,
     workflow_path: String,
     workflow_source_digest: Vec<u8>,
-    provider_installation_id: i64,
     github_repository_id: i64,
     github_repository_owner_id: i64,
     github_repository_name: String,
-    github_app_id: i64,
-    check_name: String,
-    github_app_client_id: String,
-    github_app_jwt_issuer_kind: String,
-    app_key_spki_sha256: Vec<u8>,
-    app_configuration_revision: i64,
-    policy_revision: i64,
 }
 
-async fn lock_scheduled_check_source(
+async fn lock_scheduled_fire_source(
     transaction: &mut Transaction<'_, Postgres>,
     claim: GithubScheduleFireClaim,
-) -> Result<ScheduledCheckSource, GithubScheduleStoreError> {
+) -> Result<ScheduledFireSource, GithubScheduleStoreError> {
     let row = sqlx::query(
         r"
         SELECT fire.tenant_id, fire.repository_id, fire.provider_connection_id,
@@ -1122,15 +935,8 @@ async fn lock_scheduled_check_source(
                registry.default_branch_ref, registry.source_revision,
                registry.github_repository_owner_id,
                entry.workflow_path, entry.workflow_source_digest,
-               manifest.provider_installation_id,
                manifest.github_repository_id,
-               manifest.github_repository_name,
-               manifest.github_app_id, manifest.check_name,
-               manifest.github_app_client_id,
-               manifest.github_app_jwt_issuer_kind,
-               manifest.app_key_spki_sha256,
-               manifest.app_configuration_revision,
-               manifest.policy_revision
+               manifest.github_repository_name
           FROM github_schedule_fires AS fire
           JOIN github_schedule_registry_revisions AS registry
             ON registry.tenant_id = fire.tenant_id
@@ -1172,11 +978,10 @@ async fn lock_scheduled_check_source(
     .await
     .map_err(operation_error)?
     .ok_or(GithubScheduleStoreError::ClaimRejected)?;
-    Ok(ScheduledCheckSource {
+    Ok(ScheduledFireSource {
         tenant_id: row.try_get("tenant_id").map_err(corrupt)?,
         repository_id: row.try_get("repository_id").map_err(corrupt)?,
         connection_id: row.try_get("provider_connection_id").map_err(corrupt)?,
-        fire_id: row.try_get("fire_id").map_err(corrupt)?,
         registry_id: row.try_get("registry_id").map_err(corrupt)?,
         entry_ordinal: row.try_get("entry_ordinal").map_err(corrupt)?,
         scheduled_at_ms: row.try_get("scheduled_at_ms").map_err(corrupt)?,
@@ -1186,249 +991,10 @@ async fn lock_scheduled_check_source(
         source_revision: git_object_id(&row, "source_revision")?,
         workflow_path: row.try_get("workflow_path").map_err(corrupt)?,
         workflow_source_digest: row.try_get("workflow_source_digest").map_err(corrupt)?,
-        provider_installation_id: row.try_get("provider_installation_id").map_err(corrupt)?,
         github_repository_id: row.try_get("github_repository_id").map_err(corrupt)?,
         github_repository_owner_id: row.try_get("github_repository_owner_id").map_err(corrupt)?,
         github_repository_name: row.try_get("github_repository_name").map_err(corrupt)?,
-        github_app_id: row.try_get("github_app_id").map_err(corrupt)?,
-        check_name: row.try_get("check_name").map_err(corrupt)?,
-        github_app_client_id: row.try_get("github_app_client_id").map_err(corrupt)?,
-        github_app_jwt_issuer_kind: row.try_get("github_app_jwt_issuer_kind").map_err(corrupt)?,
-        app_key_spki_sha256: row.try_get("app_key_spki_sha256").map_err(corrupt)?,
-        app_configuration_revision: row.try_get("app_configuration_revision").map_err(corrupt)?,
-        policy_revision: row.try_get("policy_revision").map_err(corrupt)?,
     })
-}
-
-async fn load_exact_scheduled_check(
-    transaction: &mut Transaction<'_, Postgres>,
-    fire_id: GithubScheduleFireId,
-    source: &ScheduledCheckSource,
-) -> Result<Option<GithubCheckSubjectReceipt>, GithubScheduleStoreError> {
-    let query = format!(
-        r"
-        SELECT {columns}
-          FROM github_check_subjects AS subject
-          JOIN github_schedule_check_evidence AS evidence
-            ON evidence.tenant_id = subject.tenant_id
-           AND evidence.repository_id = subject.repository_id
-           AND evidence.provider_connection_id = subject.provider_connection_id
-           AND evidence.schedule_fire_id = subject.schedule_fire_id
-           AND evidence.github_check_subject_id = subject.id
-         WHERE subject.origin_kind = 'scheduled_fire'
-           AND subject.provider_delivery_id IS NULL
-           AND subject.schedule_fire_id = $1
-           AND subject.tenant_id = $2
-           AND subject.repository_id = $3
-           AND subject.provider_connection_id = $4
-           AND subject.subject_key = $5
-           AND subject.provider_installation_id = $6
-           AND subject.github_repository_id = $7
-           AND subject.github_repository_name = $8
-           AND subject.github_app_id = $9
-           AND subject.head_sha = $10
-           AND subject.check_name = $11
-           AND evidence.registry_id = $12
-           AND evidence.entry_ordinal = $13
-           AND evidence.scheduled_at_ms = $14
-           AND evidence.provider_manifest_revision = $15
-           AND evidence.provider_manifest_digest = $16
-           AND evidence.default_branch_ref = $17
-           AND evidence.source_revision = $10
-           AND evidence.github_repository_owner_id = $18
-           AND evidence.github_check_head_sha = subject.head_sha
-           AND evidence.recorded_at_ms = subject.created_at_ms
-        ",
-        columns = super::github_checks::SUBJECT_COLUMNS,
-    );
-    let row = sqlx::query(AssertSqlSafe(query))
-        .bind(fire_id.as_uuid())
-        .bind(&source.tenant_id)
-        .bind(source.repository_id)
-        .bind(source.connection_id)
-        .bind(&source.workflow_path)
-        .bind(source.provider_installation_id)
-        .bind(source.github_repository_id)
-        .bind(&source.github_repository_name)
-        .bind(source.github_app_id)
-        .bind(source.source_revision.as_bytes())
-        .bind(&source.check_name)
-        .bind(source.registry_id)
-        .bind(source.entry_ordinal)
-        .bind(source.scheduled_at_ms)
-        .bind(source.manifest_revision)
-        .bind(&source.manifest_digest)
-        .bind(&source.default_branch_ref)
-        .bind(source.github_repository_owner_id)
-        .fetch_optional(&mut **transaction)
-        .await
-        .map_err(operation_error)?;
-    if let Some(row) = row {
-        let decoded = super::github_checks::decode_subject(&row)
-            .map_err(|_| GithubScheduleStoreError::CorruptData)?;
-        return Ok(Some(decoded.receipt));
-    }
-    let occupied: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM github_check_subjects WHERE schedule_fire_id = $1)",
-    )
-    .bind(fire_id.as_uuid())
-    .fetch_one(&mut **transaction)
-    .await
-    .map_err(operation_error)?;
-    if occupied {
-        Err(GithubScheduleStoreError::Conflict)
-    } else {
-        Ok(None)
-    }
-}
-
-async fn insert_scheduled_check(
-    transaction: &mut Transaction<'_, Postgres>,
-    claim: GithubScheduleFireClaim,
-    source: &ScheduledCheckSource,
-    recorded_at: UnixMillis,
-) -> Result<GithubCheckSubjectReceipt, GithubScheduleStoreError> {
-    let authority = lock_scheduled_check_authority(transaction, source, recorded_at).await?;
-    let subject_id = Uuid::new_v4();
-    let external_id = format!("automata-check:{subject_id}");
-    let query = format!(
-        r"
-        INSERT INTO github_check_subjects AS subject (
-            id, tenant_id, repository_id, origin_kind, provider_delivery_id,
-            schedule_fire_id, subject_key, provider_connection_id,
-            provider_installation_id, github_repository_id,
-            github_repository_name, github_app_id, head_sha, check_name,
-            external_id, created_at_ms, desired_updated_at_ms
-        ) VALUES (
-            $1, $2, $3, 'scheduled_fire', NULL, $4, $5, $6,
-            $7, $8, $9, $10, $11, $12, $13, $14, $14
-        )
-        RETURNING {columns}
-        ",
-        columns = super::github_checks::SUBJECT_COLUMNS,
-    );
-    let subject = sqlx::query(AssertSqlSafe(query))
-        .bind(subject_id)
-        .bind(&source.tenant_id)
-        .bind(source.repository_id)
-        .bind(claim.fire_id().as_uuid())
-        .bind(&source.workflow_path)
-        .bind(source.connection_id)
-        .bind(source.provider_installation_id)
-        .bind(source.github_repository_id)
-        .bind(&source.github_repository_name)
-        .bind(source.github_app_id)
-        .bind(source.source_revision.as_bytes())
-        .bind(&source.check_name)
-        .bind(&external_id)
-        .bind(recorded_at.get())
-        .fetch_one(&mut **transaction)
-        .await
-        .map_err(configuration_error)?;
-    insert_scheduled_check_evidence(transaction, source, &authority, subject_id, recorded_at)
-        .await?;
-    let decoded = super::github_checks::decode_subject(&subject)
-        .map_err(|_| GithubScheduleStoreError::CorruptData)?;
-    Ok(decoded.receipt)
-}
-
-struct ScheduledCheckAuthority {
-    id: Uuid,
-    identity_digest: Vec<u8>,
-    app_configuration_revision: i64,
-    policy_revision: i64,
-}
-
-async fn lock_scheduled_check_authority(
-    transaction: &mut Transaction<'_, Postgres>,
-    source: &ScheduledCheckSource,
-    recorded_at: UnixMillis,
-) -> Result<ScheduledCheckAuthority, GithubScheduleStoreError> {
-    let row = sqlx::query(
-        r"
-        SELECT id, identity_digest, app_configuration_revision, policy_revision
-          FROM github_server_service_authorities
-         WHERE tenant_id = $1 AND repository_id = $2
-           AND provider_connection_id = $3 AND provider_installation_id = $4
-           AND github_app_id = $5 AND github_repository_id = $6
-           AND github_repository_name = $7 AND service_scope = 'checks_write'
-           AND github_app_client_id = $8 AND github_app_jwt_issuer_kind = $9
-           AND app_key_spki_sha256 = $10 AND app_configuration_revision = $11
-           AND policy_revision = $12 AND state = 'active' AND created_at_ms <= $13
-         FOR SHARE
-        ",
-    )
-    .bind(&source.tenant_id)
-    .bind(source.repository_id)
-    .bind(source.connection_id)
-    .bind(source.provider_installation_id)
-    .bind(source.github_app_id)
-    .bind(source.github_repository_id)
-    .bind(&source.github_repository_name)
-    .bind(&source.github_app_client_id)
-    .bind(&source.github_app_jwt_issuer_kind)
-    .bind(&source.app_key_spki_sha256)
-    .bind(source.app_configuration_revision)
-    .bind(source.policy_revision)
-    .bind(recorded_at.get())
-    .fetch_optional(&mut **transaction)
-    .await
-    .map_err(operation_error)?
-    .ok_or(GithubScheduleStoreError::Conflict)?;
-    Ok(ScheduledCheckAuthority {
-        id: row.try_get("id").map_err(corrupt)?,
-        identity_digest: row.try_get("identity_digest").map_err(corrupt)?,
-        app_configuration_revision: row.try_get("app_configuration_revision").map_err(corrupt)?,
-        policy_revision: row.try_get("policy_revision").map_err(corrupt)?,
-    })
-}
-
-async fn insert_scheduled_check_evidence(
-    transaction: &mut Transaction<'_, Postgres>,
-    source: &ScheduledCheckSource,
-    authority: &ScheduledCheckAuthority,
-    subject_id: Uuid,
-    recorded_at: UnixMillis,
-) -> Result<(), GithubScheduleStoreError> {
-    sqlx::query(
-        r"
-        INSERT INTO github_schedule_check_evidence (
-            schedule_fire_id, tenant_id, repository_id, provider_connection_id,
-            registry_id, entry_ordinal, scheduled_at_ms,
-            provider_manifest_revision, provider_manifest_digest,
-            default_branch_ref, source_revision, github_repository_owner_id,
-            checks_authority_id, checks_authority_identity_digest,
-            checks_authority_app_configuration_revision,
-            checks_authority_policy_revision, github_check_subject_id,
-            github_check_head_sha, recorded_at_ms
-        ) VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-            $13, $14, $15, $16, $17, $11, $18
-        )
-        ",
-    )
-    .bind(source.fire_id)
-    .bind(&source.tenant_id)
-    .bind(source.repository_id)
-    .bind(source.connection_id)
-    .bind(source.registry_id)
-    .bind(source.entry_ordinal)
-    .bind(source.scheduled_at_ms)
-    .bind(source.manifest_revision)
-    .bind(&source.manifest_digest)
-    .bind(&source.default_branch_ref)
-    .bind(source.source_revision.as_bytes())
-    .bind(source.github_repository_owner_id)
-    .bind(authority.id)
-    .bind(&authority.identity_digest)
-    .bind(authority.app_configuration_revision)
-    .bind(authority.policy_revision)
-    .bind(subject_id)
-    .bind(recorded_at.get())
-    .execute(&mut **transaction)
-    .await
-    .map_err(configuration_error)?;
-    Ok(())
 }
 
 #[derive(Clone, Debug)]
@@ -1875,7 +1441,7 @@ async fn supersede_current_registry(
          WHERE registry_id = $1 AND state = 'claimed'
            AND NOT EXISTS (
                SELECT 1
-                 FROM github_schedule_workflow_run_subject_evidence AS run_evidence
+                 FROM github_schedule_workflow_run_evidence AS run_evidence
                 WHERE run_evidence.schedule_fire_id = github_schedule_fires.fire_id
            )
         ON CONFLICT (fire_id, attempt) DO NOTHING
@@ -1886,7 +1452,6 @@ async fn supersede_current_registry(
     .execute(&mut **transaction)
     .await
     .map_err(operation_error)?;
-    terminalize_superseded_scheduled_checks(transaction, old_registry, now).await?;
     sqlx::query(
         r"
         UPDATE github_schedule_fires
@@ -1896,7 +1461,7 @@ async fn supersede_current_registry(
          WHERE registry_id = $1 AND state IN ('pending', 'claimed')
            AND NOT EXISTS (
                SELECT 1
-                 FROM github_schedule_workflow_run_subject_evidence AS run_evidence
+                 FROM github_schedule_workflow_run_evidence AS run_evidence
                 WHERE run_evidence.schedule_fire_id = github_schedule_fires.fire_id
            )
         ",
@@ -1930,22 +1495,12 @@ async fn reject_supersession_during_admission_completion(
         SELECT EXISTS (
             SELECT 1
               FROM github_schedule_fires AS fire
-              JOIN github_check_subjects AS subject
-                ON subject.schedule_fire_id = fire.fire_id
              WHERE fire.registry_id = $1
                AND fire.state IN ('pending', 'claimed')
-               AND subject.origin_kind = 'scheduled_fire'
-               AND subject.schedule_fire_id = fire.fire_id
-               AND subject.subject_kind = 'workflow'
-               AND subject.parent_subject_id IS NULL
-               AND (
-                   subject.workflow_run_id IS NOT NULL
-                   OR EXISTS (
-                       SELECT 1
-                         FROM github_schedule_workflow_run_subject_evidence AS run_evidence
-                        WHERE run_evidence.schedule_fire_id = fire.fire_id
-                          AND run_evidence.github_check_subject_id = subject.id
-                   )
+               AND EXISTS (
+                   SELECT 1
+                     FROM github_schedule_workflow_run_evidence AS run_evidence
+                    WHERE run_evidence.schedule_fire_id = fire.fire_id
                )
         )
         ",
@@ -1955,77 +1510,6 @@ async fn reject_supersession_during_admission_completion(
     .await
     .map_err(operation_error)?;
     if admitted_but_unconcluded {
-        Err(GithubScheduleStoreError::Conflict)
-    } else {
-        Ok(())
-    }
-}
-
-async fn terminalize_superseded_scheduled_checks(
-    transaction: &mut Transaction<'_, Postgres>,
-    registry_id: Uuid,
-    now: UnixMillis,
-) -> Result<(), GithubScheduleStoreError> {
-    sqlx::query(
-        r"
-        UPDATE github_check_subjects AS subject
-           SET desired_state = 'completed',
-               desired_conclusion = 'failure',
-               terminal_cause = 'system_unknown',
-               desired_revision = subject.desired_revision + 1,
-               desired_updated_at_ms = $2
-          FROM github_schedule_fires AS fire
-         WHERE fire.registry_id = $1
-           AND fire.state IN ('pending', 'claimed')
-           AND subject.origin_kind = 'scheduled_fire'
-           AND subject.provider_delivery_id IS NULL
-           AND subject.schedule_fire_id = fire.fire_id
-           AND subject.subject_kind = 'workflow'
-           AND subject.parent_subject_id IS NULL
-           AND subject.job_id IS NULL
-           AND subject.job_attempt_id IS NULL
-           AND subject.workflow_run_id IS NULL
-           AND subject.linked_at_ms IS NULL
-           AND NOT EXISTS (
-               SELECT 1
-                 FROM github_schedule_workflow_run_subject_evidence AS run_evidence
-                WHERE run_evidence.schedule_fire_id = fire.fire_id
-                  AND run_evidence.github_check_subject_id = subject.id
-           )
-           AND subject.desired_state IN ('queued', 'in_progress')
-           AND subject.desired_updated_at_ms <= $2
-           AND subject.desired_revision < 9223372036854775807
-        ",
-    )
-    .bind(registry_id)
-    .bind(now.get())
-    .execute(&mut **transaction)
-    .await
-    .map_err(operation_error)?;
-    let nonterminal_remains: bool = sqlx::query_scalar(
-        r"
-        SELECT EXISTS (
-            SELECT 1
-              FROM github_check_subjects AS subject
-              JOIN github_schedule_fires AS fire
-                ON fire.fire_id = subject.schedule_fire_id
-             WHERE fire.registry_id = $1
-               AND fire.state IN ('pending', 'claimed')
-               AND subject.origin_kind = 'scheduled_fire'
-               AND subject.provider_delivery_id IS NULL
-               AND subject.subject_kind = 'workflow'
-               AND subject.parent_subject_id IS NULL
-               AND subject.job_id IS NULL
-               AND subject.job_attempt_id IS NULL
-               AND subject.desired_state IN ('queued', 'in_progress')
-        )
-        ",
-    )
-    .bind(registry_id)
-    .fetch_one(&mut **transaction)
-    .await
-    .map_err(operation_error)?;
-    if nonterminal_remains {
         Err(GithubScheduleStoreError::Conflict)
     } else {
         Ok(())
@@ -2391,14 +1875,6 @@ async fn terminalize_exhausted_fire(
         now,
     )
     .await?;
-    terminalize_scheduled_check(
-        transaction,
-        claim.fire_id(),
-        now,
-        "failure",
-        "system_unknown",
-    )
-    .await?;
     insert_attempt(
         transaction,
         claim,
@@ -2608,7 +2084,7 @@ async fn load_claimed_fire(
     let entry = GithubScheduleRegistryEntry::new(
         u16::try_from(row.try_get::<i16, _>("ordinal").map_err(corrupt)?)
             .map_err(|_| GithubScheduleStoreError::CorruptData)?,
-        GithubCheckSubjectKey::new(row.try_get::<String, _>("workflow_path").map_err(corrupt)?)
+        ProviderRepositoryPath::new(row.try_get::<String, _>("workflow_path").map_err(corrupt)?)
             .map_err(|_| GithubScheduleStoreError::CorruptData)?,
         digest(&row, "workflow_source_digest")?,
         u16::try_from(row.try_get::<i16, _>("schedule_ordinal").map_err(corrupt)?)

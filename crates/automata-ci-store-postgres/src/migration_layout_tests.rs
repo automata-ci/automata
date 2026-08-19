@@ -23,7 +23,7 @@ const CANONICAL_MIGRATIONS: &[(&str, &str)] = &[
     ),
     (
         "0005_baseline_routines_05.sql",
-        "2e57ad16e0b14c80f1aa5e2e9870ad97575c8415f52a8f66917bca2f18b40e064a42c24092871844ac3feb62b11398a4",
+        "2462a102e5532696b132352d69aa80a624eca0b97f945a0301751942a215e76431cf45afb93196a43d1fa1796ba61032",
     ),
     (
         "0006_baseline_routines_06.sql",
@@ -43,7 +43,7 @@ const CANONICAL_MIGRATIONS: &[(&str, &str)] = &[
     ),
     (
         "0010_baseline_routines_10.sql",
-        "5e1c67bd3d713fc9521d147a31fd0965c18f2f86ee27f4ac899c0db239e33f3d11e212ee6004877aa2c7c59b23229a86",
+        "116ff7e640b708db6058b590838db532b0fdb59ece8037b22cd40db3688a230a7d78e20a23003bbfc5d17a93c3aea051",
     ),
     (
         "0011_baseline_routines_11.sql",
@@ -71,7 +71,7 @@ const CANONICAL_MIGRATIONS: &[(&str, &str)] = &[
     ),
     (
         "0017_baseline_relations_execution.sql",
-        "01b80cc7889c9dbd901e407b67956da1392a791bb3265574e684aa9df4894d4b09b970c3227495bf8c823e487020448b",
+        "872f3fd107da56e48a8c3e6f88f8e3828cc5ef760ff1deb0b9e17b2bc74cc195e9132f29a89b3f7f360181d3be03417b",
     ),
     (
         "0018_baseline_relations_auth_and_delivery.sql",
@@ -91,7 +91,7 @@ const CANONICAL_MIGRATIONS: &[(&str, &str)] = &[
     ),
     (
         "0022_baseline_keys_and_constraints.sql",
-        "811561232385a17a9630e8534d98e0538af044ce0ec09f3abddb33a992301245264ceaf16831a92056c2bd82843340d7",
+        "cac46dcb4418a4964b39249197917cc2eb4b8566cc03e0c24922fe3387f04b9d13cf0ecc08226323fb01079c7829cc1c",
     ),
     (
         "0023_baseline_indexes.sql",
@@ -99,7 +99,7 @@ const CANONICAL_MIGRATIONS: &[(&str, &str)] = &[
     ),
     (
         "0024_baseline_triggers_control_plane.sql",
-        "b297b80748236be8b1bb1c1793de1d24be4b24bddb1ae628a93cca616457027658fc582c0560500e7331ce02e0a6a7ef",
+        "af87984331f5cbbf51e5a519a6b55fa461b31ccaa3ec97409c604f74f200eb2e1baa5592cb63037b32001140f21e037d",
     ),
     (
         "0025_baseline_triggers_orchestration.sql",
@@ -107,7 +107,7 @@ const CANONICAL_MIGRATIONS: &[(&str, &str)] = &[
     ),
     (
         "0026_baseline_foreign_keys.sql",
-        "4ebc234ebd99cbe18d59d75848e955057d4d92b5daa1412c8e081cf0c51d5546cd1b6133ca676fd165578c5c587ae824",
+        "174602ffba17af3a00ddc2ad25a1e53c3b8830fb9558c51a8a638bd5c6c6068827c8b964638eca0f45c98e2aac88a7f3",
     ),
     (
         "0027_workspace_usage_feed.sql",
@@ -211,7 +211,7 @@ const CANONICAL_MIGRATIONS: &[(&str, &str)] = &[
     ),
     (
         "0052_canonical_git_object_ids.sql",
-        "ddb2ca60bc2dec5b52f11dfc4ea025d2af651d34ccb090e942e1b61de1044fa7d5ca73d407c51a6141d1596ebb1be154",
+        "587e12139189fe0670c07b43c4e0c3e01f2ca0fb376542ea872b5e88222bef9a47a5f3ad301e67411421ea3c3dce9b4c",
     ),
     (
         "0053_provider_delivery_foundation.sql",
@@ -770,11 +770,10 @@ fn canonical_git_object_ids_are_a_forward_only_exact_transition() {
         source
             .matches("ALTER COLUMN source_revision TYPE bytea")
             .count(),
-        5,
+        3,
         "every persisted textual Git revision must transition exactly once",
     );
     for required in [
-        "DROP CONSTRAINT github_schedule_check_evidence_registry",
         "DROP CONSTRAINT event_subject_selections_digest_canonical",
         "DROP CONSTRAINT event_control_subjects_tenant_id_subject_id_selection_dige_fkey",
         "DROP CONSTRAINT event_subject_progress_tenant_id_subject_id_selection_dige_fkey",
@@ -787,7 +786,6 @@ fn canonical_git_object_ids_are_a_forward_only_exact_transition() {
         "USING pg_catalog.decode(source_revision, 'hex')",
         "octet_length(source_revision) = ANY (ARRAY[20, 32])",
         "CREATE OR REPLACE FUNCTION automata_github_check_subject_insert_guard()",
-        "CREATE OR REPLACE FUNCTION automata_github_schedule_check_evidence_insert_guard()",
         "CREATE OR REPLACE FUNCTION automata_validate_reusable_workflow_expansion()",
         "CREATE OR REPLACE FUNCTION automata_guard_provider_delivery_workflow_inventory()",
         "UPDATE event_subject_selections",
