@@ -1,6 +1,6 @@
 use std::fmt;
 
-use automata_ci_auth::secret::SecretString;
+use automata_ci_auth::secret::SecretStringRef;
 use automata_ci_core::{GitObjectId, Sha256Digest};
 use automata_ci_provider::{ExternalRepositoryId, ProviderConnectionId};
 use bytes::Bytes;
@@ -227,7 +227,7 @@ impl Default for ArchiveLimits {
 pub struct SnapshotRequest<'a> {
     repository: &'a RepositoryId,
     revision: &'a RevisionSpec,
-    credential: Option<&'a SecretString>,
+    credential: Option<SecretStringRef<'a>>,
     limits: ArchiveLimits,
 }
 
@@ -260,7 +260,7 @@ impl<'a> SnapshotRequest<'a> {
     pub const fn authenticated(
         repository: &'a RepositoryId,
         revision: &'a RevisionSpec,
-        credential: &'a SecretString,
+        credential: SecretStringRef<'a>,
         limits: ArchiveLimits,
     ) -> Self {
         Self {
@@ -288,7 +288,7 @@ impl<'a> SnapshotRequest<'a> {
     /// The returned reference remains tied to this request's borrow and must
     /// not be retained after the operation.
     #[must_use]
-    pub const fn credential(&self) -> Option<&SecretString> {
+    pub const fn credential(&self) -> Option<SecretStringRef<'a>> {
         self.credential
     }
 
@@ -380,7 +380,7 @@ pub enum RepositorySourceRedirectPolicy {
 pub struct RepositorySourceRequest<'a> {
     connection: &'a RepositorySourceConnection,
     revision: &'a GitObjectId,
-    credential: Option<&'a SecretString>,
+    credential: Option<SecretStringRef<'a>>,
     limits: ArchiveLimits,
     redirect_policy: RepositorySourceRedirectPolicy,
 }
@@ -417,7 +417,7 @@ impl<'a> RepositorySourceRequest<'a> {
     pub const fn authenticated(
         connection: &'a RepositorySourceConnection,
         revision: &'a GitObjectId,
-        credential: &'a SecretString,
+        credential: SecretStringRef<'a>,
         limits: ArchiveLimits,
         redirect_policy: RepositorySourceRedirectPolicy,
     ) -> Self {
@@ -453,7 +453,7 @@ impl<'a> RepositorySourceRequest<'a> {
     /// The returned reference remains tied to this request's borrow and must
     /// not be retained after the operation.
     #[must_use]
-    pub const fn credential(&self) -> Option<&SecretString> {
+    pub const fn credential(&self) -> Option<SecretStringRef<'a>> {
         self.credential
     }
 

@@ -1,6 +1,6 @@
 mod support;
 
-use automata_ci_auth::secret::SecretString;
+use automata_ci_auth::secret::{SecretString, SecretStringRef};
 use automata_ci_core::{GitObjectId, UnixMillis};
 use automata_ci_provider::{
     ExternalRepositoryId, ExternalRepositoryIdentity, NormalizedTrigger, ProviderGitRef,
@@ -80,7 +80,7 @@ fn request_is_connection_repository_and_trigger_bound() {
     let request = ChangedFileRequest::authenticated(
         &connection,
         &trigger,
-        &token,
+        SecretStringRef::from_secret(&token),
         ChangedFileLimits::new(10, 2, 4_096).unwrap(),
         UnixMillis::new(2_000),
     )
@@ -98,7 +98,7 @@ fn request_is_connection_repository_and_trigger_bound() {
         ChangedFileRequest::authenticated(
             &disabled,
             &disabled_trigger,
-            &token,
+            SecretStringRef::from_secret(&token),
             ChangedFileLimits::new(10, 2, 4_096).unwrap(),
             UnixMillis::new(2_000),
         )
@@ -110,7 +110,7 @@ fn request_is_connection_repository_and_trigger_bound() {
         ChangedFileRequest::authenticated(
             &connection,
             &trigger,
-            &token,
+            SecretStringRef::from_secret(&token),
             ChangedFileLimits::new(10, 2, 4_096).unwrap(),
             UnixMillis::new(-1),
         )
@@ -128,7 +128,7 @@ fn request_is_connection_repository_and_trigger_bound() {
         ChangedFileRequest::authenticated(
             &connection,
             &foreign,
-            &token,
+            SecretStringRef::from_secret(&token),
             ChangedFileLimits::new(10, 2, 4_096).unwrap(),
             UnixMillis::new(2_000),
         )
@@ -145,7 +145,7 @@ fn complete_files_are_canonical_unique_and_evidence_bound() {
     let request = ChangedFileRequest::authenticated(
         &connection,
         &trigger,
-        &token,
+        SecretStringRef::from_secret(&token),
         ChangedFileLimits::new(10, 2, 4_096).unwrap(),
         UnixMillis::new(2_000),
     )
@@ -181,7 +181,7 @@ fn complete_files_are_canonical_unique_and_evidence_bound() {
     let later_request = ChangedFileRequest::authenticated(
         &connection,
         &trigger,
-        &token,
+        SecretStringRef::from_secret(&token),
         ChangedFileLimits::new(10, 2, 4_096).unwrap(),
         UnixMillis::new(2_001),
     )
@@ -222,7 +222,7 @@ fn incompleteness_is_durable_and_never_exposes_partial_paths_as_complete() {
     let request = ChangedFileRequest::authenticated(
         &connection,
         &trigger,
-        &token,
+        SecretStringRef::from_secret(&token),
         ChangedFileLimits::new(10, 1, 4_096).unwrap(),
         UnixMillis::new(2_000),
     )
@@ -282,7 +282,7 @@ fn zero_changed_files_can_be_proven_complete() {
     let request = ChangedFileRequest::authenticated(
         &connection,
         &trigger,
-        &token,
+        SecretStringRef::from_secret(&token),
         ChangedFileLimits::new(10, 1, 4_096).unwrap(),
         UnixMillis::new(2_000),
     )
@@ -305,7 +305,7 @@ fn page_streaming_fails_closed_at_state_and_byte_boundaries() {
     let request = ChangedFileRequest::authenticated(
         &connection,
         &trigger,
-        &token,
+        SecretStringRef::from_secret(&token),
         ChangedFileLimits::new(10, 2, 5).unwrap(),
         UnixMillis::new(2_000),
     )

@@ -1,6 +1,6 @@
 use crate::support::{FixtureServer, ResponseSpec};
 
-use automata_ci_auth::secret::SecretString;
+use automata_ci_auth::secret::{SecretString, SecretStringRef};
 use automata_ci_core::{GitObjectId, Sha256Digest, UnixMillis, WorkspaceId};
 use automata_ci_provider::{
     ExternalRepositoryId, ExternalRepositoryIdentity, NormalizedTrigger, ProviderArchiveLimits,
@@ -148,7 +148,7 @@ async fn common_reader_uses_the_complete_multi_commit_observation() {
     let request = ChangedFileRequest::authenticated(
         &connection,
         &trigger,
-        &token,
+        SecretStringRef::from_secret(&token),
         limits(),
         UnixMillis::new(2_000),
     )
@@ -178,7 +178,7 @@ async fn provider_commit_limit_short_circuits_without_partial_comparison() {
     let request = ChangedFileRequest::authenticated(
         &connection,
         &trigger,
-        &token,
+        SecretStringRef::from_secret(&token),
         limits(),
         UnixMillis::new(2_000),
     )
@@ -222,7 +222,7 @@ async fn common_reader_seals_raw_compare_page_and_canonical_renames() {
     let request = ChangedFileRequest::authenticated(
         &connection,
         &trigger,
-        &token,
+        SecretStringRef::from_secret(&token),
         limits(),
         UnixMillis::new(2_000),
     )
@@ -267,7 +267,7 @@ async fn common_reader_reports_created_and_forced_pushes_without_provider_io() {
         let request = ChangedFileRequest::authenticated(
             &connection,
             &trigger,
-            &token,
+            SecretStringRef::from_secret(&token),
             limits(),
             UnixMillis::new(2_000),
         )
@@ -306,7 +306,7 @@ async fn common_reader_preserves_rejection_and_invalid_response_failures() {
         let request = ChangedFileRequest::authenticated(
             &connection,
             &trigger,
-            &token,
+            SecretStringRef::from_secret(&token),
             limits(),
             UnixMillis::new(2_000),
         )

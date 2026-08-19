@@ -6,7 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use automata_ci_auth::secret::SecretString;
+use automata_ci_auth::secret::{SecretString, SecretStringRef};
 use automata_ci_core::GitObjectId;
 use automata_ci_provider_github::{
     GithubChangedFilesEvidenceDigest, GithubHttpEndpoint, GithubHttpLimits,
@@ -26,9 +26,11 @@ const BEFORE: &str = "1111111111111111111111111111111111111111";
 const AFTER: &str = "2222222222222222222222222222222222222222";
 const OTHER: &str = "3333333333333333333333333333333333333333";
 
-fn test_token() -> &'static SecretString {
+fn test_token() -> SecretStringRef<'static> {
     static TOKEN: OnceLock<SecretString> = OnceLock::new();
-    TOKEN.get_or_init(|| SecretString::new("ghs_changed_files_test").expect("fixture token"))
+    SecretStringRef::from_secret(
+        TOKEN.get_or_init(|| SecretString::new("ghs_changed_files_test").expect("fixture token")),
+    )
 }
 
 fn revision(value: &str) -> GitObjectId {
@@ -271,7 +273,7 @@ async fn pull_request_transport_and_authority_failures_have_disjoint_disposition
             &repository,
             &revision(BEFORE),
             &revision(AFTER),
-            GithubPullRequestDiffAuthority::new(&token),
+            GithubPullRequestDiffAuthority::new(SecretStringRef::from_secret(&token)),
         )
         .await,
         GithubPullRequestDiffOutcome::Invalid(GithubPushDiffIncompleteReason::ProviderRejected)
@@ -544,7 +546,7 @@ async fn pull_request_authority_and_fork_repository_are_exactly_bound() {
         &head_repository,
         &revision(BEFORE),
         &revision(AFTER),
-        GithubPullRequestDiffAuthority::new(&token),
+        GithubPullRequestDiffAuthority::new(SecretStringRef::from_secret(&token)),
     )
     .await;
     assert!(matches!(outcome, GithubPullRequestDiffOutcome::Complete(_)));
@@ -722,7 +724,7 @@ async fn private_comparison_sends_only_the_exact_bearer_to_the_api_origin() {
         &before,
         &after,
         &commits,
-        GithubPushDiffAuthority::new(&token),
+        GithubPushDiffAuthority::new(SecretStringRef::from_secret(&token)),
     )
     .await;
     assert!(matches!(outcome, GithubPushDiffOutcome::Complete(_)));
@@ -1092,7 +1094,7 @@ async fn only_exact_ok_is_accepted_and_credential_rejection_is_typed() {
         &before,
         &after,
         &commits,
-        GithubPushDiffAuthority::new(&token),
+        GithubPushDiffAuthority::new(SecretStringRef::from_secret(&token)),
     )
     .await;
     assert_eq!(

@@ -41,8 +41,10 @@ const WORKLOAD_REQUEST_DOMAIN: &[u8] = b"automata.provider.workload-credential-r
 pub enum ProviderControlOperation {
     /// Resolve exact repository and commit metadata.
     RepositoryRead,
-    /// Read compare or pull-request changed-file evidence.
-    ChangedFilesRead,
+    /// Read changed-file evidence for one commit range.
+    CommitChangedFilesRead,
+    /// Read changed-file evidence for one merge request.
+    MergeRequestChangedFilesRead,
     /// Publish provider result state.
     ResultWrite,
     /// Read provider result state for reconciliation.
@@ -1088,17 +1090,18 @@ fn part(hash: &mut Sha256, value: &[u8]) {
 const fn control_operation_code(value: ProviderControlOperation) -> u8 {
     match value {
         ProviderControlOperation::RepositoryRead => 1,
-        ProviderControlOperation::ChangedFilesRead => 2,
-        ProviderControlOperation::ResultWrite => 3,
-        ProviderControlOperation::ResultRead => 4,
-        ProviderControlOperation::ResultResolve => 5,
-        ProviderControlOperation::ResultCreate => 6,
-        ProviderControlOperation::ResultReconcile => 7,
-        ProviderControlOperation::WebhookManage => 8,
-        ProviderControlOperation::ScheduleRead => 9,
-        ProviderControlOperation::DispatchWrite => 10,
-        ProviderControlOperation::MembershipRead => 11,
-        ProviderControlOperation::WorkloadCredentialManage => 12,
+        ProviderControlOperation::CommitChangedFilesRead => 2,
+        ProviderControlOperation::MergeRequestChangedFilesRead => 3,
+        ProviderControlOperation::ResultWrite => 4,
+        ProviderControlOperation::ResultRead => 5,
+        ProviderControlOperation::ResultResolve => 6,
+        ProviderControlOperation::ResultCreate => 7,
+        ProviderControlOperation::ResultReconcile => 8,
+        ProviderControlOperation::WebhookManage => 9,
+        ProviderControlOperation::ScheduleRead => 10,
+        ProviderControlOperation::DispatchWrite => 11,
+        ProviderControlOperation::MembershipRead => 12,
+        ProviderControlOperation::WorkloadCredentialManage => 13,
     }
 }
 const fn trust_class_code(value: TrustSourceClass) -> u8 {

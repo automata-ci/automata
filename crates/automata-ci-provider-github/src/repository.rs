@@ -1,4 +1,4 @@
-use automata_ci_auth::{github::GithubEndpointError, secret::SecretString};
+use automata_ci_auth::{github::GithubEndpointError, secret::SecretStringRef};
 use automata_ci_core::GitObjectId;
 use automata_ci_scm::{
     ArchiveFormat, RepositorySnapshot, RepositorySource, RepositorySourceArchive,
@@ -15,7 +15,7 @@ use url::Url;
 
 use crate::{
     config::same_origin,
-    endpoint::{GithubHttpEndpoint, authorization_header},
+    endpoint::{GithubHttpEndpoint, authorization_header_value},
     rate_limit::{is_rate_limited as headers_are_rate_limited, retry_delay_seconds},
     repository_path::{self, has_ascii_case_insensitive_suffix},
     response::{decode_json, read_json_response},
@@ -57,11 +57,12 @@ impl GithubHttpEndpoint {
     fn authenticated_get(
         &self,
         endpoint: Url,
-        credential: Option<&SecretString>,
+        credential: Option<SecretStringRef<'_>>,
     ) -> Result<reqwest::RequestBuilder, ScmError> {
         let mut request = self.client.get(endpoint).header(ACCEPT, ACCEPT_API_JSON);
         if let Some(credential) = credential {
-            let authorization = authorization_header(credential).map_err(map_endpoint_error)?;
+            let authorization = authorization_header_value(credential.expose_secret())
+                .map_err(map_endpoint_error)?;
             request = request.header(AUTHORIZATION, authorization);
         }
         Ok(request)

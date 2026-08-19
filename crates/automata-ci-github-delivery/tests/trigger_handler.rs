@@ -7,29 +7,27 @@ use std::{
 };
 
 use async_trait::async_trait;
-use automata_ci_auth::secret::SecretString;
 use automata_ci_blob::MemoryBlobStore;
 use automata_ci_core::{Sha256Digest, UnixMillis, WorkspaceId};
-use automata_ci_github_delivery::{
-    GithubTriggerCredential, GithubTriggerCredentialOperation, GithubTriggerCredentialProvider,
-    GithubTriggerCredentialProviderError, GithubTriggerCredentialRelease,
-    GithubTriggerCredentialRequest, GithubTriggerHandler, GithubWorkflowTriggerHandler,
-};
+use automata_ci_github_delivery::{GithubTriggerHandler, GithubWorkflowTriggerHandler};
 use automata_ci_provider::{
     BindProviderProcessingSource, ClaimProviderProcessing, ClaimedProviderProcessing,
-    ClaimedProviderResult, CompleteProviderProcessing, CompleteProviderResult, ExternalDeliveryId,
+    ClaimedProviderResult, CompleteProviderProcessing, CompleteProviderResult, ControlCredential,
+    ControlCredentialFuture, ControlCredentialProvider, ControlCredentialProviderError,
+    ControlCredentialRelease, ControlCredentialReleaseFuture, ControlCredentialRequest,
+    ControlCredentialRevocation, ControlCredentialStrategy, ExternalDeliveryId,
     ExternalDeliveryIdentity, ExternalRepositoryId, ExternalRepositoryIdentity, ExternalSubjectId,
     FailProviderProcessing, FailProviderResult, NormalizedTrigger, ProviderArchiveLimits,
     ProviderCapabilities, ProviderConfigurationRevision, ProviderConnectionConfiguration,
     ProviderConnectionId, ProviderConnectionManifest, ProviderConnectionRevision,
-    ProviderDefaultBranch, ProviderDeliveryEvidence, ProviderDeliveryId,
-    ProviderDeliveryObservations, ProviderEventName, ProviderGitRef, ProviderGitRefKind,
-    ProviderInstanceId, ProviderInstanceManifest, ProviderInstanceRecord, ProviderLifecycleState,
-    ProviderManifestRepository, ProviderOrigins, ProviderProcessingClaimFence,
-    ProviderProcessingFuture, ProviderProcessingInput, ProviderProcessingInvocationId,
-    ProviderProcessingReceipt, ProviderProcessingRepository, ProviderProcessingRepositoryError,
-    ProviderProcessingState, ProviderProcessingWorkerId, ProviderRepository,
-    ProviderRepositoryError, ProviderRepositoryFuture, ProviderRepositoryPath,
+    ProviderControlOperation, ProviderCredentialGeneration, ProviderDefaultBranch,
+    ProviderDeliveryEvidence, ProviderDeliveryId, ProviderDeliveryObservations, ProviderEventName,
+    ProviderGitRef, ProviderGitRefKind, ProviderInstanceId, ProviderInstanceManifest,
+    ProviderInstanceRecord, ProviderLifecycleState, ProviderManifestRepository, ProviderOrigins,
+    ProviderProcessingClaimFence, ProviderProcessingFuture, ProviderProcessingInput,
+    ProviderProcessingInvocationId, ProviderProcessingReceipt, ProviderProcessingRepository,
+    ProviderProcessingRepositoryError, ProviderProcessingState, ProviderProcessingWorkerId,
+    ProviderRepository, ProviderRepositoryError, ProviderRepositoryFuture, ProviderRepositoryPath,
     ProviderResultClaimFence, ProviderResultFuture, ProviderResultRepository,
     ProviderResultRepositoryError, ProviderResultSaveOutcome, ProviderResultSubject,
     ProviderRunnerPolicyBinding, ProviderSaveOutcome, ProviderSchemaVersion,
@@ -52,6 +50,7 @@ use automata_ci_provider_github::{
     GithubProviderFactory,
 };
 use automata_ci_scm::RepositoryId;
+use automata_ci_secret::SecretValue;
 use automata_ci_store::{
     AdmitLogicalWorkflowRun, AuthenticatedProviderDeliveryClaim, LogicalWorkflowAdmissionReceipt,
     LogicalWorkflowAdmissionRepository, LogicalWorkflowAdmissionStoreError,
@@ -115,8 +114,8 @@ async fn common_worker_drives_exact_github_source_diff_admission_and_result_cont
             .expect("credential lock")
             .as_slice(),
         &[
-            GithubTriggerCredentialOperation::ReadSource,
-            GithubTriggerCredentialOperation::ReadPushChangedFiles,
+            ProviderControlOperation::RepositoryRead,
+            ProviderControlOperation::CommitChangedFilesRead,
         ]
     );
     assert_eq!(contract.releases.load(Ordering::SeqCst), 2);
@@ -278,57 +277,49 @@ impl ProviderRuntimeAdapter for TriggerRuntime {
 
 #[derive(Debug)]
 struct Credentials {
-    operations: Mutex<Vec<GithubTriggerCredentialOperation>>,
+    operations: Mutex<Vec<ProviderControlOperation>>,
     releases: Arc<AtomicUsize>,
 }
 
-#[async_trait]
-impl GithubTriggerCredentialProvider for Credentials {
-    async fn acquire(
-        &self,
-        request: GithubTriggerCredentialRequest<'_>,
-    ) -> Result<GithubTriggerCredential, GithubTriggerCredentialProviderError> {
-        self.operations
-            .lock()
-            .expect("credential lock")
-            .push(request.operation());
-        let usable_until = UnixMillis::new(
-            request
-                .required_through()
-                .get()
-                .checked_add(60_000)
-                .expect("credential lifetime"),
-        );
-        GithubTriggerCredential::new(
-            request.context().connection().revision(),
-            request
-                .context()
-                .connection()
-                .configuration()
-                .repository()
-                .external_id()
-                .clone(),
-            request.fence(),
-            request.operation(),
-            request.app_id(),
-            request.installation_id(),
-            request.repository().clone(),
-            SecretString::new("trigger-token").expect("credential"),
-            request.required_through(),
-            usable_until,
-            Box::new(Release(self.releases.clone())),
-        )
-        .map_err(|_| GithubTriggerCredentialProviderError::InvariantViolation)
+impl ControlCredentialProvider for Credentials {
+    fn acquire<'a>(&'a self, request: &'a ControlCredentialRequest) -> ControlCredentialFuture<'a> {
+        Box::pin(async move {
+            self.operations
+                .lock()
+                .expect("credential lock")
+                .extend(request.operations().iter());
+            let usable_until = UnixMillis::new(
+                request
+                    .requested_at()
+                    .get()
+                    .checked_add(request.minimum_validity_millis().cast_signed())
+                    .and_then(|value| value.checked_add(60_000))
+                    .expect("credential lifetime"),
+            );
+            ControlCredential::new(
+                request,
+                request.operations().clone(),
+                ControlCredentialStrategy::Minted,
+                ProviderCredentialGeneration::new(1).expect("generation"),
+                SecretValue::new(b"trigger-token".to_vec()).expect("credential"),
+                request.requested_at(),
+                Some(usable_until),
+                ControlCredentialRevocation::Explicit,
+                Box::new(Release(self.releases.clone())),
+            )
+            .map_err(|_| ControlCredentialProviderError::InvalidResponse)
+        })
     }
 }
 
 #[derive(Debug)]
 struct Release(Arc<AtomicUsize>);
 
-#[async_trait]
-impl GithubTriggerCredentialRelease for Release {
-    async fn release(self: Box<Self>) {
-        self.0.fetch_add(1, Ordering::SeqCst);
+impl ControlCredentialRelease for Release {
+    fn release(self: Box<Self>) -> ControlCredentialReleaseFuture {
+        Box::pin(async move {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        })
     }
 }
 

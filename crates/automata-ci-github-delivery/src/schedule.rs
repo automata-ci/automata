@@ -9,7 +9,7 @@
 use std::{collections::BTreeMap, fmt, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
-use automata_ci_auth::secret::SecretString;
+use automata_ci_auth::secret::{SecretString, SecretStringRef};
 use automata_ci_blob::{
     BlobDescriptor, BlobKey, BlobStoreError, BlobStoreErrorKind, ImmutableBlobStore, MediaType,
 };
@@ -732,7 +732,7 @@ impl GithubScheduleService {
                 .fetch_snapshot(SnapshotRequest::authenticated(
                     &repository,
                     &revision,
-                    credential.token(),
+                    SecretStringRef::from_secret(credential.token()),
                     limits,
                 ))
                 .await;

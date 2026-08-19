@@ -3,11 +3,13 @@
 use std::{fmt, sync::Arc};
 
 use async_trait::async_trait;
-use automata_ci_auth::secret::SecretString;
+use automata_ci_auth::secret::SecretStringRef;
 use automata_ci_core::{GitObjectId, TrustSnapshot, TrustTokenRecursion, UnixMillis};
 use automata_ci_provider::{
-    ClaimedProviderProcessing, ExternalRepositoryId, NormalizedTrigger, ProviderConnectionRevision,
-    ProviderGitRef, ProviderGitRefKind, ProviderProcessingClaimFence, ProviderProcessingFailure,
+    ClaimedProviderProcessing, ControlCredentialClaim, ControlCredentialProvider,
+    ControlCredentialProviderError, ControlCredentialRequest, NormalizedTrigger,
+    ProviderControlCredentialId, ProviderControlCredentialWorkerId, ProviderControlOperation,
+    ProviderControlOperationSet, ProviderGitRef, ProviderGitRefKind, ProviderProcessingFailure,
     VerifiedProviderTriggerDelivery,
 };
 use automata_ci_provider_delivery::{
@@ -15,8 +17,7 @@ use automata_ci_provider_delivery::{
     ProviderTrustContext, derive_provider_trust_snapshot,
 };
 use automata_ci_provider_github::{
-    GithubCheckAppId, GithubConnectionPolicy, GithubHttpEndpoint, GithubHttpLimits,
-    GithubInstanceConfiguration, GithubProviderFactory,
+    GithubConnectionPolicy, GithubHttpEndpoint, GithubHttpLimits, GithubProviderFactory,
 };
 use automata_ci_scm::{
     ArchiveFormat, ArchiveLimits, ChangedFileLimits, ChangedFileRead, ChangedFileReader,
@@ -46,249 +47,10 @@ pub trait GithubTriggerHandler: fmt::Debug + Send + Sync {
     ) -> ProviderTriggerOutcome;
 }
 
-/// One exact GitHub repository operation requested by trigger processing.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum GithubTriggerCredentialOperation {
-    /// Resolve or download workflow source using repository-contents authority.
-    ReadSource,
-    /// Read a push comparison using repository-contents authority.
-    ReadPushChangedFiles,
-    /// Read pull-request files using pull-request authority.
-    ReadPullRequestChangedFiles,
-}
-
-/// Borrowed least-authority request for one GitHub trigger provider operation.
-#[derive(Clone, Copy)]
-pub struct GithubTriggerCredentialRequest<'a> {
-    context: &'a ProviderRuntimeContext,
-    trigger: &'a VerifiedProviderTriggerDelivery,
-    invocation: &'a ClaimedProviderProcessing,
-    fence: ProviderProcessingClaimFence,
-    operation: GithubTriggerCredentialOperation,
-    app_id: GithubCheckAppId,
-    installation_id: u64,
-    repository: &'a automata_ci_scm::RepositoryId,
-    required_through: UnixMillis,
-}
-
-impl GithubTriggerCredentialRequest<'_> {
-    /// Returns exact provider and connection configuration.
-    #[must_use]
-    pub const fn context(&self) -> &ProviderRuntimeContext {
-        self.context
-    }
-
-    /// Returns immutable normalized trigger evidence.
-    #[must_use]
-    pub const fn trigger(&self) -> &VerifiedProviderTriggerDelivery {
-        self.trigger
-    }
-
-    /// Returns the claimed common processing invocation.
-    #[must_use]
-    pub const fn invocation(&self) -> &ClaimedProviderProcessing {
-        self.invocation
-    }
-
-    /// Returns the latest processing fence observed for this operation.
-    #[must_use]
-    pub const fn fence(&self) -> ProviderProcessingClaimFence {
-        self.fence
-    }
-
-    /// Returns the sole provider operation being authorized.
-    #[must_use]
-    pub const fn operation(&self) -> GithubTriggerCredentialOperation {
-        self.operation
-    }
-
-    /// Returns the manifest-pinned GitHub App identity.
-    #[must_use]
-    pub const fn app_id(&self) -> GithubCheckAppId {
-        self.app_id
-    }
-
-    /// Returns the connection-pinned installation identity.
-    #[must_use]
-    pub const fn installation_id(&self) -> u64 {
-        self.installation_id
-    }
-
-    /// Returns the connection-pinned owner/name route.
-    #[must_use]
-    pub const fn repository(&self) -> &automata_ci_scm::RepositoryId {
-        self.repository
-    }
-
-    /// Returns the conservative credential lifetime requirement.
-    #[must_use]
-    pub const fn required_through(&self) -> UnixMillis {
-        self.required_through
-    }
-}
-
-impl fmt::Debug for GithubTriggerCredentialRequest<'_> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("GithubTriggerCredentialRequest")
-            .field("context", &"[exact runtime context]")
-            .field("trigger", &"[authenticated trigger]")
-            .field("invocation", &"[claimed processing invocation]")
-            .field("fence", &"[latest processing fence]")
-            .field("operation", &self.operation)
-            .field("app_id", &self.app_id)
-            .field("installation_id", &self.installation_id)
-            .field("repository", &"[redacted]")
-            .field("required_through", &self.required_through)
-            .finish()
-    }
-}
-
-/// Exact release capability for one move-only trigger credential.
-#[async_trait]
-pub trait GithubTriggerCredentialRelease: fmt::Debug + Send + Sync {
-    /// Releases the credential handoff after its sole provider operation.
-    async fn release(self: Box<Self>);
-}
-
-/// Move-only GitHub installation credential bound to one processing fence.
-#[must_use = "the trigger credential must be used and released"]
-pub struct GithubTriggerCredential {
-    connection_revision: ProviderConnectionRevision,
-    external_repository_id: ExternalRepositoryId,
-    fence: ProviderProcessingClaimFence,
-    operation: GithubTriggerCredentialOperation,
-    app_id: GithubCheckAppId,
-    installation_id: u64,
-    repository: automata_ci_scm::RepositoryId,
-    token: SecretString,
-    required_through: UnixMillis,
-    usable_until: UnixMillis,
-    release: Box<dyn GithubTriggerCredentialRelease>,
-}
-
-impl GithubTriggerCredential {
-    /// Constructs one exact request-scoped credential handoff.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an invalid installation identity or insufficient lifetime.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        connection_revision: ProviderConnectionRevision,
-        external_repository_id: ExternalRepositoryId,
-        fence: ProviderProcessingClaimFence,
-        operation: GithubTriggerCredentialOperation,
-        app_id: GithubCheckAppId,
-        installation_id: u64,
-        repository: automata_ci_scm::RepositoryId,
-        token: SecretString,
-        required_through: UnixMillis,
-        usable_until: UnixMillis,
-        release: Box<dyn GithubTriggerCredentialRelease>,
-    ) -> Result<Self, GithubTriggerCredentialValueError> {
-        if installation_id == 0
-            || required_through <= fence.expires_at()
-            || usable_until <= required_through
-        {
-            return Err(GithubTriggerCredentialValueError);
-        }
-        Ok(Self {
-            connection_revision,
-            external_repository_id,
-            fence,
-            operation,
-            app_id,
-            installation_id,
-            repository,
-            token,
-            required_through,
-            usable_until,
-            release,
-        })
-    }
-
-    fn matches(&self, request: &GithubTriggerCredentialRequest<'_>) -> bool {
-        self.connection_revision == request.context.connection().revision()
-            && &self.external_repository_id
-                == request
-                    .context
-                    .connection()
-                    .configuration()
-                    .repository()
-                    .external_id()
-            && self.fence == request.fence
-            && self.operation == request.operation
-            && self.app_id == request.app_id
-            && self.installation_id == request.installation_id
-            && &self.repository == request.repository
-            && self.required_through == request.required_through
-            && self.usable_until > request.required_through
-    }
-
-    fn token(&self) -> &SecretString {
-        &self.token
-    }
-
-    async fn release(self) {
-        let Self { token, release, .. } = self;
-        drop(token);
-        release.release().await;
-    }
-}
-
-impl fmt::Debug for GithubTriggerCredential {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("GithubTriggerCredential")
-            .field("connection_revision", &self.connection_revision)
-            .field("external_repository_id", &"[redacted]")
-            .field("fence", &"[exact processing fence]")
-            .field("operation", &self.operation)
-            .field("app_id", &self.app_id)
-            .field("installation_id", &self.installation_id)
-            .field("repository", &"[redacted]")
-            .field("token", &"[redacted]")
-            .field("required_through", &self.required_through)
-            .field("usable_until", &self.usable_until)
-            .field("release", &"[exact release capability]")
-            .finish()
-    }
-}
-
-/// Invalid trigger credential handoff.
-#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
-#[error("the GitHub trigger credential binding is invalid")]
-pub struct GithubTriggerCredentialValueError;
-
-/// Sanitized trigger credential authority failure.
-#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
-pub enum GithubTriggerCredentialProviderError {
-    /// Credential infrastructure is temporarily unavailable.
-    #[error("the GitHub trigger credential authority is unavailable")]
-    Unavailable,
-    /// Current authority rejected the exact operation.
-    #[error("the GitHub trigger credential authority rejected the operation")]
-    Rejected,
-    /// Credential authority returned inconsistent binding evidence.
-    #[error("the GitHub trigger credential authority is inconsistent")]
-    InvariantViolation,
-}
-
-/// Least-authority provider for exact GitHub trigger operations.
-#[async_trait]
-pub trait GithubTriggerCredentialProvider: fmt::Debug + Send + Sync {
-    /// Acquires one move-only credential for the exact processing fence and operation.
-    async fn acquire(
-        &self,
-        request: GithubTriggerCredentialRequest<'_>,
-    ) -> Result<GithubTriggerCredential, GithubTriggerCredentialProviderError>;
-}
-
 /// GitHub I/O adapter feeding the provider-neutral workflow application service.
 pub struct GithubWorkflowTriggerHandler {
     application: ProviderWorkflowApplicationService,
-    credentials: Arc<dyn GithubTriggerCredentialProvider>,
+    credentials: Arc<dyn ControlCredentialProvider>,
     clock: Arc<dyn ProviderDeliveryClock>,
     factory: GithubProviderFactory,
     user_agent: String,
@@ -303,7 +65,7 @@ impl GithubWorkflowTriggerHandler {
     /// Rejects an empty or control-bearing user agent.
     pub fn new(
         application: ProviderWorkflowApplicationService,
-        credentials: Arc<dyn GithubTriggerCredentialProvider>,
+        credentials: Arc<dyn ControlCredentialProvider>,
         clock: Arc<dyn ProviderDeliveryClock>,
         user_agent: impl Into<String>,
         limits: GithubHttpLimits,
@@ -376,11 +138,7 @@ impl GithubWorkflowTriggerHandler {
     ) -> Result<GithubTriggerRepository, GithubWorkflowTriggerHandlerError> {
         let provider = context.provider().manifest();
         let connection = context.connection();
-        let instance = GithubInstanceConfiguration::decode(provider.configuration())
-            .map_err(|_| GithubWorkflowTriggerHandlerError)?;
         let policy = GithubConnectionPolicy::decode(connection.configuration().adapter_policy())
-            .map_err(|_| GithubWorkflowTriggerHandlerError)?;
-        let app_id = GithubCheckAppId::new(instance.app_id().get())
             .map_err(|_| GithubWorkflowTriggerHandlerError)?;
         let endpoint = self
             .factory
@@ -393,8 +151,6 @@ impl GithubWorkflowTriggerHandler {
         Ok(GithubTriggerRepository {
             endpoint,
             source_connection,
-            app_id,
-            installation_id: policy.installation_id().get(),
             repository: policy.repository().clone(),
         })
     }
@@ -472,25 +228,23 @@ impl GithubWorkflowTriggerHandler {
         lease: &ProviderProcessingLease,
         repository: &GithubTriggerRepository,
     ) -> Result<ResolvedGithubSource, ProviderTriggerOutcome> {
-        let request = credential_request(
-            context,
-            trigger,
-            invocation,
-            lease,
-            GithubTriggerCredentialOperation::ReadSource,
-            repository.app_id,
-            repository.installation_id,
-            &repository.repository,
-        )?;
+        let requested_at = self.clock.now().map_err(|_| retry_unavailable())?;
+        let operation = ProviderControlOperation::RepositoryRead;
+        let request =
+            credential_request(context, trigger, invocation, lease, operation, requested_at)?;
         let credential = self
             .credentials
-            .acquire(request)
+            .acquire(&request)
             .await
             .map_err(credential_error)?;
-        if !credential.matches(&request) {
+        if credential.request_digest() != request.digest() || !credential.permits(operation) {
             credential.release().await;
             return Err(fail_invalid());
         }
+        let Ok(token) = SecretStringRef::new(credential.expose_secret()) else {
+            credential.release().await;
+            return Err(fail_invalid());
+        };
         let archive_limits = ArchiveLimits::new(
             context
                 .connection()
@@ -501,16 +255,9 @@ impl GithubWorkflowTriggerHandler {
         .map_err(|_| fail_invalid())?;
         let normalized = trigger.trigger().trigger();
         let result = if let Some(revision) = normalized.workflow_source_revision() {
-            fetch_exact_source(
-                repository,
-                normalized,
-                revision,
-                credential.token(),
-                archive_limits,
-            )
-            .await
+            fetch_exact_source(repository, normalized, revision, token, archive_limits).await
         } else {
-            fetch_default_source(context, repository, credential.token(), archive_limits).await
+            fetch_default_source(context, repository, token, archive_limits).await
         };
         credential.release().await;
         result.map_err(scm_error)
@@ -526,44 +273,40 @@ impl GithubWorkflowTriggerHandler {
         repository: &GithubTriggerRepository,
     ) -> Result<ProviderEventMetadata, ProviderTriggerOutcome> {
         let operation = match trigger.trigger().trigger() {
-            NormalizedTrigger::Push(_) => GithubTriggerCredentialOperation::ReadPushChangedFiles,
+            NormalizedTrigger::Push(_) => ProviderControlOperation::CommitChangedFilesRead,
             NormalizedTrigger::PullRequest(_) => {
-                GithubTriggerCredentialOperation::ReadPullRequestChangedFiles
+                ProviderControlOperation::MergeRequestChangedFilesRead
             }
             NormalizedTrigger::MergeQueue(_) | NormalizedTrigger::RepositoryDispatch(_) => {
                 return Err(fail_invalid());
             }
         };
-        let request = credential_request(
-            context,
-            trigger,
-            invocation,
-            lease,
-            operation,
-            repository.app_id,
-            repository.installation_id,
-            &repository.repository,
-        )?;
+        let observed_at = self.clock.now().map_err(|_| retry_unavailable())?;
+        let request =
+            credential_request(context, trigger, invocation, lease, operation, observed_at)?;
         let credential = self
             .credentials
-            .acquire(request)
+            .acquire(&request)
             .await
             .map_err(credential_error)?;
-        if !credential.matches(&request) {
+        if credential.request_digest() != request.digest() || !credential.permits(operation) {
             credential.release().await;
             return Err(fail_invalid());
         }
+        let Ok(token) = SecretStringRef::new(credential.expose_secret()) else {
+            credential.release().await;
+            return Err(fail_invalid());
+        };
         let limits = ChangedFileLimits::new(
             automata_ci_scm::MAX_CHANGED_FILE_COUNT,
             automata_ci_scm::MAX_CHANGED_FILE_PAGES,
             automata_ci_scm::MAX_CHANGED_FILE_RESPONSE_BYTES,
         )
         .map_err(|_| fail_invalid())?;
-        let observed_at = self.clock.now().map_err(|_| retry_unavailable())?;
         let read_request = ChangedFileRequest::authenticated(
             context.connection(),
             trigger.trigger(),
-            credential.token(),
+            token,
             limits,
             observed_at,
         )
@@ -637,8 +380,6 @@ struct ResolvedGithubSource {
 struct GithubTriggerRepository {
     endpoint: GithubHttpEndpoint,
     source_connection: RepositorySourceConnection,
-    app_id: GithubCheckAppId,
-    installation_id: u64,
     repository: RepositoryId,
 }
 
@@ -646,7 +387,7 @@ async fn fetch_exact_source(
     repository: &GithubTriggerRepository,
     trigger: &NormalizedTrigger,
     revision: GitObjectId,
-    token: &SecretString,
+    token: SecretStringRef<'_>,
     limits: ArchiveLimits,
 ) -> Result<ResolvedGithubSource, ScmError> {
     let archive = repository
@@ -676,7 +417,7 @@ async fn fetch_exact_source(
 async fn fetch_default_source(
     context: &ProviderRuntimeContext,
     repository: &GithubTriggerRepository,
-    token: &SecretString,
+    token: SecretStringRef<'_>,
     limits: ArchiveLimits,
 ) -> Result<ResolvedGithubSource, ScmError> {
     let branch = context
@@ -717,20 +458,18 @@ async fn fetch_default_source(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
-fn credential_request<'a>(
-    context: &'a ProviderRuntimeContext,
-    trigger: &'a VerifiedProviderTriggerDelivery,
-    invocation: &'a ClaimedProviderProcessing,
+fn credential_request(
+    context: &ProviderRuntimeContext,
+    trigger: &VerifiedProviderTriggerDelivery,
+    invocation: &ClaimedProviderProcessing,
     lease: &ProviderProcessingLease,
-    operation: GithubTriggerCredentialOperation,
-    app_id: GithubCheckAppId,
-    installation_id: u64,
-    repository: &'a automata_ci_scm::RepositoryId,
-) -> Result<GithubTriggerCredentialRequest<'a>, ProviderTriggerOutcome> {
+    operation: ProviderControlOperation,
+    requested_at: UnixMillis,
+) -> Result<ControlCredentialRequest, ProviderTriggerOutcome> {
     let fence = lease.current();
-    if fence.invocation_id() != invocation.receipt().invocation_id()
-        || invocation.receipt().source_delivery_id() != Some(trigger.evidence().delivery_id())
+    let receipt = invocation.receipt();
+    if fence.invocation_id() != receipt.invocation_id()
+        || receipt.source_delivery_id() != Some(trigger.evidence().delivery_id())
     {
         return Err(fail_invalid());
     }
@@ -740,17 +479,32 @@ fn credential_request<'a>(
         .checked_add(GITHUB_TRIGGER_PROVIDER_TAIL_MILLIS)
         .map(UnixMillis::new)
         .ok_or_else(fail_invalid)?;
-    Ok(GithubTriggerCredentialRequest {
-        context,
-        trigger,
-        invocation,
-        fence,
-        operation,
-        app_id,
-        installation_id,
-        repository,
-        required_through,
-    })
+    let validity_millis = required_through
+        .get()
+        .checked_sub(requested_at.get())
+        .and_then(|value| u64::try_from(value).ok())
+        .ok_or_else(fail_invalid)?;
+    let credential_id = ProviderControlCredentialId::from_uuid(receipt.invocation_id().as_uuid())
+        .map_err(|_| fail_invalid())?;
+    let worker_id = ProviderControlCredentialWorkerId::from_uuid(fence.worker_id().as_uuid())
+        .map_err(|_| fail_invalid())?;
+    let claim = ControlCredentialClaim::new(
+        credential_id,
+        worker_id,
+        fence.token(),
+        u64::from(receipt.attempts()),
+        fence.expires_at(),
+    )
+    .map_err(|_| fail_invalid())?;
+    let operations = ProviderControlOperationSet::new([operation]).map_err(|_| fail_invalid())?;
+    ControlCredentialRequest::new(
+        claim,
+        context.connection(),
+        operations,
+        requested_at,
+        validity_millis,
+    )
+    .map_err(|_| fail_invalid())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -787,13 +541,17 @@ fn application_outcome(error: &ProviderWorkflowApplicationError) -> ProviderTrig
     }
 }
 
-const fn credential_error(error: GithubTriggerCredentialProviderError) -> ProviderTriggerOutcome {
+const fn credential_error(error: ControlCredentialProviderError) -> ProviderTriggerOutcome {
     match error {
-        GithubTriggerCredentialProviderError::Unavailable => retry_unavailable(),
-        GithubTriggerCredentialProviderError::Rejected => {
+        ControlCredentialProviderError::RateLimited
+        | ControlCredentialProviderError::Unavailable
+        | ControlCredentialProviderError::Indeterminate => retry_unavailable(),
+        ControlCredentialProviderError::Unauthorized
+        | ControlCredentialProviderError::Forbidden => {
             ProviderTriggerOutcome::Fail(ProviderProcessingFailure::PolicyRejected)
         }
-        GithubTriggerCredentialProviderError::InvariantViolation => fail_invalid(),
+        ControlCredentialProviderError::Unsupported
+        | ControlCredentialProviderError::InvalidResponse => fail_invalid(),
     }
 }
 

@@ -165,7 +165,7 @@ impl OperationalWorkflowDispatchBackend {
             .fetch_snapshot(SnapshotRequest::authenticated(
                 &repository,
                 &revision,
-                credential.token(),
+                automata_ci_auth::secret::SecretStringRef::from_secret(credential.token()),
                 limits,
             ))
             .await;

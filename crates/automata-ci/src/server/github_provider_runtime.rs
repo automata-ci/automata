@@ -44,7 +44,7 @@ use automata_ci_github_delivery::{
     GithubProviderRuntimeAdapter, GithubResultProviderAdapter, GithubScheduleClock,
     GithubScheduleService, GithubScheduleServiceConfigurationError, GithubScheduleServiceError,
     GithubScheduleSourceAuthorities, GithubScheduleSourceCredentialProvider,
-    GithubTriggerCredentialProvider, GithubWorkflowTriggerHandler,
+    GithubWorkflowTriggerHandler,
 };
 use automata_ci_key_management::{EnvelopeCodec, KeyEncryptionProvider};
 use automata_ci_protocol::RuntimeAuthorityEndpoint;
@@ -939,7 +939,7 @@ impl GithubProviderRuntimeBuilder {
         )
         .map_err(GithubProviderRuntimeBuildError::ScheduleWorker)?;
         let application = ProviderWorkflowApplicationService::new(admission, results.clone());
-        let trigger_credentials: Arc<dyn GithubTriggerCredentialProvider> = adapters.clone();
+        let trigger_credentials: Arc<dyn ControlCredentialProvider> = adapters.clone();
         let trigger_handler = Arc::new(
             GithubWorkflowTriggerHandler::new(
                 application,

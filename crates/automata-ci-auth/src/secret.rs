@@ -72,6 +72,52 @@ impl fmt::Debug for SecretString {
     }
 }
 
+/// Borrowed UTF-8 secret view for request-scoped adapter boundaries.
+///
+/// This type owns no plaintext, cannot outlive its zeroizing owner, and does
+/// not implement serialization or display formatting.
+#[derive(Clone, Copy)]
+pub struct SecretStringRef<'secret>(&'secret str);
+
+impl<'secret> SecretStringRef<'secret> {
+    /// Validates borrowed provider-neutral secret bytes as bounded UTF-8 text.
+    ///
+    /// # Errors
+    ///
+    /// Rejects empty, oversized, or non-UTF-8 values.
+    pub fn new(value: &'secret [u8]) -> Result<Self, SecretError> {
+        if value.is_empty() {
+            return Err(SecretError::Empty);
+        }
+        if value.len() > MAX_SECRET_LENGTH {
+            return Err(SecretError::TooLong {
+                maximum: MAX_SECRET_LENGTH,
+            });
+        }
+        std::str::from_utf8(value)
+            .map(Self)
+            .map_err(|_| SecretError::InvalidEncoding)
+    }
+
+    /// Borrows an existing validated owned secret without copying plaintext.
+    #[must_use]
+    pub fn from_secret(value: &'secret SecretString) -> Self {
+        Self(value.expose_secret())
+    }
+
+    /// Exposes plaintext only at the final request-construction boundary.
+    #[must_use]
+    pub const fn expose_secret(self) -> &'secret str {
+        self.0
+    }
+}
+
+impl fmt::Debug for SecretStringRef<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("SecretStringRef([REDACTED])")
+    }
+}
+
 fn validate_secret_string(value: &mut String) -> Result<(), SecretError> {
     if value.is_empty() {
         value.zeroize();
@@ -221,6 +267,9 @@ pub enum SecretError {
     /// The supplied secret was empty.
     #[error("a secret must not be empty")]
     Empty,
+    /// Borrowed bytes are not valid UTF-8 text.
+    #[error("a textual secret must be valid UTF-8")]
+    InvalidEncoding,
     /// The supplied secret exceeded the bounded custody size.
     #[error("a secret exceeds the maximum length of {maximum} bytes")]
     TooLong {
@@ -502,9 +551,29 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
-        MAX_SECRET_LENGTH, SecretError, SharedSensitiveString, SharedSensitiveStringBacking,
-        validate_secret_string,
+        MAX_SECRET_LENGTH, SecretError, SecretString, SecretStringRef, SharedSensitiveString,
+        SharedSensitiveStringBacking, validate_secret_string,
     };
+
+    #[test]
+    fn borrowed_text_secret_is_bounded_validated_and_redacted() {
+        let owned = SecretString::new("provider-token").expect("owned secret");
+        let borrowed = SecretStringRef::from_secret(&owned);
+        assert_eq!(borrowed.expose_secret(), "provider-token");
+        assert_eq!(format!("{borrowed:?}"), "SecretStringRef([REDACTED])");
+
+        assert!(matches!(SecretStringRef::new(b""), Err(SecretError::Empty)));
+        assert!(matches!(
+            SecretStringRef::new(&[0xff]),
+            Err(SecretError::InvalidEncoding)
+        ));
+        assert!(matches!(
+            SecretStringRef::new(&vec![b'x'; MAX_SECRET_LENGTH + 1]),
+            Err(SecretError::TooLong {
+                maximum: MAX_SECRET_LENGTH,
+            })
+        ));
+    }
 
     #[test]
     fn oversized_rejection_zeroizes_the_owned_input_buffer() {

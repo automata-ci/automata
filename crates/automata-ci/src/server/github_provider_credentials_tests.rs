@@ -58,17 +58,17 @@ use tokio_util::sync::CancellationToken;
 use super::*;
 
 #[test]
-fn common_result_operations_reuse_exact_checks_write_actions() {
+fn common_control_operations_map_to_exact_least_authority_actions() {
     assert_eq!(
-        common_result_action(ProviderControlOperation::ResultResolve),
+        common_control_action(ProviderControlOperation::ResultResolve),
         Some(GithubServerServiceAction::EnsureCheckSuite)
     );
     assert_eq!(
-        common_result_action(ProviderControlOperation::ResultCreate),
+        common_control_action(ProviderControlOperation::ResultCreate),
         Some(GithubServerServiceAction::CreateCheckRun)
     );
     assert_eq!(
-        common_result_action(ProviderControlOperation::ResultReconcile),
+        common_control_action(ProviderControlOperation::ResultReconcile),
         Some(GithubServerServiceAction::ReconcileCheckRun)
     );
     for operation in [
@@ -76,38 +76,34 @@ fn common_result_operations_reuse_exact_checks_write_actions() {
         ProviderControlOperation::ResultWrite,
     ] {
         assert_eq!(
-            common_result_action(operation),
+            common_control_action(operation),
             Some(GithubServerServiceAction::PublishCheckRun)
         );
     }
-    assert_eq!(
-        common_result_action(ProviderControlOperation::RepositoryRead),
-        None
-    );
-}
-
-#[test]
-fn common_trigger_operations_use_least_authority_repository_actions() {
     for (operation, action, scope) in [
         (
-            GithubTriggerCredentialOperation::ReadSource,
+            ProviderControlOperation::RepositoryRead,
             GithubServerServiceAction::FetchRepositoryRevision,
             GithubServerServiceScope::RepositoryContentsRead,
         ),
         (
-            GithubTriggerCredentialOperation::ReadPushChangedFiles,
+            ProviderControlOperation::CommitChangedFilesRead,
             GithubServerServiceAction::FetchRepositoryChangedFiles,
             GithubServerServiceScope::RepositoryContentsRead,
         ),
         (
-            GithubTriggerCredentialOperation::ReadPullRequestChangedFiles,
+            ProviderControlOperation::MergeRequestChangedFilesRead,
             GithubServerServiceAction::FetchPullRequestFiles,
             GithubServerServiceScope::PullRequestsRead,
         ),
     ] {
-        assert_eq!(common_trigger_action(operation), action);
+        assert_eq!(common_control_action(operation), Some(action));
         assert_eq!(action.required_scope(), scope);
     }
+    assert_eq!(
+        common_control_action(ProviderControlOperation::ScheduleRead),
+        None
+    );
 }
 
 const OBSERVED_AT: i64 = 1_000;
@@ -484,7 +480,10 @@ fn control_connection() -> ProviderConnectionManifest {
     .expect("control connection")
 }
 
-fn control_authority(id: u128) -> GithubServerServiceAuthorityIdentity {
+fn control_authority(
+    id: u128,
+    scope: GithubServerServiceScope,
+) -> GithubServerServiceAuthorityIdentity {
     let connection = control_connection();
     GithubServerServiceAuthorityIdentity::new(
         TenantScope::from_authenticated_tenant_id(
@@ -498,7 +497,7 @@ fn control_authority(id: u128) -> GithubServerServiceAuthorityIdentity {
         GithubServerServiceAppId::new(17).expect("App ID"),
         GithubRepositoryId::new(13).expect("provider repository ID"),
         GithubRepositoryName::new("automata-ci/automata").expect("repository name"),
-        GithubServerServiceScope::ChecksWrite,
+        scope,
         GithubServerServiceAppClientId::new("Iv1.automata-test").expect("App client ID"),
         GithubServerServiceJwtIssuer::AppClientId,
         Sha256Digest::from_bytes([0x51; 32]),
@@ -732,12 +731,7 @@ fn adapters(
 
 #[test]
 fn registry_is_bounded_unique_and_implements_live_provider_ports() {
-    fn assert_ports<
-        T: ControlCredentialProvider
-            + GithubTriggerCredentialProvider
-            + GithubScheduleSourceCredentialProvider,
-    >() {
-    }
+    fn assert_ports<T: ControlCredentialProvider + GithubScheduleSourceCredentialProvider>() {}
     assert_ports::<GithubProviderCredentialAdapters>();
 
     let checks = authority(GithubServerServiceScope::ChecksWrite, 0x60);
@@ -756,9 +750,45 @@ fn registry_is_bounded_unique_and_implements_live_provider_ports() {
 }
 
 #[tokio::test]
-async fn common_result_credential_preserves_exact_github_handoff_and_release() {
+async fn common_credentials_preserve_exact_github_handoffs_and_release() {
+    for (operation, action, scope, authority_id) in [
+        (
+            ProviderControlOperation::RepositoryRead,
+            GithubServerServiceAction::FetchRepositoryRevision,
+            GithubServerServiceScope::RepositoryContentsRead,
+            0x62,
+        ),
+        (
+            ProviderControlOperation::CommitChangedFilesRead,
+            GithubServerServiceAction::FetchRepositoryChangedFiles,
+            GithubServerServiceScope::RepositoryContentsRead,
+            0x63,
+        ),
+        (
+            ProviderControlOperation::MergeRequestChangedFilesRead,
+            GithubServerServiceAction::FetchPullRequestFiles,
+            GithubServerServiceScope::PullRequestsRead,
+            0x64,
+        ),
+        (
+            ProviderControlOperation::ResultCreate,
+            GithubServerServiceAction::CreateCheckRun,
+            GithubServerServiceScope::ChecksWrite,
+            0x65,
+        ),
+    ] {
+        assert_common_control_handoff(operation, action, scope, authority_id).await;
+    }
+}
+
+async fn assert_common_control_handoff(
+    operation: ProviderControlOperation,
+    action: GithubServerServiceAction,
+    scope: GithubServerServiceScope,
+    authority_id: u128,
+) {
     let handoffs = Arc::new(FakeHandoffs::new(FakeHandoffMode::Exact));
-    let authority = control_authority(0x62);
+    let authority = control_authority(authority_id, scope);
     let mut adapters = adapters(Arc::clone(&handoffs), std::slice::from_ref(&authority));
     adapters.observation_clock = Some(Arc::new(FakeClock::new(1_200)));
     let claim = ControlCredentialClaim::new(
@@ -770,8 +800,7 @@ async fn common_result_credential_preserves_exact_github_handoff_and_release() {
         UnixMillis::new(1_500),
     )
     .expect("control claim");
-    let operations = ProviderControlOperationSet::new([ProviderControlOperation::ResultCreate])
-        .expect("result operation");
+    let operations = ProviderControlOperationSet::new([operation]).expect("control operation");
     let request = ControlCredentialRequest::new(
         claim,
         &control_connection(),
@@ -785,7 +814,7 @@ async fn common_result_credential_preserves_exact_github_handoff_and_release() {
         .await
         .expect("credential");
     assert_eq!(credential.request_digest(), request.digest());
-    assert!(credential.permits(ProviderControlOperation::ResultCreate));
+    assert!(credential.permits(operation));
     assert_eq!(
         credential.expose_secret(),
         b"github-provider-adapter-test-token"
@@ -804,7 +833,7 @@ async fn common_result_credential_preserves_exact_github_handoff_and_release() {
                 .expect("consumer ID"),
             GithubServerServiceWorkerId::from_uuid(claim.worker_id().as_uuid()).expect("worker ID"),
             GithubServerServiceClaimFence::new(claim.fence()).expect("claim fence"),
-            GithubServerServiceAction::CreateCheckRun,
+            action,
             GithubServerServiceRevision::new(claim.revision()).expect("consumer revision"),
         )
     );

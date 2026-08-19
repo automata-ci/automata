@@ -25,8 +25,5 @@ pub use schedule::{
 };
 pub use server_credential::GithubServerServiceCredentialRelease;
 pub use trigger_handler::{
-    GithubTriggerCredential, GithubTriggerCredentialOperation, GithubTriggerCredentialProvider,
-    GithubTriggerCredentialProviderError, GithubTriggerCredentialRelease,
-    GithubTriggerCredentialRequest, GithubTriggerCredentialValueError, GithubTriggerHandler,
-    GithubWorkflowTriggerHandler, GithubWorkflowTriggerHandlerError,
+    GithubTriggerHandler, GithubWorkflowTriggerHandler, GithubWorkflowTriggerHandlerError,
 };

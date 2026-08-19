@@ -6,7 +6,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use automata_ci_auth::{github::GithubEndpointError, secret::SecretString};
+use automata_ci_auth::{github::GithubEndpointError, secret::SecretStringRef};
 use automata_ci_core::GitObjectId;
 use automata_ci_provider::{NormalizedTrigger, ProviderRepositoryPath, PushCommitEvidence};
 use automata_ci_scm::{
@@ -21,7 +21,7 @@ use serde::Deserialize;
 use url::Url;
 
 use crate::{
-    endpoint::{GithubHttpEndpoint, authorization_header},
+    endpoint::{GithubHttpEndpoint, authorization_header_value},
     factory::decode_connection,
     repository_path,
     response::{JsonResponse, decode_json, read_json_response},
@@ -72,23 +72,23 @@ const fn changed_path_byte_rejection(observed: usize) -> Option<GithubChangedFil
 }
 
 /// Installation authentication for one GitHub push comparison.
-pub struct GithubPushDiffAuthority<'credential>(&'credential SecretString);
+pub struct GithubPushDiffAuthority<'credential>(SecretStringRef<'credential>);
 
 impl<'credential> GithubPushDiffAuthority<'credential> {
     /// Binds the comparison to an installation token with `contents: read`.
     #[must_use]
-    pub const fn new(credential: &'credential SecretString) -> Self {
+    pub const fn new(credential: SecretStringRef<'credential>) -> Self {
         Self(credential)
     }
 }
 
 /// Installation authentication for one GitHub pull-request comparison.
-pub struct GithubPullRequestDiffAuthority<'credential>(&'credential SecretString);
+pub struct GithubPullRequestDiffAuthority<'credential>(SecretStringRef<'credential>);
 
 impl<'credential> GithubPullRequestDiffAuthority<'credential> {
     /// Binds the comparison to an installation token with `pull requests: read`.
     #[must_use]
-    pub const fn new(credential: &'credential SecretString) -> Self {
+    pub const fn new(credential: SecretStringRef<'credential>) -> Self {
         Self(credential)
     }
 }
@@ -1258,7 +1258,8 @@ fn compare_request(
     authority: &GithubPushDiffAuthority<'_>,
 ) -> Result<RequestBuilder, CompareFailure> {
     let request = request.header(ACCEPT, ACCEPT_API_JSON);
-    let authorization = authorization_header(authority.0).map_err(classify_endpoint_error)?;
+    let authorization =
+        authorization_header_value(authority.0.expose_secret()).map_err(classify_endpoint_error)?;
     Ok(request.header(reqwest::header::AUTHORIZATION, authorization))
 }
 
@@ -1267,7 +1268,8 @@ fn pull_request_request(
     authority: &GithubPullRequestDiffAuthority<'_>,
 ) -> Result<RequestBuilder, CompareFailure> {
     let request = request.header(ACCEPT, ACCEPT_API_JSON);
-    let authorization = authorization_header(authority.0).map_err(classify_endpoint_error)?;
+    let authorization =
+        authorization_header_value(authority.0.expose_secret()).map_err(classify_endpoint_error)?;
     Ok(request.header(reqwest::header::AUTHORIZATION, authorization))
 }
 

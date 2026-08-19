@@ -1,6 +1,6 @@
 mod credential;
 
-use automata_ci_auth::secret::SecretString;
+use automata_ci_auth::secret::{SecretString, SecretStringRef};
 use automata_ci_core::GitObjectId;
 use automata_ci_provider::{ExternalRepositoryId, ProviderConnectionId};
 use automata_ci_scm::{
@@ -45,7 +45,7 @@ fn request_debug_and_snapshot_never_retain_credentials_in_metadata() {
     let request = SnapshotRequest::authenticated(
         &repository,
         &revision,
-        &credential,
+        SecretStringRef::from_secret(&credential),
         ArchiveLimits::new(1024).unwrap(),
     );
     let rendered = format!("{request:?}");
@@ -81,7 +81,7 @@ fn exact_source_request_redacts_credentials_and_source_binds_one_revision() {
     let request = RepositorySourceRequest::authenticated(
         &connection,
         &revision,
-        &credential,
+        SecretStringRef::from_secret(&credential),
         ArchiveLimits::new(1024).unwrap(),
         RepositorySourceRedirectPolicy::ConfiguredArchiveOrigin,
     );

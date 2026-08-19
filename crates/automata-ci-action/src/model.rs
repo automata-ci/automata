@@ -1,6 +1,6 @@
 use std::fmt;
 
-use automata_ci_auth::secret::SecretString;
+use automata_ci_auth::secret::{SecretString, SecretStringRef};
 use automata_ci_blob::BlobDescriptor;
 use automata_ci_core::{GitObjectId, Sha256Digest};
 use automata_ci_scm::{ArchiveLimits, RepositoryId, RevisionSpec, ScmProviderId, SnapshotRequest};
@@ -432,12 +432,12 @@ impl<'a> RepositoryActionRequest<'a> {
         self.credential.is_none()
     }
 
-    pub(crate) const fn snapshot_request(&self) -> SnapshotRequest<'_> {
+    pub(crate) fn snapshot_request(&self) -> SnapshotRequest<'_> {
         if let Some(credential) = self.credential {
             SnapshotRequest::authenticated(
                 self.repository,
                 self.revision,
-                credential,
+                SecretStringRef::from_secret(credential),
                 self.limits.compressed,
             )
         } else {

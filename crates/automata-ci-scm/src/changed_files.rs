@@ -3,7 +3,7 @@
 use std::fmt;
 
 use async_trait::async_trait;
-use automata_ci_auth::secret::SecretString;
+use automata_ci_auth::secret::SecretStringRef;
 use automata_ci_core::{Sha256Digest, UnixMillis};
 use automata_ci_provider::{
     ExternalRepositoryIdentity, ProviderConnectionId, ProviderConnectionManifest,
@@ -84,7 +84,7 @@ impl ChangedFileLimits {
 pub struct ChangedFileRequest<'request> {
     connection: &'request ProviderConnectionManifest,
     trigger: &'request SealedNormalizedTrigger,
-    credential: &'request SecretString,
+    credential: SecretStringRef<'request>,
     limits: ChangedFileLimits,
     observed_at: UnixMillis,
 }
@@ -99,7 +99,7 @@ impl<'request> ChangedFileRequest<'request> {
     pub fn authenticated(
         connection: &'request ProviderConnectionManifest,
         trigger: &'request SealedNormalizedTrigger,
-        credential: &'request SecretString,
+        credential: SecretStringRef<'request>,
         limits: ChangedFileLimits,
         observed_at: UnixMillis,
     ) -> Result<Self, ChangedFileRequestError> {
@@ -143,7 +143,7 @@ impl<'request> ChangedFileRequest<'request> {
 
     /// Returns the explicitly borrowed credential.
     #[must_use]
-    pub const fn credential(&self) -> &SecretString {
+    pub const fn credential(&self) -> SecretStringRef<'request> {
         self.credential
     }
 

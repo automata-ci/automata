@@ -2,7 +2,7 @@ use crate::support;
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use automata_ci_auth::secret::SecretString;
+use automata_ci_auth::secret::{SecretString, SecretStringRef};
 use automata_ci_core::GitObjectId;
 use automata_ci_provider::{ExternalRepositoryId, ProviderConnectionId};
 use automata_ci_provider_github::GithubTrustedOrigins;
@@ -53,7 +53,7 @@ async fn authenticated_exact_source_uses_one_api_request_and_does_not_forward_cr
         .fetch_repository_source(RepositorySourceRequest::authenticated(
             &connection,
             &revision,
-            &token,
+            SecretStringRef::from_secret(&token),
             ArchiveLimits::new(1024).unwrap(),
             RepositorySourceRedirectPolicy::ConfiguredArchiveOrigin,
         ))
@@ -103,7 +103,7 @@ async fn exact_source_rate_limit_waits_for_the_primary_limit_reset() {
         .fetch_repository_source(RepositorySourceRequest::authenticated(
             &connection,
             &revision,
-            &token,
+            SecretStringRef::from_secret(&token),
             ArchiveLimits::default(),
             RepositorySourceRedirectPolicy::ConfiguredArchiveOrigin,
         ))
@@ -128,7 +128,7 @@ async fn authenticated_exact_source_requires_explicit_configured_redirect_author
         .fetch_repository_source(RepositorySourceRequest::authenticated(
             &connection,
             &revision,
-            &token,
+            SecretStringRef::from_secret(&token),
             ArchiveLimits::default(),
             RepositorySourceRedirectPolicy::Deny,
         ))
@@ -154,7 +154,7 @@ async fn exact_source_rejects_untrusted_redirects_and_invalid_archive_media() {
         .fetch_repository_source(RepositorySourceRequest::authenticated(
             &connection,
             &revision,
-            &token,
+            SecretStringRef::from_secret(&token),
             ArchiveLimits::default(),
             RepositorySourceRedirectPolicy::ConfiguredArchiveOrigin,
         ))
@@ -178,7 +178,7 @@ async fn exact_source_rejects_untrusted_redirects_and_invalid_archive_media() {
         .fetch_repository_source(RepositorySourceRequest::authenticated(
             &connection,
             &revision,
-            &token,
+            SecretStringRef::from_secret(&token),
             ArchiveLimits::default(),
             RepositorySourceRedirectPolicy::ConfiguredArchiveOrigin,
         ))
@@ -211,7 +211,7 @@ async fn exact_source_enforces_the_incremental_archive_byte_ceiling() {
         .fetch_repository_source(RepositorySourceRequest::authenticated(
             &connection,
             &revision,
-            &token,
+            SecretStringRef::from_secret(&token),
             ArchiveLimits::new(16).unwrap(),
             RepositorySourceRedirectPolicy::ConfiguredArchiveOrigin,
         ))
@@ -317,7 +317,7 @@ async fn resolves_then_downloads_without_forwarding_the_credential() {
         .fetch_snapshot(SnapshotRequest::authenticated(
             &repository,
             &revision,
-            &token,
+            SecretStringRef::from_secret(&token),
             ArchiveLimits::new(1024).unwrap(),
         ))
         .await
