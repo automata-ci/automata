@@ -71,7 +71,9 @@ use crate::{
         EnvironmentBuilder, ResolvedActionInputs, ResolvedEnvironmentValue,
         validate_environment_overlay_names,
     },
-    error::{ExecutorAdapterError, ExecutorAdapterErrorKind, PortErrorKind},
+    error::{
+        ExecutorAdapterError, ExecutorAdapterErrorKind, ExecutorPreparationStage, PortErrorKind,
+    },
     output::{
         DIAGNOSTICS_LOG_GROUP_ID, PhaseOutputSink, SecretMasker, emit_system, emit_system_for_group,
     },
@@ -725,12 +727,19 @@ impl ActionsJobExecutor {
             return self.cancelled_job_result(attempt_id, &masker);
         }
         let started_at = self.ports.clock.now();
-        let runtime_context = self.hydrate_runtime_context(request.job()).await;
+        let runtime_context = self
+            .hydrate_runtime_context(request.job())
+            .await
+            .map_err(|error| error.at_preparation_stage(ExecutorPreparationStage::RuntimeContext));
         let Some(runtime_context) = reconcile_cancelled_operation(runtime_context, &cancellation)?
         else {
             return self.cancelled_job_result(attempt_id, &masker);
         };
-        let runtime_context = self.apply_managed_secret_bindings(runtime_context)?;
+        let runtime_context = self
+            .apply_managed_secret_bindings(runtime_context)
+            .map_err(|error| {
+                error.at_preparation_stage(ExecutorPreparationStage::RuntimeContext)
+            })?;
         if request.job().job().authority_profile() == JobAuthorityProfile::CredentialFree
             && (!request.runtime_authorities().as_slice().is_empty()
                 || !runtime_context.secrets().is_empty()
@@ -744,9 +753,14 @@ impl ActionsJobExecutor {
             if cancellation.is_cancelled() {
                 return self.cancelled_job_result(attempt_id, &masker);
             }
-            return Err(invalid_job());
+            return Err(
+                invalid_job().at_preparation_stage(ExecutorPreparationStage::RuntimeContext)
+            );
         }
-        self.register_runtime_context_secret_masks(&runtime_context, &mut masker)?;
+        self.register_runtime_context_secret_masks(&runtime_context, &mut masker)
+            .map_err(|error| {
+                error.at_preparation_stage(ExecutorPreparationStage::RuntimeContext)
+            })?;
         if cancellation.is_cancelled() {
             return self.cancelled_job_result(attempt_id, &masker);
         }
@@ -756,24 +770,32 @@ impl ActionsJobExecutor {
         {
             Ok(actions) => actions,
             Err(ActionLoadError::Preparation(kind)) => {
-                if emit_system_while_active(
+                let emitted = emit_system_while_active(
                     &format!("Action preparation failed ({kind:?})"),
                     &mut masker,
                     &events,
                     &cancellation,
-                )?
-                .is_none()
-                {
+                )
+                .map_err(|error| {
+                    error.at_preparation_stage(ExecutorPreparationStage::RepositoryActions)
+                })?;
+                if emitted.is_none() {
                     return self.cancelled_job_result(attempt_id, &masker);
                 }
-                return self.failed_job_result(attempt_id, &masker);
+                return self
+                    .failed_job_result(attempt_id, &masker)
+                    .map_err(|error| {
+                        error.at_preparation_stage(ExecutorPreparationStage::RepositoryActions)
+                    });
             }
             Err(ActionLoadError::Executor(error))
                 if error.kind() == ExecutorAdapterErrorKind::Cancelled =>
             {
                 return self.cancelled_job_result(attempt_id, &masker);
             }
-            Err(ActionLoadError::Executor(error)) => return Err(error),
+            Err(ActionLoadError::Executor(error)) => {
+                return Err(error.at_preparation_stage(ExecutorPreparationStage::RepositoryActions));
+            }
         };
         if cancellation.is_cancelled() {
             return self.cancelled_job_result(attempt_id, &masker);
@@ -782,7 +804,10 @@ impl ActionsJobExecutor {
             acknowledger
                 .acknowledge(cancellation.token())
                 .await
-                .map_err(map_executor_error)?;
+                .map_err(map_executor_error)
+                .map_err(|error| {
+                    error.at_preparation_stage(ExecutorPreparationStage::SecretCustody)
+                })?;
             if cancellation.is_cancelled() {
                 return self.cancelled_job_result(attempt_id, &masker);
             }
@@ -797,7 +822,9 @@ impl ActionsJobExecutor {
             Err(error) if matches!(error.kind(), ExecutorAdapterErrorKind::Cancelled) => {
                 return self.cancelled_job_result(attempt_id, &masker);
             }
-            Err(error) => return Err(error),
+            Err(error) => {
+                return Err(error.at_preparation_stage(ExecutorPreparationStage::Workspace));
+            }
         };
         let paths = cancellation_dominant(
             AttemptPaths::new(self.config.runner_root(), attempt_id, &workspace),
@@ -808,7 +835,9 @@ impl ActionsJobExecutor {
             Err(error) if matches!(error.kind(), ExecutorAdapterErrorKind::Cancelled) => {
                 return self.cancelled_job_result(attempt_id, &masker);
             }
-            Err(error) => return Err(error),
+            Err(error) => {
+                return Err(error.at_preparation_stage(ExecutorPreparationStage::Workspace));
+            }
         };
         let mut commands = JobCommandState::new(command_file_platform(workspace.platform()));
         let mut records = Vec::<MutableStepResult>::new();
@@ -818,7 +847,8 @@ impl ActionsJobExecutor {
             .content
             .load(request.job().execution().event())
             .await
-            .map_err(|error| map_port_error(error.kind()));
+            .map_err(|error| map_port_error(error.kind()))
+            .map_err(|error| error.at_preparation_stage(ExecutorPreparationStage::Event));
         let Some(event) = reconcile_cancelled_operation(event, &cancellation)? else {
             return self.cancelled_job_result(attempt_id, &masker);
         };
@@ -832,7 +862,9 @@ impl ActionsJobExecutor {
             Err(error) if matches!(error.kind(), ExecutorAdapterErrorKind::Cancelled) => {
                 return self.cancelled_job_result(attempt_id, &masker);
             }
-            Err(error) => return Err(error),
+            Err(error) => {
+                return Err(error.at_preparation_stage(ExecutorPreparationStage::Event));
+            }
         };
         let event_context =
             cancellation_dominant(github_value_from_json(&event_document, 0), &cancellation);
@@ -841,15 +873,18 @@ impl ActionsJobExecutor {
             Err(error) if matches!(error.kind(), ExecutorAdapterErrorKind::Cancelled) => {
                 return self.cancelled_job_result(attempt_id, &masker);
             }
-            Err(error) => return Err(error),
+            Err(error) => {
+                return Err(error.at_preparation_stage(ExecutorPreparationStage::Event));
+            }
         };
         if !matches!(&event_context, GithubValue::Object(_)) {
             if cancellation.is_cancelled() {
                 return self.cancelled_job_result(attempt_id, &masker);
             }
-            return Err(ExecutorAdapterError::new(
-                ExecutorAdapterErrorKind::InvalidJob,
-            ));
+            return Err(
+                ExecutorAdapterError::new(ExecutorAdapterErrorKind::InvalidJob)
+                    .at_preparation_stage(ExecutorPreparationStage::Event),
+            );
         }
         let job_context = self.context(
             &request,
@@ -861,10 +896,14 @@ impl ActionsJobExecutor {
             None,
             ActionsExecutionPhase::Job,
         );
+        let job_context = job_context
+            .map_err(|error| error.at_preparation_stage(ExecutorPreparationStage::JobContext));
         let Some(job_context) = reconcile_cancelled_operation(job_context, &cancellation)? else {
             return self.cancelled_job_result(attempt_id, &masker);
         };
         let service_specs = self.service_specs(&request, &job_context, &mut masker, &cancellation);
+        let service_specs = service_specs
+            .map_err(|error| error.at_preparation_stage(ExecutorPreparationStage::Services));
         let Some(service_specs) = reconcile_cancelled_operation(service_specs, &cancellation)?
         else {
             return self.cancelled_job_result(attempt_id, &masker);
@@ -877,6 +916,8 @@ impl ActionsJobExecutor {
             &events,
             &cancellation,
         );
+        let sandbox =
+            sandbox.map_err(|error| error.at_preparation_stage(ExecutorPreparationStage::Sandbox));
         let Some(sandbox) = reconcile_cancelled_operation(sandbox, &cancellation)? else {
             return self.cancelled_job_result(attempt_id, &masker);
         };
@@ -909,6 +950,9 @@ impl ActionsJobExecutor {
             request.environment().default_environment(),
             &cancellation,
         );
+        let prepared = prepared.map_err(|error| {
+            error.at_preparation_stage(ExecutorPreparationStage::AttemptDirectories)
+        });
         if reconcile_cancelled_operation(prepared, &cancellation)?.is_none() {
             return self.cancelled_job_result(attempt_id, &masker);
         }
@@ -921,10 +965,15 @@ impl ActionsJobExecutor {
             &event,
             &cancellation,
         );
+        let copied =
+            copied.map_err(|error| error.at_preparation_stage(ExecutorPreparationStage::EventCopy));
         if reconcile_cancelled_operation(copied, &cancellation)?.is_none() {
             return self.cancelled_job_result(attempt_id, &masker);
         }
         let transitioned = Self::transition_running(request.recovery_lifecycle(), &events);
+        let transitioned = transitioned.map_err(|error| {
+            error.at_preparation_stage(ExecutorPreparationStage::RunningTransition)
+        });
         if reconcile_cancelled_operation(transitioned, &cancellation)?.is_none() {
             return self.cancelled_job_result(attempt_id, &masker);
         }
@@ -5744,6 +5793,8 @@ impl JobExecutor for ActionsJobExecutor {
         cancellation: ExecutionCancellation,
     ) -> ExecutorFuture<'_> {
         Box::pin(async move {
+            let attempt_id = request.lease().attempt_id();
+            let diagnostic_cancellation = cancellation.clone();
             let system_group_id = LogGroupId::new(DIAGNOSTICS_LOG_GROUP_ID).map_err(|_| {
                 ExecutorError::from(ExecutorAdapterError::new(
                     ExecutorAdapterErrorKind::Internal,
@@ -5769,6 +5820,9 @@ impl JobExecutor for ActionsJobExecutor {
             let result = self
                 .execute_job(request, Arc::clone(&events), cancellation)
                 .await;
+            if let Err(error) = &result {
+                report_preparation_failure(*error, attempt_id, &events, &diagnostic_cancellation);
+            }
             let conclusion = result
                 .as_ref()
                 .map_or(JobConclusion::Failure, JobResult::conclusion);
@@ -5793,6 +5847,39 @@ impl JobExecutor for ActionsJobExecutor {
             self.cleanup_sandbox(&request, &events, &cancellation)
                 .map_err(ExecutorError::from)
         })
+    }
+}
+
+fn report_preparation_failure(
+    error: ExecutorAdapterError,
+    attempt_id: AttemptId,
+    events: &Arc<dyn ExecutionEvents>,
+    cancellation: &ExecutionCancellation,
+) {
+    let Some(stage) = error.preparation_stage() else {
+        return;
+    };
+    if error.kind() == ExecutorAdapterErrorKind::Cancelled {
+        return;
+    }
+    tracing::warn!(
+        attempt_id = %attempt_id,
+        preparation_stage = stage.code(),
+        error_kind = ?error.kind(),
+        "GitHub job preparation failed"
+    );
+    let diagnostic = format!("Runner preparation failed (stage: {}).", stage.code());
+    let mut masker = SecretMasker::new();
+    if let Err(diagnostic_error) =
+        emit_system_while_active(&diagnostic, &mut masker, events, cancellation)
+    {
+        tracing::warn!(
+            attempt_id = %attempt_id,
+            preparation_stage = stage.code(),
+            error_kind = ?error.kind(),
+            diagnostic_error_kind = ?diagnostic_error.kind(),
+            "Runner preparation failure diagnostic could not be committed"
+        );
     }
 }
 

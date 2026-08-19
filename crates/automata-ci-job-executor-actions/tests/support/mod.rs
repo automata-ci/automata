@@ -2586,6 +2586,7 @@ struct EventState {
     provider_operation_failures: Vec<(OperationId, ProviderFailureOutcome)>,
     pending_provider_operation: Option<(OperationId, ProviderOperationKind)>,
     provider_event_failures: BTreeSet<ProviderEventFailurePoint>,
+    fail_next_log: bool,
     cancellation_on_log: Option<ExecutionCancellation>,
     fail_log_after_cancellation: bool,
 }
@@ -2674,6 +2675,10 @@ impl FakeEvents {
             .insert(ProviderEventFailurePoint::OperationFailed);
     }
 
+    pub fn fail_next_log(&self) {
+        self.state.lock().expect("events lock").fail_next_log = true;
+    }
+
     pub fn cancel_on_next_log(&self, cancellation: ExecutionCancellation) {
         self.state.lock().expect("events lock").cancellation_on_log = Some(cancellation);
     }
@@ -2746,6 +2751,10 @@ impl ExecutionEvents for FakeEvents {
         let (cancellation, fail_after_cancellation) = {
             let mut state = self.state.lock().expect("events lock");
             if !state.active_log_groups.contains(event.group_id()) {
+                return Err(ExecutionEventError::InvalidEvent);
+            }
+            if state.fail_next_log {
+                state.fail_next_log = false;
                 return Err(ExecutionEventError::InvalidEvent);
             }
             state.logs.push(event);

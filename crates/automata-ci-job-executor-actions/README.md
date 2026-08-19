@@ -14,6 +14,13 @@ Secret-derived outputs and values matching registered credentials are marked
 sensitive instead of being returned as public values. The product compatibility
 limit is tracked separately from this component boundary.
 
+Failures before the job reaches `Running` emit one bounded runner-diagnostics
+line with a stable preparation stage, such as `sandbox` or `event_copy`. The
+stage is also recorded in runner tracing alongside the attempt ID and sanitized
+error kind. Provider error text, workflow data, paths, and credentials never
+enter this diagnostic, and a diagnostic-journal failure does not replace the
+original execution failure.
+
 The executor implements the reviewed `GITHUB_ARTIFACTS` environment-file
 delta: every phase receives fresh declaration and read-only list files; file
 subjects resolve relative to the job workspace and are SHA-256 hashed as
