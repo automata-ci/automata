@@ -1407,3 +1407,15 @@ fn handoff_id(value: u128) -> GithubServerServiceHandoffId {
 fn worker(value: u128) -> GithubServerServiceWorkerId {
     GithubServerServiceWorkerId::from_uuid(Uuid::from_u128(value)).expect("worker")
 }
+
+#[test]
+fn rejected_store_handoff_is_not_reported_as_repository_unavailable() {
+    assert_eq!(
+        map_store_handoff_error(GithubServerServiceStoreError::HandoffRejected),
+        GithubServerServiceHandoffError::Rejected
+    );
+    assert_eq!(
+        map_store_handoff_error(GithubServerServiceStoreError::NotFound),
+        GithubServerServiceHandoffError::Rejected
+    );
+}

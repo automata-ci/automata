@@ -1084,6 +1084,9 @@ pub enum GithubServerServiceHandoffError {
     /// Key management is temporarily unavailable; custody was not quarantined.
     #[error("GitHub server-service handoff key management is unavailable")]
     Unavailable,
+    /// The exact durable handoff request no longer matches current claim state.
+    #[error("GitHub server-service credential handoff was rejected")]
+    Rejected,
     /// Returned handoff evidence did not match the exact request.
     #[error("GitHub server-service handoff binding is inconsistent")]
     Inconsistent,
@@ -1214,7 +1217,7 @@ impl GithubServerServiceCredentialIssuer {
             .repository
             .acquire_github_server_service_handoff(request)
             .await
-            .map_err(|_| GithubServerServiceHandoffError::Repository)?;
+            .map_err(map_store_handoff_error)?;
         if GithubServerServiceAuthoritySelector::from_identity(handoff.identity())
             != requested_selector
             || handoff.consumer() != requested_consumer
@@ -1388,6 +1391,23 @@ impl GithubServerServiceCredentialIssuer {
         )
         .map_err(|_| GithubServerServiceHandoffError::Inconsistent)?;
         Ok(PendingGithubServerServiceHandoffRelease { request })
+    }
+}
+
+fn map_store_handoff_error(
+    error: GithubServerServiceStoreError,
+) -> GithubServerServiceHandoffError {
+    match error {
+        GithubServerServiceStoreError::Operation(_) => GithubServerServiceHandoffError::Repository,
+        GithubServerServiceStoreError::HandoffRejected
+        | GithubServerServiceStoreError::NotFound
+        | GithubServerServiceStoreError::ClaimRejected => GithubServerServiceHandoffError::Rejected,
+        GithubServerServiceStoreError::CorruptData
+        | GithubServerServiceStoreError::IdentityConflict
+        | GithubServerServiceStoreError::FenceExhausted
+        | GithubServerServiceStoreError::HandoffStillLive => {
+            GithubServerServiceHandoffError::Inconsistent
+        }
     }
 }
 

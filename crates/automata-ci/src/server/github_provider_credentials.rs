@@ -1068,6 +1068,7 @@ fn map_handoff_error(
     error: &GithubServerServiceHandoffError,
 ) -> GithubProviderCredentialHandoffError {
     match error {
+        GithubServerServiceHandoffError::Rejected => GithubProviderCredentialHandoffError::Rejected,
         GithubServerServiceHandoffError::Repository
         | GithubServerServiceHandoffError::Unavailable => {
             GithubProviderCredentialHandoffError::Unavailable

@@ -1286,66 +1286,64 @@ async fn revalidate_delivery_consumer(
     connection: &mut PgConnection,
     identity: &GithubServerServiceAuthorityIdentity,
     consumer: GithubServerServiceConsumerClaim,
-    observed_at: UnixMillis,
+    _observed_at: UnixMillis,
     require_pull_request_files_pin: bool,
 ) -> Result<Option<UnixMillis>, GithubServerServiceStoreError> {
     sqlx::query_scalar::<_, i64>(
         r"
-        SELECT delivery.claim_expires_at_ms
-        FROM provider_delivery_inbox AS delivery
+        SELECT invocation.claim_expires_at_ms
+        FROM provider_processing_invocations AS invocation
+        JOIN provider_deliveries AS delivery
+          ON delivery.delivery_id = invocation.source_delivery_id
+         AND delivery.disposition = 'trigger'
+        JOIN provider_connection_revisions AS provider_connection
+          ON provider_connection.connection_id = delivery.connection_id
+         AND provider_connection.revision = delivery.connection_revision
+         AND provider_connection.provider_instance_id = delivery.provider_instance_id
+         AND provider_connection.provider_revision = delivery.provider_revision
+         AND provider_connection.external_repository_id = delivery.repository_external_id
+        JOIN provider_instance_revisions AS provider_instance
+          ON provider_instance.instance_id = delivery.provider_instance_id
+         AND provider_instance.revision = delivery.provider_revision
+         AND provider_instance.provider_type = delivery.provider_type
+         AND provider_instance.configuration_digest =
+             provider_connection.provider_configuration_digest
+         AND provider_instance.capability_digest = provider_connection.capability_digest
         JOIN repositories AS repository
-          ON repository.id = $7
-         AND repository.tenant_id = delivery.tenant_id
-         AND repository.scm_provider = 'github'
-         AND repository.provider_repository_id = delivery.provider_repository_id::TEXT
-        WHERE delivery.id = $1
-          AND delivery.state = 'claimed'
-          AND delivery.claim_owner_id = $2
-          AND delivery.claim_fence = $3
-          AND delivery.attempt_count = $4
-          AND delivery.claimed_at_ms <= $5
-          AND delivery.state_updated_at_ms <= $5
-          AND delivery.claim_expires_at_ms > $5
-          AND delivery.tenant_id = $6
-          AND delivery.provider = 'github'
-          AND delivery.repository_visibility = 'private'
-          AND delivery.connection_id = $8
-          AND delivery.installation_id = $9
-          AND delivery.provider_repository_id = $10
-          AND delivery.repository_identity = $11
+          ON repository.id = $6
+         AND repository.tenant_id = provider_connection.workspace_id
+         AND repository.scm_provider = provider_instance.provider_type
+         AND repository.provider_repository_id = provider_connection.external_repository_id
+        WHERE invocation.invocation_id = $1
+          AND invocation.state = 'claimed'
+          AND invocation.claim_worker_id = $2
+          AND invocation.claim_fence = $3
+          AND invocation.attempts = $4
+          AND invocation.claim_started_at_ms <=
+              (extract(epoch FROM clock_timestamp()) * 1000)::BIGINT
+          AND invocation.claim_expires_at_ms >
+              (extract(epoch FROM clock_timestamp()) * 1000)::BIGINT
+          AND provider_connection.workspace_id = $5
+          AND provider_connection.connection_id = $7
+          AND provider_instance.provider_type = 'github'
+          AND provider_connection.external_repository_id = $8
+          AND delivery.repository_external_id = $8
           AND (
-              NOT $12
-              OR EXISTS (
-                  SELECT 1
-                  FROM github_provider_delivery_evidence AS evidence
-                  WHERE evidence.provider_delivery_id = delivery.id
-                    AND evidence.tenant_id = delivery.tenant_id
-                    AND evidence.authenticated_event_name = 'pull_request'
-                    AND evidence.pull_requests_authority_id = $13
-                    AND evidence.pull_requests_authority_identity_digest = $14
-                    AND evidence.pull_requests_authority_app_configuration_revision = $15
-                    AND evidence.pull_requests_authority_policy_revision = $16
-              )
+              NOT $9
+              OR delivery.event_type = 'pull_request'
           )
-        FOR SHARE OF delivery, repository
+        FOR SHARE OF invocation, delivery, provider_connection, provider_instance, repository
         ",
     )
     .bind(consumer.consumer_id().as_uuid())
     .bind(consumer.owner().as_uuid())
     .bind(pg_bigint(consumer.fence().get()))
     .bind(pg_bigint(consumer.revision().get()))
-    .bind(observed_at.get())
     .bind(identity.tenant().as_str())
     .bind(identity.repository_id().as_uuid())
     .bind(identity.connection_id().as_uuid())
-    .bind(pg_bigint(identity.installation_id().get()))
-    .bind(pg_bigint(identity.github_repository_id().get()))
-    .bind(identity.github_repository_name().as_str())
+    .bind(identity.github_repository_id().get().to_string())
     .bind(require_pull_request_files_pin)
-    .bind(identity.authority_id().as_uuid())
-    .bind(identity.identity_digest().as_bytes().as_slice())
-    .bind(pg_bigint(identity.app_configuration_revision().get()))
-    .bind(pg_bigint(identity.policy_revision().get()))
     .fetch_optional(&mut *connection)
     .await
     .map_err(operation_error)
