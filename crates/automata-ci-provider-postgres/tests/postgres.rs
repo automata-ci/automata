@@ -42,15 +42,15 @@ use automata_ci_provider::{
 use automata_ci_provider_postgres::PostgresProviderManifestRepository;
 use automata_ci_store::{
     AdmissionObject, AdmissionRepository, AdmitLogicalWorkflowRun, AdmittedLogicalWorkflowJob,
-    AuthenticatedProviderDeliveryClaim, GithubRepositoryName, GithubServerServiceAction,
-    GithubServerServiceAppClientId, GithubServerServiceAppId, GithubServerServiceAuthorityId,
-    GithubServerServiceAuthorityIdentity, GithubServerServiceClaimFence,
-    GithubServerServiceConsumerClaim, GithubServerServiceConsumerId, GithubServerServiceJwtIssuer,
-    GithubServerServiceRevision, GithubServerServiceScope, GithubServerServiceStoreError,
-    GithubServerServiceWorkerId, LogicalWorkflowAdmissionRepository as _,
-    LogicalWorkflowInvocationId, LogicalWorkflowJobId, LogicalWorkflowJobKind, ObjectKey,
-    ProviderInstallationId, ProviderRepositoryId, RepositoryId, TenantScope,
-    WorkflowAdmissionIdempotency, WorkflowRuntimePolicy, WorkflowSnapshotId,
+    AuthenticatedProviderDeliveryClaim, GithubInstallationId, GithubRepositoryId,
+    GithubRepositoryName, GithubServerServiceAction, GithubServerServiceAppClientId,
+    GithubServerServiceAppId, GithubServerServiceAuthorityId, GithubServerServiceAuthorityIdentity,
+    GithubServerServiceClaimFence, GithubServerServiceConsumerClaim, GithubServerServiceConsumerId,
+    GithubServerServiceJwtIssuer, GithubServerServiceRevision, GithubServerServiceScope,
+    GithubServerServiceStoreError, GithubServerServiceWorkerId,
+    LogicalWorkflowAdmissionRepository as _, LogicalWorkflowInvocationId, LogicalWorkflowJobId,
+    LogicalWorkflowJobKind, ObjectKey, RepositoryId, TenantScope, WorkflowAdmissionIdempotency,
+    WorkflowRuntimePolicy, WorkflowSnapshotId,
 };
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
@@ -937,9 +937,9 @@ async fn github_result_credentials_revalidate_the_common_result_lease() -> TestR
             GithubServerServiceAuthorityId::from_uuid(Uuid::from_u128(0x5a06))?,
             internal_repository_id,
             connection.connection_id(),
-            ProviderInstallationId::new(99)?,
+            GithubInstallationId::new(99)?,
             GithubServerServiceAppId::new(17)?,
-            ProviderRepositoryId::new(42)?,
+            GithubRepositoryId::new(42)?,
             GithubRepositoryName::new("automata-ci/automata")?,
             GithubServerServiceScope::ChecksWrite,
             GithubServerServiceAppClientId::new("Iv1.8a61f9b3a7aba766")?,

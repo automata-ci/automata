@@ -21,11 +21,11 @@ use automata_ci_core::{
 use automata_ci_protocol::ProtocolLimits;
 use automata_ci_store::{
     ConformanceDelivery, ConformanceDeliveryQuery, ConformanceDeliveryState,
-    ConformanceReadRepository, ConformanceWorkflowOutcome, HumanAuthorizationTarget,
-    HumanJobAttempt, HumanRunConclusion, HumanRunDetail, HumanRunScope,
+    ConformanceReadRepository, ConformanceWorkflowOutcome, GithubRepositoryId,
+    HumanAuthorizationTarget, HumanJobAttempt, HumanRunConclusion, HumanRunDetail, HumanRunScope,
     HumanWorkflowReadRepository, JobIrMetadata, LOGICAL_ACTIVATION_JOB_IR_MEDIA_TYPE,
-    LOGICAL_ACTIVATION_RUNTIME_CONTEXT_MEDIA_TYPE, ProviderRepositoryId, RepositoryId, StoreError,
-    TenantScope, WorkflowRunStatus, github_provider_repository_id,
+    LOGICAL_ACTIVATION_RUNTIME_CONTEXT_MEDIA_TYPE, RepositoryId, StoreError, TenantScope,
+    WorkflowRunStatus, github_provider_repository_id,
 };
 use axum::{
     Router,
@@ -163,7 +163,7 @@ async fn export_github_delivery(
 async fn authorized_scope(
     state: &ConformanceApiState,
     presented: PresentedAuthorization,
-    provider_repository_id: ProviderRepositoryId,
+    provider_repository_id: GithubRepositoryId,
 ) -> Result<(TenantScope, RepositoryId), ApiError> {
     match (&state.authorization, presented) {
         (
@@ -484,7 +484,7 @@ async fn load_attempt(
 
 fn delivery_target(
     path: Result<Path<(String, String)>, PathRejection>,
-) -> Result<(ProviderRepositoryId, String), ApiError> {
+) -> Result<(GithubRepositoryId, String), ApiError> {
     let Path((provider_repository_id, delivery_id)) = path.map_err(|_| ApiError::InvalidRequest)?;
     let parsed = provider_repository_id
         .parse::<u64>()
@@ -492,7 +492,7 @@ fn delivery_target(
     if parsed.to_string() != provider_repository_id {
         return Err(ApiError::InvalidRequest);
     }
-    let repository_id = ProviderRepositoryId::new(parsed).map_err(|_| ApiError::InvalidRequest)?;
+    let repository_id = GithubRepositoryId::new(parsed).map_err(|_| ApiError::InvalidRequest)?;
     if delivery_id.is_empty() {
         return Err(ApiError::InvalidRequest);
     }

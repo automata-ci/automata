@@ -572,52 +572,6 @@ fn runtime_authority_delivery_is_post_accept_exact_and_value_free() {
 }
 
 #[test]
-fn provider_delivery_event_envelope_is_complete_bounded_and_mandatory() {
-    let source = include_str!("../migrations/0040_provider_delivery_event_envelope.sql");
-
-    for required in [
-        "ADD COLUMN event_envelope_schema SMALLINT NOT NULL",
-        "ADD COLUMN event_registry_schema SMALLINT NOT NULL",
-        "ADD COLUMN event_envelope_digest BYTEA NOT NULL",
-        "ADD COLUMN event_envelope_bytes BYTEA NOT NULL",
-        "ADD COLUMN event_envelope_media_type TEXT COLLATE \"C\" NOT NULL",
-        "CONSTRAINT provider_delivery_inbox_event_envelope_complete CHECK",
-        "event_envelope_schema > 0",
-        "event_registry_schema > 0",
-        "octet_length(event_envelope_digest) = 32",
-        "octet_length(event_envelope_bytes) BETWEEN 1 AND 32768",
-        "octet_length(event_envelope_media_type) BETWEEN 1 AND 128",
-        "event_envelope_media_type LIKE '%/%'",
-        "event_envelope_media_type ~ '^[!-~]+$'",
-        "event_envelope_media_type !~ '[[:space:][:cntrl:];]'",
-        "CREATE OR REPLACE FUNCTION automata_enforce_provider_delivery_lifecycle()",
-        "NEW.event_envelope_schema IS DISTINCT FROM OLD.event_envelope_schema",
-        "NEW.event_registry_schema IS DISTINCT FROM OLD.event_registry_schema",
-        "NEW.event_envelope_digest IS DISTINCT FROM OLD.event_envelope_digest",
-        "NEW.event_envelope_bytes IS DISTINCT FROM OLD.event_envelope_bytes",
-        "NEW.event_envelope_media_type IS DISTINCT FROM OLD.event_envelope_media_type",
-    ] {
-        assert!(
-            source.contains(required),
-            "provider-delivery envelope migration lost required contract: {required}"
-        );
-    }
-
-    for forbidden in ["legacy", "event_envelope_schema IS NULL", ") NOT VALID"] {
-        assert!(
-            !source.contains(forbidden),
-            "canonical provider-delivery envelope retained compatibility SQL: {forbidden}"
-        );
-    }
-
-    assert_eq!(
-        automata_ci_store::MAX_PROVIDER_DELIVERY_EVENT_ENVELOPE_BYTES,
-        32_768,
-        "product and durable provider-envelope byte limits diverged"
-    );
-}
-
-#[test]
 fn runner_certificate_renewal_is_bounded_exact_and_immutable_while_replayable() {
     let source = include_str!("../migrations/0045_runner_certificate_renewal.sql");
 

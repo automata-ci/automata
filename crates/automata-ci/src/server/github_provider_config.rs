@@ -16,12 +16,12 @@ use automata_ci_provisioning::{
 };
 use automata_ci_runner_results::CacheRepositoryMetadata;
 use automata_ci_store::{
-    GithubCheckName, GithubInstallationBindingGeneration, GithubProviderGitRef,
-    GithubProviderManifestRevision, GithubProviderWorkflowSelection, GithubRepositoryName,
+    GithubCheckName, GithubInstallationBindingGeneration, GithubInstallationId,
+    GithubProviderGitRef, GithubProviderManifestRevision, GithubProviderWorkflowSelection,
+    GithubRepositoryId, GithubRepositoryName, GithubRepositoryOwnerId, GithubRepositoryVisibility,
     GithubServerServiceAppClientId, GithubServerServiceAppId, GithubServerServiceJwtIssuer,
-    GithubServerServiceRevision, ProviderInstallationId, ProviderRepositoryId,
-    ProviderRepositoryOwnerId, ProviderRepositoryVisibility, TenantScope,
-    WorkflowRuntimePolicyRevision, github_provider_repository_id,
+    GithubServerServiceRevision, TenantScope, WorkflowRuntimePolicyRevision,
+    github_provider_repository_id,
 };
 use automata_ci_workflow_service::GithubRunnerPolicy;
 #[cfg(test)]
@@ -179,7 +179,7 @@ configured_uuid!(
 pub struct GithubProviderInternalRepositoryId(ConfiguredUuid);
 
 impl GithubProviderInternalRepositoryId {
-    fn derive(tenant: &TenantScope, repository_id: ProviderRepositoryId) -> Self {
+    fn derive(tenant: &TenantScope, repository_id: GithubRepositoryId) -> Self {
         let repository_id = github_provider_repository_id(tenant, repository_id);
         Self(ConfiguredUuid(*repository_id.as_uuid().as_bytes()))
     }
@@ -444,7 +444,7 @@ impl fmt::Debug for GithubProviderConfig {
         let public_repositories = self
             .repositories
             .iter()
-            .filter(|repository| repository.visibility == ProviderRepositoryVisibility::Public)
+            .filter(|repository| repository.visibility == GithubRepositoryVisibility::Public)
             .count();
         formatter
             .debug_struct("GithubProviderConfig")
@@ -879,14 +879,14 @@ pub struct GithubProviderRepositoryConfig {
     tenant: TenantScope,
     internal_repository_id: GithubProviderInternalRepositoryId,
     connection_id: GithubProviderConnectionId,
-    installation_id: ProviderInstallationId,
+    installation_id: GithubInstallationId,
     installation_binding_generation: GithubInstallationBindingGeneration,
-    repository_id: ProviderRepositoryId,
-    repository_owner_id: ProviderRepositoryOwnerId,
+    repository_id: GithubRepositoryId,
+    repository_owner_id: GithubRepositoryOwnerId,
     repository_name: GithubRepositoryName,
     cache_repository: CacheRepositoryMetadata,
     workflow_git_ref: GithubProviderGitRef,
-    visibility: ProviderRepositoryVisibility,
+    visibility: GithubRepositoryVisibility,
     applied_at: UnixMillis,
     manifest_revision: GithubProviderManifestRevision,
     policy_revision: GithubServerServiceRevision,
@@ -907,16 +907,16 @@ impl GithubProviderRepositoryConfig {
         let tenant = TenantScope::from_authenticated_tenant_id(raw.tenant_id)
             .map_err(|_| GithubProviderConfigError)?;
         let connection_id = GithubProviderConnectionId::parse(&raw.connection_id)?;
-        let installation_id = ProviderInstallationId::new(raw.installation_id)
+        let installation_id = GithubInstallationId::new(raw.installation_id)
             .map_err(|_| GithubProviderConfigError)?;
         let installation_binding_generation =
             GithubInstallationBindingGeneration::new(raw.installation_binding_generation)
                 .map_err(|_| GithubProviderConfigError)?;
         let repository_id =
-            ProviderRepositoryId::new(raw.repository_id).map_err(|_| GithubProviderConfigError)?;
+            GithubRepositoryId::new(raw.repository_id).map_err(|_| GithubProviderConfigError)?;
         let internal_repository_id =
             GithubProviderInternalRepositoryId::derive(&tenant, repository_id);
-        let repository_owner_id = ProviderRepositoryOwnerId::new(raw.repository_owner_id)
+        let repository_owner_id = GithubRepositoryOwnerId::new(raw.repository_owner_id)
             .map_err(|_| GithubProviderConfigError)?;
         let repository_name =
             GithubRepositoryName::new(raw.repository).map_err(|_| GithubProviderConfigError)?;
@@ -926,8 +926,8 @@ impl GithubProviderRepositoryConfig {
         let workflow_git_ref = GithubProviderGitRef::new(cache_repository.default_branch_ref())
             .map_err(|_| GithubProviderConfigError)?;
         let visibility = match raw.visibility {
-            RawVisibility::Public => ProviderRepositoryVisibility::Public,
-            RawVisibility::Private => ProviderRepositoryVisibility::Private,
+            RawVisibility::Public => GithubRepositoryVisibility::Public,
+            RawVisibility::Private => GithubRepositoryVisibility::Private,
         };
         let manifest_revision = GithubProviderManifestRevision::new(raw.manifest_revision)
             .map_err(|_| GithubProviderConfigError)?;
@@ -1015,7 +1015,7 @@ impl GithubProviderRepositoryConfig {
 
     /// Returns the positive GitHub App installation identity.
     #[must_use]
-    pub const fn installation_id(&self) -> ProviderInstallationId {
+    pub const fn installation_id(&self) -> GithubInstallationId {
         self.installation_id
     }
 
@@ -1027,13 +1027,13 @@ impl GithubProviderRepositoryConfig {
 
     /// Returns the stable positive GitHub repository identity.
     #[must_use]
-    pub const fn repository_id(&self) -> ProviderRepositoryId {
+    pub const fn repository_id(&self) -> GithubRepositoryId {
         self.repository_id
     }
 
     /// Returns the stable positive numeric GitHub owner identity.
     #[must_use]
-    pub const fn repository_owner_id(&self) -> ProviderRepositoryOwnerId {
+    pub const fn repository_owner_id(&self) -> GithubRepositoryOwnerId {
         self.repository_owner_id
     }
 
@@ -1057,7 +1057,7 @@ impl GithubProviderRepositoryConfig {
 
     /// Returns the exact authenticated visibility expected from signed payloads.
     #[must_use]
-    pub const fn visibility(&self) -> ProviderRepositoryVisibility {
+    pub const fn visibility(&self) -> GithubRepositoryVisibility {
         self.visibility
     }
 

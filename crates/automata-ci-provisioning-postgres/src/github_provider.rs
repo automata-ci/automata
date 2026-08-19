@@ -23,9 +23,9 @@ use automata_ci_provisioning::{
     WorkspaceGithubRepositoriesRevision,
 };
 use automata_ci_store::{
-    GithubCheckName, GithubRepositoryName, GithubServerServiceAppClientId,
-    GithubServerServiceAppId, GithubServerServiceJwtIssuer, ProviderInstallationId,
-    ProviderRepositoryId, ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
+    GithubCheckName, GithubInstallationId, GithubRepositoryId, GithubRepositoryName,
+    GithubRepositoryOwnerId, GithubRepositoryVisibility, GithubServerServiceAppClientId,
+    GithubServerServiceAppId, GithubServerServiceJwtIssuer,
 };
 use automata_ci_workflow_service::GithubRunnerPolicy;
 use sha2::{Digest as _, Sha256};
@@ -777,17 +777,17 @@ impl RepositorySelectionRow {
     ) -> Result<GithubProviderRepositorySelection, GithubProviderDesiredStateFailure> {
         let installation_binding_generation = positive_u64(self.installation_binding_generation)?;
         GithubProviderRepositorySelection::new(
-            ProviderInstallationId::new(positive_u64(self.provider_installation_id)?)
+            GithubInstallationId::new(positive_u64(self.provider_installation_id)?)
                 .map_err(|_| desired_corrupt())?,
-            ProviderRepositoryId::new(positive_u64(self.provider_repository_id)?)
+            GithubRepositoryId::new(positive_u64(self.provider_repository_id)?)
                 .map_err(|_| desired_corrupt())?,
-            ProviderRepositoryOwnerId::new(positive_u64(self.provider_repository_owner_id)?)
+            GithubRepositoryOwnerId::new(positive_u64(self.provider_repository_owner_id)?)
                 .map_err(|_| desired_corrupt())?,
             GithubRepositoryName::new(self.repository_name).map_err(|_| desired_corrupt())?,
             self.default_branch,
             match self.repository_visibility.as_str() {
-                "public" => ProviderRepositoryVisibility::Public,
-                "private" => ProviderRepositoryVisibility::Private,
+                "public" => GithubRepositoryVisibility::Public,
+                "private" => GithubRepositoryVisibility::Private,
                 _ => return Err(desired_corrupt()),
             },
             match self.authority_profile.as_str() {
@@ -1178,8 +1178,8 @@ async fn insert_repository_selection(
     installation_binding_generation: i64,
 ) -> Result<(), WorkspaceGithubRepositoriesFailure> {
     let visibility = match repository.visibility() {
-        ProviderRepositoryVisibility::Public => "public",
-        ProviderRepositoryVisibility::Private => "private",
+        GithubRepositoryVisibility::Public => "public",
+        GithubRepositoryVisibility::Private => "private",
     };
     let authority_profile = match repository.authority_profile() {
         JobAuthorityProfile::Standard => "standard",
@@ -1363,8 +1363,8 @@ fn workspace_repositories_digest(command: &ApplyWorkspaceGithubRepositoriesComma
         digest_part(
             &mut digest,
             match repository.visibility() {
-                ProviderRepositoryVisibility::Public => b"public",
-                ProviderRepositoryVisibility::Private => b"private",
+                GithubRepositoryVisibility::Public => b"public",
+                GithubRepositoryVisibility::Private => b"private",
             },
         );
         digest_part(

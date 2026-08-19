@@ -20,13 +20,14 @@ use automata_ci_store::{
     BootstrapGithubProviderRepository, ClaimNextGithubServerServiceMaintenance,
     FinishGithubServerServiceMint, FinishGithubServerServiceRevocation,
     GITHUB_PROVIDER_RUNNER_POLICY_MEDIA_TYPE, GITHUB_SERVICE_SAFE_ERASE_SKEW_MILLIS,
-    GITHUB_SERVICE_TOKEN_LIFETIME_MILLIS, GithubCheckName, GithubProviderGitRef,
-    GithubProviderManifest, GithubProviderManifestLimits, GithubProviderManifestRevision,
-    GithubProviderOrigins, GithubProviderRunnerPolicyObject,
-    GithubProviderWebhookVerifierFingerprint, GithubProviderWorkflowSelection,
-    GithubRepositoryName, GithubScheduleClaimFence, GithubScheduleDiscoveryClaim,
-    GithubScheduleRegistryId, GithubScheduleWorkerId, GithubServerServiceAppClientId,
-    GithubServerServiceAppId, GithubServerServiceAuthorityId, GithubServerServiceAuthorityIdentity,
+    GITHUB_SERVICE_TOKEN_LIFETIME_MILLIS, GithubCheckName, GithubInstallationId,
+    GithubProviderGitRef, GithubProviderManifest, GithubProviderManifestLimits,
+    GithubProviderManifestRevision, GithubProviderOrigins, GithubProviderRunnerPolicyObject,
+    GithubProviderWebhookVerifierFingerprint, GithubProviderWorkflowSelection, GithubRepositoryId,
+    GithubRepositoryName, GithubRepositoryOwnerId, GithubRepositoryVisibility,
+    GithubScheduleClaimFence, GithubScheduleDiscoveryClaim, GithubScheduleRegistryId,
+    GithubScheduleWorkerId, GithubServerServiceAppClientId, GithubServerServiceAppId,
+    GithubServerServiceAuthorityId, GithubServerServiceAuthorityIdentity,
     GithubServerServiceAuthoritySelector, GithubServerServiceClaimFence,
     GithubServerServiceConsumerClaim, GithubServerServiceConsumerId,
     GithubServerServiceCredentialHandoff, GithubServerServiceEnvelopeMetadata,
@@ -35,10 +36,9 @@ use automata_ci_store::{
     GithubServerServiceJwtIssuer, GithubServerServiceMaintenanceOutcome,
     GithubServerServiceRevision, GithubServerServiceScope, GithubServerServiceStoreError,
     GithubServerServiceWorkerId, ObjectKey, ProtectedGithubServerServiceCredential,
-    ProviderInstallationId, ProviderRepositoryId, ProviderRepositoryOwnerId,
-    ProviderRepositoryVisibility, QuarantineGithubServerServiceCredential,
-    RegisterWorkflowRuntimePolicy, ReleaseGithubServerServiceHandoff, RepositoryId, Sha256Digest,
-    TenantScope, WorkflowPermissionPolicy, WorkflowRunnerFeaturePolicy, WorkflowRuntimePolicy,
+    QuarantineGithubServerServiceCredential, RegisterWorkflowRuntimePolicy,
+    ReleaseGithubServerServiceHandoff, RepositoryId, Sha256Digest, TenantScope,
+    WorkflowPermissionPolicy, WorkflowRunnerFeaturePolicy, WorkflowRuntimePolicy,
     WorkflowRuntimePolicyMapping, WorkflowRuntimePolicyRevision, github_provider_repository_id,
 };
 use sha2::{Digest as _, Sha256};
@@ -402,7 +402,7 @@ fn connection_id() -> ProviderConnectionId {
 fn repository_id() -> RepositoryId {
     github_provider_repository_id(
         &tenant(),
-        ProviderRepositoryId::new(13).expect("provider repository ID"),
+        GithubRepositoryId::new(13).expect("provider repository ID"),
     )
 }
 
@@ -412,9 +412,9 @@ fn authority(scope: GithubServerServiceScope, id: u128) -> GithubServerServiceAu
         authority_id(id),
         repository_id(),
         connection_id(),
-        ProviderInstallationId::new(11).expect("installation ID"),
+        GithubInstallationId::new(11).expect("installation ID"),
         GithubServerServiceAppId::new(17).expect("App ID"),
-        ProviderRepositoryId::new(13).expect("provider repository ID"),
+        GithubRepositoryId::new(13).expect("provider repository ID"),
         GithubRepositoryName::new("automata-ci/automata").expect("repository name"),
         scope,
         GithubServerServiceAppClientId::new("Iv1.automata-test").expect("App client ID"),
@@ -427,7 +427,7 @@ fn authority(scope: GithubServerServiceScope, id: u128) -> GithubServerServiceAu
     .expect("authority")
 }
 
-fn schedule_manifest(visibility: ProviderRepositoryVisibility) -> GithubProviderManifest {
+fn schedule_manifest(visibility: GithubRepositoryVisibility) -> GithubProviderManifest {
     let policy = test_runtime_policy();
     let runner_policy_digest = policy.canonical_digest();
     let runner_policy_size = u64::try_from(
@@ -453,8 +453,8 @@ fn schedule_manifest(visibility: ProviderRepositoryVisibility) -> GithubProvider
     GithubProviderManifest::new_with_workflow_selection_and_git_ref(
         tenant(),
         connection_id(),
-        ProviderInstallationId::new(11).expect("installation ID"),
-        ProviderRepositoryId::new(13).expect("provider repository ID"),
+        GithubInstallationId::new(11).expect("installation ID"),
+        GithubRepositoryId::new(13).expect("provider repository ID"),
         GithubRepositoryName::new("automata-ci/automata").expect("repository name"),
         visibility,
         GithubServerServiceAppId::new(17).expect("App ID"),
@@ -477,7 +477,7 @@ fn schedule_manifest(visibility: ProviderRepositoryVisibility) -> GithubProvider
         GithubProviderManifestLimits::github_dot_com_ci(),
         GithubProviderManifestRevision::new(3).expect("manifest revision"),
     )
-    .with_repository_owner_id(ProviderRepositoryOwnerId::new(19).expect("owner ID"))
+    .with_repository_owner_id(GithubRepositoryOwnerId::new(19).expect("owner ID"))
 }
 
 fn test_runtime_policy() -> WorkflowRuntimePolicy {
@@ -517,7 +517,7 @@ fn test_runtime_policy() -> WorkflowRuntimePolicy {
 }
 
 fn observation_bootstrap(
-    visibility: ProviderRepositoryVisibility,
+    visibility: GithubRepositoryVisibility,
 ) -> BootstrapGithubProviderRepository {
     let manifest = schedule_manifest(visibility);
     let policy = test_runtime_policy();
@@ -676,7 +676,7 @@ fn registry_is_bounded_unique_and_implements_live_provider_ports() {
 #[test]
 fn workflow_permission_observation_is_manifest_and_authority_bound() {
     let workflow_permissions = authority(GithubServerServiceScope::WorkflowPermissionsRead, 0x69);
-    let bootstrap = observation_bootstrap(ProviderRepositoryVisibility::Public);
+    let bootstrap = observation_bootstrap(GithubRepositoryVisibility::Public);
     let manifest = bootstrap.manifest().manifest();
     assert!(workflow_permission_identity_matches(
         &workflow_permissions,
@@ -781,8 +781,8 @@ async fn scheduled_discovery_uses_its_own_oidc_consumer_action_for_every_visibil
     let adapters = adapters(Arc::clone(&fake), std::slice::from_ref(&contents));
     let selector = GithubServerServiceAuthoritySelector::from_identity(&contents);
     for visibility in [
-        ProviderRepositoryVisibility::Public,
-        ProviderRepositoryVisibility::Private,
+        GithubRepositoryVisibility::Public,
+        GithubRepositoryVisibility::Private,
     ] {
         let manifest = schedule_manifest(visibility);
         let request = GithubScheduleSourceCredentialRequest::new(

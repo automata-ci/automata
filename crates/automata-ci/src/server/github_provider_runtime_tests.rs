@@ -12,21 +12,22 @@ use automata_ci_core::{
     AttemptId, FencingToken, JobId, JobIrVersion, LeaseId, RunId, RunnerId, RunnerSessionId,
 };
 use automata_ci_credential_github::{
+    GithubInstallationId as CredentialGithubInstallationId,
     GithubInstallationTokenRevocationCandidate, GithubInstallationTokenRevocationFailureKind,
     GithubInstallationTokenRevocationOutcome,
 };
 use automata_ci_provider::ProviderConnectionId;
 use automata_ci_store::{
-    GithubRepositoryId, GithubRepositoryName, GithubRuntimeAuthorityActivationSelectionTail,
-    GithubRuntimeAuthorityIdentity, GithubRuntimeAuthorityMaterializationSelectionTail,
-    GithubRuntimeAuthorityNamespace, GithubRuntimeAuthorityPreparationSelectionTail,
-    GithubServerServiceAppClientId, GithubServerServiceAppId, GithubServerServiceAuthorityId,
-    GithubServerServiceAuthorityIdentity, GithubServerServiceAuthoritySelector,
-    GithubServerServiceJwtIssuer, GithubServerServiceRevision, GithubServerServiceScope,
-    LogicalActivationGeneration, LogicalActivationPreparationGeneration, LogicalActivationWorkerId,
+    GithubInstallationId, GithubRepositoryId, GithubRepositoryName,
+    GithubRuntimeAuthorityActivationSelectionTail, GithubRuntimeAuthorityIdentity,
+    GithubRuntimeAuthorityMaterializationSelectionTail, GithubRuntimeAuthorityNamespace,
+    GithubRuntimeAuthorityPreparationSelectionTail, GithubServerServiceAppClientId,
+    GithubServerServiceAppId, GithubServerServiceAuthorityId, GithubServerServiceAuthorityIdentity,
+    GithubServerServiceAuthoritySelector, GithubServerServiceJwtIssuer,
+    GithubServerServiceRevision, GithubServerServiceScope, LogicalActivationGeneration,
+    LogicalActivationPreparationGeneration, LogicalActivationWorkerId,
     LogicalMaterializationGeneration, LogicalMaterializationWorkerId, LogicalWorkSelectionId,
-    ProviderInstallationId, ProviderRepositoryId, RepositoryId, RunnerGeneration, SessionEpoch,
-    StableRunnerSlot, TenantScope,
+    RepositoryId, RunnerGeneration, SessionEpoch, StableRunnerSlot, TenantScope,
 };
 use serde_json::{Value, json};
 use url::Url;
@@ -160,7 +161,7 @@ fn loopback_transport_builds_one_exact_emulator_origin() {
     let credential = provider_credential_config(
         &transport,
         GithubAppIssuer::new("Iv1.isolated-emulator").expect("issuer"),
-        GithubInstallationId::new(10).expect("installation"),
+        CredentialGithubInstallationId::new(10).expect("installation"),
     );
     assert!(credential.is_ok());
     let authority =
@@ -252,7 +253,7 @@ fn live_test_broker(
     let private_key = SecretString::new(pem).expect("published RSA fixture is nonempty");
     let broker_config = GithubAppCredentialConfig::github_dot_com(
         github_app_issuer(config).expect("validated App issuer"),
-        GithubInstallationId::new(installation_id).expect("installation"),
+        CredentialGithubInstallationId::new(installation_id).expect("installation"),
         GITHUB_HTTP_USER_AGENT,
     )
     .expect("GitHub.com broker configuration");
@@ -467,9 +468,9 @@ fn installation_replacement_has_no_retained_revocation_route() {
             .expect("current authority"),
         RepositoryId::from_uuid(Uuid::from_u128(0xfeeb)),
         ProviderConnectionId::from_uuid(Uuid::from_u128(0xfeea)).expect("connection"),
-        ProviderInstallationId::new(11).expect("installation"),
+        GithubInstallationId::new(11).expect("installation"),
         GithubServerServiceAppId::new(17).expect("App ID"),
-        ProviderRepositoryId::new(13).expect("provider repository ID"),
+        GithubRepositoryId::new(13).expect("provider repository ID"),
         GithubRepositoryName::new("automata-ci/automata").expect("repository name"),
         GithubServerServiceScope::WorkflowPermissionsRead,
         GithubServerServiceAppClientId::new("Iv1.automata-test").expect("App client ID"),
@@ -486,7 +487,7 @@ fn installation_replacement_has_no_retained_revocation_route() {
             .expect("replacement authority"),
         current.repository_id(),
         current.connection_id(),
-        ProviderInstallationId::new(current.installation_id().get() + 1)
+        GithubInstallationId::new(current.installation_id().get() + 1)
             .expect("replacement installation"),
         current.github_app_id(),
         current.github_repository_id(),

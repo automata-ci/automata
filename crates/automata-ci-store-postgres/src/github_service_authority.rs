@@ -11,23 +11,23 @@ use automata_ci_store::{
     ClaimedGithubServerServiceMint, ClaimedGithubServerServiceRevocation,
     EnsureGithubServerServiceAuthority, FinishGithubServerServiceMint,
     FinishGithubServerServiceRevocation, GITHUB_SERVICE_FAILURE_BUDGET_REARM_MILLIS,
-    GithubRepositoryName, GithubServerServiceAction, GithubServerServiceAppClientId,
-    GithubServerServiceAppId, GithubServerServiceAuthorityDescriptor,
-    GithubServerServiceAuthorityId, GithubServerServiceAuthorityIdentity,
-    GithubServerServiceAuthorityRepository, GithubServerServiceAuthoritySelector,
-    GithubServerServiceAuthorityState, GithubServerServiceClaim, GithubServerServiceClaimFence,
-    GithubServerServiceConsumerClaim, GithubServerServiceConsumerId,
-    GithubServerServiceCredentialHandoff, GithubServerServiceEnvelopeMetadata,
-    GithubServerServiceGeneration, GithubServerServiceHandoffId, GithubServerServiceIssuanceKey,
+    GithubInstallationId, GithubRepositoryId, GithubRepositoryName, GithubServerServiceAction,
+    GithubServerServiceAppClientId, GithubServerServiceAppId,
+    GithubServerServiceAuthorityDescriptor, GithubServerServiceAuthorityId,
+    GithubServerServiceAuthorityIdentity, GithubServerServiceAuthorityRepository,
+    GithubServerServiceAuthoritySelector, GithubServerServiceAuthorityState,
+    GithubServerServiceClaim, GithubServerServiceClaimFence, GithubServerServiceConsumerClaim,
+    GithubServerServiceConsumerId, GithubServerServiceCredentialHandoff,
+    GithubServerServiceEnvelopeMetadata, GithubServerServiceGeneration,
+    GithubServerServiceHandoffId, GithubServerServiceIssuanceKey,
     GithubServerServiceIssuanceReceipt, GithubServerServiceIssuanceState,
     GithubServerServiceJwtIssuer, GithubServerServiceMaintenanceOutcome,
     GithubServerServiceRevision, GithubServerServiceScope, GithubServerServiceStoreError,
     GithubServerServiceWorkerId, MAX_GITHUB_SERVICE_CONSECUTIVE_GENERATION_FAILURES,
     MAX_GITHUB_SERVICE_MINT_ATTEMPTS, MAX_GITHUB_SERVICE_REVOKE_ATTEMPTS,
     MIN_GITHUB_SERVICE_READY_USE_MILLIS, ProtectedGithubServerServiceCredential,
-    ProviderInstallationId, ProviderRepositoryId, QuarantineGithubServerServiceCredential,
-    ReleaseGithubServerServiceHandoff, RepositoryId, RetireGithubServerServiceAuthority,
-    Sha256Digest, TenantScope,
+    QuarantineGithubServerServiceCredential, ReleaseGithubServerServiceHandoff, RepositoryId,
+    RetireGithubServerServiceAuthority, Sha256Digest, TenantScope,
 };
 
 use super::{PostgresStore, pg_bigint};
@@ -2952,9 +2952,8 @@ fn decode_authority(
     let connection_id =
         ProviderConnectionId::from_uuid(uuid_column(row, "provider_connection_id")?)
             .map_err(|_| GithubServerServiceStoreError::CorruptData)?;
-    let installation_id =
-        ProviderInstallationId::new(positive_u64(row, "provider_installation_id")?)
-            .map_err(|_| GithubServerServiceStoreError::CorruptData)?;
+    let installation_id = GithubInstallationId::new(positive_u64(row, "provider_installation_id")?)
+        .map_err(|_| GithubServerServiceStoreError::CorruptData)?;
     let app_id = GithubServerServiceAppId::new(positive_u64(row, "github_app_id")?)
         .map_err(|_| GithubServerServiceStoreError::CorruptData)?;
     let app_client_id =
@@ -2963,9 +2962,8 @@ fn decode_authority(
     let jwt_issuer =
         decode_github_server_service_jwt_issuer(&string_column(row, "github_app_jwt_issuer_kind")?)
             .ok_or(GithubServerServiceStoreError::CorruptData)?;
-    let github_repository_id =
-        ProviderRepositoryId::new(positive_u64(row, "github_repository_id")?)
-            .map_err(|_| GithubServerServiceStoreError::CorruptData)?;
+    let github_repository_id = GithubRepositoryId::new(positive_u64(row, "github_repository_id")?)
+        .map_err(|_| GithubServerServiceStoreError::CorruptData)?;
     let github_repository_name =
         GithubRepositoryName::new(string_column(row, "github_repository_name")?)
             .map_err(|_| GithubServerServiceStoreError::CorruptData)?;

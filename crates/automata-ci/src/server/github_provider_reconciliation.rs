@@ -16,7 +16,7 @@ use automata_ci_provider_github::{
 };
 use automata_ci_scm::RepositoryId;
 use automata_ci_store::{
-    GithubProviderManifestLimits, GithubServerServiceJwtIssuer, ProviderRepositoryVisibility,
+    GithubProviderManifestLimits, GithubRepositoryVisibility, GithubServerServiceJwtIssuer,
     WORKFLOW_RUNTIME_POLICY_SCHEMA,
 };
 use url::Url;
@@ -121,8 +121,8 @@ fn common_connections(
             .strip_prefix("refs/heads/")
             .ok_or(GithubProviderConfigError)?;
         let visibility = match repository.visibility() {
-            ProviderRepositoryVisibility::Public => RepositoryVisibility::Public,
-            ProviderRepositoryVisibility::Private => RepositoryVisibility::Private,
+            GithubRepositoryVisibility::Public => RepositoryVisibility::Public,
+            GithubRepositoryVisibility::Private => RepositoryVisibility::Private,
         };
         let adapter_policy = GithubConnectionPolicy::new(
             repository.installation_id().get(),

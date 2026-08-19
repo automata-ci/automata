@@ -1,10 +1,9 @@
 //! Immutable, revisioned GitHub provider configuration for product bootstrap.
 //!
 //! Static configuration is the desired source, while this repository retains
-//! the exact non-secret revision that accepted deliveries and Check subjects
-//! will pin. Historical revisions remain readable after the current pointer
-//! advances. Webhook secrets, App private keys, and credential values never
-//! enter this boundary.
+//! the exact non-secret revision that provider activity pins. Historical
+//! revisions remain readable after the current pointer advances. Webhook
+//! secrets, App private keys, and credential values never enter this boundary.
 
 use std::num::NonZeroU64;
 
@@ -18,12 +17,11 @@ use automata_ci_core::JobAuthorityProfile;
 
 use crate::{
     AdmissionObject, GithubCheckAppId, GithubCheckName, GithubCheckSubjectKey,
-    GithubRepositoryName, GithubServerServiceAppClientId, GithubServerServiceAppId,
-    GithubServerServiceJwtIssuer, GithubServerServiceRevision, ProviderDeliveryIdentity,
-    ProviderInstallationId, ProviderRepositoryId, ProviderRepositoryOwnerId,
-    ProviderRepositoryVisibility, RegisterWorkflowRuntimePolicy, RepositoryId,
-    RepositoryOperationError, Sha256Digest, TenantScope, WorkflowRuntimePolicyReceipt,
-    WorkflowRuntimePolicyRevision,
+    GithubInstallationId, GithubRepositoryId, GithubRepositoryName, GithubRepositoryOwnerId,
+    GithubRepositoryVisibility, GithubServerServiceAppClientId, GithubServerServiceAppId,
+    GithubServerServiceJwtIssuer, GithubServerServiceRevision, RegisterWorkflowRuntimePolicy,
+    RepositoryId, RepositoryOperationError, Sha256Digest, TenantScope,
+    WorkflowRuntimePolicyReceipt, WorkflowRuntimePolicyRevision,
 };
 use automata_ci_provider::ProviderConnectionId;
 
@@ -565,12 +563,12 @@ pub struct GithubProviderManifest {
     tenant: TenantScope,
     repository_id: RepositoryId,
     connection_id: ProviderConnectionId,
-    installation_id: ProviderInstallationId,
+    installation_id: GithubInstallationId,
     installation_binding_generation: GithubInstallationBindingGeneration,
-    github_repository_id: ProviderRepositoryId,
-    github_repository_owner_id: Option<ProviderRepositoryOwnerId>,
+    github_repository_id: GithubRepositoryId,
+    github_repository_owner_id: Option<GithubRepositoryOwnerId>,
     github_repository_name: GithubRepositoryName,
-    repository_visibility: ProviderRepositoryVisibility,
+    repository_visibility: GithubRepositoryVisibility,
     github_app_id: GithubServerServiceAppId,
     app_client_id: GithubServerServiceAppClientId,
     jwt_issuer: GithubServerServiceJwtIssuer,
@@ -609,10 +607,10 @@ impl GithubProviderManifest {
     pub fn new(
         tenant: TenantScope,
         connection_id: ProviderConnectionId,
-        installation_id: ProviderInstallationId,
-        github_repository_id: ProviderRepositoryId,
+        installation_id: GithubInstallationId,
+        github_repository_id: GithubRepositoryId,
         github_repository_name: GithubRepositoryName,
-        repository_visibility: ProviderRepositoryVisibility,
+        repository_visibility: GithubRepositoryVisibility,
         github_app_id: GithubServerServiceAppId,
         app_client_id: GithubServerServiceAppClientId,
         jwt_issuer: GithubServerServiceJwtIssuer,
@@ -668,10 +666,10 @@ impl GithubProviderManifest {
     pub fn new_with_workflow_selection(
         tenant: TenantScope,
         connection_id: ProviderConnectionId,
-        installation_id: ProviderInstallationId,
-        github_repository_id: ProviderRepositoryId,
+        installation_id: GithubInstallationId,
+        github_repository_id: GithubRepositoryId,
         github_repository_name: GithubRepositoryName,
-        repository_visibility: ProviderRepositoryVisibility,
+        repository_visibility: GithubRepositoryVisibility,
         github_app_id: GithubServerServiceAppId,
         app_client_id: GithubServerServiceAppClientId,
         jwt_issuer: GithubServerServiceJwtIssuer,
@@ -729,10 +727,10 @@ impl GithubProviderManifest {
     pub fn new_with_workflow_selection_and_git_ref(
         tenant: TenantScope,
         connection_id: ProviderConnectionId,
-        installation_id: ProviderInstallationId,
-        github_repository_id: ProviderRepositoryId,
+        installation_id: GithubInstallationId,
+        github_repository_id: GithubRepositoryId,
         github_repository_name: GithubRepositoryName,
-        repository_visibility: ProviderRepositoryVisibility,
+        repository_visibility: GithubRepositoryVisibility,
         github_app_id: GithubServerServiceAppId,
         app_client_id: GithubServerServiceAppClientId,
         jwt_issuer: GithubServerServiceJwtIssuer,
@@ -799,11 +797,11 @@ impl GithubProviderManifest {
     pub fn new_owner_bound_with_workflow_selection_and_git_ref(
         tenant: TenantScope,
         connection_id: ProviderConnectionId,
-        installation_id: ProviderInstallationId,
-        github_repository_id: ProviderRepositoryId,
-        github_repository_owner_id: ProviderRepositoryOwnerId,
+        installation_id: GithubInstallationId,
+        github_repository_id: GithubRepositoryId,
+        github_repository_owner_id: GithubRepositoryOwnerId,
         github_repository_name: GithubRepositoryName,
-        repository_visibility: ProviderRepositoryVisibility,
+        repository_visibility: GithubRepositoryVisibility,
         github_app_id: GithubServerServiceAppId,
         app_client_id: GithubServerServiceAppClientId,
         jwt_issuer: GithubServerServiceJwtIssuer,
@@ -856,7 +854,7 @@ impl GithubProviderManifest {
     #[must_use]
     pub fn with_repository_owner_id(
         mut self,
-        github_repository_owner_id: ProviderRepositoryOwnerId,
+        github_repository_owner_id: GithubRepositoryOwnerId,
     ) -> Self {
         self.github_repository_owner_id = Some(github_repository_owner_id);
         self.digest = self.compute_digest();
@@ -880,7 +878,7 @@ impl GithubProviderManifest {
     }
     /// Returns the exact GitHub App installation ID.
     #[must_use]
-    pub const fn installation_id(&self) -> ProviderInstallationId {
+    pub const fn installation_id(&self) -> GithubInstallationId {
         self.installation_id
     }
     /// Returns the immutable installation-binding generation.
@@ -900,12 +898,12 @@ impl GithubProviderManifest {
     }
     /// Returns the stable numeric GitHub repository ID.
     #[must_use]
-    pub const fn github_repository_id(&self) -> ProviderRepositoryId {
+    pub const fn github_repository_id(&self) -> GithubRepositoryId {
         self.github_repository_id
     }
     /// Returns the immutable numeric repository owner when this revision is owner-bound.
     #[must_use]
-    pub const fn github_repository_owner_id(&self) -> Option<ProviderRepositoryOwnerId> {
+    pub const fn github_repository_owner_id(&self) -> Option<GithubRepositoryOwnerId> {
         self.github_repository_owner_id
     }
     /// Returns the canonical case-sensitive `owner/repository` identity.
@@ -915,7 +913,7 @@ impl GithubProviderManifest {
     }
     /// Returns the fixed expected authenticated visibility.
     #[must_use]
-    pub const fn repository_visibility(&self) -> ProviderRepositoryVisibility {
+    pub const fn repository_visibility(&self) -> GithubRepositoryVisibility {
         self.repository_visibility
     }
     /// Returns the numeric GitHub App identity.
@@ -1050,8 +1048,8 @@ impl GithubProviderManifest {
     #[must_use]
     pub const fn source_authentication(&self) -> &'static str {
         match self.repository_visibility {
-            ProviderRepositoryVisibility::Public => GITHUB_PROVIDER_PUBLIC_SOURCE_AUTHENTICATION,
-            ProviderRepositoryVisibility::Private => GITHUB_PROVIDER_PRIVATE_SOURCE_AUTHENTICATION,
+            GithubRepositoryVisibility::Public => GITHUB_PROVIDER_PUBLIC_SOURCE_AUTHENTICATION,
+            GithubRepositoryVisibility::Private => GITHUB_PROVIDER_PRIVATE_SOURCE_AUTHENTICATION,
         }
     }
     /// Returns the exact revision-selection behavior.
@@ -1078,22 +1076,6 @@ impl GithubProviderManifest {
     #[must_use]
     pub const fn digest(&self) -> Sha256Digest {
         self.digest
-    }
-
-    /// Checks the complete authenticated GitHub delivery routing identity.
-    ///
-    /// Visibility is intentionally part of this match. A revision never treats
-    /// a public/private event as equivalent just because its connection,
-    /// installation, and numeric repository ID happen to match.
-    #[must_use]
-    pub fn matches_delivery_identity(&self, identity: &ProviderDeliveryIdentity) -> bool {
-        identity.tenant() == &self.tenant
-            && identity.provider() == "github"
-            && identity.connection_id() == self.connection_id
-            && identity.installation_id() == self.installation_id
-            && identity.repository_id() == self.github_repository_id
-            && identity.repository_visibility() == self.repository_visibility()
-            && identity.repository_identity() == self.github_repository_name.as_str()
     }
 
     #[cfg(feature = "adapter-spi")]
@@ -1619,7 +1601,7 @@ pub trait GithubProviderManifestRepository: Send + Sync {
 #[must_use]
 pub fn github_provider_repository_id(
     tenant: &TenantScope,
-    github_repository_id: ProviderRepositoryId,
+    github_repository_id: GithubRepositoryId,
 ) -> RepositoryId {
     let provider_repository_id = github_repository_id.get().to_string();
     let uuid = derived_uuid(

@@ -13,15 +13,13 @@ use automata_ci_store::{
     GITHUB_PROVIDER_PUBLIC_SOURCE_AUTHENTICATION, GITHUB_PROVIDER_PUSH_WEBHOOK_MAX_COMMITS,
     GITHUB_PROVIDER_REST_API_VERSION, GITHUB_PROVIDER_WEBHOOK_ACCEPT_TIMEOUT_MILLIS,
     GITHUB_PROVIDER_WEBHOOK_MAX_BODY_BYTES, GITHUB_PROVIDER_WORKFLOW_MAX_BYTES, GithubCheckName,
-    GithubInstallationBindingGeneration, GithubProviderGitRef, GithubProviderManifest,
-    GithubProviderManifestLimits, GithubProviderManifestRepository, GithubProviderManifestRevision,
-    GithubProviderManifestValueError, GithubProviderOrigins,
-    GithubProviderWebhookVerifierFingerprint, GithubProviderWorkflowSelection,
-    GithubRepositoryName, GithubServerServiceAppClientId, GithubServerServiceAppId,
-    GithubServerServiceJwtIssuer, GithubServerServiceRevision, ProviderDeliveryIdentity,
-    ProviderInstallationId, ProviderRepositoryCoordinates, ProviderRepositoryId,
-    ProviderRepositoryOwnerId, ProviderRepositoryVisibility, TenantScope,
-    github_provider_repository_id,
+    GithubInstallationBindingGeneration, GithubInstallationId, GithubProviderGitRef,
+    GithubProviderManifest, GithubProviderManifestLimits, GithubProviderManifestRepository,
+    GithubProviderManifestRevision, GithubProviderManifestValueError, GithubProviderOrigins,
+    GithubProviderWebhookVerifierFingerprint, GithubProviderWorkflowSelection, GithubRepositoryId,
+    GithubRepositoryName, GithubRepositoryOwnerId, GithubRepositoryVisibility,
+    GithubServerServiceAppClientId, GithubServerServiceAppId, GithubServerServiceJwtIssuer,
+    GithubServerServiceRevision, TenantScope, github_provider_repository_id,
 };
 use uuid::Uuid;
 
@@ -34,7 +32,7 @@ fn manifest_closes_public_repository_selector_and_origins() {
     );
     assert_eq!(
         manifest.repository_visibility(),
-        ProviderRepositoryVisibility::Public
+        GithubRepositoryVisibility::Public
     );
     assert_eq!(
         manifest.workflow_path(),
@@ -66,11 +64,6 @@ fn manifest_closes_public_repository_selector_and_origins() {
         manifest.github_app_id().get()
     );
 
-    let public = delivery_identity(ProviderRepositoryVisibility::Public);
-    let private = delivery_identity(ProviderRepositoryVisibility::Private);
-    assert!(manifest.matches_delivery_identity(&public));
-    assert!(!manifest.matches_delivery_identity(&private));
-
     let private_manifest = manifest_with(
         2,
         1,
@@ -79,18 +72,16 @@ fn manifest_closes_public_repository_selector_and_origins() {
         [7; 32],
         [9; 32],
         "Automata CI",
-        ProviderRepositoryVisibility::Private,
+        GithubRepositoryVisibility::Private,
     );
     assert_eq!(
         private_manifest.repository_visibility(),
-        ProviderRepositoryVisibility::Private
+        GithubRepositoryVisibility::Private
     );
     assert_eq!(
         private_manifest.source_authentication(),
         GITHUB_PROVIDER_PRIVATE_SOURCE_AUTHENTICATION
     );
-    assert!(!private_manifest.matches_delivery_identity(&public));
-    assert!(private_manifest.matches_delivery_identity(&private));
 }
 
 #[test]
@@ -191,7 +182,7 @@ fn all_direct_selection_is_canonical_and_digest_bound() {
         [7; 32],
         [9; 32],
         "Automata CI",
-        ProviderRepositoryVisibility::Public,
+        GithubRepositoryVisibility::Public,
         automata_ci_core::JobAuthorityProfile::Standard,
         GithubProviderWorkflowSelection::all_direct(),
     );
@@ -220,7 +211,7 @@ fn configured_default_branch_ref_is_canonical_and_digest_bound() {
         [7; 32],
         [9; 32],
         "Automata CI",
-        ProviderRepositoryVisibility::Public,
+        GithubRepositoryVisibility::Public,
         automata_ci_core::JobAuthorityProfile::Standard,
         GithubProviderWorkflowSelection::all_direct(),
         GithubProviderGitRef::main(),
@@ -233,7 +224,7 @@ fn configured_default_branch_ref_is_canonical_and_digest_bound() {
         [7; 32],
         [9; 32],
         "Automata CI",
-        ProviderRepositoryVisibility::Public,
+        GithubRepositoryVisibility::Public,
         automata_ci_core::JobAuthorityProfile::Standard,
         GithubProviderWorkflowSelection::all_direct(),
         GithubProviderGitRef::new("refs/heads/release/stable").expect("branch ref"),
@@ -277,7 +268,7 @@ fn digest_binds_every_mutable_evidence_and_server_derived_repository() {
         [7; 32],
         [10; 32],
         "Automata CI",
-        ProviderRepositoryVisibility::Public,
+        GithubRepositoryVisibility::Public,
     );
     let credential_free = manifest_with_profile(
         1,
@@ -287,7 +278,7 @@ fn digest_binds_every_mutable_evidence_and_server_derived_repository() {
         [7; 32],
         [9; 32],
         "Automata CI",
-        ProviderRepositoryVisibility::Public,
+        GithubRepositoryVisibility::Public,
         automata_ci_core::JobAuthorityProfile::CredentialFree,
     );
     assert_eq!(original, exact_reconstruction);
@@ -327,15 +318,15 @@ fn owner_binding_uses_an_independent_domain_and_preserves_the_base_digest() {
     let base = manifest(1, 1, 1, [7; 32], "Automata CI");
     let owner = base
         .clone()
-        .with_repository_owner_id(ProviderRepositoryOwnerId::new(404).expect("owner ID"));
+        .with_repository_owner_id(GithubRepositoryOwnerId::new(404).expect("owner ID"));
     let other_owner = base
         .clone()
-        .with_repository_owner_id(ProviderRepositoryOwnerId::new(405).expect("owner ID"));
+        .with_repository_owner_id(GithubRepositoryOwnerId::new(405).expect("owner ID"));
 
     assert_eq!(base.github_repository_owner_id(), None);
     assert_eq!(
         owner.github_repository_owner_id(),
-        Some(ProviderRepositoryOwnerId::new(404).expect("owner ID"))
+        Some(GithubRepositoryOwnerId::new(404).expect("owner ID"))
     );
     assert_ne!(base.digest(), owner.digest());
     assert_ne!(owner.digest(), other_owner.digest());
@@ -357,13 +348,6 @@ fn installation_binding_generation_is_positive_digest_bound_and_identity_preserv
     assert_eq!(replacement.installation_binding_generation().get(), 2);
     assert_eq!(first.repository_id(), replacement.repository_id());
     assert_ne!(first.digest(), replacement.digest());
-
-    let old_delivery = delivery_identity_for_installation(101);
-    let replacement_delivery = delivery_identity_for_installation(404);
-    assert!(first.matches_delivery_identity(&old_delivery));
-    assert!(!first.matches_delivery_identity(&replacement_delivery));
-    assert!(!replacement.matches_delivery_identity(&old_delivery));
-    assert!(replacement.matches_delivery_identity(&replacement_delivery));
 
     assert_eq!(
         GithubInstallationBindingGeneration::new(0),
@@ -416,7 +400,7 @@ pub(crate) fn manifest(
         spki,
         [9; 32],
         check_name,
-        ProviderRepositoryVisibility::Public,
+        GithubRepositoryVisibility::Public,
     )
 }
 
@@ -429,7 +413,7 @@ fn manifest_with(
     spki: [u8; 32],
     webhook_verifier_fingerprint: [u8; 32],
     check_name: &str,
-    visibility: ProviderRepositoryVisibility,
+    visibility: GithubRepositoryVisibility,
 ) -> GithubProviderManifest {
     manifest_with_profile(
         manifest_revision,
@@ -453,7 +437,7 @@ fn manifest_with_profile(
     spki: [u8; 32],
     webhook_verifier_fingerprint: [u8; 32],
     check_name: &str,
-    visibility: ProviderRepositoryVisibility,
+    visibility: GithubRepositoryVisibility,
     authority_profile: automata_ci_core::JobAuthorityProfile,
 ) -> GithubProviderManifest {
     manifest_with_profile_selection(
@@ -479,7 +463,7 @@ fn manifest_with_profile_selection(
     spki: [u8; 32],
     webhook_verifier_fingerprint: [u8; 32],
     check_name: &str,
-    visibility: ProviderRepositoryVisibility,
+    visibility: GithubRepositoryVisibility,
     authority_profile: automata_ci_core::JobAuthorityProfile,
     workflow_selection: GithubProviderWorkflowSelection,
 ) -> GithubProviderManifest {
@@ -507,7 +491,7 @@ fn manifest_with_profile_selection_at_ref(
     spki: [u8; 32],
     webhook_verifier_fingerprint: [u8; 32],
     check_name: &str,
-    visibility: ProviderRepositoryVisibility,
+    visibility: GithubRepositoryVisibility,
     authority_profile: automata_ci_core::JobAuthorityProfile,
     workflow_selection: GithubProviderWorkflowSelection,
     git_ref: GithubProviderGitRef,
@@ -524,7 +508,7 @@ fn manifest_with_profile_selection_at_ref(
         authority_profile,
         workflow_selection,
         git_ref,
-        ProviderInstallationId::new(101).expect("installation"),
+        GithubInstallationId::new(101).expect("installation"),
         GithubInstallationBindingGeneration::initial(),
     )
 }
@@ -542,11 +526,11 @@ fn manifest_for_installation(
         [7; 32],
         [9; 32],
         "Automata CI",
-        ProviderRepositoryVisibility::Public,
+        GithubRepositoryVisibility::Public,
         automata_ci_core::JobAuthorityProfile::Standard,
         GithubProviderWorkflowSelection::all_direct(),
         GithubProviderGitRef::main(),
-        ProviderInstallationId::new(installation_id).expect("installation"),
+        GithubInstallationId::new(installation_id).expect("installation"),
         GithubInstallationBindingGeneration::new(installation_binding_generation)
             .expect("installation binding generation"),
     )
@@ -561,11 +545,11 @@ fn manifest_with_profile_selection_at_ref_and_installation(
     spki: [u8; 32],
     webhook_verifier_fingerprint: [u8; 32],
     check_name: &str,
-    visibility: ProviderRepositoryVisibility,
+    visibility: GithubRepositoryVisibility,
     authority_profile: automata_ci_core::JobAuthorityProfile,
     workflow_selection: GithubProviderWorkflowSelection,
     git_ref: GithubProviderGitRef,
-    installation_id: ProviderInstallationId,
+    installation_id: GithubInstallationId,
     installation_binding_generation: GithubInstallationBindingGeneration,
 ) -> GithubProviderManifest {
     let runtime_policy = github_manifest_fixture::fixture_github_runtime_policy(policy_revision);
@@ -573,7 +557,7 @@ fn manifest_with_profile_selection_at_ref_and_installation(
         TenantScope::from_authenticated_tenant_id("automata-ci").expect("tenant"),
         ProviderConnectionId::from_uuid(Uuid::from_u128(0x100)).expect("connection"),
         installation_id,
-        ProviderRepositoryId::new(202).expect("repository"),
+        GithubRepositoryId::new(202).expect("repository"),
         GithubRepositoryName::new("automata-ci/automata").expect("repository name"),
         visibility,
         GithubServerServiceAppId::new(303).expect("App"),
@@ -599,38 +583,4 @@ fn manifest_with_profile_selection_at_ref_and_installation(
         GithubProviderManifestRevision::new(manifest_revision).expect("manifest revision"),
     )
     .with_installation_binding_generation(installation_binding_generation)
-}
-
-fn delivery_identity(visibility: ProviderRepositoryVisibility) -> ProviderDeliveryIdentity {
-    ProviderDeliveryIdentity::new(
-        TenantScope::from_authenticated_tenant_id("automata-ci").expect("tenant"),
-        "github",
-        ProviderConnectionId::from_uuid(Uuid::from_u128(0x100)).expect("connection"),
-        ProviderInstallationId::new(101).expect("installation"),
-        ProviderRepositoryCoordinates::new(
-            ProviderRepositoryId::new(202).expect("repository"),
-            visibility,
-            "automata-ci/automata",
-        )
-        .expect("repository coordinates"),
-        "delivery-1",
-    )
-    .expect("delivery identity")
-}
-
-fn delivery_identity_for_installation(installation_id: u64) -> ProviderDeliveryIdentity {
-    ProviderDeliveryIdentity::new(
-        TenantScope::from_authenticated_tenant_id("automata-ci").expect("tenant"),
-        "github",
-        ProviderConnectionId::from_uuid(Uuid::from_u128(0x100)).expect("connection"),
-        ProviderInstallationId::new(installation_id).expect("installation"),
-        ProviderRepositoryCoordinates::new(
-            ProviderRepositoryId::new(202).expect("repository"),
-            ProviderRepositoryVisibility::Public,
-            "automata-ci/automata",
-        )
-        .expect("repository coordinates"),
-        "delivery-1",
-    )
-    .expect("delivery identity")
 }

@@ -13,7 +13,7 @@ use super::{
 use automata_ci_provider::ProviderConnectionId;
 use automata_ci_store::{
     GITHUB_PROVIDER_API_ORIGIN, GITHUB_PROVIDER_REST_API_VERSION,
-    GITHUB_PROVIDER_RUNNER_POLICY_MEDIA_TYPE, GITHUB_PROVIDER_WEB_ORIGIN,
+    GITHUB_PROVIDER_RUNNER_POLICY_MEDIA_TYPE, GITHUB_PROVIDER_WEB_ORIGIN, GithubInstallationId,
     GithubJobRuntimeAuthorityEvidence, GithubJobRuntimeAuthorityExecution,
     GithubJobRuntimeAuthorityRepository, GithubJobRuntimeAuthorityResolution,
     GithubJobRuntimeAuthorityStoreError, GithubRepositoryId, GithubRepositoryName,
@@ -24,8 +24,8 @@ use automata_ci_store::{
     LOGICAL_ACTIVATION_JOB_IR_MEDIA_TYPE, LogicalActivationGeneration,
     LogicalActivationPreparationGeneration, LogicalActivationWorkerId,
     LogicalMaterializationGeneration, LogicalMaterializationWorkerId, LogicalWorkSelectionId,
-    MAX_GITHUB_AUTHORITY_REQUEST_MILLIS, ObjectKey, ProviderInstallationId, RepositoryId,
-    RunnerGeneration, SessionEpoch, StableRunnerSlot, TenantScope,
+    MAX_GITHUB_AUTHORITY_REQUEST_MILLIS, ObjectKey, RepositoryId, RunnerGeneration, SessionEpoch,
+    StableRunnerSlot, TenantScope,
 };
 
 const GITHUB_REPOSITORY_AUTHORITY_NAMESPACE: &str = "github.repository";
@@ -54,7 +54,7 @@ struct ExactExecutionSelector {
     job_ir_object_key: Option<String>,
     repository_id: Option<RepositoryId>,
     provider_connection_id: Option<ProviderConnectionId>,
-    provider_installation_id: Option<ProviderInstallationId>,
+    provider_installation_id: Option<GithubInstallationId>,
     github_repository_id: Option<GithubRepositoryId>,
 }
 
@@ -909,7 +909,7 @@ fn decode_evidence(
     let provider_connection_id = ProviderConnectionId::from_uuid(row.provider_connection_id)
         .map_err(|_| GithubJobRuntimeAuthorityStoreError::CorruptData)?;
     let provider_installation_id =
-        ProviderInstallationId::new(positive_u64(row.provider_installation_id)?)
+        GithubInstallationId::new(positive_u64(row.provider_installation_id)?)
             .map_err(|_| GithubJobRuntimeAuthorityStoreError::CorruptData)?;
     let github_repository_id = GithubRepositoryId::new(positive_u64(row.github_repository_id)?)
         .map_err(|_| GithubJobRuntimeAuthorityStoreError::CorruptData)?;

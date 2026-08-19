@@ -9,6 +9,7 @@ mod event_subject;
 mod github_check_rerun;
 mod github_job_runtime_authority;
 mod github_native_check;
+mod github_provider_identity;
 mod github_provider_manifest;
 mod github_schedule;
 mod github_service_authority;
@@ -27,7 +28,6 @@ mod outbox;
 mod plan;
 mod protected_environment;
 mod provider_admission;
-mod provider_delivery;
 mod publication;
 mod receipt;
 mod reconciliation;
@@ -101,6 +101,10 @@ pub use github_job_runtime_authority::{
 pub use github_native_check::{
     GithubCheckAppId, GithubCheckName, GithubCheckRunId, GithubCheckSubjectKey, GithubCheckSuiteId,
     GithubNativeCheckValueError,
+};
+pub use github_provider_identity::{
+    GithubInstallationId, GithubProviderIdentityError, GithubRepositoryId, GithubRepositoryOwnerId,
+    GithubRepositoryVisibility,
 };
 pub use github_provider_manifest::{
     BootstrapGithubProviderManifest, BootstrapGithubProviderRepository,
@@ -307,23 +311,6 @@ pub use protected_environment::{
 pub use provider_admission::{
     AuthenticatedProviderDeliveryClaim, AuthenticatedProviderDeliveryClaimError,
 };
-pub use provider_delivery::{
-    AcceptProviderDelivery, ClaimProviderDelivery, ClaimedProviderDelivery,
-    CompleteProviderDelivery, MAX_PROVIDER_DELIVERY_ATTEMPTS, MAX_PROVIDER_DELIVERY_CLAIM_MILLIS,
-    MAX_PROVIDER_DELIVERY_EVENT_ENVELOPE_BYTES, MAX_PROVIDER_DELIVERY_RETRY_BACKOFF_MILLIS,
-    MAX_PROVIDER_DELIVERY_TOTAL_CLAIM_MILLIS, MAX_PROVIDER_DELIVERY_WORKFLOW_OUTCOMES,
-    ProviderDeliveryClaimFence, ProviderDeliveryClaimRenewalRepository,
-    ProviderDeliveryEventEnvelope, ProviderDeliveryFailureKind, ProviderDeliveryIdentity,
-    ProviderDeliveryReceipt, ProviderDeliveryRenewalTiming, ProviderDeliveryRepository,
-    ProviderDeliveryState, ProviderDeliveryStoreError, ProviderDeliveryValueError,
-    ProviderDeliveryWorkflowConclusion, ProviderDeliveryWorkflowInventory,
-    ProviderDeliveryWorkflowInventoryEntry, ProviderDeliveryWorkflowInventoryReceipt,
-    ProviderDeliveryWorkflowOutcome, ProviderDeliveryWorkflowSourceState, ProviderInstallationId,
-    ProviderRepositoryCoordinates, ProviderRepositoryId, ProviderRepositoryOwnerId,
-    ProviderRepositoryVisibility, RecordProviderDeliveryWorkflowProgress,
-    RegisterProviderDeliveryWorkflowInventory, RejectProviderDelivery, RenewProviderDeliveryClaim,
-    RenewedProviderDeliveryClaim, RetryProviderDelivery,
-};
 pub use publication::{
     PublicationRepositoryError, RepositoryPublicationRepository, RepositoryPublicationSettings,
     UpdateRepositoryPublication, UpdateRepositoryPublicationOutcome,
@@ -357,7 +344,7 @@ pub use runtime_authority::{
     ClaimedGithubRuntimeAuthorityRevocation, CommitGithubRuntimeAuthority,
     ConfirmGithubRuntimeAuthorityRevocation, DeferGithubRuntimeAuthorityRevocation,
     GITHUB_AUTHORITY_EXPIRY_SKEW_MILLIS, GITHUB_AUTHORITY_PROVIDER_CLOCK_SKEW_MILLIS,
-    GITHUB_AUTHORITY_TOKEN_LIFETIME_MILLIS, GithubRepositoryId, GithubRepositoryName,
+    GITHUB_AUTHORITY_TOKEN_LIFETIME_MILLIS, GithubRepositoryName,
     GithubRuntimeAuthorityActivationSelectionTail, GithubRuntimeAuthorityClaimFence,
     GithubRuntimeAuthorityCommitDisposition, GithubRuntimeAuthorityCorruptionKind,
     GithubRuntimeAuthorityEnvelopeMetadata, GithubRuntimeAuthorityIdentity,

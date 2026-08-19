@@ -7,15 +7,16 @@ use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
 use crate::{
-    BootstrapGithubProviderRepository, GITHUB_PROVIDER_REST_API_VERSION, GithubProviderManifest,
-    GithubProviderManifestRevision, GithubRepositoryName, GithubServerServiceAction,
-    GithubServerServiceAppClientId, GithubServerServiceAppId, GithubServerServiceAuthorityIdentity,
+    BootstrapGithubProviderRepository, GITHUB_PROVIDER_REST_API_VERSION, GithubInstallationId,
+    GithubProviderManifest, GithubProviderManifestRevision, GithubRepositoryId,
+    GithubRepositoryName, GithubServerServiceAction, GithubServerServiceAppClientId,
+    GithubServerServiceAppId, GithubServerServiceAuthorityIdentity,
     GithubServerServiceAuthoritySelector, GithubServerServiceClaimFence,
     GithubServerServiceConsumerClaim, GithubServerServiceConsumerId, GithubServerServiceGeneration,
     GithubServerServiceHandoffId, GithubServerServiceJwtIssuer, GithubServerServiceRevision,
     GithubServerServiceScope, GithubServerServiceWorkerId,
-    MAX_GITHUB_SERVICE_CONSUMER_REQUEST_MILLIS, ProviderInstallationId, ProviderRepositoryId,
-    ReleaseGithubServerServiceHandoff, RepositoryId, TenantScope, WorkflowRuntimePolicyRevision,
+    MAX_GITHUB_SERVICE_CONSUMER_REQUEST_MILLIS, ReleaseGithubServerServiceHandoff, RepositoryId,
+    TenantScope, WorkflowRuntimePolicyRevision,
 };
 use automata_ci_provider::ProviderConnectionId;
 
@@ -49,8 +50,8 @@ pub struct GithubWorkflowPermissionObservationCandidate {
     manifest_digest: Sha256Digest,
     runtime_policy_revision: WorkflowRuntimePolicyRevision,
     runtime_policy_digest: Sha256Digest,
-    installation_id: ProviderInstallationId,
-    github_repository_id: ProviderRepositoryId,
+    installation_id: GithubInstallationId,
+    github_repository_id: GithubRepositoryId,
     github_repository_name: GithubRepositoryName,
     github_app_id: GithubServerServiceAppId,
     github_app_client_id: GithubServerServiceAppClientId,
@@ -174,11 +175,11 @@ impl GithubWorkflowPermissionObservationCandidate {
         self.runtime_policy_digest
     }
     #[must_use]
-    pub const fn installation_id(&self) -> ProviderInstallationId {
+    pub const fn installation_id(&self) -> GithubInstallationId {
         self.installation_id
     }
     #[must_use]
-    pub const fn github_repository_id(&self) -> ProviderRepositoryId {
+    pub const fn github_repository_id(&self) -> GithubRepositoryId {
         self.github_repository_id
     }
     #[must_use]

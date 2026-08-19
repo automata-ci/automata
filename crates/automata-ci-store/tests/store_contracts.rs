@@ -35,10 +35,6 @@ mod logical_run_finalization_api;
 mod logical_work_selection_api;
 #[path = "managed_secret_authority_api.rs"]
 mod managed_secret_authority_api;
-#[path = "provider_delivery_api.rs"]
-mod provider_delivery_api;
-#[path = "provider_delivery_receipt.rs"]
-mod provider_delivery_receipt;
 #[path = "reusable_workflow_admission_api.rs"]
 mod reusable_workflow_admission_api;
 #[path = "runner_payload_tombstone_api.rs"]

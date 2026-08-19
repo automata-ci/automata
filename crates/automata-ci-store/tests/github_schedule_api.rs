@@ -6,22 +6,22 @@ use automata_ci_schedule::CronExpression;
 use automata_ci_store::{
     ClaimDueGithubScheduleFire, ClaimGithubScheduleDiscovery, ClaimedGithubScheduleFire,
     CompleteGithubScheduleFire, GITHUB_SCHEDULE_ARCHIVE_MEDIA_TYPE,
-    GITHUB_SCHEDULE_INVALID_REGISTRY_FAILURE, GithubCheckName, GithubProviderGitRef,
-    GithubProviderManifest, GithubProviderManifestLimits, GithubProviderManifestRevision,
-    GithubProviderOrigins, GithubProviderWebhookVerifierFingerprint,
-    GithubProviderWorkflowSelection, GithubRepositoryName, GithubScheduleArchive,
-    GithubScheduleClaimFence, GithubScheduleDiscoveryClaim, GithubScheduleFireClaim,
-    GithubScheduleFireConclusion, GithubScheduleFireId, GithubScheduleFireReceipt,
-    GithubScheduleRegistryEntry, GithubScheduleRegistryId, GithubScheduleRegistryReceipt,
-    GithubScheduleSourceAuthority, GithubScheduleValueError, GithubScheduleWorkerId,
-    GithubServerServiceAppClientId, GithubServerServiceAppId, GithubServerServiceAuthorityId,
-    GithubServerServiceAuthorityIdentity, GithubServerServiceAuthoritySelector,
-    GithubServerServiceJwtIssuer, GithubServerServiceRevision, GithubServerServiceScope,
-    MAX_GITHUB_REGISTERED_SCHEDULES, MAX_GITHUB_SCHEDULE_CLAIM_MILLIS,
-    MAX_GITHUB_SCHEDULE_FIRE_ATTEMPTS, MAX_GITHUB_SCHEDULE_RETRY_MILLIS, ObjectKey,
-    ProviderInstallationId, ProviderRepositoryId, ProviderRepositoryOwnerId,
-    ProviderRepositoryVisibility, RegisterGithubScheduleRegistry, RetryGithubScheduleFire,
-    TenantScope,
+    GITHUB_SCHEDULE_INVALID_REGISTRY_FAILURE, GithubCheckName, GithubInstallationId,
+    GithubProviderGitRef, GithubProviderManifest, GithubProviderManifestLimits,
+    GithubProviderManifestRevision, GithubProviderOrigins,
+    GithubProviderWebhookVerifierFingerprint, GithubProviderWorkflowSelection, GithubRepositoryId,
+    GithubRepositoryName, GithubRepositoryOwnerId, GithubRepositoryVisibility,
+    GithubScheduleArchive, GithubScheduleClaimFence, GithubScheduleDiscoveryClaim,
+    GithubScheduleFireClaim, GithubScheduleFireConclusion, GithubScheduleFireId,
+    GithubScheduleFireReceipt, GithubScheduleRegistryEntry, GithubScheduleRegistryId,
+    GithubScheduleRegistryReceipt, GithubScheduleSourceAuthority, GithubScheduleValueError,
+    GithubScheduleWorkerId, GithubServerServiceAppClientId, GithubServerServiceAppId,
+    GithubServerServiceAuthorityId, GithubServerServiceAuthorityIdentity,
+    GithubServerServiceAuthoritySelector, GithubServerServiceJwtIssuer,
+    GithubServerServiceRevision, GithubServerServiceScope, MAX_GITHUB_REGISTERED_SCHEDULES,
+    MAX_GITHUB_SCHEDULE_CLAIM_MILLIS, MAX_GITHUB_SCHEDULE_FIRE_ATTEMPTS,
+    MAX_GITHUB_SCHEDULE_RETRY_MILLIS, ObjectKey, RegisterGithubScheduleRegistry,
+    RetryGithubScheduleFire, TenantScope,
 };
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
@@ -242,12 +242,12 @@ fn registry_entry_rejects_invalid_bounds_and_schedule_fields() {
 
 #[test]
 fn discovery_request_preserves_repository_authority_evidence() {
-    let private_manifest = manifest("schedule-private", ProviderRepositoryVisibility::Private, 1);
-    let public_manifest = manifest("schedule-public", ProviderRepositoryVisibility::Public, 1);
+    let private_manifest = manifest("schedule-private", GithubRepositoryVisibility::Private, 1);
+    let public_manifest = manifest("schedule-public", GithubRepositoryVisibility::Public, 1);
     let private_selector = source_selector(&private_manifest, 30);
     let private_authority = GithubScheduleSourceAuthority::new(private_selector.clone());
     let public_selector = source_selector(&public_manifest, 31);
-    let owner = ProviderRepositoryOwnerId::new(404).expect("owner ID");
+    let owner = GithubRepositoryOwnerId::new(404).expect("owner ID");
 
     let request = ClaimGithubScheduleDiscovery::new(
         registry_id(31),
@@ -287,16 +287,16 @@ fn discovery_request_preserves_repository_authority_evidence() {
 
 #[test]
 fn discovery_request_rejects_owner_and_source_authority_mismatches() {
-    let private_manifest = manifest("schedule-private", ProviderRepositoryVisibility::Private, 1);
-    let public_manifest = manifest("schedule-public", ProviderRepositoryVisibility::Public, 1);
+    let private_manifest = manifest("schedule-private", GithubRepositoryVisibility::Private, 1);
+    let public_manifest = manifest("schedule-public", GithubRepositoryVisibility::Public, 1);
     let private_authority =
         GithubScheduleSourceAuthority::new(source_selector(&private_manifest, 30));
-    let owner = ProviderRepositoryOwnerId::new(404).expect("owner ID");
+    let owner = GithubRepositoryOwnerId::new(404).expect("owner ID");
     assert!(matches!(
         ClaimGithubScheduleDiscovery::new(
             registry_id(35),
             private_manifest.clone(),
-            ProviderRepositoryOwnerId::new(405).expect("different owner ID"),
+            GithubRepositoryOwnerId::new(405).expect("different owner ID"),
             private_authority.clone(),
             worker_id(36),
             1,
@@ -305,7 +305,7 @@ fn discovery_request_rejects_owner_and_source_authority_mismatches() {
     ));
     let unbound = unbound_manifest(
         "schedule-owner-unbound",
-        ProviderRepositoryVisibility::Public,
+        GithubRepositoryVisibility::Public,
         1,
     );
     let unbound_authority = GithubScheduleSourceAuthority::new(source_selector(&unbound, 38));
@@ -325,7 +325,7 @@ fn discovery_request_rejects_owner_and_source_authority_mismatches() {
         (
             private_manifest.clone(),
             GithubScheduleSourceAuthority::new(source_selector(
-                &manifest("another-tenant", ProviderRepositoryVisibility::Private, 1),
+                &manifest("another-tenant", GithubRepositoryVisibility::Private, 1),
                 35,
             )),
         ),
@@ -363,10 +363,10 @@ fn discovery_request_rejects_owner_and_source_authority_mismatches() {
 
 #[test]
 fn discovery_request_rejects_invalid_lease_bounds() {
-    let private_manifest = manifest("schedule-private", ProviderRepositoryVisibility::Private, 1);
+    let private_manifest = manifest("schedule-private", GithubRepositoryVisibility::Private, 1);
     let private_authority =
         GithubScheduleSourceAuthority::new(source_selector(&private_manifest, 30));
-    let owner = ProviderRepositoryOwnerId::new(404).expect("owner ID");
+    let owner = GithubRepositoryOwnerId::new(404).expect("owner ID");
     for lease in [0, -1, MAX_GITHUB_SCHEDULE_CLAIM_MILLIS + 1] {
         assert!(matches!(
             ClaimGithubScheduleDiscovery::new(
@@ -386,7 +386,7 @@ fn discovery_request_rejects_invalid_lease_bounds() {
 fn registry_preserves_canonical_inventory_evidence() {
     let provider_manifest = manifest(
         "registry-validation",
-        ProviderRepositoryVisibility::Private,
+        GithubRepositoryVisibility::Private,
         1,
     );
     let authority = GithubScheduleSourceAuthority::new(source_selector(&provider_manifest, 50));
@@ -415,7 +415,7 @@ fn registry_preserves_canonical_inventory_evidence() {
 fn registry_rejects_noncanonical_inventory_shapes() {
     let provider_manifest = manifest(
         "registry-validation",
-        ProviderRepositoryVisibility::Private,
+        GithubRepositoryVisibility::Private,
         1,
     );
     let authority = GithubScheduleSourceAuthority::new(source_selector(&provider_manifest, 50));
@@ -510,12 +510,12 @@ fn registry_rejects_noncanonical_inventory_shapes() {
 fn registry_rejects_authority_incompatible_with_the_manifest() {
     let provider_manifest = manifest(
         "registry-validation",
-        ProviderRepositoryVisibility::Private,
+        GithubRepositoryVisibility::Private,
         1,
     );
     let claim = discovery_claim(51, 52, 1_000, 2_000);
     let wrong_authority = GithubScheduleSourceAuthority::new(source_selector(
-        &manifest("registry-other", ProviderRepositoryVisibility::Private, 1),
+        &manifest("registry-other", GithubRepositoryVisibility::Private, 1),
         53,
     ));
     assert!(matches!(
@@ -535,7 +535,7 @@ fn registry_rejects_authority_incompatible_with_the_manifest() {
 fn registry_rejects_only_a_tampered_first_fire_cursor() {
     let provider_manifest = manifest(
         "registry-validation",
-        ProviderRepositoryVisibility::Private,
+        GithubRepositoryVisibility::Private,
         1,
     );
     let authority = GithubScheduleSourceAuthority::new(source_selector(&provider_manifest, 50));
@@ -577,7 +577,7 @@ fn registry_accepts_an_exact_maximum_inventory() {
             "UTC",
         ));
     }
-    let maximum_manifest = manifest("registry-maximum", ProviderRepositoryVisibility::Public, 1);
+    let maximum_manifest = manifest("registry-maximum", GithubRepositoryVisibility::Public, 1);
     let maximum_authority =
         GithubScheduleSourceAuthority::new(source_selector(&maximum_manifest, 54));
     RegisterGithubScheduleRegistry::new(
@@ -593,7 +593,7 @@ fn registry_accepts_an_exact_maximum_inventory() {
 
 #[test]
 fn inventory_digest_excludes_separately_bound_registry_evidence() {
-    let provider_manifest = manifest("inventory-digest", ProviderRepositoryVisibility::Public, 1);
+    let provider_manifest = manifest("inventory-digest", GithubRepositoryVisibility::Public, 1);
     let baseline_claim = discovery_claim(60, 61, 1_000, 2_000);
     let baseline_entries = baseline_inventory_entries(baseline_claim);
     let baseline_authority =
@@ -616,7 +616,7 @@ fn inventory_digest_excludes_separately_bound_registry_evidence() {
     let same_definitions = baseline_inventory_entries(same_definitions_claim);
     let other_manifest = manifest(
         "inventory-other-manifest",
-        ProviderRepositoryVisibility::Public,
+        GithubRepositoryVisibility::Public,
         2,
     );
     let other_authority = GithubScheduleSourceAuthority::new(source_selector(&other_manifest, 62));
@@ -639,7 +639,7 @@ fn inventory_digest_excludes_separately_bound_registry_evidence() {
 
 #[test]
 fn inventory_digest_changes_for_each_source_definition_mutation() {
-    let provider_manifest = manifest("inventory-digest", ProviderRepositoryVisibility::Public, 1);
+    let provider_manifest = manifest("inventory-digest", GithubRepositoryVisibility::Public, 1);
     let baseline_claim = discovery_claim(60, 61, 1_000, 2_000);
     let baseline_entries = baseline_inventory_entries(baseline_claim);
     let baseline_authority =
@@ -903,7 +903,7 @@ fn completion_and_retry_accept_only_bounded_sanitized_outcomes() {
 
 #[test]
 fn claimed_fire_and_receipts_preserve_complete_noncredential_evidence() {
-    let manifest = manifest("claimed-fire", ProviderRepositoryVisibility::Public, 1);
+    let manifest = manifest("claimed-fire", GithubRepositoryVisibility::Public, 1);
     let claim = fire_claim(110, 111, 1, 2, 10_000, 20_000);
     let archive = archive(8, "github/schedules/claimed.tar.gz", 800);
     let entry = entry(
@@ -1025,16 +1025,16 @@ fn canonical_registry_entries(
 
 fn manifest(
     tenant: &str,
-    visibility: ProviderRepositoryVisibility,
+    visibility: GithubRepositoryVisibility,
     revision: u64,
 ) -> GithubProviderManifest {
     unbound_manifest(tenant, visibility, revision)
-        .with_repository_owner_id(ProviderRepositoryOwnerId::new(404).expect("owner ID"))
+        .with_repository_owner_id(GithubRepositoryOwnerId::new(404).expect("owner ID"))
 }
 
 fn unbound_manifest(
     tenant: &str,
-    visibility: ProviderRepositoryVisibility,
+    visibility: GithubRepositoryVisibility,
     revision: u64,
 ) -> GithubProviderManifest {
     let runtime = fixture_github_runtime_policy(1);
@@ -1042,8 +1042,8 @@ fn unbound_manifest(
         TenantScope::from_authenticated_tenant_id(tenant).expect("tenant"),
         ProviderConnectionId::from_uuid(Uuid::from_u128(0x1_0000 + u128::from(revision)))
             .expect("connection"),
-        ProviderInstallationId::new(101).expect("installation"),
-        ProviderRepositoryId::new(202).expect("repository"),
+        GithubInstallationId::new(101).expect("installation"),
+        GithubRepositoryId::new(202).expect("repository"),
         GithubRepositoryName::new("example/neutral-schedules").expect("repository name"),
         visibility,
         GithubServerServiceAppId::new(303).expect("App"),

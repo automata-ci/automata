@@ -60,7 +60,6 @@ mod maintenance;
 mod managed_secret_authority;
 mod observability;
 mod protected_environment;
-mod provider_delivery;
 mod publication;
 mod reusable_workflow_admission;
 mod reusable_workflow_runtime;

@@ -3,8 +3,8 @@ use automata_ci_key_management::{EncryptedEnvelope, KeyId, WrappedDataKey};
 use automata_ci_provider::ProviderConnectionId;
 use automata_ci_store::{
     AcquireGithubServerServiceHandoff, ClaimNextGithubServerServiceMaintenance,
-    FinishGithubServerServiceMint, GithubRepositoryName, GithubServerServiceAction,
-    GithubServerServiceAppClientId, GithubServerServiceAppId,
+    FinishGithubServerServiceMint, GithubInstallationId, GithubRepositoryId, GithubRepositoryName,
+    GithubServerServiceAction, GithubServerServiceAppClientId, GithubServerServiceAppId,
     GithubServerServiceAuthorityDescriptor, GithubServerServiceAuthorityId,
     GithubServerServiceAuthorityIdentity, GithubServerServiceAuthorityRepository,
     GithubServerServiceAuthoritySelector, GithubServerServiceAuthorityState,
@@ -17,8 +17,7 @@ use automata_ci_store::{
     GithubServerServiceValueError, GithubServerServiceWorkerId,
     MAX_GITHUB_SERVICE_CONSUMER_REQUEST_MILLIS, MAX_GITHUB_SERVICE_HANDOFF_MILLIS,
     MAX_GITHUB_SERVICE_PLAINTEXT_BYTES, MIN_GITHUB_SERVICE_READY_USE_MILLIS,
-    ProtectedGithubServerServiceCredential, ProviderInstallationId, ProviderRepositoryId,
-    RepositoryId, TenantScope,
+    ProtectedGithubServerServiceCredential, RepositoryId, TenantScope,
 };
 use uuid::Uuid;
 
@@ -546,9 +545,9 @@ fn identity(
         authority_id(),
         RepositoryId::from_uuid(Uuid::from_u128(0x100)),
         ProviderConnectionId::from_uuid(Uuid::from_u128(0x200)).expect("connection"),
-        ProviderInstallationId::new(11).expect("installation"),
+        GithubInstallationId::new(11).expect("installation"),
         GithubServerServiceAppId::new(17).expect("App"),
-        ProviderRepositoryId::new(13).expect("repository"),
+        GithubRepositoryId::new(13).expect("repository"),
         GithubRepositoryName::new("automata-ci/automata").expect("repository name"),
         scope,
         GithubServerServiceAppClientId::new("Iv1.8a61f9b3a7aba766").expect("client ID"),

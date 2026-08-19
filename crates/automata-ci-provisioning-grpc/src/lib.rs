@@ -31,9 +31,9 @@ use automata_ci_provisioning::{
     WorkspaceProvisioner,
 };
 use automata_ci_store::{
-    GithubCheckName, GithubRepositoryName, GithubServerServiceAppClientId,
-    GithubServerServiceAppId, GithubServerServiceJwtIssuer, ProviderInstallationId,
-    ProviderRepositoryId, ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
+    GithubCheckName, GithubInstallationId, GithubRepositoryId, GithubRepositoryName,
+    GithubRepositoryOwnerId, GithubRepositoryVisibility, GithubServerServiceAppClientId,
+    GithubServerServiceAppId, GithubServerServiceJwtIssuer,
 };
 use automata_ci_workflow_service::GithubRunnerPolicy;
 use bytes::Bytes;
@@ -605,11 +605,9 @@ fn decode_workspace_repositories_command(
         .map(|repository| {
             let visibility = match wire::GithubRepositoryVisibility::try_from(repository.visibility)
             {
-                Ok(wire::GithubRepositoryVisibility::Public) => {
-                    ProviderRepositoryVisibility::Public
-                }
+                Ok(wire::GithubRepositoryVisibility::Public) => GithubRepositoryVisibility::Public,
                 Ok(wire::GithubRepositoryVisibility::Private) => {
-                    ProviderRepositoryVisibility::Private
+                    GithubRepositoryVisibility::Private
                 }
                 Ok(wire::GithubRepositoryVisibility::Unspecified) | Err(_) => return Err(()),
             };
@@ -622,9 +620,9 @@ fn decode_workspace_repositories_command(
                     Ok(wire::GithubJobAuthorityProfile::Unspecified) | Err(_) => return Err(()),
                 };
             GithubProviderRepositorySelection::new(
-                ProviderInstallationId::new(repository.installation_id).map_err(|_| ())?,
-                ProviderRepositoryId::new(repository.repository_id).map_err(|_| ())?,
-                ProviderRepositoryOwnerId::new(repository.repository_owner_id).map_err(|_| ())?,
+                GithubInstallationId::new(repository.installation_id).map_err(|_| ())?,
+                GithubRepositoryId::new(repository.repository_id).map_err(|_| ())?,
+                GithubRepositoryOwnerId::new(repository.repository_owner_id).map_err(|_| ())?,
                 GithubRepositoryName::new(repository.repository_name).map_err(|_| ())?,
                 repository.default_branch,
                 visibility,

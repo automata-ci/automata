@@ -14,12 +14,12 @@ use automata_ci_provider::ProviderConnectionId;
 use automata_ci_scm::credential::{CredentialProvenance, ProviderResourceId};
 use automata_ci_store::{
     GITHUB_SERVICE_SAFE_ERASE_SKEW_MILLIS, GITHUB_SERVICE_TOKEN_LIFETIME_MILLIS,
-    GithubRepositoryName, GithubServerServiceAction, GithubServerServiceAppClientId,
-    GithubServerServiceAppId, GithubServerServiceAuthorityId, GithubServerServiceClaim,
-    GithubServerServiceClaimFence, GithubServerServiceConsumerId,
+    GithubInstallationId, GithubRepositoryId, GithubRepositoryName, GithubServerServiceAction,
+    GithubServerServiceAppClientId, GithubServerServiceAppId, GithubServerServiceAuthorityId,
+    GithubServerServiceClaim, GithubServerServiceClaimFence, GithubServerServiceConsumerId,
     GithubServerServiceEnvelopeMetadata, GithubServerServiceGeneration,
     GithubServerServiceIssuanceState, GithubServerServiceJwtIssuer, GithubServerServiceRevision,
-    ProviderInstallationId, ProviderRepositoryId, RepositoryId,
+    RepositoryId,
 };
 use uuid::Uuid;
 
@@ -1135,9 +1135,9 @@ fn identity(
             .expect("authority"),
         RepositoryId::from_uuid(Uuid::from_u128(0x401)),
         ProviderConnectionId::from_uuid(Uuid::from_u128(0x402)).expect("connection"),
-        ProviderInstallationId::new(INSTALLATION_ID).expect("installation"),
+        GithubInstallationId::new(INSTALLATION_ID).expect("installation"),
         GithubServerServiceAppId::new(19).expect("App"),
-        ProviderRepositoryId::new(23).expect("repository"),
+        GithubRepositoryId::new(23).expect("repository"),
         GithubRepositoryName::new("automata-ci/automata").expect("repository name"),
         scope,
         GithubServerServiceAppClientId::new("Iv1.server-service-test").expect("client ID"),

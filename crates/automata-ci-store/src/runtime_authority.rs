@@ -24,13 +24,13 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
-    GithubServerServiceAppClientId, GithubServerServiceAppId, GithubServerServiceJwtIssuer,
-    LogicalActivationGeneration, LogicalActivationPreparationGeneration, LogicalActivationWorkerId,
+    GithubInstallationId, GithubRepositoryId, GithubServerServiceAppClientId,
+    GithubServerServiceAppId, GithubServerServiceJwtIssuer, LogicalActivationGeneration,
+    LogicalActivationPreparationGeneration, LogicalActivationWorkerId,
     LogicalMaterializationGeneration, LogicalMaterializationWorkerId, LogicalWorkSelectionId,
     MAX_LOGICAL_ACTIVATION_CLAIM_MILLIS, MAX_LOGICAL_ACTIVATION_PREPARATION_CLAIM_MILLIS,
-    MAX_LOGICAL_MATERIALIZATION_CLAIM_MILLIS, ProviderInstallationId, RepositoryId,
-    RepositoryOperationError, RunnerGeneration, SessionEpoch, Sha256Digest, StableRunnerSlot,
-    TenantScope,
+    MAX_LOGICAL_MATERIALIZATION_CLAIM_MILLIS, RepositoryId, RepositoryOperationError,
+    RunnerGeneration, SessionEpoch, Sha256Digest, StableRunnerSlot, TenantScope,
 };
 use automata_ci_provider::ProviderConnectionId;
 
@@ -232,32 +232,6 @@ impl GithubRuntimeAuthorityNamespace {
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
-    }
-}
-
-/// Positive numeric GitHub repository identity.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct GithubRepositoryId(NonZeroU64);
-
-impl GithubRepositoryId {
-    /// Constructs a positive provider identity within the signed 64-bit storage boundary.
-    ///
-    /// # Errors
-    ///
-    /// Rejects zero and values larger than `i64::MAX`.
-    pub fn new(value: u64) -> Result<Self, GithubRuntimeAuthorityValueError> {
-        let value = NonZeroU64::new(value)
-            .ok_or(GithubRuntimeAuthorityValueError::InvalidGithubRepositoryId)?;
-        if value.get() > i64::MAX as u64 {
-            return Err(GithubRuntimeAuthorityValueError::InvalidGithubRepositoryId);
-        }
-        Ok(Self(value))
-    }
-
-    /// Returns the positive numeric GitHub repository identity.
-    #[must_use]
-    pub const fn get(self) -> u64 {
-        self.0.get()
     }
 }
 
@@ -497,7 +471,7 @@ pub struct GithubRuntimeAuthorityIdentity {
     job_ir_digest: Sha256Digest,
     repository_id: RepositoryId,
     provider_connection_id: ProviderConnectionId,
-    provider_installation_id: ProviderInstallationId,
+    provider_installation_id: GithubInstallationId,
     github_app_id: GithubServerServiceAppId,
     github_app_client_id: GithubServerServiceAppClientId,
     github_app_jwt_issuer_kind: GithubServerServiceJwtIssuer,
@@ -547,7 +521,7 @@ impl GithubRuntimeAuthorityIdentity {
         job_ir_digest: Sha256Digest,
         repository_id: RepositoryId,
         provider_connection_id: ProviderConnectionId,
-        provider_installation_id: ProviderInstallationId,
+        provider_installation_id: GithubInstallationId,
         github_app_id: GithubServerServiceAppId,
         github_app_client_id: GithubServerServiceAppClientId,
         github_app_jwt_issuer_kind: GithubServerServiceJwtIssuer,
@@ -734,7 +708,7 @@ impl GithubRuntimeAuthorityIdentity {
     }
     /// Returns the exact GitHub App installation selected for minting.
     #[must_use]
-    pub const fn provider_installation_id(&self) -> ProviderInstallationId {
+    pub const fn provider_installation_id(&self) -> GithubInstallationId {
         self.provider_installation_id
     }
     /// Returns the exact numeric GitHub App identity used for this issuance.
@@ -2687,9 +2661,6 @@ pub enum GithubRuntimeAuthorityValueError {
     /// A required UUID identity used the nil sentinel.
     #[error("runtime-authority identity field is nil: {0}")]
     NilIdentity(&'static str),
-    /// A numeric GitHub repository identity is zero or exceeds the signed 64-bit boundary.
-    #[error("GitHub repository ID must be a positive BIGINT")]
-    InvalidGithubRepositoryId,
     /// Repository name evidence is not canonical bounded `owner/repository`.
     #[error("GitHub repository name is invalid")]
     InvalidRepositoryName,

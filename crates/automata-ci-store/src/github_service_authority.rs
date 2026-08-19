@@ -18,7 +18,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
-    GithubRepositoryName, ProviderInstallationId, ProviderRepositoryId, RepositoryId,
+    GithubInstallationId, GithubRepositoryId, GithubRepositoryName, RepositoryId,
     RepositoryOperationError, Sha256Digest, TenantScope,
 };
 use automata_ci_provider::ProviderConnectionId;
@@ -265,9 +265,9 @@ pub struct GithubServerServiceAuthorityIdentity {
     authority_id: GithubServerServiceAuthorityId,
     repository_id: RepositoryId,
     connection_id: ProviderConnectionId,
-    installation_id: ProviderInstallationId,
+    installation_id: GithubInstallationId,
     github_app_id: GithubServerServiceAppId,
-    github_repository_id: ProviderRepositoryId,
+    github_repository_id: GithubRepositoryId,
     github_repository_name: GithubRepositoryName,
     scope: GithubServerServiceScope,
     app_client_id: GithubServerServiceAppClientId,
@@ -290,9 +290,9 @@ impl GithubServerServiceAuthorityIdentity {
         authority_id: GithubServerServiceAuthorityId,
         repository_id: RepositoryId,
         connection_id: ProviderConnectionId,
-        installation_id: ProviderInstallationId,
+        installation_id: GithubInstallationId,
         github_app_id: GithubServerServiceAppId,
-        github_repository_id: ProviderRepositoryId,
+        github_repository_id: GithubRepositoryId,
         github_repository_name: GithubRepositoryName,
         scope: GithubServerServiceScope,
         app_client_id: GithubServerServiceAppClientId,
@@ -348,7 +348,7 @@ impl GithubServerServiceAuthorityIdentity {
     }
     /// Returns the configured App installation.
     #[must_use]
-    pub const fn installation_id(&self) -> ProviderInstallationId {
+    pub const fn installation_id(&self) -> GithubInstallationId {
         self.installation_id
     }
     /// Returns the numeric GitHub App identity.
@@ -358,7 +358,7 @@ impl GithubServerServiceAuthorityIdentity {
     }
     /// Returns the provider-stable numeric repository identity.
     #[must_use]
-    pub const fn github_repository_id(&self) -> ProviderRepositoryId {
+    pub const fn github_repository_id(&self) -> GithubRepositoryId {
         self.github_repository_id
     }
     /// Returns the exact canonical `owner/repository` spelling.

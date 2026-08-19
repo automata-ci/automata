@@ -1,7 +1,7 @@
 use std::{collections::BTreeMap, fs, path::PathBuf, sync::Mutex};
 
 use automata_ci_provider::ProviderConnectionId;
-use automata_ci_store::ProviderRepositoryVisibility;
+use automata_ci_store::GithubRepositoryVisibility;
 use serde_json::{Value, json};
 
 use super::*;
@@ -311,11 +311,11 @@ fn mixed_public_private_projection_has_one_canonical_authority_shape() {
     assert_eq!(plan.manifests()[1].git_ref(), "refs/heads/refs/release");
     assert_eq!(
         plan.manifests()[0].repository_visibility(),
-        ProviderRepositoryVisibility::Private
+        GithubRepositoryVisibility::Private
     );
     assert_eq!(
         plan.manifests()[1].repository_visibility(),
-        ProviderRepositoryVisibility::Public
+        GithubRepositoryVisibility::Public
     );
     let ordered_authorities = plan
         .authorities()
@@ -571,9 +571,9 @@ fn database_desired_state(
         ShardId, WorkspaceGithubRepositoriesDesiredState, WorkspaceGithubRepositoriesRevision,
     };
     use automata_ci_store::{
-        GithubCheckName, GithubRepositoryName, GithubServerServiceAppClientId,
-        GithubServerServiceAppId, GithubServerServiceJwtIssuer, ProviderInstallationId,
-        ProviderRepositoryId, ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
+        GithubCheckName, GithubInstallationId, GithubRepositoryId, GithubRepositoryName,
+        GithubRepositoryOwnerId, GithubRepositoryVisibility, GithubServerServiceAppClientId,
+        GithubServerServiceAppId, GithubServerServiceJwtIssuer,
     };
     use automata_ci_workflow_service::GithubRunnerPolicy;
     use url::Url;
@@ -594,12 +594,12 @@ fn database_desired_state(
     let workspace_id =
         WorkspaceId::parse("11111111-1111-4111-8111-111111111111").expect("workspace ID");
     let repository = GithubProviderRepositorySelection::new(
-        ProviderInstallationId::new(101).expect("installation ID"),
-        ProviderRepositoryId::new(301).expect("repository ID"),
-        ProviderRepositoryOwnerId::new(401).expect("owner ID"),
+        GithubInstallationId::new(101).expect("installation ID"),
+        GithubRepositoryId::new(301).expect("repository ID"),
+        GithubRepositoryOwnerId::new(401).expect("owner ID"),
         GithubRepositoryName::new("octo/database-repository").expect("repository name"),
         "main",
-        ProviderRepositoryVisibility::Public,
+        GithubRepositoryVisibility::Public,
         JobAuthorityProfile::CredentialFree,
     )
     .expect("repository selection");

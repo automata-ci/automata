@@ -15,11 +15,11 @@ use automata_ci_store::{
     ClaimGithubRuntimeAuthorityRevocation, ClaimedGithubRuntimeAuthorityMint,
     ClaimedGithubRuntimeAuthorityRevocation, CommitGithubRuntimeAuthority,
     ConfirmGithubRuntimeAuthorityRevocation, DeferGithubRuntimeAuthorityRevocation,
-    GITHUB_PROVIDER_RUNNER_POLICY_MEDIA_TYPE, GithubRepositoryId, GithubRepositoryName,
-    GithubRuntimeAuthorityActivationSelectionTail, GithubRuntimeAuthorityClaimFence,
-    GithubRuntimeAuthorityCommitDisposition, GithubRuntimeAuthorityCorruptionKind,
-    GithubRuntimeAuthorityEnvelopeMetadata, GithubRuntimeAuthorityIdentity,
-    GithubRuntimeAuthorityInspection, GithubRuntimeAuthorityKey,
+    GITHUB_PROVIDER_RUNNER_POLICY_MEDIA_TYPE, GithubInstallationId, GithubRepositoryId,
+    GithubRepositoryName, GithubRuntimeAuthorityActivationSelectionTail,
+    GithubRuntimeAuthorityClaimFence, GithubRuntimeAuthorityCommitDisposition,
+    GithubRuntimeAuthorityCorruptionKind, GithubRuntimeAuthorityEnvelopeMetadata,
+    GithubRuntimeAuthorityIdentity, GithubRuntimeAuthorityInspection, GithubRuntimeAuthorityKey,
     GithubRuntimeAuthorityMaterializationSelectionTail, GithubRuntimeAuthorityNamespace,
     GithubRuntimeAuthorityPreparationSelectionTail, GithubRuntimeAuthorityReceipt,
     GithubRuntimeAuthorityReconciliationReport, GithubRuntimeAuthorityRepository,
@@ -30,12 +30,11 @@ use automata_ci_store::{
     LogicalActivationPreparationGeneration, LogicalActivationWorkerId,
     LogicalMaterializationGeneration, LogicalMaterializationWorkerId, LogicalWorkSelectionId,
     MAX_GITHUB_AUTHORITY_MINT_ATTEMPTS, MarkGithubRuntimeAuthorityIndeterminate,
-    ProtectedGithubRuntimeAuthority, ProviderInstallationId, QuarantineGithubRuntimeAuthority,
-    ReadyGithubRuntimeAuthority, ReconcileGithubRuntimeAuthorities,
-    RejectGithubRuntimeAuthorityMint, RepositoryId, RetryGithubRuntimeAuthorityMint,
-    RetryGithubRuntimeAuthorityRevocation, RevalidateGithubRuntimeAuthorityRevocation,
-    RevalidatedGithubRuntimeAuthorityRevocation, RunnerGeneration, SessionEpoch, Sha256Digest,
-    StableRunnerSlot, TenantScope,
+    ProtectedGithubRuntimeAuthority, QuarantineGithubRuntimeAuthority, ReadyGithubRuntimeAuthority,
+    ReconcileGithubRuntimeAuthorities, RejectGithubRuntimeAuthorityMint, RepositoryId,
+    RetryGithubRuntimeAuthorityMint, RetryGithubRuntimeAuthorityRevocation,
+    RevalidateGithubRuntimeAuthorityRevocation, RevalidatedGithubRuntimeAuthorityRevocation,
+    RunnerGeneration, SessionEpoch, Sha256Digest, StableRunnerSlot, TenantScope,
 };
 
 use super::{PostgresStore, pg_bigint};
@@ -3949,7 +3948,7 @@ fn decode_identity(
         ProviderConnectionId::from_uuid(uuid_column(row, "provider_connection_id")?)
             .map_err(|_| GithubRuntimeAuthorityStoreError::CorruptData)?;
     let provider_installation_id =
-        ProviderInstallationId::new(positive_u64_column(row, "provider_installation_id")?)
+        GithubInstallationId::new(positive_u64_column(row, "provider_installation_id")?)
             .map_err(|_| GithubRuntimeAuthorityStoreError::CorruptData)?;
     let github_app_id = GithubServerServiceAppId::new(positive_u64_column(row, "github_app_id")?)
         .map_err(|_| GithubRuntimeAuthorityStoreError::CorruptData)?;

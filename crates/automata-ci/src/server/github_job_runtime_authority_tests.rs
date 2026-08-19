@@ -26,7 +26,7 @@ use automata_ci_protocol::ProtocolLimits;
 use automata_ci_protocol_protobuf::encode_job_ir;
 use automata_ci_provider::ProviderConnectionId;
 use automata_ci_store::{
-    GithubJobRuntimeAuthorityEvidence, GithubJobRuntimeAuthorityExecution,
+    GithubInstallationId, GithubJobRuntimeAuthorityEvidence, GithubJobRuntimeAuthorityExecution,
     GithubJobRuntimeAuthorityRepository, GithubJobRuntimeAuthorityResolution,
     GithubJobRuntimeAuthorityStoreError, GithubRepositoryId, GithubRepositoryName,
     GithubRuntimeAuthorityActivationSelectionTail, GithubRuntimeAuthorityIdentity,
@@ -35,8 +35,8 @@ use automata_ci_store::{
     GithubServerServiceAppId, GithubServerServiceJwtIssuer, JobIrMetadata,
     LogicalActivationGeneration, LogicalActivationPreparationGeneration, LogicalActivationWorkerId,
     LogicalMaterializationGeneration, LogicalMaterializationWorkerId, LogicalWorkSelectionId,
-    ObjectKey, ProviderInstallationId, RepositoryId, RunnerGeneration, RunnerSessionFence,
-    SessionEpoch, StableRunnerSlot, TenantScope,
+    ObjectKey, RepositoryId, RunnerGeneration, RunnerSessionFence, SessionEpoch, StableRunnerSlot,
+    TenantScope,
 };
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
@@ -270,7 +270,7 @@ fn identity(
         metadata.digest(),
         RepositoryId::from_uuid(Uuid::from_u128(11)),
         ProviderConnectionId::from_uuid(Uuid::from_u128(12)).expect("connection"),
-        ProviderInstallationId::new(17).expect("installation"),
+        GithubInstallationId::new(17).expect("installation"),
         GithubServerServiceAppId::new(19).expect("App ID"),
         GithubServerServiceAppClientId::new("Iv1.automata-runtime").expect("App client ID"),
         GithubServerServiceJwtIssuer::AppClientId,

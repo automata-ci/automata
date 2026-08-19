@@ -313,7 +313,7 @@ impl fmt::Debug for GithubScheduleSourceCredentialRequest<'_> {
 pub struct GithubScheduleSourceCredential {
     tenant: automata_ci_store::TenantScope,
     connection_id: ProviderConnectionId,
-    repository_id: automata_ci_store::ProviderRepositoryId,
+    repository_id: automata_ci_store::GithubRepositoryId,
     repository: ScmRepositoryId,
     authority_selector: GithubServerServiceAuthoritySelector,
     consumer: GithubServerServiceConsumerClaim,

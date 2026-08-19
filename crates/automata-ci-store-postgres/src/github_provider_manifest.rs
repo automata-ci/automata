@@ -13,16 +13,16 @@ use super::{
 use automata_ci_provider::ProviderConnectionId;
 use automata_ci_store::{
     AdmissionObject, BootstrapGithubProviderRepository, GithubCheckName,
-    GithubInstallationBindingGeneration, GithubProviderManifest,
+    GithubInstallationBindingGeneration, GithubInstallationId, GithubProviderManifest,
     GithubProviderManifestBootstrapReceipt, GithubProviderManifestLimits,
     GithubProviderManifestRecord, GithubProviderManifestRepository, GithubProviderManifestRevision,
     GithubProviderManifestStoreError, GithubProviderOrigins,
     GithubProviderRepositoryBootstrapReceipt, GithubProviderRunnerPolicyObject,
-    GithubProviderWebhookVerifierFingerprint, GithubProviderWorkflowSelection,
-    GithubRepositoryName, GithubServerServiceAppClientId, GithubServerServiceAppId,
-    GithubServerServiceJwtIssuer, GithubServerServiceRevision, ObjectKey, ProviderInstallationId,
-    ProviderRepositoryId, ProviderRepositoryOwnerId, ProviderRepositoryVisibility, RepositoryId,
-    StoreError, TenantScope, WorkflowRuntimePolicyRevision, WorkflowRuntimePolicyStoreError,
+    GithubProviderWebhookVerifierFingerprint, GithubProviderWorkflowSelection, GithubRepositoryId,
+    GithubRepositoryName, GithubRepositoryOwnerId, GithubRepositoryVisibility,
+    GithubServerServiceAppClientId, GithubServerServiceAppId, GithubServerServiceJwtIssuer,
+    GithubServerServiceRevision, ObjectKey, RepositoryId, StoreError, TenantScope,
+    WorkflowRuntimePolicyRevision, WorkflowRuntimePolicyStoreError,
 };
 
 const CURRENT_MANIFEST_QUERY: &str = r"
@@ -822,7 +822,7 @@ fn decode_manifest_record(
             .map_err(operation_error)?,
     )
     .map_err(|_| GithubProviderManifestStoreError::CorruptData)?;
-    let installation_id = ProviderInstallationId::new(positive_u64(
+    let installation_id = GithubInstallationId::new(positive_u64(
         row.try_get("provider_installation_id")
             .map_err(operation_error)?,
     )?)
@@ -832,7 +832,7 @@ fn decode_manifest_record(
             .map_err(operation_error)?,
     )?)
     .map_err(|_| GithubProviderManifestStoreError::CorruptData)?;
-    let github_repository_id = ProviderRepositoryId::new(positive_u64(
+    let github_repository_id = GithubRepositoryId::new(positive_u64(
         row.try_get("github_repository_id")
             .map_err(operation_error)?,
     )?)
@@ -842,7 +842,7 @@ fn decode_manifest_record(
         .map_err(operation_error)?
         .map(positive_u64)
         .transpose()?
-        .map(ProviderRepositoryOwnerId::new)
+        .map(GithubRepositoryOwnerId::new)
         .transpose()
         .map_err(|_| GithubProviderManifestStoreError::CorruptData)?;
     let github_repository_name = GithubRepositoryName::new(
@@ -1035,10 +1035,10 @@ fn decode_manifest_record(
         row,
         "repository_source_authentication",
         match repository_visibility {
-            ProviderRepositoryVisibility::Public => {
+            GithubRepositoryVisibility::Public => {
                 automata_ci_store::GITHUB_PROVIDER_PUBLIC_SOURCE_AUTHENTICATION
             }
-            ProviderRepositoryVisibility::Private => {
+            GithubRepositoryVisibility::Private => {
                 automata_ci_store::GITHUB_PROVIDER_PRIVATE_SOURCE_AUTHENTICATION
             }
         },
@@ -1122,18 +1122,18 @@ fn parse_authority_profile(
 }
 
 const fn provider_repository_visibility_name(
-    visibility: ProviderRepositoryVisibility,
+    visibility: GithubRepositoryVisibility,
 ) -> &'static str {
     match visibility {
-        ProviderRepositoryVisibility::Public => "public",
-        ProviderRepositoryVisibility::Private => "private",
+        GithubRepositoryVisibility::Public => "public",
+        GithubRepositoryVisibility::Private => "private",
     }
 }
 
-fn decode_provider_repository_visibility(value: &str) -> Option<ProviderRepositoryVisibility> {
+fn decode_provider_repository_visibility(value: &str) -> Option<GithubRepositoryVisibility> {
     match value {
-        "public" => Some(ProviderRepositoryVisibility::Public),
-        "private" => Some(ProviderRepositoryVisibility::Private),
+        "public" => Some(GithubRepositoryVisibility::Public),
+        "private" => Some(GithubRepositoryVisibility::Private),
         _ => None,
     }
 }

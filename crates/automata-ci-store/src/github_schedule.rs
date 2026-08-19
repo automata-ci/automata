@@ -10,8 +10,8 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
-    GithubProviderManifest, GithubProviderManifestRevision, GithubServerServiceAuthoritySelector,
-    ObjectKey, ProviderRepositoryOwnerId, RepositoryId, StoreError, TenantScope,
+    GithubProviderManifest, GithubProviderManifestRevision, GithubRepositoryOwnerId,
+    GithubServerServiceAuthoritySelector, ObjectKey, RepositoryId, StoreError, TenantScope,
 };
 use automata_ci_provider::{ProviderConnectionId, ProviderRepositoryPath};
 
@@ -280,7 +280,7 @@ impl GithubScheduleSourceAuthority {
 pub struct ClaimGithubScheduleDiscovery {
     registry_id: GithubScheduleRegistryId,
     manifest: GithubProviderManifest,
-    repository_owner_id: ProviderRepositoryOwnerId,
+    repository_owner_id: GithubRepositoryOwnerId,
     source_authority: GithubScheduleSourceAuthority,
     worker_id: GithubScheduleWorkerId,
     lease_millis: i64,
@@ -298,7 +298,7 @@ impl ClaimGithubScheduleDiscovery {
     pub fn new(
         registry_id: GithubScheduleRegistryId,
         manifest: GithubProviderManifest,
-        repository_owner_id: ProviderRepositoryOwnerId,
+        repository_owner_id: GithubRepositoryOwnerId,
         source_authority: GithubScheduleSourceAuthority,
         worker_id: GithubScheduleWorkerId,
         lease_millis: i64,
@@ -336,7 +336,7 @@ impl ClaimGithubScheduleDiscovery {
 
     /// Returns the provider-stable numeric repository owner.
     #[must_use]
-    pub const fn repository_owner_id(&self) -> ProviderRepositoryOwnerId {
+    pub const fn repository_owner_id(&self) -> GithubRepositoryOwnerId {
         self.repository_owner_id
     }
 
@@ -459,7 +459,7 @@ pub struct RegisterGithubScheduleRegistry {
     registry_id: GithubScheduleRegistryId,
     discovery_claim: GithubScheduleDiscoveryClaim,
     manifest: GithubProviderManifest,
-    repository_owner_id: ProviderRepositoryOwnerId,
+    repository_owner_id: GithubRepositoryOwnerId,
     source_authority: GithubScheduleSourceAuthority,
     source_revision: GitObjectId,
     archive: GithubScheduleArchive,
@@ -532,7 +532,7 @@ impl RegisterGithubScheduleRegistry {
 
     /// Returns the provider-stable numeric owner resolved with the exact source revision.
     #[must_use]
-    pub const fn repository_owner_id(&self) -> ProviderRepositoryOwnerId {
+    pub const fn repository_owner_id(&self) -> GithubRepositoryOwnerId {
         self.repository_owner_id
     }
 

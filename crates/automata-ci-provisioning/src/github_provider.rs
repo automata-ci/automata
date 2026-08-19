@@ -3,9 +3,9 @@ use std::{collections::BTreeSet, fmt, num::NonZeroU64};
 use automata_ci_core::{JobAuthorityProfile, WorkspaceId};
 use automata_ci_provider_github::GithubWebhookVerifier;
 use automata_ci_store::{
-    GithubCheckName, GithubRepositoryName, GithubServerServiceAppClientId,
-    GithubServerServiceAppId, GithubServerServiceJwtIssuer, ProviderInstallationId,
-    ProviderRepositoryId, ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
+    GithubCheckName, GithubInstallationId, GithubRepositoryId, GithubRepositoryName,
+    GithubRepositoryOwnerId, GithubRepositoryVisibility, GithubServerServiceAppClientId,
+    GithubServerServiceAppId, GithubServerServiceJwtIssuer,
 };
 use automata_ci_workflow_service::GithubRunnerPolicy;
 use thiserror::Error;
@@ -498,13 +498,13 @@ impl fmt::Debug for AuthorizedApplyGithubProviderConfiguration {
 /// One selected GitHub repository in a complete workspace desired set.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GithubProviderRepositorySelection {
-    installation_id: ProviderInstallationId,
+    installation_id: GithubInstallationId,
     installation_binding_generation: u64,
-    repository_id: ProviderRepositoryId,
-    repository_owner_id: ProviderRepositoryOwnerId,
+    repository_id: GithubRepositoryId,
+    repository_owner_id: GithubRepositoryOwnerId,
     repository_name: GithubRepositoryName,
     default_branch: String,
-    visibility: ProviderRepositoryVisibility,
+    visibility: GithubRepositoryVisibility,
     authority_profile: JobAuthorityProfile,
 }
 
@@ -516,12 +516,12 @@ impl GithubProviderRepositorySelection {
     /// Rejects a noncanonical default branch or a credential-free private repository.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        installation_id: ProviderInstallationId,
-        repository_id: ProviderRepositoryId,
-        repository_owner_id: ProviderRepositoryOwnerId,
+        installation_id: GithubInstallationId,
+        repository_id: GithubRepositoryId,
+        repository_owner_id: GithubRepositoryOwnerId,
         repository_name: GithubRepositoryName,
         default_branch: impl Into<String>,
-        visibility: ProviderRepositoryVisibility,
+        visibility: GithubRepositoryVisibility,
         authority_profile: JobAuthorityProfile,
     ) -> Result<Self, GithubProviderValueError> {
         let default_branch = default_branch.into();
@@ -529,7 +529,7 @@ impl GithubProviderRepositorySelection {
             || matches!(
                 (visibility, authority_profile),
                 (
-                    ProviderRepositoryVisibility::Private,
+                    GithubRepositoryVisibility::Private,
                     JobAuthorityProfile::CredentialFree
                 )
             )
@@ -550,7 +550,7 @@ impl GithubProviderRepositorySelection {
 
     /// Returns the GitHub App installation identity.
     #[must_use]
-    pub const fn installation_id(&self) -> ProviderInstallationId {
+    pub const fn installation_id(&self) -> GithubInstallationId {
         self.installation_id
     }
 
@@ -578,13 +578,13 @@ impl GithubProviderRepositorySelection {
 
     /// Returns the stable numeric GitHub repository identity.
     #[must_use]
-    pub const fn repository_id(&self) -> ProviderRepositoryId {
+    pub const fn repository_id(&self) -> GithubRepositoryId {
         self.repository_id
     }
 
     /// Returns the stable numeric GitHub owner identity.
     #[must_use]
-    pub const fn repository_owner_id(&self) -> ProviderRepositoryOwnerId {
+    pub const fn repository_owner_id(&self) -> GithubRepositoryOwnerId {
         self.repository_owner_id
     }
 
@@ -602,7 +602,7 @@ impl GithubProviderRepositorySelection {
 
     /// Returns the authenticated repository visibility.
     #[must_use]
-    pub const fn visibility(&self) -> ProviderRepositoryVisibility {
+    pub const fn visibility(&self) -> GithubRepositoryVisibility {
         self.visibility
     }
 
@@ -1323,12 +1323,12 @@ mod tests {
 
     fn repository(id: u64, name: &str) -> GithubProviderRepositorySelection {
         GithubProviderRepositorySelection::new(
-            ProviderInstallationId::new(10).unwrap(),
-            ProviderRepositoryId::new(id).unwrap(),
-            ProviderRepositoryOwnerId::new(20).unwrap(),
+            GithubInstallationId::new(10).unwrap(),
+            GithubRepositoryId::new(id).unwrap(),
+            GithubRepositoryOwnerId::new(20).unwrap(),
             GithubRepositoryName::new(name).unwrap(),
             "main",
-            ProviderRepositoryVisibility::Public,
+            GithubRepositoryVisibility::Public,
             JobAuthorityProfile::CredentialFree,
         )
         .unwrap()
@@ -1378,12 +1378,12 @@ mod tests {
     fn private_repositories_cannot_claim_credential_free_execution() {
         assert_eq!(
             GithubProviderRepositorySelection::new(
-                ProviderInstallationId::new(10).unwrap(),
-                ProviderRepositoryId::new(30).unwrap(),
-                ProviderRepositoryOwnerId::new(20).unwrap(),
+                GithubInstallationId::new(10).unwrap(),
+                GithubRepositoryId::new(30).unwrap(),
+                GithubRepositoryOwnerId::new(20).unwrap(),
                 GithubRepositoryName::new("owner/private").unwrap(),
                 "main",
-                ProviderRepositoryVisibility::Private,
+                GithubRepositoryVisibility::Private,
                 JobAuthorityProfile::CredentialFree,
             )
             .unwrap_err(),
