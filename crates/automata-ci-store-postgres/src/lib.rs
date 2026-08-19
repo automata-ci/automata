@@ -45,7 +45,6 @@ mod github_job_runtime_authority;
 mod github_provider_manifest;
 mod github_schedule;
 mod github_service_authority;
-mod github_subject_evidence;
 mod github_workflow_permissions;
 mod live_log_ticket;
 mod log_notifications;

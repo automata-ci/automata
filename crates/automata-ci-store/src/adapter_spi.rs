@@ -452,25 +452,6 @@ pub fn github_server_service_authority_matches(
     selector.matches(identity)
 }
 
-/// Revalidates signed subject evidence against exact logical admission inputs.
-#[must_use]
-pub fn github_subject_evidence_matches_logical_admission(
-    evidence: &crate::RecordGithubWorkflowRunSubjectEvidence,
-    delivery_id: crate::ProviderDeliveryId,
-    durable_admitted_at: UnixMillis,
-    command: &crate::AdmitLogicalWorkflowRun,
-) -> bool {
-    evidence.matches_logical_admission(delivery_id, durable_admitted_at, command)
-}
-
-/// Returns the already-validated replay command without exposing its field.
-#[must_use]
-pub const fn github_subject_evidence_replay_command(
-    replay: &crate::ValidateGithubWorkflowRunSubjectEvidenceReplay,
-) -> &crate::AdmitLogicalWorkflowRun {
-    replay.command()
-}
-
 /// Enforces the admitted maximum secret-exposure boundary at terminal commit.
 #[must_use]
 pub const fn logical_instance_accepts_terminal_secret_exposure(

@@ -23,14 +23,14 @@ use automata_ci_store::{
     AdmittedReusableInput, AdmittedReusableInputKind, AdmittedReusableInvocation,
     AdmittedReusableJob, AdmittedReusableOutput, AdmittedReusablePermissions,
     AdmittedReusableSecret, AdmittedReusableWorkflowCatalogEntry,
-    AdmittedReusableWorkflowExpansion, AuthenticatedGithubDeliveryClaim,
-    AuthenticatedProviderDeliveryClaim, AuthenticatedWorkflowDispatchClaim,
-    AuthenticatedWorkflowDispatchSource, GithubScheduleFireClaim, JobCredentialRequirements,
-    JobEnvironmentRequirement, LogicalWorkflowAdmissionRepository,
-    LogicalWorkflowAdmissionStoreError, LogicalWorkflowAdmissionValueError, LogicalWorkflowJobId,
-    LogicalWorkflowJobKind, ObjectKey, ProviderDeliveryId, ProviderProcessingClaimSource,
-    ProviderProcessingReceipt, ResolveAuthenticatedWorkflowDispatchSource,
-    WorkflowAdmissionIdempotency, WorkflowAdmissionValueError, WorkflowConcurrency,
+    AdmittedReusableWorkflowExpansion, AuthenticatedProviderDeliveryClaim,
+    AuthenticatedWorkflowDispatchClaim, AuthenticatedWorkflowDispatchSource,
+    GithubScheduleFireClaim, JobCredentialRequirements, JobEnvironmentRequirement,
+    LogicalWorkflowAdmissionRepository, LogicalWorkflowAdmissionStoreError,
+    LogicalWorkflowAdmissionValueError, LogicalWorkflowJobId, LogicalWorkflowJobKind, ObjectKey,
+    ProviderDeliveryId, ProviderProcessingClaimSource, ProviderProcessingReceipt,
+    ResolveAuthenticatedWorkflowDispatchSource, WorkflowAdmissionIdempotency,
+    WorkflowAdmissionValueError, WorkflowConcurrency,
 };
 use bytes::Bytes;
 use sha2::{Digest as _, Sha256};
@@ -84,7 +84,6 @@ enum AdmissionAuthority {
         processing: ProviderProcessingReceipt,
         claim_source: Arc<dyn ProviderProcessingClaimSource>,
     },
-    AuthenticatedGithub(AuthenticatedGithubDeliveryClaim),
     AuthenticatedWorkflowDispatch(WorkflowDispatchAuthorization),
     ScheduledGithub(GithubScheduleFireClaim),
 }
@@ -191,32 +190,6 @@ impl WorkflowAdmissionService {
         ))
     }
 
-    /// Publishes and admits one workflow selected from an authenticated GitHub
-    /// delivery while atomically binding its signed subject evidence.
-    ///
-    /// `current_claim` is the exact live inbox owner/attempt/fence snapshot
-    /// obtained by the signed delivery worker, not provider-controlled input.
-    /// The durable adapter row-locks and validates it together with all exact
-    /// manifest, queued-Check, repository, source, plan, and run evidence in
-    /// the admission transaction. The ordinary [`Self::admit`] path cannot
-    /// create or backfill that evidence.
-    ///
-    /// # Errors
-    ///
-    /// Fails closed on the same admission errors as [`Self::admit`], and when
-    /// signed GitHub subject evidence is absent or does not match the request.
-    pub fn admit_authenticated_github_delivery(
-        &self,
-        request: WorkflowAdmissionRequest,
-        current_claim: AuthenticatedGithubDeliveryClaim,
-    ) -> impl Future<Output = Result<WorkflowAdmissionResult, WorkflowAdmissionError>> + Send + '_
-    {
-        Box::pin(self.admit_with_authority(
-            request,
-            AdmissionAuthority::AuthenticatedGithub(current_claim),
-        ))
-    }
-
     /// Publishes and admits one invocation from an exact live scheduled fire.
     ///
     /// # Errors
@@ -311,7 +284,6 @@ impl WorkflowAdmissionService {
     ) -> Result<WorkflowAdmissionResult, WorkflowAdmissionError> {
         let delivery_id = match &authority {
             AdmissionAuthority::AuthenticatedProvider { delivery_id, .. } => Some(*delivery_id),
-            AdmissionAuthority::AuthenticatedGithub(claim) => Some(claim.claim().delivery_id()),
             AdmissionAuthority::ProviderNeutral
             | AdmissionAuthority::AuthenticatedWorkflowDispatch(_)
             | AdmissionAuthority::ScheduledGithub(_) => None,
@@ -320,7 +292,6 @@ impl WorkflowAdmissionService {
             AdmissionAuthority::ScheduledGithub(claim) => Some(claim.fire_id()),
             AdmissionAuthority::ProviderNeutral
             | AdmissionAuthority::AuthenticatedProvider { .. }
-            | AdmissionAuthority::AuthenticatedGithub(_)
             | AdmissionAuthority::AuthenticatedWorkflowDispatch(_) => None,
         };
         let (
@@ -427,7 +398,6 @@ impl WorkflowAdmissionService {
                 }
                 AdmissionAuthority::ProviderNeutral
                 | AdmissionAuthority::AuthenticatedProvider { .. }
-                | AdmissionAuthority::AuthenticatedGithub(_)
                 | AdmissionAuthority::ScheduledGithub(_) => {
                     if request.event_media_type()
                         == AUTOMATA_WORKFLOW_DISPATCH_EVIDENCE_V1_MEDIA_TYPE
@@ -553,34 +523,6 @@ impl WorkflowAdmissionService {
                 )?;
                 self.repository
                     .admit_authenticated_provider_delivery(command, current_claim, observed_at)
-                    .await
-            }
-            AdmissionAuthority::AuthenticatedGithub(current_claim) => {
-                let observed_at = self.clock.now();
-                // The provider path binds run creation to the same immediate
-                // trusted observation that the Store validates against the
-                // row-locked claim. Blob publication may be slow, so the
-                // earlier encode-stage timestamp is not commit authority.
-                let command = build_command(
-                    &request,
-                    &*self.ids,
-                    observed_at,
-                    repository_id,
-                    workflow_id,
-                    snapshot_id,
-                    command.idempotency().clone(),
-                    run_id,
-                    command.request_digest(),
-                    &source_blob,
-                    &event_blob,
-                    &plan_blob,
-                    &base_context_blob,
-                    command.display_title(),
-                    command.concurrency().cloned(),
-                    command.reusable_workflows().cloned(),
-                )?;
-                self.repository
-                    .admit_authenticated_github_delivery(command, current_claim, observed_at)
                     .await
             }
             AdmissionAuthority::AuthenticatedWorkflowDispatch(_) => {
