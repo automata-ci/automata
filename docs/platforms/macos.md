@@ -473,7 +473,10 @@ reuse, destroy-time helper-loss cleanup and slot reuse, live-orphan recovery,
 and the allowlisted runtime-proxy probe serially. Set
 `AUTOMATA_MACOS_PHYSICAL_REPETITIONS` from 1 through 10 for a bounded repeated
 runner soak. It refuses a `CARGO_TARGET_DIR` on the VM storage filesystem so
-build artifacts cannot consume the clone-capacity safety margin.
+build artifacts cannot consume the clone-capacity safety margin. Before
+compiling or hashing the sealed template, it also checks the storage
+filesystem's currently available bytes against the template artifacts' logical
+length plus the provider's 32 GiB headroom and reports the exact shortfall.
 
 The runtime proxy has a separate physical contract test. It starts a temporary
 loopback HTTP origin on the host, boots the sealed NIC-less guest through the
