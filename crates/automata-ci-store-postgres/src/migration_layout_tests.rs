@@ -278,7 +278,7 @@ const CANONICAL_MIGRATIONS: &[(&str, &str)] = &[
         "6f8805e0a386ac29de076173d29d1cd62dc7f68c8b318edc014bd206200126d8748ec93a607b18b703216932c4d760db",
     ),
     (
-        "0061_installation_runner_bootstrap.sql",
+        "0063_installation_runner_bootstrap.sql",
         "d8566e6c4275f513c390000c93a74c639a523fe066b96ee60fb7244888197b9c8535e6309e60bbe2576cb8839a21d27b",
     ),
 ];

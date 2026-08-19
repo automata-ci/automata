@@ -30,7 +30,7 @@ use automata_ci_store::{
 
 mod migration;
 #[cfg(test)]
-mod migration_0061_tests;
+mod migration_0063_tests;
 #[cfg(test)]
 mod migration_layout_tests;
 #[cfg(test)]

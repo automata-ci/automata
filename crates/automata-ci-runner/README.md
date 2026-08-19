@@ -13,7 +13,7 @@ Other provider implementations have narrower status:
 | --- | --- |
 | Rootless Podman on Linux | Available |
 | Kubernetes on Linux | Experimental; cluster isolation must be attested by the operator |
-| Fixed-relay Docker on Linux | Experimental local-installation foundation; no public stack lifecycle |
+| Fixed-relay Docker on Linux | Experimental local-installation provider with public x86-64 Linux `local up`/`local down` stack lifecycle; no public local job runner |
 | Virtualization.framework on Apple Silicon | Component complete; physical-host production qualification remains |
 | Hyper-V containers on Windows Server 2025 | Component complete; broker, image publication, and physical-host qualification remain |
 

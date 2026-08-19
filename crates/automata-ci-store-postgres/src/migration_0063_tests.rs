@@ -82,7 +82,7 @@ where
             "invalid PostgreSQL URL supplied through {DATABASE_URL_ENVIRONMENT}: {error}"
         ))
     })?;
-    let database_name = format!("automata_m61_{}", Uuid::new_v4().simple());
+    let database_name = format!("automata_m63_{}", Uuid::new_v4().simple());
     debug_assert!(
         database_name
             .bytes()
@@ -169,7 +169,7 @@ async fn require_postgres_18(connection: &mut PgConnection) -> TestResult {
             .await?;
     if version < MINIMUM_POSTGRES_VERSION {
         return Err(message_error(format!(
-            "migration 0061 live tests require PostgreSQL 18 or newer; server_version_num is {version}"
+            "migration 0063 live tests require PostgreSQL 18 or newer; server_version_num is {version}"
         )));
     }
     let can_create_database: bool = sqlx::query_scalar(
@@ -188,7 +188,7 @@ async fn require_postgres_18(connection: &mut PgConnection) -> TestResult {
     .await?;
     if !can_create_database {
         return Err(message_error(
-            "migration 0061 live tests require CREATEDB on the isolated PostgreSQL server",
+            "migration 0063 live tests require CREATEDB on the isolated PostgreSQL server",
         ));
     }
     Ok(())
@@ -228,7 +228,7 @@ impl TestClock {
         let mut transaction = pool.begin().await?;
         sqlx::query(
             r"
-            CREATE TABLE automata_test.__automata_m61_clock (
+            CREATE TABLE automata_test.__automata_m63_clock (
                 singleton BOOLEAN PRIMARY KEY CHECK (singleton),
                 now_ms BIGINT NOT NULL
             )
@@ -238,7 +238,7 @@ impl TestClock {
         .await?;
         sqlx::query(
             r"
-            INSERT INTO automata_test.__automata_m61_clock (singleton, now_ms)
+            INSERT INTO automata_test.__automata_m63_clock (singleton, now_ms)
             VALUES (TRUE, $1)
             ",
         )
@@ -251,11 +251,11 @@ impl TestClock {
             RETURNS TIMESTAMPTZ
             LANGUAGE SQL
             VOLATILE
-            AS $automata_m61_clock$
+            AS $automata_m63_clock$
                 SELECT TIMESTAMPTZ 'epoch' + now_ms * INTERVAL '1 millisecond'
-                FROM automata_test.__automata_m61_clock
+                FROM automata_test.__automata_m63_clock
                 WHERE singleton
-            $automata_m61_clock$
+            $automata_m63_clock$
             ",
         )
         .execute(&mut *transaction)
@@ -268,7 +268,7 @@ impl TestClock {
 
     async fn set(&self, now_ms: i64) -> TestResult {
         let updated =
-            sqlx::query("UPDATE automata_test.__automata_m61_clock SET now_ms=$1 WHERE singleton")
+            sqlx::query("UPDATE automata_test.__automata_m63_clock SET now_ms=$1 WHERE singleton")
                 .bind(now_ms)
                 .execute(&self.pool)
                 .await?;
@@ -448,6 +448,7 @@ fn windows_admission(
         digest(7),
         true,
         true,
+        64,
     )?;
     let promotion = WindowsImagePromotionBinding::new(
         "production.windows.v1",
@@ -651,7 +652,7 @@ async fn seed_0051_human_upgrade_fixture(
     .bind(LEGACY_PROVIDER_ID)
     .bind(LEGACY_PROVIDER_SUBJECT)
     .bind(session_id.as_bytes().repeat(2))
-    .bind(format!("migration-0061-{session_id}"))
+    .bind(format!("migration-0063-{session_id}"))
     .bind(authorization_revision)
     .bind(now_ms - 1_000)
     .bind(now_ms + 600_000)
@@ -713,14 +714,14 @@ async fn seed_0051_human_upgrade_fixture(
     clippy::too_many_lines,
     reason = "the test keeps migration, concurrent retries, clock boundaries, Windows consumption, and corruption probes in one isolated database"
 )]
-async fn migration_0061_fresh_database_supports_exact_deployment_bootstrap() -> TestResult {
+async fn migration_0063_fresh_database_supports_exact_deployment_bootstrap() -> TestResult {
     run_with_unmigrated_database(|database| async move {
         MIGRATOR.run(database.pool()).await?;
         let applied_version: i64 =
             sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations")
                 .fetch_one(database.pool())
                 .await?;
-        assert_eq!(applied_version, 61);
+        assert_eq!(applied_version, 63);
         let clock = TestClock::freeze_at_database_now(database.pool()).await?;
 
         let corrupt_tenant = "corrupt-audit-probe";
@@ -1733,7 +1734,7 @@ async fn migration_0061_fresh_database_supports_exact_deployment_bootstrap() -> 
     clippy::too_many_lines,
     reason = "the predecessor fixture and post-migration continuity assertions are intentionally contiguous"
 )]
-async fn migration_0061_upgrades_0051_human_installation_and_token_exactly() -> TestResult {
+async fn migration_0063_upgrades_0051_human_installation_and_token_exactly() -> TestResult {
     run_with_unmigrated_database(|database| async move {
         let fixture = seed_0051_human_upgrade_fixture(&database).await?;
         let LegacyHumanUpgradeFixture {
@@ -1769,7 +1770,7 @@ async fn migration_0061_upgrades_0051_human_installation_and_token_exactly() -> 
         let applied_version: i64 = sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations")
             .fetch_one(database.pool())
             .await?;
-        assert_eq!(applied_version, 61);
+        assert_eq!(applied_version, 63);
         let relation_names: (Option<String>, Option<String>) = sqlx::query_as(
             r"
             SELECT
@@ -1886,7 +1887,7 @@ async fn migration_0061_upgrades_0051_human_installation_and_token_exactly() -> 
     clippy::too_many_lines,
     reason = "the configured singleton and consumed token must cross the migration together as one legacy authority witness"
 )]
-async fn migration_0061_upgrades_configured_human_and_consumed_token_exactly() -> TestResult {
+async fn migration_0063_upgrades_configured_human_and_consumed_token_exactly() -> TestResult {
     run_with_unmigrated_database(|database| async move {
         let fixture = seed_0051_human_upgrade_fixture(&database).await?;
         let LegacyHumanUpgradeFixture {
@@ -2090,7 +2091,7 @@ async fn migration_0061_upgrades_configured_human_and_consumed_token_exactly() -
         let applied_version: i64 = sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations")
             .fetch_one(database.pool())
             .await?;
-        assert_eq!(applied_version, 61);
+        assert_eq!(applied_version, 63);
 
         let upgraded_installation: StoredLegacyHumanInstallation = sqlx::query_as(
             r"

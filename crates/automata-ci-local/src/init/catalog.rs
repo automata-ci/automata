@@ -17,8 +17,8 @@ use super::{LocalInitError, LocalInitErrorCode};
 const CATALOG_SCHEMA: &str = "automata.local/release-catalog/v1";
 const SOURCE_SCHEMA: &str = "automata.local/release-catalog-source/v1";
 const LIFECYCLE_RUNTIME_SCHEMA: &str = "automata.local/lifecycle-runtime/v1";
-const DATABASE_MIGRATION_CEILING: u64 = 61;
-const SOURCE_SHA256: &str = "092336db1d4dad5651d44496c5c1c9e0434aefe03fafbbfa772b827937afa934";
+const DATABASE_MIGRATION_CEILING: u64 = 63;
+const SOURCE_SHA256: &str = "4800b79a3f4e7b39183fcba05f69f1a1310d1d44f6d5ec4ac559d47e715250ca";
 const CANDIDATE_BASENAME: &str = "automata-service-proxy-candidate-x86_64-unknown-linux-musl.tar";
 const CANDIDATE_PATH: &str = concat!(
     "target/service-proxy-publication/",
@@ -649,15 +649,7 @@ fn validate_lifecycle_runtime(value: &Value) -> Result<(), LocalInitError> {
 fn validate_renderer_service_contracts(
     images: &BTreeMap<String, RawImage>,
 ) -> Result<(), LocalInitError> {
-    let sandbox_guest = images.get("sandbox-guest").ok_or_else(invalid_catalog)?;
-    let sandbox_guest_runtime = object(&sandbox_guest.runtime)?;
-    if sandbox_guest_runtime
-        .get("guest_protocol")
-        .and_then(Value::as_u64)
-        != Some(u64::from(automata_ci_sandbox_guest::GUEST_PROTOCOL_VERSION))
-    {
-        return Err(invalid_catalog());
-    }
+    validate_sandbox_guest_contract(images)?;
     let runner = images.get("runner").ok_or_else(invalid_catalog)?;
     let runner_runtime = object(&runner.runtime)?;
     if runner_runtime.get("binary").and_then(Value::as_str) != Some(super::renderer::RUNNER_BINARY)
@@ -750,6 +742,21 @@ fn validate_renderer_service_contracts(
         || runtime.get("cap_drop") != Some(&serde_json::json!(["ALL"]))
         || runtime.get("security_opt") != Some(&serde_json::json!(["no-new-privileges:true"]))
         || runtime.get("tmpfs") != Some(&serde_json::json!(super::renderer::RUSTFS_TMPFS))
+    {
+        return Err(invalid_catalog());
+    }
+    Ok(())
+}
+
+fn validate_sandbox_guest_contract(
+    images: &BTreeMap<String, RawImage>,
+) -> Result<(), LocalInitError> {
+    let sandbox_guest = images.get("sandbox-guest").ok_or_else(invalid_catalog)?;
+    let sandbox_guest_runtime = object(&sandbox_guest.runtime)?;
+    if sandbox_guest_runtime
+        .get("guest_protocol")
+        .and_then(Value::as_u64)
+        != Some(u64::from(automata_ci_sandbox_guest::GUEST_PROTOCOL_VERSION))
     {
         return Err(invalid_catalog());
     }
