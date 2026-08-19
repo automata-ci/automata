@@ -207,6 +207,11 @@ uuid_identity!(
     "provider result subject ID"
 );
 uuid_identity!(
+    /// Provider-neutral identity of one workflow invocation before admission.
+    ProviderWorkflowInvocationId,
+    "provider workflow invocation ID"
+);
+uuid_identity!(
     /// Durable identity of one provider result publication worker.
     ProviderResultWorkerId,
     "provider result worker ID"

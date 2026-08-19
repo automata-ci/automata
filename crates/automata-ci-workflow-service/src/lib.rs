@@ -89,8 +89,10 @@ pub use observer::{
     WorkflowAdmissionObserver, WorkflowAdmissionStage, WorkflowAdmissionStageOutcome,
 };
 pub use port::{AdmissionClock, AdmissionIdGenerator, WorkflowPlanVerifier};
-pub(crate) use provider_result::ProviderWorkflowResultRequest;
-pub use provider_result::{ProviderWorkflowResultService, ProviderWorkflowResultServiceError};
+pub use provider_result::{
+    ProviderWorkflowResultDisposition, ProviderWorkflowResultRequest,
+    ProviderWorkflowResultService, ProviderWorkflowResultServiceError,
+};
 pub use provider_result_projection::{
     ProviderWorkflowResultProjectionError, ProviderWorkflowResultProjectionOutcome,
     ProviderWorkflowResultProjectionService,

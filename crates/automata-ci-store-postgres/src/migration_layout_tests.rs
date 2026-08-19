@@ -259,7 +259,7 @@ const CANONICAL_MIGRATIONS: &[(&str, &str)] = &[
     ),
     (
         "0064_provider_result_outbox.sql",
-        "1f8ae184bc2926c8a447afa7ad1ea9d466d0e064a89a69aa1c52dbd9ceabcf6af3ac7849bfa8871e911d6daae54d327f",
+        "7af01449d74f3b67004da67a15de7b627ee3b8016bcb3eb39fabb2e8319ac3d30792255a4286796241e0cff544a9d488",
     ),
     (
         "0065_provider_result_recovery_state.sql",

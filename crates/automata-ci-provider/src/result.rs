@@ -16,8 +16,9 @@ use uuid::Uuid;
 use crate::{
     ExternalRepositoryIdentity, ExternalResultId, ProviderCapabilities, ProviderCapability,
     ProviderCapabilityKind, ProviderConnectionId, ProviderConnectionManifest,
-    ProviderConnectionRevision, ProviderDeliveryId, ProviderLifecycleState, ProviderRepositoryPath,
-    ProviderResultSubjectId, ProviderResultWorkerId, ProviderSchemaVersion, StatusHistoryModel,
+    ProviderConnectionRevision, ProviderLifecycleState, ProviderRepositoryPath,
+    ProviderResultSubjectId, ProviderResultWorkerId, ProviderSchemaVersion,
+    ProviderWorkflowInvocationId, StatusHistoryModel,
 };
 
 /// Maximum desired-result title bytes.
@@ -55,9 +56,9 @@ const RESULT_SUBJECT_ID_DOMAIN: &[u8] = b"automata.provider.result-subject-id.v1
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProviderResultSubjectKind {
     /// A workflow selected from an authenticated delivery before admission.
-    PendingWorkflow {
-        /// Authenticated delivery that selected the workflow.
-        delivery_id: ProviderDeliveryId,
+    WorkflowInvocation {
+        /// Opaque provider-neutral invocation identity.
+        invocation_id: ProviderWorkflowInvocationId,
         /// Canonical repository-relative workflow path.
         workflow_path: ProviderRepositoryPath,
     },
@@ -78,12 +79,12 @@ pub enum ProviderResultSubjectKind {
 impl ProviderResultSubjectKind {
     fn hash_into(&self, hash: &mut Sha256) {
         match self {
-            Self::PendingWorkflow {
-                delivery_id,
+            Self::WorkflowInvocation {
+                invocation_id,
                 workflow_path,
             } => {
                 hash.update([1]);
-                hash.update(delivery_id.as_uuid().as_bytes());
+                hash.update(invocation_id.as_uuid().as_bytes());
                 part(hash, workflow_path.as_str().as_bytes());
             }
             Self::WorkflowRun { run_id } => {
