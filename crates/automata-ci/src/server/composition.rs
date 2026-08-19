@@ -53,7 +53,13 @@ use automata_ci_job_executor_actions::{
 };
 use automata_ci_key_management::KeyEncryptionProvider;
 use automata_ci_protocol::ProtocolLimits;
-use automata_ci_provider_github::MAX_GITHUB_WEBHOOK_SECRET_BYTES;
+use automata_ci_provider::{
+    ProviderConfigurationFactory, ProviderFactoryRegistry, ProviderManifestRepository,
+    ProviderWebhookEndpointRepository,
+};
+use automata_ci_provider_delivery::{ProviderReconciliationError, ProviderReconciliationService};
+use automata_ci_provider_github::{GithubProviderFactory, MAX_GITHUB_WEBHOOK_SECRET_BYTES};
+use automata_ci_provider_postgres::PostgresProviderManifestRepository;
 use automata_ci_provisioning::{
     GithubProviderConfigurationApplier, GithubProviderDesiredStateReader,
     ProvisioningWorkloadAuthenticator, WorkspaceEntitlementApplier,
@@ -118,6 +124,7 @@ use tokio::net::TcpListener;
 
 use super::config::DatabaseTransportLoadError;
 use super::github_job_runtime_authority::unavailable_github_job_runtime_authority_issuer;
+use super::github_provider_reconciliation::github_common_desired_state;
 use super::github_provider_runtime::provider_http_endpoint;
 use super::state_metrics::ControlPlaneStateSampler;
 use super::workload_oidc::{
@@ -951,10 +958,18 @@ async fn build_github_provider_runtime(
     let Some(provider) = provider else {
         return Ok(None);
     };
-    if provider.is_empty() {
+    let (provider, app_private_key, webhook_secret) = provider.into_parts();
+    reconcile_github_common_provider(
+        &provider,
+        &app_private_key,
+        &webhook_secret,
+        store.as_ref(),
+        Arc::clone(&control_plane_key_provider),
+    )
+    .await?;
+    if provider.repositories().is_empty() {
         return Ok(None);
     }
-    let (provider, app_private_key, webhook_secret) = provider.into_parts();
     let app_key = {
         if app_private_key.len() > MAX_GITHUB_APP_PRIVATE_KEY_PEM_BYTES {
             return Err(ServerCompositionError::InvalidGithubProviderConfiguration);
@@ -980,6 +995,31 @@ async fn build_github_provider_runtime(
     .build()
     .await?;
     Ok(Some(runtime))
+}
+
+async fn reconcile_github_common_provider(
+    provider: &super::GithubProviderConfig,
+    app_private_key: &[u8],
+    webhook_secret: &[u8],
+    store: &PostgresStore,
+    key_provider: Arc<dyn KeyEncryptionProvider>,
+) -> Result<(), ServerCompositionError> {
+    let repository = Arc::new(PostgresProviderManifestRepository::new(
+        store.postgres_pool().clone(),
+        key_provider,
+    ));
+    let manifests: Arc<dyn ProviderManifestRepository> = repository.clone();
+    let endpoints: Arc<dyn ProviderWebhookEndpointRepository> = repository;
+    let factory: Arc<dyn ProviderConfigurationFactory> = Arc::new(GithubProviderFactory::new());
+    let factories = ProviderFactoryRegistry::new([factory])
+        .map_err(|_| ServerCompositionError::InvalidGithubProviderConfiguration)?;
+    ProviderReconciliationService::new(factories, manifests, endpoints)
+        .reconcile(
+            github_common_desired_state(provider, app_private_key, webhook_secret)
+                .map_err(|_| ServerCompositionError::InvalidGithubProviderConfiguration)?,
+        )
+        .await?;
+    Ok(())
 }
 
 fn build_results(
@@ -2113,6 +2153,9 @@ pub enum ServerCompositionError {
     /// The optional GitHub provider configuration or its secret encoding was invalid.
     #[error("GitHub provider configuration is invalid")]
     InvalidGithubProviderConfiguration,
+    /// Common provider desired-state validation or persistence failed.
+    #[error("GitHub provider desired-state reconciliation failed")]
+    GithubProviderReconciliation(#[from] ProviderReconciliationError),
     /// The exact GitHub provider runtime could not be built or converged.
     #[error(transparent)]
     GithubProvider(#[from] GithubProviderRuntimeBuildError),

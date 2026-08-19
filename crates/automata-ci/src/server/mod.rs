@@ -6,6 +6,7 @@ mod github_job_runtime_authority;
 mod github_provider;
 mod github_provider_config;
 mod github_provider_credentials;
+mod github_provider_reconciliation;
 mod github_provider_runtime;
 mod github_webhook;
 pub(crate) mod human_auth;

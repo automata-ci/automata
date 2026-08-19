@@ -6,9 +6,14 @@ use std::{collections::BTreeSet, fmt, sync::Arc};
 use std::str::FromStr as _;
 
 use automata_ci_core::JobAuthorityProfile;
-use automata_ci_core::WorkspaceId;
+use automata_ci_core::{UnixMillis, WorkspaceId};
 use automata_ci_github_delivery::GithubScheduleServiceConfig;
-use automata_ci_provisioning::{GithubProviderDesiredState, GithubProviderRepositorySelection};
+use automata_ci_provider::{
+    ProviderConfigurationRevision, ProviderInstanceId, ProviderWebhookEndpointId,
+};
+use automata_ci_provisioning::{
+    GithubProviderDesiredState, GithubProviderRepositorySelection, GithubProviderTimestamp,
+};
 use automata_ci_runner_results::CacheRepositoryMetadata;
 use automata_ci_store::{
     GithubCheckName, GithubInstallationBindingGeneration, GithubProviderGitRef,
@@ -43,6 +48,8 @@ const CONFIG_SCHEMA: u16 = 4;
 const DATABASE_CONNECTION_ID_DOMAIN: &[u8] =
     b"automata-ci/github-provider/database-connection/v1\0";
 const DATABASE_AUTHORITY_ID_DOMAIN: &[u8] = b"automata-ci/github-provider/database-authority/v1\0";
+const DATABASE_INSTANCE_ID_DOMAIN: &[u8] = b"automata-ci/provider-instance/github/v1\0";
+const DATABASE_ENDPOINT_ID_DOMAIN: &[u8] = b"automata-ci/provider-endpoint/github/v1\0";
 
 /// Sanitized GitHub provider configuration failure.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
@@ -99,6 +106,33 @@ impl ConfiguredUuid {
         decoded[8] = (decoded[8] & 0x3f) | 0x80;
         Self(decoded)
     }
+}
+
+fn configured_instance_id(shard_id: &str) -> Result<ProviderInstanceId, GithubProviderConfigError> {
+    let configured = ConfiguredUuid::derive(DATABASE_INSTANCE_ID_DOMAIN, &[shard_id.as_bytes()]);
+    ProviderInstanceId::from_uuid(uuid::Uuid::from_bytes(configured.0))
+        .map_err(|_| GithubProviderConfigError)
+}
+
+fn configured_endpoint_id(
+    shard_id: &str,
+) -> Result<ProviderWebhookEndpointId, GithubProviderConfigError> {
+    let configured = ConfiguredUuid::derive(DATABASE_ENDPOINT_ID_DOMAIN, &[shard_id.as_bytes()]);
+    ProviderWebhookEndpointId::from_uuid(uuid::Uuid::from_bytes(configured.0))
+        .map_err(|_| GithubProviderConfigError)
+}
+
+fn unix_millis(value: GithubProviderTimestamp) -> Result<UnixMillis, GithubProviderConfigError> {
+    let seconds = value
+        .seconds()
+        .checked_mul(1_000)
+        .ok_or(GithubProviderConfigError)?;
+    let fractional = i64::from(value.nanoseconds() / 1_000_000);
+    let millis = seconds
+        .checked_add(fractional)
+        .filter(|value| *value >= 0)
+        .ok_or(GithubProviderConfigError)?;
+    Ok(UnixMillis::new(millis))
 }
 
 macro_rules! configured_uuid {
@@ -169,6 +203,10 @@ impl fmt::Debug for GithubProviderInternalRepositoryId {
 /// One strict GitHub App, webhook authority, and repository registry.
 #[derive(Clone, Eq, PartialEq)]
 pub struct GithubProviderConfig {
+    instance_id: ProviderInstanceId,
+    endpoint_id: ProviderWebhookEndpointId,
+    configuration_revision: ProviderConfigurationRevision,
+    applied_at: UnixMillis,
     transport: GithubProviderTransport,
     dashboard_url: Url,
     app: GithubProviderAppConfig,
@@ -224,6 +262,11 @@ impl GithubProviderConfig {
             (repository.installation_id, repository.repository_id)
         });
         Ok(Self {
+            instance_id: configured_instance_id("test-fixture")?,
+            endpoint_id: configured_endpoint_id("test-fixture")?,
+            configuration_revision: ProviderConfigurationRevision::new(1)
+                .map_err(|_| GithubProviderConfigError)?,
+            applied_at: UnixMillis::new(0),
             transport,
             dashboard_url,
             app,
@@ -238,14 +281,20 @@ impl GithubProviderConfig {
         desired: GithubProviderDesiredState,
     ) -> Result<DatabaseGithubProviderConfig, GithubProviderConfigError> {
         let (
-            _shard_id,
+            shard_id,
             configuration_revision,
+            applied_at,
             app_configuration_revision,
             webhook_verifier_revision,
             runner_policy_revision,
             configuration,
             workspaces,
         ) = desired.into_parts();
+        let instance_id = configured_instance_id(shard_id.as_str())?;
+        let endpoint_id = configured_endpoint_id(shard_id.as_str())?;
+        let provider_revision = ProviderConfigurationRevision::new(configuration_revision.get())
+            .map_err(|_| GithubProviderConfigError)?;
+        let provider_applied_at = unix_millis(applied_at)?;
         let (
             dashboard_url,
             app_id,
@@ -277,6 +326,7 @@ impl GithubProviderConfig {
         for workspace in workspaces {
             let workspace_id = workspace.workspace_id();
             let workspace_revision = workspace.revision();
+            let workspace_applied_at = unix_millis(workspace.applied_at())?;
             // One reviewed shard generation must describe both the provider
             // authority and every repository projection loaded by a replica.
             // Mixed generations are never partially activated.
@@ -292,6 +342,7 @@ impl GithubProviderConfig {
                     selected,
                     &runner_policy,
                     &check_name,
+                    workspace_applied_at,
                 )?);
             }
         }
@@ -304,6 +355,10 @@ impl GithubProviderConfig {
         });
         Ok(DatabaseGithubProviderConfig {
             config: Self {
+                instance_id,
+                endpoint_id,
+                configuration_revision: provider_revision,
+                applied_at: provider_applied_at,
                 transport: GithubProviderTransport::GithubDotCom,
                 dashboard_url,
                 app: GithubProviderAppConfig {
@@ -321,6 +376,30 @@ impl GithubProviderConfig {
             app_private_key: private_key.into_inner(),
             webhook_secret: webhook_secret.into_inner(),
         })
+    }
+
+    /// Returns the stable common provider-instance identity for this shard.
+    #[must_use]
+    pub const fn instance_id(&self) -> ProviderInstanceId {
+        self.instance_id
+    }
+
+    /// Returns the opaque provider-instance webhook endpoint identity.
+    #[must_use]
+    pub const fn endpoint_id(&self) -> ProviderWebhookEndpointId {
+        self.endpoint_id
+    }
+
+    /// Returns the complete provider configuration revision.
+    #[must_use]
+    pub const fn configuration_revision(&self) -> ProviderConfigurationRevision {
+        self.configuration_revision
+    }
+
+    /// Returns the stable database commit time for this configuration.
+    #[must_use]
+    pub const fn applied_at(&self) -> UnixMillis {
+        self.applied_at
     }
 
     /// Returns the closed production or loopback-emulator transport policy.
@@ -369,6 +448,10 @@ impl fmt::Debug for GithubProviderConfig {
             .count();
         formatter
             .debug_struct("GithubProviderConfig")
+            .field("instance_id", &self.instance_id)
+            .field("endpoint_id", &self.endpoint_id)
+            .field("configuration_revision", &self.configuration_revision)
+            .field("applied_at", &self.applied_at)
             .field("transport", &self.transport)
             .field("dashboard_url", &"[configured]")
             .field("app", &self.app)
@@ -403,11 +486,6 @@ impl DatabaseGithubProviderConfig {
     ) -> (GithubProviderConfig, Zeroizing<Vec<u8>>, Zeroizing<Vec<u8>>) {
         (self.config, self.app_private_key, self.webhook_secret)
     }
-
-    /// Returns whether the snapshot currently selects any repositories.
-    pub(crate) fn is_empty(&self) -> bool {
-        self.config.repositories.is_empty()
-    }
 }
 
 impl fmt::Debug for DatabaseGithubProviderConfig {
@@ -428,6 +506,7 @@ fn database_repository_config(
     selected: &GithubProviderRepositorySelection,
     runner_policy: &GithubRunnerPolicy,
     check_name: &GithubCheckName,
+    applied_at: UnixMillis,
 ) -> Result<GithubProviderRepositoryConfig, GithubProviderConfigError> {
     let tenant = TenantScope::from_authenticated_tenant_id(workspace_id.to_string())
         .map_err(|_| GithubProviderConfigError)?;
@@ -481,6 +560,7 @@ fn database_repository_config(
         cache_repository,
         workflow_git_ref,
         visibility,
+        applied_at,
         manifest_revision,
         policy_revision,
         runtime_policy_revision,
@@ -816,6 +896,7 @@ pub struct GithubProviderRepositoryConfig {
     cache_repository: CacheRepositoryMetadata,
     workflow_git_ref: GithubProviderGitRef,
     visibility: ProviderRepositoryVisibility,
+    applied_at: UnixMillis,
     manifest_revision: GithubProviderManifestRevision,
     policy_revision: GithubServerServiceRevision,
     runtime_policy_revision: WorkflowRuntimePolicyRevision,
@@ -908,6 +989,7 @@ impl GithubProviderRepositoryConfig {
             cache_repository,
             workflow_git_ref,
             visibility,
+            applied_at: UnixMillis::new(0),
             manifest_revision,
             policy_revision,
             runtime_policy_revision,
@@ -986,6 +1068,12 @@ impl GithubProviderRepositoryConfig {
     #[must_use]
     pub const fn visibility(&self) -> ProviderRepositoryVisibility {
         self.visibility
+    }
+
+    /// Returns the stable database commit time of this repository desired set.
+    #[must_use]
+    pub const fn applied_at(&self) -> UnixMillis {
+        self.applied_at
     }
 
     /// Returns the positive immutable provider-manifest revision.

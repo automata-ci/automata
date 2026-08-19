@@ -963,6 +963,13 @@ pub trait ProviderWebhookEndpointRepository: fmt::Debug + Send + Sync {
         endpoint: ProviderWebhookEndpointManifest,
     ) -> ProviderDeliveryFuture<'_, ProviderSaveOutcome>;
 
+    /// Loads the current endpoint manifest without requiring active connections
+    /// or decrypting its verification candidates.
+    fn current_endpoint_manifest(
+        &self,
+        endpoint_id: ProviderWebhookEndpointId,
+    ) -> ProviderDeliveryFuture<'_, Option<ProviderWebhookEndpointManifest>>;
+
     /// Loads and decrypts the current exact endpoint record.
     fn resolve_endpoint(
         &self,

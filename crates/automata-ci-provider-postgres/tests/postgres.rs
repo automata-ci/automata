@@ -417,6 +417,12 @@ async fn instance_and_connection_revisions_are_atomic_encrypted_and_exact() -> T
         );
         assert_eq!(
             repository
+                .latest_secret_generation(instance_id, name.clone())
+                .await?,
+            Some(ProviderSecretGeneration::new(2).expect("generation"))
+        );
+        assert_eq!(
+            repository
                 .load_instance(
                     instance_id,
                     ProviderConfigurationRevision::new(1).expect("revision"),
@@ -476,6 +482,56 @@ async fn instance_and_connection_revisions_are_atomic_encrypted_and_exact() -> T
                 .get(),
             2
         );
+        assert_eq!(repository.current_connections(instance_id).await?.len(), 1);
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL 18 via AUTOMATA_TEST_DATABASE_URL"]
+async fn disabled_endpoint_does_not_require_an_active_connection() -> TestResult {
+    run_with_database(|database| async move {
+        let repository = repository(database.pool().clone());
+        let instance_id = ProviderInstanceId::from_uuid(Uuid::from_u128(0x5a01))?;
+        repository
+            .save_instance(instance_record(
+                instance_id,
+                "forgejo",
+                1,
+                TOKEN,
+                1,
+                ProviderLifecycleState::Active,
+                Some(UnixMillis::new(1_000)),
+            ))
+            .await?;
+        let endpoint_id = ProviderWebhookEndpointId::from_uuid(Uuid::from_u128(0x5a02))?;
+        let endpoint = ProviderWebhookEndpointManifest::new(
+            endpoint_id,
+            ProviderWebhookEndpointRevision::new(1)?,
+            ProviderWebhookEndpointState::Disabled,
+            ProviderTypeId::new("forgejo")?,
+            instance_id,
+            ProviderConfigurationRevision::new(1)?,
+            1_048_576,
+            86_400_000,
+            vec![ProviderWebhookSecretReference::new(
+                ProviderConfigurationRevision::new(1)?,
+                ProviderSecretName::new("control-token")?,
+                ProviderSecretGeneration::new(1)?,
+            )],
+            UnixMillis::new(1_000),
+            None,
+        )?;
+        assert_eq!(
+            repository.save_endpoint(endpoint.clone()).await?,
+            ProviderSaveOutcome::Inserted
+        );
+        assert_eq!(
+            repository.current_endpoint_manifest(endpoint_id).await?,
+            Some(endpoint)
+        );
+        assert!(repository.resolve_endpoint(endpoint_id).await?.is_none());
         Ok(())
     })
     .await

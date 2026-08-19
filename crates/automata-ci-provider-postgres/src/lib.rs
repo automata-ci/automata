@@ -18,7 +18,8 @@ use automata_ci_provider::{
     ProviderManifestRepository, ProviderProcessingFuture, ProviderProcessingReceipt,
     ProviderProcessingRepository, ProviderRepositoryError, ProviderRepositoryFuture,
     ProviderResultFuture, ProviderResultRepository, ProviderResultSaveOutcome, ProviderSaveOutcome,
-    ProviderWebhookEndpointId, ProviderWebhookEndpointManifest, ProviderWebhookEndpointRecord,
+    ProviderSecretGeneration, ProviderSecretName, ProviderWebhookEndpointId,
+    ProviderWebhookEndpointManifest, ProviderWebhookEndpointRecord,
     ProviderWebhookEndpointRepository, ProviderWebhookEndpointRevision,
     ProviderWorkflowResultObservation, ProviderWorkflowResultSource, RenewProviderProcessing,
     RenewProviderResult, RetryProviderProcessing,
@@ -94,6 +95,14 @@ impl ProviderManifestRepository for PostgresProviderManifestRepository {
         Box::pin(self.current_instance_inner(instance_id))
     }
 
+    fn latest_secret_generation(
+        &self,
+        instance_id: ProviderInstanceId,
+        name: ProviderSecretName,
+    ) -> ProviderRepositoryFuture<'_, Option<ProviderSecretGeneration>> {
+        Box::pin(self.latest_secret_generation_inner(instance_id, name))
+    }
+
     fn save_connection(
         &self,
         manifest: ProviderConnectionManifest,
@@ -115,6 +124,13 @@ impl ProviderManifestRepository for PostgresProviderManifestRepository {
     ) -> ProviderRepositoryFuture<'_, Option<ProviderConnectionManifest>> {
         Box::pin(self.current_connection_inner(connection_id))
     }
+
+    fn current_connections(
+        &self,
+        instance_id: ProviderInstanceId,
+    ) -> ProviderRepositoryFuture<'_, Vec<ProviderConnectionManifest>> {
+        Box::pin(self.current_connections_inner(instance_id))
+    }
 }
 
 impl ProviderWebhookEndpointRepository for PostgresProviderManifestRepository {
@@ -123,6 +139,13 @@ impl ProviderWebhookEndpointRepository for PostgresProviderManifestRepository {
         endpoint: ProviderWebhookEndpointManifest,
     ) -> ProviderDeliveryFuture<'_, ProviderSaveOutcome> {
         Box::pin(self.save_endpoint_inner(endpoint))
+    }
+
+    fn current_endpoint_manifest(
+        &self,
+        endpoint_id: ProviderWebhookEndpointId,
+    ) -> ProviderDeliveryFuture<'_, Option<ProviderWebhookEndpointManifest>> {
+        Box::pin(self.current_endpoint_manifest_inner(endpoint_id))
     }
 
     fn resolve_endpoint(

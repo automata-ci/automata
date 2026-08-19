@@ -238,6 +238,7 @@ dependencies = [
  "automata-ci-provider",
  "automata-ci-provider-delivery",
  "automata-ci-provider-github",
+ "automata-ci-provider-postgres",
  "automata-ci-provisioning",
  "automata-ci-provisioning-grpc",
  "automata-ci-provisioning-postgres",

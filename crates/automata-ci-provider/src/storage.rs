@@ -6,7 +6,8 @@ use thiserror::Error;
 
 use crate::{
     ProviderConfigurationRevision, ProviderConnectionId, ProviderConnectionManifest,
-    ProviderConnectionRevision, ProviderInstanceId, ProviderInstanceManifest, ProviderSecretSet,
+    ProviderConnectionRevision, ProviderInstanceId, ProviderInstanceManifest,
+    ProviderSecretGeneration, ProviderSecretName, ProviderSecretSet,
 };
 
 /// Boxed future returned by provider manifest repository operations.
@@ -97,6 +98,17 @@ pub trait ProviderManifestRepository: fmt::Debug + Send + Sync {
         instance_id: ProviderInstanceId,
     ) -> ProviderRepositoryFuture<'_, Option<ProviderInstanceRecord>>;
 
+    /// Returns the largest durable generation ever used by one named secret.
+    ///
+    /// This historical view lets generic reconciliation assign a generation
+    /// when a secret name is reintroduced after being absent from the current
+    /// configuration.
+    fn latest_secret_generation(
+        &self,
+        instance_id: ProviderInstanceId,
+        name: ProviderSecretName,
+    ) -> ProviderRepositoryFuture<'_, Option<ProviderSecretGeneration>>;
+
     /// Atomically stores one first or contiguous connection revision.
     fn save_connection(
         &self,
@@ -115,6 +127,15 @@ pub trait ProviderManifestRepository: fmt::Debug + Send + Sync {
         &self,
         connection_id: ProviderConnectionId,
     ) -> ProviderRepositoryFuture<'_, Option<ProviderConnectionManifest>>;
+
+    /// Lists every current connection revision owned by one provider instance.
+    ///
+    /// Disabled and retired connections are included so complete desired-state
+    /// reconciliation can detect removals and preserve lifecycle history.
+    fn current_connections(
+        &self,
+        instance_id: ProviderInstanceId,
+    ) -> ProviderRepositoryFuture<'_, Vec<ProviderConnectionManifest>>;
 }
 
 /// Sanitized durable provider repository failure.

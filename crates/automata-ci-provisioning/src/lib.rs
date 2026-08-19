@@ -33,9 +33,9 @@ pub use github_provider::{
     GithubProviderConfiguration, GithubProviderConfigurationFailure,
     GithubProviderConfigurationFailureKind, GithubProviderConfigurationRevision,
     GithubProviderDesiredState, GithubProviderDesiredStateFailure,
-    GithubProviderDesiredStateFailureKind, GithubProviderRepositorySelection,
-    GithubProviderSchedulePolicy, GithubProviderSecret, GithubProviderTimestamp,
-    GithubProviderValueError, MAX_GITHUB_PROVIDER_REPOSITORIES,
+    GithubProviderDesiredStateFailureKind, GithubProviderDesiredStateVersion,
+    GithubProviderRepositorySelection, GithubProviderSchedulePolicy, GithubProviderSecret,
+    GithubProviderTimestamp, GithubProviderValueError, MAX_GITHUB_PROVIDER_REPOSITORIES,
     WorkspaceGithubRepositoriesDesiredState, WorkspaceGithubRepositoriesFailure,
     WorkspaceGithubRepositoriesFailureKind, WorkspaceGithubRepositoriesRevision,
 };

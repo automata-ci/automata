@@ -427,7 +427,7 @@ fn registry_materializes_capability_bound_records_without_caller_digest_authorit
 }
 
 #[test]
-fn manifest_successors_require_real_change_and_exact_lifecycle_evidence() {
+fn manifest_successors_accept_generation_fences_and_require_exact_lifecycle_evidence() {
     let capabilities = source_capabilities().expect("capabilities");
     let digest = provider_capability_digest(&capabilities).expect("capability digest");
     let prior = manifest(
@@ -452,10 +452,9 @@ fn manifest_successors_require_real_change_and_exact_lifecycle_evidence() {
         None,
         None,
     );
-    assert_eq!(
-        revision_only.validate_successor(&prior),
-        Err(ProviderConfigurationError::InvalidSuccessor)
-    );
+    revision_only
+        .validate_successor(&prior)
+        .expect("complete desired-state generation fence");
 
     let activated = manifest(
         "github",
