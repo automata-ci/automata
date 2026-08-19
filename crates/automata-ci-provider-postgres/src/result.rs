@@ -10,8 +10,8 @@ use automata_ci_provider::{
     ProviderResultPublicationModel, ProviderResultRepositoryError, ProviderResultSaveOutcome,
     ProviderResultSubject, ProviderResultSubjectId, ProviderResultSubjectKind,
     ProviderResultSummary, ProviderResultTitle, ProviderResultWorkerId, ProviderSchemaVersion,
-    ProviderWorkflowResultObservation, ProviderWorkflowRunState, RetryProviderResult,
-    RenewProviderResult, SaveDesiredProviderResult,
+    ProviderWorkflowResultObservation, ProviderWorkflowRunState, RenewProviderResult,
+    RetryProviderResult, SaveDesiredProviderResult,
 };
 use sqlx::{FromRow, Postgres, Transaction};
 

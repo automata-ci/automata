@@ -178,9 +178,10 @@ mod tests {
     use automata_ci_core::{RunId, UnixMillis};
     use automata_ci_provider::{
         ClaimProviderResult, ClaimedProviderResult, CompleteProviderResult, FailProviderResult,
-        ProviderResultFuture, ProviderResultRepository, ProviderResultRepositoryError,
-        ProviderResultSaveOutcome, ProviderWorkflowResultObservation, ProviderWorkflowResultSource,
-        ProviderWorkflowRunState, RetryProviderResult, SaveDesiredProviderResult,
+        ProviderResultClaimFence, ProviderResultFuture, ProviderResultRepository,
+        ProviderResultRepositoryError, ProviderResultSaveOutcome,
+        ProviderWorkflowResultObservation, ProviderWorkflowResultSource, ProviderWorkflowRunState,
+        RenewProviderResult, RetryProviderResult, SaveDesiredProviderResult,
     };
     use tokio_util::sync::CancellationToken;
     use url::Url;
@@ -233,6 +234,13 @@ mod tests {
             _request: CompleteProviderResult,
         ) -> ProviderResultFuture<'_, ()> {
             Box::pin(async { Ok(()) })
+        }
+
+        fn renew_result(
+            &self,
+            _request: RenewProviderResult,
+        ) -> ProviderResultFuture<'_, ProviderResultClaimFence> {
+            Box::pin(async { Err(ProviderResultRepositoryError::Corrupt) })
         }
 
         fn retry_result(&self, _request: RetryProviderResult) -> ProviderResultFuture<'_, ()> {

@@ -396,11 +396,11 @@ mod tests {
         ProviderConfigurationRevision, ProviderConnectionConfiguration, ProviderConnectionId,
         ProviderConnectionManifest, ProviderConnectionPolicyDocument, ProviderConnectionRevision,
         ProviderDefaultBranch, ProviderLifecycleState, ProviderRepositoryPath,
-        ProviderResultDetailsUrl, ProviderResultFuture, ProviderResultName,
-        ProviderResultRepository, ProviderResultRepositoryError, ProviderResultSubject,
-        ProviderResultSubjectId, ProviderResultSubjectKind, ProviderRunnerPolicyBinding,
-        ProviderSchemaVersion, ProviderWorkflowSource, RepositoryVisibility,
-        SaveDesiredProviderResult,
+        ProviderResultClaimFence, ProviderResultDetailsUrl, ProviderResultFuture,
+        ProviderResultName, ProviderResultRepository, ProviderResultRepositoryError,
+        ProviderResultSubject, ProviderResultSubjectId, ProviderResultSubjectKind,
+        ProviderRunnerPolicyBinding, ProviderSchemaVersion, ProviderWorkflowSource,
+        RenewProviderResult, RepositoryVisibility, SaveDesiredProviderResult,
     };
     use automata_ci_store::WorkflowRerunReceipt;
     use url::Url;
@@ -441,6 +441,13 @@ mod tests {
             _request: automata_ci_provider::CompleteProviderResult,
         ) -> ProviderResultFuture<'_, ()> {
             Box::pin(async { Ok(()) })
+        }
+
+        fn renew_result(
+            &self,
+            _request: RenewProviderResult,
+        ) -> ProviderResultFuture<'_, ProviderResultClaimFence> {
+            Box::pin(async { Err(ProviderResultRepositoryError::Corrupt) })
         }
 
         fn retry_result(
@@ -499,6 +506,13 @@ mod tests {
             _request: automata_ci_provider::CompleteProviderResult,
         ) -> ProviderResultFuture<'_, ()> {
             Box::pin(async { Ok(()) })
+        }
+
+        fn renew_result(
+            &self,
+            _request: RenewProviderResult,
+        ) -> ProviderResultFuture<'_, ProviderResultClaimFence> {
+            Box::pin(async { Err(ProviderResultRepositoryError::Corrupt) })
         }
 
         fn retry_result(

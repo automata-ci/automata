@@ -19,8 +19,7 @@ use automata_ci_provider::{
     ProviderResultSubjectId, ProviderResultSubjectKind, ProviderResultSummary, ProviderResultTitle,
     ProviderResultWorkerId, ProviderRunnerPolicyBinding, ProviderSchemaVersion,
     ProviderWorkflowSource, RenewProviderResult, RepositoryVisibility, RetryProviderResult,
-    RichCheckCapability,
-    SaveDesiredProviderResult, StatusHistoryModel,
+    RichCheckCapability, SaveDesiredProviderResult, StatusHistoryModel,
 };
 use url::Url;
 use uuid::Uuid;
