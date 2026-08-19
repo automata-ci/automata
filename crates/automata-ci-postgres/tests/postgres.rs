@@ -4,6 +4,9 @@
 mod support;
 
 #[cfg(feature = "test-support")]
+#[path = "auth/delegated_actor.rs"]
+mod delegated_actor;
+#[cfg(feature = "test-support")]
 #[path = "store/execution/runner_control.rs"]
 mod runner_control;
 #[cfg(feature = "test-support")]

@@ -2,8 +2,9 @@ use std::{collections::BTreeSet, fmt};
 
 use automata_ci_auth::{
     authorization::{
-        AuthorizationContext, AuthorizationScope, RepositoryResource, RepositoryResourceId,
-        RoleName, RunnerGroupResource, RunnerGroupResourceId, ScopedRoleGrant,
+        AuthorizationContext, AuthorizationScope, Permission, RepositoryResource,
+        RepositoryResourceId, RoleName, RunnerGroupResource, RunnerGroupResourceId,
+        ScopedRoleGrant,
     },
     delegated_actor::{
         DelegatedActorRequestSnapshot, DelegatedActorResolutionFuture, DelegatedActorResolver,
@@ -73,6 +74,26 @@ struct ScopedGrantRow {
     repository_tenant_id: Option<String>,
     runner_group_id: Option<Uuid>,
     runner_group_tenant_id: Option<String>,
+}
+
+#[derive(FromRow)]
+struct TenantPermissionRow {
+    permission_name: String,
+}
+
+fn assemble_granted_tenant_permissions(
+    requested: &BTreeSet<Permission>,
+    rows: impl IntoIterator<Item = TenantPermissionRow>,
+) -> Result<BTreeSet<Permission>, DelegatedActorResolverError> {
+    let mut granted = BTreeSet::new();
+    for row in rows {
+        let permission = Permission::new(row.permission_name)
+            .map_err(|_| DelegatedActorResolverError::CorruptData)?;
+        if !requested.contains(&permission) || !granted.insert(permission) {
+            return Err(DelegatedActorResolverError::CorruptData);
+        }
+    }
+    Ok(granted)
 }
 
 impl ScopedGrantRow {
@@ -186,6 +207,22 @@ const ACTIVE_GRANTS_SELECT: &str = r"
     LIMIT $4
 ";
 
+const ACTIVE_TENANT_PERMISSIONS_SELECT: &str = r"
+    SELECT DISTINCT permission_grant.permission_name
+    FROM rbac_role_bindings AS binding
+    JOIN rbac_role_permissions AS permission_grant
+      ON permission_grant.tenant_id = binding.tenant_id
+     AND permission_grant.role_id = binding.role_id
+    WHERE binding.tenant_id = $1
+      AND binding.principal_id = $2
+      AND binding.scope_kind = 'tenant'
+      AND binding.status = 'active'
+      AND (binding.valid_until_ms IS NULL OR binding.valid_until_ms > $3)
+      AND permission_grant.permission_name = ANY($4::text[])
+    ORDER BY permission_grant.permission_name
+    LIMIT $5
+";
+
 async fn commit(
     transaction: sqlx::Transaction<'_, sqlx::Postgres>,
 ) -> Result<(), DelegatedActorResolverError> {
@@ -291,6 +328,34 @@ impl DelegatedActorResolver for PostgresDelegatedActorResolver {
                     return Err(DelegatedActorResolverError::CorruptData);
                 }
             }
+            let granted_tenant_permissions = if request.requested_tenant_permissions().is_empty() {
+                BTreeSet::new()
+            } else {
+                let requested_permissions = request
+                    .requested_tenant_permissions()
+                    .iter()
+                    .map(|permission| permission.as_str().to_owned())
+                    .collect::<Vec<_>>();
+                let permission_limit = i64::try_from(requested_permissions.len() + 1)
+                    .map_err(|_| DelegatedActorResolverError::CorruptData)?;
+                let permission_rows =
+                    sqlx::query_as::<_, TenantPermissionRow>(ACTIVE_TENANT_PERMISSIONS_SELECT)
+                        .bind(request.tenant_id().as_str())
+                        .bind(identity.principal_id)
+                        .bind(database_time_ms)
+                        .bind(&requested_permissions)
+                        .bind(permission_limit)
+                        .fetch_all(&mut *transaction)
+                        .await
+                        .map_err(|_| DelegatedActorResolverError::Unavailable)?;
+                if permission_rows.len() > requested_permissions.len() {
+                    return Err(DelegatedActorResolverError::CorruptData);
+                }
+                assemble_granted_tenant_permissions(
+                    request.requested_tenant_permissions(),
+                    permission_rows,
+                )?
+            };
             let principal_id = PrincipalId::new(identity.principal_id.hyphenated().to_string())
                 .map_err(|_| DelegatedActorResolverError::CorruptData)?;
             let authorization = AuthorizationContext::authenticated_at_revision(
@@ -307,6 +372,7 @@ impl DelegatedActorResolver for PostgresDelegatedActorResolver {
                 request.tenant_id(),
                 viewer,
                 authorization,
+                granted_tenant_permissions,
             )
             .map_err(|_| DelegatedActorResolverError::CorruptData)?;
             commit(transaction).await?;
@@ -326,5 +392,42 @@ mod tests {
         assert!(ACTIVE_GRANTS_SELECT.contains("binding.tenant_id = $1"));
         assert!(ACTIVE_GRANTS_SELECT.contains("binding.principal_id = $2"));
         assert!(ACTIVE_GRANTS_SELECT.contains("LIMIT $4"));
+    }
+
+    #[test]
+    fn granted_tenant_permissions_are_an_exact_requested_subset() {
+        let read = Permission::new("billing:read").expect("read permission");
+        let manage = Permission::new("billing:manage").expect("manage permission");
+        let requested = BTreeSet::from([read.clone(), manage]);
+        let granted = assemble_granted_tenant_permissions(
+            &requested,
+            [TenantPermissionRow {
+                permission_name: read.as_str().to_owned(),
+            }],
+        )
+        .expect("granted permission set");
+
+        assert_eq!(granted, BTreeSet::from([read]));
+
+        let unexpected = assemble_granted_tenant_permissions(
+            &requested,
+            [TenantPermissionRow {
+                permission_name: "tenant:delete".to_owned(),
+            }],
+        );
+        assert_eq!(unexpected, Err(DelegatedActorResolverError::CorruptData));
+
+        let duplicate = assemble_granted_tenant_permissions(
+            &requested,
+            [
+                TenantPermissionRow {
+                    permission_name: "billing:read".to_owned(),
+                },
+                TenantPermissionRow {
+                    permission_name: "billing:read".to_owned(),
+                },
+            ],
+        );
+        assert_eq!(duplicate, Err(DelegatedActorResolverError::CorruptData));
     }
 }

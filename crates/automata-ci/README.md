@@ -68,6 +68,7 @@ provides:
 | Method | Path | Result |
 | --- | --- | --- |
  | `GET` | `/internal/v2/workspaces/{workspace_id}/viewer` | Current Core principal and authorization revision |
+ | `POST` | `/internal/v2/workspaces/{workspace_id}/authorization-checks` | Current allow/deny decisions for up to 16 tenant-scoped permissions |
  | `GET` | `/internal/v2/workspaces/{workspace_id}/repositories` | Authorized repository directory |
  | `GET` | `/internal/v2/workspaces/{workspace_id}/repositories/{owner}/{repository}/runs` | Filtered workflow and run page |
  | `GET` | `/internal/v2/workspaces/{workspace_id}/repositories/{owner}/{repository}/runs/{run_id}` | Run, job, and artifact snapshot |
@@ -80,7 +81,10 @@ workspace ID. Opaque pagination cursors must be returned unchanged. Run
 numbers and artifact IDs and sizes are decimal strings
 so JavaScript clients cannot silently lose integer precision. Missing and
 unauthorized repository resources remain indistinguishable as `404`; a valid
-assertion does not move authorization policy into the hosted layer.
+assertion does not move authorization policy into the hosted layer. The
+authorization-check operation returns only decisions for its exact requested
+permissions and the current authorization revision; it never publishes roles
+or Core's permission graph.
 
 When managed-secret encryption is configured, `--runner-public-url` is also
 required. It is the exact HTTPS origin configured as each runner's
