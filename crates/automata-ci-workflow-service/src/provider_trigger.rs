@@ -6,7 +6,7 @@ use automata_ci_core::{JobRuntimeContext, TrustSnapshot, WorkflowEventProvenance
 use automata_ci_provider::{
     ClaimedProviderProcessing, NormalizedTrigger, ProviderConnectionManifest, ProviderGitRef,
     ProviderLifecycleState, ProviderProcessingClaimSource, ProviderProcessingInput,
-    ProviderWorkflowSource, VerifiedProviderTriggerDelivery,
+    ProviderWorkflowInvocationId, ProviderWorkflowSource, VerifiedProviderTriggerDelivery,
 };
 use automata_ci_scm::{ArchiveFormat, RepositorySourceArchive};
 use automata_ci_store::{
@@ -22,7 +22,8 @@ use bytes::Bytes;
 use thiserror::Error;
 
 use crate::{
-    AdmissionRepositoryCoordinates, ProviderWorkflowResultRequest, ProviderWorkflowResultService,
+    AdmissionRepositoryCoordinates, ProviderWorkflowResultDisposition,
+    ProviderWorkflowResultRequest, ProviderWorkflowResultService,
     ProviderWorkflowResultServiceError, RepositoryWorkflowSource, WorkflowAdmissionError,
     WorkflowAdmissionRequest, WorkflowAdmissionRequestError, WorkflowAdmissionResult,
     WorkflowAdmissionService,
@@ -243,16 +244,16 @@ impl ProviderWorkflowApplicationService {
                     ProviderWorkflowRejection::UnsupportedCompilationDisposition,
                 ),
             };
+            let result_request = initial_result_request(
+                &request,
+                object,
+                workflow.path.clone(),
+                attempt,
+                created_at,
+                outcome,
+            )?;
             self.results
-                .project(ProviderWorkflowResultRequest {
-                    connection: &request.connection,
-                    delivery: &request.delivery,
-                    object,
-                    workflow_path: &workflow.path,
-                    attempt,
-                    created_at,
-                    disposition: outcome,
-                })
+                .project_invocation(result_request)
                 .await
                 .map_err(provider_result_error)?;
             results.push(ProviderWorkflowApplicationReport {
@@ -262,6 +263,43 @@ impl ProviderWorkflowApplicationService {
         }
         Ok(ProviderWorkflowApplicationOutcome::Applied(results))
     }
+}
+
+fn initial_result_request(
+    request: &ProviderWorkflowApplicationRequest,
+    object: automata_ci_core::GitObjectId,
+    workflow_path: String,
+    attempt: u32,
+    created_at: automata_ci_core::UnixMillis,
+    disposition: ProviderWorkflowDisposition,
+) -> Result<ProviderWorkflowResultRequest<'_>, ProviderWorkflowApplicationError> {
+    let disposition = match disposition {
+        ProviderWorkflowDisposition::Admitted(admission) => {
+            ProviderWorkflowResultDisposition::Admitted(admission)
+        }
+        ProviderWorkflowDisposition::NotSelected(_) => ProviderWorkflowResultDisposition::Skipped,
+        ProviderWorkflowDisposition::Rejected(_) => ProviderWorkflowResultDisposition::Failed,
+    };
+    ProviderWorkflowResultRequest::new(
+        &request.connection,
+        ProviderWorkflowInvocationId::from_uuid(
+            request.delivery.evidence().delivery_id().as_uuid(),
+        )
+        .map_err(|_| ProviderWorkflowApplicationError::InvalidEvidence)?,
+        request
+            .delivery
+            .trigger()
+            .trigger()
+            .target_repository()
+            .path()
+            .as_str(),
+        object,
+        workflow_path,
+        attempt,
+        created_at,
+        disposition,
+    )
+    .map_err(provider_result_error)
 }
 
 impl fmt::Debug for ProviderWorkflowApplicationService {

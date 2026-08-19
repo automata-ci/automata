@@ -2,16 +2,16 @@ use automata_ci_core::{GitObjectAlgorithm, GitObjectId, JobId, RunId, Sha256Dige
 use automata_ci_provider::{
     ClaimProviderResult, ClaimedProviderResult, CompleteProviderResult, DesiredProviderResult,
     ExternalResultId, FailProviderResult, ProviderConnectionId, ProviderConnectionRevision,
-    ProviderDeliveryId, ProviderRepositoryPath, ProviderResultAnnotation,
-    ProviderResultAnnotationLevel, ProviderResultAnnotationMessage, ProviderResultAnnotationTitle,
-    ProviderResultBinding, ProviderResultClaimFence, ProviderResultConclusion,
-    ProviderResultContinuation, ProviderResultDetailsUrl, ProviderResultFailureKind,
-    ProviderResultModelError, ProviderResultName, ProviderResultPhase, ProviderResultProjection,
+    ProviderRepositoryPath, ProviderResultAnnotation, ProviderResultAnnotationLevel,
+    ProviderResultAnnotationMessage, ProviderResultAnnotationTitle, ProviderResultBinding,
+    ProviderResultClaimFence, ProviderResultConclusion, ProviderResultContinuation,
+    ProviderResultDetailsUrl, ProviderResultFailureKind, ProviderResultModelError,
+    ProviderResultName, ProviderResultPhase, ProviderResultProjection,
     ProviderResultPublicationModel, ProviderResultRepositoryError, ProviderResultSaveOutcome,
     ProviderResultSubject, ProviderResultSubjectId, ProviderResultSubjectKind,
     ProviderResultSummary, ProviderResultTitle, ProviderResultWorkerId, ProviderSchemaVersion,
-    ProviderWorkflowResultObservation, ProviderWorkflowRunState, RenewProviderResult,
-    RetryProviderResult, SaveDesiredProviderResult,
+    ProviderWorkflowInvocationId, ProviderWorkflowResultObservation, ProviderWorkflowRunState,
+    RenewProviderResult, RetryProviderResult, SaveDesiredProviderResult,
 };
 use sqlx::{FromRow, Postgres, Transaction};
 
@@ -28,7 +28,7 @@ struct ResultRow {
     result_name: String,
     result_details_url: String,
     subject_kind: String,
-    delivery_id: Option<uuid::Uuid>,
+    invocation_id: Option<uuid::Uuid>,
     workflow_path: Option<String>,
     run_id: Option<uuid::Uuid>,
     job_id: Option<uuid::Uuid>,
@@ -652,7 +652,7 @@ async fn insert_subject(
         INSERT INTO provider_result_subjects (
             subject_id, connection_id, connection_revision, connection_digest,
             object_algorithm, object_bytes, result_name, result_details_url,
-            subject_kind, delivery_id, workflow_path, run_id, job_id, attempt,
+            subject_kind, invocation_id, workflow_path, run_id, job_id, attempt,
             created_at_ms, subject_digest
         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
         ",
@@ -666,7 +666,7 @@ async fn insert_subject(
     .bind(subject.name().as_str())
     .bind(subject.details_url().as_url().as_str())
     .bind(kind.kind)
-    .bind(kind.delivery_id)
+    .bind(kind.invocation_id)
     .bind(kind.workflow_path)
     .bind(kind.run_id)
     .bind(kind.job_id)
@@ -681,7 +681,7 @@ async fn insert_subject(
 
 struct SubjectColumns<'a> {
     kind: &'static str,
-    delivery_id: Option<uuid::Uuid>,
+    invocation_id: Option<uuid::Uuid>,
     workflow_path: Option<&'a str>,
     run_id: Option<uuid::Uuid>,
     job_id: Option<uuid::Uuid>,
@@ -690,26 +690,26 @@ struct SubjectColumns<'a> {
 impl<'a> From<&'a ProviderResultSubjectKind> for SubjectColumns<'a> {
     fn from(value: &'a ProviderResultSubjectKind) -> Self {
         match value {
-            ProviderResultSubjectKind::PendingWorkflow {
-                delivery_id,
+            ProviderResultSubjectKind::WorkflowInvocation {
+                invocation_id,
                 workflow_path,
             } => Self {
-                kind: "pending-workflow",
-                delivery_id: Some(delivery_id.as_uuid()),
+                kind: "workflow-invocation",
+                invocation_id: Some(invocation_id.as_uuid()),
                 workflow_path: Some(workflow_path.as_str()),
                 run_id: None,
                 job_id: None,
             },
             ProviderResultSubjectKind::WorkflowRun { run_id } => Self {
                 kind: "workflow-run",
-                delivery_id: None,
+                invocation_id: None,
                 workflow_path: None,
                 run_id: Some(run_id.as_uuid()),
                 job_id: None,
             },
             ProviderResultSubjectKind::Job { run_id, job_id } => Self {
                 kind: "job",
-                delivery_id: None,
+                invocation_id: None,
                 workflow_path: None,
                 run_id: Some(run_id.as_uuid()),
                 job_id: Some(job_id.as_uuid()),
@@ -824,7 +824,7 @@ async fn load_result_row(
                subject.connection_revision, subject.connection_digest,
                subject.object_algorithm, subject.object_bytes, subject.result_name,
                subject.result_details_url, subject.subject_kind,
-               subject.delivery_id, subject.workflow_path,
+               subject.invocation_id, subject.workflow_path,
                subject.run_id, subject.job_id, subject.attempt,
                subject.created_at_ms, subject.subject_digest,
                outbox.generation, outbox.phase, outbox.conclusion,
@@ -871,9 +871,9 @@ fn subject_kind(
     row: &ResultRow,
 ) -> Result<ProviderResultSubjectKind, ProviderResultRepositoryError> {
     match row.subject_kind.as_str() {
-        "pending-workflow" => Ok(ProviderResultSubjectKind::PendingWorkflow {
-            delivery_id: ProviderDeliveryId::from_uuid(
-                row.delivery_id
+        "workflow-invocation" => Ok(ProviderResultSubjectKind::WorkflowInvocation {
+            invocation_id: ProviderWorkflowInvocationId::from_uuid(
+                row.invocation_id
                     .ok_or(ProviderResultRepositoryError::Corrupt)?,
             )
             .map_err(|_| ProviderResultRepositoryError::Corrupt)?,

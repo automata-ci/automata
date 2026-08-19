@@ -9,24 +9,73 @@ use automata_ci_provider::{
     ProviderResultProjection, ProviderResultRepository, ProviderResultRepositoryError,
     ProviderResultSaveOutcome, ProviderResultSubject, ProviderResultSubjectId,
     ProviderResultSubjectKind, ProviderResultSummary, ProviderResultTitle,
-    ProviderWorkflowRunState, SaveDesiredProviderResult, VerifiedProviderTriggerDelivery,
+    ProviderWorkflowInvocationId, ProviderWorkflowRunState, SaveDesiredProviderResult,
 };
 use automata_ci_store::WorkflowRerunReceipt;
 use thiserror::Error;
 use url::Url;
 
-use crate::ProviderWorkflowDisposition;
+use crate::WorkflowAdmissionResult;
 
 const RESULT_NAME_PREFIX: &str = "Automata CI / ";
 
-pub(crate) struct ProviderWorkflowResultRequest<'a> {
-    pub(crate) connection: &'a ProviderConnectionManifest,
-    pub(crate) delivery: &'a VerifiedProviderTriggerDelivery,
-    pub(crate) object: GitObjectId,
-    pub(crate) workflow_path: &'a str,
-    pub(crate) attempt: u32,
-    pub(crate) created_at: UnixMillis,
-    pub(crate) disposition: ProviderWorkflowDisposition,
+/// Exact provider-neutral inputs for an invocation's initial desired result.
+#[derive(Debug)]
+pub struct ProviderWorkflowResultRequest<'a> {
+    connection: &'a ProviderConnectionManifest,
+    invocation_id: ProviderWorkflowInvocationId,
+    repository_path: ProviderRepositoryPath,
+    object: GitObjectId,
+    workflow_path: ProviderRepositoryPath,
+    attempt: u32,
+    created_at: UnixMillis,
+    disposition: ProviderWorkflowResultDisposition,
+}
+
+impl<'a> ProviderWorkflowResultRequest<'a> {
+    /// Creates one provider-neutral initial workflow-result projection.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid repository coordinates, workflow paths, attempts, or timestamps.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        connection: &'a ProviderConnectionManifest,
+        invocation_id: ProviderWorkflowInvocationId,
+        repository_path: impl Into<String>,
+        object: GitObjectId,
+        workflow_path: impl Into<String>,
+        attempt: u32,
+        created_at: UnixMillis,
+        disposition: ProviderWorkflowResultDisposition,
+    ) -> Result<Self, ProviderWorkflowResultServiceError> {
+        if attempt == 0 || created_at.get() < 0 {
+            return Err(ProviderWorkflowResultServiceError::InvalidEvidence);
+        }
+        Ok(Self {
+            connection,
+            invocation_id,
+            repository_path: ProviderRepositoryPath::new(repository_path)
+                .map_err(|_| ProviderWorkflowResultServiceError::InvalidEvidence)?,
+            object,
+            workflow_path: ProviderRepositoryPath::new(workflow_path)
+                .map_err(|_| ProviderWorkflowResultServiceError::InvalidEvidence)?,
+            attempt,
+            created_at,
+            disposition,
+        })
+    }
+}
+
+/// Closed provider-facing outcome of one workflow invocation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProviderWorkflowResultDisposition {
+    /// A logical workflow run exists, including an exact idempotent replay.
+    Admitted(WorkflowAdmissionResult),
+    /// The valid workflow did not select the invocation.
+    Skipped,
+    /// The invocation reached a deterministic terminal rejection.
+    Failed,
 }
 
 /// Provider-neutral producer for initial workflow result state.
@@ -62,40 +111,42 @@ impl ProviderWorkflowResultService {
         })
     }
 
-    pub(crate) async fn project(
+    /// Creates or exactly replays the initial desired result for one invocation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed error when immutable invocation evidence is invalid or
+    /// contradicts the durable result subject.
+    pub async fn project_invocation(
         &self,
         request: ProviderWorkflowResultRequest<'_>,
     ) -> Result<ProviderResultSaveOutcome, ProviderWorkflowResultServiceError> {
         let ProviderWorkflowResultRequest {
             connection,
-            delivery,
+            invocation_id,
+            repository_path,
             object,
             workflow_path,
             attempt,
             created_at,
             disposition,
         } = request;
-        let path = ProviderRepositoryPath::new(workflow_path)
-            .map_err(|_| ProviderWorkflowResultServiceError::InvalidEvidence)?;
         let kind = match disposition {
-            ProviderWorkflowDisposition::Admitted(admission) => {
+            ProviderWorkflowResultDisposition::Admitted(admission) => {
                 ProviderResultSubjectKind::WorkflowRun {
                     run_id: admission.receipt().run_id(),
                 }
             }
-            ProviderWorkflowDisposition::NotSelected(_)
-            | ProviderWorkflowDisposition::Rejected(_) => {
-                ProviderResultSubjectKind::PendingWorkflow {
-                    delivery_id: delivery.evidence().delivery_id(),
-                    workflow_path: path,
+            ProviderWorkflowResultDisposition::Skipped
+            | ProviderWorkflowResultDisposition::Failed => {
+                ProviderResultSubjectKind::WorkflowInvocation {
+                    invocation_id,
+                    workflow_path: workflow_path.clone(),
                 }
             }
         };
-        let name = bounded_name(workflow_path);
-        let details_url = self.details_url(
-            delivery.trigger().trigger().target_repository().path(),
-            &kind,
-        )?;
+        let name = bounded_name(workflow_path.as_str());
+        let details_url = self.details_url(&repository_path, &kind)?;
         let subject = ProviderResultSubject::new(
             ProviderResultSubjectId::derive(connection.connection_id(), &kind),
             connection,
@@ -108,15 +159,15 @@ impl ProviderWorkflowResultService {
         )
         .map_err(model_error)?;
         let (phase, conclusion, summary) = match disposition {
-            ProviderWorkflowDisposition::Admitted(_) => {
+            ProviderWorkflowResultDisposition::Admitted(_) => {
                 (ProviderResultPhase::Queued, None, "Workflow run queued.")
             }
-            ProviderWorkflowDisposition::NotSelected(_) => (
+            ProviderWorkflowResultDisposition::Skipped => (
                 ProviderResultPhase::Completed,
                 Some(ProviderResultConclusion::Skipped),
                 "Workflow was not selected for this event.",
             ),
-            ProviderWorkflowDisposition::Rejected(_) => (
+            ProviderWorkflowResultDisposition::Failed => (
                 ProviderResultPhase::Completed,
                 Some(ProviderResultConclusion::Failure),
                 "Workflow could not be admitted.",
@@ -606,8 +657,8 @@ mod tests {
         let pending = service
             .details_url(
                 &repository,
-                &ProviderResultSubjectKind::PendingWorkflow {
-                    delivery_id: automata_ci_provider::ProviderDeliveryId::new(),
+                &ProviderResultSubjectKind::WorkflowInvocation {
+                    invocation_id: automata_ci_provider::ProviderWorkflowInvocationId::new(),
                     workflow_path: ProviderRepositoryPath::new(".ci/workflows/build.yml").unwrap(),
                 },
             )

@@ -359,7 +359,7 @@ CREATE TABLE provider_result_subjects (
     object_algorithm TEXT NOT NULL,
     object_bytes BYTEA NOT NULL,
     subject_kind TEXT NOT NULL,
-    delivery_id UUID,
+    invocation_id UUID,
     workflow_path TEXT,
     run_id UUID,
     job_id UUID,
@@ -376,14 +376,14 @@ CREATE TABLE provider_result_subjects (
         OR (object_algorithm = 'sha256' AND octet_length(object_bytes) = 32)
     ),
     CHECK (
-        (subject_kind = 'pending-workflow'
-            AND delivery_id IS NOT NULL AND workflow_path IS NOT NULL
+        (subject_kind = 'workflow-invocation'
+            AND invocation_id IS NOT NULL AND workflow_path IS NOT NULL
             AND run_id IS NULL AND job_id IS NULL)
         OR (subject_kind = 'workflow-run'
-            AND delivery_id IS NULL AND workflow_path IS NULL
+            AND invocation_id IS NULL AND workflow_path IS NULL
             AND run_id IS NOT NULL AND job_id IS NULL)
         OR (subject_kind = 'job'
-            AND delivery_id IS NULL AND workflow_path IS NULL
+            AND invocation_id IS NULL AND workflow_path IS NULL
             AND run_id IS NOT NULL AND job_id IS NOT NULL)
     ),
     CHECK (

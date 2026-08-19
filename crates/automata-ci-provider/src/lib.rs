@@ -99,7 +99,7 @@ pub use identity::{
     MAX_PROVIDER_TYPE_ID_BYTES, ProviderConnectionId, ProviderControlCredentialId,
     ProviderDeliveryId, ProviderIdentityError, ProviderInstanceId, ProviderProcessingInvocationId,
     ProviderProcessingWorkerId, ProviderResultSubjectId, ProviderResultWorkerId, ProviderTypeId,
-    ProviderWebhookEndpointId, ProviderWorkloadCredentialId,
+    ProviderWebhookEndpointId, ProviderWorkflowInvocationId, ProviderWorkloadCredentialId,
 };
 pub use result::{
     ClaimProviderResult, ClaimedProviderResult, CompleteProviderResult, DesiredProviderResult,
