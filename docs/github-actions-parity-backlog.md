@@ -1220,7 +1220,8 @@ current baseline.
 - [ ] Add Xcode and toolchain profiles.
 - [ ] Add macOS acceptance jobs.
 - [x] Add physical clone cleanup, runner cancellation, interrupted-launch
-  recovery, live-helper-loss slot reuse, and live-orphan startup recovery tests.
+  recovery, live-helper-loss slot reuse, destroy-time helper-loss cleanup, and
+  live-orphan startup recovery tests.
 
 ### Architecture and image breadth
 
