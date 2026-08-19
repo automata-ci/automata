@@ -140,12 +140,70 @@ async fn common_worker_drives_exact_github_source_diff_admission_and_result_cont
     assert!(requests.iter().all(|request| request.body.is_empty()));
 }
 
+#[tokio::test]
+async fn public_exact_source_uses_the_direct_archive_without_a_credential() {
+    let server = HttpServer::spawn().await;
+    enqueue_public_filtered_source(&server);
+    let contract = contract_with_visibility(&server.origin(), RepositoryVisibility::Public);
+
+    assert_eq!(
+        contract.worker.run_once().await.expect("processing pass"),
+        ProviderProcessingWorkerOutcome::Completed
+    );
+    assert_eq!(
+        contract
+            .credentials
+            .operations
+            .lock()
+            .expect("credential lock")
+            .as_slice(),
+        &[GithubTriggerCredentialOperation::ReadPushChangedFiles]
+    );
+    assert_eq!(contract.releases.load(Ordering::SeqCst), 1);
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[0].uri,
+        format!("/owner/repository/legacy.tar.gz/{AFTER}")
+    );
+    assert!(!requests[0].headers.contains_key("authorization"));
+    assert_eq!(
+        requests[1].uri,
+        format!("/api/v3/repos/owner/repository/compare/{BEFORE}...{AFTER}?per_page=100&page=1")
+    );
+    assert_eq!(requests[1].headers["authorization"], "Bearer trigger-token");
+}
+
 fn enqueue_filtered_source(server: &HttpServer) {
     let source = archive(BTreeMap::from([(WORKFLOW_PATH, FILTERED_WORKFLOW)]));
     server.enqueue(
         HttpResponse::status(StatusCode::FOUND)
             .header("location", server.url("archive/source.tar.gz").as_str()),
     );
+    server.enqueue(HttpResponse::binary(
+        StatusCode::OK,
+        "application/gzip",
+        source.to_vec(),
+    ));
+    server.enqueue(HttpResponse::json(
+        StatusCode::OK,
+        serde_json::to_vec(&json!({
+            "status": "ahead",
+            "ahead_by": 1,
+            "behind_by": 0,
+            "total_commits": 1,
+            "base_commit": {"sha": BEFORE},
+            "merge_base_commit": {"sha": BEFORE},
+            "commits": [{"sha": AFTER}],
+            "files": [{"filename": "src/lib.rs", "status": "modified"}]
+        }))
+        .expect("compare response"),
+    ));
+}
+
+fn enqueue_public_filtered_source(server: &HttpServer) {
+    let source = archive(BTreeMap::from([(WORKFLOW_PATH, FILTERED_WORKFLOW)]));
     server.enqueue(HttpResponse::binary(
         StatusCode::OK,
         "application/gzip",
@@ -177,9 +235,13 @@ struct Contract {
 }
 
 fn contract(origin: &Url) -> Contract {
-    let (provider, connection) = manifests(origin);
+    contract_with_visibility(origin, RepositoryVisibility::Private)
+}
+
+fn contract_with_visibility(origin: &Url, visibility: RepositoryVisibility) -> Contract {
+    let (provider, connection) = manifests(origin, visibility);
     let worker_id = ProviderProcessingWorkerId::from_uuid(Uuid::from_u128(5)).expect("worker");
-    let invocation = invocation(&provider, &connection, worker_id);
+    let invocation = invocation(&provider, &connection, worker_id, visibility);
     let processing = Arc::new(ProcessingRepository::new(invocation));
     let manifests = Arc::new(Manifests {
         provider,
@@ -591,7 +653,10 @@ impl ProviderResultRepository for Results {
     }
 }
 
-fn manifests(origin: &Url) -> (ProviderInstanceManifest, ProviderConnectionManifest) {
+fn manifests(
+    origin: &Url,
+    visibility: RepositoryVisibility,
+) -> (ProviderInstanceManifest, ProviderConnectionManifest) {
     let instance_id = ProviderInstanceId::from_uuid(Uuid::from_u128(1)).expect("instance");
     let provider_revision = ProviderConfigurationRevision::new(1).expect("provider revision");
     let api = origin.join("api/v3/").expect("API origin");
@@ -628,7 +693,7 @@ fn manifests(origin: &Url) -> (ProviderInstanceManifest, ProviderConnectionManif
         provider_revision,
         provider.configuration().digest(),
         provider.capability_digest(),
-        RepositoryVisibility::Private,
+        visibility,
         ProviderDefaultBranch::new("main").expect("default branch"),
         ProviderWorkflowSource::Directory(
             ProviderRepositoryPath::new(".ci/workflows").expect("workflow root"),
@@ -671,12 +736,13 @@ fn invocation(
     provider: &ProviderInstanceManifest,
     connection: &ProviderConnectionManifest,
     worker_id: ProviderProcessingWorkerId,
+    visibility: RepositoryVisibility,
 ) -> ClaimedProviderProcessing {
     let repository = ProviderRepository::new(
         connection.configuration().repository().clone(),
         ExternalSubjectId::new("7").expect("owner ID"),
         ProviderRepositoryPath::new("owner/repository").expect("repository path"),
-        RepositoryVisibility::Private,
+        visibility,
     );
     let push = PushTrigger::new(
         repository,
