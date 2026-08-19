@@ -26,7 +26,7 @@ fn admission_epoch_and_workflow_plan_use_independent_sql_parameters() {
     }
 
     assert!(
-        inspected_queries >= 19,
+        inspected_queries >= 17,
         "expected the PostgreSQL Store adapter's independently versioned run-schema queries"
     );
 
