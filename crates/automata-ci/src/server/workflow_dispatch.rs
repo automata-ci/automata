@@ -5,10 +5,18 @@ use std::{
 };
 
 use async_trait::async_trait;
+use automata_ci_auth::secret::SecretStringRef;
 use automata_ci_blob::{
     BlobDescriptor, BlobKey, BlobPayload, BlobStoreErrorKind, ImmutableBlobStore, MediaType,
 };
 use automata_ci_core::{Sha256Digest, UnixMillis};
+use automata_ci_provider::{
+    ControlCredentialClaim, ControlCredentialProvider, ControlCredentialProviderError,
+    ControlCredentialRequest, ProviderControlCredentialId, ProviderControlCredentialWorkerId,
+    ProviderControlOperation, ProviderControlOperationSet, ProviderLifecycleState,
+    ProviderManifestRepository,
+};
+use automata_ci_provider_github::GithubConnectionPolicy;
 use automata_ci_scm::{
     ArchiveFormat, ArchiveLimits, RepositoryId as ScmRepositoryId, RevisionSpec, ScmErrorKind,
     ScmProvider, SnapshotRequest,
@@ -32,10 +40,6 @@ use automata_ci_workflow_service::{
 use bytes::Bytes;
 use sha2::{Digest as _, Sha256};
 
-use super::github_provider_credentials::{
-    GithubProviderCredentialAdapters, GithubWorkflowDispatchSourceCredentialError,
-};
-
 use crate::app::workflow_dispatch_api::{
     WorkflowDispatchApiBackend, WorkflowDispatchApiBackendError, WorkflowDispatchApiInputValue,
     WorkflowDispatchApiOutcome, WorkflowDispatchApiRequest,
@@ -46,9 +50,10 @@ pub(crate) struct OperationalWorkflowDispatchBackend {
     service: GithubWorkflowDispatchService,
     source_resolutions: Arc<dyn WorkflowDispatchSourceResolutionRepository>,
     manifests: Arc<dyn GithubProviderManifestRepository>,
+    connections: Arc<dyn ProviderManifestRepository>,
     source: Arc<dyn ScmProvider>,
     blobs: Arc<dyn ImmutableBlobStore>,
-    credentials: Arc<GithubProviderCredentialAdapters>,
+    credentials: Arc<dyn ControlCredentialProvider>,
     worker_id: GithubServerServiceWorkerId,
 }
 
@@ -58,15 +63,17 @@ impl OperationalWorkflowDispatchBackend {
         service: GithubWorkflowDispatchService,
         source_resolutions: Arc<dyn WorkflowDispatchSourceResolutionRepository>,
         manifests: Arc<dyn GithubProviderManifestRepository>,
+        connections: Arc<dyn ProviderManifestRepository>,
         source: Arc<dyn ScmProvider>,
         blobs: Arc<dyn ImmutableBlobStore>,
-        credentials: Arc<GithubProviderCredentialAdapters>,
+        credentials: Arc<dyn ControlCredentialProvider>,
         worker_id: GithubServerServiceWorkerId,
     ) -> Self {
         Self {
             service,
             source_resolutions,
             manifests,
+            connections,
             source,
             blobs,
             credentials,
@@ -144,6 +151,7 @@ impl OperationalWorkflowDispatchBackend {
         {
             return Err(WorkflowDispatchApiBackendError::Conflict);
         }
+        let connection = self.load_dispatch_connection(&claim, manifest).await?;
         let repository = ScmRepositoryId::new(manifest.github_repository_name().as_str())
             .map_err(|_| WorkflowDispatchApiBackendError::Invariant)?;
         let revision = RevisionSpec::new(claim.git_ref())
@@ -151,21 +159,27 @@ impl OperationalWorkflowDispatchBackend {
         let limits = ArchiveLimits::new(manifest.limits().archive_max_compressed_bytes())
             .map_err(|_| WorkflowDispatchApiBackendError::Invariant)?;
         let observed_at = system_now().ok_or(WorkflowDispatchApiBackendError::Unavailable)?;
+        let operation = ProviderControlOperation::RepositoryRead;
+        let request = workflow_dispatch_credential_request(&claim, &connection, observed_at)?;
         let credential = self
             .credentials
-            .acquire_workflow_dispatch_source(&claim, manifest, observed_at)
+            .acquire(&request)
             .await
             .map_err(classify_source_credential_error)?;
-        if !credential.matches(&claim, manifest) {
+        if credential.request_digest() != request.digest() || !credential.permits(operation) {
             credential.release().await;
             return Err(WorkflowDispatchApiBackendError::Invariant);
         }
+        let Ok(token) = SecretStringRef::new(credential.expose_secret()) else {
+            credential.release().await;
+            return Err(WorkflowDispatchApiBackendError::Invariant);
+        };
         let result = self
             .source
             .fetch_snapshot(SnapshotRequest::authenticated(
                 &repository,
                 &revision,
-                automata_ci_auth::secret::SecretStringRef::from_secret(credential.token()),
+                token,
                 limits,
             ))
             .await;
@@ -201,6 +215,36 @@ impl OperationalWorkflowDispatchBackend {
             .complete_workflow_dispatch_source_resolution(complete)
             .await
             .map_err(|error| classify_source_store_error(&error))
+    }
+
+    async fn load_dispatch_connection(
+        &self,
+        claim: &WorkflowDispatchSourceClaim,
+        manifest: &automata_ci_store::GithubProviderManifest,
+    ) -> Result<automata_ci_provider::ProviderConnectionManifest, WorkflowDispatchApiBackendError>
+    {
+        let connection = self
+            .connections
+            .current_connection(claim.connection_id())
+            .await
+            .map_err(|_| WorkflowDispatchApiBackendError::Unavailable)?
+            .ok_or(WorkflowDispatchApiBackendError::Conflict)?;
+        let policy = GithubConnectionPolicy::decode(connection.configuration().adapter_policy())
+            .map_err(|_| WorkflowDispatchApiBackendError::Conflict)?;
+        if connection.state() != ProviderLifecycleState::Active
+            || connection.configuration().workspace_id().to_string() != claim.tenant().as_str()
+            || connection
+                .configuration()
+                .repository()
+                .external_id()
+                .as_str()
+                != manifest.github_repository_id().get().to_string()
+            || policy.installation_id().get() != manifest.installation_id().get()
+            || policy.repository().as_str() != manifest.github_repository_name().as_str()
+        {
+            return Err(WorkflowDispatchApiBackendError::Conflict);
+        }
+        Ok(connection)
     }
 
     async fn store_source(
@@ -336,6 +380,53 @@ fn system_now() -> Option<UnixMillis> {
     i64::try_from(millis).ok().map(UnixMillis::new)
 }
 
+fn workflow_dispatch_credential_request(
+    claim: &WorkflowDispatchSourceClaim,
+    connection: &automata_ci_provider::ProviderConnectionManifest,
+    observed_at: UnixMillis,
+) -> Result<ControlCredentialRequest, WorkflowDispatchApiBackendError> {
+    if observed_at < claim.claimed_at() || observed_at >= claim.expires_at() {
+        return Err(WorkflowDispatchApiBackendError::Conflict);
+    }
+    let required_through = claim
+        .expires_at()
+        .get()
+        .checked_add(5 * 60 * 1_000)
+        .ok_or(WorkflowDispatchApiBackendError::Invariant)?;
+    let validity_millis = required_through
+        .checked_sub(observed_at.get())
+        .and_then(|value| u64::try_from(value).ok())
+        .ok_or(WorkflowDispatchApiBackendError::Invariant)?;
+    let control_claim = workflow_dispatch_control_claim(claim)?;
+    let operations = ProviderControlOperationSet::new([ProviderControlOperation::RepositoryRead])
+        .map_err(|_| WorkflowDispatchApiBackendError::Invariant)?;
+    ControlCredentialRequest::new(
+        control_claim,
+        connection,
+        operations,
+        observed_at,
+        validity_millis,
+    )
+    .map_err(|_| WorkflowDispatchApiBackendError::Invariant)
+}
+
+fn workflow_dispatch_control_claim(
+    claim: &WorkflowDispatchSourceClaim,
+) -> Result<ControlCredentialClaim, WorkflowDispatchApiBackendError> {
+    let credential_id = ProviderControlCredentialId::from_uuid(claim.operation_id().as_uuid())
+        .map_err(|_| WorkflowDispatchApiBackendError::Invariant)?;
+    let worker_id = ProviderControlCredentialWorkerId::from_uuid(claim.worker_id().as_uuid())
+        .map_err(|_| WorkflowDispatchApiBackendError::Invariant)?;
+    ControlCredentialClaim::new(
+        credential_id,
+        worker_id,
+        claim.fence().get(),
+        1,
+        claim.expires_at(),
+    )
+    .map_err(|_| WorkflowDispatchApiBackendError::Invariant)
+}
+
 fn classify_source_store_error(
     error: &WorkflowDispatchSourceResolutionStoreError,
 ) -> WorkflowDispatchApiBackendError {
@@ -357,16 +448,18 @@ fn classify_source_store_error(
 }
 
 const fn classify_source_credential_error(
-    error: GithubWorkflowDispatchSourceCredentialError,
+    error: ControlCredentialProviderError,
 ) -> WorkflowDispatchApiBackendError {
     match error {
-        GithubWorkflowDispatchSourceCredentialError::Unavailable => {
+        ControlCredentialProviderError::RateLimited
+        | ControlCredentialProviderError::Unavailable
+        | ControlCredentialProviderError::Indeterminate => {
             WorkflowDispatchApiBackendError::Unavailable
         }
-        GithubWorkflowDispatchSourceCredentialError::Rejected => {
-            WorkflowDispatchApiBackendError::Forbidden
-        }
-        GithubWorkflowDispatchSourceCredentialError::Inconsistent => {
+        ControlCredentialProviderError::Unauthorized
+        | ControlCredentialProviderError::Forbidden => WorkflowDispatchApiBackendError::Forbidden,
+        ControlCredentialProviderError::Unsupported
+        | ControlCredentialProviderError::InvalidResponse => {
             WorkflowDispatchApiBackendError::Invariant
         }
     }
@@ -442,6 +535,55 @@ fn classify_dispatch_error(error: &GithubWorkflowDispatchError) -> WorkflowDispa
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dispatch_source_fence_maps_exactly_to_common_control_claim() {
+        use automata_ci_core::{OperationId, WorkflowId};
+        use automata_ci_provider::ProviderConnectionId;
+        use automata_ci_store::{
+            GithubProviderManifestRevision, GithubServerServiceAuthorityId,
+            GithubServerServiceAuthoritySelector, GithubServerServiceClaimFence,
+            GithubServerServiceRevision, TenantScope,
+        };
+        use uuid::Uuid;
+
+        let operation_id = OperationId::from_uuid(Uuid::from_u128(0x81));
+        let worker_id = GithubServerServiceWorkerId::from_uuid(Uuid::from_u128(0x82))
+            .expect("dispatch worker ID");
+        let tenant =
+            TenantScope::from_authenticated_tenant_id("dispatch-tenant").expect("dispatch tenant");
+        let selector = GithubServerServiceAuthoritySelector::from_durable_parts(
+            tenant.clone(),
+            GithubServerServiceAuthorityId::from_uuid(Uuid::from_u128(0x83)).expect("authority ID"),
+            Sha256Digest::from_bytes([0x84; 32]),
+            GithubServerServiceRevision::new(1).expect("app revision"),
+            GithubServerServiceRevision::new(1).expect("policy revision"),
+        );
+        let claim = WorkflowDispatchSourceClaim::from_durable_parts(
+            tenant,
+            automata_ci_store::RepositoryId::from_uuid(Uuid::from_u128(0x85)),
+            WorkflowId::from_uuid(Uuid::from_u128(0x86)),
+            ".github/workflows/ci.yml",
+            "refs/heads/main",
+            operation_id,
+            ProviderConnectionId::from_uuid(Uuid::from_u128(0x87)).expect("connection ID"),
+            GithubProviderManifestRevision::new(3).expect("manifest revision"),
+            Sha256Digest::from_bytes([0x88; 32]),
+            selector,
+            worker_id,
+            GithubServerServiceClaimFence::new(7).expect("claim fence"),
+            UnixMillis::new(1_000),
+            UnixMillis::new(301_000),
+        )
+        .expect("dispatch source claim");
+
+        let mapped = workflow_dispatch_control_claim(&claim).expect("common control claim");
+        assert_eq!(mapped.credential_id().as_uuid(), operation_id.as_uuid());
+        assert_eq!(mapped.worker_id().as_uuid(), worker_id.as_uuid());
+        assert_eq!(mapped.fence(), 7);
+        assert_eq!(mapped.revision(), 1);
+        assert_eq!(mapped.expires_at(), UnixMillis::new(301_000));
+    }
 
     #[test]
     fn disabled_workflow_is_a_dispatch_conflict() {

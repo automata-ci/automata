@@ -595,6 +595,7 @@ impl ProductionComponents {
                         GithubWorkflowDispatchService::new(admission),
                         source_resolutions,
                         manifests,
+                        provider.workflow_dispatch_connections(),
                         provider.workflow_dispatch_source(),
                         Arc::clone(&blob_store),
                         provider.workflow_dispatch_credentials(),
