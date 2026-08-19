@@ -226,7 +226,16 @@ impl ProviderWorkflowApplicationService {
                         )) => ProviderWorkflowDisposition::Rejected(
                             ProviderWorkflowRejection::RunNumberExhausted,
                         ),
-                        Err(error) => return Err(admission_error(&error)),
+                        Err(error) => {
+                            let mapped = admission_error(&error);
+                            tracing::warn!(
+                                workflow_path = %workflow.path,
+                                ?error,
+                                ?mapped,
+                                "provider workflow admission failed"
+                            );
+                            return Err(mapped);
+                        }
                     }
                 }
                 CompilationDisposition::NotSelected(reason) => {
@@ -252,10 +261,15 @@ impl ProviderWorkflowApplicationService {
                 created_at,
                 outcome,
             )?;
-            self.results
-                .project_invocation(result_request)
-                .await
-                .map_err(provider_result_error)?;
+            if let Err(error) = self.results.project_invocation(result_request).await {
+                let mapped = provider_result_error(error);
+                tracing::warn!(
+                    workflow_path = %workflow.path,
+                    ?mapped,
+                    "provider workflow result projection failed"
+                );
+                return Err(mapped);
+            }
             results.push(ProviderWorkflowApplicationReport {
                 path: workflow.path,
                 disposition: outcome,
