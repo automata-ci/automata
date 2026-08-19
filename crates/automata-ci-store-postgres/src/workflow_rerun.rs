@@ -35,7 +35,6 @@ const RERUN_REQUEST_DIGEST_DOMAIN: &[u8] = b"automata.workflow-rerun.request.v1\
 const RERUN_RUN_ID_DOMAIN: &[u8] = b"automata.workflow-rerun.run-id.v1\0";
 const RERUN_INVOCATION_ID_DOMAIN: &[u8] = b"automata.workflow-rerun.invocation-id.v1\0";
 const RERUN_JOB_ID_DOMAIN: &[u8] = b"automata.workflow-rerun.job-id.v1\0";
-const RERUN_CHECK_SUBJECT_ID_DOMAIN: &[u8] = b"automata.workflow-rerun.check-subject-id.v1\0";
 const RERUN_AUDIT_ID_DOMAIN: &[u8] = b"automata.workflow-rerun.audit.v1\0";
 const GITHUB_CHECK_RERUN_OPERATION_ID_DOMAIN: &[u8] =
     b"automata.github-check-rerun.operation-id.v1\0";
@@ -45,20 +44,6 @@ const REPLAY_RECEIPT_SQL: &str = r"
            receipt.committed_at_ms, receipt.github_subject_evidence_required,
            rerun.operation_id, rerun.source_run_id, rerun.rerun_run_id,
            run.public_run_id_alias, run.run_number, run.run_attempt,
-           check_evidence.run_id AS check_evidence_run_id,
-           check_evidence.source_run_id AS check_evidence_source_run_id,
-           check_evidence.github_check_subject_id,
-           check_evidence.github_check_head_sha AS check_evidence_head_sha,
-           check_evidence.recorded_at_ms AS check_evidence_recorded_at_ms,
-           subject.origin_kind AS check_origin_kind,
-           subject.workflow_rerun_run_id AS check_origin_run_id,
-           subject.workflow_run_id AS check_workflow_run_id,
-           subject.head_sha AS check_subject_head_sha,
-           run_evidence.run_id AS run_evidence_run_id,
-           run_evidence.github_check_subject_id AS run_evidence_subject_id,
-           run_evidence.github_check_head_sha AS run_evidence_head_sha,
-           run_evidence.subject_evidence_sha256 AS run_evidence_digest,
-           run_evidence.admitted_at_ms AS run_evidence_admitted_at_ms,
            audit_evidence.run_id AS audit_evidence_run_id,
            audit_evidence.request_digest AS audit_request_digest,
            audit_evidence.recorded_at_ms AS audit_recorded_at_ms,
@@ -76,20 +61,6 @@ const REPLAY_RECEIPT_SQL: &str = r"
       ON rerun.tenant_id = receipt.tenant_id
      AND ('workflow-rerun:' || rerun.operation_id::TEXT) = receipt.idempotency_key
     LEFT JOIN workflow_runs AS run ON run.id = receipt.run_id
-    LEFT JOIN workflow_rerun_check_evidence AS check_evidence
-      ON check_evidence.tenant_id = rerun.tenant_id
-     AND check_evidence.operation_id = rerun.operation_id
-     AND check_evidence.run_id = rerun.rerun_run_id
-     AND check_evidence.source_run_id = rerun.source_run_id
-    LEFT JOIN github_check_subjects AS subject
-      ON subject.tenant_id = check_evidence.tenant_id
-     AND subject.id = check_evidence.github_check_subject_id
-    LEFT JOIN github_workflow_rerun_subject_evidence AS run_evidence
-      ON run_evidence.tenant_id = check_evidence.tenant_id
-     AND run_evidence.operation_id = check_evidence.operation_id
-     AND run_evidence.run_id = check_evidence.run_id
-     AND run_evidence.github_check_subject_id =
-         check_evidence.github_check_subject_id
     LEFT JOIN workflow_rerun_audit_evidence AS audit_evidence
       ON audit_evidence.tenant_id = rerun.tenant_id
      AND audit_evidence.operation_id = rerun.operation_id
@@ -114,7 +85,6 @@ struct SourceRun {
     event_digest: Vec<u8>,
     created_at_ms: i64,
     root_created_at_ms: i64,
-    check_subject_id: Uuid,
     concurrency: Option<WorkflowConcurrency>,
 }
 
@@ -139,19 +109,10 @@ struct SourceJob {
     instance_count: i32,
 }
 
-#[derive(Debug)]
-struct RepositoryContentsAuthorityEvidence {
-    id: Uuid,
-    identity_digest: Vec<u8>,
-    app_configuration_revision: i64,
-    policy_revision: i64,
-}
-
 struct RerunWrite<'a> {
     request: &'a RerunWorkflow,
     actor: &'a AuthorizedHumanRepositoryAction,
     source: &'a SourceRun,
-    repository_contents_authority: &'a RepositoryContentsAuthorityEvidence,
     request_digest: [u8; 32],
     idempotency_key: &'a str,
     admitted_at_ms: i64,
@@ -638,9 +599,6 @@ async fn admit_authorized_rerun(
     {
         return Err(WorkflowRerunStoreError::SourceExpired);
     }
-    let repository_contents_authority =
-        lock_repository_contents_authority(&mut transaction, &request, &source, database_now)
-            .await?;
     ensure_root_attempt(&mut transaction, &source).await?;
     let next_attempt = next_attempt(&mut transaction, &source).await?;
     let triggering_actor = load_triggering_actor(&mut transaction, &actor).await?;
@@ -663,7 +621,6 @@ async fn admit_authorized_rerun(
         request: &request,
         actor: &actor,
         source: &source,
-        repository_contents_authority: &repository_contents_authority,
         request_digest,
         idempotency_key: &idempotency_key,
         admitted_at_ms: database_now,
@@ -749,16 +706,6 @@ async fn persist_rerun(
         write.admitted_at_ms,
     )
     .await?;
-    insert_rerun_check_projection(transaction, write).await?;
-    copy_runtime_policy_pin(
-        transaction,
-        write.source,
-        write.run_id,
-        write.admitted_at_ms,
-    )
-    .await?;
-    insert_jobs_and_dependencies(transaction, write).await?;
-    seal_graph(transaction, write.run_id).await?;
     record_audit_event(
         transaction,
         write.request,
@@ -768,7 +715,15 @@ async fn persist_rerun(
         write.admitted_at_ms,
     )
     .await?;
-
+    copy_runtime_policy_pin(
+        transaction,
+        write.source,
+        write.run_id,
+        write.admitted_at_ms,
+    )
+    .await?;
+    insert_jobs_and_dependencies(transaction, write).await?;
+    seal_graph(transaction, write.run_id).await?;
     Ok(())
 }
 
@@ -802,7 +757,7 @@ async fn claim_idempotency_receipt(
         INSERT INTO workflow_admission_receipts (
             tenant_id, idempotency_kind, idempotency_key, request_digest,
             github_subject_evidence_required
-        ) VALUES ($1, 'operation', $2, $3, TRUE)
+        ) VALUES ($1, 'operation', $2, $3, FALSE)
         ON CONFLICT DO NOTHING
         ",
     )
@@ -839,7 +794,7 @@ async fn replay_receipt(
             .try_get::<Option<Uuid>, _>("source_run_id")
             .map_err(operation_error)?
             != Some(request.source_run_id().as_uuid())
-        || !row
+        || row
             .try_get::<bool, _>("github_subject_evidence_required")
             .map_err(operation_error)?
     {
@@ -880,21 +835,6 @@ fn validate_replay_evidence(
     request_digest: [u8; 32],
     run_id: Uuid,
 ) -> Result<(), WorkflowRerunStoreError> {
-    let subject_id = row
-        .try_get("github_check_subject_id")
-        .map_err(operation_error)?;
-    let check_head = row
-        .try_get("check_evidence_head_sha")
-        .map_err(operation_error)?;
-    let subject_head = row
-        .try_get("check_subject_head_sha")
-        .map_err(operation_error)?;
-    let run_head = row
-        .try_get("run_evidence_head_sha")
-        .map_err(operation_error)?;
-    let run_digest = row
-        .try_get("run_evidence_digest")
-        .map_err(operation_error)?;
     let committed_at_ms = row.try_get("committed_at_ms").map_err(operation_error)?;
     let principal_id = Uuid::parse_str(request.actor().principal_id().as_str())
         .map_err(|_| StoreError::corrupt_data("workflow rerun actor principal is invalid"))?;
@@ -904,17 +844,11 @@ fn validate_replay_evidence(
         request,
         request_digest,
         run_id,
-        subject_id,
-        check_head,
-        subject_head,
-        run_head,
-        run_digest,
         committed_at_ms,
         principal_id,
         session_id,
         resource_id: run_id.hyphenated().to_string(),
     };
-    validate_replay_check_evidence(row, &evidence)?;
     validate_replay_audit_evidence(row, &evidence)
 }
 
@@ -922,18 +856,13 @@ struct ReplayEvidence<'a> {
     request: &'a RerunWorkflow,
     request_digest: [u8; 32],
     run_id: Uuid,
-    subject_id: Option<Uuid>,
-    check_head: Option<Vec<u8>>,
-    subject_head: Option<Vec<u8>>,
-    run_head: Option<Vec<u8>>,
-    run_digest: Option<Vec<u8>>,
     committed_at_ms: Option<i64>,
     principal_id: Uuid,
     session_id: Uuid,
     resource_id: String,
 }
 
-fn validate_replay_check_evidence(
+fn validate_replay_audit_evidence(
     row: &PgRow,
     evidence: &ReplayEvidence<'_>,
 ) -> Result<(), WorkflowRerunStoreError> {
@@ -942,64 +871,9 @@ fn validate_replay_check_evidence(
         .map_err(operation_error)?
         != Some(evidence.request.operation_id().as_uuid())
         || row
-            .try_get::<Option<Uuid>, _>("check_evidence_run_id")
+            .try_get::<Option<Uuid>, _>("audit_evidence_run_id")
             .map_err(operation_error)?
             != Some(evidence.run_id)
-        || row
-            .try_get::<Option<Uuid>, _>("check_evidence_source_run_id")
-            .map_err(operation_error)?
-            != Some(evidence.request.source_run_id().as_uuid())
-        || evidence.subject_id.is_none()
-        || row
-            .try_get::<Option<String>, _>("check_origin_kind")
-            .map_err(operation_error)?
-            .as_deref()
-            != Some("workflow_rerun")
-        || row
-            .try_get::<Option<Uuid>, _>("check_origin_run_id")
-            .map_err(operation_error)?
-            != Some(evidence.run_id)
-        || row
-            .try_get::<Option<Uuid>, _>("check_workflow_run_id")
-            .map_err(operation_error)?
-            != Some(evidence.run_id)
-        || row
-            .try_get::<Option<Uuid>, _>("run_evidence_run_id")
-            .map_err(operation_error)?
-            != Some(evidence.run_id)
-        || row
-            .try_get::<Option<Uuid>, _>("run_evidence_subject_id")
-            .map_err(operation_error)?
-            != evidence.subject_id
-        || evidence.check_head.is_none()
-        || evidence.check_head != evidence.subject_head
-        || evidence.check_head != evidence.run_head
-        || evidence
-            .run_digest
-            .as_deref()
-            .is_none_or(|digest| digest.len() != 32)
-        || row
-            .try_get::<Option<i64>, _>("check_evidence_recorded_at_ms")
-            .map_err(operation_error)?
-            != evidence.committed_at_ms
-        || row
-            .try_get::<Option<i64>, _>("run_evidence_admitted_at_ms")
-            .map_err(operation_error)?
-            != evidence.committed_at_ms
-    {
-        return Err(replay_evidence_error());
-    }
-    Ok(())
-}
-
-fn validate_replay_audit_evidence(
-    row: &PgRow,
-    evidence: &ReplayEvidence<'_>,
-) -> Result<(), WorkflowRerunStoreError> {
-    if row
-        .try_get::<Option<Uuid>, _>("audit_evidence_run_id")
-        .map_err(operation_error)?
-        != Some(evidence.run_id)
         || row
             .try_get::<Option<Vec<u8>>, _>("audit_request_digest")
             .map_err(operation_error)?
@@ -1116,9 +990,8 @@ async fn lock_source_run(
                marker.state AS marker_state, invocation.state AS invocation_state,
                claim.state AS result_claim_state, result.finalized_at_ms,
                root_run.id AS root_run_id, attempt.attempt AS durable_attempt,
-               check_projection.subject_count AS check_subject_count,
-               check_projection.subject_id AS check_subject_id,
-               check_projection.terminal_count AS terminal_check_subject_count
+               result_projection.subject_count AS result_subject_count,
+               result_projection.terminal_count AS terminal_result_subject_count
         FROM workflow_runs AS run
         JOIN repositories AS repository ON repository.id = run.repository_id
         LEFT JOIN logical_workflow_runs AS marker ON marker.run_id = run.id
@@ -1138,18 +1011,17 @@ async fn lock_source_run(
          AND concurrency.normalized_key = run.concurrency_group_key
         LEFT JOIN LATERAL (
             SELECT count(*)::BIGINT AS subject_count,
-                   (array_agg(subject.id ORDER BY subject.id))[1] AS subject_id,
                    count(*) FILTER (
-                       WHERE subject.desired_state = 'completed'
-                         AND subject.desired_conclusion IS NOT NULL
-                         AND subject.terminal_cause IS NOT NULL
-                         AND subject.desired_revision IN (2, 3)
+                       WHERE outbox.phase = 'completed'
+                         AND outbox.conclusion IS NOT NULL
+                         AND outbox.state = 'completed'
                    )::BIGINT AS terminal_count
-            FROM github_workflow_run_manifest_origins AS origin
-            JOIN github_check_subjects AS subject ON subject.id = origin.github_check_subject_id
-             AND (subject.tenant_id, subject.repository_id) = (origin.tenant_id, origin.repository_id)
-            WHERE origin.run_id = run.id
-        ) AS check_projection ON TRUE
+            FROM provider_result_subjects AS subject
+            JOIN provider_result_outbox AS outbox
+              ON outbox.subject_id = subject.subject_id
+            WHERE subject.subject_kind = 'workflow-run'
+              AND subject.run_id = run.id
+        ) AS result_projection ON TRUE
         WHERE repository.tenant_id = $1
           AND run.repository_id = $2
           AND run.id = $3
@@ -1193,82 +1065,8 @@ async fn lock_source_run(
             .try_get("source_created_at_ms")
             .map_err(operation_error)?,
         root_created_at_ms: row.try_get("root_created_at_ms").map_err(operation_error)?,
-        check_subject_id: row
-            .try_get::<Option<Uuid>, _>("check_subject_id")
-            .map_err(operation_error)?
-            .ok_or(WorkflowRerunStoreError::UnsupportedSelection)?,
         concurrency,
     })
-}
-
-async fn lock_repository_contents_authority(
-    transaction: &mut Transaction<'_, Postgres>,
-    request: &RerunWorkflow,
-    source: &SourceRun,
-    admitted_at_ms: i64,
-) -> Result<RepositoryContentsAuthorityEvidence, WorkflowRerunStoreError> {
-    let rows = sqlx::query(
-        r"
-        SELECT authority.id, authority.identity_digest,
-               authority.app_configuration_revision, authority.policy_revision
-        FROM github_workflow_run_base_manifest_origins AS origin
-        JOIN github_provider_manifest_revisions AS manifest
-          ON manifest.tenant_id = origin.tenant_id
-         AND manifest.repository_id = origin.repository_id
-         AND manifest.provider_connection_id = origin.provider_connection_id
-         AND manifest.manifest_revision = origin.provider_manifest_revision
-         AND manifest.manifest_digest = origin.provider_manifest_digest
-        JOIN github_server_service_authorities AS authority
-          ON authority.tenant_id = origin.tenant_id
-         AND authority.id = origin.repository_contents_authority_id
-         AND authority.repository_id = origin.repository_id
-         AND authority.provider_connection_id = origin.provider_connection_id
-         AND authority.provider_installation_id = origin.provider_installation_id
-         AND authority.github_app_id = manifest.github_app_id
-         AND authority.github_repository_id = origin.github_repository_id
-         AND authority.github_repository_name = origin.github_repository_name
-         AND authority.service_scope = 'repository_contents_read'
-         AND authority.github_app_client_id = manifest.github_app_client_id
-         AND authority.github_app_jwt_issuer_kind =
-             manifest.github_app_jwt_issuer_kind
-         AND authority.app_key_spki_sha256 = manifest.app_key_spki_sha256
-         AND authority.app_configuration_revision =
-             origin.repository_contents_authority_app_configuration_revision
-         AND authority.policy_revision =
-             origin.repository_contents_authority_policy_revision
-         AND authority.identity_digest =
-             origin.repository_contents_authority_identity_digest
-         AND authority.state = 'active'
-         AND authority.created_at_ms <= $4
-         AND authority.state_updated_at_ms <= $4
-        WHERE origin.tenant_id = $1
-          AND origin.repository_id = $2
-          AND origin.run_id = $3
-        FOR SHARE OF manifest, authority
-        ",
-    )
-    .bind(request.actor().tenant_id().as_str())
-    .bind(request.repository_id().as_uuid())
-    .bind(source.root_run_id)
-    .bind(admitted_at_ms)
-    .fetch_all(&mut **transaction)
-    .await
-    .map_err(operation_error)?;
-    match rows.as_slice() {
-        [row] => Ok(RepositoryContentsAuthorityEvidence {
-            id: row.try_get("id").map_err(operation_error)?,
-            identity_digest: row.try_get("identity_digest").map_err(operation_error)?,
-            app_configuration_revision: row
-                .try_get("app_configuration_revision")
-                .map_err(operation_error)?,
-            policy_revision: row.try_get("policy_revision").map_err(operation_error)?,
-        }),
-        [] => Err(WorkflowRerunStoreError::UnsupportedSelection),
-        _ => Err(StoreError::corrupt_data(
-            "workflow rerun repository contents authority is ambiguous",
-        )
-        .into()),
-    }
 }
 
 fn validate_source_row(row: &PgRow) -> Result<Uuid, WorkflowRerunStoreError> {
@@ -1321,11 +1119,11 @@ fn validate_source_row(row: &PgRow) -> Result<Uuid, WorkflowRerunStoreError> {
             .map_err(operation_error)?,
     )?;
     if row
-        .try_get::<i64, _>("check_subject_count")
+        .try_get::<i64, _>("result_subject_count")
         .map_err(operation_error)?
         != 1
         || row
-            .try_get::<i64, _>("terminal_check_subject_count")
+            .try_get::<i64, _>("terminal_result_subject_count")
             .map_err(operation_error)?
             != 1
     {
@@ -1941,260 +1739,6 @@ async fn insert_attempt_and_request(
     Ok(())
 }
 
-async fn insert_rerun_check_projection(
-    transaction: &mut Transaction<'_, Postgres>,
-    write: &RerunWrite<'_>,
-) -> Result<(), WorkflowRerunStoreError> {
-    let subject_id = derived_uuid(RERUN_CHECK_SUBJECT_ID_DOMAIN, &write.request_digest, &[]);
-    let external_id = format!("automata-check:{subject_id}");
-    insert_rerun_check_subject(transaction, write, subject_id, &external_id).await?;
-    link_rerun_check_subject(transaction, write, subject_id).await?;
-    insert_rerun_check_evidence(transaction, write, subject_id).await?;
-    insert_rerun_run_subject_evidence(transaction, write, subject_id).await
-}
-
-async fn insert_rerun_check_subject(
-    transaction: &mut Transaction<'_, Postgres>,
-    write: &RerunWrite<'_>,
-    subject_id: Uuid,
-    external_id: &str,
-) -> Result<(), WorkflowRerunStoreError> {
-    let inserted = sqlx::query(
-        r"
-        INSERT INTO github_check_subjects (
-            id, tenant_id, repository_id, origin_kind,
-            provider_delivery_id, schedule_fire_id, workflow_rerun_run_id,
-            subject_key, provider_connection_id, provider_installation_id,
-            github_repository_id, github_app_id, head_sha, check_name,
-            external_id, created_at_ms, desired_updated_at_ms
-        )
-        SELECT $1, source.tenant_id, source.repository_id, 'workflow_rerun',
-               NULL, NULL, $2, source.subject_key, source.provider_connection_id,
-               source.provider_installation_id, source.github_repository_id,
-               source.github_app_id, source.head_sha, source.check_name,
-               $3, $4, $4
-        FROM github_check_subjects AS source
-        JOIN workflow_rerun_attempts AS attempt
-          ON attempt.run_id = $2
-         AND attempt.source_run_id = $5
-        WHERE source.id = $6
-          AND source.workflow_run_id = attempt.source_run_id
-          AND source.desired_state = 'completed'
-          AND source.desired_conclusion IS NOT NULL
-          AND source.terminal_cause IS NOT NULL
-          AND source.desired_revision = 3
-        ",
-    )
-    .bind(subject_id)
-    .bind(write.run_id)
-    .bind(external_id)
-    .bind(write.admitted_at_ms)
-    .bind(write.source.run_id)
-    .bind(write.source.check_subject_id)
-    .execute(&mut **transaction)
-    .await
-    .map_err(operation_error)?
-    .rows_affected();
-    exact_one(inserted, "workflow rerun Check subject was not created")
-}
-
-async fn link_rerun_check_subject(
-    transaction: &mut Transaction<'_, Postgres>,
-    write: &RerunWrite<'_>,
-    subject_id: Uuid,
-) -> Result<(), WorkflowRerunStoreError> {
-    let linked = sqlx::query(
-        r"
-        UPDATE github_check_subjects AS subject
-        SET workflow_run_id = $2,
-            linked_at_ms = $3,
-            desired_state = 'in_progress',
-            desired_revision = 2,
-            desired_updated_at_ms = $3
-        WHERE subject.id = $1
-          AND subject.origin_kind = 'workflow_rerun'
-          AND subject.workflow_rerun_run_id = $2
-          AND subject.workflow_run_id IS NULL
-          AND subject.linked_at_ms IS NULL
-          AND subject.desired_state = 'queued'
-          AND subject.desired_revision = 1
-        ",
-    )
-    .bind(subject_id)
-    .bind(write.run_id)
-    .bind(write.admitted_at_ms)
-    .execute(&mut **transaction)
-    .await
-    .map_err(operation_error)?
-    .rows_affected();
-    exact_one(
-        linked,
-        "workflow rerun Check subject did not link and start",
-    )
-}
-
-async fn insert_rerun_check_evidence(
-    transaction: &mut Transaction<'_, Postgres>,
-    write: &RerunWrite<'_>,
-    subject_id: Uuid,
-) -> Result<(), WorkflowRerunStoreError> {
-    let evidence = sqlx::query(
-        r"
-        INSERT INTO workflow_rerun_check_evidence (
-            run_id, source_run_id, tenant_id, operation_id, repository_id,
-            provider_connection_id, provider_manifest_revision,
-            provider_manifest_digest, source_github_check_subject_id,
-            github_check_subject_id, github_check_head_sha, checks_authority_id,
-            checks_authority_identity_digest,
-            checks_authority_app_configuration_revision,
-            checks_authority_policy_revision,
-            repository_contents_authority_id,
-            repository_contents_authority_identity_digest,
-            repository_contents_authority_app_configuration_revision,
-            repository_contents_authority_policy_revision, recorded_at_ms
-        )
-        SELECT $1, $2, origin.tenant_id, request.operation_id,
-               origin.repository_id, origin.provider_connection_id,
-               origin.provider_manifest_revision, origin.provider_manifest_digest,
-               $3, $4, origin.github_check_head_sha, authority.id,
-               authority.identity_digest, authority.app_configuration_revision,
-               authority.policy_revision, $8, $9, $10, $11, $5
-        FROM workflow_rerun_attempts AS attempt
-        JOIN workflow_rerun_requests AS request
-          ON request.tenant_id = $6
-         AND request.operation_id = $7
-         AND request.rerun_run_id = attempt.run_id
-         AND request.source_run_id = attempt.source_run_id
-        JOIN github_workflow_run_base_manifest_origins AS origin
-          ON origin.tenant_id = request.tenant_id
-         AND origin.repository_id = request.repository_id
-         AND origin.run_id = attempt.root_run_id
-        JOIN github_provider_manifest_revisions AS manifest
-          ON manifest.tenant_id = origin.tenant_id
-         AND manifest.repository_id = origin.repository_id
-         AND manifest.provider_connection_id = origin.provider_connection_id
-         AND manifest.manifest_revision = origin.provider_manifest_revision
-         AND manifest.manifest_digest = origin.provider_manifest_digest
-        JOIN github_server_service_authorities AS authority
-          ON authority.tenant_id = origin.tenant_id
-         AND authority.repository_id = origin.repository_id
-         AND authority.provider_connection_id = origin.provider_connection_id
-         AND authority.provider_installation_id = origin.provider_installation_id
-         AND authority.github_app_id = manifest.github_app_id
-         AND authority.github_repository_id = origin.github_repository_id
-         AND authority.github_repository_name = origin.github_repository_name
-         AND authority.service_scope = 'checks_write'
-         AND authority.github_app_client_id = manifest.github_app_client_id
-         AND authority.github_app_jwt_issuer_kind =
-             manifest.github_app_jwt_issuer_kind
-         AND authority.app_key_spki_sha256 = manifest.app_key_spki_sha256
-         AND authority.app_configuration_revision =
-             manifest.app_configuration_revision
-         AND authority.policy_revision = manifest.policy_revision
-         AND authority.state = 'active'
-         AND authority.created_at_ms <= $5
-         AND authority.state_updated_at_ms <= $5
-        WHERE attempt.run_id = $1
-          AND attempt.source_run_id = $2
-        FOR SHARE OF manifest, authority
-        ",
-    )
-    .bind(write.run_id)
-    .bind(write.source.run_id)
-    .bind(write.source.check_subject_id)
-    .bind(subject_id)
-    .bind(write.admitted_at_ms)
-    .bind(write.request.actor().tenant_id().as_str())
-    .bind(write.request.operation_id().as_uuid())
-    .bind(write.repository_contents_authority.id)
-    .bind(
-        write
-            .repository_contents_authority
-            .identity_digest
-            .as_slice(),
-    )
-    .bind(
-        write
-            .repository_contents_authority
-            .app_configuration_revision,
-    )
-    .bind(write.repository_contents_authority.policy_revision)
-    .execute(&mut **transaction)
-    .await
-    .map_err(operation_error)?
-    .rows_affected();
-    match evidence {
-        1 => Ok(()),
-        0 => Err(WorkflowRerunStoreError::UnsupportedSelection),
-        _ => Err(
-            StoreError::corrupt_data("workflow rerun Check evidence authority is ambiguous").into(),
-        ),
-    }
-}
-
-async fn insert_rerun_run_subject_evidence(
-    transaction: &mut Transaction<'_, Postgres>,
-    write: &RerunWrite<'_>,
-    subject_id: Uuid,
-) -> Result<(), WorkflowRerunStoreError> {
-    let rows = sqlx::query(
-        r"
-        INSERT INTO github_workflow_rerun_subject_evidence (
-            operation_id, tenant_id, repository_id, workflow_id, snapshot_id,
-            run_id, source_run_id, root_invocation_id,
-            github_repository_owner_id, github_check_subject_id,
-            github_check_head_sha, workflow_path, source_digest,
-            event_name, event_digest, git_ref, workflow_plan_schema,
-            plan_digest, logical_admission_digest, admitted_at_ms
-        )
-        SELECT request.operation_id, origin.tenant_id, origin.repository_id,
-               run.workflow_id, run.snapshot_id, attempt.run_id,
-               attempt.source_run_id, marker.root_invocation_id,
-               origin.github_repository_owner_id, $2,
-               origin.github_check_head_sha, origin.workflow_path,
-               origin.source_digest, origin.event_name, origin.event_digest,
-               origin.git_ref, origin.workflow_plan_schema, origin.plan_digest,
-               marker.admission_digest, $3
-        FROM workflow_rerun_attempts AS attempt
-        JOIN workflow_rerun_requests AS request
-          ON request.tenant_id = $4
-         AND request.operation_id = $5
-         AND request.rerun_run_id = attempt.run_id
-         AND request.source_run_id = attempt.source_run_id
-        JOIN workflow_runs AS run ON run.id = attempt.run_id
-        JOIN logical_workflow_runs AS marker ON marker.run_id = attempt.run_id
-        JOIN workflow_rerun_check_evidence AS check_evidence
-          ON check_evidence.tenant_id = request.tenant_id
-         AND check_evidence.operation_id = request.operation_id
-         AND check_evidence.run_id = attempt.run_id
-         AND check_evidence.github_check_subject_id = $2
-        JOIN github_workflow_run_base_manifest_origins AS origin
-          ON origin.tenant_id = request.tenant_id
-         AND origin.repository_id = request.repository_id
-         AND origin.run_id = attempt.root_run_id
-         AND origin.provider_connection_id =
-             check_evidence.provider_connection_id
-         AND origin.provider_manifest_revision =
-             check_evidence.provider_manifest_revision
-         AND origin.provider_manifest_digest =
-             check_evidence.provider_manifest_digest
-        WHERE attempt.run_id = $1
-          AND attempt.source_run_id = $6
-        ",
-    )
-    .bind(write.run_id)
-    .bind(subject_id)
-    .bind(write.admitted_at_ms)
-    .bind(write.request.actor().tenant_id().as_str())
-    .bind(write.request.operation_id().as_uuid())
-    .bind(write.source.run_id)
-    .execute(&mut **transaction)
-    .await
-    .map_err(operation_error)?
-    .rows_affected();
-    exact_one(rows, "workflow rerun run-subject evidence was not sealed")
-}
-
 fn selection_columns(selection: WorkflowRerunSelection) -> (&'static str, Option<Uuid>) {
     match selection {
         WorkflowRerunSelection::EntireWorkflow => ("entire_workflow", None),
@@ -2220,7 +1764,7 @@ async fn finalize_admission_receipt(
         WHERE tenant_id = $1 AND idempotency_kind = 'operation'
           AND idempotency_key = $2 AND request_digest = $6
           AND repository_id IS NULL AND run_id IS NULL AND committed_at_ms IS NULL
-          AND github_subject_evidence_required
+          AND NOT github_subject_evidence_required
         ",
     )
     .bind(request.actor().tenant_id().as_str())
