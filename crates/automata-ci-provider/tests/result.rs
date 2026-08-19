@@ -1,6 +1,6 @@
 use std::sync::Mutex;
 
-use automata_ci_core::{GitObjectId, RunId, Sha256Digest, UnixMillis, WorkspaceId};
+use automata_ci_core::{GitObjectId, ManagedTenantId, RunId, Sha256Digest, UnixMillis};
 use automata_ci_provider::{
     ClaimProviderResult, ClaimedProviderResult, CommitStatusCapability, CommitStatusState,
     CompleteProviderResult, DesiredProviderResult, ExternalRepositoryId,
@@ -26,7 +26,7 @@ use uuid::Uuid;
 
 fn connection() -> ProviderConnectionManifest {
     let configuration = ProviderConnectionConfiguration::new(
-        WorkspaceId::parse("11111111-1111-4111-8111-111111111111").unwrap(),
+        ManagedTenantId::parse("11111111-1111-4111-8111-111111111111").unwrap(),
         ExternalRepositoryIdentity::new(
             "22222222-2222-4222-8222-222222222222".parse().unwrap(),
             ExternalRepositoryId::new("repository-42").unwrap(),

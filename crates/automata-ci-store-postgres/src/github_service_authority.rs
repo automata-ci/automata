@@ -1284,7 +1284,7 @@ async fn revalidate_provider_result_consumer(
          AND provider_instance.capability_digest = provider_connection.capability_digest
         JOIN repositories AS repository
           ON repository.id = $7
-         AND repository.tenant_id = provider_connection.workspace_id
+         AND repository.tenant_id = provider_connection.tenant_id
          AND repository.scm_provider = provider_instance.provider_type
          AND repository.provider_repository_id = provider_connection.external_repository_id
         WHERE outbox.subject_id = $1
@@ -1295,7 +1295,7 @@ async fn revalidate_provider_result_consumer(
           AND outbox.claim_started_at_ms <= $4
           AND outbox.claim_expires_at_ms > $4
           AND subject.connection_id = $6
-          AND provider_connection.workspace_id = $8
+          AND provider_connection.tenant_id = $8
           AND provider_instance.provider_type = 'github'
           AND provider_connection.external_repository_id = $9
         FOR SHARE OF outbox, subject, provider_connection, provider_instance, repository

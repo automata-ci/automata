@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
-//! Canonical mTLS gRPC transport for shard management and workspace provisioning.
+//! Canonical mTLS gRPC transport for shard management and tenant provisioning.
 //!
 //! Protobuf remains a wire adapter. Callers cannot pass generated DTOs to the
 //! application port, and application implementations cannot observe TLS or
@@ -10,27 +10,26 @@
 use std::{fmt, sync::Arc};
 
 use automata_ci_core::JobAuthorityProfile;
-use automata_ci_core::WorkspaceId;
+use automata_ci_core::ManagedTenantId;
 use automata_ci_provisioning::{
     ApplyGithubProviderConfigurationCommand, ApplyGithubProviderConfigurationResult,
     ApplyGithubProviderRunnerPolicyCommand, ApplyGithubProviderRunnerPolicyResult,
-    ApplyWorkspaceEntitlementCommand, ApplyWorkspaceEntitlementResult,
-    ApplyWorkspaceGithubRepositoriesCommand, ApplyWorkspaceGithubRepositoriesResult,
+    ApplyTenantEntitlementCommand, ApplyTenantEntitlementResult,
+    ApplyTenantGithubRepositoriesCommand, ApplyTenantGithubRepositoriesResult,
     AuthorizedApplyGithubProviderConfiguration, AuthorizedApplyGithubProviderRunnerPolicy,
-    AuthorizedApplyWorkspaceEntitlement, AuthorizedApplyWorkspaceGithubRepositories,
-    AuthorizedProvisionWorkspace, ComputeSeconds, DelegatedActorIssuer, DisplayName,
+    AuthorizedApplyTenantEntitlement, AuthorizedApplyTenantGithubRepositories,
+    AuthorizedProvisionTenant, ComputeSeconds, DelegatedActorIssuer, DisplayName,
     EntitlementDurationSeconds, EntitlementFailure, EntitlementFailureKind, EntitlementRevision,
     ExternalAccountSubject, GithubProviderConfiguration, GithubProviderConfigurationApplier,
     GithubProviderConfigurationFailure, GithubProviderConfigurationFailureKind,
     GithubProviderConfigurationRevision, GithubProviderRepositorySelection,
     GithubProviderRunnerPolicyApplier, GithubProviderRunnerPolicyFailure,
     GithubProviderRunnerPolicyFailureKind, GithubProviderSchedulePolicy, GithubProviderSecret,
-    OperationId, ProvisionWorkspaceCommand, ProvisionWorkspaceResult,
-    ProvisioningAuthenticationError, ProvisioningFailure, ProvisioningFailureKind,
-    ProvisioningWorkloadAuthenticator, ShardId, WorkloadAuthenticationEvidence,
-    WorkspaceEntitlementApplier, WorkspaceExecutionEntitlement, WorkspaceGithubRepositoriesApplier,
-    WorkspaceGithubRepositoriesFailure, WorkspaceGithubRepositoriesFailureKind,
-    WorkspaceGithubRepositoriesRevision, WorkspaceProvisioner,
+    OperationId, ProvisionTenantCommand, ProvisionTenantResult, ProvisioningAuthenticationError,
+    ProvisioningFailure, ProvisioningFailureKind, ProvisioningWorkloadAuthenticator, ShardId,
+    TenantEntitlementApplier, TenantExecutionEntitlement, TenantGithubRepositoriesApplier,
+    TenantGithubRepositoriesFailure, TenantGithubRepositoriesFailureKind,
+    TenantGithubRepositoriesRevision, TenantProvisioner, WorkloadAuthenticationEvidence,
 };
 use automata_ci_store::{
     GithubCheckName, GithubRepositoryName, GithubServerServiceAppClientId,
@@ -59,16 +58,15 @@ pub const MAX_MANAGEMENT_MESSAGE_BYTES: usize = 256 * 1024;
 const MAX_CLIENT_CA_PEM_BYTES: usize = 4 * 1024 * 1024;
 const MAX_SERVER_CERTIFICATE_PEM_BYTES: usize = 4 * 1024 * 1024;
 const MAX_SERVER_PRIVATE_KEY_PEM_BYTES: usize = 1024 * 1024;
-const FAILURE_TYPE_URL: &str =
-    "type.googleapis.com/automata.management.v1.ProvisionWorkspaceFailure";
+const FAILURE_TYPE_URL: &str = "type.googleapis.com/automata.management.v1.ProvisionTenantFailure";
 const ENTITLEMENT_FAILURE_TYPE_URL: &str =
-    "type.googleapis.com/automata.management.v1.ApplyWorkspaceEntitlementFailure";
+    "type.googleapis.com/automata.management.v1.ApplyTenantEntitlementFailure";
 const PROVIDER_CONFIGURATION_FAILURE_TYPE_URL: &str =
     "type.googleapis.com/automata.management.v1.ApplyGithubProviderConfigurationFailure";
 const RUNNER_POLICY_FAILURE_TYPE_URL: &str =
     "type.googleapis.com/automata.management.v1.ApplyGithubProviderRunnerPolicyFailure";
-const WORKSPACE_REPOSITORIES_FAILURE_TYPE_URL: &str =
-    "type.googleapis.com/automata.management.v1.ApplyWorkspaceGithubRepositoriesFailure";
+const TENANT_REPOSITORIES_FAILURE_TYPE_URL: &str =
+    "type.googleapis.com/automata.management.v1.ApplyTenantGithubRepositoriesFailure";
 
 /// Bounded PEM inputs for an mTLS-only management listener.
 pub struct ManagementServerTlsConfig {
@@ -136,29 +134,29 @@ impl fmt::Debug for ManagementServerTlsConfig {
 
 /// Complete transport-neutral mutation ports served by the management listener.
 pub struct ManagementApplicationPorts {
-    provisioner: Arc<dyn WorkspaceProvisioner>,
-    entitlement_applier: Arc<dyn WorkspaceEntitlementApplier>,
+    provisioner: Arc<dyn TenantProvisioner>,
+    entitlement_applier: Arc<dyn TenantEntitlementApplier>,
     provider_configuration_applier: Arc<dyn GithubProviderConfigurationApplier>,
     runner_policy_applier: Arc<dyn GithubProviderRunnerPolicyApplier>,
-    workspace_repositories_applier: Arc<dyn WorkspaceGithubRepositoriesApplier>,
+    tenant_repositories_applier: Arc<dyn TenantGithubRepositoriesApplier>,
 }
 
 impl ManagementApplicationPorts {
     /// Collects the complete application surface without opening a listener.
     #[must_use]
     pub fn new(
-        provisioner: Arc<dyn WorkspaceProvisioner>,
-        entitlement_applier: Arc<dyn WorkspaceEntitlementApplier>,
+        provisioner: Arc<dyn TenantProvisioner>,
+        entitlement_applier: Arc<dyn TenantEntitlementApplier>,
         provider_configuration_applier: Arc<dyn GithubProviderConfigurationApplier>,
         runner_policy_applier: Arc<dyn GithubProviderRunnerPolicyApplier>,
-        workspace_repositories_applier: Arc<dyn WorkspaceGithubRepositoriesApplier>,
+        tenant_repositories_applier: Arc<dyn TenantGithubRepositoriesApplier>,
     ) -> Self {
         Self {
             provisioner,
             entitlement_applier,
             provider_configuration_applier,
             runner_policy_applier,
-            workspace_repositories_applier,
+            tenant_repositories_applier,
         }
     }
 }
@@ -175,8 +173,8 @@ impl fmt::Debug for ManagementApplicationPorts {
             )
             .field("runner_policy_applier", &self.runner_policy_applier)
             .field(
-                "workspace_repositories_applier",
-                &self.workspace_repositories_applier,
+                "tenant_repositories_applier",
+                &self.tenant_repositories_applier,
             )
             .finish()
     }
@@ -187,11 +185,11 @@ pub struct ManagementGrpcServer {
     listener: TcpListener,
     tls: ManagementServerTlsConfig,
     authenticator: Arc<dyn ProvisioningWorkloadAuthenticator>,
-    provisioner: Arc<dyn WorkspaceProvisioner>,
-    entitlement_applier: Arc<dyn WorkspaceEntitlementApplier>,
+    provisioner: Arc<dyn TenantProvisioner>,
+    entitlement_applier: Arc<dyn TenantEntitlementApplier>,
     provider_configuration_applier: Arc<dyn GithubProviderConfigurationApplier>,
     runner_policy_applier: Arc<dyn GithubProviderRunnerPolicyApplier>,
-    workspace_repositories_applier: Arc<dyn WorkspaceGithubRepositoriesApplier>,
+    tenant_repositories_applier: Arc<dyn TenantGithubRepositoriesApplier>,
 }
 
 impl ManagementGrpcServer {
@@ -210,7 +208,7 @@ impl ManagementGrpcServer {
             entitlement_applier: ports.entitlement_applier,
             provider_configuration_applier: ports.provider_configuration_applier,
             runner_policy_applier: ports.runner_policy_applier,
-            workspace_repositories_applier: ports.workspace_repositories_applier,
+            tenant_repositories_applier: ports.tenant_repositories_applier,
         }
     }
 
@@ -230,7 +228,7 @@ impl ManagementGrpcServer {
             entitlement_applier: self.entitlement_applier,
             provider_configuration_applier: self.provider_configuration_applier,
             runner_policy_applier: self.runner_policy_applier,
-            workspace_repositories_applier: self.workspace_repositories_applier,
+            tenant_repositories_applier: self.tenant_repositories_applier,
         };
         let service =
             wire::shard_management_service_server::ShardManagementServiceServer::new(adapter)
@@ -264,8 +262,8 @@ impl fmt::Debug for ManagementGrpcServer {
             )
             .field("runner_policy_applier", &self.runner_policy_applier)
             .field(
-                "workspace_repositories_applier",
-                &self.workspace_repositories_applier,
+                "tenant_repositories_applier",
+                &self.tenant_repositories_applier,
             )
             .finish_non_exhaustive()
     }
@@ -274,11 +272,11 @@ impl fmt::Debug for ManagementGrpcServer {
 #[derive(Clone)]
 struct ManagementGrpcAdapter {
     authenticator: Arc<dyn ProvisioningWorkloadAuthenticator>,
-    provisioner: Arc<dyn WorkspaceProvisioner>,
-    entitlement_applier: Arc<dyn WorkspaceEntitlementApplier>,
+    provisioner: Arc<dyn TenantProvisioner>,
+    entitlement_applier: Arc<dyn TenantEntitlementApplier>,
     provider_configuration_applier: Arc<dyn GithubProviderConfigurationApplier>,
     runner_policy_applier: Arc<dyn GithubProviderRunnerPolicyApplier>,
-    workspace_repositories_applier: Arc<dyn WorkspaceGithubRepositoriesApplier>,
+    tenant_repositories_applier: Arc<dyn TenantGithubRepositoriesApplier>,
 }
 
 impl fmt::Debug for ManagementGrpcAdapter {
@@ -294,8 +292,8 @@ impl fmt::Debug for ManagementGrpcAdapter {
             )
             .field("runner_policy_applier", &self.runner_policy_applier)
             .field(
-                "workspace_repositories_applier",
-                &self.workspace_repositories_applier,
+                "tenant_repositories_applier",
+                &self.tenant_repositories_applier,
             )
             .finish()
     }
@@ -303,10 +301,10 @@ impl fmt::Debug for ManagementGrpcAdapter {
 
 #[tonic::async_trait]
 impl wire::shard_management_service_server::ShardManagementService for ManagementGrpcAdapter {
-    async fn provision_workspace(
+    async fn provision_tenant(
         &self,
-        request: Request<wire::ProvisionWorkspaceRequest>,
-    ) -> Result<Response<wire::ProvisionWorkspaceResponse>, Status> {
+        request: Request<wire::ProvisionTenantRequest>,
+    ) -> Result<Response<wire::ProvisionTenantResponse>, Status> {
         let certificates = request
             .peer_certs()
             .ok_or_else(|| Status::unauthenticated("workload authentication is required"))?;
@@ -325,23 +323,23 @@ impl wire::shard_management_service_server::ShardManagementService for Managemen
         let command = decode_command(request.into_inner()).map_err(|()| {
             contract_status(
                 Code::InvalidArgument,
-                wire::ProvisionWorkspaceFailureReason::InvalidRequest,
-                "workspace provisioning request is invalid",
+                wire::ProvisionTenantFailureReason::InvalidRequest,
+                "tenant provisioning request is invalid",
                 None,
             )
         })?;
         let authorized =
-            AuthorizedProvisionWorkspace::authorize(authority, command).map_err(|_| {
+            AuthorizedProvisionTenant::authorize(authority, command).map_err(|_| {
                 contract_status(
                     Code::PermissionDenied,
-                    wire::ProvisionWorkspaceFailureReason::Forbidden,
-                    "workspace provisioning is outside the workload authority",
+                    wire::ProvisionTenantFailureReason::Forbidden,
+                    "tenant provisioning is outside the workload authority",
                     None,
                 )
             })?;
         let expected_operation_id = authorized.command().operation_id();
         let expected_shard_id = authorized.command().shard_id().clone();
-        let expected_workspace_id = authorized.command().workspace_id();
+        let expected_tenant_id = authorized.command().tenant_id();
         let result = self
             .provisioner
             .provision(authorized)
@@ -349,22 +347,22 @@ impl wire::shard_management_service_server::ShardManagementService for Managemen
             .map_err(|error| provisioning_status(&error))?;
         if result.operation_id() != expected_operation_id
             || result.shard_id() != &expected_shard_id
-            || result.workspace_id() != expected_workspace_id
+            || result.tenant_id() != expected_tenant_id
         {
             return Err(contract_status(
                 Code::Internal,
-                wire::ProvisionWorkspaceFailureReason::InternalError,
-                "workspace provisioning returned an inconsistent result",
+                wire::ProvisionTenantFailureReason::InternalError,
+                "tenant provisioning returned an inconsistent result",
                 None,
             ));
         }
         Ok(Response::new(encode_result(&result)))
     }
 
-    async fn apply_workspace_entitlement(
+    async fn apply_tenant_entitlement(
         &self,
-        request: Request<wire::ApplyWorkspaceEntitlementRequest>,
-    ) -> Result<Response<wire::ApplyWorkspaceEntitlementResponse>, Status> {
+        request: Request<wire::ApplyTenantEntitlementRequest>,
+    ) -> Result<Response<wire::ApplyTenantEntitlementResponse>, Status> {
         let certificates = request
             .peer_certs()
             .ok_or_else(|| Status::unauthenticated("workload authentication is required"))?;
@@ -383,21 +381,21 @@ impl wire::shard_management_service_server::ShardManagementService for Managemen
         let command = decode_entitlement_command(request.into_inner()).map_err(|()| {
             entitlement_contract_status(
                 Code::InvalidArgument,
-                wire::ApplyWorkspaceEntitlementFailureReason::InvalidRequest,
-                "workspace entitlement request is invalid",
+                wire::ApplyTenantEntitlementFailureReason::InvalidRequest,
+                "tenant entitlement request is invalid",
             )
         })?;
-        let authorized = AuthorizedApplyWorkspaceEntitlement::authorize(authority, command)
-            .map_err(|_| {
+        let authorized =
+            AuthorizedApplyTenantEntitlement::authorize(authority, command).map_err(|_| {
                 entitlement_contract_status(
                     Code::PermissionDenied,
-                    wire::ApplyWorkspaceEntitlementFailureReason::Forbidden,
-                    "workspace entitlement is outside the workload authority",
+                    wire::ApplyTenantEntitlementFailureReason::Forbidden,
+                    "tenant entitlement is outside the workload authority",
                 )
             })?;
         let expected_operation_id = authorized.command().operation_id();
         let expected_shard_id = authorized.command().shard_id().clone();
-        let expected_workspace_id = authorized.command().workspace_id();
+        let expected_tenant_id = authorized.command().tenant_id();
         let expected_revision = authorized.command().revision();
         let result = self
             .entitlement_applier
@@ -406,13 +404,13 @@ impl wire::shard_management_service_server::ShardManagementService for Managemen
             .map_err(entitlement_status)?;
         if result.operation_id() != expected_operation_id
             || result.shard_id() != &expected_shard_id
-            || result.workspace_id() != expected_workspace_id
+            || result.tenant_id() != expected_tenant_id
             || result.revision() != expected_revision
         {
             return Err(entitlement_contract_status(
                 Code::Internal,
-                wire::ApplyWorkspaceEntitlementFailureReason::InternalError,
-                "workspace entitlement application returned an inconsistent result",
+                wire::ApplyTenantEntitlementFailureReason::InternalError,
+                "tenant entitlement application returned an inconsistent result",
             ));
         }
         Ok(Response::new(encode_entitlement_result(&result)))
@@ -501,48 +499,47 @@ impl wire::shard_management_service_server::ShardManagementService for Managemen
         Ok(Response::new(encode_runner_policy_result(&result)))
     }
 
-    async fn apply_workspace_github_repositories(
+    async fn apply_tenant_github_repositories(
         &self,
-        request: Request<wire::ApplyWorkspaceGithubRepositoriesRequest>,
-    ) -> Result<Response<wire::ApplyWorkspaceGithubRepositoriesResponse>, Status> {
+        request: Request<wire::ApplyTenantGithubRepositoriesRequest>,
+    ) -> Result<Response<wire::ApplyTenantGithubRepositoriesResponse>, Status> {
         let authority = authenticate_management_request(&self.authenticator, &request).await?;
-        let command =
-            decode_workspace_repositories_command(request.into_inner()).map_err(|()| {
-                workspace_repositories_contract_status(
-                    Code::InvalidArgument,
-                    wire::ApplyWorkspaceGithubRepositoriesFailureReason::InvalidRequest,
-                    "workspace GitHub repositories request is invalid",
-                )
-            })?;
-        let authorized = AuthorizedApplyWorkspaceGithubRepositories::authorize(authority, command)
+        let command = decode_tenant_repositories_command(request.into_inner()).map_err(|()| {
+            tenant_repositories_contract_status(
+                Code::InvalidArgument,
+                wire::ApplyTenantGithubRepositoriesFailureReason::InvalidRequest,
+                "tenant GitHub repositories request is invalid",
+            )
+        })?;
+        let authorized = AuthorizedApplyTenantGithubRepositories::authorize(authority, command)
             .map_err(|_| {
-                workspace_repositories_contract_status(
+                tenant_repositories_contract_status(
                     Code::PermissionDenied,
-                    wire::ApplyWorkspaceGithubRepositoriesFailureReason::Forbidden,
-                    "workspace GitHub repositories are outside the workload authority",
+                    wire::ApplyTenantGithubRepositoriesFailureReason::Forbidden,
+                    "tenant GitHub repositories are outside the workload authority",
                 )
             })?;
         let expected_operation_id = authorized.command().operation_id();
         let expected_shard_id = authorized.command().shard_id().clone();
-        let expected_workspace_id = authorized.command().workspace_id();
+        let expected_tenant_id = authorized.command().tenant_id();
         let expected_revision = authorized.command().revision();
         let result = self
-            .workspace_repositories_applier
+            .tenant_repositories_applier
             .apply(authorized)
             .await
-            .map_err(|error| workspace_repositories_status(&error))?;
+            .map_err(|error| tenant_repositories_status(&error))?;
         if result.operation_id() != expected_operation_id
             || result.shard_id() != &expected_shard_id
-            || result.workspace_id() != expected_workspace_id
+            || result.tenant_id() != expected_tenant_id
             || result.revision() != expected_revision
         {
-            return Err(workspace_repositories_contract_status(
+            return Err(tenant_repositories_contract_status(
                 Code::Internal,
-                wire::ApplyWorkspaceGithubRepositoriesFailureReason::InternalError,
-                "workspace GitHub repositories returned an inconsistent result",
+                wire::ApplyTenantGithubRepositoriesFailureReason::InternalError,
+                "tenant GitHub repositories returned an inconsistent result",
             ));
         }
-        Ok(Response::new(encode_workspace_repositories_result(&result)))
+        Ok(Response::new(encode_tenant_repositories_result(&result)))
     }
 }
 
@@ -566,28 +563,26 @@ async fn authenticate_management_request<T>(
         .map_err(authentication_status)
 }
 
-fn decode_command(
-    request: wire::ProvisionWorkspaceRequest,
-) -> Result<ProvisionWorkspaceCommand, ()> {
-    let workspace = request.workspace.ok_or(())?;
+fn decode_command(request: wire::ProvisionTenantRequest) -> Result<ProvisionTenantCommand, ()> {
+    let tenant = request.tenant.ok_or(())?;
     let initial_owner = request.initial_owner.ok_or(())?;
-    Ok(ProvisionWorkspaceCommand::new(
+    Ok(ProvisionTenantCommand::new(
         OperationId::parse(&request.operation_id).map_err(|_| ())?,
         ShardId::new(request.shard_id).map_err(|_| ())?,
-        WorkspaceId::parse(&workspace.workspace_id).map_err(|_| ())?,
-        DisplayName::new(workspace.display_name).map_err(|_| ())?,
+        ManagedTenantId::parse(&tenant.tenant_id).map_err(|_| ())?,
+        DisplayName::new(tenant.display_name).map_err(|_| ())?,
         DelegatedActorIssuer::new(initial_owner.issuer).map_err(|_| ())?,
         ExternalAccountSubject::parse(&initial_owner.subject).map_err(|_| ())?,
         DisplayName::new(initial_owner.display_name).map_err(|_| ())?,
     ))
 }
 
-fn encode_result(result: &ProvisionWorkspaceResult) -> wire::ProvisionWorkspaceResponse {
+fn encode_result(result: &ProvisionTenantResult) -> wire::ProvisionTenantResponse {
     let provisioned_at = result.provisioned_at();
-    wire::ProvisionWorkspaceResponse {
+    wire::ProvisionTenantResponse {
         operation_id: result.operation_id().to_string(),
         shard_id: result.shard_id().as_str().to_owned(),
-        workspace_id: result.workspace_id().to_string(),
+        tenant_id: result.tenant_id().to_string(),
         initial_owner_principal_id: result.initial_owner_principal_id().to_string(),
         provisioned_at: Some(prost_types::Timestamp {
             seconds: provisioned_at.seconds(),
@@ -598,11 +593,11 @@ fn encode_result(result: &ProvisionWorkspaceResult) -> wire::ProvisionWorkspaceR
 }
 
 fn decode_entitlement_command(
-    request: wire::ApplyWorkspaceEntitlementRequest,
-) -> Result<ApplyWorkspaceEntitlementCommand, ()> {
+    request: wire::ApplyTenantEntitlementRequest,
+) -> Result<ApplyTenantEntitlementCommand, ()> {
     let execution = request.execution.ok_or(())?.policy.ok_or(())?;
     let execution = match execution {
-        wire::workspace_execution_entitlement::Policy::Capped(capped) => {
+        wire::tenant_execution_entitlement::Policy::Capped(capped) => {
             let compute_seconds = ComputeSeconds::new(capped.compute_seconds).map_err(|_| ())?;
             let valid_for = capped
                 .valid_for
@@ -616,36 +611,34 @@ fn decode_entitlement_command(
                     .map_err(|_| ())
                 })
                 .transpose()?;
-            WorkspaceExecutionEntitlement::capped(compute_seconds, valid_for)
+            TenantExecutionEntitlement::capped(compute_seconds, valid_for)
         }
-        wire::workspace_execution_entitlement::Policy::Uncapped(_) => {
-            WorkspaceExecutionEntitlement::Uncapped
+        wire::tenant_execution_entitlement::Policy::Uncapped(_) => {
+            TenantExecutionEntitlement::Uncapped
         }
-        wire::workspace_execution_entitlement::Policy::Paused(_) => {
-            WorkspaceExecutionEntitlement::Paused
-        }
+        wire::tenant_execution_entitlement::Policy::Paused(_) => TenantExecutionEntitlement::Paused,
     };
-    Ok(ApplyWorkspaceEntitlementCommand::new(
+    Ok(ApplyTenantEntitlementCommand::new(
         OperationId::parse(&request.operation_id).map_err(|_| ())?,
         ShardId::new(request.shard_id).map_err(|_| ())?,
-        WorkspaceId::parse(&request.workspace_id).map_err(|_| ())?,
+        ManagedTenantId::parse(&request.tenant_id).map_err(|_| ())?,
         EntitlementRevision::new(request.revision).map_err(|_| ())?,
         execution,
     ))
 }
 
 fn encode_entitlement_result(
-    result: &ApplyWorkspaceEntitlementResult,
-) -> wire::ApplyWorkspaceEntitlementResponse {
+    result: &ApplyTenantEntitlementResult,
+) -> wire::ApplyTenantEntitlementResponse {
     let timestamp =
         |value: automata_ci_provisioning::EntitlementTimestamp| prost_types::Timestamp {
             seconds: value.seconds(),
             nanos: i32::try_from(value.nanoseconds()).expect("validated nanoseconds fit i32"),
         };
-    wire::ApplyWorkspaceEntitlementResponse {
+    wire::ApplyTenantEntitlementResponse {
         operation_id: result.operation_id().to_string(),
         shard_id: result.shard_id().as_str().to_owned(),
-        workspace_id: result.workspace_id().to_string(),
+        tenant_id: result.tenant_id().to_string(),
         revision: result.revision().get(),
         applied_at: Some(timestamp(result.applied_at())),
         expires_at: result.expires_at().map(timestamp),
@@ -703,9 +696,9 @@ fn decode_runner_policy_command(
     ))
 }
 
-fn decode_workspace_repositories_command(
-    request: wire::ApplyWorkspaceGithubRepositoriesRequest,
-) -> Result<ApplyWorkspaceGithubRepositoriesCommand, ()> {
+fn decode_tenant_repositories_command(
+    request: wire::ApplyTenantGithubRepositoriesRequest,
+) -> Result<ApplyTenantGithubRepositoriesCommand, ()> {
     let repositories = request
         .repositories
         .into_iter()
@@ -740,11 +733,11 @@ fn decode_workspace_repositories_command(
             .map_err(|_| ())
         })
         .collect::<Result<Vec<_>, _>>()?;
-    ApplyWorkspaceGithubRepositoriesCommand::new(
+    ApplyTenantGithubRepositoriesCommand::new(
         OperationId::parse(&request.operation_id).map_err(|_| ())?,
         ShardId::new(request.shard_id).map_err(|_| ())?,
-        WorkspaceId::parse(&request.workspace_id).map_err(|_| ())?,
-        WorkspaceGithubRepositoriesRevision::new(request.revision).map_err(|_| ())?,
+        ManagedTenantId::parse(&request.tenant_id).map_err(|_| ())?,
+        TenantGithubRepositoriesRevision::new(request.revision).map_err(|_| ())?,
         repositories,
     )
     .map_err(|_| ())
@@ -780,14 +773,14 @@ fn encode_runner_policy_result(
     }
 }
 
-fn encode_workspace_repositories_result(
-    result: &ApplyWorkspaceGithubRepositoriesResult,
-) -> wire::ApplyWorkspaceGithubRepositoriesResponse {
+fn encode_tenant_repositories_result(
+    result: &ApplyTenantGithubRepositoriesResult,
+) -> wire::ApplyTenantGithubRepositoriesResponse {
     let applied_at = result.applied_at();
-    wire::ApplyWorkspaceGithubRepositoriesResponse {
+    wire::ApplyTenantGithubRepositoriesResponse {
         operation_id: result.operation_id().to_string(),
         shard_id: result.shard_id().as_str().to_owned(),
-        workspace_id: result.workspace_id().to_string(),
+        tenant_id: result.tenant_id().to_string(),
         revision: result.revision().get(),
         applied_at: Some(prost_types::Timestamp {
             seconds: applied_at.seconds(),
@@ -816,33 +809,33 @@ fn provisioning_status(error: &ProvisioningFailure) -> Status {
     let (code, reason, message) = match error.kind() {
         ProvisioningFailureKind::OperationConflict => (
             Code::Aborted,
-            wire::ProvisionWorkspaceFailureReason::OperationConflict,
+            wire::ProvisionTenantFailureReason::OperationConflict,
             "provisioning operation conflicts with its durable receipt",
         ),
-        ProvisioningFailureKind::WorkspaceConflict => (
+        ProvisioningFailureKind::TenantConflict => (
             Code::AlreadyExists,
-            wire::ProvisionWorkspaceFailureReason::WorkspaceConflict,
-            "workspace identity is already owned by another operation",
+            wire::ProvisionTenantFailureReason::TenantConflict,
+            "tenant identity is already owned by another operation",
         ),
         ProvisioningFailureKind::PrincipalUnavailable => (
             Code::FailedPrecondition,
-            wire::ProvisionWorkspaceFailureReason::PrincipalUnavailable,
+            wire::ProvisionTenantFailureReason::PrincipalUnavailable,
             "initial owner principal is unavailable",
         ),
         ProvisioningFailureKind::RateLimited => (
             Code::ResourceExhausted,
-            wire::ProvisionWorkspaceFailureReason::RateLimited,
-            "workspace provisioning rate is exhausted",
+            wire::ProvisionTenantFailureReason::RateLimited,
+            "tenant provisioning rate is exhausted",
         ),
         ProvisioningFailureKind::Internal => (
             Code::Internal,
-            wire::ProvisionWorkspaceFailureReason::InternalError,
-            "workspace provisioning failed internally",
+            wire::ProvisionTenantFailureReason::InternalError,
+            "tenant provisioning failed internally",
         ),
         ProvisioningFailureKind::TemporarilyUnavailable => (
             Code::Unavailable,
-            wire::ProvisionWorkspaceFailureReason::TemporarilyUnavailable,
-            "workspace provisioning is temporarily unavailable",
+            wire::ProvisionTenantFailureReason::TemporarilyUnavailable,
+            "tenant provisioning is temporarily unavailable",
         ),
     };
     contract_status(code, reason, message, request_id)
@@ -852,33 +845,33 @@ fn entitlement_status(error: EntitlementFailure) -> Status {
     let (code, reason, message) = match error.kind() {
         EntitlementFailureKind::OperationConflict => (
             Code::Aborted,
-            wire::ApplyWorkspaceEntitlementFailureReason::OperationConflict,
+            wire::ApplyTenantEntitlementFailureReason::OperationConflict,
             "entitlement operation conflicts with its durable receipt",
         ),
         EntitlementFailureKind::StaleRevision => (
             Code::FailedPrecondition,
-            wire::ApplyWorkspaceEntitlementFailureReason::StaleRevision,
+            wire::ApplyTenantEntitlementFailureReason::StaleRevision,
             "entitlement revision is stale",
         ),
-        EntitlementFailureKind::WorkspaceUnavailable => (
+        EntitlementFailureKind::TenantUnavailable => (
             Code::PermissionDenied,
-            wire::ApplyWorkspaceEntitlementFailureReason::WorkspaceUnavailable,
-            "workspace is unavailable to this management authority",
+            wire::ApplyTenantEntitlementFailureReason::TenantUnavailable,
+            "tenant is unavailable to this management authority",
         ),
         EntitlementFailureKind::RateLimited => (
             Code::ResourceExhausted,
-            wire::ApplyWorkspaceEntitlementFailureReason::RateLimited,
-            "workspace entitlement mutation rate is exhausted",
+            wire::ApplyTenantEntitlementFailureReason::RateLimited,
+            "tenant entitlement mutation rate is exhausted",
         ),
         EntitlementFailureKind::Internal => (
             Code::Internal,
-            wire::ApplyWorkspaceEntitlementFailureReason::InternalError,
-            "workspace entitlement application failed internally",
+            wire::ApplyTenantEntitlementFailureReason::InternalError,
+            "tenant entitlement application failed internally",
         ),
         EntitlementFailureKind::TemporarilyUnavailable => (
             Code::Unavailable,
-            wire::ApplyWorkspaceEntitlementFailureReason::TemporarilyUnavailable,
-            "workspace entitlement application is temporarily unavailable",
+            wire::ApplyTenantEntitlementFailureReason::TemporarilyUnavailable,
+            "tenant entitlement application is temporarily unavailable",
         ),
     };
     entitlement_contract_status(code, reason, message)
@@ -951,49 +944,49 @@ fn runner_policy_status(error: &GithubProviderRunnerPolicyFailure) -> Status {
     runner_policy_contract_status(code, reason, message)
 }
 
-fn workspace_repositories_status(error: &WorkspaceGithubRepositoriesFailure) -> Status {
+fn tenant_repositories_status(error: &TenantGithubRepositoriesFailure) -> Status {
     let (code, reason, message) = match error.kind() {
-        WorkspaceGithubRepositoriesFailureKind::OperationConflict => (
+        TenantGithubRepositoriesFailureKind::OperationConflict => (
             Code::Aborted,
-            wire::ApplyWorkspaceGithubRepositoriesFailureReason::OperationConflict,
-            "workspace repository operation conflicts with its durable receipt",
+            wire::ApplyTenantGithubRepositoriesFailureReason::OperationConflict,
+            "tenant repository operation conflicts with its durable receipt",
         ),
-        WorkspaceGithubRepositoriesFailureKind::StaleRevision => (
+        TenantGithubRepositoriesFailureKind::StaleRevision => (
             Code::FailedPrecondition,
-            wire::ApplyWorkspaceGithubRepositoriesFailureReason::StaleRevision,
-            "workspace repository revision is stale",
+            wire::ApplyTenantGithubRepositoriesFailureReason::StaleRevision,
+            "tenant repository revision is stale",
         ),
-        WorkspaceGithubRepositoriesFailureKind::WorkspaceUnavailable => (
+        TenantGithubRepositoriesFailureKind::TenantUnavailable => (
             Code::PermissionDenied,
-            wire::ApplyWorkspaceGithubRepositoriesFailureReason::WorkspaceUnavailable,
-            "workspace is unavailable to this management authority",
+            wire::ApplyTenantGithubRepositoriesFailureReason::TenantUnavailable,
+            "tenant is unavailable to this management authority",
         ),
-        WorkspaceGithubRepositoriesFailureKind::ShardRegistryConflict => (
+        TenantGithubRepositoriesFailureKind::ShardRegistryConflict => (
             Code::FailedPrecondition,
-            wire::ApplyWorkspaceGithubRepositoriesFailureReason::ShardRegistryConflict,
-            "workspace repositories conflict with the shard registry",
+            wire::ApplyTenantGithubRepositoriesFailureReason::ShardRegistryConflict,
+            "tenant repositories conflict with the shard registry",
         ),
-        WorkspaceGithubRepositoriesFailureKind::Internal => (
+        TenantGithubRepositoriesFailureKind::Internal => (
             Code::Internal,
-            wire::ApplyWorkspaceGithubRepositoriesFailureReason::InternalError,
-            "workspace repository configuration failed internally",
+            wire::ApplyTenantGithubRepositoriesFailureReason::InternalError,
+            "tenant repository configuration failed internally",
         ),
-        WorkspaceGithubRepositoriesFailureKind::TemporarilyUnavailable => (
+        TenantGithubRepositoriesFailureKind::TemporarilyUnavailable => (
             Code::Unavailable,
-            wire::ApplyWorkspaceGithubRepositoriesFailureReason::TemporarilyUnavailable,
-            "workspace repository configuration is temporarily unavailable",
+            wire::ApplyTenantGithubRepositoriesFailureReason::TemporarilyUnavailable,
+            "tenant repository configuration is temporarily unavailable",
         ),
     };
-    workspace_repositories_contract_status(code, reason, message)
+    tenant_repositories_contract_status(code, reason, message)
 }
 
 fn contract_status(
     code: Code,
-    reason: wire::ProvisionWorkspaceFailureReason,
+    reason: wire::ProvisionTenantFailureReason,
     message: &'static str,
     request_id: Option<&str>,
 ) -> Status {
-    let detail = wire::ProvisionWorkspaceFailure {
+    let detail = wire::ProvisionTenantFailure {
         reason: reason as i32,
         request_id: request_id.unwrap_or_default().to_owned(),
     };
@@ -1010,10 +1003,10 @@ fn contract_status(
 
 fn entitlement_contract_status(
     code: Code,
-    reason: wire::ApplyWorkspaceEntitlementFailureReason,
+    reason: wire::ApplyTenantEntitlementFailureReason,
     message: &'static str,
 ) -> Status {
-    let detail = wire::ApplyWorkspaceEntitlementFailure {
+    let detail = wire::ApplyTenantEntitlementFailure {
         reason: reason as i32,
     };
     let rich_status = tonic_types::pb::Status {
@@ -1065,19 +1058,19 @@ fn runner_policy_contract_status(
     Status::with_details(code, message, Bytes::from(rich_status.encode_to_vec()))
 }
 
-fn workspace_repositories_contract_status(
+fn tenant_repositories_contract_status(
     code: Code,
-    reason: wire::ApplyWorkspaceGithubRepositoriesFailureReason,
+    reason: wire::ApplyTenantGithubRepositoriesFailureReason,
     message: &'static str,
 ) -> Status {
-    let detail = wire::ApplyWorkspaceGithubRepositoriesFailure {
+    let detail = wire::ApplyTenantGithubRepositoriesFailure {
         reason: reason as i32,
     };
     let rich_status = tonic_types::pb::Status {
         code: code as i32,
         message: message.to_owned(),
         details: vec![prost_types::Any {
-            type_url: WORKSPACE_REPOSITORIES_FAILURE_TYPE_URL.to_owned(),
+            type_url: TENANT_REPOSITORIES_FAILURE_TYPE_URL.to_owned(),
             value: detail.encode_to_vec(),
         }],
     };
@@ -1122,7 +1115,7 @@ mod tests {
         EntitlementApplicationFuture, EntitlementTimestamp,
         GithubProviderConfigurationApplicationFuture, InitialOwnerPrincipalId, ProvisionedAt,
         ProvisioningAuthenticationFuture, ProvisioningAuthority,
-        WorkspaceGithubRepositoriesApplicationFuture, WorkspaceProvisioningFuture,
+        TenantGithubRepositoriesApplicationFuture, TenantProvisioningFuture,
     };
     use rcgen::{
         BasicConstraints, CertificateParams, CertifiedIssuer, DnType, ExtendedKeyUsagePurpose,
@@ -1240,17 +1233,17 @@ mod tests {
     #[derive(Debug)]
     struct RecordingProvisioner {
         calls: AtomicUsize,
-        result: ProvisionWorkspaceResult,
+        result: ProvisionTenantResult,
     }
 
     impl RecordingProvisioner {
         fn new() -> Self {
             Self {
                 calls: AtomicUsize::new(0),
-                result: ProvisionWorkspaceResult::new(
+                result: ProvisionTenantResult::new(
                     OperationId::parse("55555555-5555-4555-8555-555555555555").unwrap(),
                     ShardId::new("prod-us-east-1-001").unwrap(),
-                    WorkspaceId::parse("22222222-2222-4222-8222-222222222222").unwrap(),
+                    ManagedTenantId::parse("22222222-2222-4222-8222-222222222222").unwrap(),
                     InitialOwnerPrincipalId::parse("66666666-6666-4666-8666-666666666666").unwrap(),
                     ProvisionedAt::new(1_786_500_000, 0).unwrap(),
                 ),
@@ -1258,18 +1251,15 @@ mod tests {
         }
     }
 
-    impl WorkspaceProvisioner for RecordingProvisioner {
-        fn provision(
-            &self,
-            request: AuthorizedProvisionWorkspace,
-        ) -> WorkspaceProvisioningFuture<'_> {
+    impl TenantProvisioner for RecordingProvisioner {
+        fn provision(&self, request: AuthorizedProvisionTenant) -> TenantProvisioningFuture<'_> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             assert_eq!(
                 request.authority().id().as_str(),
                 "automata-cloud-production"
             );
             assert_eq!(
-                request.command().workspace_id().to_string(),
+                request.command().tenant_id().to_string(),
                 "22222222-2222-4222-8222-222222222222"
             );
             Box::pin(future::ready(Ok(self.result.clone())))
@@ -1279,17 +1269,17 @@ mod tests {
     #[derive(Debug)]
     struct RecordingEntitlementApplier {
         calls: AtomicUsize,
-        result: ApplyWorkspaceEntitlementResult,
+        result: ApplyTenantEntitlementResult,
     }
 
     impl RecordingEntitlementApplier {
         fn new() -> Self {
             Self {
                 calls: AtomicUsize::new(0),
-                result: ApplyWorkspaceEntitlementResult::new(
+                result: ApplyTenantEntitlementResult::new(
                     OperationId::parse("77777777-7777-4777-8777-777777777777").unwrap(),
                     ShardId::new("prod-us-east-1-001").unwrap(),
-                    WorkspaceId::parse("22222222-2222-4222-8222-222222222222").unwrap(),
+                    ManagedTenantId::parse("22222222-2222-4222-8222-222222222222").unwrap(),
                     EntitlementRevision::new(1).unwrap(),
                     EntitlementTimestamp::new(1_786_500_100, 0).unwrap(),
                     Some(EntitlementTimestamp::new(1_787_104_900, 0).unwrap()),
@@ -1298,16 +1288,16 @@ mod tests {
         }
     }
 
-    impl WorkspaceEntitlementApplier for RecordingEntitlementApplier {
+    impl TenantEntitlementApplier for RecordingEntitlementApplier {
         fn apply(
             &self,
-            request: AuthorizedApplyWorkspaceEntitlement,
+            request: AuthorizedApplyTenantEntitlement,
         ) -> EntitlementApplicationFuture<'_> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             assert_eq!(request.command().revision().get(), 1);
             assert_eq!(
                 request.command().execution(),
-                WorkspaceExecutionEntitlement::capped(
+                TenantExecutionEntitlement::capped(
                     ComputeSeconds::new(6_000).unwrap(),
                     Some(EntitlementDurationSeconds::new(604_800).unwrap())
                 )
@@ -1363,28 +1353,28 @@ mod tests {
     }
 
     #[derive(Debug)]
-    struct UnusedWorkspaceRepositoriesApplier;
+    struct UnusedTenantRepositoriesApplier;
 
-    impl WorkspaceGithubRepositoriesApplier for UnusedWorkspaceRepositoriesApplier {
+    impl TenantGithubRepositoriesApplier for UnusedTenantRepositoriesApplier {
         fn apply(
             &self,
-            _request: AuthorizedApplyWorkspaceGithubRepositories,
-        ) -> WorkspaceGithubRepositoriesApplicationFuture<'_> {
-            Box::pin(future::ready(Err(WorkspaceGithubRepositoriesFailure::new(
-                WorkspaceGithubRepositoriesFailureKind::Internal,
+            _request: AuthorizedApplyTenantGithubRepositories,
+        ) -> TenantGithubRepositoriesApplicationFuture<'_> {
+            Box::pin(future::ready(Err(TenantGithubRepositoriesFailure::new(
+                TenantGithubRepositoriesFailureKind::Internal,
             ))))
         }
     }
 
-    fn valid_wire_request() -> wire::ProvisionWorkspaceRequest {
-        wire::ProvisionWorkspaceRequest {
+    fn valid_wire_request() -> wire::ProvisionTenantRequest {
+        wire::ProvisionTenantRequest {
             operation_id: "55555555-5555-4555-8555-555555555555".to_owned(),
             shard_id: "prod-us-east-1-001".to_owned(),
-            workspace: Some(wire::WorkspaceProvisioningTarget {
-                workspace_id: "22222222-2222-4222-8222-222222222222".to_owned(),
+            tenant: Some(wire::TenantProvisioningTarget {
+                tenant_id: "22222222-2222-4222-8222-222222222222".to_owned(),
                 display_name: "Acme Engineering".to_owned(),
             }),
-            initial_owner: Some(wire::InitialWorkspaceOwner {
+            initial_owner: Some(wire::InitialTenantOwner {
                 issuer: "https://cloud.automata.example".to_owned(),
                 subject: "11111111-1111-4111-8111-111111111111".to_owned(),
                 display_name: "The Octocat".to_owned(),
@@ -1392,15 +1382,15 @@ mod tests {
         }
     }
 
-    fn valid_entitlement_wire_request() -> wire::ApplyWorkspaceEntitlementRequest {
-        wire::ApplyWorkspaceEntitlementRequest {
+    fn valid_entitlement_wire_request() -> wire::ApplyTenantEntitlementRequest {
+        wire::ApplyTenantEntitlementRequest {
             operation_id: "77777777-7777-4777-8777-777777777777".to_owned(),
             shard_id: "prod-us-east-1-001".to_owned(),
-            workspace_id: "22222222-2222-4222-8222-222222222222".to_owned(),
+            tenant_id: "22222222-2222-4222-8222-222222222222".to_owned(),
             revision: 1,
-            execution: Some(wire::WorkspaceExecutionEntitlement {
-                policy: Some(wire::workspace_execution_entitlement::Policy::Capped(
-                    wire::CappedWorkspaceExecution {
+            execution: Some(wire::TenantExecutionEntitlement {
+                policy: Some(wire::tenant_execution_entitlement::Policy::Capped(
+                    wire::CappedTenantExecution {
                         compute_seconds: 6_000,
                         valid_for: Some(prost_types::Duration {
                             seconds: 604_800,
@@ -1414,7 +1404,7 @@ mod tests {
 
     fn valid_runner_policy() -> Vec<u8> {
         serde_json::to_vec(&serde_json::json!({
-            "workspace": {"derivation": 1, "root": "/__w", "schema": 1},
+            "workspace":{"derivation": 1, "root": "/__w", "schema": 1},
             "mappings": [{
                 "runner_features": {
                     "schema": 1,
@@ -1496,12 +1486,11 @@ mod tests {
         }
     }
 
-    fn valid_workspace_repositories_wire_request() -> wire::ApplyWorkspaceGithubRepositoriesRequest
-    {
-        wire::ApplyWorkspaceGithubRepositoriesRequest {
+    fn valid_tenant_repositories_wire_request() -> wire::ApplyTenantGithubRepositoriesRequest {
+        wire::ApplyTenantGithubRepositoriesRequest {
             operation_id: "99999999-9999-4999-8999-999999999999".to_owned(),
             shard_id: "prod-us-east-1-001".to_owned(),
-            workspace_id: "22222222-2222-4222-8222-222222222222".to_owned(),
+            tenant_id: "22222222-2222-4222-8222-222222222222".to_owned(),
             revision: 2,
             repositories: vec![wire::GithubRepositorySelection {
                 installation_id: 100,
@@ -1523,16 +1512,13 @@ mod tests {
             "55555555-5555-4555-8555-555555555555"
         );
         assert_eq!(command.shard_id().as_str(), "prod-us-east-1-001");
-        assert_eq!(
-            command.workspace_display_name().as_str(),
-            "Acme Engineering"
-        );
+        assert_eq!(command.tenant_display_name().as_str(), "Acme Engineering");
     }
 
     #[test]
     fn missing_nested_message_and_noncanonical_uuid_are_invalid() {
         let mut request = valid_wire_request();
-        request.workspace = None;
+        request.tenant = None;
         assert!(decode_command(request).is_err());
 
         let mut request = valid_wire_request();
@@ -1541,12 +1527,12 @@ mod tests {
     }
 
     #[test]
-    fn entitlement_wire_request_decodes_a_workspace_aggregate() {
+    fn entitlement_wire_request_decodes_a_tenant_aggregate() {
         let command = decode_entitlement_command(valid_entitlement_wire_request()).unwrap();
         assert_eq!(command.revision().get(), 1);
         assert_eq!(
             command.execution(),
-            WorkspaceExecutionEntitlement::capped(
+            TenantExecutionEntitlement::capped(
                 ComputeSeconds::new(6_000).unwrap(),
                 Some(EntitlementDurationSeconds::new(604_800).unwrap())
             )
@@ -1556,7 +1542,7 @@ mod tests {
     #[test]
     fn entitlement_rejects_fractional_or_missing_policy() {
         let mut request = valid_entitlement_wire_request();
-        let Some(wire::workspace_execution_entitlement::Policy::Capped(capped)) = request
+        let Some(wire::tenant_execution_entitlement::Policy::Capped(capped)) = request
             .execution
             .as_mut()
             .and_then(|value| value.policy.as_mut())
@@ -1588,8 +1574,8 @@ mod tests {
         assert_eq!(policy.runner_policy().runtime_policy().mappings().len(), 1);
 
         let repositories =
-            decode_workspace_repositories_command(valid_workspace_repositories_wire_request())
-                .expect("workspace repositories");
+            decode_tenant_repositories_command(valid_tenant_repositories_wire_request())
+                .expect("tenant repositories");
         assert_eq!(repositories.revision().get(), 2);
         assert_eq!(repositories.repositories().len(), 1);
         assert_eq!(repositories.repositories()[0].repository_id().get(), 200);
@@ -1609,17 +1595,17 @@ mod tests {
         policy.runner_policy.clear();
         assert!(decode_runner_policy_command(policy).is_err());
 
-        let mut repositories = valid_workspace_repositories_wire_request();
+        let mut repositories = valid_tenant_repositories_wire_request();
         repositories.repositories[0].visibility = wire::GithubRepositoryVisibility::Private as i32;
-        assert!(decode_workspace_repositories_command(repositories).is_err());
+        assert!(decode_tenant_repositories_command(repositories).is_err());
     }
 
     #[test]
     fn result_encodes_stable_contract_fields() {
-        let result = ProvisionWorkspaceResult::new(
+        let result = ProvisionTenantResult::new(
             OperationId::parse("55555555-5555-4555-8555-555555555555").unwrap(),
             ShardId::new("prod-us-east-1-001").unwrap(),
-            WorkspaceId::parse("22222222-2222-4222-8222-222222222222").unwrap(),
+            ManagedTenantId::parse("22222222-2222-4222-8222-222222222222").unwrap(),
             InitialOwnerPrincipalId::parse("66666666-6666-4666-8666-666666666666").unwrap(),
             ProvisionedAt::new(1_786_500_000, 123_000_000).unwrap(),
         );
@@ -1640,7 +1626,7 @@ mod tests {
     #[test]
     fn application_failure_uses_the_richer_error_model() {
         let error = ProvisioningFailure::new(
-            ProvisioningFailureKind::WorkspaceConflict,
+            ProvisioningFailureKind::TenantConflict,
             Some(automata_ci_provisioning::ProvisioningRequestId::new("request-123").unwrap()),
         );
         let status = provisioning_status(&error);
@@ -1651,10 +1637,10 @@ mod tests {
         assert_eq!(rich.details.len(), 1);
         assert_eq!(rich.details[0].type_url, FAILURE_TYPE_URL);
         let detail =
-            wire::ProvisionWorkspaceFailure::decode(rich.details[0].value.as_slice()).unwrap();
+            wire::ProvisionTenantFailure::decode(rich.details[0].value.as_slice()).unwrap();
         assert_eq!(
             detail.reason,
-            wire::ProvisionWorkspaceFailureReason::WorkspaceConflict as i32
+            wire::ProvisionTenantFailureReason::TenantConflict as i32
         );
         assert_eq!(detail.request_id, "request-123");
     }
@@ -1715,7 +1701,7 @@ mod tests {
                 entitlement_applier.clone(),
                 Arc::new(UnusedProviderConfigurationApplier),
                 runner_policy_applier.clone(),
-                Arc::new(UnusedWorkspaceRepositoriesApplier),
+                Arc::new(UnusedTenantRepositoriesApplier),
             ),
         );
         let cancellation = CancellationToken::new();
@@ -1736,19 +1722,18 @@ mod tests {
             if anonymous.ready().await.is_err() {
                 true
             } else {
-                let response: Result<Response<wire::ProvisionWorkspaceResponse>, Status> =
-                    anonymous
-                        .unary(
-                            Request::new(valid_wire_request()),
-                            tonic::codegen::http::uri::PathAndQuery::from_static(
-                                "/automata.management.v1.ShardManagementService/ProvisionWorkspace",
-                            ),
-                            tonic_prost::ProstCodec::<
-                                wire::ProvisionWorkspaceRequest,
-                                wire::ProvisionWorkspaceResponse,
-                            >::default(),
-                        )
-                        .await;
+                let response: Result<Response<wire::ProvisionTenantResponse>, Status> = anonymous
+                    .unary(
+                        Request::new(valid_wire_request()),
+                        tonic::codegen::http::uri::PathAndQuery::from_static(
+                            "/automata.management.v1.ShardManagementService/ProvisionTenant",
+                        ),
+                        tonic_prost::ProstCodec::<
+                            wire::ProvisionTenantRequest,
+                            wire::ProvisionTenantResponse,
+                        >::default(),
+                    )
+                    .await;
                 response.is_err()
             }
         } else {
@@ -1774,15 +1759,15 @@ mod tests {
         let mut client = tonic::client::Grpc::new(channel);
         client.ready().await.expect("ready gRPC client");
         let path = tonic::codegen::http::uri::PathAndQuery::from_static(
-            "/automata.management.v1.ShardManagementService/ProvisionWorkspace",
+            "/automata.management.v1.ShardManagementService/ProvisionTenant",
         );
-        let response: Response<wire::ProvisionWorkspaceResponse> = client
+        let response: Response<wire::ProvisionTenantResponse> = client
             .unary(
                 Request::new(valid_wire_request()),
                 path,
                 tonic_prost::ProstCodec::<
-                    wire::ProvisionWorkspaceRequest,
-                    wire::ProvisionWorkspaceResponse,
+                    wire::ProvisionTenantRequest,
+                    wire::ProvisionTenantResponse,
                 >::default(),
             )
             .await
@@ -1794,15 +1779,15 @@ mod tests {
         assert_eq!(provisioner.calls.load(Ordering::SeqCst), 1);
 
         client.ready().await.expect("ready entitlement client");
-        let entitlement: Response<wire::ApplyWorkspaceEntitlementResponse> = client
+        let entitlement: Response<wire::ApplyTenantEntitlementResponse> = client
             .unary(
                 Request::new(valid_entitlement_wire_request()),
                 tonic::codegen::http::uri::PathAndQuery::from_static(
-                    "/automata.management.v1.ShardManagementService/ApplyWorkspaceEntitlement",
+                    "/automata.management.v1.ShardManagementService/ApplyTenantEntitlement",
                 ),
                 tonic_prost::ProstCodec::<
-                    wire::ApplyWorkspaceEntitlementRequest,
-                    wire::ApplyWorkspaceEntitlementResponse,
+                    wire::ApplyTenantEntitlementRequest,
+                    wire::ApplyTenantEntitlementResponse,
                 >::default(),
             )
             .await

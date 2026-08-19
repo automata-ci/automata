@@ -6,7 +6,7 @@ use std::{collections::BTreeSet, fmt, sync::Arc};
 use std::str::FromStr as _;
 
 use automata_ci_core::JobAuthorityProfile;
-use automata_ci_core::{UnixMillis, WorkspaceId};
+use automata_ci_core::{ManagedTenantId, UnixMillis};
 use automata_ci_github_delivery::GithubScheduleServiceConfig;
 use automata_ci_provider::{
     ProviderConfigurationRevision, ProviderInstanceId, ProviderWebhookEndpointId,
@@ -288,7 +288,7 @@ impl GithubProviderConfig {
             webhook_verifier_revision,
             runner_policy_revision,
             configuration,
-            workspaces,
+            tenants,
         ) = desired.into_parts();
         let instance_id = configured_instance_id(shard_id.as_str())?;
         let endpoint_id = configured_endpoint_id(shard_id.as_str())?;
@@ -323,26 +323,26 @@ impl GithubProviderConfig {
         .map(GithubProviderScheduleConfig)
         .map_err(|_| GithubProviderConfigError)?;
         let mut repositories = Vec::new();
-        for workspace in workspaces {
-            let workspace_id = workspace.workspace_id();
-            let workspace_revision = workspace.revision();
-            let workspace_applied_at = unix_millis(workspace.applied_at())?;
+        for tenant in tenants {
+            let tenant_id = tenant.tenant_id();
+            let tenant_revision = tenant.revision();
+            let tenant_applied_at = unix_millis(tenant.applied_at())?;
             // One reviewed shard generation must describe both the provider
             // authority and every repository projection loaded by a replica.
             // Mixed generations are never partially activated.
-            if workspace_revision.get() != configuration_revision.get() {
+            if tenant_revision.get() != configuration_revision.get() {
                 return Err(GithubProviderConfigError);
             }
             let projected_revision = configuration_revision.get();
-            for selected in workspace.repositories() {
+            for selected in tenant.repositories() {
                 repositories.push(database_repository_config(
-                    workspace_id,
+                    tenant_id,
                     projected_revision,
                     runner_policy_revision,
                     selected,
                     &runner_policy,
                     &check_name,
-                    workspace_applied_at,
+                    tenant_applied_at,
                 )?);
             }
         }
@@ -500,7 +500,7 @@ impl fmt::Debug for DatabaseGithubProviderConfig {
 }
 
 fn database_repository_config(
-    workspace_id: WorkspaceId,
+    tenant_id: ManagedTenantId,
     projected_revision: u64,
     runner_policy_revision: u64,
     selected: &GithubProviderRepositorySelection,
@@ -508,23 +508,23 @@ fn database_repository_config(
     check_name: &GithubCheckName,
     applied_at: UnixMillis,
 ) -> Result<GithubProviderRepositoryConfig, GithubProviderConfigError> {
-    let tenant = TenantScope::from_authenticated_tenant_id(workspace_id.to_string())
+    let tenant = TenantScope::from_authenticated_tenant_id(tenant_id.to_string())
         .map_err(|_| GithubProviderConfigError)?;
     let repository_id = selected.repository_id();
-    let workspace_bytes = workspace_id.as_uuid();
+    let tenant_bytes = tenant_id.as_uuid();
     let repository_bytes = repository_id.get().to_be_bytes();
     let revision_bytes = projected_revision.to_be_bytes();
     let policy_revision = GithubServerServiceRevision::new(projected_revision)
         .map_err(|_| GithubProviderConfigError)?;
     let connection_id = GithubProviderConnectionId(ConfiguredUuid::derive(
         DATABASE_CONNECTION_ID_DOMAIN,
-        &[workspace_bytes.as_bytes(), &repository_bytes],
+        &[tenant_bytes.as_bytes(), &repository_bytes],
     ));
     let authority = |scope: &'static [u8]| GithubProviderAuthorityConfig {
         authority_id: GithubProviderAuthorityId(ConfiguredUuid::derive(
             DATABASE_AUTHORITY_ID_DOMAIN,
             &[
-                workspace_bytes.as_bytes(),
+                tenant_bytes.as_bytes(),
                 &repository_bytes,
                 &revision_bytes,
                 scope,

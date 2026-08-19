@@ -278,7 +278,7 @@ async fn resolve_github_check_targets(
               ON connection.connection_id = subject.connection_id
              AND connection.revision = subject.connection_revision
             JOIN workflow_runs AS run ON run.id = subject.run_id
-            WHERE connection.workspace_id = $1
+            WHERE connection.tenant_id = $1
               AND connection.connection_id = $2
               AND connection.external_repository_id = $3
               AND subject.object_algorithm = 'sha1'
@@ -326,7 +326,7 @@ async fn resolve_github_check_targets(
                   ON connection.connection_id = subject.connection_id
                  AND connection.revision = subject.connection_revision
                 JOIN workflow_runs AS run ON run.id = subject.run_id
-                WHERE connection.workspace_id = $1
+                WHERE connection.tenant_id = $1
                   AND connection.connection_id = $2
                   AND connection.external_repository_id = $3
                   AND subject.object_algorithm = 'sha1'

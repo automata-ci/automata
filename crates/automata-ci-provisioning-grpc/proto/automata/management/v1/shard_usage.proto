@@ -11,13 +11,13 @@ service ShardUsageExportService {
   // Returns a stable page after an opaque exclusive cursor. Retrying a page is
   // safe: consumers deduplicate by event_id and advance their stored cursor in
   // the same transaction that durably accepts the returned events.
-  rpc ListWorkspaceUsage(ListWorkspaceUsageRequest) returns (ListWorkspaceUsageResponse) {
+  rpc ListTenantUsage(ListTenantUsageRequest) returns (ListTenantUsageResponse) {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
 }
 
 // Authority-scoped cursor-pull request for one shard.
-message ListWorkspaceUsageRequest {
+message ListTenantUsageRequest {
   // Expected immutable shard identity, already verified through capability
   // discovery and checked against the authenticated workload authority.
   string shard_id = 1;
@@ -33,15 +33,15 @@ message ListWorkspaceUsageRequest {
 
 // One immutable actual-execution fact. This is provider-neutral usage, not a
 // price, Stripe meter event, invoice line, or guarantee that usage is billable.
-message WorkspaceUsageEvent {
+message TenantUsageEvent {
   // Globally stable, non-nil canonical lower-case UUID used for idempotency.
   string event_id = 1;
 
   // Immutable identity of the shard that recorded the event.
   string shard_id = 2;
 
-  // Externally managed workspace as a non-nil canonical lower-case UUID.
-  string workspace_id = 3;
+  // Externally managed tenant as a non-nil canonical lower-case UUID.
+  string tenant_id = 3;
 
   // Core execution attempt as a non-nil canonical lower-case UUID. Several
   // events may cover non-overlapping intervals of one attempt.
@@ -61,28 +61,28 @@ message WorkspaceUsageEvent {
 
 // Stable feed page. An empty page is valid and retains a continuation cursor
 // from which a later poll can observe newly appended events.
-message ListWorkspaceUsageResponse {
+message ListTenantUsageResponse {
   // Events in stable append order after the request cursor.
-  repeated WorkspaceUsageEvent events = 1;
+  repeated TenantUsageEvent events = 1;
 
   // Opaque exclusive position after every event in this response.
   bytes next_cursor = 2;
 }
 
 // Stable machine-readable reason attached to a failed usage-export RPC.
-enum ListWorkspaceUsageFailureReason {
-  LIST_WORKSPACE_USAGE_FAILURE_REASON_UNSPECIFIED = 0;
-  LIST_WORKSPACE_USAGE_FAILURE_REASON_INVALID_REQUEST = 1;
-  LIST_WORKSPACE_USAGE_FAILURE_REASON_UNAUTHENTICATED = 2;
-  LIST_WORKSPACE_USAGE_FAILURE_REASON_FORBIDDEN = 3;
-  LIST_WORKSPACE_USAGE_FAILURE_REASON_INVALID_CURSOR = 4;
-  LIST_WORKSPACE_USAGE_FAILURE_REASON_RATE_LIMITED = 5;
-  LIST_WORKSPACE_USAGE_FAILURE_REASON_INTERNAL_ERROR = 6;
-  LIST_WORKSPACE_USAGE_FAILURE_REASON_TEMPORARILY_UNAVAILABLE = 7;
+enum ListTenantUsageFailureReason {
+  LIST_TENANT_USAGE_FAILURE_REASON_UNSPECIFIED = 0;
+  LIST_TENANT_USAGE_FAILURE_REASON_INVALID_REQUEST = 1;
+  LIST_TENANT_USAGE_FAILURE_REASON_UNAUTHENTICATED = 2;
+  LIST_TENANT_USAGE_FAILURE_REASON_FORBIDDEN = 3;
+  LIST_TENANT_USAGE_FAILURE_REASON_INVALID_CURSOR = 4;
+  LIST_TENANT_USAGE_FAILURE_REASON_RATE_LIMITED = 5;
+  LIST_TENANT_USAGE_FAILURE_REASON_INTERNAL_ERROR = 6;
+  LIST_TENANT_USAGE_FAILURE_REASON_TEMPORARILY_UNAVAILABLE = 7;
 }
 
 // Typed detail carried in google.rpc.Status.details after Core can safely
 // construct contract-specific details.
-message ListWorkspaceUsageFailure {
-  ListWorkspaceUsageFailureReason reason = 1;
+message ListTenantUsageFailure {
+  ListTenantUsageFailureReason reason = 1;
 }

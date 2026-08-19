@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use automata_ci_core::{GitObjectAlgorithm, Sha256Digest, UnixMillis, WorkspaceId};
+use automata_ci_core::{GitObjectAlgorithm, ManagedTenantId, Sha256Digest, UnixMillis};
 use automata_ci_key_management::SecretBytes;
 use automata_ci_provider::{
     ExternalRepositoryId, ExternalRepositoryIdentity, MAX_PROVIDER_SCHEMA_VERSION,
@@ -176,7 +176,7 @@ fn connection_manifest(
     provider_configuration_digest: Sha256Digest,
 ) -> ProviderConnectionManifest {
     let configuration = ProviderConnectionConfiguration::new(
-        WorkspaceId::parse("11111111-1111-4111-8111-111111111111").expect("workspace"),
+        ManagedTenantId::parse("11111111-1111-4111-8111-111111111111").expect("tenant"),
         ExternalRepositoryIdentity::new(
             instance.instance_id(),
             ExternalRepositoryId::new("42").expect("repository"),
@@ -389,7 +389,7 @@ fn registry_materializes_capability_bound_records_without_caller_digest_authorit
                 ProviderConnectionId::from_uuid(Uuid::from_u128(72)).expect("connection ID"),
                 ProviderConnectionRevision::new(1).expect("connection revision"),
                 ProviderLifecycleState::Active,
-                WorkspaceId::parse("11111111-1111-4111-8111-111111111111").expect("workspace"),
+                ManagedTenantId::parse("11111111-1111-4111-8111-111111111111").expect("tenant"),
                 ExternalRepositoryId::new("repository-42").expect("repository ID"),
                 RepositoryVisibility::Private,
                 ProviderDefaultBranch::new("main").expect("branch"),

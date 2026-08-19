@@ -1,6 +1,6 @@
 use std::fmt;
 
-use automata_ci_core::WorkspaceId;
+use automata_ci_core::ManagedTenantId;
 use thiserror::Error;
 
 use crate::{OperationId, ProvisioningAuthority, ShardId};
@@ -12,7 +12,7 @@ const PROTOBUF_TIMESTAMP_MIN_SECONDS: i64 = -62_135_596_800;
 const PROTOBUF_TIMESTAMP_MAX_SECONDS: i64 = 253_402_300_799;
 const NANOS_PER_SECOND: u32 = 1_000_000_000;
 
-/// Monotonically increasing version of one workspace entitlement snapshot.
+/// Monotonically increasing version of one tenant entitlement snapshot.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct EntitlementRevision(u64);
 
@@ -36,7 +36,7 @@ impl EntitlementRevision {
     }
 }
 
-/// Positive workspace compute allowance measured at whole-second granularity.
+/// Positive tenant compute allowance measured at whole-second granularity.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ComputeSeconds(u64);
 
@@ -84,24 +84,24 @@ impl EntitlementDurationSeconds {
     }
 }
 
-/// Complete execution policy installed for one workspace revision.
+/// Complete execution policy installed for one tenant revision.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum WorkspaceExecutionEntitlement {
-    /// Execution is bounded by aggregate workspace compute, optionally until a deadline.
+pub enum TenantExecutionEntitlement {
+    /// Execution is bounded by aggregate tenant compute, optionally until a deadline.
     Capped {
         /// Total compute available to this entitlement revision.
         compute_seconds: ComputeSeconds,
         /// Optional validity period anchored by Core when the revision commits.
         valid_for: Option<EntitlementDurationSeconds>,
     },
-    /// Execution is metered but has no Core-enforced workspace compute ceiling.
+    /// Execution is metered but has no Core-enforced tenant compute ceiling.
     Uncapped,
     /// New and running execution is not permitted.
     Paused,
 }
 
-impl WorkspaceExecutionEntitlement {
-    /// Creates a capped aggregate workspace allowance.
+impl TenantExecutionEntitlement {
+    /// Creates a capped aggregate tenant allowance.
     #[must_use]
     pub const fn capped(
         compute_seconds: ComputeSeconds,
@@ -114,30 +114,30 @@ impl WorkspaceExecutionEntitlement {
     }
 }
 
-/// Complete validated semantic input for one workspace entitlement revision.
+/// Complete validated semantic input for one tenant entitlement revision.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ApplyWorkspaceEntitlementCommand {
+pub struct ApplyTenantEntitlementCommand {
     operation_id: OperationId,
     shard_id: ShardId,
-    workspace_id: WorkspaceId,
+    tenant_id: ManagedTenantId,
     revision: EntitlementRevision,
-    execution: WorkspaceExecutionEntitlement,
+    execution: TenantExecutionEntitlement,
 }
 
-impl ApplyWorkspaceEntitlementCommand {
+impl ApplyTenantEntitlementCommand {
     /// Creates a complete entitlement snapshot command.
     #[must_use]
     pub const fn new(
         operation_id: OperationId,
         shard_id: ShardId,
-        workspace_id: WorkspaceId,
+        tenant_id: ManagedTenantId,
         revision: EntitlementRevision,
-        execution: WorkspaceExecutionEntitlement,
+        execution: TenantExecutionEntitlement,
     ) -> Self {
         Self {
             operation_id,
             shard_id,
-            workspace_id,
+            tenant_id,
             revision,
             execution,
         }
@@ -155,13 +155,13 @@ impl ApplyWorkspaceEntitlementCommand {
         &self.shard_id
     }
 
-    /// Returns the workspace receiving this snapshot.
+    /// Returns the tenant receiving this snapshot.
     #[must_use]
-    pub const fn workspace_id(&self) -> WorkspaceId {
-        self.workspace_id
+    pub const fn tenant_id(&self) -> ManagedTenantId {
+        self.tenant_id
     }
 
-    /// Returns the monotonic workspace revision.
+    /// Returns the monotonic tenant revision.
     #[must_use]
     pub const fn revision(&self) -> EntitlementRevision {
         self.revision
@@ -169,30 +169,30 @@ impl ApplyWorkspaceEntitlementCommand {
 
     /// Returns the complete execution policy.
     #[must_use]
-    pub const fn execution(&self) -> WorkspaceExecutionEntitlement {
+    pub const fn execution(&self) -> TenantExecutionEntitlement {
         self.execution
     }
 }
 
 /// Entitlement command proven to target the authority's configured shard.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AuthorizedApplyWorkspaceEntitlement {
+pub struct AuthorizedApplyTenantEntitlement {
     authority: ProvisioningAuthority,
-    command: ApplyWorkspaceEntitlementCommand,
+    command: ApplyTenantEntitlementCommand,
 }
 
-impl AuthorizedApplyWorkspaceEntitlement {
+impl AuthorizedApplyTenantEntitlement {
     /// Authorizes a command against the server-derived shard binding.
     ///
     /// Durable persistence additionally requires the same authority to own the
-    /// workspace's external-management binding.
+    /// tenant's external-management binding.
     ///
     /// # Errors
     ///
     /// Rejects a command for another shard.
     pub fn authorize(
         authority: ProvisioningAuthority,
-        command: ApplyWorkspaceEntitlementCommand,
+        command: ApplyTenantEntitlementCommand,
     ) -> Result<Self, EntitlementAuthorizationError> {
         if authority.shard_id() != command.shard_id() {
             return Err(EntitlementAuthorizationError::Forbidden);
@@ -208,13 +208,13 @@ impl AuthorizedApplyWorkspaceEntitlement {
 
     /// Returns the validated semantic command.
     #[must_use]
-    pub const fn command(&self) -> &ApplyWorkspaceEntitlementCommand {
+    pub const fn command(&self) -> &ApplyTenantEntitlementCommand {
         &self.command
     }
 
     /// Consumes the request into its authority and command.
     #[must_use]
-    pub fn into_parts(self) -> (ProvisioningAuthority, ApplyWorkspaceEntitlementCommand) {
+    pub fn into_parts(self) -> (ProvisioningAuthority, ApplyTenantEntitlementCommand) {
         (self.authority, self.command)
     }
 }
@@ -260,22 +260,22 @@ impl EntitlementTimestamp {
 
 /// Stable result committed atomically with one entitlement revision.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ApplyWorkspaceEntitlementResult {
+pub struct ApplyTenantEntitlementResult {
     operation_id: OperationId,
     shard_id: ShardId,
-    workspace_id: WorkspaceId,
+    tenant_id: ManagedTenantId,
     revision: EntitlementRevision,
     applied_at: EntitlementTimestamp,
     expires_at: Option<EntitlementTimestamp>,
 }
 
-impl ApplyWorkspaceEntitlementResult {
+impl ApplyTenantEntitlementResult {
     /// Creates a durable first-attempt or replay result.
     #[must_use]
     pub const fn new(
         operation_id: OperationId,
         shard_id: ShardId,
-        workspace_id: WorkspaceId,
+        tenant_id: ManagedTenantId,
         revision: EntitlementRevision,
         applied_at: EntitlementTimestamp,
         expires_at: Option<EntitlementTimestamp>,
@@ -283,7 +283,7 @@ impl ApplyWorkspaceEntitlementResult {
         Self {
             operation_id,
             shard_id,
-            workspace_id,
+            tenant_id,
             revision,
             applied_at,
             expires_at,
@@ -302,13 +302,13 @@ impl ApplyWorkspaceEntitlementResult {
         &self.shard_id
     }
 
-    /// Returns the workspace receiving the snapshot.
+    /// Returns the tenant receiving the snapshot.
     #[must_use]
-    pub const fn workspace_id(&self) -> WorkspaceId {
-        self.workspace_id
+    pub const fn tenant_id(&self) -> ManagedTenantId {
+        self.tenant_id
     }
 
-    /// Returns the committed workspace revision.
+    /// Returns the committed tenant revision.
     #[must_use]
     pub const fn revision(&self) -> EntitlementRevision {
         self.revision
@@ -332,10 +332,10 @@ impl ApplyWorkspaceEntitlementResult {
 pub enum EntitlementFailureKind {
     /// The operation identity is already bound to different semantic input.
     OperationConflict,
-    /// The revision is not newer than the workspace's current revision.
+    /// The revision is not newer than the tenant's current revision.
     StaleRevision,
-    /// The workspace is not managed by this exact external authority.
-    WorkspaceUnavailable,
+    /// The tenant is not managed by this exact external authority.
+    TenantUnavailable,
     /// The authority exceeded a bounded mutation rate.
     RateLimited,
     /// Core failed without a safer specific result.
@@ -346,7 +346,7 @@ pub enum EntitlementFailureKind {
 
 /// Sanitized durable entitlement failure.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
-#[error("workspace entitlement application failed: {kind:?}")]
+#[error("tenant entitlement application failed: {kind:?}")]
 pub struct EntitlementFailure {
     kind: EntitlementFailureKind,
 }
@@ -409,13 +409,13 @@ mod tests {
         )
     }
 
-    fn command() -> ApplyWorkspaceEntitlementCommand {
-        ApplyWorkspaceEntitlementCommand::new(
+    fn command() -> ApplyTenantEntitlementCommand {
+        ApplyTenantEntitlementCommand::new(
             OperationId::parse("55555555-5555-4555-8555-555555555555").unwrap(),
             ShardId::new("prod-us-east-1-001").unwrap(),
-            WorkspaceId::parse("22222222-2222-4222-8222-222222222222").unwrap(),
+            ManagedTenantId::parse("22222222-2222-4222-8222-222222222222").unwrap(),
             EntitlementRevision::new(1).unwrap(),
-            WorkspaceExecutionEntitlement::capped(
+            TenantExecutionEntitlement::capped(
                 ComputeSeconds::new(6_000).unwrap(),
                 Some(EntitlementDurationSeconds::new(7 * 24 * 60 * 60).unwrap()),
             ),
@@ -425,11 +425,11 @@ mod tests {
     #[test]
     fn capped_snapshot_authorizes_for_exact_shard() {
         let authorized =
-            AuthorizedApplyWorkspaceEntitlement::authorize(authority(), command()).unwrap();
+            AuthorizedApplyTenantEntitlement::authorize(authority(), command()).unwrap();
         assert_eq!(authorized.command().revision().get(), 1);
         assert_eq!(
             authorized.command().execution(),
-            WorkspaceExecutionEntitlement::capped(
+            TenantExecutionEntitlement::capped(
                 ComputeSeconds::new(6_000).unwrap(),
                 Some(EntitlementDurationSeconds::new(604_800).unwrap())
             )
@@ -441,7 +441,7 @@ mod tests {
         let mut command = command();
         command.shard_id = ShardId::new("prod-eu-west-1-001").unwrap();
         assert_eq!(
-            AuthorizedApplyWorkspaceEntitlement::authorize(authority(), command),
+            AuthorizedApplyTenantEntitlement::authorize(authority(), command),
             Err(EntitlementAuthorizationError::Forbidden)
         );
     }

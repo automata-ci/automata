@@ -1,4 +1,4 @@
-use automata_ci_core::WorkspaceId;
+use automata_ci_core::ManagedTenantId;
 use automata_ci_provider::{
     ExternalRepositoryId, ExternalRepositoryIdentity, ProviderArchiveLimits,
     ProviderConfigurationRevision, ProviderConnectionConfiguration, ProviderConnectionId,
@@ -19,7 +19,7 @@ struct ConnectionRow {
     connection_id: uuid::Uuid,
     revision: i64,
     lifecycle_state: String,
-    workspace_id: String,
+    tenant_id: String,
     provider_instance_id: uuid::Uuid,
     external_repository_id: String,
     provider_revision: i64,
@@ -228,13 +228,13 @@ async fn ensure_connection_references(
     .fetch_one(&mut **transaction)
     .await
     .map_err(unavailable)?;
-    let workspace_exists =
+    let tenant_exists =
         sqlx::query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM tenants WHERE id = $1)")
-            .bind(configuration.workspace_id().to_string())
+            .bind(configuration.tenant_id().to_string())
             .fetch_one(&mut **transaction)
             .await
             .map_err(unavailable)?;
-    if !provider_exists || !workspace_exists {
+    if !provider_exists || !tenant_exists {
         return Err(ProviderRepositoryError::NotFound);
     }
     Ok(())
@@ -253,7 +253,7 @@ async fn insert_connection(
     sqlx::query(
         r"
         INSERT INTO provider_connection_revisions (
-            connection_id, revision, lifecycle_state, workspace_id,
+            connection_id, revision, lifecycle_state, tenant_id,
             provider_instance_id, external_repository_id, provider_revision,
             provider_configuration_digest, capability_digest,
             repository_visibility, default_branch, workflow_source_kind,
@@ -272,7 +272,7 @@ async fn insert_connection(
     .bind(manifest.connection_id().as_uuid())
     .bind(i64::try_from(manifest.revision().get()).map_err(|_| ProviderRepositoryError::Corrupt)?)
     .bind(lifecycle_text(manifest.state()))
-    .bind(configuration.workspace_id().to_string())
+    .bind(configuration.tenant_id().to_string())
     .bind(configuration.repository().instance_id().as_uuid())
     .bind(configuration.repository().external_id().as_str())
     .bind(
@@ -368,7 +368,7 @@ fn decode_connection(
         return Err(ProviderRepositoryError::Corrupt);
     }
     let configuration = ProviderConnectionConfiguration::new(
-        WorkspaceId::parse(&row.workspace_id).map_err(|_| ProviderRepositoryError::Corrupt)?,
+        ManagedTenantId::parse(&row.tenant_id).map_err(|_| ProviderRepositoryError::Corrupt)?,
         ExternalRepositoryIdentity::new(
             instance_id,
             ExternalRepositoryId::new(row.external_repository_id)

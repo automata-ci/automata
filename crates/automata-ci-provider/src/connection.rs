@@ -2,7 +2,7 @@
 
 use std::{fmt, num::NonZeroU64};
 
-use automata_ci_core::{Sha256Digest, UnixMillis, WorkspaceId};
+use automata_ci_core::{ManagedTenantId, Sha256Digest, UnixMillis};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
@@ -432,7 +432,7 @@ impl ProviderConnectionPolicyDocument {
 /// Complete provider-neutral configuration of one repository connection.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProviderConnectionConfiguration {
-    workspace_id: WorkspaceId,
+    tenant_id: ManagedTenantId,
     repository: ExternalRepositoryIdentity,
     provider_revision: ProviderConfigurationRevision,
     provider_configuration_digest: Sha256Digest,
@@ -451,7 +451,7 @@ impl ProviderConnectionConfiguration {
     #[allow(clippy::too_many_arguments)]
     #[must_use]
     pub fn new(
-        workspace_id: WorkspaceId,
+        tenant_id: ManagedTenantId,
         repository: ExternalRepositoryIdentity,
         provider_revision: ProviderConfigurationRevision,
         provider_configuration_digest: Sha256Digest,
@@ -464,7 +464,7 @@ impl ProviderConnectionConfiguration {
         adapter_policy: ProviderConnectionPolicyDocument,
     ) -> Self {
         let mut value = Self {
-            workspace_id,
+            tenant_id,
             repository,
             provider_revision,
             provider_configuration_digest,
@@ -481,10 +481,10 @@ impl ProviderConnectionConfiguration {
         value
     }
 
-    /// Returns the owning workspace.
+    /// Returns the owning tenant.
     #[must_use]
-    pub const fn workspace_id(&self) -> WorkspaceId {
-        self.workspace_id
+    pub const fn tenant_id(&self) -> ManagedTenantId {
+        self.tenant_id
     }
 
     /// Returns the instance-scoped provider repository identity.
@@ -556,7 +556,7 @@ impl ProviderConnectionConfiguration {
     fn compute_digest(&self) -> Sha256Digest {
         let mut hash = Sha256::new();
         hash.update(CONNECTION_CONFIGURATION_DIGEST_DOMAIN);
-        part(&mut hash, self.workspace_id.as_uuid().as_bytes());
+        part(&mut hash, self.tenant_id.as_uuid().as_bytes());
         part(
             &mut hash,
             self.repository.instance_id().as_uuid().as_bytes(),
@@ -609,7 +609,7 @@ pub struct ProviderConnectionDraft {
     connection_id: ProviderConnectionId,
     revision: ProviderConnectionRevision,
     state: ProviderLifecycleState,
-    workspace_id: WorkspaceId,
+    tenant_id: ManagedTenantId,
     external_repository_id: ExternalRepositoryId,
     visibility: RepositoryVisibility,
     default_branch: ProviderDefaultBranch,
@@ -633,7 +633,7 @@ impl ProviderConnectionDraft {
         connection_id: ProviderConnectionId,
         revision: ProviderConnectionRevision,
         state: ProviderLifecycleState,
-        workspace_id: WorkspaceId,
+        tenant_id: ManagedTenantId,
         external_repository_id: ExternalRepositoryId,
         visibility: RepositoryVisibility,
         default_branch: ProviderDefaultBranch,
@@ -651,7 +651,7 @@ impl ProviderConnectionDraft {
             connection_id,
             revision,
             state,
-            workspace_id,
+            tenant_id,
             external_repository_id,
             visibility,
             default_branch,
@@ -670,7 +670,7 @@ impl ProviderConnectionDraft {
         provider: &ProviderInstanceManifest,
     ) -> Result<ProviderConnectionManifest, ProviderConnectionError> {
         let configuration = ProviderConnectionConfiguration::new(
-            self.workspace_id,
+            self.tenant_id,
             ExternalRepositoryIdentity::new(provider.instance_id(), self.external_repository_id),
             provider.revision(),
             provider.configuration().digest(),
@@ -701,7 +701,7 @@ impl fmt::Debug for ProviderConnectionDraft {
             .field("connection_id", &self.connection_id)
             .field("revision", &self.revision)
             .field("state", &self.state)
-            .field("workspace_id", &self.workspace_id)
+            .field("tenant_id", &self.tenant_id)
             .field("external_repository_id", &self.external_repository_id)
             .field("visibility", &self.visibility)
             .field("default_branch", &self.default_branch)

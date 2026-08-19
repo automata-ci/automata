@@ -1,7 +1,7 @@
 use crate::support::{FixtureServer, ResponseSpec};
 
 use automata_ci_auth::secret::SecretString;
-use automata_ci_core::{GitObjectId, Sha256Digest, UnixMillis, WorkspaceId};
+use automata_ci_core::{GitObjectId, ManagedTenantId, Sha256Digest, UnixMillis};
 use automata_ci_provider::{
     ExternalRepositoryId, ExternalRepositoryIdentity, NormalizedTrigger, ProviderArchiveLimits,
     ProviderConfigurationRevision, ProviderConnectionConfiguration, ProviderConnectionId,
@@ -37,7 +37,7 @@ fn identity() -> ExternalRepositoryIdentity {
 
 fn connection() -> ProviderConnectionManifest {
     let configuration = ProviderConnectionConfiguration::new(
-        WorkspaceId::parse("11111111-1111-4111-8111-111111111111").expect("workspace"),
+        ManagedTenantId::parse("11111111-1111-4111-8111-111111111111").expect("tenant"),
         identity(),
         ProviderConfigurationRevision::new(1).expect("provider revision"),
         Sha256Digest::from_bytes([3; 32]),

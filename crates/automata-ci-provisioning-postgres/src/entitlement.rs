@@ -1,27 +1,27 @@
 use std::fmt;
 
 use automata_ci_provisioning::{
-    ApplyWorkspaceEntitlementResult, AuthorizedApplyWorkspaceEntitlement, EntitlementFailure,
-    EntitlementFailureKind, EntitlementTimestamp, WorkspaceEntitlementApplier,
-    WorkspaceExecutionEntitlement,
+    ApplyTenantEntitlementResult, AuthorizedApplyTenantEntitlement, EntitlementFailure,
+    EntitlementFailureKind, EntitlementTimestamp, TenantEntitlementApplier,
+    TenantExecutionEntitlement,
 };
 use sqlx::{FromRow, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
-const WORKSPACE_ENTITLEMENT_APPLIED_AUDIT_ACTION: &str = "workspace.entitlement.applied";
+const TENANT_ENTITLEMENT_APPLIED_AUDIT_ACTION: &str = "tenant.entitlement.applied";
 
-/// Replica-safe `PostgreSQL` implementation of workspace entitlement application.
+/// Replica-safe `PostgreSQL` implementation of tenant entitlement application.
 ///
-/// The adapter serializes mutations through the immutable workspace management
+/// The adapter serializes mutations through the immutable tenant management
 /// binding, verifies its exact authority and shard, and atomically stores both
 /// the current snapshot and stable operation receipt. It deliberately performs
 /// no per-job budget allocation.
 #[derive(Clone)]
-pub struct PostgresWorkspaceEntitlementApplier {
+pub struct PostgresTenantEntitlementApplier {
     pool: PgPool,
 }
 
-impl PostgresWorkspaceEntitlementApplier {
+impl PostgresTenantEntitlementApplier {
     /// Binds entitlement application to `pool`.
     #[must_use]
     pub const fn new(pool: PgPool) -> Self {
@@ -31,43 +31,43 @@ impl PostgresWorkspaceEntitlementApplier {
     #[allow(clippy::too_many_lines)] // One ordered transaction owns every entitlement effect.
     async fn apply_inner(
         &self,
-        request: AuthorizedApplyWorkspaceEntitlement,
-    ) -> Result<ApplyWorkspaceEntitlementResult, EntitlementFailure> {
+        request: AuthorizedApplyTenantEntitlement,
+    ) -> Result<ApplyTenantEntitlementResult, EntitlementFailure> {
         let (authority, command) = request.into_parts();
         let authority_id = authority.id().as_str();
         let operation_id = command.operation_id();
         let shard_id = command.shard_id();
-        let workspace_id = command.workspace_id();
-        let workspace_text = workspace_id.to_string();
+        let tenant_id = command.tenant_id();
+        let tenant_text = tenant_id.to_string();
         let revision = i64::try_from(command.revision().get())
             .map_err(|_| failure(EntitlementFailureKind::Internal))?;
         let policy = PolicyFields::from(command.execution())?;
 
         let mut transaction = self.pool.begin().await.map_err(database_failure)?;
-        let binding = lock_management_binding(&mut transaction, &workspace_text).await?;
+        let binding = lock_management_binding(&mut transaction, &tenant_text).await?;
         if binding.as_ref().is_none_or(|binding| {
             binding.authority_id != authority_id || binding.shard_id != shard_id.as_str()
         }) {
-            return Err(failure(EntitlementFailureKind::WorkspaceUnavailable));
+            return Err(failure(EntitlementFailureKind::TenantUnavailable));
         }
 
         if let Some(stored) =
             load_operation(&mut transaction, authority_id, operation_id.as_uuid()).await?
         {
-            if !stored.matches(shard_id.as_str(), &workspace_text, revision, policy) {
+            if !stored.matches(shard_id.as_str(), &tenant_text, revision, policy) {
                 return Err(failure(EntitlementFailureKind::OperationConflict));
             }
-            return stored.result(operation_id, shard_id.clone(), workspace_id);
+            return stored.result(operation_id, shard_id.clone(), tenant_id);
         }
 
         let current_revision: Option<i64> = sqlx::query_scalar(
             r"
-            SELECT revision FROM workspace_execution_entitlements
-            WHERE workspace_id=$1
+            SELECT revision FROM tenant_execution_entitlements
+            WHERE tenant_id=$1
             FOR UPDATE
             ",
         )
-        .bind(&workspace_text)
+        .bind(&tenant_text)
         .fetch_optional(&mut *transaction)
         .await
         .map_err(database_failure)?;
@@ -86,8 +86,8 @@ impl PostgresWorkspaceEntitlementApplier {
             .transpose()?;
         let inserted = sqlx::query(
             r"
-            INSERT INTO workspace_entitlement_operations (
-                authority_id, operation_id, shard_id, workspace_id, revision,
+            INSERT INTO tenant_entitlement_operations (
+                authority_id, operation_id, shard_id, tenant_id, revision,
                 policy_kind, compute_limit_ms, valid_for_ms, applied_at_ms,
                 expires_at_ms
             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
@@ -97,7 +97,7 @@ impl PostgresWorkspaceEntitlementApplier {
         .bind(authority_id)
         .bind(operation_id.as_uuid())
         .bind(shard_id.as_str())
-        .bind(&workspace_text)
+        .bind(&tenant_text)
         .bind(revision)
         .bind(policy.kind)
         .bind(policy.compute_limit_ms)
@@ -112,10 +112,10 @@ impl PostgresWorkspaceEntitlementApplier {
             let stored = load_operation(&mut transaction, authority_id, operation_id.as_uuid())
                 .await?
                 .ok_or_else(|| failure(EntitlementFailureKind::Internal))?;
-            if !stored.matches(shard_id.as_str(), &workspace_text, revision, policy) {
+            if !stored.matches(shard_id.as_str(), &tenant_text, revision, policy) {
                 return Err(failure(EntitlementFailureKind::OperationConflict));
             }
-            return stored.result(operation_id, shard_id.clone(), workspace_id);
+            return stored.result(operation_id, shard_id.clone(), tenant_id);
         }
 
         let state = if policy.kind == "paused" {
@@ -125,13 +125,13 @@ impl PostgresWorkspaceEntitlementApplier {
         };
         let updated = sqlx::query(
             r"
-            INSERT INTO workspace_execution_entitlements (
-                workspace_id, authority_id, shard_id, revision, operation_id,
+            INSERT INTO tenant_execution_entitlements (
+                tenant_id, authority_id, shard_id, revision, operation_id,
                 policy_kind, compute_limit_ms, valid_for_ms,
                 consumed_compute_ms, state, applied_at_ms, expires_at_ms,
                 exhausted_at_ms
             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,0,$9,$10,$11,NULL)
-            ON CONFLICT (workspace_id) DO UPDATE SET
+            ON CONFLICT (tenant_id) DO UPDATE SET
                 authority_id=EXCLUDED.authority_id,
                 shard_id=EXCLUDED.shard_id,
                 revision=EXCLUDED.revision,
@@ -144,10 +144,10 @@ impl PostgresWorkspaceEntitlementApplier {
                 applied_at_ms=EXCLUDED.applied_at_ms,
                 expires_at_ms=EXCLUDED.expires_at_ms,
                 exhausted_at_ms=NULL
-            WHERE workspace_execution_entitlements.revision < EXCLUDED.revision
+            WHERE tenant_execution_entitlements.revision < EXCLUDED.revision
             ",
         )
-        .bind(&workspace_text)
+        .bind(&tenant_text)
         .bind(authority_id)
         .bind(shard_id.as_str())
         .bind(revision)
@@ -170,13 +170,13 @@ impl PostgresWorkspaceEntitlementApplier {
             INSERT INTO security_audit_events (
                 event_id, tenant_id, occurred_at_ms, actor_kind, action,
                 outcome, resource_kind, resource_id
-            ) VALUES ($1,$2,$3,'system',$4,'succeeded','workspace',$2)
+            ) VALUES ($1,$2,$3,'system',$4,'succeeded','tenant',$2)
             ",
         )
         .bind(Uuid::new_v4())
-        .bind(&workspace_text)
+        .bind(&tenant_text)
         .bind(applied_at_ms)
-        .bind(WORKSPACE_ENTITLEMENT_APPLIED_AUDIT_ACTION)
+        .bind(TENANT_ENTITLEMENT_APPLIED_AUDIT_ACTION)
         .execute(&mut *transaction)
         .await
         .map_err(database_failure)?;
@@ -185,7 +185,7 @@ impl PostgresWorkspaceEntitlementApplier {
         result(
             operation_id,
             shard_id.clone(),
-            workspace_id,
+            tenant_id,
             command.revision(),
             applied_at_ms,
             expires_at_ms,
@@ -193,18 +193,18 @@ impl PostgresWorkspaceEntitlementApplier {
     }
 }
 
-impl fmt::Debug for PostgresWorkspaceEntitlementApplier {
+impl fmt::Debug for PostgresTenantEntitlementApplier {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("PostgresWorkspaceEntitlementApplier")
+            .debug_struct("PostgresTenantEntitlementApplier")
             .finish_non_exhaustive()
     }
 }
 
-impl WorkspaceEntitlementApplier for PostgresWorkspaceEntitlementApplier {
+impl TenantEntitlementApplier for PostgresTenantEntitlementApplier {
     fn apply(
         &self,
-        request: AuthorizedApplyWorkspaceEntitlement,
+        request: AuthorizedApplyTenantEntitlement,
     ) -> automata_ci_provisioning::EntitlementApplicationFuture<'_> {
         Box::pin(self.apply_inner(request))
     }
@@ -218,9 +218,9 @@ struct PolicyFields {
 }
 
 impl PolicyFields {
-    fn from(value: WorkspaceExecutionEntitlement) -> Result<Self, EntitlementFailure> {
+    fn from(value: TenantExecutionEntitlement) -> Result<Self, EntitlementFailure> {
         match value {
-            WorkspaceExecutionEntitlement::Capped {
+            TenantExecutionEntitlement::Capped {
                 compute_seconds,
                 valid_for,
             } => Ok(Self {
@@ -230,12 +230,12 @@ impl PolicyFields {
                     .map(|duration| seconds_to_milliseconds(duration.get()))
                     .transpose()?,
             }),
-            WorkspaceExecutionEntitlement::Uncapped => Ok(Self {
+            TenantExecutionEntitlement::Uncapped => Ok(Self {
                 kind: "uncapped",
                 compute_limit_ms: None,
                 valid_for_ms: None,
             }),
-            WorkspaceExecutionEntitlement::Paused => Ok(Self {
+            TenantExecutionEntitlement::Paused => Ok(Self {
                 kind: "paused",
                 compute_limit_ms: None,
                 valid_for_ms: None,
@@ -252,16 +252,16 @@ struct ManagementBinding {
 
 async fn lock_management_binding(
     transaction: &mut Transaction<'_, Postgres>,
-    workspace_id: &str,
+    tenant_id: &str,
 ) -> Result<Option<ManagementBinding>, EntitlementFailure> {
     sqlx::query_as::<_, ManagementBinding>(
         r"
-        SELECT authority_id, shard_id FROM workspace_management_bindings
-        WHERE workspace_id=$1
+        SELECT authority_id, shard_id FROM tenant_management_bindings
+        WHERE tenant_id=$1
         FOR UPDATE
         ",
     )
-    .bind(workspace_id)
+    .bind(tenant_id)
     .fetch_optional(&mut **transaction)
     .await
     .map_err(database_failure)
@@ -270,7 +270,7 @@ async fn lock_management_binding(
 #[derive(FromRow)]
 struct StoredOperation {
     shard_id: String,
-    workspace_id: String,
+    tenant_id: String,
     revision: i64,
     policy_kind: String,
     compute_limit_ms: Option<i64>,
@@ -283,12 +283,12 @@ impl StoredOperation {
     fn matches(
         &self,
         shard_id: &str,
-        workspace_id: &str,
+        tenant_id: &str,
         revision: i64,
         policy: PolicyFields,
     ) -> bool {
         self.shard_id == shard_id
-            && self.workspace_id == workspace_id
+            && self.tenant_id == tenant_id
             && self.revision == revision
             && self.policy_kind == policy.kind
             && self.compute_limit_ms == policy.compute_limit_ms
@@ -299,12 +299,12 @@ impl StoredOperation {
         self,
         operation_id: automata_ci_provisioning::OperationId,
         shard_id: automata_ci_provisioning::ShardId,
-        workspace_id: automata_ci_core::WorkspaceId,
-    ) -> Result<ApplyWorkspaceEntitlementResult, EntitlementFailure> {
+        tenant_id: automata_ci_core::ManagedTenantId,
+    ) -> Result<ApplyTenantEntitlementResult, EntitlementFailure> {
         result(
             operation_id,
             shard_id,
-            workspace_id,
+            tenant_id,
             automata_ci_provisioning::EntitlementRevision::new(
                 u64::try_from(self.revision)
                     .map_err(|_| failure(EntitlementFailureKind::Internal))?,
@@ -323,9 +323,9 @@ async fn load_operation(
 ) -> Result<Option<StoredOperation>, EntitlementFailure> {
     sqlx::query_as::<_, StoredOperation>(
         r"
-        SELECT shard_id, workspace_id, revision, policy_kind,
+        SELECT shard_id, tenant_id, revision, policy_kind,
                compute_limit_ms, valid_for_ms, applied_at_ms, expires_at_ms
-        FROM workspace_entitlement_operations
+        FROM tenant_entitlement_operations
         WHERE authority_id=$1 AND operation_id=$2
         FOR UPDATE
         ",
@@ -340,15 +340,15 @@ async fn load_operation(
 fn result(
     operation_id: automata_ci_provisioning::OperationId,
     shard_id: automata_ci_provisioning::ShardId,
-    workspace_id: automata_ci_core::WorkspaceId,
+    tenant_id: automata_ci_core::ManagedTenantId,
     revision: automata_ci_provisioning::EntitlementRevision,
     applied_at_ms: i64,
     expires_at_ms: Option<i64>,
-) -> Result<ApplyWorkspaceEntitlementResult, EntitlementFailure> {
-    Ok(ApplyWorkspaceEntitlementResult::new(
+) -> Result<ApplyTenantEntitlementResult, EntitlementFailure> {
+    Ok(ApplyTenantEntitlementResult::new(
         operation_id,
         shard_id,
-        workspace_id,
+        tenant_id,
         revision,
         timestamp(applied_at_ms)?,
         expires_at_ms.map(timestamp).transpose()?,

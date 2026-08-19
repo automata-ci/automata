@@ -270,7 +270,7 @@ async fn prepare_request(
 pub(crate) async fn dispatch_delegated_workflow(
     backend: &Arc<dyn WorkflowDispatchApiBackend>,
     actor: RepositoryMutationActor,
-    workspace_id: Uuid,
+    tenant_id: Uuid,
     repository_id: String,
     workflow_id: String,
     request: Request,
@@ -292,7 +292,7 @@ pub(crate) async fn dispatch_delegated_workflow(
         Err(error) => return error.into_response(),
     };
     match backend.dispatch(dispatch).await {
-        Ok(outcome) => delegated_success_response(workspace_id, outcome),
+        Ok(outcome) => delegated_success_response(tenant_id, outcome),
         Err(error) => ApiError::from(error).into_response(),
     }
 }
@@ -425,7 +425,7 @@ fn success_response(outcome: WorkflowDispatchApiOutcome) -> Response {
     )
 }
 
-fn delegated_success_response(workspace_id: Uuid, outcome: WorkflowDispatchApiOutcome) -> Response {
+fn delegated_success_response(tenant_id: Uuid, outcome: WorkflowDispatchApiOutcome) -> Response {
     json_response(
         if outcome.is_replay() {
             StatusCode::OK
@@ -434,7 +434,7 @@ fn delegated_success_response(workspace_id: Uuid, outcome: WorkflowDispatchApiOu
         },
         &DelegatedDispatchResponseDocument {
             protocol_version: 1,
-            workspace_id,
+            tenant_id,
             run_id: outcome.run_id().as_uuid(),
             run_number: outcome.run_number().to_string(),
             replay: outcome.is_replay(),
@@ -514,7 +514,7 @@ struct DispatchResponseDocument {
 #[derive(Debug, Serialize)]
 struct DelegatedDispatchResponseDocument {
     protocol_version: u8,
-    workspace_id: Uuid,
+    tenant_id: Uuid,
     run_id: Uuid,
     run_number: String,
     replay: bool,
@@ -561,7 +561,7 @@ mod tests {
     const WORKFLOW_ID: &str = "22222222-2222-4222-8222-222222222222";
     const OPERATION_ID: &str = "33333333-3333-4333-8333-333333333333";
     const RUN_ID: &str = "44444444-4444-4444-8444-444444444444";
-    const WORKSPACE_ID: &str = "55555555-5555-4555-8555-555555555555";
+    const TENANT_ID: &str = "55555555-5555-4555-8555-555555555555";
     const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
     const PATH: &str = "/api/v1/repositories/aaaaaaaa-1111-4111-8111-111111111111/workflows/22222222-2222-4222-8222-222222222222/dispatches";
 
@@ -742,13 +742,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delegated_route_retains_external_authority_and_workspace_envelope() {
+    async fn delegated_route_retains_external_authority_and_tenant_envelope() {
         let backend = RecordingBackend::success(false);
         let dispatch_backend: Arc<dyn WorkflowDispatchApiBackend> = backend.clone();
         let response = dispatch_delegated_workflow(
             &dispatch_backend,
             delegated_mutation_actor(),
-            Uuid::parse_str(WORKSPACE_ID).expect("workspace ID"),
+            Uuid::parse_str(TENANT_ID).expect("tenant ID"),
             REPOSITORY_ID.to_owned(),
             WORKFLOW_ID.to_owned(),
             request(PATH, None, "application/json", valid_body()),
@@ -760,7 +760,7 @@ mod tests {
             response_json(response).await,
             json!({
                 "protocol_version": 1,
-                "workspace_id": WORKSPACE_ID,
+                "tenant_id": TENANT_ID,
                 "run_id": RUN_ID,
                 "run_number": "17",
                 "replay": false

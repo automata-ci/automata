@@ -2,7 +2,7 @@
 //!
 //! Delegated assertions are deliberately separate from durable browser and CLI
 //! sessions. The issuer authenticates an external actor, while Core remains the
-//! authority for principal mapping, workspace membership, and RBAC.
+//! authority for principal mapping, tenant membership, and RBAC.
 
 use std::{collections::BTreeSet, fmt, future::Future, pin::Pin};
 
@@ -178,7 +178,7 @@ impl DelegatedRepositoryMutationActor {
     ///
     /// # Errors
     ///
-    /// Rejects anonymous, revisionless, or cross-workspace snapshots.
+    /// Rejects anonymous, revisionless, or cross-tenant snapshots.
     pub fn from_snapshot(
         snapshot: &DelegatedActorRequestSnapshot,
     ) -> Result<Self, DelegatedRepositoryMutationActorError> {
@@ -209,7 +209,7 @@ impl DelegatedRepositoryMutationActor {
         &self.assertion
     }
 
-    /// Returns the exact Core workspace bounding the mutation.
+    /// Returns the exact Core tenant bounding the mutation.
     #[must_use]
     pub const fn tenant_id(&self) -> &TenantId {
         &self.tenant_id
@@ -258,7 +258,7 @@ pub enum RepositoryMutationActor {
 }
 
 impl RepositoryMutationActor {
-    /// Returns the exact Core workspace bounding the mutation.
+    /// Returns the exact Core tenant bounding the mutation.
     #[must_use]
     pub const fn tenant_id(&self) -> &TenantId {
         match self {
@@ -329,11 +329,11 @@ impl From<DelegatedRepositoryMutationActor> for RepositoryMutationActor {
 }
 
 impl DelegatedActorRequestSnapshot {
-    /// Creates a workspace-consistent delegated request snapshot.
+    /// Creates a tenant-consistent delegated request snapshot.
     ///
     /// # Errors
     ///
-    /// Rejects anonymous or cross-workspace authorization evidence.
+    /// Rejects anonymous or cross-tenant authorization evidence.
     pub fn new(
         assertion: DelegatedActorAssertion,
         expected_tenant_id: &TenantId,
@@ -367,7 +367,7 @@ impl DelegatedActorRequestSnapshot {
         &self.viewer
     }
 
-    /// Returns Core's current workspace-scoped RBAC evidence.
+    /// Returns Core's current tenant-scoped RBAC evidence.
     #[must_use]
     pub const fn authorization(&self) -> &AuthorizationContext {
         &self.authorization
@@ -388,7 +388,7 @@ impl DelegatedActorRequestSnapshot {
 #[error("delegated actor request snapshot is inconsistent")]
 pub struct DelegatedActorRequestSnapshotError;
 
-/// A verified assertion paired with the exact requested workspace.
+/// A verified assertion paired with the exact requested tenant.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolveDelegatedActorRequest {
     assertion: DelegatedActorAssertion,
@@ -429,7 +429,7 @@ impl ResolveDelegatedActorRequest {
         &self.assertion
     }
 
-    /// Returns the requested Core workspace identity.
+    /// Returns the requested Core tenant identity.
     #[must_use]
     pub const fn tenant_id(&self) -> &TenantId {
         &self.tenant_id
@@ -452,11 +452,11 @@ pub struct DelegatedActorPermissionRequestError;
 pub enum ResolveDelegatedActorOutcome {
     /// The external identity resolved to current Core membership and RBAC.
     Authenticated(Box<DelegatedActorRequestSnapshot>),
-    /// The external identity or requested workspace membership does not exist.
+    /// The external identity or requested tenant membership does not exist.
     NotFound,
     /// The mapped Core principal is disabled.
     PrincipalDisabled,
-    /// The mapped workspace membership is suspended.
+    /// The mapped tenant membership is suspended.
     MembershipSuspended,
 }
 
@@ -471,7 +471,7 @@ pub type DelegatedActorResolutionFuture<'a> = Pin<
 
 /// Resolves verified external identities against current Core-owned authority.
 pub trait DelegatedActorResolver: fmt::Debug + Send + Sync {
-    /// Loads the principal mapping, workspace membership, and RBAC snapshot.
+    /// Loads the principal mapping, tenant membership, and RBAC snapshot.
     fn resolve<'a>(
         &'a self,
         request: &'a ResolveDelegatedActorRequest,
