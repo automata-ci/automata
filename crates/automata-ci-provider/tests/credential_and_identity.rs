@@ -17,7 +17,8 @@ use automata_ci_provider::{
     ProviderRepositoryPath, ProviderRunnerPolicyBinding, ProviderSchemaVersion,
     ProviderWorkflowSource, ProviderWorkloadCredentialId, RepositoryVisibility,
     SourceReadCapability, WorkloadCredentialPermission, WorkloadCredentialPermissionSet,
-    WorkloadCredentialProfile, WorkloadCredentialRequest, WorkloadCredentialRevocation,
+    WorkloadCredentialProfile, WorkloadCredentialRequest, WorkloadCredentialRetirement,
+    WorkloadCredentialRevocation,
 };
 use automata_ci_secret::SecretValue;
 use static_assertions::assert_not_impl_any;
@@ -26,6 +27,14 @@ use uuid::Uuid;
 
 assert_not_impl_any!(ControlCredential: Clone, serde::Serialize);
 assert_not_impl_any!(IssuedWorkloadCredential: Clone, serde::Serialize);
+assert_not_impl_any!(
+    automata_ci_provider::WorkloadCredentialRevocationCandidate: Clone,
+    serde::Serialize
+);
+assert_not_impl_any!(
+    automata_ci_provider::WorkloadCredentialIssueOutcome: Clone,
+    serde::Serialize
+);
 assert_not_impl_any!(ProviderHumanCredential: Clone, serde::Serialize);
 assert_not_impl_any!(ProviderPkceVerifier: Clone, serde::Serialize);
 assert_not_impl_any!(automata_ci_provider::ProviderAuthorizationUrl: Clone, serde::Serialize);
@@ -321,7 +330,6 @@ fn workload_authority_is_lease_bound_and_write_requires_same_repository_trust() 
         request.lease().fencing_token(),
         FencingToken::new(4).unwrap()
     );
-    assert!(request.marker().as_str().starts_with("automata-workload:"));
     let issued = IssuedWorkloadCredential::new(
         &request,
         None,
@@ -333,6 +341,69 @@ fn workload_authority_is_lease_bound_and_write_requires_same_repository_trust() 
     .unwrap();
     assert_eq!(issued.request_digest(), request.digest());
     assert!(!format!("{issued:?}").contains("must-not-leak"));
+    assert!(matches!(
+        issued.retire(),
+        WorkloadCredentialRetirement::ProviderExpiry
+    ));
+}
+
+#[test]
+fn explicit_workload_retirement_preserves_the_secret_bearing_cleanup_obligation() {
+    let request = WorkloadCredentialRequest::new(
+        ProviderWorkloadCredentialId::from_uuid(Uuid::from_u128(31)).unwrap(),
+        &connection(),
+        JobId::from_uuid(Uuid::from_u128(32)),
+        AttemptNumber::new(1).unwrap(),
+        lease(),
+        TrustSourceClass::SameRepository,
+        WorkloadCredentialProfile::CheckoutRead,
+        WorkloadCredentialPermissionSet::default(),
+        UnixMillis::new(2_001),
+        UnixMillis::new(4_000),
+    )
+    .unwrap();
+    assert!(matches!(
+        IssuedWorkloadCredential::new(
+            &request,
+            None,
+            secret("too-short-provider-expiry"),
+            UnixMillis::new(2_002),
+            Some(UnixMillis::new(3_999)),
+            WorkloadCredentialRevocation::Explicit,
+        ),
+        Err(ProviderCredentialModelError::InvalidValidity)
+    ));
+    let issued = IssuedWorkloadCredential::new(
+        &request,
+        None,
+        secret("explicit-workload-secret-that-must-not-leak"),
+        UnixMillis::new(2_002),
+        Some(UnixMillis::new(4_500)),
+        WorkloadCredentialRevocation::Explicit,
+    )
+    .unwrap();
+    let WorkloadCredentialRetirement::Revoke(candidate) = issued.retire() else {
+        panic!("explicit credentials must retain a revocation candidate");
+    };
+    assert_eq!(candidate.request_digest(), request.digest());
+    assert_eq!(
+        candidate.provider_expires_at(),
+        Some(UnixMillis::new(4_500))
+    );
+    assert!(!format!("{candidate:?}").contains("must-not-leak"));
+    assert_eq!(
+        candidate.expose_secret(),
+        b"explicit-workload-secret-that-must-not-leak"
+    );
+    assert!(automata_ci_provider::WorkloadCredentialRetryAfter::new(0).is_err());
+    assert_eq!(
+        automata_ci_provider::WorkloadCredentialRetryAfter::new(
+            automata_ci_provider::MAX_WORKLOAD_CREDENTIAL_RETRY_MILLIS
+        )
+        .unwrap()
+        .millis(),
+        automata_ci_provider::MAX_WORKLOAD_CREDENTIAL_RETRY_MILLIS
+    );
 }
 
 #[test]

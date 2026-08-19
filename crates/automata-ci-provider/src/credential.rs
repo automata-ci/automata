@@ -32,6 +32,8 @@ pub const MAX_WORKLOAD_PERMISSIONS: usize = 64;
 pub const MAX_WORKLOAD_PERMISSION_NAME_BYTES: usize = 64;
 /// Maximum custody lifetime of one workload credential.
 pub const MAX_WORKLOAD_CREDENTIAL_VALIDITY_MILLIS: u64 = 60 * 60 * 1_000;
+/// Maximum provider guidance accepted for a workload credential retry.
+pub const MAX_WORKLOAD_CREDENTIAL_RETRY_MILLIS: u64 = 24 * 60 * 60 * 1_000;
 
 const CONTROL_REQUEST_DOMAIN: &[u8] = b"automata.provider.control-credential-request.v1\0";
 const WORKLOAD_REQUEST_DOMAIN: &[u8] = b"automata.provider.workload-credential-request.v1\0";
@@ -613,21 +615,6 @@ impl WorkloadCredentialPermissionSet {
     }
 }
 
-/// Deterministic provider reconciliation marker for one workload authority.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct WorkloadCredentialMarker(String);
-
-impl WorkloadCredentialMarker {
-    fn derive(credential_id: ProviderWorkloadCredentialId) -> Self {
-        Self(format!("automata-workload:{credential_id}"))
-    }
-    /// Returns the marker adapters use to find ambiguous provider creates.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
 /// Exact job, attempt, lease, trust, repository, and permission issuance request.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkloadCredentialRequest {
@@ -644,7 +631,6 @@ pub struct WorkloadCredentialRequest {
     permissions: WorkloadCredentialPermissionSet,
     requested_at: UnixMillis,
     expires_at: UnixMillis,
-    marker: WorkloadCredentialMarker,
     digest: Sha256Digest,
 }
 
@@ -702,7 +688,6 @@ impl WorkloadCredentialRequest {
             WorkloadCredentialProfile::CheckoutRead
             | WorkloadCredentialProfile::RepositoryWrite => {}
         }
-        let marker = WorkloadCredentialMarker::derive(credential_id);
         let mut value = Self {
             credential_id,
             connection_id: connection.connection_id(),
@@ -717,7 +702,6 @@ impl WorkloadCredentialRequest {
             permissions,
             requested_at,
             expires_at,
-            marker,
             digest: Sha256Digest::from_bytes([0; 32]),
         };
         value.digest = value.calculate_digest();
@@ -751,7 +735,6 @@ impl WorkloadCredentialRequest {
         }
         hash.update(self.requested_at.get().to_be_bytes());
         hash.update(self.expires_at.get().to_be_bytes());
-        part(&mut hash, self.marker.as_str().as_bytes());
         Sha256Digest::from_bytes(hash.finalize().into())
     }
 
@@ -820,11 +803,6 @@ impl WorkloadCredentialRequest {
     pub const fn expires_at(&self) -> UnixMillis {
         self.expires_at
     }
-    /// Returns the deterministic provider reconciliation marker.
-    #[must_use]
-    pub const fn marker(&self) -> &WorkloadCredentialMarker {
-        &self.marker
-    }
     /// Returns the canonical request digest.
     #[must_use]
     pub const fn digest(&self) -> Sha256Digest {
@@ -858,7 +836,9 @@ impl IssuedWorkloadCredential {
     ) -> Result<Self, ProviderCredentialModelError> {
         if issued_at < request.requested_at
             || issued_at >= request.expires_at
-            || provider_expires_at.is_some_and(|expires_at| expires_at <= issued_at)
+            || provider_expires_at.is_some_and(|expires_at| {
+                expires_at <= issued_at || expires_at < request.expires_at
+            })
             || (revocation == WorkloadCredentialRevocation::ProviderExpiry
                 && provider_expires_at.is_none())
         {
@@ -908,6 +888,23 @@ impl IssuedWorkloadCredential {
     pub const fn revocation(&self) -> WorkloadCredentialRevocation {
         self.revocation
     }
+
+    /// Ends local use and returns the provider cleanup obligation, if any.
+    pub fn retire(self) -> WorkloadCredentialRetirement {
+        match self.revocation {
+            WorkloadCredentialRevocation::ProviderExpiry => {
+                WorkloadCredentialRetirement::ProviderExpiry
+            }
+            WorkloadCredentialRevocation::Explicit => {
+                WorkloadCredentialRetirement::Revoke(WorkloadCredentialRevocationCandidate {
+                    request_digest: self.request_digest,
+                    external_id: self.external_id,
+                    value: self.value,
+                    provider_expires_at: self.provider_expires_at,
+                })
+            }
+        }
+    }
 }
 
 impl fmt::Debug for IssuedWorkloadCredential {
@@ -924,81 +921,311 @@ impl fmt::Debug for IssuedWorkloadCredential {
     }
 }
 
-/// Value-free exact request to find and revoke one workload credential.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RevokeWorkloadCredential {
-    request: WorkloadCredentialRequest,
-    external_id: Option<ExternalCredentialId>,
-    revoked_at: UnixMillis,
+/// Provider cleanup required after local custody of an issued credential ends.
+#[must_use]
+#[derive(Debug)]
+pub enum WorkloadCredentialRetirement {
+    /// Provider-enforced expiry is the only cleanup mechanism.
+    ProviderExpiry,
+    /// The exact secret-bearing credential must be explicitly revoked.
+    Revoke(WorkloadCredentialRevocationCandidate),
 }
 
-impl RevokeWorkloadCredential {
-    /// Creates revocation work from immutable original issuance intent.
-    ///
-    /// # Errors
-    ///
-    /// Rejects revocation predating issuance intent.
-    pub fn new(
-        request: WorkloadCredentialRequest,
-        external_id: Option<ExternalCredentialId>,
-        revoked_at: UnixMillis,
-    ) -> Result<Self, ProviderCredentialModelError> {
-        if revoked_at < request.requested_at {
-            return Err(ProviderCredentialModelError::InvalidTimestamp);
-        }
-        Ok(Self {
-            request,
-            external_id,
-            revoked_at,
-        })
-    }
-    /// Returns the original value-free issuance intent.
+/// A uniquely recovered workload credential retained until revocation or expiry.
+///
+/// This value is move-only, redacted, and zeroized on drop. A durable lifecycle
+/// coordinator must protect it before relinquishing memory ownership and must
+/// retain it whenever a revocation attempt is not confirmed.
+pub struct WorkloadCredentialRevocationCandidate {
+    request_digest: Sha256Digest,
+    external_id: Option<ExternalCredentialId>,
+    value: SecretValue,
+    provider_expires_at: Option<UnixMillis>,
+}
+
+impl WorkloadCredentialRevocationCandidate {
+    /// Restores one exact cleanup obligation from protected durable custody.
     #[must_use]
-    pub const fn request(&self) -> &WorkloadCredentialRequest {
-        &self.request
+    pub fn new(
+        request_digest: Sha256Digest,
+        external_id: Option<ExternalCredentialId>,
+        value: SecretValue,
+        provider_expires_at: Option<UnixMillis>,
+    ) -> Self {
+        Self {
+            request_digest,
+            external_id,
+            value,
+            provider_expires_at,
+        }
+    }
+    /// Returns the exact issuance request digest.
+    #[must_use]
+    pub const fn request_digest(&self) -> Sha256Digest {
+        self.request_digest
     }
     /// Returns provider identity learned from issuance, when available.
     #[must_use]
     pub const fn external_id(&self) -> Option<&ExternalCredentialId> {
         self.external_id.as_ref()
     }
-    /// Returns the trusted revocation observation time.
+    /// Explicitly exposes the bearer value to protected custody or revocation.
     #[must_use]
-    pub const fn revoked_at(&self) -> UnixMillis {
-        self.revoked_at
+    pub fn expose_secret(&self) -> &[u8] {
+        self.value.expose_secret()
+    }
+    /// Consumes the candidate into protected durable secret custody.
+    #[must_use]
+    pub fn into_secret(self) -> SecretValue {
+        self.value
+    }
+    /// Returns the provider-enforced expiration when it was recoverable.
+    #[must_use]
+    pub const fn provider_expires_at(&self) -> Option<UnixMillis> {
+        self.provider_expires_at
     }
 }
 
-/// Provider outcome after idempotent workload credential revocation.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum WorkloadCredentialRevocationOutcome {
-    /// An existing provider credential was revoked.
-    Revoked,
-    /// No credential matching the exact marker exists.
-    NotFound,
+impl fmt::Debug for WorkloadCredentialRevocationCandidate {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WorkloadCredentialRevocationCandidate")
+            .field("request_digest", &self.request_digest)
+            .field("external_id", &self.external_id)
+            .field("value", &"[REDACTED]")
+            .field("provider_expires_at", &self.provider_expires_at)
+            .finish()
+    }
 }
 
-/// Future returned by workload credential provider operations.
-pub type WorkloadCredentialFuture<'a, T> =
-    Pin<Box<dyn Future<Output = Result<T, WorkloadCredentialProviderError>> + Send + 'a>>;
+/// A recovered credential that failed validation and requires cleanup.
+pub struct PendingWorkloadCredentialRevocation {
+    candidate: WorkloadCredentialRevocationCandidate,
+    reason: WorkloadCredentialProviderError,
+}
 
-/// Adapter port for deterministic issue/reconcile and idempotent revocation.
-pub trait WorkloadCredentialIssuer: fmt::Debug + Send + Sync {
-    /// Reconciles the deterministic marker before creating provider state.
-    fn issue<'a>(
+impl PendingWorkloadCredentialRevocation {
+    /// Creates a cleanup obligation for a recovered but unusable credential.
+    #[must_use]
+    pub const fn new(
+        candidate: WorkloadCredentialRevocationCandidate,
+        reason: WorkloadCredentialProviderError,
+    ) -> Self {
+        Self { candidate, reason }
+    }
+    /// Borrows the candidate that must be retained until cleanup is confirmed.
+    #[must_use]
+    pub const fn candidate(&self) -> &WorkloadCredentialRevocationCandidate {
+        &self.candidate
+    }
+    /// Returns the sanitized reason the credential could not be issued.
+    #[must_use]
+    pub const fn reason(&self) -> WorkloadCredentialProviderError {
+        self.reason
+    }
+    /// Consumes this state into its cleanup obligation.
+    #[must_use]
+    pub fn into_candidate(self) -> WorkloadCredentialRevocationCandidate {
+        self.candidate
+    }
+}
+
+impl fmt::Debug for PendingWorkloadCredentialRevocation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PendingWorkloadCredentialRevocation")
+            .field("candidate", &self.candidate)
+            .field("reason", &self.reason)
+            .finish()
+    }
+}
+
+/// Why a provider mutation may have committed without a recoverable credential.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum WorkloadCredentialIndeterminateReason {
+    /// Transport failed after the request may have reached the provider.
+    #[error("workload credential transport outcome is indeterminate")]
+    Transport,
+    /// The provider failed after accepting a side-effectful request.
+    #[error("workload credential provider outcome is indeterminate")]
+    ProviderUnavailable,
+    /// A successful response exceeded the configured byte ceiling.
+    #[error("workload credential response exceeded its byte limit")]
+    ResponseTooLarge,
+    /// A successful response ended before its body completed.
+    #[error("workload credential response was truncated")]
+    TruncatedResponse,
+    /// A successful response could not be decoded safely.
+    #[error("workload credential response was malformed")]
+    MalformedResponse,
+    /// A successful response contained no recoverable credential.
+    #[error("workload credential response contained no credential")]
+    MissingCredential,
+    /// A successful response contained more than one possible credential.
+    #[error("workload credential response contained ambiguous credentials")]
+    AmbiguousCredential,
+    /// The provider returned a status that proves neither creation nor rejection.
+    #[error("workload credential response status was indeterminate")]
+    UnexpectedStatus,
+}
+
+/// Provider-side issue outcome requiring durable operator reconciliation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct IndeterminateWorkloadCredential {
+    reason: WorkloadCredentialIndeterminateReason,
+}
+
+impl IndeterminateWorkloadCredential {
+    /// Creates an indeterminate issue result from a sanitized reason.
+    #[must_use]
+    pub const fn new(reason: WorkloadCredentialIndeterminateReason) -> Self {
+        Self { reason }
+    }
+    /// Returns why this exact issuance must never be retried automatically.
+    #[must_use]
+    pub const fn reason(self) -> WorkloadCredentialIndeterminateReason {
+        self.reason
+    }
+}
+
+/// Complete outcome of exactly one provider-side workload credential issue attempt.
+///
+/// This enum is move-only and non-serializable. Every variant requires a
+/// distinct durable lifecycle transition; in particular, callers must never
+/// retry issuance after [`Self::Indeterminate`].
+#[must_use]
+#[derive(Debug)]
+pub enum WorkloadCredentialIssueOutcome {
+    /// One credential exactly satisfies the immutable request.
+    Ready(IssuedWorkloadCredential),
+    /// One credential was recovered but is unusable and must be revoked.
+    RevokePending(PendingWorkloadCredentialRevocation),
+    /// A credential may exist, but no unique secret could be recovered.
+    Indeterminate(IndeterminateWorkloadCredential),
+    /// The provider definitively rejected the request before creating a credential.
+    Rejected(WorkloadCredentialProviderError),
+}
+
+/// Sanitized classification of an unconfirmed revocation attempt.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum WorkloadCredentialRevocationFailureKind {
+    /// Provider authentication failed without proving the credential absent.
+    #[error("workload credential revocation authentication failed")]
+    Unauthorized,
+    /// Provider quota prevented revocation confirmation.
+    #[error("workload credential revocation was rate limited")]
+    RateLimited,
+    /// Transport or provider availability prevented confirmation.
+    #[error("workload credential revocation is unavailable")]
+    Unavailable,
+    /// Provider response did not confirm revocation.
+    #[error("workload credential revocation response is invalid")]
+    InvalidResponse,
+}
+
+/// An unconfirmed revocation failure with bounded provider retry guidance.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+#[error("workload credential revocation was not confirmed: {kind}")]
+pub struct WorkloadCredentialRevocationFailure {
+    kind: WorkloadCredentialRevocationFailureKind,
+    retry_after: Option<WorkloadCredentialRetryAfter>,
+}
+
+impl WorkloadCredentialRevocationFailure {
+    /// Creates a sanitized failure without provider retry guidance.
+    #[must_use]
+    pub const fn new(kind: WorkloadCredentialRevocationFailureKind) -> Self {
+        Self {
+            kind,
+            retry_after: None,
+        }
+    }
+    /// Creates a rate-limit failure with validated retry guidance.
+    #[must_use]
+    pub const fn rate_limited(retry_after: Option<WorkloadCredentialRetryAfter>) -> Self {
+        Self {
+            kind: WorkloadCredentialRevocationFailureKind::RateLimited,
+            retry_after,
+        }
+    }
+    /// Returns the stable failure classification.
+    #[must_use]
+    pub const fn kind(self) -> WorkloadCredentialRevocationFailureKind {
+        self.kind
+    }
+    /// Returns bounded provider retry guidance when available.
+    #[must_use]
+    pub const fn retry_after(self) -> Option<WorkloadCredentialRetryAfter> {
+        self.retry_after
+    }
+}
+
+/// Result of one revocation attempt. Only `Confirmed` permits secret erasure.
+#[must_use]
+#[derive(Debug)]
+pub enum WorkloadCredentialRevocationOutcome {
+    /// The provider confirmed that the exact credential is no longer usable.
+    Confirmed,
+    /// Revocation was not proven; the candidate remains owned by the caller.
+    Unconfirmed {
+        /// The exact secret-bearing cleanup obligation.
+        candidate: WorkloadCredentialRevocationCandidate,
+        /// Sanitized reason confirmation failed.
+        failure: WorkloadCredentialRevocationFailure,
+    },
+}
+
+/// Future returned by one workload credential issue attempt.
+pub type WorkloadCredentialIssueFuture<'a> =
+    Pin<Box<dyn Future<Output = WorkloadCredentialIssueOutcome> + Send + 'a>>;
+
+/// Future returned by one workload credential revocation attempt.
+pub type WorkloadCredentialRevocationFuture<'a> =
+    Pin<Box<dyn Future<Output = WorkloadCredentialRevocationOutcome> + Send + 'a>>;
+
+/// Adapter port for one-attempt issue and secret-bearing revocation.
+pub trait WorkloadCredentialProvider: fmt::Debug + Send + Sync {
+    /// Performs exactly one provider-side issue mutation.
+    fn issue_once<'a>(
         &'a self,
         request: &'a WorkloadCredentialRequest,
-    ) -> WorkloadCredentialFuture<'a, IssuedWorkloadCredential>;
-    /// Finds by external identity or marker and converges on absence.
-    fn revoke<'a>(
-        &'a self,
-        request: &'a RevokeWorkloadCredential,
-    ) -> WorkloadCredentialFuture<'a, WorkloadCredentialRevocationOutcome>;
+    ) -> WorkloadCredentialIssueFuture<'a>;
+    /// Attempts to revoke the exact recovered credential.
+    ///
+    /// The implementation must return ownership of `candidate` unless the
+    /// provider confirms that the credential is no longer usable.
+    fn revoke(
+        &self,
+        candidate: WorkloadCredentialRevocationCandidate,
+    ) -> WorkloadCredentialRevocationFuture<'_>;
 }
 
-/// Sanitized workload credential provider failure.
+/// Bounded provider guidance for retrying a credential operation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WorkloadCredentialRetryAfter(NonZeroU64);
+
+impl WorkloadCredentialRetryAfter {
+    /// Creates retry guidance within the common credential retry bound.
+    ///
+    /// # Errors
+    ///
+    /// Rejects zero or excessive delays.
+    pub fn new(millis: u64) -> Result<Self, ProviderCredentialModelError> {
+        NonZeroU64::new(millis)
+            .filter(|value| value.get() <= MAX_WORKLOAD_CREDENTIAL_RETRY_MILLIS)
+            .map(Self)
+            .ok_or(ProviderCredentialModelError::InvalidRetry)
+    }
+    /// Returns the suggested retry delay in milliseconds.
+    #[must_use]
+    pub const fn millis(self) -> u64 {
+        self.0.get()
+    }
+}
+
+/// Stable classification of a definitive provider rejection.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
-pub enum WorkloadCredentialProviderError {
+pub enum WorkloadCredentialProviderErrorKind {
     /// The profile or permission mapping is unsupported.
     #[error("workload credential profile is unsupported")]
     Unsupported,
@@ -1008,21 +1235,58 @@ pub enum WorkloadCredentialProviderError {
     /// Provider authorization denied the request.
     #[error("workload credential authorization failed")]
     Forbidden,
+    /// The exact provider resource does not exist or was deliberately hidden.
+    #[error("workload credential provider resource was not found")]
+    NotFound,
     /// Provider quota is temporarily exhausted.
     #[error("workload credential provider is rate limited")]
     RateLimited,
     /// Provider service is temporarily unavailable.
     #[error("workload credential provider is unavailable")]
     Unavailable,
-    /// A mutation may have committed and must be reconciled by marker.
-    #[error("workload credential provider outcome is indeterminate")]
-    Indeterminate,
-    /// Provider state conflicts with the deterministic request.
+    /// Provider state conflicts with the exact request.
     #[error("workload credential provider state conflicts with the request")]
     Conflict,
     /// Provider response violates the common contract.
     #[error("workload credential provider response is invalid")]
     InvalidResponse,
+}
+
+/// Sanitized definitive provider rejection with bounded retry guidance.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+#[error("workload credential operation was rejected: {kind}")]
+pub struct WorkloadCredentialProviderError {
+    kind: WorkloadCredentialProviderErrorKind,
+    retry_after: Option<WorkloadCredentialRetryAfter>,
+}
+
+impl WorkloadCredentialProviderError {
+    /// Creates a sanitized rejection without provider retry guidance.
+    #[must_use]
+    pub const fn new(kind: WorkloadCredentialProviderErrorKind) -> Self {
+        Self {
+            kind,
+            retry_after: None,
+        }
+    }
+    /// Creates a rate-limit rejection with validated retry guidance.
+    #[must_use]
+    pub const fn rate_limited(retry_after: Option<WorkloadCredentialRetryAfter>) -> Self {
+        Self {
+            kind: WorkloadCredentialProviderErrorKind::RateLimited,
+            retry_after,
+        }
+    }
+    /// Returns the stable provider rejection classification.
+    #[must_use]
+    pub const fn kind(self) -> WorkloadCredentialProviderErrorKind {
+        self.kind
+    }
+    /// Returns bounded provider retry guidance when available.
+    #[must_use]
+    pub const fn retry_after(self) -> Option<WorkloadCredentialRetryAfter> {
+        self.retry_after
+    }
 }
 
 /// Invalid common provider credential model.
@@ -1055,6 +1319,9 @@ pub enum ProviderCredentialModelError {
     /// Workload lease evidence is invalid.
     #[error("provider workload credential lease is invalid")]
     InvalidLease,
+    /// Provider retry guidance is zero or excessive.
+    #[error("provider workload credential retry guidance is invalid")]
+    InvalidRetry,
 }
 
 fn valid_permission_name(value: &str) -> bool {
