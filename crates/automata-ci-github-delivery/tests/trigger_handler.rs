@@ -30,15 +30,15 @@ use automata_ci_provider::{
     ProviderProcessingReceipt, ProviderProcessingRepository, ProviderProcessingRepositoryError,
     ProviderProcessingState, ProviderProcessingWorkerId, ProviderRepository,
     ProviderRepositoryError, ProviderRepositoryFuture, ProviderRepositoryPath,
-    ProviderResultFuture, ProviderResultRepository, ProviderResultRepositoryError,
-    ProviderResultSaveOutcome, ProviderResultSubject, ProviderRunnerPolicyBinding,
-    ProviderSaveOutcome, ProviderSchemaVersion, ProviderSecretBindings, ProviderSecretSet,
-    ProviderTypeId, ProviderWebhookEndpointId, ProviderWebhookEndpointRevision,
-    ProviderWebhookSecretReference, ProviderWebhookSignatureEvidence, ProviderWorkflowSource,
-    PushCommitEvidence, PushTrigger, RenewProviderProcessing, RepositoryVisibility,
-    RetryProviderProcessing, RetryProviderResult, SaveDesiredProviderResult,
-    VerifiedProviderControlDelivery, VerifiedProviderTriggerDelivery, provider_capability_digest,
-    provider_raw_webhook_descriptor,
+    ProviderResultClaimFence, ProviderResultFuture, ProviderResultRepository,
+    ProviderResultRepositoryError, ProviderResultSaveOutcome, ProviderResultSubject,
+    ProviderRunnerPolicyBinding, ProviderSaveOutcome, ProviderSchemaVersion,
+    ProviderSecretBindings, ProviderSecretSet, ProviderTypeId, ProviderWebhookEndpointId,
+    ProviderWebhookEndpointRevision, ProviderWebhookSecretReference,
+    ProviderWebhookSignatureEvidence, ProviderWorkflowSource, PushCommitEvidence, PushTrigger,
+    RenewProviderProcessing, RenewProviderResult, RepositoryVisibility, RetryProviderProcessing,
+    RetryProviderResult, SaveDesiredProviderResult, VerifiedProviderControlDelivery,
+    VerifiedProviderTriggerDelivery, provider_capability_digest, provider_raw_webhook_descriptor,
 };
 use automata_ci_provider_delivery::{
     ProviderControlHandlingError, ProviderDeliveryClock, ProviderDeliveryClockError,
@@ -560,6 +560,13 @@ impl ProviderResultRepository for Results {
     }
 
     fn complete_result(&self, _request: CompleteProviderResult) -> ProviderResultFuture<'_, ()> {
+        Box::pin(async { Err(ProviderResultRepositoryError::Corrupt) })
+    }
+
+    fn renew_result(
+        &self,
+        _request: RenewProviderResult,
+    ) -> ProviderResultFuture<'_, ProviderResultClaimFence> {
         Box::pin(async { Err(ProviderResultRepositoryError::Corrupt) })
     }
 
