@@ -12,9 +12,10 @@ use std::{
 use automata_ci_execution::{
     DestroySandbox, EnvironmentProfile, EnvironmentProfileId, ExecutionArgv, ExecutionCommand,
     ExecutionEnvironment, ExecutionErrorKind, ExecutionTermination, NetworkPolicy, NeverCancelled,
-    OperationId, ProviderErrorKind, ResourceLimits, RootFilesystemPolicy, RunnerId, SandboxCustody,
-    SandboxEnvironment, SandboxGeneration, SandboxHandle, SandboxProvider, SandboxSpec,
-    Sha256Digest, TargetPath, discard_execution_output,
+    OperationId, OperationOutcome, ProviderErrorKind, ProviderStage, ResourceLimits,
+    RootFilesystemPolicy, RunnerId, SandboxCustody, SandboxEnvironment, SandboxGeneration,
+    SandboxHandle, SandboxProvider, SandboxSpec, Sha256Digest, TargetPath,
+    discard_execution_output,
 };
 use automata_ci_sandbox_guest::GUEST_PROTOCOL_VERSION;
 use automata_ci_sandbox_macos::{MacosVirtualizationProvider, MacosVirtualizationProviderOptions};
@@ -269,6 +270,51 @@ fn provider_cleans_up_and_reuses_slot_after_live_helper_loss() {
     assert_attempts_empty(&root);
 }
 
+#[test]
+#[ignore = "requires a sealed VM template on a physical Apple Silicon runner"]
+fn provider_recovers_an_interrupted_launch_and_reuses_the_slot() {
+    let root = required_path(VM_STORAGE_ROOT_ENV);
+    assert_attempts_empty(&root);
+    let provider = MacosVirtualizationProvider::open(physical_options(root.clone()))
+        .expect("open physical macOS provider");
+
+    let interrupted_spec = physical_spec("launch-helper-loss");
+    let (attempt, result) = thread::scope(|scope| {
+        let create = scope.spawn(|| provider.create(&interrupted_spec, &NeverCancelled));
+        let attempt = wait_for_single_attempt(&root, Duration::from_secs(30));
+        kill_helper_for_attempt(&root, &attempt, Duration::from_secs(30));
+        let result = create.join().expect("join interrupted VM create");
+        (attempt, result)
+    });
+    let error = result.expect_err("killing the helper must interrupt VM launch");
+    assert_eq!(error.kind(), ProviderErrorKind::AdapterUnavailable);
+    assert_eq!(error.stage(), ProviderStage::CreateSandbox);
+    assert_eq!(error.outcome(), OperationOutcome::Uncertain);
+    let handle = error
+        .recovery_handle()
+        .expect("interrupted launch must return its exact recovery handle");
+    assert_eq!(handle.opaque(), attempt);
+    provider
+        .destroy(
+            &DestroySandbox::new(
+                OperationId::new(),
+                handle.clone(),
+                interrupted_spec.generation(),
+                interrupted_spec.custody(),
+            ),
+            &NeverCancelled,
+        )
+        .expect("reconcile interrupted VM launch");
+    assert_attempts_empty(&root);
+
+    create_probe_and_destroy(
+        &provider,
+        &physical_spec("launch-helper-loss-reuse"),
+        "reuse provider slot after interrupted launch",
+    );
+    assert_attempts_empty(&root);
+}
+
 struct PhysicalSandboxCleanup {
     provider: MacosVirtualizationProvider,
     handle: SandboxHandle,
@@ -360,16 +406,97 @@ fn probe_command(working_directory: &TargetPath) -> ExecutionCommand {
     .expect("probe command")
 }
 
-fn kill_attempt_helper(root: &Path, handle: &SandboxHandle) {
+fn create_probe_and_destroy(
+    provider: &MacosVirtualizationProvider,
+    spec: &SandboxSpec,
+    create_label: &str,
+) {
+    let created = provider
+        .create(spec, &NeverCancelled)
+        .unwrap_or_else(|error| panic!("{create_label}: {error}"));
+    let mut cleanup = PhysicalSandboxCleanup::new(
+        provider.clone(),
+        created.handle().clone(),
+        spec.generation(),
+        spec.custody(),
+    );
+    let endpoint = provider
+        .attach(created.handle(), &NeverCancelled)
+        .expect("attach replacement VM");
+    let output = endpoint
+        .exec(
+            &probe_command(spec.workspace()),
+            &NeverCancelled,
+            discard_execution_output(),
+        )
+        .expect("execute in replacement VM");
+    assert_eq!(output.termination(), ExecutionTermination::Exited(0));
+    drop(endpoint);
+    provider
+        .destroy(
+            &DestroySandbox::new(
+                OperationId::new(),
+                created.handle().clone(),
+                spec.generation(),
+                spec.custody(),
+            ),
+            &NeverCancelled,
+        )
+        .expect("destroy replacement VM");
+    cleanup.disarm();
+}
+
+fn wait_for_single_attempt(root: &Path, timeout: Duration) -> String {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let attempts: Vec<_> = fs::read_dir(root.join("attempts"))
+            .expect("read physical provider attempts")
+            .map(|entry| entry.expect("read physical provider attempt entry"))
+            .collect();
+        match attempts.as_slice() {
+            [attempt] => {
+                return attempt
+                    .file_name()
+                    .into_string()
+                    .expect("physical attempt name must be UTF-8");
+            }
+            [] if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
+            [] => panic!("provider did not create one VM attempt before the deadline"),
+            _ => panic!("provider created more than one physical VM attempt"),
+        }
+    }
+}
+
+fn kill_helper_for_attempt(root: &Path, attempt: &str, timeout: Duration) {
+    let lock = root.join("attempts").join(attempt).join(".vm.lock");
+    let deadline = Instant::now() + timeout;
+    loop {
+        let pids = helper_pids_for_lock(&lock);
+        match pids.as_slice() {
+            [pid] => {
+                let status = Command::new("/bin/kill")
+                    .args(["-KILL", &pid.to_string()])
+                    .status()
+                    .expect("kill physical VM helper");
+                assert!(status.success(), "physical VM helper kill failed");
+                return;
+            }
+            [] if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
+            [] => panic!("physical VM helper did not start before the deadline"),
+            _ => panic!("more than one helper owns the physical VM attempt"),
+        }
+    }
+}
+
+fn helper_pids_for_lock(lock: &Path) -> Vec<u32> {
     let helper = required_path(VM_HELPER_ENV);
-    let lock = root.join("attempts").join(handle.opaque()).join(".vm.lock");
     let expected = format!("{} run --lock {}", helper.display(), lock.display());
     let output = Command::new("/bin/ps")
         .args(["-axo", "pid=,command="])
         .output()
         .expect("list physical host processes");
     assert!(output.status.success(), "physical host ps failed");
-    let pids: Vec<u32> = String::from_utf8(output.stdout)
+    String::from_utf8(output.stdout)
         .expect("physical host process list must be UTF-8")
         .lines()
         .filter_map(|line| {
@@ -378,7 +505,12 @@ fn kill_attempt_helper(root: &Path, handle: &SandboxHandle) {
             let command = fields.next()?.trim_start();
             (command == expected).then_some(pid)
         })
-        .collect();
+        .collect()
+}
+
+fn kill_attempt_helper(root: &Path, handle: &SandboxHandle) {
+    let lock = root.join("attempts").join(handle.opaque()).join(".vm.lock");
+    let pids = helper_pids_for_lock(&lock);
     assert_eq!(
         pids.len(),
         1,

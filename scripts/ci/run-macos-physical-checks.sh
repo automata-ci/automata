@@ -114,6 +114,10 @@ for ((iteration = 1; iteration <= repetitions; iteration++)); do
     macos_vm_runner_process_e2e:: -- \
     --ignored --nocapture --test-threads=1
 done
+run_test 'helper loss during VM launch recovery and slot reuse' \
+  cargo test -p automata-ci-sandbox-macos --test macos_provider --locked \
+  provider_recovers_an_interrupted_launch_and_reuses_the_slot -- \
+  --ignored --exact --nocapture --test-threads=1
 run_test 'live helper loss cleanup and slot reuse' \
   cargo test -p automata-ci-sandbox-macos --test macos_provider --locked \
   provider_cleans_up_and_reuses_slot_after_live_helper_loss -- \

@@ -1219,8 +1219,8 @@ current baseline.
   either Developer ID distribution or an exact private-fleet leaf identity.
 - [ ] Add Xcode and toolchain profiles.
 - [ ] Add macOS acceptance jobs.
-- [x] Add physical clone cleanup, runner cancellation, live-helper-loss slot
-  reuse, and live-orphan startup recovery tests.
+- [x] Add physical clone cleanup, runner cancellation, interrupted-launch
+  recovery, live-helper-loss slot reuse, and live-orphan startup recovery tests.
 
 ### Architecture and image breadth
 
