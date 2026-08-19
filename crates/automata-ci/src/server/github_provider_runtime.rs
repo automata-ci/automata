@@ -1,9 +1,9 @@
 //! Production runtime for one exact GitHub provider registry.
 //!
 //! Construction converges immutable provider manifests and server-service
-//! authorities before it transfers the webhook connection registry into live
-//! ingress. The runtime then owns delivery, Checks, credential maintenance,
-//! and exact handoff-release supervision as one shutdown unit.
+//! authorities before it exposes provider-specific adapters to the common
+//! runtime. The runtime owns only GitHub auxiliary services: schedules,
+//! credential maintenance, and exact handoff-release supervision.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -41,39 +41,37 @@ use automata_ci_credential_github::{
     PinnedGithubRuntimeAuthorityMintBroker,
 };
 use automata_ci_github_delivery::{
-    GithubChecksCredentialProvider, GithubChecksPublisher, GithubChecksPublisherConfig,
-    GithubChecksPublisherError, GithubChecksPublisherOutcome, GithubDeliveryClock,
-    GithubDeliveryConfigurationError, GithubDeliveryConnection, GithubDeliveryIngress,
-    GithubDeliveryRepositories, GithubDeliveryService, GithubDeliveryServiceConfig,
-    GithubDeliveryServiceError, GithubDeliverySourceCredentialProvider, GithubDeliveryWorkerConfig,
-    GithubDeliveryWorkerConfigurationError, GithubDeliveryWorkflowAdmissionProcessor,
-    GithubDeliveryWorkflowProcessor, GithubPushChangedFilesProvider,
-    GithubRestPushChangedFilesProvider, GithubScheduleClock, GithubScheduleService,
+    GithubDeliveryConnection, GithubProviderRuntimeAdapter, GithubResultCredentialProvider,
+    GithubResultProviderAdapter, GithubScheduleClock, GithubScheduleService,
     GithubScheduleServiceConfigurationError, GithubScheduleServiceError,
     GithubScheduleSourceAuthorities, GithubScheduleSourceCredentialProvider,
+    GithubTriggerCredentialProvider, GithubWorkflowTriggerHandler,
 };
 use automata_ci_key_management::{EnvelopeCodec, KeyEncryptionProvider};
 use automata_ci_protocol::RuntimeAuthorityEndpoint;
-use automata_ci_provider::ProviderConnectionId;
+use automata_ci_provider::{ProviderConnectionId, ProviderResultRepository};
+use automata_ci_provider_delivery::{
+    ProviderDeliveryClock, ProviderDeliveryClockError, ProviderResultAdapter,
+    ProviderRuntimeAdapter,
+};
 use automata_ci_provider_github::{GithubHttpEndpoint, GithubHttpLimits, GithubWebhookVerifier};
+use automata_ci_provider_postgres::PostgresProviderManifestRepository;
 use automata_ci_scm::ScmProvider;
 use automata_ci_store::{
-    GITHUB_PROVIDER_WEB_ORIGIN, GithubCheckProjectionOutbox, GithubCheckProjectionWorkerId,
-    GithubCheckStoreError, GithubJobRuntimeAuthorityRepository,
-    GithubRepositoryDispatchEvidenceRepository, GithubRuntimeAuthorityRepository,
-    GithubRuntimeAuthorityWorkerId, GithubScheduleWorkerId, GithubServerServiceAppClientId,
-    GithubServerServiceAppId, GithubServerServiceAuthorityRepository,
-    GithubServerServiceAuthoritySelector, GithubServerServiceAuthorityState,
-    GithubServerServiceIssuanceState, GithubServerServiceJwtIssuer, GithubServerServiceScope,
-    GithubServerServiceWorkerId, GithubSubjectEvidenceRepository,
+    GITHUB_PROVIDER_WEB_ORIGIN, GithubCheckRerunRepository, GithubJobRuntimeAuthorityRepository,
+    GithubRuntimeAuthorityRepository, GithubRuntimeAuthorityWorkerId, GithubScheduleWorkerId,
+    GithubServerServiceAppClientId, GithubServerServiceAppId,
+    GithubServerServiceAuthorityRepository, GithubServerServiceAuthoritySelector,
+    GithubServerServiceAuthorityState, GithubServerServiceIssuanceState,
+    GithubServerServiceJwtIssuer, GithubServerServiceScope, GithubServerServiceWorkerId,
     GithubWorkflowPermissionDefaultsObservation,
     GithubWorkflowPermissionDefaultsObservationRepository, LogicalWorkflowAdmissionRepository,
-    MAX_GITHUB_SERVICE_CONSUMER_REQUEST_MILLIS, ProviderProcessingWorkerId,
-    RetireGithubServerServiceAuthority, TenantScope,
+    MAX_GITHUB_SERVICE_CONSUMER_REQUEST_MILLIS, RetireGithubServerServiceAuthority, TenantScope,
 };
 use automata_ci_store_postgres::PostgresStore;
 use automata_ci_workflow_service::{
-    GithubWorkflowPlanVerifier, WorkflowAdmissionObserver, WorkflowAdmissionService,
+    GithubWorkflowPlanVerifier, ProviderWorkflowApplicationService, ProviderWorkflowResultService,
+    WorkflowAdmissionObserver, WorkflowAdmissionService,
 };
 use futures::{StreamExt as _, stream::FuturesUnordered};
 use thiserror::Error;
@@ -155,9 +153,6 @@ fn job_authority_broker_pins(
     }
     Ok(pins)
 }
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct GithubProviderFatalNotification;
 
 /// Non-secret topology of one built GitHub provider runtime.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -541,8 +536,12 @@ impl GithubProviderRuntimeBuilder {
             policy,
         } = self;
         let shape = GithubProviderRuntimeShape::from_config(&config);
+        let provider_repository = Arc::new(PostgresProviderManifestRepository::new(
+            store.postgres_pool().clone(),
+            Arc::clone(&key_encryption_provider),
+        ));
         let clock = Arc::new(NonRegressingGithubProviderClock::default());
-        let delivery_clock: Arc<dyn GithubDeliveryClock> = clock.clone();
+        let provider_clock: Arc<dyn ProviderDeliveryClock> = clock.clone();
         let credential_clock: Arc<dyn GithubServerServiceCoordinatorClock> = clock.clone();
         let observation_clock = credential_clock.clone();
         let schedule_clock: Arc<dyn GithubScheduleClock> = clock.clone();
@@ -939,66 +938,34 @@ impl GithubProviderRuntimeBuilder {
             config.schedule().service_config(),
         )
         .map_err(GithubProviderRuntimeBuildError::ScheduleWorker)?;
-        let changed_files: Arc<dyn GithubPushChangedFilesProvider> =
-            Arc::new(GithubRestPushChangedFilesProvider::new(endpoint.clone()));
-        let workflow_processor: Arc<dyn GithubDeliveryWorkflowProcessor> = Arc::new(
-            GithubDeliveryWorkflowAdmissionProcessor::new(admission)
-                .with_changed_files_provider(changed_files),
-        );
-        let repository_source = Arc::new(endpoint.clone());
-        let repository_dispatch_resolver = Arc::new(endpoint.clone());
-        let repository_dispatch_evidence: Arc<dyn GithubRepositoryDispatchEvidenceRepository> =
-            store.clone();
-        let delivery_worker = ProviderProcessingWorkerId::from_uuid(Uuid::new_v4())
-            .map_err(|_| GithubProviderRuntimeBuildError::InvalidWorkerIdentity)?;
-        let source_credentials: Arc<dyn GithubDeliverySourceCredentialProvider> = adapters.clone();
-        let delivery = GithubDeliveryService::new_with_repository_dispatch(
-            blobs.clone(),
-            repository_source,
-            repository_dispatch_resolver,
-            workflow_processor,
-            store.clone(),
-            repository_dispatch_evidence,
-            source_credentials,
-            delivery_clock.clone(),
-            delivery_worker,
-            GithubDeliveryWorkerConfig::default(),
-            GithubDeliveryServiceConfig::default(),
-        )
-        .map_err(GithubProviderRuntimeBuildError::DeliveryWorker)?;
-
-        let checks_credentials: Arc<dyn GithubChecksCredentialProvider> = adapters.clone();
-        let checks_outbox: Arc<dyn GithubCheckProjectionOutbox> = store.clone();
-        let checks = Arc::new(
-            GithubChecksPublisher::new(
-                endpoint,
-                checks_outbox,
-                blobs.clone(),
-                checks_credentials,
-                delivery_clock.clone(),
-                config.dashboard_url().clone(),
-                GithubChecksPublisherConfig::default(),
+        let result_repository: Arc<dyn ProviderResultRepository> = provider_repository;
+        let results =
+            ProviderWorkflowResultService::new(result_repository, config.dashboard_url().clone())
+                .map_err(|_| GithubProviderRuntimeBuildError::InvalidConfiguration)?;
+        let application = ProviderWorkflowApplicationService::new(admission, results.clone());
+        let trigger_credentials: Arc<dyn GithubTriggerCredentialProvider> = adapters.clone();
+        let trigger_handler = Arc::new(
+            GithubWorkflowTriggerHandler::new(
+                application,
+                trigger_credentials,
+                provider_clock,
+                GITHUB_HTTP_USER_AGENT,
+                GithubHttpLimits::default(),
             )
             .map_err(|_| GithubProviderRuntimeBuildError::InvalidConfiguration)?,
         );
-        let checks_worker = GithubCheckProjectionWorkerId::from_uuid(Uuid::new_v4())
-            .map_err(|_| GithubProviderRuntimeBuildError::InvalidWorkerIdentity)?;
-        let subject_evidence: Arc<dyn GithubSubjectEvidenceRepository> = store.clone();
-        let repository_dispatches: Arc<dyn GithubRepositoryDispatchEvidenceRepository> =
-            store.clone();
-        let check_reruns: Arc<dyn automata_ci_store::GithubCheckRerunRepository> = store;
-        let ingress = Arc::new(
-            GithubDeliveryIngress::new(
-                verifier,
-                config.webhook().verifier_revision(),
-                plan.into_connections(),
-                blobs,
-                GithubDeliveryRepositories::new(subject_evidence)
-                    .with_repository_dispatches(repository_dispatches)
-                    .with_check_reruns(check_reruns),
-                delivery_clock,
+        let check_reruns: Arc<dyn GithubCheckRerunRepository> = store.clone();
+        let runtime_adapter: Arc<dyn ProviderRuntimeAdapter> = Arc::new(
+            GithubProviderRuntimeAdapter::new(trigger_handler, check_reruns, results.clone()),
+        );
+        let result_credentials: Arc<dyn GithubResultCredentialProvider> = adapters.clone();
+        let result_adapter: Arc<dyn ProviderResultAdapter> = Arc::new(
+            GithubResultProviderAdapter::new(
+                result_credentials,
+                GITHUB_HTTP_USER_AGENT,
+                GithubHttpLimits::default(),
             )
-            .map_err(GithubProviderRuntimeBuildError::Ingress)?,
+            .map_err(|_| GithubProviderRuntimeBuildError::InvalidConfiguration)?,
         );
         let maintenance: Arc<dyn CredentialMaintenancePort> =
             Arc::new(ServerServiceCredentialMaintenance {
@@ -1008,10 +975,10 @@ impl GithubProviderRuntimeBuilder {
         let release_drain: Arc<dyn ReleaseDrainPort> = releases;
 
         Ok(GithubProviderRuntime {
-            ingress,
-            delivery: Arc::new(delivery),
+            runtime_adapter,
+            result_adapter,
+            workflow_results: results,
             schedule: Arc::new(schedule),
-            checks,
             maintenance,
             permission_defaults,
             credential_commit_supervisor,
@@ -1024,7 +991,6 @@ impl GithubProviderRuntimeBuilder {
             release_drain,
             connection_ids,
             maintenance_authorities,
-            checks_worker,
             idle_delay: policy.idle_delay,
             drain_timeout: policy.drain_timeout,
             shape,
@@ -1119,12 +1085,12 @@ impl fmt::Debug for GithubProviderRuntimeBuilder {
     }
 }
 
-/// Fully built provider ingress and background runtime.
+/// Fully built GitHub adapters and auxiliary background runtime.
 pub struct GithubProviderRuntime {
-    ingress: Arc<GithubDeliveryIngress>,
-    delivery: Arc<GithubDeliveryService>,
+    runtime_adapter: Arc<dyn ProviderRuntimeAdapter>,
+    result_adapter: Arc<dyn ProviderResultAdapter>,
+    workflow_results: ProviderWorkflowResultService,
     schedule: Arc<GithubScheduleService>,
-    checks: Arc<GithubChecksPublisher>,
     maintenance: Arc<dyn CredentialMaintenancePort>,
     permission_defaults: Arc<WorkflowPermissionDefaultsRefresher>,
     credential_commit_supervisor: Arc<CredentialMaintenanceCommitSupervisor>,
@@ -1137,17 +1103,34 @@ pub struct GithubProviderRuntime {
     release_drain: Arc<dyn ReleaseDrainPort>,
     connection_ids: Arc<[ProviderConnectionId]>,
     maintenance_authorities: Arc<[GithubServerServiceAuthoritySelector]>,
-    checks_worker: GithubCheckProjectionWorkerId,
     idle_delay: Duration,
     drain_timeout: Duration,
     shape: GithubProviderRuntimeShape,
 }
 
 impl GithubProviderRuntime {
-    /// Returns the authenticated webhook ingress for HTTP route composition.
+    /// Returns the GitHub trigger/control adapter for the common processing registry.
     #[must_use]
-    pub fn ingress(&self) -> Arc<GithubDeliveryIngress> {
-        self.ingress.clone()
+    pub fn runtime_adapter(&self) -> Arc<dyn ProviderRuntimeAdapter> {
+        self.runtime_adapter.clone()
+    }
+
+    /// Returns the GitHub result adapter for the common publication registry.
+    #[must_use]
+    pub fn result_adapter(&self) -> Arc<dyn ProviderResultAdapter> {
+        self.result_adapter.clone()
+    }
+
+    /// Returns the exact active common connection identities.
+    #[must_use]
+    pub fn connection_ids(&self) -> Arc<[ProviderConnectionId]> {
+        self.connection_ids.clone()
+    }
+
+    /// Returns the common desired-result producer shared with lifecycle projection.
+    #[must_use]
+    pub fn workflow_results(&self) -> ProviderWorkflowResultService {
+        self.workflow_results.clone()
     }
 
     /// Returns the non-secret exact runtime topology.
@@ -1196,24 +1179,24 @@ impl GithubProviderRuntime {
         self.run_inner(shutdown, None).await
     }
 
-    pub(super) async fn run_with_fatal_notification(
+    pub(super) async fn run_with_fatal_signal(
         self,
         shutdown: CancellationToken,
-        fatal_notification: oneshot::Sender<GithubProviderFatalNotification>,
+        fatal: CancellationToken,
     ) -> Result<(), GithubProviderRuntimeError> {
-        self.run_inner(shutdown, Some(fatal_notification)).await
+        self.run_inner(shutdown, Some(fatal)).await
     }
 
     async fn run_inner(
         self,
         shutdown: CancellationToken,
-        fatal_notification: Option<oneshot::Sender<GithubProviderFatalNotification>>,
+        fatal: Option<CancellationToken>,
     ) -> Result<(), GithubProviderRuntimeError> {
         let Self {
-            ingress: _,
-            delivery,
+            runtime_adapter: _,
+            result_adapter: _,
+            workflow_results: _,
             schedule,
-            checks,
             maintenance,
             permission_defaults,
             credential_commit_supervisor,
@@ -1226,36 +1209,17 @@ impl GithubProviderRuntime {
             release_drain,
             connection_ids,
             maintenance_authorities,
-            checks_worker,
             idle_delay,
             drain_timeout,
             shape: _,
         } = self;
         let stop = CancellationToken::new();
         let loops = FuturesUnordered::new();
-        let delivery_stop = stop.clone();
-        loops.push(runtime_loop(async move {
-            RuntimeLoopExit::Delivery(delivery.run(delivery_stop).await)
-        }));
         let schedule_stop = stop.clone();
         loops.push(runtime_loop(async move {
             RuntimeLoopExit::Schedules(schedule.run(schedule_stop).await)
         }));
-        let checks_connections = connection_ids;
-        let checks_delay = idle_delay;
-        let checks_stop = stop.clone();
-        loops.push(runtime_loop(async move {
-            RuntimeLoopExit::Checks(
-                run_checks_loop(
-                    checks,
-                    checks_connections,
-                    checks_worker,
-                    checks_delay,
-                    checks_stop,
-                )
-                .await,
-            )
-        }));
+        drop(connection_ids);
         let maintenance_selectors = maintenance_authorities;
         let maintenance_delay = idle_delay;
         let maintenance_stop = stop.clone();
@@ -1297,7 +1261,7 @@ impl GithubProviderRuntime {
             job_authority_drain,
             release_drain,
             drain_timeout,
-            fatal_notification,
+            fatal,
         )
         .await
     }
@@ -1314,7 +1278,6 @@ impl fmt::Debug for GithubProviderRuntime {
                 "maintenance_authority_count",
                 &self.maintenance_authorities.len(),
             )
-            .field("checks_worker", &self.checks_worker)
             .field(
                 "job_runtime_authority_issuer",
                 &"[OPTIONAL RUNTIME AUTHORITY ISSUER]",
@@ -1373,29 +1336,17 @@ pub enum GithubProviderRuntimeBuildError {
     /// Observed workflow-permission provenance did not match immutable configuration.
     #[error("the GitHub workflow-permission observation is invalid")]
     WorkflowPermissionObservation,
-    /// Delivery worker configuration was incompatible with runtime policy.
-    #[error(transparent)]
-    DeliveryWorker(GithubDeliveryWorkerConfigurationError),
     /// Schedule worker configuration was incompatible with runtime policy.
     #[error(transparent)]
     ScheduleWorker(GithubScheduleServiceConfigurationError),
-    /// The post-bootstrap ingress registry was inconsistent.
-    #[error(transparent)]
-    Ingress(GithubDeliveryConfigurationError),
 }
 
 /// Sanitized fatal background-service failure after ordered drain.
 #[derive(Debug, Error)]
 pub enum GithubProviderRuntimeError {
-    /// Durable delivery supervision failed.
-    #[error(transparent)]
-    Delivery(#[from] GithubDeliveryServiceError),
     /// Durable schedule discovery or due-fire supervision failed.
     #[error(transparent)]
     Schedules(#[from] GithubScheduleServiceError),
-    /// Fenced GitHub Checks publication failed.
-    #[error(transparent)]
-    Checks(#[from] GithubChecksPublisherError),
     /// Server-service credential maintenance failed.
     #[error(transparent)]
     Credentials(#[from] GithubServerServiceCoordinatorError),
@@ -1435,15 +1386,15 @@ impl NonRegressingGithubProviderClock {
     }
 }
 
-impl GithubDeliveryClock for NonRegressingGithubProviderClock {
+impl GithubServerServiceCoordinatorClock for NonRegressingGithubProviderClock {
     fn now(&self) -> UnixMillis {
         self.system_now()
     }
 }
 
-impl GithubServerServiceCoordinatorClock for NonRegressingGithubProviderClock {
-    fn now(&self) -> UnixMillis {
-        self.system_now()
+impl ProviderDeliveryClock for NonRegressingGithubProviderClock {
+    fn now(&self) -> Result<UnixMillis, ProviderDeliveryClockError> {
+        Ok(self.system_now())
     }
 }
 
@@ -1502,59 +1453,6 @@ impl<T: Clone> FairSweep<T> {
             self.consecutive_idle = 0;
         }
         false
-    }
-}
-
-async fn run_checks_loop(
-    checks: Arc<GithubChecksPublisher>,
-    connections: Arc<[ProviderConnectionId]>,
-    worker: GithubCheckProjectionWorkerId,
-    idle_delay: Duration,
-    stop: CancellationToken,
-) -> Result<(), GithubChecksPublisherError> {
-    let mut sweep = FairSweep::new(connections);
-    loop {
-        if stop.is_cancelled() {
-            return Ok(());
-        }
-        let connection = sweep.next();
-        match checks.run_once(connection, worker).await {
-            Ok(GithubChecksPublisherOutcome::Idle) => {
-                if sweep.observe(true) && sleep_or_stop(idle_delay, &stop).await {
-                    return Ok(());
-                }
-            }
-            Ok(GithubChecksPublisherOutcome::Advanced(_)) => {
-                tracing::debug!(?connection, "GitHub Check projection advanced");
-                let _ = sweep.observe(false);
-            }
-            Ok(GithubChecksPublisherOutcome::RetryScheduled(_)) => {
-                tracing::warn!(
-                    ?connection,
-                    "GitHub Check projection scheduled a durable retry"
-                );
-                let _ = sweep.observe(false);
-            }
-            Ok(GithubChecksPublisherOutcome::ReconciliationRequired(_)) => {
-                tracing::warn!(?connection, "GitHub Check creation requires reconciliation");
-                let _ = sweep.observe(false);
-            }
-            Ok(GithubChecksPublisherOutcome::Blocked(_)) => {
-                tracing::error!(
-                    ?connection,
-                    "GitHub Check projection blocked on provider mismatch"
-                );
-                let _ = sweep.observe(false);
-            }
-            Err(GithubChecksPublisherError::Store(GithubCheckStoreError::Operation(_))) => {
-                tracing::warn!(?connection, "GitHub Check projection store is unavailable");
-                let _ = sweep.observe(false);
-                if sleep_or_stop(idle_delay, &stop).await {
-                    return Ok(());
-                }
-            }
-            Err(error) => return Err(error),
-        }
     }
 }
 
@@ -2692,9 +2590,7 @@ impl ReleaseDrainPort for GithubProviderCredentialReleaseSupervisor {
 }
 
 enum RuntimeLoopExit {
-    Delivery(Result<(), GithubDeliveryServiceError>),
     Schedules(Result<(), GithubScheduleServiceError>),
-    Checks(Result<(), GithubChecksPublisherError>),
     Credentials(Result<(), GithubServerServiceCoordinatorError>),
     PermissionDefaults(Result<(), GithubProviderRuntimeBuildError>),
     JobAuthority(Result<(), GithubRuntimeAuthorityLifecycleError>),
@@ -2715,7 +2611,7 @@ async fn supervise_runtime_loops(
     job_authority_drain: Arc<dyn JobRuntimeAuthorityDrainPort>,
     release_drain: Arc<dyn ReleaseDrainPort>,
     drain_timeout: Duration,
-    mut fatal_notification: Option<oneshot::Sender<GithubProviderFatalNotification>>,
+    fatal: Option<CancellationToken>,
 ) -> Result<(), GithubProviderRuntimeError> {
     let mut first_error = None;
     let mut stopping = shutdown.is_cancelled();
@@ -2751,15 +2647,11 @@ async fn supervise_runtime_loops(
             break;
         };
         let error = match exit {
-            RuntimeLoopExit::Delivery(Ok(()))
-            | RuntimeLoopExit::Schedules(Ok(()))
-            | RuntimeLoopExit::Checks(Ok(()))
+            RuntimeLoopExit::Schedules(Ok(()))
             | RuntimeLoopExit::Credentials(Ok(()))
             | RuntimeLoopExit::PermissionDefaults(Ok(()))
             | RuntimeLoopExit::JobAuthority(Ok(())) => None,
-            RuntimeLoopExit::Delivery(Err(error)) => Some(error.into()),
             RuntimeLoopExit::Schedules(Err(error)) => Some(error.into()),
-            RuntimeLoopExit::Checks(Err(error)) => Some(error.into()),
             RuntimeLoopExit::Credentials(Err(error)) => Some(error.into()),
             RuntimeLoopExit::PermissionDefaults(Err(_)) => {
                 Some(GithubProviderRuntimeError::PermissionDefaults)
@@ -2767,21 +2659,22 @@ async fn supervise_runtime_loops(
             RuntimeLoopExit::JobAuthority(Err(error)) => Some(error.into()),
         };
         let pre_shutdown_exit = !stopping && !shutdown.is_cancelled();
-        let mut notify_fatal = false;
         if first_error.is_none() {
             first_error = error.or_else(|| {
                 pre_shutdown_exit.then_some(GithubProviderRuntimeError::UnexpectedStop)
             });
-            notify_fatal = pre_shutdown_exit && first_error.is_some();
+            if pre_shutdown_exit
+                && first_error.is_some()
+                && let Some(fatal) = &fatal
+            {
+                fatal.cancel();
+            }
         }
         if !stopping {
             stopping = true;
             drain_deadline = Some(tokio::time::Instant::now() + drain_timeout);
             job_authority_drain.close();
             stop.cancel();
-        }
-        if notify_fatal && let Some(notification) = fatal_notification.take() {
-            let _ = notification.send(GithubProviderFatalNotification);
         }
     }
     job_authority_drain.close();

@@ -298,10 +298,7 @@ async fn resolve_github_check_targets(
     transaction: &mut Transaction<'_, Postgres>,
     request: &GithubCheckRerunRequest,
 ) -> Result<Vec<GithubCheckRerunResolution>, GithubCheckRerunStoreError> {
-    let installation_id = i64::try_from(request.installation_id())
-        .map_err(|_| GithubCheckRerunStoreError::AuthorityRejected)?;
-    let repository_id = i64::try_from(request.github_repository_id())
-        .map_err(|_| GithubCheckRerunStoreError::AuthorityRejected)?;
+    let repository_id = request.github_repository_id().to_string();
     let head_sha = request.head_sha().as_bytes().to_vec();
     match request.target() {
         GithubCheckRerunTarget::Run {
@@ -311,32 +308,33 @@ async fn resolve_github_check_targets(
             ..
         } => sqlx::query_as::<_, (Uuid, Uuid, String, Option<Uuid>)>(
             r"
-            SELECT subject.repository_id, subject.workflow_run_id,
-                   subject.subject_kind, concrete.logical_job_id
-            FROM github_check_subjects AS subject
-            JOIN github_check_projection_outbox AS outbox
-              ON outbox.subject_id = subject.id
-            LEFT JOIN logical_workflow_concrete_jobs AS concrete
-              ON concrete.run_id = subject.workflow_run_id
-             AND concrete.job_id = subject.job_id
-            WHERE subject.tenant_id = $1
-              AND subject.provider_connection_id = $2
-              AND subject.provider_installation_id = $3
-              AND subject.github_repository_id = $4
-              AND subject.github_app_id = $5
-              AND subject.head_sha = $6
-              AND subject.external_id = $7
-              AND subject.workflow_run_id IS NOT NULL
-              AND subject.desired_state = 'completed'
-              AND outbox.external_suite_id = $8
-              AND outbox.external_run_id = $9
+            SELECT run.repository_id, subject.run_id,
+                   'workflow'::TEXT, NULL::UUID
+            FROM provider_result_subjects AS subject
+            JOIN provider_result_outbox AS outbox
+              ON outbox.subject_id = subject.subject_id
+            JOIN provider_connection_revisions AS connection
+              ON connection.connection_id = subject.connection_id
+             AND connection.revision = subject.connection_revision
+            JOIN workflow_runs AS run ON run.id = subject.run_id
+            WHERE connection.workspace_id = $1
+              AND connection.connection_id = $2
+              AND connection.external_repository_id = $3
+              AND subject.object_algorithm = 'sha1'
+              AND subject.object_bytes = $4
+              AND subject.subject_kind = 'workflow-run'
+              AND ('automata-result:' || subject.subject_id::TEXT) = $5
+              AND outbox.phase = 'completed'
+              AND outbox.state = 'completed'
+              AND COALESCE(
+                    outbox.external_result_id,
+                    outbox.binding_external_result_id
+                  ) = ('github-check:' || $6::TEXT || ':' || $7::TEXT)
             ",
         )
         .bind(request.tenant().as_str())
         .bind(request.connection_id().as_uuid())
-        .bind(installation_id)
         .bind(repository_id)
-        .bind(pg_bigint(request.app_id().get()))
         .bind(head_sha)
         .bind(external_id)
         .bind(pg_bigint(suite_id.get()))
@@ -358,29 +356,37 @@ async fn resolve_github_check_targets(
         GithubCheckRerunTarget::Suite { suite_id } => {
             let rows = sqlx::query_as::<_, (Uuid, Uuid, String, Option<Uuid>)>(
                 r"
-                SELECT DISTINCT subject.repository_id, subject.workflow_run_id,
-                                subject.subject_kind, NULL::UUID
-                FROM github_check_subjects AS subject
-                JOIN github_check_projection_outbox AS outbox
-                  ON outbox.subject_id = subject.id
-                WHERE subject.tenant_id = $1
-                  AND subject.provider_connection_id = $2
-                  AND subject.provider_installation_id = $3
-                  AND subject.github_repository_id = $4
-                  AND subject.github_app_id = $5
-                  AND subject.head_sha = $6
-                  AND subject.subject_kind = 'job'
-                  AND subject.workflow_run_id IS NOT NULL
-                  AND subject.desired_state = 'completed'
-                  AND outbox.external_suite_id = $7
-                ORDER BY subject.workflow_run_id
+                SELECT DISTINCT run.repository_id, subject.run_id,
+                                'workflow'::TEXT, NULL::UUID
+                FROM provider_result_subjects AS subject
+                JOIN provider_result_outbox AS outbox
+                  ON outbox.subject_id = subject.subject_id
+                JOIN provider_connection_revisions AS connection
+                  ON connection.connection_id = subject.connection_id
+                 AND connection.revision = subject.connection_revision
+                JOIN workflow_runs AS run ON run.id = subject.run_id
+                WHERE connection.workspace_id = $1
+                  AND connection.connection_id = $2
+                  AND connection.external_repository_id = $3
+                  AND subject.object_algorithm = 'sha1'
+                  AND subject.object_bytes = $4
+                  AND subject.subject_kind = 'workflow-run'
+                  AND outbox.phase = 'completed'
+                  AND outbox.state = 'completed'
+                  AND split_part(
+                        COALESCE(
+                          outbox.external_result_id,
+                          outbox.binding_external_result_id
+                        ),
+                        ':',
+                        2
+                      ) = $5::TEXT
+                ORDER BY subject.run_id
                 ",
             )
             .bind(request.tenant().as_str())
             .bind(request.connection_id().as_uuid())
-            .bind(installation_id)
             .bind(repository_id)
-            .bind(pg_bigint(request.app_id().get()))
             .bind(head_sha)
             .bind(pg_bigint(suite_id.get()))
             .fetch_all(&mut **transaction)
