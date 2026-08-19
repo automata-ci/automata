@@ -13,10 +13,7 @@ use std::{
 
 use async_trait::async_trait;
 use automata_ci_action_actions::JavascriptRuntime;
-use automata_ci_actions_runtime::{
-    ActionsCommandFileDecoder, ActionsCompletedStepApplicator, CommandFileKind,
-    StepId as RuntimeStepId, WorkflowCommandLimits, WorkflowCommandPolicy,
-};
+use automata_ci_actions_runtime::{CommandFileKind, StepId as RuntimeStepId};
 use automata_ci_auth::secret::{SecretString, SharedSensitiveString};
 use automata_ci_core::{
     ActionReference, AttemptId, ContainerSpec, ContextValue, EnvironmentProfile,
@@ -43,8 +40,8 @@ use automata_ci_execution::{
     SignalRequest, TargetPath, TargetPlatform, WaitRequest,
 };
 use automata_ci_expression_actions::{
-    ExtensionFunctionResult, GithubEvaluationContext, GithubExpressionEvaluator,
-    GithubExpressionFunctionProvider, GithubObject, GithubValue, MapContext,
+    ExtensionFunctionResult, GithubEvaluationContext, GithubExpressionFunctionProvider,
+    GithubObject, GithubValue, MapContext,
 };
 use automata_ci_job_executor_actions::{
     ActionPreparationError, ActionPreparationPort, ActionPreparationRequest, ActionsExecutionPhase,
@@ -228,49 +225,6 @@ impl Fixture {
             Arc::new(FakeJobContent::default()),
             Arc::new(FakeContexts::secretless()),
         )
-    }
-
-    pub fn with_workflow_command_policy(self, policy: WorkflowCommandPolicy) -> Self {
-        let Self {
-            executor,
-            provider,
-            endpoint_state,
-            events,
-            environment,
-        } = self;
-        Self {
-            executor: executor.with_compatibility_engines(
-                GithubExpressionEvaluator::default(),
-                ActionsCommandFileDecoder::default(),
-                ActionsCompletedStepApplicator::default(),
-                WorkflowCommandLimits::default(),
-                policy,
-            ),
-            provider,
-            endpoint_state,
-            events,
-            environment,
-        }
-    }
-
-    pub fn with_custody_acknowledger(
-        self,
-        acknowledger: Arc<dyn SecretCustodyAcknowledger>,
-    ) -> Self {
-        let Self {
-            executor,
-            provider,
-            endpoint_state,
-            events,
-            environment,
-        } = self;
-        Self {
-            executor: executor.with_secret_custody(Arc::new(FakeSecrets), acknowledger),
-            provider,
-            endpoint_state,
-            events,
-            environment,
-        }
     }
 
     pub fn with_managed_secret_custody(
@@ -1137,41 +1091,6 @@ pub fn local_action_step(id: &str, path: &str) -> StepIr {
 
 pub fn prepared_node24_action() -> PreparedAction {
     prepared_node24_action_with_post_condition("always()")
-}
-
-pub fn prepared_windows_namespace_unsafe_node24_action() -> PreparedAction {
-    let compiler = GithubConditionCompiler::default();
-    let pre_condition = compiler
-        .compile_condition(Some("always()"), GithubConditionPhase::Step)
-        .expect("valid pre condition");
-    let post_condition = compiler
-        .compile_condition(Some("always()"), GithubConditionPhase::Step)
-        .expect("valid post condition");
-    let javascript = PreparedJavascriptAction::new(
-        JavascriptRuntime::Node24,
-        "dist/index.js",
-        None,
-        pre_condition,
-        None,
-        post_condition,
-    )
-    .expect("valid JavaScript action");
-    let archive = test_action_archive(&[
-        (
-            "action.yml",
-            b"runs:\n  using: node24\n  main: dist/index.js\n",
-        ),
-        ("dist/index.js", b"console.log('must not run')\n"),
-        ("CON.txt", b"unsafe Windows namespace entry\n"),
-    ]);
-    let digest = Sha256Digest::from_bytes(Sha256::digest(&archive).into());
-    let definition = PreparedActionDefinition::new(
-        Vec::new(),
-        Vec::new(),
-        PreparedActionExecution::Javascript(Box::new(javascript)),
-    )
-    .expect("valid JavaScript definition");
-    PreparedAction::with_definition(digest, archive, "", definition).expect("valid action")
 }
 
 pub fn prepared_node24_action_with_post_condition(post_condition: &str) -> PreparedAction {
