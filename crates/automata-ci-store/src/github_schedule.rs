@@ -10,11 +10,10 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
-    GithubCheckSubjectKey, GithubCheckSubjectReceipt, GithubProviderManifest,
-    GithubProviderManifestRevision, GithubServerServiceAuthoritySelector, ObjectKey,
-    ProviderRepositoryOwnerId, RepositoryId, StoreError, TenantScope,
+    GithubProviderManifest, GithubProviderManifestRevision, GithubServerServiceAuthoritySelector,
+    ObjectKey, ProviderRepositoryOwnerId, RepositoryId, StoreError, TenantScope,
 };
-use automata_ci_provider::ProviderConnectionId;
+use automata_ci_provider::{ProviderConnectionId, ProviderRepositoryPath};
 
 /// Exact media type retained for one immutable gzip repository archive.
 pub const GITHUB_SCHEDULE_ARCHIVE_MEDIA_TYPE: &str =
@@ -164,7 +163,7 @@ impl GithubScheduleArchive {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GithubScheduleRegistryEntry {
     ordinal: u16,
-    workflow_path: GithubCheckSubjectKey,
+    workflow_path: ProviderRepositoryPath,
     workflow_source_digest: Sha256Digest,
     schedule_ordinal: u16,
     cron_expression: String,
@@ -369,7 +368,7 @@ impl GithubScheduleRegistryEntry {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         ordinal: u16,
-        workflow_path: GithubCheckSubjectKey,
+        workflow_path: ProviderRepositoryPath,
         workflow_source_digest: Sha256Digest,
         schedule_ordinal: u16,
         cron_expression: impl Into<String>,
@@ -1030,26 +1029,6 @@ pub struct GithubScheduleFireReceipt {
     recorded_at: UnixMillis,
 }
 
-/// Typed request to create or replay the Check for one live scheduled fire.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct RegisterGithubScheduledCheckSubject {
-    claim: GithubScheduleFireClaim,
-}
-
-impl RegisterGithubScheduledCheckSubject {
-    /// Binds Check registration to one exact claim snapshot.
-    #[must_use]
-    pub const fn new(claim: GithubScheduleFireClaim) -> Self {
-        Self { claim }
-    }
-
-    /// Returns the exact claim that must still be live.
-    #[must_use]
-    pub const fn claim(self) -> GithubScheduleFireClaim {
-        self.claim
-    }
-}
-
 impl GithubScheduleFireReceipt {
     /// Rehydrates a checked receipt.
     #[must_use]
@@ -1103,12 +1082,6 @@ pub trait GithubScheduleRepository: fmt::Debug + Send + Sync {
         claim: GithubScheduleFireClaim,
         lease_millis: i64,
     ) -> Result<GithubScheduleFireClaim, GithubScheduleStoreError>;
-
-    /// Creates or exactly replays the queued Check and sealed schedule evidence.
-    async fn register_github_scheduled_check_subject(
-        &self,
-        request: RegisterGithubScheduledCheckSubject,
-    ) -> Result<GithubCheckSubjectReceipt, GithubScheduleStoreError>;
 
     /// Releases a live claim into a bounded durable retry.
     async fn retry_github_schedule_fire(
