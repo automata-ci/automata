@@ -17,13 +17,14 @@ use automata_ci_provider::{
     ProviderInstanceId, ProviderLifecycleState, ProviderProcessingClaimFence,
     ProviderProcessingClaimSource, ProviderProcessingInput, ProviderProcessingInvocationId,
     ProviderProcessingReceipt, ProviderProcessingState, ProviderProcessingWorkerId,
-    ProviderRepository, ProviderRepositoryPath, ProviderResultFuture, ProviderResultRepository,
-    ProviderResultRepositoryError, ProviderResultSaveOutcome, ProviderResultSubject,
-    ProviderRunnerPolicyBinding, ProviderSchemaVersion, ProviderSecretGeneration,
-    ProviderSecretName, ProviderTypeId, ProviderWebhookEndpointId, ProviderWebhookEndpointRevision,
-    ProviderWebhookSecretReference, ProviderWebhookSignatureEvidence, ProviderWorkflowSource,
-    PushCommitEvidence, PushTrigger, RepositoryVisibility, RetryProviderResult,
-    SaveDesiredProviderResult, VerifiedProviderTriggerDelivery, provider_raw_webhook_descriptor,
+    ProviderRepository, ProviderRepositoryPath, ProviderResultClaimFence, ProviderResultFuture,
+    ProviderResultRepository, ProviderResultRepositoryError, ProviderResultSaveOutcome,
+    ProviderResultSubject, ProviderRunnerPolicyBinding, ProviderSchemaVersion,
+    ProviderSecretGeneration, ProviderSecretName, ProviderTypeId, ProviderWebhookEndpointId,
+    ProviderWebhookEndpointRevision, ProviderWebhookSecretReference,
+    ProviderWebhookSignatureEvidence, ProviderWorkflowSource, PushCommitEvidence, PushTrigger,
+    RenewProviderResult, RepositoryVisibility, RetryProviderResult, SaveDesiredProviderResult,
+    VerifiedProviderTriggerDelivery, provider_raw_webhook_descriptor,
 };
 use automata_ci_provider_delivery::{ProviderTrustContext, derive_provider_trust_snapshot};
 use automata_ci_scm::{
@@ -169,6 +170,13 @@ impl ProviderResultRepository for Results {
     }
 
     fn complete_result(&self, _request: CompleteProviderResult) -> ProviderResultFuture<'_, ()> {
+        Box::pin(async { Err(ProviderResultRepositoryError::Corrupt) })
+    }
+
+    fn renew_result(
+        &self,
+        _request: RenewProviderResult,
+    ) -> ProviderResultFuture<'_, ProviderResultClaimFence> {
         Box::pin(async { Err(ProviderResultRepositoryError::Corrupt) })
     }
 
