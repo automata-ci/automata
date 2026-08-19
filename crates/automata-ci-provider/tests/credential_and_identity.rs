@@ -15,10 +15,9 @@ use automata_ci_provider::{
     ProviderDefaultBranch, ProviderHumanCredential, ProviderHumanIdentity, ProviderInstanceId,
     ProviderLifecycleState, ProviderMembership, ProviderMembershipSnapshot, ProviderPkceVerifier,
     ProviderRepositoryPath, ProviderRunnerPolicyBinding, ProviderSchemaVersion,
-    ProviderWorkflowSource, ProviderWorkloadCredentialId, RepositoryVisibility,
-    SourceReadCapability, WorkloadCredentialPermission, WorkloadCredentialPermissionSet,
-    WorkloadCredentialProfile, WorkloadCredentialRequest, WorkloadCredentialRetirement,
-    WorkloadCredentialRevocation,
+    ProviderWorkflowSource, RepositoryVisibility, SourceReadCapability,
+    WorkloadCredentialPermission, WorkloadCredentialPermissionSet, WorkloadCredentialProfile,
+    WorkloadCredentialRequest, WorkloadCredentialRetirement, WorkloadCredentialRevocation,
 };
 use automata_ci_secret::SecretValue;
 use static_assertions::assert_not_impl_any;
@@ -312,13 +311,12 @@ fn workload_authority_is_lease_bound_and_write_requires_same_repository_trust() 
     .unwrap();
     let build = |trust_class| {
         WorkloadCredentialRequest::new(
-            ProviderWorkloadCredentialId::from_uuid(Uuid::from_u128(21)).unwrap(),
             &connection(),
             JobId::from_uuid(Uuid::from_u128(22)),
             AttemptNumber::new(1).unwrap(),
             lease(),
             trust_class,
-            WorkloadCredentialProfile::RepositoryWrite,
+            WorkloadCredentialProfile::RepositoryAccess,
             write.clone(),
             UnixMillis::new(2_001),
             UnixMillis::new(4_000),
@@ -350,7 +348,6 @@ fn workload_authority_is_lease_bound_and_write_requires_same_repository_trust() 
 #[test]
 fn explicit_workload_retirement_preserves_the_secret_bearing_cleanup_obligation() {
     let request = WorkloadCredentialRequest::new(
-        ProviderWorkloadCredentialId::from_uuid(Uuid::from_u128(31)).unwrap(),
         &connection(),
         JobId::from_uuid(Uuid::from_u128(32)),
         AttemptNumber::new(1).unwrap(),

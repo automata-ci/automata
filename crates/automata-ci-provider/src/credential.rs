@@ -36,6 +36,7 @@ pub const MAX_WORKLOAD_CREDENTIAL_VALIDITY_MILLIS: u64 = 60 * 60 * 1_000;
 pub const MAX_WORKLOAD_CREDENTIAL_RETRY_MILLIS: u64 = 24 * 60 * 60 * 1_000;
 
 const CONTROL_REQUEST_DOMAIN: &[u8] = b"automata.provider.control-credential-request.v1\0";
+const WORKLOAD_CREDENTIAL_ID_DOMAIN: &[u8] = b"automata.provider.workload-credential-id.v1\0";
 const WORKLOAD_REQUEST_DOMAIN: &[u8] = b"automata.provider.workload-credential-request.v1\0";
 
 /// Provider API operation requested by an application service.
@@ -615,6 +616,40 @@ impl WorkloadCredentialPermissionSet {
     }
 }
 
+impl ProviderWorkloadCredentialId {
+    /// Derives one stable RFC 9562 version-8 identity from exact issuance evidence.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if a UUID carrying mandatory version and variant bits is
+    /// classified as nil, which would indicate a UUID library invariant break.
+    #[must_use]
+    pub fn derive(
+        connection: &ProviderConnectionManifest,
+        job_id: JobId,
+        attempt: AttemptNumber,
+        lease: &Lease,
+    ) -> Self {
+        let mut hash = Sha256::new();
+        hash.update(WORKLOAD_CREDENTIAL_ID_DOMAIN);
+        hash.update(connection.connection_id().as_uuid().as_bytes());
+        hash.update(connection.revision().get().to_be_bytes());
+        hash.update(connection.digest().as_bytes());
+        hash.update(job_id.as_uuid().as_bytes());
+        hash.update(attempt.get().to_be_bytes());
+        hash.update(lease.attempt_id().as_uuid().as_bytes());
+        hash.update(lease.lease_id().as_uuid().as_bytes());
+        hash.update(lease.fencing_token().get().to_be_bytes());
+        let digest = hash.finalize();
+        let mut bytes = [0_u8; 16];
+        bytes.copy_from_slice(&digest[..16]);
+        bytes[6] = (bytes[6] & 0x0f) | 0x80;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        Self::from_uuid(uuid::Uuid::from_bytes(bytes))
+            .expect("a domain-separated version-8 workload credential ID is non-nil")
+    }
+}
+
 /// Exact job, attempt, lease, trust, repository, and permission issuance request.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkloadCredentialRequest {
@@ -643,7 +678,6 @@ impl WorkloadCredentialRequest {
     /// or permissions inconsistent with the selected profile.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        credential_id: ProviderWorkloadCredentialId,
         connection: &ProviderConnectionManifest,
         job_id: JobId,
         attempt: AttemptNumber,
@@ -678,16 +712,17 @@ impl WorkloadCredentialRequest {
             WorkloadCredentialProfile::CheckoutRead if !permissions.is_empty() => {
                 return Err(ProviderCredentialModelError::InvalidWorkloadPermission);
             }
-            WorkloadCredentialProfile::RepositoryWrite
+            WorkloadCredentialProfile::RepositoryAccess
                 if permissions.is_empty()
-                    || !has_write
-                    || trust_class != TrustSourceClass::SameRepository =>
+                    || (has_write && trust_class != TrustSourceClass::SameRepository) =>
             {
                 return Err(ProviderCredentialModelError::InvalidWorkloadPermission);
             }
             WorkloadCredentialProfile::CheckoutRead
-            | WorkloadCredentialProfile::RepositoryWrite => {}
+            | WorkloadCredentialProfile::RepositoryAccess => {}
         }
+        let credential_id =
+            ProviderWorkloadCredentialId::derive(connection, job_id, attempt, &lease);
         let mut value = Self {
             credential_id,
             connection_id: connection.connection_id(),
@@ -1387,7 +1422,7 @@ const fn trust_class_code(value: TrustSourceClass) -> u8 {
 const fn profile_code(value: WorkloadCredentialProfile) -> u8 {
     match value {
         WorkloadCredentialProfile::CheckoutRead => 1,
-        WorkloadCredentialProfile::RepositoryWrite => 2,
+        WorkloadCredentialProfile::RepositoryAccess => 2,
     }
 }
 const fn permission_level_code(value: PermissionLevel) -> u8 {

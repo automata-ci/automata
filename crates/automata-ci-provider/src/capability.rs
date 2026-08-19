@@ -67,8 +67,8 @@ pub enum StatusHistoryModel {
 pub enum WorkloadCredentialProfile {
     /// Read-only access sufficient for exact repository checkout.
     CheckoutRead,
-    /// Provider-mapped write access for an explicitly admitted permission set.
-    RepositoryWrite,
+    /// Exact provider-mapped repository access beyond minimal checkout.
+    RepositoryAccess,
 }
 
 /// Provider enforcement available for issued workload credentials.
