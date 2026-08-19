@@ -19,9 +19,7 @@ pub use result_adapter::{GithubResultProviderAdapter, GithubResultProviderAdapte
 pub use schedule::{
     GithubScheduleClock, GithubScheduleService, GithubScheduleServiceConfig,
     GithubScheduleServiceConfigurationError, GithubScheduleServiceError, GithubScheduleServicePass,
-    GithubScheduleSourceAuthorities, GithubScheduleSourceCredential,
-    GithubScheduleSourceCredentialProvider, GithubScheduleSourceCredentialProviderError,
-    GithubScheduleSourceCredentialRequest, GithubScheduleSourceCredentialValueError,
+    GithubScheduleSourceAuthorities,
 };
 pub use server_credential::GithubServerServiceCredentialRelease;
 pub use trigger_handler::{

@@ -8,8 +8,7 @@
 
 use std::{collections::BTreeMap, fmt, sync::Arc, time::Duration};
 
-use async_trait::async_trait;
-use automata_ci_auth::secret::{SecretString, SecretStringRef};
+use automata_ci_auth::secret::SecretStringRef;
 use automata_ci_blob::{
     BlobDescriptor, BlobKey, BlobStoreError, BlobStoreErrorKind, ImmutableBlobStore, MediaType,
 };
@@ -20,9 +19,13 @@ use automata_ci_core::{
     WorkflowPlan,
 };
 use automata_ci_provider::{
-    ProviderConnectionId, ProviderConnectionManifest, ProviderLifecycleState,
-    ProviderManifestRepository, ProviderRepositoryError, ProviderWorkflowInvocationId,
+    ControlCredentialClaim, ControlCredentialProvider, ControlCredentialProviderError,
+    ControlCredentialRequest, ProviderConnectionId, ProviderConnectionManifest,
+    ProviderControlCredentialId, ProviderControlCredentialWorkerId, ProviderControlOperation,
+    ProviderControlOperationSet, ProviderLifecycleState, ProviderManifestRepository,
+    ProviderRepositoryError, ProviderWorkflowInvocationId,
 };
+use automata_ci_provider_github::GithubConnectionPolicy;
 use automata_ci_scm::{
     ArchiveFormat, ArchiveLimits, RepositoryId as ScmRepositoryId, RevisionSpec, ScmError,
     ScmErrorKind, ScmProvider, SnapshotRequest,
@@ -34,12 +37,9 @@ use automata_ci_store::{
     GithubProviderManifestStoreError, GithubScheduleArchive, GithubScheduleDiscoveryClaim,
     GithubScheduleFireClaim, GithubScheduleFireConclusion, GithubScheduleRegistryEntry,
     GithubScheduleRegistryId, GithubScheduleRepository, GithubScheduleSourceAuthority,
-    GithubScheduleStoreError, GithubScheduleWorkerId, GithubServerServiceAction,
-    GithubServerServiceAuthoritySelector, GithubServerServiceClaimFence,
-    GithubServerServiceConsumerClaim, GithubServerServiceConsumerId, GithubServerServiceRevision,
-    GithubServerServiceWorkerId, MAX_GITHUB_SCHEDULE_CLAIM_MILLIS,
-    MAX_GITHUB_SCHEDULE_RETRY_MILLIS, ObjectKey, RegisterGithubScheduleRegistry,
-    RetryGithubScheduleFire, WorkflowAdmissionIdempotency,
+    GithubScheduleStoreError, GithubScheduleWorkerId, GithubServerServiceAuthoritySelector,
+    MAX_GITHUB_SCHEDULE_CLAIM_MILLIS, MAX_GITHUB_SCHEDULE_RETRY_MILLIS, ObjectKey,
+    RegisterGithubScheduleRegistry, RetryGithubScheduleFire, WorkflowAdmissionIdempotency,
 };
 use automata_ci_workflow_actions::{
     CompilationDisposition, CompileWorkflowRequest, GithubWorkflowCompiler, GithubWorkflowFrontend,
@@ -60,8 +60,6 @@ use thiserror::Error;
 use tokio::time::{sleep, timeout};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
-
-use crate::GithubServerServiceCredentialRelease;
 
 const GITHUB_PROVIDER: &str = "github";
 const DEFAULT_POLL_MILLIS: i64 = 1_000;
@@ -202,234 +200,6 @@ impl Default for GithubScheduleServiceConfig {
 #[error("GitHub schedule service configuration is invalid")]
 pub struct GithubScheduleServiceConfigurationError;
 
-/// Borrowed exact repository-source authority for one discovery claim.
-pub struct GithubScheduleSourceCredentialRequest<'a> {
-    claim: GithubScheduleDiscoveryClaim,
-    manifest: &'a GithubProviderManifest,
-    authority_selector: &'a GithubServerServiceAuthoritySelector,
-    observed_at: UnixMillis,
-    required_through: UnixMillis,
-}
-
-impl<'a> GithubScheduleSourceCredentialRequest<'a> {
-    /// Creates a source credential request for a live discovery claim.
-    ///
-    /// # Errors
-    ///
-    /// Rejects stale, cross-tenant, or overflowing input.
-    pub fn new(
-        claim: GithubScheduleDiscoveryClaim,
-        manifest: &'a GithubProviderManifest,
-        authority_selector: &'a GithubServerServiceAuthoritySelector,
-        observed_at: UnixMillis,
-    ) -> Result<Self, GithubScheduleSourceCredentialValueError> {
-        let required_through = claim
-            .expires_at()
-            .get()
-            .checked_add(MAX_PROVIDER_REQUEST_MILLIS)
-            .map(UnixMillis::new)
-            .ok_or(GithubScheduleSourceCredentialValueError)?;
-        if manifest.github_repository_owner_id().is_none()
-            || authority_selector.tenant() != manifest.tenant()
-            || observed_at < claim.claimed_at()
-            || observed_at >= claim.expires_at()
-            || required_through <= observed_at
-        {
-            return Err(GithubScheduleSourceCredentialValueError);
-        }
-        Ok(Self {
-            claim,
-            manifest,
-            authority_selector,
-            observed_at,
-            required_through,
-        })
-    }
-
-    /// Returns the live discovery fence.
-    #[must_use]
-    pub const fn claim(&self) -> GithubScheduleDiscoveryClaim {
-        self.claim
-    }
-    /// Returns the immutable manifest being resolved.
-    #[must_use]
-    pub const fn manifest(&self) -> &GithubProviderManifest {
-        self.manifest
-    }
-    /// Returns the exact least-authority selector.
-    #[must_use]
-    pub const fn authority_selector(&self) -> &GithubServerServiceAuthoritySelector {
-        self.authority_selector
-    }
-    /// Returns the trusted credential acquisition observation.
-    #[must_use]
-    pub const fn observed_at(&self) -> UnixMillis {
-        self.observed_at
-    }
-    /// Returns the conservative requested credential horizon.
-    #[must_use]
-    pub const fn required_through(&self) -> UnixMillis {
-        self.required_through
-    }
-
-    /// Derives the disjoint server-service consumer claim for schedule discovery.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error only if independently validated schedule identities no
-    /// longer fit the adjacent server-service identity domain.
-    pub fn consumer_claim(
-        &self,
-    ) -> Result<GithubServerServiceConsumerClaim, GithubScheduleSourceCredentialValueError> {
-        Ok(GithubServerServiceConsumerClaim::new(
-            GithubServerServiceConsumerId::from_uuid(self.claim.registry_id().as_uuid())
-                .map_err(|_| GithubScheduleSourceCredentialValueError)?,
-            GithubServerServiceWorkerId::from_uuid(self.claim.worker_id().as_uuid())
-                .map_err(|_| GithubScheduleSourceCredentialValueError)?,
-            GithubServerServiceClaimFence::new(self.claim.fence().get())
-                .map_err(|_| GithubScheduleSourceCredentialValueError)?,
-            GithubServerServiceAction::DiscoverRepositorySchedules,
-            GithubServerServiceRevision::new(self.manifest.revision().get())
-                .map_err(|_| GithubScheduleSourceCredentialValueError)?,
-        ))
-    }
-}
-
-impl fmt::Debug for GithubScheduleSourceCredentialRequest<'_> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("GithubScheduleSourceCredentialRequest")
-            .field("claim", &self.claim)
-            .field("manifest", &"[exact manifest]")
-            .field("authority_selector", &"[exact selector]")
-            .field("observed_at", &self.observed_at)
-            .field("required_through", &self.required_through)
-            .finish()
-    }
-}
-
-/// Move-only exact repository source credential for schedule discovery.
-#[must_use = "the credential must be released after its one source operation"]
-pub struct GithubScheduleSourceCredential {
-    tenant: automata_ci_store::TenantScope,
-    connection_id: ProviderConnectionId,
-    repository_id: automata_ci_store::GithubRepositoryId,
-    repository: ScmRepositoryId,
-    authority_selector: GithubServerServiceAuthoritySelector,
-    consumer: GithubServerServiceConsumerClaim,
-    required_through: UnixMillis,
-    token: SecretString,
-    release: Box<dyn GithubServerServiceCredentialRelease>,
-}
-
-impl GithubScheduleSourceCredential {
-    /// Creates one exact, release-bound schedule source handoff.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a cross-repository, wrong-action, or invalid-horizon handoff.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        request: &GithubScheduleSourceCredentialRequest<'_>,
-        repository: ScmRepositoryId,
-        authority_selector: GithubServerServiceAuthoritySelector,
-        consumer: GithubServerServiceConsumerClaim,
-        token: SecretString,
-        release: Box<dyn GithubServerServiceCredentialRelease>,
-    ) -> Result<Self, GithubScheduleSourceCredentialValueError> {
-        let manifest = request.manifest();
-        if repository.as_str() != manifest.github_repository_name().as_str()
-            || authority_selector != *request.authority_selector()
-            || consumer != request.consumer_claim()?
-            || consumer.action() != GithubServerServiceAction::DiscoverRepositorySchedules
-            || request.required_through() < request.observed_at()
-        {
-            return Err(GithubScheduleSourceCredentialValueError);
-        }
-        Ok(Self {
-            tenant: manifest.tenant().clone(),
-            connection_id: manifest.connection_id(),
-            repository_id: manifest.github_repository_id(),
-            repository,
-            authority_selector,
-            consumer,
-            required_through: request.required_through(),
-            token,
-            release,
-        })
-    }
-
-    /// Reports whether this handoff is exact for one currently live request.
-    #[must_use]
-    pub fn matches(&self, request: &GithubScheduleSourceCredentialRequest<'_>) -> bool {
-        self.tenant == *request.manifest().tenant()
-            && self.connection_id == request.manifest().connection_id()
-            && self.repository_id == request.manifest().github_repository_id()
-            && self.repository.as_str() == request.manifest().github_repository_name().as_str()
-            && self.authority_selector == *request.authority_selector()
-            && request
-                .consumer_claim()
-                .is_ok_and(|consumer| consumer == self.consumer)
-            && self.required_through == request.required_through()
-    }
-
-    fn token(&self) -> &SecretString {
-        &self.token
-    }
-
-    async fn release(self) {
-        let Self { token, release, .. } = self;
-        drop(token);
-        release.release().await;
-    }
-}
-
-impl fmt::Debug for GithubScheduleSourceCredential {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("GithubScheduleSourceCredential")
-            .field("tenant", &"[bound]")
-            .field("connection_id", &self.connection_id)
-            .field("repository_id", &self.repository_id)
-            .field("repository", &"[bound]")
-            .field("authority_selector", &"[bound]")
-            .field("consumer", &self.consumer)
-            .field("required_through", &self.required_through)
-            .field("token", &"[redacted]")
-            .field("release", &"[credential release]")
-            .finish()
-    }
-}
-
-/// Invalid schedule source-credential binding.
-#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
-#[error("GitHub schedule source credential binding is invalid")]
-pub struct GithubScheduleSourceCredentialValueError;
-
-/// Sanitized result from product-owned schedule source authority.
-#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
-pub enum GithubScheduleSourceCredentialProviderError {
-    /// Current authority is temporarily unavailable.
-    #[error("GitHub schedule source credential authority is unavailable")]
-    Unavailable,
-    /// The exact current authority rejected the discovery claim.
-    #[error("GitHub schedule source credential authority rejected the request")]
-    Rejected,
-    /// The authority could not establish a coherent exact handoff.
-    #[error("GitHub schedule source credential authority is inconsistent")]
-    InvariantViolation,
-}
-
-/// Least-authority source credential provider for schedule discovery.
-#[async_trait]
-pub trait GithubScheduleSourceCredentialProvider: fmt::Debug + Send + Sync {
-    /// Acquires one move-only `contents:read` handoff for the exact discovery claim.
-    async fn acquire(
-        &self,
-        request: GithubScheduleSourceCredentialRequest<'_>,
-    ) -> Result<GithubScheduleSourceCredential, GithubScheduleSourceCredentialProviderError>;
-}
-
 /// Exact source selectors configured for current manifests.
 #[derive(Clone, Debug, Default)]
 pub struct GithubScheduleSourceAuthorities {
@@ -492,7 +262,7 @@ pub struct GithubScheduleService {
     admission: WorkflowAdmissionService,
     results: ProviderWorkflowResultService,
     source_authorities: GithubScheduleSourceAuthorities,
-    credentials: Arc<dyn GithubScheduleSourceCredentialProvider>,
+    credentials: Arc<dyn ControlCredentialProvider>,
     clock: Arc<dyn GithubScheduleClock>,
     worker_id: GithubScheduleWorkerId,
     config: GithubScheduleServiceConfig,
@@ -513,7 +283,7 @@ impl GithubScheduleService {
         admission: WorkflowAdmissionService,
         results: ProviderWorkflowResultService,
         source_authorities: GithubScheduleSourceAuthorities,
-        credentials: Arc<dyn GithubScheduleSourceCredentialProvider>,
+        credentials: Arc<dyn ControlCredentialProvider>,
         clock: Arc<dyn GithubScheduleClock>,
         worker_id: GithubScheduleWorkerId,
         config: GithubScheduleServiceConfig,
@@ -623,6 +393,9 @@ impl GithubScheduleService {
         let Some(owner) = manifest.github_repository_owner_id() else {
             return Ok(false);
         };
+        let Some(connection) = self.load_discovery_connection(&manifest).await? else {
+            return Ok(false);
+        };
         let Some(selector) = self.source_authorities.selector(manifest.connection_id()) else {
             return Ok(false);
         };
@@ -651,7 +424,7 @@ impl GithubScheduleService {
             Err(error) => return Err(error.into()),
         };
         let discovered = match self
-            .fetch_and_store_discovery_archive(&manifest, claim, &source_authority)
+            .fetch_and_store_discovery_archive(&manifest, &connection, claim)
             .await
         {
             Ok(archive) => archive,
@@ -701,8 +474,8 @@ impl GithubScheduleService {
     async fn fetch_and_store_discovery_archive(
         &self,
         manifest: &GithubProviderManifest,
+        connection: &ProviderConnectionManifest,
         claim: GithubScheduleDiscoveryClaim,
-        authority: &GithubScheduleSourceAuthority,
     ) -> Result<DiscoveryArchive, GithubScheduleServiceError> {
         let repository = ScmRepositoryId::new(manifest.github_repository_name().as_str())
             .map_err(|_| GithubScheduleServiceError::InvalidArchive)?;
@@ -711,28 +484,32 @@ impl GithubScheduleService {
         let limits = ArchiveLimits::new(manifest.limits().archive_max_compressed_bytes())
             .map_err(|_| GithubScheduleServiceError::InvalidArchive)?;
         let snapshot = {
-            let selector = authority.selector();
             let observed_at = self.clock.now()?;
-            let request =
-                GithubScheduleSourceCredentialRequest::new(claim, manifest, selector, observed_at)
-                    .map_err(|_| GithubScheduleServiceError::CredentialRejected)?;
+            let operation = ProviderControlOperation::RepositoryRead;
+            let request = schedule_credential_request(
+                claim,
+                manifest.revision().get(),
+                connection,
+                observed_at,
+            )?;
             let credential = self
                 .credentials
-                .acquire(request)
+                .acquire(&request)
                 .await
                 .map_err(map_credential_error)?;
-            let request =
-                GithubScheduleSourceCredentialRequest::new(claim, manifest, selector, observed_at)
-                    .map_err(|_| GithubScheduleServiceError::CredentialRejected)?;
-            if !credential.matches(&request) {
+            if credential.request_digest() != request.digest() || !credential.permits(operation) {
                 credential.release().await;
                 return Err(GithubScheduleServiceError::CredentialRejected);
             }
+            let Ok(token) = SecretStringRef::new(credential.expose_secret()) else {
+                credential.release().await;
+                return Err(GithubScheduleServiceError::CredentialRejected);
+            };
             let result = self
                 .fetch_snapshot(SnapshotRequest::authenticated(
                     &repository,
                     &revision,
-                    SecretStringRef::from_secret(credential.token()),
+                    token,
                     limits,
                 ))
                 .await;
@@ -774,6 +551,36 @@ impl GithubScheduleService {
             size,
             bytes,
         })
+    }
+
+    async fn load_discovery_connection(
+        &self,
+        manifest: &GithubProviderManifest,
+    ) -> Result<Option<ProviderConnectionManifest>, GithubScheduleServiceError> {
+        let Some(connection) = self
+            .connections
+            .current_connection(manifest.connection_id())
+            .await
+            .map_err(map_provider_repository_error)?
+        else {
+            return Ok(None);
+        };
+        let Ok(policy) =
+            GithubConnectionPolicy::decode(connection.configuration().adapter_policy())
+        else {
+            return Ok(None);
+        };
+        let exact = connection.state() == ProviderLifecycleState::Active
+            && connection.configuration().workspace_id().to_string() == manifest.tenant().as_str()
+            && connection
+                .configuration()
+                .repository()
+                .external_id()
+                .as_str()
+                == manifest.github_repository_id().get().to_string()
+            && policy.installation_id().get() == manifest.installation_id().get()
+            && policy.repository().as_str() == manifest.github_repository_name().as_str();
+        Ok(exact.then_some(connection))
     }
 
     async fn fetch_snapshot(
@@ -1415,15 +1222,66 @@ fn archive_descriptor(archive: &GithubScheduleArchive) -> Result<BlobDescriptor,
     ))
 }
 
-const fn map_credential_error(
-    error: GithubScheduleSourceCredentialProviderError,
-) -> GithubScheduleServiceError {
+fn schedule_credential_request(
+    claim: GithubScheduleDiscoveryClaim,
+    manifest_revision: u64,
+    connection: &ProviderConnectionManifest,
+    observed_at: UnixMillis,
+) -> Result<ControlCredentialRequest, GithubScheduleServiceError> {
+    if observed_at < claim.claimed_at() || observed_at >= claim.expires_at() {
+        return Err(GithubScheduleServiceError::CredentialRejected);
+    }
+    let required_through = claim
+        .expires_at()
+        .get()
+        .checked_add(MAX_PROVIDER_REQUEST_MILLIS)
+        .ok_or(GithubScheduleServiceError::CredentialRejected)?;
+    let validity_millis = required_through
+        .checked_sub(observed_at.get())
+        .and_then(|value| u64::try_from(value).ok())
+        .ok_or(GithubScheduleServiceError::CredentialRejected)?;
+    let control_claim = schedule_control_claim(claim, manifest_revision)?;
+    let operations = ProviderControlOperationSet::new([ProviderControlOperation::RepositoryRead])
+        .map_err(|_| GithubScheduleServiceError::CredentialRejected)?;
+    ControlCredentialRequest::new(
+        control_claim,
+        connection,
+        operations,
+        observed_at,
+        validity_millis,
+    )
+    .map_err(|_| GithubScheduleServiceError::CredentialRejected)
+}
+
+fn schedule_control_claim(
+    claim: GithubScheduleDiscoveryClaim,
+    manifest_revision: u64,
+) -> Result<ControlCredentialClaim, GithubScheduleServiceError> {
+    let credential_id = ProviderControlCredentialId::from_uuid(claim.registry_id().as_uuid())
+        .map_err(|_| GithubScheduleServiceError::CredentialRejected)?;
+    let worker_id = ProviderControlCredentialWorkerId::from_uuid(claim.worker_id().as_uuid())
+        .map_err(|_| GithubScheduleServiceError::CredentialRejected)?;
+    ControlCredentialClaim::new(
+        credential_id,
+        worker_id,
+        claim.fence().get(),
+        manifest_revision,
+        claim.expires_at(),
+    )
+    .map_err(|_| GithubScheduleServiceError::CredentialRejected)
+}
+
+const fn map_credential_error(error: ControlCredentialProviderError) -> GithubScheduleServiceError {
     match error {
-        GithubScheduleSourceCredentialProviderError::Unavailable => {
+        ControlCredentialProviderError::RateLimited
+        | ControlCredentialProviderError::Unavailable
+        | ControlCredentialProviderError::Indeterminate => {
             GithubScheduleServiceError::CredentialUnavailable
         }
-        GithubScheduleSourceCredentialProviderError::Rejected
-        | GithubScheduleSourceCredentialProviderError::InvariantViolation => {
+        ControlCredentialProviderError::Unsupported
+        | ControlCredentialProviderError::Unauthorized
+        | ControlCredentialProviderError::Forbidden
+        | ControlCredentialProviderError::InvalidResponse => {
             GithubScheduleServiceError::CredentialRejected
         }
     }
@@ -1469,6 +1327,29 @@ fn map_admission_error(error: &WorkflowAdmissionError) -> FireFailure {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn schedule_discovery_fence_maps_exactly_to_common_control_claim() {
+        let registry_id = GithubScheduleRegistryId::from_uuid(Uuid::from_u128(0x7a))
+            .expect("schedule registry ID");
+        let worker_id =
+            GithubScheduleWorkerId::from_uuid(Uuid::from_u128(0x7b)).expect("schedule worker ID");
+        let claim = GithubScheduleDiscoveryClaim::from_durable_parts(
+            registry_id,
+            worker_id,
+            automata_ci_store::GithubScheduleClaimFence::new(9).expect("schedule fence"),
+            UnixMillis::new(1_000),
+            UnixMillis::new(301_000),
+        )
+        .expect("schedule discovery claim");
+
+        let mapped = schedule_control_claim(claim, 11).expect("common control claim");
+        assert_eq!(mapped.credential_id().as_uuid(), registry_id.as_uuid());
+        assert_eq!(mapped.worker_id().as_uuid(), worker_id.as_uuid());
+        assert_eq!(mapped.fence(), 9);
+        assert_eq!(mapped.revision(), 11);
+        assert_eq!(mapped.expires_at(), UnixMillis::new(301_000));
+    }
 
     #[test]
     fn bounded_policy_has_deterministic_defaults_and_rejects_open_catch_up() {

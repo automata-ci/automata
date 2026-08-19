@@ -21,11 +21,7 @@ use automata_ci_credential_github::{
     GithubServerServiceResolutionError, PendingGithubServerServiceCorruptionCleanup,
     PendingGithubServerServiceHandoffRelease, github_server_service_credential_request,
 };
-use automata_ci_github_delivery::{
-    GithubScheduleSourceCredential, GithubScheduleSourceCredentialProvider,
-    GithubScheduleSourceCredentialProviderError, GithubScheduleSourceCredentialRequest,
-    GithubServerServiceCredentialRelease,
-};
+use automata_ci_github_delivery::GithubServerServiceCredentialRelease;
 use automata_ci_provider::{
     ControlCredential, ControlCredentialFuture, ControlCredentialProvider,
     ControlCredentialProviderError, ControlCredentialRelease, ControlCredentialReleaseFuture,
@@ -1385,57 +1381,6 @@ impl GithubProviderCredentialAdapters {
         .map_err(|_| ControlCredentialProviderError::InvalidResponse)
     }
 
-    async fn acquire_schedule_source(
-        &self,
-        request: GithubScheduleSourceCredentialRequest<'_>,
-    ) -> Result<GithubScheduleSourceCredential, GithubScheduleSourceCredentialProviderError> {
-        let authority = self
-            .authority(
-                request.authority_selector(),
-                GithubServerServiceScope::RepositoryContentsRead,
-            )
-            .await
-            .map_err(schedule_source_handoff_error)?;
-        if !schedule_identity_matches(&authority, request.manifest()) {
-            return Err(GithubScheduleSourceCredentialProviderError::Rejected);
-        }
-        let consumer = request
-            .consumer_claim()
-            .map_err(|_| GithubScheduleSourceCredentialProviderError::InvariantViolation)?;
-        let handoff_request = acquire_request(
-            request.authority_selector().clone(),
-            consumer,
-            request.observed_at(),
-            request.required_through(),
-        )
-        .map_err(schedule_source_handoff_error)?;
-        let handoff = self
-            .handoffs
-            .acquire(handoff_request)
-            .await
-            .map_err(schedule_source_handoff_error)?;
-        if !schedule_handoff_matches(&handoff, &request, consumer) {
-            release_invalid_handoff(handoff).await;
-            return Err(GithubScheduleSourceCredentialProviderError::InvariantViolation);
-        }
-        let Ok(canonical_request) = github_server_service_credential_request(&authority) else {
-            release_invalid_handoff(handoff).await;
-            return Err(GithubScheduleSourceCredentialProviderError::InvariantViolation);
-        };
-        let repository = canonical_request.repository().repository().clone();
-        let drop_release_arm = handoff.drop_release_arm.clone();
-        arm_drop_release(drop_release_arm);
-        GithubScheduleSourceCredential::new(
-            &request,
-            repository,
-            handoff.selector,
-            handoff.consumer,
-            handoff.token,
-            handoff.release,
-        )
-        .map_err(|_| GithubScheduleSourceCredentialProviderError::InvariantViolation)
-    }
-
     /// Acquires one exact repository handoff for a live manual-dispatch claim.
     pub(crate) async fn acquire_workflow_dispatch_source(
         &self,
@@ -1851,16 +1796,6 @@ impl ControlCredentialProvider for GithubProviderCredentialAdapters {
     }
 }
 
-#[async_trait]
-impl GithubScheduleSourceCredentialProvider for GithubProviderCredentialAdapters {
-    async fn acquire(
-        &self,
-        request: GithubScheduleSourceCredentialRequest<'_>,
-    ) -> Result<GithubScheduleSourceCredential, GithubScheduleSourceCredentialProviderError> {
-        self.acquire_schedule_source(request).await
-    }
-}
-
 fn acquire_request(
     selector: GithubServerServiceAuthoritySelector,
     consumer: GithubServerServiceConsumerClaim,
@@ -1895,19 +1830,6 @@ fn schedule_identity_matches(
         && authority.app_key_spki_sha256() == manifest.app_key_spki_sha256()
         && authority.app_configuration_revision() == manifest.app_configuration_revision()
         && authority.policy_revision() == manifest.policy_revision()
-}
-
-fn schedule_handoff_matches(
-    handoff: &GithubProviderCredentialHandoff,
-    request: &GithubScheduleSourceCredentialRequest<'_>,
-    consumer: GithubServerServiceConsumerClaim,
-) -> bool {
-    handoff.selector == *request.authority_selector()
-        && handoff.consumer == consumer
-        && handoff.key.authority_id() == request.authority_selector().authority_id()
-        && handoff.required_through == request.required_through()
-        && handoff.acquired_at == request.observed_at()
-        && handoff.usable_until >= request.required_through()
 }
 
 async fn release_invalid_handoff(handoff: GithubProviderCredentialHandoff) {
@@ -1980,22 +1902,6 @@ const fn common_control_handoff_error(
         GithubProviderCredentialHandoffError::Rejected => ControlCredentialProviderError::Forbidden,
         GithubProviderCredentialHandoffError::Inconsistent => {
             ControlCredentialProviderError::InvalidResponse
-        }
-    }
-}
-
-const fn schedule_source_handoff_error(
-    error: GithubProviderCredentialHandoffError,
-) -> GithubScheduleSourceCredentialProviderError {
-    match error {
-        GithubProviderCredentialHandoffError::Unavailable => {
-            GithubScheduleSourceCredentialProviderError::Unavailable
-        }
-        GithubProviderCredentialHandoffError::Rejected => {
-            GithubScheduleSourceCredentialProviderError::Rejected
-        }
-        GithubProviderCredentialHandoffError::Inconsistent => {
-            GithubScheduleSourceCredentialProviderError::InvariantViolation
         }
     }
 }

@@ -36,11 +36,9 @@ use automata_ci_store::{
     GithubProviderManifestRevision, GithubProviderOrigins, GithubProviderRunnerPolicyObject,
     GithubProviderWebhookVerifierFingerprint, GithubProviderWorkflowSelection, GithubRepositoryId,
     GithubRepositoryName, GithubRepositoryOwnerId, GithubRepositoryVisibility,
-    GithubScheduleClaimFence, GithubScheduleDiscoveryClaim, GithubScheduleRegistryId,
-    GithubScheduleWorkerId, GithubServerServiceAppClientId, GithubServerServiceAppId,
-    GithubServerServiceAuthorityId, GithubServerServiceAuthorityIdentity,
-    GithubServerServiceAuthoritySelector, GithubServerServiceClaimFence,
-    GithubServerServiceConsumerClaim, GithubServerServiceConsumerId,
+    GithubServerServiceAppClientId, GithubServerServiceAppId, GithubServerServiceAuthorityId,
+    GithubServerServiceAuthorityIdentity, GithubServerServiceAuthoritySelector,
+    GithubServerServiceClaimFence, GithubServerServiceConsumerClaim, GithubServerServiceConsumerId,
     GithubServerServiceCredentialHandoff, GithubServerServiceEnvelopeMetadata,
     GithubServerServiceGeneration, GithubServerServiceHandoffId, GithubServerServiceIssuanceKey,
     GithubServerServiceIssuanceReceipt, GithubServerServiceIssuanceState,
@@ -615,17 +613,6 @@ fn observation_bootstrap(
     BootstrapGithubProviderRepository::new(policy, manifest).expect("repository bootstrap")
 }
 
-fn schedule_discovery_claim() -> GithubScheduleDiscoveryClaim {
-    GithubScheduleDiscoveryClaim::from_durable_parts(
-        GithubScheduleRegistryId::from_uuid(Uuid::from_u128(0x7a)).expect("schedule registry ID"),
-        GithubScheduleWorkerId::from_uuid(Uuid::from_u128(0x7b)).expect("schedule worker ID"),
-        GithubScheduleClaimFence::new(9).expect("schedule fence"),
-        UnixMillis::new(OBSERVED_AT),
-        UnixMillis::new(OBSERVED_AT + 300_000),
-    )
-    .expect("schedule discovery claim")
-}
-
 fn concrete_release_codec() -> Arc<EnvelopeCodec> {
     let key = LocalKeyMaterial::new(
         KeyId::new("product-release-test-key-v1").expect("key ID"),
@@ -731,7 +718,7 @@ fn adapters(
 
 #[test]
 fn registry_is_bounded_unique_and_implements_live_provider_ports() {
-    fn assert_ports<T: ControlCredentialProvider + GithubScheduleSourceCredentialProvider>() {}
+    fn assert_ports<T: ControlCredentialProvider>() {}
     assert_ports::<GithubProviderCredentialAdapters>();
 
     let checks = authority(GithubServerServiceScope::ChecksWrite, 0x60);
@@ -940,40 +927,6 @@ fn workflow_permission_observation_is_manifest_and_authority_bound() {
         )
         .is_err()
     );
-}
-
-#[tokio::test]
-async fn scheduled_discovery_uses_its_own_oidc_consumer_action_for_every_visibility() {
-    let contents = authority(GithubServerServiceScope::RepositoryContentsRead, 0x67);
-    let fake = Arc::new(FakeHandoffs::new(FakeHandoffMode::Rejected));
-    let adapters = adapters(Arc::clone(&fake), std::slice::from_ref(&contents));
-    let selector = GithubServerServiceAuthoritySelector::from_identity(&contents);
-    for visibility in [
-        GithubRepositoryVisibility::Public,
-        GithubRepositoryVisibility::Private,
-    ] {
-        let manifest = schedule_manifest(visibility);
-        let request = GithubScheduleSourceCredentialRequest::new(
-            schedule_discovery_claim(),
-            &manifest,
-            &selector,
-            UnixMillis::new(OBSERVED_AT),
-        )
-        .expect("scheduled discovery request");
-        assert_eq!(
-            adapters
-                .acquire_schedule_source(request)
-                .await
-                .expect_err("the fake authority rejects after recording the exact request"),
-            GithubScheduleSourceCredentialProviderError::Rejected
-        );
-    }
-    let requests = fake.requests();
-    assert_eq!(requests.len(), 2);
-    assert!(requests.iter().all(|request| {
-        request.consumer().action() == GithubServerServiceAction::DiscoverRepositorySchedules
-            && request.consumer().action() != GithubServerServiceAction::FetchRepositoryRevision
-    }));
 }
 
 #[tokio::test]

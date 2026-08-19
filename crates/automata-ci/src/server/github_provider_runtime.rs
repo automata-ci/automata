@@ -43,8 +43,7 @@ use automata_ci_credential_github::{
 use automata_ci_github_delivery::{
     GithubProviderRuntimeAdapter, GithubResultProviderAdapter, GithubScheduleClock,
     GithubScheduleService, GithubScheduleServiceConfigurationError, GithubScheduleServiceError,
-    GithubScheduleSourceAuthorities, GithubScheduleSourceCredentialProvider,
-    GithubWorkflowTriggerHandler,
+    GithubScheduleSourceAuthorities, GithubWorkflowTriggerHandler,
 };
 use automata_ci_key_management::{EnvelopeCodec, KeyEncryptionProvider};
 use automata_ci_protocol::RuntimeAuthorityEndpoint;
@@ -923,7 +922,7 @@ impl GithubProviderRuntimeBuilder {
         let schedule_worker = GithubScheduleWorkerId::from_uuid(Uuid::new_v4())
             .map_err(|_| GithubProviderRuntimeBuildError::InvalidWorkerIdentity)?;
         let schedule_source = Arc::new(endpoint.clone());
-        let credentials: Arc<dyn GithubScheduleSourceCredentialProvider> = adapters.clone();
+        let credentials: Arc<dyn ControlCredentialProvider> = adapters.clone();
         let schedule = GithubScheduleService::new(
             blobs.clone(),
             schedule_source,
