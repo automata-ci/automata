@@ -122,6 +122,10 @@ run_test 'live helper loss cleanup and slot reuse' \
   cargo test -p automata-ci-sandbox-macos --test macos_provider --locked \
   provider_cleans_up_and_reuses_slot_after_live_helper_loss -- \
   --ignored --exact --nocapture --test-threads=1
+run_test 'helper loss during VM destroy cleanup and slot reuse' \
+  cargo test -p automata-ci-sandbox-macos --test macos_provider --locked \
+  provider_completes_destroy_when_the_helper_dies_during_quiescence -- \
+  --ignored --exact --nocapture --test-threads=1
 run_test 'live VM orphan recovery after owner loss' \
   cargo test -p automata-ci-sandbox-macos --test macos_provider --locked \
   provider_reconciles_a_live_orphan_after_owner_process_loss -- \

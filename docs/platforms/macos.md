@@ -445,8 +445,11 @@ destroys the clone, and proves the same provider slot can run and clean a fresh
 VM. The interrupted-launch test kills the exact helper after its owned attempt
 appears, requires an uncertain `CreateSandbox` adapter-unavailable error with
 the exact recovery handle, reconciles that handle, and proves the slot can
-launch and clean a replacement VM. A continuous protected physical lane, the
-destroy-time helper-crash transition, and a retained repeated-clean soak remain
+launch and clean a replacement VM. The destroy-transition test holds a real
+guest operation, observes its cancellation checkpoint and the exact durable
+destroy intent, kills that attempt's helper, and requires the endpoint to close,
+destruction to complete, and the slot to run and clean a replacement VM. A
+continuous protected physical lane and a retained repeated-clean soak remain
 deployment work.
 
 Create `/Volumes/AutomataVM/e2e-state` as an empty `0700` directory owned by
@@ -466,8 +469,8 @@ export AUTOMATA_MACOS_VM_STORAGE_QUOTA_BYTES=<exact-volume-quota-bytes>
 
 The entrypoint runs the shipped-runner success/timeout and cancellation matrix,
 interrupted-launch recovery and slot reuse, live-helper-loss cleanup and slot
-reuse, live-orphan recovery, and the allowlisted runtime-proxy probe serially.
-Set
+reuse, destroy-time helper-loss cleanup and slot reuse, live-orphan recovery,
+and the allowlisted runtime-proxy probe serially. Set
 `AUTOMATA_MACOS_PHYSICAL_REPETITIONS` from 1 through 10 for a bounded repeated
 runner soak. It refuses a `CARGO_TARGET_DIR` on the VM storage filesystem so
 build artifacts cannot consume the clone-capacity safety margin.

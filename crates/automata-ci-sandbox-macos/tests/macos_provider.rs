@@ -5,13 +5,15 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    sync::{Condvar, Mutex},
     thread,
     time::{Duration, Instant},
 };
 
 use automata_ci_execution::{
-    DestroySandbox, EnvironmentProfile, EnvironmentProfileId, ExecutionArgv, ExecutionCommand,
-    ExecutionEnvironment, ExecutionErrorKind, ExecutionTermination, NetworkPolicy, NeverCancelled,
+    Cancellation, CancellationDisposition, DestroyDisposition, DestroySandbox, EnvironmentProfile,
+    EnvironmentProfileId, ExecutionArgv, ExecutionCommand, ExecutionEnvironment,
+    ExecutionErrorKind, ExecutionStage, ExecutionTermination, NetworkPolicy, NeverCancelled,
     OperationId, OperationOutcome, ProviderErrorKind, ProviderStage, ResourceLimits,
     RootFilesystemPolicy, RunnerId, SandboxCustody, SandboxEnvironment, SandboxGeneration,
     SandboxHandle, SandboxProvider, SandboxSpec, Sha256Digest, TargetPath,
@@ -315,6 +317,95 @@ fn provider_recovers_an_interrupted_launch_and_reuses_the_slot() {
     assert_attempts_empty(&root);
 }
 
+#[test]
+#[ignore = "requires a sealed VM template on a physical Apple Silicon runner"]
+fn provider_completes_destroy_when_the_helper_dies_during_quiescence() {
+    let root = required_path(VM_STORAGE_ROOT_ENV);
+    assert_attempts_empty(&root);
+    let provider = MacosVirtualizationProvider::open(physical_options(root.clone()))
+        .expect("open physical macOS provider");
+
+    let first_spec = physical_spec("destroy-helper-loss");
+    let first = provider
+        .create(&first_spec, &NeverCancelled)
+        .expect("create destroy-helper-loss VM");
+    let mut first_cleanup = PhysicalSandboxCleanup::new(
+        provider.clone(),
+        first.handle().clone(),
+        first_spec.generation(),
+        first_spec.custody(),
+    );
+    let endpoint = provider
+        .attach(first.handle(), &NeverCancelled)
+        .expect("attach destroy-helper-loss VM");
+    let command = blocking_command(first_spec.workspace());
+    let destroy = DestroySandbox::new(
+        OperationId::new(),
+        first.handle().clone(),
+        first_spec.generation(),
+        first_spec.custody(),
+    );
+    let cancellation = ObservedCancellation::default();
+    let (execution_result, destroy_result) = thread::scope(|scope| {
+        let execution =
+            scope.spawn(|| endpoint.exec(&command, &cancellation, discard_execution_output()));
+        cancellation.wait(Duration::from_secs(30));
+        let destroying = scope.spawn(|| provider.destroy(&destroy, &NeverCancelled));
+        wait_for_destroy_intent(&root, &destroy, Duration::from_secs(30));
+        kill_attempt_helper(&root, first.handle());
+        (
+            execution.join().expect("join active VM execution"),
+            destroying.join().expect("join interrupted VM destroy"),
+        )
+    });
+    let execution_error =
+        execution_result.expect_err("helper loss must close the active guest operation");
+    assert_eq!(execution_error.kind(), ExecutionErrorKind::BackendRejected);
+    assert_eq!(execution_error.stage(), ExecutionStage::Exec);
+    assert_eq!(
+        destroy_result.expect("complete destroy after helper loss"),
+        DestroyDisposition::Destroyed
+    );
+    first_cleanup.disarm();
+    assert_attempts_empty(&root);
+
+    create_probe_and_destroy(
+        &provider,
+        &physical_spec("destroy-helper-loss-reuse"),
+        "reuse provider slot after destroy-time helper loss",
+    );
+    assert_attempts_empty(&root);
+}
+
+#[derive(Debug, Default)]
+struct ObservedCancellation {
+    observed: Mutex<bool>,
+    notification: Condvar,
+}
+
+impl ObservedCancellation {
+    fn wait(&self, timeout: Duration) {
+        let observed = self.observed.lock().expect("lock cancellation observation");
+        let (observed, _) = self
+            .notification
+            .wait_timeout_while(observed, timeout, |observed| !*observed)
+            .expect("wait for cancellation observation");
+        assert!(
+            *observed,
+            "active guest operation did not reach its cancellation checkpoint"
+        );
+    }
+}
+
+impl Cancellation for ObservedCancellation {
+    fn disposition(&self) -> CancellationDisposition {
+        let mut observed = self.observed.lock().expect("lock cancellation observation");
+        *observed = true;
+        self.notification.notify_all();
+        CancellationDisposition::Active
+    }
+}
+
 struct PhysicalSandboxCleanup {
     provider: MacosVirtualizationProvider,
     handle: SandboxHandle,
@@ -406,6 +497,22 @@ fn probe_command(working_directory: &TargetPath) -> ExecutionCommand {
     .expect("probe command")
 }
 
+fn blocking_command(working_directory: &TargetPath) -> ExecutionCommand {
+    ExecutionCommand::new(
+        OperationId::new(),
+        ExecutionArgv::new(
+            TargetPath::posix("/usr/bin/tail").expect("tail path"),
+            vec!["-f".to_owned(), "/dev/null".to_owned()],
+        )
+        .expect("blocking argv"),
+        working_directory.clone(),
+        ExecutionEnvironment::empty(),
+        Duration::from_secs(90),
+        16 * 1024,
+    )
+    .expect("blocking command")
+}
+
 fn create_probe_and_destroy(
     provider: &MacosVirtualizationProvider,
     spec: &SandboxSpec,
@@ -485,6 +592,47 @@ fn kill_helper_for_attempt(root: &Path, attempt: &str, timeout: Duration) {
             [] => panic!("physical VM helper did not start before the deadline"),
             _ => panic!("more than one helper owns the physical VM attempt"),
         }
+    }
+}
+
+fn wait_for_destroy_intent(root: &Path, request: &DestroySandbox, timeout: Duration) {
+    let journal = root.join(".automata-macos-virtualization-v2.events");
+    let operation_id = request.operation_id().to_string();
+    let generation = request.generation().get();
+    let deadline = Instant::now() + timeout;
+    loop {
+        let contents = fs::read_to_string(&journal).expect("read physical provider journal");
+        let observed = contents.split_inclusive('\n').any(|record| {
+            if !record.ends_with('\n') {
+                return false;
+            }
+            let record: serde_json::Value =
+                serde_json::from_str(record).expect("parse complete physical journal record");
+            record
+                .pointer("/event/kind")
+                .and_then(|value| value.as_str())
+                == Some("destroy_intent")
+                && record
+                    .pointer("/event/request/operation_id")
+                    .and_then(|value| value.as_str())
+                    == Some(operation_id.as_str())
+                && record
+                    .pointer("/event/request/handle")
+                    .and_then(|value| value.as_str())
+                    == Some(request.handle().opaque())
+                && record
+                    .pointer("/event/request/generation")
+                    .and_then(serde_json::Value::as_u64)
+                    == Some(generation)
+        });
+        if observed {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "provider did not durably publish the exact destroy intent"
+        );
+        thread::sleep(Duration::from_millis(10));
     }
 }
 
