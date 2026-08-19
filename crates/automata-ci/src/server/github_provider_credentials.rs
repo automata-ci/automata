@@ -1459,7 +1459,7 @@ impl GithubProviderCredentialAdapters {
                 .repository()
                 .external_id()
                 .clone(),
-            request.claimed().claim(),
+            request.claim(),
             request.operation(),
             request.app_id(),
             request.installation_id(),
@@ -2316,7 +2316,7 @@ const fn repository_action(action: GithubDeliveryRepositoryAction) -> GithubServ
 fn common_result_consumer(
     request: &GithubResultCredentialRequest<'_>,
 ) -> Result<GithubServerServiceConsumerClaim, GithubResultCredentialProviderError> {
-    let claim = request.claimed().claim();
+    let claim = request.claim();
     let consumer_id = GithubServerServiceConsumerId::from_uuid(claim.subject_id().as_uuid())
         .map_err(|_| GithubResultCredentialProviderError::InvariantViolation)?;
     let owner = GithubServerServiceWorkerId::from_uuid(claim.worker_id().as_uuid())
