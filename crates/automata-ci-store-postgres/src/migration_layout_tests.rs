@@ -273,6 +273,10 @@ const CANONICAL_MIGRATIONS: &[(&str, &str)] = &[
         "0067_provider_workflow_result_identity.sql",
         "ba5857f778d00011c25d93402772430a99a05a0724081e3bfe1906883e707726e5694b8d942bf6c732f6a966d7733814",
     ),
+    (
+        "0068_provider_credential_envelope_revisions.sql",
+        "6f8805e0a386ac29de076173d29d1cd62dc7f68c8b318edc014bd206200126d8748ec93a607b18b703216932c4d760db",
+    ),
 ];
 
 const BASELINE_MIGRATION_COUNT: u32 = 26;
@@ -449,6 +453,27 @@ fn provider_runner_policy_revision_is_independent_and_positive() {
         assert!(
             source.contains(required),
             "provider runner-policy revision migration lost required contract: {required}"
+        );
+    }
+}
+
+#[test]
+fn provider_credential_envelope_revision_backfills_current_custody() {
+    let source = include_str!("../migrations/0068_provider_credential_envelope_revisions.sql");
+
+    for required in [
+        "ADD COLUMN app_private_key_envelope_revision bigint",
+        "ADD COLUMN webhook_secret_envelope_revision bigint",
+        "SET app_private_key_envelope_revision = revision",
+        "webhook_secret_envelope_revision = revision",
+        "ALTER COLUMN app_private_key_envelope_revision SET NOT NULL",
+        "ALTER COLUMN webhook_secret_envelope_revision SET NOT NULL",
+        "app_private_key_envelope_revision > 0",
+        "webhook_secret_envelope_revision > 0",
+    ] {
+        assert!(
+            source.contains(required),
+            "provider credential-envelope migration lost required contract: {required}"
         );
     }
 }

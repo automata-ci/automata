@@ -3,14 +3,15 @@ use std::{fmt, future::Future, pin::Pin};
 use thiserror::Error;
 
 use crate::{
-    ApplyGithubProviderConfigurationResult, ApplyWorkspaceEntitlementResult,
-    ApplyWorkspaceGithubRepositoriesResult, AuthorizedApplyGithubProviderConfiguration,
+    ApplyGithubProviderConfigurationResult, ApplyGithubProviderRunnerPolicyResult,
+    ApplyWorkspaceEntitlementResult, ApplyWorkspaceGithubRepositoriesResult,
+    AuthorizedApplyGithubProviderConfiguration, AuthorizedApplyGithubProviderRunnerPolicy,
     AuthorizedApplyWorkspaceEntitlement, AuthorizedApplyWorkspaceGithubRepositories,
     AuthorizedListWorkspaceUsage, AuthorizedProvisionWorkspace, EntitlementFailure,
     GithubProviderConfigurationFailure, GithubProviderDesiredState,
-    GithubProviderDesiredStateFailure, ProvisionWorkspaceResult, ProvisioningAuthority,
-    ProvisioningFailure, UsageExportFailure, WorkspaceGithubRepositoriesFailure,
-    WorkspaceUsagePage,
+    GithubProviderDesiredStateFailure, GithubProviderRunnerPolicyFailure, ProvisionWorkspaceResult,
+    ProvisioningAuthority, ProvisioningFailure, UsageExportFailure,
+    WorkspaceGithubRepositoriesFailure, WorkspaceUsagePage,
 };
 
 const MAX_CERTIFICATE_COUNT: usize = 32;
@@ -166,6 +167,32 @@ pub trait GithubProviderConfigurationApplier: fmt::Debug + Send + Sync {
         &self,
         request: AuthorizedApplyGithubProviderConfiguration,
     ) -> GithubProviderConfigurationApplicationFuture<'_>;
+}
+
+/// Boxed credential-preserving GitHub runner-policy application.
+pub type GithubProviderRunnerPolicyApplicationFuture<'a> = Pin<
+    Box<
+        dyn Future<
+                Output = Result<
+                    ApplyGithubProviderRunnerPolicyResult,
+                    GithubProviderRunnerPolicyFailure,
+                >,
+            > + Send
+            + 'a,
+    >,
+>;
+
+/// Atomic, idempotent application port for the shard-wide GitHub runner policy.
+///
+/// Implementations must retain the current encrypted provider credentials,
+/// reject an absent provider configuration, and commit the policy, shared
+/// configuration revision, current pointer, and operation receipt atomically.
+pub trait GithubProviderRunnerPolicyApplier: fmt::Debug + Send + Sync {
+    /// Applies one authorized complete runner-policy replacement.
+    fn apply(
+        &self,
+        request: AuthorizedApplyGithubProviderRunnerPolicy,
+    ) -> GithubProviderRunnerPolicyApplicationFuture<'_>;
 }
 
 /// Boxed workspace GitHub repository desired-set application.

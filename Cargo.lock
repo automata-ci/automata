@@ -854,11 +854,14 @@ version = "0.1.0"
 dependencies = [
  "automata-ci-core",
  "automata-ci-key-management",
+ "automata-ci-postgres",
  "automata-ci-provisioning",
  "automata-ci-store",
  "automata-ci-workflow-service",
+ "serde_json",
  "sha2 0.11.0",
  "sqlx",
+ "tokio",
  "url",
  "uuid",
 ]

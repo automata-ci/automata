@@ -8,19 +8,22 @@ use automata_ci_key_management::{
 };
 use automata_ci_provisioning::{
     ApplyGithubProviderConfigurationCommand, ApplyGithubProviderConfigurationResult,
+    ApplyGithubProviderRunnerPolicyCommand, ApplyGithubProviderRunnerPolicyResult,
     ApplyWorkspaceGithubRepositoriesCommand, ApplyWorkspaceGithubRepositoriesResult,
-    AuthorizedApplyGithubProviderConfiguration, AuthorizedApplyWorkspaceGithubRepositories,
-    GithubProviderConfigurationApplicationFuture, GithubProviderConfigurationApplier,
-    GithubProviderConfigurationFailure, GithubProviderConfigurationFailureKind,
-    GithubProviderConfigurationRevision, GithubProviderDesiredState,
-    GithubProviderDesiredStateFailure, GithubProviderDesiredStateFailureKind,
-    GithubProviderDesiredStateLoadFuture, GithubProviderDesiredStateReader,
-    GithubProviderDesiredStateVersion, GithubProviderRepositorySelection,
-    GithubProviderSchedulePolicy, GithubProviderSecret, GithubProviderTimestamp,
-    MAX_GITHUB_PROVIDER_REPOSITORIES, ShardId, WorkspaceGithubRepositoriesApplicationFuture,
-    WorkspaceGithubRepositoriesApplier, WorkspaceGithubRepositoriesDesiredState,
-    WorkspaceGithubRepositoriesFailure, WorkspaceGithubRepositoriesFailureKind,
-    WorkspaceGithubRepositoriesRevision,
+    AuthorizedApplyGithubProviderConfiguration, AuthorizedApplyGithubProviderRunnerPolicy,
+    AuthorizedApplyWorkspaceGithubRepositories, GithubProviderConfigurationApplicationFuture,
+    GithubProviderConfigurationApplier, GithubProviderConfigurationFailure,
+    GithubProviderConfigurationFailureKind, GithubProviderConfigurationRevision,
+    GithubProviderDesiredState, GithubProviderDesiredStateFailure,
+    GithubProviderDesiredStateFailureKind, GithubProviderDesiredStateLoadFuture,
+    GithubProviderDesiredStateReader, GithubProviderDesiredStateVersion,
+    GithubProviderRepositorySelection, GithubProviderRunnerPolicyApplicationFuture,
+    GithubProviderRunnerPolicyApplier, GithubProviderRunnerPolicyFailure,
+    GithubProviderRunnerPolicyFailureKind, GithubProviderSchedulePolicy, GithubProviderSecret,
+    GithubProviderTimestamp, MAX_GITHUB_PROVIDER_REPOSITORIES, ShardId,
+    WorkspaceGithubRepositoriesApplicationFuture, WorkspaceGithubRepositoriesApplier,
+    WorkspaceGithubRepositoriesDesiredState, WorkspaceGithubRepositoriesFailure,
+    WorkspaceGithubRepositoriesFailureKind, WorkspaceGithubRepositoriesRevision,
 };
 use automata_ci_store::{
     GithubCheckName, GithubRepositoryName, GithubServerServiceAppClientId,
@@ -35,6 +38,7 @@ use uuid::Uuid;
 
 const CONFIGURATION_SECRET_PURPOSE: &str = "github-provider/configuration-secret:v1";
 const CONFIGURATION_DIGEST_DOMAIN: &[u8] = b"automata-ci/github-provider/configuration/v1\0";
+const RUNNER_POLICY_DIGEST_DOMAIN: &[u8] = b"automata-ci/github-provider/runner-policy/v1\0";
 const REPOSITORY_DIGEST_DOMAIN: &[u8] = b"automata-ci/github-provider/repositories/v1\0";
 const SYSTEM_ENCRYPTION_TENANT: &str = "automata-system";
 
@@ -204,11 +208,13 @@ impl PostgresGithubProviderConfigurationApplier {
             INSERT INTO github_provider_configuration_current (
                 singleton, shard_id, revision, authority_id, operation_id, dashboard_url,
                 github_app_id, github_app_client_id, github_app_jwt_issuer_kind,
-                app_configuration_revision, app_private_key_sha256,
+                app_configuration_revision, app_private_key_envelope_revision,
+                app_private_key_sha256,
                 app_private_key_envelope_schema, app_private_key_wrapping_key_id,
                 app_private_key_wrapped_data_key, app_private_key_nonce,
                 app_private_key_ciphertext, webhook_verifier_revision,
-                webhook_secret_sha256, webhook_secret_envelope_schema,
+                webhook_secret_envelope_revision, webhook_secret_sha256,
+                webhook_secret_envelope_schema,
                 webhook_secret_wrapping_key_id, webhook_secret_wrapped_data_key,
                 webhook_secret_nonce, webhook_secret_ciphertext, check_name,
                 runner_policy_revision, runner_policy, schedule_poll_millis,
@@ -217,8 +223,8 @@ impl PostgresGithubProviderConfigurationApplier {
                 schedule_maximum_manifests, schedule_maximum_fires_per_pass,
                 applied_at_ms
             ) VALUES (
-                true,$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
-                $17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33
+                true,$1,$2,$3,$4,$5,$6,$7,$8,$9,$2,$10,$11,$12,$13,$14,$15,$16,
+                $2,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33
             )
             ",
         )
@@ -280,6 +286,162 @@ impl GithubProviderConfigurationApplier for PostgresGithubProviderConfigurationA
         &self,
         request: AuthorizedApplyGithubProviderConfiguration,
     ) -> GithubProviderConfigurationApplicationFuture<'_> {
+        Box::pin(self.apply_inner(request))
+    }
+}
+
+/// Replica-safe credential-preserving GitHub runner-policy updater.
+#[derive(Clone)]
+pub struct PostgresGithubProviderRunnerPolicyApplier {
+    pool: PgPool,
+}
+
+impl PostgresGithubProviderRunnerPolicyApplier {
+    /// Binds runner-policy updates to a database.
+    #[must_use]
+    pub const fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one transaction advances one provider aggregate and its receipt"
+    )]
+    async fn apply_inner(
+        &self,
+        request: AuthorizedApplyGithubProviderRunnerPolicy,
+    ) -> Result<ApplyGithubProviderRunnerPolicyResult, GithubProviderRunnerPolicyFailure> {
+        let (authority, command) = request.into_parts();
+        let runner_policy = command
+            .runner_policy()
+            .canonical_bytes()
+            .map_err(|_| runner_policy_internal())?;
+        let digest = runner_policy_digest(&command, &runner_policy);
+        let authority_id = authority.id().as_str();
+        let operation_id = command.operation_id();
+        let shard_id = command.shard_id();
+        let revision = command.revision();
+        let revision_i64 = i64::try_from(revision.get()).map_err(|_| runner_policy_internal())?;
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(runner_policy_database_failure)?;
+        lock_provider_registry(&mut transaction)
+            .await
+            .map_err(runner_policy_database_failure)?;
+
+        if let Some(stored) =
+            load_runner_policy_operation(&mut transaction, authority_id, operation_id.as_uuid())
+                .await?
+        {
+            if stored.shard_id != shard_id.as_str()
+                || stored.revision != revision_i64
+                || stored.request_digest.as_slice() != digest.as_slice()
+            {
+                return Err(runner_policy_failure(
+                    GithubProviderRunnerPolicyFailureKind::OperationConflict,
+                ));
+            }
+            return runner_policy_result(
+                operation_id,
+                shard_id.clone(),
+                revision,
+                stored.applied_at_ms,
+            );
+        }
+
+        let current = sqlx::query_as::<_, CurrentRunnerPolicy>(
+            r"
+            SELECT shard_id, revision, runner_policy_revision, runner_policy
+            FROM github_provider_configuration_current WHERE singleton=true
+            ",
+        )
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(runner_policy_database_failure)?
+        .ok_or_else(|| {
+            runner_policy_failure(GithubProviderRunnerPolicyFailureKind::ProviderUnavailable)
+        })?;
+        if current.shard_id != shard_id.as_str() {
+            return Err(runner_policy_internal());
+        }
+        if revision_i64 <= current.revision {
+            return Err(runner_policy_failure(
+                GithubProviderRunnerPolicyFailureKind::StaleRevision,
+            ));
+        }
+        let runner_policy_revision = if current.runner_policy == runner_policy {
+            current.runner_policy_revision
+        } else {
+            current
+                .runner_policy_revision
+                .checked_add(1)
+                .ok_or_else(runner_policy_internal)?
+        };
+        let applied_at_ms = database_time_milliseconds(&mut transaction)
+            .await
+            .map_err(runner_policy_database_failure)?;
+
+        sqlx::query(
+            r"
+            INSERT INTO github_provider_configuration_operations (
+                authority_id, operation_id, shard_id, revision,
+                request_digest, applied_at_ms
+            ) VALUES ($1,$2,$3,$4,$5,$6)
+            ",
+        )
+        .bind(authority_id)
+        .bind(operation_id.as_uuid())
+        .bind(shard_id.as_str())
+        .bind(revision_i64)
+        .bind(digest.as_slice())
+        .bind(applied_at_ms)
+        .execute(&mut *transaction)
+        .await
+        .map_err(runner_policy_database_failure)?;
+        let updated = sqlx::query(
+            r"
+            UPDATE github_provider_configuration_current
+            SET revision=$1, authority_id=$2, operation_id=$3,
+                runner_policy_revision=$4, runner_policy=$5, applied_at_ms=$6
+            WHERE singleton=true AND revision=$7
+            ",
+        )
+        .bind(revision_i64)
+        .bind(authority_id)
+        .bind(operation_id.as_uuid())
+        .bind(runner_policy_revision)
+        .bind(runner_policy)
+        .bind(applied_at_ms)
+        .bind(current.revision)
+        .execute(&mut *transaction)
+        .await
+        .map_err(runner_policy_database_failure)?;
+        if updated.rows_affected() != 1 {
+            return Err(runner_policy_internal());
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(runner_policy_database_failure)?;
+        runner_policy_result(operation_id, shard_id.clone(), revision, applied_at_ms)
+    }
+}
+
+impl fmt::Debug for PostgresGithubProviderRunnerPolicyApplier {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PostgresGithubProviderRunnerPolicyApplier")
+            .finish_non_exhaustive()
+    }
+}
+
+impl GithubProviderRunnerPolicyApplier for PostgresGithubProviderRunnerPolicyApplier {
+    fn apply(
+        &self,
+        request: AuthorizedApplyGithubProviderRunnerPolicy,
+    ) -> GithubProviderRunnerPolicyApplicationFuture<'_> {
         Box::pin(self.apply_inner(request))
     }
 }
@@ -582,14 +744,14 @@ impl PostgresGithubProviderDesiredStateReader {
         let revision = positive_u64(provider.revision)?;
         let private_key = open_provider_secret(
             self.envelopes.as_ref(),
-            revision,
+            positive_u64(provider.app_private_key_envelope_revision)?,
             "app-private-key",
             provider.app_private_key_envelope(),
         )
         .await?;
         let webhook_secret = open_provider_secret(
             self.envelopes.as_ref(),
-            revision,
+            positive_u64(provider.webhook_secret_envelope_revision)?,
             "webhook-secret",
             provider.webhook_secret_envelope(),
         )
@@ -702,6 +864,7 @@ struct ProviderDesiredStateRow {
     github_app_client_id: String,
     github_app_jwt_issuer_kind: String,
     app_configuration_revision: i64,
+    app_private_key_envelope_revision: i64,
     app_private_key_sha256: Vec<u8>,
     app_private_key_envelope_schema: i16,
     app_private_key_wrapping_key_id: String,
@@ -709,6 +872,7 @@ struct ProviderDesiredStateRow {
     app_private_key_nonce: Vec<u8>,
     app_private_key_ciphertext: Vec<u8>,
     webhook_verifier_revision: i64,
+    webhook_secret_envelope_revision: i64,
     webhook_secret_sha256: Vec<u8>,
     webhook_secret_envelope_schema: i16,
     webhook_secret_wrapping_key_id: String,
@@ -935,6 +1099,14 @@ struct ProviderOperationRow {
     applied_at_ms: i64,
 }
 
+#[derive(FromRow)]
+struct CurrentRunnerPolicy {
+    shard_id: String,
+    revision: i64,
+    runner_policy_revision: i64,
+    runner_policy: Vec<u8>,
+}
+
 async fn load_provider_operation(
     transaction: &mut Transaction<'_, Postgres>,
     authority_id: &str,
@@ -971,6 +1143,25 @@ async fn load_provider_operation_from_pool(
     .fetch_optional(pool)
     .await
     .map_err(provider_database_failure)
+}
+
+async fn load_runner_policy_operation(
+    transaction: &mut Transaction<'_, Postgres>,
+    authority_id: &str,
+    operation_id: Uuid,
+) -> Result<Option<ProviderOperationRow>, GithubProviderRunnerPolicyFailure> {
+    sqlx::query_as(
+        r"
+        SELECT shard_id, revision, request_digest, applied_at_ms
+        FROM github_provider_configuration_operations
+        WHERE authority_id=$1 AND operation_id=$2
+        ",
+    )
+    .bind(authority_id)
+    .bind(operation_id)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(runner_policy_database_failure)
 }
 
 #[derive(FromRow)]
@@ -1339,6 +1530,18 @@ fn provider_configuration_digest(
     Ok(digest.finalize().into())
 }
 
+fn runner_policy_digest(
+    command: &ApplyGithubProviderRunnerPolicyCommand,
+    canonical_runner_policy: &[u8],
+) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(RUNNER_POLICY_DIGEST_DOMAIN);
+    digest_part(&mut digest, command.shard_id().as_str().as_bytes());
+    digest_part(&mut digest, &command.revision().get().to_be_bytes());
+    digest_part(&mut digest, canonical_runner_policy);
+    digest.finalize().into()
+}
+
 fn workspace_repositories_digest(command: &ApplyWorkspaceGithubRepositoriesCommand) -> [u8; 32] {
     let mut digest = Sha256::new();
     digest.update(REPOSITORY_DIGEST_DOMAIN);
@@ -1406,6 +1609,21 @@ fn provider_result(
     ))
 }
 
+fn runner_policy_result(
+    operation_id: automata_ci_provisioning::OperationId,
+    shard_id: automata_ci_provisioning::ShardId,
+    revision: GithubProviderConfigurationRevision,
+    applied_at_ms: i64,
+) -> Result<ApplyGithubProviderRunnerPolicyResult, GithubProviderRunnerPolicyFailure> {
+    let applied_at = timestamp(applied_at_ms).map_err(|()| runner_policy_internal())?;
+    Ok(ApplyGithubProviderRunnerPolicyResult::new(
+        operation_id,
+        shard_id,
+        revision,
+        applied_at,
+    ))
+}
+
 fn workspace_result(
     operation_id: automata_ci_provisioning::OperationId,
     shard_id: automata_ci_provisioning::ShardId,
@@ -1446,6 +1664,20 @@ fn provider_internal() -> GithubProviderConfigurationFailure {
 
 fn provider_database_failure(_: sqlx::Error) -> GithubProviderConfigurationFailure {
     provider_failure(GithubProviderConfigurationFailureKind::TemporarilyUnavailable)
+}
+
+fn runner_policy_failure(
+    kind: GithubProviderRunnerPolicyFailureKind,
+) -> GithubProviderRunnerPolicyFailure {
+    GithubProviderRunnerPolicyFailure::new(kind)
+}
+
+fn runner_policy_internal() -> GithubProviderRunnerPolicyFailure {
+    runner_policy_failure(GithubProviderRunnerPolicyFailureKind::Internal)
+}
+
+fn runner_policy_database_failure(_: sqlx::Error) -> GithubProviderRunnerPolicyFailure {
+    runner_policy_failure(GithubProviderRunnerPolicyFailureKind::TemporarilyUnavailable)
 }
 
 fn workspace_failure(

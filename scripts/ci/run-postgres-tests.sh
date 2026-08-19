@@ -103,11 +103,13 @@ fi
 printf 'PostgreSQL tests: application and storage behavior\n' >&2
 run_bounded_tests cargo test \
   -p automata-ci-postgres \
+  -p automata-ci-provisioning-postgres \
   -p automata-ci-provider-postgres \
   -p automata-ci-runner-results \
   --test postgres \
   --test postgres_artifacts \
   --test postgres_cache \
+  --test github_provider \
   --all-features \
   --locked \
   -- \

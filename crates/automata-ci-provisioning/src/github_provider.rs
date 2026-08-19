@@ -495,6 +495,124 @@ impl fmt::Debug for AuthorizedApplyGithubProviderConfiguration {
     }
 }
 
+/// Validated credential-preserving runner-policy update command.
+pub struct ApplyGithubProviderRunnerPolicyCommand {
+    operation_id: OperationId,
+    shard_id: ShardId,
+    revision: GithubProviderConfigurationRevision,
+    runner_policy: GithubRunnerPolicy,
+}
+
+impl ApplyGithubProviderRunnerPolicyCommand {
+    /// Creates a runner-policy update within the provider configuration revision stream.
+    #[must_use]
+    pub const fn new(
+        operation_id: OperationId,
+        shard_id: ShardId,
+        revision: GithubProviderConfigurationRevision,
+        runner_policy: GithubRunnerPolicy,
+    ) -> Self {
+        Self {
+            operation_id,
+            shard_id,
+            revision,
+            runner_policy,
+        }
+    }
+
+    /// Returns the stable idempotency identity.
+    #[must_use]
+    pub const fn operation_id(&self) -> OperationId {
+        self.operation_id
+    }
+
+    /// Returns the expected shard identity.
+    #[must_use]
+    pub const fn shard_id(&self) -> &ShardId {
+        &self.shard_id
+    }
+
+    /// Returns the monotonic provider configuration revision.
+    #[must_use]
+    pub const fn revision(&self) -> GithubProviderConfigurationRevision {
+        self.revision
+    }
+
+    /// Returns the complete replacement runner policy.
+    #[must_use]
+    pub const fn runner_policy(&self) -> &GithubRunnerPolicy {
+        &self.runner_policy
+    }
+}
+
+impl fmt::Debug for ApplyGithubProviderRunnerPolicyCommand {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ApplyGithubProviderRunnerPolicyCommand")
+            .field("operation_id", &self.operation_id)
+            .field("shard_id", &self.shard_id)
+            .field("revision", &self.revision)
+            .field("runner_policy", &"[VALIDATED]")
+            .finish()
+    }
+}
+
+/// Runner-policy command proven to target the caller's configured shard.
+pub struct AuthorizedApplyGithubProviderRunnerPolicy {
+    authority: ProvisioningAuthority,
+    command: ApplyGithubProviderRunnerPolicyCommand,
+}
+
+impl AuthorizedApplyGithubProviderRunnerPolicy {
+    /// Authorizes the requested shard against authenticated workload authority.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a command addressed to another shard.
+    pub fn authorize(
+        authority: ProvisioningAuthority,
+        command: ApplyGithubProviderRunnerPolicyCommand,
+    ) -> Result<Self, GithubProviderValueError> {
+        if authority.shard_id() != command.shard_id() {
+            return Err(GithubProviderValueError::Forbidden);
+        }
+        Ok(Self { authority, command })
+    }
+
+    /// Returns the authenticated workload authority.
+    #[must_use]
+    pub const fn authority(&self) -> &ProvisioningAuthority {
+        &self.authority
+    }
+
+    /// Returns the validated command.
+    #[must_use]
+    pub const fn command(&self) -> &ApplyGithubProviderRunnerPolicyCommand {
+        &self.command
+    }
+
+    /// Consumes the authorized request.
+    #[must_use]
+    pub fn into_parts(
+        self,
+    ) -> (
+        ProvisioningAuthority,
+        ApplyGithubProviderRunnerPolicyCommand,
+    ) {
+        (self.authority, self.command)
+    }
+}
+
+impl fmt::Debug for AuthorizedApplyGithubProviderRunnerPolicy {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AuthorizedApplyGithubProviderRunnerPolicy")
+            .field("authority", &self.authority)
+            .field("command", &self.command)
+            .finish()
+    }
+}
+
 /// One selected GitHub repository in a complete workspace desired set.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GithubProviderRepositorySelection {
@@ -1078,6 +1196,57 @@ impl ApplyGithubProviderConfigurationResult {
     }
 }
 
+/// Stable result of applying one credential-preserving runner-policy revision.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ApplyGithubProviderRunnerPolicyResult {
+    operation_id: OperationId,
+    shard_id: ShardId,
+    revision: GithubProviderConfigurationRevision,
+    applied_at: GithubProviderTimestamp,
+}
+
+impl ApplyGithubProviderRunnerPolicyResult {
+    /// Creates a stable durable result.
+    #[must_use]
+    pub const fn new(
+        operation_id: OperationId,
+        shard_id: ShardId,
+        revision: GithubProviderConfigurationRevision,
+        applied_at: GithubProviderTimestamp,
+    ) -> Self {
+        Self {
+            operation_id,
+            shard_id,
+            revision,
+            applied_at,
+        }
+    }
+
+    /// Returns the request operation identity.
+    #[must_use]
+    pub const fn operation_id(&self) -> OperationId {
+        self.operation_id
+    }
+
+    /// Returns the configured shard identity.
+    #[must_use]
+    pub const fn shard_id(&self) -> &ShardId {
+        &self.shard_id
+    }
+
+    /// Returns the committed provider configuration revision.
+    #[must_use]
+    pub const fn revision(&self) -> GithubProviderConfigurationRevision {
+        self.revision
+    }
+
+    /// Returns the stable database commit time.
+    #[must_use]
+    pub const fn applied_at(&self) -> GithubProviderTimestamp {
+        self.applied_at
+    }
+}
+
 /// Stable result of applying one workspace repository desired-set revision.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ApplyWorkspaceGithubRepositoriesResult {
@@ -1158,6 +1327,44 @@ pub enum GithubProviderConfigurationFailureKind {
 #[error("GitHub provider configuration failed: {kind:?}")]
 pub struct GithubProviderConfigurationFailure {
     kind: GithubProviderConfigurationFailureKind,
+}
+
+/// Closed credential-preserving runner-policy failure classification.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GithubProviderRunnerPolicyFailureKind {
+    /// An operation ID was reused for different input.
+    OperationConflict,
+    /// The revision did not advance the current provider configuration.
+    StaleRevision,
+    /// No provider configuration exists to update safely.
+    ProviderUnavailable,
+    /// The authenticated workload cannot mutate this shard.
+    Forbidden,
+    /// Durable storage is temporarily unavailable.
+    TemporarilyUnavailable,
+    /// Core failed without a safer specific classification.
+    Internal,
+}
+
+/// Sanitized runner-policy application failure.
+#[derive(Clone, Debug, Eq, Error, PartialEq)]
+#[error("GitHub provider runner-policy update failed: {kind:?}")]
+pub struct GithubProviderRunnerPolicyFailure {
+    kind: GithubProviderRunnerPolicyFailureKind,
+}
+
+impl GithubProviderRunnerPolicyFailure {
+    /// Creates one closed failure.
+    #[must_use]
+    pub const fn new(kind: GithubProviderRunnerPolicyFailureKind) -> Self {
+        Self { kind }
+    }
+
+    /// Returns the machine-readable failure kind.
+    #[must_use]
+    pub const fn kind(&self) -> GithubProviderRunnerPolicyFailureKind {
+        self.kind
+    }
 }
 
 impl GithubProviderConfigurationFailure {
@@ -1422,6 +1629,35 @@ mod tests {
         );
         assert_eq!(
             AuthorizedApplyGithubProviderConfiguration::authorize(authority(), command)
+                .unwrap_err()
+                .to_string(),
+            GithubProviderValueError::Forbidden.to_string()
+        );
+    }
+
+    #[test]
+    fn runner_policy_update_is_complete_redacted_and_shard_scoped() {
+        let command = ApplyGithubProviderRunnerPolicyCommand::new(
+            OperationId::parse("33333333-3333-4333-8333-333333333333").unwrap(),
+            ShardId::new("local").unwrap(),
+            GithubProviderConfigurationRevision::new(2).unwrap(),
+            GithubRunnerPolicy::decode_configuration(RUNNER_POLICY).unwrap(),
+        );
+        let debug = format!("{command:?}");
+        assert!(debug.contains("[VALIDATED]"));
+        assert!(!debug.contains("ubuntu-24-04"));
+        let authorized = AuthorizedApplyGithubProviderRunnerPolicy::authorize(authority(), command)
+            .expect("matching shard is authorized");
+        assert_eq!(authorized.command().revision().get(), 2);
+
+        let foreign = ApplyGithubProviderRunnerPolicyCommand::new(
+            OperationId::parse("44444444-4444-4444-8444-444444444444").unwrap(),
+            ShardId::new("other").unwrap(),
+            GithubProviderConfigurationRevision::new(3).unwrap(),
+            GithubRunnerPolicy::decode_configuration(RUNNER_POLICY).unwrap(),
+        );
+        assert_eq!(
+            AuthorizedApplyGithubProviderRunnerPolicy::authorize(authority(), foreign)
                 .unwrap_err()
                 .to_string(),
             GithubProviderValueError::Forbidden.to_string()
