@@ -11,9 +11,130 @@ use serde_json::{Map as JsonMap, Value as JsonValue};
 use crate::event::GithubEventActor;
 use crate::webhook::{
     AuthenticatedGithubWebhook, GithubWebhookBodyDigest, GithubWebhookError, GithubWebhookRef,
-    GithubWebhookRefKind, GithubWebhookRepository, VerifiedGithubPush, durable_provider_id,
-    normalize_branch_name, parse_git_ref,
+    GithubWebhookRefKind, GithubWebhookRepository, durable_provider_id, normalize_branch_name,
+    parse_git_ref,
 };
+
+macro_rules! verified_github_webhook_authenticated_accessors {
+    (push) => {
+        /// Returns the exact singleton `X-GitHub-Delivery` value.
+        ///
+        /// This header is outside the body MAC and must be included separately in
+        /// any durable request or idempotency digest.
+        pub fn delivery_id(&self) -> &str {
+            self.identity.authenticated.delivery_id()
+        }
+
+        /// Returns the exact singleton `X-GitHub-Event` value.
+        ///
+        /// This header is outside the body MAC and must be included separately in
+        /// any durable request digest.
+        pub fn event_name(&self) -> &str {
+            self.identity.authenticated.event_name()
+        }
+
+        /// Returns the exact authenticated JSON bytes without reserialization.
+        pub fn raw_body(&self) -> &Bytes {
+            self.identity.authenticated.raw_body()
+        }
+
+        /// Returns SHA-256 of the exact authenticated body.
+        pub const fn body_sha256(&self) -> GithubWebhookBodyDigest {
+            self.identity.authenticated.body_sha256()
+        }
+
+        /// Returns the nonzero GitHub App installation identifier.
+        pub const fn installation_id(&self) -> NonZeroU64 {
+            self.identity.installation_id
+        }
+    };
+    ($event_name:literal, $installation:literal) => {
+        /// Returns the exact singleton delivery header outside the body MAC.
+        #[must_use]
+        pub fn delivery_id(&self) -> &str {
+            self.identity.authenticated.delivery_id()
+        }
+
+        #[doc = $event_name]
+        #[must_use]
+        pub fn event_name(&self) -> &str {
+            self.identity.authenticated.event_name()
+        }
+
+        /// Returns the exact HMAC-authenticated body without reserialization.
+        #[must_use]
+        pub const fn raw_body(&self) -> &Bytes {
+            self.identity.authenticated.raw_body()
+        }
+
+        /// Returns SHA-256 of the exact authenticated body.
+        #[must_use]
+        pub const fn body_sha256(&self) -> GithubWebhookBodyDigest {
+            self.identity.authenticated.body_sha256()
+        }
+
+        #[doc = $installation]
+        #[must_use]
+        pub const fn installation_id(&self) -> NonZeroU64 {
+            self.identity.installation_id
+        }
+    };
+}
+
+macro_rules! verified_github_webhook_repository_accessor {
+    (push) => {
+        /// Returns the internally consistent provider repository identity.
+        pub const fn repository(&self) -> &GithubWebhookRepository {
+            &self.identity.repository
+        }
+    };
+    ($repository:literal) => {
+        #[doc = $repository]
+        #[must_use]
+        pub const fn repository(&self) -> &GithubWebhookRepository {
+            &self.identity.repository
+        }
+    };
+}
+
+macro_rules! verified_github_webhook_accessors {
+    (|$event:ident| $(
+        $(#[$attribute:meta])*
+        [$($constness:tt)*] fn $name:ident -> $return_type:ty = $body:expr;
+    )*) => {
+        $(
+            $(#[$attribute])*
+            pub $($constness)* fn $name(&self) -> $return_type {
+                let $event = self;
+                $body
+            }
+        )*
+    };
+}
+
+macro_rules! debug_verified_github_webhook_identity {
+    ($debug:ident, $identity:expr, workflow) => {
+        $debug
+            .field("delivery_id", &"[redacted]")
+            .field("event_name", &$identity.authenticated.event_name())
+            .field("raw_body", &"[redacted]")
+            .field("body_len", &$identity.authenticated.raw_body().len())
+            .field("body_sha256", &$identity.authenticated.body_sha256())
+            .field("installation_id", &$identity.installation_id);
+    };
+    ($debug:ident, $identity:expr, control) => {
+        $debug
+            .field("delivery_id", &"[redacted]")
+            .field("event_name", &$identity.authenticated.event_name())
+            .field("body_sha256", &$identity.authenticated.body_sha256())
+            .field("installation_id", &$identity.installation_id)
+            .field("repository", &$identity.repository);
+    };
+}
+
+pub(super) mod push;
+
+use push::VerifiedGithubPush;
 
 const ZERO_COMMIT_SHA: &str = "0000000000000000000000000000000000000000";
 const MAX_REPOSITORY_DISPATCH_EVENT_TYPE_CHARS: usize = 100;
@@ -52,6 +173,27 @@ const fn repository_dispatch_payload_character_rejection(
         return Some(GithubRepositoryDispatchLimitRejection::ClientPayloadCharacters);
     }
     None
+}
+
+#[derive(Clone, Eq, PartialEq)]
+struct VerifiedGithubWebhookIdentity {
+    authenticated: AuthenticatedGithubWebhook,
+    installation_id: NonZeroU64,
+    repository: GithubWebhookRepository,
+}
+
+impl VerifiedGithubWebhookIdentity {
+    const fn new(
+        authenticated: AuthenticatedGithubWebhook,
+        installation_id: NonZeroU64,
+        repository: GithubWebhookRepository,
+    ) -> Self {
+        Self {
+            authenticated,
+            installation_id,
+            repository,
+        }
+    }
 }
 
 /// A currently documented GitHub `pull_request` webhook activity.
@@ -203,82 +345,51 @@ pub enum VerifiedGithubWebhook {
 }
 
 impl VerifiedGithubWebhook {
+    const fn identity(&self) -> &VerifiedGithubWebhookIdentity {
+        match self {
+            Self::Push(event) => &event.identity,
+            Self::PullRequest(event) => &event.identity,
+            Self::MergeGroup(event) => &event.identity,
+            Self::RepositoryDispatch(event) => &event.identity,
+            Self::CheckRun(event) => &event.identity,
+            Self::CheckSuite(event) => &event.identity,
+        }
+    }
+
     /// Returns the exact singleton delivery header outside the body MAC.
     #[must_use]
     pub fn delivery_id(&self) -> &str {
-        match self {
-            Self::Push(event) => event.delivery_id(),
-            Self::PullRequest(event) => event.delivery_id(),
-            Self::MergeGroup(event) => event.delivery_id(),
-            Self::RepositoryDispatch(event) => event.delivery_id(),
-            Self::CheckRun(event) => event.delivery_id(),
-            Self::CheckSuite(event) => event.delivery_id(),
-        }
+        self.identity().authenticated.delivery_id()
     }
 
     /// Returns the exact singleton event-name header outside the body MAC.
     #[must_use]
     pub fn event_name(&self) -> &str {
-        match self {
-            Self::Push(event) => event.event_name(),
-            Self::PullRequest(event) => event.event_name(),
-            Self::MergeGroup(event) => event.event_name(),
-            Self::RepositoryDispatch(event) => event.event_name(),
-            Self::CheckRun(event) => event.event_name(),
-            Self::CheckSuite(event) => event.event_name(),
-        }
+        self.identity().authenticated.event_name()
     }
 
     /// Returns the exact HMAC-authenticated body without reserialization.
     #[must_use]
     pub fn raw_body(&self) -> &Bytes {
-        match self {
-            Self::Push(event) => event.raw_body(),
-            Self::PullRequest(event) => event.raw_body(),
-            Self::MergeGroup(event) => event.raw_body(),
-            Self::RepositoryDispatch(event) => event.raw_body(),
-            Self::CheckRun(event) => event.raw_body(),
-            Self::CheckSuite(event) => event.raw_body(),
-        }
+        self.identity().authenticated.raw_body()
     }
 
     /// Returns SHA-256 of the exact authenticated body.
     #[must_use]
     pub const fn body_sha256(&self) -> GithubWebhookBodyDigest {
-        match self {
-            Self::Push(event) => event.body_sha256(),
-            Self::PullRequest(event) => event.body_sha256(),
-            Self::MergeGroup(event) => event.body_sha256(),
-            Self::RepositoryDispatch(event) => event.body_sha256(),
-            Self::CheckRun(event) => event.body_sha256(),
-            Self::CheckSuite(event) => event.body_sha256(),
-        }
+        self.identity().authenticated.body_sha256()
     }
 
     /// Returns the nonzero GitHub App installation identifier.
     #[must_use]
     pub const fn installation_id(&self) -> NonZeroU64 {
-        match self {
-            Self::Push(event) => event.installation_id(),
-            Self::PullRequest(event) => event.installation_id(),
-            Self::MergeGroup(event) => event.installation_id(),
-            Self::RepositoryDispatch(event) => event.installation_id(),
-            Self::CheckRun(event) => event.installation_id(),
-            Self::CheckSuite(event) => event.installation_id(),
-        }
+        self.identity().installation_id
     }
 
     /// Returns the internally consistent event repository identity.
     #[must_use]
     pub const fn repository(&self) -> &GithubWebhookRepository {
-        match self {
-            Self::Push(event) => event.repository(),
-            Self::PullRequest(event) => event.repository(),
-            Self::MergeGroup(event) => event.repository(),
-            Self::RepositoryDispatch(event) => event.repository(),
-            Self::CheckRun(event) => event.repository(),
-            Self::CheckSuite(event) => event.repository(),
-        }
+        &self.identity().repository
     }
 }
 
@@ -301,9 +412,7 @@ impl fmt::Debug for VerifiedGithubWebhook {
 /// Authenticated identity for one native Check Run rerun control.
 #[derive(Clone, Eq, PartialEq)]
 pub struct VerifiedGithubCheckRun {
-    authenticated: AuthenticatedGithubWebhook,
-    installation_id: NonZeroU64,
-    repository: GithubWebhookRepository,
+    identity: VerifiedGithubWebhookIdentity,
     actor: GithubEventActor,
     app_id: NonZeroU64,
     run_id: NonZeroU64,
@@ -314,82 +423,43 @@ pub struct VerifiedGithubCheckRun {
 }
 
 impl VerifiedGithubCheckRun {
-    /// Returns the exact singleton delivery header outside the body MAC.
-    #[must_use]
-    pub fn delivery_id(&self) -> &str {
-        self.authenticated.delivery_id()
-    }
-    /// Returns the exact `check_run` event-name header.
-    #[must_use]
-    pub fn event_name(&self) -> &str {
-        self.authenticated.event_name()
-    }
-    /// Returns the exact HMAC-authenticated body without reserialization.
-    #[must_use]
-    pub const fn raw_body(&self) -> &Bytes {
-        self.authenticated.raw_body()
-    }
-    /// Returns SHA-256 of the exact authenticated body.
-    #[must_use]
-    pub const fn body_sha256(&self) -> GithubWebhookBodyDigest {
-        self.authenticated.body_sha256()
-    }
-    /// Returns the nonzero App installation identifier.
-    #[must_use]
-    pub const fn installation_id(&self) -> NonZeroU64 {
-        self.installation_id
-    }
-    /// Returns the exact repository from the signed payload.
-    #[must_use]
-    pub const fn repository(&self) -> &GithubWebhookRepository {
-        &self.repository
-    }
-    /// Returns the authenticated GitHub sender facts to reauthorize.
-    #[must_use]
-    pub const fn actor(&self) -> &GithubEventActor {
-        &self.actor
-    }
-    /// Returns the GitHub App that owns the Check Run.
-    #[must_use]
-    pub const fn app_id(&self) -> NonZeroU64 {
-        self.app_id
-    }
-    /// Returns the exact Check Run identifier.
-    #[must_use]
-    pub const fn run_id(&self) -> NonZeroU64 {
-        self.run_id
-    }
-    /// Returns the exact Check Suite identifier.
-    #[must_use]
-    pub const fn suite_id(&self) -> NonZeroU64 {
-        self.suite_id
-    }
-    /// Returns the exact checked commit.
-    #[must_use]
-    pub const fn head_revision(&self) -> &GitObjectId {
-        &self.head_revision
-    }
-    /// Returns Automata's bounded external Check identity.
-    #[must_use]
-    pub fn external_id(&self) -> &str {
-        &self.external_id
-    }
-    /// Returns the requested rerun operation.
-    #[must_use]
-    pub const fn action(&self) -> GithubCheckRunAction {
-        self.action
+    verified_github_webhook_authenticated_accessors!(
+        "Returns the exact `check_run` event-name header.",
+        "Returns the nonzero App installation identifier."
+    );
+    verified_github_webhook_repository_accessor!(
+        "Returns the exact repository from the signed payload."
+    );
+    verified_github_webhook_accessors! { |event|
+        /// Returns the authenticated GitHub sender facts to reauthorize.
+        #[must_use]
+        [const] fn actor -> &GithubEventActor = &event.actor;
+        /// Returns the GitHub App that owns the Check Run.
+        #[must_use]
+        [const] fn app_id -> NonZeroU64 = event.app_id;
+        /// Returns the exact Check Run identifier.
+        #[must_use]
+        [const] fn run_id -> NonZeroU64 = event.run_id;
+        /// Returns the exact Check Suite identifier.
+        #[must_use]
+        [const] fn suite_id -> NonZeroU64 = event.suite_id;
+        /// Returns the exact checked commit.
+        #[must_use]
+        [const] fn head_revision -> &GitObjectId = &event.head_revision;
+        /// Returns Automata's bounded external Check identity.
+        #[must_use]
+        [] fn external_id -> &str = &event.external_id;
+        /// Returns the requested rerun operation.
+        #[must_use]
+        [const] fn action -> GithubCheckRunAction = event.action;
     }
 }
 
 impl fmt::Debug for VerifiedGithubCheckRun {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("VerifiedGithubCheckRun")
-            .field("delivery_id", &"[redacted]")
-            .field("event_name", &self.authenticated.event_name())
-            .field("body_sha256", &self.authenticated.body_sha256())
-            .field("installation_id", &self.installation_id)
-            .field("repository", &self.repository)
+        let mut debug = formatter.debug_struct("VerifiedGithubCheckRun");
+        debug_verified_github_webhook_identity!(debug, self.identity, control);
+        debug
             .field("actor", &self.actor)
             .field("app_id", &self.app_id)
             .field("run_id", &self.run_id)
@@ -404,9 +474,7 @@ impl fmt::Debug for VerifiedGithubCheckRun {
 /// Authenticated identity for one native Check Suite re-request.
 #[derive(Clone, Eq, PartialEq)]
 pub struct VerifiedGithubCheckSuite {
-    authenticated: AuthenticatedGithubWebhook,
-    installation_id: NonZeroU64,
-    repository: GithubWebhookRepository,
+    identity: VerifiedGithubWebhookIdentity,
     actor: GithubEventActor,
     app_id: NonZeroU64,
     suite_id: NonZeroU64,
@@ -414,67 +482,34 @@ pub struct VerifiedGithubCheckSuite {
 }
 
 impl VerifiedGithubCheckSuite {
-    /// Returns the exact singleton delivery header outside the body MAC.
-    #[must_use]
-    pub fn delivery_id(&self) -> &str {
-        self.authenticated.delivery_id()
-    }
-    /// Returns the exact `check_suite` event-name header.
-    #[must_use]
-    pub fn event_name(&self) -> &str {
-        self.authenticated.event_name()
-    }
-    /// Returns the exact HMAC-authenticated body without reserialization.
-    #[must_use]
-    pub const fn raw_body(&self) -> &Bytes {
-        self.authenticated.raw_body()
-    }
-    /// Returns SHA-256 of the exact authenticated body.
-    #[must_use]
-    pub const fn body_sha256(&self) -> GithubWebhookBodyDigest {
-        self.authenticated.body_sha256()
-    }
-    /// Returns the nonzero App installation identifier.
-    #[must_use]
-    pub const fn installation_id(&self) -> NonZeroU64 {
-        self.installation_id
-    }
-    /// Returns the exact repository from the signed payload.
-    #[must_use]
-    pub const fn repository(&self) -> &GithubWebhookRepository {
-        &self.repository
-    }
-    /// Returns the authenticated GitHub sender facts to reauthorize.
-    #[must_use]
-    pub const fn actor(&self) -> &GithubEventActor {
-        &self.actor
-    }
-    /// Returns the GitHub App that owns the Check Suite.
-    #[must_use]
-    pub const fn app_id(&self) -> NonZeroU64 {
-        self.app_id
-    }
-    /// Returns the exact Check Suite identifier.
-    #[must_use]
-    pub const fn suite_id(&self) -> NonZeroU64 {
-        self.suite_id
-    }
-    /// Returns the exact checked commit.
-    #[must_use]
-    pub const fn head_revision(&self) -> &GitObjectId {
-        &self.head_revision
+    verified_github_webhook_authenticated_accessors!(
+        "Returns the exact `check_suite` event-name header.",
+        "Returns the nonzero App installation identifier."
+    );
+    verified_github_webhook_repository_accessor!(
+        "Returns the exact repository from the signed payload."
+    );
+    verified_github_webhook_accessors! { |event|
+        /// Returns the authenticated GitHub sender facts to reauthorize.
+        #[must_use]
+        [const] fn actor -> &GithubEventActor = &event.actor;
+        /// Returns the GitHub App that owns the Check Suite.
+        #[must_use]
+        [const] fn app_id -> NonZeroU64 = event.app_id;
+        /// Returns the exact Check Suite identifier.
+        #[must_use]
+        [const] fn suite_id -> NonZeroU64 = event.suite_id;
+        /// Returns the exact checked commit.
+        #[must_use]
+        [const] fn head_revision -> &GitObjectId = &event.head_revision;
     }
 }
 
 impl fmt::Debug for VerifiedGithubCheckSuite {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("VerifiedGithubCheckSuite")
-            .field("delivery_id", &"[redacted]")
-            .field("event_name", &self.authenticated.event_name())
-            .field("body_sha256", &self.authenticated.body_sha256())
-            .field("installation_id", &self.installation_id)
-            .field("repository", &self.repository)
+        let mut debug = formatter.debug_struct("VerifiedGithubCheckSuite");
+        debug_verified_github_webhook_identity!(debug, self.identity, control);
+        debug
             .field("actor", &self.actor)
             .field("app_id", &self.app_id)
             .field("suite_id", &self.suite_id)
@@ -489,10 +524,8 @@ impl fmt::Debug for VerifiedGithubCheckSuite {
 /// body and this typed view, but is always redacted from `Debug` output.
 #[derive(Clone, Eq, PartialEq)]
 pub struct VerifiedGithubRepositoryDispatch {
-    authenticated: AuthenticatedGithubWebhook,
-    installation_id: NonZeroU64,
+    identity: VerifiedGithubWebhookIdentity,
     actor: Option<GithubEventActor>,
-    repository: GithubWebhookRepository,
     event_type: Box<str>,
     branch: Box<str>,
     git_ref: Box<str>,
@@ -500,85 +533,44 @@ pub struct VerifiedGithubRepositoryDispatch {
 }
 
 impl VerifiedGithubRepositoryDispatch {
-    /// Returns the exact singleton delivery header outside the body MAC.
-    #[must_use]
-    pub fn delivery_id(&self) -> &str {
-        self.authenticated.delivery_id()
+    verified_github_webhook_authenticated_accessors!(
+        "Returns the exact `repository_dispatch` event-name header.",
+        "Returns the nonzero GitHub App installation identifier."
+    );
+
+    verified_github_webhook_accessors! { |event|
+        /// Returns the authenticated sender facts when supplied by the webhook.
+        #[must_use]
+        [const] fn actor -> Option<&GithubEventActor> = event.actor.as_ref();
     }
 
-    /// Returns the exact `repository_dispatch` event-name header.
-    #[must_use]
-    pub fn event_name(&self) -> &str {
-        self.authenticated.event_name()
-    }
+    verified_github_webhook_repository_accessor!(
+        "Returns the repository that received the custom dispatch."
+    );
 
-    /// Returns the exact HMAC-authenticated body without reserialization.
-    #[must_use]
-    pub const fn raw_body(&self) -> &Bytes {
-        self.authenticated.raw_body()
-    }
-
-    /// Returns SHA-256 of the exact authenticated body.
-    #[must_use]
-    pub const fn body_sha256(&self) -> GithubWebhookBodyDigest {
-        self.authenticated.body_sha256()
-    }
-
-    /// Returns the nonzero GitHub App installation identifier.
-    #[must_use]
-    pub const fn installation_id(&self) -> NonZeroU64 {
-        self.installation_id
-    }
-
-    /// Returns the authenticated sender facts when supplied by the webhook.
-    #[must_use]
-    pub const fn actor(&self) -> Option<&GithubEventActor> {
-        self.actor.as_ref()
-    }
-
-    /// Returns the repository that received the custom dispatch.
-    #[must_use]
-    pub const fn repository(&self) -> &GithubWebhookRepository {
-        &self.repository
-    }
-
-    /// Returns the bounded custom event type used by `on.repository_dispatch.types`.
-    #[must_use]
-    pub fn event_type(&self) -> &str {
-        &self.event_type
-    }
-
-    /// Returns the validated unqualified default-branch name.
-    #[must_use]
-    pub fn branch(&self) -> &str {
-        &self.branch
-    }
-
-    /// Returns the full default-branch reference used by the workflow run.
-    #[must_use]
-    pub fn git_ref(&self) -> &str {
-        &self.git_ref
-    }
-
-    /// Returns the bounded custom client payload, or `None` for JSON `null`.
-    #[must_use]
-    pub const fn client_payload(&self) -> Option<&JsonMap<String, JsonValue>> {
-        self.client_payload.as_ref()
+    verified_github_webhook_accessors! { |event|
+        /// Returns the bounded custom event type used by `on.repository_dispatch.types`.
+        #[must_use]
+        [] fn event_type -> &str = &event.event_type;
+        /// Returns the validated unqualified default-branch name.
+        #[must_use]
+        [] fn branch -> &str = &event.branch;
+        /// Returns the full default-branch reference used by the workflow run.
+        #[must_use]
+        [] fn git_ref -> &str = &event.git_ref;
+        /// Returns the bounded custom client payload, or `None` for JSON `null`.
+        #[must_use]
+        [const] fn client_payload -> Option<&JsonMap<String, JsonValue>> = event.client_payload.as_ref();
     }
 }
 
 impl fmt::Debug for VerifiedGithubRepositoryDispatch {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("VerifiedGithubRepositoryDispatch")
-            .field("delivery_id", &"[redacted]")
-            .field("event_name", &self.authenticated.event_name())
-            .field("raw_body", &"[redacted]")
-            .field("body_len", &self.authenticated.raw_body().len())
-            .field("body_sha256", &self.authenticated.body_sha256())
-            .field("installation_id", &self.installation_id)
+        let mut debug = formatter.debug_struct("VerifiedGithubRepositoryDispatch");
+        debug_verified_github_webhook_identity!(debug, self.identity, workflow);
+        debug
             .field("actor", &self.actor)
-            .field("repository", &self.repository)
+            .field("repository", &self.identity.repository)
             .field("event_type", &"[redacted]")
             .field("branch", &"[redacted]")
             .field("git_ref", &"[redacted]")
@@ -590,11 +582,9 @@ impl fmt::Debug for VerifiedGithubRepositoryDispatch {
 /// Authenticated and strictly normalized pull-request webhook evidence.
 #[derive(Clone, Eq, PartialEq)]
 pub struct VerifiedGithubPullRequest {
-    authenticated: AuthenticatedGithubWebhook,
-    installation_id: NonZeroU64,
+    identity: VerifiedGithubWebhookIdentity,
     actor: Option<GithubEventActor>,
     source_actor: Option<GithubEventActor>,
-    repository: GithubWebhookRepository,
     head_repository: GithubWebhookRepository,
     number: NonZeroU64,
     action: GithubPullRequestAction,
@@ -609,138 +599,73 @@ pub struct VerifiedGithubPullRequest {
 }
 
 impl VerifiedGithubPullRequest {
-    /// Returns the exact singleton delivery header outside the body MAC.
-    #[must_use]
-    pub fn delivery_id(&self) -> &str {
-        self.authenticated.delivery_id()
+    verified_github_webhook_authenticated_accessors!(
+        "Returns the exact `pull_request` event-name header.",
+        "Returns the nonzero GitHub App installation identifier."
+    );
+
+    verified_github_webhook_accessors! { |event|
+        /// Returns the authenticated event sender facts when supplied by GitHub.
+        #[must_use]
+        [const] fn actor -> Option<&GithubEventActor> = event.actor.as_ref();
+        /// Returns the pull-request author's authenticated identity facts when
+        /// supplied by GitHub.
+        #[must_use]
+        [const] fn source_actor -> Option<&GithubEventActor> = event.source_actor.as_ref();
     }
 
-    /// Returns the exact `pull_request` event-name header.
-    #[must_use]
-    pub fn event_name(&self) -> &str {
-        self.authenticated.event_name()
-    }
+    verified_github_webhook_repository_accessor!(
+        "Returns the base repository where the pull request occurred."
+    );
 
-    /// Returns the exact HMAC-authenticated body without reserialization.
-    #[must_use]
-    pub const fn raw_body(&self) -> &Bytes {
-        self.authenticated.raw_body()
-    }
-
-    /// Returns SHA-256 of the exact authenticated body.
-    #[must_use]
-    pub const fn body_sha256(&self) -> GithubWebhookBodyDigest {
-        self.authenticated.body_sha256()
-    }
-
-    /// Returns the nonzero GitHub App installation identifier.
-    #[must_use]
-    pub const fn installation_id(&self) -> NonZeroU64 {
-        self.installation_id
-    }
-
-    /// Returns the authenticated event sender facts when supplied by GitHub.
-    #[must_use]
-    pub const fn actor(&self) -> Option<&GithubEventActor> {
-        self.actor.as_ref()
-    }
-
-    /// Returns the pull-request author's authenticated identity facts when
-    /// supplied by GitHub.
-    #[must_use]
-    pub const fn source_actor(&self) -> Option<&GithubEventActor> {
-        self.source_actor.as_ref()
-    }
-
-    /// Returns the base repository where the pull request occurred.
-    #[must_use]
-    pub const fn repository(&self) -> &GithubWebhookRepository {
-        &self.repository
-    }
-
-    /// Returns the exact source repository for the pull-request head.
-    #[must_use]
-    pub const fn head_repository(&self) -> &GithubWebhookRepository {
-        &self.head_repository
-    }
-
-    /// Returns the positive pull-request number within the base repository.
-    #[must_use]
-    pub const fn number(&self) -> NonZeroU64 {
-        self.number
-    }
-
-    /// Returns the validated provider activity.
-    #[must_use]
-    pub const fn action(&self) -> GithubPullRequestAction {
-        self.action
-    }
-
-    /// Returns whether this event describes a pull request that was merged.
-    #[must_use]
-    pub const fn merged(&self) -> bool {
-        self.merged
-    }
-
-    /// Returns whether the pull request is currently a draft.
-    #[must_use]
-    pub const fn draft(&self) -> bool {
-        self.draft
-    }
-
-    /// Returns the canonical pull-request head commit.
-    #[must_use]
-    pub const fn head_revision(&self) -> &GitObjectId {
-        &self.head_revision
-    }
-
-    /// Returns the canonical base-branch commit observed by the payload.
-    #[must_use]
-    pub const fn base_revision(&self) -> &GitObjectId {
-        &self.base_revision
-    }
-
-    /// Returns the merge-branch commit used as `GITHUB_SHA` for this event.
-    ///
-    /// GitHub may send `null` before it has materialized the pull-request merge
-    /// commit; absence remains explicit rather than inventing an object identity.
-    #[must_use]
-    pub const fn merge_revision(&self) -> Option<GitObjectId> {
-        self.merge_revision
-    }
-
-    /// Returns the validated unqualified pull-request head branch.
-    #[must_use]
-    pub fn head_ref(&self) -> &str {
-        &self.head_ref
-    }
-
-    /// Returns the validated unqualified target branch used by trigger filters.
-    #[must_use]
-    pub fn base_ref(&self) -> &str {
-        &self.base_ref
-    }
-
-    /// Returns the full ref GitHub assigns to the workflow run.
-    #[must_use]
-    pub fn git_ref(&self) -> &str {
-        &self.git_ref
+    verified_github_webhook_accessors! { |event|
+        /// Returns the exact source repository for the pull-request head.
+        #[must_use]
+        [const] fn head_repository -> &GithubWebhookRepository = &event.head_repository;
+        /// Returns the positive pull-request number within the base repository.
+        #[must_use]
+        [const] fn number -> NonZeroU64 = event.number;
+        /// Returns the validated provider activity.
+        #[must_use]
+        [const] fn action -> GithubPullRequestAction = event.action;
+        /// Returns whether this event describes a pull request that was merged.
+        #[must_use]
+        [const] fn merged -> bool = event.merged;
+        /// Returns whether the pull request is currently a draft.
+        #[must_use]
+        [const] fn draft -> bool = event.draft;
+        /// Returns the canonical pull-request head commit.
+        #[must_use]
+        [const] fn head_revision -> &GitObjectId = &event.head_revision;
+        /// Returns the canonical base-branch commit observed by the payload.
+        #[must_use]
+        [const] fn base_revision -> &GitObjectId = &event.base_revision;
+        /// Returns the merge-branch commit used as `GITHUB_SHA` for this event.
+        ///
+        /// GitHub may send `null` before it has materialized the pull-request merge
+        /// commit; absence remains explicit rather than inventing an object identity.
+        #[must_use]
+        [const] fn merge_revision -> Option<GitObjectId> = event.merge_revision;
+        /// Returns the validated unqualified pull-request head branch.
+        #[must_use]
+        [] fn head_ref -> &str = &event.head_ref;
+        /// Returns the validated unqualified target branch used by trigger filters.
+        #[must_use]
+        [] fn base_ref -> &str = &event.base_ref;
+        /// Returns the full ref GitHub assigns to the workflow run.
+        #[must_use]
+        [] fn git_ref -> &str = &event.git_ref;
     }
 }
 
 impl fmt::Debug for VerifiedGithubPullRequest {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("VerifiedGithubPullRequest")
-            .field("delivery_id", &"[redacted]")
-            .field("event_name", &self.authenticated.event_name())
-            .field("raw_body", &"[redacted]")
-            .field("body_len", &self.authenticated.raw_body().len())
-            .field("body_sha256", &self.authenticated.body_sha256())
-            .field("installation_id", &self.installation_id)
+        let mut debug = formatter.debug_struct("VerifiedGithubPullRequest");
+        debug_verified_github_webhook_identity!(debug, self.identity, workflow);
+        debug
             .field("actor", &self.actor)
             .field("source_actor", &self.source_actor)
-            .field("repository", &self.repository)
+            .field("repository", &self.identity.repository)
             .field("head_repository", &self.head_repository)
             .field("number", &self.number)
             .field("action", &self.action)
@@ -759,10 +684,8 @@ impl fmt::Debug for VerifiedGithubPullRequest {
 /// Authenticated and strictly normalized merge-queue group webhook evidence.
 #[derive(Clone, Eq, PartialEq)]
 pub struct VerifiedGithubMergeGroup {
-    authenticated: AuthenticatedGithubWebhook,
-    installation_id: NonZeroU64,
+    identity: VerifiedGithubWebhookIdentity,
     actor: Option<GithubEventActor>,
-    repository: GithubWebhookRepository,
     action: GithubMergeGroupAction,
     head_revision: GitObjectId,
     base_revision: GitObjectId,
@@ -771,91 +694,47 @@ pub struct VerifiedGithubMergeGroup {
 }
 
 impl VerifiedGithubMergeGroup {
-    /// Returns the exact singleton delivery header outside the body MAC.
-    #[must_use]
-    pub fn delivery_id(&self) -> &str {
-        self.authenticated.delivery_id()
+    verified_github_webhook_authenticated_accessors!(
+        "Returns the exact `merge_group` event-name header.",
+        "Returns the nonzero GitHub App installation identifier."
+    );
+
+    verified_github_webhook_accessors! { |event|
+        /// Returns the authenticated sender facts when supplied by the webhook.
+        #[must_use]
+        [const] fn actor -> Option<&GithubEventActor> = event.actor.as_ref();
     }
 
-    /// Returns the exact `merge_group` event-name header.
-    #[must_use]
-    pub fn event_name(&self) -> &str {
-        self.authenticated.event_name()
-    }
+    verified_github_webhook_repository_accessor!(
+        "Returns the repository whose merge queue created the group."
+    );
 
-    /// Returns the exact HMAC-authenticated body without reserialization.
-    #[must_use]
-    pub const fn raw_body(&self) -> &Bytes {
-        self.authenticated.raw_body()
-    }
-
-    /// Returns SHA-256 of the exact authenticated body.
-    #[must_use]
-    pub const fn body_sha256(&self) -> GithubWebhookBodyDigest {
-        self.authenticated.body_sha256()
-    }
-
-    /// Returns the nonzero GitHub App installation identifier.
-    #[must_use]
-    pub const fn installation_id(&self) -> NonZeroU64 {
-        self.installation_id
-    }
-
-    /// Returns the authenticated sender facts when supplied by the webhook.
-    #[must_use]
-    pub const fn actor(&self) -> Option<&GithubEventActor> {
-        self.actor.as_ref()
-    }
-
-    /// Returns the repository whose merge queue created the group.
-    #[must_use]
-    pub const fn repository(&self) -> &GithubWebhookRepository {
-        &self.repository
-    }
-
-    /// Returns the validated provider activity.
-    #[must_use]
-    pub const fn action(&self) -> GithubMergeGroupAction {
-        self.action
-    }
-
-    /// Returns the canonical merge-group head commit to check.
-    #[must_use]
-    pub const fn head_revision(&self) -> &GitObjectId {
-        &self.head_revision
-    }
-
-    /// Returns the canonical parent commit of the merge group.
-    #[must_use]
-    pub const fn base_revision(&self) -> &GitObjectId {
-        &self.base_revision
-    }
-
-    /// Returns the canonical full merge-group branch reference.
-    #[must_use]
-    pub const fn head_ref(&self) -> &GithubWebhookRef {
-        &self.head_ref
-    }
-
-    /// Returns the canonical full target-branch reference.
-    #[must_use]
-    pub const fn base_ref(&self) -> &GithubWebhookRef {
-        &self.base_ref
+    verified_github_webhook_accessors! { |event|
+        /// Returns the validated provider activity.
+        #[must_use]
+        [const] fn action -> GithubMergeGroupAction = event.action;
+        /// Returns the canonical merge-group head commit to check.
+        #[must_use]
+        [const] fn head_revision -> &GitObjectId = &event.head_revision;
+        /// Returns the canonical parent commit of the merge group.
+        #[must_use]
+        [const] fn base_revision -> &GitObjectId = &event.base_revision;
+        /// Returns the canonical full merge-group branch reference.
+        #[must_use]
+        [const] fn head_ref -> &GithubWebhookRef = &event.head_ref;
+        /// Returns the canonical full target-branch reference.
+        #[must_use]
+        [const] fn base_ref -> &GithubWebhookRef = &event.base_ref;
     }
 }
 
 impl fmt::Debug for VerifiedGithubMergeGroup {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("VerifiedGithubMergeGroup")
-            .field("delivery_id", &"[redacted]")
-            .field("event_name", &self.authenticated.event_name())
-            .field("raw_body", &"[redacted]")
-            .field("body_len", &self.authenticated.raw_body().len())
-            .field("body_sha256", &self.authenticated.body_sha256())
-            .field("installation_id", &self.installation_id)
+        let mut debug = formatter.debug_struct("VerifiedGithubMergeGroup");
+        debug_verified_github_webhook_identity!(debug, self.identity, workflow);
+        debug
             .field("actor", &self.actor)
-            .field("repository", &self.repository)
+            .field("repository", &self.identity.repository)
             .field("action", &self.action)
             .field("head_revision", &"[redacted]")
             .field("base_revision", &"[redacted]")
@@ -1091,14 +970,17 @@ pub(crate) fn normalize_check_run(
         return Err(GithubWebhookError::InvalidPayload);
     }
     let actor = payload.sender.normalize()?;
+    let installation_id = durable_provider_id(payload.installation.id)?;
+    let repository = payload.repository.normalize()?;
+    let app_id = durable_provider_id(payload.check_run.app.id)?;
+    let run_id = durable_provider_id(payload.check_run.id)?;
+    let suite_id = durable_provider_id(payload.check_run.check_suite.id)?;
     Ok(VerifiedGithubCheckRun {
-        authenticated,
-        installation_id: durable_provider_id(payload.installation.id)?,
-        repository: payload.repository.normalize()?,
+        identity: VerifiedGithubWebhookIdentity::new(authenticated, installation_id, repository),
         actor,
-        app_id: durable_provider_id(payload.check_run.app.id)?,
-        run_id: durable_provider_id(payload.check_run.id)?,
-        suite_id: durable_provider_id(payload.check_run.check_suite.id)?,
+        app_id,
+        run_id,
+        suite_id,
         head_revision,
         external_id: payload.check_run.external_id.into_boxed_str(),
         action,
@@ -1117,14 +999,17 @@ pub(crate) fn normalize_check_suite(
         return Err(GithubWebhookError::InvalidPayload);
     }
     let actor = payload.sender.normalize()?;
+    let installation_id = durable_provider_id(payload.installation.id)?;
+    let repository = payload.repository.normalize()?;
+    let app_id = durable_provider_id(payload.check_suite.app.id)?;
+    let suite_id = durable_provider_id(payload.check_suite.id)?;
+    let head_revision = exact_revision(payload.check_suite.head_sha)?;
     Ok(VerifiedGithubCheckSuite {
-        authenticated,
-        installation_id: durable_provider_id(payload.installation.id)?,
-        repository: payload.repository.normalize()?,
+        identity: VerifiedGithubWebhookIdentity::new(authenticated, installation_id, repository),
         actor,
-        app_id: durable_provider_id(payload.check_suite.app.id)?,
-        suite_id: durable_provider_id(payload.check_suite.id)?,
-        head_revision: exact_revision(payload.check_suite.head_sha)?,
+        app_id,
+        suite_id,
+        head_revision,
     })
 }
 
@@ -1173,11 +1058,9 @@ pub(crate) fn normalize_pull_request(
         .transpose()?;
 
     Ok(VerifiedGithubPullRequest {
-        authenticated,
-        installation_id,
+        identity: VerifiedGithubWebhookIdentity::new(authenticated, installation_id, repository),
         actor,
         source_actor,
-        repository,
         head_repository,
         number,
         action,
@@ -1207,10 +1090,8 @@ pub(crate) fn normalize_merge_group(
     let actor = payload.sender.map(SenderPayload::normalize).transpose()?;
 
     Ok(VerifiedGithubMergeGroup {
-        authenticated,
-        installation_id,
+        identity: VerifiedGithubWebhookIdentity::new(authenticated, installation_id, repository),
         actor,
-        repository,
         action,
         head_revision,
         base_revision,
@@ -1236,10 +1117,8 @@ pub(crate) fn normalize_repository_dispatch(
     let actor = payload.sender.map(SenderPayload::normalize).transpose()?;
 
     Ok(VerifiedGithubRepositoryDispatch {
-        authenticated,
-        installation_id,
+        identity: VerifiedGithubWebhookIdentity::new(authenticated, installation_id, repository),
         actor,
-        repository,
         event_type,
         branch,
         git_ref,
