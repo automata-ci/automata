@@ -447,26 +447,22 @@ Create `/Volumes/AutomataVM/e2e-state` as an empty `0700` directory owned by
 the physical runner service account before running the command below.
 
 ```console
-AUTOMATA_MACOS_VM_HELPER=/Library/Automata/bin/automata-macos-vm-helper \
-AUTOMATA_MACOS_VM_HELPER_SHA256=<helper-sha256> \
-AUTOMATA_MACOS_VM_HELPER_REQUIREMENT='<strict-designated-requirement>' \
-AUTOMATA_MACOS_VM_TEMPLATE_MANIFEST=/Volumes/AutomataVM/templates/macos-15-arm64-v1/manifest.json \
-AUTOMATA_MACOS_VM_TEMPLATE_SHA256=<manifest-sha256> \
-AUTOMATA_MACOS_VM_STORAGE_ROOT=/Volumes/AutomataVM/e2e-state \
-AUTOMATA_MACOS_VM_STORAGE_VOLUME_UUID=<uppercase-volume-uuid> \
-AUTOMATA_MACOS_VM_STORAGE_QUOTA_BYTES=<exact-volume-quota-bytes> \
-cargo test --locked -p automata-ci-runner --test runner -- \
-  macos_vm_runner_process_e2e::shipped_runner_process_executes_a_claimed_isolated_job_with_action_runtimes \
-  --ignored --nocapture --test-threads=1
-
-cargo test --locked -p automata-ci-runner --test runner -- \
-  macos_vm_runner_process_e2e::shipped_runner_process_cancels_a_running_isolated_job \
-  --ignored --nocapture --test-threads=1
-
-cargo test --locked -p automata-ci-sandbox-macos --test macos_provider -- \
-  provider_reconciles_a_live_orphan_after_owner_process_loss \
-  --ignored --exact --nocapture
+export AUTOMATA_MACOS_VM_HELPER=/Library/Automata/bin/automata-macos-vm-helper
+export AUTOMATA_MACOS_VM_HELPER_SHA256=<helper-sha256>
+export AUTOMATA_MACOS_VM_HELPER_REQUIREMENT='<strict-designated-requirement>'
+export AUTOMATA_MACOS_VM_TEMPLATE_MANIFEST=/Volumes/AutomataVM/templates/macos-15-arm64-v1/manifest.json
+export AUTOMATA_MACOS_VM_TEMPLATE_SHA256=<manifest-sha256>
+export AUTOMATA_MACOS_VM_STORAGE_ROOT=/Volumes/AutomataVM/e2e-state
+export AUTOMATA_MACOS_VM_STORAGE_VOLUME_UUID=<uppercase-volume-uuid>
+export AUTOMATA_MACOS_VM_STORAGE_QUOTA_BYTES=<exact-volume-quota-bytes>
+./scripts/ci/run-macos-physical-checks.sh
 ```
+
+The entrypoint runs the shipped-runner success/timeout and cancellation matrix,
+live-orphan recovery, and the allowlisted runtime-proxy probe serially. Set
+`AUTOMATA_MACOS_PHYSICAL_REPETITIONS` from 1 through 10 for a bounded repeated
+runner soak. It refuses a `CARGO_TARGET_DIR` on the VM storage filesystem so
+build artifacts cannot consume the clone-capacity safety margin.
 
 The runtime proxy has a separate physical contract test. It starts a temporary
 loopback HTTP origin on the host, boots the sealed NIC-less guest through the
