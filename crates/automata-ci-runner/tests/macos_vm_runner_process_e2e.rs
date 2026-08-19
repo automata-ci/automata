@@ -30,8 +30,9 @@ use automata_ci_core::{
     JobId, JobInstanceIdentity, JobIr, JobIrEnvelope, JobPermissionRequest, JobResourceAllocation,
     JobRuntimeContext, JobSource, Lease, LeaseId, LogAck, OperatingSystem, OperationId,
     ResourceCapacity, RunId, RunValueTemplates, RunnerFeature, RunnerId, RunnerRequirements,
-    RunnerSessionId, RuntimeBoolean, SemanticStep, Sha256Digest, ShellTemplate, StepId, StepIr,
-    StrategyContext, UnixMillis, ValueTemplate, WorkflowId,
+    RunnerSessionId, RuntimeBoolean, RuntimePositiveInteger, RuntimeTimeoutTemplate, SemanticStep,
+    Sha256Digest, ShellTemplate, StepId, StepIr, StrategyContext, UnixMillis, ValueTemplate,
+    WorkflowId,
 };
 #[cfg(target_os = "macos")]
 use automata_ci_core::{ExpressionProgram, ValueSource};
@@ -100,7 +101,7 @@ const VM_STORAGE_VOLUME_UUID_ENV: &str = "AUTOMATA_MACOS_VM_STORAGE_VOLUME_UUID"
 #[cfg(target_os = "macos")]
 const VM_STORAGE_QUOTA_BYTES_ENV: &str = "AUTOMATA_MACOS_VM_STORAGE_QUOTA_BYTES";
 #[cfg(target_os = "macos")]
-const DIFFERENTIAL_REFERENCE: &str = "differential.bash=ok\nisolation.cpu=4\nisolation.memory=8589934592\nisolation.process_limit=512\nisolation.process_ceiling=ok\nisolation.no_host_helper=true\nisolation.no_ethernet=true\nactions.node20=ok\nactions.node24=ok\nactions.repository=ok\nactions.repository.environment=repository-action-env\nactions.repository.output=repository-action-output\ndifferential.sh=ok\ndifferential.environment=command-file\ndifferential.output=vm-output\ndifferential.workspace=true\ndifferential.conclusion=success\n";
+const DIFFERENTIAL_REFERENCE: &str = "differential.bash=ok\nisolation.cpu=4\nisolation.memory=8589934592\nisolation.process_limit=512\nisolation.process_ceiling=ok\nisolation.no_host_helper=true\nisolation.no_ethernet=true\nactions.node20=ok\nactions.node24=ok\nactions.repository=ok\nisolation.timeout_process_group=ok\nactions.repository.environment=repository-action-env\nactions.repository.output=repository-action-output\ndifferential.sh=ok\ndifferential.environment=command-file\ndifferential.output=vm-output\ndifferential.workspace=true\ndifferential.conclusion=success\n";
 const TEARDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -427,13 +428,29 @@ fn macos_steps() -> Vec<StepIr> {
             )]),
         ),
     );
+    let timeout = StepIr::new(
+        StepId::new("macos-timeout-process-group").expect("timeout step ID"),
+        ValueTemplate::literal("Terminate a timed-out process group").expect("timeout step name"),
+        RuntimeBoolean::literal(false),
+        SemanticStep::run(RunValueTemplates::new(
+            ValueTemplate::literal(
+                "set -eu\n/bin/sleep 300 &\ntimeout_child=$!\nprintf '%s\\n' \"$timeout_child\" > timeout-child.pid\nwait \"$timeout_child\"",
+            )
+            .expect("timeout command"),
+            ShellTemplate::named(ValueTemplate::literal("sh").expect("timeout shell")),
+        )),
+    )
+    .with_continue_on_error(RuntimeBoolean::literal(true))
+    .with_timeout(RuntimeTimeoutTemplate::seconds(
+        RuntimePositiveInteger::literal(2),
+    ));
     let consumer = StepIr::new(
         StepId::new("macos-sh-reference").expect("consumer step ID"),
         ValueTemplate::literal("Run sh differential fixture").expect("consumer step name"),
         RuntimeBoolean::literal(false),
         SemanticStep::run(RunValueTemplates::new(
             ValueTemplate::literal(format!(
-                "set -eu\ntest \"$AUTOMATA_DIFFERENTIAL_ENV\" = command-file\ntest \"$AUTOMATA_ACTION_ENV\" = repository-action-env\ntest \"$FROM_OUTPUT\" = vm-output\ntest \"$FROM_ACTION_OUTPUT\" = repository-action-output\ntest \"$PWD\" = \"$GITHUB_WORKSPACE\"\ntest \"$(cat differential-artifact.txt)\" = vm-workspace\nprintf 'actions.repository.environment=%s\\nactions.repository.output=%s\\ndifferential.sh=ok\\ndifferential.environment=%s\\ndifferential.output=%s\\ndifferential.workspace=true\\ndifferential.conclusion=success\\n%s\\n' \"$AUTOMATA_ACTION_ENV\" \"$FROM_ACTION_OUTPUT\" \"$AUTOMATA_DIFFERENTIAL_ENV\" \"$FROM_OUTPUT\" '{SENTINEL}'"
+                "set -eu\ntimeout_child=$(cat timeout-child.pid)\ntimeout_checks=0\nwhile kill -0 \"$timeout_child\" 2>/dev/null; do\n  timeout_checks=$((timeout_checks + 1))\n  test \"$timeout_checks\" -lt 5\n  /bin/sleep 1\ndone\ntest \"$AUTOMATA_DIFFERENTIAL_ENV\" = command-file\ntest \"$AUTOMATA_ACTION_ENV\" = repository-action-env\ntest \"$FROM_OUTPUT\" = vm-output\ntest \"$FROM_ACTION_OUTPUT\" = repository-action-output\ntest \"$PWD\" = \"$GITHUB_WORKSPACE\"\ntest \"$(cat differential-artifact.txt)\" = vm-workspace\nprintf 'isolation.timeout_process_group=ok\\nactions.repository.environment=%s\\nactions.repository.output=%s\\ndifferential.sh=ok\\ndifferential.environment=%s\\ndifferential.output=%s\\ndifferential.workspace=true\\ndifferential.conclusion=success\\n%s\\n' \"$AUTOMATA_ACTION_ENV\" \"$FROM_ACTION_OUTPUT\" \"$AUTOMATA_DIFFERENTIAL_ENV\" \"$FROM_OUTPUT\" '{SENTINEL}'"
             ))
             .expect("consumer command"),
             ShellTemplate::named(ValueTemplate::literal("sh").expect("sh shell")),
@@ -453,7 +470,7 @@ fn macos_steps() -> Vec<StepIr> {
             )),
         ),
     ]));
-    vec![producer, repository_action, consumer]
+    vec![producer, repository_action, timeout, consumer]
 }
 
 #[cfg(target_os = "macos")]
