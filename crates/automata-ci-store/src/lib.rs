@@ -7,8 +7,8 @@ mod conformance;
 mod error;
 mod event_subject;
 mod github_check_rerun;
-mod github_checks;
 mod github_job_runtime_authority;
+mod github_native_check;
 mod github_provider_manifest;
 mod github_schedule;
 mod github_service_authority;
@@ -93,28 +93,14 @@ pub use github_check_rerun::{
     GithubCheckRerunAction, GithubCheckRerunRepository, GithubCheckRerunRequest,
     GithubCheckRerunStoreError, GithubCheckRerunTarget, GithubCheckRerunValueError,
 };
-pub use github_checks::{
-    AdvanceGithubCheckAnnotations, BeginGithubCheckAnnotationBatch, BeginGithubCheckRunCreate,
-    BindGithubCheckRun, BindGithubCheckSuite, BlockGithubCheckAnnotationMismatch,
-    BlockGithubCheckProjectionForCredentialRejection, ClaimGithubCheckProjection,
-    ClaimedGithubCheckProjection, ClearGithubCheckAnnotationUncertainty,
-    CompleteGithubCheckProjection, GithubCheckAnnotationProgress, GithubCheckAppId,
-    GithubCheckConclusion, GithubCheckCreateReconciliation, GithubCheckDesiredProjection,
-    GithubCheckDetailsTarget, GithubCheckName, GithubCheckProjectionAction,
-    GithubCheckProjectionClaimFence, GithubCheckProjectionOutbox, GithubCheckProjectionWorkerId,
-    GithubCheckRunBindingFence, GithubCheckRunCreateFence, GithubCheckRunId, GithubCheckStoreError,
-    GithubCheckSubjectId, GithubCheckSubjectIdentity, GithubCheckSubjectKey,
-    GithubCheckSubjectOrigin, GithubCheckSubjectReceipt, GithubCheckSuiteId,
-    GithubCheckTerminalCause, GithubCheckValueError, InitializeGithubCheckPresentation,
-    MAX_GITHUB_CHECK_CREATE_RECONCILE_GRACE_MILLIS, MAX_GITHUB_CHECK_PROJECTION_ATTEMPTS,
-    MAX_GITHUB_CHECK_PROJECTION_CLAIM_MILLIS, MAX_GITHUB_CHECK_PROJECTION_RETRY_MILLIS,
-    ReleaseUnissuedGithubCheckAnnotationBatch, ReleaseUnissuedGithubCheckRunCreate,
-    ResolveGithubCheckRunCreate, RetryGithubCheckProjection, RetryUncertainGithubCheckAnnotations,
-};
 pub use github_job_runtime_authority::{
     GithubJobRuntimeAuthorityEvidence, GithubJobRuntimeAuthorityExecution,
     GithubJobRuntimeAuthorityRepository, GithubJobRuntimeAuthorityResolution,
     GithubJobRuntimeAuthorityStoreError, GithubJobRuntimeAuthorityValueError,
+};
+pub use github_native_check::{
+    GithubCheckAppId, GithubCheckName, GithubCheckRunId, GithubCheckSubjectKey, GithubCheckSuiteId,
+    GithubNativeCheckValueError,
 };
 pub use github_provider_manifest::{
     BootstrapGithubProviderManifest, BootstrapGithubProviderRepository,

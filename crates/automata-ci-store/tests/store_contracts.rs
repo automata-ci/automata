@@ -7,8 +7,6 @@ mod github_manifest_fixture;
 mod event_subject_api;
 #[path = "g1_api.rs"]
 mod g1_api;
-#[path = "github_checks_api.rs"]
-mod github_checks_api;
 #[path = "github_job_runtime_authority_api.rs"]
 mod github_job_runtime_authority_api;
 #[path = "github_provider_manifest_api.rs"]
