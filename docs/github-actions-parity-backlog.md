@@ -1215,10 +1215,12 @@ current baseline.
 - [ ] Decide whether Intel/x64 is a later supported profile.
 - [x] Contain the whole process tree inside the disposable VM and enforce the
   sealed guest process ceiling.
-- [x] Add macOS Keychain custody and strict Developer ID helper verification.
+- [x] Add macOS Keychain custody and strict signed-helper verification for
+  either Developer ID distribution or an exact private-fleet leaf identity.
 - [ ] Add Xcode and toolchain profiles.
 - [ ] Add macOS acceptance jobs.
-- [ ] Add cleanup and recovery tests.
+- [x] Add physical clone cleanup, runner cancellation, and live-orphan startup
+  recovery tests.
 
 ### Architecture and image breadth
 

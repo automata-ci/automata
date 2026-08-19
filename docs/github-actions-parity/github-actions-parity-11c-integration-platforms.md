@@ -119,26 +119,28 @@ Acceptance:
 **Owner:** P with R and X review. **Size:** L. **Dependencies:** IT-01, IT-07,
 FND-02, PLAT-02.
 
-**Primary scope:** the accepted Apple Silicon macOS 15+ Bash/sh slice; actions,
-containers, Intel, signing jobs, and Xcode profiles stay outside this package.
+**Primary scope:** the accepted Apple Silicon macOS 15+ Bash/sh and configured
+Node-action slice; containers, Intel, signing jobs, and broader Xcode profiles
+stay outside this package.
 
 Tasks:
 
-- [ ] Implement the common adapter contract through the disposable macOS VM
+- [x] Implement the common adapter contract through the disposable macOS VM
   provider on a dedicated Apple Silicon macOS 15+ host.
-- [ ] Record exact OS/build, architecture, runner, shell, optional Python/pwsh,
+- [x] Record exact OS/build, architecture, runner, shell, optional Python/pwsh,
   identity, filesystem, network, and cleanup boundaries.
-- [ ] Run only the admitted VM-backed `run:` smoke without action/container
-  substitution.
-- [ ] Prove process-tree termination, workspace cleanup, restart handling, and
+- [x] Run the admitted VM-backed `run:` and configured Node 20/24 repository
+  action smoke without host or container substitution.
+- [x] Prove process-tree termination, workspace cleanup, restart handling, and
   no persistent keychain/developer credential access.
 
 Acceptance:
 
-- [ ] One ARM64 VM smoke passes through shipped processes and cleans all
+- [x] One ARM64 VM smoke passes through shipped processes and cleans all
   owned state.
-- [ ] Intel, actions, containers, signing, and Xcode are still rejected or
-  represented by later product packages.
+- [x] Intel, containers, signing, and broader Xcode profiles are still rejected
+  or represented by later product packages; configured Node actions are part
+  of the accepted slice.
 
 ### IT-12 — Multi-replica and fault topology adapter
 
