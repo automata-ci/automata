@@ -8,7 +8,7 @@ use automata_ci_core::{PermissionLevel as CommonPermissionLevel, UnixMillis};
 use automata_ci_provider::{
     ExternalRepositoryIdentity, IndeterminateWorkloadCredential,
     PendingWorkloadCredentialRevocation, ProviderConnectionId, ProviderConnectionManifest,
-    ProviderConnectionRevision, ProviderLifecycleState, ProviderPermission, ProviderPermissionSet,
+    ProviderConnectionRevision, ProviderLifecycleState, ProviderPermissionSet,
     WorkloadCredentialIndeterminateReason, WorkloadCredentialIssuance,
     WorkloadCredentialIssueFuture, WorkloadCredentialIssueOutcome, WorkloadCredentialProfile,
     WorkloadCredentialProvider, WorkloadCredentialProviderError,
@@ -19,7 +19,6 @@ use automata_ci_provider::{
 };
 use automata_ci_scm::credential::{
     CredentialError, CredentialErrorKind, PermissionLevel, PermissionSet,
-    RepositoryCredentialRequest,
 };
 use automata_ci_secret::SecretValue;
 use reqwest::{
@@ -57,7 +56,6 @@ use crate::{
     },
     signer::{GithubAppJwtSigner, GithubAppKeyError},
 };
-use automata_ci_store::GithubRepositoryName;
 
 const ACCEPT_API_JSON: &str = "application/vnd.github+json";
 const X_GITHUB_API_VERSION: &str = "x-github-api-version";
@@ -382,19 +380,6 @@ impl GithubAppCredentialBroker {
     /// `Ready` or `RevokePending`; it is never discarded behind an error.
     pub async fn mint_once(
         &self,
-        request: &RepositoryCredentialRequest,
-    ) -> GithubInstallationTokenMintOutcome {
-        let request = match installation_token_request(request) {
-            Ok(request) => request,
-            Err(error) => {
-                return GithubInstallationTokenMintOutcome::Rejected(map_token_error(error));
-            }
-        };
-        self.mint_installation_once(&request).await
-    }
-
-    pub(crate) async fn mint_installation_once(
-        &self,
         request: &GithubInstallationTokenRequest,
     ) -> GithubInstallationTokenMintOutcome {
         let prepared = match self.prepare_mint(request) {
@@ -704,7 +689,7 @@ impl GithubAppCredentialBroker {
             Err(failure) => GithubInstallationTokenMintOutcome::RevokePending(
                 GithubInstallationTokenRevokePending::new(
                     candidate,
-                    map_token_error(failure.error),
+                    map_internal_error(failure.error),
                     failure.provider_expires_at,
                     failure.conservative_expires_at,
                 ),
@@ -1094,7 +1079,7 @@ fn mint_status_outcome(
     headers: &HeaderMap,
 ) -> GithubInstallationTokenMintOutcome {
     if let Some(error) = definitive_mint_rejection(status, headers) {
-        return GithubInstallationTokenMintOutcome::Rejected(map_token_error(error));
+        return GithubInstallationTokenMintOutcome::Rejected(map_internal_error(error));
     }
     let reason = if status.is_server_error() {
         GithubInstallationTokenIndeterminateReason::ProviderUnavailable
@@ -1135,60 +1120,13 @@ fn revoke_pending(
 ) -> GithubInstallationTokenMintOutcome {
     GithubInstallationTokenMintOutcome::RevokePending(GithubInstallationTokenRevokePending::new(
         candidate,
-        map_token_error(CredentialError::new(reason)),
+        map_internal_error(CredentialError::new(reason)),
         provider_expires_at,
         conservative_expires_at,
     ))
 }
 
-pub(crate) fn installation_token_request(
-    request: &RepositoryCredentialRequest,
-) -> Result<GithubInstallationTokenRequest, CredentialError> {
-    if request.repository().provider().as_str() != "github" {
-        return Err(CredentialError::new(CredentialErrorKind::InvalidRequest));
-    }
-    let repository_id = request
-        .repository()
-        .stable_id()
-        .as_str()
-        .parse::<u64>()
-        .ok()
-        .filter(|value| *value != 0)
-        .ok_or_else(|| CredentialError::new(CredentialErrorKind::InvalidRequest))?;
-    let repository_name = GithubRepositoryName::new(request.repository().repository().as_str())
-        .map_err(|_| CredentialError::new(CredentialErrorKind::InvalidRequest))?;
-    let permissions = request
-        .permissions()
-        .iter()
-        .map(|(name, level)| {
-            let level = match level {
-                PermissionLevel::Read => automata_ci_core::PermissionLevel::Read,
-                PermissionLevel::Write => automata_ci_core::PermissionLevel::Write,
-                PermissionLevel::Admin => {
-                    return Err(CredentialError::new(CredentialErrorKind::InvalidRequest));
-                }
-            };
-            ProviderPermission::new(name.as_str(), level)
-                .map_err(|_| CredentialError::new(CredentialErrorKind::InvalidRequest))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let permissions = ProviderPermissionSet::new(permissions)
-        .map_err(|_| CredentialError::new(CredentialErrorKind::InvalidRequest))?;
-    let minimum_validity_millis = request
-        .minimum_validity()
-        .as_seconds()
-        .checked_mul(1_000)
-        .ok_or_else(|| CredentialError::new(CredentialErrorKind::InvalidRequest))?;
-    GithubInstallationTokenRequest::new(
-        repository_id,
-        repository_name,
-        permissions,
-        minimum_validity_millis,
-    )
-    .map_err(|_| CredentialError::new(CredentialErrorKind::InvalidRequest))
-}
-
-fn map_token_error(error: CredentialError) -> GithubInstallationTokenError {
+fn map_internal_error(error: CredentialError) -> GithubInstallationTokenError {
     let kind = match error.kind() {
         CredentialErrorKind::UnsupportedProvider | CredentialErrorKind::InvalidRequest => {
             GithubInstallationTokenErrorKind::InvalidRequest

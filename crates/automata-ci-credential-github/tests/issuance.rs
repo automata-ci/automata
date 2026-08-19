@@ -2,20 +2,24 @@ mod support;
 
 use std::sync::Arc;
 
+use automata_ci_core::PermissionLevel;
 use automata_ci_credential_github::{
     GithubInstallationTokenErrorKind, GithubInstallationTokenIndeterminateReason,
-    GithubInstallationTokenMintOutcome, GithubWorkloadCredentialProvider,
+    GithubInstallationTokenMintOutcome, GithubInstallationTokenRequest,
+    GithubWorkloadCredentialProvider,
 };
+use automata_ci_provider::{ProviderPermission, ProviderPermissionSet};
 use automata_ci_provider::{
     WorkloadCredentialIssueOutcome, WorkloadCredentialProvider,
     WorkloadCredentialProviderErrorKind, WorkloadCredentialRetirement,
     WorkloadCredentialRevocationOutcome,
 };
+use automata_ci_store::GithubRepositoryName;
 use axum::http::StatusCode;
 use serde_json::Value;
 use support::{
     EXPIRATION, FixtureServer, INSTALLATION_ID, NOW, REPOSITORY_ID, ResponseSpec, request,
-    request_for, success_response, workload_connection, workload_connection_for, workload_request,
+    success_response, workload_connection, workload_connection_for, workload_request,
     workload_request_for,
 };
 
@@ -142,17 +146,30 @@ async fn issues_one_exact_repository_and_permission_scope() {
 #[tokio::test]
 async fn provider_and_repository_inputs_fail_before_network_access() {
     let fixture = FixtureServer::spawn().await;
-    let broker = fixture.broker();
-    let wrong_provider = request_for("gitlab", REPOSITORY_ID.to_string(), "owner/repository");
-    let invalid_stable_id = request_for("github", "not-numeric", "owner/repository");
-    let invalid_repository = request_for("github", REPOSITORY_ID.to_string(), "owner/repo.git");
-
-    for invalid in [&wrong_provider, &invalid_stable_id, &invalid_repository] {
-        assert!(matches!(
-            broker.mint_once(invalid).await,
-            GithubInstallationTokenMintOutcome::Rejected(_)
-        ));
-    }
+    let permissions =
+        ProviderPermissionSet::new([
+            ProviderPermission::new("contents", PermissionLevel::Read).unwrap()
+        ])
+        .unwrap();
+    assert!(
+        GithubInstallationTokenRequest::new(
+            0,
+            GithubRepositoryName::new("owner/repository").unwrap(),
+            permissions.clone(),
+            300_000,
+        )
+        .is_err()
+    );
+    assert!(GithubRepositoryName::new("owner/repo.git").is_err());
+    assert!(
+        GithubInstallationTokenRequest::new(
+            REPOSITORY_ID,
+            GithubRepositoryName::new("owner/repository").unwrap(),
+            permissions,
+            0,
+        )
+        .is_err()
+    );
     assert!(fixture.requests().is_empty());
 }
 

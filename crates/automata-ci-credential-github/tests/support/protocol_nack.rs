@@ -10,11 +10,10 @@ use automata_ci_auth::{
     secret::SecretString,
     time::{Clock, UnixTimestamp},
 };
-use automata_ci_scm::credential::{
-    MinimumValidity, PermissionLevel, PermissionName, PermissionSet, ProviderResourceId,
-    RepositoryCredentialRequest, RepositoryScope, WorkloadIdentity,
-};
-use automata_ci_scm::{RepositoryId, ScmProviderId};
+use automata_ci_core::PermissionLevel;
+use automata_ci_provider::{ProviderPermission, ProviderPermissionSet};
+use automata_ci_scm::credential::ProviderResourceId;
+use automata_ci_store::GithubRepositoryName;
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
     net::{TcpListener, TcpStream},
@@ -27,6 +26,7 @@ use super::{GithubAppCredentialBroker, github_http_client_builder};
 use crate::{
     GithubAppCredentialConfig, GithubAppHttpLimits, GithubInstallationId,
     GithubInstallationTokenIndeterminateReason, GithubInstallationTokenMintOutcome,
+    GithubInstallationTokenRequest,
 };
 
 const CLIENT_CONNECTION_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
@@ -223,21 +223,17 @@ fn private_key() -> SecretString {
     SecretString::new(pem).expect("published RSA test fixture is non-empty")
 }
 
-fn request() -> RepositoryCredentialRequest {
-    RepositoryCredentialRequest::new(
-        WorkloadIdentity::new("tenant/run-42/verify/attempt-1").expect("workload identity"),
-        RepositoryScope::new(
-            ScmProviderId::new("github").expect("provider ID"),
-            RepositoryId::new("automata-ci/automata").expect("repository ID"),
-            ProviderResourceId::new(REPOSITORY_ID.to_string()).expect("provider resource ID"),
-        ),
-        PermissionSet::new([(
-            PermissionName::new("contents").expect("permission name"),
-            PermissionLevel::Read,
-        )])
+fn request() -> GithubInstallationTokenRequest {
+    GithubInstallationTokenRequest::new(
+        REPOSITORY_ID,
+        GithubRepositoryName::new("automata-ci/automata").expect("repository name"),
+        ProviderPermissionSet::new([
+            ProviderPermission::new("contents", PermissionLevel::Read).expect("permission")
+        ])
         .expect("permission set"),
-        MinimumValidity::from_seconds(300).expect("minimum validity"),
+        300_000,
     )
+    .expect("installation-token request")
 }
 
 #[tokio::test]

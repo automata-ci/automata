@@ -194,7 +194,7 @@ impl GithubServerServiceCredentialBroker for GithubAppCredentialBroker {
                 GithubInstallationTokenError::new(GithubInstallationTokenErrorKind::InvalidRequest),
             );
         }
-        GithubAppCredentialBroker::mint_installation_once(self, request).await
+        GithubAppCredentialBroker::mint_once(self, request).await
     }
 
     async fn revoke(
