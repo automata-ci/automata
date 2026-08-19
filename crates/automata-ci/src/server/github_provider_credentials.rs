@@ -22,9 +22,7 @@ use automata_ci_credential_github::{
     PendingGithubServerServiceHandoffRelease, github_server_service_credential_request,
 };
 use automata_ci_github_delivery::{
-    GithubChecksCredentialProvider, GithubChecksCredentialProviderError,
-    GithubChecksCredentialRequest, GithubChecksServerServiceCredential, GithubResultCredential,
-    GithubResultCredentialProvider, GithubResultCredentialProviderError,
+    GithubResultCredential, GithubResultCredentialProvider, GithubResultCredentialProviderError,
     GithubResultCredentialRelease, GithubResultCredentialRequest, GithubResultOperation,
     GithubScheduleSourceCredential, GithubScheduleSourceCredentialProvider,
     GithubScheduleSourceCredentialProviderError, GithubScheduleSourceCredentialRequest,
@@ -37,13 +35,13 @@ use automata_ci_provider_github::{
     GithubHttpEndpoint, GithubWorkflowPermissionDefaults, GithubWorkflowPermissionDefaultsRequest,
 };
 use automata_ci_store::{
-    AcquireGithubServerServiceHandoff, GithubCheckSubjectIdentity, GithubProviderManifest,
-    GithubServerServiceAction, GithubServerServiceAuthorityId,
-    GithubServerServiceAuthorityIdentity, GithubServerServiceAuthorityRepository,
-    GithubServerServiceAuthoritySelector, GithubServerServiceAuthorityState,
-    GithubServerServiceClaimFence, GithubServerServiceConsumerClaim, GithubServerServiceConsumerId,
-    GithubServerServiceHandoffId, GithubServerServiceIssuanceKey, GithubServerServiceRevision,
-    GithubServerServiceScope, GithubServerServiceStoreError, GithubServerServiceWorkerId,
+    AcquireGithubServerServiceHandoff, GithubProviderManifest, GithubServerServiceAction,
+    GithubServerServiceAuthorityId, GithubServerServiceAuthorityIdentity,
+    GithubServerServiceAuthorityRepository, GithubServerServiceAuthoritySelector,
+    GithubServerServiceAuthorityState, GithubServerServiceClaimFence,
+    GithubServerServiceConsumerClaim, GithubServerServiceConsumerId, GithubServerServiceHandoffId,
+    GithubServerServiceIssuanceKey, GithubServerServiceRevision, GithubServerServiceScope,
+    GithubServerServiceStoreError, GithubServerServiceWorkerId,
     GithubWorkflowPermissionDefaultsObservationRepository,
     GithubWorkflowPermissionObservationCandidate, ReconcileGithubWorkflowPermissionHandoff,
     ReleaseGithubServerServiceHandoff, TenantScope, WorkflowDispatchSourceClaim,
@@ -963,7 +961,6 @@ impl fmt::Debug for SupervisedCredentialRelease {
 
 struct GithubProviderCredentialHandoff {
     selector: GithubServerServiceAuthoritySelector,
-    handoff_id: GithubServerServiceHandoffId,
     consumer: GithubServerServiceConsumerClaim,
     key: GithubServerServiceIssuanceKey,
     required_through: UnixMillis,
@@ -1024,7 +1021,6 @@ impl GithubProviderCredentialHandoffIssuer for ExactCredentialHandoffIssuer {
         };
         let binding = credential.binding();
         let selector = binding.selector().clone();
-        let handoff_id = binding.handoff_id();
         let consumer = binding.consumer();
         let key = binding.key();
         let binding_required_through = binding.required_through();
@@ -1045,7 +1041,6 @@ impl GithubProviderCredentialHandoffIssuer for ExactCredentialHandoffIssuer {
         };
         Ok(GithubProviderCredentialHandoff {
             selector,
-            handoff_id,
             consumer,
             key,
             required_through: binding_required_through,
@@ -1232,19 +1227,6 @@ impl GithubProviderCredentialAdapters {
         })
     }
 
-    #[cfg(test)]
-    fn with_durable_handoffs(
-        handoffs: Arc<dyn GithubProviderCredentialHandoffIssuer>,
-        authorities: &[GithubServerServiceAuthorityIdentity],
-        repository: Arc<dyn GithubProviderAuthorityLookup>,
-        routes: GithubProviderCredentialRequestResolver,
-    ) -> Result<Self, GithubProviderCredentialAdapterConfigurationError> {
-        let mut adapters = Self::with_handoffs(handoffs, authorities)?;
-        adapters.durable_authorities =
-            Some(DurableGithubProviderAuthorityResolver { repository, routes });
-        Ok(adapters)
-    }
-
     async fn authority(
         &self,
         selector: &GithubServerServiceAuthoritySelector,
@@ -1339,67 +1321,6 @@ impl GithubProviderCredentialAdapters {
             selector,
             canonical_request.repository().repository().clone(),
         ))
-    }
-
-    async fn acquire_checks(
-        &self,
-        context: ChecksCredentialContext,
-    ) -> Result<GithubChecksServerServiceCredential, GithubChecksCredentialProviderError> {
-        let authority = self
-            .authority(&context.selector, GithubServerServiceScope::ChecksWrite)
-            .await
-            .map_err(checks_handoff_error)?;
-        if !checks_identity_matches(&authority, &context.identity)
-            || context.consumer.action().required_scope() != GithubServerServiceScope::ChecksWrite
-        {
-            return Err(GithubChecksCredentialProviderError::Rejected);
-        }
-        let request = acquire_request(
-            context.selector.clone(),
-            context.consumer,
-            context.observed_at,
-            context.required_through,
-        )
-        .map_err(checks_handoff_error)?;
-        let handoff = self
-            .handoffs
-            .acquire(request)
-            .await
-            .map_err(checks_handoff_error)?;
-        if !handoff_matches(&handoff, &context) {
-            release_invalid_handoff(handoff).await;
-            return Err(GithubChecksCredentialProviderError::InvariantViolation);
-        }
-        let Ok(canonical_request) = github_server_service_credential_request(&authority) else {
-            release_invalid_handoff(handoff).await;
-            return Err(GithubChecksCredentialProviderError::InvariantViolation);
-        };
-        let repository = canonical_request.repository().repository().clone();
-        let drop_release_arm = handoff.drop_release_arm.clone();
-        let credential = GithubChecksServerServiceCredential::new(
-            handoff.selector,
-            handoff.handoff_id,
-            handoff.consumer,
-            handoff.required_through,
-            handoff.acquired_at,
-            context.identity.tenant().clone(),
-            context.identity.repository_id(),
-            context.identity.connection_id(),
-            context.identity.installation_id(),
-            context.identity.github_repository_id(),
-            context.identity.app_id(),
-            repository,
-            handoff.token,
-            handoff.usable_until,
-            handoff.release,
-        );
-        match credential {
-            Ok(credential) => {
-                arm_drop_release(drop_release_arm);
-                Ok(credential)
-            }
-            Err(_) => Err(GithubChecksCredentialProviderError::InvariantViolation),
-        }
     }
 
     async fn acquire_common_result(
@@ -1992,26 +1913,6 @@ impl fmt::Debug for GithubProviderCredentialAdapters {
     }
 }
 
-#[async_trait]
-impl GithubChecksCredentialProvider for GithubProviderCredentialAdapters {
-    async fn acquire(
-        &self,
-        request: GithubChecksCredentialRequest<'_>,
-    ) -> Result<GithubChecksServerServiceCredential, GithubChecksCredentialProviderError> {
-        let consumer = request
-            .consumer_claim()
-            .map_err(|_| GithubChecksCredentialProviderError::InvariantViolation)?;
-        self.acquire_checks(ChecksCredentialContext {
-            identity: request.identity().clone(),
-            selector: request.authority_selector().clone(),
-            consumer,
-            observed_at: request.observed_at(),
-            required_through: request.required_through(),
-        })
-        .await
-    }
-}
-
 struct CommonResultCredentialRelease {
     inner: Box<dyn GithubServerServiceCredentialRelease>,
 }
@@ -2082,14 +1983,6 @@ impl GithubScheduleSourceCredentialProvider for GithubProviderCredentialAdapters
     }
 }
 
-struct ChecksCredentialContext {
-    identity: GithubCheckSubjectIdentity,
-    selector: GithubServerServiceAuthoritySelector,
-    consumer: GithubServerServiceConsumerClaim,
-    observed_at: UnixMillis,
-    required_through: UnixMillis,
-}
-
 fn acquire_request(
     selector: GithubServerServiceAuthoritySelector,
     consumer: GithubServerServiceConsumerClaim,
@@ -2108,19 +2001,6 @@ fn acquire_request(
     .map_err(|_| GithubProviderCredentialHandoffError::Inconsistent)
 }
 
-fn checks_identity_matches(
-    authority: &GithubServerServiceAuthorityIdentity,
-    identity: &GithubCheckSubjectIdentity,
-) -> bool {
-    authority.tenant() == identity.tenant()
-        && authority.repository_id() == identity.repository_id()
-        && authority.connection_id() == identity.connection_id()
-        && authority.installation_id() == identity.installation_id()
-        && authority.github_repository_id() == identity.github_repository_id()
-        && authority.github_repository_name() == identity.github_repository_name()
-        && authority.github_app_id().get() == identity.app_id().get()
-}
-
 fn schedule_identity_matches(
     authority: &GithubServerServiceAuthorityIdentity,
     manifest: &GithubProviderManifest,
@@ -2137,18 +2017,6 @@ fn schedule_identity_matches(
         && authority.app_key_spki_sha256() == manifest.app_key_spki_sha256()
         && authority.app_configuration_revision() == manifest.app_configuration_revision()
         && authority.policy_revision() == manifest.policy_revision()
-}
-
-fn handoff_matches(
-    handoff: &GithubProviderCredentialHandoff,
-    context: &ChecksCredentialContext,
-) -> bool {
-    handoff.selector == context.selector
-        && handoff.consumer == context.consumer
-        && handoff.key.authority_id() == context.selector.authority_id()
-        && handoff.required_through == context.required_through
-        && handoff.acquired_at == context.observed_at
-        && handoff.usable_until > context.required_through
 }
 
 fn schedule_handoff_matches(
@@ -2275,22 +2143,6 @@ const fn common_trigger_handoff_error(
         }
         GithubProviderCredentialHandoffError::Inconsistent => {
             GithubTriggerCredentialProviderError::InvariantViolation
-        }
-    }
-}
-
-const fn checks_handoff_error(
-    error: GithubProviderCredentialHandoffError,
-) -> GithubChecksCredentialProviderError {
-    match error {
-        GithubProviderCredentialHandoffError::Unavailable => {
-            GithubChecksCredentialProviderError::Unavailable
-        }
-        GithubProviderCredentialHandoffError::Rejected => {
-            GithubChecksCredentialProviderError::Rejected
-        }
-        GithubProviderCredentialHandoffError::Inconsistent => {
-            GithubChecksCredentialProviderError::InvariantViolation
         }
     }
 }

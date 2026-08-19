@@ -6,7 +6,6 @@ use std::{
     time::Duration,
 };
 
-use automata_ci_core::GitObjectId;
 use automata_ci_core::{
     Architecture, EnvironmentProfile, EnvironmentProfileId, JobResourceAllocation,
     JobResourcePolicy, OperatingSystem, ResourceCapacity, RunnerLabel,
@@ -21,8 +20,7 @@ use automata_ci_store::{
     BootstrapGithubProviderRepository, ClaimNextGithubServerServiceMaintenance,
     FinishGithubServerServiceMint, FinishGithubServerServiceRevocation,
     GITHUB_PROVIDER_RUNNER_POLICY_MEDIA_TYPE, GITHUB_SERVICE_SAFE_ERASE_SKEW_MILLIS,
-    GITHUB_SERVICE_TOKEN_LIFETIME_MILLIS, GithubCheckAppId, GithubCheckName,
-    GithubCheckSubjectIdentity, GithubCheckSubjectKey, GithubProviderGitRef,
+    GITHUB_SERVICE_TOKEN_LIFETIME_MILLIS, GithubCheckName, GithubProviderGitRef,
     GithubProviderManifest, GithubProviderManifestLimits, GithubProviderManifestRevision,
     GithubProviderOrigins, GithubProviderRunnerPolicyObject,
     GithubProviderWebhookVerifierFingerprint, GithubProviderWorkflowSelection,
@@ -37,7 +35,7 @@ use automata_ci_store::{
     GithubServerServiceJwtIssuer, GithubServerServiceMaintenanceOutcome,
     GithubServerServiceRevision, GithubServerServiceScope, GithubServerServiceStoreError,
     GithubServerServiceWorkerId, ObjectKey, ProtectedGithubServerServiceCredential,
-    ProviderDeliveryId, ProviderInstallationId, ProviderRepositoryId, ProviderRepositoryOwnerId,
+    ProviderInstallationId, ProviderRepositoryId, ProviderRepositoryOwnerId,
     ProviderRepositoryVisibility, QuarantineGithubServerServiceCredential,
     RegisterWorkflowRuntimePolicy, ReleaseGithubServerServiceHandoff, RepositoryId, Sha256Digest,
     TenantScope, WorkflowPermissionPolicy, WorkflowRunnerFeaturePolicy, WorkflowRuntimePolicy,
@@ -107,11 +105,6 @@ const REQUIRED_THROUGH: i64 = 2_000;
 enum FakeHandoffMode {
     Exact,
     Rejected,
-    WrongSelector,
-    WrongConsumer,
-    WrongHorizon,
-    WrongAcquiredAt,
-    WrongIssuanceAuthority,
 }
 
 struct FakeHandoffs {
@@ -162,54 +155,15 @@ impl GithubProviderCredentialHandoffIssuer for FakeHandoffs {
         if self.mode == FakeHandoffMode::Rejected {
             return Err(GithubProviderCredentialHandoffError::Rejected);
         }
-        let selector = if self.mode == FakeHandoffMode::WrongSelector {
-            GithubServerServiceAuthoritySelector::from_durable_parts(
-                request.selector().tenant().clone(),
-                authority_id(0xff),
-                request.selector().identity_digest(),
-                request.selector().app_configuration_revision(),
-                request.selector().policy_revision(),
-            )
-        } else {
-            request.selector().clone()
-        };
-        let requested_consumer = request.consumer();
-        let consumer = if self.mode == FakeHandoffMode::WrongConsumer {
-            GithubServerServiceConsumerClaim::new(
-                requested_consumer.consumer_id(),
-                requested_consumer.owner(),
-                requested_consumer.fence(),
-                requested_consumer.action(),
-                GithubServerServiceRevision::new(requested_consumer.revision().get() + 1)
-                    .expect("different revision"),
-            )
-        } else {
-            requested_consumer
-        };
-        let key_authority = if self.mode == FakeHandoffMode::WrongIssuanceAuthority {
-            authority_id(0xfe)
-        } else {
-            request.authority_id()
-        };
         Ok(GithubProviderCredentialHandoff {
-            selector,
-            handoff_id: GithubServerServiceHandoffId::from_uuid(Uuid::from_u128(0x70))
-                .expect("handoff ID"),
-            consumer,
+            selector: request.selector().clone(),
+            consumer: request.consumer(),
             key: GithubServerServiceIssuanceKey::new(
-                key_authority,
+                request.authority_id(),
                 GithubServerServiceGeneration::new(1).expect("generation"),
             ),
-            required_through: if self.mode == FakeHandoffMode::WrongHorizon {
-                UnixMillis::new(request.required_through().get() + 1)
-            } else {
-                request.required_through()
-            },
-            acquired_at: if self.mode == FakeHandoffMode::WrongAcquiredAt {
-                UnixMillis::new(request.observed_at().get() + 1)
-            } else {
-                request.observed_at()
-            },
+            required_through: request.required_through(),
+            acquired_at: request.observed_at(),
             usable_until: UnixMillis::new(request.required_through().get() + 10_000),
             token: SecretString::new("github-provider-adapter-test-token")
                 .expect("fixture credential"),
@@ -218,61 +172,6 @@ impl GithubProviderCredentialHandoffIssuer for FakeHandoffs {
             }),
             drop_release_arm: None,
         })
-    }
-}
-
-struct FakeAuthorityLookup {
-    descriptors: Mutex<
-        BTreeMap<
-            GithubServerServiceAuthorityId,
-            automata_ci_store::GithubServerServiceAuthorityDescriptor,
-        >,
-    >,
-    calls: AtomicUsize,
-}
-
-impl FakeAuthorityLookup {
-    fn new(
-        descriptors: impl IntoIterator<Item = automata_ci_store::GithubServerServiceAuthorityDescriptor>,
-    ) -> Self {
-        Self {
-            descriptors: Mutex::new(
-                descriptors
-                    .into_iter()
-                    .map(|descriptor| (descriptor.identity().authority_id(), descriptor))
-                    .collect(),
-            ),
-            calls: AtomicUsize::new(0),
-        }
-    }
-}
-
-impl fmt::Debug for FakeAuthorityLookup {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("FakeAuthorityLookup")
-            .field("descriptors", &"[AUTHORITY DESCRIPTORS]")
-            .field("calls", &self.calls.load(Ordering::SeqCst))
-            .finish()
-    }
-}
-
-#[async_trait]
-impl GithubProviderAuthorityLookup for FakeAuthorityLookup {
-    async fn inspect(
-        &self,
-        selector: &GithubServerServiceAuthoritySelector,
-    ) -> Result<
-        automata_ci_store::GithubServerServiceAuthorityDescriptor,
-        GithubServerServiceStoreError,
-    > {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        self.descriptors
-            .lock()
-            .expect("descriptor lock")
-            .get(&selector.authority_id())
-            .cloned()
-            .ok_or(GithubServerServiceStoreError::NotFound)
     }
 }
 
@@ -528,65 +427,6 @@ fn authority(scope: GithubServerServiceScope, id: u128) -> GithubServerServiceAu
     .expect("authority")
 }
 
-fn historical_authority(
-    current: &GithubServerServiceAuthorityIdentity,
-    id: u128,
-    app_key_spki_sha256: Sha256Digest,
-) -> GithubServerServiceAuthorityIdentity {
-    historical_authority_with_fingerprint(
-        current,
-        id,
-        app_key_spki_sha256,
-        current.configuration_fingerprint(),
-    )
-}
-
-fn historical_authority_with_fingerprint(
-    current: &GithubServerServiceAuthorityIdentity,
-    id: u128,
-    app_key_spki_sha256: Sha256Digest,
-    configuration_fingerprint: Sha256Digest,
-) -> GithubServerServiceAuthorityIdentity {
-    GithubServerServiceAuthorityIdentity::new(
-        current.tenant().clone(),
-        authority_id(id),
-        current.repository_id(),
-        current.connection_id(),
-        current.installation_id(),
-        current.github_app_id(),
-        current.github_repository_id(),
-        current.github_repository_name().clone(),
-        current.scope(),
-        current.app_client_id().clone(),
-        current.jwt_issuer(),
-        app_key_spki_sha256,
-        GithubServerServiceRevision::new(2).expect("historical App revision"),
-        GithubServerServiceRevision::new(4).expect("historical policy revision"),
-        configuration_fingerprint,
-    )
-    .expect("historical authority")
-}
-
-fn authority_descriptor(
-    identity: GithubServerServiceAuthorityIdentity,
-    state: GithubServerServiceAuthorityState,
-) -> automata_ci_store::GithubServerServiceAuthorityDescriptor {
-    automata_ci_store::GithubServerServiceAuthorityDescriptor::from_durable_parts(
-        identity,
-        state,
-        None,
-        None,
-        GithubServerServiceGeneration::new(1).expect("next generation"),
-        0,
-        None,
-        None,
-        None,
-        UnixMillis::new(0),
-        UnixMillis::new(0),
-    )
-    .expect("authority descriptor")
-}
-
 fn schedule_manifest(visibility: ProviderRepositoryVisibility) -> GithubProviderManifest {
     let policy = test_runtime_policy();
     let runner_policy_digest = policy.canonical_digest();
@@ -791,69 +631,6 @@ async fn concrete_release_handoff(
     .expect("concrete handoff")
 }
 
-#[derive(Clone, Copy)]
-enum ChecksIdentityDrift {
-    Exact,
-    Tenant,
-    InternalRepository,
-    Connection,
-    Installation,
-    ProviderRepository,
-    RepositoryName,
-    App,
-}
-
-fn checks_identity(drift: ChecksIdentityDrift) -> GithubCheckSubjectIdentity {
-    GithubCheckSubjectIdentity::new(
-        if matches!(drift, ChecksIdentityDrift::Tenant) {
-            TenantScope::from_authenticated_tenant_id("other-tenant").expect("other tenant")
-        } else {
-            tenant()
-        },
-        if matches!(drift, ChecksIdentityDrift::InternalRepository) {
-            RepositoryId::from_uuid(Uuid::from_u128(0x31))
-        } else {
-            repository_id()
-        },
-        ProviderDeliveryId::from_uuid(Uuid::from_u128(0x40)).expect("delivery ID"),
-        GithubCheckSubjectKey::new(".ci/workflows/ci.yml").expect("subject key"),
-        if matches!(drift, ChecksIdentityDrift::Connection) {
-            ProviderConnectionId::from_uuid(Uuid::from_u128(0x21)).expect("other connection")
-        } else {
-            connection_id()
-        },
-        ProviderInstallationId::new(if matches!(drift, ChecksIdentityDrift::Installation) {
-            12
-        } else {
-            11
-        })
-        .expect("installation ID"),
-        ProviderRepositoryId::new(
-            if matches!(drift, ChecksIdentityDrift::ProviderRepository) {
-                14
-            } else {
-                13
-            },
-        )
-        .expect("provider repository ID"),
-        GithubRepositoryName::new(if matches!(drift, ChecksIdentityDrift::RepositoryName) {
-            "automata-ci/other"
-        } else {
-            "automata-ci/automata"
-        })
-        .expect("repository name"),
-        GithubCheckAppId::new(if matches!(drift, ChecksIdentityDrift::App) {
-            18
-        } else {
-            17
-        })
-        .expect("App ID"),
-        GitObjectId::from_durable_bytes(&[0x11; 20]).expect("head SHA"),
-        GithubCheckName::new("Automata CI").expect("Check name"),
-    )
-    .expect("Checks identity")
-}
-
 fn consumer(action: GithubServerServiceAction) -> GithubServerServiceConsumerClaim {
     GithubServerServiceConsumerClaim::new(
         GithubServerServiceConsumerId::from_uuid(Uuid::from_u128(0x50)).expect("consumer ID"),
@@ -864,16 +641,6 @@ fn consumer(action: GithubServerServiceAction) -> GithubServerServiceConsumerCla
     )
 }
 
-fn checks_context(authority: &GithubServerServiceAuthorityIdentity) -> ChecksCredentialContext {
-    ChecksCredentialContext {
-        identity: checks_identity(ChecksIdentityDrift::Exact),
-        selector: GithubServerServiceAuthoritySelector::from_identity(authority),
-        consumer: consumer(GithubServerServiceAction::CreateCheckRun),
-        observed_at: UnixMillis::new(OBSERVED_AT),
-        required_through: UnixMillis::new(REQUIRED_THROUGH),
-    }
-}
-
 fn adapters(
     handoffs: Arc<FakeHandoffs>,
     authorities: &[GithubServerServiceAuthorityIdentity],
@@ -881,21 +648,14 @@ fn adapters(
     GithubProviderCredentialAdapters::with_handoffs(handoffs, authorities).expect("adapters")
 }
 
-fn durable_adapters(
-    handoffs: Arc<FakeHandoffs>,
-    authorities: &[GithubServerServiceAuthorityIdentity],
-    lookup: Arc<FakeAuthorityLookup>,
-) -> GithubProviderCredentialAdapters {
-    let lookup: Arc<dyn GithubProviderAuthorityLookup> = lookup;
-    let routes =
-        GithubProviderCredentialRequestResolver::new(authorities).expect("strict durable routes");
-    GithubProviderCredentialAdapters::with_durable_handoffs(handoffs, authorities, lookup, routes)
-        .expect("durable adapters")
-}
-
 #[test]
 fn registry_is_bounded_unique_and_implements_live_provider_ports() {
-    fn assert_ports<T: GithubChecksCredentialProvider + GithubScheduleSourceCredentialProvider>() {}
+    fn assert_ports<
+        T: GithubResultCredentialProvider
+            + GithubTriggerCredentialProvider
+            + GithubScheduleSourceCredentialProvider,
+    >() {
+    }
     assert_ports::<GithubProviderCredentialAdapters>();
 
     let checks = authority(GithubServerServiceScope::ChecksWrite, 0x60);
@@ -1046,112 +806,6 @@ async fn scheduled_discovery_uses_its_own_oidc_consumer_action_for_every_visibil
         request.consumer().action() == GithubServerServiceAction::DiscoverRepositorySchedules
             && request.consumer().action() != GithubServerServiceAction::FetchRepositoryRevision
     }));
-}
-
-#[tokio::test]
-async fn full_checks_coordinates_are_rejected_before_handoff_io() {
-    let checks = authority(GithubServerServiceScope::ChecksWrite, 0x60);
-    let fake = Arc::new(FakeHandoffs::new(FakeHandoffMode::Exact));
-    let adapters = adapters(Arc::clone(&fake), std::slice::from_ref(&checks));
-    for drift in [
-        ChecksIdentityDrift::Tenant,
-        ChecksIdentityDrift::InternalRepository,
-        ChecksIdentityDrift::Connection,
-        ChecksIdentityDrift::Installation,
-        ChecksIdentityDrift::ProviderRepository,
-        ChecksIdentityDrift::RepositoryName,
-        ChecksIdentityDrift::App,
-    ] {
-        let mut context = checks_context(&checks);
-        context.identity = checks_identity(drift);
-        assert_eq!(
-            adapters
-                .acquire_checks(context)
-                .await
-                .expect_err("reject coordinate drift"),
-            GithubChecksCredentialProviderError::Rejected
-        );
-    }
-    let mut changed_selector = checks_context(&checks);
-    changed_selector.selector = GithubServerServiceAuthoritySelector::from_durable_parts(
-        tenant(),
-        checks.authority_id(),
-        Sha256Digest::from_bytes([0x7f; 32]),
-        checks.app_configuration_revision(),
-        checks.policy_revision(),
-    );
-    assert_eq!(
-        adapters
-            .acquire_checks(changed_selector)
-            .await
-            .expect_err("reject selector drift"),
-        GithubChecksCredentialProviderError::Rejected
-    );
-    assert_eq!(fake.calls.load(Ordering::SeqCst), 0);
-}
-
-#[tokio::test]
-async fn retired_unknown_and_route_drifted_authorities_never_enter_handoff_io() {
-    let current = authority(GithubServerServiceScope::ChecksWrite, 0x60);
-    let retired = historical_authority(&current, 0x62, current.app_key_spki_sha256());
-    let drifted = historical_authority(&current, 0x63, Sha256Digest::from_bytes([0x77; 32]));
-    let fingerprint_drifted = historical_authority_with_fingerprint(
-        &current,
-        0x65,
-        current.app_key_spki_sha256(),
-        Sha256Digest::from_bytes([0x78; 32]),
-    );
-    let lookup = Arc::new(FakeAuthorityLookup::new([
-        authority_descriptor(retired.clone(), GithubServerServiceAuthorityState::Retired),
-        authority_descriptor(drifted.clone(), GithubServerServiceAuthorityState::Active),
-        authority_descriptor(
-            fingerprint_drifted.clone(),
-            GithubServerServiceAuthorityState::Active,
-        ),
-    ]));
-    let handoffs = Arc::new(FakeHandoffs::new(FakeHandoffMode::Exact));
-    let adapters = durable_adapters(
-        Arc::clone(&handoffs),
-        std::slice::from_ref(&current),
-        Arc::clone(&lookup),
-    );
-    let unknown = historical_authority(&current, 0x64, current.app_key_spki_sha256());
-
-    for rejected in [&retired, &drifted, &fingerprint_drifted, &unknown] {
-        assert_eq!(
-            adapters
-                .acquire_checks(checks_context(rejected))
-                .await
-                .expect_err("historical route must fail closed"),
-            GithubChecksCredentialProviderError::Rejected
-        );
-    }
-    assert_eq!(lookup.calls.load(Ordering::SeqCst), 4);
-    assert_eq!(handoffs.calls.load(Ordering::SeqCst), 0);
-}
-
-#[tokio::test]
-async fn inconsistent_returned_binding_is_released_and_never_delivered() {
-    let checks = authority(GithubServerServiceScope::ChecksWrite, 0x60);
-    for mode in [
-        FakeHandoffMode::WrongSelector,
-        FakeHandoffMode::WrongConsumer,
-        FakeHandoffMode::WrongHorizon,
-        FakeHandoffMode::WrongAcquiredAt,
-        FakeHandoffMode::WrongIssuanceAuthority,
-    ] {
-        let fake = Arc::new(FakeHandoffs::new(mode));
-        let adapters = adapters(Arc::clone(&fake), std::slice::from_ref(&checks));
-        assert_eq!(
-            adapters
-                .acquire_checks(checks_context(&checks))
-                .await
-                .expect_err("inconsistent handoff"),
-            GithubChecksCredentialProviderError::InvariantViolation
-        );
-        assert_eq!(fake.calls.load(Ordering::SeqCst), 1);
-        assert_eq!(fake.releases.load(Ordering::SeqCst), 1);
-    }
 }
 
 #[tokio::test]
