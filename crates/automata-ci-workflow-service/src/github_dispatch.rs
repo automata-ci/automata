@@ -650,7 +650,8 @@ impl GithubWorkflowDispatchEvidence {
             && self.document.repository.name == request.repository().name()
             && self.document.workflow.path == request.workflow_path()
             && self.document.workflow.git_ref == request.git_ref()
-            && self.document.workflow.commit_sha == request.commit_sha()
+            && self.document.workflow.commit_sha == request.source_revision()
+            && self.document.workflow.commit_sha == request.execution_revision()
             && matches!(
                 request.idempotency(),
                 WorkflowAdmissionIdempotency::Operation(operation_id)

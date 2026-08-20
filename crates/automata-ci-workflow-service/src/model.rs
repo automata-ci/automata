@@ -155,7 +155,8 @@ pub struct WorkflowAdmissionRequest {
     base_context: JobRuntimeContext,
     trust_snapshot: TrustSnapshot,
     idempotency: WorkflowAdmissionIdempotency,
-    commit_sha: GitObjectId,
+    source_revision: GitObjectId,
+    execution_revision: GitObjectId,
     git_ref: String,
     workflow_name: String,
     actor: Option<String>,
@@ -184,7 +185,7 @@ impl WorkflowAdmissionRequest {
         plan: WorkflowPlan,
         base_context: JobRuntimeContext,
         idempotency: WorkflowAdmissionIdempotency,
-        commit_sha: GitObjectId,
+        source_revision: GitObjectId,
     ) -> WorkflowAdmissionRequestBuilder {
         WorkflowAdmissionRequestBuilder {
             request: Self {
@@ -199,7 +200,8 @@ impl WorkflowAdmissionRequest {
                 base_context,
                 trust_snapshot: TrustSnapshot::deny_all_unclassified(),
                 idempotency,
-                commit_sha,
+                source_revision,
+                execution_revision: source_revision,
                 git_ref: String::new(),
                 workflow_name: String::new(),
                 actor: None,
@@ -281,9 +283,18 @@ impl WorkflowAdmissionRequest {
     }
 
     #[must_use]
-    /// Returns the canonical source commit identifier.
-    pub const fn commit_sha(&self) -> GitObjectId {
-        self.commit_sha
+    /// Returns the immutable revision containing the admitted workflow source.
+    pub const fn source_revision(&self) -> GitObjectId {
+        self.source_revision
+    }
+
+    /// Returns the immutable revision executed by the workflow run.
+    ///
+    /// Pull-request events can execute a provider-created merge revision while
+    /// loading the workflow definition from the pull-request head revision.
+    #[must_use]
+    pub const fn execution_revision(&self) -> GitObjectId {
+        self.execution_revision
     }
 
     #[must_use]
@@ -330,6 +341,13 @@ impl WorkflowAdmissionRequest {
 }
 
 impl WorkflowAdmissionRequestBuilder {
+    /// Binds the immutable revision executed by the workflow run.
+    #[must_use]
+    pub const fn execution_revision(mut self, execution_revision: GitObjectId) -> Self {
+        self.request.execution_revision = execution_revision;
+        self
+    }
+
     /// Binds the pure trust-policy result derived from authenticated event facts.
     #[must_use]
     pub fn trust_snapshot(mut self, trust_snapshot: TrustSnapshot) -> Self {
@@ -555,13 +573,13 @@ fn validate_plan_provenance(
     if plan.source().provider() != request.repository.provider()
         || plan.event().provider() != request.repository.provider()
         || repository != expected_repository
-        || *revision != request.commit_sha()
+        || *revision != request.source_revision()
         || path != request.workflow_path()
         || plan.source().source_id() != request.workflow_path()
         || plan
             .event()
             .commit_sha()
-            .is_some_and(|sha| sha != request.commit_sha())
+            .is_some_and(|sha| sha != request.execution_revision())
         || plan
             .event()
             .git_ref()

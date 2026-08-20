@@ -76,8 +76,13 @@ workflow YAML + event
         |
  fenced activation and matrix expansion
         |
-       JobIR
+JobIR
 ```
+
+Workflow source provenance and execution provenance are independent evidence.
+For pull requests, the workflow file is loaded from the head revision while
+the run may execute GitHub's synthetic merge revision; admission retains and
+validates both rather than treating the merge revision as the workflow source.
 
 `WorkflowFrontend` parses and validates the GitHub dialect. The compiler lowers
 it with event provenance into logical state. Activation evaluates the

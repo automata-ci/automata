@@ -33,6 +33,22 @@ use automata_ci_workflow_service::{
 };
 use bytes::Bytes;
 
+#[test]
+fn pull_request_admission_accepts_a_provider_merge_revision() {
+    let request = support::pull_request_with_merge_revision("pull-request-merge");
+
+    assert_ne!(request.source_revision(), request.execution_revision());
+    assert!(matches!(
+        request.plan().source().origin(),
+        automata_ci_core::PlanSourceOrigin::Repository { revision, .. }
+            if *revision == request.source_revision()
+    ));
+    assert_eq!(
+        request.plan().event().commit_sha(),
+        Some(request.execution_revision())
+    );
+}
+
 #[tokio::test]
 async fn run_name_is_evaluated_once_and_is_identical_on_replay() {
     let request = run_name_request(
@@ -171,8 +187,9 @@ async fn human_projection_is_bound_into_the_logical_admission() {
         original.plan().clone(),
         original.base_context().clone(),
         original.idempotency().clone(),
-        original.commit_sha(),
+        original.source_revision(),
     )
+    .execution_revision(original.execution_revision())
     .git_ref(original.git_ref())
     .workflow_name(original.workflow_name())
     .actor("octocat")
@@ -615,8 +632,9 @@ fn try_rebuild_with_base(
         original.plan().clone(),
         base_context,
         original.idempotency().clone(),
-        original.commit_sha(),
+        original.source_revision(),
     )
+    .execution_revision(original.execution_revision())
     .git_ref(original.git_ref())
     .workflow_name(original.workflow_name())
     .actor(original.actor().expect("fixture actor"))

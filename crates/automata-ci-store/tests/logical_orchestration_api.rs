@@ -113,6 +113,15 @@ fn command(
 }
 
 fn trust_snapshot(repository_id: &str, git_ref: &str, revision: &str) -> TrustSnapshot {
+    trust_snapshot_with_revisions(repository_id, git_ref, revision, revision)
+}
+
+fn trust_snapshot_with_revisions(
+    repository_id: &str,
+    git_ref: &str,
+    source_revision: &str,
+    execution_revision: &str,
+) -> TrustSnapshot {
     let actor = TrustActorEvidence::new(
         "provider-actor-17",
         TrustActorKind::User,
@@ -128,7 +137,7 @@ fn trust_snapshot(repository_id: &str, git_ref: &str, revision: &str) -> TrustSn
                 .with_triggering_actor(actor)
                 .with_repositories(repository.clone(), repository)
                 .with_refs(git_ref, git_ref, git_ref)
-                .with_revisions(revision, revision, revision)
+                .with_revisions(source_revision, source_revision, execution_revision)
                 .with_fork(false)
                 .with_token_recursion(TrustTokenRecursion::Suppressed),
         )

@@ -243,7 +243,8 @@ fn project_github_logical_job(
 ) -> Result<ProjectedGithubLogicalJob, LogicalJobProjectionError> {
     let plan = request.job.plan();
     reject_unsupported_semantics(request.job)?;
-    validate_plan_execution(plan, &request.execution)?;
+    let trust_snapshot = required_trust_snapshot(request.trust_snapshot, request.instance)?;
+    validate_plan_execution(plan, &request.execution, trust_snapshot)?;
     if request.instance.identity().logical_job_key() != request.job.key().value().as_str() {
         return Err(LogicalJobProjectionError::InstanceJobMismatch);
     }
@@ -251,7 +252,6 @@ fn project_github_logical_job(
     let LogicalJobKind::Steps(step_job) = request.job.execution() else {
         unreachable!("unsupported reusable jobs were rejected above");
     };
-    let trust_snapshot = required_trust_snapshot(request.trust_snapshot, request.instance)?;
     let runner = request
         .instance
         .runner()
@@ -599,6 +599,7 @@ fn literal_value_template(value: &ValueTemplate) -> Option<&str> {
 fn validate_plan_execution(
     plan: &automata_ci_core::WorkflowPlan,
     execution: &JobExecutionContext,
+    trust_snapshot: &TrustSnapshot,
 ) -> Result<(), LogicalJobProjectionError> {
     if plan.source().provider() != "github" || plan.event().provider() != "github" {
         return Err(LogicalJobProjectionError::ProviderMismatch);
@@ -616,8 +617,11 @@ fn validate_plan_execution(
     let PlanSourceOrigin::Repository { revision, .. } = plan.source().origin() else {
         return Err(LogicalJobProjectionError::NonRepositorySource);
     };
-    if let Some(commit_sha) = plan.event().commit_sha()
-        && commit_sha != *revision
+    let evidence = trust_snapshot.evidence();
+    let source_revision = revision.to_string();
+    let event_revision = plan.event().commit_sha().map(|value| value.to_string());
+    if evidence.source_revision() != Some(source_revision.as_str())
+        || event_revision.as_deref() != evidence.execution_revision()
     {
         return Err(LogicalJobProjectionError::ExecutionProvenanceMismatch);
     }

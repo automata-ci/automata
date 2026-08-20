@@ -593,6 +593,9 @@ fn admission_request(
     .map_err(|_| ProviderWorkflowApplicationError::InvalidEvidence)?;
     let event = ActionsProviderEventDocument::from_normalized_trigger(trigger)
         .map_err(|_| ProviderWorkflowApplicationError::InvalidEvidence)?;
+    let execution_revision = trigger
+        .workflow_execution_revision()
+        .unwrap_or(*request.source.revision());
     let mut builder = WorkflowAdmissionRequest::builder(
         tenant,
         coordinates,
@@ -604,6 +607,7 @@ fn admission_request(
         idempotency,
         *request.source.revision(),
     )
+    .execution_revision(execution_revision)
     .raw_event_digest(request.delivery.evidence().raw_body().digest())
     .trust_snapshot(request.trust.clone())
     .git_ref(request.execution_ref.full())
@@ -623,6 +627,12 @@ fn event_provenance(
     // `github` is the current durable identifier of the Actions-compatible
     // source/event dialect. Host-provider identity is stored separately in
     // admission repository and common delivery evidence.
+    let execution_revision = request
+        .delivery
+        .trigger()
+        .trigger()
+        .workflow_execution_revision()
+        .unwrap_or(*request.source.revision());
     WorkflowEventProvenance::new("github", event_name)
         .with_delivery_id(
             request
@@ -632,7 +642,7 @@ fn event_provenance(
                 .external_id()
                 .as_str(),
         )
-        .with_commit_sha(*request.source.revision())
+        .with_commit_sha(execution_revision)
         .with_git_ref(request.execution_ref.full())
 }
 
