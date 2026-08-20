@@ -64,7 +64,12 @@ and rejects an owned orphan or ambiguous identity. It never performs global
 prune. Corrupt records, non-contiguous sequences, reparse traversal, reserved
 DOS names, ownership drift, and lifecycle ambiguity fail closed.
 
-This is a component implementation, not production acceptance. The current
-direct CLI boundary must be replaced or confined by the least-privilege broker,
-independent watchdog, signed-image pipeline, and physical Windows host gates in
-the [Windows runner isolation plan](../../docs/platforms/windows.md).
+This is a component implementation, not production acceptance. Privileged
+broker code is deliberately not part of this runner adapter: the adapter links
+only `automata-ci-windows-broker-protocol`, while lifecycle/grant/watchdog and
+durable-ledger ownership live in `automata-ci-windows-broker` and the fixed HCS
+implementation lives in `automata-ci-windows-broker-hcs`. Product IPC/service
+composition is still absent, so the current direct CLI path remains limited to
+profile admission and offline component work. The remaining signed-image and
+physical Windows host gates are tracked in the
+[Windows runner isolation plan](../../docs/platforms/windows.md).

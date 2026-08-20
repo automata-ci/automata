@@ -5,7 +5,9 @@ use automata_ci_execution::{
     SandboxHandle,
 };
 
-use crate::{WINDOWS_HYPERV_PROVIDER_ID, error};
+use automata_ci_windows_broker_protocol::WINDOWS_HYPERV_PROVIDER_ID;
+
+use crate::error;
 
 const HANDLE_VERSION: &str = "wh2";
 

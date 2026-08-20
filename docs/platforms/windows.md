@@ -158,6 +158,35 @@ must place that authority behind a narrow broker, or prove an equivalently
 restricted engine service identity and API surface, before hostile jobs are
 admitted.
 
+The broker component is split across explicit trust boundaries. The
+runner-side `automata-ci-sandbox-windows` adapter links only the bounded
+`automata-ci-windows-broker-protocol` request/consumer contract. Privileged
+grant verification, lifecycle policy, reconciliation, watchdog supervision,
+and the abstract durable/host-compute ports live in
+`automata-ci-windows-broker`; its file-ledger implementation is a separate
+module. Replay payloads use a separate protected result-store port backed by
+authenticated encryption; the JSON lifecycle ledger contains only operation
+metadata and opaque protected-content references. The fixed named-pipe
+HCS/container-engine implementation is isolated in
+`automata-ci-windows-broker-hcs`. The sandbox adapter does not link either
+privileged implementation crate, and neither raw engine endpoints nor HCS
+documents cross the runner boundary. The HCS adapter invokes only the immutable
+in-image guest executable in one-request standard-I/O mode; literal workload
+argv, environment, exec, and copy semantics stay inside the bounded guest
+protocol. On Windows the guest places the workload in a nested Job Object with
+the admitted process ceiling and terminates the whole tree on timeout.
+Successful exec and copy outcomes are protected before the lifecycle ledger
+adopts their reference. Startup authenticates all retained objects; missing or
+altered content fails closed. Metadata admission uses the shared endpoint
+operation budget, while protected byte capacity is reserved before host
+mutation. A durable response acknowledgement replaces the replay reference
+with a non-replayable tombstone and reclaims the object, including restart-safe
+completion of interrupted garbage collection. Response-loss retries before
+that acknowledgement replay without a second host mutation, and conflicting
+operation-ID reuse is rejected. Service IPC, identity/ACL composition, and
+product installation remain future gates, so this split is component code,
+not a claim that hostile Windows workloads can run.
+
 The current source tree now also has a provider-neutral lease-authority
 extension boundary. Before scheduling, protocol 3 carries a bounded canonical
 contribution bundle which registered control-side extensions validate and

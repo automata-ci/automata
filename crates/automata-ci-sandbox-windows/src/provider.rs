@@ -20,13 +20,16 @@ use automata_ci_execution::{
     SandboxLaunch, SandboxPrivilegePolicy, SandboxProvider, SandboxRecord, SandboxSpec,
     SandboxState, Sha256Digest, TargetPath, TargetPlatform,
 };
+use automata_ci_windows_broker_protocol::{
+    WINDOWS_HYPERV_PROVIDER_ID, WindowsHyperVSandboxAuthorizationConsumer,
+    WindowsHyperVSandboxAuthorizationRequest,
+};
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
 
 use crate::{
     RuntimeCommandExecutor, RuntimeCommandOutput, RuntimeCommandRequest, RuntimeCommandTermination,
-    SystemRuntimeCommandExecutor, WINDOWS_HYPERV_PROVIDER_ID,
-    WindowsHyperVSandboxAuthorizationConsumer, WindowsHyperVSandboxAuthorizationRequest,
+    SystemRuntimeCommandExecutor,
     endpoint::{EndpointReplayCache, WindowsHyperVExecutionEndpoint},
     error,
     naming::ResourceName,
