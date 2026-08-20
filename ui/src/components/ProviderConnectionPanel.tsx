@@ -72,7 +72,7 @@ function lifecycleDescription(
     case "pending":
       return `Waiting for ${providerLabel} to confirm this installation.`;
     case "active":
-      return `Choose which ${providerLabel} repositories this workspace can use.`;
+      return `Choose which ${providerLabel} repositories this tenant can use.`;
     case "suspended":
       return `This ${providerLabel} installation is suspended. Existing selections are read-only.`;
     case "removed":

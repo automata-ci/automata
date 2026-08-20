@@ -33,6 +33,8 @@ describe("provider connection package components", () => {
 
     expect(html).toContain('data-provider-connection-state="active"');
     expect(html).toContain("Connected");
+    expect(html).toContain("repositories this tenant can use");
+    expect(html).not.toContain("workspace");
     expect(html).toContain("Host action");
     expect(html).toContain('name="repository_ids"');
     expect(html).toContain('value="123"');
