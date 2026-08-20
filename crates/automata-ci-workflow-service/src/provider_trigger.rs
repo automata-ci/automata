@@ -603,6 +603,7 @@ fn admission_request(
         idempotency,
         *request.source.revision(),
     )
+    .raw_event_digest(request.delivery.evidence().raw_body().digest())
     .trust_snapshot(request.trust.clone())
     .git_ref(request.execution_ref.full())
     .workflow_name(workflow_name)

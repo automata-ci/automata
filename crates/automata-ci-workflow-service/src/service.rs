@@ -725,6 +725,7 @@ fn build_command(
         jobs,
         admitted_at,
     )
+    .raw_event_digest(request.raw_event_digest())
     .base_context(base_context.metadata.clone())
     .trust_snapshot(request.trust_snapshot().clone())
     .concurrency(concurrency)

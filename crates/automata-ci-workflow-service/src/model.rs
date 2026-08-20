@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use automata_ci_core::{
-    GitObjectId, JobRuntimeContext, TrustSnapshot, WorkflowPlan, WorkflowPlanVersion,
+    GitObjectId, JobRuntimeContext, Sha256Digest, TrustSnapshot, WorkflowPlan, WorkflowPlanVersion,
 };
 use automata_ci_store::{
     LogicalWorkflowAdmissionReceipt, MAX_ADMISSION_EVENT_BYTES, MAX_ADMISSION_OBJECT_BYTES,
@@ -149,6 +149,7 @@ pub struct WorkflowAdmissionRequest {
     workflow_path: String,
     source: Bytes,
     event: Bytes,
+    raw_event_digest: Option<Sha256Digest>,
     event_media_type: String,
     plan: WorkflowPlan,
     base_context: JobRuntimeContext,
@@ -192,6 +193,7 @@ impl WorkflowAdmissionRequest {
                 workflow_path: workflow_path.into(),
                 source,
                 event,
+                raw_event_digest: None,
                 event_media_type: WORKFLOW_EVENT_MEDIA_TYPE.to_owned(),
                 plan,
                 base_context,
@@ -237,6 +239,13 @@ impl WorkflowAdmissionRequest {
     /// Returns the exact immutable provider event bytes.
     pub const fn event(&self) -> &Bytes {
         &self.event
+    }
+
+    /// Returns the exact authenticated provider webhook body digest, when the
+    /// request originated from a provider delivery.
+    #[must_use]
+    pub const fn raw_event_digest(&self) -> Option<Sha256Digest> {
+        self.raw_event_digest
     }
 
     /// Returns the immutable event evidence media type.
@@ -342,6 +351,13 @@ impl WorkflowAdmissionRequestBuilder {
     #[must_use]
     pub fn event_media_type(mut self, media_type: impl Into<String>) -> Self {
         self.request.event_media_type = media_type.into();
+        self
+    }
+
+    /// Binds the raw webhook digest separately from canonical event bytes.
+    #[must_use]
+    pub fn raw_event_digest(mut self, digest: Sha256Digest) -> Self {
+        self.request.raw_event_digest = Some(digest);
         self
     }
 

@@ -1612,7 +1612,10 @@ async fn load_provider_selection_authority(
         )
         .into());
     }
-    if row.raw_body_digest.as_slice() != command.event().digest().as_bytes() {
+    if command
+        .raw_event_digest()
+        .is_some_and(|digest| row.raw_body_digest.as_slice() != digest.as_bytes())
+    {
         return Err(StoreError::corrupt_data(
             "authenticated provider event bytes disagree with logical admission",
         )
