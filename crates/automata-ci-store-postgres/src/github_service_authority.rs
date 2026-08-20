@@ -887,6 +887,7 @@ async fn acquire_handoff(
 ) -> Result<GithubServerServiceCredentialHandoff, GithubServerServiceStoreError> {
     let rejected = |stage: &'static str| {
         tracing::warn!(
+            target: "automata_ci",
             stage,
             action = request.consumer().action().as_str(),
             "GitHub server-service credential handoff rejected"
