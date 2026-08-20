@@ -281,6 +281,10 @@ const CANONICAL_MIGRATIONS: &[(&str, &str)] = &[
         "0069_provider_instance_webhook_endpoints.sql",
         "b47bdc4fd116ceca54490f5ed7ab4ecb07122dd62ea50cf893749218b2066f654d58b6ff6c3da081ac6f2da860e4ac4a",
     ),
+    (
+        "0070_provider_admission_idempotency_key.sql",
+        "0526cf85598c894b8b08216a9db0ef92b5e58116f1db690ddb2582249453d1a050f68d130ee356e80d7d5f5f8440d87a",
+    ),
 ];
 
 const BASELINE_MIGRATION_COUNT: u32 = 26;

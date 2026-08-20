@@ -253,7 +253,7 @@ async fn production_migrations_upgrade_deployed_schema_and_immutable_evidence() 
         let applied_version: i64 = sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations")
             .fetch_one(&database.pool)
             .await?;
-        assert_eq!(applied_version, 69);
+        assert_eq!(applied_version, 70);
 
         assert_migrated_contract(&database.pool).await?;
         Ok(())

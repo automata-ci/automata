@@ -2061,10 +2061,10 @@ async fn record_provider_admission_evidence(
             normalized_trigger_digest, raw_event_digest, request_digest,
             source_revision, git_ref, event_name, actor, original_worker_id,
             original_fence, original_claimed_at_ms, original_expires_at_ms,
-            admitted_at_ms
+            admitted_at_ms, idempotency_key
         ) VALUES (
             $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
-            $18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28
+            $18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29
         )
         ",
     )
@@ -2098,6 +2098,7 @@ async fn record_provider_admission_evidence(
     .bind(fence.claimed_at().get())
     .bind(fence.expires_at().get())
     .bind(observed_at.get())
+    .bind(command.idempotency().key())
     .execute(&mut **transaction)
     .await
     .map_err(operation_error)?;
@@ -2190,6 +2191,7 @@ async fn validate_provider_admission_evidence_replay(
           AND evidence.request_digest = $19 AND evidence.source_revision = $20
           AND evidence.git_ref = $21 AND evidence.event_name = $22
           AND evidence.actor IS NOT DISTINCT FROM $23
+          AND evidence.idempotency_key = $24
         FOR SHARE OF evidence, pin, policy
         ",
     )
@@ -2216,6 +2218,7 @@ async fn validate_provider_admission_evidence_replay(
     .bind(command.git_ref())
     .bind(command.event_name())
     .bind(command.actor())
+    .bind(command.idempotency().key())
     .fetch_optional(&mut **transaction)
     .await
     .map_err(operation_error)?;
