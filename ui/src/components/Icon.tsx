@@ -5,6 +5,7 @@ export type IconName =
   | "chevron-down"
   | "chevron-right"
   | "commit"
+  | "external-link"
   | "overview"
   | "pull-request"
   | "repository"
@@ -29,6 +30,7 @@ const phosphorIconNames: Readonly<Record<IconName, string>> = {
   "chevron-down": "caret-down",
   "chevron-right": "caret-right",
   commit: "git-commit",
+  "external-link": "arrow-square-out",
   overview: "book-open",
   "pull-request": "git-pull-request",
   repository: "book-bookmark",

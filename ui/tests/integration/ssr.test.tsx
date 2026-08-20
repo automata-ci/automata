@@ -78,6 +78,11 @@ describe("server rendering", () => {
       "automata-ci/automata",
     );
     expect(
+      rendered.querySelector<HTMLAnchorElement>(".repository-directory__name")?.getAttribute(
+        "href",
+      ),
+    ).toBe("/automata-ci/automata/actions");
+    expect(
       rendered.querySelector<HTMLAnchorElement>(
         '.repository-directory__destinations a[href="/automata-ci/automata/actions"]',
       ),
@@ -93,6 +98,12 @@ describe("server rendering", () => {
     expect(signIn?.querySelector("button")?.textContent).toBe("Sign in");
     expect(rendered.querySelector(".theme-toggle")).not.toBeNull();
     expect(rendered.querySelector(".repo-header")).toBeNull();
+    const source = rendered.querySelector<HTMLAnchorElement>(
+      '.repository-directory__destinations a[href="https://github.com/automata-ci/automata"]',
+    );
+    expect(source?.getAttribute("target")).toBe("_blank");
+    expect(source?.getAttribute("rel")).toBe("noreferrer");
+    expect(source?.querySelector(".ph-arrow-square-out")).not.toBeNull();
   });
 
   it("labels a secrets-only repository destination honestly", () => {
@@ -163,6 +174,16 @@ describe("server rendering", () => {
     expect(branchFilter?.getAttribute("autocapitalize")).toBe("none");
     expect(branchFilter?.getAttribute("autocomplete")).toBe("off");
     expect(branchFilter?.getAttribute("autocorrect")).toBe("off");
+    expect(
+      rendered.querySelector<HTMLAnchorElement>(".repo-header__identity a")
+        ?.getAttribute("href"),
+    ).toBe("/automata-ci/automata/actions");
+    const source = rendered.querySelector<HTMLAnchorElement>(
+      '.repo-nav a[href="https://github.com/automata-ci/automata"]',
+    );
+    expect(source?.getAttribute("target")).toBe("_blank");
+    expect(source?.getAttribute("rel")).toBe("noreferrer");
+    expect(source?.querySelector(".ph-arrow-square-out")).not.toBeNull();
   });
 
   it("renders sign-out as a native account disclosure and an exact POST form", () => {
