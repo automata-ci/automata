@@ -291,9 +291,14 @@ Acceptance:
 - [x] Self-hosted macOS 15 differential fixtures cover stable environment,
   working-directory, command-file, output, timeout, cancellation, and
   conclusion behavior.
-- [ ] Physical Apple Silicon acceptance proves VM template identity,
+- [x] Physical Apple Silicon acceptance proves VM template identity,
   filesystem/network separation, CPU/memory/process enforcement, helper-crash
   recovery, and repeated clean execution.
+
+  The dedicated Apple Silicon Mac mini completed the full ignored physical
+  suite with three repetitions on 2026-08-19; the retained evidence and the
+  exact deployment-only continuous-lane gap are recorded in the
+  [macOS platform guide](../platforms/macos.md#validation).
 
 ### PLAT-03 — Windows Hyper-V-container scale and expanded profiles
 
