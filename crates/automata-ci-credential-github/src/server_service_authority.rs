@@ -1217,7 +1217,21 @@ impl GithubServerServiceCredentialIssuer {
             .repository
             .acquire_github_server_service_handoff(request)
             .await
-            .map_err(map_store_handoff_error)?;
+            .map_err(|error| {
+                tracing::warn!(
+                    error = ?error,
+                    action = requested_consumer.action().as_str(),
+                    tenant = requested_selector.tenant().as_str(),
+                    authority_id = ?requested_selector.authority_id(),
+                    identity_digest = %requested_selector.identity_digest(),
+                    app_configuration_revision = requested_selector
+                        .app_configuration_revision()
+                        .get(),
+                    policy_revision = requested_selector.policy_revision().get(),
+                    "GitHub server-service credential handoff repository rejected request"
+                );
+                map_store_handoff_error(error)
+            })?;
         if GithubServerServiceAuthoritySelector::from_identity(handoff.identity())
             != requested_selector
             || handoff.consumer() != requested_consumer
