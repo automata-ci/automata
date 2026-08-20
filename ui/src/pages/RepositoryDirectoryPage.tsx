@@ -74,6 +74,7 @@ export function RepositoryDirectoryPage({
 function RepositoryRow({ repository }: { readonly repository: RepositoryDirectoryItemModel }) {
   const secretsHref = `/${repository.owner}/${repository.name}/settings/secrets`;
   const settingsLabel = repository.settingsHref === secretsHref ? "Secrets" : "Access";
+  const primaryHref = repository.actionsHref ?? repository.sourceHref;
 
   return (
     <li className="repository-directory__item">
@@ -82,7 +83,12 @@ function RepositoryRow({ repository }: { readonly repository: RepositoryDirector
           <Icon name="repository" size={18} />
         </span>
         <div>
-          <a className="repository-directory__name" href={repository.sourceHref}>
+          <a
+            className="repository-directory__name"
+            href={primaryHref}
+            rel={repository.actionsHref === null ? "noreferrer" : undefined}
+            target={repository.actionsHref === null ? "_blank" : undefined}
+          >
             <span>{repository.owner}</span>
             <span>/</span>
             <strong>{repository.name}</strong>
@@ -94,9 +100,15 @@ function RepositoryRow({ repository }: { readonly repository: RepositoryDirector
         aria-label={`${repository.owner}/${repository.name} destinations`}
         className="repository-directory__destinations"
       >
-        <a className="button button--quiet" href={repository.sourceHref}>
+        <a
+          className="button button--quiet"
+          href={repository.sourceHref}
+          rel="noreferrer"
+          target="_blank"
+        >
           <Icon name="overview" />
           Code
+          <Icon name="external-link" size={14} />
         </a>
         {repository.actionsHref === null ? null : (
           <a className="button button--quiet" href={repository.actionsHref}>
