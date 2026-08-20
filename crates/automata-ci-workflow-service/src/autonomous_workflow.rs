@@ -3458,7 +3458,12 @@ impl AutonomousWorkflowService {
         };
         let selected = match outcome {
             Err(error) if is_repository_unavailable(&error) => {
-                tracing::warn!(%error, queue = ?AutonomousWorkflowQueue::Orchestration, "logical work selection unavailable; retrying bounded poll");
+                tracing::warn!(
+                    %error,
+                    error_chain = %error_source_chain(&error),
+                    queue = ?AutonomousWorkflowQueue::Orchestration,
+                    "logical work selection unavailable; retrying bounded poll"
+                );
                 return Ok(unavailable_poll(AutonomousWorkflowQueue::Orchestration));
             }
             Err(error) => {
@@ -3915,7 +3920,12 @@ impl AutonomousWorkflowService {
         };
         let selected = match outcome {
             Err(error) if is_repository_unavailable(&error) => {
-                tracing::warn!(%error, queue = ?AutonomousWorkflowQueue::Materialization, "logical work selection unavailable; retrying bounded poll");
+                tracing::warn!(
+                    %error,
+                    error_chain = %error_source_chain(&error),
+                    queue = ?AutonomousWorkflowQueue::Materialization,
+                    "logical work selection unavailable; retrying bounded poll"
+                );
                 return Ok(unavailable_poll(AutonomousWorkflowQueue::Materialization));
             }
             Err(error) => {
@@ -4416,6 +4426,22 @@ fn is_repository_unavailable(error: &automata_ci_store::LogicalWorkSelectionStor
         error,
         automata_ci_store::LogicalWorkSelectionStoreError::Store(StoreError::Operation(_))
     )
+}
+
+/// Formats the trusted repository error source chain without changing the
+/// stable, sanitized top-level error message exposed to callers.
+fn error_source_chain(error: &(dyn std::error::Error + 'static)) -> String {
+    let mut chain = Vec::new();
+    let mut source = error.source();
+    while let Some(current) = source {
+        chain.push(current.to_string());
+        source = current.source();
+    }
+    if chain.is_empty() {
+        String::from("none")
+    } else {
+        chain.join(" -> ")
+    }
 }
 
 #[cfg(test)]
