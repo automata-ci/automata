@@ -165,6 +165,7 @@ impl ProviderWorkflowApplicationService {
     /// Returns a sanitized application error for invalid archive/evidence,
     /// request construction, unavailable admission infrastructure, or a
     /// contradictory durable admission.
+    #[allow(clippy::too_many_lines)] // The two-pass application proof stays atomic.
     pub async fn apply(
         &self,
         request: ProviderWorkflowApplicationRequest,

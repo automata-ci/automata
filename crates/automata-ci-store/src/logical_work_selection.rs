@@ -129,6 +129,26 @@ impl ClaimNextLogicalJobOrchestration {
     pub const fn duration_ms(&self) -> i64 {
         self.duration_ms
     }
+
+    /// Rebinds the caller timestamp immediately before a store attempt.
+    ///
+    /// Selection custody owns the stable identity; the timestamp is an
+    /// attempt-local admission observation and must not age while custody or
+    /// the database pool is contended.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same validation error as [`Self::new`] for an invalid
+    /// timestamp or duration.
+    pub fn with_observed_at(
+        &self,
+        observed_at: UnixMillis,
+    ) -> Result<Self, LogicalWorkSelectionValueError> {
+        validate_request(observed_at, self.duration_ms)?;
+        let mut request = self.clone();
+        request.observed_at = observed_at;
+        Ok(request)
+    }
 }
 
 /// Kind of inert orchestration discovery evidence recorded by the selector.
@@ -297,6 +317,26 @@ impl ClaimNextLogicalInstanceMaterialization {
     #[must_use]
     pub const fn duration_ms(&self) -> i64 {
         self.duration_ms
+    }
+
+    /// Rebinds the caller timestamp immediately before a store attempt.
+    ///
+    /// Selection custody owns the stable identity; the timestamp is an
+    /// attempt-local admission observation and must not age while custody or
+    /// the database pool is contended.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same validation error as [`Self::new`] for an invalid
+    /// timestamp or duration.
+    pub fn with_observed_at(
+        &self,
+        observed_at: UnixMillis,
+    ) -> Result<Self, LogicalWorkSelectionValueError> {
+        validate_request(observed_at, self.duration_ms)?;
+        let mut request = self.clone();
+        request.observed_at = observed_at;
+        Ok(request)
     }
 }
 

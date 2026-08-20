@@ -3431,13 +3431,18 @@ impl AutonomousWorkflowService {
         submitted: bool,
     ) -> Result<QueuePoll, AutonomousWorkflowError> {
         let submission = async {
+            let now = trusted_now(self.clock.as_ref())
+                .map_err(|_| AutonomousWorkflowLeaseError::AuthorityRejected)?;
+            let store_request = request
+                .with_observed_at(now)
+                .map_err(|_| AutonomousWorkflowLeaseError::AuthorityRejected)?;
             if !submitted {
                 self.custody
                     .mark_orchestration_selection_submitted(&request)?;
             }
             Ok::<_, AutonomousWorkflowLeaseError>(
                 self.selections
-                    .claim_next_logical_job_orchestration(request.clone())
+                    .claim_next_logical_job_orchestration(store_request)
                     .await,
             )
         };
@@ -3457,7 +3462,10 @@ impl AutonomousWorkflowService {
             }
             Err(error) => {
                 self.custody.set_orchestration(OrchestrationCustody::Idle);
-                return selection_failure(&error, AutonomousWorkflowQueue::Orchestration);
+                return Ok(selection_failure(
+                    &error,
+                    AutonomousWorkflowQueue::Orchestration,
+                ));
             }
             Ok(LogicalJobOrchestrationSelectionOutcome::Idle) => {
                 self.custody.set_orchestration(OrchestrationCustody::Idle);
@@ -3875,13 +3883,18 @@ impl AutonomousWorkflowService {
         submitted: bool,
     ) -> Result<QueuePoll, AutonomousWorkflowError> {
         let submission = async {
+            let now = trusted_now(self.clock.as_ref())
+                .map_err(|_| AutonomousWorkflowLeaseError::AuthorityRejected)?;
+            let store_request = request
+                .with_observed_at(now)
+                .map_err(|_| AutonomousWorkflowLeaseError::AuthorityRejected)?;
             if !submitted {
                 self.custody
                     .mark_materialization_selection_submitted(&request)?;
             }
             Ok::<_, AutonomousWorkflowLeaseError>(
                 self.selections
-                    .claim_next_logical_instance_materialization(request.clone())
+                    .claim_next_logical_instance_materialization(store_request)
                     .await,
             )
         };
@@ -3906,7 +3919,10 @@ impl AutonomousWorkflowService {
             Err(error) => {
                 self.custody
                     .set_materialization(MaterializationCustody::Idle);
-                return selection_failure(&error, AutonomousWorkflowQueue::Materialization);
+                return Ok(selection_failure(
+                    &error,
+                    AutonomousWorkflowQueue::Materialization,
+                ));
             }
             Ok(LogicalInstanceMaterializationSelectionOutcome::Idle) => {
                 self.custody
@@ -4324,16 +4340,14 @@ fn unavailable_or_shutdown(
 fn selection_failure(
     error: &automata_ci_store::LogicalWorkSelectionStoreError,
     queue: AutonomousWorkflowQueue,
-) -> Result<QueuePoll, AutonomousWorkflowError> {
+) -> QueuePoll {
     // Selection is a read/claim poll.  A rejected or malformed candidate must
     // not terminate the control plane: the transaction has rolled back and the
     // next bounded poll can re-read the authoritative graph after maintenance
     // or a concurrent worker has advanced it.  Fatal authority errors remain
     // enforced at consume/finalization boundaries, after a durable claim exists.
     tracing::warn!(%error, ?queue, "logical work selection failed; retrying bounded poll");
-    Ok(QueuePoll::Outcome(AutonomousWorkflowOutcome::Unavailable(
-        queue,
-    )))
+    QueuePoll::Outcome(AutonomousWorkflowOutcome::Unavailable(queue))
 }
 
 fn selection_submission_failure(
