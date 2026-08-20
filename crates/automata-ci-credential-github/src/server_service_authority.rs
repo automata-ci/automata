@@ -1236,7 +1236,7 @@ impl GithubServerServiceCredentialIssuer {
                     required_through = requested_through.get(),
                     "GitHub server-service credential handoff repository rejected request"
                 );
-                map_store_handoff_error(error)
+                map_store_handoff_error(&error)
             })?;
         if GithubServerServiceAuthoritySelector::from_identity(handoff.identity())
             != requested_selector
@@ -1415,7 +1415,7 @@ impl GithubServerServiceCredentialIssuer {
 }
 
 fn map_store_handoff_error(
-    error: GithubServerServiceStoreError,
+    error: &GithubServerServiceStoreError,
 ) -> GithubServerServiceHandoffError {
     match error {
         GithubServerServiceStoreError::Operation(_) => GithubServerServiceHandoffError::Repository,

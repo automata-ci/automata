@@ -923,11 +923,10 @@ async fn acquire_handoff(
         UnixMillis::new(consumer_check_now),
     )
     .await
-    .map_err(|error| {
+    .inspect_err(|error| {
         if matches!(&error, GithubServerServiceStoreError::HandoffRejected) {
             let _ = rejected("consumer_revalidation_initial");
         }
-        error
     })?;
     if consumer_expires_at
         .get()
@@ -1051,11 +1050,10 @@ async fn acquire_handoff(
         UnixMillis::new(database_now),
     )
     .await
-    .map_err(|error| {
+    .inspect_err(|error| {
         if matches!(&error, GithubServerServiceStoreError::HandoffRejected) {
             let _ = rejected("consumer_revalidation_final");
         }
-        error
     })?;
     if request.consumer().action() != GithubServerServiceAction::ObserveWorkflowPermissionDefaults
         && database_now >= consumer_expires_at.get()

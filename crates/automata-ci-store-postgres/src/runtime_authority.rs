@@ -4646,7 +4646,7 @@ fn operation_error(error: sqlx::Error) -> GithubRuntimeAuthorityStoreError {
     let code = error
         .as_database_error()
         .and_then(sqlx::error::DatabaseError::code)
-        .map(|value| value.into_owned());
+        .map(std::borrow::Cow::into_owned);
     let constraint = error
         .as_database_error()
         .and_then(sqlx::error::DatabaseError::constraint)
