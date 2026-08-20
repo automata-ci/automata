@@ -155,6 +155,7 @@ impl LogicalWorkSelectionRepository for PostgresStore {
         request: ClaimNextLogicalJobOrchestration,
     ) -> Result<LogicalJobOrchestrationSelectionOutcome, LogicalWorkSelectionStoreError> {
         let mut transaction = begin_read_committed(self).await?;
+        let request_database_now = read_selection_database_now(&mut transaction).await?;
         if let Some(row) = lock_activation_receipt(&mut transaction, &request).await? {
             let outcome = replay_activation(&mut transaction, &request, &row).await?;
             transaction.commit().await.map_err(operation_error)?;
@@ -178,6 +179,7 @@ impl LogicalWorkSelectionRepository for PostgresStore {
             "activation",
             request.observed_at(),
             request.duration_ms(),
+            request_database_now,
         )
         .await?;
         cleanup_receipts(&mut transaction, "activation", admission.replay_floor).await?;
@@ -314,6 +316,7 @@ impl LogicalWorkSelectionRepository for PostgresStore {
     ) -> Result<LogicalInstanceMaterializationSelectionOutcome, LogicalWorkSelectionStoreError>
     {
         let mut transaction = begin_read_committed(self).await?;
+        let request_database_now = read_selection_database_now(&mut transaction).await?;
         if let Some(row) = lock_materialization_receipt(&mut transaction, &request).await? {
             let outcome = replay_materialization(&mut transaction, &request, &row).await?;
             transaction.commit().await.map_err(operation_error)?;
@@ -335,6 +338,7 @@ impl LogicalWorkSelectionRepository for PostgresStore {
             "materialization",
             request.observed_at(),
             request.duration_ms(),
+            request_database_now,
         )
         .await?;
         cleanup_receipts(&mut transaction, "materialization", admission.replay_floor).await?;
@@ -766,6 +770,7 @@ async fn lock_selection_admission(
     queue: &'static str,
     observed_at: UnixMillis,
     duration_ms: i64,
+    request_database_now: i64,
 ) -> Result<SelectionAdmission, LogicalWorkSelectionStoreError> {
     let row = sqlx::query(
         r"
@@ -786,8 +791,8 @@ async fn lock_selection_admission(
     if floor < 0 || floor > updated_at || updated_at > now {
         return Err(StoreError::corrupt_data("logical work replay horizon is malformed").into());
     }
-    if observed_at.get() < now.saturating_sub(MAX_SELECTION_CLOCK_SKEW_MILLIS)
-        || observed_at.get() > now.saturating_add(MAX_SELECTION_CLOCK_SKEW_MILLIS)
+    if observed_at.get() < request_database_now.saturating_sub(MAX_SELECTION_CLOCK_SKEW_MILLIS)
+        || observed_at.get() > request_database_now.saturating_add(MAX_SELECTION_CLOCK_SKEW_MILLIS)
     {
         return Err(LogicalWorkSelectionStoreError::SelectionClockSkew);
     }
@@ -808,6 +813,15 @@ async fn lock_selection_admission(
         previous_floor: floor,
         previous_updated_at: updated_at,
     })
+}
+
+async fn read_selection_database_now(
+    transaction: &mut Transaction<'_, Postgres>,
+) -> Result<i64, LogicalWorkSelectionStoreError> {
+    sqlx::query_scalar("SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint")
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(operation_error)
 }
 
 async fn advance_selection_horizon(
