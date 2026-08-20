@@ -440,6 +440,37 @@ disposable VM before connecting to the control plane. Missing or wrong-major
 Node runtimes therefore cannot be advertised. Old schema/native configuration
 is an error.
 
+### Headless launchd supervision
+
+The checked-in headless service installer uses a root-owned macOS
+`LaunchDaemon`, so the control plane and runner can start at boot and restart
+without a GUI, monitor, or interactive SSH session. It runs each process as a
+named non-root service account and refuses a root account or insecure input
+files. See
+[`scripts/macos/launchd/README.md`](../../scripts/macos/launchd/README.md) for
+the exact commands.
+
+Create the control-plane environment file as the service account with mode
+`0600`. It must contain only reviewed `NAME=value` assignments; every
+credential-bearing Automata variable must be a `file:` or `env:` reference,
+never a secret value. The runner JSON must also be mode `0600` and owned by the
+runner account. Provision TLS files, Keychain items, and the APFS state root
+before installing the daemon. Validate both commands directly as their service
+accounts first, then install with `sudo`:
+
+```console
+sudo scripts/macos/launchd/install.sh control-plane automata-control \
+  /Library/Automata/etc/control-plane.env /Library/Automata/bin/automata
+sudo scripts/macos/launchd/install.sh runner automata-runner \
+  /Library/Automata/etc/runner.macos.json /Library/Automata/bin/automata-runner
+```
+
+Inspect the exact system domain with `sudo launchctl print
+system/dev.automata.runner`; service output is written beneath
+`/Library/Logs/Automata`. `launchd` only supervises process lifetime: server
+readiness, runner mTLS, VM helper signature, template digest, APFS quota, and
+guest admission remain enforced by Automata at startup.
+
 ## Validation
 
 Repository CI intentionally does not schedule paid GitHub-hosted macOS jobs.
