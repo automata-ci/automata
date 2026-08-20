@@ -1062,7 +1062,11 @@ fn build_provider_runtime(
     let result_adapters = ProviderResultAdapterRegistry::new([github.result_adapter()])
         .map_err(|_| ServerCompositionError::InvalidGithubProviderConfiguration)?;
     let contexts = ProviderRuntimeContextResolver::new(manifests);
-    let result_config = ProviderResultWorkerConfig::new(60_000, 1_000)
+    // Result publication crosses the provider handoff and can contend with
+    // runner/admission transactions. Keep the claim live long enough for the
+    // bounded durable handoff while remaining below the provider model's
+    // fifteen-minute claim ceiling.
+    let result_config = ProviderResultWorkerConfig::new(5 * 60_000, 1_000)
         .map_err(|_| ServerCompositionError::InvalidGithubProviderConfiguration)?;
     let result_workers = github
         .connection_ids()
