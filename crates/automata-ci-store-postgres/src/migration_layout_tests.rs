@@ -293,6 +293,10 @@ const CANONICAL_MIGRATIONS: &[(&str, &str)] = &[
         "0072_provider_delivery_runtime_provenance.sql",
         "9d7afe44c0c0584f898acc1bfac98493517976c9e0b70b5d8813dfe6aa8681192b301635789e7ce1b37e421cb2ef1988",
     ),
+    (
+        "0073_provider_delivery_runtime_authority_current.sql",
+        "f1444ab4d4ed0fd9b96b000b706092340a7d961f188709fd06a22812e4bae2ad456391a1da82a0a9f65e4365261d1e62",
+    ),
 ];
 
 const BASELINE_MIGRATION_COUNT: u32 = 26;
@@ -1061,6 +1065,21 @@ fn provider_workflow_result_identity_is_unique_and_provider_neutral() {
         assert!(
             !source.contains(forbidden),
             "workflow-result identity retained provider-specific or transitional surface: {forbidden}",
+        );
+    }
+}
+
+#[test]
+fn provider_delivery_runtime_authority_currentness_does_not_require_subject_evidence() {
+    let source = include_str!("../migrations/0073_provider_delivery_runtime_authority_current.sql");
+    for required in [
+        "automata_github_runtime_authority_base_is_current",
+        "origin.origin_kind = ''provider_delivery''",
+        "admission_receipt.github_subject_evidence_required",
+    ] {
+        assert!(
+            source.contains(required),
+            "currentness repair lost: {required}"
         );
     }
 }
