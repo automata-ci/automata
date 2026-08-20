@@ -895,9 +895,21 @@ async fn acquire_handoff(
     };
     let mut transaction = store.pool.begin().await.map_err(operation_error)?;
     pin_read_committed(&mut transaction).await?;
-    let authority_row = select_authority_for_update(&mut transaction, request.selector())
-        .await?
-        .ok_or(GithubServerServiceStoreError::NotFound)?;
+    let Some(authority_row) =
+        select_authority_for_update(&mut transaction, request.selector()).await?
+    else {
+        tracing::warn!(
+            stage = "authority_not_found",
+            action = request.consumer().action().as_str(),
+            tenant = request.selector().tenant().as_str(),
+            authority_id = ?request.selector().authority_id(),
+            identity_digest = %request.selector().identity_digest(),
+            app_configuration_revision = request.selector().app_configuration_revision().get(),
+            policy_revision = request.selector().policy_revision().get(),
+            "GitHub server-service credential handoff rejected"
+        );
+        return Err(GithubServerServiceStoreError::NotFound);
+    };
     let descriptor = decode_authority(&authority_row)?;
     if descriptor.identity().scope() != request.consumer().action().required_scope() {
         return Err(rejected("scope"));
