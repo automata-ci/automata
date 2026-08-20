@@ -655,6 +655,36 @@ impl<'a> ProbeResources<'a> {
         exists.arg(kind.description()).arg("exists").arg(identifier);
         let output = self.commands.execute(&exists, self.cancellation);
         match output.termination() {
+            CommandTermination::Exited(Some(1)) if kind == ResourceKind::Container => {
+                // Podman reports false from `container exists` while a
+                // container is asynchronously transitioning through Removing.
+                // That state still owns the user namespace, so treating it as
+                // absent would report cleanup complete and make the next
+                // admission probe fail with "not enough unused IDs". Recheck
+                // the all-containers listing before declaring it absent.
+                let mut listing = cleanup_podman_request(deadline);
+                listing
+                    .arg("ps")
+                    .arg("--all")
+                    .arg("--no-trunc")
+                    .arg("--format")
+                    .arg("{{.ID}}\n{{.Names}}");
+                if identifier.starts_with("automata-probe-ctr-") {
+                    listing.arg("--filter").arg(format!("name=^{identifier}$"));
+                } else {
+                    listing.arg("--filter").arg(format!("id={identifier}"));
+                }
+                let listing_output = self.commands.execute(&listing, self.cancellation);
+                if !listing_output.succeeded() {
+                    return Err(listing_output.failure_detail());
+                }
+                let present = listing_output
+                    .stdout()
+                    .lines()
+                    .map(str::trim)
+                    .any(|line| !line.is_empty());
+                Ok(present)
+            }
             CommandTermination::Exited(Some(1)) => Ok(false),
             _ if output.succeeded() => Ok(true),
             _ => Err(output.failure_detail()),
@@ -1397,5 +1427,107 @@ fn checked_command(
         CommandTermination::ExecutionIntegrityFailed | CommandTermination::Exited(_) => Err(
             ProbeFailure::degraded(ProbeReasonCode::ActiveProbeCommandFailed, detail),
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        collections::VecDeque,
+        ffi::OsString,
+        path::PathBuf,
+        sync::Mutex,
+        time::{Duration, Instant},
+    };
+
+    use automata_ci_execution::NetworkPolicy;
+
+    use super::*;
+
+    struct ScriptedExecutor {
+        outputs: Mutex<VecDeque<CommandOutput>>,
+        requests: Mutex<Vec<Vec<OsString>>>,
+    }
+
+    impl ScriptedExecutor {
+        fn new(outputs: impl IntoIterator<Item = CommandOutput>) -> Self {
+            Self {
+                outputs: Mutex::new(outputs.into_iter().collect()),
+                requests: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl CommandExecutor for ScriptedExecutor {
+        fn execute(
+            &self,
+            request: &CommandRequest,
+            _cancellation: &ProbeCancellation,
+        ) -> CommandOutput {
+            self.requests
+                .lock()
+                .expect("request record must be available")
+                .push(request.arguments().to_vec());
+            self.outputs
+                .lock()
+                .expect("scripted output must be available")
+                .pop_front()
+                .expect("every request must have a scripted output")
+        }
+    }
+
+    #[test]
+    fn removing_container_remains_present_until_all_container_listing_is_empty() {
+        let identifier = "0123456789abcdef0123456789abcdef";
+        let plan = ActiveProbePlan::new_in(
+            PathBuf::from("/proc/self/exe"),
+            identifier,
+            "/var/lib/automata-runner-test",
+            NetworkPolicy::PrivateEgress,
+        )
+        .expect("test plan must be valid");
+        let container_name = plan.container_name().to_owned();
+        let executor = ScriptedExecutor::new([
+            CommandOutput::failure(1, "container does not exist"),
+            CommandOutput::success(format!("{container_name}\n")),
+        ]);
+        let cancellation = ProbeCancellation::default();
+        let mut resources = ProbeResources::new(
+            &plan,
+            b"unused",
+            &executor,
+            &cancellation,
+            Duration::from_secs(1),
+        );
+
+        let exists = resources
+            .resource_exists(
+                ResourceKind::Container,
+                &container_name,
+                Instant::now() + Duration::from_secs(1),
+            )
+            .expect("removing-state fallback lookup must succeed");
+        resources.cleanup_finished = true;
+
+        assert!(exists, "a removing container still owns host resources");
+        let requests = executor
+            .requests
+            .lock()
+            .expect("request record must be available");
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[1],
+            [
+                "--remote=false",
+                "ps",
+                "--all",
+                "--no-trunc",
+                "--format",
+                "{{.ID}}\n{{.Names}}",
+                "--filter",
+                &format!("name=^{container_name}$"),
+            ]
+            .map(OsString::from)
+        );
     }
 }
