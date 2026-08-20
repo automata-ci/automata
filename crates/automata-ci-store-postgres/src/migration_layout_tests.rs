@@ -285,6 +285,10 @@ const CANONICAL_MIGRATIONS: &[(&str, &str)] = &[
         "0070_provider_admission_idempotency_key.sql",
         "0526cf85598c894b8b08216a9db0ef92b5e58116f1db690ddb2582249453d1a050f68d130ee356e80d7d5f5f8440d87a",
     ),
+    (
+        "0071_provider_delivery_preparation_provenance.sql",
+        "037a2b0a9219ce44a72dbbde9bc5f49f268a7ef94b1d0706126e1aeab5cdc056c9eb3e70686ee28d2c6b0abdccd16516",
+    ),
 ];
 
 const BASELINE_MIGRATION_COUNT: u32 = 26;
