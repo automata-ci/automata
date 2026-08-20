@@ -587,6 +587,19 @@ fn validate_plan_provenance(
     {
         return Err(WorkflowAdmissionRequestError::ProvenanceMismatch);
     }
+    if !request.trust_snapshot().is_construction_placeholder() {
+        let evidence = request.trust_snapshot().evidence();
+        let source_revision = request.source_revision().to_string();
+        let execution_revision = request.execution_revision().to_string();
+        if evidence.target_repository().is_none_or(|repository| {
+            repository.id() != request.repository().provider_repository_id()
+        }) || evidence.execution_ref() != Some(request.git_ref())
+            || evidence.source_revision() != Some(source_revision.as_str())
+            || evidence.execution_revision() != Some(execution_revision.as_str())
+        {
+            return Err(WorkflowAdmissionRequestError::ProvenanceMismatch);
+        }
+    }
     if let WorkflowAdmissionIdempotency::ProviderDelivery(delivery) = request.idempotency()
         && plan.event().delivery_id() != Some(delivery.as_str())
     {

@@ -721,7 +721,7 @@ fn build_command(
         ids.logical_invocation_id(run_id),
         request.plan().event().name(),
         event.metadata.clone(),
-        request.execution_revision(),
+        request.source_revision(),
         jobs,
         admitted_at,
     )

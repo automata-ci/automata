@@ -358,7 +358,7 @@ fn result_coordinates(
     let object = request
         .trust
         .evidence()
-        .execution_revision()
+        .source_revision()
         .ok_or(ProviderWorkflowApplicationError::InvalidEvidence)
         .and_then(|revision| {
             automata_ci_core::GitObjectId::from_provider_hex(revision)

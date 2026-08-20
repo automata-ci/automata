@@ -145,7 +145,7 @@ fn trust_snapshot_with_revisions(
 }
 
 #[test]
-fn trust_snapshot_must_bind_the_exact_admitted_execution_origin() {
+fn trust_snapshot_must_bind_the_exact_admitted_source_origin() {
     let build = |snapshot: TrustSnapshot| {
         AdmitLogicalWorkflowRun::builder(
             TenantScope::from_authenticated_tenant_id("logical-tenant").expect("tenant"),
@@ -186,6 +186,16 @@ fn trust_snapshot_must_bind_the_exact_admitted_execution_origin() {
     let revision = "09".repeat(20);
 
     assert!(build(trust_snapshot("repository-7", "refs/heads/main", &revision)).is_ok());
+    assert!(
+        build(trust_snapshot_with_revisions(
+            "repository-7",
+            "refs/heads/main",
+            &revision,
+            &"0a".repeat(20),
+        ))
+        .is_ok(),
+        "the execution revision may differ from the admitted check subject"
+    );
     for conflicting in [
         trust_snapshot("repository-8", "refs/heads/main", &revision),
         trust_snapshot("repository-7", "refs/heads/other", &revision),
