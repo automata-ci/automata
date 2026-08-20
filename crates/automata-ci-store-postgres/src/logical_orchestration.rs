@@ -1129,10 +1129,7 @@ async fn admit_logical_workflow_transaction(
     lock_logical_admission_idempotency(&mut transaction, &command).await?;
     let dispatch_actor =
         authorize_dispatch_subject(&mut transaction, &command, &subject_evidence).await?;
-    let github_subject_evidence_required = matches!(
-        &subject_evidence,
-        SubjectEvidenceAdmission::ScheduledGithub { .. }
-    );
+    let github_subject_evidence_required = false;
 
     let existing_receipt = admission_receipt_exists(&mut transaction, &command).await?;
     let publication = if existing_receipt {

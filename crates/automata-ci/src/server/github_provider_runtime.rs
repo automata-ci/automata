@@ -914,6 +914,10 @@ impl GithubProviderRuntimeBuilder {
         if let Some(observer) = admission_observer {
             admission = admission.with_observer(observer);
         }
+        let result_repository: Arc<dyn ProviderResultRepository> = provider_repository.clone();
+        let results =
+            ProviderWorkflowResultService::new(result_repository, config.dashboard_url().clone())
+                .map_err(|_| GithubProviderRuntimeBuildError::InvalidConfiguration)?;
         let schedule_admission = admission.clone();
         let schedule_worker = GithubScheduleWorkerId::from_uuid(Uuid::new_v4())
             .map_err(|_| GithubProviderRuntimeBuildError::InvalidWorkerIdentity)?;
@@ -923,7 +927,9 @@ impl GithubProviderRuntimeBuilder {
             blobs.clone(),
             schedule_source,
             store.clone(),
+            provider_repository.clone(),
             schedule_admission,
+            results.clone(),
             schedule_source_authorities,
             credentials,
             schedule_clock,
@@ -931,10 +937,6 @@ impl GithubProviderRuntimeBuilder {
             config.schedule().service_config(),
         )
         .map_err(GithubProviderRuntimeBuildError::ScheduleWorker)?;
-        let result_repository: Arc<dyn ProviderResultRepository> = provider_repository;
-        let results =
-            ProviderWorkflowResultService::new(result_repository, config.dashboard_url().clone())
-                .map_err(|_| GithubProviderRuntimeBuildError::InvalidConfiguration)?;
         let application = ProviderWorkflowApplicationService::new(admission, results.clone());
         let trigger_credentials: Arc<dyn GithubTriggerCredentialProvider> = adapters.clone();
         let trigger_handler = Arc::new(

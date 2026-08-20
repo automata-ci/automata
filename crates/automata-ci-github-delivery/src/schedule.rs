@@ -19,7 +19,10 @@ use automata_ci_core::{
     TrustPolicy, TrustRepositoryEvidence, TrustTokenRecursion, UnixMillis, WorkflowEventProvenance,
     WorkflowPlan,
 };
-use automata_ci_provider::ProviderConnectionId;
+use automata_ci_provider::{
+    ProviderConnectionId, ProviderConnectionManifest, ProviderLifecycleState,
+    ProviderManifestRepository, ProviderRepositoryError, ProviderWorkflowInvocationId,
+};
 use automata_ci_scm::{
     ArchiveFormat, ArchiveLimits, RepositoryId as ScmRepositoryId, RevisionSpec, ScmError,
     ScmErrorKind, ScmProvider, SnapshotRequest,
@@ -36,7 +39,7 @@ use automata_ci_store::{
     GithubServerServiceConsumerClaim, GithubServerServiceConsumerId, GithubServerServiceRevision,
     GithubServerServiceWorkerId, MAX_GITHUB_SCHEDULE_CLAIM_MILLIS,
     MAX_GITHUB_SCHEDULE_RETRY_MILLIS, ObjectKey, RegisterGithubScheduleRegistry,
-    RegisterGithubScheduledCheckSubject, RetryGithubScheduleFire, WorkflowAdmissionIdempotency,
+    RetryGithubScheduleFire, WorkflowAdmissionIdempotency,
 };
 use automata_ci_workflow_actions::{
     CompilationDisposition, CompileWorkflowRequest, GithubWorkflowCompiler, GithubWorkflowFrontend,
@@ -46,8 +49,10 @@ use automata_ci_workflow_actions::{
 };
 use automata_ci_workflow_service::{
     AUTOMATA_GITHUB_SCHEDULE_EVIDENCE_V1_MEDIA_TYPE, AdmissionRepositoryCoordinates,
-    GithubScheduleEvidence, RepositoryWorkflowSource, WorkflowAdmissionError,
-    WorkflowAdmissionRequest, WorkflowAdmissionRequestError, WorkflowAdmissionService,
+    GithubScheduleEvidence, ProviderWorkflowResultDisposition, ProviderWorkflowResultRequest,
+    ProviderWorkflowResultService, ProviderWorkflowResultServiceError, RepositoryWorkflowSource,
+    WorkflowAdmissionError, WorkflowAdmissionRequest, WorkflowAdmissionRequestError,
+    WorkflowAdmissionResult, WorkflowAdmissionService,
 };
 use bytes::Bytes;
 use sha2::{Digest as _, Sha256};
@@ -485,8 +490,10 @@ pub struct GithubScheduleService {
     objects: Arc<dyn ImmutableBlobStore>,
     source: Arc<dyn ScmProvider>,
     manifests: Arc<dyn GithubProviderManifestRepository>,
+    connections: Arc<dyn ProviderManifestRepository>,
     schedules: Arc<dyn GithubScheduleRepository>,
     admission: WorkflowAdmissionService,
+    results: ProviderWorkflowResultService,
     source_authorities: GithubScheduleSourceAuthorities,
     credentials: Arc<dyn GithubScheduleSourceCredentialProvider>,
     clock: Arc<dyn GithubScheduleClock>,
@@ -505,7 +512,9 @@ impl GithubScheduleService {
         objects: Arc<dyn ImmutableBlobStore>,
         source: Arc<dyn ScmProvider>,
         repository: Arc<R>,
+        connections: Arc<dyn ProviderManifestRepository>,
         admission: WorkflowAdmissionService,
+        results: ProviderWorkflowResultService,
         source_authorities: GithubScheduleSourceAuthorities,
         credentials: Arc<dyn GithubScheduleSourceCredentialProvider>,
         clock: Arc<dyn GithubScheduleClock>,
@@ -522,8 +531,10 @@ impl GithubScheduleService {
             objects,
             source,
             manifests: repository.clone(),
+            connections,
             schedules: repository,
             admission,
+            results,
             source_authorities,
             credentials,
             clock,
@@ -789,10 +800,18 @@ impl GithubScheduleService {
         claimed: ClaimedGithubScheduleFire,
     ) -> Result<(), GithubScheduleServiceError> {
         let claim = claimed.claim();
+        let connection = self.load_fire_connection(&claimed).await?;
         let now = self.clock.now()?;
         let Ok(cron) =
             automata_ci_schedule::CronExpression::parse(claimed.entry().cron_expression())
         else {
+            self.project_fire_result(
+                &claimed,
+                &connection,
+                claim,
+                ProviderWorkflowResultDisposition::Failed,
+            )
+            .await?;
             return self.complete_invalid_registry(claim).await;
         };
         let lateness = now.get().saturating_sub(claimed.scheduled_at().get());
@@ -800,6 +819,13 @@ impl GithubScheduleService {
             let next = cron
                 .next_after(now, claimed.entry().timezone())
                 .map_err(|_| GithubScheduleServiceError::InvalidRegistry)?;
+            self.project_fire_result(
+                &claimed,
+                &connection,
+                claim,
+                ProviderWorkflowResultDisposition::Skipped,
+            )
+            .await?;
             return self
                 .complete(
                     claim,
@@ -808,26 +834,9 @@ impl GithubScheduleService {
                 )
                 .await;
         }
-        let check_claim = match self
-            .schedules
-            .register_github_scheduled_check_subject(RegisterGithubScheduledCheckSubject::new(
-                claim,
-            ))
-            .await
-        {
-            Ok(_) => claim,
-            Err(GithubScheduleStoreError::ClaimRejected | GithubScheduleStoreError::Conflict) => {
-                return Ok(());
-            }
-            Err(error) => {
-                return self
-                    .retry_or_return(claim, "github.schedule.check_unavailable", error)
-                    .await;
-            }
-        };
         let claim = match self
             .schedules
-            .renew_github_schedule_fire(check_claim, self.config.fire_claim_millis())
+            .renew_github_schedule_fire(claim, self.config.fire_claim_millis())
             .await
         {
             Ok(claim) => claim,
@@ -836,18 +845,35 @@ impl GithubScheduleService {
             }
             Err(error) => return Err(error.into()),
         };
-        let conclusion = match Box::pin(self.admit_claimed_fire(&claimed, claim)).await {
-            Ok(run_id) => GithubScheduleFireConclusion::Admitted(run_id),
-            Err(FireFailure::Skipped(kind)) => {
-                GithubScheduleFireConclusion::Skipped(kind.to_owned())
-            }
-            Err(FireFailure::Failed(kind)) => GithubScheduleFireConclusion::Failed(kind.to_owned()),
-            Err(FireFailure::InvalidRegistry) => {
-                return self.complete_invalid_registry(claim).await;
-            }
-            Err(FireFailure::Retry(kind)) => return self.retry(claim, kind).await,
-            Err(FireFailure::Lost) => return Ok(()),
-        };
+        let (conclusion, disposition) =
+            match Box::pin(self.admit_claimed_fire(&claimed, claim)).await {
+                Ok(admission) => (
+                    GithubScheduleFireConclusion::Admitted(admission.receipt().run_id()),
+                    ProviderWorkflowResultDisposition::Admitted(admission),
+                ),
+                Err(FireFailure::Skipped(kind)) => (
+                    GithubScheduleFireConclusion::Skipped(kind.to_owned()),
+                    ProviderWorkflowResultDisposition::Skipped,
+                ),
+                Err(FireFailure::Failed(kind)) => (
+                    GithubScheduleFireConclusion::Failed(kind.to_owned()),
+                    ProviderWorkflowResultDisposition::Failed,
+                ),
+                Err(FireFailure::InvalidRegistry) => {
+                    self.project_fire_result(
+                        &claimed,
+                        &connection,
+                        claim,
+                        ProviderWorkflowResultDisposition::Failed,
+                    )
+                    .await?;
+                    return self.complete_invalid_registry(claim).await;
+                }
+                Err(FireFailure::Retry(kind)) => return self.retry(claim, kind).await,
+                Err(FireFailure::Lost) => return Ok(()),
+            };
+        self.project_fire_result(&claimed, &connection, claim, disposition)
+            .await?;
         let next = cron
             .next_after(claimed.scheduled_at(), claimed.entry().timezone())
             .map_err(|_| GithubScheduleServiceError::InvalidRegistry)?;
@@ -858,7 +884,7 @@ impl GithubScheduleService {
         &self,
         claimed: &ClaimedGithubScheduleFire,
         claim: GithubScheduleFireClaim,
-    ) -> Result<automata_ci_core::RunId, FireFailure> {
+    ) -> Result<WorkflowAdmissionResult, FireFailure> {
         let (source, available, repository_owner_id) =
             self.load_claimed_workflow_sources(claimed).await?;
         let plan = compile_claimed_workflow(claimed, &source)?;
@@ -947,8 +973,61 @@ impl GithubScheduleService {
                 .admit_scheduled_github_workflow(request, claim),
         )
         .await
-        .map(|result| result.receipt().run_id())
         .map_err(|error| map_admission_error(&error))
+    }
+
+    async fn load_fire_connection(
+        &self,
+        claimed: &ClaimedGithubScheduleFire,
+    ) -> Result<ProviderConnectionManifest, GithubScheduleServiceError> {
+        let connection = self
+            .connections
+            .current_connection(claimed.connection_id())
+            .await
+            .map_err(map_provider_repository_error)?
+            .ok_or(GithubScheduleServiceError::ResultRejected)?;
+        if connection.state() != ProviderLifecycleState::Active
+            || connection
+                .configuration()
+                .repository()
+                .external_id()
+                .as_str()
+                != claimed.provider_repository_id()
+        {
+            return Err(GithubScheduleServiceError::ResultRejected);
+        }
+        Ok(connection)
+    }
+
+    async fn project_fire_result(
+        &self,
+        claimed: &ClaimedGithubScheduleFire,
+        connection: &ProviderConnectionManifest,
+        claim: GithubScheduleFireClaim,
+        disposition: ProviderWorkflowResultDisposition,
+    ) -> Result<(), GithubScheduleServiceError> {
+        let request = ProviderWorkflowResultRequest::new(
+            connection,
+            ProviderWorkflowInvocationId::from_uuid(claim.fire_id().as_uuid())
+                .map_err(|_| GithubScheduleServiceError::ResultRejected)?,
+            format!(
+                "{}/{}",
+                claimed.repository_owner(),
+                claimed.repository_name()
+            ),
+            claimed.source_revision(),
+            claimed.entry().workflow_path(),
+            // Lease retries repeat one provider-visible workflow invocation.
+            1,
+            claimed.scheduled_at(),
+            disposition,
+        )
+        .map_err(map_result_error)?;
+        self.results
+            .project_invocation(request)
+            .await
+            .map(|_| ())
+            .map_err(map_result_error)
     }
 
     async fn load_claimed_workflow_sources(
@@ -1067,18 +1146,6 @@ impl GithubScheduleService {
             Err(error) => Err(error.into()),
         }
     }
-
-    async fn retry_or_return(
-        &self,
-        claim: GithubScheduleFireClaim,
-        kind: &'static str,
-        error: GithubScheduleStoreError,
-    ) -> Result<(), GithubScheduleServiceError> {
-        match error {
-            GithubScheduleStoreError::Store(_) => self.retry(claim, kind).await,
-            error => Err(error.into()),
-        }
-    }
 }
 
 fn compile_claimed_workflow(
@@ -1141,8 +1208,10 @@ impl fmt::Debug for GithubScheduleService {
             .field("objects", &self.objects)
             .field("source", &self.source)
             .field("manifests", &"[provider manifest repository]")
+            .field("connections", &"[common provider manifest repository]")
             .field("schedules", &"[schedule repository]")
             .field("admission", &"[workflow admission service]")
+            .field("results", &self.results)
             .field(
                 "source_authority_count",
                 &self.source_authorities.selectors.len(),
@@ -1208,12 +1277,19 @@ pub enum GithubScheduleServiceError {
     /// Durable schedule boundary failed.
     #[error(transparent)]
     Store(#[from] GithubScheduleStoreError),
+    /// Common provider connection or result storage is temporarily unavailable.
+    #[error("scheduled workflow result storage is unavailable")]
+    ResultUnavailable,
+    /// Common provider connection and scheduled invocation evidence disagreed.
+    #[error("scheduled workflow result evidence is invalid")]
+    ResultRejected,
 }
 
 fn retryable_schedule_error(error: &GithubScheduleServiceError) -> bool {
     match error {
         GithubScheduleServiceError::SourceUnavailable
         | GithubScheduleServiceError::CredentialUnavailable
+        | GithubScheduleServiceError::ResultUnavailable
         | GithubScheduleServiceError::Manifest(GithubProviderManifestStoreError::Operation(_))
         | GithubScheduleServiceError::Store(GithubScheduleStoreError::Store(_)) => true,
         GithubScheduleServiceError::Blob(error) => error.kind() == BlobStoreErrorKind::Unavailable,
@@ -1223,8 +1299,35 @@ fn retryable_schedule_error(error: &GithubScheduleServiceError) -> bool {
         | GithubScheduleServiceError::InvalidRegistry
         | GithubScheduleServiceError::SourceRejected
         | GithubScheduleServiceError::CredentialRejected
+        | GithubScheduleServiceError::ResultRejected
         | GithubScheduleServiceError::Manifest(_)
         | GithubScheduleServiceError::Store(_) => false,
+    }
+}
+
+const fn map_provider_repository_error(
+    error: ProviderRepositoryError,
+) -> GithubScheduleServiceError {
+    match error {
+        ProviderRepositoryError::Unavailable => GithubScheduleServiceError::ResultUnavailable,
+        ProviderRepositoryError::Conflict
+        | ProviderRepositoryError::NotFound
+        | ProviderRepositoryError::Corrupt
+        | ProviderRepositoryError::SecretCustody => GithubScheduleServiceError::ResultRejected,
+    }
+}
+
+const fn map_result_error(error: ProviderWorkflowResultServiceError) -> GithubScheduleServiceError {
+    match error {
+        ProviderWorkflowResultServiceError::Unavailable => {
+            GithubScheduleServiceError::ResultUnavailable
+        }
+        ProviderWorkflowResultServiceError::InvalidConfiguration
+        | ProviderWorkflowResultServiceError::InvalidEvidence
+        | ProviderWorkflowResultServiceError::SubjectNotReady
+        | ProviderWorkflowResultServiceError::Inconsistent => {
+            GithubScheduleServiceError::ResultRejected
+        }
     }
 }
 
@@ -1278,7 +1381,7 @@ fn registry_entries(
                 .map_err(|_| ())?;
             GithubScheduleRegistryEntry::new(
                 u16::try_from(ordinal).map_err(|_| ())?,
-                automata_ci_store::GithubCheckSubjectKey::new(path).map_err(|_| ())?,
+                automata_ci_provider::ProviderRepositoryPath::new(path).map_err(|_| ())?,
                 digest,
                 schedule.ordinal(),
                 schedule.expression().exact(),
@@ -1417,6 +1520,7 @@ mod tests {
         let retryable = [
             GithubScheduleServiceError::SourceUnavailable,
             GithubScheduleServiceError::CredentialUnavailable,
+            GithubScheduleServiceError::ResultUnavailable,
             GithubScheduleServiceError::Blob(BlobStoreError::new(BlobStoreErrorKind::Unavailable)),
             GithubScheduleServiceError::Manifest(GithubProviderManifestStoreError::operation(
                 std::io::Error::other("temporary manifest backend failure"),
@@ -1443,6 +1547,7 @@ mod tests {
             GithubScheduleServiceError::InvalidRegistry,
             GithubScheduleServiceError::SourceRejected,
             GithubScheduleServiceError::CredentialRejected,
+            GithubScheduleServiceError::ResultRejected,
             GithubScheduleServiceError::Blob(BlobStoreError::new(BlobStoreErrorKind::Unauthorized)),
             GithubScheduleServiceError::Blob(BlobStoreError::new(BlobStoreErrorKind::Integrity)),
             GithubScheduleServiceError::Manifest(GithubProviderManifestStoreError::CorruptData),

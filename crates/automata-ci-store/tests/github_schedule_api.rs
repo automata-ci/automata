@@ -1,27 +1,27 @@
 use crate::github_manifest_fixture;
 
 use automata_ci_core::{GitObjectAlgorithm, GitObjectId, RunId, Sha256Digest, UnixMillis};
-use automata_ci_provider::ProviderConnectionId;
+use automata_ci_provider::{ProviderConnectionId, ProviderRepositoryPath};
 use automata_ci_schedule::CronExpression;
 use automata_ci_store::{
     ClaimDueGithubScheduleFire, ClaimGithubScheduleDiscovery, ClaimedGithubScheduleFire,
     CompleteGithubScheduleFire, GITHUB_SCHEDULE_ARCHIVE_MEDIA_TYPE,
-    GITHUB_SCHEDULE_INVALID_REGISTRY_FAILURE, GithubCheckName, GithubCheckSubjectKey,
-    GithubProviderGitRef, GithubProviderManifest, GithubProviderManifestLimits,
-    GithubProviderManifestRevision, GithubProviderOrigins,
-    GithubProviderWebhookVerifierFingerprint, GithubProviderWorkflowSelection,
-    GithubRepositoryName, GithubScheduleArchive, GithubScheduleClaimFence,
-    GithubScheduleDiscoveryClaim, GithubScheduleFireClaim, GithubScheduleFireConclusion,
-    GithubScheduleFireId, GithubScheduleFireReceipt, GithubScheduleRegistryEntry,
-    GithubScheduleRegistryId, GithubScheduleRegistryReceipt, GithubScheduleSourceAuthority,
-    GithubScheduleValueError, GithubScheduleWorkerId, GithubServerServiceAppClientId,
-    GithubServerServiceAppId, GithubServerServiceAuthorityId, GithubServerServiceAuthorityIdentity,
-    GithubServerServiceAuthoritySelector, GithubServerServiceJwtIssuer,
-    GithubServerServiceRevision, GithubServerServiceScope, MAX_GITHUB_REGISTERED_SCHEDULES,
-    MAX_GITHUB_SCHEDULE_CLAIM_MILLIS, MAX_GITHUB_SCHEDULE_FIRE_ATTEMPTS,
-    MAX_GITHUB_SCHEDULE_RETRY_MILLIS, ObjectKey, ProviderInstallationId, ProviderRepositoryId,
-    ProviderRepositoryOwnerId, ProviderRepositoryVisibility, RegisterGithubScheduleRegistry,
-    RegisterGithubScheduledCheckSubject, RetryGithubScheduleFire, TenantScope,
+    GITHUB_SCHEDULE_INVALID_REGISTRY_FAILURE, GithubCheckName, GithubProviderGitRef,
+    GithubProviderManifest, GithubProviderManifestLimits, GithubProviderManifestRevision,
+    GithubProviderOrigins, GithubProviderWebhookVerifierFingerprint,
+    GithubProviderWorkflowSelection, GithubRepositoryName, GithubScheduleArchive,
+    GithubScheduleClaimFence, GithubScheduleDiscoveryClaim, GithubScheduleFireClaim,
+    GithubScheduleFireConclusion, GithubScheduleFireId, GithubScheduleFireReceipt,
+    GithubScheduleRegistryEntry, GithubScheduleRegistryId, GithubScheduleRegistryReceipt,
+    GithubScheduleSourceAuthority, GithubScheduleValueError, GithubScheduleWorkerId,
+    GithubServerServiceAppClientId, GithubServerServiceAppId, GithubServerServiceAuthorityId,
+    GithubServerServiceAuthorityIdentity, GithubServerServiceAuthoritySelector,
+    GithubServerServiceJwtIssuer, GithubServerServiceRevision, GithubServerServiceScope,
+    MAX_GITHUB_REGISTERED_SCHEDULES, MAX_GITHUB_SCHEDULE_CLAIM_MILLIS,
+    MAX_GITHUB_SCHEDULE_FIRE_ATTEMPTS, MAX_GITHUB_SCHEDULE_RETRY_MILLIS, ObjectKey,
+    ProviderInstallationId, ProviderRepositoryId, ProviderRepositoryOwnerId,
+    ProviderRepositoryVisibility, RegisterGithubScheduleRegistry, RetryGithubScheduleFire,
+    TenantScope,
 };
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
@@ -181,8 +181,7 @@ fn registry_entry_preserves_definition_and_derives_its_digest() {
     );
 
     let debug = format!("{schedule_entry:?}");
-    assert!(debug.contains("GithubCheckSubjectKey([REDACTED])"));
-    assert!(!debug.contains(".ci/workflows/nightly.yml"));
+    assert!(debug.contains(".ci/workflows/nightly.yml"));
 }
 
 #[test]
@@ -949,11 +948,8 @@ fn claimed_fire_and_receipts_preserve_complete_noncredential_evidence() {
     assert_eq!(fire.entry(), &entry);
     assert_eq!(fire.scheduled_at(), UnixMillis::new(30_000));
     let debug = format!("{fire:?}");
-    assert!(debug.contains("GithubCheckSubjectKey([REDACTED])"));
-    assert!(!debug.contains(".ci/workflows/claimed.yml"));
+    assert!(debug.contains(".ci/workflows/claimed.yml"));
 
-    let check = RegisterGithubScheduledCheckSubject::new(claim);
-    assert_eq!(check.claim(), claim);
     let registry_receipt = GithubScheduleRegistryReceipt::from_durable_parts(
         registry_id(112),
         UnixMillis::new(40_000),
@@ -1117,8 +1113,8 @@ fn digest(byte: u8) -> Sha256Digest {
     Sha256Digest::from_bytes([byte; 32])
 }
 
-fn workflow_path(value: &str) -> GithubCheckSubjectKey {
-    GithubCheckSubjectKey::new(value).expect("workflow path")
+fn workflow_path(value: &str) -> ProviderRepositoryPath {
+    ProviderRepositoryPath::new(value).expect("workflow path")
 }
 
 #[allow(clippy::too_many_arguments)]
