@@ -887,7 +887,7 @@ async fn acquire_handoff(
 ) -> Result<GithubServerServiceCredentialHandoff, GithubServerServiceStoreError> {
     let rejected = |stage: &'static str| {
         tracing::warn!(
-            target: "automata_ci",
+            target: "automata_ci_credential_github::server_service_authority",
             stage,
             action = request.consumer().action().as_str(),
             "GitHub server-service credential handoff rejected"
@@ -1238,7 +1238,7 @@ async fn revalidate_handoff_consumer(
     };
     let Some(claim_expires_at) = claim_expires_at else {
         tracing::warn!(
-            target: "automata_ci",
+            target: "automata_ci_credential_github::server_service_authority",
             stage = "consumer_revalidation_empty",
             action = consumer.action().as_str(),
             consumer_id = ?consumer.consumer_id(),
