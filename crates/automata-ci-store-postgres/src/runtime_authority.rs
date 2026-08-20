@@ -4643,6 +4643,15 @@ fn fencing_i64(value: FencingToken) -> i64 {
 }
 
 fn operation_error(error: sqlx::Error) -> GithubRuntimeAuthorityStoreError {
+    let code = error
+        .as_database_error()
+        .and_then(sqlx::error::DatabaseError::code)
+        .map(|value| value.into_owned());
+    let constraint = error
+        .as_database_error()
+        .and_then(sqlx::error::DatabaseError::constraint)
+        .map(str::to_owned);
+    tracing::error!(code = ?code, constraint = ?constraint, "GitHub runtime-authority database operation failed");
     GithubRuntimeAuthorityStoreError::operation(error)
 }
 
