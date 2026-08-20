@@ -360,6 +360,24 @@ Remote Login, Screen Sharing, or other remote service is enabled, then shut
 down cleanly. Use the identity copied into the dedicated host output directory
 for sealing.
 
+The installer deliberately starts with a disk of at least 64 GiB because that
+is the supported sizing range for `VZMacOSInstaller`. After provisioning,
+removing temporary guest material, and shutting down, the unsealed image can
+be compacted to reclaim unused APFS capacity. The size passed to `compact` is
+the macOS APFS container size; the image also contains Apple's approximately
+512 MiB internal-storage container:
+
+```console
+"$tool" compact "$template" 28
+```
+
+`compact` refuses an already sealed template and invokes Apple's APFS-aware
+`hdiutil resize` operation. It fails if the requested size is below the
+guest's actual APFS minimum, so do not delete the System, Preboot, Recovery,
+or Data volumes to force a smaller image. A 28 GiB container is a compact
+smoke/basic-CI tier; Xcode-heavy jobs still need a larger template and a host
+volume with the corresponding quota.
+
 Seal only on an offline trusted builder:
 
 ```console
