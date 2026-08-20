@@ -747,7 +747,6 @@ async fn lock_current_execution(
          AND admission_receipt.repository_id = origin.repository_id
          AND admission_receipt.run_id = origin.run_id
          AND admission_receipt.committed_at_ms = origin.admitted_at_ms
-         AND admission_receipt.github_subject_evidence_required
         JOIN github_provider_manifest_revisions AS manifest
           ON manifest.tenant_id = origin.tenant_id
          AND manifest.repository_id = origin.repository_id
