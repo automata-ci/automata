@@ -1241,11 +1241,11 @@ impl AdmitLogicalWorkflowRunBuilder {
         }
         if !command.trust_snapshot.is_construction_placeholder() {
             let evidence = command.trust_snapshot.evidence();
-            let execution_revision = command.head_sha.to_string();
+            let source_revision = command.head_sha.to_string();
             if evidence.target_repository().is_none_or(|repository| {
                 repository.id() != command.repository.provider_repository_id()
             }) || evidence.execution_ref() != Some(command.git_ref.as_str())
-                || evidence.execution_revision() != Some(execution_revision.as_str())
+                || evidence.source_revision() != Some(source_revision.as_str())
             {
                 return Err(LogicalWorkflowAdmissionValueError::InvalidTrustSnapshot);
             }

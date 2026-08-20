@@ -113,6 +113,15 @@ fn command(
 }
 
 fn trust_snapshot(repository_id: &str, git_ref: &str, revision: &str) -> TrustSnapshot {
+    trust_snapshot_with_revisions(repository_id, git_ref, revision, revision)
+}
+
+fn trust_snapshot_with_revisions(
+    repository_id: &str,
+    git_ref: &str,
+    source_revision: &str,
+    execution_revision: &str,
+) -> TrustSnapshot {
     let actor = TrustActorEvidence::new(
         "provider-actor-17",
         TrustActorKind::User,
@@ -128,7 +137,7 @@ fn trust_snapshot(repository_id: &str, git_ref: &str, revision: &str) -> TrustSn
                 .with_triggering_actor(actor)
                 .with_repositories(repository.clone(), repository)
                 .with_refs(git_ref, git_ref, git_ref)
-                .with_revisions(revision, revision, revision)
+                .with_revisions(source_revision, source_revision, execution_revision)
                 .with_fork(false)
                 .with_token_recursion(TrustTokenRecursion::Suppressed),
         )
@@ -136,7 +145,7 @@ fn trust_snapshot(repository_id: &str, git_ref: &str, revision: &str) -> TrustSn
 }
 
 #[test]
-fn trust_snapshot_must_bind_the_exact_admitted_execution_origin() {
+fn trust_snapshot_must_bind_the_exact_admitted_source_origin() {
     let build = |snapshot: TrustSnapshot| {
         AdmitLogicalWorkflowRun::builder(
             TenantScope::from_authenticated_tenant_id("logical-tenant").expect("tenant"),
@@ -177,6 +186,16 @@ fn trust_snapshot_must_bind_the_exact_admitted_execution_origin() {
     let revision = "09".repeat(20);
 
     assert!(build(trust_snapshot("repository-7", "refs/heads/main", &revision)).is_ok());
+    assert!(
+        build(trust_snapshot_with_revisions(
+            "repository-7",
+            "refs/heads/main",
+            &revision,
+            &"0a".repeat(20),
+        ))
+        .is_ok(),
+        "the execution revision may differ from the admitted check subject"
+    );
     for conflicting in [
         trust_snapshot("repository-8", "refs/heads/main", &revision),
         trust_snapshot("repository-7", "refs/heads/other", &revision),

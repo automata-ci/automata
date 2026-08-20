@@ -32,8 +32,9 @@ fn rebuild(
         original.plan().clone(),
         original.base_context().clone(),
         original.idempotency().clone(),
-        original.commit_sha(),
+        original.source_revision(),
     )
+    .execution_revision(original.execution_revision())
     .git_ref(original.git_ref())
     .workflow_name(original.workflow_name())
     .actor(original.actor().expect("fixture actor"))

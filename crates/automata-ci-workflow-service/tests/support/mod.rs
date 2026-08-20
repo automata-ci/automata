@@ -83,6 +83,55 @@ pub fn push_request(tenant: &str) -> WorkflowAdmissionRequest {
     )
 }
 
+pub fn pull_request_with_merge_revision(tenant: &str) -> WorkflowAdmissionRequest {
+    let source_revision =
+        automata_ci_core::GitObjectId::from_provider_hex(REVISION).expect("source revision");
+    let execution_revision = automata_ci_core::GitObjectId::from_provider_hex(
+        "abcdefabcdefabcdefabcdefabcdefabcdefabcd",
+    )
+    .expect("execution revision");
+    let provenance = SourceProvenance::new(
+        SourceId::new(WORKFLOW_PATH),
+        SourceOrigin::Repository {
+            repository: Arc::from(REPOSITORY),
+            revision: source_revision,
+            path: Arc::from(WORKFLOW_PATH),
+        },
+    );
+    let parsed =
+        GithubWorkflowFrontend::default().parse(ParseWorkflowRequest::new(provenance, CI_SOURCE));
+    let compiled = GithubWorkflowCompiler::new().compile(
+        CompileWorkflowRequest::new(
+            parsed.plan().expect("source plan"),
+            WorkflowEventProvenance::new("github", "pull_request")
+                .with_delivery_id(DELIVERY)
+                .with_commit_sha(execution_revision)
+                .with_git_ref(GIT_REF),
+        )
+        .with_event_metadata(ProviderEventMetadata::pull_request("synchronize", "main")),
+    );
+    assert!(compiled.is_accepted(), "{:#?}", compiled.diagnostics());
+    WorkflowAdmissionRequest::builder(
+        TenantScope::from_authenticated_tenant_id(tenant).expect("tenant"),
+        AdmissionRepositoryCoordinates::new("github", "repository-automata", REPOSITORY)
+            .expect("repository"),
+        WORKFLOW_PATH,
+        Bytes::from_static(CI_SOURCE.as_bytes()),
+        Bytes::from_static(b"{\"action\":\"synchronize\"}"),
+        compiled.into_parts().0.expect("compiled plan"),
+        JobRuntimeContext::empty_base(),
+        WorkflowAdmissionIdempotency::provider_delivery(DELIVERY).expect("delivery"),
+        source_revision,
+    )
+    .execution_revision(execution_revision)
+    .git_ref(GIT_REF)
+    .workflow_name("CI")
+    .actor("local-bootstrap")
+    .run_attempt(1)
+    .build()
+    .expect("valid pull request admission")
+}
+
 pub fn compile_ci_at_path(
     workflow_path: &str,
     event_name: &str,
@@ -165,8 +214,9 @@ pub fn changed_event_request(original: &WorkflowAdmissionRequest) -> WorkflowAdm
         original.plan().clone(),
         original.base_context().clone(),
         original.idempotency().clone(),
-        original.commit_sha(),
+        original.source_revision(),
     )
+    .execution_revision(original.execution_revision())
     .git_ref(original.git_ref())
     .workflow_name(original.workflow_name())
     .actor(original.actor().expect("fixture actor"))

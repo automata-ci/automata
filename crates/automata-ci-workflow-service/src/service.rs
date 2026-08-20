@@ -389,7 +389,7 @@ impl WorkflowAdmissionService {
                         workflow_id,
                         request.workflow_path(),
                         request.git_ref(),
-                        request.commit_sha(),
+                        request.execution_revision(),
                         source_blob.metadata.clone(),
                         operation_id,
                         event_blob.metadata.digest(),
@@ -721,7 +721,7 @@ fn build_command(
         ids.logical_invocation_id(run_id),
         request.plan().event().name(),
         event.metadata.clone(),
-        request.commit_sha(),
+        request.source_revision(),
         jobs,
         admitted_at,
     )
@@ -773,7 +773,7 @@ fn prepare_reusable_workflow_expansion(
     }
     let catalog = GithubReusableWorkflowCatalog::compile_reachable(
         request.repository().path(),
-        request.commit_sha(),
+        request.source_revision(),
         request.plan(),
         request.repository_workflow_sources().iter().cloned(),
     )?;
@@ -862,7 +862,7 @@ fn prepare_reusable_workflow_expansion(
         .map_err(|_| WorkflowAdmissionError::Internal)?;
         let descriptor_digest = catalog_descriptor_digest(
             path,
-            request.commit_sha(),
+            request.source_revision(),
             source.digest(),
             plan.digest(),
             contract_digest,
@@ -872,7 +872,7 @@ fn prepare_reusable_workflow_expansion(
         admitted_catalog.push(AdmittedReusableWorkflowCatalogEntry::new(
             *id,
             path,
-            request.commit_sha(),
+            request.source_revision(),
             source.clone(),
             plan.clone(),
             contract_digest,
@@ -1737,7 +1737,7 @@ fn canonical_request_digest(
     ] {
         digest_field(&mut digest, value.as_bytes());
     }
-    digest_field(&mut digest, request.commit_sha().as_bytes());
+    digest_field(&mut digest, request.source_revision().as_bytes());
     digest_optional_field(&mut digest, request.actor());
     digest_optional_field(&mut digest, request.display_title());
     digest_optional_field(&mut digest, request.commit_subject());
