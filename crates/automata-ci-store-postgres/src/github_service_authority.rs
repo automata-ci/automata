@@ -3654,12 +3654,23 @@ fn operation_error(error: sqlx::Error) -> GithubServerServiceStoreError {
         .and_then(sqlx::error::DatabaseError::constraint);
     match constraint {
         Some(
-            "github_server_service_handoffs_authority_exact"
+            constraint @ ("github_server_service_handoffs_authority_exact"
             | "github_server_service_handoffs_checks_claim_exact"
+            | "github_server_service_handoffs_schedule_discovery_claim_exact"
             | "github_server_service_handoffs_source_claim_exact"
+            | "github_server_service_handoffs_pull_requests_claim_exact"
+            | "github_workflow_permission_handoff_exact"
             | "github_server_service_handoffs_scope_exact"
-            | "github_server_service_handoffs_immutable",
-        ) => GithubServerServiceStoreError::HandoffRejected,
+            | "github_server_service_handoffs_immutable"),
+        ) => {
+            tracing::warn!(
+                target: "automata_ci_credential_github::server_service_authority",
+                stage = "database_insert_guard",
+                constraint,
+                "GitHub server-service credential handoff rejected"
+            );
+            GithubServerServiceStoreError::HandoffRejected
+        }
         Some("github_server_service_issuances_handoff_live") => {
             GithubServerServiceStoreError::HandoffStillLive
         }

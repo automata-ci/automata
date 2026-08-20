@@ -297,6 +297,10 @@ const CANONICAL_MIGRATIONS: &[(&str, &str)] = &[
         "0073_provider_delivery_runtime_authority_current.sql",
         "f1444ab4d4ed0fd9b96b000b706092340a7d961f188709fd06a22812e4bae2ad456391a1da82a0a9f65e4365261d1e62",
     ),
+    (
+        "0074_provider_handoff_consumer_guard.sql",
+        "cc8e6393ec556f8e209a06b19f0333b97729a1dbd85509debc1b04a374eb6f3ff1c707709e3fb2c0a0326d81d637d4df",
+    ),
 ];
 
 const BASELINE_MIGRATION_COUNT: u32 = 26;
@@ -969,6 +973,39 @@ fn provider_result_outbox_is_current_only_provider_neutral_and_fenced() {
         assert!(
             !source.contains(forbidden),
             "provider result outbox retained provider-specific or legacy surface: {forbidden}",
+        );
+    }
+}
+
+#[test]
+fn github_service_handoffs_revalidate_current_provider_consumers() {
+    let source = include_str!("../migrations/0074_provider_handoff_consumer_guard.sql");
+
+    for required in [
+        "FROM provider_result_outbox AS outbox",
+        "JOIN provider_result_subjects AS subject",
+        "outbox.generation = NEW.consumer_revision",
+        "outbox.claim_worker_id = NEW.consumer_owner_id",
+        "outbox.claim_fence = NEW.consumer_claim_fence",
+        "FROM provider_processing_invocations AS invocation",
+        "JOIN provider_deliveries AS delivery",
+        "FROM workflow_dispatch_source_resolutions AS resolution",
+        "NEW.consumer_action = 'fetch_pull_request_files'",
+        "delivery.event_type = 'pull_request'",
+    ] {
+        assert!(
+            source.contains(required),
+            "provider handoff guard lost current consumer binding: {required}",
+        );
+    }
+    for superseded in [
+        "github_check_projection_outbox",
+        "github_check_subjects",
+        "provider_delivery_inbox",
+    ] {
+        assert!(
+            !source.contains(superseded),
+            "provider handoff guard retained superseded consumer storage: {superseded}",
         );
     }
 }
