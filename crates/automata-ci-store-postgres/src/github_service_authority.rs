@@ -885,6 +885,14 @@ async fn acquire_handoff(
     store: &PostgresStore,
     request: AcquireGithubServerServiceHandoff,
 ) -> Result<GithubServerServiceCredentialHandoff, GithubServerServiceStoreError> {
+    let rejected = |stage: &'static str| {
+        tracing::warn!(
+            stage,
+            action = request.consumer().action().as_str(),
+            "GitHub server-service credential handoff rejected"
+        );
+        GithubServerServiceStoreError::HandoffRejected
+    };
     let mut transaction = store.pool.begin().await.map_err(operation_error)?;
     pin_read_committed(&mut transaction).await?;
     let authority_row = select_authority_for_update(&mut transaction, request.selector())
@@ -892,7 +900,7 @@ async fn acquire_handoff(
         .ok_or(GithubServerServiceStoreError::NotFound)?;
     let descriptor = decode_authority(&authority_row)?;
     if descriptor.identity().scope() != request.consumer().action().required_scope() {
-        return Err(GithubServerServiceStoreError::HandoffRejected);
+        return Err(rejected("scope"));
     }
     let consumer_check_now = database_now_ms(&mut transaction).await?;
     let consumer_expires_at = revalidate_handoff_consumer(
@@ -901,13 +909,19 @@ async fn acquire_handoff(
         request.consumer(),
         UnixMillis::new(consumer_check_now),
     )
-    .await?;
+    .await
+    .map_err(|error| {
+        if matches!(&error, GithubServerServiceStoreError::HandoffRejected) {
+            let _ = rejected("consumer_revalidation_initial");
+        }
+        error
+    })?;
     if consumer_expires_at
         .get()
         .checked_add(request.consumer().action().provider_tail_millis())
         .is_none_or(|maximum| request.required_through().get() > maximum)
     {
-        return Err(GithubServerServiceStoreError::HandoffRejected);
+        return Err(rejected("consumer_horizon_initial"));
     }
     let consumer = request.consumer();
     let existing_handoff = sqlx::query(
@@ -941,14 +955,14 @@ async fn acquire_handoff(
             || replay_consumer != request.consumer()
             || optional_i64(row, "released_at_ms")?.is_some()
         {
-            return Err(GithubServerServiceStoreError::HandoffRejected);
+            return Err(rejected("replay_binding"));
         }
         let durable_required_through = i64_column(row, "required_through_ms")?;
         let durable_granted_at = i64_column(row, "granted_at_ms")?;
         if durable_required_through != request.required_through().get()
             || request.observed_at().get() < durable_granted_at
         {
-            return Err(GithubServerServiceStoreError::HandoffRejected);
+            return Err(rejected("replay_horizon"));
         }
         (
             GithubServerServiceHandoffId::from_uuid(uuid_column(row, "id")?)
@@ -958,11 +972,11 @@ async fn acquire_handoff(
         )
     } else {
         if descriptor.state() != GithubServerServiceAuthorityState::Active {
-            return Err(GithubServerServiceStoreError::HandoffRejected);
+            return Err(rejected("authority_state"));
         }
         let generation = descriptor
             .current_generation()
-            .ok_or(GithubServerServiceStoreError::HandoffRejected)?;
+            .ok_or_else(|| rejected("authority_generation"))?;
         let key = GithubServerServiceIssuanceKey::new(request.authority_id(), generation);
         let issuance = select_issuance_for_update(&mut transaction, key)
             .await?
@@ -973,7 +987,7 @@ async fn acquire_handoff(
                 .usable_until()
                 .is_none_or(|until| until < request.required_through())
         {
-            return Err(GithubServerServiceStoreError::HandoffRejected);
+            return Err(rejected("issuance_horizon_initial"));
         }
         let inserted = sqlx::query(
             r"
@@ -1000,7 +1014,7 @@ async fn acquire_handoff(
         .await
         .map_err(operation_error)?;
         if inserted.rows_affected() != 1 {
-            return Err(GithubServerServiceStoreError::HandoffRejected);
+            return Err(rejected("handoff_conflict"));
         }
         (
             request.proposed_handoff_id(),
@@ -1016,34 +1030,52 @@ async fn acquire_handoff(
     let receipt = decode_issuance_receipt(&issuance)?;
     let database_now = database_now_ms(&mut transaction).await?;
     validate_caller_clock(request.observed_at(), database_now)
-        .map_err(|_| GithubServerServiceStoreError::HandoffRejected)?;
+        .map_err(|_| rejected("caller_clock"))?;
     let consumer_expires_at = revalidate_handoff_consumer(
         &mut transaction,
         descriptor.identity(),
         request.consumer(),
         UnixMillis::new(database_now),
     )
-    .await?;
-    if (request.consumer().action() != GithubServerServiceAction::ObserveWorkflowPermissionDefaults
-        && database_now >= consumer_expires_at.get())
-        || database_now >= request.required_through().get()
-        || consumer_expires_at
-            .get()
-            .checked_add(request.consumer().action().provider_tail_millis())
-            .is_none_or(|maximum| request.required_through().get() > maximum)
-        || !matches!(
-            receipt.state(),
-            GithubServerServiceIssuanceState::Ready
-                | GithubServerServiceIssuanceState::RevokePending
-        )
-        || receipt
-            .usable_until()
-            .is_none_or(|until| until.get() < request.required_through().get())
-        || !is_replay
-            && (receipt.state() != GithubServerServiceIssuanceState::Ready
-                || descriptor.current_generation() != Some(generation))
+    .await
+    .map_err(|error| {
+        if matches!(&error, GithubServerServiceStoreError::HandoffRejected) {
+            let _ = rejected("consumer_revalidation_final");
+        }
+        error
+    })?;
+    if request.consumer().action() != GithubServerServiceAction::ObserveWorkflowPermissionDefaults
+        && database_now >= consumer_expires_at.get()
     {
-        return Err(GithubServerServiceStoreError::HandoffRejected);
+        return Err(rejected("consumer_expired_final"));
+    }
+    if database_now >= request.required_through().get() {
+        return Err(rejected("handoff_expired_final"));
+    }
+    if consumer_expires_at
+        .get()
+        .checked_add(request.consumer().action().provider_tail_millis())
+        .is_none_or(|maximum| request.required_through().get() > maximum)
+    {
+        return Err(rejected("consumer_horizon_final"));
+    }
+    if !matches!(
+        receipt.state(),
+        GithubServerServiceIssuanceState::Ready | GithubServerServiceIssuanceState::RevokePending
+    ) {
+        return Err(rejected("issuance_state_final"));
+    }
+    if receipt
+        .usable_until()
+        .is_none_or(|until| until.get() < request.required_through().get())
+    {
+        return Err(rejected("issuance_horizon_final"));
+    }
+    if !is_replay
+        && (receipt.state() != GithubServerServiceIssuanceState::Ready
+            || descriptor.current_generation() != Some(generation))
+    {
+        return Err(rejected("current_generation_final"));
     }
     let protected = match decode_protected(descriptor.identity().clone(), &issuance) {
         Ok(protected) => protected,
