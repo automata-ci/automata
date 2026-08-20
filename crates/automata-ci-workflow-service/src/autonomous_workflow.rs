@@ -4322,7 +4322,7 @@ fn unavailable_or_shutdown(
 }
 
 fn selection_failure(
-    _error: &automata_ci_store::LogicalWorkSelectionStoreError,
+    error: &automata_ci_store::LogicalWorkSelectionStoreError,
     queue: AutonomousWorkflowQueue,
 ) -> Result<QueuePoll, AutonomousWorkflowError> {
     // Selection is a read/claim poll.  A rejected or malformed candidate must
@@ -4330,6 +4330,7 @@ fn selection_failure(
     // next bounded poll can re-read the authoritative graph after maintenance
     // or a concurrent worker has advanced it.  Fatal authority errors remain
     // enforced at consume/finalization boundaries, after a durable claim exists.
+    tracing::warn!(%error, ?queue, "logical work selection failed; retrying bounded poll");
     Ok(QueuePoll::Outcome(AutonomousWorkflowOutcome::Unavailable(
         queue,
     )))
@@ -4339,6 +4340,7 @@ fn selection_submission_failure(
     error: AutonomousWorkflowLeaseError,
     queue: AutonomousWorkflowQueue,
 ) -> Result<QueuePoll, AutonomousWorkflowError> {
+    tracing::warn!(%error, ?queue, "logical work selection submission failed; retrying bounded poll");
     match error {
         AutonomousWorkflowLeaseError::Shutdown => Err(AutonomousWorkflowError::Shutdown),
         AutonomousWorkflowLeaseError::DeadlineElapsed
