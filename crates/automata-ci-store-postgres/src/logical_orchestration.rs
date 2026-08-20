@@ -1729,9 +1729,13 @@ fn provider_trigger_matches_command(
         NormalizedTrigger::RepositoryDispatch(value) => value.actor(),
     }
     .map(|actor| actor.external_id().as_str());
-    let source_matches = trigger
-        .workflow_source_revision()
-        .is_none_or(|revision| revision == command.head_sha());
+    let source_matches = trigger.workflow_source_revision().is_none_or(|revision| {
+        command
+            .trust_snapshot()
+            .evidence()
+            .source_revision()
+            .is_some_and(|source_revision| source_revision == revision.to_string())
+    });
     let reference_matches = trigger.workflow_execution_ref().map_or_else(
         || command.git_ref() == format!("refs/heads/{default_branch}"),
         |git_ref| git_ref.full() == command.git_ref(),
