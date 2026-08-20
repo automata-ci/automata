@@ -3458,6 +3458,7 @@ impl AutonomousWorkflowService {
         };
         let selected = match outcome {
             Err(error) if is_repository_unavailable(&error) => {
+                tracing::warn!(%error, queue = ?AutonomousWorkflowQueue::Orchestration, "logical work selection unavailable; retrying bounded poll");
                 return Ok(unavailable_poll(AutonomousWorkflowQueue::Orchestration));
             }
             Err(error) => {
@@ -3914,6 +3915,7 @@ impl AutonomousWorkflowService {
         };
         let selected = match outcome {
             Err(error) if is_repository_unavailable(&error) => {
+                tracing::warn!(%error, queue = ?AutonomousWorkflowQueue::Materialization, "logical work selection unavailable; retrying bounded poll");
                 return Ok(unavailable_poll(AutonomousWorkflowQueue::Materialization));
             }
             Err(error) => {
