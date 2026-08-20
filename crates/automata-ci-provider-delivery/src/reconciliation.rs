@@ -715,7 +715,13 @@ fn validate_provider_revision(
     current: Option<&ProviderInstanceRecord>,
     desired: ProviderConfigurationRevision,
 ) -> Result<(), ProviderReconciliationError> {
-    let valid = current.map_or(desired.get() == 1, |current| {
+    // The provider-neutral registry may be empty when it is first introduced
+    // alongside an already-established provider configuration.  In that
+    // bootstrap case the durable provider configuration revision is the
+    // authoritative starting point and need not be replayed from revision 1.
+    // Once a neutral manifest exists, every subsequent observation remains
+    // strictly idempotent or contiguous.
+    let valid = current.is_none_or(|current| {
         let current = current.manifest().revision().get();
         desired.get() == current || current.checked_add(1) == Some(desired.get())
     });
@@ -956,8 +962,6 @@ mod tests {
                     manifest
                         .validate_successor(&current.manifest)
                         .map_err(|_| ProviderRepositoryError::Conflict)?;
-                } else if manifest.revision().get() != 1 {
-                    return Err(ProviderRepositoryError::Conflict);
                 }
                 let stored = secrets
                     .into_secrets()
@@ -1309,5 +1313,32 @@ mod tests {
         assert_eq!(endpoint.revision().get(), 2);
         assert_eq!(endpoint.provider_revision().get(), 2);
         assert_eq!(endpoint.state(), ProviderWebhookEndpointState::Disabled);
+    }
+
+    #[tokio::test]
+    async fn first_observation_bootstraps_an_existing_provider_revision() {
+        let repository = Arc::new(MemoryRepository::default());
+        let factory = Arc::new(TestFactory {
+            provider_type: ProviderTypeId::new("forgejo").expect("provider type"),
+        }) as Arc<dyn ProviderConfigurationFactory>;
+        let service = ProviderReconciliationService::new(
+            ProviderFactoryRegistry::new([factory]).expect("registry"),
+            repository.clone(),
+            repository,
+        );
+
+        let report = service
+            .reconcile(desired(
+                ProviderInstanceId::new(),
+                ProviderConnectionId::new(),
+                ProviderWebhookEndpointId::new(),
+                2,
+                b"bootstrap-secret",
+                false,
+            ))
+            .await
+            .expect("first observation with an existing durable revision");
+        assert_eq!(report.instance(), ProviderSaveOutcome::Inserted);
+        assert_eq!(report.endpoint(), ProviderSaveOutcome::Inserted);
     }
 }
