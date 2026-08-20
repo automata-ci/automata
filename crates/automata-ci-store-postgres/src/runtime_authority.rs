@@ -3264,7 +3264,6 @@ async fn lock_exact_authority_graph(
          AND admission.repository_id = origin.repository_id
          AND admission.run_id = origin.run_id
          AND admission.committed_at_ms = origin.admitted_at_ms
-         AND admission.github_subject_evidence_required
         JOIN github_provider_manifest_revisions AS manifest
           ON manifest.tenant_id = origin.tenant_id
          AND manifest.repository_id = origin.repository_id
@@ -4644,6 +4643,15 @@ fn fencing_i64(value: FencingToken) -> i64 {
 }
 
 fn operation_error(error: sqlx::Error) -> GithubRuntimeAuthorityStoreError {
+    let code = error
+        .as_database_error()
+        .and_then(sqlx::error::DatabaseError::code)
+        .map(std::borrow::Cow::into_owned);
+    let constraint = error
+        .as_database_error()
+        .and_then(sqlx::error::DatabaseError::constraint)
+        .map(str::to_owned);
+    tracing::error!(code = ?code, constraint = ?constraint, "GitHub runtime-authority database operation failed");
     GithubRuntimeAuthorityStoreError::operation(error)
 }
 

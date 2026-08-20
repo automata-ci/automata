@@ -24,7 +24,7 @@ def documents() -> tuple[dict, dict]:
         "total_count": 1,
         "check_runs": [
             {
-                "name": "Automata CI / required",
+                "name": "Automata CI / .ci/workflows/ci.yml",
                 "head_sha": COMMIT,
                 "status": "completed",
                 "conclusion": "success",

@@ -1068,6 +1068,7 @@ fn map_handoff_error(
     error: &GithubServerServiceHandoffError,
 ) -> GithubProviderCredentialHandoffError {
     match error {
+        GithubServerServiceHandoffError::Rejected => GithubProviderCredentialHandoffError::Rejected,
         GithubServerServiceHandoffError::Repository
         | GithubServerServiceHandoffError::Unavailable => {
             GithubProviderCredentialHandoffError::Unavailable
@@ -1327,7 +1328,7 @@ impl GithubProviderCredentialAdapters {
         &self,
         request: GithubResultCredentialRequest<'_>,
     ) -> Result<GithubResultCredential, GithubResultCredentialProviderError> {
-        let (selector, repository) = self
+        let (selector, repository) = match self
             .operation_authority(
                 request.context(),
                 request.claimed().subject().repository().external_id(),
@@ -1337,7 +1338,18 @@ impl GithubProviderCredentialAdapters {
                 GithubServerServiceScope::ChecksWrite,
             )
             .await
-            .map_err(common_result_handoff_error)?;
+        {
+            Ok(authority) => authority,
+            Err(error) => {
+                tracing::warn!(
+                    stage = "authority_resolution",
+                    operation = ?request.operation(),
+                    reason = ?error,
+                    "GitHub result credential acquisition failed"
+                );
+                return Err(common_result_handoff_error(error));
+            }
+        };
         let consumer = common_result_consumer(&request)?;
         let observed_at = self
             .observation_clock
@@ -1351,11 +1363,18 @@ impl GithubProviderCredentialAdapters {
             request.required_through(),
         )
         .map_err(common_result_handoff_error)?;
-        let handoff = self
-            .handoffs
-            .acquire(handoff_request)
-            .await
-            .map_err(common_result_handoff_error)?;
+        let handoff = match self.handoffs.acquire(handoff_request).await {
+            Ok(handoff) => handoff,
+            Err(error) => {
+                tracing::warn!(
+                    stage = "durable_handoff",
+                    operation = ?request.operation(),
+                    reason = ?error,
+                    "GitHub result credential acquisition failed"
+                );
+                return Err(common_result_handoff_error(error));
+            }
+        };
         if handoff.selector != selector
             || handoff.consumer != consumer
             || handoff.key.authority_id() != selector.authority_id()

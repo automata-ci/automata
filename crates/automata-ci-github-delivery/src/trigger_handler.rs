@@ -8,7 +8,7 @@ use automata_ci_core::{GitObjectId, TrustSnapshot, TrustTokenRecursion, UnixMill
 use automata_ci_provider::{
     ClaimedProviderProcessing, ExternalRepositoryId, NormalizedTrigger, ProviderConnectionRevision,
     ProviderGitRef, ProviderGitRefKind, ProviderProcessingClaimFence, ProviderProcessingFailure,
-    VerifiedProviderTriggerDelivery,
+    RepositoryVisibility, VerifiedProviderTriggerDelivery,
 };
 use automata_ci_provider_delivery::{
     ProviderDeliveryClock, ProviderProcessingLease, ProviderRuntimeContext, ProviderTriggerOutcome,
@@ -341,7 +341,14 @@ impl GithubWorkflowTriggerHandler {
             .await
         {
             Ok(source) => source,
-            Err(outcome) => return outcome,
+            Err(outcome) => {
+                tracing::warn!(
+                    trigger_kind = normalized_trigger_kind(normalized),
+                    outcome = ?outcome,
+                    "GitHub trigger source resolution failed"
+                );
+                return outcome;
+            }
         };
         let recursion = match normalized {
             NormalizedTrigger::RepositoryDispatch(_) => TrustTokenRecursion::Unknown,
@@ -425,14 +432,28 @@ impl GithubWorkflowTriggerHandler {
         );
         let first = match first {
             Ok(request) => self.application.apply(request).await,
-            Err(_) => return fail_invalid(),
+            Err(error) => {
+                tracing::warn!(
+                    trigger_kind = normalized_trigger_kind(normalized),
+                    ?error,
+                    "GitHub trigger application request rejected"
+                );
+                return fail_invalid();
+            }
         };
         match first {
             Ok(ProviderWorkflowApplicationOutcome::Applied(_)) => {
                 return ProviderTriggerOutcome::Complete;
             }
             Ok(ProviderWorkflowApplicationOutcome::RequiresChangedFiles) => {}
-            Err(error) => return application_outcome(&error),
+            Err(error) => {
+                tracing::warn!(
+                    trigger_kind = normalized_trigger_kind(normalized),
+                    ?error,
+                    "GitHub trigger workflow application failed"
+                );
+                return application_outcome(&error);
+            }
         }
         let metadata = match self
             .changed_files_metadata(context, trigger, invocation, lease, repository)
@@ -457,9 +478,23 @@ impl GithubWorkflowTriggerHandler {
                     ProviderTriggerOutcome::Complete
                 }
                 Ok(ProviderWorkflowApplicationOutcome::RequiresChangedFiles) => fail_invalid(),
-                Err(error) => application_outcome(&error),
+                Err(error) => {
+                    tracing::warn!(
+                        trigger_kind = normalized_trigger_kind(normalized),
+                        ?error,
+                        "GitHub trigger workflow application failed after changed-file replay"
+                    );
+                    application_outcome(&error)
+                }
             },
-            Err(_) => fail_invalid(),
+            Err(error) => {
+                tracing::warn!(
+                    trigger_kind = normalized_trigger_kind(normalized),
+                    ?error,
+                    "GitHub trigger changed-file application request rejected"
+                );
+                fail_invalid()
+            }
         }
     }
 
@@ -472,6 +507,22 @@ impl GithubWorkflowTriggerHandler {
         lease: &ProviderProcessingLease,
         repository: &GithubTriggerRepository,
     ) -> Result<ResolvedGithubSource, ProviderTriggerOutcome> {
+        let archive_limits = ArchiveLimits::new(
+            context
+                .connection()
+                .configuration()
+                .archive_limits()
+                .compressed_bytes(),
+        )
+        .map_err(|_| fail_invalid())?;
+        let normalized = trigger.trigger().trigger();
+        if context.connection().configuration().visibility() == RepositoryVisibility::Public
+            && let Some(revision) = normalized.workflow_source_revision()
+        {
+            return fetch_exact_source(repository, normalized, revision, None, archive_limits)
+                .await
+                .map_err(scm_error);
+        }
         let request = credential_request(
             context,
             trigger,
@@ -491,21 +542,12 @@ impl GithubWorkflowTriggerHandler {
             credential.release().await;
             return Err(fail_invalid());
         }
-        let archive_limits = ArchiveLimits::new(
-            context
-                .connection()
-                .configuration()
-                .archive_limits()
-                .compressed_bytes(),
-        )
-        .map_err(|_| fail_invalid())?;
-        let normalized = trigger.trigger().trigger();
         let result = if let Some(revision) = normalized.workflow_source_revision() {
             fetch_exact_source(
                 repository,
                 normalized,
                 revision,
-                credential.token(),
+                Some(credential.token()),
                 archive_limits,
             )
             .await
@@ -646,19 +688,25 @@ async fn fetch_exact_source(
     repository: &GithubTriggerRepository,
     trigger: &NormalizedTrigger,
     revision: GitObjectId,
-    token: &SecretString,
+    token: Option<&SecretString>,
     limits: ArchiveLimits,
 ) -> Result<ResolvedGithubSource, ScmError> {
-    let archive = repository
-        .endpoint
-        .fetch_repository_source(RepositorySourceRequest::authenticated(
+    let request = match token {
+        Some(token) => RepositorySourceRequest::authenticated(
             &repository.source_connection,
             &revision,
             token,
             limits,
             RepositorySourceRedirectPolicy::ConfiguredArchiveOrigin,
-        ))
-        .await?;
+        ),
+        None => RepositorySourceRequest::public(
+            &repository.source_connection,
+            &revision,
+            limits,
+            RepositorySourceRedirectPolicy::ConfiguredArchiveOrigin,
+        ),
+    };
+    let archive = repository.endpoint.fetch_repository_source(request).await?;
     let execution_ref = trigger
         .workflow_execution_ref()
         .cloned()
@@ -816,4 +864,13 @@ const fn retry_unavailable() -> ProviderTriggerOutcome {
 
 const fn fail_invalid() -> ProviderTriggerOutcome {
     ProviderTriggerOutcome::Fail(ProviderProcessingFailure::InvalidEvidence)
+}
+
+fn normalized_trigger_kind(trigger: &NormalizedTrigger) -> &'static str {
+    match trigger {
+        NormalizedTrigger::Push(_) => "push",
+        NormalizedTrigger::PullRequest(_) => "pull_request",
+        NormalizedTrigger::MergeQueue(_) => "merge_queue",
+        NormalizedTrigger::RepositoryDispatch(_) => "repository_dispatch",
+    }
 }

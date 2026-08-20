@@ -34,7 +34,6 @@ const CURSOR_SCHEMA: u16 = 1;
 const RESULT_STATE_DOMAIN: &[u8] = b"automata.github.common-result-state.v1\0";
 const DEFAULT_VISIBILITY_MARGIN_MILLIS: i64 = 2_000;
 const MAX_GITHUB_ANNOTATIONS_PER_REQUEST: usize = 50;
-const GITHUB_RESULT_PROVIDER_TAIL_MILLIS: i64 = 10 * 60 * 1_000;
 
 /// One exact GitHub Checks action requested from credential authority.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -55,6 +54,29 @@ pub enum GithubResultOperation {
     ReadAnnotations,
     /// Append one exact bounded annotation batch.
     AppendAnnotations,
+}
+
+impl GithubResultOperation {
+    /// Returns the bounded provider-I/O tail required by this operation.
+    ///
+    /// Suite creation, check-run creation, and creation reconciliation each
+    /// issue one bounded request. Reading or mutating an existing check run
+    /// may perform a read followed by a write, so it uses the two-request
+    /// publication horizon admitted by the durable server-service action.
+    const fn provider_tail_millis(self) -> i64 {
+        match self {
+            Self::EnsureSuite | Self::CreateRun | Self::ReconcileRun => {
+                automata_ci_store::MAX_GITHUB_SERVICE_CONSUMER_REQUEST_MILLIS
+            }
+            Self::ReadRun
+            | Self::StartRun
+            | Self::CompleteRun
+            | Self::ReadAnnotations
+            | Self::AppendAnnotations => {
+                2 * automata_ci_store::MAX_GITHUB_SERVICE_CONSUMER_REQUEST_MILLIS
+            }
+        }
+    }
 }
 
 /// Borrowed exact authority request for one common result claim.
@@ -346,7 +368,7 @@ impl GithubResultProviderAdapter {
         let Some(required_through) = claim
             .expires_at()
             .get()
-            .checked_add(GITHUB_RESULT_PROVIDER_TAIL_MILLIS)
+            .checked_add(operation.provider_tail_millis())
             .map(UnixMillis::new)
         else {
             return failed(ResultPublisherError::Conflict);
@@ -1829,6 +1851,31 @@ mod tests {
                 Err(ResultPublisherError::Conflict)
             );
         }
+    }
+
+    #[test]
+    fn result_operation_horizon_matches_durable_action_shape() {
+        let one_request = automata_ci_store::MAX_GITHUB_SERVICE_CONSUMER_REQUEST_MILLIS;
+        assert_eq!(
+            GithubResultOperation::EnsureSuite.provider_tail_millis(),
+            one_request
+        );
+        assert_eq!(
+            GithubResultOperation::CreateRun.provider_tail_millis(),
+            one_request
+        );
+        assert_eq!(
+            GithubResultOperation::ReconcileRun.provider_tail_millis(),
+            one_request
+        );
+        assert_eq!(
+            GithubResultOperation::ReadRun.provider_tail_millis(),
+            2 * one_request
+        );
+        assert_eq!(
+            GithubResultOperation::CompleteRun.provider_tail_millis(),
+            2 * one_request
+        );
     }
 
     #[test]

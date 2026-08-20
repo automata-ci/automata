@@ -165,6 +165,7 @@ impl ProviderWorkflowApplicationService {
     /// Returns a sanitized application error for invalid archive/evidence,
     /// request construction, unavailable admission infrastructure, or a
     /// contradictory durable admission.
+    #[allow(clippy::too_many_lines)] // The two-pass application proof stays atomic.
     pub async fn apply(
         &self,
         request: ProviderWorkflowApplicationRequest,
@@ -226,7 +227,16 @@ impl ProviderWorkflowApplicationService {
                         )) => ProviderWorkflowDisposition::Rejected(
                             ProviderWorkflowRejection::RunNumberExhausted,
                         ),
-                        Err(error) => return Err(admission_error(&error)),
+                        Err(error) => {
+                            let mapped = admission_error(&error);
+                            tracing::warn!(
+                                workflow_path = %workflow.path,
+                                ?error,
+                                ?mapped,
+                                "provider workflow admission failed"
+                            );
+                            return Err(mapped);
+                        }
                     }
                 }
                 CompilationDisposition::NotSelected(reason) => {
@@ -252,10 +262,15 @@ impl ProviderWorkflowApplicationService {
                 created_at,
                 outcome,
             )?;
-            self.results
-                .project_invocation(result_request)
-                .await
-                .map_err(provider_result_error)?;
+            if let Err(error) = self.results.project_invocation(result_request).await {
+                let mapped = provider_result_error(error);
+                tracing::warn!(
+                    workflow_path = %workflow.path,
+                    ?mapped,
+                    "provider workflow result projection failed"
+                );
+                return Err(mapped);
+            }
             results.push(ProviderWorkflowApplicationReport {
                 path: workflow.path,
                 disposition: outcome,
@@ -589,6 +604,7 @@ fn admission_request(
         idempotency,
         *request.source.revision(),
     )
+    .raw_event_digest(request.delivery.evidence().raw_body().digest())
     .trust_snapshot(request.trust.clone())
     .git_ref(request.execution_ref.full())
     .workflow_name(workflow_name)

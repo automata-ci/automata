@@ -53,7 +53,6 @@ struct SelectionAdmission {
 }
 
 struct LockedSelectionHorizon {
-    replay_floor: i64,
     activation_cursor: Option<ActivationDiscoveryCursor>,
     materialization_cursor: Option<MaterializationDiscoveryCursor>,
 }
@@ -156,6 +155,7 @@ impl LogicalWorkSelectionRepository for PostgresStore {
         request: ClaimNextLogicalJobOrchestration,
     ) -> Result<LogicalJobOrchestrationSelectionOutcome, LogicalWorkSelectionStoreError> {
         let mut transaction = begin_read_committed(self).await?;
+        let request_database_now = read_selection_database_now(&mut transaction).await?;
         if let Some(row) = lock_activation_receipt(&mut transaction, &request).await? {
             let outcome = replay_activation(&mut transaction, &request, &row).await?;
             transaction.commit().await.map_err(operation_error)?;
@@ -170,7 +170,22 @@ impl LogicalWorkSelectionRepository for PostgresStore {
             return Ok(outcome);
         }
         let horizon = lock_selection_horizon(&mut transaction, "activation").await?;
-        cleanup_receipts(&mut transaction, "activation", horizon.replay_floor).await?;
+        // Admit the caller's clock while the request is still fresh. Receipt
+        // cleanup and candidate discovery are bounded but may legitimately be
+        // expensive after an outage; neither may turn that database work into
+        // a false client-clock rejection and roll the cleanup back forever.
+        let admission = lock_selection_admission(
+            &mut transaction,
+            "activation",
+            request.observed_at(),
+            request.duration_ms(),
+            request_database_now,
+        )
+        .await?;
+        // The delete trigger authenticates cleanup against the durable horizon.
+        // The proposed successor floor is not durable until candidate discovery
+        // completes, so only reclaim receipts outside the locked predecessor.
+        cleanup_receipts(&mut transaction, "activation", admission.previous_floor).await?;
         let mut can_wrap = horizon.activation_cursor.is_some();
         let mut discovery_cursor = horizon.activation_cursor;
         let mut scanned_candidates = 0_usize;
@@ -204,13 +219,6 @@ impl LogicalWorkSelectionRepository for PostgresStore {
                     rollback_candidate_savepoint(&mut transaction).await?;
                     continue;
                 }
-                let admission = lock_selection_admission(
-                    &mut transaction,
-                    "activation",
-                    request.observed_at(),
-                    request.duration_ms(),
-                )
-                .await?;
                 let now = admission.database_now;
                 if !activation_candidate_is_eligible(&mut transaction, &candidate, now).await? {
                     rollback_candidate_savepoint(&mut transaction).await?;
@@ -271,13 +279,6 @@ impl LogicalWorkSelectionRepository for PostgresStore {
             }
             discovery_cursor = next_cursor;
         };
-        let admission = lock_selection_admission(
-            &mut transaction,
-            "activation",
-            request.observed_at(),
-            request.duration_ms(),
-        )
-        .await?;
         advance_selection_horizon(
             &mut transaction,
             "activation",
@@ -318,6 +319,7 @@ impl LogicalWorkSelectionRepository for PostgresStore {
     ) -> Result<LogicalInstanceMaterializationSelectionOutcome, LogicalWorkSelectionStoreError>
     {
         let mut transaction = begin_read_committed(self).await?;
+        let request_database_now = read_selection_database_now(&mut transaction).await?;
         if let Some(row) = lock_materialization_receipt(&mut transaction, &request).await? {
             let outcome = replay_materialization(&mut transaction, &request, &row).await?;
             transaction.commit().await.map_err(operation_error)?;
@@ -334,7 +336,22 @@ impl LogicalWorkSelectionRepository for PostgresStore {
             return Ok(outcome);
         }
         let horizon = lock_selection_horizon(&mut transaction, "materialization").await?;
-        cleanup_receipts(&mut transaction, "materialization", horizon.replay_floor).await?;
+        let admission = lock_selection_admission(
+            &mut transaction,
+            "materialization",
+            request.observed_at(),
+            request.duration_ms(),
+            request_database_now,
+        )
+        .await?;
+        // Match the delete trigger's durable replay authority. Advancing to the
+        // proposed floor happens only after discovery has selected its cursor.
+        cleanup_receipts(
+            &mut transaction,
+            "materialization",
+            admission.previous_floor,
+        )
+        .await?;
         let mut can_wrap = horizon.materialization_cursor.is_some();
         let mut discovery_cursor = horizon.materialization_cursor;
         let mut scanned_candidates = 0_usize;
@@ -368,13 +385,6 @@ impl LogicalWorkSelectionRepository for PostgresStore {
                     rollback_candidate_savepoint(&mut transaction).await?;
                     continue;
                 }
-                let admission = lock_selection_admission(
-                    &mut transaction,
-                    "materialization",
-                    request.observed_at(),
-                    request.duration_ms(),
-                )
-                .await?;
                 let now = admission.database_now;
                 if !materialization_candidate_is_eligible(&mut transaction, &candidate, now).await?
                 {
@@ -438,13 +448,6 @@ impl LogicalWorkSelectionRepository for PostgresStore {
             }
             discovery_cursor = next_cursor;
         };
-        let admission = lock_selection_admission(
-            &mut transaction,
-            "materialization",
-            request.observed_at(),
-            request.duration_ms(),
-        )
-        .await?;
         advance_selection_horizon(
             &mut transaction,
             "materialization",
@@ -767,7 +770,6 @@ async fn lock_selection_horizon(
         None
     };
     Ok(LockedSelectionHorizon {
-        replay_floor,
         activation_cursor,
         materialization_cursor,
     })
@@ -778,6 +780,7 @@ async fn lock_selection_admission(
     queue: &'static str,
     observed_at: UnixMillis,
     duration_ms: i64,
+    request_database_now: i64,
 ) -> Result<SelectionAdmission, LogicalWorkSelectionStoreError> {
     let row = sqlx::query(
         r"
@@ -798,8 +801,8 @@ async fn lock_selection_admission(
     if floor < 0 || floor > updated_at || updated_at > now {
         return Err(StoreError::corrupt_data("logical work replay horizon is malformed").into());
     }
-    if observed_at.get() < now.saturating_sub(MAX_SELECTION_CLOCK_SKEW_MILLIS)
-        || observed_at.get() > now.saturating_add(MAX_SELECTION_CLOCK_SKEW_MILLIS)
+    if observed_at.get() < request_database_now.saturating_sub(MAX_SELECTION_CLOCK_SKEW_MILLIS)
+        || observed_at.get() > request_database_now.saturating_add(MAX_SELECTION_CLOCK_SKEW_MILLIS)
     {
         return Err(LogicalWorkSelectionStoreError::SelectionClockSkew);
     }
@@ -820,6 +823,15 @@ async fn lock_selection_admission(
         previous_floor: floor,
         previous_updated_at: updated_at,
     })
+}
+
+async fn read_selection_database_now(
+    transaction: &mut Transaction<'_, Postgres>,
+) -> Result<i64, LogicalWorkSelectionStoreError> {
+    sqlx::query_scalar("SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint")
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(operation_error)
 }
 
 async fn advance_selection_horizon(

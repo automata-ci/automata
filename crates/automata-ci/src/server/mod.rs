@@ -216,6 +216,7 @@ pub async fn serve(args: &ServerArgs) -> Result<()> {
         .provider_runtime
         .as_ref()
         .map(ProviderRuntime::ingress);
+    let provider_webhook_ingress_enabled = provider_ingress.is_some();
     let router = match http::router_with_readiness_web_data(
         readiness.clone(),
         components.web_data.clone(),
@@ -268,6 +269,7 @@ pub async fn serve(args: &ServerArgs) -> Result<()> {
         results_address = %results_address,
         metrics_address = ?metrics_address,
         results_public_url = %config.results_public_endpoint.url(),
+        provider_webhook_ingress_enabled,
         version = build.version,
         commit = build.commit,
         "control plane listening"

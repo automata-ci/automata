@@ -1062,8 +1062,14 @@ fn build_provider_runtime(
     let result_adapters = ProviderResultAdapterRegistry::new([github.result_adapter()])
         .map_err(|_| ServerCompositionError::InvalidGithubProviderConfiguration)?;
     let contexts = ProviderRuntimeContextResolver::new(manifests);
-    let result_config = ProviderResultWorkerConfig::new(60_000, 1_000)
-        .map_err(|_| ServerCompositionError::InvalidGithubProviderConfiguration)?;
+    // Result publication resolves durable workflow context before opening the
+    // provider handoff. Use the model's full bounded lease so database
+    // contention cannot consume the claim before credential acquisition.
+    let result_config = ProviderResultWorkerConfig::new(
+        automata_ci_provider::MAX_PROVIDER_RESULT_LEASE_MILLIS,
+        1_000,
+    )
+    .map_err(|_| ServerCompositionError::InvalidGithubProviderConfiguration)?;
     let result_workers = github
         .connection_ids()
         .iter()

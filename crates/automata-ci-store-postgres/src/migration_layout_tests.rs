@@ -281,6 +281,26 @@ const CANONICAL_MIGRATIONS: &[(&str, &str)] = &[
         "0069_provider_instance_webhook_endpoints.sql",
         "b47bdc4fd116ceca54490f5ed7ab4ecb07122dd62ea50cf893749218b2066f654d58b6ff6c3da081ac6f2da860e4ac4a",
     ),
+    (
+        "0070_provider_admission_idempotency_key.sql",
+        "0526cf85598c894b8b08216a9db0ef92b5e58116f1db690ddb2582249453d1a050f68d130ee356e80d7d5f5f8440d87a",
+    ),
+    (
+        "0071_provider_delivery_preparation_provenance.sql",
+        "037a2b0a9219ce44a72dbbde9bc5f49f268a7ef94b1d0706126e1aeab5cdc056c9eb3e70686ee28d2c6b0abdccd16516",
+    ),
+    (
+        "0072_provider_delivery_runtime_provenance.sql",
+        "9d7afe44c0c0584f898acc1bfac98493517976c9e0b70b5d8813dfe6aa8681192b301635789e7ce1b37e421cb2ef1988",
+    ),
+    (
+        "0073_provider_delivery_runtime_authority_current.sql",
+        "f1444ab4d4ed0fd9b96b000b706092340a7d961f188709fd06a22812e4bae2ad456391a1da82a0a9f65e4365261d1e62",
+    ),
+    (
+        "0074_provider_handoff_consumer_guard.sql",
+        "cc8e6393ec556f8e209a06b19f0333b97729a1dbd85509debc1b04a374eb6f3ff1c707709e3fb2c0a0326d81d637d4df",
+    ),
 ];
 
 const BASELINE_MIGRATION_COUNT: u32 = 26;
@@ -958,6 +978,39 @@ fn provider_result_outbox_is_current_only_provider_neutral_and_fenced() {
 }
 
 #[test]
+fn github_service_handoffs_revalidate_current_provider_consumers() {
+    let source = include_str!("../migrations/0074_provider_handoff_consumer_guard.sql");
+
+    for required in [
+        "FROM provider_result_outbox AS outbox",
+        "JOIN provider_result_subjects AS subject",
+        "outbox.generation = NEW.consumer_revision",
+        "outbox.claim_worker_id = NEW.consumer_owner_id",
+        "outbox.claim_fence = NEW.consumer_claim_fence",
+        "FROM provider_processing_invocations AS invocation",
+        "JOIN provider_deliveries AS delivery",
+        "FROM workflow_dispatch_source_resolutions AS resolution",
+        "NEW.consumer_action = 'fetch_pull_request_files'",
+        "delivery.event_type = 'pull_request'",
+    ] {
+        assert!(
+            source.contains(required),
+            "provider handoff guard lost current consumer binding: {required}",
+        );
+    }
+    for superseded in [
+        "github_check_projection_outbox",
+        "github_check_subjects",
+        "provider_delivery_inbox",
+    ] {
+        assert!(
+            !source.contains(superseded),
+            "provider handoff guard retained superseded consumer storage: {superseded}",
+        );
+    }
+}
+
+#[test]
 fn provider_result_recovery_state_is_bounded_and_provider_neutral() {
     let source = include_str!("../migrations/0065_provider_result_recovery_state.sql");
 
@@ -1049,6 +1102,21 @@ fn provider_workflow_result_identity_is_unique_and_provider_neutral() {
         assert!(
             !source.contains(forbidden),
             "workflow-result identity retained provider-specific or transitional surface: {forbidden}",
+        );
+    }
+}
+
+#[test]
+fn provider_delivery_runtime_authority_currentness_does_not_require_subject_evidence() {
+    let source = include_str!("../migrations/0073_provider_delivery_runtime_authority_current.sql");
+    for required in [
+        "automata_github_runtime_authority_base_is_current",
+        "origin.origin_kind = ''provider_delivery''",
+        "admission_receipt.github_subject_evidence_required",
+    ] {
+        assert!(
+            source.contains(required),
+            "currentness repair lost: {required}"
         );
     }
 }

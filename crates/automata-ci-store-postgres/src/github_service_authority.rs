@@ -885,14 +885,35 @@ async fn acquire_handoff(
     store: &PostgresStore,
     request: AcquireGithubServerServiceHandoff,
 ) -> Result<GithubServerServiceCredentialHandoff, GithubServerServiceStoreError> {
+    let rejected = |stage: &'static str| {
+        tracing::warn!(
+            target: "automata_ci_credential_github::server_service_authority",
+            stage,
+            action = request.consumer().action().as_str(),
+            "GitHub server-service credential handoff rejected"
+        );
+        GithubServerServiceStoreError::HandoffRejected
+    };
     let mut transaction = store.pool.begin().await.map_err(operation_error)?;
     pin_read_committed(&mut transaction).await?;
-    let authority_row = select_authority_for_update(&mut transaction, request.selector())
-        .await?
-        .ok_or(GithubServerServiceStoreError::NotFound)?;
+    let Some(authority_row) =
+        select_authority_for_update(&mut transaction, request.selector()).await?
+    else {
+        tracing::warn!(
+            stage = "authority_not_found",
+            action = request.consumer().action().as_str(),
+            tenant = request.selector().tenant().as_str(),
+            authority_id = ?request.selector().authority_id(),
+            identity_digest = %request.selector().identity_digest(),
+            app_configuration_revision = request.selector().app_configuration_revision().get(),
+            policy_revision = request.selector().policy_revision().get(),
+            "GitHub server-service credential handoff rejected"
+        );
+        return Err(GithubServerServiceStoreError::NotFound);
+    };
     let descriptor = decode_authority(&authority_row)?;
     if descriptor.identity().scope() != request.consumer().action().required_scope() {
-        return Err(GithubServerServiceStoreError::HandoffRejected);
+        return Err(rejected("scope"));
     }
     let consumer_check_now = database_now_ms(&mut transaction).await?;
     let consumer_expires_at = revalidate_handoff_consumer(
@@ -901,13 +922,18 @@ async fn acquire_handoff(
         request.consumer(),
         UnixMillis::new(consumer_check_now),
     )
-    .await?;
+    .await
+    .inspect_err(|error| {
+        if matches!(&error, GithubServerServiceStoreError::HandoffRejected) {
+            let _ = rejected("consumer_revalidation_initial");
+        }
+    })?;
     if consumer_expires_at
         .get()
         .checked_add(request.consumer().action().provider_tail_millis())
         .is_none_or(|maximum| request.required_through().get() > maximum)
     {
-        return Err(GithubServerServiceStoreError::HandoffRejected);
+        return Err(rejected("consumer_horizon_initial"));
     }
     let consumer = request.consumer();
     let existing_handoff = sqlx::query(
@@ -941,14 +967,14 @@ async fn acquire_handoff(
             || replay_consumer != request.consumer()
             || optional_i64(row, "released_at_ms")?.is_some()
         {
-            return Err(GithubServerServiceStoreError::HandoffRejected);
+            return Err(rejected("replay_binding"));
         }
         let durable_required_through = i64_column(row, "required_through_ms")?;
         let durable_granted_at = i64_column(row, "granted_at_ms")?;
         if durable_required_through != request.required_through().get()
             || request.observed_at().get() < durable_granted_at
         {
-            return Err(GithubServerServiceStoreError::HandoffRejected);
+            return Err(rejected("replay_horizon"));
         }
         (
             GithubServerServiceHandoffId::from_uuid(uuid_column(row, "id")?)
@@ -958,11 +984,11 @@ async fn acquire_handoff(
         )
     } else {
         if descriptor.state() != GithubServerServiceAuthorityState::Active {
-            return Err(GithubServerServiceStoreError::HandoffRejected);
+            return Err(rejected("authority_state"));
         }
         let generation = descriptor
             .current_generation()
-            .ok_or(GithubServerServiceStoreError::HandoffRejected)?;
+            .ok_or_else(|| rejected("authority_generation"))?;
         let key = GithubServerServiceIssuanceKey::new(request.authority_id(), generation);
         let issuance = select_issuance_for_update(&mut transaction, key)
             .await?
@@ -973,7 +999,7 @@ async fn acquire_handoff(
                 .usable_until()
                 .is_none_or(|until| until < request.required_through())
         {
-            return Err(GithubServerServiceStoreError::HandoffRejected);
+            return Err(rejected("issuance_horizon_initial"));
         }
         let inserted = sqlx::query(
             r"
@@ -1000,7 +1026,7 @@ async fn acquire_handoff(
         .await
         .map_err(operation_error)?;
         if inserted.rows_affected() != 1 {
-            return Err(GithubServerServiceStoreError::HandoffRejected);
+            return Err(rejected("handoff_conflict"));
         }
         (
             request.proposed_handoff_id(),
@@ -1016,34 +1042,51 @@ async fn acquire_handoff(
     let receipt = decode_issuance_receipt(&issuance)?;
     let database_now = database_now_ms(&mut transaction).await?;
     validate_caller_clock(request.observed_at(), database_now)
-        .map_err(|_| GithubServerServiceStoreError::HandoffRejected)?;
+        .map_err(|_| rejected("caller_clock"))?;
     let consumer_expires_at = revalidate_handoff_consumer(
         &mut transaction,
         descriptor.identity(),
         request.consumer(),
         UnixMillis::new(database_now),
     )
-    .await?;
-    if (request.consumer().action() != GithubServerServiceAction::ObserveWorkflowPermissionDefaults
-        && database_now >= consumer_expires_at.get())
-        || database_now >= request.required_through().get()
-        || consumer_expires_at
-            .get()
-            .checked_add(request.consumer().action().provider_tail_millis())
-            .is_none_or(|maximum| request.required_through().get() > maximum)
-        || !matches!(
-            receipt.state(),
-            GithubServerServiceIssuanceState::Ready
-                | GithubServerServiceIssuanceState::RevokePending
-        )
-        || receipt
-            .usable_until()
-            .is_none_or(|until| until.get() < request.required_through().get())
-        || !is_replay
-            && (receipt.state() != GithubServerServiceIssuanceState::Ready
-                || descriptor.current_generation() != Some(generation))
+    .await
+    .inspect_err(|error| {
+        if matches!(&error, GithubServerServiceStoreError::HandoffRejected) {
+            let _ = rejected("consumer_revalidation_final");
+        }
+    })?;
+    if request.consumer().action() != GithubServerServiceAction::ObserveWorkflowPermissionDefaults
+        && database_now >= consumer_expires_at.get()
     {
-        return Err(GithubServerServiceStoreError::HandoffRejected);
+        return Err(rejected("consumer_expired_final"));
+    }
+    if database_now >= request.required_through().get() {
+        return Err(rejected("handoff_expired_final"));
+    }
+    if consumer_expires_at
+        .get()
+        .checked_add(request.consumer().action().provider_tail_millis())
+        .is_none_or(|maximum| request.required_through().get() > maximum)
+    {
+        return Err(rejected("consumer_horizon_final"));
+    }
+    if !matches!(
+        receipt.state(),
+        GithubServerServiceIssuanceState::Ready | GithubServerServiceIssuanceState::RevokePending
+    ) {
+        return Err(rejected("issuance_state_final"));
+    }
+    if receipt
+        .usable_until()
+        .is_none_or(|until| until.get() < request.required_through().get())
+    {
+        return Err(rejected("issuance_horizon_final"));
+    }
+    if !is_replay
+        && (receipt.state() != GithubServerServiceIssuanceState::Ready
+            || descriptor.current_generation() != Some(generation))
+    {
+        return Err(rejected("current_generation_final"));
     }
     let protected = match decode_protected(descriptor.identity().clone(), &issuance) {
         Ok(protected) => protected,
@@ -1191,7 +1234,21 @@ async fn revalidate_handoff_consumer(
             .map(UnixMillis::new)
         }
     };
-    claim_expires_at.ok_or(GithubServerServiceStoreError::HandoffRejected)
+    let Some(claim_expires_at) = claim_expires_at else {
+        tracing::warn!(
+            target: "automata_ci_credential_github::server_service_authority",
+            stage = "consumer_revalidation_empty",
+            action = consumer.action().as_str(),
+            consumer_id = ?consumer.consumer_id(),
+            consumer_owner = ?consumer.owner(),
+            consumer_fence = consumer.fence().get(),
+            consumer_revision = consumer.revision().get(),
+            observed_at = observed_at.get(),
+            "GitHub server-service credential handoff consumer query matched no live claim"
+        );
+        return Err(GithubServerServiceStoreError::HandoffRejected);
+    };
+    Ok(claim_expires_at)
 }
 
 async fn revalidate_provider_result_consumer(
@@ -1286,66 +1343,64 @@ async fn revalidate_delivery_consumer(
     connection: &mut PgConnection,
     identity: &GithubServerServiceAuthorityIdentity,
     consumer: GithubServerServiceConsumerClaim,
-    observed_at: UnixMillis,
+    _observed_at: UnixMillis,
     require_pull_request_files_pin: bool,
 ) -> Result<Option<UnixMillis>, GithubServerServiceStoreError> {
     sqlx::query_scalar::<_, i64>(
         r"
-        SELECT delivery.claim_expires_at_ms
-        FROM provider_delivery_inbox AS delivery
+        SELECT invocation.claim_expires_at_ms
+        FROM provider_processing_invocations AS invocation
+        JOIN provider_deliveries AS delivery
+          ON delivery.delivery_id = invocation.source_delivery_id
+         AND delivery.disposition = 'trigger'
+        JOIN provider_connection_revisions AS provider_connection
+          ON provider_connection.connection_id = delivery.connection_id
+         AND provider_connection.revision = delivery.connection_revision
+         AND provider_connection.provider_instance_id = delivery.provider_instance_id
+         AND provider_connection.provider_revision = delivery.provider_revision
+         AND provider_connection.external_repository_id = delivery.repository_external_id
+        JOIN provider_instance_revisions AS provider_instance
+          ON provider_instance.instance_id = delivery.provider_instance_id
+         AND provider_instance.revision = delivery.provider_revision
+         AND provider_instance.provider_type = delivery.provider_type
+         AND provider_instance.configuration_digest =
+             provider_connection.provider_configuration_digest
+         AND provider_instance.capability_digest = provider_connection.capability_digest
         JOIN repositories AS repository
-          ON repository.id = $7
-         AND repository.tenant_id = delivery.tenant_id
-         AND repository.scm_provider = 'github'
-         AND repository.provider_repository_id = delivery.provider_repository_id::TEXT
-        WHERE delivery.id = $1
-          AND delivery.state = 'claimed'
-          AND delivery.claim_owner_id = $2
-          AND delivery.claim_fence = $3
-          AND delivery.attempt_count = $4
-          AND delivery.claimed_at_ms <= $5
-          AND delivery.state_updated_at_ms <= $5
-          AND delivery.claim_expires_at_ms > $5
-          AND delivery.tenant_id = $6
-          AND delivery.provider = 'github'
-          AND delivery.repository_visibility = 'private'
-          AND delivery.connection_id = $8
-          AND delivery.installation_id = $9
-          AND delivery.provider_repository_id = $10
-          AND delivery.repository_identity = $11
+          ON repository.id = $6
+         AND repository.tenant_id = provider_connection.workspace_id
+         AND repository.scm_provider = provider_instance.provider_type
+         AND repository.provider_repository_id = provider_connection.external_repository_id
+        WHERE invocation.invocation_id = $1
+          AND invocation.state = 'claimed'
+          AND invocation.claim_worker_id = $2
+          AND invocation.claim_fence = $3
+          AND invocation.attempts = $4
+          AND invocation.claim_started_at_ms <=
+              (extract(epoch FROM clock_timestamp()) * 1000)::BIGINT
+          AND invocation.claim_expires_at_ms >
+              (extract(epoch FROM clock_timestamp()) * 1000)::BIGINT
+          AND provider_connection.workspace_id = $5
+          AND provider_connection.connection_id = $7
+          AND provider_instance.provider_type = 'github'
+          AND provider_connection.external_repository_id = $8
+          AND delivery.repository_external_id = $8
           AND (
-              NOT $12
-              OR EXISTS (
-                  SELECT 1
-                  FROM github_provider_delivery_evidence AS evidence
-                  WHERE evidence.provider_delivery_id = delivery.id
-                    AND evidence.tenant_id = delivery.tenant_id
-                    AND evidence.authenticated_event_name = 'pull_request'
-                    AND evidence.pull_requests_authority_id = $13
-                    AND evidence.pull_requests_authority_identity_digest = $14
-                    AND evidence.pull_requests_authority_app_configuration_revision = $15
-                    AND evidence.pull_requests_authority_policy_revision = $16
-              )
+              NOT $9
+              OR delivery.event_type = 'pull_request'
           )
-        FOR SHARE OF delivery, repository
+        FOR SHARE OF invocation, delivery, provider_connection, provider_instance, repository
         ",
     )
     .bind(consumer.consumer_id().as_uuid())
     .bind(consumer.owner().as_uuid())
     .bind(pg_bigint(consumer.fence().get()))
     .bind(pg_bigint(consumer.revision().get()))
-    .bind(observed_at.get())
     .bind(identity.tenant().as_str())
     .bind(identity.repository_id().as_uuid())
     .bind(identity.connection_id().as_uuid())
-    .bind(pg_bigint(identity.installation_id().get()))
-    .bind(pg_bigint(identity.github_repository_id().get()))
-    .bind(identity.github_repository_name().as_str())
+    .bind(identity.github_repository_id().get().to_string())
     .bind(require_pull_request_files_pin)
-    .bind(identity.authority_id().as_uuid())
-    .bind(identity.identity_digest().as_bytes().as_slice())
-    .bind(pg_bigint(identity.app_configuration_revision().get()))
-    .bind(pg_bigint(identity.policy_revision().get()))
     .fetch_optional(&mut *connection)
     .await
     .map_err(operation_error)
@@ -3597,12 +3652,23 @@ fn operation_error(error: sqlx::Error) -> GithubServerServiceStoreError {
         .and_then(sqlx::error::DatabaseError::constraint);
     match constraint {
         Some(
-            "github_server_service_handoffs_authority_exact"
+            constraint @ ("github_server_service_handoffs_authority_exact"
             | "github_server_service_handoffs_checks_claim_exact"
+            | "github_server_service_handoffs_schedule_discovery_claim_exact"
             | "github_server_service_handoffs_source_claim_exact"
+            | "github_server_service_handoffs_pull_requests_claim_exact"
+            | "github_workflow_permission_handoff_exact"
             | "github_server_service_handoffs_scope_exact"
-            | "github_server_service_handoffs_immutable",
-        ) => GithubServerServiceStoreError::HandoffRejected,
+            | "github_server_service_handoffs_immutable"),
+        ) => {
+            tracing::warn!(
+                target: "automata_ci_credential_github::server_service_authority",
+                stage = "database_insert_guard",
+                constraint,
+                "GitHub server-service credential handoff rejected"
+            );
+            GithubServerServiceStoreError::HandoffRejected
+        }
         Some("github_server_service_issuances_handoff_live") => {
             GithubServerServiceStoreError::HandoffStillLive
         }

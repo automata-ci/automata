@@ -3431,30 +3431,47 @@ impl AutonomousWorkflowService {
         submitted: bool,
     ) -> Result<QueuePoll, AutonomousWorkflowError> {
         let submission = async {
+            let now = trusted_now(self.clock.as_ref())
+                .map_err(|_| AutonomousWorkflowLeaseError::AuthorityRejected)?;
+            let store_request = request
+                .with_observed_at(now)
+                .map_err(|_| AutonomousWorkflowLeaseError::AuthorityRejected)?;
             if !submitted {
                 self.custody
                     .mark_orchestration_selection_submitted(&request)?;
             }
             Ok::<_, AutonomousWorkflowLeaseError>(
                 self.selections
-                    .claim_next_logical_job_orchestration(request.clone())
+                    .claim_next_logical_job_orchestration(store_request)
                     .await,
             )
         };
         let outcome = match await_custody(shutdown, submission).await {
             Ok(Ok(outcome)) => outcome,
-            Ok(Err(_)) => return Err(AutonomousWorkflowError::AuthorityRejected),
+            Ok(Err(error)) => {
+                self.custody.set_orchestration(OrchestrationCustody::Idle);
+                return selection_submission_failure(error, AutonomousWorkflowQueue::Orchestration);
+            }
             Err(error) => {
                 return unavailable_or_shutdown(error, AutonomousWorkflowQueue::Orchestration);
             }
         };
         let selected = match outcome {
             Err(error) if is_repository_unavailable(&error) => {
+                tracing::warn!(
+                    %error,
+                    error_chain = %error_source_chain(&error),
+                    queue = ?AutonomousWorkflowQueue::Orchestration,
+                    "logical work selection unavailable; retrying bounded poll"
+                );
                 return Ok(unavailable_poll(AutonomousWorkflowQueue::Orchestration));
             }
             Err(error) => {
                 self.custody.set_orchestration(OrchestrationCustody::Idle);
-                return selection_failure(&error, AutonomousWorkflowQueue::Orchestration);
+                return Ok(selection_failure(
+                    &error,
+                    AutonomousWorkflowQueue::Orchestration,
+                ));
             }
             Ok(LogicalJobOrchestrationSelectionOutcome::Idle) => {
                 self.custody.set_orchestration(OrchestrationCustody::Idle);
@@ -3872,31 +3889,52 @@ impl AutonomousWorkflowService {
         submitted: bool,
     ) -> Result<QueuePoll, AutonomousWorkflowError> {
         let submission = async {
+            let now = trusted_now(self.clock.as_ref())
+                .map_err(|_| AutonomousWorkflowLeaseError::AuthorityRejected)?;
+            let store_request = request
+                .with_observed_at(now)
+                .map_err(|_| AutonomousWorkflowLeaseError::AuthorityRejected)?;
             if !submitted {
                 self.custody
                     .mark_materialization_selection_submitted(&request)?;
             }
             Ok::<_, AutonomousWorkflowLeaseError>(
                 self.selections
-                    .claim_next_logical_instance_materialization(request.clone())
+                    .claim_next_logical_instance_materialization(store_request)
                     .await,
             )
         };
         let outcome = match await_custody(shutdown, submission).await {
             Ok(Ok(outcome)) => outcome,
-            Ok(Err(_)) => return Err(AutonomousWorkflowError::AuthorityRejected),
+            Ok(Err(error)) => {
+                self.custody
+                    .set_materialization(MaterializationCustody::Idle);
+                return selection_submission_failure(
+                    error,
+                    AutonomousWorkflowQueue::Materialization,
+                );
+            }
             Err(error) => {
                 return unavailable_or_shutdown(error, AutonomousWorkflowQueue::Materialization);
             }
         };
         let selected = match outcome {
             Err(error) if is_repository_unavailable(&error) => {
+                tracing::warn!(
+                    %error,
+                    error_chain = %error_source_chain(&error),
+                    queue = ?AutonomousWorkflowQueue::Materialization,
+                    "logical work selection unavailable; retrying bounded poll"
+                );
                 return Ok(unavailable_poll(AutonomousWorkflowQueue::Materialization));
             }
             Err(error) => {
                 self.custody
                     .set_materialization(MaterializationCustody::Idle);
-                return selection_failure(&error, AutonomousWorkflowQueue::Materialization);
+                return Ok(selection_failure(
+                    &error,
+                    AutonomousWorkflowQueue::Materialization,
+                ));
             }
             Ok(LogicalInstanceMaterializationSelectionOutcome::Idle) => {
                 self.custody
@@ -4314,13 +4352,26 @@ fn unavailable_or_shutdown(
 fn selection_failure(
     error: &automata_ci_store::LogicalWorkSelectionStoreError,
     queue: AutonomousWorkflowQueue,
+) -> QueuePoll {
+    // Selection is a read/claim poll.  A rejected or malformed candidate must
+    // not terminate the control plane: the transaction has rolled back and the
+    // next bounded poll can re-read the authoritative graph after maintenance
+    // or a concurrent worker has advanced it.  Fatal authority errors remain
+    // enforced at consume/finalization boundaries, after a durable claim exists.
+    tracing::warn!(%error, ?queue, "logical work selection failed; retrying bounded poll");
+    QueuePoll::Outcome(AutonomousWorkflowOutcome::Unavailable(queue))
+}
+
+fn selection_submission_failure(
+    error: AutonomousWorkflowLeaseError,
+    queue: AutonomousWorkflowQueue,
 ) -> Result<QueuePoll, AutonomousWorkflowError> {
-    if is_repository_unavailable(error) {
-        Ok(QueuePoll::Outcome(AutonomousWorkflowOutcome::Unavailable(
-            queue,
-        )))
-    } else {
-        Err(AutonomousWorkflowError::AuthorityRejected)
+    tracing::warn!(%error, ?queue, "logical work selection submission failed; retrying bounded poll");
+    match error {
+        AutonomousWorkflowLeaseError::Shutdown => Err(AutonomousWorkflowError::Shutdown),
+        AutonomousWorkflowLeaseError::DeadlineElapsed
+        | AutonomousWorkflowLeaseError::Unavailable
+        | AutonomousWorkflowLeaseError::AuthorityRejected => Ok(unavailable_poll(queue)),
     }
 }
 
@@ -4375,6 +4426,22 @@ fn is_repository_unavailable(error: &automata_ci_store::LogicalWorkSelectionStor
         error,
         automata_ci_store::LogicalWorkSelectionStoreError::Store(StoreError::Operation(_))
     )
+}
+
+/// Formats the trusted repository error source chain without changing the
+/// stable, sanitized top-level error message exposed to callers.
+fn error_source_chain(error: &(dyn std::error::Error + 'static)) -> String {
+    let mut chain = Vec::new();
+    let mut source = error.source();
+    while let Some(current) = source {
+        chain.push(current.to_string());
+        source = current.source();
+    }
+    if chain.is_empty() {
+        String::from("none")
+    } else {
+        chain.join(" -> ")
+    }
 }
 
 #[cfg(test)]

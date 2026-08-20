@@ -13,7 +13,7 @@ import urllib.parse
 APP_ID = 4_558_711
 APP_OWNER = "automata-ci"
 APP_SLUG = "automata-ci"
-CHECK_NAME = "Automata CI / required"
+CHECK_NAME = "Automata CI / .ci/workflows/ci.yml"
 DASHBOARD_ORIGIN = "https://ci.automata-ci.com"
 EXTERNAL_ID = re.compile(
     r"automata-check:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"

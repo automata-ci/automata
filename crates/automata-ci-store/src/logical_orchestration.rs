@@ -900,6 +900,7 @@ pub struct AdmitLogicalWorkflowRun {
     root_invocation_id: LogicalWorkflowInvocationId,
     event_name: String,
     event: AdmissionObject,
+    raw_event_digest: Option<Sha256Digest>,
     head_sha: GitObjectId,
     actor: Option<String>,
     display_title: Option<String>,
@@ -961,6 +962,7 @@ impl AdmitLogicalWorkflowRun {
                 root_invocation_id,
                 event_name: event_name.into(),
                 event,
+                raw_event_digest: None,
                 head_sha,
                 actor: None,
                 display_title: None,
@@ -1081,6 +1083,13 @@ impl AdmitLogicalWorkflowRun {
         &self.event
     }
 
+    /// Returns the exact authenticated provider webhook body digest, when the
+    /// admission was created from a provider delivery.
+    #[must_use]
+    pub const fn raw_event_digest(&self) -> Option<Sha256Digest> {
+        self.raw_event_digest
+    }
+
     /// Returns the immutable head commit digest bytes.
     #[must_use]
     pub const fn head_sha(&self) -> GitObjectId {
@@ -1135,6 +1144,13 @@ impl AdmitLogicalWorkflowRunBuilder {
     #[must_use]
     pub fn trust_snapshot(mut self, trust_snapshot: TrustSnapshot) -> Self {
         self.command.trust_snapshot = trust_snapshot;
+        self
+    }
+
+    /// Binds the raw webhook digest separately from canonical event bytes.
+    #[must_use]
+    pub fn raw_event_digest(mut self, digest: Option<Sha256Digest>) -> Self {
+        self.command.raw_event_digest = digest;
         self
     }
 

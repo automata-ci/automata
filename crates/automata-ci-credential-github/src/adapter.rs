@@ -14,7 +14,7 @@ use reqwest::{
     header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue, USER_AGENT},
     redirect::Policy,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use url::Url;
@@ -50,6 +50,8 @@ const MAX_REQUEST_BODY_BYTES: usize = 16 * 1_024;
 const MAX_TOKEN_LIFETIME_SECONDS: u64 = 3_600;
 const MAX_PROVIDER_CLOCK_SKEW_SECONDS: u64 = 60;
 const MAX_REPOSITORY_COMPONENT_BYTES: usize = 100;
+const MAX_WEBHOOK_URL_BYTES: usize = 2_048;
+const MAX_WEBHOOK_SECRET_BYTES: usize = 16 * 1_024;
 const BROKER_POLICY_FINGERPRINT_DOMAIN: &[u8] = b"automata-ci/github-app-broker-policy/v1\0";
 
 struct ValidatedResponseMetadata {
@@ -69,6 +71,21 @@ struct PreparedMintRequest {
     endpoint: Url,
     authorization: HeaderValue,
     body: Vec<u8>,
+}
+
+#[derive(Serialize)]
+struct AppWebhookUpdateRequest<'a> {
+    url: &'a str,
+    content_type: &'static str,
+    insecure_ssl: &'static str,
+    secret: &'a str,
+}
+
+#[derive(Deserialize)]
+struct AppWebhookUpdateResponse {
+    url: String,
+    content_type: String,
+    insecure_ssl: serde_json::Value,
 }
 
 /// GitHub App installation-token client with a fixed network and identity scope.
@@ -260,6 +277,104 @@ impl GithubAppCredentialBroker {
             return Err(GithubAppInstallationObservationError::InvalidResponse);
         }
         Ok(endpoint)
+    }
+
+    fn app_webhook_configuration_url(&self) -> Result<Url, GithubAppWebhookUpdateError> {
+        let mut endpoint = self.config.api_base.clone();
+        let mut segments = endpoint
+            .path_segments_mut()
+            .map_err(|()| GithubAppWebhookUpdateError::InvalidConfiguration)?;
+        segments.pop_if_empty();
+        segments.push("app");
+        segments.push("hook");
+        segments.push("config");
+        drop(segments);
+        if !self.config.trusts_api_url(&endpoint) {
+            return Err(GithubAppWebhookUpdateError::InvalidConfiguration);
+        }
+        Ok(endpoint)
+    }
+
+    /// Converges the GitHub App's delivery URL, JSON encoding, TLS verification,
+    /// and HMAC secret through the App-authenticated configuration endpoint.
+    ///
+    /// This operation intentionally reapplies the secret because GitHub never
+    /// returns it for comparison. The private key, App assertion, webhook
+    /// secret, provider response body, and remote URL are omitted from errors.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an invalid public HTTPS URL or secret and returns a sanitized
+    /// failure when authentication, transport, provider status, or response
+    /// validation fails.
+    pub async fn update_app_webhook_configuration(
+        &self,
+        webhook_url: &Url,
+        webhook_secret: &[u8],
+    ) -> Result<(), GithubAppWebhookUpdateError> {
+        if webhook_url.as_str().len() > MAX_WEBHOOK_URL_BYTES
+            || webhook_url.scheme() != "https"
+            || webhook_url.host_str().is_none()
+            || !webhook_url.username().is_empty()
+            || webhook_url.password().is_some()
+            || webhook_url.query().is_some()
+            || webhook_url.fragment().is_some()
+            || webhook_secret.is_empty()
+            || webhook_secret.len() > MAX_WEBHOOK_SECRET_BYTES
+        {
+            return Err(GithubAppWebhookUpdateError::InvalidConfiguration);
+        }
+        let secret = std::str::from_utf8(webhook_secret)
+            .map_err(|_| GithubAppWebhookUpdateError::InvalidConfiguration)?;
+        let body = serde_json::to_vec(&AppWebhookUpdateRequest {
+            url: webhook_url.as_str(),
+            content_type: "json",
+            insecure_ssl: "0",
+            secret,
+        })
+        .map_err(|_| GithubAppWebhookUpdateError::InvalidConfiguration)?;
+        if body.len() > MAX_REQUEST_BODY_BYTES {
+            return Err(GithubAppWebhookUpdateError::InvalidConfiguration);
+        }
+        let assertion = self
+            .signer
+            .sign(self.clock.now())
+            .map_err(|_| GithubAppWebhookUpdateError::Authentication)?;
+        let authorization = bearer_header(assertion.expose_secret())
+            .map_err(|_| GithubAppWebhookUpdateError::Authentication)?;
+        let response = self
+            .client
+            .patch(self.app_webhook_configuration_url()?)
+            .header(ACCEPT, ACCEPT_API_JSON)
+            .header(AUTHORIZATION, authorization)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body)
+            .send()
+            .await
+            .map_err(|_| GithubAppWebhookUpdateError::Transport)?;
+        if response.status() != StatusCode::OK {
+            return Err(GithubAppWebhookUpdateError::Rejected);
+        }
+        let response =
+            crate::response::read_created_response(response, self.config.limits.max_response_bytes)
+                .await;
+        if response.completion != CreatedBodyCompletion::Complete || !response.metadata_valid {
+            return Err(GithubAppWebhookUpdateError::InvalidResponse);
+        }
+        let response: AppWebhookUpdateResponse = serde_json::from_slice(&response.body)
+            .map_err(|_| GithubAppWebhookUpdateError::InvalidResponse)?;
+        let tls_verification_enabled = match response.insecure_ssl {
+            serde_json::Value::String(value) => value == "0",
+            serde_json::Value::Number(value) => value.as_u64() == Some(0),
+            _ => false,
+        };
+        if response.url != webhook_url.as_str()
+            || response.content_type != "json"
+            || !tls_verification_enabled
+        {
+            return Err(GithubAppWebhookUpdateError::InvalidResponse);
+        }
+        Ok(())
     }
 
     /// Observes the effective GitHub App installation capabilities.
@@ -593,6 +708,26 @@ impl GithubAppCredentialBroker {
         }
         Ok(endpoint)
     }
+}
+
+/// Sanitized failure while converging a GitHub App webhook configuration.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum GithubAppWebhookUpdateError {
+    /// The public webhook URL, HMAC secret, or derived API endpoint is invalid.
+    #[error("GitHub App webhook configuration is invalid")]
+    InvalidConfiguration,
+    /// The App assertion could not be produced or encoded.
+    #[error("GitHub App webhook configuration could not be authenticated")]
+    Authentication,
+    /// The fixed-origin GitHub API request did not complete.
+    #[error("GitHub App webhook configuration transport failed")]
+    Transport,
+    /// GitHub rejected the authenticated update.
+    #[error("GitHub App webhook configuration was rejected")]
+    Rejected,
+    /// GitHub returned an invalid or mismatched bounded response.
+    #[error("GitHub App webhook configuration response was invalid")]
+    InvalidResponse,
 }
 
 fn permissions_match_github_response(requested: &PermissionSet, returned: &PermissionSet) -> bool {

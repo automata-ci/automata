@@ -177,13 +177,13 @@ Work from a clean branch based on `main`.
    `vX.Y.Z` release link.
 4. Run the local rehearsal and the normal test suite.
 5. Merge through the repository's merge queue and wait for
-   `Automata CI / required` to succeed on the resulting commit.
+   `Automata CI / .ci/workflows/ci.yml` to succeed on the resulting commit.
 
 Before any mutation, the release gate requires the tagged commit to be in
 `main` and queries GitHub for one latest Check with all of these properties:
 
 - App ID `4558711`, slug `automata-ci`, and organization owner `automata-ci`;
-- check name `Automata CI / required`;
+- check name `Automata CI / .ci/workflows/ci.yml`;
 - the exact tagged commit and a successful terminal conclusion;
 - an `automata-check:<UUID>` external identity; and
 - the `https://ci.automata-ci.com/automata-ci/automata/actions` dashboard path.

@@ -4,7 +4,8 @@ use super::{TestResult, message_error};
 
 /// A schema-local replacement for `PostgreSQL`'s wall clock.
 ///
-/// Pools created by this crate search `automata_test` before `pg_catalog`, so
+/// Application pools created by this crate search `automata_test` before the
+/// production `public` schema and `pg_catalog`, so
 /// unqualified calls to `clock_timestamp()` resolve this fixture on every
 /// current and replacement connection while the clock is frozen.
 #[derive(Debug)]

@@ -26,7 +26,7 @@ use crate::support::{TestResult, run_with_database};
 static MIGRATOR: sqlx::migrate::Migrator =
     sqlx::migrate!("../automata-ci-store-postgres/migrations");
 
-const PRE_BILLING_MIGRATION_VERSION: i64 = 60;
+const PRE_BILLING_MIGRATION_VERSION: i64 = 62;
 const PROVISIONING_PAUSE_LOCK: i64 = 1_504_061_001;
 
 fn authority() -> ProvisioningAuthority {
@@ -152,7 +152,7 @@ async fn billing_migration_serializes_concurrent_owner_provisioning() -> TestRes
             )
             .await?;
 
-            let migration_pool = database.connect_pool(1).await?;
+            let migration_pool = database.connect_migration_pool(1).await?;
             let migration = tokio::spawn(async move { MIGRATOR.run(&migration_pool).await });
             wait_for_pending_lock(
                 database.pool(),

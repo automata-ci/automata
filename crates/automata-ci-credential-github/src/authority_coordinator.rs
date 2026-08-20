@@ -19,12 +19,12 @@ use automata_ci_store::{
     GithubRuntimeAuthorityEnvelopeMetadata, GithubRuntimeAuthorityInspection,
     GithubRuntimeAuthorityMintFailure, GithubRuntimeAuthorityReceipt,
     GithubRuntimeAuthorityRepository, GithubRuntimeAuthorityState,
-    GithubRuntimeAuthorityTerminalReason, GithubRuntimeAuthorityWorkerId,
-    GithubServerServiceAppClientId, GithubServerServiceAppId, GithubServerServiceJwtIssuer,
-    InspectGithubRuntimeAuthority, MAX_GITHUB_AUTHORITY_MINT_CLAIM_MILLIS,
-    MAX_GITHUB_AUTHORITY_MINT_RETRY_BACKOFF_MILLIS, MarkGithubRuntimeAuthorityIndeterminate,
-    ProtectedGithubRuntimeAuthority, RejectGithubRuntimeAuthorityMint,
-    RetryGithubRuntimeAuthorityMint, Sha256Digest,
+    GithubRuntimeAuthorityStoreError, GithubRuntimeAuthorityTerminalReason,
+    GithubRuntimeAuthorityWorkerId, GithubServerServiceAppClientId, GithubServerServiceAppId,
+    GithubServerServiceJwtIssuer, InspectGithubRuntimeAuthority,
+    MAX_GITHUB_AUTHORITY_MINT_CLAIM_MILLIS, MAX_GITHUB_AUTHORITY_MINT_RETRY_BACKOFF_MILLIS,
+    MarkGithubRuntimeAuthorityIndeterminate, ProtectedGithubRuntimeAuthority,
+    RejectGithubRuntimeAuthorityMint, RetryGithubRuntimeAuthorityMint, Sha256Digest,
 };
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
@@ -785,7 +785,10 @@ impl GithubRuntimeAuthorityMintCoordinator {
             .repository
             .claim_github_runtime_authority_mint(claim)
             .await
-            .map_err(|_| GithubRuntimeAuthorityCoordinatorError::Repository)?
+            .map_err(|error| {
+                observe_repository_failure("claim", &error);
+                GithubRuntimeAuthorityCoordinatorError::Repository
+            })?
         else {
             return self.claim_unavailable(identity).await;
         };
@@ -826,8 +829,10 @@ impl GithubRuntimeAuthorityMintCoordinator {
             .repository
             .begin_github_runtime_authority_mint(begin)
             .await
-            .map_err(|_| GithubRuntimeAuthorityCoordinatorError::Repository)?
-        {
+            .map_err(|error| {
+                observe_repository_failure("begin", &error);
+                GithubRuntimeAuthorityCoordinatorError::Repository
+            })? {
             BeginGithubRuntimeAuthorityMintOutcome::AlreadyStarted(receipt) => {
                 return Ok(GithubRuntimeAuthorityCoordinationOutcome::AlreadyStarted(
                     receipt,
@@ -859,7 +864,10 @@ impl GithubRuntimeAuthorityMintCoordinator {
         self.repository
             .inspect_github_runtime_authority(request)
             .await
-            .map_err(|_| GithubRuntimeAuthorityCoordinatorError::Repository)
+            .map_err(|error| {
+                observe_repository_failure("inspect", &error);
+                GithubRuntimeAuthorityCoordinatorError::Repository
+            })
     }
 
     async fn claim_unavailable(
@@ -932,7 +940,10 @@ impl GithubRuntimeAuthorityMintCoordinator {
                     .repository
                     .mark_github_runtime_authority_indeterminate(request)
                     .await
-                    .map_err(|_| GithubRuntimeAuthorityCoordinatorError::Repository)?;
+                    .map_err(|error| {
+                        observe_repository_failure("indeterminate", &error);
+                        GithubRuntimeAuthorityCoordinatorError::Repository
+                    })?;
                 Ok(GithubRuntimeAuthorityCoordinationOutcome::Transitioned(
                     receipt,
                 ))
@@ -965,14 +976,20 @@ impl GithubRuntimeAuthorityMintCoordinator {
             self.repository
                 .retry_github_runtime_authority_mint(request)
                 .await
-                .map_err(|_| GithubRuntimeAuthorityCoordinatorError::Repository)?
+                .map_err(|error| {
+                    observe_repository_failure("retry", &error);
+                    GithubRuntimeAuthorityCoordinatorError::Repository
+                })?
         } else {
             let request = RejectGithubRuntimeAuthorityMint::new(claim, failure, observed_at)
                 .map_err(|_| GithubRuntimeAuthorityCoordinatorError::InvalidTime)?;
             self.repository
                 .reject_github_runtime_authority_mint(request)
                 .await
-                .map_err(|_| GithubRuntimeAuthorityCoordinatorError::Repository)?
+                .map_err(|error| {
+                    observe_repository_failure("reject", &error);
+                    GithubRuntimeAuthorityCoordinatorError::Repository
+                })?
         };
         Ok(GithubRuntimeAuthorityCoordinationOutcome::Transitioned(
             receipt,
@@ -1013,6 +1030,24 @@ impl GithubRuntimeAuthorityMintCoordinator {
     fn observation_at_least(&self, lower_bound: UnixMillis) -> UnixMillis {
         self.clock.now().max(lower_bound)
     }
+}
+
+fn observe_repository_failure(operation: &'static str, error: &GithubRuntimeAuthorityStoreError) {
+    let kind = match error {
+        GithubRuntimeAuthorityStoreError::Operation(_) => "operation",
+        GithubRuntimeAuthorityStoreError::CorruptData => "corrupt_data",
+        GithubRuntimeAuthorityStoreError::IdentityConflict => "identity_conflict",
+        GithubRuntimeAuthorityStoreError::MintClaimRejected => "mint_claim_rejected",
+        GithubRuntimeAuthorityStoreError::RevocationClaimRejected => "revocation_claim_rejected",
+        GithubRuntimeAuthorityStoreError::QuarantineRejected => "quarantine_rejected",
+        GithubRuntimeAuthorityStoreError::FenceExhausted => "fence_exhausted",
+        GithubRuntimeAuthorityStoreError::RetryLimitReached => "retry_limit_reached",
+    };
+    tracing::warn!(
+        operation,
+        kind,
+        "GitHub runtime-authority repository failure"
+    );
 }
 
 impl fmt::Debug for GithubRuntimeAuthorityMintCoordinator {

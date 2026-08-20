@@ -284,7 +284,10 @@ impl<'a> GithubScheduleSourceCredentialRequest<'a> {
             GithubServerServiceClaimFence::new(self.claim.fence().get())
                 .map_err(|_| GithubScheduleSourceCredentialValueError)?,
             GithubServerServiceAction::DiscoverRepositorySchedules,
-            GithubServerServiceRevision::new(self.manifest.revision().get())
+            // Schedule discovery has a stable consumer contract revision. The
+            // manifest revision tracks provider configuration evolution and is
+            // intentionally independent from this handoff claim revision.
+            GithubServerServiceRevision::new(1)
                 .map_err(|_| GithubScheduleSourceCredentialValueError)?,
         ))
     }

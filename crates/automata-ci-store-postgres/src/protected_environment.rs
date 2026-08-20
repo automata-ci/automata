@@ -1622,6 +1622,22 @@ async fn issue_leased_job_secret_grants(
     let reusable_permission: String = gate
         .try_get("reusable_secret_permission")
         .map_err(operation_error)?;
+
+    // Standard jobs may carry an authority profile even when their compiled
+    // plan contains no secret references.  In that case there is no secret
+    // authority to issue, so provider-event provenance is intentionally not
+    // consulted.  Unknown provenance must still reject every non-empty
+    // selection below.
+    let expected_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM job_secret_selections WHERE attempt_id = $1")
+            .bind(request.attempt_id().as_uuid())
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(operation_error)?;
+    if expected_count == 0 {
+        transaction.commit().await.map_err(operation_error)?;
+        return Ok(Vec::new());
+    }
     if !matches!(event_trust.as_str(), "trusted" | "untrusted")
         || !matches!(
             source_kind.as_str(),
@@ -1646,12 +1662,6 @@ async fn issue_leased_job_secret_grants(
             return Err(ProtectedEnvironmentStoreError::AuthorityRejected);
         }
     }
-    let expected_count: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM job_secret_selections WHERE attempt_id = $1")
-            .bind(request.attempt_id().as_uuid())
-            .fetch_one(&mut *transaction)
-            .await
-            .map_err(operation_error)?;
     if !secret_selection_permission_allows_issue(
         &invocation_kind,
         &reusable_permission,

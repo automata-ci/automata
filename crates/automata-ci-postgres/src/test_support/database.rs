@@ -27,6 +27,8 @@ const MAX_NAMESPACE_LENGTH: usize = 27;
 // Eight connections preserve those in-test races while the PostgreSQL lane's
 // two libtest workers bound aggregate demand to sixteen primary connections.
 const DEFAULT_POOL_CONNECTIONS: u32 = 8;
+const MIGRATION_SEARCH_PATH: &str = "public, pg_catalog";
+const APPLICATION_SEARCH_PATH: &str = "automata_test, public, pg_catalog";
 const MINIMUM_POSTGRES_VERSION: i32 = 180_000;
 const TEMPLATE_MARKER_VERSION: &str = "automata-ci-postgres-test-support:v1";
 const TEMPLATE_LOCK_SALT: i64 = 6_482_851_405_936_141_723;
@@ -308,8 +310,11 @@ impl PostgresTestHarness {
     /// Creates or reuses the fully initialized, disconnected job template.
     ///
     /// The initializer executes at most once for a namespace across cooperating
-    /// processes. Its pool searches `automata_test, pg_catalog`. Callers must
-    /// supply a namespace unique to the complete CI run. Set
+    /// processes. Its migration pool uses production's `public` schema. Cloned
+    /// application pools search `automata_test, public, pg_catalog` so the test
+    /// clock may shadow `pg_catalog.clock_timestamp()` without relocating the
+    /// production schema. Callers must supply a namespace unique to the complete
+    /// CI run. Set
     /// `INITIALIZER_FINGERPRINT_ENVIRONMENT`
     /// or call [`Self::with_initializer_fingerprint`] so incompatible
     /// initializers fail closed. Without a fingerprint, callers must change the
@@ -367,8 +372,8 @@ impl PostgresTestHarness {
 
     /// Creates an application-empty test database from `PostgreSQL` `template0`.
     ///
-    /// Only the `automata_test` schema is bootstrapped, so migration tests start
-    /// without any current application objects or migration ledger.
+    /// Only the `automata_test` helper schema is bootstrapped, so migration tests
+    /// start with an empty production `public` schema and no migration ledger.
     ///
     /// # Errors
     ///
@@ -406,6 +411,7 @@ impl PostgresTestHarness {
             &self.admin_options,
             &database_name,
             DEFAULT_POOL_CONNECTIONS,
+            MIGRATION_SEARCH_PATH,
         )
         .await
         {
@@ -531,6 +537,7 @@ impl PostgresTestHarness {
             &self.admin_options,
             template_name,
             DEFAULT_POOL_CONNECTIONS,
+            MIGRATION_SEARCH_PATH,
         )
         .await
         {
@@ -711,6 +718,7 @@ impl PreparedTemplate {
             &self.harness.admin_options,
             &database_name,
             DEFAULT_POOL_CONNECTIONS,
+            APPLICATION_SEARCH_PATH,
         )
         .await
         {
@@ -784,14 +792,31 @@ impl TestDatabase {
         self.database_name.as_str()
     }
 
-    /// Creates a replacement pool with the canonical fixed search path.
+    /// Creates a replacement application pool with the canonical fixed search path.
     ///
     /// # Errors
     ///
     /// Returns an error if `max_connections` is zero or `PostgreSQL` cannot open
     /// the pool.
     pub(super) async fn connect_pool(&self, max_connections: u32) -> TestResult<PgPool> {
-        connect_database_pool(&self.admin_options, &self.database_name, max_connections).await
+        connect_database_pool(
+            &self.admin_options,
+            &self.database_name,
+            max_connections,
+            APPLICATION_SEARCH_PATH,
+        )
+        .await
+    }
+
+    /// Creates a replacement pool with production's migration search path.
+    pub(super) async fn connect_migration_pool(&self, max_connections: u32) -> TestResult<PgPool> {
+        connect_database_pool(
+            &self.admin_options,
+            &self.database_name,
+            max_connections,
+            MIGRATION_SEARCH_PATH,
+        )
+        .await
     }
 
     /// Closes the primary pool and drops exactly this database with `FORCE`.
@@ -945,6 +970,7 @@ async fn connect_database_pool(
     admin_options: &PgConnectOptions,
     database_name: &DatabaseIdentifier,
     max_connections: u32,
+    search_path: &'static str,
 ) -> TestResult<PgPool> {
     if max_connections == 0 {
         return Err(message_error(
@@ -954,10 +980,10 @@ async fn connect_database_pool(
     let options = admin_options.clone().database(database_name.as_str());
     Ok(PgPoolOptions::new()
         .max_connections(max_connections)
-        .after_connect(|connection, _metadata| {
+        .after_connect(move |connection, _metadata| {
             Box::pin(async move {
                 sqlx::query("SELECT pg_catalog.set_config('search_path', $1, false)")
-                    .bind("automata_test, pg_catalog")
+                    .bind(search_path)
                     .execute(connection)
                     .await?;
                 Ok(())

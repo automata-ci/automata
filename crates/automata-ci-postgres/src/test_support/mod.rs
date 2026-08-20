@@ -92,6 +92,16 @@ impl PostgresTestDatabase {
     pub async fn connect_pool(&self, max_connections: u32) -> TestResult<PgPool> {
         self.database.connect_pool(max_connections).await
     }
+
+    /// Opens another pool with production's migration search path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `max_connections` is zero or `PostgreSQL` cannot
+    /// establish the pool.
+    pub async fn connect_migration_pool(&self, max_connections: u32) -> TestResult<PgPool> {
+        self.database.connect_migration_pool(max_connections).await
+    }
 }
 
 /// Runs a test with an isolated, migrated database and default Store adapter.
@@ -141,8 +151,8 @@ where
 
 /// Runs a test with an application-empty database and configured Store adapter.
 ///
-/// The database contains the `automata_test` schema but no current application
-/// objects or migration ledger.
+/// The database contains the `automata_test` helper schema but no current
+/// application objects or migration ledger in production's `public` schema.
 ///
 /// # Errors
 ///

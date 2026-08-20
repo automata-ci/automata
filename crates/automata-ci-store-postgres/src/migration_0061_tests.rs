@@ -9,7 +9,6 @@ use uuid::Uuid;
 use crate::migration::MIGRATOR;
 
 const DATABASE_URL_ENVIRONMENT: &str = "AUTOMATA_TEST_DATABASE_URL";
-const TEST_SCHEMA: &str = "automata_test";
 const MINIMUM_POSTGRES_VERSION: i32 = 180_000;
 
 type TestError = Box<dyn std::error::Error + Send + Sync + 'static>;
@@ -48,7 +47,7 @@ where
         .after_connect(|connection, _metadata| {
             Box::pin(async move {
                 sqlx::query("SELECT pg_catalog.set_config('search_path', $1, false)")
-                    .bind(format!("{TEST_SCHEMA}, pg_catalog"))
+                    .bind("public, pg_catalog")
                     .execute(connection)
                     .await?;
                 Ok(())
@@ -63,15 +62,6 @@ where
             return Err(error.into());
         }
     };
-    if let Err(error) = sqlx::query("CREATE SCHEMA automata_test")
-        .execute(&pool)
-        .await
-    {
-        pool.close().await;
-        cleanup_database(&admin_options, &database_name).await?;
-        return Err(error.into());
-    }
-
     let database = Arc::new(TestDatabase { pool });
     let task = tokio::spawn(test(Arc::clone(&database))).await;
     database.pool.close().await;
@@ -253,7 +243,7 @@ async fn production_migrations_upgrade_deployed_schema_and_immutable_evidence() 
         let applied_version: i64 = sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations")
             .fetch_one(&database.pool)
             .await?;
-        assert_eq!(applied_version, 69);
+        assert_eq!(applied_version, 74);
 
         assert_migrated_contract(&database.pool).await?;
         Ok(())
