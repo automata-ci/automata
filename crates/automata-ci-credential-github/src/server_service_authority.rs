@@ -1228,6 +1228,12 @@ impl GithubServerServiceCredentialIssuer {
                         .app_configuration_revision()
                         .get(),
                     policy_revision = requested_selector.policy_revision().get(),
+                    consumer_id = ?requested_consumer.consumer_id(),
+                    consumer_owner = ?requested_consumer.owner(),
+                    consumer_fence = requested_consumer.fence().get(),
+                    consumer_revision = requested_consumer.revision().get(),
+                    requested_at = requested_at.get(),
+                    required_through = requested_through.get(),
                     "GitHub server-service credential handoff repository rejected request"
                 );
                 map_store_handoff_error(error)
