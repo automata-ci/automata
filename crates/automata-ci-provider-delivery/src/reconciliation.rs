@@ -715,7 +715,7 @@ fn validate_provider_revision(
     current: Option<&ProviderInstanceRecord>,
     desired: ProviderConfigurationRevision,
 ) -> Result<(), ProviderReconciliationError> {
-    let valid = current.map_or(desired.get() == 1, |current| {
+    let valid = current.is_none_or(|current| {
         let current = current.manifest().revision().get();
         desired.get() == current || current.checked_add(1) == Some(desired.get())
     });
@@ -956,8 +956,6 @@ mod tests {
                     manifest
                         .validate_successor(&current.manifest)
                         .map_err(|_| ProviderRepositoryError::Conflict)?;
-                } else if manifest.revision().get() != 1 {
-                    return Err(ProviderRepositoryError::Conflict);
                 }
                 let stored = secrets
                     .into_secrets()
@@ -1251,7 +1249,7 @@ mod tests {
                 instance_id,
                 connection_id,
                 endpoint_id,
-                1,
+                2,
                 b"first-secret",
                 true,
             ))
@@ -1266,7 +1264,7 @@ mod tests {
                 instance_id,
                 connection_id,
                 endpoint_id,
-                1,
+                2,
                 b"first-secret",
                 true,
             ))
@@ -1281,7 +1279,7 @@ mod tests {
                 instance_id,
                 connection_id,
                 endpoint_id,
-                2,
+                3,
                 b"second-secret",
                 false,
             ))
@@ -1290,7 +1288,7 @@ mod tests {
         assert_eq!(removed.connections_disabled(), 1);
         let state = repository.state.lock().expect("repository state");
         let instance = state.instance.as_ref().expect("instance");
-        assert_eq!(instance.manifest.revision().get(), 2);
+        assert_eq!(instance.manifest.revision().get(), 3);
         assert_eq!(
             instance
                 .manifest
@@ -1307,7 +1305,7 @@ mod tests {
         assert_eq!(connection.state(), ProviderLifecycleState::Disabled);
         let endpoint = state.endpoint.as_ref().expect("endpoint");
         assert_eq!(endpoint.revision().get(), 2);
-        assert_eq!(endpoint.provider_revision().get(), 2);
+        assert_eq!(endpoint.provider_revision().get(), 3);
         assert_eq!(endpoint.state(), ProviderWebhookEndpointState::Disabled);
     }
 }

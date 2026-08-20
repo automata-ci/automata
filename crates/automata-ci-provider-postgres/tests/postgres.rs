@@ -495,6 +495,36 @@ async fn instance_and_connection_revisions_are_atomic_encrypted_and_exact() -> T
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL 18 via AUTOMATA_TEST_DATABASE_URL"]
+async fn instance_projection_can_bootstrap_at_an_existing_source_revision() -> TestResult {
+    run_with_database(|database| async move {
+        let repository = repository(database.pool().clone());
+        let instance_id = ProviderInstanceId::from_uuid(Uuid::from_u128(0x7001))?;
+        assert_eq!(
+            repository
+                .save_instance(instance_record(
+                    instance_id,
+                    "github",
+                    7,
+                    TOKEN,
+                    1,
+                    ProviderLifecycleState::Disabled,
+                    None,
+                ))
+                .await?,
+            ProviderSaveOutcome::Inserted
+        );
+        let current = repository
+            .current_instance(instance_id)
+            .await?
+            .expect("current projected instance");
+        assert_eq!(current.manifest().revision().get(), 7);
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL 18 via AUTOMATA_TEST_DATABASE_URL"]
 async fn disabled_endpoint_does_not_require_an_active_connection() -> TestResult {
     run_with_database(|database| async move {
         let repository = repository(database.pool().clone());

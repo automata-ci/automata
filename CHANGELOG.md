@@ -113,6 +113,8 @@ structure of [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
 
 ### Changed
 
+- Provider instance projections can bootstrap from an already-advanced
+  source-of-truth revision while retaining contiguous durable successors.
 - PostgreSQL upgrades now preserve the checksums of deployed migrations 0053
   and 0056, move the provider-instance webhook cutover into forward migration
   0069, and safely convert historical Check evidence in migration 0061.
