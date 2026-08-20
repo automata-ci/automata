@@ -53,7 +53,6 @@ struct SelectionAdmission {
 }
 
 struct LockedSelectionHorizon {
-    replay_floor: i64,
     activation_cursor: Option<ActivationDiscoveryCursor>,
     materialization_cursor: Option<MaterializationDiscoveryCursor>,
 }
@@ -170,7 +169,18 @@ impl LogicalWorkSelectionRepository for PostgresStore {
             return Ok(outcome);
         }
         let horizon = lock_selection_horizon(&mut transaction, "activation").await?;
-        cleanup_receipts(&mut transaction, "activation", horizon.replay_floor).await?;
+        // Admit the caller's clock while the request is still fresh. Receipt
+        // cleanup and candidate discovery are bounded but may legitimately be
+        // expensive after an outage; neither may turn that database work into
+        // a false client-clock rejection and roll the cleanup back forever.
+        let admission = lock_selection_admission(
+            &mut transaction,
+            "activation",
+            request.observed_at(),
+            request.duration_ms(),
+        )
+        .await?;
+        cleanup_receipts(&mut transaction, "activation", admission.replay_floor).await?;
         let mut can_wrap = horizon.activation_cursor.is_some();
         let mut discovery_cursor = horizon.activation_cursor;
         let mut scanned_candidates = 0_usize;
@@ -204,13 +214,6 @@ impl LogicalWorkSelectionRepository for PostgresStore {
                     rollback_candidate_savepoint(&mut transaction).await?;
                     continue;
                 }
-                let admission = lock_selection_admission(
-                    &mut transaction,
-                    "activation",
-                    request.observed_at(),
-                    request.duration_ms(),
-                )
-                .await?;
                 let now = admission.database_now;
                 if !activation_candidate_is_eligible(&mut transaction, &candidate, now).await? {
                     rollback_candidate_savepoint(&mut transaction).await?;
@@ -271,13 +274,6 @@ impl LogicalWorkSelectionRepository for PostgresStore {
             }
             discovery_cursor = next_cursor;
         };
-        let admission = lock_selection_admission(
-            &mut transaction,
-            "activation",
-            request.observed_at(),
-            request.duration_ms(),
-        )
-        .await?;
         advance_selection_horizon(
             &mut transaction,
             "activation",
@@ -334,7 +330,14 @@ impl LogicalWorkSelectionRepository for PostgresStore {
             return Ok(outcome);
         }
         let horizon = lock_selection_horizon(&mut transaction, "materialization").await?;
-        cleanup_receipts(&mut transaction, "materialization", horizon.replay_floor).await?;
+        let admission = lock_selection_admission(
+            &mut transaction,
+            "materialization",
+            request.observed_at(),
+            request.duration_ms(),
+        )
+        .await?;
+        cleanup_receipts(&mut transaction, "materialization", admission.replay_floor).await?;
         let mut can_wrap = horizon.materialization_cursor.is_some();
         let mut discovery_cursor = horizon.materialization_cursor;
         let mut scanned_candidates = 0_usize;
@@ -368,13 +371,6 @@ impl LogicalWorkSelectionRepository for PostgresStore {
                     rollback_candidate_savepoint(&mut transaction).await?;
                     continue;
                 }
-                let admission = lock_selection_admission(
-                    &mut transaction,
-                    "materialization",
-                    request.observed_at(),
-                    request.duration_ms(),
-                )
-                .await?;
                 let now = admission.database_now;
                 if !materialization_candidate_is_eligible(&mut transaction, &candidate, now).await?
                 {
@@ -438,13 +434,6 @@ impl LogicalWorkSelectionRepository for PostgresStore {
             }
             discovery_cursor = next_cursor;
         };
-        let admission = lock_selection_admission(
-            &mut transaction,
-            "materialization",
-            request.observed_at(),
-            request.duration_ms(),
-        )
-        .await?;
         advance_selection_horizon(
             &mut transaction,
             "materialization",
@@ -767,7 +756,6 @@ async fn lock_selection_horizon(
         None
     };
     Ok(LockedSelectionHorizon {
-        replay_floor,
         activation_cursor,
         materialization_cursor,
     })
