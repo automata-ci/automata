@@ -18,7 +18,7 @@ required = (
     "name: Release\n",
     'tags:\n      - "v*"',
     "python3 scripts/ci/verify-release-authority.py",
-    "check_name=Automata CI / required",
+    "check_name=Automata CI / .ci/workflows/ci.yml",
     "AUTOMATA_SCRATCH_RUNTIME=none",
     "AUTOMATA_SERVICE_PROXY_OCI_BUILDER: buildah-chroot",
     "AUTOMATA_SERVICE_PROXY_PROCESS_PROBE: metadata-only",

@@ -153,7 +153,7 @@ jobs:
             > "$comparison"
           gh api --method GET \
             "repos/${GITHUB_REPOSITORY}/commits/${RELEASE_COMMIT}/check-runs" \
-            -f 'check_name=Automata CI / required' \
+            -f 'check_name=Automata CI / .ci/workflows/ci.yml' \
             -f filter=latest \
             -f per_page=100 \
             > "$checks"
