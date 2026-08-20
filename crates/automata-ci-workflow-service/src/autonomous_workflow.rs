@@ -3443,7 +3443,10 @@ impl AutonomousWorkflowService {
         };
         let outcome = match await_custody(shutdown, submission).await {
             Ok(Ok(outcome)) => outcome,
-            Ok(Err(_)) => return Err(AutonomousWorkflowError::AuthorityRejected),
+            Ok(Err(error)) => {
+                self.custody.set_orchestration(OrchestrationCustody::Idle);
+                return selection_submission_failure(error, AutonomousWorkflowQueue::Orchestration);
+            }
             Err(error) => {
                 return unavailable_or_shutdown(error, AutonomousWorkflowQueue::Orchestration);
             }
@@ -3884,7 +3887,14 @@ impl AutonomousWorkflowService {
         };
         let outcome = match await_custody(shutdown, submission).await {
             Ok(Ok(outcome)) => outcome,
-            Ok(Err(_)) => return Err(AutonomousWorkflowError::AuthorityRejected),
+            Ok(Err(error)) => {
+                self.custody
+                    .set_materialization(MaterializationCustody::Idle);
+                return selection_submission_failure(
+                    error,
+                    AutonomousWorkflowQueue::Materialization,
+                );
+            }
             Err(error) => {
                 return unavailable_or_shutdown(error, AutonomousWorkflowQueue::Materialization);
             }
@@ -4312,15 +4322,28 @@ fn unavailable_or_shutdown(
 }
 
 fn selection_failure(
-    error: &automata_ci_store::LogicalWorkSelectionStoreError,
+    _error: &automata_ci_store::LogicalWorkSelectionStoreError,
     queue: AutonomousWorkflowQueue,
 ) -> Result<QueuePoll, AutonomousWorkflowError> {
-    if is_repository_unavailable(error) {
-        Ok(QueuePoll::Outcome(AutonomousWorkflowOutcome::Unavailable(
-            queue,
-        )))
-    } else {
-        Err(AutonomousWorkflowError::AuthorityRejected)
+    // Selection is a read/claim poll.  A rejected or malformed candidate must
+    // not terminate the control plane: the transaction has rolled back and the
+    // next bounded poll can re-read the authoritative graph after maintenance
+    // or a concurrent worker has advanced it.  Fatal authority errors remain
+    // enforced at consume/finalization boundaries, after a durable claim exists.
+    Ok(QueuePoll::Outcome(AutonomousWorkflowOutcome::Unavailable(
+        queue,
+    )))
+}
+
+fn selection_submission_failure(
+    error: AutonomousWorkflowLeaseError,
+    queue: AutonomousWorkflowQueue,
+) -> Result<QueuePoll, AutonomousWorkflowError> {
+    match error {
+        AutonomousWorkflowLeaseError::Shutdown => Err(AutonomousWorkflowError::Shutdown),
+        AutonomousWorkflowLeaseError::DeadlineElapsed
+        | AutonomousWorkflowLeaseError::Unavailable
+        | AutonomousWorkflowLeaseError::AuthorityRejected => Ok(unavailable_poll(queue)),
     }
 }
 
