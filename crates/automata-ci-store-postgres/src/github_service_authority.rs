@@ -1236,7 +1236,21 @@ async fn revalidate_handoff_consumer(
             .map(UnixMillis::new)
         }
     };
-    claim_expires_at.ok_or(GithubServerServiceStoreError::HandoffRejected)
+    let Some(claim_expires_at) = claim_expires_at else {
+        tracing::warn!(
+            target: "automata_ci",
+            stage = "consumer_revalidation_empty",
+            action = consumer.action().as_str(),
+            consumer_id = ?consumer.consumer_id(),
+            consumer_owner = ?consumer.owner(),
+            consumer_fence = consumer.fence().get(),
+            consumer_revision = consumer.revision().get(),
+            observed_at = observed_at.get(),
+            "GitHub server-service credential handoff consumer query matched no live claim"
+        );
+        return Err(GithubServerServiceStoreError::HandoffRejected);
+    };
+    Ok(claim_expires_at)
 }
 
 async fn revalidate_provider_result_consumer(
