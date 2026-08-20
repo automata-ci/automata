@@ -5,7 +5,9 @@ use std::{
 
 use async_trait::async_trait;
 use automata_ci_blob::MemoryBlobStore;
-use automata_ci_core::{GitObjectId, Sha256Digest, TrustTokenRecursion, UnixMillis, WorkspaceId};
+use automata_ci_core::{
+    GitObjectId, ManagedTenantId, Sha256Digest, TrustTokenRecursion, UnixMillis,
+};
 use automata_ci_provider::{
     ClaimProviderResult, ClaimedProviderProcessing, ClaimedProviderResult, CompleteProviderResult,
     ExternalDeliveryId, ExternalDeliveryIdentity, ExternalRepositoryId, ExternalRepositoryIdentity,
@@ -564,7 +566,7 @@ fn connection_manifest(
     repository_identity: ExternalRepositoryIdentity,
 ) -> ProviderConnectionManifest {
     let configuration = ProviderConnectionConfiguration::new(
-        WorkspaceId::parse("11111111-1111-4111-8111-111111111111").expect("workspace"),
+        ManagedTenantId::parse("11111111-1111-4111-8111-111111111111").expect("tenant"),
         repository_identity,
         provider_revision,
         Sha256Digest::from_bytes([8; 32]),

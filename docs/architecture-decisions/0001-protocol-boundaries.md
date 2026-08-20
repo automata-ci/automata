@@ -43,7 +43,7 @@ authentication. Management RPCs do not declare an HTTP projection.
 Core owns a separate HTTP/JSON API for browsers, CLIs, and third-party
 integrations. The self-hosted UI calls Core directly. Automata Cloud exposes its
 own thin HTTP/JSON edge, authenticates SaaS users, and delegates ordinary
-workspace operations to the same Core API on the selected shard. Cloud-only
+tenant operations to the same Core API on the selected shard. Cloud-only
 billing and account routes are implemented with Fastify. HTTP schemas and
 generated OpenAPI descriptions live with the route implementations rather than
 in a centralized contracts directory.

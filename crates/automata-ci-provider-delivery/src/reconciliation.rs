@@ -2,7 +2,7 @@
 
 use std::{collections::BTreeMap, fmt, sync::Arc};
 
-use automata_ci_core::{UnixMillis, WorkspaceId};
+use automata_ci_core::{ManagedTenantId, UnixMillis};
 use automata_ci_key_management::SecretBytes;
 use automata_ci_provider::{
     ExternalRepositoryId, MAX_PROVIDER_SECRET_BINDINGS, MAX_PROVIDER_WEBHOOK_CONNECTIONS,
@@ -120,7 +120,7 @@ impl fmt::Debug for ProviderInstanceDesiredState {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProviderConnectionDesiredState {
     connection_id: ProviderConnectionId,
-    workspace_id: WorkspaceId,
+    tenant_id: ManagedTenantId,
     external_repository_id: ExternalRepositoryId,
     visibility: RepositoryVisibility,
     default_branch: ProviderDefaultBranch,
@@ -140,7 +140,7 @@ impl ProviderConnectionDesiredState {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         connection_id: ProviderConnectionId,
-        workspace_id: WorkspaceId,
+        tenant_id: ManagedTenantId,
         external_repository_id: ExternalRepositoryId,
         visibility: RepositoryVisibility,
         default_branch: ProviderDefaultBranch,
@@ -155,7 +155,7 @@ impl ProviderConnectionDesiredState {
         }
         Ok(Self {
             connection_id,
-            workspace_id,
+            tenant_id,
             external_repository_id,
             visibility,
             default_branch,
@@ -539,7 +539,7 @@ impl ProviderReconciliationService {
                     desired.connection_id,
                     revision,
                     ProviderLifecycleState::Active,
-                    desired.workspace_id,
+                    desired.tenant_id,
                     desired.external_repository_id,
                     desired.visibility,
                     desired.default_branch,
@@ -1195,7 +1195,7 @@ mod tests {
             .then(|| {
                 ProviderConnectionDesiredState::new(
                     connection_id,
-                    WorkspaceId::parse("11111111-1111-4111-8111-111111111111").expect("workspace"),
+                    ManagedTenantId::parse("11111111-1111-4111-8111-111111111111").expect("tenant"),
                     ExternalRepositoryId::new("42").expect("external repository"),
                     RepositoryVisibility::Private,
                     ProviderDefaultBranch::new("main").expect("default branch"),

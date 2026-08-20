@@ -1,4 +1,4 @@
-use automata_ci_core::{Sha256Digest, UnixMillis, WorkspaceId};
+use automata_ci_core::{ManagedTenantId, Sha256Digest, UnixMillis};
 use automata_ci_provider::{
     ExternalRepositoryId, ExternalRepositoryIdentity, ProviderArchiveLimits,
     ProviderConfigurationRevision, ProviderConnectionConfiguration, ProviderConnectionId,
@@ -17,7 +17,7 @@ pub(crate) fn connection_with_state(
     state: ProviderLifecycleState,
 ) -> ProviderConnectionManifest {
     let configuration = ProviderConnectionConfiguration::new(
-        WorkspaceId::parse("11111111-1111-4111-8111-111111111111").expect("workspace"),
+        ManagedTenantId::parse("11111111-1111-4111-8111-111111111111").expect("tenant"),
         ExternalRepositoryIdentity::new(
             "22222222-2222-4222-8222-222222222222"
                 .parse::<ProviderInstanceId>()

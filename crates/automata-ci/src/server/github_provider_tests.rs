@@ -560,15 +560,15 @@ async fn duplicate_config_and_durable_manifest_selector_drift_fail_closed() {
 
 fn database_desired_state(
     configuration_revision: u64,
-    workspace_revision: u64,
+    tenant_revision: u64,
     runner_policy_revision: u64,
 ) -> automata_ci_provisioning::GithubProviderDesiredState {
     use automata_ci_core::JobAuthorityProfile;
-    use automata_ci_core::WorkspaceId;
+    use automata_ci_core::ManagedTenantId;
     use automata_ci_provisioning::{
         GithubProviderConfiguration, GithubProviderConfigurationRevision,
         GithubProviderRepositorySelection, GithubProviderSchedulePolicy, GithubProviderSecret,
-        ShardId, WorkspaceGithubRepositoriesDesiredState, WorkspaceGithubRepositoriesRevision,
+        ShardId, TenantGithubRepositoriesDesiredState, TenantGithubRepositoriesRevision,
     };
     use automata_ci_store::{
         GithubCheckName, GithubRepositoryName, GithubServerServiceAppClientId,
@@ -591,8 +591,8 @@ fn database_desired_state(
         GithubProviderSchedulePolicy::default(),
     )
     .expect("provider configuration");
-    let workspace_id =
-        WorkspaceId::parse("11111111-1111-4111-8111-111111111111").expect("workspace ID");
+    let tenant_id =
+        ManagedTenantId::parse("11111111-1111-4111-8111-111111111111").expect("tenant ID");
     let repository = GithubProviderRepositorySelection::new(
         ProviderInstallationId::new(101).expect("installation ID"),
         ProviderRepositoryId::new(301).expect("repository ID"),
@@ -617,15 +617,14 @@ fn database_desired_state(
         .expect("desired-state version"),
         configuration,
         vec![
-            WorkspaceGithubRepositoriesDesiredState::new(
-                workspace_id,
-                WorkspaceGithubRepositoriesRevision::new(workspace_revision)
-                    .expect("workspace revision"),
+            TenantGithubRepositoriesDesiredState::new(
+                tenant_id,
+                TenantGithubRepositoriesRevision::new(tenant_revision).expect("tenant revision"),
                 automata_ci_provisioning::GithubProviderTimestamp::new(2_000, 0)
-                    .expect("workspace applied time"),
+                    .expect("tenant applied time"),
                 vec![repository],
             )
-            .expect("workspace desired state"),
+            .expect("tenant desired state"),
         ],
     )
     .expect("provider desired state")

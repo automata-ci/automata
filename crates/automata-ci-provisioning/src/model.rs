@@ -1,6 +1,6 @@
 use std::fmt;
 
-use automata_ci_core::WorkspaceId;
+use automata_ci_core::ManagedTenantId;
 use thiserror::Error;
 use url::Url;
 use uuid::Uuid;
@@ -108,7 +108,7 @@ impl ShardId {
 pub struct DisplayName(String);
 
 impl DisplayName {
-    /// Validates one workspace or human display label.
+    /// Validates one tenant or human display label.
     ///
     /// # Errors
     ///
@@ -230,26 +230,26 @@ impl ProvisioningAuthority {
     }
 }
 
-/// Complete validated semantic input for workspace provisioning.
+/// Complete validated semantic input for tenant provisioning.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ProvisionWorkspaceCommand {
+pub struct ProvisionTenantCommand {
     operation_id: OperationId,
     shard_id: ShardId,
-    workspace_id: WorkspaceId,
-    workspace_display_name: DisplayName,
+    tenant_id: ManagedTenantId,
+    tenant_display_name: DisplayName,
     initial_owner_issuer: DelegatedActorIssuer,
     initial_owner_subject: ExternalAccountSubject,
     initial_owner_display_name: DisplayName,
 }
 
-impl ProvisionWorkspaceCommand {
+impl ProvisionTenantCommand {
     /// Creates one fully validated provisioning command.
     #[allow(clippy::too_many_arguments)]
     pub const fn new(
         operation_id: OperationId,
         shard_id: ShardId,
-        workspace_id: WorkspaceId,
-        workspace_display_name: DisplayName,
+        tenant_id: ManagedTenantId,
+        tenant_display_name: DisplayName,
         initial_owner_issuer: DelegatedActorIssuer,
         initial_owner_subject: ExternalAccountSubject,
         initial_owner_display_name: DisplayName,
@@ -257,8 +257,8 @@ impl ProvisionWorkspaceCommand {
         Self {
             operation_id,
             shard_id,
-            workspace_id,
-            workspace_display_name,
+            tenant_id,
+            tenant_display_name,
             initial_owner_issuer,
             initial_owner_subject,
             initial_owner_display_name,
@@ -275,14 +275,14 @@ impl ProvisionWorkspaceCommand {
         &self.shard_id
     }
 
-    /// Returns the exact workspace/Core tenant identity.
-    pub const fn workspace_id(&self) -> WorkspaceId {
-        self.workspace_id
+    /// Returns the exact tenant/Core tenant identity.
+    pub const fn tenant_id(&self) -> ManagedTenantId {
+        self.tenant_id
     }
 
-    /// Returns the initial workspace label.
-    pub const fn workspace_display_name(&self) -> &DisplayName {
-        &self.workspace_display_name
+    /// Returns the initial tenant label.
+    pub const fn tenant_display_name(&self) -> &DisplayName {
+        &self.tenant_display_name
     }
 
     /// Returns the exact external identity issuer.
@@ -303,12 +303,12 @@ impl ProvisionWorkspaceCommand {
 
 /// Provisioning command proven to be within a workload authority's scope.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AuthorizedProvisionWorkspace {
+pub struct AuthorizedProvisionTenant {
     authority: ProvisioningAuthority,
-    command: ProvisionWorkspaceCommand,
+    command: ProvisionTenantCommand,
 }
 
-impl AuthorizedProvisionWorkspace {
+impl AuthorizedProvisionTenant {
     /// Authorizes a command against the server-derived shard and issuer bindings.
     ///
     /// # Errors
@@ -316,7 +316,7 @@ impl AuthorizedProvisionWorkspace {
     /// Rejects a command for any other shard or delegated actor issuer.
     pub fn authorize(
         authority: ProvisioningAuthority,
-        command: ProvisionWorkspaceCommand,
+        command: ProvisionTenantCommand,
     ) -> Result<Self, ProvisioningAuthorizationError> {
         if authority.shard_id != command.shard_id
             || authority.delegated_actor_issuer != command.initial_owner_issuer
@@ -332,12 +332,12 @@ impl AuthorizedProvisionWorkspace {
     }
 
     /// Returns the validated semantic command.
-    pub const fn command(&self) -> &ProvisionWorkspaceCommand {
+    pub const fn command(&self) -> &ProvisionTenantCommand {
         &self.command
     }
 
     /// Consumes the request into its authority and command.
-    pub fn into_parts(self) -> (ProvisioningAuthority, ProvisionWorkspaceCommand) {
+    pub fn into_parts(self) -> (ProvisioningAuthority, ProvisionTenantCommand) {
         (self.authority, self.command)
     }
 }
@@ -381,27 +381,27 @@ impl ProvisionedAt {
 
 /// Stable result committed atomically with the provisioning operation.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ProvisionWorkspaceResult {
+pub struct ProvisionTenantResult {
     operation_id: OperationId,
     shard_id: ShardId,
-    workspace_id: WorkspaceId,
+    tenant_id: ManagedTenantId,
     initial_owner_principal_id: InitialOwnerPrincipalId,
     provisioned_at: ProvisionedAt,
 }
 
-impl ProvisionWorkspaceResult {
+impl ProvisionTenantResult {
     /// Creates a durable first-attempt or replay result.
     pub const fn new(
         operation_id: OperationId,
         shard_id: ShardId,
-        workspace_id: WorkspaceId,
+        tenant_id: ManagedTenantId,
         initial_owner_principal_id: InitialOwnerPrincipalId,
         provisioned_at: ProvisionedAt,
     ) -> Self {
         Self {
             operation_id,
             shard_id,
-            workspace_id,
+            tenant_id,
             initial_owner_principal_id,
             provisioned_at,
         }
@@ -417,9 +417,9 @@ impl ProvisionWorkspaceResult {
         &self.shard_id
     }
 
-    /// Returns the resulting workspace/Core tenant identity.
-    pub const fn workspace_id(&self) -> WorkspaceId {
-        self.workspace_id
+    /// Returns the resulting tenant/Core tenant identity.
+    pub const fn tenant_id(&self) -> ManagedTenantId {
+        self.tenant_id
     }
 
     /// Returns the Core-owned initial owner principal.
@@ -465,8 +465,8 @@ impl ProvisioningRequestId {
 pub enum ProvisioningFailureKind {
     /// The operation ID is already bound to different semantic input.
     OperationConflict,
-    /// Another operation already owns the workspace identity.
-    WorkspaceConflict,
+    /// Another operation already owns the tenant identity.
+    TenantConflict,
     /// The exact external identity cannot be used as an active principal.
     PrincipalUnavailable,
     /// The authority exceeded a bounded provisioning rate.
@@ -479,7 +479,7 @@ pub enum ProvisioningFailureKind {
 
 /// Sanitized application failure with optional safe correlation identity.
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
-#[error("workspace provisioning failed: {kind:?}")]
+#[error("tenant provisioning failed: {kind:?}")]
 pub struct ProvisioningFailure {
     kind: ProvisioningFailureKind,
     request_id: Option<ProvisioningRequestId>,
@@ -557,11 +557,11 @@ mod tests {
         )
     }
 
-    fn command() -> ProvisionWorkspaceCommand {
-        ProvisionWorkspaceCommand::new(
+    fn command() -> ProvisionTenantCommand {
+        ProvisionTenantCommand::new(
             OperationId::parse("55555555-5555-4555-8555-555555555555").unwrap(),
             ShardId::new("prod-us-east-1-001").unwrap(),
-            WorkspaceId::parse("22222222-2222-4222-8222-222222222222").unwrap(),
+            ManagedTenantId::parse("22222222-2222-4222-8222-222222222222").unwrap(),
             DisplayName::new("Acme Engineering").unwrap(),
             DelegatedActorIssuer::new("https://cloud.automata.example").unwrap(),
             ExternalAccountSubject::parse("11111111-1111-4111-8111-111111111111").unwrap(),
@@ -571,13 +571,13 @@ mod tests {
 
     #[test]
     fn canonical_contract_values_authorize() {
-        let authorized = AuthorizedProvisionWorkspace::authorize(authority(), command()).unwrap();
+        let authorized = AuthorizedProvisionTenant::authorize(authority(), command()).unwrap();
         assert_eq!(
             authorized.authority().id().as_str(),
             "automata-cloud-production"
         );
         assert_eq!(
-            authorized.command().workspace_id().to_string(),
+            authorized.command().tenant_id().to_string(),
             "22222222-2222-4222-8222-222222222222"
         );
     }
@@ -587,7 +587,7 @@ mod tests {
         let mut wrong_shard = command();
         wrong_shard.shard_id = ShardId::new("prod-eu-west-1-001").unwrap();
         assert_eq!(
-            AuthorizedProvisionWorkspace::authorize(authority(), wrong_shard),
+            AuthorizedProvisionTenant::authorize(authority(), wrong_shard),
             Err(ProvisioningAuthorizationError::Forbidden)
         );
 
@@ -595,7 +595,7 @@ mod tests {
         wrong_issuer.initial_owner_issuer =
             DelegatedActorIssuer::new("https://other.automata.example").unwrap();
         assert_eq!(
-            AuthorizedProvisionWorkspace::authorize(authority(), wrong_issuer),
+            AuthorizedProvisionTenant::authorize(authority(), wrong_issuer),
             Err(ProvisioningAuthorizationError::Forbidden)
         );
     }

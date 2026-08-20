@@ -9,7 +9,7 @@ use std::{
 use async_trait::async_trait;
 use automata_ci_auth::secret::SecretString;
 use automata_ci_blob::MemoryBlobStore;
-use automata_ci_core::{Sha256Digest, UnixMillis, WorkspaceId};
+use automata_ci_core::{ManagedTenantId, Sha256Digest, UnixMillis};
 use automata_ci_github_delivery::{
     GithubTriggerCredential, GithubTriggerCredentialOperation, GithubTriggerCredentialProvider,
     GithubTriggerCredentialProviderError, GithubTriggerCredentialRelease,
@@ -620,7 +620,7 @@ fn manifests(origin: &Url) -> (ProviderInstanceManifest, ProviderConnectionManif
     )
     .expect("provider manifest");
     let configuration = ProviderConnectionConfiguration::new(
-        WorkspaceId::parse("11111111-1111-4111-8111-111111111111").expect("workspace"),
+        ManagedTenantId::parse("11111111-1111-4111-8111-111111111111").expect("tenant"),
         ExternalRepositoryIdentity::new(
             instance_id,
             ExternalRepositoryId::new("42").expect("repository ID"),

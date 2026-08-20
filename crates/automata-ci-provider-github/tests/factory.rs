@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use automata_ci_core::{Sha256Digest, UnixMillis, WorkspaceId};
+use automata_ci_core::{ManagedTenantId, Sha256Digest, UnixMillis};
 use automata_ci_key_management::SecretBytes;
 use automata_ci_provider::{
     ExternalRepositoryId, ExternalRepositoryIdentity, ProviderArchiveLimits, ProviderCapability,
@@ -103,7 +103,7 @@ fn connection(
     repository: &str,
 ) -> ProviderConnectionManifest {
     let configuration = ProviderConnectionConfiguration::new(
-        WorkspaceId::parse("11111111-1111-4111-8111-111111111111").expect("workspace"),
+        ManagedTenantId::parse("11111111-1111-4111-8111-111111111111").expect("tenant"),
         ExternalRepositoryIdentity::new(
             instance.instance_id(),
             ExternalRepositoryId::new(external_repository_id).expect("external repository ID"),

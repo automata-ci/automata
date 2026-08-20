@@ -1285,7 +1285,7 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
 
-    use automata_ci_core::{GitObjectId, RunId, UnixMillis, WorkspaceId};
+    use automata_ci_core::{GitObjectId, ManagedTenantId, RunId, UnixMillis};
     use automata_ci_provider::{
         ClaimedProviderResult, DesiredProviderResult, ExternalRepositoryIdentity,
         ProviderArchiveLimits, ProviderConfigurationRevision, ProviderConnectionConfiguration,
@@ -1637,7 +1637,7 @@ mod tests {
         .document()
         .expect("connection document");
         let configuration = ProviderConnectionConfiguration::new(
-            WorkspaceId::parse("11111111-1111-4111-8111-111111111111").expect("workspace"),
+            ManagedTenantId::parse("11111111-1111-4111-8111-111111111111").expect("tenant"),
             ExternalRepositoryIdentity::new(
                 instance_id,
                 ExternalRepositoryId::new("42").expect("repository ID"),

@@ -1,6 +1,6 @@
 [package]
 name = "automata-ci-provisioning"
-description = "Transport-neutral workspace provisioning boundary for Automata Core"
+description = "Transport-neutral tenant provisioning boundary for Automata Core"
 publish.workspace = true
 version.workspace = true
 edition.workspace = true

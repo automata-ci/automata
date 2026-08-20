@@ -1,6 +1,6 @@
 use std::fmt;
 
-use automata_ci_core::WorkspaceId;
+use automata_ci_core::ManagedTenantId;
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -199,10 +199,10 @@ impl ConsumedComputeMilliseconds {
 /// The event is provider-neutral actual usage, not a price, invoice line, or
 /// promise that a commercial provider will bill the interval.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct WorkspaceUsageEvent {
+pub struct TenantUsageEvent {
     event_id: UsageEventId,
     shard_id: ShardId,
-    workspace_id: WorkspaceId,
+    tenant_id: ManagedTenantId,
     attempt_id: UsageAttemptId,
     entitlement_revision: EntitlementRevision,
     interval_start: UsageTimestamp,
@@ -210,7 +210,7 @@ pub struct WorkspaceUsageEvent {
     consumed_compute: ConsumedComputeMilliseconds,
 }
 
-impl WorkspaceUsageEvent {
+impl TenantUsageEvent {
     /// Creates one positive accounted interval under an entitlement revision.
     ///
     /// # Errors
@@ -220,7 +220,7 @@ impl WorkspaceUsageEvent {
     pub fn new(
         event_id: UsageEventId,
         shard_id: ShardId,
-        workspace_id: WorkspaceId,
+        tenant_id: ManagedTenantId,
         attempt_id: UsageAttemptId,
         entitlement_revision: EntitlementRevision,
         interval_start: UsageTimestamp,
@@ -233,7 +233,7 @@ impl WorkspaceUsageEvent {
         Ok(Self {
             event_id,
             shard_id,
-            workspace_id,
+            tenant_id,
             attempt_id,
             entitlement_revision,
             interval_start,
@@ -254,10 +254,10 @@ impl WorkspaceUsageEvent {
         &self.shard_id
     }
 
-    /// Returns the workspace that consumed the compute.
+    /// Returns the tenant that consumed the compute.
     #[must_use]
-    pub const fn workspace_id(&self) -> WorkspaceId {
-        self.workspace_id
+    pub const fn tenant_id(&self) -> ManagedTenantId {
+        self.tenant_id
     }
 
     /// Returns the execution attempt that consumed the compute.
@@ -293,13 +293,13 @@ impl WorkspaceUsageEvent {
 
 /// Validated request for an authority-scoped page of immutable usage events.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ListWorkspaceUsageCommand {
+pub struct ListTenantUsageCommand {
     shard_id: ShardId,
     cursor: UsageExportCursor,
     page_size: UsageExportPageSize,
 }
 
-impl ListWorkspaceUsageCommand {
+impl ListTenantUsageCommand {
     /// Creates one cursor-pull request.
     #[must_use]
     pub const fn new(
@@ -335,23 +335,23 @@ impl ListWorkspaceUsageCommand {
 
 /// Usage request proven to target the authenticated authority's configured shard.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AuthorizedListWorkspaceUsage {
+pub struct AuthorizedListTenantUsage {
     authority: ProvisioningAuthority,
-    command: ListWorkspaceUsageCommand,
+    command: ListTenantUsageCommand,
 }
 
-impl AuthorizedListWorkspaceUsage {
+impl AuthorizedListTenantUsage {
     /// Authorizes a usage request against the server-derived shard binding.
     ///
     /// Durable export additionally filters events by this exact authority so
-    /// two authorities sharing a shard cannot observe each other's workspaces.
+    /// two authorities sharing a shard cannot observe each other's tenants.
     ///
     /// # Errors
     ///
     /// Rejects a command for another shard.
     pub fn authorize(
         authority: ProvisioningAuthority,
-        command: ListWorkspaceUsageCommand,
+        command: ListTenantUsageCommand,
     ) -> Result<Self, UsageAuthorizationError> {
         if authority.shard_id() != command.shard_id() {
             return Err(UsageAuthorizationError::Forbidden);
@@ -367,32 +367,32 @@ impl AuthorizedListWorkspaceUsage {
 
     /// Returns the validated semantic command.
     #[must_use]
-    pub const fn command(&self) -> &ListWorkspaceUsageCommand {
+    pub const fn command(&self) -> &ListTenantUsageCommand {
         &self.command
     }
 
     /// Consumes the request into its authority and command.
     #[must_use]
-    pub fn into_parts(self) -> (ProvisioningAuthority, ListWorkspaceUsageCommand) {
+    pub fn into_parts(self) -> (ProvisioningAuthority, ListTenantUsageCommand) {
         (self.authority, self.command)
     }
 }
 
 /// Stable page returned from the durable authority-scoped usage feed.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct WorkspaceUsagePage {
-    events: Vec<WorkspaceUsageEvent>,
+pub struct TenantUsagePage {
+    events: Vec<TenantUsageEvent>,
     next_cursor: UsageExportCursor,
 }
 
-impl WorkspaceUsagePage {
+impl TenantUsagePage {
     /// Creates one bounded page and its exclusive continuation cursor.
     ///
     /// # Errors
     ///
     /// Rejects more events than the version-one page bound.
     pub fn new(
-        events: Vec<WorkspaceUsageEvent>,
+        events: Vec<TenantUsageEvent>,
         next_cursor: UsageExportCursor,
     ) -> Result<Self, UsageValueError> {
         if events.len() > MAX_PAGE_SIZE as usize {
@@ -406,7 +406,7 @@ impl WorkspaceUsagePage {
 
     /// Returns the immutable events in stable feed order.
     #[must_use]
-    pub fn events(&self) -> &[WorkspaceUsageEvent] {
+    pub fn events(&self) -> &[TenantUsageEvent] {
         &self.events
     }
 
@@ -418,7 +418,7 @@ impl WorkspaceUsagePage {
 
     /// Consumes the page into its events and continuation cursor.
     #[must_use]
-    pub fn into_parts(self) -> (Vec<WorkspaceUsageEvent>, UsageExportCursor) {
+    pub fn into_parts(self) -> (Vec<TenantUsageEvent>, UsageExportCursor) {
         (self.events, self.next_cursor)
     }
 }
@@ -438,7 +438,7 @@ pub enum UsageExportFailureKind {
 
 /// Sanitized durable usage-export failure.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
-#[error("workspace usage export failed: {kind:?}")]
+#[error("tenant usage export failed: {kind:?}")]
 pub struct UsageExportFailure {
     kind: UsageExportFailureKind,
 }
@@ -507,11 +507,11 @@ mod tests {
         )
     }
 
-    fn event() -> WorkspaceUsageEvent {
-        WorkspaceUsageEvent::new(
+    fn event() -> TenantUsageEvent {
+        TenantUsageEvent::new(
             UsageEventId::parse("77777777-7777-4777-8777-777777777777").unwrap(),
             ShardId::new("prod-us-east-1-001").unwrap(),
-            WorkspaceId::parse("22222222-2222-4222-8222-222222222222").unwrap(),
+            ManagedTenantId::parse("22222222-2222-4222-8222-222222222222").unwrap(),
             UsageAttemptId::parse("66666666-6666-4666-8666-666666666666").unwrap(),
             EntitlementRevision::new(3).unwrap(),
             UsageTimestamp::new(1_786_500_100, 0).unwrap(),
@@ -523,16 +523,16 @@ mod tests {
 
     #[test]
     fn cursor_pull_authorizes_for_exact_shard() {
-        let command = ListWorkspaceUsageCommand::new(
+        let command = ListTenantUsageCommand::new(
             ShardId::new("prod-us-east-1-001").unwrap(),
             UsageExportCursor::beginning(),
             UsageExportPageSize::new(250).unwrap(),
         );
-        let authorized = AuthorizedListWorkspaceUsage::authorize(authority(), command).unwrap();
+        let authorized = AuthorizedListTenantUsage::authorize(authority(), command).unwrap();
         assert_eq!(authorized.command().page_size().get(), 250);
         assert!(authorized.command().cursor().as_bytes().is_empty());
 
-        let page = WorkspaceUsagePage::new(
+        let page = TenantUsagePage::new(
             vec![event()],
             UsageExportCursor::new(vec![0, 0, 0, 1]).unwrap(),
         )
@@ -543,13 +543,13 @@ mod tests {
 
     #[test]
     fn another_shard_is_forbidden() {
-        let command = ListWorkspaceUsageCommand::new(
+        let command = ListTenantUsageCommand::new(
             ShardId::new("prod-eu-west-1-001").unwrap(),
             UsageExportCursor::beginning(),
             UsageExportPageSize::new(100).unwrap(),
         );
         assert_eq!(
-            AuthorizedListWorkspaceUsage::authorize(authority(), command),
+            AuthorizedListTenantUsage::authorize(authority(), command),
             Err(UsageAuthorizationError::Forbidden)
         );
     }
@@ -577,7 +577,7 @@ mod tests {
             Err(UsageValueError::InvalidPageSize)
         );
         assert_eq!(
-            WorkspaceUsagePage::new(
+            TenantUsagePage::new(
                 vec![event(); MAX_PAGE_SIZE as usize + 1],
                 UsageExportCursor::beginning(),
             ),
@@ -589,10 +589,10 @@ mod tests {
     fn usage_intervals_and_compute_are_positive() {
         let start = UsageTimestamp::new(1_786_500_100, 0).unwrap();
         assert_eq!(
-            WorkspaceUsageEvent::new(
+            TenantUsageEvent::new(
                 UsageEventId::parse("77777777-7777-4777-8777-777777777777").unwrap(),
                 ShardId::new("prod-us-east-1-001").unwrap(),
-                WorkspaceId::parse("22222222-2222-4222-8222-222222222222").unwrap(),
+                ManagedTenantId::parse("22222222-2222-4222-8222-222222222222").unwrap(),
                 UsageAttemptId::parse("66666666-6666-4666-8666-666666666666").unwrap(),
                 EntitlementRevision::new(3).unwrap(),
                 start,

@@ -110,7 +110,7 @@ fn common_connections(
             repository.connection_id().as_bytes(),
         ))
         .map_err(|_| GithubProviderConfigError)?;
-        let workspace_id = automata_ci_core::WorkspaceId::parse(repository.tenant().as_str())
+        let tenant_id = automata_ci_core::ManagedTenantId::parse(repository.tenant().as_str())
             .map_err(|_| GithubProviderConfigError)?;
         let external_repository_id =
             ExternalRepositoryId::new(repository.repository_id().get().to_string())
@@ -134,7 +134,7 @@ fn common_connections(
         connections.push(
             ProviderConnectionDesiredState::new(
                 connection_id,
-                workspace_id,
+                tenant_id,
                 external_repository_id,
                 visibility,
                 ProviderDefaultBranch::new(default_branch)

@@ -1283,11 +1283,7 @@ impl GithubProviderCredentialAdapters {
         GithubProviderCredentialHandoffError,
     > {
         let tenant = TenantScope::from_authenticated_tenant_id(
-            context
-                .connection()
-                .configuration()
-                .workspace_id()
-                .to_string(),
+            context.connection().configuration().tenant_id().to_string(),
         )
         .map_err(|_| GithubProviderCredentialHandoffError::Inconsistent)?;
         let github_repository_id = external_repository_id

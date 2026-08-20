@@ -4,14 +4,14 @@ use thiserror::Error;
 
 use crate::{
     ApplyGithubProviderConfigurationResult, ApplyGithubProviderRunnerPolicyResult,
-    ApplyWorkspaceEntitlementResult, ApplyWorkspaceGithubRepositoriesResult,
+    ApplyTenantEntitlementResult, ApplyTenantGithubRepositoriesResult,
     AuthorizedApplyGithubProviderConfiguration, AuthorizedApplyGithubProviderRunnerPolicy,
-    AuthorizedApplyWorkspaceEntitlement, AuthorizedApplyWorkspaceGithubRepositories,
-    AuthorizedListWorkspaceUsage, AuthorizedProvisionWorkspace, EntitlementFailure,
+    AuthorizedApplyTenantEntitlement, AuthorizedApplyTenantGithubRepositories,
+    AuthorizedListTenantUsage, AuthorizedProvisionTenant, EntitlementFailure,
     GithubProviderConfigurationFailure, GithubProviderDesiredState,
-    GithubProviderDesiredStateFailure, GithubProviderRunnerPolicyFailure, ProvisionWorkspaceResult,
-    ProvisioningAuthority, ProvisioningFailure, UsageExportFailure,
-    WorkspaceGithubRepositoriesFailure, WorkspaceUsagePage,
+    GithubProviderDesiredStateFailure, GithubProviderRunnerPolicyFailure, ProvisionTenantResult,
+    ProvisioningAuthority, ProvisioningFailure, TenantGithubRepositoriesFailure, TenantUsagePage,
+    UsageExportFailure,
 };
 
 const MAX_CERTIFICATE_COUNT: usize = 32;
@@ -105,10 +105,9 @@ pub enum ProvisioningAuthenticationError {
     Unavailable,
 }
 
-/// Boxed durable workspace provisioning operation.
-pub type WorkspaceProvisioningFuture<'a> = Pin<
-    Box<dyn Future<Output = Result<ProvisionWorkspaceResult, ProvisioningFailure>> + Send + 'a>,
->;
+/// Boxed durable tenant provisioning operation.
+pub type TenantProvisioningFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<ProvisionTenantResult, ProvisioningFailure>> + Send + 'a>>;
 
 /// Atomic, idempotent application port for one Core shard.
 ///
@@ -116,31 +115,24 @@ pub type WorkspaceProvisioningFuture<'a> = Pin<
 /// principal mapping, membership, built-in owner binding, audit event, and
 /// stable response in one durable transaction. Exact retries return the stored
 /// response without repeating effects.
-pub trait WorkspaceProvisioner: fmt::Debug + Send + Sync {
-    /// Applies one authorized workspace provisioning command.
-    fn provision(&self, request: AuthorizedProvisionWorkspace) -> WorkspaceProvisioningFuture<'_>;
+pub trait TenantProvisioner: fmt::Debug + Send + Sync {
+    /// Applies one authorized tenant provisioning command.
+    fn provision(&self, request: AuthorizedProvisionTenant) -> TenantProvisioningFuture<'_>;
 }
 
-/// Boxed durable workspace entitlement operation.
+/// Boxed durable tenant entitlement operation.
 pub type EntitlementApplicationFuture<'a> = Pin<
-    Box<
-        dyn Future<Output = Result<ApplyWorkspaceEntitlementResult, EntitlementFailure>>
-            + Send
-            + 'a,
-    >,
+    Box<dyn Future<Output = Result<ApplyTenantEntitlementResult, EntitlementFailure>> + Send + 'a>,
 >;
 
-/// Atomic, idempotent workspace entitlement application port.
+/// Atomic, idempotent tenant entitlement application port.
 ///
-/// Implementations must verify the workspace's durable external-management
+/// Implementations must verify the tenant's durable external-management
 /// binding, reject stale revisions, and commit the current snapshot and stable
 /// operation response in one transaction.
-pub trait WorkspaceEntitlementApplier: fmt::Debug + Send + Sync {
+pub trait TenantEntitlementApplier: fmt::Debug + Send + Sync {
     /// Applies one authorized complete entitlement snapshot.
-    fn apply(
-        &self,
-        request: AuthorizedApplyWorkspaceEntitlement,
-    ) -> EntitlementApplicationFuture<'_>;
+    fn apply(&self, request: AuthorizedApplyTenantEntitlement) -> EntitlementApplicationFuture<'_>;
 }
 
 /// Boxed shard-wide GitHub provider configuration application.
@@ -195,31 +187,31 @@ pub trait GithubProviderRunnerPolicyApplier: fmt::Debug + Send + Sync {
     ) -> GithubProviderRunnerPolicyApplicationFuture<'_>;
 }
 
-/// Boxed workspace GitHub repository desired-set application.
-pub type WorkspaceGithubRepositoriesApplicationFuture<'a> = Pin<
+/// Boxed tenant GitHub repository desired-set application.
+pub type TenantGithubRepositoriesApplicationFuture<'a> = Pin<
     Box<
         dyn Future<
                 Output = Result<
-                    ApplyWorkspaceGithubRepositoriesResult,
-                    WorkspaceGithubRepositoriesFailure,
+                    ApplyTenantGithubRepositoriesResult,
+                    TenantGithubRepositoriesFailure,
                 >,
             > + Send
             + 'a,
     >,
 >;
 
-/// Atomic, idempotent application port for one complete workspace repository set.
+/// Atomic, idempotent application port for one complete tenant repository set.
 ///
 /// Omission is authoritative: a successful revision replaces the complete
-/// desired set for that workspace. Implementations retain durable operation
+/// desired set for that tenant. Implementations retain durable operation
 /// receipts for replay while exposing only current desired state to the provider
 /// runtime.
-pub trait WorkspaceGithubRepositoriesApplier: fmt::Debug + Send + Sync {
-    /// Applies one authorized complete workspace repository selection.
+pub trait TenantGithubRepositoriesApplier: fmt::Debug + Send + Sync {
+    /// Applies one authorized complete tenant repository selection.
     fn apply(
         &self,
-        request: AuthorizedApplyWorkspaceGithubRepositories,
-    ) -> WorkspaceGithubRepositoriesApplicationFuture<'_>;
+        request: AuthorizedApplyTenantGithubRepositories,
+    ) -> TenantGithubRepositoriesApplicationFuture<'_>;
 }
 
 /// Boxed load of the current database-backed GitHub provider desired state.
@@ -237,15 +229,15 @@ pub type GithubProviderDesiredStateLoadFuture<'a> = Pin<
 
 /// Read port for one transactionally consistent provider desired-state snapshot.
 pub trait GithubProviderDesiredStateReader: fmt::Debug + Send + Sync {
-    /// Loads the current provider configuration and all current workspace sets.
+    /// Loads the current provider configuration and all current tenant sets.
     ///
     /// `None` means no shard-wide provider configuration has been installed.
     fn load(&self) -> GithubProviderDesiredStateLoadFuture<'_>;
 }
 
-/// Boxed durable workspace usage-export operation.
+/// Boxed durable tenant usage-export operation.
 pub type UsageExportFuture<'a> =
-    Pin<Box<dyn Future<Output = Result<WorkspaceUsagePage, UsageExportFailure>> + Send + 'a>>;
+    Pin<Box<dyn Future<Output = Result<TenantUsagePage, UsageExportFailure>> + Send + 'a>>;
 
 /// Stable cursor-pull port for immutable execution-accounting facts.
 ///
@@ -253,9 +245,9 @@ pub type UsageExportFuture<'a> =
 /// authority, return events in stable append order, and never reuse an event ID
 /// for different facts. A consumer can therefore commit event ingestion and
 /// its continuation cursor atomically for at-least-once delivery.
-pub trait WorkspaceUsageExporter: fmt::Debug + Send + Sync {
+pub trait TenantUsageExporter: fmt::Debug + Send + Sync {
     /// Lists one authority-scoped page after the request's exclusive cursor.
-    fn list(&self, request: AuthorizedListWorkspaceUsage) -> UsageExportFuture<'_>;
+    fn list(&self, request: AuthorizedListTenantUsage) -> UsageExportFuture<'_>;
 }
 
 #[cfg(test)]
