@@ -2515,6 +2515,54 @@ mod tests {
         assert!(!valid(Some(MAX_PROCESS_LIMIT + 1)));
     }
 
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_nested_job_enforces_the_command_tree_process_ceiling() {
+        let working_directory = std::env::temp_dir().to_string_lossy().into_owned();
+        let arguments = vec![
+            "/d".to_owned(),
+            "/c".to_owned(),
+            r"C:\Windows\System32\ping.exe -n 1 127.0.0.1 >nul".to_owned(),
+        ];
+        let limited = execute(
+            r"C:\Windows\System32\cmd.exe".to_owned(),
+            arguments.clone(),
+            BTreeMap::new(),
+            working_directory.clone(),
+            5_000,
+            4_096,
+            Some(1),
+            false,
+        )
+        .await;
+        assert!(matches!(
+            limited,
+            GuestResponse::Exec {
+                termination: GuestTermination::Exited(1),
+                ..
+            }
+        ));
+
+        let admitted = execute(
+            r"C:\Windows\System32\cmd.exe".to_owned(),
+            arguments,
+            BTreeMap::new(),
+            working_directory,
+            5_000,
+            4_096,
+            Some(2),
+            false,
+        )
+        .await;
+        assert!(matches!(
+            admitted,
+            GuestResponse::Exec {
+                termination: GuestTermination::Exited(0),
+                ..
+            }
+        ));
+    }
+
     #[test]
     fn frame_round_trip_redacts_debug() {
         let request = GuestRequest::Exec {

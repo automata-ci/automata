@@ -56,6 +56,9 @@ members = [
     "crates/automata-ci-workflow-actions",
     "crates/automata-ci-workflow-service",
     "crates/automata-ci-windows-file-security",
+    "crates/automata-ci-windows-broker",
+    "crates/automata-ci-windows-broker-hcs",
+    "crates/automata-ci-windows-broker-protocol",
 ]
 exclude = ["ui/renderer/vendor/rquickjs-macro-0.10.0"]
 default-members = [
@@ -132,6 +135,9 @@ automata-ci-ui-renderer = { path = "crates/automata-ci-ui-renderer", version = "
 automata-ci-workflow-actions = { path = "crates/automata-ci-workflow-actions", version = "0.1.0" }
 automata-ci-workflow-service = { path = "crates/automata-ci-workflow-service", version = "0.1.0" }
 automata-ci-windows-file-security = { path = "crates/automata-ci-windows-file-security", version = "0.1.0" }
+automata-ci-windows-broker = { path = "crates/automata-ci-windows-broker", version = "0.1.0" }
+automata-ci-windows-broker-hcs = { path = "crates/automata-ci-windows-broker-hcs", version = "0.1.0" }
+automata-ci-windows-broker-protocol = { path = "crates/automata-ci-windows-broker-protocol", version = "0.1.0" }
 axum = { version = "0.8.4", features = ["http1", "json", "tokio"] }
 base64 = "0.23.1"
 bytes = "=1.12.1"
