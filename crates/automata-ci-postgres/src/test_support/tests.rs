@@ -208,7 +208,7 @@ async fn template0_database_is_application_empty() -> TestResult {
                 .fetch_one(database.pool())
                 .await?;
                 let migration_ledger_exists: bool = sqlx::query_scalar(
-                    "SELECT pg_catalog.to_regclass('automata_test._sqlx_migrations') IS NOT NULL",
+                    "SELECT pg_catalog.to_regclass('public._sqlx_migrations') IS NOT NULL",
                 )
                 .fetch_one(database.pool())
                 .await?;
