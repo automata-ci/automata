@@ -105,7 +105,7 @@ export function Shell({
         <div className="repo-header">
           <div className="repo-header__identity layout-wide">
             <Icon name="repository" size={18} />
-            <a href={repository.sourceHref}>
+            <a href={repository.runsHref}>
               <span>{repository.owner}</span>
               <span className="repo-header__separator" aria-hidden="true">
                 /
@@ -115,9 +115,10 @@ export function Shell({
             </a>
           </div>
           <nav className="repo-nav layout-wide" aria-label="Repository navigation">
-            <a href={repository.sourceHref}>
+            <a href={repository.sourceHref} rel="noreferrer" target="_blank">
               <Icon name="overview" />
               Code
+              <Icon name="external-link" size={14} />
             </a>
             <a
               href={repository.runsHref}
