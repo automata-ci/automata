@@ -182,7 +182,10 @@ impl LogicalWorkSelectionRepository for PostgresStore {
             request_database_now,
         )
         .await?;
-        cleanup_receipts(&mut transaction, "activation", admission.replay_floor).await?;
+        // The delete trigger authenticates cleanup against the durable horizon.
+        // The proposed successor floor is not durable until candidate discovery
+        // completes, so only reclaim receipts outside the locked predecessor.
+        cleanup_receipts(&mut transaction, "activation", admission.previous_floor).await?;
         let mut can_wrap = horizon.activation_cursor.is_some();
         let mut discovery_cursor = horizon.activation_cursor;
         let mut scanned_candidates = 0_usize;
@@ -341,7 +344,14 @@ impl LogicalWorkSelectionRepository for PostgresStore {
             request_database_now,
         )
         .await?;
-        cleanup_receipts(&mut transaction, "materialization", admission.replay_floor).await?;
+        // Match the delete trigger's durable replay authority. Advancing to the
+        // proposed floor happens only after discovery has selected its cursor.
+        cleanup_receipts(
+            &mut transaction,
+            "materialization",
+            admission.previous_floor,
+        )
+        .await?;
         let mut can_wrap = horizon.materialization_cursor.is_some();
         let mut discovery_cursor = horizon.materialization_cursor;
         let mut scanned_candidates = 0_usize;
