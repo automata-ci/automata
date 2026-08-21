@@ -4,6 +4,7 @@ use automata_ci_control::scheduling::{
     SchedulingInputError, classify_candidate_capacity,
 };
 use automata_ci_core::{RequirementMismatch, UnixMillis};
+use automata_ci_store::WorkflowRunPriority;
 
 use super::scheduling_support::{
     attempt_id, candidate, effective_runner, job_id, label, routing, runner_id, windows_candidate,
@@ -40,6 +41,27 @@ fn default_policy_is_fifo_and_independent_of_input_order() {
         placement.slot().runner_id(),
         placement.session().runner_id()
     );
+}
+
+#[test]
+fn merge_queue_candidates_precede_older_normal_work() {
+    let merge_queue = RunnableCandidate::new(
+        attempt_id(3),
+        job_id(3),
+        WorkflowRunPriority::MERGE_QUEUE,
+        UnixMillis::new(300),
+        routing(&["linux"]),
+    );
+    let normal = candidate(4, 100, &["linux"]);
+    let candidates = [normal, merge_queue.clone()];
+    let runners = [effective_runner(1, &["linux"], &[], &[1])];
+
+    let decision = DeterministicScheduler
+        .decide(SchedulingInput::new(&candidates, &runners).expect("valid snapshot"));
+    let PlacementDecision::Place(placement) = decision else {
+        panic!("a matching placement was expected");
+    };
+    assert_eq!(placement.attempt_id(), merge_queue.attempt_id());
 }
 
 #[test]
@@ -185,6 +207,7 @@ fn scheduler_policy_is_object_safe_and_replaceable() {
     let candidates = [RunnableCandidate::new(
         attempt_id(1),
         job_id(1),
+        WorkflowRunPriority::NORMAL,
         UnixMillis::new(100),
         routing(&[]),
     )];

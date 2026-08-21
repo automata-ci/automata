@@ -481,6 +481,7 @@ function projectRunDetail(sample: PreviewRunSample): RunDetailPageModel {
       workflowName: sample.run.workflowName,
       workflowHref: sample.run.workflowHref,
       status: sample.run.status,
+      priority: { level: 0, label: "Normal", mergeQueueManaged: false },
       sourceRef: sample.run.sourceRef,
       event: sample.run.event,
       actor: sample.run.actor,
@@ -499,6 +500,7 @@ function projectRunDetail(sample: PreviewRunSample): RunDetailPageModel {
       label: `${sample.jobs.items.length} jobs`,
     },
     artifacts: sample.artifacts,
+    priorityUpdate: null,
     rerun: null,
   };
 }

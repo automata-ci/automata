@@ -301,6 +301,10 @@ const CANONICAL_MIGRATIONS: &[(&str, &str)] = &[
         "0074_provider_handoff_consumer_guard.sql",
         "cc8e6393ec556f8e209a06b19f0333b97729a1dbd85509debc1b04a374eb6f3ff1c707709e3fb2c0a0326d81d637d4df",
     ),
+    (
+        "0075_workflow_run_priority.sql",
+        "284e2801912bc38a25b1684459e08797a95839c5f87e8d5fda7e103def1da8dc686cb77fe677db42ee47b02c97de0135",
+    ),
 ];
 
 const BASELINE_MIGRATION_COUNT: u32 = 26;

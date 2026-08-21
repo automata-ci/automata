@@ -412,6 +412,8 @@ pub struct HumanRun {
     pub head_commit: GitObjectId,
     /// Current durable run lifecycle.
     pub status: crate::WorkflowRunStatus,
+    /// Effective priority used for every queued job in this run.
+    pub priority: crate::WorkflowRunPriority,
     /// Stable aggregate conclusion once derivable from latest attempts.
     pub conclusion: Option<HumanRunConclusion>,
     /// Immutable human-facing workflow name.

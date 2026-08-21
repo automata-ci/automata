@@ -1,6 +1,6 @@
 //! Object-safe scheduling policy port and deterministic default policy.
 
-use std::fmt;
+use std::{cmp::Reverse, fmt};
 
 use super::{
     CandidateCapacity, CandidateDecline, CandidateDeclineReason, EffectiveRunner,
@@ -20,9 +20,9 @@ pub trait SchedulerPolicy: fmt::Debug + Send + Sync {
 
 /// Stable FIFO policy with deterministic runner and slot tie-breaking.
 ///
-/// Candidates are ordered by queue timestamp and attempt ID. Runners are
-/// ordered by durable runner ID and slots by one-based ordinal. Input slice
-/// order therefore cannot change a decision.
+/// Candidates are ordered by descending priority, then queue timestamp and
+/// attempt ID. Runners are ordered by durable runner ID and slots by one-based
+/// ordinal. Input slice order therefore cannot change a decision.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DeterministicScheduler;
 
@@ -36,7 +36,13 @@ impl SchedulerPolicy for DeterministicScheduler {
         }
 
         let mut candidates = input.candidates().iter().collect::<Vec<_>>();
-        candidates.sort_by_key(|candidate| (candidate.queued_at(), candidate.attempt_id()));
+        candidates.sort_by_key(|candidate| {
+            (
+                Reverse(candidate.priority()),
+                candidate.queued_at(),
+                candidate.attempt_id(),
+            )
+        });
         let mut runners = input.runners().iter().collect::<Vec<_>>();
         runners.sort_by_key(|runner| runner.session().runner_id());
 

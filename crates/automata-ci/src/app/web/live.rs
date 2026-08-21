@@ -3,7 +3,7 @@ use std::{collections::HashSet, fmt::Write as _, str::FromStr as _, sync::Arc};
 use async_trait::async_trait;
 use automata_ci_auth::authorization::{
     AuthorizationRequest, AuthorizationScope, OutputVisibility, Permission, SecretExposureClass,
-    repository_read_permissions,
+    repository_mutation_permissions, repository_read_permissions,
 };
 use automata_ci_blob::{BlobStoreError, BlobStoreErrorKind, ImmutableBlobStore};
 use automata_ci_core::{
@@ -1118,6 +1118,7 @@ fn map_run(run: &HumanRun) -> Result<RunSummary, WebDataError> {
             .and_then(|title| visible_text(title)),
         workflow: workflow_from_run(run),
         status: run_status(run)?,
+        priority: run.priority,
         git_ref: run
             .git_ref
             .as_ref()
@@ -1714,6 +1715,21 @@ impl LiveWebData {
             .into_iter()
             .filter_map(|(artifact, _)| artifact)
             .collect();
+        let priority_editable = !detail.run.priority.is_merge_queue()
+            && matches!(
+                detail.run.status,
+                WorkflowRunStatus::Queued | WorkflowRunStatus::InProgress
+            )
+            && self
+                .allowed(
+                    &context,
+                    &tenant,
+                    &repository,
+                    repository_mutation_permissions::RUN_PRIORITY_UPDATE,
+                    None,
+                    SecretExposureClass::Secretless,
+                )
+                .await?;
         Ok(Some(RunDetailPage {
             repository: map_repository(
                 &repository,
@@ -1735,6 +1751,7 @@ impl LiveWebData {
                 },
                 items: artifacts,
             },
+            priority_editable,
         }))
     }
 
@@ -3251,6 +3268,7 @@ mod tests {
             head_commit: automata_ci_core::GitObjectId::from_durable_bytes(&[7; 20])
                 .expect("commit ID"),
             status: WorkflowRunStatus::Completed,
+            priority: automata_ci_store::WorkflowRunPriority::NORMAL,
             conclusion: Some(HumanRunConclusion::Lost),
             workflow_name: "CI".to_owned(),
             git_ref: Some("refs/heads/main".to_owned()),
@@ -4276,6 +4294,7 @@ mod tests {
             head_commit: automata_ci_core::GitObjectId::from_durable_bytes(&[7; 20])
                 .expect("commit ID"),
             status: WorkflowRunStatus::Completed,
+            priority: automata_ci_store::WorkflowRunPriority::NORMAL,
             conclusion: Some(HumanRunConclusion::Success),
             workflow_name: "\u{200b}".to_owned(),
             git_ref: Some("\u{202e}".to_owned()),

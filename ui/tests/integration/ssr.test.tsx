@@ -1163,6 +1163,56 @@ describe("hydration", () => {
     await act(async () => root?.unmount());
   });
 
+  it("submits the exact server-granted run priority and recovers from rejection", async () => {
+    if (runDetailRequest.page.kind !== "run-detail") {
+      throw new Error("The run-detail fixture is unavailable");
+    }
+    const endpoint = `/automata-ci/automata/actions/runs/${PRIMARY_RUN_ID}/priority`;
+    const request: RenderRequest = {
+      ...runDetailRequest,
+      page: {
+        ...runDetailRequest.page,
+        priorityUpdate: {
+          endpoint,
+          csrfToken: SHELL_CSRF_TOKEN,
+          current: 50,
+        },
+      },
+    };
+    const fetchMock = vi.fn(async () => new Response(null, { status: 409 }));
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    document.open();
+    document.write(renderPage(request));
+    document.close();
+    const parsedRequest = readRenderRequest(document);
+
+    let root: ReturnType<typeof hydrateRoot> | undefined;
+    await act(async () => {
+      root = hydrateRoot(document, <HtmlDocument request={parsedRequest} />);
+    });
+    const button = document.querySelector<HTMLButtonElement>(
+      '[aria-label="Priority controls"] button',
+    );
+    await act(async () => button?.click());
+
+    expect(fetchMock).toHaveBeenCalledWith(endpoint, {
+      method: "PUT",
+      credentials: "same-origin",
+      headers: {
+        "content-type": "application/json",
+        "x-automata-csrf-token": SHELL_CSRF_TOKEN,
+      },
+      body: JSON.stringify({ priority: 50 }),
+    });
+    expect(button?.disabled).toBe(false);
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain(
+      "The priority could not be updated",
+    );
+
+    await act(async () => root?.unmount());
+  });
+
   it.each([
     ["run list", runListRequest, "Workflow runs"],
     ["run detail", runDetailRequest, "Build and test release candidate"],

@@ -39,6 +39,12 @@ pub mod repository_read_permissions {
     pub const ARTIFACT_DOWNLOAD: &str = "artifacts:download";
 }
 
+/// Canonical repository-scoped mutation permissions.
+pub mod repository_mutation_permissions {
+    /// Allows changing the priority of queued workflow runs.
+    pub const RUN_PRIORITY_UPDATE: &str = "runs:priority:update";
+}
+
 macro_rules! policy_name {
     ($name:ident, $label:literal) => {
         #[doc = concat!("A bounded, portable ", $label, " used by RBAC policy.")]

@@ -722,6 +722,7 @@ fn candidate_from_durable(
         candidate: RunnableCandidate::new(
             durable.attempt_id(),
             durable.job_id(),
+            durable.priority(),
             durable.queued_at(),
             routing,
         ),

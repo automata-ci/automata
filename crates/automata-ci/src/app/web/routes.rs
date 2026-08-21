@@ -2961,6 +2961,7 @@ mod tests {
             title: Some("Validate checkout and release metadata".to_owned()),
             workflow: workflow(),
             status: Status::Succeeded,
+            priority: automata_ci_store::WorkflowRunPriority::NORMAL,
             git_ref: None,
             event: "pull_request".to_owned(),
             actor: None,
@@ -3030,6 +3031,7 @@ mod tests {
                     downloadable: true,
                 }],
             },
+            priority_editable: false,
         }
     }
 

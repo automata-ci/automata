@@ -12,6 +12,7 @@ use automata_ci_core::{
     RunnerLabel, RunnerPlatform, RunnerRequirements, RunnerSessionId, SandboxCapabilities,
     SandboxFeature, UnixMillis,
 };
+use automata_ci_store::WorkflowRunPriority;
 
 pub fn typed_id<T>(tail: u64) -> T
 where
@@ -150,6 +151,7 @@ pub fn candidate(tail: u64, queued_at: i64, labels: &[&str]) -> RunnableCandidat
     RunnableCandidate::new(
         attempt_id(tail),
         job_id(tail),
+        WorkflowRunPriority::NORMAL,
         UnixMillis::new(queued_at),
         routing(labels),
     )
@@ -159,6 +161,7 @@ pub fn windows_candidate(tail: u64, queued_at: i64) -> RunnableCandidate {
     RunnableCandidate::new(
         attempt_id(tail),
         job_id(tail),
+        WorkflowRunPriority::NORMAL,
         UnixMillis::new(queued_at),
         RoutingRequirements::new(
             RunnerRequirements::default()

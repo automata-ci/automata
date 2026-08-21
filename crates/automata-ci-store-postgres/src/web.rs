@@ -31,7 +31,7 @@ use automata_ci_store::{
     HumanRunStatusFilter, HumanRunner, HumanTerminalResult, HumanWorkflow, HumanWorkflowCursor,
     HumanWorkflowListQuery, HumanWorkflowPage, HumanWorkflowProjectedName,
     HumanWorkflowReadRepository, JobIrMetadata, RepositoryCoordinate, RepositoryId, StoreError,
-    TenantScope, WorkflowRunStatus,
+    TenantScope, WorkflowRunPriority, WorkflowRunStatus,
 };
 
 use super::PostgresStore;
@@ -348,7 +348,8 @@ macro_rules! run_page_sql {
             r"
             SELECT run.id, run.workflow_id, workflow.path AS workflow_path,
                    run.run_number, run.run_attempt, run.event_name, run.head_sha,
-                   run.status, run.workflow_name, run.git_ref, run.actor,
+                   run.status, run.scheduling_priority,
+                   run.workflow_name, run.git_ref, run.actor,
                    run.display_title, run.commit_subject,
                    run.created_at_ms, run.updated_at_ms,
                    run.publication_policy_revision,
@@ -590,6 +591,11 @@ fn decode_run(row: &PgRow) -> Result<HumanRun, StoreError> {
         )
         .map_err(|_| StoreError::corrupt_data("workflow run head digest is invalid"))?,
         status,
+        priority: WorkflowRunPriority::from_storage(
+            row.try_get("scheduling_priority")
+                .map_err(operation_error)?,
+        )
+        .ok_or_else(|| StoreError::corrupt_data("workflow run priority is invalid"))?,
         conclusion,
         workflow_name: row.try_get("workflow_name").map_err(operation_error)?,
         git_ref: row.try_get("git_ref").map_err(operation_error)?,
@@ -699,7 +705,8 @@ fn parse_lifecycle(value: &str) -> Result<JobLifecycle, StoreError> {
 const RUN_BY_ID_SQL: &str = r"
     SELECT run.id, run.workflow_id, workflow.path AS workflow_path,
            run.run_number, run.run_attempt, run.event_name, run.head_sha,
-           run.status, run.workflow_name, run.git_ref, run.actor,
+           run.status, run.scheduling_priority,
+           run.workflow_name, run.git_ref, run.actor,
            run.display_title, run.commit_subject,
            run.created_at_ms, run.updated_at_ms,
            run.publication_policy_revision,

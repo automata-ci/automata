@@ -6,6 +6,7 @@ import type {
   ResultCollectionVisibility,
   RunDetailModel,
   RunDetailPageModel,
+  RunPriorityControlsModel,
   RunRerunControlsModel,
   StatusModel,
 } from "../models";
@@ -30,7 +31,9 @@ import {
   formatEventName,
 } from "../presentation/runPresentation";
 import { useRunRerun } from "../hooks/useRunRerun";
+import { useRunPriority } from "../hooks/useRunPriority";
 import { RunRerunControlsView } from "../views/RunRerunControlsView";
+import { RunPriorityControlsView } from "../views/RunPriorityControlsView";
 
 export interface RunDetailPageProps {
   readonly model: RunDetailPageModel;
@@ -85,12 +88,17 @@ export function RunDetailPage({ model, shellUtility }: RunDetailPageProps) {
                 )}
               </p>
             </div>
-            {model.rerun === null ? null : (
-              <RunRerunControls
-                controls={model.rerun}
-                runsHref={model.repository.runsHref}
-              />
-            )}
+            <div className="run-heading-actions">
+              {model.priorityUpdate === null ? null : (
+                <RunPriorityControls controls={model.priorityUpdate} />
+              )}
+              {model.rerun === null ? null : (
+                <RunRerunControls
+                  controls={model.rerun}
+                  runsHref={model.repository.runsHref}
+                />
+              )}
+            </div>
           </header>
 
           <RunSummary run={run} />
@@ -106,6 +114,21 @@ export function RunDetailPage({ model, shellUtility }: RunDetailPageProps) {
         </ActionsLayout>
       </main>
     </Shell>
+  );
+}
+
+function RunPriorityControls({ controls }: { readonly controls: RunPriorityControlsModel }) {
+  const priority = useRunPriority(controls);
+  return (
+    <RunPriorityControlsView
+      current={priority.level}
+      csrfToken={controls.csrfToken}
+      endpoint={controls.endpoint}
+      error={priority.error}
+      onChange={priority.setLevel}
+      onSubmit={priority.submit}
+      pending={priority.pending}
+    />
   );
 }
 
@@ -144,6 +167,13 @@ function RunSummary({ run }: { readonly run: RunDetailModel }) {
             </dd>
           </div>
         )}
+        <div>
+          <dt>Priority</dt>
+          <dd>
+            {run.priority.label}
+            {run.priority.mergeQueueManaged ? " (automatic)" : ` · ${run.priority.level}`}
+          </dd>
+        </div>
         <div>
           <dt>Commit</dt>
           <dd>

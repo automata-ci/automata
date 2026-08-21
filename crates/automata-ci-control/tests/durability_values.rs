@@ -2,7 +2,7 @@ use automata_ci_control::{
     cancellation::{CancelJobCommandPayload, CancellationRepository},
     lease::{
         BeginLeaseRequest, CompleteLeaseRequest, LeaseRequestKey, RevokedLeaseOfferFallback,
-        RunnableAttempt, RunnableScanLimit,
+        RunnableAttempt, RunnableQueueKey, RunnableScanLimit,
     },
 };
 use automata_ci_core::{
@@ -12,7 +12,7 @@ use automata_ci_core::{
 use automata_ci_store::{
     CommandSequence, DocumentSchema, JobIrMetadata, LeaseOfferCommandIdentity, ObjectKey,
     RunnerGeneration, RunnerOperationResponse, RunnerProtocolVersion, RunnerSessionFence,
-    SessionEpoch, StableRunnerSlot,
+    SessionEpoch, StableRunnerSlot, WorkflowRunPriority,
 };
 
 #[test]
@@ -130,10 +130,13 @@ fn control_values_and_ports_remain_backend_neutral_and_dyn_compatible() {
     let candidate_job_id = JobId::new();
     let candidate_run_id = RunId::new();
     let candidate = RunnableAttempt::try_new(
-        AttemptId::new(),
+        RunnableQueueKey::new(
+            WorkflowRunPriority::NORMAL,
+            UnixMillis::new(1),
+            AttemptId::new(),
+        ),
         candidate_job_id,
         candidate_run_id,
-        UnixMillis::new(1),
         RunnerRequirements::default(),
         JobIrMetadata::new(
             candidate_job_id,

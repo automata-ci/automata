@@ -1411,11 +1411,11 @@ fn worker(value: u128) -> GithubServerServiceWorkerId {
 #[test]
 fn rejected_store_handoff_is_not_reported_as_repository_unavailable() {
     assert_eq!(
-        map_store_handoff_error(GithubServerServiceStoreError::HandoffRejected),
+        map_store_handoff_error(&GithubServerServiceStoreError::HandoffRejected),
         GithubServerServiceHandoffError::Rejected
     );
     assert_eq!(
-        map_store_handoff_error(GithubServerServiceStoreError::NotFound),
+        map_store_handoff_error(&GithubServerServiceStoreError::NotFound),
         GithubServerServiceHandoffError::Rejected
     );
 }

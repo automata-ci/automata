@@ -13,8 +13,8 @@ use crate::server::{SecretSource, VersionedSecretSource};
 #[derive(Debug, Subcommand)]
 /// Top-level service and operator command selection.
 ///
-/// Server, authentication, repository-secret, environment-review,
-/// workflow-rerun, and administrative status operations are implemented.
+/// Server, authentication, repository-secret, environment-review, workflow
+/// priority, workflow-rerun, and administrative status operations are implemented.
 pub enum Command {
     /// Run the human API, runner control, Results gateway, and SSR interface.
     Server(Box<ServerArgs>),
@@ -28,6 +28,8 @@ pub enum Command {
     EnvironmentReview(EnvironmentReviewArgs),
     /// Create an authenticated rerun of one completed workflow run.
     Rerun(RerunArgs),
+    /// Set the priority of one queued workflow run.
+    Priority(PriorityArgs),
     /// Manage self-hosted runners and one-time enrollment tokens.
     Runner(RunnerArgs),
     /// Inspect control-plane status.
@@ -46,6 +48,7 @@ impl Command {
             Self::Secret(args) => Some(&args.operator),
             Self::EnvironmentReview(args) => Some(&args.operator),
             Self::Rerun(args) => Some(&args.operator),
+            Self::Priority(args) => Some(&args.operator),
             Self::Runner(args) => Some(&args.operator),
             Self::Admin(args) => Some(&args.operator),
             Self::Server(_) | Self::Local(_) | Self::Internal(_) => None,
@@ -398,6 +401,22 @@ pub struct RerunArgs {
     /// Stable operation UUID for an exact retry; generated once when omitted.
     #[arg(long, value_parser = parse_canonical_uuid)]
     pub operation_id: Option<Uuid>,
+}
+
+#[derive(Debug, Args)]
+/// Authenticated workflow-priority request.
+pub struct PriorityArgs {
+    /// Connection and output policy for this operator command.
+    #[command(flatten)]
+    pub operator: OperatorArgs,
+    /// GitHub repository in canonical OWNER/REPOSITORY form.
+    pub repository: RepositoryRef,
+    /// Exact canonical queued workflow-run UUID.
+    #[arg(value_parser = parse_canonical_uuid)]
+    pub run_id: Uuid,
+    /// Exact user-controlled priority in 0..=99; larger values run first.
+    #[arg(long, value_parser = clap::value_parser!(u8).range(0..=99))]
+    pub level: u8,
 }
 
 fn parse_canonical_uuid(value: &str) -> Result<Uuid, String> {

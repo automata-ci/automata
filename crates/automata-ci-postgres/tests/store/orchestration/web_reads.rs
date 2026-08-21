@@ -1311,7 +1311,8 @@ async fn seed_public_completed_run(
             publication_policy_revision, requested_dashboard_visibility,
             effective_dashboard_visibility, requested_log_visibility,
             requested_artifact_visibility, publication_safety_reason,
-            publication_safety_schema, runner_requirements_schema
+            publication_safety_schema, runner_requirements_schema,
+            scheduling_priority
         ) VALUES (
             $1, $2, $3, $4, 2, 3, 'push', 'web/event',
             decode(repeat('41', 32), 'hex'), 1, 'application/json',
@@ -1319,7 +1320,7 @@ async fn seed_public_completed_run(
             'application/vnd.automata.workflow-plan.protobuf', 1, $5,
             'completed', 10, 21, 'CI', 'refs/heads/main', 'octocat',
             'Typed dashboard reads', 'Preserve immutable descriptors',
-            2, 'public', 'public', 'public', 'public', 'repository_policy', $6, 1
+            2, 'public', 'public', 'public', 'public', 'repository_policy', $6, 1, 0
         )
         ",
     )
@@ -1613,13 +1614,14 @@ async fn insert_queued_run(
             plan_size_bytes, plan_media_type, plan_schema, workflow_name, head_sha,
             status, created_at_ms, updated_at_ms,
             requested_dashboard_visibility, effective_dashboard_visibility,
-            publication_safety_reason, runner_requirements_schema
+            publication_safety_reason, runner_requirements_schema,
+            scheduling_priority
         ) VALUES (
             $1, $2, $3, $4, $5, 'push', 'web/keyset-event',
             decode(repeat('43', 32), 'hex'), 1, 'application/json',
             decode(repeat('44', 32), 'hex'), 'web/keyset-plan', 1,
             'application/vnd.automata.workflow-plan.protobuf', 1, 'Keyset', $6,
-            'queued', $7, $7, $8, $8, 'repository_policy', 1
+            'queued', $7, $7, $8, $8, 'repository_policy', 1, 0
         )
         ",
     )

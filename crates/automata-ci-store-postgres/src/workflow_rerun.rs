@@ -1531,7 +1531,8 @@ async fn insert_run(
             requested_log_visibility, requested_artifact_visibility,
             publication_safety_reason, publication_safety_schema,
             concurrency_queue_policy, public_run_id_alias, triggering_actor,
-            concurrency_cancel_in_progress, runner_requirements_schema
+            concurrency_cancel_in_progress, runner_requirements_schema,
+            scheduling_priority
         )
         SELECT $2, repository_id, workflow_id, snapshot_id, run_number, $3,
                event_name, event_object_key, head_sha, 'queued', $4, $4,
@@ -1543,7 +1544,8 @@ async fn insert_run(
                requested_log_visibility, requested_artifact_visibility,
                publication_safety_reason, publication_safety_schema,
                concurrency_queue_policy, public_run_id_alias, $5,
-               concurrency_cancel_in_progress, runner_requirements_schema
+               concurrency_cancel_in_progress, runner_requirements_schema,
+               scheduling_priority
         FROM workflow_runs
         WHERE id = $1
         ",

@@ -181,6 +181,7 @@ use crate::app::{
         SetupPageAvailabilityError, SetupPageAvailabilityState, WebData,
     },
     workflow_dispatch_api::{WorkflowDispatchApiBackend, workflow_dispatch_api_router},
+    workflow_priority_api::workflow_priority_api_router,
     workflow_rerun_api::{WorkflowRerunApiBackend, workflow_rerun_api_router},
 };
 use automata_ci_workflow_actions::GithubConditionCompiler;
@@ -1980,6 +1981,13 @@ async fn build_human_api(
     );
     router = router.merge(workflow_rerun_api_router(
         rerun_backend,
+        Arc::clone(runtime.clock()),
+    ));
+    let priority_reads: Arc<dyn HumanWorkflowReadRepository> = store.clone();
+    let priorities: Arc<dyn automata_ci_store::WorkflowPriorityRepository> = store.clone();
+    router = router.merge(workflow_priority_api_router(
+        priority_reads,
+        priorities,
         Arc::clone(runtime.clock()),
     ));
     if let Some(secret_management) = secret_management {

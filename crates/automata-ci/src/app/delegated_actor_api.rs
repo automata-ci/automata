@@ -1457,6 +1457,7 @@ mod tests {
                 path: ".github/workflows/ci.yml".to_owned(),
             },
             status: Status::InProgress,
+            priority: automata_ci_store::WorkflowRunPriority::NORMAL,
             git_ref: Some("refs/heads/main".to_owned()),
             event: "push".to_owned(),
             actor: Some("octocat".to_owned()),

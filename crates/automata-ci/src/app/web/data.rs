@@ -1123,6 +1123,7 @@ pub(crate) struct RunSummary {
     pub(crate) title: Option<String>,
     pub(crate) workflow: Workflow,
     pub(crate) status: Status,
+    pub(crate) priority: automata_ci_store::WorkflowRunPriority,
     pub(crate) git_ref: Option<String>,
     pub(crate) event: String,
     pub(crate) actor: Option<String>,
@@ -1140,6 +1141,7 @@ pub(crate) struct RunDetailPage {
     pub(crate) job_previous_cursor: Option<String>,
     pub(crate) job_next_cursor: Option<String>,
     pub(crate) artifacts: VisibleCollection<ArtifactSummary>,
+    pub(crate) priority_editable: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

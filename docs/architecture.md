@@ -118,6 +118,14 @@ aliases, jobs, attempts, leases, runner registration, admission, concurrency,
 publication settings, and result metadata. Server replicas coordinate with
 transactions and fencing rather than process-local locks.
 
+Scheduling priority is part of durable workflow-run state. Admission derives the
+value from provider-neutral trust evidence: ordinary runs use level `0`, and
+merge-queue runs use reserved level `100`. Authorized operators may set queued or
+in-progress runs to bounded user levels `0..=99`; the server rejects attempts to
+override merge-queue ownership. The scheduler orders higher levels first, then
+queue age and attempt ID, so priority changes are explicit, durable, and
+deterministic across replicas.
+
 S3-compatible storage owns immutable workflow and action bundles, log segments,
 artifacts, cache objects, and final manifests. Exact public action bundles have
 a write-once reference manifest derived from their provider, repository,

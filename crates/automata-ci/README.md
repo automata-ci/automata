@@ -392,6 +392,22 @@ The command supports failed-job and exact job closures, keeps one operation ID
 across bounded retries, and prints that ID for safe exact replay. See the
 [workflow-rerun guide](../../docs/workflow-reruns.md) for the complete contract.
 
+Queued or in-progress runs can be reprioritized with the same protected CLI
+session:
+
+```console
+automata priority --server-url https://ci.example.test \
+  automata-ci/automata \
+  20000000-0000-4000-8000-000000000002 \
+  --level 75
+```
+
+User levels are bounded to `0..=99`, with larger values selected first and FIFO
+ordering within a level. Merge-queue runs receive reserved level `100`, cannot
+be overridden by users, and are selected before all user-prioritized work. The
+browser run page exposes the same authorized update and retains a native form
+path when JavaScript is unavailable.
+
 A current protected-environment reviewer can also record one exact decision for
 a repository and gated job attempt:
 

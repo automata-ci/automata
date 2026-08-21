@@ -9,6 +9,14 @@ maintenance, and identifier-free state snapshots live in
 repositories live in the owning domain adapter crates, including
 `automata-ci-store-postgres`.
 
+Workflow admission derives a durable priority from its trust source: ordinary
+admission is level `0`, while merge-queue admission is the reserved level `100`.
+Authorized operators can update queued or in-progress runs to a user level in
+`0..=99`; merge-queue runs remain server-managed. The store contract owns the
+bounded value and mutation outcome so HTTP and CLI adapters share one behavior.
+Changing a value also invalidates that tenant's runnable keyset cursors, so a
+bump cannot be hidden behind an already-open scan cycle.
+
 ## Tests
 
 Store contracts compile into one explicit integration target. PostgreSQL and

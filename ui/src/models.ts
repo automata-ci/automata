@@ -215,6 +215,7 @@ export interface RunDetailModel {
   readonly workflowName: string;
   readonly workflowHref: string;
   readonly status: StatusModel;
+  readonly priority: RunPriorityModel;
   readonly sourceRef: SourceRefModel | null;
   readonly event: string;
   readonly actor: string | null;
@@ -222,6 +223,12 @@ export interface RunDetailModel {
   readonly createdAt: TimestampModel;
   readonly durationLabel: string | null;
   readonly attempt: number;
+}
+
+export interface RunPriorityModel {
+  readonly level: number;
+  readonly label: string;
+  readonly mergeQueueManaged: boolean;
 }
 
 export interface RunDetailPageModel {
@@ -232,7 +239,14 @@ export interface RunDetailPageModel {
   readonly jobs: ResultCollectionModel<JobModel>;
   readonly jobPagination: PaginationModel;
   readonly artifacts: ResultCollectionModel<ArtifactModel>;
+  readonly priorityUpdate: RunPriorityControlsModel | null;
   readonly rerun: RunRerunControlsModel | null;
+}
+
+export interface RunPriorityControlsModel {
+  readonly endpoint: string;
+  readonly csrfToken: string;
+  readonly current: number;
 }
 
 export interface RunRerunControlsModel {

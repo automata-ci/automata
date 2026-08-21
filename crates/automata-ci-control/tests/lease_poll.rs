@@ -6,8 +6,8 @@ use automata_ci_control::lease::{
     LeaseIdGenerator, LeasePollConfig, LeasePollObservation, LeasePollObserver, LeasePollOutcome,
     LeasePollRepository, LeasePollService, LeaseRequestKey, LeaseTimeToLive, NoWorkLeaseRequest,
     RunnableAttempt, RunnableAttemptError, RunnableAttemptGate, RunnableAttemptGateDisposition,
-    RunnableScanLimit, RunnableScanPage, RunnableScanRequest, TryClaimAttempt, TryClaimOutcome,
-    TryClaimReceipt,
+    RunnableQueueKey, RunnableScanLimit, RunnableScanPage, RunnableScanRequest, TryClaimAttempt,
+    TryClaimOutcome, TryClaimReceipt,
     repository::{RunnableAttemptRepository, RunnerClaimRepository},
     routing::{
         RunnerGroupId, RunnerRoutingRepository, RunnerRoutingSnapshot, RunnerSlotAvailability,
@@ -31,6 +31,7 @@ use automata_ci_protocol::{
 use automata_ci_store::{
     AttemptAssignment, JobIrMetadata, ObjectKey, RoutingDocument, RoutingLabel, RunnerGeneration,
     RunnerSessionFence, RunnerSlotCount, SessionEpoch, StableRunnerSlot, StoreError,
+    WorkflowRunPriority,
 };
 
 fn empty_lease_request(header: MessageHeader, slot: RunnerSlotOrdinal) -> LeaseRequest {
@@ -429,10 +430,13 @@ fn runnable<const N: usize>(
                 .map(|group| RunnerGroup::new(group).expect("runner group")),
         );
     RunnableAttempt::try_new(
-        attempt_id,
+        RunnableQueueKey::new(
+            WorkflowRunPriority::NORMAL,
+            UnixMillis::new(queued_at),
+            attempt_id,
+        ),
         job_id,
         run_id,
-        UnixMillis::new(queued_at),
         requirements,
         metadata,
         None,
@@ -523,10 +527,9 @@ fn windows_fixture(with_trust: bool) -> Fixture {
         .expect("placement trust")
     });
     let candidate = RunnableAttempt::try_new(
-        attempt_id,
+        RunnableQueueKey::new(WorkflowRunPriority::NORMAL, UnixMillis::new(40), attempt_id),
         job_id,
         run_id,
-        UnixMillis::new(40),
         requirements,
         metadata.clone(),
         placement_trust,
@@ -750,10 +753,13 @@ fn windows_candidate_rejects_stale_materialization_requirements() {
     let candidate = &fixture.repository.candidates[0];
 
     let error = RunnableAttempt::try_new(
-        candidate.attempt_id(),
+        RunnableQueueKey::new(
+            candidate.priority(),
+            candidate.queued_at(),
+            candidate.attempt_id(),
+        ),
         candidate.job_id(),
         candidate.run_id(),
-        candidate.queued_at(),
         candidate
             .requirements()
             .clone()
