@@ -131,13 +131,13 @@ pub async fn seed_control_plane(pool: &PgPool, runner_count: usize) -> TestResul
             event_object_key, event_digest, event_size_bytes, event_media_type,
             plan_digest, plan_object_key, plan_size_bytes, plan_media_type,
             plan_schema, workflow_name, head_sha, status, created_at_ms, updated_at_ms,
-            runner_requirements_schema
+            runner_requirements_schema, scheduling_priority
         ) VALUES (
             $1, $2, $3, $4, 1, 'push', 'test/event',
             decode(repeat('09', 32), 'hex'), 1, 'application/json',
             decode(repeat('0a', 32), 'hex'), 'test/plan', 1,
             'application/vnd.automata.workflow-plan.protobuf', 1, 'Store test',
-            $5, 'queued', 1, 1, $6
+            $5, 'queued', 1, 1, $6, 0
         )
         ",
     )

@@ -304,7 +304,16 @@ struct RunDetailPage {
     jobs: VisibleCollection<Job>,
     job_pagination: Pagination,
     artifacts: VisibleCollection<Artifact>,
+    priority_update: Option<RunPriorityControls>,
     rerun: Option<RunRerunControls>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RunPriorityControls {
+    endpoint: String,
+    csrf_token: String,
+    current: u8,
 }
 
 #[derive(Debug, Serialize)]
@@ -460,6 +469,7 @@ struct RunDetail {
     workflow_name: String,
     workflow_href: String,
     status: Status,
+    priority: RunPriority,
     source_ref: Option<SourceRef>,
     event: String,
     actor: Option<String>,
@@ -467,6 +477,14 @@ struct RunDetail {
     created_at: Timestamp,
     duration_label: Option<String>,
     attempt: u32,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RunPriority {
+    level: u8,
+    label: &'static str,
+    merge_queue_managed: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -2033,6 +2051,17 @@ pub(super) fn run_detail(
         workflow_name: data.run.workflow.name.clone(),
         workflow_href: paths.workflow(data.run.workflow.id),
         status: status(data.run.status),
+        priority: RunPriority {
+            level: data.run.priority.level(),
+            label: if data.run.priority.is_merge_queue() {
+                "Merge queue"
+            } else if data.run.priority == automata_ci_store::WorkflowRunPriority::NORMAL {
+                "Normal"
+            } else {
+                "Elevated"
+            },
+            merge_queue_managed: data.run.priority.is_merge_queue(),
+        },
         source_ref: source.source_ref(data.run.git_ref.as_deref())?,
         event: data.run.event.clone(),
         actor: data.run.actor.clone(),
@@ -2042,6 +2071,14 @@ pub(super) fn run_detail(
         attempt: data.run.attempt,
     };
     let run_href = paths.run(data.run.id);
+    let priority_update =
+        mutation
+            .filter(|_| data.priority_editable)
+            .map(|mutation| RunPriorityControls {
+                endpoint: format!("{run_href}/priority"),
+                csrf_token: mutation.csrf_token.expose_secret().to_owned(),
+                current: data.run.priority.level(),
+            });
     let rerun = mutation
         .filter(|_| {
             matches!(
@@ -2104,6 +2141,7 @@ pub(super) fn run_detail(
                 visibility: collection_visibility(data.artifacts.visibility),
                 items: artifacts,
             },
+            priority_update,
             rerun,
         },
     )
@@ -4979,6 +5017,7 @@ mod tests {
                 path: ".ci/workflows/ci.yml".to_owned(),
             },
             status,
+            priority: automata_ci_store::WorkflowRunPriority::NORMAL,
             git_ref: Some("refs/heads/main".to_owned()),
             event: "push".to_owned(),
             actor: None,

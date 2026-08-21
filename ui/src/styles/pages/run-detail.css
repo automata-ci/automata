@@ -32,6 +32,34 @@
   max-width: 100%;
 }
 
+.run-heading-actions,
+.run-priority-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--space-2);
+}
+
+.run-heading-actions {
+  justify-content: flex-end;
+}
+
+.run-priority-controls label {
+  display: grid;
+  gap: 4px;
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+
+.run-priority-controls input {
+  width: 88px;
+}
+
+.run-priority-controls [role="alert"] {
+  flex-basis: 100%;
+  margin: 0;
+}
+
 .run-overview {
   margin-bottom: var(--space-6);
 }

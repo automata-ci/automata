@@ -73,6 +73,7 @@ use automata_ci_store::{
     RunnerOperationResponse, RunnerPayloadTombstone, RunnerPayloadTombstoneReason,
     RunnerProtocolVersion, RunnerSessionFence, RunnerSessionSnapshot, RunnerSlotCount,
     SessionEpoch, StableRunnerSlot, StoreError, WORKFLOW_ADMISSION_EPOCH, WorkflowPlanRepository,
+    WorkflowRunPriority,
 };
 
 const LEASE_OPERATION_KIND: &str = "automata.lease-request.v1";
@@ -7438,8 +7439,9 @@ async fn load_scan_cursor(
     let row = sqlx::query(
         r"
         SELECT runner_generation, routing_fingerprint, cursor_version,
-               after_queued_at_ms, after_attempt_id,
-               cycle_upper_queued_at_ms, cycle_upper_attempt_id
+               after_scheduling_priority, after_queued_at_ms, after_attempt_id,
+               cycle_upper_scheduling_priority, cycle_upper_queued_at_ms,
+               cycle_upper_attempt_id
         FROM runner_queue_cursors
         WHERE runner_id = $1 AND runner_slot = $2
         FOR UPDATE
@@ -7471,28 +7473,47 @@ fn decode_scan_cursor(row: &sqlx::postgres::PgRow) -> Result<StoredScanCursor, S
         )
         .map_err(|error| StoreError::corrupt_data(error.clone()))?,
         version,
-        after: decode_queue_key(row, "after_queued_at_ms", "after_attempt_id")?,
-        cycle_upper: decode_queue_key(row, "cycle_upper_queued_at_ms", "cycle_upper_attempt_id")?,
+        after: decode_queue_key(
+            row,
+            "after_scheduling_priority",
+            "after_queued_at_ms",
+            "after_attempt_id",
+        )?,
+        cycle_upper: decode_queue_key(
+            row,
+            "cycle_upper_scheduling_priority",
+            "cycle_upper_queued_at_ms",
+            "cycle_upper_attempt_id",
+        )?,
     })
 }
 
 fn decode_queue_key(
     row: &sqlx::postgres::PgRow,
+    priority_column: &str,
     time_column: &str,
     id_column: &str,
 ) -> Result<Option<RunnableQueueKey>, StoreError> {
+    let priority = row
+        .try_get::<Option<i16>, _>(priority_column)
+        .map_err(operation_error)?;
     let queued_at = row
         .try_get::<Option<i64>, _>(time_column)
         .map_err(operation_error)?;
     let attempt_id = row
         .try_get::<Option<Uuid>, _>(id_column)
         .map_err(operation_error)?;
-    match (queued_at, attempt_id) {
-        (None, None) => Ok(None),
-        (Some(time), Some(id)) => Ok(Some(RunnableQueueKey::new(
-            UnixMillis::new(time),
-            AttemptId::from_uuid(id),
-        ))),
+    match (priority, queued_at, attempt_id) {
+        (None, None, None) => Ok(None),
+        (Some(priority), Some(time), Some(id)) => {
+            let priority = WorkflowRunPriority::from_storage(priority)
+                .ok_or_else(|| StoreError::corrupt_data("invalid runnable queue priority"))?;
+            Ok(Some(RunnableQueueKey::new(
+                priority,
+                UnixMillis::new(time),
+                AttemptId::from_uuid(id),
+            )))
+        }
         _ => Err(StoreError::corrupt_data(
             "partial runnable queue cursor key",
         )),
@@ -7506,7 +7527,7 @@ async fn scan_cycle_upper(
 ) -> Result<Option<RunnableQueueKey>, StoreError> {
     let row = sqlx::query(
         r"
-        SELECT attempt.queued_at_ms, attempt.id AS attempt_id
+        SELECT run.scheduling_priority, attempt.queued_at_ms, attempt.id AS attempt_id
         FROM job_attempts AS attempt
         JOIN jobs AS job ON job.id = attempt.job_id
         JOIN workflow_runs AS run ON run.id = job.run_id
@@ -7543,7 +7564,7 @@ async fn scan_cycle_upper(
                     LIMIT 1
                 ), '') <> 'succeeded'
           )
-        ORDER BY attempt.queued_at_ms DESC, attempt.id DESC
+        ORDER BY run.scheduling_priority, attempt.queued_at_ms DESC, attempt.id DESC
         LIMIT 1
         ",
     )
@@ -7557,6 +7578,11 @@ async fn scan_cycle_upper(
     row.as_ref()
         .map(|row| {
             Ok(RunnableQueueKey::new(
+                WorkflowRunPriority::from_storage(
+                    row.try_get("scheduling_priority")
+                        .map_err(operation_error)?,
+                )
+                .ok_or_else(|| StoreError::corrupt_data("invalid runnable queue priority"))?,
                 UnixMillis::new(row.try_get("queued_at_ms").map_err(operation_error)?),
                 AttemptId::from_uuid(row.try_get("attempt_id").map_err(operation_error)?),
             ))
@@ -7574,6 +7600,7 @@ async fn scan_page_rows(
     sqlx::query(
         r"
         SELECT attempt.id AS attempt_id, attempt.job_id, attempt.queued_at_ms,
+               run.scheduling_priority,
                job.run_id, job.requirements, job.job_ir_schema,
                job.job_ir_size_bytes, job.job_ir_digest, job.job_ir_object_key,
                trust.snapshot_schema AS placement_trust_snapshot_schema,
@@ -7591,15 +7618,19 @@ async fn scan_page_rows(
         LEFT JOIN logical_workflow_concrete_jobs AS concrete
           ON concrete.job_id = job.id AND concrete.run_id = run.id
         WHERE repository.tenant_id = $1
-          AND job.admission_epoch = $9
+          AND job.admission_epoch = $11
           AND job.job_ir_schema = $2
           AND attempt.lifecycle = 'queued'
           AND attempt.queued_at_ms <= $3
           AND (
-              $4::BIGINT IS NULL
-              OR (attempt.queued_at_ms, attempt.id) > ($4, $5::UUID)
+              $4::SMALLINT IS NULL
+              OR (
+                  100 - run.scheduling_priority, attempt.queued_at_ms, attempt.id
+              ) > ($4, $5, $6::UUID)
           )
-          AND (attempt.queued_at_ms, attempt.id) <= ($6, $7)
+          AND (
+              100 - run.scheduling_priority, attempt.queued_at_ms, attempt.id
+          ) <= ($7, $8, $9)
           AND run.status IN ('queued', 'in_progress')
           AND NOT EXISTS (
               SELECT 1 FROM attempt_cancellation_intents AS cancellation
@@ -7627,15 +7658,17 @@ async fn scan_page_rows(
                     LIMIT 1
                 ), '') <> 'succeeded'
           )
-        ORDER BY attempt.queued_at_ms, attempt.id
-        LIMIT $8
+        ORDER BY run.scheduling_priority DESC, attempt.queued_at_ms, attempt.id
+        LIMIT $10
         ",
     )
     .bind(&routing.tenant_id)
     .bind(i32::from(routing.job_ir_version.get()))
     .bind(request.observed_at().get())
+    .bind(after.map(|key| key.priority().queue_order()))
     .bind(after.map(|key| key.queued_at().get()))
     .bind(after.map(|key| key.attempt_id().as_uuid()))
+    .bind(upper.priority().queue_order())
     .bind(upper.queued_at().get())
     .bind(upper.attempt_id().as_uuid())
     .bind(i64::from(request.limit().get()))
@@ -8294,10 +8327,11 @@ async fn advance_scan_cursor(
             r"
             INSERT INTO runner_queue_cursors (
                 runner_id, runner_slot, runner_generation, routing_fingerprint,
-                cursor_version, after_queued_at_ms, after_attempt_id,
+                cursor_version, after_scheduling_priority, after_queued_at_ms,
+                after_attempt_id, cycle_upper_scheduling_priority,
                 cycle_upper_queued_at_ms, cycle_upper_attempt_id, updated_at_ms
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
             ON CONFLICT (runner_id, runner_slot) DO NOTHING
             ",
         )
@@ -8306,8 +8340,10 @@ async fn advance_scan_cursor(
         .bind(generation_i64(cursor.session().runner_generation())?)
         .bind(cursor.routing_fingerprint().as_bytes().as_slice())
         .bind(cursor_version_i64(next_version)?)
+        .bind(through.map(|key| key.priority().storage_value()))
         .bind(through.map(|key| key.queued_at().get()))
         .bind(through.map(|key| key.attempt_id().as_uuid()))
+        .bind(upper.map(|key| key.priority().storage_value()))
         .bind(upper.map(|key| key.queued_at().get()))
         .bind(upper.map(|key| key.attempt_id().as_uuid()))
         .bind(observed_at.get())
@@ -8322,12 +8358,14 @@ async fn advance_scan_cursor(
             SET runner_generation = $3,
                 routing_fingerprint = $4,
                 cursor_version = $5,
-                after_queued_at_ms = $6,
-                after_attempt_id = $7,
-                cycle_upper_queued_at_ms = $8,
-                cycle_upper_attempt_id = $9,
-                updated_at_ms = $10
-            WHERE runner_id = $1 AND runner_slot = $2 AND cursor_version = $11
+                after_scheduling_priority = $6,
+                after_queued_at_ms = $7,
+                after_attempt_id = $8,
+                cycle_upper_scheduling_priority = $9,
+                cycle_upper_queued_at_ms = $10,
+                cycle_upper_attempt_id = $11,
+                updated_at_ms = $12
+            WHERE runner_id = $1 AND runner_slot = $2 AND cursor_version = $13
             ",
         )
         .bind(cursor.session().runner_id().as_uuid())
@@ -8335,8 +8373,10 @@ async fn advance_scan_cursor(
         .bind(generation_i64(cursor.session().runner_generation())?)
         .bind(cursor.routing_fingerprint().as_bytes().as_slice())
         .bind(cursor_version_i64(next_version)?)
+        .bind(through.map(|key| key.priority().storage_value()))
         .bind(through.map(|key| key.queued_at().get()))
         .bind(through.map(|key| key.attempt_id().as_uuid()))
+        .bind(upper.map(|key| key.priority().storage_value()))
         .bind(upper.map(|key| key.queued_at().get()))
         .bind(upper.map(|key| key.attempt_id().as_uuid()))
         .bind(observed_at.get())
@@ -8409,6 +8449,7 @@ async fn evaluate_claim(
                job.requirements,
                repository.tenant_id, run.id AS run_id, run.repository_id,
                run.status AS run_status, run.concurrency_group_key,
+               run.scheduling_priority,
                trust.snapshot_schema AS placement_trust_snapshot_schema,
                trust.policy_revision AS placement_trust_policy_revision,
                trust.policy_digest AS placement_trust_policy_digest,
@@ -9350,6 +9391,11 @@ fn decode_runnable_attempt(row: &sqlx::postgres::PgRow) -> Result<RunnableAttemp
     let attempt_id = AttemptId::from_uuid(row.try_get("attempt_id").map_err(operation_error)?);
     let job_id = JobId::from_uuid(row.try_get("job_id").map_err(operation_error)?);
     let run_id = RunId::from_uuid(row.try_get("run_id").map_err(operation_error)?);
+    let priority = WorkflowRunPriority::from_storage(
+        row.try_get("scheduling_priority")
+            .map_err(operation_error)?,
+    )
+    .ok_or_else(|| StoreError::corrupt_data("invalid durable workflow scheduling priority"))?;
     let queued_at = UnixMillis::new(row.try_get("queued_at_ms").map_err(operation_error)?);
     let requirements_value: serde_json::Value =
         row.try_get("requirements").map_err(operation_error)?;
@@ -9378,10 +9424,9 @@ fn decode_runnable_attempt(row: &sqlx::postgres::PgRow) -> Result<RunnableAttemp
         .map_err(|error| StoreError::corrupt_data(error.to_string()))?;
     let placement_trust = decode_placement_trust(row, &requirements)?;
     RunnableAttempt::try_new(
-        attempt_id,
+        RunnableQueueKey::new(priority, queued_at, attempt_id),
         job_id,
         run_id,
-        queued_at,
         requirements,
         ir_metadata,
         placement_trust,

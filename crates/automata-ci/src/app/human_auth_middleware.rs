@@ -55,6 +55,10 @@ use super::{
         RepositorySecretFormError, collect_repository_secret_form, is_repository_secret_form,
     },
     web::{RequestContext, Viewer},
+    workflow_priority_api::{
+        MAX_PRIORITY_FORM_BYTES, is_workflow_priority_form, parse_workflow_priority_form,
+        workflow_priority_csrf_token,
+    },
 };
 
 #[cfg(test)]
@@ -318,6 +322,7 @@ pub(crate) async fn authenticate_human_request(
     let raw = presented.expose_secret();
     let safe_method = is_safe_method(request.method()) || live_log_ticket;
     let mut pending_rbac_form_body = None;
+    let mut pending_workflow_priority_form_body = None;
     let browser_csrf = if expected_kind == SessionKind::Browser {
         let csrf = match state.sessions.derive_csrf_raw(raw, expected_kind) {
             Ok(csrf) => csrf,
@@ -326,7 +331,10 @@ pub(crate) async fn authenticate_human_request(
         let csrf = Arc::new(csrf);
         if !safe_method {
             match verify_browser_mutation_request(&mut request, &state.origin, &csrf).await {
-                Ok(rbac_form_body) => pending_rbac_form_body = rbac_form_body,
+                Ok((rbac_form_body, workflow_priority_form_body)) => {
+                    pending_rbac_form_body = rbac_form_body;
+                    pending_workflow_priority_form_body = workflow_priority_form_body;
+                }
                 Err(BrowserMutationRequestError::Forbidden) => {
                     return request_auth_error_response(
                         surface,
@@ -388,6 +396,11 @@ pub(crate) async fn authenticate_human_request(
             RbacManagementFormSubmission::Valid,
         );
         request.extensions_mut().insert(submission);
+    }
+    if let Some(body) = pending_workflow_priority_form_body {
+        request
+            .extensions_mut()
+            .insert(parse_workflow_priority_form(&body));
     }
 
     let touched = match state
@@ -525,14 +538,20 @@ async fn verify_browser_mutation_request(
     request: &mut Request<Body>,
     origin: &HumanAuthOrigin,
     expected_csrf: &CsrfToken,
-) -> Result<Option<bytes::Bytes>, BrowserMutationRequestError> {
+) -> Result<(Option<bytes::Bytes>, Option<bytes::Bytes>), BrowserMutationRequestError> {
     let publication_form = is_publication_settings_form(request.method(), request.uri().path());
     let rbac_form = is_rbac_management_form(request.method(), request.uri().path());
     let repository_secret_form = is_repository_secret_form(request.method(), request.uri().path());
     let logout_form = is_browser_logout_form(request.method(), request.uri().path());
-    if !publication_form && !rbac_form && !repository_secret_form && !logout_form {
+    let workflow_priority_form = is_workflow_priority_form(request.method(), request.uri().path());
+    if !publication_form
+        && !rbac_form
+        && !repository_secret_form
+        && !logout_form
+        && !workflow_priority_form
+    {
         return verify_browser_mutation(request.headers(), origin, expected_csrf)
-            .map(|()| None)
+            .map(|()| (None, None))
             .map_err(|_| BrowserMutationRequestError::Forbidden);
     }
     let mut content_types = request.headers().get_all(CONTENT_TYPE).iter();
@@ -567,27 +586,34 @@ async fn verify_browser_mutation_request(
         verify_browser_mutation(&headers, origin, expected_csrf)
             .map_err(|_| BrowserMutationRequestError::Forbidden)?;
         request.extensions_mut().insert(submission);
-        return Ok(None);
+        return Ok((None, None));
     }
-    let maximum_body_bytes = match (logout_form, publication_form, rbac_form) {
-        (true, false, false) => MAX_BROWSER_LOGOUT_FORM_BYTES,
-        (false, true, false) => MAX_PUBLICATION_SETTINGS_FORM_BYTES,
-        (false, false, true) => MAX_RBAC_MANAGEMENT_FORM_BYTES,
-        _ => return Err(BrowserMutationRequestError::Forbidden),
+    let maximum_body_bytes = if logout_form {
+        MAX_BROWSER_LOGOUT_FORM_BYTES
+    } else if publication_form {
+        MAX_PUBLICATION_SETTINGS_FORM_BYTES
+    } else if rbac_form {
+        MAX_RBAC_MANAGEMENT_FORM_BYTES
+    } else if workflow_priority_form {
+        MAX_PRIORITY_FORM_BYTES
+    } else {
+        return Err(BrowserMutationRequestError::Forbidden);
     };
     let body = std::mem::replace(request.body_mut(), Body::empty());
     let bytes = to_bytes(body, maximum_body_bytes)
         .await
         .map_err(|_| BrowserMutationRequestError::PayloadTooLarge)?;
-    let csrf_token = match (logout_form, publication_form, rbac_form) {
-        (true, false, false) => {
-            browser_logout_csrf_token(&bytes).ok_or(BrowserMutationRequestError::Forbidden)?
-        }
-        (false, true, false) => publication_settings_csrf_token(&bytes)
-            .map_err(|_| BrowserMutationRequestError::Forbidden)?,
-        (false, false, true) => rbac_management_csrf_token(&bytes)
-            .map_err(|_| BrowserMutationRequestError::Forbidden)?,
-        _ => return Err(BrowserMutationRequestError::Forbidden),
+    let csrf_token = if logout_form {
+        browser_logout_csrf_token(&bytes).ok_or(BrowserMutationRequestError::Forbidden)?
+    } else if publication_form {
+        publication_settings_csrf_token(&bytes)
+            .map_err(|_| BrowserMutationRequestError::Forbidden)?
+    } else if rbac_form {
+        rbac_management_csrf_token(&bytes).map_err(|_| BrowserMutationRequestError::Forbidden)?
+    } else if workflow_priority_form {
+        workflow_priority_csrf_token(&bytes).map_err(|()| BrowserMutationRequestError::Forbidden)?
+    } else {
+        return Err(BrowserMutationRequestError::Forbidden);
     };
     let mut headers = request.headers().clone();
     let mut csrf_header = axum::http::HeaderValue::from_str(csrf_token.expose_secret())
@@ -603,9 +629,11 @@ async fn verify_browser_mutation_request(
             });
         request.extensions_mut().insert(submission);
     } else if rbac_form {
-        return Ok(Some(bytes));
+        return Ok((Some(bytes), None));
+    } else if workflow_priority_form {
+        return Ok((None, Some(bytes)));
     }
-    Ok(None)
+    Ok((None, None))
 }
 
 fn is_safe_method(method: &Method) -> bool {

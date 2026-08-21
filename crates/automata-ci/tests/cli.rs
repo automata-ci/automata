@@ -505,6 +505,7 @@ fn only_operational_top_level_commands_are_advertised() {
             "secret",
             "environment-review",
             "rerun",
+            "priority",
             "runner",
             "admin"
         ]
@@ -739,6 +740,36 @@ fn rerun_parses_exact_selection_and_retry_identity() {
     assert_eq!(
         args.operation_id.expect("operation ID").to_string(),
         "40000000-0000-4000-8000-000000000004"
+    );
+}
+
+#[test]
+fn priority_parses_bounded_user_levels() {
+    let cli = Cli::try_parse_from([
+        "automata",
+        "priority",
+        "automata-ci/automata",
+        "20000000-0000-4000-8000-000000000002",
+        "--level",
+        "99",
+    ])
+    .expect("priority command must parse");
+    let Command::Priority(args) = cli.command else {
+        panic!("priority command expected");
+    };
+    assert_eq!(args.repository.owner(), "automata-ci");
+    assert_eq!(args.repository.name(), "automata");
+    assert_eq!(args.level, 99);
+    assert!(
+        Cli::try_parse_from([
+            "automata",
+            "priority",
+            "automata-ci/automata",
+            "20000000-0000-4000-8000-000000000002",
+            "--level",
+            "100",
+        ])
+        .is_err()
     );
 }
 

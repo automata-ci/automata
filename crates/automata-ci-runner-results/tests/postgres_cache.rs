@@ -1434,7 +1434,7 @@ async fn second_run_attempt(
             requested_dashboard_visibility, effective_dashboard_visibility,
             requested_log_visibility, requested_artifact_visibility,
             publication_safety_reason, publication_safety_schema,
-            runner_requirements_schema
+            runner_requirements_schema, scheduling_priority
         )
         SELECT
             $1, repository_id, workflow_id, snapshot_id, run_number + 1,
@@ -1445,7 +1445,7 @@ async fn second_run_attempt(
             requested_dashboard_visibility, effective_dashboard_visibility,
             requested_log_visibility, requested_artifact_visibility,
             publication_safety_reason, publication_safety_schema,
-            runner_requirements_schema
+            runner_requirements_schema, scheduling_priority
         FROM workflow_runs
         WHERE id = $2
         ",

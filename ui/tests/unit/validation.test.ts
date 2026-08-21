@@ -1520,6 +1520,36 @@ describe("render request validation", () => {
       expect(() => validateRenderRequest(input)).toThrow(`at ${errorPath}`);
     },
   );
+
+  it("validates bounded run priority and merge-queue ownership", () => {
+    const editable = cloneRequest(runDetailRequest);
+    setPath(editable, ["page", "priorityUpdate"], {
+      endpoint: "/automata-ci/automata/actions/runs/550e8400-e29b-41d4-a716-446655440000/priority",
+      csrfToken: "csrf",
+      current: 99,
+    });
+    expect(() => validateRenderRequest(editable)).not.toThrow();
+
+    for (const level of [-1, 100, 1.5]) {
+      const invalid = structuredClone(editable);
+      setPath(invalid, ["page", "priorityUpdate", "current"], level);
+      expect(() => validateRenderRequest(invalid)).toThrow(
+        "at $.page.priorityUpdate.current",
+      );
+    }
+
+    const mergeQueue = cloneRequest(runDetailRequest);
+    setPath(mergeQueue, ["page", "run", "priority"], {
+      level: 100,
+      label: "Merge queue",
+      mergeQueueManaged: true,
+    });
+    expect(() => validateRenderRequest(mergeQueue)).not.toThrow();
+    setPath(mergeQueue, ["page", "run", "priority", "level"], 99);
+    expect(() => validateRenderRequest(mergeQueue)).toThrow(
+      "at $.page.run.priority",
+    );
+  });
 });
 
 describe("malformed and fuzz-style input", () => {

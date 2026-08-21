@@ -22,7 +22,7 @@ use automata_ci_core::{JobLifecycle, RunnerGroup, RunnerLabel, UnixMillis};
 use automata_ci_metrics::{
     Counter, Family, Gauge, Histogram, Registry, Unit, classic_and_native_histogram,
 };
-use automata_ci_store::WorkflowRunStatus;
+use automata_ci_store::{WorkflowRunPriority, WorkflowRunStatus};
 use prometheus_client::{
     collector::Collector,
     encoding::{
@@ -412,6 +412,7 @@ fn compatible_capacity_snapshot(
         let candidate = RunnableCandidate::new(
             durable.attempt_id(),
             durable.job_id(),
+            WorkflowRunPriority::NORMAL,
             durable.queued_at(),
             routing,
         );

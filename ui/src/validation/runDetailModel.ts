@@ -37,6 +37,7 @@ export function validateRunDetailPage(value: unknown, path: string): void {
     "jobs",
     "jobPagination",
     "artifacts",
+    "priorityUpdate",
     "rerun",
   ]);
   expectLiteral(page.kind, `${path}.kind`, "run-detail");
@@ -50,6 +51,16 @@ export function validateRunDetailPage(value: unknown, path: string): void {
     RENDER_REQUEST_LIMITS.jobCount,
     validateJob,
   );
+  if (page.priorityUpdate !== null) {
+    const priority = expectObject(page.priorityUpdate, `${path}.priorityUpdate`, [
+      "endpoint",
+      "csrfToken",
+      "current",
+    ]);
+    expectRouteField(priority, "endpoint", `${path}.priorityUpdate`);
+    expectString(priority.csrfToken, `${path}.priorityUpdate.csrfToken`, 256, 1);
+    expectInteger(priority.current, `${path}.priorityUpdate.current`, 0, 99);
+  }
   validatePagination(page.jobPagination, `${path}.jobPagination`);
   validateResultCollection(
     page.artifacts,
@@ -112,6 +123,7 @@ function validateRunDetail(
     "workflowName",
     "workflowHref",
     "status",
+    "priority",
     "sourceRef",
     "event",
     "actor",
@@ -125,6 +137,15 @@ function validateRunDetail(
   expectTextField(run, "workflowName", path);
   expectRouteField(run, "workflowHref", path);
   validateStatus(run.status, `${path}.status`);
+  const priority = expectObject(run.priority, `${path}.priority`, [
+    "level",
+    "label",
+    "mergeQueueManaged",
+  ]);
+  const priorityLevel = expectInteger(priority.level, `${path}.priority.level`, 0, 100);
+  expectDisplayText(priority.label, `${path}.priority.label`);
+  expectBoolean(priority.mergeQueueManaged, `${path}.priority.mergeQueueManaged`);
+  if (priority.mergeQueueManaged !== (priorityLevel === 100)) invalid(`${path}.priority`, "merge-queue ownership must match reserved priority 100");
   validateSourceRef(run.sourceRef, `${path}.sourceRef`, repository);
   expectTextField(run, "event", path);
   if (run.actor !== null) {

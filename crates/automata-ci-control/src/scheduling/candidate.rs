@@ -1,6 +1,7 @@
 //! Immutable runnable scheduling candidates.
 
 use automata_ci_core::{AttemptId, JobId, UnixMillis};
+use automata_ci_store::WorkflowRunPriority;
 
 use super::RoutingRequirements;
 
@@ -13,6 +14,7 @@ use super::RoutingRequirements;
 pub struct RunnableCandidate {
     attempt_id: AttemptId,
     job_id: JobId,
+    priority: WorkflowRunPriority,
     queued_at: UnixMillis,
     routing: RoutingRequirements,
 }
@@ -24,12 +26,14 @@ impl RunnableCandidate {
     pub const fn new(
         attempt_id: AttemptId,
         job_id: JobId,
+        priority: WorkflowRunPriority,
         queued_at: UnixMillis,
         routing: RoutingRequirements,
     ) -> Self {
         Self {
             attempt_id,
             job_id,
+            priority,
             queued_at,
             routing,
         }
@@ -45,6 +49,12 @@ impl RunnableCandidate {
     #[must_use]
     pub const fn job_id(&self) -> JobId {
         self.job_id
+    }
+
+    /// Returns the provider-neutral workflow priority.
+    #[must_use]
+    pub const fn priority(&self) -> WorkflowRunPriority {
+        self.priority
     }
 
     /// Returns when the attempt joined the runnable queue.

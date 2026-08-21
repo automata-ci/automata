@@ -3195,12 +3195,13 @@ async fn insert_run(
             publication_policy_revision, requested_dashboard_visibility,
             effective_dashboard_visibility, requested_log_visibility,
             requested_artifact_visibility, publication_safety_reason,
-            publication_safety_schema, runner_requirements_schema
+            publication_safety_schema, runner_requirements_schema,
+            scheduling_priority
         ) VALUES (
             $1,$2,$3,$4,$5,$6,$7,$8,$9,'queued',$10,
             $11,$12,$13,$14,$15,$15,$16,$17,$18,
             $19,$20,$21,$22,$23,$24,$25,$26,$27,
-            $28,$29,$29,$30,$31,'repository_policy',$33,$32
+            $28,$29,$29,$30,$31,'repository_policy',$33,$32,$34
         )
         ON CONFLICT (id) DO NOTHING
         RETURNING id
@@ -3251,6 +3252,7 @@ async fn insert_run(
     .bind(publication.artifacts())
     .bind(i16::try_from(RUNNER_REQUIREMENTS_SCHEMA_VERSION).unwrap_or(i16::MAX))
     .bind(schemas.publication_safety_i32)
+    .bind(command.priority().storage_value())
     .fetch_optional(&mut **transaction)
     .await
     .map_err(operation_error)?;

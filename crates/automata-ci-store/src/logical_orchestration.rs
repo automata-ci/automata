@@ -19,7 +19,7 @@ use crate::{
     GithubServerServiceConsumerClaim, GithubServerServiceConsumerId, GithubServerServiceRevision,
     GithubServerServiceWorkerId, JobCredentialRequirements,
     LOGICAL_ACTIVATION_RUNTIME_CONTEXT_MEDIA_TYPE, RepositoryId, Sha256Digest, StoreError,
-    TenantScope, WorkflowAdmissionIdempotency, WorkflowSnapshotId,
+    TenantScope, WorkflowAdmissionIdempotency, WorkflowRunPriority, WorkflowSnapshotId,
 };
 use automata_ci_provider::ProviderConnectionId;
 
@@ -1051,6 +1051,12 @@ impl AdmitLogicalWorkflowRun {
     #[must_use]
     pub const fn trust_snapshot(&self) -> &TrustSnapshot {
         &self.trust_snapshot
+    }
+
+    /// Returns the queue priority derived from sealed provider-neutral trust.
+    #[must_use]
+    pub const fn priority(&self) -> WorkflowRunPriority {
+        WorkflowRunPriority::from_trust_source(self.trust_snapshot.source_class())
     }
 
     /// Returns the workflow-run identity.

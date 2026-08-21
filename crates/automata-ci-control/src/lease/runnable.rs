@@ -1,12 +1,15 @@
 //! Runnable-queue scan values and opaque cursor proofs.
 
-use std::num::{NonZeroU16, NonZeroU64};
+use std::{
+    cmp::Ordering,
+    num::{NonZeroU16, NonZeroU64},
+};
 
 use automata_ci_core::{
     AttemptId, JobAuthorityProfile, JobId, RunId, RunnerRequirements, Sha256Digest,
     TrustAuthorityDecision, TrustSnapshot, TrustSourceClass, UnixMillis,
 };
-use automata_ci_store::{JobIrMetadata, RunnerSessionFence, StableRunnerSlot};
+use automata_ci_store::{JobIrMetadata, RunnerSessionFence, StableRunnerSlot, WorkflowRunPriority};
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
@@ -95,8 +98,9 @@ impl RunnableScanRequest {
 }
 
 /// Stable keyset position in the runnable FIFO.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct RunnableQueueKey {
+    priority: WorkflowRunPriority,
     queued_at: UnixMillis,
     attempt_id: AttemptId,
 }
@@ -104,11 +108,22 @@ pub struct RunnableQueueKey {
 impl RunnableQueueKey {
     /// Creates a stable FIFO keyset position.
     #[must_use]
-    pub const fn new(queued_at: UnixMillis, attempt_id: AttemptId) -> Self {
+    pub const fn new(
+        priority: WorkflowRunPriority,
+        queued_at: UnixMillis,
+        attempt_id: AttemptId,
+    ) -> Self {
         Self {
+            priority,
             queued_at,
             attempt_id,
         }
+    }
+
+    /// Returns the provider-neutral scheduling priority.
+    #[must_use]
+    pub const fn priority(self) -> WorkflowRunPriority {
+        self.priority
     }
 
     /// Returns the queue time component.
@@ -121,6 +136,22 @@ impl RunnableQueueKey {
     #[must_use]
     pub const fn attempt_id(self) -> AttemptId {
         self.attempt_id
+    }
+}
+
+impl Ord for RunnableQueueKey {
+    fn cmp(&self, other: &Self) -> Ordering {
+        (self.priority.queue_order(), self.queued_at, self.attempt_id).cmp(&(
+            other.priority.queue_order(),
+            other.queued_at,
+            other.attempt_id,
+        ))
+    }
+}
+
+impl PartialOrd for RunnableQueueKey {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
     }
 }
 
@@ -187,6 +218,7 @@ pub struct RunnableAttempt {
     attempt_id: AttemptId,
     job_id: JobId,
     run_id: RunId,
+    priority: WorkflowRunPriority,
     queued_at: UnixMillis,
     requirements: RunnerRequirements,
     ir_metadata: JobIrMetadata,
@@ -302,10 +334,9 @@ impl RunnableAttempt {
     ///
     /// Rejects mismatched `JobIR` identity.
     pub fn try_new(
-        attempt_id: AttemptId,
+        queue_key: RunnableQueueKey,
         job_id: JobId,
         run_id: RunId,
-        queued_at: UnixMillis,
         requirements: RunnerRequirements,
         ir_metadata: JobIrMetadata,
         placement_trust: Option<AuthenticatedPlacementTrust>,
@@ -322,10 +353,11 @@ impl RunnableAttempt {
             return Err(RunnableAttemptError::PlacementRequirementsMismatch);
         }
         Ok(Self {
-            attempt_id,
+            attempt_id: queue_key.attempt_id(),
             job_id,
             run_id,
-            queued_at,
+            priority: queue_key.priority(),
+            queued_at: queue_key.queued_at(),
             requirements,
             ir_metadata,
             placement_trust,
@@ -350,6 +382,12 @@ impl RunnableAttempt {
         self.run_id
     }
 
+    /// Returns the provider-neutral workflow priority.
+    #[must_use]
+    pub const fn priority(&self) -> WorkflowRunPriority {
+        self.priority
+    }
+
     /// Returns the durable queue time.
     #[must_use]
     pub const fn queued_at(&self) -> UnixMillis {
@@ -359,7 +397,7 @@ impl RunnableAttempt {
     /// Returns the stable FIFO keyset position.
     #[must_use]
     pub const fn queue_key(&self) -> RunnableQueueKey {
-        RunnableQueueKey::new(self.queued_at, self.attempt_id)
+        RunnableQueueKey::new(self.priority, self.queued_at, self.attempt_id)
     }
 
     /// Returns the runner requirements used for routing.

@@ -35,6 +35,7 @@ mod reusable_workflow_admission;
 mod reusable_workflow_runtime;
 mod runner_payload;
 mod runtime_authority;
+mod scheduling;
 mod secret_custody;
 mod secret_management;
 mod session;
@@ -392,6 +393,11 @@ pub use runtime_authority::{
     ReconcileGithubRuntimeAuthorities, RejectGithubRuntimeAuthorityMint,
     RetryGithubRuntimeAuthorityMint, RetryGithubRuntimeAuthorityRevocation,
     RevalidateGithubRuntimeAuthorityRevocation, RevalidatedGithubRuntimeAuthorityRevocation,
+};
+pub use scheduling::{
+    MAX_USER_WORKFLOW_PRIORITY, MERGE_QUEUE_WORKFLOW_PRIORITY, UpdateWorkflowRunPriority,
+    UpdateWorkflowRunPriorityOutcome, WorkflowPriorityRepository, WorkflowPriorityRepositoryError,
+    WorkflowRunPriority, WorkflowRunPriorityError,
 };
 pub use secret_custody::{
     MAX_SECRET_CUSTODY_CONFIGURED_KEYS, SECRET_CUSTODY_CANARY_GENERATION,

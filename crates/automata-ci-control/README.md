@@ -9,6 +9,11 @@ validated runner capabilities to deterministic placement decisions. Its
 application services compose those decisions with durable ports and versioned
 runner messages.
 
+Runnable attempts carry one transport-neutral workflow priority. User-selected
+levels are bounded to `0..=99` (larger values run first); merge-queue admission
+uses the reserved level `100` and therefore always precedes user work. The
+deterministic scheduler preserves queue age and attempt ID order within a level.
+
 Runner lease-authority integrations cross one provider-neutral extension
 boundary. Every canonical poll contribution is accepted before scheduling and
 its exact bundle digest is acknowledged in the durable poll response. Offer

@@ -283,6 +283,7 @@ export const runDetailRequest: RenderRequest = {
       workflowName: "CI",
       workflowHref: `/automata-ci/automata/actions/workflows/${CI_WORKFLOW_ID}`,
       status: { label: "In progress", tone: "running" },
+      priority: { level: 0, label: "Normal", mergeQueueManaged: false },
       sourceRef: {
         name: "main",
         kind: "branch",
@@ -338,6 +339,7 @@ export const runDetailRequest: RenderRequest = {
         },
       ],
     },
+    priorityUpdate: null,
     rerun: null,
   },
 };
