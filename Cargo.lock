@@ -1275,14 +1275,36 @@ version = "0.1.0"
 dependencies = [
  "automata-ci-core",
  "automata-ci-execution",
+ "automata-ci-protocol",
  "automata-ci-runner-spool",
  "automata-ci-sandbox-guest",
+ "automata-ci-windows-broker-core",
+ "automata-ci-windows-broker-protocol",
+ "base64 0.23.1",
+ "getrandom 0.4.3",
+ "ring",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror",
+ "zeroize",
+]
+
+[[package]]
+name = "automata-ci-windows-broker-core"
+version = "0.1.0"
+dependencies = [
+ "automata-ci-core",
+ "automata-ci-execution",
+ "automata-ci-protocol",
+ "automata-ci-windows-broker-protocol",
  "base64 0.23.1",
  "ring",
  "serde",
  "serde_json",
  "sha2 0.11.0",
  "thiserror",
+ "zeroize",
 ]
 
 [[package]]

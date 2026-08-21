@@ -57,6 +57,7 @@ members = [
     "crates/automata-ci-workflow-service",
     "crates/automata-ci-windows-file-security",
     "crates/automata-ci-windows-broker",
+    "crates/automata-ci-windows-broker-core",
     "crates/automata-ci-windows-broker-hcs",
     "crates/automata-ci-windows-broker-protocol",
 ]
@@ -136,6 +137,7 @@ automata-ci-workflow-actions = { path = "crates/automata-ci-workflow-actions", v
 automata-ci-workflow-service = { path = "crates/automata-ci-workflow-service", version = "0.1.0" }
 automata-ci-windows-file-security = { path = "crates/automata-ci-windows-file-security", version = "0.1.0" }
 automata-ci-windows-broker = { path = "crates/automata-ci-windows-broker", version = "0.1.0" }
+automata-ci-windows-broker-core = { path = "crates/automata-ci-windows-broker-core", version = "0.1.0" }
 automata-ci-windows-broker-hcs = { path = "crates/automata-ci-windows-broker-hcs", version = "0.1.0" }
 automata-ci-windows-broker-protocol = { path = "crates/automata-ci-windows-broker-protocol", version = "0.1.0" }
 axum = { version = "0.8.4", features = ["http1", "json", "tokio"] }
