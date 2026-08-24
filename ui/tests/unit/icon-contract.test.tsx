@@ -39,6 +39,19 @@ describe("icon contract", () => {
     );
   });
 
+  it("includes the bundled Phosphor glyph used by external links", () => {
+    const styles = readFileSync(
+      resolve(process.cwd(), "src/styles/foundations/icons.css"),
+      "utf8",
+    );
+
+    expect(styles).toContain(".ph.ph-arrow-square-out::before");
+    expect(styles).toContain('content: "\\e5de"');
+    expect(renderToStaticMarkup(<Icon name="external-link" />)).toContain(
+      "ph ph-arrow-square-out",
+    );
+  });
+
   it("uses bundled Phosphor glyphs for the native account disclosure", () => {
     const styles = readFileSync(
       resolve(process.cwd(), "src/styles/foundations/icons.css"),

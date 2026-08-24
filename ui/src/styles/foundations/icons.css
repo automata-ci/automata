@@ -46,6 +46,10 @@
   content: "\e282";
 }
 
+.ph.ph-arrow-square-out::before {
+  content: "\e5de";
+}
+
 .ph.ph-tag::before {
   content: "\e478";
 }
