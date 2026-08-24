@@ -1,6 +1,6 @@
 [package]
 name = "automata-ci-provisioning-postgres"
-description = "PostgreSQL workspace provisioning adapters for Automata"
+description = "PostgreSQL tenant provisioning adapters for Automata"
 publish.workspace = true
 version.workspace = true
 edition.workspace = true

@@ -72,16 +72,16 @@ use automata_ci_provider_github::{
 use automata_ci_provider_postgres::PostgresProviderManifestRepository;
 use automata_ci_provisioning::{
     GithubProviderConfigurationApplier, GithubProviderDesiredStateReader,
-    GithubProviderRunnerPolicyApplier, ProvisioningWorkloadAuthenticator,
-    WorkspaceEntitlementApplier, WorkspaceGithubRepositoriesApplier, WorkspaceProvisioner,
+    GithubProviderRunnerPolicyApplier, ProvisioningWorkloadAuthenticator, TenantEntitlementApplier,
+    TenantGithubRepositoriesApplier, TenantProvisioner,
 };
 use automata_ci_provisioning_grpc::{
     ManagementApplicationPorts, ManagementGrpcServer, ManagementServerTlsConfig,
 };
 use automata_ci_provisioning_postgres::{
     PostgresGithubProviderConfigurationApplier, PostgresGithubProviderDesiredStateReader,
-    PostgresGithubProviderRunnerPolicyApplier, PostgresWorkspaceEntitlementApplier,
-    PostgresWorkspaceGithubRepositoriesApplier, PostgresWorkspaceProvisioner,
+    PostgresGithubProviderRunnerPolicyApplier, PostgresTenantEntitlementApplier,
+    PostgresTenantGithubRepositoriesApplier, PostgresTenantProvisioner,
 };
 use automata_ci_runner_auth_postgres::PostgresRunnerMachineDirectory;
 use automata_ci_runner_results::{
@@ -868,11 +868,11 @@ fn build_management_server(
             config.authority().clone(),
             config.client_certificate_sha256().to_vec(),
         ));
-    let provisioner: Arc<dyn WorkspaceProvisioner> = Arc::new(PostgresWorkspaceProvisioner::new(
+    let provisioner: Arc<dyn TenantProvisioner> = Arc::new(PostgresTenantProvisioner::new(
         store.postgres_pool().clone(),
     ));
-    let entitlement_applier: Arc<dyn WorkspaceEntitlementApplier> = Arc::new(
-        PostgresWorkspaceEntitlementApplier::new(store.postgres_pool().clone()),
+    let entitlement_applier: Arc<dyn TenantEntitlementApplier> = Arc::new(
+        PostgresTenantEntitlementApplier::new(store.postgres_pool().clone()),
     );
     let provider_configuration_applier: Arc<dyn GithubProviderConfigurationApplier> =
         Arc::new(PostgresGithubProviderConfigurationApplier::new(
@@ -882,8 +882,8 @@ fn build_management_server(
     let runner_policy_applier: Arc<dyn GithubProviderRunnerPolicyApplier> = Arc::new(
         PostgresGithubProviderRunnerPolicyApplier::new(store.postgres_pool().clone()),
     );
-    let workspace_repositories_applier: Arc<dyn WorkspaceGithubRepositoriesApplier> = Arc::new(
-        PostgresWorkspaceGithubRepositoriesApplier::new(store.postgres_pool().clone()),
+    let tenant_repositories_applier: Arc<dyn TenantGithubRepositoriesApplier> = Arc::new(
+        PostgresTenantGithubRepositoriesApplier::new(store.postgres_pool().clone()),
     );
     Ok(Some(ManagementGrpcServer::new(
         listener,
@@ -894,7 +894,7 @@ fn build_management_server(
             entitlement_applier,
             provider_configuration_applier,
             runner_policy_applier,
-            workspace_repositories_applier,
+            tenant_repositories_applier,
         ),
     )))
 }

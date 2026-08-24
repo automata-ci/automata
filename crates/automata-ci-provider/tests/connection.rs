@@ -1,4 +1,4 @@
-use automata_ci_core::{Sha256Digest, UnixMillis, WorkspaceId};
+use automata_ci_core::{ManagedTenantId, Sha256Digest, UnixMillis};
 use automata_ci_provider::{
     ExternalRepositoryId, ExternalRepositoryIdentity, ProviderArchiveLimits,
     ProviderConfigurationRevision, ProviderConnectionConfiguration, ProviderConnectionError,
@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 fn configuration(visibility: RepositoryVisibility) -> ProviderConnectionConfiguration {
     ProviderConnectionConfiguration::new(
-        WorkspaceId::parse("11111111-1111-4111-8111-111111111111").expect("workspace"),
+        ManagedTenantId::parse("11111111-1111-4111-8111-111111111111").expect("tenant"),
         ExternalRepositoryIdentity::new(
             ProviderInstanceId::from_uuid(Uuid::from_u128(2)).expect("instance"),
             ExternalRepositoryId::new("repository-42").expect("repository"),

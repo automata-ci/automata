@@ -301,6 +301,10 @@ const CANONICAL_MIGRATIONS: &[(&str, &str)] = &[
         "0074_provider_handoff_consumer_guard.sql",
         "cc8e6393ec556f8e209a06b19f0333b97729a1dbd85509debc1b04a374eb6f3ff1c707709e3fb2c0a0326d81d637d4df",
     ),
+    (
+        "0075_managed_tenant_terminology.sql",
+        "24d361521f054b5de434c0ccfc06a1cac3ae3bbbad399277a529f323a09154a9d058876f43886fb99afdc49f7e1b7e28",
+    ),
 ];
 
 const BASELINE_MIGRATION_COUNT: u32 = 26;
@@ -1117,6 +1121,34 @@ fn provider_delivery_runtime_authority_currentness_does_not_require_subject_evid
         assert!(
             source.contains(required),
             "currentness repair lost: {required}"
+        );
+    }
+}
+
+#[test]
+fn externally_managed_boundaries_use_tenant_terminology() {
+    let source = include_str!("../migrations/0075_managed_tenant_terminology.sql");
+
+    for required in [
+        "RENAME TO tenant_provisioning_operations",
+        "RENAME TO tenant_management_bindings",
+        "RENAME TO tenant_entitlement_operations",
+        "RENAME TO tenant_execution_entitlements",
+        "RENAME TO tenant_usage_events",
+        "RENAME TO tenant_github_repository_operations",
+        "RENAME COLUMN workspace_id TO tenant_id",
+        "SET name = 'tenant-owner'",
+        "LOCK TABLE rbac_roles IN SHARE MODE",
+    ] {
+        assert!(
+            source.contains(required),
+            "managed tenant terminology migration lost: {required}"
+        );
+    }
+    for forbidden in ["IF NOT EXISTS", " CASCADE"] {
+        assert!(
+            !source.contains(forbidden),
+            "managed tenant terminology retained transitional SQL: {forbidden}"
         );
     }
 }

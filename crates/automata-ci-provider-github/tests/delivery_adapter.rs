@@ -3,7 +3,7 @@ use crate::support::{
     signed_webhook_headers,
 };
 
-use automata_ci_core::{GitObjectId, Sha256Digest, UnixMillis, WorkspaceId};
+use automata_ci_core::{GitObjectId, ManagedTenantId, Sha256Digest, UnixMillis};
 use automata_ci_key_management::SecretBytes;
 use automata_ci_provider::{
     DeliveryAdapter as _, ExternalRepositoryId, ExternalRepositoryIdentity, NormalizedTrigger,
@@ -83,7 +83,7 @@ impl Fixture {
         .document()
         .expect("policy document");
         let configuration = ProviderConnectionConfiguration::new(
-            WorkspaceId::parse("11111111-1111-4111-8111-111111111111").expect("workspace"),
+            ManagedTenantId::parse("11111111-1111-4111-8111-111111111111").expect("tenant"),
             ExternalRepositoryIdentity::new(
                 instance_id,
                 ExternalRepositoryId::new(repository_id).expect("repository ID"),

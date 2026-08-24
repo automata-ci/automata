@@ -1,6 +1,6 @@
 use std::{collections::BTreeSet, fmt, num::NonZeroU64};
 
-use automata_ci_core::{JobAuthorityProfile, WorkspaceId};
+use automata_ci_core::{JobAuthorityProfile, ManagedTenantId};
 use automata_ci_provider_github::GithubWebhookVerifier;
 use automata_ci_store::{
     GithubCheckName, GithubRepositoryName, GithubServerServiceAppClientId,
@@ -18,8 +18,8 @@ use crate::{OperationId, ProvisioningAuthority, ShardId};
 pub const MAX_GITHUB_PROVIDER_PRIVATE_KEY_BYTES: usize = 32 * 1_024;
 /// Maximum repositories served by one shard-wide GitHub provider runtime.
 pub const MAX_GITHUB_PROVIDER_REPOSITORIES: usize = 256;
-/// Maximum repositories in one workspace desired-set revision.
-pub const MAX_WORKSPACE_GITHUB_REPOSITORIES: usize = MAX_GITHUB_PROVIDER_REPOSITORIES;
+/// Maximum repositories in one tenant desired-set revision.
+pub const MAX_TENANT_GITHUB_REPOSITORIES: usize = MAX_GITHUB_PROVIDER_REPOSITORIES;
 
 const PROTOBUF_TIMESTAMP_MIN_SECONDS: i64 = -62_135_596_800;
 const PROTOBUF_TIMESTAMP_MAX_SECONDS: i64 = 253_402_300_799;
@@ -64,9 +64,9 @@ positive_revision!(
     InvalidProviderRevision
 );
 positive_revision!(
-    /// Monotonic complete GitHub repository desired-set revision for one workspace.
-    WorkspaceGithubRepositoriesRevision,
-    InvalidWorkspaceRevision
+    /// Monotonic complete GitHub repository desired-set revision for one tenant.
+    TenantGithubRepositoriesRevision,
+    InvalidTenantRevision
 );
 
 /// Owned GitHub provider credential accepted only at a secret-handling boundary.
@@ -613,7 +613,7 @@ impl fmt::Debug for AuthorizedApplyGithubProviderRunnerPolicy {
     }
 }
 
-/// One selected GitHub repository in a complete workspace desired set.
+/// One selected GitHub repository in a complete tenant desired set.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GithubProviderRepositorySelection {
     installation_id: ProviderInstallationId,
@@ -731,20 +731,20 @@ impl GithubProviderRepositorySelection {
     }
 }
 
-/// Complete validated repository desired-set command for one workspace.
+/// Complete validated repository desired-set command for one tenant.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ApplyWorkspaceGithubRepositoriesCommand {
+pub struct ApplyTenantGithubRepositoriesCommand {
     operation_id: OperationId,
     shard_id: ShardId,
-    workspace_id: WorkspaceId,
-    revision: WorkspaceGithubRepositoriesRevision,
+    tenant_id: ManagedTenantId,
+    revision: TenantGithubRepositoriesRevision,
     repositories: Vec<GithubProviderRepositorySelection>,
 }
 
-impl ApplyWorkspaceGithubRepositoriesCommand {
+impl ApplyTenantGithubRepositoriesCommand {
     /// Creates a complete, stably ordered repository desired set.
     ///
-    /// An empty set is valid and disconnects every repository from the workspace.
+    /// An empty set is valid and disconnects every repository from the tenant.
     ///
     /// # Errors
     ///
@@ -752,15 +752,15 @@ impl ApplyWorkspaceGithubRepositoriesCommand {
     pub fn new(
         operation_id: OperationId,
         shard_id: ShardId,
-        workspace_id: WorkspaceId,
-        revision: WorkspaceGithubRepositoriesRevision,
+        tenant_id: ManagedTenantId,
+        revision: TenantGithubRepositoriesRevision,
         repositories: Vec<GithubProviderRepositorySelection>,
     ) -> Result<Self, GithubProviderValueError> {
         let repositories = normalize_repositories(repositories)?;
         Ok(Self {
             operation_id,
             shard_id,
-            workspace_id,
+            tenant_id,
             revision,
             repositories,
         })
@@ -778,15 +778,15 @@ impl ApplyWorkspaceGithubRepositoriesCommand {
         &self.shard_id
     }
 
-    /// Returns the workspace receiving this desired set.
+    /// Returns the tenant receiving this desired set.
     #[must_use]
-    pub const fn workspace_id(&self) -> WorkspaceId {
-        self.workspace_id
+    pub const fn tenant_id(&self) -> ManagedTenantId {
+        self.tenant_id
     }
 
-    /// Returns the monotonic workspace desired-set revision.
+    /// Returns the monotonic tenant desired-set revision.
     #[must_use]
-    pub const fn revision(&self) -> WorkspaceGithubRepositoriesRevision {
+    pub const fn revision(&self) -> TenantGithubRepositoriesRevision {
         self.revision
     }
 
@@ -797,24 +797,24 @@ impl ApplyWorkspaceGithubRepositoriesCommand {
     }
 }
 
-/// Workspace desired-set command proven to target the caller's configured shard.
+/// Tenant desired-set command proven to target the caller's configured shard.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AuthorizedApplyWorkspaceGithubRepositories {
+pub struct AuthorizedApplyTenantGithubRepositories {
     authority: ProvisioningAuthority,
-    command: ApplyWorkspaceGithubRepositoriesCommand,
+    command: ApplyTenantGithubRepositoriesCommand,
 }
 
-impl AuthorizedApplyWorkspaceGithubRepositories {
+impl AuthorizedApplyTenantGithubRepositories {
     /// Authorizes the requested shard against authenticated workload authority.
     ///
-    /// Durable persistence additionally verifies that the authority owns the workspace.
+    /// Durable persistence additionally verifies that the authority owns the tenant.
     ///
     /// # Errors
     ///
     /// Rejects a command addressed to another shard.
     pub fn authorize(
         authority: ProvisioningAuthority,
-        command: ApplyWorkspaceGithubRepositoriesCommand,
+        command: ApplyTenantGithubRepositoriesCommand,
     ) -> Result<Self, GithubProviderValueError> {
         if authority.shard_id() != command.shard_id() {
             return Err(GithubProviderValueError::Forbidden);
@@ -830,60 +830,55 @@ impl AuthorizedApplyWorkspaceGithubRepositories {
 
     /// Returns the validated command.
     #[must_use]
-    pub const fn command(&self) -> &ApplyWorkspaceGithubRepositoriesCommand {
+    pub const fn command(&self) -> &ApplyTenantGithubRepositoriesCommand {
         &self.command
     }
 
     /// Consumes the authorized request.
     #[must_use]
-    pub fn into_parts(
-        self,
-    ) -> (
-        ProvisioningAuthority,
-        ApplyWorkspaceGithubRepositoriesCommand,
-    ) {
+    pub fn into_parts(self) -> (ProvisioningAuthority, ApplyTenantGithubRepositoriesCommand) {
         (self.authority, self.command)
     }
 }
 
-/// Current complete repository desired set for one workspace.
+/// Current complete repository desired set for one tenant.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct WorkspaceGithubRepositoriesDesiredState {
-    workspace_id: WorkspaceId,
-    revision: WorkspaceGithubRepositoriesRevision,
+pub struct TenantGithubRepositoriesDesiredState {
+    tenant_id: ManagedTenantId,
+    revision: TenantGithubRepositoriesRevision,
     applied_at: GithubProviderTimestamp,
     repositories: Vec<GithubProviderRepositorySelection>,
 }
 
-impl WorkspaceGithubRepositoriesDesiredState {
-    /// Creates one already-validated, stably ordered workspace desired set.
+impl TenantGithubRepositoriesDesiredState {
+    /// Creates one already-validated, stably ordered tenant desired set.
     ///
     /// # Errors
     ///
     /// Rejects excessive or duplicate repository identities.
     pub fn new(
-        workspace_id: WorkspaceId,
-        revision: WorkspaceGithubRepositoriesRevision,
+        tenant_id: ManagedTenantId,
+        revision: TenantGithubRepositoriesRevision,
         applied_at: GithubProviderTimestamp,
         repositories: Vec<GithubProviderRepositorySelection>,
     ) -> Result<Self, GithubProviderValueError> {
         Ok(Self {
-            workspace_id,
+            tenant_id,
             revision,
             applied_at,
             repositories: normalize_repositories(repositories)?,
         })
     }
 
-    /// Returns the workspace owning this desired set.
+    /// Returns the tenant owning this desired set.
     #[must_use]
-    pub const fn workspace_id(&self) -> WorkspaceId {
-        self.workspace_id
+    pub const fn tenant_id(&self) -> ManagedTenantId {
+        self.tenant_id
     }
 
     /// Returns its monotonic complete-set revision.
     #[must_use]
-    pub const fn revision(&self) -> WorkspaceGithubRepositoriesRevision {
+    pub const fn revision(&self) -> TenantGithubRepositoriesRevision {
         self.revision
     }
 
@@ -903,7 +898,7 @@ impl WorkspaceGithubRepositoriesDesiredState {
 fn normalize_repositories(
     mut repositories: Vec<GithubProviderRepositorySelection>,
 ) -> Result<Vec<GithubProviderRepositorySelection>, GithubProviderValueError> {
-    if repositories.len() > MAX_WORKSPACE_GITHUB_REPOSITORIES {
+    if repositories.len() > MAX_TENANT_GITHUB_REPOSITORIES {
         return Err(GithubProviderValueError::TooManyRepositories);
     }
     let mut ids = BTreeSet::new();
@@ -965,7 +960,7 @@ pub struct GithubProviderDesiredState {
     shard_id: ShardId,
     version: GithubProviderDesiredStateVersion,
     configuration: GithubProviderConfiguration,
-    workspaces: Vec<WorkspaceGithubRepositoriesDesiredState>,
+    tenants: Vec<TenantGithubRepositoriesDesiredState>,
 }
 
 impl GithubProviderDesiredState {
@@ -973,25 +968,25 @@ impl GithubProviderDesiredState {
     ///
     /// # Errors
     ///
-    /// Rejects zero runtime revisions or duplicate workspace identities.
+    /// Rejects zero runtime revisions or duplicate tenant identities.
     pub fn new(
         shard_id: ShardId,
         version: GithubProviderDesiredStateVersion,
         configuration: GithubProviderConfiguration,
-        mut workspaces: Vec<WorkspaceGithubRepositoriesDesiredState>,
+        mut tenants: Vec<TenantGithubRepositoriesDesiredState>,
     ) -> Result<Self, GithubProviderValueError> {
-        workspaces.sort_unstable_by_key(WorkspaceGithubRepositoriesDesiredState::workspace_id);
-        if workspaces
+        tenants.sort_unstable_by_key(TenantGithubRepositoriesDesiredState::tenant_id);
+        if tenants
             .windows(2)
-            .any(|pair| pair[0].workspace_id == pair[1].workspace_id)
+            .any(|pair| pair[0].tenant_id == pair[1].tenant_id)
         {
-            return Err(GithubProviderValueError::DuplicateWorkspace);
+            return Err(GithubProviderValueError::DuplicateTenant);
         }
         Ok(Self {
             shard_id,
             version,
             configuration,
-            workspaces,
+            tenants,
         })
     }
 
@@ -1037,10 +1032,10 @@ impl GithubProviderDesiredState {
         &self.configuration
     }
 
-    /// Returns current workspace sets in stable workspace order.
+    /// Returns current tenant sets in stable tenant order.
     #[must_use]
-    pub fn workspaces(&self) -> &[WorkspaceGithubRepositoriesDesiredState] {
-        &self.workspaces
+    pub fn tenants(&self) -> &[TenantGithubRepositoriesDesiredState] {
+        &self.tenants
     }
 
     /// Consumes the snapshot into runtime projection parts.
@@ -1055,7 +1050,7 @@ impl GithubProviderDesiredState {
         u64,
         u64,
         GithubProviderConfiguration,
-        Vec<WorkspaceGithubRepositoriesDesiredState>,
+        Vec<TenantGithubRepositoriesDesiredState>,
     ) {
         (
             self.shard_id,
@@ -1065,7 +1060,7 @@ impl GithubProviderDesiredState {
             self.version.webhook_verifier_revision,
             self.version.runner_policy_revision,
             self.configuration,
-            self.workspaces,
+            self.tenants,
         )
     }
 }
@@ -1093,13 +1088,13 @@ impl fmt::Debug for GithubProviderDesiredState {
                 &self.version.runner_policy_revision,
             )
             .field("configuration", &self.configuration)
-            .field("workspace_count", &self.workspaces.len())
+            .field("tenant_count", &self.tenants.len())
             .field(
                 "repository_count",
                 &self
-                    .workspaces
+                    .tenants
                     .iter()
-                    .map(|workspace| workspace.repositories.len())
+                    .map(|tenant| tenant.repositories.len())
                     .sum::<usize>(),
             )
             .finish()
@@ -1247,30 +1242,30 @@ impl ApplyGithubProviderRunnerPolicyResult {
     }
 }
 
-/// Stable result of applying one workspace repository desired-set revision.
+/// Stable result of applying one tenant repository desired-set revision.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ApplyWorkspaceGithubRepositoriesResult {
+pub struct ApplyTenantGithubRepositoriesResult {
     operation_id: OperationId,
     shard_id: ShardId,
-    workspace_id: WorkspaceId,
-    revision: WorkspaceGithubRepositoriesRevision,
+    tenant_id: ManagedTenantId,
+    revision: TenantGithubRepositoriesRevision,
     applied_at: GithubProviderTimestamp,
 }
 
-impl ApplyWorkspaceGithubRepositoriesResult {
+impl ApplyTenantGithubRepositoriesResult {
     /// Creates a stable durable result.
     #[must_use]
     pub const fn new(
         operation_id: OperationId,
         shard_id: ShardId,
-        workspace_id: WorkspaceId,
-        revision: WorkspaceGithubRepositoriesRevision,
+        tenant_id: ManagedTenantId,
+        revision: TenantGithubRepositoriesRevision,
         applied_at: GithubProviderTimestamp,
     ) -> Self {
         Self {
             operation_id,
             shard_id,
-            workspace_id,
+            tenant_id,
             revision,
             applied_at,
         }
@@ -1288,15 +1283,15 @@ impl ApplyWorkspaceGithubRepositoriesResult {
         &self.shard_id
     }
 
-    /// Returns the affected workspace identity.
+    /// Returns the affected tenant identity.
     #[must_use]
-    pub const fn workspace_id(&self) -> WorkspaceId {
-        self.workspace_id
+    pub const fn tenant_id(&self) -> ManagedTenantId {
+        self.tenant_id
     }
 
     /// Returns the committed desired-set revision.
     #[must_use]
-    pub const fn revision(&self) -> WorkspaceGithubRepositoriesRevision {
+    pub const fn revision(&self) -> TenantGithubRepositoriesRevision {
         self.revision
     }
 
@@ -1381,15 +1376,15 @@ impl GithubProviderConfigurationFailure {
     }
 }
 
-/// Closed workspace repository desired-set failure classification.
+/// Closed tenant repository desired-set failure classification.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum WorkspaceGithubRepositoriesFailureKind {
+pub enum TenantGithubRepositoriesFailureKind {
     /// An operation ID was reused for different input.
     OperationConflict,
-    /// The revision did not advance the current workspace desired set.
+    /// The revision did not advance the current tenant desired set.
     StaleRevision,
-    /// The workspace is absent or managed by another authority.
-    WorkspaceUnavailable,
+    /// The tenant is absent or managed by another authority.
+    TenantUnavailable,
     /// The resulting shard registry would duplicate a repository or exceed capacity.
     ShardRegistryConflict,
     /// Durable storage is temporarily unavailable.
@@ -1398,23 +1393,23 @@ pub enum WorkspaceGithubRepositoriesFailureKind {
     Internal,
 }
 
-/// Sanitized workspace repository desired-set application failure.
+/// Sanitized tenant repository desired-set application failure.
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
-#[error("workspace GitHub repository configuration failed: {kind:?}")]
-pub struct WorkspaceGithubRepositoriesFailure {
-    kind: WorkspaceGithubRepositoriesFailureKind,
+#[error("tenant GitHub repository configuration failed: {kind:?}")]
+pub struct TenantGithubRepositoriesFailure {
+    kind: TenantGithubRepositoriesFailureKind,
 }
 
-impl WorkspaceGithubRepositoriesFailure {
+impl TenantGithubRepositoriesFailure {
     /// Creates one closed failure.
     #[must_use]
-    pub const fn new(kind: WorkspaceGithubRepositoriesFailureKind) -> Self {
+    pub const fn new(kind: TenantGithubRepositoriesFailureKind) -> Self {
         Self { kind }
     }
 
     /// Returns the machine-readable failure kind.
     #[must_use]
-    pub const fn kind(&self) -> WorkspaceGithubRepositoriesFailureKind {
+    pub const fn kind(&self) -> TenantGithubRepositoriesFailureKind {
         self.kind
     }
 }
@@ -1455,9 +1450,9 @@ pub enum GithubProviderValueError {
     /// The shard-wide configuration revision is invalid.
     #[error("GitHub provider configuration revision is invalid")]
     InvalidProviderRevision,
-    /// The workspace repository desired-set revision is invalid.
-    #[error("workspace GitHub repository revision is invalid")]
-    InvalidWorkspaceRevision,
+    /// The tenant repository desired-set revision is invalid.
+    #[error("tenant GitHub repository revision is invalid")]
+    InvalidTenantRevision,
     /// The dashboard URL is not a canonical HTTPS base origin.
     #[error("GitHub provider dashboard URL is invalid")]
     InvalidDashboardUrl,
@@ -1476,11 +1471,11 @@ pub enum GithubProviderValueError {
     /// A complete desired set contains duplicate repository identity.
     #[error("GitHub provider repository selection is duplicated")]
     DuplicateRepository,
-    /// A desired-state snapshot contains a duplicate workspace identity.
-    #[error("GitHub provider workspace desired state is duplicated")]
-    DuplicateWorkspace,
+    /// A desired-state snapshot contains a duplicate tenant identity.
+    #[error("GitHub provider tenant desired state is duplicated")]
+    DuplicateTenant,
     /// A complete desired set exceeds the hard repository bound.
-    #[error("workspace GitHub repository selection is excessive")]
+    #[error("tenant GitHub repository selection is excessive")]
     TooManyRepositories,
     /// A management command targets another shard.
     #[error("GitHub provider management is outside the workload authority")]
@@ -1558,22 +1553,22 @@ mod tests {
 
     #[test]
     fn repository_desired_set_is_complete_sorted_and_unique() {
-        let command = ApplyWorkspaceGithubRepositoriesCommand::new(
+        let command = ApplyTenantGithubRepositoriesCommand::new(
             OperationId::parse("11111111-1111-4111-8111-111111111111").unwrap(),
             ShardId::new("local").unwrap(),
-            WorkspaceId::parse("22222222-2222-4222-8222-222222222222").unwrap(),
-            WorkspaceGithubRepositoriesRevision::new(1).unwrap(),
+            ManagedTenantId::parse("22222222-2222-4222-8222-222222222222").unwrap(),
+            TenantGithubRepositoriesRevision::new(1).unwrap(),
             vec![repository(2, "owner/two"), repository(1, "owner/one")],
         )
         .unwrap();
         assert_eq!(command.repositories()[0].repository_id().get(), 1);
 
         assert_eq!(
-            ApplyWorkspaceGithubRepositoriesCommand::new(
+            ApplyTenantGithubRepositoriesCommand::new(
                 OperationId::parse("11111111-1111-4111-8111-111111111111").unwrap(),
                 ShardId::new("local").unwrap(),
-                WorkspaceId::parse("22222222-2222-4222-8222-222222222222").unwrap(),
-                WorkspaceGithubRepositoriesRevision::new(1).unwrap(),
+                ManagedTenantId::parse("22222222-2222-4222-8222-222222222222").unwrap(),
+                TenantGithubRepositoriesRevision::new(1).unwrap(),
                 vec![repository(1, "owner/one"), repository(1, "owner/two")],
             )
             .unwrap_err(),

@@ -54,25 +54,24 @@ use automata_ci_core::WorkflowId;
 use automata_ci_store::HumanLiveLogBrowserOrigin;
 
 /// Protected Core endpoint used by Cloud to resolve the current viewer.
-pub const DELEGATED_ACTOR_VIEWER_PATH: &str = "/internal/v2/workspaces/{workspace_id}/viewer";
+pub const DELEGATED_ACTOR_VIEWER_PATH: &str = "/internal/v2/tenants/{tenant_id}/viewer";
 /// Protected Core endpoint used by Cloud to check current tenant permissions.
 pub const DELEGATED_ACTOR_AUTHORIZATION_CHECK_PATH: &str =
-    "/internal/v2/workspaces/{workspace_id}/authorization-checks";
+    "/internal/v2/tenants/{tenant_id}/authorization-checks";
 /// Protected Core endpoint used by Cloud to list repositories visible to one actor.
-pub const DELEGATED_ACTOR_REPOSITORIES_PATH: &str =
-    "/internal/v2/workspaces/{workspace_id}/repositories";
+pub const DELEGATED_ACTOR_REPOSITORIES_PATH: &str = "/internal/v2/tenants/{tenant_id}/repositories";
 /// Protected Core endpoint used by Cloud to list repository workflow runs.
 pub const DELEGATED_ACTOR_RUNS_PATH: &str =
-    "/internal/v2/workspaces/{workspace_id}/repositories/{owner}/{repository}/runs";
+    "/internal/v2/tenants/{tenant_id}/repositories/{owner}/{repository}/runs";
 /// Protected Core endpoint used by Cloud to read one run and its current jobs.
 pub const DELEGATED_ACTOR_RUN_PATH: &str =
-    "/internal/v2/workspaces/{workspace_id}/repositories/{owner}/{repository}/runs/{run_id}";
+    "/internal/v2/tenants/{tenant_id}/repositories/{owner}/{repository}/runs/{run_id}";
 /// Protected Core endpoint used by Cloud to read job and structured-stream metadata.
-pub const DELEGATED_ACTOR_JOB_LOG_PATH: &str = "/internal/v2/workspaces/{workspace_id}/repositories/{owner}/{repository}/runs/{run_id}/jobs/{job_id}";
+pub const DELEGATED_ACTOR_JOB_LOG_PATH: &str = "/internal/v2/tenants/{tenant_id}/repositories/{owner}/{repository}/runs/{run_id}/jobs/{job_id}";
 /// Protected Core endpoint used by Cloud to authorize one browser log tail.
-pub const DELEGATED_ACTOR_LIVE_LOG_TICKET_PATH: &str = "/internal/v2/workspaces/{workspace_id}/repositories/{owner}/{repository}/runs/{run_id}/jobs/{job_id}/live-ticket";
+pub const DELEGATED_ACTOR_LIVE_LOG_TICKET_PATH: &str = "/internal/v2/tenants/{tenant_id}/repositories/{owner}/{repository}/runs/{run_id}/jobs/{job_id}/live-ticket";
 /// Protected Core endpoint used by Cloud to dispatch one exact durable workflow source.
-pub const DELEGATED_ACTOR_WORKFLOW_DISPATCH_PATH: &str = "/internal/v2/workspaces/{workspace_id}/repositories/{repository_id}/workflows/{workflow_id}/dispatches";
+pub const DELEGATED_ACTOR_WORKFLOW_DISPATCH_PATH: &str = "/internal/v2/tenants/{tenant_id}/repositories/{repository_id}/workflows/{workflow_id}/dispatches";
 
 const MAX_ASSERTION_BYTES: usize = 8 * 1024;
 const MAX_JWT_SEGMENT_BYTES: usize = 6 * 1024;
@@ -176,7 +175,7 @@ impl DelegatedActorVerifier {
             return Err(DelegatedActorVerificationError::Rejected);
         }
         let subject = canonical_uuid(&claims.sub)?;
-        let workspace_id = canonical_uuid(&claims.workspace_id)?;
+        let tenant_id = canonical_uuid(&claims.tenant_id)?;
         let session_id = canonical_uuid(&claims.session_id)?;
         let assertion_id = canonical_uuid(&claims.jti)?;
         let assertion = DelegatedActorAssertion::new(
@@ -191,7 +190,7 @@ impl DelegatedActorVerifier {
         .map_err(|_| DelegatedActorVerificationError::Rejected)?;
         Ok(VerifiedDelegatedActor {
             assertion,
-            workspace_id,
+            tenant_id,
         })
     }
 
@@ -248,7 +247,7 @@ impl DelegatedActorVerifier {
 #[derive(Debug)]
 struct VerifiedDelegatedActor {
     assertion: DelegatedActorAssertion,
-    workspace_id: Uuid,
+    tenant_id: Uuid,
 }
 
 #[derive(Debug)]
@@ -272,7 +271,7 @@ struct DelegatedActorClaims {
     iss: String,
     sub: String,
     aud: String,
-    workspace_id: String,
+    tenant_id: String,
     session_id: String,
     auth_time: u64,
     iat: u64,
@@ -415,9 +414,9 @@ impl std::fmt::Debug for DelegatedActorApiState {
 }
 
 #[derive(Serialize)]
-struct WorkspaceViewerResponse {
+struct TenantViewerResponse {
     protocol_version: u8,
-    workspace_id: String,
+    tenant_id: String,
     principal_id: String,
     display_name: String,
     authorization_revision: u64,
@@ -425,22 +424,22 @@ struct WorkspaceViewerResponse {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct WorkspaceAuthorizationCheckRequest {
+struct TenantAuthorizationCheckRequest {
     protocol_version: u8,
     permissions: Vec<String>,
 }
 
 #[derive(Serialize)]
-struct WorkspaceAuthorizationCheckResponse {
+struct TenantAuthorizationCheckResponse {
     protocol_version: u8,
-    workspace_id: String,
+    tenant_id: String,
     principal_id: String,
     authorization_revision: u64,
-    decisions: Vec<WorkspacePermissionDecisionResponse>,
+    decisions: Vec<TenantPermissionDecisionResponse>,
 }
 
 #[derive(Serialize)]
-struct WorkspacePermissionDecisionResponse {
+struct TenantPermissionDecisionResponse {
     permission: String,
     allowed: bool,
 }
@@ -470,7 +469,7 @@ struct RunDetailQuery {
 #[derive(Serialize)]
 struct RepositoryDirectoryResponse {
     protocol_version: u8,
-    workspace_id: String,
+    tenant_id: String,
     repositories: Vec<RepositoryDirectoryItemResponse>,
     next_cursor: Option<String>,
 }
@@ -494,7 +493,7 @@ struct RepositoryResponse {
 #[derive(Serialize)]
 struct RunListResponse {
     protocol_version: u8,
-    workspace_id: String,
+    tenant_id: String,
     repository: RepositoryResponse,
     workflows: Vec<WorkflowDefinitionResponse>,
     selected_workflow: Option<WorkflowDefinitionResponse>,
@@ -539,7 +538,7 @@ struct RunSummaryResponse {
 #[derive(Serialize)]
 struct RunDetailResponse {
     protocol_version: u8,
-    workspace_id: String,
+    tenant_id: String,
     repository: RepositoryResponse,
     run: RunSummaryResponse,
     jobs: VisibleCollectionResponse<JobSummaryResponse>,
@@ -579,7 +578,7 @@ struct ArtifactSummaryResponse {
 #[derive(Serialize)]
 struct JobLogResponse {
     protocol_version: u8,
-    workspace_id: String,
+    tenant_id: String,
     repository: RepositoryResponse,
     run: RunSummaryResponse,
     jobs: Vec<JobNavigationItemResponse>,
@@ -608,27 +607,24 @@ pub(crate) fn router(
     workflow_dispatch: Option<Arc<dyn WorkflowDispatchApiBackend>>,
 ) -> Router {
     let mut router = Router::new()
-        .route(DELEGATED_ACTOR_VIEWER_PATH, get(workspace_viewer))
+        .route(DELEGATED_ACTOR_VIEWER_PATH, get(tenant_viewer))
         .route(
             DELEGATED_ACTOR_AUTHORIZATION_CHECK_PATH,
-            post(workspace_authorization_check)
+            post(tenant_authorization_check)
                 .layer(DefaultBodyLimit::max(MAX_AUTHORIZATION_CHECK_BODY_BYTES)),
         )
-        .route(
-            DELEGATED_ACTOR_REPOSITORIES_PATH,
-            get(workspace_repositories),
-        )
-        .route(DELEGATED_ACTOR_RUNS_PATH, get(workspace_runs))
-        .route(DELEGATED_ACTOR_RUN_PATH, get(workspace_run))
-        .route(DELEGATED_ACTOR_JOB_LOG_PATH, get(workspace_job_log))
+        .route(DELEGATED_ACTOR_REPOSITORIES_PATH, get(tenant_repositories))
+        .route(DELEGATED_ACTOR_RUNS_PATH, get(tenant_runs))
+        .route(DELEGATED_ACTOR_RUN_PATH, get(tenant_run))
+        .route(DELEGATED_ACTOR_JOB_LOG_PATH, get(tenant_job_log))
         .route(
             DELEGATED_ACTOR_LIVE_LOG_TICKET_PATH,
-            post(workspace_live_log_ticket),
+            post(tenant_live_log_ticket),
         );
     if workflow_dispatch.is_some() {
         router = router.route(
             DELEGATED_ACTOR_WORKFLOW_DISPATCH_PATH,
-            post(workspace_workflow_dispatch),
+            post(tenant_workflow_dispatch),
         );
     }
     router.with_state(DelegatedActorApiState {
@@ -641,13 +637,13 @@ pub(crate) fn router(
     })
 }
 
-async fn workspace_authorization_check(
+async fn tenant_authorization_check(
     State(state): State<DelegatedActorApiState>,
-    Path(workspace_id): Path<String>,
+    Path(tenant_id): Path<String>,
     headers: HeaderMap,
-    payload: Result<Json<WorkspaceAuthorizationCheckRequest>, JsonRejection>,
+    payload: Result<Json<TenantAuthorizationCheckRequest>, JsonRejection>,
 ) -> Response {
-    let Ok(workspace_uuid) = canonical_uuid(&workspace_id) else {
+    let Ok(tenant_uuid) = canonical_uuid(&tenant_id) else {
         return status_response(StatusCode::NOT_FOUND);
     };
     let Ok(Json(request)) = payload else {
@@ -659,7 +655,7 @@ async fn workspace_authorization_check(
     let requested_permissions = permissions.iter().cloned().collect();
     let snapshot = match resolve_actor_with_tenant_permissions(
         &state,
-        workspace_uuid,
+        tenant_uuid,
         &headers,
         requested_permissions,
     )
@@ -675,14 +671,14 @@ async fn workspace_authorization_check(
     ) else {
         return status_response(StatusCode::INTERNAL_SERVER_ERROR);
     };
-    json_response(WorkspaceAuthorizationCheckResponse {
+    json_response(TenantAuthorizationCheckResponse {
         protocol_version: 2,
-        workspace_id,
+        tenant_id,
         principal_id: principal_id.as_str().to_owned(),
         authorization_revision,
         decisions: permissions
             .into_iter()
-            .map(|permission| WorkspacePermissionDecisionResponse {
+            .map(|permission| TenantPermissionDecisionResponse {
                 allowed: snapshot.allows_tenant_permission(&permission),
                 permission: permission.into(),
             })
@@ -691,7 +687,7 @@ async fn workspace_authorization_check(
 }
 
 fn authorization_check_permissions(
-    request: WorkspaceAuthorizationCheckRequest,
+    request: TenantAuthorizationCheckRequest,
 ) -> Option<Vec<Permission>> {
     if request.protocol_version != 2
         || request.permissions.is_empty()
@@ -711,15 +707,15 @@ fn authorization_check_permissions(
     Some(permissions)
 }
 
-async fn workspace_workflow_dispatch(
+async fn tenant_workflow_dispatch(
     State(state): State<DelegatedActorApiState>,
-    Path((workspace_id, repository_id, workflow_id)): Path<(String, String, String)>,
+    Path((tenant_id, repository_id, workflow_id)): Path<(String, String, String)>,
     request: axum::extract::Request,
 ) -> Response {
-    let Ok(workspace_uuid) = canonical_uuid(&workspace_id) else {
+    let Ok(tenant_uuid) = canonical_uuid(&tenant_id) else {
         return status_response(StatusCode::NOT_FOUND);
     };
-    let snapshot = match resolve_actor(&state, workspace_uuid, request.headers()).await {
+    let snapshot = match resolve_actor(&state, tenant_uuid, request.headers()).await {
         Ok(snapshot) => snapshot,
         Err(response) => return response,
     };
@@ -733,7 +729,7 @@ async fn workspace_workflow_dispatch(
     dispatch_delegated_workflow(
         backend,
         actor,
-        workspace_uuid,
+        tenant_uuid,
         repository_id,
         workflow_id,
         request,
@@ -741,15 +737,15 @@ async fn workspace_workflow_dispatch(
     .await
 }
 
-async fn workspace_viewer(
+async fn tenant_viewer(
     State(state): State<DelegatedActorApiState>,
-    Path(workspace_id): Path<String>,
+    Path(tenant_id): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    let Ok(workspace_uuid) = canonical_uuid(&workspace_id) else {
+    let Ok(tenant_uuid) = canonical_uuid(&tenant_id) else {
         return status_response(StatusCode::NOT_FOUND);
     };
-    let snapshot = match resolve_actor(&state, workspace_uuid, &headers).await {
+    let snapshot = match resolve_actor(&state, tenant_uuid, &headers).await {
         Ok(snapshot) => snapshot,
         Err(response) => return response,
     };
@@ -765,9 +761,9 @@ async fn workspace_viewer(
             (header::CACHE_CONTROL, "no-store"),
             (header::CONTENT_TYPE, "application/json"),
         ],
-        Json(WorkspaceViewerResponse {
+        Json(TenantViewerResponse {
             protocol_version: 2,
-            workspace_id,
+            tenant_id,
             principal_id: principal_id.as_str().to_owned(),
             display_name: snapshot.viewer().display_name().to_owned(),
             authorization_revision,
@@ -776,16 +772,16 @@ async fn workspace_viewer(
         .into_response()
 }
 
-async fn workspace_repositories(
+async fn tenant_repositories(
     State(state): State<DelegatedActorApiState>,
-    Path(workspace_id): Path<String>,
+    Path(tenant_id): Path<String>,
     Query(query): Query<RepositoryDirectoryQuery>,
     headers: HeaderMap,
 ) -> Response {
     if !valid_cursor(query.cursor.as_deref()) {
         return status_response(StatusCode::BAD_REQUEST);
     }
-    let context = match resolve_context(&state, &workspace_id, &headers).await {
+    let context = match resolve_context(&state, &tenant_id, &headers).await {
         Ok(context) => context,
         Err(response) => return response,
     };
@@ -794,14 +790,14 @@ async fn workspace_repositories(
         limit: REPOSITORY_PAGE_SIZE,
     };
     match state.web_data.repository_page(&context, &request).await {
-        Ok(page) => json_response(repository_directory_response(workspace_id, page)),
+        Ok(page) => json_response(repository_directory_response(tenant_id, page)),
         Err(error) => web_data_error_response(error),
     }
 }
 
-async fn workspace_runs(
+async fn tenant_runs(
     State(state): State<DelegatedActorApiState>,
-    Path((workspace_id, owner, repository)): Path<(String, String, String)>,
+    Path((tenant_id, owner, repository)): Path<(String, String, String)>,
     Query(query): Query<RunListQuery>,
     headers: HeaderMap,
 ) -> Response {
@@ -828,7 +824,7 @@ async fn workspace_runs(
         "completed" => StatusFilter::Completed,
         _ => return status_response(StatusCode::BAD_REQUEST),
     };
-    let context = match resolve_context(&state, &workspace_id, &headers).await {
+    let context = match resolve_context(&state, &tenant_id, &headers).await {
         Ok(context) => context,
         Err(response) => return response,
     };
@@ -845,15 +841,15 @@ async fn workspace_runs(
         .list_runs(&context, &repository, &request)
         .await
     {
-        Ok(Some(page)) => json_response(run_list_response(workspace_id, page)),
+        Ok(Some(page)) => json_response(run_list_response(tenant_id, page)),
         Ok(None) => status_response(StatusCode::NOT_FOUND),
         Err(error) => web_data_error_response(error),
     }
 }
 
-async fn workspace_run(
+async fn tenant_run(
     State(state): State<DelegatedActorApiState>,
-    Path((workspace_id, owner, repository, run_id)): Path<(String, String, String, String)>,
+    Path((tenant_id, owner, repository, run_id)): Path<(String, String, String, String)>,
     Query(query): Query<RunDetailQuery>,
     headers: HeaderMap,
 ) -> Response {
@@ -866,7 +862,7 @@ async fn workspace_run(
     if !valid_cursor(query.job_cursor.as_deref()) {
         return status_response(StatusCode::BAD_REQUEST);
     }
-    let context = match resolve_context(&state, &workspace_id, &headers).await {
+    let context = match resolve_context(&state, &tenant_id, &headers).await {
         Ok(context) => context,
         Err(response) => return response,
     };
@@ -879,15 +875,15 @@ async fn workspace_run(
         .run_detail(&context, &repository, run_id, &request)
         .await
     {
-        Ok(Some(page)) => json_response(run_detail_response(workspace_id, page)),
+        Ok(Some(page)) => json_response(run_detail_response(tenant_id, page)),
         Ok(None) => status_response(StatusCode::NOT_FOUND),
         Err(error) => web_data_error_response(error),
     }
 }
 
-async fn workspace_job_log(
+async fn tenant_job_log(
     State(state): State<DelegatedActorApiState>,
-    Path((workspace_id, owner, repository, run_id, job_id)): Path<(
+    Path((tenant_id, owner, repository, run_id, job_id)): Path<(
         String,
         String,
         String,
@@ -906,7 +902,7 @@ async fn workspace_job_log(
     let (Some(run_id), Some(job_id)) = (parse_run_id(&run_id), parse_job_id(&job_id)) else {
         return status_response(StatusCode::NOT_FOUND);
     };
-    let context = match resolve_context(&state, &workspace_id, &headers).await {
+    let context = match resolve_context(&state, &tenant_id, &headers).await {
         Ok(context) => context,
         Err(response) => return response,
     };
@@ -915,15 +911,15 @@ async fn workspace_job_log(
         .job_log(&context, &repository, run_id, job_id)
         .await
     {
-        Ok(Some(page)) => json_response(job_log_response(workspace_id, page)),
+        Ok(Some(page)) => json_response(job_log_response(tenant_id, page)),
         Ok(None) => status_response(StatusCode::NOT_FOUND),
         Err(error) => web_data_error_response(error),
     }
 }
 
-async fn workspace_live_log_ticket(
+async fn tenant_live_log_ticket(
     State(state): State<DelegatedActorApiState>,
-    Path((workspace_id, owner, repository, run_id, job_id)): Path<(
+    Path((tenant_id, owner, repository, run_id, job_id)): Path<(
         String,
         String,
         String,
@@ -932,10 +928,10 @@ async fn workspace_live_log_ticket(
     )>,
     headers: HeaderMap,
 ) -> Response {
-    let Ok(workspace_uuid) = canonical_uuid(&workspace_id) else {
+    let Ok(tenant_uuid) = canonical_uuid(&tenant_id) else {
         return status_response(StatusCode::NOT_FOUND);
     };
-    let snapshot = match resolve_actor(&state, workspace_uuid, &headers).await {
+    let snapshot = match resolve_actor(&state, tenant_uuid, &headers).await {
         Ok(snapshot) => snapshot,
         Err(response) => return response,
     };
@@ -945,7 +941,7 @@ async fn workspace_live_log_ticket(
     let (Some(run_id), Some(job_id)) = (parse_run_id(&run_id), parse_job_id(&job_id)) else {
         return status_response(StatusCode::NOT_FOUND);
     };
-    let Ok(tenant_id) = TenantId::new(workspace_id) else {
+    let Ok(tenant_id) = TenantId::new(tenant_id) else {
         return status_response(StatusCode::NOT_FOUND);
     };
     let Ok(context) = RequestContext::new(
@@ -977,14 +973,14 @@ async fn workspace_live_log_ticket(
 
 async fn resolve_context(
     state: &DelegatedActorApiState,
-    workspace_id: &str,
+    tenant_id: &str,
     headers: &HeaderMap,
 ) -> Result<RequestContext, Response> {
-    let workspace_uuid =
-        canonical_uuid(workspace_id).map_err(|_| status_response(StatusCode::NOT_FOUND))?;
-    let snapshot = resolve_actor(state, workspace_uuid, headers).await?;
-    let tenant_id = TenantId::new(workspace_id.to_owned())
-        .map_err(|_| status_response(StatusCode::NOT_FOUND))?;
+    let tenant_uuid =
+        canonical_uuid(tenant_id).map_err(|_| status_response(StatusCode::NOT_FOUND))?;
+    let snapshot = resolve_actor(state, tenant_uuid, headers).await?;
+    let tenant_id =
+        TenantId::new(tenant_id.to_owned()).map_err(|_| status_response(StatusCode::NOT_FOUND))?;
     RequestContext::new(
         tenant_id,
         snapshot.authorization().clone(),
@@ -997,12 +993,12 @@ async fn resolve_context(
 }
 
 fn repository_directory_response(
-    workspace_id: String,
+    tenant_id: String,
     page: RepositoryDirectoryPage,
 ) -> RepositoryDirectoryResponse {
     RepositoryDirectoryResponse {
         protocol_version: 2,
-        workspace_id,
+        tenant_id,
         repositories: page
             .repositories
             .into_iter()
@@ -1037,10 +1033,10 @@ fn repository_response(repository: Repository) -> RepositoryResponse {
     }
 }
 
-fn run_list_response(workspace_id: String, page: RunListPage) -> RunListResponse {
+fn run_list_response(tenant_id: String, page: RunListPage) -> RunListResponse {
     RunListResponse {
         protocol_version: 2,
-        workspace_id,
+        tenant_id,
         repository: repository_response(page.repository),
         workflows: page
             .workflows
@@ -1090,10 +1086,10 @@ fn run_summary_response(run: RunSummary) -> RunSummaryResponse {
     }
 }
 
-fn run_detail_response(workspace_id: String, page: RunDetailPage) -> RunDetailResponse {
+fn run_detail_response(tenant_id: String, page: RunDetailPage) -> RunDetailResponse {
     RunDetailResponse {
         protocol_version: 2,
-        workspace_id,
+        tenant_id,
         repository: repository_response(page.repository),
         run: run_summary_response(page.run),
         jobs: VisibleCollectionResponse {
@@ -1143,10 +1139,10 @@ fn artifact_summary_response(artifact: ArtifactSummary) -> ArtifactSummaryRespon
     }
 }
 
-fn job_log_response(workspace_id: String, page: JobLogPage) -> JobLogResponse {
+fn job_log_response(tenant_id: String, page: JobLogPage) -> JobLogResponse {
     JobLogResponse {
         protocol_version: 2,
-        workspace_id,
+        tenant_id,
         repository: repository_response(page.repository),
         run: run_summary_response(page.run),
         jobs: page
@@ -1225,15 +1221,15 @@ fn web_data_error_response(error: WebDataError) -> Response {
 
 async fn resolve_actor(
     state: &DelegatedActorApiState,
-    workspace_uuid: Uuid,
+    tenant_uuid: Uuid,
     headers: &HeaderMap,
 ) -> Result<Box<DelegatedActorRequestSnapshot>, Response> {
-    resolve_actor_with_tenant_permissions(state, workspace_uuid, headers, BTreeSet::new()).await
+    resolve_actor_with_tenant_permissions(state, tenant_uuid, headers, BTreeSet::new()).await
 }
 
 async fn resolve_actor_with_tenant_permissions(
     state: &DelegatedActorApiState,
-    workspace_uuid: Uuid,
+    tenant_uuid: Uuid,
     headers: &HeaderMap,
     requested_tenant_permissions: BTreeSet<Permission>,
 ) -> Result<Box<DelegatedActorRequestSnapshot>, Response> {
@@ -1242,13 +1238,13 @@ async fn resolve_actor_with_tenant_permissions(
     };
     let now = unix_time();
     let verified = match state.verifier.verify(token, now).await {
-        Ok(value) if value.workspace_id == workspace_uuid => value,
+        Ok(value) if value.tenant_id == tenant_uuid => value,
         Ok(_) | Err(DelegatedActorVerificationError::Rejected) => return Err(unauthorized()),
         Err(DelegatedActorVerificationError::Unavailable) => {
             return Err(status_response(StatusCode::SERVICE_UNAVAILABLE));
         }
     };
-    let Ok(tenant_id) = TenantId::new(workspace_uuid.hyphenated().to_string()) else {
+    let Ok(tenant_id) = TenantId::new(tenant_uuid.hyphenated().to_string()) else {
         return Err(status_response(StatusCode::NOT_FOUND));
     };
     let request = ResolveDelegatedActorRequest::new(verified.assertion, tenant_id)
@@ -1504,7 +1500,7 @@ mod tests {
 
     #[test]
     fn authorization_check_accepts_one_exact_bounded_permission_set() {
-        let parsed = authorization_check_permissions(WorkspaceAuthorizationCheckRequest {
+        let parsed = authorization_check_permissions(TenantAuthorizationCheckRequest {
             protocol_version: 2,
             permissions: vec!["billing:read".to_owned(), "billing:manage".to_owned()],
         })
@@ -1515,23 +1511,23 @@ mod tests {
         );
 
         for rejected in [
-            WorkspaceAuthorizationCheckRequest {
+            TenantAuthorizationCheckRequest {
                 protocol_version: 1,
                 permissions: vec!["billing:read".to_owned()],
             },
-            WorkspaceAuthorizationCheckRequest {
+            TenantAuthorizationCheckRequest {
                 protocol_version: 2,
                 permissions: Vec::new(),
             },
-            WorkspaceAuthorizationCheckRequest {
+            TenantAuthorizationCheckRequest {
                 protocol_version: 2,
                 permissions: vec!["billing:read".to_owned(), "billing:read".to_owned()],
             },
-            WorkspaceAuthorizationCheckRequest {
+            TenantAuthorizationCheckRequest {
                 protocol_version: 2,
                 permissions: vec!["billing/read".to_owned()],
             },
-            WorkspaceAuthorizationCheckRequest {
+            TenantAuthorizationCheckRequest {
                 protocol_version: 2,
                 permissions: (0..=MAX_DELEGATED_TENANT_PERMISSION_CHECKS)
                     .map(|index| format!("billing:test-{index}"))
@@ -1588,12 +1584,12 @@ mod tests {
             None,
         );
 
-        let workspace_id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
-        let token = sign_current_test_token(&key, &random, workspace_id);
+        let tenant_id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+        let token = sign_current_test_token(&key, &random, tenant_id);
         let request = Request::builder()
             .method("POST")
             .uri(format!(
-                "/internal/v2/workspaces/{workspace_id}/authorization-checks"
+                "/internal/v2/tenants/{tenant_id}/authorization-checks"
             ))
             .header(header::AUTHORIZATION, format!("Bearer {token}"))
             .header(header::CONTENT_TYPE, "application/json")
@@ -1623,7 +1619,7 @@ mod tests {
             body,
             serde_json::json!({
                 "protocol_version": 2,
-                "workspace_id": workspace_id,
+                "tenant_id": tenant_id,
                 "principal_id": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
                 "authorization_revision": 17,
                 "decisions": [
@@ -1635,7 +1631,7 @@ mod tests {
         assert_eq!(
             *resolver.observed.lock().expect("resolver observation lock"),
             vec![(
-                TenantId::new(workspace_id).expect("tenant ID"),
+                TenantId::new(tenant_id).expect("tenant ID"),
                 BTreeSet::from([billing_manage, billing_read])
             )]
         );
@@ -1668,7 +1664,7 @@ mod tests {
             "iss": "https://cloud.automata.example",
             "sub": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
             "aud": "prod-us-east-1",
-            "workspace_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "tenant_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
             "session_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
             "auth_time": 900,
             "iat": 1_000,
@@ -1681,8 +1677,8 @@ mod tests {
             .await
             .expect("valid assertion");
         assert_eq!(
-            verified_actor.workspace_id,
-            Uuid::parse_str("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb").expect("workspace")
+            verified_actor.tenant_id,
+            Uuid::parse_str("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb").expect("tenant")
         );
 
         let mut wrong_audience = claims.clone();
@@ -1726,7 +1722,7 @@ mod tests {
     fn sign_current_test_token(
         key: &EcdsaKeyPair,
         random: &SystemRandom,
-        workspace_id: &str,
+        tenant_id: &str,
     ) -> String {
         let now = unix_time().as_seconds();
         let header = serde_json::json!({"alg": "ES256", "kid": "key_1", "typ": "at+jwt"});
@@ -1735,7 +1731,7 @@ mod tests {
             "iss": "https://cloud.automata.example",
             "sub": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
             "aud": "prod-us-east-1",
-            "workspace_id": workspace_id,
+            "tenant_id": tenant_id,
             "session_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
             "auth_time": now.saturating_sub(10),
             "iat": now,

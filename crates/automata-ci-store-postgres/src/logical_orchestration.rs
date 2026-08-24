@@ -1682,7 +1682,7 @@ async fn load_provider_selection_authority_row(
           AND invocation.created_at_ms = $8
           AND $9 >= invocation.claim_started_at_ms
           AND $9 < invocation.claim_expires_at_ms
-          AND connection.workspace_id = $10
+          AND connection.tenant_id = $10
           AND connection.lifecycle_state = 'active'
           AND provider.lifecycle_state = 'active'
           AND delivery.provider_type = $11

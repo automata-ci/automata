@@ -1,6 +1,6 @@
 [package]
 name = "automata-ci-provisioning-grpc"
-description = "mTLS gRPC adapter for Automata Core workspace provisioning"
+description = "mTLS gRPC adapter for Automata Core tenant provisioning"
 publish.workspace = true
 version.workspace = true
 edition.workspace = true

@@ -1,7 +1,7 @@
 use std::{collections::BTreeMap, fmt, sync::Arc};
 
 use automata_ci_core::JobAuthorityProfile;
-use automata_ci_core::WorkspaceId;
+use automata_ci_core::ManagedTenantId;
 use automata_ci_key_management::{
     EncryptedEnvelope, EnvelopeCodec, EnvelopeError, KeyEncryptionContext, KeyEncryptionProvider,
     KeyId, KeyPurpose, SecretBytes, WrappedDataKey,
@@ -9,9 +9,9 @@ use automata_ci_key_management::{
 use automata_ci_provisioning::{
     ApplyGithubProviderConfigurationCommand, ApplyGithubProviderConfigurationResult,
     ApplyGithubProviderRunnerPolicyCommand, ApplyGithubProviderRunnerPolicyResult,
-    ApplyWorkspaceGithubRepositoriesCommand, ApplyWorkspaceGithubRepositoriesResult,
+    ApplyTenantGithubRepositoriesCommand, ApplyTenantGithubRepositoriesResult,
     AuthorizedApplyGithubProviderConfiguration, AuthorizedApplyGithubProviderRunnerPolicy,
-    AuthorizedApplyWorkspaceGithubRepositories, GithubProviderConfigurationApplicationFuture,
+    AuthorizedApplyTenantGithubRepositories, GithubProviderConfigurationApplicationFuture,
     GithubProviderConfigurationApplier, GithubProviderConfigurationFailure,
     GithubProviderConfigurationFailureKind, GithubProviderConfigurationRevision,
     GithubProviderDesiredState, GithubProviderDesiredStateFailure,
@@ -21,9 +21,9 @@ use automata_ci_provisioning::{
     GithubProviderRunnerPolicyApplier, GithubProviderRunnerPolicyFailure,
     GithubProviderRunnerPolicyFailureKind, GithubProviderSchedulePolicy, GithubProviderSecret,
     GithubProviderTimestamp, MAX_GITHUB_PROVIDER_REPOSITORIES, ShardId,
-    WorkspaceGithubRepositoriesApplicationFuture, WorkspaceGithubRepositoriesApplier,
-    WorkspaceGithubRepositoriesDesiredState, WorkspaceGithubRepositoriesFailure,
-    WorkspaceGithubRepositoriesFailureKind, WorkspaceGithubRepositoriesRevision,
+    TenantGithubRepositoriesApplicationFuture, TenantGithubRepositoriesApplier,
+    TenantGithubRepositoriesDesiredState, TenantGithubRepositoriesFailure,
+    TenantGithubRepositoriesFailureKind, TenantGithubRepositoriesRevision,
 };
 use automata_ci_store::{
     GithubCheckName, GithubRepositoryName, GithubServerServiceAppClientId,
@@ -446,14 +446,14 @@ impl GithubProviderRunnerPolicyApplier for PostgresGithubProviderRunnerPolicyApp
     }
 }
 
-/// Replica-safe `PostgreSQL` implementation of complete workspace repository sets.
+/// Replica-safe `PostgreSQL` implementation of complete tenant repository sets.
 #[derive(Clone)]
-pub struct PostgresWorkspaceGithubRepositoriesApplier {
+pub struct PostgresTenantGithubRepositoriesApplier {
     pool: PgPool,
 }
 
-impl PostgresWorkspaceGithubRepositoriesApplier {
-    /// Binds workspace GitHub repository desired state to `pool`.
+impl PostgresTenantGithubRepositoriesApplier {
+    /// Binds tenant GitHub repository desired state to `pool`.
     #[must_use]
     pub const fn new(pool: PgPool) -> Self {
         Self { pool }
@@ -465,91 +465,87 @@ impl PostgresWorkspaceGithubRepositoriesApplier {
     )]
     async fn apply_inner(
         &self,
-        request: AuthorizedApplyWorkspaceGithubRepositories,
-    ) -> Result<ApplyWorkspaceGithubRepositoriesResult, WorkspaceGithubRepositoriesFailure> {
+        request: AuthorizedApplyTenantGithubRepositories,
+    ) -> Result<ApplyTenantGithubRepositoriesResult, TenantGithubRepositoriesFailure> {
         let (authority, command) = request.into_parts();
-        let digest = workspace_repositories_digest(&command);
+        let digest = tenant_repositories_digest(&command);
         let authority_id = authority.id().as_str();
         let operation_id = command.operation_id();
         let shard_id = command.shard_id();
-        let workspace_id = command.workspace_id();
-        let workspace_text = workspace_id.to_string();
+        let tenant_id = command.tenant_id();
+        let tenant_text = tenant_id.to_string();
         let revision = command.revision();
-        let revision_i64 = i64::try_from(revision.get()).map_err(|_| workspace_internal())?;
-        let mut transaction = self
-            .pool
-            .begin()
-            .await
-            .map_err(workspace_database_failure)?;
+        let revision_i64 = i64::try_from(revision.get()).map_err(|_| tenant_internal())?;
+        let mut transaction = self.pool.begin().await.map_err(tenant_database_failure)?;
 
-        let binding = sqlx::query_as::<_, WorkspaceBinding>(
+        let binding = sqlx::query_as::<_, TenantBinding>(
             r"
-            SELECT authority_id, shard_id FROM workspace_management_bindings
-            WHERE workspace_id=$1 FOR UPDATE
+            SELECT authority_id, shard_id FROM tenant_management_bindings
+            WHERE tenant_id=$1 FOR UPDATE
             ",
         )
-        .bind(&workspace_text)
+        .bind(&tenant_text)
         .fetch_optional(&mut *transaction)
         .await
-        .map_err(workspace_database_failure)?;
+        .map_err(tenant_database_failure)?;
         if binding.as_ref().is_none_or(|binding| {
             binding.authority_id != authority_id || binding.shard_id != shard_id.as_str()
         }) {
-            return Err(workspace_failure(
-                WorkspaceGithubRepositoriesFailureKind::WorkspaceUnavailable,
+            return Err(tenant_failure(
+                TenantGithubRepositoriesFailureKind::TenantUnavailable,
             ));
         }
 
         if let Some(stored) =
-            load_workspace_operation(&mut transaction, authority_id, operation_id.as_uuid()).await?
+            load_tenant_operation(&mut transaction, authority_id, operation_id.as_uuid()).await?
         {
             if stored.shard_id != shard_id.as_str()
-                || stored.workspace_id != workspace_text
+                || stored.tenant_id != tenant_text
                 || stored.revision != revision_i64
                 || stored.request_digest.as_slice() != digest.as_slice()
             {
-                return Err(workspace_failure(
-                    WorkspaceGithubRepositoriesFailureKind::OperationConflict,
+                return Err(tenant_failure(
+                    TenantGithubRepositoriesFailureKind::OperationConflict,
                 ));
             }
-            return workspace_result(
+            return tenant_result(
                 operation_id,
                 shard_id.clone(),
-                workspace_id,
+                tenant_id,
                 revision,
                 stored.applied_at_ms,
             );
         }
         let current_revision: Option<i64> = sqlx::query_scalar(
-            "SELECT revision FROM workspace_github_repository_current WHERE workspace_id=$1",
+            "SELECT revision FROM tenant_github_repository_current WHERE tenant_id=$1",
         )
-        .bind(&workspace_text)
+        .bind(&tenant_text)
         .fetch_optional(&mut *transaction)
         .await
-        .map_err(workspace_database_failure)?;
+        .map_err(tenant_database_failure)?;
         if current_revision.is_some_and(|current| revision_i64 <= current) {
-            return Err(workspace_failure(
-                WorkspaceGithubRepositoriesFailureKind::StaleRevision,
+            return Err(tenant_failure(
+                TenantGithubRepositoriesFailureKind::StaleRevision,
             ));
         }
         lock_provider_registry(&mut transaction)
             .await
-            .map_err(workspace_database_failure)?;
+            .map_err(tenant_database_failure)?;
         validate_shard_registry(
             &mut transaction,
             shard_id,
-            workspace_id,
+            tenant_id,
             command.repositories(),
         )
         .await?;
         let applied_at_ms = database_time_milliseconds(&mut transaction)
             .await
-            .map_err(workspace_database_failure)?;
+            .map_err(tenant_database_failure)?;
 
         sqlx::query(
             r"
-            INSERT INTO workspace_github_repository_operations (
-                authority_id, operation_id, shard_id, workspace_id, revision,
+            INSERT INTO tenant_github_repository_operations (
+                authority_id, operation_id, shard_id, tenant_id, revision,
                 request_digest, applied_at_ms
             ) VALUES ($1,$2,$3,$4,$5,$6,$7)
             ",
@@ -557,26 +553,26 @@ impl PostgresWorkspaceGithubRepositoriesApplier {
         .bind(authority_id)
         .bind(operation_id.as_uuid())
         .bind(shard_id.as_str())
-        .bind(&workspace_text)
+        .bind(&tenant_text)
         .bind(revision_i64)
         .bind(digest.as_slice())
         .bind(applied_at_ms)
         .execute(&mut *transaction)
         .await
-        .map_err(workspace_database_failure)?;
-        sqlx::query("DELETE FROM workspace_github_repository_current WHERE workspace_id=$1")
-            .bind(&workspace_text)
+        .map_err(tenant_database_failure)?;
+        sqlx::query("DELETE FROM tenant_github_repository_current WHERE tenant_id=$1")
+            .bind(&tenant_text)
             .execute(&mut *transaction)
             .await
-            .map_err(workspace_database_failure)?;
+            .map_err(tenant_database_failure)?;
         sqlx::query(
             r"
-            INSERT INTO workspace_github_repository_current (
-                workspace_id, shard_id, revision, authority_id, operation_id, applied_at_ms
+            INSERT INTO tenant_github_repository_current (
+                tenant_id, shard_id, revision, authority_id, operation_id, applied_at_ms
             ) VALUES ($1,$2,$3,$4,$5,$6)
             ",
         )
-        .bind(&workspace_text)
+        .bind(&tenant_text)
         .bind(shard_id.as_str())
         .bind(revision_i64)
         .bind(authority_id)
@@ -584,21 +580,21 @@ impl PostgresWorkspaceGithubRepositoriesApplier {
         .bind(applied_at_ms)
         .execute(&mut *transaction)
         .await
-        .map_err(workspace_database_failure)?;
+        .map_err(tenant_database_failure)?;
         for (ordinal, repository) in command.repositories().iter().enumerate() {
             let installation_binding_generation = advance_installation_binding(
                 &mut transaction,
-                &workspace_text,
+                &tenant_text,
                 revision_i64,
                 repository,
             )
             .await?;
             insert_repository_selection(
                 &mut transaction,
-                &workspace_text,
+                &tenant_text,
                 shard_id,
                 revision_i64,
-                i32::try_from(ordinal).map_err(|_| workspace_internal())?,
+                i32::try_from(ordinal).map_err(|_| tenant_internal())?,
                 repository,
                 installation_binding_generation,
             )
@@ -609,43 +605,43 @@ impl PostgresWorkspaceGithubRepositoriesApplier {
             INSERT INTO security_audit_events (
                 event_id, tenant_id, occurred_at_ms, actor_kind, action,
                 outcome, resource_kind, resource_id
-            ) VALUES ($1,$2,$3,'system','workspace.github.repositories.applied',
-                      'succeeded','workspace',$2)
+            ) VALUES ($1,$2,$3,'system','tenant.github.repositories.applied',
+                      'succeeded','tenant',$2)
             ",
         )
         .bind(Uuid::new_v4())
-        .bind(&workspace_text)
+        .bind(&tenant_text)
         .bind(applied_at_ms)
         .execute(&mut *transaction)
         .await
-        .map_err(workspace_database_failure)?;
+        .map_err(tenant_database_failure)?;
         transaction
             .commit()
             .await
-            .map_err(workspace_database_failure)?;
-        workspace_result(
+            .map_err(tenant_database_failure)?;
+        tenant_result(
             operation_id,
             shard_id.clone(),
-            workspace_id,
+            tenant_id,
             revision,
             applied_at_ms,
         )
     }
 }
 
-impl fmt::Debug for PostgresWorkspaceGithubRepositoriesApplier {
+impl fmt::Debug for PostgresTenantGithubRepositoriesApplier {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("PostgresWorkspaceGithubRepositoriesApplier")
+            .debug_struct("PostgresTenantGithubRepositoriesApplier")
             .finish_non_exhaustive()
     }
 }
 
-impl WorkspaceGithubRepositoriesApplier for PostgresWorkspaceGithubRepositoriesApplier {
+impl TenantGithubRepositoriesApplier for PostgresTenantGithubRepositoriesApplier {
     fn apply(
         &self,
-        request: AuthorizedApplyWorkspaceGithubRepositories,
-    ) -> WorkspaceGithubRepositoriesApplicationFuture<'_> {
+        request: AuthorizedApplyTenantGithubRepositories,
+    ) -> TenantGithubRepositoriesApplicationFuture<'_> {
         Box::pin(self.apply_inner(request))
     }
 }
@@ -692,12 +688,12 @@ impl PostgresGithubProviderDesiredStateReader {
                 .map_err(desired_database_failure)?;
             return Ok(None);
         };
-        let workspace_states = sqlx::query_as::<_, WorkspaceCurrentRow>(
+        let tenant_states = sqlx::query_as::<_, TenantCurrentRow>(
             r"
-            SELECT current.workspace_id, current.revision, current.applied_at_ms
-            FROM workspace_github_repository_current AS current
+            SELECT current.tenant_id, current.revision, current.applied_at_ms
+            FROM tenant_github_repository_current AS current
             WHERE current.shard_id=$1
-            ORDER BY current.workspace_id
+            ORDER BY current.tenant_id
             ",
         )
         .bind(&provider.shard_id)
@@ -706,20 +702,20 @@ impl PostgresGithubProviderDesiredStateReader {
         .map_err(desired_database_failure)?;
         let selections = sqlx::query_as::<_, RepositorySelectionRow>(
             r"
-            SELECT selections.workspace_id, selections.revision,
+            SELECT selections.tenant_id, selections.revision,
                    selections.provider_installation_id,
                    selections.installation_binding_generation,
                    selections.provider_repository_id,
                    selections.provider_repository_owner_id,
                    selections.repository_name, selections.default_branch,
                    selections.repository_visibility, selections.authority_profile
-            FROM workspace_github_repository_current AS current
-            JOIN workspace_github_repository_selections AS selections
-              ON selections.workspace_id=current.workspace_id
+            FROM tenant_github_repository_current AS current
+            JOIN tenant_github_repository_selections AS selections
+              ON selections.tenant_id=current.tenant_id
              AND selections.shard_id=current.shard_id
              AND selections.revision=current.revision
             WHERE current.shard_id=$1
-            ORDER BY selections.workspace_id, selections.ordinal
+            ORDER BY selections.tenant_id, selections.ordinal
             ",
         )
         .bind(&provider.shard_id)
@@ -730,7 +726,7 @@ impl PostgresGithubProviderDesiredStateReader {
             .commit()
             .await
             .map_err(desired_database_failure)?;
-        self.decode_desired_state(provider, workspace_states, selections)
+        self.decode_desired_state(provider, tenant_states, selections)
             .await
             .map(Some)
     }
@@ -738,7 +734,7 @@ impl PostgresGithubProviderDesiredStateReader {
     async fn decode_desired_state(
         &self,
         provider: ProviderDesiredStateRow,
-        workspace_states: Vec<WorkspaceCurrentRow>,
+        tenant_states: Vec<TenantCurrentRow>,
         selections: Vec<RepositorySelectionRow>,
     ) -> Result<GithubProviderDesiredState, GithubProviderDesiredStateFailure> {
         let revision = positive_u64(provider.revision)?;
@@ -793,24 +789,24 @@ impl PostgresGithubProviderDesiredStateReader {
 
         let mut repositories = BTreeMap::<(String, i64), Vec<_>>::new();
         for selection in selections {
-            let key = (selection.workspace_id.clone(), selection.revision);
+            let key = (selection.tenant_id.clone(), selection.revision);
             repositories
                 .entry(key)
                 .or_default()
                 .push(selection.decode()?);
         }
-        let mut workspaces = Vec::with_capacity(workspace_states.len());
-        for state in workspace_states {
-            let workspace_id =
-                WorkspaceId::parse(&state.workspace_id).map_err(|_| desired_corrupt())?;
-            let revision = WorkspaceGithubRepositoriesRevision::new(positive_u64(state.revision)?)
+        let mut tenants = Vec::with_capacity(tenant_states.len());
+        for state in tenant_states {
+            let tenant_id =
+                ManagedTenantId::parse(&state.tenant_id).map_err(|_| desired_corrupt())?;
+            let revision = TenantGithubRepositoriesRevision::new(positive_u64(state.revision)?)
                 .map_err(|_| desired_corrupt())?;
             let selected = repositories
-                .remove(&(state.workspace_id, state.revision))
+                .remove(&(state.tenant_id, state.revision))
                 .unwrap_or_default();
-            workspaces.push(
-                WorkspaceGithubRepositoriesDesiredState::new(
-                    workspace_id,
+            tenants.push(
+                TenantGithubRepositoriesDesiredState::new(
+                    tenant_id,
                     revision,
                     timestamp(state.applied_at_ms).map_err(|()| desired_corrupt())?,
                     selected,
@@ -834,7 +830,7 @@ impl PostgresGithubProviderDesiredStateReader {
             )
             .map_err(|_| desired_corrupt())?,
             configuration,
-            workspaces,
+            tenants,
         )
         .map_err(|_| desired_corrupt())
     }
@@ -915,15 +911,15 @@ impl ProviderDesiredStateRow {
 }
 
 #[derive(FromRow)]
-struct WorkspaceCurrentRow {
-    workspace_id: String,
+struct TenantCurrentRow {
+    tenant_id: String,
     revision: i64,
     applied_at_ms: i64,
 }
 
 #[derive(FromRow)]
 struct RepositorySelectionRow {
-    workspace_id: String,
+    tenant_id: String,
     revision: i64,
     provider_installation_id: i64,
     installation_binding_generation: i64,
@@ -1254,29 +1250,29 @@ fn next_runner_policy_revision(
 }
 
 #[derive(FromRow)]
-struct WorkspaceBinding {
+struct TenantBinding {
     authority_id: String,
     shard_id: String,
 }
 
 #[derive(FromRow)]
-struct WorkspaceOperationRow {
+struct TenantOperationRow {
     shard_id: String,
-    workspace_id: String,
+    tenant_id: String,
     revision: i64,
     request_digest: Vec<u8>,
     applied_at_ms: i64,
 }
 
-async fn load_workspace_operation(
+async fn load_tenant_operation(
     transaction: &mut Transaction<'_, Postgres>,
     authority_id: &str,
     operation_id: Uuid,
-) -> Result<Option<WorkspaceOperationRow>, WorkspaceGithubRepositoriesFailure> {
+) -> Result<Option<TenantOperationRow>, TenantGithubRepositoriesFailure> {
     sqlx::query_as(
         r"
-        SELECT shard_id, workspace_id, revision, request_digest, applied_at_ms
-        FROM workspace_github_repository_operations
+        SELECT shard_id, tenant_id, revision, request_digest, applied_at_ms
+        FROM tenant_github_repository_operations
         WHERE authority_id=$1 AND operation_id=$2
         ",
     )
@@ -1284,7 +1280,7 @@ async fn load_workspace_operation(
     .bind(operation_id)
     .fetch_optional(&mut **transaction)
     .await
-    .map_err(workspace_database_failure)
+    .map_err(tenant_database_failure)
 }
 
 async fn lock_provider_registry(
@@ -1301,33 +1297,33 @@ async fn lock_provider_registry(
 async fn validate_shard_registry(
     transaction: &mut Transaction<'_, Postgres>,
     shard_id: &ShardId,
-    workspace_id: WorkspaceId,
+    tenant_id: ManagedTenantId,
     repositories: &[GithubProviderRepositorySelection],
-) -> Result<(), WorkspaceGithubRepositoriesFailure> {
-    let workspace_text = workspace_id.to_string();
+) -> Result<(), TenantGithubRepositoriesFailure> {
+    let tenant_text = tenant_id.to_string();
     let existing_count: i64 = sqlx::query_scalar(
         r"
-        SELECT count(*) FROM workspace_github_repository_selections
-        WHERE shard_id=$1 AND workspace_id<>$2
+        SELECT count(*) FROM tenant_github_repository_selections
+        WHERE shard_id=$1 AND tenant_id<>$2
         ",
     )
     .bind(shard_id.as_str())
-    .bind(&workspace_text)
+    .bind(&tenant_text)
     .fetch_one(&mut **transaction)
     .await
-    .map_err(workspace_database_failure)?;
-    let existing_count = usize::try_from(existing_count).map_err(|_| workspace_internal())?;
+    .map_err(tenant_database_failure)?;
+    let existing_count = usize::try_from(existing_count).map_err(|_| tenant_internal())?;
     if existing_count
         .checked_add(repositories.len())
         .is_none_or(|count| count > MAX_GITHUB_PROVIDER_REPOSITORIES)
     {
-        return Err(workspace_registry_conflict());
+        return Err(tenant_registry_conflict());
     }
 
     let repository_ids = repositories
         .iter()
         .map(|repository| {
-            i64::try_from(repository.repository_id().get()).map_err(|_| workspace_internal())
+            i64::try_from(repository.repository_id().get()).map_err(|_| tenant_internal())
         })
         .collect::<Result<Vec<_>, _>>()?;
     let repository_names = repositories
@@ -1337,8 +1333,8 @@ async fn validate_shard_registry(
     let conflicts: bool = sqlx::query_scalar(
         r"
         SELECT EXISTS (
-            SELECT 1 FROM workspace_github_repository_selections
-            WHERE shard_id=$1 AND workspace_id<>$2
+            SELECT 1 FROM tenant_github_repository_selections
+            WHERE shard_id=$1 AND tenant_id<>$2
               AND (
                   provider_repository_id=ANY($3::bigint[])
                   OR lower(repository_name)=ANY($4::text[])
@@ -1347,27 +1343,27 @@ async fn validate_shard_registry(
         ",
     )
     .bind(shard_id.as_str())
-    .bind(&workspace_text)
+    .bind(&tenant_text)
     .bind(repository_ids)
     .bind(repository_names)
     .fetch_one(&mut **transaction)
     .await
-    .map_err(workspace_database_failure)?;
+    .map_err(tenant_database_failure)?;
     if conflicts {
-        return Err(workspace_registry_conflict());
+        return Err(tenant_registry_conflict());
     }
     Ok(())
 }
 
 async fn insert_repository_selection(
     transaction: &mut Transaction<'_, Postgres>,
-    workspace_id: &str,
+    tenant_id: &str,
     shard_id: &ShardId,
     revision: i64,
     ordinal: i32,
     repository: &GithubProviderRepositorySelection,
     installation_binding_generation: i64,
-) -> Result<(), WorkspaceGithubRepositoriesFailure> {
+) -> Result<(), TenantGithubRepositoriesFailure> {
     let visibility = match repository.visibility() {
         ProviderRepositoryVisibility::Public => "public",
         ProviderRepositoryVisibility::Private => "private",
@@ -1378,8 +1374,8 @@ async fn insert_repository_selection(
     };
     sqlx::query(
         r"
-        INSERT INTO workspace_github_repository_selections (
-            workspace_id, shard_id, revision, ordinal, provider_installation_id,
+        INSERT INTO tenant_github_repository_selections (
+            tenant_id, shard_id, revision, ordinal, provider_installation_id,
             installation_binding_generation,
             provider_repository_id, provider_repository_owner_id,
             repository_name, default_branch, repository_visibility,
@@ -1387,21 +1383,21 @@ async fn insert_repository_selection(
         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
         ",
     )
-    .bind(workspace_id)
+    .bind(tenant_id)
     .bind(shard_id.as_str())
     .bind(revision)
     .bind(ordinal)
-    .bind(i64::try_from(repository.installation_id().get()).map_err(|_| workspace_internal())?)
+    .bind(i64::try_from(repository.installation_id().get()).map_err(|_| tenant_internal())?)
     .bind(installation_binding_generation)
-    .bind(i64::try_from(repository.repository_id().get()).map_err(|_| workspace_internal())?)
-    .bind(i64::try_from(repository.repository_owner_id().get()).map_err(|_| workspace_internal())?)
+    .bind(i64::try_from(repository.repository_id().get()).map_err(|_| tenant_internal())?)
+    .bind(i64::try_from(repository.repository_owner_id().get()).map_err(|_| tenant_internal())?)
     .bind(repository.repository_name().as_str())
     .bind(repository.default_branch())
     .bind(visibility)
     .bind(authority_profile)
     .execute(&mut **transaction)
     .await
-    .map_err(workspace_database_failure)?;
+    .map_err(tenant_database_failure)?;
     Ok(())
 }
 
@@ -1413,43 +1409,43 @@ struct InstallationBindingRow {
 
 async fn advance_installation_binding(
     transaction: &mut Transaction<'_, Postgres>,
-    workspace_id: &str,
-    workspace_revision: i64,
+    tenant_id: &str,
+    tenant_revision: i64,
     repository: &GithubProviderRepositorySelection,
-) -> Result<i64, WorkspaceGithubRepositoriesFailure> {
+) -> Result<i64, TenantGithubRepositoriesFailure> {
     let repository_id =
-        i64::try_from(repository.repository_id().get()).map_err(|_| workspace_internal())?;
+        i64::try_from(repository.repository_id().get()).map_err(|_| tenant_internal())?;
     let installation_id =
-        i64::try_from(repository.installation_id().get()).map_err(|_| workspace_internal())?;
+        i64::try_from(repository.installation_id().get()).map_err(|_| tenant_internal())?;
     let current = sqlx::query_as::<_, InstallationBindingRow>(
         r"
         SELECT provider_installation_id, binding_generation
-        FROM workspace_github_repository_installation_bindings
-        WHERE workspace_id=$1 AND provider_repository_id=$2
+        FROM tenant_github_repository_installation_bindings
+        WHERE tenant_id=$1 AND provider_repository_id=$2
         FOR UPDATE
         ",
     )
-    .bind(workspace_id)
+    .bind(tenant_id)
     .bind(repository_id)
     .fetch_optional(&mut **transaction)
     .await
-    .map_err(workspace_database_failure)?;
+    .map_err(tenant_database_failure)?;
     let Some(current) = current else {
         sqlx::query(
             r"
-            INSERT INTO workspace_github_repository_installation_bindings (
-                workspace_id, provider_repository_id, provider_installation_id,
+            INSERT INTO tenant_github_repository_installation_bindings (
+                tenant_id, provider_repository_id, provider_installation_id,
                 binding_generation, updated_at_revision
             ) VALUES ($1,$2,$3,1,$4)
             ",
         )
-        .bind(workspace_id)
+        .bind(tenant_id)
         .bind(repository_id)
         .bind(installation_id)
-        .bind(workspace_revision)
+        .bind(tenant_revision)
         .execute(&mut **transaction)
         .await
-        .map_err(workspace_database_failure)?;
+        .map_err(tenant_database_failure)?;
         return Ok(1);
     };
     if current.provider_installation_id == installation_id {
@@ -1458,31 +1454,31 @@ async fn advance_installation_binding(
     let next_generation = current
         .binding_generation
         .checked_add(1)
-        .ok_or_else(workspace_internal)?;
+        .ok_or_else(tenant_internal)?;
     let updated = sqlx::query(
         r"
-        UPDATE workspace_github_repository_installation_bindings
+        UPDATE tenant_github_repository_installation_bindings
         SET provider_installation_id=$3,
             binding_generation=$4,
             updated_at_revision=$5
-        WHERE workspace_id=$1
+        WHERE tenant_id=$1
           AND provider_repository_id=$2
           AND provider_installation_id=$6
           AND binding_generation=$7
         ",
     )
-    .bind(workspace_id)
+    .bind(tenant_id)
     .bind(repository_id)
     .bind(installation_id)
     .bind(next_generation)
-    .bind(workspace_revision)
+    .bind(tenant_revision)
     .bind(current.provider_installation_id)
     .bind(current.binding_generation)
     .execute(&mut **transaction)
     .await
-    .map_err(workspace_database_failure)?;
+    .map_err(tenant_database_failure)?;
     if updated.rows_affected() != 1 {
-        return Err(workspace_internal());
+        return Err(tenant_internal());
     }
     Ok(next_generation)
 }
@@ -1542,11 +1538,11 @@ fn runner_policy_digest(
     digest.finalize().into()
 }
 
-fn workspace_repositories_digest(command: &ApplyWorkspaceGithubRepositoriesCommand) -> [u8; 32] {
+fn tenant_repositories_digest(command: &ApplyTenantGithubRepositoriesCommand) -> [u8; 32] {
     let mut digest = Sha256::new();
     digest.update(REPOSITORY_DIGEST_DOMAIN);
     digest_part(&mut digest, command.shard_id().as_str().as_bytes());
-    digest_part(&mut digest, command.workspace_id().as_uuid().as_bytes());
+    digest_part(&mut digest, command.tenant_id().as_uuid().as_bytes());
     digest_part(&mut digest, &command.revision().get().to_be_bytes());
     for repository in command.repositories() {
         digest_part(
@@ -1624,18 +1620,18 @@ fn runner_policy_result(
     ))
 }
 
-fn workspace_result(
+fn tenant_result(
     operation_id: automata_ci_provisioning::OperationId,
     shard_id: automata_ci_provisioning::ShardId,
-    workspace_id: WorkspaceId,
-    revision: WorkspaceGithubRepositoriesRevision,
+    tenant_id: ManagedTenantId,
+    revision: TenantGithubRepositoriesRevision,
     applied_at_ms: i64,
-) -> Result<ApplyWorkspaceGithubRepositoriesResult, WorkspaceGithubRepositoriesFailure> {
-    let applied_at = timestamp(applied_at_ms).map_err(|()| workspace_internal())?;
-    Ok(ApplyWorkspaceGithubRepositoriesResult::new(
+) -> Result<ApplyTenantGithubRepositoriesResult, TenantGithubRepositoriesFailure> {
+    let applied_at = timestamp(applied_at_ms).map_err(|()| tenant_internal())?;
+    Ok(ApplyTenantGithubRepositoriesResult::new(
         operation_id,
         shard_id,
-        workspace_id,
+        tenant_id,
         revision,
         applied_at,
     ))
@@ -1680,20 +1676,18 @@ fn runner_policy_database_failure(_: sqlx::Error) -> GithubProviderRunnerPolicyF
     runner_policy_failure(GithubProviderRunnerPolicyFailureKind::TemporarilyUnavailable)
 }
 
-fn workspace_failure(
-    kind: WorkspaceGithubRepositoriesFailureKind,
-) -> WorkspaceGithubRepositoriesFailure {
-    WorkspaceGithubRepositoriesFailure::new(kind)
+fn tenant_failure(kind: TenantGithubRepositoriesFailureKind) -> TenantGithubRepositoriesFailure {
+    TenantGithubRepositoriesFailure::new(kind)
 }
 
-fn workspace_internal() -> WorkspaceGithubRepositoriesFailure {
-    workspace_failure(WorkspaceGithubRepositoriesFailureKind::Internal)
+fn tenant_internal() -> TenantGithubRepositoriesFailure {
+    tenant_failure(TenantGithubRepositoriesFailureKind::Internal)
 }
 
-fn workspace_registry_conflict() -> WorkspaceGithubRepositoriesFailure {
-    workspace_failure(WorkspaceGithubRepositoriesFailureKind::ShardRegistryConflict)
+fn tenant_registry_conflict() -> TenantGithubRepositoriesFailure {
+    tenant_failure(TenantGithubRepositoriesFailureKind::ShardRegistryConflict)
 }
 
-fn workspace_database_failure(_: sqlx::Error) -> WorkspaceGithubRepositoriesFailure {
-    workspace_failure(WorkspaceGithubRepositoriesFailureKind::TemporarilyUnavailable)
+fn tenant_database_failure(_: sqlx::Error) -> TenantGithubRepositoriesFailure {
+    tenant_failure(TenantGithubRepositoriesFailureKind::TemporarilyUnavailable)
 }

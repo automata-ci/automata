@@ -1,6 +1,6 @@
 use automata_ci_core::{
     AttemptId, AttemptNumber, FencingToken, GitObjectAlgorithm, JobId, Lease, LeaseId,
-    PermissionLevel, RunnerId, Sha256Digest, TrustSourceClass, UnixMillis, WorkspaceId,
+    ManagedTenantId, PermissionLevel, RunnerId, Sha256Digest, TrustSourceClass, UnixMillis,
 };
 use automata_ci_provider::{
     AuthorizationCodeRequest, ControlCredential, ControlCredentialRequest,
@@ -35,7 +35,7 @@ fn instance(value: u128) -> ProviderInstanceId {
 
 fn connection() -> ProviderConnectionManifest {
     let configuration = ProviderConnectionConfiguration::new(
-        WorkspaceId::parse("11111111-1111-4111-8111-111111111111").unwrap(),
+        ManagedTenantId::parse("11111111-1111-4111-8111-111111111111").unwrap(),
         ExternalRepositoryIdentity::new(instance(2), ExternalRepositoryId::new("repo-42").unwrap()),
         ProviderConfigurationRevision::new(3).unwrap(),
         Sha256Digest::from_bytes([3; 32]),

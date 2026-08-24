@@ -76,33 +76,33 @@ uuid_id!(/// Idempotency key for a mutating operation.
 uuid_id!(/// Identifies a durable stream of log frames.
     LogStreamId);
 
-/// Canonical non-nil identity of one Automata workspace.
+/// Canonical non-nil identity of one Automata tenant.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(try_from = "String", into = "String")]
-pub struct WorkspaceId(Uuid);
+pub struct ManagedTenantId(Uuid);
 
-impl WorkspaceId {
-    /// Parses an exact lower-case hyphenated non-nil workspace UUID.
+impl ManagedTenantId {
+    /// Parses an exact lower-case hyphenated non-nil tenant UUID.
     ///
     /// # Errors
     ///
     /// Rejects nil, non-hyphenated, upper-case, or otherwise noncanonical text.
-    pub fn parse(value: &str) -> Result<Self, WorkspaceIdError> {
-        let parsed = Uuid::parse_str(value).map_err(|_| WorkspaceIdError)?;
+    pub fn parse(value: &str) -> Result<Self, ManagedTenantIdError> {
+        let parsed = Uuid::parse_str(value).map_err(|_| ManagedTenantIdError)?;
         if parsed.is_nil() || parsed.hyphenated().to_string() != value {
-            return Err(WorkspaceIdError);
+            return Err(ManagedTenantIdError);
         }
         Ok(Self(parsed))
     }
 
-    /// Constructs a workspace identity from a non-nil UUID.
+    /// Constructs a tenant identity from a non-nil UUID.
     ///
     /// # Errors
     ///
     /// Rejects the nil UUID.
-    pub const fn from_uuid(value: Uuid) -> Result<Self, WorkspaceIdError> {
+    pub const fn from_uuid(value: Uuid) -> Result<Self, ManagedTenantIdError> {
         if value.is_nil() {
-            return Err(WorkspaceIdError);
+            return Err(ManagedTenantIdError);
         }
         Ok(Self(value))
     }
@@ -114,38 +114,38 @@ impl WorkspaceId {
     }
 }
 
-impl fmt::Display for WorkspaceId {
+impl fmt::Display for ManagedTenantId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "{}", self.0.hyphenated())
     }
 }
 
-impl FromStr for WorkspaceId {
-    type Err = WorkspaceIdError;
+impl FromStr for ManagedTenantId {
+    type Err = ManagedTenantIdError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         Self::parse(value)
     }
 }
 
-impl TryFrom<String> for WorkspaceId {
-    type Error = WorkspaceIdError;
+impl TryFrom<String> for ManagedTenantId {
+    type Error = ManagedTenantIdError;
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
         Self::parse(&value)
     }
 }
 
-impl From<WorkspaceId> for String {
-    fn from(value: WorkspaceId) -> Self {
+impl From<ManagedTenantId> for String {
+    fn from(value: ManagedTenantId) -> Self {
         value.to_string()
     }
 }
 
-/// Invalid canonical workspace identity.
+/// Invalid canonical tenant identity.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
-#[error("workspace ID is invalid")]
-pub struct WorkspaceIdError;
+#[error("tenant ID is invalid")]
+pub struct ManagedTenantIdError;
 
 /// Stable positive numeric alias for a workflow run.
 ///

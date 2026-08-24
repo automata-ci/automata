@@ -1,16 +1,17 @@
 use automata_ci_core::{
-    AttemptNumber, FencingToken, IdentifierError, RunId, RunIdAlias, WorkspaceId, WorkspaceIdError,
+    AttemptNumber, FencingToken, IdentifierError, ManagedTenantId, ManagedTenantIdError, RunId,
+    RunIdAlias,
 };
 use uuid::Uuid;
 
 #[test]
-fn workspace_ids_are_canonical_and_non_nil() {
+fn tenant_ids_are_canonical_and_non_nil() {
     let value = "22222222-2222-4222-8222-222222222222";
-    let workspace = WorkspaceId::parse(value).expect("workspace ID");
-    assert_eq!(workspace.to_string(), value);
+    let tenant = ManagedTenantId::parse(value).expect("tenant ID");
+    assert_eq!(tenant.to_string(), value);
     assert_eq!(
-        serde_json::from_str::<WorkspaceId>(&format!("\"{value}\"")).expect("deserialize"),
-        workspace
+        serde_json::from_str::<ManagedTenantId>(&format!("\"{value}\"")).expect("deserialize"),
+        tenant
     );
 
     for invalid in [
@@ -18,9 +19,12 @@ fn workspace_ids_are_canonical_and_non_nil() {
         "22222222222242228222222222222222",
         "22222222-2222-4222-8222-22222222222A",
     ] {
-        assert_eq!(WorkspaceId::parse(invalid), Err(WorkspaceIdError));
+        assert_eq!(ManagedTenantId::parse(invalid), Err(ManagedTenantIdError));
     }
-    assert_eq!(WorkspaceId::from_uuid(Uuid::nil()), Err(WorkspaceIdError));
+    assert_eq!(
+        ManagedTenantId::from_uuid(Uuid::nil()),
+        Err(ManagedTenantIdError)
+    );
 }
 
 #[test]

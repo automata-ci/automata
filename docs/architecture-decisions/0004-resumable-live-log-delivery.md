@@ -17,11 +17,11 @@ rebuilding page snapshots adds avoidable latency and work and cannot provide the
 intended live-log experience at scale.
 
 Automata Cloud must not proxy log bytes through its private API. A browser may
-connect to any healthy Core replica in the workspace's shard, and no workspace
+connect to any healthy Core replica in the tenant's shard, and no tenant
 or runner connection is permanently assigned to one HTTP replica. A live
 connection can nevertheless terminate on one replica for its lifetime, so
 replica loss, deployment draining, network changes, and suspended browser tabs
-must not lose output or require sticky workspace routing.
+must not lose output or require sticky tenant routing.
 
 WebTransport is newly available across current major browsers and offers
 reliable multiplexed streams, stream backpressure, and QUIC connection
@@ -106,7 +106,7 @@ checks and measured demand justifies enabling it.
 ## Consequences
 
 - Core replicas remain interchangeable across reconnects; a live connection
-  does not create workspace affinity.
+  does not create tenant affinity.
 - Ordering, replay, completion, authorization, and limits can be tested once
   below both streaming transports.
 - PostgreSQL and object storage remain the recovery source of truth while the
