@@ -38,6 +38,17 @@ describe("client bootstrap", () => {
     expect(
       (element as ReactElement<{ request: unknown }>).props.request,
     ).not.toBe(runListRequest);
+
+    const menu = document.querySelector<HTMLDetailsElement>(".viewer-menu");
+    const outside = document.querySelector("main");
+    if (!menu || !outside) {
+      throw new Error("The hydrated account-menu fixture is unavailable");
+    }
+    menu.open = true;
+    outside.dispatchEvent(
+      new MouseEvent("pointerdown", { bubbles: true, composed: true }),
+    );
+    expect(menu.open).toBe(false);
   });
 
   it.each([

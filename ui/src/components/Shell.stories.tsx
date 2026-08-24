@@ -1,5 +1,6 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import { expect, userEvent, within } from "storybook/test";
+import { installViewerMenuDismissal } from "../enhancements/viewerMenu";
 import { previewRepository, previewShell } from "../preview/sampleData";
 import { Shell } from "./Shell";
 
@@ -43,15 +44,35 @@ export const AccountMenu: Story = {
     },
   },
   play: async ({ canvasElement }) => {
+    const removeViewerMenuDismissal = installViewerMenuDismissal(
+      canvasElement.ownerDocument,
+    );
     const canvas = within(canvasElement);
-    await userEvent.click(canvas.getByText(/account menu$/u));
-    await expect(
-      canvas.getByRole("navigation", { name: "Account navigation" }),
-    ).toBeVisible();
-    await expect(canvas.getByRole("link", { name: "Organizations" })).toBeVisible();
-    await expect(canvas.getByRole("link", { name: "Settings" })).toBeVisible();
-    await expect(canvas.getByRole("button", { name: "Sign out" })).toBeVisible();
-    await expect(canvas.getByTitle("Ada Lovelace’s Analytical Engine")).toBeVisible();
+    try {
+      await userEvent.click(canvas.getByText(/account menu$/u));
+      const navigation = canvas.getByRole("navigation", {
+        name: "Account navigation",
+      });
+      await expect(navigation).toBeVisible();
+      await expect(
+        canvas.getByRole("link", { name: "Organizations" }),
+      ).toBeVisible();
+      await expect(
+        canvas.getByRole("link", { name: "Settings" }),
+      ).toBeVisible();
+      await expect(
+        canvas.getByRole("button", { name: "Sign out" }),
+      ).toBeVisible();
+      await expect(
+        canvas.getByTitle("Ada Lovelace’s Analytical Engine"),
+      ).toBeVisible();
+      await userEvent.click(
+        canvas.getByRole("heading", { name: "Workflow runs" }),
+      );
+      await expect(navigation).not.toBeVisible();
+    } finally {
+      removeViewerMenuDismissal();
+    }
   },
 };
 export const SignedOut: Story = {

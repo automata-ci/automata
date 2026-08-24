@@ -51,6 +51,7 @@ preview fixture separate:
 ```text
 src/
 ├── components/   reusable landmarks and presentation components
+├── enhancements/ framework-neutral progressive DOM enhancements
 ├── hooks/         React state, effects, measurement, and browser lifecycle
 ├── logs/          resumable transport controller and strict SSE adapter
 ├── pages/         thin composition containers for validated page models
@@ -74,6 +75,8 @@ reconnects through the same replay path, as specified by
 The preview fixture owns its sample data and its small query-preserving GET adapter, and
 production source never imports test fixtures. The adapter is reinstalled on hot
 module replacement so routing changes do not leave a stale submit handler.
+Framework-neutral shell enhancements are exported for package consumers so the
+embedded client and Cloud install the same behavior over the shared markup.
 `styles.css` only declares the cascade order and imports the focused modules
 documented in `src/styles/README.md`.
 
