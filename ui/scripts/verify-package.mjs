@@ -33,6 +33,7 @@ const expectedExports = [
   "THEME_BOOTSTRAP_SCRIPT",
   "ThemeToggle",
   "createSameOriginLiveLogAccessProvider",
+  "installViewerMenuDismissal",
   "validateLiveLogAccess",
 ];
 
@@ -171,6 +172,7 @@ async function verifyTypeScriptConsumer(archive) {
       join(consumerDirectory, "consumer.mts"),
       `import {
   App,
+  installViewerMenuDismissal,
   validateLiveLogAccess,
   type AppProps,
   type JobLogPageModel,
@@ -186,6 +188,7 @@ declare const record: LiveLogRecord;
 
 const props: AppProps = { page, jobLogAccess: accessProvider };
 void App;
+void installViewerMenuDismissal;
 void props;
 void record;
 validateLiveLogAccess(access);

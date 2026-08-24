@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   App,
+  installViewerMenuDismissal,
   ProviderConnectionPanel,
   RepositorySelectionList,
   Shell,
@@ -11,6 +12,7 @@ import {
 describe("public package entrypoint", () => {
   it("exports the supported runtime surface", () => {
     expect(App).toBeTypeOf("function");
+    expect(installViewerMenuDismissal).toBeTypeOf("function");
     expect(ProviderConnectionPanel).toBeTypeOf("function");
     expect(RepositorySelectionList).toBeTypeOf("function");
     expect(Shell).toBeTypeOf("function");
