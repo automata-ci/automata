@@ -1,4 +1,9 @@
-import type { PropsWithChildren, ReactNode } from "react";
+import {
+  createContext,
+  useContext,
+  type PropsWithChildren,
+  type ReactNode,
+} from "react";
 import type { RepositoryModel, ShellModel } from "../models";
 import { isVisibleDisplayCodePoint } from "../unicode";
 import { AutomataMark } from "./AutomataMark";
@@ -7,6 +12,23 @@ import { Icon } from "./Icon";
 export interface ShellFooterLink {
   readonly href: string;
   readonly label: string;
+}
+
+export interface ShellFooterLinksProviderProps extends PropsWithChildren {
+  readonly links: readonly ShellFooterLink[];
+}
+
+const ShellFooterLinksContext = createContext<readonly ShellFooterLink[]>([]);
+
+export function ShellFooterLinksProvider({
+  children,
+  links,
+}: ShellFooterLinksProviderProps) {
+  return (
+    <ShellFooterLinksContext.Provider value={links}>
+      {children}
+    </ShellFooterLinksContext.Provider>
+  );
 }
 
 export interface ShellProps extends PropsWithChildren {
@@ -21,10 +43,12 @@ export function Shell({
   shell,
   repository,
   currentRepositoryView = "actions",
-  footerLinks = [],
+  footerLinks,
   utility,
   children,
 }: ShellProps) {
+  const inheritedFooterLinks = useContext(ShellFooterLinksContext);
+  const resolvedFooterLinks = footerLinks ?? inheritedFooterLinks;
   const viewerInitial = shell.viewer === null
     ? null
     : firstUppercaseCodePoint(shell.viewer.displayName);
@@ -193,12 +217,12 @@ export function Shell({
               {shell.productName}
             </span>
           </a>
-          {footerLinks.length === 0 ? null : (
+          {resolvedFooterLinks.length === 0 ? null : (
             <nav
               className="site-footer__navigation"
               aria-label="Footer navigation"
             >
-              {footerLinks.map((item) => (
+              {resolvedFooterLinks.map((item) => (
                 <a href={item.href} key={`${item.label}:${item.href}`}>
                   {item.label}
                 </a>

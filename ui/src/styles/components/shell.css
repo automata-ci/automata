@@ -178,3 +178,11 @@ button.viewer-link {
   color: var(--fg-default);
   text-decoration: none;
 }
+
+.site-footer__navigation a {
+  color: var(--fg-muted);
+}
+
+.site-footer__navigation a:hover {
+  color: var(--accent-fg);
+}

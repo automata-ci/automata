@@ -5,6 +5,7 @@ import {
   ProviderConnectionPanel,
   RepositorySelectionList,
   Shell,
+  ShellFooterLinksProvider,
   THEME_BOOTSTRAP_SCRIPT,
   ThemeToggle,
 } from "../src/public";
@@ -16,6 +17,7 @@ describe("public package entrypoint", () => {
     expect(ProviderConnectionPanel).toBeTypeOf("function");
     expect(RepositorySelectionList).toBeTypeOf("function");
     expect(Shell).toBeTypeOf("function");
+    expect(ShellFooterLinksProvider).toBeTypeOf("function");
     expect(ThemeToggle).toBeTypeOf("function");
     expect(THEME_BOOTSTRAP_SCRIPT).toBeTypeOf("string");
   });

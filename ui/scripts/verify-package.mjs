@@ -30,6 +30,7 @@ const expectedExports = [
   "ProviderConnectionPanel",
   "RepositorySelectionList",
   "Shell",
+  "ShellFooterLinksProvider",
   "THEME_BOOTSTRAP_SCRIPT",
   "ThemeToggle",
   "createSameOriginLiveLogAccessProvider",

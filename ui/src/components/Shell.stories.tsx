@@ -39,12 +39,15 @@ export const CloudFooter: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     const footer = canvas.getByRole("contentinfo");
+    const terms = canvas.getByRole("link", { name: "Terms" });
     await expect(
       canvas.getByRole("navigation", { name: "Footer navigation" }),
     ).toBeVisible();
-    await expect(canvas.getByRole("link", { name: "Terms" })).toBeVisible();
+    await expect(terms).toBeVisible();
     await expect(canvas.getByRole("link", { name: "Contact" })).toBeVisible();
     expect(getComputedStyle(footer).borderTopWidth).toBe("0px");
+    const idleColor = getComputedStyle(terms).color;
+    expect(idleColor).toBe(getComputedStyle(footer).color);
   },
 };
 export const AccountMenu: Story = {

@@ -1,7 +1,9 @@
 export { App, type AppProps } from "./App.js";
 export {
   Shell,
+  ShellFooterLinksProvider,
   type ShellFooterLink,
+  type ShellFooterLinksProviderProps,
   type ShellProps,
 } from "./components/Shell.js";
 export {

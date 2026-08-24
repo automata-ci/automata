@@ -1,7 +1,10 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
-import { Shell } from "../../src/components/Shell";
+import {
+  Shell,
+  ShellFooterLinksProvider,
+} from "../../src/components/Shell";
 import { previewShell } from "../../src/preview/sampleData";
 
 describe("Shell footer", () => {
@@ -39,5 +42,20 @@ describe("Shell footer", () => {
     );
     expect(html).toContain('<a href="#terms">Terms</a>');
     expect(html).toContain('<a href="#privacy">Privacy</a>');
+  });
+
+  it("inherits footer navigation from a composed host", () => {
+    const html = renderToStaticMarkup(
+      <ShellFooterLinksProvider
+        links={[{ href: "#status", label: "Status" }]}
+      >
+        <Shell repository={null} shell={previewShell}>
+          <main id="main-content" />
+        </Shell>
+      </ShellFooterLinksProvider>,
+    );
+
+    expect(html).toContain('aria-label="Footer navigation"');
+    expect(html).toContain('<a href="#status">Status</a>');
   });
 });
