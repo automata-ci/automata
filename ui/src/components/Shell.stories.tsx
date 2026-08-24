@@ -36,6 +36,16 @@ export const CloudFooter: Story = {
     repository: null,
     shell: { ...previewShell, productName: "Automata Cloud" },
   },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const footer = canvas.getByRole("contentinfo");
+    await expect(
+      canvas.getByRole("navigation", { name: "Footer navigation" }),
+    ).toBeVisible();
+    await expect(canvas.getByRole("link", { name: "Terms" })).toBeVisible();
+    await expect(canvas.getByRole("link", { name: "Contact" })).toBeVisible();
+    expect(getComputedStyle(footer).borderTopWidth).toBe("0px");
+  },
 };
 export const AccountMenu: Story = {
   args: {
