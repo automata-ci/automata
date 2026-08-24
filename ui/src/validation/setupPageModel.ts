@@ -15,6 +15,7 @@ export function validateSetupPage(value: unknown, path: string): void {
 
   const shellPath = `${path}.shell`;
   const shell = expectObject(field(page, "shell", path), shellPath, [
+    "accountNavigation",
     "productName",
     "homeHref",
     "signIn",
@@ -29,7 +30,13 @@ export function validateSetupPage(value: unknown, path: string): void {
   expectLiteral(shell.homeHref, `${shellPath}.homeHref`, "/setup");
   expectLiteral(shell.documentTitle, `${shellPath}.documentTitle`, "Set up Automata");
   expectLiteral(shell.description, `${shellPath}.description`, SETUP_DESCRIPTION);
-  if (shell.signIn !== null || shell.signOut !== null || shell.viewer !== null) {
+  if (
+    shell.signIn !== null ||
+    shell.signOut !== null ||
+    shell.viewer !== null ||
+    !Array.isArray(shell.accountNavigation) ||
+    shell.accountNavigation.length !== 0
+  ) {
     invalid(shellPath, "an anonymous setup-only shell without account actions");
   }
   const [navigation] = shellContext.navigation;

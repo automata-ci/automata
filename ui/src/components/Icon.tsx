@@ -13,6 +13,7 @@ export type IconName =
   | "settings"
   | "sign-out"
   | "moon"
+  | "organizations"
   | "sun"
   | "tag"
   | "workflow";
@@ -38,6 +39,7 @@ const phosphorIconNames: Readonly<Record<IconName, string>> = {
   settings: "gear-six",
   "sign-out": "sign-out",
   moon: "moon",
+  organizations: "buildings",
   sun: "sun",
   tag: "tag",
   workflow: "path",

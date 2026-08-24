@@ -23,6 +23,7 @@ const setupRequest = {
   page: {
     kind: "setup",
     shell: {
+      accountNavigation: [],
       productName: "Automata",
       homeHref: "/setup",
       signIn: null,

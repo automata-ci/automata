@@ -12,6 +12,12 @@ interface ViewerModel {
   readonly displayName: string;
 }
 
+interface AccountNavigationItemModel {
+  readonly icon: "organizations" | "settings";
+  readonly label: string;
+  readonly href: string;
+}
+
 interface NavigationItemModel {
   readonly label: string;
   readonly href: string;
@@ -29,6 +35,7 @@ interface SignOutModel {
 }
 
 export interface ShellModel {
+  readonly accountNavigation: readonly AccountNavigationItemModel[];
   readonly productName: string;
   readonly homeHref: string;
   readonly signIn: SignInModel | null;

@@ -75,6 +75,7 @@ const smokeRequest = {
   page: {
     kind: "run-list",
     shell: {
+      accountNavigation: [],
       productName: "Automata",
       homeHref: "/repositories",
       signIn: { action: "/auth/github/login", returnPath: "/automata-ci/automata/actions" },

@@ -70,17 +70,21 @@ button.viewer-link {
 }
 
 .viewer-menu__identity {
-  color: var(--fg-muted);
-  border-bottom: 1px solid var(--border-muted);
-  font-size: 12px;
+  font-size: 13px;
 }
 
-.viewer-menu__identity strong {
+.viewer-menu__name {
   color: var(--fg-default);
-  font-size: 13px;
   font-weight: 600;
 }
 
+.viewer-menu__divider {
+  background: transparent;
+  border: 0;
+  border-top: 1px solid var(--border-muted);
+}
+
+.viewer-menu__navigation a,
 .viewer-menu__sign-out {
   color: var(--fg-default);
   background: transparent;
@@ -90,8 +94,10 @@ button.viewer-link {
   text-align: left;
 }
 
+.viewer-menu__navigation a:hover,
 .viewer-menu__sign-out:hover {
   background: var(--control-hover);
+  text-decoration: none;
 }
 
 .viewer-link__avatar {

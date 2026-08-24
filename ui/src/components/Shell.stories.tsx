@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
+import { expect, userEvent, within } from "storybook/test";
 import { previewRepository, previewShell } from "../preview/sampleData";
 import { Shell } from "./Shell";
 
@@ -21,6 +22,38 @@ export default meta;
 type Story = StoryObj<typeof meta>;
 export const Repository: Story = {};
 export const TenantPage: Story = { args: { repository: null } };
+export const AccountMenu: Story = {
+  args: {
+    repository: null,
+    shell: {
+      ...previewShell,
+      accountNavigation: [
+        {
+          icon: "organizations",
+          label: "Organizations",
+          href: "/organizations",
+        },
+        { icon: "settings", label: "Settings", href: "/settings" },
+      ],
+      signOut: {
+        action: "/auth/logout",
+        csrfToken: "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",
+      },
+      viewer: { displayName: "Ada Lovelace’s Analytical Engine" },
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(canvas.getByText(/account menu$/u));
+    await expect(
+      canvas.getByRole("navigation", { name: "Account navigation" }),
+    ).toBeVisible();
+    await expect(canvas.getByRole("link", { name: "Organizations" })).toBeVisible();
+    await expect(canvas.getByRole("link", { name: "Settings" })).toBeVisible();
+    await expect(canvas.getByRole("button", { name: "Sign out" })).toBeVisible();
+    await expect(canvas.getByTitle("Ada Lovelace’s Analytical Engine")).toBeVisible();
+  },
+};
 export const SignedOut: Story = {
   args: {
     repository: null,

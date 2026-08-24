@@ -48,6 +48,7 @@ const shellHtml = renderToStaticMarkup(
     {
       repository: null,
       shell: {
+        accountNavigation: [],
         productName: "Automata",
         homeHref: "/",
         signIn: null,

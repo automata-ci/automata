@@ -36,6 +36,7 @@ export interface PreviewRunSample {
 }
 
 export const previewShell: ShellModel = {
+  accountNavigation: [],
   productName: "Automata",
   homeHref: "?view=repositories",
   signIn: null,

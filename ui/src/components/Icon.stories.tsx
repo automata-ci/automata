@@ -9,6 +9,7 @@ const iconNames: readonly IconName[] = [
   "chevron-right",
   "commit",
   "moon",
+  "organizations",
   "overview",
   "pull-request",
   "repository",

@@ -12,6 +12,7 @@ const SECONDARY_COMMIT = "3278d9e87d30ca91c5ec19bcef01cec33aa4182e";
 export const SHELL_CSRF_TOKEN = "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE";
 
 const shell: ShellModel = {
+  accountNavigation: [],
   productName: "Automata",
   homeHref: "/repositories",
   signIn: null,

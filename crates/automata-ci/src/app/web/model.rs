@@ -112,6 +112,7 @@ struct RenderAssets {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Shell {
+    account_navigation: Vec<AccountNavigationItem>,
     product_name: &'static str,
     home_href: String,
     sign_in: Option<SignIn>,
@@ -120,6 +121,13 @@ struct Shell {
     description: &'static str,
     viewer: Option<Viewer>,
     navigation: Vec<NavigationItem>,
+}
+
+#[derive(Debug, Serialize)]
+struct AccountNavigationItem {
+    icon: &'static str,
+    label: &'static str,
+    href: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -2615,6 +2623,7 @@ fn global_shell(
         });
     }
     Ok(Shell {
+        account_navigation: Vec::new(),
         product_name: "Automata",
         home_href: REPOSITORIES_PATH.to_owned(),
         sign_in: context.sign_in_action().map(|action| SignIn {
@@ -2642,6 +2651,7 @@ fn global_shell(
 
 fn setup_shell() -> Shell {
     Shell {
+        account_navigation: Vec::new(),
         product_name: "Automata",
         home_href: SETUP_PATH.to_owned(),
         sign_in: None,

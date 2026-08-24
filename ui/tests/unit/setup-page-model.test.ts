@@ -26,6 +26,7 @@ function setupRequest(): Record<string, unknown> {
         description: SETUP_DESCRIPTION,
         viewer: null,
         navigation: [{ label: "Setup", href: "/setup", current: true }],
+        accountNavigation: [],
       },
       form: {
         action: "/setup/auth/github",

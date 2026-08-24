@@ -35,6 +35,9 @@ toggle, in-page log filtering, and repository-settings draft and submission
 states. Links, GET filters, settings forms, and RBAC management forms retain
 their native behavior when JavaScript is absent or fails. There is no SPA router
 and every initial page route remains a complete server-rendered document.
+Authenticated hosts may also provide bounded account-menu destinations alongside
+the native, CSRF-protected sign-out capability; the shared shell keeps those
+controls usable without JavaScript.
 
 ## Source architecture
 

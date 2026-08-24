@@ -52,6 +52,19 @@ describe("icon contract", () => {
     );
   });
 
+  it("includes the bundled Phosphor glyph used by organization links", () => {
+    const styles = readFileSync(
+      resolve(process.cwd(), "src/styles/foundations/icons.css"),
+      "utf8",
+    );
+
+    expect(styles).toContain(".ph.ph-buildings::before");
+    expect(styles).toContain('content: "\\e102"');
+    expect(renderToStaticMarkup(<Icon name="organizations" />)).toContain(
+      "ph ph-buildings",
+    );
+  });
+
   it("uses bundled Phosphor glyphs for the native account disclosure", () => {
     const styles = readFileSync(
       resolve(process.cwd(), "src/styles/foundations/icons.css"),

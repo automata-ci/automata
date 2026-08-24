@@ -21,6 +21,9 @@ export function Shell({
   const viewerInitial = shell.viewer === null
     ? null
     : firstUppercaseCodePoint(shell.viewer.displayName);
+  const hasViewerMenu =
+    shell.viewer !== null &&
+    (shell.accountNavigation.length !== 0 || shell.signOut !== null);
 
   return (
     <>
@@ -59,7 +62,7 @@ export function Shell({
                   Sign in
                 </button>
               </form>
-            ) : shell.viewer === null ? null : shell.signOut === null ? (
+            ) : shell.viewer === null ? null : !hasViewerMenu ? (
               <span className="viewer-link">
                 <span className="viewer-link__avatar" aria-hidden="true">
                   {viewerInitial}
@@ -72,29 +75,62 @@ export function Shell({
                   <span className="viewer-link__avatar" aria-hidden="true">
                     {viewerInitial}
                   </span>
-                  <span className="viewer-link__name">{shell.viewer.displayName}</span>
                   <Icon
                     className="viewer-menu__chevron"
                     name="chevron-down"
                     size={14}
                   />
-                  <span className="sr-only"> account menu</span>
+                  <span className="sr-only">
+                    {shell.viewer.displayName} account menu
+                  </span>
                 </summary>
                 <div className="viewer-menu__popover">
-                  <p className="viewer-menu__identity">
-                    Signed in as <strong>{shell.viewer.displayName}</strong>
-                  </p>
-                  <form action={shell.signOut.action} method="post">
-                    <input
-                      name="csrf_token"
-                      type="hidden"
-                      value={shell.signOut.csrfToken}
-                    />
-                    <button className="viewer-menu__sign-out" type="submit">
-                      <Icon name="sign-out" />
-                      <span>Sign out</span>
-                    </button>
-                  </form>
+                  <div className="viewer-menu__identity">
+                    <span
+                      className="viewer-menu__avatar viewer-link__avatar"
+                      aria-hidden="true"
+                    >
+                      {viewerInitial}
+                    </span>
+                    <strong
+                      className="viewer-menu__name"
+                      title={shell.viewer.displayName}
+                    >
+                      {shell.viewer.displayName}
+                    </strong>
+                  </div>
+                  <hr className="viewer-menu__divider" />
+                  {shell.accountNavigation.length === 0 ? null : (
+                    <nav
+                      className="viewer-menu__navigation"
+                      aria-label="Account navigation"
+                    >
+                      {shell.accountNavigation.map((item) => (
+                        <a href={item.href} key={`${item.icon}:${item.href}`}>
+                          <Icon name={item.icon} />
+                          <span>{item.label}</span>
+                        </a>
+                      ))}
+                    </nav>
+                  )}
+                  {shell.signOut === null ? null : (
+                    <>
+                      {shell.accountNavigation.length === 0 ? null : (
+                        <hr className="viewer-menu__divider" />
+                      )}
+                      <form action={shell.signOut.action} method="post">
+                        <input
+                          name="csrf_token"
+                          type="hidden"
+                          value={shell.signOut.csrfToken}
+                        />
+                        <button className="viewer-menu__sign-out" type="submit">
+                          <Icon name="sign-out" />
+                          <span>Sign out</span>
+                        </button>
+                      </form>
+                    </>
+                  )}
                 </div>
               </details>
             )}

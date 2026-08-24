@@ -62,6 +62,10 @@
   content: "\e0e4";
 }
 
+.ph.ph-buildings::before {
+  content: "\e102";
+}
+
 .ph.ph-magnifying-glass::before {
   content: "\e30c";
 }

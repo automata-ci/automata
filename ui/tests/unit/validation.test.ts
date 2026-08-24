@@ -714,6 +714,44 @@ describe("render request validation", () => {
     }
   });
 
+  it("validates bounded authenticated account navigation", () => {
+    const valid = cloneRequest(runListRequest);
+    setPath(valid, ["page", "shell", "accountNavigation"], [
+      {
+        icon: "organizations",
+        label: "Organizations",
+        href: "/organizations",
+      },
+      { icon: "settings", label: "Settings", href: "/settings" },
+    ]);
+    expect(() => validateRenderRequest(valid)).not.toThrow();
+
+    const anonymous = cloneRequest(repositoryDirectoryRequest);
+    setPath(anonymous, ["page", "shell", "accountNavigation"], [
+      { icon: "settings", label: "Settings", href: "/settings" },
+    ]);
+    expect(() => validateRenderRequest(anonymous)).toThrow(
+      "at $.page.shell.accountNavigation",
+    );
+
+    const unknownIcon = cloneRequest(runListRequest);
+    setPath(unknownIcon, ["page", "shell", "accountNavigation"], [
+      { icon: "profile", label: "Profile", href: "/profile" },
+    ]);
+    expect(() => validateRenderRequest(unknownIcon)).toThrow(
+      "at $.page.shell.accountNavigation[0].icon",
+    );
+
+    const duplicateDestination = cloneRequest(runListRequest);
+    setPath(duplicateDestination, ["page", "shell", "accountNavigation"], [
+      { icon: "organizations", label: "Organizations", href: "/settings" },
+      { icon: "settings", label: "Settings", href: "/settings" },
+    ]);
+    expect(() => validateRenderRequest(duplicateDestination)).toThrow(
+      "at $.page.shell.accountNavigation[1].href",
+    );
+  });
+
   it("binds repository updates to the displayed settings destination", () => {
     const input = cloneRequest(repositorySettingsRequest);
     setPath(input, ["page", "update", "action"], "/unrelated/settings");

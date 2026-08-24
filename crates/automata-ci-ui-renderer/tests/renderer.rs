@@ -23,6 +23,7 @@ fn valid_request() -> Value {
         "page": {
             "kind": "run-list",
             "shell": {
+                "accountNavigation": [],
                 "productName": "Automata",
                 "homeHref": "/repositories",
                 "signIn": {
@@ -102,6 +103,7 @@ fn job_log_request(log_visibility: &str) -> Value {
     request["page"] = json!({
         "kind": "job-log",
         "shell": {
+            "accountNavigation": [],
             "productName": "Automata",
             "homeHref": "/repositories",
             "signIn": {
@@ -176,6 +178,7 @@ fn repository_directory_request() -> Value {
         "page": {
             "kind": "repository-directory",
             "shell": {
+                "accountNavigation": [],
                 "productName": "Automata",
                 "homeHref": "/repositories",
                 "signIn": null,
