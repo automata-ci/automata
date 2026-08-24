@@ -197,15 +197,39 @@
   padding-inline: 10px;
 }
 
-.site-footer .layout-width {
+.site-footer__inner {
   display: flex;
-  justify-content: space-between;
+  align-items: center;
+  justify-content: center;
   gap: var(--space-4);
+  flex-wrap: wrap;
 }
 
-.site-footer .layout-width > span {
+.site-footer__brand,
+.site-footer__navigation {
+  display: inline-flex;
+  align-items: center;
+}
+
+.site-footer__brand {
+  min-width: 0;
+  gap: var(--space-2);
+}
+
+.site-footer__mark {
+  display: block;
+  flex: 0 0 auto;
+}
+
+.site-footer__brand-label {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.site-footer__navigation {
+  justify-content: center;
+  gap: var(--space-4);
+  flex-wrap: wrap;
 }

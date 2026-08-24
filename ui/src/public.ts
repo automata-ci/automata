@@ -1,5 +1,9 @@
 export { App, type AppProps } from "./App.js";
-export { Shell, type ShellProps } from "./components/Shell.js";
+export {
+  Shell,
+  type ShellFooterLink,
+  type ShellProps,
+} from "./components/Shell.js";
 export {
   ProviderConnectionPanel,
   type ProviderConnectionLifecycle,

@@ -12,7 +12,7 @@ describe("icon contract", () => {
   it("reserves inline SVG for the official mark and uses Phosphor for interface icons", () => {
     const html = `${renderPage(runListRequest)}${renderPage(runDetailRequest)}`;
 
-    expect(html.match(/<svg/gu)).toHaveLength(2);
+    expect(html.match(/<svg/gu)).toHaveLength(4);
     expect(html).toContain('viewBox="0 0 14 9"');
     expect(html).toContain("ph ph-play-circle");
     expect(html).toContain("ph ph-circle-notch");

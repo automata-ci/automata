@@ -23,6 +23,20 @@ export default meta;
 type Story = StoryObj<typeof meta>;
 export const Repository: Story = {};
 export const TenantPage: Story = { args: { repository: null } };
+export const CloudFooter: Story = {
+  args: {
+    footerLinks: [
+      { href: "#terms", label: "Terms" },
+      { href: "#privacy", label: "Privacy" },
+      { href: "#security", label: "Security" },
+      { href: "#status", label: "Status" },
+      { href: "#docs", label: "Docs" },
+      { href: "#contact", label: "Contact" },
+    ],
+    repository: null,
+    shell: { ...previewShell, productName: "Automata Cloud" },
+  },
+};
 export const AccountMenu: Story = {
   args: {
     repository: null,

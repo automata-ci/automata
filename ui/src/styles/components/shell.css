@@ -165,8 +165,16 @@ button.viewer-link {
 }
 
 .site-footer {
-  padding-block: 24px;
+  padding-block: 32px;
   color: var(--fg-muted);
-  border-top: 1px solid var(--border-default);
   font-size: 12px;
+}
+
+.site-footer__brand {
+  color: var(--fg-muted);
+}
+
+.site-footer__brand:hover {
+  color: var(--fg-default);
+  text-decoration: none;
 }

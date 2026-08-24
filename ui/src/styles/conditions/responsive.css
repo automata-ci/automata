@@ -574,9 +574,9 @@
     border-radius: 0;
   }
 
-  .site-footer .layout-width {
+  .site-footer__inner {
     flex-direction: column;
-    gap: 4px;
+    gap: var(--space-3);
   }
 }
 

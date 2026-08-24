@@ -4,10 +4,16 @@ import { isVisibleDisplayCodePoint } from "../unicode";
 import { AutomataMark } from "./AutomataMark";
 import { Icon } from "./Icon";
 
+export interface ShellFooterLink {
+  readonly href: string;
+  readonly label: string;
+}
+
 export interface ShellProps extends PropsWithChildren {
   readonly shell: ShellModel;
   readonly repository: RepositoryModel | null;
   readonly currentRepositoryView?: "actions" | "settings";
+  readonly footerLinks?: readonly ShellFooterLink[];
   readonly utility?: ReactNode;
 }
 
@@ -15,6 +21,7 @@ export function Shell({
   shell,
   repository,
   currentRepositoryView = "actions",
+  footerLinks = [],
   utility,
   children,
 }: ShellProps) {
@@ -179,8 +186,25 @@ export function Shell({
       )}
       {children}
       <footer className="site-footer">
-        <div className="layout-width">
-          <span>{shell.productName}</span>
+        <div className="site-footer__inner layout-width">
+          <a className="site-footer__brand" href={shell.homeHref}>
+            <AutomataMark className="site-footer__mark" />
+            <span className="site-footer__brand-label">
+              {shell.productName}
+            </span>
+          </a>
+          {footerLinks.length === 0 ? null : (
+            <nav
+              className="site-footer__navigation"
+              aria-label="Footer navigation"
+            >
+              {footerLinks.map((item) => (
+                <a href={item.href} key={`${item.label}:${item.href}`}>
+                  {item.label}
+                </a>
+              ))}
+            </nav>
+          )}
         </div>
       </footer>
     </>
