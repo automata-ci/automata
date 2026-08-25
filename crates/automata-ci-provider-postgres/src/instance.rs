@@ -175,8 +175,6 @@ impl PostgresProviderManifestRepository {
                 .validate_successor(&current_manifest)
                 .map_err(|_| ProviderRepositoryError::Conflict)?;
             Some(current_manifest.secrets().clone())
-        } else if manifest.revision().get() != 1 {
-            return Err(ProviderRepositoryError::Conflict);
         } else {
             None
         };
