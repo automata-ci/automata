@@ -35,7 +35,6 @@ const MAX_GITHUB_CHECK_PROJECTION_CLOCK_SKEW_MILLIS: i64 = 60_000;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ProjectionSubjectOrigin {
     ProviderDelivery,
-    ScheduledFire,
     WorkflowRerun,
 }
 
@@ -67,7 +66,7 @@ pub(super) const SUBJECT_COLUMNS: &str = r"
 
 #[rustfmt::skip]
 macro_rules! projection_origin_authority_sql {
-    ($prefix:literal, $indent:literal, $schedule_connection_indent:literal, $suffix:literal $(,)?) => {
+    ($prefix:literal, $indent:literal, $suffix:literal $(,)?) => {
         concat!(
             $prefix,
             $indent, "AND CASE subject.origin_kind\n",
@@ -105,17 +104,6 @@ macro_rules! projection_origin_authority_sql {
             $indent, "                AND subject.workflow_run_id IS NULL\n",
             $indent, "          )\n",
             $indent, "        )\n",
-            $indent, "  )\n",
-            $indent, "  WHEN 'scheduled_fire' THEN EXISTS (\n",
-            $indent, "      SELECT 1\n",
-            $indent, "      FROM github_schedule_check_evidence AS schedule_evidence\n",
-            $indent, "      WHERE schedule_evidence.github_check_subject_id =\n",
-            $indent, "                COALESCE(subject.parent_subject_id, subject.id)\n",
-            $indent, "        AND schedule_evidence.schedule_fire_id = subject.schedule_fire_id\n",
-            $indent, "        AND schedule_evidence.tenant_id = subject.tenant_id\n",
-            $indent, "        AND schedule_evidence.repository_id = subject.repository_id\n",
-            $indent, "        AND schedule_evidence.provider_connection_id =\n",
-            $indent, $schedule_connection_indent, "subject.provider_connection_id\n",
             $indent, "  )\n",
             $indent, "  WHEN 'workflow_rerun' THEN EXISTS (\n",
             $indent, "      SELECT 1\n",
@@ -242,9 +230,8 @@ const LOCK_PROJECTION_CANDIDATE_SQL: &str = projection_origin_authority_sql!(
     JOIN github_check_subjects AS subject
       ON subject.id = outbox.subject_id
     WHERE subject.provider_connection_id = $1
-",
+    ",
     "      ",
-    "          ",
     r"      AND outbox.claim_fence < 9223372036854775807
       AND (
         outbox.attempted_revision IS DISTINCT FROM subject.desired_revision
@@ -310,22 +297,6 @@ const CLAIM_LOCKED_DELIVERY_PROJECTION_SQL: &str = claim_locked_projection_sql!(
 "
 );
 
-const CLAIM_LOCKED_SCHEDULE_PROJECTION_SQL: &str = claim_locked_projection_sql!(
-    r"    FROM github_check_subjects AS subject,
-         github_schedule_check_evidence AS evidence
-    WHERE outbox.subject_id = $1
-      AND subject.id = outbox.subject_id
-      AND subject.origin_kind = 'scheduled_fire'
-      AND subject.provider_delivery_id IS NULL
-      AND subject.provider_connection_id = $2
-      AND evidence.github_check_subject_id = COALESCE(subject.parent_subject_id, subject.id)
-      AND evidence.schedule_fire_id = subject.schedule_fire_id
-      AND evidence.tenant_id = subject.tenant_id
-      AND evidence.repository_id = subject.repository_id
-      AND evidence.provider_connection_id = subject.provider_connection_id
-"
-);
-
 const CLAIM_LOCKED_RERUN_PROJECTION_SQL: &str = claim_locked_projection_sql!(
     r"    FROM github_check_subjects AS subject,
          workflow_rerun_check_evidence AS evidence
@@ -350,9 +321,8 @@ const PROJECTION_FENCE_EXHAUSTED_SQL: &str = projection_origin_authority_sql!(
             FROM github_check_projection_outbox AS outbox
             JOIN github_check_subjects AS subject ON subject.id = outbox.subject_id
             WHERE subject.provider_connection_id = $1
-",
+    ",
     "              ",
-    "            ",
     r"              AND outbox.claim_fence = 9223372036854775807
               AND (
                 outbox.state = 'pending'
@@ -380,9 +350,8 @@ const BLOCK_EXHAUSTED_CANDIDATES_SQL: &str = projection_origin_authority_sql!(
         FROM github_check_subjects AS subject
         WHERE subject.id = outbox.subject_id
           AND subject.provider_connection_id = $1
-",
+    ",
     "          ",
-    "            ",
     r"          AND outbox.attempted_revision = subject.desired_revision
           AND outbox.attempt_count >= 64
           AND (
@@ -1790,7 +1759,6 @@ fn decode_projection_origin(
         .as_str()
     {
         "provider_delivery" => Ok(ProjectionSubjectOrigin::ProviderDelivery),
-        "scheduled_fire" => Ok(ProjectionSubjectOrigin::ScheduledFire),
         "workflow_rerun" => Ok(ProjectionSubjectOrigin::WorkflowRerun),
         _ => Err(GithubCheckStoreError::CorruptData),
     }
@@ -1816,7 +1784,6 @@ async fn claim_locked_projection(
         .ok_or(GithubCheckStoreError::CorruptData)?;
     let claim_sql = match origin {
         ProjectionSubjectOrigin::ProviderDelivery => CLAIM_LOCKED_DELIVERY_PROJECTION_SQL,
-        ProjectionSubjectOrigin::ScheduledFire => CLAIM_LOCKED_SCHEDULE_PROJECTION_SQL,
         ProjectionSubjectOrigin::WorkflowRerun => CLAIM_LOCKED_RERUN_PROJECTION_SQL,
     };
     let row = sqlx::query(claim_sql)
@@ -2195,15 +2162,14 @@ mod tests {
     use super::*;
 
     #[rustfmt::skip]
-    const PROJECTION_SQL: [&str; 6] = [LOCK_PROJECTION_CANDIDATE_SQL, CLAIM_LOCKED_DELIVERY_PROJECTION_SQL, CLAIM_LOCKED_SCHEDULE_PROJECTION_SQL, CLAIM_LOCKED_RERUN_PROJECTION_SQL, PROJECTION_FENCE_EXHAUSTED_SQL, BLOCK_EXHAUSTED_CANDIDATES_SQL];
+    const PROJECTION_SQL: [&str; 5] = [LOCK_PROJECTION_CANDIDATE_SQL, CLAIM_LOCKED_DELIVERY_PROJECTION_SQL, CLAIM_LOCKED_RERUN_PROJECTION_SQL, PROJECTION_FENCE_EXHAUSTED_SQL, BLOCK_EXHAUSTED_CANDIDATES_SQL];
     #[rustfmt::skip]
-    const FINGERPRINTS: [(usize, &str, usize, &str); 6] = [
-        (4159, "691859128cd03244c477255920adc51ea2c649cf06f9040d1fa0f14f1d5e7e5c", 2992, "3210a2469eb3f703ab710fea0013c58bb79ec9ae9f536f3c74a561803ca77bcb"),
+    const FINGERPRINTS: [(usize, &str, usize, &str); 5] = [
+        (3559, "6dfa071d3b8d57082c0cbc428754fd9aca68f710adbb6f9c0d237222183c6667", 2534, "8973709b7f81d9f9ada99972ecacefa165186bd6c063ff637c7f006ce0b8d015"),
         (6285, "bace26ab71eddd1fd8a26bfae37e7254e5fd20d468abf4d4f8930d0eb2596a38", 5118, "6b2fecb3ad8d196f5539467fc0fdda38e2265568351272fe1099729ec8dde866"),
-        (5241, "b8fdd9e95c5856d800e80eb88f154ba13c2ccef7d2ee307049d648f4e709917d", 4384, "73737d04020eec9ac84c84d57f5ef7e40f6a393810451720e3405fbe31beefa5"),
         (5278, "c3d9e042cca7c7183d7398087cd873aa7a353e1d1deff98f9b529cb3337d62c3", 4415, "743b5543234e7e8c898976c9a7ad8dc1a359afe3041b8deb67495f8811040fad"),
-        (4244, "40d9d6a2235070d9ee8d005649f82be97a89cfd8a6694cd7ae918b34c65b8602", 2593, "e9f89a3d82dbe3739d4562daad4bb3d736fc47fa8df77a2fe961ea8f0ed0a251"),
-        (4402, "fa051bb08fde7acb32390dc421db6d14ca07b651b9df8ef5e02ac11bd9512bc8", 2939, "e926232caf0c5ca982cd0281d572418864d3c4a61cb70cb427808f4c225122a6"),
+        (3554, "d9f75908d7a9b84099ae92cff4584ee55fd73f68c309ff4545d59a70c1e80b95", 2135, "d52fdcff7f313aba4a10802c37f4066fe43163990e065cafc7bcbf5813c4a4e6"),
+        (3756, "7304327d51592eef6ea2190542907a6e456d7431b8b4cf1731e060f00637826e", 2481, "824e34c302cc4eb906b8fbb828aaca9b9c097ecd5fdcfd12d7af6160ccfe02a2"),
     ];
 
     #[test]
@@ -2226,14 +2192,14 @@ mod tests {
             .map(|sql| canonical_sql(origin_authority(sql)));
         assert!(canonical.windows(2).all(|pair| pair[0] == pair[1]));
         assert_eq!((canonical[0].len(), sha256(&canonical[0])),
-            (2118, "793e9a4664128465995c1c1957f4f2e73dce82a8bda586468474caf2800330c2".to_owned()));
+            (1660, "7f065fcee1c1e5f9e56ab56ded5e8f49633d316f90bdad66428f192b707a17da".to_owned()));
     }
 
     #[test]
     fn placeholders_and_returning_projection_are_preserved() {
         #[rustfmt::skip]
-        let expected: [&[u8]; 6] = [
-            &[1, 2, 2, 2][..], &[3, 4, 5, 4, 1, 2, 4, 4, 4], &[3, 4, 5, 4, 1, 2, 4, 4, 4],
+        let expected: [&[u8]; 5] = [
+            &[1, 2, 2, 2][..], &[3, 4, 5, 4, 1, 2, 4, 4, 4],
             &[3, 4, 5, 4, 1, 2, 4, 4, 4], &[1, 2, 2, 2], &[2, 1, 2, 2, 2],
         ];
         for (sql, expected) in PROJECTION_SQL.into_iter().zip(expected) {
@@ -2241,7 +2207,6 @@ mod tests {
         }
         let returning = [
             CLAIM_LOCKED_DELIVERY_PROJECTION_SQL,
-            CLAIM_LOCKED_SCHEDULE_PROJECTION_SQL,
             CLAIM_LOCKED_RERUN_PROJECTION_SQL,
         ]
         .map(|sql| {
@@ -2258,7 +2223,6 @@ mod tests {
         #[rustfmt::skip]
         let cases = [
             (CLAIM_LOCKED_DELIVERY_PROJECTION_SQL, "provider_delivery", "github_provider_delivery_evidence", &["schedule_fire_id"][..], &["provider_delivery_id", "workflow_rerun_run_id"][..]),
-            (CLAIM_LOCKED_SCHEDULE_PROJECTION_SQL, "scheduled_fire", "github_schedule_check_evidence", &["provider_delivery_id"][..], &["schedule_fire_id", "workflow_rerun_run_id"][..]),
             (CLAIM_LOCKED_RERUN_PROJECTION_SQL, "workflow_rerun", "workflow_rerun_check_evidence", &["provider_delivery_id", "schedule_fire_id"][..], &["workflow_rerun_run_id"][..]),
         ];
         for (sql, origin, evidence, required_nulls, forbidden_nulls) in cases {

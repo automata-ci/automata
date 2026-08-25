@@ -150,7 +150,7 @@ pub use github_schedule::{
     GithubScheduleSourceAuthority, GithubScheduleStoreError, GithubScheduleValueError,
     GithubScheduleWorkerId, MAX_GITHUB_REGISTERED_SCHEDULES, MAX_GITHUB_SCHEDULE_CLAIM_MILLIS,
     MAX_GITHUB_SCHEDULE_FIRE_ATTEMPTS, MAX_GITHUB_SCHEDULE_RETRY_MILLIS,
-    RegisterGithubScheduleRegistry, RegisterGithubScheduledCheckSubject, RetryGithubScheduleFire,
+    RegisterGithubScheduleRegistry, RetryGithubScheduleFire,
 };
 pub use github_service_authority::{
     AcquireGithubServerServiceHandoff, BeginGithubServerServiceMint,
