@@ -357,8 +357,7 @@ fn valid_canonical_name(value: &str) -> bool {
 
 fn valid_canonical_uuid(value: &str) -> bool {
     Uuid::parse_str(value)
-        .ok()
-        .is_some_and(|parsed| !parsed.is_nil() && parsed.hyphenated().to_string().as_str() == value)
+        .is_ok_and(|parsed| !parsed.is_nil() && parsed.hyphenated().to_string().as_str() == value)
 }
 
 fn digest_text(hasher: &mut Sha256, value: &str) {

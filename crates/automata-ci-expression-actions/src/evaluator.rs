@@ -500,7 +500,7 @@ impl Tree {
             return Err(functions::invalid_operation());
         }
         let mut sensitive = false;
-        for pair in arguments[..arguments.len() - 1].chunks_exact(2) {
+        for pair in arguments[..arguments.len() - 1].as_chunks::<2>().0 {
             let predicate = self.evaluate(pair[0], context, limits)?;
             sensitive |= predicate.value.is_sensitive();
             if predicate

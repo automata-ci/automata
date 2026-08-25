@@ -104,7 +104,7 @@ impl GitObjectId {
             });
         }
         let mut bytes = [0; GIT_SHA256_BYTES];
-        for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+        for (index, pair) in value.as_bytes().as_chunks::<2>().0.iter().enumerate() {
             let high = lowercase_hex_nibble(pair[0])
                 .ok_or(GitObjectIdError::InvalidHex { index: index * 2 })?;
             let low = lowercase_hex_nibble(pair[1]).ok_or(GitObjectIdError::InvalidHex {

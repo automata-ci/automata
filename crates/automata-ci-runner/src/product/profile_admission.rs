@@ -2340,7 +2340,7 @@ mod tests {
         assert_eq!(provider.resource_count(), 0);
         let calls = provider.calls();
         assert_eq!(calls.len(), profiles.len() * 3);
-        for (calls, environment) in calls.chunks_exact(3).zip(profiles.values()) {
+        for (calls, environment) in calls.as_chunks::<3>().0.iter().zip(profiles.values()) {
             let Call::Create(spec) = &calls[0] else {
                 panic!("profile must begin with create")
             };

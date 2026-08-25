@@ -1511,7 +1511,7 @@ pub fn load_spool_key(source: &SecretSource) -> Result<Zeroizing<Vec<u8>>, Runne
         return Err(RunnerProductError::InvalidSpoolKey);
     }
     let mut decoded = Zeroizing::new(vec![0_u8; AES_256_GCM_KEY_BYTES]);
-    for (index, pair) in encoded.chunks_exact(2).enumerate() {
+    for (index, pair) in encoded.as_chunks::<2>().0.iter().enumerate() {
         let high = hex_nibble(pair[0]).ok_or(RunnerProductError::InvalidSpoolKey)?;
         let low = hex_nibble(pair[1]).ok_or(RunnerProductError::InvalidSpoolKey)?;
         decoded[index] = (high << 4) | low;

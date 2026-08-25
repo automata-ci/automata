@@ -8523,15 +8523,12 @@ async fn evaluate_claim(
             .satisfies(&machine_requirements)
             .is_ok();
     let labels_match = requirements.labels().iter().all(|label| {
-        RoutingLabel::new(label.as_str())
-            .ok()
-            .is_some_and(|label| routing.labels.contains(&label))
+        RoutingLabel::new(label.as_str()).is_ok_and(|label| routing.labels.contains(&label))
     });
     let group_matches = requirements.eligible_groups().is_empty()
         || routing.group_name.as_ref().is_some_and(|name| {
             RunnerGroup::new(name)
-                .ok()
-                .is_some_and(|group| requirements.eligible_groups().contains(&group))
+                .is_ok_and(|group| requirements.eligible_groups().contains(&group))
         });
     if tenant_id != routing.tenant_id
         || admission_epoch != i32::from(WORKFLOW_ADMISSION_EPOCH)

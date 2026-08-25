@@ -393,7 +393,7 @@ async fn observer_distinguishes_new_replay_and_durable_failure() {
     );
     let stages = observer.stages.lock().expect("stage lock");
     assert_eq!(stages.len(), 15);
-    for attempt in stages.chunks_exact(5).take(2) {
+    for attempt in stages.as_chunks::<5>().0.iter().take(2) {
         assert_eq!(
             attempt,
             [

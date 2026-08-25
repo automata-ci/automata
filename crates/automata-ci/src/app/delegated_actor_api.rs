@@ -975,6 +975,7 @@ async fn workspace_live_log_ticket(
     }
 }
 
+#[allow(clippy::result_large_err)] // Axum responses are terminal handler values, not retained errors.
 async fn resolve_context(
     state: &DelegatedActorApiState,
     workspace_id: &str,
@@ -1223,6 +1224,7 @@ fn web_data_error_response(error: WebDataError) -> Response {
     })
 }
 
+#[allow(clippy::result_large_err)] // Axum responses are terminal handler values, not retained errors.
 async fn resolve_actor(
     state: &DelegatedActorApiState,
     workspace_uuid: Uuid,
@@ -1231,6 +1233,7 @@ async fn resolve_actor(
     resolve_actor_with_tenant_permissions(state, workspace_uuid, headers, BTreeSet::new()).await
 }
 
+#[allow(clippy::result_large_err)] // Axum responses are terminal handler values, not retained errors.
 async fn resolve_actor_with_tenant_permissions(
     state: &DelegatedActorApiState,
     workspace_uuid: Uuid,
