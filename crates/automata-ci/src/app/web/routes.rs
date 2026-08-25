@@ -913,6 +913,7 @@ fn rbac_see_other(location: &str, notice: &'static str) -> Response<Body> {
     response
 }
 
+#[allow(clippy::result_large_err)] // Axum responses are terminal handler values, not retained errors.
 async fn rbac_mutation_capabilities(
     state: &WebState,
     rbac_data: &Arc<dyn RbacWebData>,
@@ -946,6 +947,7 @@ async fn rbac_mutation_capabilities(
     }
 }
 
+#[allow(clippy::result_large_err)] // Axum responses are terminal handler values, not retained errors.
 async fn rbac_direct_binding_grant_options(
     state: &WebState,
     rbac_data: &Arc<dyn RbacWebData>,
@@ -1882,7 +1884,7 @@ fn parse_artifact_id(value: &str) -> Option<i64> {
 }
 
 fn if_none_match_matches(value: &HeaderValue, etag: &str) -> bool {
-    value.to_str().ok().is_some_and(|value| {
+    value.to_str().is_ok_and(|value| {
         value.split(',').any(|candidate| {
             let candidate = candidate.trim();
             candidate == "*"

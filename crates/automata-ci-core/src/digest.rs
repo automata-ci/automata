@@ -63,7 +63,7 @@ impl FromStr for Sha256Digest {
             });
         }
         let mut bytes = [0; SHA256_DIGEST_BYTES];
-        for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+        for (index, pair) in value.as_bytes().as_chunks::<2>().0.iter().enumerate() {
             let high =
                 hex_nibble(pair[0]).ok_or(Sha256DigestError::InvalidHex { index: index * 2 })?;
             let low = hex_nibble(pair[1]).ok_or(Sha256DigestError::InvalidHex {

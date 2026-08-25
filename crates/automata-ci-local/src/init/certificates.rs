@@ -110,7 +110,9 @@ fn derived_key(
 ) -> Result<(KeyPair, Zeroizing<String>), LocalInitError> {
     let candidates = deriver.bytes(purpose, 64);
     let secret = candidates
-        .chunks_exact(32)
+        .as_chunks::<32>()
+        .0
+        .iter()
         .find_map(|candidate| p256::SecretKey::from_slice(candidate).ok())
         .ok_or_else(reset_required)?;
     let pem = secret

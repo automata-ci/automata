@@ -812,7 +812,7 @@ fn parse_signature(value: &[u8]) -> Result<[u8; 32], GithubWebhookError> {
         .filter(|encoded| encoded.len() == 64)
         .ok_or(GithubWebhookError::InvalidSignature)?;
     let mut signature = [0_u8; 32];
-    for (target, pair) in signature.iter_mut().zip(encoded.chunks_exact(2)) {
+    for (target, pair) in signature.iter_mut().zip(encoded.as_chunks::<2>().0) {
         let high = lower_hex_nibble(pair[0]).ok_or(GithubWebhookError::InvalidSignature)?;
         let low = lower_hex_nibble(pair[1]).ok_or(GithubWebhookError::InvalidSignature)?;
         *target = (high << 4) | low;
