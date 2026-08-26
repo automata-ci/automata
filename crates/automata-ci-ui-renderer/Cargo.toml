@@ -11,6 +11,16 @@ homepage.workspace = true
 readme = "README.md"
 description = "Isolated server-side renderer and embedded web assets for Automata"
 publish.workspace = true
+include = [
+    "build.rs",
+    "Cargo.toml",
+    "README.md",
+    "contract.json",
+    "generated/**",
+    "src/**",
+    "tests/**",
+    "wit/**",
+]
 
 [[test]]
 name = "ui_renderer"
@@ -23,7 +33,11 @@ wasmtime.workspace = true
 wasmtime-wasi.workspace = true
 
 [dev-dependencies]
-automata-ci-core.workspace = true
+sha2.workspace = true
+
+[build-dependencies]
+serde.workspace = true
+serde_json.workspace = true
 sha2.workspace = true
 
 [lints]

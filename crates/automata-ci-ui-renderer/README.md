@@ -8,6 +8,12 @@ HTML and asset metadata to the control-plane web layer.
 The `automata server` command composes this crate. It is not a standalone web
 server or frontend framework.
 
+A source checkout requires the generated `target/ui-renderer` build before
+Cargo compiles this crate. Run
+`./scripts/ui/reproduce-renderer-in-profile.sh` from the repository root. The
+published crate carries the same release-generated assets and does not require
+Node.js when used as a dependency.
+
 - [Development documentation](https://github.com/automata-ci/automata/blob/main/docs/development.md)
 - API documentation: run `cargo doc -p automata-ci-ui-renderer --open` from a source checkout.
 - [Issues and support](https://github.com/automata-ci/automata/issues)

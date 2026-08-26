@@ -4,8 +4,12 @@
 
 mod assets;
 mod error;
-mod generated_assets;
-mod generated_contract;
+mod generated_assets {
+    include!(concat!(env!("OUT_DIR"), "/generated_assets.rs"));
+}
+mod generated_contract {
+    include!(concat!(env!("OUT_DIR"), "/generated_contract.rs"));
+}
 mod policy;
 mod port;
 mod runtime;

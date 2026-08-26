@@ -217,8 +217,9 @@ loader escape paths, and performs a render smoke test. It is a closure check for
 trusted bundler output, not a sandbox for hostile JavaScript or string-evaluation
 analysis.
 
-The checked-in Vite server bundle is compiled into a WASI Preview 2 component;
-Rust embeds that component and the hash-addressed client assets. At runtime the
+The Vite server bundle is compiled into a WASI Preview 2 component during the
+locked UI build; Rust embeds that component and the hash-addressed client
+assets from `target/ui-renderer`. At runtime the
 host supplies those same-origin paths through `RenderRequest.host.assets` and
 invokes the component with a fresh, resource-limited Wasmtime store. Host-owned
 locale, CSP nonce, and executable asset paths stay outside the page model and
@@ -234,8 +235,9 @@ component contains the JavaScript runtime and renderer behind a narrow WIT
 interface, with no inherited filesystem, sockets, environment, subprocesses, or
 standard streams. The Rust host enforces input/output, aggregate memory, table,
 instance, host-resource, fuel, concurrency, and wall-time limits. The component,
-client assets, lockfiles, provenance, and CycloneDX inventory are reproducibly
-generated and checked by CI before static-musl packaging.
+client assets, provenance, and CycloneDX inventory are reproducibly generated
+under `target/` and checked by CI before Cargo and static-musl packaging.
+Generated code and binary assets are not committed.
 
 The serialized interface is versioned (`schemaVersion: 1`) and validated deeply
 with exact shapes and explicit size limits before rendering or hydration. Every

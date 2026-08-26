@@ -1,4 +1,5 @@
-use automata_ci_core::Sha256Digest;
+use std::fmt::Write as _;
+
 use automata_ci_ui_renderer::{AssetContentType, client_assets, find_asset};
 use sha2::{Digest, Sha256};
 
@@ -29,5 +30,10 @@ fn exposes_only_exact_immutable_client_assets() {
 }
 
 fn hex_sha256(bytes: &[u8]) -> String {
-    Sha256Digest::from_bytes(Sha256::digest(bytes).into()).to_string()
+    let digest = Sha256::digest(bytes);
+    let mut encoded = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        write!(&mut encoded, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    encoded
 }

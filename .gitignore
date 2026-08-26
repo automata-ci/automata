@@ -2,6 +2,7 @@
 /target/
 **/target/
 /crates/*/*.cdx.json
+/crates/automata-ci-ui-renderer/generated/
 
 # Swift Package Manager build output
 **/.build/

@@ -4,7 +4,7 @@
   "llvm_coverage_export_version": "3.1.0",
   "report_scope": {
     "description": "Compiled production source in the ordinary Rust workspace set",
-    "ignore_filename_regex": "((^|/)target/|/automata-ci-ui-renderer/|/generated/|generated_assets\\.rs$|generated_contract\\.rs$)",
+    "ignore_filename_regex": "((^|/)target/|/automata-ci-ui-renderer/|/generated/)",
     "exclusions": [
       {
         "name": "cargo-default-nonproduction-source",
@@ -12,11 +12,11 @@
       },
       {
         "name": "ui-renderer",
-        "description": "The separately executed resource-heavy renderer package and generated assets"
+        "description": "The separately executed resource-heavy renderer package and target-only build output"
       },
       {
         "name": "generated-rust",
-        "description": "Generated protobuf, contract, and embedded-asset Rust"
+        "description": "Generated protobuf Rust"
       },
       {
         "name": "cargo-build-output",

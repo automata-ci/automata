@@ -83,7 +83,7 @@ run_reproduction() {
     [[ "$(cargo deny --version)" == "cargo-deny 0.20.2" ]] || \
         die "renderer profile does not contain cargo-deny 0.20.2"
 
-    "${script_directory}/regenerate-renderer.sh"
+    "${script_directory}/build-renderer.sh"
     for test_script in "${repository_root}"/scripts/ui/tests/*.test.sh; do
         "${test_script}"
     done
@@ -156,14 +156,17 @@ readonly -a ownership_environment
                 return
             fi
             for path in \
-                target/agent-scratch/ssr \
+                target/sbom-generation \
+                target/task-tmp/renderer-build-test \
+                target/task-tmp/renderer-preflight-test \
+                target/task-tmp/renderer-provenance-test \
+                target/task-tmp/renderer-sbom \
+                target/task-tmp/rquickjs-macro-diagnostics \
+                target/task-tmp/ui-renderer \
+                target/ui-renderer \
                 target/ui-renderer-wrapper \
                 ui/node_modules \
-                ui/dist \
-                ui/renderer \
-                crates/automata-ci-ui-renderer/assets \
-                crates/automata-ci-ui-renderer/src/generated_assets.rs \
-                crates/automata-ci-ui-renderer/src/generated_contract.rs; do
+                ui/dist; do
                 if [[ -e "${path}" || -L "${path}" ]]; then
                     chown --recursive --no-dereference \
                         "${AUTOMATA_RENDERER_HOST_UID}:${AUTOMATA_RENDERER_HOST_GID}" \

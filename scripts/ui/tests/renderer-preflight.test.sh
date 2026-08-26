@@ -12,12 +12,12 @@ cleanup() {
 trap cleanup EXIT
 
 helper="${repository_root}/scripts/ui/renderer-preflight-env.sh"
-regenerator="${repository_root}/scripts/ui/regenerate-renderer.sh"
+builder="${repository_root}/scripts/ui/build-renderer.sh"
 fake_repository="${scratch_directory}/workspace"
 fake_script_directory="${fake_repository}/scripts/ui"
 mkdir -p -- "${fake_script_directory}"
 install -m 0644 -- "${helper}" "${fake_script_directory}/renderer-preflight-env.sh"
-install -m 0755 -- "${regenerator}" "${fake_script_directory}/regenerate-renderer.sh"
+install -m 0755 -- "${builder}" "${fake_script_directory}/build-renderer.sh"
 
 clean_environment=(
     PATH=/usr/bin:/bin
@@ -93,17 +93,17 @@ for variable in \
     if /usr/bin/env -i \
         "${clean_environment[@]}" \
         "${variable}=adversarial" \
-        bash "${fake_script_directory}/regenerate-renderer.sh" \
+        bash "${fake_script_directory}/build-renderer.sh" \
         >"${log}" 2>&1; then
-        echo "renderer regeneration accepted ambient ${variable}" >&2
+        echo "renderer build accepted ambient ${variable}" >&2
         exit 1
     fi
     grep -Fq -- "${variable}" "${log}" || {
-        echo "renderer regeneration did not identify rejected ${variable}" >&2
+        echo "renderer build did not identify rejected ${variable}" >&2
         exit 1
     }
     [[ ! -e "${fake_repository}/target" ]] || {
-        echo "renderer regeneration touched target before rejecting ${variable}" >&2
+        echo "renderer build touched target before rejecting ${variable}" >&2
         exit 1
     }
 done
@@ -112,9 +112,9 @@ empty_log="${scratch_directory}/empty-wasi-sdk.log"
 if /usr/bin/env -i \
     "${clean_environment[@]}" \
     WASI_SDK= \
-    bash "${fake_script_directory}/regenerate-renderer.sh" \
+    bash "${fake_script_directory}/build-renderer.sh" \
     >"${empty_log}" 2>&1; then
-    echo "renderer regeneration accepted an empty ambient WASI_SDK" >&2
+    echo "renderer build accepted an empty ambient WASI_SDK" >&2
     exit 1
 fi
 grep -Fq -- 'WASI_SDK' "${empty_log}"
@@ -126,9 +126,9 @@ if /usr/bin/env -i \
     CARGO_HOME=/opt/cargo \
     RUSTUP_HOME=/opt/rustup \
     CARGO_INCREMENTAL=1 \
-    bash "${fake_script_directory}/regenerate-renderer.sh" \
+    bash "${fake_script_directory}/build-renderer.sh" \
     >"${incremental_log}" 2>&1; then
-    echo "renderer regeneration accepted CARGO_INCREMENTAL=1" >&2
+    echo "renderer build accepted CARGO_INCREMENTAL=1" >&2
     exit 1
 fi
 grep -Fq -- 'CARGO_INCREMENTAL=0' "${incremental_log}"
@@ -139,9 +139,9 @@ install -m 0644 -- /dev/null "${fake_repository}/.cargo/config.toml"
 cargo_config_log="${scratch_directory}/cargo-config.log"
 if /usr/bin/env -i \
     "${clean_environment[@]}" \
-    bash "${fake_script_directory}/regenerate-renderer.sh" \
+    bash "${fake_script_directory}/build-renderer.sh" \
     >"${cargo_config_log}" 2>&1; then
-    echo "renderer regeneration accepted a repository Cargo config" >&2
+    echo "renderer build accepted a repository Cargo config" >&2
     exit 1
 fi
 grep -Fq -- 'forbids Cargo config' "${cargo_config_log}"
