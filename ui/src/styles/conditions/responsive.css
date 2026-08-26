@@ -574,9 +574,9 @@
     border-radius: 0;
   }
 
-  .site-footer .layout-width {
+  .site-footer__inner {
     flex-direction: column;
-    gap: 4px;
+    gap: var(--space-3);
   }
 }
 
@@ -611,6 +611,7 @@
 
   .primary-nav a,
   .repo-nav a,
+  .viewer-menu__navigation a,
   .viewer-menu__sign-out,
   .workflow-navigation__primary a,
   .workflow-navigation__workflow,

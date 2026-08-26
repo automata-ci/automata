@@ -16,6 +16,7 @@ if [ "$(node --version)" != v24.19.0 ]; then
   exit 1
 fi
 
+"$repository_root/scripts/ui/reproduce-renderer-in-profile.sh"
 cargo fmt --all -- --check
 cargo clippy \
   --locked \

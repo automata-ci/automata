@@ -12,7 +12,7 @@ describe("icon contract", () => {
   it("reserves inline SVG for the official mark and uses Phosphor for interface icons", () => {
     const html = `${renderPage(runListRequest)}${renderPage(runDetailRequest)}`;
 
-    expect(html.match(/<svg/gu)).toHaveLength(2);
+    expect(html.match(/<svg/gu)).toHaveLength(4);
     expect(html).toContain('viewBox="0 0 14 9"');
     expect(html).toContain("ph ph-play-circle");
     expect(html).toContain("ph ph-circle-notch");
@@ -36,6 +36,32 @@ describe("icon contract", () => {
     expect(styles).toContain('content: "\\e272"');
     expect(renderToStaticMarkup(<Icon name="settings" />)).toContain(
       "ph ph-gear-six",
+    );
+  });
+
+  it("includes the bundled Phosphor glyph used by external links", () => {
+    const styles = readFileSync(
+      resolve(process.cwd(), "src/styles/foundations/icons.css"),
+      "utf8",
+    );
+
+    expect(styles).toContain(".ph.ph-arrow-square-out::before");
+    expect(styles).toContain('content: "\\e5de"');
+    expect(renderToStaticMarkup(<Icon name="external-link" />)).toContain(
+      "ph ph-arrow-square-out",
+    );
+  });
+
+  it("includes the bundled Phosphor glyph used by organization links", () => {
+    const styles = readFileSync(
+      resolve(process.cwd(), "src/styles/foundations/icons.css"),
+      "utf8",
+    );
+
+    expect(styles).toContain(".ph.ph-buildings::before");
+    expect(styles).toContain('content: "\\e102"');
+    expect(renderToStaticMarkup(<Icon name="organizations" />)).toContain(
+      "ph ph-buildings",
     );
   });
 

@@ -30,9 +30,11 @@ const expectedExports = [
   "ProviderConnectionPanel",
   "RepositorySelectionList",
   "Shell",
+  "ShellFooterLinksProvider",
   "THEME_BOOTSTRAP_SCRIPT",
   "ThemeToggle",
   "createSameOriginLiveLogAccessProvider",
+  "installViewerMenuDismissal",
   "validateLiveLogAccess",
 ];
 
@@ -48,6 +50,7 @@ const shellHtml = renderToStaticMarkup(
     {
       repository: null,
       shell: {
+        accountNavigation: [],
         productName: "Automata",
         homeHref: "/",
         signIn: null,
@@ -170,6 +173,7 @@ async function verifyTypeScriptConsumer(archive) {
       join(consumerDirectory, "consumer.mts"),
       `import {
   App,
+  installViewerMenuDismissal,
   validateLiveLogAccess,
   type AppProps,
   type JobLogPageModel,
@@ -185,6 +189,7 @@ declare const record: LiveLogRecord;
 
 const props: AppProps = { page, jobLogAccess: accessProvider };
 void App;
+void installViewerMenuDismissal;
 void props;
 void record;
 validateLiveLogAccess(access);

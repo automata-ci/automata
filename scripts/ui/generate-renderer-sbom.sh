@@ -21,7 +21,7 @@ wrapper_directory="$(
         "renderer wrapper source directory"
 )"
 raw_sbom="${wrapper_directory}/renderer_cdylib.cdx.json"
-output_path="${1:-${repository_root}/ui/renderer/renderer.cdx.json}"
+output_path="${1:-${repository_root}/target/ui-renderer/renderer.cdx.json}"
 component_path="${2:-}"
 readonly wrapper_directory raw_sbom output_path component_path
 
@@ -32,7 +32,7 @@ die() {
 
 (( $# <= 2 )) || die "usage: $0 [OUTPUT_PATH [COMPONENT_PATH]]"
 [[ -f "${wrapper_directory}/Cargo.toml" ]] || \
-    die "renderer wrapper source is missing; run regenerate-renderer.sh first"
+    die "renderer wrapper source is missing; run build-renderer.sh first"
 [[ ! -e "${raw_sbom}" ]] || die "refusing to overwrite ${raw_sbom}"
 [[ "$(cargo cyclonedx --version)" == "${expected_cyclonedx_version}" ]] || \
     die "cargo-cyclonedx 0.5.9 is required"
@@ -43,7 +43,7 @@ if [[ -n "${component_path}" ]]; then
     component="${component_path}"
 else
     mapfile -t components < <(
-        find "${repository_root}/crates/automata-ci-ui-renderer/assets" -maxdepth 1 -type f \
+        find "${repository_root}/target/ui-renderer/assets" -maxdepth 1 -type f \
             -name 'renderer-*.wasm' -print | LC_ALL=C sort
     )
     [[ "${#components[@]}" -eq 1 ]] || die "expected exactly one renderer component"

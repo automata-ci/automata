@@ -27,11 +27,13 @@ export AUTOMATA_PSQL_BINARY=/opt/homebrew/opt/postgresql@18/bin/psql
 ```
 
 Run `./scripts/ci/run-macos-checks.sh` from the repository root for the complete
-non-service macOS gate. It rejects an unpinned Node version, keeps all test
-scratch space under a short, trusted `target/` ancestry that also respects
-Darwin Unix-socket limits, formats, lints, tests, and documents every workspace
-target other than the intentionally Linux-only `automata-ci-service-proxy`, then
-builds all three release Swift executables used by the native VM provider.
+non-service macOS gate. It builds the architecture-neutral UI renderer through
+the locked container profile before Cargo, so Docker or Podman must be
+available. The gate rejects an unpinned Node version, keeps all test scratch
+space under a short, trusted `target/` ancestry that also respects Darwin
+Unix-socket limits, formats, lints, tests, and documents every workspace target
+other than the intentionally Linux-only `automata-ci-service-proxy`, then builds
+all three release Swift executables used by the native VM provider.
 
 The secret-safe PostgreSQL launcher discovers that Apple Silicon Homebrew path
 and the Intel Homebrew prefix when no override is set. Keep the explicit
@@ -268,11 +270,11 @@ the `s3` bundle also needs PostgreSQL and public GitHub access; those
 prerequisites can contribute partial profiles without executing the complete
 `postgres` or `github-live` bundles. The manifest records that distinction.
 
-The generated protobuf module and renderer-generated Rust are excluded from
-the report, not from compilation or tests. Renderer tests remain in their
-separate resource-heavy CI job; this workflow makes no renderer coverage
-claim. Review per-file and per-crate gaps and ratchet the committed policy only
-from a reproducible ordinary-bundle report.
+The generated protobuf module is excluded from the report, not from compilation
+or tests. Renderer build output lives under `target/`; focused renderer tests run
+in Rust CI after that resource-heavy build, while this coverage workflow makes
+no renderer claim. Review per-file and per-crate gaps and ratchet the committed
+policy only from a reproducible ordinary-bundle report.
 
 ## Runner capability admission
 
@@ -313,13 +315,18 @@ floors retain 0.99–1.29 percentage points of headroom under the reviewed
 CI-pinned Node 24.19.0 baseline; see the
 [UI guide](../ui/README.md#commands) for the baseline and ratcheting policy.
 
-If a frontend change intentionally updates the embedded renderer, use the
-locked profile launcher. It runs regeneration and asset verification inside
-the locked, reproducible profile environment:
+Before the first Cargo build in a fresh checkout, and after changing frontend
+source, use the locked profile launcher. It generates and verifies the renderer
+component and browser assets under `target/ui-renderer`:
 
 ```console
 ./scripts/ui/reproduce-renderer-in-profile.sh
 ```
+
+Cargo does not commit or regenerate those artifacts itself. Its renderer build
+script validates the existing build output and emits only Rust bindings into
+Cargo's `OUT_DIR`. Node and the locked renderer toolchain are build
+dependencies, not production runtime dependencies.
 
 Read [the UI guide](../ui/README.md) before changing the render contract or
 adding a page kind.

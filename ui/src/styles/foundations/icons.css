@@ -46,6 +46,10 @@
   content: "\e282";
 }
 
+.ph.ph-arrow-square-out::before {
+  content: "\e5de";
+}
+
 .ph.ph-tag::before {
   content: "\e478";
 }
@@ -56,6 +60,10 @@
 
 .ph.ph-book-bookmark::before {
   content: "\e0e4";
+}
+
+.ph.ph-buildings::before {
+  content: "\e102";
 }
 
 .ph.ph-magnifying-glass::before {

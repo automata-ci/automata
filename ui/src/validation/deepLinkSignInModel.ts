@@ -6,6 +6,7 @@ export function validateDeepLinkSignInPage(value: unknown, path: string): void {
   expectLiteral(page.kind, `${path}.kind`, "deep-link-sign-in");
   validateShell(page.shell, `${path}.shell`);
   const shell = expectObject(page.shell, `${path}.shell`, [
+    "accountNavigation",
     "productName",
     "homeHref",
     "signIn",

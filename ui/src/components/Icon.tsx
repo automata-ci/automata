@@ -5,6 +5,7 @@ export type IconName =
   | "chevron-down"
   | "chevron-right"
   | "commit"
+  | "external-link"
   | "overview"
   | "pull-request"
   | "repository"
@@ -12,6 +13,7 @@ export type IconName =
   | "settings"
   | "sign-out"
   | "moon"
+  | "organizations"
   | "sun"
   | "tag"
   | "workflow";
@@ -29,6 +31,7 @@ const phosphorIconNames: Readonly<Record<IconName, string>> = {
   "chevron-down": "caret-down",
   "chevron-right": "caret-right",
   commit: "git-commit",
+  "external-link": "arrow-square-out",
   overview: "book-open",
   "pull-request": "git-pull-request",
   repository: "book-bookmark",
@@ -36,6 +39,7 @@ const phosphorIconNames: Readonly<Record<IconName, string>> = {
   settings: "gear-six",
   "sign-out": "sign-out",
   moon: "moon",
+  organizations: "buildings",
   sun: "sun",
   tag: "tag",
   workflow: "path",

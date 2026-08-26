@@ -1261,7 +1261,7 @@ dependencies = [
 name = "automata-ci-ui-renderer"
 version = "0.1.0"
 dependencies = [
- "automata-ci-core",
+ "serde",
  "serde_json",
  "sha2 0.11.0",
  "thiserror",

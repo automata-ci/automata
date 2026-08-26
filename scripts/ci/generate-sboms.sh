@@ -170,14 +170,15 @@ node "${script_directory}/normalize-cyclonedx.mjs" \
     "${repository_root}" \
     "${source_date_epoch}"
 
-renderer_sbom="${repository_root}/ui/renderer/renderer.cdx.json"
-[[ -f "${renderer_sbom}" ]] || die "missing embedded renderer SBOM"
+renderer_build="${repository_root}/target/ui-renderer"
+renderer_sbom="${renderer_build}/renderer.cdx.json"
+[[ -f "${renderer_sbom}" ]] || die "missing generated renderer SBOM"
 mapfile -t renderer_components < <(
-    find "${repository_root}/crates/automata-ci-ui-renderer/assets" -maxdepth 1 -type f \
+    find "${renderer_build}/assets" -maxdepth 1 -type f \
         -name 'renderer-*.wasm' -print | LC_ALL=C sort
 )
 [[ "${#renderer_components[@]}" -eq 1 ]] || \
-    die "expected exactly one embedded renderer component"
+    die "expected exactly one generated renderer component"
 renderer_sha256="$(sha256sum "${renderer_components[0]}" | awk '{print $1}')"
 node "${script_directory}/normalize-cyclonedx.mjs" \
     "${renderer_sbom}" \
@@ -186,7 +187,7 @@ node "${script_directory}/normalize-cyclonedx.mjs" \
     0 \
     "${renderer_sha256}"
 cmp --silent "${renderer_sbom}" "${scratch_directory}/renderer.cdx.json" || \
-    die "embedded renderer SBOM is stale or noncanonical"
+    die "generated renderer SBOM is stale or noncanonical"
 
 mkdir -p -- "${output_directory}"
 for name in \

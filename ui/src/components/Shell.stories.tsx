@@ -1,4 +1,6 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
+import { expect, userEvent, within } from "storybook/test";
+import { installViewerMenuDismissal } from "../enhancements/viewerMenu";
 import { previewRepository, previewShell } from "../preview/sampleData";
 import { Shell } from "./Shell";
 
@@ -21,6 +23,85 @@ export default meta;
 type Story = StoryObj<typeof meta>;
 export const Repository: Story = {};
 export const TenantPage: Story = { args: { repository: null } };
+export const CloudFooter: Story = {
+  args: {
+    footerLinks: [
+      { href: "#terms", label: "Terms" },
+      { href: "#privacy", label: "Privacy" },
+      { href: "#security", label: "Security" },
+      { href: "#status", label: "Status" },
+      { href: "#docs", label: "Docs" },
+      { href: "#contact", label: "Contact" },
+    ],
+    repository: null,
+    shell: { ...previewShell, productName: "Automata Cloud" },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const footer = canvas.getByRole("contentinfo");
+    const terms = canvas.getByRole("link", { name: "Terms" });
+    await expect(
+      canvas.getByRole("navigation", { name: "Footer navigation" }),
+    ).toBeVisible();
+    await expect(terms).toBeVisible();
+    await expect(canvas.getByRole("link", { name: "Contact" })).toBeVisible();
+    expect(getComputedStyle(footer).borderTopWidth).toBe("0px");
+    const idleColor = getComputedStyle(terms).color;
+    expect(idleColor).toBe(getComputedStyle(footer).color);
+  },
+};
+export const AccountMenu: Story = {
+  args: {
+    repository: null,
+    shell: {
+      ...previewShell,
+      accountNavigation: [
+        {
+          icon: "organizations",
+          label: "Organizations",
+          href: "/organizations",
+        },
+        { icon: "settings", label: "Settings", href: "/settings" },
+      ],
+      signOut: {
+        action: "/auth/logout",
+        csrfToken: "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",
+      },
+      viewer: { displayName: "Ada Lovelace’s Analytical Engine" },
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const removeViewerMenuDismissal = installViewerMenuDismissal(
+      canvasElement.ownerDocument,
+    );
+    const canvas = within(canvasElement);
+    try {
+      await userEvent.click(canvas.getByText(/account menu$/u));
+      const navigation = canvas.getByRole("navigation", {
+        name: "Account navigation",
+      });
+      await expect(navigation).toBeVisible();
+      await expect(
+        canvas.getByRole("link", { name: "Organizations" }),
+      ).toBeVisible();
+      await expect(
+        canvas.getByRole("link", { name: "Settings" }),
+      ).toBeVisible();
+      await expect(
+        canvas.getByRole("button", { name: "Sign out" }),
+      ).toBeVisible();
+      await expect(
+        canvas.getByTitle("Ada Lovelace’s Analytical Engine"),
+      ).toBeVisible();
+      await userEvent.click(
+        canvas.getByRole("heading", { name: "Workflow runs" }),
+      );
+      await expect(navigation).not.toBeVisible();
+    } finally {
+      removeViewerMenuDismissal();
+    }
+  },
+};
 export const SignedOut: Story = {
   args: {
     repository: null,

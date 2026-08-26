@@ -35,6 +35,9 @@ toggle, in-page log filtering, and repository-settings draft and submission
 states. Links, GET filters, settings forms, and RBAC management forms retain
 their native behavior when JavaScript is absent or fails. There is no SPA router
 and every initial page route remains a complete server-rendered document.
+Authenticated hosts may also provide bounded account-menu destinations alongside
+the native, CSRF-protected sign-out capability; the shared shell keeps those
+controls usable without JavaScript.
 
 ## Source architecture
 
@@ -48,6 +51,7 @@ preview fixture separate:
 ```text
 src/
 ├── components/   reusable landmarks and presentation components
+├── enhancements/ framework-neutral progressive DOM enhancements
 ├── hooks/         React state, effects, measurement, and browser lifecycle
 ├── logs/          resumable transport controller and strict SSE adapter
 ├── pages/         thin composition containers for validated page models
@@ -71,6 +75,8 @@ reconnects through the same replay path, as specified by
 The preview fixture owns its sample data and its small query-preserving GET adapter, and
 production source never imports test fixtures. The adapter is reinstalled on hot
 module replacement so routing changes do not leave a stale submit handler.
+Framework-neutral shell enhancements are exported for package consumers so the
+embedded client and Cloud install the same behavior over the shared markup.
 `styles.css` only declares the cascade order and imports the focused modules
 documented in `src/styles/README.md`.
 
@@ -211,8 +217,9 @@ loader escape paths, and performs a render smoke test. It is a closure check for
 trusted bundler output, not a sandbox for hostile JavaScript or string-evaluation
 analysis.
 
-The checked-in Vite server bundle is compiled into a WASI Preview 2 component;
-Rust embeds that component and the hash-addressed client assets. At runtime the
+The Vite server bundle is compiled into a WASI Preview 2 component during the
+locked UI build; Rust embeds that component and the hash-addressed client
+assets from `target/ui-renderer`. At runtime the
 host supplies those same-origin paths through `RenderRequest.host.assets` and
 invokes the component with a fresh, resource-limited Wasmtime store. Host-owned
 locale, CSP nonce, and executable asset paths stay outside the page model and
@@ -228,8 +235,9 @@ component contains the JavaScript runtime and renderer behind a narrow WIT
 interface, with no inherited filesystem, sockets, environment, subprocesses, or
 standard streams. The Rust host enforces input/output, aggregate memory, table,
 instance, host-resource, fuel, concurrency, and wall-time limits. The component,
-client assets, lockfiles, provenance, and CycloneDX inventory are reproducibly
-generated and checked by CI before static-musl packaging.
+client assets, provenance, and CycloneDX inventory are reproducibly generated
+under `target/` and checked by CI before Cargo and static-musl packaging.
+Generated code and binary assets are not committed.
 
 The serialized interface is versioned (`schemaVersion: 1`) and validated deeply
 with exact shapes and explicit size limits before rendering or hydration. Every

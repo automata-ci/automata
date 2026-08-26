@@ -4,7 +4,7 @@
 # runtime capability it supports. Automata enables only WASI Preview 2 and text
 # encoding. Regeneration replaces the generated manifest with this allowlist so
 # Cargo resolves, audits, and inventories exactly the dependency graph compiled
-# into the checked-in component.
+# into the generated component.
 
 [package]
 name = "renderer"

@@ -133,9 +133,15 @@ describe("stylesheet entrypoint boundaries", () => {
     expect(componentStyles).toMatch(
       /\.viewer-menu\s*>\s*summary\s*\{[^}]*cursor:\s*pointer;/su,
     );
+    expect(layoutStyles).toMatch(
+      /\.viewer-menu__name\s*\{[^}]*max-width:\s*20ch;[^}]*text-overflow:\s*ellipsis;/su,
+    );
     expect(accessibilityStyles).toContain(":focus-visible");
     expect(responsiveStyles).toMatch(
       /@media \(any-pointer: coarse\)[\s\S]*\.viewer-menu__sign-out,[\s\S]*min-height:\s*40px;/u,
+    );
+    expect(responsiveStyles).toMatch(
+      /@media \(any-pointer: coarse\)[\s\S]*\.viewer-menu__navigation a,[\s\S]*min-height:\s*40px;/u,
     );
   });
 });

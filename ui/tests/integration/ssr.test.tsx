@@ -78,6 +78,11 @@ describe("server rendering", () => {
       "automata-ci/automata",
     );
     expect(
+      rendered.querySelector<HTMLAnchorElement>(".repository-directory__name")?.getAttribute(
+        "href",
+      ),
+    ).toBe("/automata-ci/automata/actions");
+    expect(
       rendered.querySelector<HTMLAnchorElement>(
         '.repository-directory__destinations a[href="/automata-ci/automata/actions"]',
       ),
@@ -93,6 +98,12 @@ describe("server rendering", () => {
     expect(signIn?.querySelector("button")?.textContent).toBe("Sign in");
     expect(rendered.querySelector(".theme-toggle")).not.toBeNull();
     expect(rendered.querySelector(".repo-header")).toBeNull();
+    const source = rendered.querySelector<HTMLAnchorElement>(
+      '.repository-directory__destinations a[href="https://github.com/automata-ci/automata"]',
+    );
+    expect(source?.getAttribute("target")).toBe("_blank");
+    expect(source?.getAttribute("rel")).toBe("noreferrer");
+    expect(source?.querySelector(".ph-arrow-square-out")).not.toBeNull();
   });
 
   it("labels a secrets-only repository destination honestly", () => {
@@ -163,11 +174,41 @@ describe("server rendering", () => {
     expect(branchFilter?.getAttribute("autocapitalize")).toBe("none");
     expect(branchFilter?.getAttribute("autocomplete")).toBe("off");
     expect(branchFilter?.getAttribute("autocorrect")).toBe("off");
+    expect(
+      rendered.querySelector<HTMLAnchorElement>(".repo-header__identity a")
+        ?.getAttribute("href"),
+    ).toBe("/automata-ci/automata/actions");
+    const source = rendered.querySelector<HTMLAnchorElement>(
+      '.repo-nav a[href="https://github.com/automata-ci/automata"]',
+    );
+    expect(source?.getAttribute("target")).toBe("_blank");
+    expect(source?.getAttribute("rel")).toBe("noreferrer");
+    expect(source?.querySelector(".ph-arrow-square-out")).not.toBeNull();
   });
 
   it("renders sign-out as a native account disclosure and an exact POST form", () => {
+    if (runListRequest.page.kind !== "run-list") {
+      throw new Error("The run-list fixture is unavailable");
+    }
+    const request = {
+      ...runListRequest,
+      page: {
+        ...runListRequest.page,
+        shell: {
+          ...runListRequest.page.shell,
+          accountNavigation: [
+            {
+              icon: "organizations",
+              label: "Organizations",
+              href: "/organizations",
+            },
+            { icon: "settings", label: "Settings", href: "/settings" },
+          ],
+        },
+      },
+    } as const;
     const rendered = new DOMParser().parseFromString(
-      renderPage(runListRequest),
+      renderPage(request),
       "text/html",
     );
     const menu = rendered.querySelector<HTMLDetailsElement>(
@@ -187,9 +228,26 @@ describe("server rendering", () => {
     );
 
     expect(menu?.open).toBe(false);
-    expect(summary?.textContent).toContain("Ada");
     expect(summary?.textContent).toContain("account menu");
+    expect(summary?.textContent).toContain("Ada");
     expect(summary?.querySelector(".ph-caret-down")).not.toBeNull();
+    const identity = menu?.querySelector<HTMLElement>(".viewer-menu__identity");
+    expect(identity?.querySelector(".viewer-menu__avatar")?.textContent).toBe(
+      "A",
+    );
+    expect(identity?.querySelector(".viewer-menu__name")?.textContent).toBe(
+      "Ada",
+    );
+    expect(
+      identity?.querySelector(".viewer-menu__name")?.getAttribute("title"),
+    ).toBe("Ada");
+    const accountNavigation = menu?.querySelector(
+      'nav[aria-label="Account navigation"]',
+    );
+    expect(accountNavigation?.textContent).toBe("OrganizationsSettings");
+    expect(accountNavigation?.querySelector(".ph-buildings")).not.toBeNull();
+    expect(accountNavigation?.querySelector(".ph-gear-six")).not.toBeNull();
+    expect(menu?.querySelectorAll(".viewer-menu__divider")).toHaveLength(2);
     expect(form?.method).toBe("post");
     expect(token?.type).toBe("hidden");
     expect(token?.value).toBe(SHELL_CSRF_TOKEN);
@@ -981,9 +1039,9 @@ describe("server rendering", () => {
     expect(
       listDocument.querySelector(".run-row__result")?.textContent,
     ).toContain("In progress");
-    expect(listDocument.querySelector(".viewer-link")?.textContent).toContain(
-      "Ada",
-    );
+    expect(
+      listDocument.querySelector(".viewer-menu__identity")?.textContent,
+    ).toContain("Ada");
     expect(listDocument.querySelector("a.viewer-link")).toBeNull();
     expect(
       detailDocument

@@ -29,7 +29,7 @@ jobs:
   rust:
     name: Rust
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 30
     resources:
       limits:
         cpu: "4"
@@ -53,6 +53,13 @@ jobs:
 
       - name: Run Rust and CI checks
         run: |
+          env \
+            -u CARGO_BUILD_JOBS \
+            -u CARGO_PROFILE_DEV_DEBUG \
+            -u CARGO_PROFILE_TEST_DEBUG \
+            -u CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS \
+            -u RUSTC_WRAPPER \
+            ./scripts/ui/reproduce-renderer-in-profile.sh
           cargo fmt --all -- --check
           ./scripts/ci/install-actionlint.sh target/ci-tools
           ./scripts/ci/install-zizmor.sh target/ci-tools

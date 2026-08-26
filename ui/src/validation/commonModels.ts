@@ -57,6 +57,7 @@ const STATUS_TONE_BY_LABEL: Readonly<Record<string, StatusContext["tone"]>> = {
 
 export function validateShell(value: unknown, path: string): ShellContext {
   const shell = expectObject(value, path, [
+    "accountNavigation",
     "productName",
     "homeHref",
     "signIn",
@@ -66,6 +67,26 @@ export function validateShell(value: unknown, path: string): ShellContext {
     "viewer",
     "navigation",
   ]);
+  const accountNavigationPath = `${path}.accountNavigation`;
+  const accountNavigation = expectArray(
+    shell.accountNavigation,
+    accountNavigationPath,
+    RENDER_REQUEST_LIMITS.navigationCount,
+  );
+  const seenAccountNavigationHrefs = new Set<string>();
+  const seenAccountNavigationIcons = new Set<string>();
+  accountNavigation.forEach((item, index) => {
+    const itemPath = `${accountNavigationPath}[${index}]`;
+    const navigationItem = expectObject(item, itemPath, ["icon", "label", "href"]);
+    const icon = expectOneOf(navigationItem.icon, `${itemPath}.icon`, [
+      "organizations",
+      "settings",
+    ] as const);
+    const href = expectRouteField(navigationItem, "href", itemPath);
+    expectTextField(navigationItem, "label", itemPath);
+    expectUnique(seenAccountNavigationIcons, icon, `${itemPath}.icon`);
+    expectUnique(seenAccountNavigationHrefs, href, `${itemPath}.href`);
+  });
   expectTextField(shell, "productName", path);
   const homeHref = expectRouteField(shell, "homeHref", path);
   const signInPath = `${path}.signIn`;
@@ -106,6 +127,8 @@ export function validateShell(value: unknown, path: string): ShellContext {
     }
   } else if (hasSignOut) {
     invalid(signOutPath, "null for an anonymous viewer");
+  } else if (accountNavigation.length !== 0) {
+    invalid(accountNavigationPath, "empty for an anonymous viewer");
   }
 
   const navigationPath = `${path}.navigation`;

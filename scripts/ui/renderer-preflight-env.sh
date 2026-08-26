@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# This file is sourced by regenerate-renderer.sh. Keep the environment check
+# This file is sourced by build-renderer.sh. Keep the environment check
 # free of filesystem writes: it must run before target scratch or generated
 # output can be created.
 
@@ -74,7 +74,7 @@ automata_renderer_reject_ambient_overrides() {
     )
 
     [[ -x /usr/bin/env ]] || {
-        echo "renderer regeneration requires /usr/bin/env" >&2
+        echo "renderer build requires /usr/bin/env" >&2
         return 1
     }
 
@@ -83,7 +83,7 @@ automata_renderer_reject_ambient_overrides() {
         value="${entry#*=}"
         for forbidden_name in "${forbidden_names[@]}"; do
             if [[ "${name}" == "${forbidden_name}" ]]; then
-                echo "renderer regeneration forbids ambient ${name}" >&2
+                echo "renderer build forbids ambient ${name}" >&2
                 return 1
             fi
         done
@@ -96,7 +96,7 @@ automata_renderer_reject_ambient_overrides() {
                     "${base}_wasm32_wasip2" | \
                     "${base}_x86_64-unknown-linux-gnu" | \
                     "${base}_x86_64_unknown_linux_gnu")
-                    echo "renderer regeneration forbids ambient ${name}" >&2
+                    echo "renderer build forbids ambient ${name}" >&2
                     return 1
                     ;;
             esac
@@ -112,12 +112,12 @@ automata_renderer_reject_ambient_overrides() {
                 CARGO_REGISTRY_* | \
                 CARGO_SOURCE_* | \
                 CARGO_TARGET_*)
-                echo "renderer regeneration forbids ambient ${name}" >&2
+                echo "renderer build forbids ambient ${name}" >&2
                 return 1
                 ;;
         esac
         if [[ "${name}" == CARGO_INCREMENTAL && "${value}" != 0 ]]; then
-            echo "renderer regeneration requires ambient CARGO_INCREMENTAL=0 when set" >&2
+            echo "renderer build requires ambient CARGO_INCREMENTAL=0 when set" >&2
             return 1
         fi
     done < <(/usr/bin/env -0)

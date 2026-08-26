@@ -97,9 +97,14 @@ install -d -m 0700 -- "$TMPDIR"
 Build the complete workspace and run a focused Rust test while iterating:
 
 ```sh
+./scripts/ui/reproduce-renderer-in-profile.sh # first build or after UI changes
 cargo build --workspace --locked
 cargo test -p automata-ci-core --locked
 ```
+
+The renderer build writes generated JavaScript, CSS, WASM, provenance, and
+bindings only beneath `target/`; none are source files. Cargo fails closed with
+the generation command when that build output is absent.
 
 Replace the package and add a test-name filter for the code you changed.
 

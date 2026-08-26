@@ -1,13 +1,41 @@
-import type { PropsWithChildren, ReactNode } from "react";
+import {
+  createContext,
+  useContext,
+  type PropsWithChildren,
+  type ReactNode,
+} from "react";
 import type { RepositoryModel, ShellModel } from "../models";
 import { isVisibleDisplayCodePoint } from "../unicode";
 import { AutomataMark } from "./AutomataMark";
 import { Icon } from "./Icon";
 
+export interface ShellFooterLink {
+  readonly href: string;
+  readonly label: string;
+}
+
+export interface ShellFooterLinksProviderProps extends PropsWithChildren {
+  readonly links: readonly ShellFooterLink[];
+}
+
+const ShellFooterLinksContext = createContext<readonly ShellFooterLink[]>([]);
+
+export function ShellFooterLinksProvider({
+  children,
+  links,
+}: ShellFooterLinksProviderProps) {
+  return (
+    <ShellFooterLinksContext.Provider value={links}>
+      {children}
+    </ShellFooterLinksContext.Provider>
+  );
+}
+
 export interface ShellProps extends PropsWithChildren {
   readonly shell: ShellModel;
   readonly repository: RepositoryModel | null;
   readonly currentRepositoryView?: "actions" | "settings";
+  readonly footerLinks?: readonly ShellFooterLink[];
   readonly utility?: ReactNode;
 }
 
@@ -15,12 +43,18 @@ export function Shell({
   shell,
   repository,
   currentRepositoryView = "actions",
+  footerLinks,
   utility,
   children,
 }: ShellProps) {
+  const inheritedFooterLinks = useContext(ShellFooterLinksContext);
+  const resolvedFooterLinks = footerLinks ?? inheritedFooterLinks;
   const viewerInitial = shell.viewer === null
     ? null
     : firstUppercaseCodePoint(shell.viewer.displayName);
+  const hasViewerMenu =
+    shell.viewer !== null &&
+    (shell.accountNavigation.length !== 0 || shell.signOut !== null);
 
   return (
     <>
@@ -59,7 +93,7 @@ export function Shell({
                   Sign in
                 </button>
               </form>
-            ) : shell.viewer === null ? null : shell.signOut === null ? (
+            ) : shell.viewer === null ? null : !hasViewerMenu ? (
               <span className="viewer-link">
                 <span className="viewer-link__avatar" aria-hidden="true">
                   {viewerInitial}
@@ -72,29 +106,62 @@ export function Shell({
                   <span className="viewer-link__avatar" aria-hidden="true">
                     {viewerInitial}
                   </span>
-                  <span className="viewer-link__name">{shell.viewer.displayName}</span>
                   <Icon
                     className="viewer-menu__chevron"
                     name="chevron-down"
                     size={14}
                   />
-                  <span className="sr-only"> account menu</span>
+                  <span className="sr-only">
+                    {shell.viewer.displayName} account menu
+                  </span>
                 </summary>
                 <div className="viewer-menu__popover">
-                  <p className="viewer-menu__identity">
-                    Signed in as <strong>{shell.viewer.displayName}</strong>
-                  </p>
-                  <form action={shell.signOut.action} method="post">
-                    <input
-                      name="csrf_token"
-                      type="hidden"
-                      value={shell.signOut.csrfToken}
-                    />
-                    <button className="viewer-menu__sign-out" type="submit">
-                      <Icon name="sign-out" />
-                      <span>Sign out</span>
-                    </button>
-                  </form>
+                  <div className="viewer-menu__identity">
+                    <span
+                      className="viewer-menu__avatar viewer-link__avatar"
+                      aria-hidden="true"
+                    >
+                      {viewerInitial}
+                    </span>
+                    <strong
+                      className="viewer-menu__name"
+                      title={shell.viewer.displayName}
+                    >
+                      {shell.viewer.displayName}
+                    </strong>
+                  </div>
+                  <hr className="viewer-menu__divider" />
+                  {shell.accountNavigation.length === 0 ? null : (
+                    <nav
+                      className="viewer-menu__navigation"
+                      aria-label="Account navigation"
+                    >
+                      {shell.accountNavigation.map((item) => (
+                        <a href={item.href} key={`${item.icon}:${item.href}`}>
+                          <Icon name={item.icon} />
+                          <span>{item.label}</span>
+                        </a>
+                      ))}
+                    </nav>
+                  )}
+                  {shell.signOut === null ? null : (
+                    <>
+                      {shell.accountNavigation.length === 0 ? null : (
+                        <hr className="viewer-menu__divider" />
+                      )}
+                      <form action={shell.signOut.action} method="post">
+                        <input
+                          name="csrf_token"
+                          type="hidden"
+                          value={shell.signOut.csrfToken}
+                        />
+                        <button className="viewer-menu__sign-out" type="submit">
+                          <Icon name="sign-out" />
+                          <span>Sign out</span>
+                        </button>
+                      </form>
+                    </>
+                  )}
                 </div>
               </details>
             )}
@@ -105,7 +172,7 @@ export function Shell({
         <div className="repo-header">
           <div className="repo-header__identity layout-wide">
             <Icon name="repository" size={18} />
-            <a href={repository.sourceHref}>
+            <a href={repository.runsHref}>
               <span>{repository.owner}</span>
               <span className="repo-header__separator" aria-hidden="true">
                 /
@@ -115,9 +182,10 @@ export function Shell({
             </a>
           </div>
           <nav className="repo-nav layout-wide" aria-label="Repository navigation">
-            <a href={repository.sourceHref}>
+            <a href={repository.sourceHref} rel="noreferrer" target="_blank">
               <Icon name="overview" />
               Code
+              <Icon name="external-link" size={14} />
             </a>
             <a
               href={repository.runsHref}
@@ -142,8 +210,25 @@ export function Shell({
       )}
       {children}
       <footer className="site-footer">
-        <div className="layout-width">
-          <span>{shell.productName}</span>
+        <div className="site-footer__inner layout-width">
+          <a className="site-footer__brand" href={shell.homeHref}>
+            <AutomataMark className="site-footer__mark" />
+            <span className="site-footer__brand-label">
+              {shell.productName}
+            </span>
+          </a>
+          {resolvedFooterLinks.length === 0 ? null : (
+            <nav
+              className="site-footer__navigation"
+              aria-label="Footer navigation"
+            >
+              {resolvedFooterLinks.map((item) => (
+                <a href={item.href} key={`${item.label}:${item.href}`}>
+                  {item.label}
+                </a>
+              ))}
+            </nav>
+          )}
         </div>
       </footer>
     </>
