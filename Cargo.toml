@@ -195,7 +195,7 @@ tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt", "json"] }
 url = { version = "2.5.4", features = ["serde"] }
 uuid = { version = "1.18.0", features = ["serde", "v4"] }
-wasmtime = { version = "=47.0.3", default-features = false, features = ["component-model", "cranelift", "runtime", "std"] }
+wasmtime = { version = "=48.0.7", default-features = false, features = ["component-model", "cranelift", "runtime", "std"] }
 wasmtime-wasi = { version = "=47.0.3", default-features = false, features = ["p2"] }
 windows-permissions = "=0.2.4"
 winapi-util = "=0.1.11"
